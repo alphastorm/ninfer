@@ -77,6 +77,7 @@ struct PreparedRequest {
     std::size_t tool_name_max_length       = 64;
     ToolArgumentTypeContracts tool_argument_types;
     bool enable_thinking                   = true;
+    std::optional<ninfer::ReasoningEffort> reasoning_effort;
     bool preserve_thinking                 = false;
     bool preserve_thinking_semantic_change = false;
     std::shared_ptr<RequestLifetime> lifetime;
