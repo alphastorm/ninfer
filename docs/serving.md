@@ -236,6 +236,8 @@ wire response contains typed `output` Items.
 | `input` | required string or non-empty typed Item array |
 | `instructions` | optional string, inserted before the reconstructed conversation for this request only |
 | `previous_response_id` | optional ID of a retained local Response |
+| `ninfer_session` | optional 64-character lowercase SHA-256; authenticated private Engine lineage and stored-continuation namespace |
+| `ninfer_request_id` | optional 64-character lowercase SHA-256 used only for request-log correlation |
 | `max_output_tokens` | integer at least `16`; default is `--default-max-tokens` |
 | `stream` | boolean; `true` selects Responses SSE rather than a JSON body |
 | `store` | boolean, default `true`; controls local retrieval and continuation state |
@@ -380,6 +382,13 @@ context, matching the Responses rule that previous top-level instructions do not
 Function definitions are request configuration rather than conversation Items and must be sent
 again on tool-result turns. The reconstructed prompt follows the ordinary Engine path, so compatible
 checkpoint reuse applies naturally.
+When a stored Response carries `ninfer_session`, every `previous_response_id` continuation must
+send the same digest. A different or omitted session receives the same 404 `response_not_found` as
+an unknown ID, so one authenticated session cannot enumerate or continue another session's DAG.
+Every fork from the same parent and session selects the same `http:<digest>` Engine lineage. Parent
+deletion does not invalidate already stored descendants. Changing `ninfer_request_id` never changes
+lineage selection.
+
 
 A stored Response also retains its resolved `preserve_thinking` value. A child which omits the
 field inherits the parent value. An explicit different value creates a new semantic branch; prompt
@@ -410,8 +419,9 @@ stored.
 
 ### Responses input token count
 
-`POST /v1/responses/input_tokens` accepts exactly `model` and `input`, performs the same typed Item,
-template, and media expansion, and does not run generation:
+`POST /v1/responses/input_tokens` accepts `model`, `input`, the two authenticated NInfer identity
+fields, and the thinking-history option, performs the same typed Item, template, and media expansion,
+and does not run generation:
 
 ```bash
 curl http://127.0.0.1:8080/v1/responses/input_tokens \
@@ -484,19 +494,22 @@ curl http://127.0.0.1:8080/v1/messages/count_tokens \
 Pass `--api-key VALUE` to require the same value as an OpenAI bearer token or Anthropic
 `x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated.
 
-OpenAI Chat Completions and Anthropic Messages also accept optional top-level `ninfer_session` and
-`ninfer_request_id` fields for trusted local-agent clients. Each value must be a caller-computed
-64-character lowercase SHA-256 digest; raw session or request identifiers must not be sent. A
-valid `ninfer_session` selects the private `http:<digest>` cache lineage with live-session
-retention, while `ninfer_request_id` provides request-log correlation. Either field is rejected
-with HTTP 401 unless the server was started with `--api-key`; normal endpoint authentication then
-ensures only authenticated callers can select those cache and log identities.
+OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages accept optional top-level
+`ninfer_session` and `ninfer_request_id` fields for trusted local-agent clients. Each value must be
+a caller-computed 64-character lowercase SHA-256 digest; raw session or request identifiers must
+not be sent. A valid `ninfer_session` selects the private `http:<digest>` cache lineage with
+live-session retention, while `ninfer_request_id` provides request-log correlation only. Either
+field is rejected with HTTP 401 unless the server was started with `--api-key`; normal endpoint
+authentication then ensures only authenticated callers can select those cache and log identities.
 
-`GET /v1/ninfer/status` uses the same authentication boundary. Its
-`ninfer_server_status` schema-v1 body reports exact declared build/deployment/model identities,
-resolved Engine settings, scheduler activity, cache occupancy and last reuse selection, Host and
-Device-wait totals, and aggregate MTP acceptance. `GET /health` remains the only unauthenticated
-GET when `--api-key` is configured.
+`GET /v1/ninfer/status` is always authenticated: it returns HTTP 401 when the server has no
+configured API key, and the ordinary API-key pre-route rejects a missing or invalid credential. Its
+`ninfer_server_status` schema-v1 body has stable `identity`, `runtime`, `scheduler`, `cache`, and
+`mtp` groups. Those groups contain declared release/deployment/model digests, resolved static
+runtime settings, published scheduler counters, bounded cache gauges, and aggregate MTP totals. The
+route performs no filesystem hashing, device query, prompt lookup, or response-store traversal and
+contains no paths, credentials, prompts, generated text, GPU UUID, or process arguments.
+`GET /health` remains unauthenticated.
 
 ```bash
 curl http://127.0.0.1:8080/v1/models \
@@ -591,9 +604,11 @@ Run `./build/apps/ninfer-serve --help` for the exact option contract.
 
 `tools/lifecycle/ninfer_container.py` builds and operates one isolated Docker candidate from a
 Linux or WSL host. It never changes a shared route or stops another container. Candidate ports bind
-to loopback by default. An explicit `bind_host` of `0.0.0.0` is accepted only with
-`api_key_file`; any other bind address is rejected. `start` refuses an existing container name
-or listening port, and `stop` refuses a container without the lifecycle ownership label.
+to loopback by default. Every lifecycle configuration requires `api_key_file` because startup and
+status verification use the authenticated status contract. An explicit `bind_host` of `0.0.0.0`
+accepts that same secret-backed configuration; any other bind address is rejected. `start` refuses
+an existing container name or listening port, and `stop` refuses a container without the lifecycle
+ownership label.
 
 Build the runtime image with the exact upstream and patch-stack identities embedded in both
 binaries. The source-dirty field is measured from Git and passed explicitly through the Docker
@@ -650,7 +665,8 @@ python3 tools/lifecycle/ninfer_container.py health --config candidate.json
 python3 tools/lifecycle/ninfer_container.py status --config candidate.json
 
 python3 tools/smoke/serve_contract.py \
-  --base-url http://127.0.0.1:18088 --model registered-model
+  --base-url http://127.0.0.1:18088 --model registered-model \
+  --api-key-file /run/secrets/ninfer_api_key
 python3 tools/smoke/agent_protocol.py \
   --base-url http://127.0.0.1:18088 \
   --model registered-model \

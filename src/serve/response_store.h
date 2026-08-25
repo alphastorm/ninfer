@@ -12,6 +12,7 @@
 #include <list>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -34,6 +35,7 @@ std::vector<ChatTurn> flatten_response_context(const ResponseContext& context);
 struct StoredResponse {
     std::string id;
     std::string session_key;
+    std::optional<std::string> client_session_sha256;
     nlohmann::json response;
     std::vector<nlohmann::json> input_items;
     ResponseContext context;
@@ -47,8 +49,14 @@ public:
     // get() refreshes LRU recency. Returned immutable records remain valid if
     // another request evicts or deletes their public store entry.
     std::shared_ptr<const StoredResponse> get(const std::string& id);
+    // A different or absent session is deliberately indistinguishable from a missing response.
+    // This keeps previous_response_id authority in one authenticated session namespace.
+    std::shared_ptr<const StoredResponse>
+    get_for_session(const std::string& id, const std::optional<std::string>& session_sha256);
     void put(StoredResponse response);
     bool erase(const std::string& id);
+    bool erase_for_session(const std::string& id,
+                           const std::optional<std::string>& session_sha256);
 
     [[nodiscard]] std::size_t size() const;
     [[nodiscard]] std::size_t bytes() const;

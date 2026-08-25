@@ -21,6 +21,7 @@ def write_config(path: Path, *, restart_policy: str | None = None) -> Path:
         "deployment_profile": "test-profile",
         "port": 18088,
         "request_log_dir": "/srv/ninfer/logs",
+        "api_key_file": "/run/secrets/ninfer-test-api-key",
     }
     if restart_policy is not None:
         config["restart_policy"] = restart_policy

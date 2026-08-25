@@ -173,6 +173,8 @@ def load_config(path: Path) -> RuntimeConfig:
         if api_key_value is None
         else require_absolute_path(api_key_value, "api_key_file")
     )
+    if api_key_file is None:
+        fail("api_key_file is required for authenticated lifecycle status verification")
     if bind_host == "0.0.0.0" and api_key_file is None:
         fail("a non-loopback bind_host requires api_key_file")
     restart_policy = raw.get("restart_policy", "no")
@@ -478,9 +480,9 @@ def verify_status(
     ):
         fail("status endpoint returned the wrong envelope")
     reported = status.get("identity")
-    server = status.get("server")
-    if not isinstance(reported, dict) or not isinstance(server, dict):
-        fail("status endpoint omitted identity or server fields")
+    runtime = status.get("runtime")
+    if not isinstance(reported, dict) or not isinstance(runtime, dict):
+        fail("status endpoint omitted identity or runtime fields")
     expected = {
         "binary_sha256": identity.binary_sha256,
         "model_artifact_sha256": identity.model_artifact_sha256,
@@ -492,10 +494,8 @@ def verify_status(
             fail(
                 f"status identity field {field} differs from the lifecycle measurement"
             )
-    if server.get("public_model_id") != config.model_id:
+    if runtime.get("public_model_id") != config.model_id:
         fail("status public_model_id differs from lifecycle configuration")
-    if server.get("api_key_configured") != (config.api_key_file is not None):
-        fail("status api_key_configured differs from lifecycle configuration")
 
 
 def receipt(

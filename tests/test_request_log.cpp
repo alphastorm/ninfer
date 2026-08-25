@@ -298,22 +298,30 @@ int main() {
     failures += check(status.at("artifact_type") == "ninfer_server_status" &&
                           status.at("schema_version") == 1 && status.at("status") == "ok",
                       "status envelope mismatch");
+    failures += check(status.size() == 8 && status.contains("identity") &&
+                          status.contains("runtime") && status.contains("scheduler") &&
+                          status.contains("cache") && status.contains("mtp") &&
+                          !status.contains("server") && !status.contains("engine") &&
+                          !status.contains("activity") && !status.contains("totals"),
+                      "status top-level versioned groups changed");
     failures += check(status.at("identity").at("binary_sha256") == options.binary_sha256 &&
-                          status.at("server").at("public_model_id") == "deployment-alias" &&
-                          status.at("server").at("api_key_configured") == true,
-                      "status identity or server configuration missing");
+                          status.at("runtime").at("public_model_id") == "deployment-alias" &&
+                          status.at("runtime").at("max_context") == engine_options.max_context,
+                      "status identity or runtime configuration missing");
     failures += check(
-        status.at("activity").at("running") == 2 && status.at("activity").at("waiting") == 3 &&
+        status.at("scheduler").at("running") == 2 &&
+            status.at("scheduler").at("waiting") == 3 &&
+            status.at("scheduler").at("prefill_host_nanoseconds") == 100 &&
+            status.at("scheduler").at("decode_device_wait_nanoseconds") == 400 &&
             status.at("cache").at("private_catalog").at("occupied") == 3 &&
             status.at("cache").at("shared_catalog").at("active_references") == 2 &&
             status.at("cache").at("last_selection").at("path") == "private_long_anchor" &&
             status.at("cache").at("last_selection").at("frontier_tokens") == 32768,
-        "status activity or cache gauges missing");
-    failures += check(status.at("totals").at("prefill_host_nanoseconds") == 100 &&
-                          status.at("totals").at("decode_device_wait_nanoseconds") == 400 &&
-                          status.at("totals").at("mtp").at("accepted_tokens") == 8 &&
-                          status.at("totals").at("mtp").at("tokens_per_round") == 3.0,
-                      "status host/device or MTP totals missing");
+        "status scheduler or cache gauges missing");
+    failures += check(status.at("mtp").at("accepted_tokens") == 8 &&
+                          status.at("mtp").at("acceptance_ratio") == (8.0 / 12.0) &&
+                          status.at("mtp").at("tokens_per_round") == 3.0,
+                      "status MTP totals missing");
     failures += check(status.dump().find("must-not-appear") == std::string::npos,
                       "status JSON leaked the API key");
 

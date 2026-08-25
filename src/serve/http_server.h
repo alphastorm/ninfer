@@ -67,6 +67,11 @@ private:
     ServeOptions options_;
     std::string public_model_id_;
     ResponseStore response_store_;
+    // Immutable startup values are captured once so status polling only snapshots published
+    // counters and never contends with execution for a live memory summary.
+    ninfer::EngineOptions status_engine_options_;
+    ninfer::LoadSummary status_load_;
+    ninfer::MemorySummary status_memory_;
     JsonlRequestLog request_jsonl_;
     httplib::Server server_;
     std::atomic<std::uint64_t> request_seq_{0};

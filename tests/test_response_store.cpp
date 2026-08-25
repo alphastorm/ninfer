@@ -83,6 +83,59 @@ int test_lru_and_delete() {
     return failures;
 }
 
+int test_session_lineage_isolation() {
+    const std::string session_a(64, 'a');
+    const std::string session_b(64, 'b');
+    ResponseStore store(8, 1ULL << 20);
+
+    const ResponseContext first_context =
+        append_response_context({}, {text_turn(ninfer::ChatRole::User, "first")});
+    StoredResponse first = record("resp_first", first_context);
+    first.session_key = "http:" + session_a;
+    first.client_session_sha256 = session_a;
+    store.put(std::move(first));
+
+    const std::shared_ptr<const StoredResponse> continued =
+        store.get_for_session("resp_first", session_a);
+    int failures = 0;
+    failures += check(continued && continued->session_key == "http:" + session_a,
+                      "first turn did not retain its stable Engine lineage");
+    failures += check(!store.get_for_session("resp_first", session_b) &&
+                          !store.get_for_session("resp_first", std::nullopt),
+                      "another or absent session accessed the first turn");
+
+    StoredResponse branch_one = record(
+        "resp_branch_one",
+        append_response_context(continued->context,
+                                {text_turn(ninfer::ChatRole::Assistant, "one")}));
+    branch_one.session_key = continued->session_key;
+    branch_one.client_session_sha256 = session_a;
+    store.put(std::move(branch_one));
+    StoredResponse branch_two = record(
+        "resp_branch_two",
+        append_response_context(continued->context,
+                                {text_turn(ninfer::ChatRole::Assistant, "two")}));
+    branch_two.session_key = continued->session_key;
+    branch_two.client_session_sha256 = session_a;
+    store.put(std::move(branch_two));
+
+    failures += check(!store.erase_for_session("resp_first", session_b),
+                      "another session deleted the first turn");
+    failures += check(store.erase_for_session("resp_first", session_a),
+                      "owning session could not delete the first turn");
+    const std::shared_ptr<const StoredResponse> surviving_one =
+        store.get_for_session("resp_branch_one", session_a);
+    const std::shared_ptr<const StoredResponse> surviving_two =
+        store.get_for_session("resp_branch_two", session_a);
+    failures += check(surviving_one && surviving_two &&
+                          surviving_one->context->parent.get() == surviving_two->context->parent.get() &&
+                          flatten_response_context(surviving_one->context).size() == 2,
+                      "forks lost their shared context after parent deletion");
+    failures += check(!store.get_for_session("resp_branch_one", session_b),
+                      "branch isolation was not preserved");
+    return failures;
+}
+
 int test_oversized_record() {
     ResponseStore store(4, 256);
     StoredResponse large = record(
@@ -105,6 +158,7 @@ int main() {
     int failures = 0;
     failures += test_context_dag();
     failures += test_lru_and_delete();
+    failures += test_session_lineage_isolation();
     failures += test_oversized_record();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;

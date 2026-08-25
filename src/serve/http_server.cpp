@@ -391,14 +391,21 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
 }
 
 void HttpServer::handle_status(const httplib::Request&, httplib::Response& res) const {
+    if (options_.api_key.empty()) {
+        ApiError error;
+        error.status  = 401;
+        error.code    = "authentication_required";
+        error.message = "server status requires API authentication";
+        write_error(res, error);
+        return;
+    }
     if (service_ == nullptr) {
         res.status = 503;
         res.set_content(nlohmann::json{{"status", "loading"}}.dump(), "application/json");
         return;
     }
-    res.set_content(format_status_json(options_, service_->engine_options(), public_model_id_,
-                                       service_->load_summary(), service_->memory_summary(),
-                                       service_->runtime_stats()),
+    res.set_content(format_status_json(options_, status_engine_options_, public_model_id_,
+                                       status_load_, status_memory_, service_->runtime_stats()),
                     "application/json");
 }
 
@@ -832,12 +839,13 @@ void HttpServer::attach(GenerationService& service) {
     if (service_ != nullptr) {
         throw std::logic_error("HTTP generation service is already attached");
     }
-    const ninfer::LoadSummary load = service.load_summary();
-    public_model_id_               = resolve_public_model_id(options_, load.model_id);
-    service_                       = &service;
-    request_jsonl_.write_server_start(options_, service.engine_options(),
-                                      service.sampling_defaults(), public_model_id_, load,
-                                      service.memory_summary());
+    status_load_           = service.load_summary();
+    status_engine_options_ = service.engine_options();
+    status_memory_         = service.memory_summary();
+    public_model_id_       = resolve_public_model_id(options_, status_load_.model_id);
+    request_jsonl_.write_server_start(options_, status_engine_options_, service.sampling_defaults(),
+                                      public_model_id_, status_load_, status_memory_);
+    service_ = &service;
 }
 
 bool HttpServer::listen() {
