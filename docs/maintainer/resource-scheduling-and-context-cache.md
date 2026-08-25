@@ -980,6 +980,24 @@ HostKVArena
 
 State 仍然使用 fixed image slots，因为 state与 KV 的资源形态不同。
 
+### 8.4 Process 与 platform boundary
+
+`HostStatePool`、`HostKVArena`、`StateImageStore`和`HostKVExtentStore`只保存
+Program-owned、in-process的Host replica。它们不定义disk serialization、journal、
+cross-process restore或第二种product artifact。
+
+Microsoft DirectStorage不适用于当前`sm_120a` WSL runtime。该API依赖`_WIN32`、
+`dstorage.h`、D3D12/DXGI、Win32 shared handles及CUDA-D3D12 external-memory/semaphore
+interop；WSL target编译并执行Linux binary。旧disk-cache实现所依赖的`DiskStateCache`和
+`snapshot_turn_checkpoint_to_disk`也已由本章的StateImage与packed logical-order Host KV
+架构取代。不得通过恢复旧文件、compatibility alias或静默fallback伪造可用的DirectStorage
+route。
+
+如果cross-process persistence未来进入product scope，必须直接以canonical StateImage和
+packed logical-order Host KV representation定义disk format、lifecycle与failure semantics，
+并选择目标runtime原生支持的storage backend。在此之前，DirectStorage对WSL route为
+**non-applicable**，不是未验证但可启用的runtime capability。
+
 ---
 
 ## 9. 部分 KV 驻留
