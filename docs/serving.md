@@ -610,16 +610,17 @@ accepts that same secret-backed configuration; any other bind address is rejecte
 an existing container name or listening port, and `stop` refuses a container without the lifecycle
 ownership label.
 
-Build the runtime image with the exact upstream and patch-stack identities embedded in both
-binaries. The source-dirty field is measured from Git and passed explicitly through the Docker
-build:
+Build the runtime image from an exact clean commit with the upstream and patch-stack identities
+embedded in both binaries. The lifecycle refuses any tracked or untracked source change, verifies
+that the upstream commit is an ancestor, and gives Docker a Git archive of the measured release
+head rather than the working tree. Only that verified archive can set `source_dirty` to `false`:
 
 ```bash
 python3 tools/lifecycle/ninfer_container.py build \
   --image ninfer:canary \
   --upstream-base-sha 4eef14a7560d87a3ba717898e1d488a4c4c7246d \
   --expect-patch-stack-sha "$(git rev-parse HEAD)" \
-  --build-profile rtx-5090-release
+  --build-profile qwen38-5090-v0.1.0
 ```
 
 Runtime configuration is one JSON object. `args` contains individual server argv elements; the

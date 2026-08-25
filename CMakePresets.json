@@ -17,7 +17,7 @@
         "NINFER_BUILD_APPS": "ON",
         "BUILD_TESTING": "ON",
         "NINFER_BUILD_BENCHMARKS": "OFF",
-        "NINFER_BUILD_PROFILE": "rtx-5090-release",
+        "NINFER_BUILD_PROFILE": "qwen38-5090-v0.1.0",
         "NINFER_UPSTREAM_BASE_SHA": "4eef14a7560d87a3ba717898e1d488a4c4c7246d",
         "NINFER_PATCH_STACK_SHA": "auto",
         "NINFER_SOURCE_DIRTY": "auto"

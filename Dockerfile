@@ -21,7 +21,7 @@ COPY . .
 ARG NINFER_BUILD_PROFILE=docker-release
 ARG NINFER_UPSTREAM_BASE_SHA=unknown
 ARG NINFER_PATCH_STACK_SHA=unknown
-ARG NINFER_SOURCE_DIRTY=ON
+ARG NINFER_SOURCE_CLEAN_VERIFIED=OFF
 RUN cmake -S . -B /build -G Ninja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CUDA_ARCHITECTURES=120a \
@@ -31,8 +31,8 @@ RUN cmake -S . -B /build -G Ninja \
         -DNINFER_BUILD_PROFILE="${NINFER_BUILD_PROFILE}" \
         -DNINFER_UPSTREAM_BASE_SHA="${NINFER_UPSTREAM_BASE_SHA}" \
         -DNINFER_PATCH_STACK_SHA="${NINFER_PATCH_STACK_SHA}" \
-        -DNINFER_SOURCE_DIRTY="${NINFER_SOURCE_DIRTY}" \
-    && cmake --build /build --parallel --target ninfer ninfer-serve
+        -DNINFER_SOURCE_CLEAN_VERIFIED="${NINFER_SOURCE_CLEAN_VERIFIED}" \
+    && cmake --build /build -j --target ninfer ninfer-serve
 
 FROM nvidia/cuda:13.1.2-runtime-ubuntu24.04
 
