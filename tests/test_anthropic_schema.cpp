@@ -5,6 +5,7 @@
 // count_tokens body, and Anthropic error body. This is the schema boundary
 // consumed by Claude Code / other Anthropic clients.
 
+#include "serve/client_identity.h"
 #include "serve/anthropic_schema.h"
 #include "serve/request.h"
 #include "serve/translate.h"
@@ -724,10 +725,9 @@ int test_string_typed_argument_survives_render() {
     const CompletionUsage usage{3, 1};
     // arguments_json carries taskId as a string, exactly as the schema-aware
     // parser emits it for a string-typed parameter with a numeric-looking value.
-    const std::vector<ToolCall> calls = {
-        ToolCall{"toolu_1", "TaskUpdate", R"({"taskId":"1"})"}};
-    const Json resp = Json::parse(
-        make_messages_response("msg_s", "claude-x", "", "", calls, "tool_use", usage));
+    const std::vector<ToolCall> calls = {ToolCall{"toolu_1", "TaskUpdate", R"({"taskId":"1"})"}};
+    const Json resp =
+        Json::parse(make_messages_response("msg_s", "claude-x", "", "", calls, "tool_use", usage));
     const Json& content = resp.at("content");
     failures += check(content.size() == 1 && content.at(0).at("type") == "tool_use",
                       "render produced a single tool_use block");
@@ -835,11 +835,44 @@ int test_count_tokens_and_error() {
     return failures;
 }
 
+int test_client_identity() {
+    const std::string session_digest(64, 'c');
+    const std::string request_digest(64, 'd');
+    Json body = {
+        {"model", "m"},
+        {"messages", Json::array({Json{{"role", "user"}, {"content", "hello"}}})},
+        {"ninfer_session", session_digest},
+        {"ninfer_request_id", request_digest},
+    };
+
+    int failures                    = 0;
+    const GenerationRequest request = parse_messages_request(body, default_limits());
+    failures += check(request.client_session_sha256 == session_digest,
+                      "ninfer_session digest was not parsed");
+    failures += check(request.client_request_id == request_digest,
+                      "ninfer_request_id digest was not parsed");
+
+    Json malformed              = body;
+    malformed["ninfer_session"] = "short";
+    failures += check(api_code([&] {
+                          (void)parse_messages_request(malformed, default_limits());
+                      }) == "invalid_ninfer_identity",
+                      "malformed ninfer_session was accepted");
+    Json non_string                 = body;
+    non_string["ninfer_request_id"] = Json::array();
+    failures += check(api_code([&] {
+                          (void)parse_messages_request(non_string, default_limits());
+                      }) == "invalid_ninfer_identity",
+                      "non-string ninfer_request_id was accepted");
+    return failures;
+}
+
 } // namespace
 
 int main() {
     int failures = 0;
     failures += test_parse_basic_and_system();
+    failures += test_client_identity();
     failures += test_parse_system_array_and_blocks();
     failures += test_cache_control_boundaries();
     failures += test_ordered_system_messages();

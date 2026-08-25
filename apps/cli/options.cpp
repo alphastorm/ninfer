@@ -74,8 +74,8 @@ ReasoningEffort parse_reasoning_effort(std::string_view text) {
 } // namespace
 
 std::string usage_text(const char* argv0) {
-    return std::string("usage: ") + argv0 + " --version\n" +
-           "       " + argv0 + " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
+    return std::string("usage: ") + argv0 + " --version\n" + "       " + argv0 +
+           " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N]\n"
            "       [--kv-dtype bf16|int8|fp8] [--spec mtp|dflash --draft-tokens N]\n"

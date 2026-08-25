@@ -7,7 +7,6 @@
 #include <optional>
 #include <string>
 #include <string_view>
-#include <vector>
 
 namespace ninfer::serve {
 
@@ -31,7 +30,7 @@ struct ServeOptions {
     std::string artifact_sha256;                  // lifecycle-computed artifact identity
     std::string config_sha256;                    // lifecycle-computed canonical config identity
     std::string deployment_profile;               // generic operator-selected profile name
-    std::uint32_t max_context = 8192;
+    std::uint32_t max_context          = 8192;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(8192);
     std::uint32_t max_concurrency      = 1;
     std::uint32_t max_pending_requests = 16;
@@ -62,10 +61,6 @@ struct ServeOptions {
     // fields. An omitted seed is replaced per request with a fresh random seed.
     SamplingOverrides sampling_overrides;
     bool greedy = false; // --greedy: force temperature 0 (exact argmax)
-
-    // Exact process argv for the server-start record. Secret-bearing option values are redacted
-    // while parsing; this is provenance only and never affects execution.
-    std::vector<std::string> startup_argv;
 };
 
 ServeOptions parse_serve_options(int argc, char** argv);

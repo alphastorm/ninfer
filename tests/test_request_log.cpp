@@ -1,3 +1,5 @@
+#include "ninfer/build_info.h"
+
 #include "serve/console_log.h"
 #include "serve/request_log.h"
 
@@ -29,7 +31,20 @@ int check(bool condition, const char* message) {
 } // namespace
 
 int main() {
-    int failures = 0;
+    int failures                           = 0;
+    const ninfer::BuildInfo compiled_build = ninfer::build_info();
+    failures += check(
+        !compiled_build.upstream_base_sha.empty() && !compiled_build.patch_stack_sha.empty() &&
+            !compiled_build.build_profile.empty() && !compiled_build.build_type.empty() &&
+            !compiled_build.cxx_compiler.empty() && !compiled_build.cuda_compiler.empty() &&
+            !compiled_build.cuda_toolkit.empty(),
+        "compiled build identity contains an empty field");
+    const std::string version = ninfer::format_build_info("ninfer-serve");
+    failures += check(version.rfind("ninfer-serve upstream_base_sha=", 0) == 0 &&
+                          version.find(" patch_stack_sha=") != std::string::npos &&
+                          version.find(" source_dirty=") != std::string::npos,
+                      "formatted build identity is incomplete");
+
 
     bool protected_artifact_rejected = false;
     try {
@@ -39,12 +54,16 @@ int main() {
                       "request log accepted the model artifact as its output path");
 
     ServeOptions options;
-    options.artifact_path                  = "/models/qwen3_6_27b.ninfer";
+    options.artifact_path                  = "/home/private-user/models/qwen3_6_27b.ninfer";
     options.host                           = "127.0.0.1";
     options.port                           = 8123;
     options.api_key                        = "must-not-appear";
     options.model_id_override              = "deployment-alias";
     options.request_log_jsonl              = "requests.jsonl";
+    options.binary_sha256                  = std::string(64, '1');
+    options.artifact_sha256                = std::string(64, '2');
+    options.config_sha256                  = std::string(64, '3');
+    options.deployment_profile             = "rtx-5090-release";
     options.max_context                    = 262144;
     options.kv_capacity                    = ninfer::KvCapacityPolicy::explicit_capacity(524288);
     options.prefill_chunk                  = 1024;
@@ -58,7 +77,6 @@ int main() {
     options.preserve_thinking              = true;
     options.default_thinking_budget        = 512;
     options.sampling_overrides.temperature = 0.6F;
-    options.startup_argv = {"ninfer-serve", options.artifact_path, "--api-key", "<redacted>"};
 
     ninfer::EngineOptions engine_options;
     engine_options.artifact_path                                   = options.artifact_path;
@@ -158,6 +176,14 @@ int main() {
     failures += check(server.at("schema_version") == kRequestLogSchemaVersion,
                       "server record schema mismatch");
     failures += check(server.at("event") == "server_start", "server event mismatch");
+    failures +=
+        check(server.at("identity").at("binary_sha256") == options.binary_sha256 &&
+                  server.at("identity").at("model_artifact_sha256") == options.artifact_sha256 &&
+                  server.at("identity").at("config_sha256") == options.config_sha256 &&
+                  server.at("identity").at("deployment_profile") == options.deployment_profile &&
+                  server.at("identity").at("target") == "qwen3_6_27b" &&
+                  server.at("identity").at("weights_id") == "groupwise-int",
+              "server lifecycle identity missing");
     failures += check(server.at("server").at("public_model_id") == "deployment-alias",
                       "resolved public model id missing");
     failures += check(server.at("artifact").at("target") == "qwen3_6_27b", "server target missing");
@@ -233,14 +259,72 @@ int main() {
                       "Host context-cache memory ledger missing");
     failures += check(server.dump().find("must-not-appear") == std::string::npos,
                       "server JSON leaked the API key");
-    failures += check(server.at("argv").at(3) == "<redacted>",
-                      "server argv did not retain the redaction marker");
+    failures += check(!server.at("artifact").contains("path"),
+                      "server JSON retained the model artifact path");
+    failures += check(server.dump().find("private-user") == std::string::npos,
+                      "server JSON leaked a username from a local path");
+    ninfer::RuntimeStats runtime;
+    runtime.running_requests                  = 2;
+    runtime.prefilling_requests               = 1;
+    runtime.decode_ready_requests             = 1;
+    runtime.waiting_requests                  = 3;
+    runtime.materializing_requests            = 1;
+    runtime.capture_pending_requests          = 1;
+    runtime.device_state_occupied_slots       = 3;
+    runtime.host_state_occupied_slots         = 2;
+    runtime.host_kv_occupied_bytes            = 16ULL << 20;
+    runtime.private_catalog_occupied          = 3;
+    runtime.shared_catalog_occupied           = 1;
+    runtime.shared_active_references          = 2;
+    runtime.reused_prompt_tokens              = 4096;
+    runtime.last_selected_reuse_path          = ninfer::PrefixReusePath::PrivateLongAnchor;
+    runtime.last_selected_frontier_tokens     = 32768;
+    runtime.last_predicted_materialization_ns = 42000;
+    runtime.computed_prefill_tokens           = 8192;
+    runtime.committed_decode_tokens           = 512;
+    runtime.decode_rounds                     = 128;
+    runtime.decode_row_rounds                 = 128;
+    runtime.host_work.prefill_host_ns         = 100;
+    runtime.host_work.prefill_device_wait_ns  = 200;
+    runtime.host_work.decode_host_ns          = 300;
+    runtime.host_work.decode_device_wait_ns   = 400;
+    runtime.speculative_rounds                = 4;
+    runtime.speculative_drafted_tokens        = 12;
+    runtime.speculative_accepted_tokens       = 8;
+    runtime.speculative_fallback_steps        = 1;
+
+    const Json status = Json::parse(
+        format_status_json(options, engine_options, "deployment-alias", load, memory, runtime));
+    failures += check(status.at("artifact_type") == "ninfer_server_status" &&
+                          status.at("schema_version") == 1 && status.at("status") == "ok",
+                      "status envelope mismatch");
+    failures += check(status.at("identity").at("binary_sha256") == options.binary_sha256 &&
+                          status.at("server").at("public_model_id") == "deployment-alias" &&
+                          status.at("server").at("api_key_configured") == true,
+                      "status identity or server configuration missing");
+    failures += check(
+        status.at("activity").at("running") == 2 && status.at("activity").at("waiting") == 3 &&
+            status.at("cache").at("private_catalog").at("occupied") == 3 &&
+            status.at("cache").at("shared_catalog").at("active_references") == 2 &&
+            status.at("cache").at("last_selection").at("path") == "private_long_anchor" &&
+            status.at("cache").at("last_selection").at("frontier_tokens") == 32768,
+        "status activity or cache gauges missing");
+    failures += check(status.at("totals").at("prefill_host_nanoseconds") == 100 &&
+                          status.at("totals").at("decode_device_wait_nanoseconds") == 400 &&
+                          status.at("totals").at("mtp").at("accepted_tokens") == 8 &&
+                          status.at("totals").at("mtp").at("tokens_per_round") == 3.0,
+                      "status host/device or MTP totals missing");
+    failures += check(status.dump().find("must-not-appear") == std::string::npos,
+                      "status JSON leaked the API key");
+
 
     GenerationRequest request;
-    request.model          = "qwen3.6-27b";
-    request.stream         = false;
-    request.max_tokens     = 4096;
-    request.max_tokens_set = true;
+    request.model                 = "qwen3.6-27b";
+    request.stream                = false;
+    request.max_tokens            = 4096;
+    request.max_tokens_set        = true;
+    request.client_session_sha256 = std::string(64, 'e');
+    request.client_request_id     = std::string(64, 'f');
     request.messages.resize(2);
     request.messages.front().content.push_back(ContentPart{.kind = ContentKind::Image});
 
@@ -287,6 +371,11 @@ int main() {
                           started.at("preparation_seconds").at("tokenize") == 0.02 &&
                           started.at("preparation_seconds").at("cache_misses") == 1,
                       "request-scoped media preparation diagnostics missing");
+    failures += check(started.at("request").at("client_identity").at("session_sha256") ==
+                              *request.client_session_sha256 &&
+                          started.at("request").at("client_identity").at("request_sha256") ==
+                              *request.client_request_id,
+                      "request-start correlation digests missing");
 
     ApiError preparation_error;
     preparation_error.status = 400;
@@ -310,6 +399,11 @@ int main() {
                           rejected.at("error").at("code") == "context_length_exceeded" &&
                           rejected.at("error").at("param") == "messages",
                       "preparation rejection API error missing");
+    failures += check(rejected.at("request").at("client_identity").at("session_sha256") ==
+                              *request.client_session_sha256 &&
+                          rejected.at("request").at("client_identity").at("request_sha256") ==
+                              *request.client_request_id,
+                      "request-rejection correlation digests missing");
     failures +=
         check(format_request_rejected(rejected_context)
                           .find("rejected phase=prepare protocol=anthropic_messages") !=
@@ -369,6 +463,11 @@ int main() {
                           done.at("result").at("thinking_control_tokens") == 19 &&
                           done.at("result").at("thinking_control_applied") == true,
                       "thinking-control result accounting missing");
+    failures += check(done.at("request").at("client_identity").at("session_sha256") ==
+                              *request.client_session_sha256 &&
+                          done.at("request").at("client_identity").at("request_sha256") ==
+                              *request.client_request_id,
+                      "request-done correlation digests missing");
     outcome.metrics.prefix_reuse_path = ninfer::PrefixReusePath::PrivateResponseReplay;
     const Json response_restore =
         Json::parse(format_request_done_json("serve-test", 3001, context, outcome));

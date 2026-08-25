@@ -1,5 +1,7 @@
 #include "serve/openai_schema.h"
 
+#include "serve/client_identity.h"
+
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -451,10 +453,10 @@ void reject_unsupported_features(const Json& body) {
             throw ApiException(std::move(error));
         }
     }
-    for (const char* key : {"grammar", "structured_outputs", "json_schema", "regex", "ebnf",
-                            "structural_tag", "guided_json", "guided_regex", "guided_choice",
-                            "guided_grammar", "guided_decoding_backend",
-                            "guided_whitespace_pattern"}) {
+    for (const char* key :
+         {"grammar", "structured_outputs", "json_schema", "regex", "ebnf", "structural_tag",
+          "guided_json", "guided_regex", "guided_choice", "guided_grammar",
+          "guided_decoding_backend", "guided_whitespace_pattern"}) {
         if (body.contains(key) && !body.at(key).is_null()) {
             ApiError error;
             error.message = std::string(key) + " requires unsupported structured decoding";
@@ -563,6 +565,7 @@ GenerationRequest parse_chat_completion_request(const Json& body, const RequestL
         bad_request("missing required field: model", "model");
     }
     out.model = body.at("model").get<std::string>();
+    parse_client_identity(body, out);
 
     parse_tools(body, out);
     parse_tool_choice(body, out);

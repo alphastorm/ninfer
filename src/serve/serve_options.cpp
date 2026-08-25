@@ -64,10 +64,10 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
 
 std::string parse_sha256(const char* text, const char* label) {
     const std::string value(text == nullptr ? "" : text);
-    const bool valid = value.size() == 64 &&
-                       std::all_of(value.begin(), value.end(), [](unsigned char c) {
-                           return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-                       });
+    const bool valid =
+        value.size() == 64 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        });
     if (!valid) {
         throw std::invalid_argument(std::string(label) +
                                     " must be a 64-character lowercase SHA-256");
@@ -82,8 +82,7 @@ std::string parse_profile_name(const char* text) {
                            return std::isalnum(c) != 0 || c == '.' || c == '_' || c == '-';
                        });
     if (!valid) {
-        throw std::invalid_argument(
-            "--deployment-profile must match [A-Za-z0-9._-]{1,64}");
+        throw std::invalid_argument("--deployment-profile must match [A-Za-z0-9._-]{1,64}");
     }
     return value;
 }
@@ -91,8 +90,8 @@ std::string parse_profile_name(const char* text) {
 } // namespace
 
 std::string serve_usage_text(const char* argv0) {
-    return std::string("usage: ") + argv0 + " --version\n" +
-           "       " + argv0 + " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
+    return std::string("usage: ") + argv0 + " --version\n" + "       " + argv0 +
+           " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
            "[--model-id ID] [--binary-sha256 SHA] [--artifact-sha256 SHA] "
            "[--config-sha256 SHA] [--deployment-profile NAME] "
            "[--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
@@ -144,17 +143,6 @@ std::string serve_usage_text(const char* argv0) {
 
 ServeOptions parse_serve_options(int argc, char** argv) {
     ServeOptions options;
-    options.startup_argv.reserve(static_cast<std::size_t>(argc));
-    bool redact_next = false;
-    for (int i = 0; i < argc; ++i) {
-        if (redact_next) {
-            options.startup_argv.emplace_back("<redacted>");
-            redact_next = false;
-            continue;
-        }
-        options.startup_argv.emplace_back(argv[i] == nullptr ? "" : argv[i]);
-        redact_next = options.startup_argv.back() == "--api-key";
-    }
     bool default_max_tokens_explicit = false;
     bool kv_capacity_explicit        = false;
     bool context_capacity_explicit   = false;
@@ -195,8 +183,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.config_sha256 =
                 parse_sha256(require_value("--config-sha256"), "--config-sha256");
         } else if (arg == "--deployment-profile") {
-            options.deployment_profile =
-                parse_profile_name(require_value("--deployment-profile"));
+            options.deployment_profile = parse_profile_name(require_value("--deployment-profile"));
         } else if (arg == "--max-context") {
             options.max_context = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--max-context"), "max-context"));

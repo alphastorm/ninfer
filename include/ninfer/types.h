@@ -606,24 +606,24 @@ struct RuntimeHostWorkStats {
 struct RuntimeStats {
     RuntimeHostWorkStats host_work;
     // Actual prompt tokens evaluated by prefill; reused checkpoint-prefix tokens are excluded.
-    std::uint64_t computed_prefill_tokens      = 0;
+    std::uint64_t computed_prefill_tokens = 0;
     // Tokens committed by decode rounds; the first token emitted by prefill is excluded.
-    std::uint64_t committed_decode_tokens      = 0;
+    std::uint64_t committed_decode_tokens = 0;
     // Decode batch executions and the sum of their batch sizes.
-    std::uint64_t decode_rounds                = 0;
-    std::uint64_t decode_row_rounds            = 0;
-    std::uint64_t speculative_rounds           = 0;
-    std::uint64_t speculative_drafted_tokens   = 0;
-    std::uint64_t speculative_accepted_tokens  = 0;
-    std::uint64_t speculative_fallback_steps   = 0;
-    std::uint32_t running_requests             = 0;
-    std::uint32_t prefilling_requests       = 0;
-    std::uint32_t decode_ready_requests     = 0;
-    std::uint32_t waiting_requests          = 0;
-    std::uint32_t materializing_requests    = 0;
-    std::uint32_t capture_pending_requests  = 0;
-    std::uint64_t active_captures_completed = 0;
-    std::uint64_t active_captures_aborted   = 0;
+    std::uint64_t decode_rounds               = 0;
+    std::uint64_t decode_row_rounds           = 0;
+    std::uint64_t speculative_rounds          = 0;
+    std::uint64_t speculative_drafted_tokens  = 0;
+    std::uint64_t speculative_accepted_tokens = 0;
+    std::uint64_t speculative_fallback_steps  = 0;
+    std::uint32_t running_requests            = 0;
+    std::uint32_t prefilling_requests         = 0;
+    std::uint32_t decode_ready_requests       = 0;
+    std::uint32_t waiting_requests            = 0;
+    std::uint32_t materializing_requests      = 0;
+    std::uint32_t capture_pending_requests    = 0;
+    std::uint64_t active_captures_completed   = 0;
+    std::uint64_t active_captures_aborted     = 0;
 
     std::uint64_t root_selections                    = 0;
     std::uint64_t private_endpoint_selections        = 0;
@@ -674,14 +674,14 @@ struct RuntimeStats {
     std::uint32_t device_main_kv_occupied_pages     = 0;
     std::uint32_t device_backend_kv_occupied_pages  = 0;
     std::size_t host_kv_occupied_bytes              = 0;
-    std::uint64_t private_checkpoint_degradations = 0;
-    std::uint64_t private_checkpoint_evictions    = 0;
-    std::uint64_t shared_checkpoint_degradations  = 0;
-    std::uint64_t shared_checkpoint_evictions     = 0;
-    std::uint32_t shared_active_references        = 0;
-    std::uint32_t private_catalog_occupied        = 0;
-    std::uint32_t shared_catalog_occupied         = 0;
-    std::uint64_t historical_fork_hits            = 0;
+    std::uint64_t private_checkpoint_degradations   = 0;
+    std::uint64_t private_checkpoint_evictions      = 0;
+    std::uint64_t shared_checkpoint_degradations    = 0;
+    std::uint64_t shared_checkpoint_evictions       = 0;
+    std::uint32_t shared_active_references          = 0;
+    std::uint32_t private_catalog_occupied          = 0;
+    std::uint32_t shared_catalog_occupied           = 0;
+    std::uint64_t historical_fork_hits              = 0;
     std::uint64_t last_predicted_materialization_ns = 0;
     double actual_context_transfer_seconds          = 0.0;
 };

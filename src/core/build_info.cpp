@@ -23,10 +23,9 @@ std::string format_build_info(std::string_view program_name) {
     const BuildInfo info = build_info();
     std::ostringstream out;
     out << program_name << " upstream_base_sha=" << info.upstream_base_sha
-        << " patch_stack_sha=" << info.patch_stack_sha
-        << " build_profile=" << info.build_profile << " build_type=" << info.build_type
-        << " cxx_compiler=" << info.cxx_compiler << " cuda_compiler=" << info.cuda_compiler
-        << " cuda_toolkit=" << info.cuda_toolkit
+        << " patch_stack_sha=" << info.patch_stack_sha << " build_profile=" << info.build_profile
+        << " build_type=" << info.build_type << " cxx_compiler=" << info.cxx_compiler
+        << " cuda_compiler=" << info.cuda_compiler << " cuda_toolkit=" << info.cuda_toolkit
         << " source_dirty=" << (info.source_dirty ? "true" : "false");
     return out.str();
 }

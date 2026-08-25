@@ -62,8 +62,8 @@ std::string new_tool_call_id() {
     return std::string(buf.data());
 }
 
-const std::unordered_map<std::string, std::vector<std::string>>* tool_param_types(
-    const ToolParamTypeMap& map, const std::string& tool_name) {
+const std::unordered_map<std::string, std::vector<std::string>>*
+tool_param_types(const ToolParamTypeMap& map, const std::string& tool_name) {
     const auto it = map.find(tool_name);
     return it == map.end() ? nullptr : &it->second;
 }
@@ -97,7 +97,7 @@ namespace {
 // allowed to deserialize when every type it declares is in this set.
 const std::unordered_set<std::string>& non_string_schema_types() {
     static const std::unordered_set<std::string> types = {"integer", "number", "boolean",
-                                                          "array", "object", "null"};
+                                                          "array",   "object", "null"};
     return types;
 }
 
@@ -186,11 +186,10 @@ bool parse_parameter(std::string_view inner, std::size_t& pos, Json& args,
     pos                         = name_end + 1;
     const std::size_t value_end = inner.find(kParamClose, pos);
     if (value_end == std::string_view::npos) { return false; }
-    const std::string raw_value = trim_ascii(inner.substr(pos, value_end - pos));
+    const std::string raw_value              = trim_ascii(inner.substr(pos, value_end - pos));
     const std::vector<std::string>* declared = param_declared_types(param_types, tool_name, key);
-    const bool is_boolean =
-        declared != nullptr &&
-        std::find(declared->begin(), declared->end(), "boolean") != declared->end();
+    const bool is_boolean = declared != nullptr && std::find(declared->begin(), declared->end(),
+                                                             "boolean") != declared->end();
     if (is_boolean) {
         // Boolean-declared params: the model may emit Python-style scalars
         // (True/False, 1/0) that are not valid JSON, so coerce the raw text
@@ -219,15 +218,15 @@ bool parse_parameter(std::string_view inner, std::size_t& pos, Json& args,
     // permits a non-string type. For string-typed, unknown, or absent
     // params, keep the raw text so the model's value reaches the client
     // with its type intact; the client owns the schema and validates.
-    Json parsed = Json::parse(raw_value, nullptr, false);
+    Json parsed                = Json::parse(raw_value, nullptr, false);
     const bool can_deserialize = declared != nullptr;
     args[key] = (parsed.is_discarded() || !can_deserialize) ? Json(raw_value) : parsed;
-    pos                         = value_end + kParamClose.size();
+    pos       = value_end + kParamClose.size();
     return true;
 }
 
 bool parse_one_tool_call(std::string_view block, std::size_t max_name_length,
-                          const ToolParamTypeMap& param_types, ToolCall& out) {
+                         const ToolParamTypeMap& param_types, ToolCall& out) {
     constexpr std::string_view kFunctionOpen  = "<function=";
     constexpr std::string_view kFunctionClose = "</function>";
     std::size_t pos                           = 0;
@@ -248,9 +247,7 @@ bool parse_one_tool_call(std::string_view block, std::size_t max_name_length,
     for (;;) {
         skip_ws(params, param_pos);
         if (param_pos >= params.size()) { break; }
-        if (!parse_parameter(params, param_pos, args, name, param_types)) {
-            return false;
-        }
+        if (!parse_parameter(params, param_pos, args, name, param_types)) { return false; }
     }
 
     pos = function_end + kFunctionClose.size();

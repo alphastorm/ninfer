@@ -59,7 +59,7 @@ int test_single_call() {
 int test_multiple_calls_and_json_values() {
     // payload is object => recorded; value is string => absent.
     ninfer::serve::ToolParamTypeMap map;
-    map["first"]["payload"]  = {"object"};
+    map["first"]["payload"] = {"object"};
 
     const ninfer::serve::ParsedToolCallOutput parsed = ninfer::serve::parse_qwen_tool_call_output(
         "<tool_call>\n"
@@ -95,14 +95,13 @@ int test_string_param_keeps_numeric_looking_value() {
     map["TaskUpdate"]["priority"] = {"integer"};
 
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(
-            "   <tool_call>\n"
-            "<function=TaskUpdate>\n"
-            "<parameter=status>deleted</parameter>\n"
-            "<parameter=taskId>1</parameter>\n"
-            "</function>\n"
-            "</tool_call>",
-            64, map);
+        ninfer::serve::parse_qwen_tool_call_output("   <tool_call>\n"
+                                                   "<function=TaskUpdate>\n"
+                                                   "<parameter=status>deleted</parameter>\n"
+                                                   "<parameter=taskId>1</parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>",
+                                                   64, map);
 
     int failures = 0;
     failures += check(parsed.is_tool_call_response, "string-typed call parsed as tool response");
@@ -117,13 +116,12 @@ int test_string_param_keeps_numeric_looking_value() {
 
 int test_unknown_param_defaults_to_string() {
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(
-            "   <tool_call>\n"
-            "<function=adhoc>\n"
-            "<parameter=count>7</parameter>\n"
-            "</function>\n"
-            "</tool_call>",
-            64, {});
+        ninfer::serve::parse_qwen_tool_call_output("   <tool_call>\n"
+                                                   "<function=adhoc>\n"
+                                                   "<parameter=count>7</parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>",
+                                                   64, {});
 
     int failures = 0;
     failures += check(parsed.is_tool_call_response, "unknown-schema call parsed as tool response");
@@ -233,18 +231,16 @@ int test_incremental_filter_fallback() {
 int test_schema_driven_type_map() {
     // taskId is string; days is integer; count is nullable integer; note has a
     // misspelled "strnig" type; flag is boolean; payload is object.
-    const ninfer::serve::ToolDefinition tool = make_tool(
-        "TaskUpdate",
-        R"({"type":"object","properties":{)"
-        R"("taskId":{"type":"string"},)"
-        R"("days":{"type":"integer"},)"
-        R"("count":{"type":["integer","null"]},)"
-        R"("note":{"type":"strnig"},)"
-        R"("flag":{"type":"boolean"},)"
-        R"("payload":{"type":"object"})"
-        R"(}})");
-    const ninfer::serve::ToolParamTypeMap map =
-        ninfer::serve::build_tool_param_type_map({tool});
+    const ninfer::serve::ToolDefinition tool =
+        make_tool("TaskUpdate", R"({"type":"object","properties":{)"
+                                R"("taskId":{"type":"string"},)"
+                                R"("days":{"type":"integer"},)"
+                                R"("count":{"type":["integer","null"]},)"
+                                R"("note":{"type":"strnig"},)"
+                                R"("flag":{"type":"boolean"},)"
+                                R"("payload":{"type":"object"})"
+                                R"(}})");
+    const ninfer::serve::ToolParamTypeMap map = ninfer::serve::build_tool_param_type_map({tool});
 
     int failures = 0;
     failures += check(map.count("TaskUpdate") == 1, "tool recorded");
@@ -260,19 +256,17 @@ int test_schema_driven_type_map() {
 
 // (a) numeric-looking string param (taskId=1 -> "1" string).
 int test_schema_string_param_keeps_numeric_looking_value() {
-    const ninfer::serve::ToolDefinition tool = make_tool(
-        "TaskUpdate", R"({"type":"object","properties":{"taskId":{"type":"string"}}})");
-    const ninfer::serve::ToolParamTypeMap map =
-        ninfer::serve::build_tool_param_type_map({tool});
+    const ninfer::serve::ToolDefinition tool =
+        make_tool("TaskUpdate", R"({"type":"object","properties":{"taskId":{"type":"string"}}})");
+    const ninfer::serve::ToolParamTypeMap map = ninfer::serve::build_tool_param_type_map({tool});
 
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(
-            "   <tool_call>\n"
-            "<function=TaskUpdate>\n"
-            "<parameter=taskId>1</parameter>\n"
-            "</function>\n"
-            "</tool_call>",
-            64, map);
+        ninfer::serve::parse_qwen_tool_call_output("   <tool_call>\n"
+                                                   "<function=TaskUpdate>\n"
+                                                   "<parameter=taskId>1</parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>",
+                                                   64, map);
 
     int failures = 0;
     failures += check(parsed.is_tool_call_response, "schema string call parsed as tool response");
@@ -285,19 +279,17 @@ int test_schema_string_param_keeps_numeric_looking_value() {
 
 // (b) genuine integer (days=2 -> 2 number).
 int test_schema_integer_param_deserializes() {
-    const ninfer::serve::ToolDefinition tool = make_tool(
-        "get_weather", R"({"type":"object","properties":{"days":{"type":"integer"}}})");
-    const ninfer::serve::ToolParamTypeMap map =
-        ninfer::serve::build_tool_param_type_map({tool});
+    const ninfer::serve::ToolDefinition tool =
+        make_tool("get_weather", R"({"type":"object","properties":{"days":{"type":"integer"}}})");
+    const ninfer::serve::ToolParamTypeMap map = ninfer::serve::build_tool_param_type_map({tool});
 
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(
-            "   <tool_call>\n"
-            "<function=get_weather>\n"
-            "<parameter=days>2</parameter>\n"
-            "</function>\n"
-            "</tool_call>",
-            64, map);
+        ninfer::serve::parse_qwen_tool_call_output("   <tool_call>\n"
+                                                   "<function=get_weather>\n"
+                                                   "<parameter=days>2</parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>",
+                                                   64, map);
 
     int failures = 0;
     failures += check(parsed.is_tool_call_response, "schema integer call parsed");
@@ -311,17 +303,15 @@ int test_schema_integer_param_deserializes() {
 int test_schema_nullable_integer_deserializes() {
     const ninfer::serve::ToolDefinition tool = make_tool(
         "get_items", R"({"type":"object","properties":{"count":{"type":["integer","null"]}}})");
-    const ninfer::serve::ToolParamTypeMap map =
-        ninfer::serve::build_tool_param_type_map({tool});
+    const ninfer::serve::ToolParamTypeMap map = ninfer::serve::build_tool_param_type_map({tool});
 
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(
-            "   <tool_call>\n"
-            "<function=get_items>\n"
-            "<parameter=count>7</parameter>\n"
-            "</function>\n"
-            "</tool_call>",
-            64, map);
+        ninfer::serve::parse_qwen_tool_call_output("   <tool_call>\n"
+                                                   "<function=get_items>\n"
+                                                   "<parameter=count>7</parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>",
+                                                   64, map);
 
     int failures = 0;
     failures += check(parsed.is_tool_call_response, "nullable integer call parsed");
@@ -335,17 +325,15 @@ int test_schema_nullable_integer_deserializes() {
 int test_schema_nullable_string_preserves_raw() {
     const ninfer::serve::ToolDefinition tool = make_tool(
         "get_opt", R"({"type":"object","properties":{"opt":{"type":["string","null"]}}})");
-    const ninfer::serve::ToolParamTypeMap map =
-        ninfer::serve::build_tool_param_type_map({tool});
+    const ninfer::serve::ToolParamTypeMap map = ninfer::serve::build_tool_param_type_map({tool});
 
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(
-            "   <tool_call>\n"
-            "<function=get_opt>\n"
-            "<parameter=opt>5</parameter>\n"
-            "</function>\n"
-            "</tool_call>",
-            64, map);
+        ninfer::serve::parse_qwen_tool_call_output("   <tool_call>\n"
+                                                   "<function=get_opt>\n"
+                                                   "<parameter=opt>5</parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>",
+                                                   64, map);
 
     int failures = 0;
     failures += check(parsed.is_tool_call_response, "nullable string call parsed");
@@ -357,21 +345,19 @@ int test_schema_nullable_string_preserves_raw() {
 
 // ["integer","string"] => string allowed => not recorded; 9 -> "9".
 int test_schema_mixed_integer_string_preserves_raw() {
-    const ninfer::serve::ToolDefinition tool = make_tool(
-        "mix", R"({"type":"object","properties":{"v":{"type":["integer","string"]}}})");
-    const ninfer::serve::ToolParamTypeMap map =
-        ninfer::serve::build_tool_param_type_map({tool});
+    const ninfer::serve::ToolDefinition tool =
+        make_tool("mix", R"({"type":"object","properties":{"v":{"type":["integer","string"]}}})");
+    const ninfer::serve::ToolParamTypeMap map = ninfer::serve::build_tool_param_type_map({tool});
 
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(
-            "   <tool_call>\n"
-            "<function=mix>\n"
-            "<parameter=v>9</parameter>\n"
-            "</function>\n"
-            "</tool_call>",
-            64, map);
+        ninfer::serve::parse_qwen_tool_call_output("   <tool_call>\n"
+                                                   "<function=mix>\n"
+                                                   "<parameter=v>9</parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>",
+                                                   64, map);
 
-    int failures = 0;
+    int failures    = 0;
     const Json args = Json::parse(parsed.tool_calls[0].arguments_json);
     failures += check(args.at("v").is_string(), "mixed integer/string v stays a string");
     failures += check(args.at("v") == "9", "mixed integer/string v value preserved as text");
@@ -380,21 +366,19 @@ int test_schema_mixed_integer_string_preserves_raw() {
 
 // (d) invalid type spelling ("strnig" -> raw text).
 int test_schema_invalid_type_spelling_preserves_raw() {
-    const ninfer::serve::ToolDefinition tool = make_tool(
-        "bad", R"({"type":"object","properties":{"note":{"type":"strnig"}}})");
-    const ninfer::serve::ToolParamTypeMap map =
-        ninfer::serve::build_tool_param_type_map({tool});
+    const ninfer::serve::ToolDefinition tool =
+        make_tool("bad", R"({"type":"object","properties":{"note":{"type":"strnig"}}})");
+    const ninfer::serve::ToolParamTypeMap map = ninfer::serve::build_tool_param_type_map({tool});
 
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(
-            "   <tool_call>\n"
-            "<function=bad>\n"
-            "<parameter=note>hi</parameter>\n"
-            "</function>\n"
-            "</tool_call>",
-            64, map);
+        ninfer::serve::parse_qwen_tool_call_output("   <tool_call>\n"
+                                                   "<function=bad>\n"
+                                                   "<parameter=note>hi</parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>",
+                                                   64, map);
 
-    int failures = 0;
+    int failures    = 0;
     const Json args = Json::parse(parsed.tool_calls[0].arguments_json);
     failures += check(args.at("note").is_string(), "invalid-type note stays a string");
     failures += check(args.at("note") == "hi", "invalid-type note value preserved as text");
@@ -405,28 +389,25 @@ int test_schema_invalid_type_spelling_preserves_raw() {
 // (vLLM qwen3coder coercion); non-boolean text stays raw.
 int test_schema_boolean_param_coerces_python_scalars() {
     const ninfer::serve::ToolDefinition tool = make_tool(
-        "set_flags",
-        R"({"type":"object","properties":{)"
-        R"("a":{"type":"boolean"},"b":{"type":"boolean"},"c":{"type":"boolean"},)"
-        R"("d":{"type":"boolean"},"e":{"type":"boolean"},"f":{"type":"boolean"},)"
-        R"("g":{"type":"boolean"}}})");
-    const ninfer::serve::ToolParamTypeMap map =
-        ninfer::serve::build_tool_param_type_map({tool});
+        "set_flags", R"({"type":"object","properties":{)"
+                     R"("a":{"type":"boolean"},"b":{"type":"boolean"},"c":{"type":"boolean"},)"
+                     R"("d":{"type":"boolean"},"e":{"type":"boolean"},"f":{"type":"boolean"},)"
+                     R"("g":{"type":"boolean"}}})");
+    const ninfer::serve::ToolParamTypeMap map = ninfer::serve::build_tool_param_type_map({tool});
 
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(
-            "    <tool_call>\n"
-            "<function=set_flags>\n"
-            "<parameter=a>True</parameter>\n"
-            "<parameter=b>1</parameter>\n"
-            "<parameter=c>False</parameter>\n"
-            "<parameter=d>0</parameter>\n"
-            "<parameter=e>maybe</parameter>\n"
-            "<parameter=f>true</parameter>\n"
-            "<parameter=g> TRUE </parameter>\n"
-            "</function>\n"
-            "</tool_call>",
-            64, map);
+        ninfer::serve::parse_qwen_tool_call_output("    <tool_call>\n"
+                                                   "<function=set_flags>\n"
+                                                   "<parameter=a>True</parameter>\n"
+                                                   "<parameter=b>1</parameter>\n"
+                                                   "<parameter=c>False</parameter>\n"
+                                                   "<parameter=d>0</parameter>\n"
+                                                   "<parameter=e>maybe</parameter>\n"
+                                                   "<parameter=f>true</parameter>\n"
+                                                   "<parameter=g> TRUE </parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>",
+                                                   64, map);
 
     int failures = 0;
     failures += check(parsed.is_tool_call_response, "schema boolean call parsed as tool response");
@@ -434,8 +415,8 @@ int test_schema_boolean_param_coerces_python_scalars() {
     const Json args = Json::parse(parsed.tool_calls[0].arguments_json);
     failures += check(args.at("a").is_boolean() && args.at("a") == true,
                       "boolean param True coerces to true");
-    failures += check(args.at("b").is_boolean() && args.at("b") == true,
-                      "boolean param 1 coerces to true");
+    failures +=
+        check(args.at("b").is_boolean() && args.at("b") == true, "boolean param 1 coerces to true");
     failures += check(args.at("c").is_boolean() && args.at("c") == false,
                       "boolean param False coerces to false");
     failures += check(args.at("d").is_boolean() && args.at("d") == false,
@@ -457,63 +438,58 @@ int test_schema_nullable_boolean_param() {
         R"({"type":"object","properties":{)"
         R"("a":{"type":["boolean","null"]},"b":{"type":["null","boolean"]},)"
         R"("c":{"type":"boolean"},"d":{"type":["boolean","null"]},"e":{"type":["null","boolean"]},"f":{"type":["boolean","null"]}}})");
-    const ninfer::serve::ToolParamTypeMap map =
-        ninfer::serve::build_tool_param_type_map({tool});
+    const ninfer::serve::ToolParamTypeMap map = ninfer::serve::build_tool_param_type_map({tool});
 
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(
-            "    <tool_call>\n"
-            "<function=flags>\n"
-            "<parameter=a>True</parameter>\n"
-            "<parameter=b>null</parameter>\n"
-            "<parameter=c>null</parameter>\n"
-            "<parameter=d>maybe</parameter>\n"
-            "<parameter=e>False</parameter>\n"
-            "<parameter=f>Null</parameter>\n"
-            "</function>\n"
-            "</tool_call>",
-            64, map);
+        ninfer::serve::parse_qwen_tool_call_output("    <tool_call>\n"
+                                                   "<function=flags>\n"
+                                                   "<parameter=a>True</parameter>\n"
+                                                   "<parameter=b>null</parameter>\n"
+                                                   "<parameter=c>null</parameter>\n"
+                                                   "<parameter=d>maybe</parameter>\n"
+                                                   "<parameter=e>False</parameter>\n"
+                                                   "<parameter=f>Null</parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>",
+                                                   64, map);
 
     int failures = 0;
-    failures += check(parsed.is_tool_call_response, "nullable boolean call parsed as tool response");
+    failures +=
+        check(parsed.is_tool_call_response, "nullable boolean call parsed as tool response");
     failures += check(parsed.tool_calls.size() == 1, "one nullable boolean call");
     const Json args = Json::parse(parsed.tool_calls[0].arguments_json);
     failures += check(args.at("a").is_boolean() && args.at("a") == true,
                       "nullable boolean True coerces to true");
-    failures += check(args.at("b").is_null(),
-                      "nullable boolean null is JSON null (null listed first)");
-    failures += check(args.at("c").is_null(),
-                      "plain boolean null is JSON null");
+    failures +=
+        check(args.at("b").is_null(), "nullable boolean null is JSON null (null listed first)");
+    failures += check(args.at("c").is_null(), "plain boolean null is JSON null");
     failures += check(args.at("d").is_string() && args.at("d") == "maybe",
                       "non-boolean text for a nullable boolean stays raw");
     failures += check(args.at("e").is_boolean() && args.at("e") == false,
                       "nullable boolean False coerces to false (null listed first)");
-    failures += check(args.at("f").is_null(),
-                      "capitalized Null is JSON null (case-insensitive)");
+    failures += check(args.at("f").is_null(), "capitalized Null is JSON null (case-insensitive)");
     return failures;
 }
 
 // (e) boolean true for a string param -> raw text "true".
 // (f) null for a string param -> raw text "null".
 int test_schema_string_param_bool_and_null_preserve_raw() {
-    const ninfer::serve::ToolDefinition tool = make_tool(
-        "flaggy", R"({"type":"object","properties":{"s":{"type":"string"}}})");
-    const ninfer::serve::ToolParamTypeMap map =
-        ninfer::serve::build_tool_param_type_map({tool});
+    const ninfer::serve::ToolDefinition tool =
+        make_tool("flaggy", R"({"type":"object","properties":{"s":{"type":"string"}}})");
+    const ninfer::serve::ToolParamTypeMap map = ninfer::serve::build_tool_param_type_map({tool});
 
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(
-            "   <tool_call>\n"
-            "<function=flaggy>\n"
-            "<parameter=s>true</parameter>\n"
-            "</function>\n"
-            "</tool_call>\n"
-            "<tool_call>\n"
-            "<function=flaggy>\n"
-            "<parameter=s>null</parameter>\n"
-            "</function>\n"
-            "</tool_call>",
-            64, map);
+        ninfer::serve::parse_qwen_tool_call_output("   <tool_call>\n"
+                                                   "<function=flaggy>\n"
+                                                   "<parameter=s>true</parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>\n"
+                                                   "<tool_call>\n"
+                                                   "<function=flaggy>\n"
+                                                   "<parameter=s>null</parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>",
+                                                   64, map);
 
     int failures = 0;
     failures += check(parsed.tool_calls.size() == 2, "two string-param calls parsed");
@@ -528,21 +504,19 @@ int test_schema_string_param_bool_and_null_preserve_raw() {
 
 // (g) object-looking text for a string param -> raw text.
 int test_schema_string_param_object_text_preserves_raw() {
-    const ninfer::serve::ToolDefinition tool = make_tool(
-        "obj", R"({"type":"object","properties":{"s":{"type":"string"}}})");
-    const ninfer::serve::ToolParamTypeMap map =
-        ninfer::serve::build_tool_param_type_map({tool});
+    const ninfer::serve::ToolDefinition tool =
+        make_tool("obj", R"({"type":"object","properties":{"s":{"type":"string"}}})");
+    const ninfer::serve::ToolParamTypeMap map = ninfer::serve::build_tool_param_type_map({tool});
 
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(
-            "   <tool_call>\n"
-            "<function=obj>\n"
-            "<parameter=s>{\"k\":1}</parameter>\n"
-            "</function>\n"
-            "</tool_call>",
-            64, map);
+        ninfer::serve::parse_qwen_tool_call_output("   <tool_call>\n"
+                                                   "<function=obj>\n"
+                                                   "<parameter=s>{\"k\":1}</parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>",
+                                                   64, map);
 
-    int failures = 0;
+    int failures    = 0;
     const Json args = Json::parse(parsed.tool_calls[0].arguments_json);
     failures += check(args.at("s").is_string(), "string param object text stays a string");
     failures += check(args.at("s") == "{\"k\":1}", "string param object text preserved verbatim");
@@ -551,22 +525,19 @@ int test_schema_string_param_object_text_preserves_raw() {
 
 // (h) empty type array ("type":[] -> raw text, no crash).
 int test_schema_empty_type_array_preserves_raw() {
-    const ninfer::serve::ToolDefinition tool = make_tool(
-        "emptytype", R"({"type":"object","properties":{"n":{"type":[]}}})");
-    const ninfer::serve::ToolParamTypeMap map =
-        ninfer::serve::build_tool_param_type_map({tool});
+    const ninfer::serve::ToolDefinition tool =
+        make_tool("emptytype", R"({"type":"object","properties":{"n":{"type":[]}}})");
+    const ninfer::serve::ToolParamTypeMap map = ninfer::serve::build_tool_param_type_map({tool});
 
     int failures = 0;
-    failures += check(map.at("emptytype").count("n") == 0,
-                      "empty type array leaves n unrecorded");
+    failures += check(map.at("emptytype").count("n") == 0, "empty type array leaves n unrecorded");
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(
-            "    <tool_call>\n"
-            "<function=emptytype>\n"
-            "<parameter=n>3</parameter>\n"
-            "</function>\n"
-            "</tool_call>",
-            64, map);
+        ninfer::serve::parse_qwen_tool_call_output("    <tool_call>\n"
+                                                   "<function=emptytype>\n"
+                                                   "<parameter=n>3</parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>",
+                                                   64, map);
     failures += check(parsed.is_tool_call_response, "empty-array call parsed");
     const Json args = Json::parse(parsed.tool_calls[0].arguments_json);
     failures += check(args.at("n").is_string(), "empty type array n stays a string");
@@ -576,22 +547,20 @@ int test_schema_empty_type_array_preserves_raw() {
 
 // (i) non-string non-array "type" (e.g. "type":5) preserves raw text.
 int test_schema_non_string_non_array_type_preserves_raw() {
-    const ninfer::serve::ToolDefinition tool = make_tool(
-        "numtype", R"({"type":"object","properties":{"n":{"type":5}}})");
-    const ninfer::serve::ToolParamTypeMap map =
-        ninfer::serve::build_tool_param_type_map({tool});
+    const ninfer::serve::ToolDefinition tool =
+        make_tool("numtype", R"({"type":"object","properties":{"n":{"type":5}}})");
+    const ninfer::serve::ToolParamTypeMap map = ninfer::serve::build_tool_param_type_map({tool});
 
     int failures = 0;
-    failures += check(map.at("numtype").count("n") == 0,
-                      "non-string non-array type leaves n unrecorded");
+    failures +=
+        check(map.at("numtype").count("n") == 0, "non-string non-array type leaves n unrecorded");
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(
-            "    <tool_call>\n"
-            "<function=numtype>\n"
-            "<parameter=n>3</parameter>\n"
-            "</function>\n"
-            "</tool_call>",
-            64, map);
+        ninfer::serve::parse_qwen_tool_call_output("    <tool_call>\n"
+                                                   "<function=numtype>\n"
+                                                   "<parameter=n>3</parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>",
+                                                   64, map);
     failures += check(parsed.is_tool_call_response, "non-string-type call parsed");
     const Json args = Json::parse(parsed.tool_calls[0].arguments_json);
     failures += check(args.at("n").is_string(), "non-string-type n stays a string");
@@ -603,10 +572,9 @@ int test_schema_non_string_non_array_type_preserves_raw() {
 // must replace the first definition's recorded (integer) permissions,
 // leaving the param unrecorded (raw text) instead of leaking the first.
 int test_duplicate_tool_definition_no_properties_replaces() {
-    const ninfer::serve::ToolDefinition first = make_tool(
-        "dup2", R"({"type":"object","properties":{"count":{"type":"integer"}}})");
-    const ninfer::serve::ToolDefinition second = make_tool(
-        "dup2", R"({"type":"object"})");
+    const ninfer::serve::ToolDefinition first =
+        make_tool("dup2", R"({"type":"object","properties":{"count":{"type":"integer"}}})");
+    const ninfer::serve::ToolDefinition second = make_tool("dup2", R"({"type":"object"})");
     const ninfer::serve::ToolParamTypeMap map =
         ninfer::serve::build_tool_param_type_map({first, second});
 
@@ -615,13 +583,12 @@ int test_duplicate_tool_definition_no_properties_replaces() {
     failures += check(map.at("dup2").count("count") == 0,
                       "second no-properties definition replaced the first (count not recorded)");
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(
-            "    <tool_call>\n"
-            "<function=dup2>\n"
-            "<parameter=count>3</parameter>\n"
-            "</function>\n"
-            "</tool_call>",
-            64, map);
+        ninfer::serve::parse_qwen_tool_call_output("    <tool_call>\n"
+                                                   "<function=dup2>\n"
+                                                   "<parameter=count>3</parameter>\n"
+                                                   "</function>\n"
+                                                   "</tool_call>",
+                                                   64, map);
     failures += check(parsed.is_tool_call_response, "no-properties dup call parsed");
     const Json args = Json::parse(parsed.tool_calls[0].arguments_json);
     failures += check(args.at("count").is_string(), "no-properties dup count stays a string");
@@ -632,10 +599,10 @@ int test_duplicate_tool_definition_no_properties_replaces() {
 // A redefinition of the same tool name must replace the prior entry so a
 // second (string) definition cannot leak the first's integer permission.
 int test_duplicate_tool_definition_replaced() {
-    const ninfer::serve::ToolDefinition first = make_tool(
-        "dup", R"({"type":"object","properties":{"count":{"type":"integer"}}})");
-    const ninfer::serve::ToolDefinition second = make_tool(
-        "dup", R"({"type":"object","properties":{"count":{"type":"string"}}})");
+    const ninfer::serve::ToolDefinition first =
+        make_tool("dup", R"({"type":"object","properties":{"count":{"type":"integer"}}})");
+    const ninfer::serve::ToolDefinition second =
+        make_tool("dup", R"({"type":"object","properties":{"count":{"type":"string"}}})");
     const ninfer::serve::ToolParamTypeMap map =
         ninfer::serve::build_tool_param_type_map({first, second});
 

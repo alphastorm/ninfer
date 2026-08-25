@@ -1,6 +1,7 @@
 #include "serve/generation_service.h"
 
 #include "product/media_acquire/acquire.h"
+#include "serve/client_identity.h"
 #include "serve/console_log.h"
 #include "serve/tool_call_parser.h"
 #include "serve/translate.h"
@@ -280,6 +281,8 @@ std::shared_ptr<RequestLifetime> GenerationService::acquire_request_lifetime() c
 PreparedRequest GenerationService::prepare(const GenerationRequest& request,
                                            std::function<bool()> is_cancelled,
                                            ContextCacheHints context_cache) const {
+    apply_client_identity_cache_hints(request, !options_.api_key.empty(), context_cache);
+
     PreparedRequest prepared;
     prepared.include_usage        = request.include_usage;
     prepared.tool_capable         = request.uses_tools() || request.has_tool_history();
@@ -340,6 +343,7 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
 
 int GenerationService::count_prompt_tokens(const GenerationRequest& request,
                                            std::function<bool()> is_cancelled) const {
+    require_authenticated_client_identity(request, !options_.api_key.empty());
     const bool request_has_media = request.media_item_count() != 0;
     if (request_has_media && !options_.enable_vision) {
         const std::invalid_argument error("Vision is disabled for this server");

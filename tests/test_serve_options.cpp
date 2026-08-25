@@ -1,6 +1,7 @@
 #include "serve/serve_options.h"
 #include "serve/translate.h"
 
+#include <functional>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -23,10 +24,53 @@ ServeOptions parse(std::vector<std::string> arguments) {
     return parse_serve_options(static_cast<int>(argv.size()), argv.data());
 }
 
+bool rejects(const std::function<void()>& operation) {
+    try {
+        operation();
+    } catch (const std::invalid_argument&) { return true; }
+    return false;
+}
+
 } // namespace
 
 int main() {
-    int failures = 0;
+    int failures               = 0;
+    const ServeOptions version = parse({"ninfer-serve", "--version"});
+    failures += check(version.version_requested && version.artifact_path.empty(),
+                      "--version requires or parses a model artifact");
+
+    const std::string binary_sha(64, '1');
+    const std::string artifact_sha(64, '2');
+    const std::string config_sha(64, '3');
+    const ServeOptions identity = parse(
+        {"ninfer-serve", "model.ninfer", "--binary-sha256", binary_sha, "--artifact-sha256",
+         artifact_sha, "--config-sha256", config_sha, "--deployment-profile", "rtx-5090-release"});
+    failures +=
+        check(identity.binary_sha256 == binary_sha && identity.artifact_sha256 == artifact_sha &&
+                  identity.config_sha256 == config_sha &&
+                  identity.deployment_profile == "rtx-5090-release",
+              "lifecycle identity options were not preserved");
+    failures += check(
+        rejects([&] {
+            (void)parse({"ninfer-serve", "model.ninfer", "--binary-sha256", std::string(64, 'A')});
+        }),
+        "uppercase binary SHA-256 was accepted");
+    failures +=
+        check(rejects([&] {
+                  (void)parse({"ninfer-serve", "model.ninfer", "--artifact-sha256", "short"});
+              }),
+              "short artifact SHA-256 was accepted");
+    failures += check(
+        rejects([&] {
+            (void)parse({"ninfer-serve", "model.ninfer", "--config-sha256", std::string(65, '3')});
+        }),
+        "long config SHA-256 was accepted");
+    failures += check(rejects([] {
+                          (void)parse({"ninfer-serve", "model.ninfer", "--deployment-profile",
+                                       "private/location"});
+                      }),
+                      "invalid deployment profile was accepted");
+
 
     const ServeOptions defaults = parse({"ninfer-serve", "model.ninfer"});
     failures += check(defaults.allow_prefix_reuse, "prefix reuse is not enabled by default");
@@ -301,14 +345,6 @@ int main() {
     failures +=
         check(serve_usage_text("ninfer-serve").find("--request-log-jsonl") != std::string::npos,
               "serve help omits --request-log-jsonl");
-    bool secret_present    = false;
-    bool redaction_present = false;
-    for (const std::string& argument : logged.startup_argv) {
-        secret_present    = secret_present || argument == "do-not-log";
-        redaction_present = redaction_present || argument == "<redacted>";
-    }
-    failures += check(!secret_present, "startup argv retained the API key");
-    failures += check(redaction_present, "startup argv omitted the API-key redaction marker");
 
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
