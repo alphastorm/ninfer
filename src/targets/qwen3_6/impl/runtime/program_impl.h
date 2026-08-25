@@ -2642,21 +2642,41 @@ void ProgramImplCore::snapshot_turn_checkpoint_to_disk(std::uint32_t lane, DiskS
 
     std::vector<std::byte> missing_pages_data;
     std::uint32_t single_page_bytes = 0;
-    void* h_text_pinned = nullptr;
-    std::size_t missing_total_bytes = 0;
 
     if (!missing_physical_page_ids.empty()) {
+        constexpr std::size_t max_staging_bytes = 128ULL * 1024ULL * 1024ULL;
         const auto& pool = decoder->text_kv.pool();
         single_page_bytes = static_cast<std::uint32_t>(pool.total_page_bytes());
-        missing_total_bytes = pool.total_page_bytes() * missing_physical_page_ids.size();
+        const std::size_t missing_total_bytes =
+            pool.total_page_bytes() * missing_physical_page_ids.size();
+        const std::size_t pages_per_batch =
+            std::max<std::size_t>(1, max_staging_bytes / single_page_bytes);
+        const std::size_t batch_capacity =
+            std::min(pages_per_batch, missing_physical_page_ids.size()) * single_page_bytes;
 
+        missing_pages_data.resize(missing_total_bytes);
         void* d_staging = nullptr;
-        CUDA_CHECK(cudaMallocAsync(&d_staging, missing_total_bytes, device.stream));
-        pool.gather_to_contiguous_device(missing_physical_page_ids, d_staging, device.stream);
+        void* h_text_pinned = nullptr;
+        CUDA_CHECK(cudaMallocAsync(&d_staging, batch_capacity, device.stream));
+        CUDA_CHECK(cudaMallocHost(&h_text_pinned, batch_capacity));
 
-        CUDA_CHECK(cudaMallocHost(&h_text_pinned, missing_total_bytes));
-        CUDA_CHECK(cudaMemcpyAsync(h_text_pinned, d_staging, missing_total_bytes,
-                                   cudaMemcpyDeviceToHost, device.stream));
+        for (std::size_t first_page = 0; first_page < missing_physical_page_ids.size();
+             first_page += pages_per_batch) {
+            const std::size_t batch_pages =
+                std::min(pages_per_batch, missing_physical_page_ids.size() - first_page);
+            const std::size_t batch_bytes = batch_pages * single_page_bytes;
+            const std::span<const std::int32_t> page_ids(
+                missing_physical_page_ids.data() + first_page, batch_pages);
+
+            pool.gather_to_contiguous_device(page_ids, d_staging, device.stream);
+            CUDA_CHECK(cudaMemcpyAsync(h_text_pinned, d_staging, batch_bytes,
+                                       cudaMemcpyDeviceToHost, device.stream));
+            CUDA_CHECK(cudaStreamSynchronize(device.stream));
+            std::memcpy(missing_pages_data.data() + first_page * single_page_bytes,
+                        h_text_pinned, batch_bytes);
+        }
+
+        CUDA_CHECK(cudaFreeHost(h_text_pinned));
         CUDA_CHECK(cudaFreeAsync(d_staging, device.stream));
     } else if (sequence.kv && sequence.kv->text.valid()) {
         const auto& pool = decoder->text_kv.pool();
@@ -2698,13 +2718,6 @@ void ProgramImplCore::snapshot_turn_checkpoint_to_disk(std::uint32_t lane, DiskS
     }
 
     CUDA_CHECK(cudaStreamSynchronize(device.stream));
-
-    if (h_text_pinned && missing_total_bytes > 0) {
-        missing_pages_data.resize(missing_total_bytes);
-        std::memcpy(missing_pages_data.data(), h_text_pinned, missing_total_bytes);
-        CUDA_CHECK(cudaFreeHost(h_text_pinned));
-        h_text_pinned = nullptr;
-    }
 
     disk_cache.enqueue_save_cow(model_hash, std::move(turn_toks), 0, sequence.rope_delta,
                                 std::move(gdn_payload), std::move(all_page_hashes),
