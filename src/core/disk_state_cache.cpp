@@ -600,7 +600,14 @@ public:
             journal_.pool_data_path(), text_pages, path, header.payload_offset_bytes,
             manifest_payload_bytes, stream, out_d_staging_ptr, out_text_bytes
         );
-        if (!ok) { return false; }
+        if (!ok) {
+            const cudaError_t direct_storage_error = cudaGetLastError();
+            if (direct_storage_error != cudaSuccess) {
+                std::cerr << "[warn] ninfer: [prompt-cache] DirectStorage restore fell back after CUDA error: "
+                          << cudaGetErrorString(direct_storage_error) << '\n';
+            }
+            return false;
+        }
 
         const auto load_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t_load_0).count();
         const std::size_t total_payload_bytes = header.text_page_count * header.text_page_bytes + manifest_payload_bytes;
