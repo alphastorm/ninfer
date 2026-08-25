@@ -323,6 +323,9 @@ void HttpServer::register_routes() {
     server_.Get("/health", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(nlohmann::json{{"status", "ok"}}.dump(), "application/json");
     });
+    server_.Get("/v1/ninfer/status", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_status(req, res);
+    });
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
     });
@@ -385,6 +388,18 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
         return;
     }
     res.set_content(make_model_object(public_model_id_, unix_time_now()), "application/json");
+}
+
+void HttpServer::handle_status(const httplib::Request&, httplib::Response& res) const {
+    if (service_ == nullptr) {
+        res.status = 503;
+        res.set_content(nlohmann::json{{"status", "loading"}}.dump(), "application/json");
+        return;
+    }
+    res.set_content(format_status_json(options_, service_->engine_options(), public_model_id_,
+                                       service_->load_summary(), service_->memory_summary(),
+                                       service_->runtime_stats()),
+                    "application/json");
 }
 
 void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::Response& res) {

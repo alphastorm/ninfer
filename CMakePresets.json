@@ -1,0 +1,44 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "release-rtx-5090",
+      "displayName": "Release for RTX 5090 (sm_120a)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/release-rtx-5090",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_CUDA_ARCHITECTURES": "120a",
+        "NINFER_BUILD_APPS": "ON",
+        "BUILD_TESTING": "ON",
+        "NINFER_BUILD_BENCHMARKS": "OFF",
+        "NINFER_BUILD_PROFILE": "rtx-5090-release",
+        "NINFER_UPSTREAM_BASE_SHA": "4eef14a7560d87a3ba717898e1d488a4c4c7246d",
+        "NINFER_PATCH_STACK_SHA": "auto"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "release-rtx-5090",
+      "configurePreset": "release-rtx-5090",
+      "targets": ["ninfer", "ninfer-serve"]
+    },
+    {
+      "name": "test-rtx-5090",
+      "configurePreset": "release-rtx-5090"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "release-rtx-5090",
+      "configurePreset": "release-rtx-5090",
+      "output": {"outputOnFailure": true}
+    }
+  ]
+}

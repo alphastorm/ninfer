@@ -3,6 +3,9 @@
 #include "serve/generation_service.h"
 #include "serve/http_server.h"
 #include "serve/serve_options.h"
+#include "serve/server_identity.h"
+
+#include "ninfer/build_info.h"
 
 #include <atomic>
 #include <chrono>
@@ -45,6 +48,10 @@ int main(int argc, char** argv) {
             std::cout << ninfer::serve::serve_usage_text(argv[0]);
             return 0;
         }
+        if (options.version_requested) {
+            std::cout << ninfer::format_build_info("ninfer-serve") << '\n';
+            return 0;
+        }
 
         using Clock = std::chrono::steady_clock;
         ninfer::serve::HttpServer server(options);
@@ -69,6 +76,9 @@ int main(int argc, char** argv) {
         loaded << "model loaded in "
                << std::chrono::duration<double>(Clock::now() - load_start).count() << " s";
         ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Info, loaded.str());
+        ninfer::serve::write_console_log(
+            ninfer::serve::ConsoleLogLevel::Info,
+            ninfer::serve::format_server_identity(options, service.load_summary()));
 
         const ninfer::MemorySummary memory            = service.memory_summary();
         const ninfer::ContextCostSummary context_cost = service.load_summary().context_cost;

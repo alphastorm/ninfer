@@ -8,6 +8,7 @@
 #include <limits>
 #include <random>
 #include <string>
+#include <unordered_set>
 
 namespace ninfer::serve {
 namespace {
@@ -250,12 +251,16 @@ void parse_messages(const Json& body, GenerationRequest& out) {
                 item.at("tool_call_id").get<std::string>().empty()) {
                 bad_request("tool messages must contain a string tool_call_id", "messages");
             }
-            if (!item.contains("content") || !item.at("content").is_string()) {
-                bad_request("tool messages must contain string content", "messages");
+            if (!item.contains("content")) {
+                bad_request("tool messages must contain content", "messages");
             }
             turn.tool_call_id = item.at("tool_call_id").get<std::string>();
-            turn.content.push_back(
-                ContentPart{ContentKind::Text, item.at("content").get<std::string>(), "text"});
+            parse_content_parts(item.at("content"), turn, i);
+            for (const ContentPart& part : turn.content) {
+                if (part.kind != ContentKind::Text) {
+                    bad_request("tool message content parts must have type 'text'", "messages");
+                }
+            }
             out.messages.push_back(std::move(turn));
             continue;
         }
@@ -298,6 +303,7 @@ void parse_tools(const Json& body, GenerationRequest& out) {
     const Json& tools = body.at("tools");
     if (!tools.is_array()) { bad_request("tools must be an array", "tools"); }
     out.tools.reserve(tools.size());
+    std::unordered_set<std::string> names;
     for (std::size_t i = 0; i < tools.size(); ++i) {
         const Json& item = tools.at(i);
         if (!item.is_object()) { bad_request("tools entries must be objects", "tools"); }
@@ -314,6 +320,9 @@ void parse_tools(const Json& body, GenerationRequest& out) {
         Json& fn        = normalized["function"];
         ToolDefinition tool;
         tool.name = require_function_name(fn, "tools");
+        if (!names.insert(tool.name).second) {
+            bad_request("duplicate function tool name: " + tool.name, "tools");
+        }
         if (fn.contains("description") && !fn.at("description").is_null()) {
             if (!fn.at("description").is_string()) {
                 bad_request("function description must be a string", "tools");
@@ -439,6 +448,18 @@ void reject_unsupported_features(const Json& body) {
             error.message = std::string(key) + " is not supported yet";
             error.param   = key;
             error.code    = "tools_not_supported";
+            throw ApiException(std::move(error));
+        }
+    }
+    for (const char* key : {"grammar", "structured_outputs", "json_schema", "regex", "ebnf",
+                            "structural_tag", "guided_json", "guided_regex", "guided_choice",
+                            "guided_grammar", "guided_decoding_backend",
+                            "guided_whitespace_pattern"}) {
+        if (body.contains(key) && !body.at(key).is_null()) {
+            ApiError error;
+            error.message = std::string(key) + " requires unsupported structured decoding";
+            error.param   = key;
+            error.code    = "structured_output_not_supported";
             throw ApiException(std::move(error));
         }
     }

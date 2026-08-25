@@ -1,6 +1,7 @@
 #include "serve/request_log.h"
 #include "product/speculative_options.h"
 #include "serve/console_log.h"
+#include "serve/server_identity.h"
 
 #include <cuda_runtime.h>
 #include <nlohmann/json.hpp>
@@ -615,6 +616,7 @@ std::string format_server_start_json(
                                                           {"default_thinking", options.enable_thinking},
                                                           {"default_thinking_budget", std::move(default_thinking_budget)},
                                                           {"default_preserve_thinking", options.preserve_thinking}};
+    record["identity"] = server_identity_json(options, load);
     record["artifact"]                             = Json{{"path", options.artifact_path},
                                                           {"size_bytes", std::move(artifact_size)},
                                                           {"target", load.target},
@@ -707,6 +709,96 @@ std::string format_server_start_json(
              {"cuda_driver_version", environment.cuda_driver_version}};
     record["argv"] = options.startup_argv;
     return record.dump();
+}
+
+std::string format_status_json(const ServeOptions& options,
+                               const ninfer::EngineOptions& engine_options,
+                               const std::string& public_model_id,
+                               const ninfer::LoadSummary& load,
+                               const ninfer::MemorySummary& memory,
+                               const ninfer::RuntimeStats& runtime) {
+    const ninfer::ContextCacheOptions& cache = engine_options.context_cache;
+    const std::uint64_t device_state_capacity =
+        static_cast<std::uint64_t>(engine_options.max_concurrency) +
+        cache.device_state_slots.value_or(0);
+    Json mtp_acceptance = nullptr;
+    if (runtime.speculative_drafted_tokens != 0) {
+        mtp_acceptance = static_cast<double>(runtime.speculative_accepted_tokens) /
+                         static_cast<double>(runtime.speculative_drafted_tokens);
+    }
+    Json tokens_per_round = nullptr;
+    if (runtime.speculative_rounds != 0) {
+        tokens_per_round =
+            1.0 + static_cast<double>(runtime.speculative_accepted_tokens) /
+                      static_cast<double>(runtime.speculative_rounds);
+    }
+
+    Json status = {
+        {"artifact_type", "ninfer_server_status"},
+        {"schema_version", 1},
+        {"status", "ok"},
+        {"identity", server_identity_json(options, load)},
+        {"server", Json{{"public_model_id", public_model_id},
+                         {"api_key_configured", !options.api_key.empty()}}},
+        {"engine", Json{{"max_context", engine_options.max_context},
+                         {"kv_capacity_mode", kv_capacity_mode_name(memory.kv_capacity_mode)},
+                         {"kv_capacity_tokens", memory.kv_capacity},
+                         {"kv_cache", kv_cache_name(engine_options.kv_cache)},
+                         {"max_concurrency", engine_options.max_concurrency},
+                         {"max_pending_requests", engine_options.max_pending_requests},
+                         {"speculative_backend",
+                          product::speculative_backend_name(engine_options.speculative.backend)},
+                         {"speculative_draft_window", engine_options.speculative.draft_tokens},
+                         {"proposal_head",
+                          proposal_head_name(engine_options.speculative.proposal_head)}}},
+        {"activity", Json{{"running", runtime.running_requests},
+                           {"prefilling", runtime.prefilling_requests},
+                           {"decode_ready", runtime.decode_ready_requests},
+                           {"waiting", runtime.waiting_requests},
+                           {"materializing", runtime.materializing_requests},
+                           {"capture_pending", runtime.capture_pending_requests}}},
+        {"cache", Json{{"device_state",
+                         Json{{"occupied", runtime.device_state_occupied_slots},
+                              {"capacity", device_state_capacity}}},
+                        {"host_state",
+                         Json{{"occupied", runtime.host_state_occupied_slots},
+                              {"capacity", memory.host_state_capacity_slots}}},
+                        {"host_kv",
+                         Json{{"occupied_bytes", runtime.host_kv_occupied_bytes},
+                              {"capacity_bytes", memory.host_kv_capacity_bytes}}},
+                        {"private_catalog",
+                         Json{{"occupied", runtime.private_catalog_occupied},
+                              {"capacity", cache.max_private_continuations.value_or(0)}}},
+                        {"shared_catalog",
+                         Json{{"occupied", runtime.shared_catalog_occupied},
+                              {"capacity", cache.max_shared_prefixes.value_or(0)},
+                              {"active_references", runtime.shared_active_references}}},
+                        {"reused_prompt_tokens", runtime.reused_prompt_tokens},
+                        {"last_selection",
+                         Json{{"path", prefix_reuse_path_name(runtime.last_selected_reuse_path)},
+                              {"frontier_tokens", runtime.last_selected_frontier_tokens}}},
+                        {"private_evictions", runtime.private_checkpoint_evictions},
+                        {"shared_evictions", runtime.shared_checkpoint_evictions},
+                        {"last_materialization_predicted_nanoseconds",
+                         runtime.last_predicted_materialization_ns}}},
+        {"totals", Json{{"computed_prefill_tokens", runtime.computed_prefill_tokens},
+                         {"committed_decode_tokens", runtime.committed_decode_tokens},
+                         {"decode_rounds", runtime.decode_rounds},
+                         {"decode_row_rounds", runtime.decode_row_rounds},
+                         {"prefill_host_nanoseconds", runtime.host_work.prefill_host_ns},
+                         {"prefill_device_wait_nanoseconds",
+                          runtime.host_work.prefill_device_wait_ns},
+                         {"decode_host_nanoseconds", runtime.host_work.decode_host_ns},
+                         {"decode_device_wait_nanoseconds",
+                          runtime.host_work.decode_device_wait_ns},
+                         {"mtp", Json{{"rounds", runtime.speculative_rounds},
+                                      {"drafted_tokens", runtime.speculative_drafted_tokens},
+                                      {"accepted_tokens", runtime.speculative_accepted_tokens},
+                                      {"fallback_steps", runtime.speculative_fallback_steps},
+                                      {"acceptance_ratio", std::move(mtp_acceptance)},
+                                      {"tokens_per_round", std::move(tokens_per_round)}}}}},
+    };
+    return status.dump();
 }
 
 std::string format_request_start_json(const std::string& server_instance_id,

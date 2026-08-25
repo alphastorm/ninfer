@@ -543,6 +543,7 @@ private:
             break;
         }
         cumulative_stats_.reused_prompt_tokens += summary.reusable_prompt_tokens;
+        cumulative_stats_.last_selected_reuse_path    = summary.prefix_reuse_path;
         cumulative_stats_.last_selected_frontier_tokens = summary.reusable_prompt_tokens;
     }
 
@@ -724,7 +725,12 @@ private:
         }
         result.timings                 = request->generation_timings;
         result.timings.prepare_seconds = request->prepare_seconds;
-        result.speculative             = std::move(request->speculative_stats);
+        cumulative_stats_.speculative_rounds += request->speculative_stats.rounds;
+        cumulative_stats_.speculative_drafted_tokens += request->speculative_stats.drafted_tokens;
+        cumulative_stats_.speculative_accepted_tokens +=
+            request->speculative_stats.accepted_tokens;
+        cumulative_stats_.speculative_fallback_steps += request->speculative_stats.fallback_steps;
+        result.speculative = std::move(request->speculative_stats);
         result.thinking                = request->output.thinking_stats();
         if (request->first_token) {
             result.timings.first_token_seconds =

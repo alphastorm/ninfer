@@ -376,6 +376,17 @@ int test_reject_unsupported() {
     } catch (...) { text_ok = false; }
     failures += check(text_ok, "text response_format accepted");
 
+    for (const char* key : {"grammar", "structured_outputs", "json_schema", "regex", "ebnf",
+                            "structural_tag", "guided_json", "guided_regex", "guided_choice",
+                            "guided_grammar", "guided_decoding_backend",
+                            "guided_whitespace_pattern"}) {
+        Json structured = base;
+        structured[key] = Json::object();
+        failures += check(api_code([&] {
+                              (void)parse_chat_completion_request(structured, default_limits());
+                          }) == "structured_output_not_supported",
+                          std::string("unsupported structured field accepted: ") + key);
+    }
     Json no_model = {{"messages", Json::array({Json{{"role", "user"}, {"content", "hi"}}})}};
     failures +=
         check(throws_api([&] { (void)parse_chat_completion_request(no_model, default_limits()); }),
@@ -443,6 +454,13 @@ int test_parse_function_tools_and_choices() {
     failures +=
         check(throws_api([&] { (void)parse_chat_completion_request(unknown, default_limits()); }),
               "unknown named tool_choice rejected");
+
+    // Duplicate function tool names are rejected (matches Responses behavior).
+    Json dup           = base;
+    dup["tools"]       = Json::array({tool, tool});
+    failures +=
+        check(throws_api([&] { (void)parse_chat_completion_request(dup, default_limits()); }),
+              "duplicate function tool names rejected");
     return failures;
 }
 
@@ -474,6 +492,24 @@ int test_parse_tool_history_messages() {
         check(req.messages[2].content.at(0).text == R"({"temp":20})", "tool content parsed");
     failures += check(translate_options(req).output.preserve_special_tokens,
                       "tool history preserves special tokens in Engine output");
+
+    Json array_content = body;
+    array_content["messages"][2]["content"] =
+        Json::array({Json{{"type", "text"}, {"text", "first"}},
+                     Json{{"type", "text"}, {"text", "second"}}});
+    const GenerationRequest array_request =
+        parse_chat_completion_request(array_content, default_limits());
+    failures += check(array_request.messages[2].content.size() == 2 &&
+                          array_request.messages[2].content[0].text == "first" &&
+                          array_request.messages[2].content[1].text == "second",
+                      "tool text content array parsed");
+
+    Json media_content = body;
+    media_content["messages"][2]["content"] = Json::array(
+        {Json{{"type", "image_url"}, {"image_url", Json{{"url", "https://example.test/a.png"}}}}});
+    failures += check(
+        throws_api([&] { (void)parse_chat_completion_request(media_content, default_limits()); }),
+        "non-text tool content array rejected");
 
     Json bad_args                                                     = body;
     bad_args["messages"][1]["tool_calls"][0]["function"]["arguments"] = R"(["Paris"])";

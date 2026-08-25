@@ -2881,12 +2881,20 @@ public:
         out.device_main_kv_occupied_pages    = used.device.main_kv_pages;
         out.device_backend_kv_occupied_pages = used.device.backend_kv_pages;
         out.host_kv_occupied_bytes           = used.host.kv_bytes;
-        std::uint64_t shared_references      = 0;
+        std::uint32_t private_occupied = 0;
+        for (const CatalogEntry& entry : catalog_) {
+            if (entry.state != CatalogState::Vacant) { ++private_occupied; }
+        }
+        std::uint32_t shared_occupied  = 0;
+        std::uint64_t shared_references = 0;
         for (const SharedCatalogEntry& entry : shared_catalog_) {
+            if (entry.state != SharedCatalogState::Vacant) { ++shared_occupied; }
             if (entry.state == SharedCatalogState::Catalogued) {
                 shared_references += entry.summary.active_references;
             }
         }
+        out.private_catalog_occupied = private_occupied;
+        out.shared_catalog_occupied  = shared_occupied;
         out.shared_active_references = shared_references > std::numeric_limits<std::uint32_t>::max()
                                            ? std::numeric_limits<std::uint32_t>::max()
                                            : static_cast<std::uint32_t>(shared_references);

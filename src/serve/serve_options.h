@@ -19,14 +19,19 @@ inline constexpr std::size_t kDefaultResponseStoreRecords = 1024;
 inline constexpr std::size_t kDefaultResponseStoreBytes   = 256ULL << 20;
 
 struct ServeOptions {
-    bool help_requested = false;
+    bool help_requested    = false;
+    bool version_requested = false;
     std::string artifact_path;
     std::string host = "127.0.0.1";
     int port         = 8080;
     std::string api_key;                          // empty => no auth
     std::optional<std::string> model_id_override; // unset => artifact identity.model_id
     std::string request_log_jsonl;                // empty => structured request logging disabled
-    std::uint32_t max_context          = 8192;
+    std::string binary_sha256;                    // lifecycle-computed executable identity
+    std::string artifact_sha256;                  // lifecycle-computed artifact identity
+    std::string config_sha256;                    // lifecycle-computed canonical config identity
+    std::string deployment_profile;               // generic operator-selected profile name
+    std::uint32_t max_context = 8192;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(8192);
     std::uint32_t max_concurrency      = 1;
     std::uint32_t max_pending_requests = 16;
