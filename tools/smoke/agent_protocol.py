@@ -492,11 +492,14 @@ def responses_session_lifecycle(
     if response_id(branch_read) != branch_id:
         raise ProtocolError("Responses fork disappeared after parent deletion")
     return {
-        "first": first_id,
-        "continuation": continuation_id,
-        "branch": branch_id,
-        "post_delete_continuation": surviving_id,
-        "cross_session_rejected": True,
+        "first_turn_completed": True,
+        "continuation_completed": True,
+        "fork_count": 2,
+        "cross_session_status": 404,
+        "parent_delete_status": 200,
+        "parent_get_after_delete_status": 404,
+        "surviving_descendants_retrieved": True,
+        "surviving_descendant_continued": True,
     }
 
 
