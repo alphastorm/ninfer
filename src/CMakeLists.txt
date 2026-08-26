@@ -37,6 +37,7 @@ add_library(ninfer_core STATIC
   runtime/engine/request_memory.cpp)
 ninfer_internal_includes(ninfer_core)
 target_include_directories(ninfer_core PRIVATE ${PROJECT_BINARY_DIR}/generated)
+add_dependencies(ninfer_core ninfer_verify_build_source)
 ninfer_cuda_archive(ninfer_core)
 target_link_libraries(ninfer_core PUBLIC ${NINFER_CUDART_TARGET} CUDA::nvtx3)
 if(WIN32)
