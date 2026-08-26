@@ -99,7 +99,7 @@ std::string read_api_key_file(const char* path) {
     std::ifstream input(path, std::ios::binary);
     if (!input) { throw std::invalid_argument("cannot open --api-key-file"); }
     std::string value((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
-    if (!input.eof()) { throw std::invalid_argument("cannot read --api-key-file"); }
+    if (input.bad()) { throw std::invalid_argument("cannot read --api-key-file"); }
     while (!value.empty() && (value.back() == '\n' || value.back() == '\r')) { value.pop_back(); }
     if (value.empty() || value.find('\0') != std::string::npos ||
         value.find('\n') != std::string::npos || value.find('\r') != std::string::npos) {
