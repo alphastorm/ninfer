@@ -224,7 +224,10 @@ try {
         -Destination (Join-Path $StateRoot 'Control-Release.ps1') -Force
 
     & icacls.exe $StateRoot '/inheritance:r' '/grant:r' `
-        'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' "$env:USERNAME`:(OI)(CI)M" '/T' '/C' | Out-Null
+        'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' "$env:USERNAME`:(OI)(CI)M" | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'failed to restrict release state ACL' }
+    & icacls.exe (Join-Path $StateRoot '*') '/reset' '/T' '/C' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'failed to propagate release state ACL' }
     Register-ReleaseTask $taskName (Join-Path $StateRoot 'Control-Release.ps1')
 
     if (-not $NoStart) {

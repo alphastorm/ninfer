@@ -14,6 +14,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+Add-Type -AssemblyName System.Web.Extensions
+$jsonSerializer = [Web.Script.Serialization.JavaScriptSerializer]::new()
+$jsonSerializer.MaxJsonLength = [int]::MaxValue
+
 function Read-JsonFile([string]$Path) {
     return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
 }
@@ -42,14 +46,14 @@ function Read-OneLineSecret([string]$Path) {
 function Get-Digest([string]$Label) {
     $sha = [Security.Cryptography.SHA256]::Create()
     try {
-        return ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Label)))) `
-            .Replace('-', '').ToLowerInvariant()
+        $digest = [BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($Label)))
+        return $digest.Replace('-', '').ToLowerInvariant()
     }
     finally { $sha.Dispose() }
 }
 
 function Invoke-Chat([string]$Uri, [hashtable]$Headers, [object]$Body) {
-    $json = $Body | ConvertTo-Json -Depth 20 -Compress
+    [string]$json = $jsonSerializer.Serialize($Body)
     return Invoke-RestMethod -Method Post -Uri $Uri -Headers $Headers -ContentType 'application/json' `
         -Body $json -TimeoutSec 1800 -UseBasicParsing
 }
@@ -80,7 +84,8 @@ $protocolJson = & $Python $smokePath --base-url $baseUrl --model ([string]$confi
 if ($LASTEXITCODE -ne 0) { throw 'agent protocol smoke failed' }
 $protocol = ($protocolJson | Out-String) | ConvertFrom-Json
 
-$longPrompt = Get-Content -LiteralPath (Resolve-Path -LiteralPath $LongPromptFile).Path -Raw -Encoding UTF8
+$longPromptPath = (Resolve-Path -LiteralPath $LongPromptFile).Path
+$longPrompt = [IO.File]::ReadAllText($longPromptPath, [Text.UTF8Encoding]::new($false, $true))
 if ([string]::IsNullOrWhiteSpace($longPrompt)) { throw 'long prompt corpus is empty' }
 $sessionDigest = Get-Digest 'ninfer-qwen38-4090-v0.1/qualification-session'
 $firstRequestDigest = Get-Digest 'ninfer-qwen38-4090-v0.1/qualification-first'
@@ -102,7 +107,7 @@ if ([int]$first.usage.prompt_tokens -lt 100000) {
     throw 'long qualification prompt did not reach 100000 input tokens'
 }
 $assistant = $first.choices[0].message
-$assistantTurn = [ordered]@{ role = 'assistant'; content = $assistant.content }
+$assistantTurn = [ordered]@{ role = 'assistant'; content = [string]$assistant.content }
 $reasoningProperty = $assistant.PSObject.Properties['reasoning_content']
 if ($null -ne $reasoningProperty -and
     -not [string]::IsNullOrEmpty([string]$reasoningProperty.Value)) {

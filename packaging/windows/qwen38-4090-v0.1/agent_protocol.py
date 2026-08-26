@@ -145,6 +145,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         digest("tool-session"),
         digest("tool-request"),
     )
+    tool_request["max_completion_tokens"] = 256
     tool_request["tools"] = [tool_schema]
     tool_request["tool_choice"] = {"type": "function", "function": {"name": "weather_lookup"}}
     tool_response = json_response(
@@ -248,7 +249,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "model": args.model,
             "previous_response_id": response_id,
             "input": "This must not resolve.",
-            "max_output_tokens": 8,
+            "max_output_tokens": 16,
             "ninfer_session": digest("other-responses-session"),
             "ninfer_request_id": digest("responses-cross-session"),
         },
