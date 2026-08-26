@@ -205,7 +205,8 @@ std::vector<std::string> ResponseStore::session_digests() const {
     return out;
 }
 
-bool ResponseStore::restore_session(ResponseStoreSnapshot snapshot) {
+bool ResponseStore::restore_session(ResponseStoreSnapshot snapshot,
+                                    const std::function<bool()>& commit_external) {
     if (snapshot.client_session_sha256.empty() || snapshot.latest_response_id.empty() ||
         snapshot.records.empty() || snapshot.records.size() > max_records_) {
         return false;
@@ -274,6 +275,7 @@ bool ResponseStore::restore_session(ResponseStoreSnapshot snapshot) {
                 replacement.current_bytes_ > max_bytes_) {
                 continue;
             }
+            if (!commit_external()) { return false; }
             records_.swap(replacement.records_);
             lru_.swap(replacement.lru_);
             live_context_references_.swap(replacement.live_context_references_);

@@ -496,11 +496,13 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
         std::optional<VerifiedSessionCheckpoint> checkpoint = checkpoint_store_->load(
             session_sha256, checkpoint_runtime_fingerprint_, required_response_id);
         if (!checkpoint) { return false; }
-        const std::optional<runtime::ContinuationCheckpointStats> restored =
-            runtime::CheckpointEngineAccess::restore_session(
-                *engine_, session_sha256, checkpoint->responses.latest_response_id,
-                *checkpoint->engine, checkpoint_store_->options().staging_bytes);
-        return restored.has_value() && responses.restore_session(std::move(checkpoint->responses));
+        const std::string checkpoint_tag = checkpoint->responses.latest_response_id;
+        return responses.restore_session(std::move(checkpoint->responses), [&] {
+            return runtime::CheckpointEngineAccess::restore_session(
+                       *engine_, session_sha256, checkpoint_tag,
+                       *checkpoint->engine, checkpoint_store_->options().staging_bytes)
+                .has_value();
+        });
     } catch (...) {
         return false;
     }

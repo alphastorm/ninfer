@@ -176,10 +176,28 @@ int test_codec_round_trip() {
     failures += check(encoded == reencoded, "response snapshot has a stable canonical encoding");
     ResponseStore live(4, 1ULL << 20);
     live.put(original.records.front());
-    failures += check(!live.restore_session(original) && live.size() == 1 &&
+    bool duplicate_external_commit = false;
+    failures += check(!live.restore_session(original, [&] {
+                          duplicate_external_commit = true;
+                          return true;
+                      }) &&
+                          !duplicate_external_commit && live.size() == 1 &&
                           live.get("resp_private_first") != nullptr &&
                           live.get("resp_private_second") == nullptr,
-                      "failed ResponseStore restore leaves existing state unchanged");
+                      "invalid ResponseStore restore leaves both transaction sides unchanged");
+
+    ResponseStore gated(4, 1ULL << 20);
+    bool failed_external_commit = false;
+    failures += check(!gated.restore_session(original, [&] {
+                          failed_external_commit = true;
+                          return false;
+                      }) &&
+                          failed_external_commit && gated.size() == 0,
+                      "failed external restore does not publish Responses state");
+    failures += check(gated.restore_session(original, [] { return true; }) && gated.size() == 2 &&
+                          gated.get("resp_private_first") != nullptr &&
+                          gated.get("resp_private_second") != nullptr,
+                      "successful external restore atomically publishes Responses state");
     return failures;
 }
 
@@ -233,7 +251,7 @@ int test_transaction_restart_compatibility_and_corruption() {
                           loaded->expected_engine.restored_tokens == 97500,
                       "verified engine reader restores exact payload and token summary");
     ResponseStore response_store(8, 1ULL << 20);
-    failures += check(response_store.restore_session(loaded->responses),
+    failures += check(response_store.restore_session(loaded->responses, [] { return true; }),
                       "verified response snapshot installs atomically");
     const auto restored_response =
         response_store.get_for_session(responses.latest_response_id,
