@@ -373,7 +373,7 @@ def verify_expected(identity: RuntimeIdentity, expected: ExpectedIdentity) -> No
 
 
 def inspect_container(name: str) -> dict[str, Any] | None:
-    result = run(["docker", "inspect", name], check=False)
+    result = run(["docker", "container", "inspect", name], check=False)
     if result.returncode != 0:
         return None
     try:
@@ -405,7 +405,9 @@ def require_gpu_idle() -> None:
     running = run(["docker", "ps", "--quiet"]).stdout.split()
     if running:
         try:
-            inspected = json.loads(run(["docker", "inspect", *running]).stdout)
+            inspected = json.loads(
+                run(["docker", "container", "inspect", *running]).stdout
+            )
         except json.JSONDecodeError as error:
             raise LifecycleError(
                 "Docker returned invalid running-container JSON"

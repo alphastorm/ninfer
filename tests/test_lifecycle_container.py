@@ -5,10 +5,12 @@ from pathlib import Path
 import tempfile
 import subprocess
 import unittest
+from unittest import mock
 
 from tools.lifecycle.ninfer_container import (
     LifecycleError,
     canonical_config_sha256,
+    inspect_container,
     load_config,
     materialize_source_archive,
     verify_clean_source,
@@ -33,6 +35,22 @@ def write_config(path: Path, *, restart_policy: str | None = None) -> Path:
 
 
 class LifecycleConfigTests(unittest.TestCase):
+    def test_container_lookup_ignores_same_named_image(self) -> None:
+        image_only = subprocess.CompletedProcess(
+            args=["docker", "container", "inspect", "ninfer:test"],
+            returncode=1,
+            stdout="",
+            stderr="no such container",
+        )
+        with mock.patch(
+            "tools.lifecycle.ninfer_container.run", return_value=image_only
+        ) as run_mock:
+            self.assertIsNone(inspect_container("ninfer:test"))
+
+        run_mock.assert_called_once_with(
+            ["docker", "container", "inspect", "ninfer:test"], check=False
+        )
+
     def test_restart_policy_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
