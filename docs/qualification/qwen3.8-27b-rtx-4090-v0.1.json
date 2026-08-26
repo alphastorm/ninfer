@@ -1,0 +1,126 @@
+{
+  "artifact_type": "ninfer_public_windows_release_qualification",
+  "schema_version": 1,
+  "status": "passed",
+  "release_tier": "beta",
+  "qualified_utc": "2026-08-26T02:31:24.7585041Z",
+  "release_id": "qwen38-4090-v0.1-66e08ca64122",
+  "qualification_target": {
+    "platform": "windows-x86_64",
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "cuda_architecture": "sm_89"
+  },
+  "source": {
+    "qualified_commit": "66e08ca641223d8467d4ec1e6ab1029028062cac",
+    "upstream_base_sha": "9ec1b82c7afa021314682d7a95390f8935ead7c2",
+    "source_dirty": false,
+    "model_repository": "neroued/Qwen3.8-27B-NInfer",
+    "model_revision": "18dfc887423fa5aabf3cb56fac41490e462b3fab",
+    "patch_provenance": {
+      "raw_patch_sha256": "ac8ba36da9bfc89ff97021eecba8c7ba8f88f9e7e9bfd1c9c3509b723d81d4e0",
+      "normalized_patch_sha256": "6cf03d7b4562165d9c7416b0878ff183dae0db00811176ead11e487f1c916898",
+      "series_sha256": "7da9a7b244275fb306bcaf745b61ed183c60c8a85fdf272e640ba3cb95aa71a3",
+      "bounded_staging_commit": "e89e415d95921cecf4cf8a00df5540a4a036ff84",
+      "direct_storage_fallback_commit": "a9bb55b8e9b02ff34e4725dc8ca95d4fadeb3e0d"
+    }
+  },
+  "package": {
+    "filename": "ninfer-qwen38-4090-v0.1-windows-x86_64.zip",
+    "sha256": "5d873b9a5fa910b564e3a5e72df7cc8c96e984047e8329ec787173882206fd3a",
+    "size_bytes": 228992663,
+    "manifest_entries": 22,
+    "runtime_dlls": 12,
+    "checksum_verification": "passed"
+  },
+  "identity": {
+    "binary_sha256": "aa2bc9b8929e6f9085caa5501f1b9553701c1bfb51f4b277691b528b0b293a1b",
+    "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
+    "model_artifact_size_bytes": 18210531328,
+    "config_sha256": "8ee93f07172d9dd5044b4fa3a8823a53b7ce616d890b5352a44f18be4e901c5f",
+    "build_type": "Release",
+    "cxx_compiler": "MSVC-19.44.35228.0",
+    "cuda_compiler": "NVIDIA-13.3.73",
+    "cuda_toolkit": "13.3.73",
+    "target": "qwen3_8_27b",
+    "model_id": "qwen3.8-27b",
+    "weights_id": "groupwise-int"
+  },
+  "configuration": {
+    "public_model_id": "qwen3.8-27b",
+    "max_context": 131072,
+    "kv_dtype": "rk2v4-e8",
+    "prefill_chunk": 512,
+    "speculative_backend": "none",
+    "reasoning_effort": "xhigh",
+    "disk_cache_gib": 100,
+    "concurrency": 1
+  },
+  "speculation_decision": {
+    "selected_profile": "MTP0",
+    "mtp0": "qualified",
+    "bounded_mtp3": "not_attempted",
+    "reason": "The private Golden gate was not run, so the required deterministic and end-to-end promotion comparison was unavailable."
+  },
+  "protocol": {
+    "artifact_type": "ninfer_agent_protocol_smoke",
+    "schema_version": 1,
+    "status": "passed",
+    "checks": {
+      "anthropic_count_tokens": true,
+      "authenticated_status": true,
+      "duplicate_tool_names_rejected": true,
+      "malformed_identity_rejected": true,
+      "responses_continuation": true,
+      "responses_cross_session_isolation": true,
+      "streaming_parity": true,
+      "tool_result_array": true,
+      "typed_tool_arguments": true,
+      "unsupported_structured_output_rejected": true
+    }
+  },
+  "persistence": {
+    "first_prompt_tokens": 105052,
+    "first_completion_tokens": 16,
+    "first_elapsed_seconds": 88.4687637,
+    "post_restart_prompt_tokens": 105089,
+    "post_restart_completion_tokens": 16,
+    "post_restart_elapsed_seconds": 4.9079209,
+    "restored_tokens": 105068,
+    "reuse_path": "restore_disk_checkpoint",
+    "post_restart_prepare_seconds": 0.0722435
+  },
+  "release_gates": {
+    "P": {
+      "status": "passed",
+      "scope": "installed-package protocol and tool correctness",
+      "checks_passed": 10,
+      "checks_failed": 0
+    },
+    "L": {
+      "status": "passed",
+      "scope": "installed-package 100K+ continuation across NInfer restart",
+      "omp_restart_component": "not_run"
+    },
+    "G": {
+      "status": "not_run",
+      "scope": "one real Golden implementation task"
+    }
+  },
+  "source_receipt": {
+    "sha256": "b554476c3f3d9e0dbd353f2e65a7e7b391b91a4d621b10d983d1f7103e19846b",
+    "sanitized_fields_omitted": [
+      "identity.build_profile",
+      "identity.deployment_profile",
+      "protocol.identity.deployment_profile"
+    ]
+  },
+  "isolation": {
+    "qualification_mode": "isolated_candidate",
+    "candidate_cleaned_up": true,
+    "incumbent_preserved": true,
+    "production_service_modified": false,
+    "production_routes_modified": false,
+    "production_locks_or_pins_modified": false,
+    "artifact_published": false
+  }
+}
