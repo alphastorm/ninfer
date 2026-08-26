@@ -137,6 +137,20 @@ configure_file(
   "${PROJECT_BINARY_DIR}/generated/ninfer_build_info_config.h"
   @ONLY)
 
+# Recheck the configured Git identity before every compilation. CMake configuration is not rerun
+# merely because a source file becomes dirty, so configure-time provenance alone can otherwise
+# survive into a binary compiled from different bytes.
+add_custom_target(ninfer_verify_build_source ALL
+  COMMAND "${CMAKE_COMMAND}"
+    "-DNINFER_SOURCE_DIR=${PROJECT_SOURCE_DIR}"
+    "-DNINFER_CONFIGURED_PATCH_STACK_SHA=${NINFER_PATCH_STACK_SHA_RESOLVED}"
+    "-DNINFER_CONFIGURED_SOURCE_DIRTY=${NINFER_SOURCE_DIRTY_BOOL}"
+    "-DNINFER_SOURCE_DIRTY_MODE=${NINFER_SOURCE_DIRTY}"
+    "-DNINFER_GIT_EXECUTABLE=${GIT_EXECUTABLE}"
+    -P "${PROJECT_SOURCE_DIR}/cmake/verify_build_source.cmake"
+  COMMENT "Verifying NInfer build source identity"
+  VERBATIM)
+
 # --- Subdirectories ----------------------------------------------------------
 add_subdirectory(src)
 if(NINFER_BUILD_APPS)
