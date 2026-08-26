@@ -2,9 +2,11 @@
 
 #include <ninfer/targets/qwen3_6/state_image.h>
 
+#include <cstring>
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -141,6 +143,80 @@ public:
         return host_ == nullptr ? 0U : host_->occupied();
     }
 
+    [[nodiscard]] const qwen3_6::StateImageHostLayout& host_layout() const noexcept {
+        return device_->host_layout();
+    }
+
+    void copy_checkpoint_to_host(StateImageHandle handle,
+                                 qwen3_6::HostStateImageView destination,
+                                 cudaStream_t stream = nullptr) const {
+        const Object& object = require(handle);
+        const auto& layout   = host_layout();
+        if (object.role != StateImageRole::CheckpointImmutable || destination.data == nullptr ||
+            destination.layout != &layout) {
+            throw std::invalid_argument("StateImage checkpoint export view is invalid");
+        }
+        if (object.host_slot) {
+            if (host_ == nullptr) {
+                throw std::logic_error("StateImage Host replica has no backing pool");
+            }
+            const qwen3_6::HostStateImageConstView source = host_->view(*object.host_slot);
+            std::memcpy(destination.data, source.data, layout.image_bytes);
+            return;
+        }
+        if (!object.device_slot) {
+            throw std::logic_error("StateImage checkpoint has no exportable replica");
+        }
+        device_->copy_to_host(*object.device_slot, destination, stream);
+    }
+
+    [[nodiscard]] std::optional<StateImageHandle>
+    import_checkpoint(qwen3_6::HostStateImageConstView source,
+                      cudaStream_t stream = nullptr) {
+        const auto& layout = host_layout();
+        if (source.data == nullptr || source.layout != &layout) {
+            throw std::invalid_argument("StateImage checkpoint import view is invalid");
+        }
+
+        if (host_ != nullptr) {
+            std::optional<qwen3_6::HostStateSlotHandle> host_slot = host_->allocate();
+            if (host_slot) {
+                std::optional<StateImageHandle> handle =
+                    allocate(StateImageRole::CheckpointImmutable, false);
+                if (!handle) {
+                    (void)host_->release(*host_slot);
+                    return std::nullopt;
+                }
+                bool host_attached = false;
+                try {
+                    qwen3_6::HostStateImageView destination = host_->writable_view(*host_slot);
+                    std::memcpy(destination.data, source.data, layout.image_bytes);
+                    Object& object      = require(*handle);
+                    object.host_slot     = *host_slot;
+                    host_attached        = true;
+                    object.content_epoch = next_epoch();
+                    return handle;
+                } catch (...) {
+                    if (!host_attached) { (void)host_->release(*host_slot); }
+                    (void)release(*handle);
+                    throw;
+                }
+            }
+        }
+
+        std::optional<StateImageHandle> handle =
+            allocate(StateImageRole::CheckpointImmutable, true);
+        if (!handle) { return std::nullopt; }
+        try {
+            Object& object = require(*handle);
+            device_->copy_from_host(source, *object.device_slot, stream);
+            object.content_epoch = next_epoch();
+            return handle;
+        } catch (...) {
+            (void)release(*handle);
+            throw;
+        }
+    }
     [[nodiscard]] std::optional<StateImageHandle> reserve_destination() noexcept {
         return allocate(StateImageRole::ReservedDestination, true);
     }

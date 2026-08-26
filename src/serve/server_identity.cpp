@@ -37,6 +37,42 @@ nlohmann::json server_identity_json(const ServeOptions& options, const ninfer::L
     };
 }
 
+nlohmann::json session_checkpoint_runtime_fingerprint(const ServeOptions& options,
+                                                      const ninfer::EngineOptions& engine,
+                                                      const ninfer::LoadSummary& load) {
+    const auto& cache = engine.context_cache;
+    return nlohmann::json{
+        {"artifact_type", "ninfer_session_checkpoint_runtime"},
+        {"schema_version", 1},
+        {"server", server_identity_json(options, load)},
+        {"frontend", {{"artifact_sha256", options.artifact_sha256},
+                      {"config_sha256", options.config_sha256},
+                      {"target", load.target},
+                      {"model_id", load.model_id},
+                      {"weights_id", load.weights_id}}},
+        {"engine", {{"max_context", engine.max_context},
+                    {"kv_capacity_mode", static_cast<int>(engine.kv_capacity.mode)},
+                    {"kv_capacity_tokens", engine.kv_capacity.explicit_tokens},
+                    {"kv_capacity_headroom_bytes", engine.kv_capacity.automatic_headroom_bytes},
+                    {"max_concurrency", engine.max_concurrency},
+                    {"prefill_chunk", engine.prefill_chunk},
+                    {"kv_cache", static_cast<int>(engine.kv_cache)},
+                    {"speculative_backend", static_cast<int>(engine.speculative.backend)},
+                    {"speculative_draft_tokens", engine.speculative.draft_tokens},
+                    {"speculative_proposal_head", static_cast<int>(engine.speculative.proposal_head)},
+                    {"enable_vision", engine.enable_vision},
+                    {"use_cuda_graph", engine.use_cuda_graph},
+                    {"device_state_slots", *cache.device_state_slots},
+                    {"host_state_slots", cache.host_state_slots},
+                    {"host_kv_capacity_bytes", cache.host_kv_capacity_bytes},
+                    {"max_private_continuations", *cache.max_private_continuations},
+                    {"max_shared_prefixes", *cache.max_shared_prefixes},
+                    {"max_long_anchors_per_continuation", *cache.max_long_anchors_per_continuation},
+                    {"max_cache_markers_per_request", *cache.max_cache_markers_per_request}}},
+        {"responses", {{"max_records", options.response_store_max_records},
+                       {"max_bytes", options.response_store_max_bytes}}},
+    };
+ }
 std::string format_server_identity(const ServeOptions& options, const ninfer::LoadSummary& load) {
     const ninfer::BuildInfo build = ninfer::build_info();
     const auto value_or_unknown   = [](const std::string& value) -> const std::string& {

@@ -8,6 +8,7 @@
 #include "serve/request.h"
 #include "serve/serve_options.h"
 #include "serve/tool_call_parser.h"
+#include "serve/session_checkpoint_store.h"
 
 #include <chrono>
 #include <cstddef>
@@ -16,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <mutex>
 #include <vector>
 
 namespace ninfer::serve {
@@ -114,13 +116,23 @@ public:
 
     [[nodiscard]] PreparedRequest prepare(const GenerationRequest& req,
                                           std::function<bool()> is_cancelled = {},
-                                          ContextCacheHints context_cache    = {}) const;
+                                          ContextCacheHints context_cache    = {},
+                                          std::string checkpoint_tag        = {}) const;
     [[nodiscard]] int count_prompt_tokens(const GenerationRequest& req,
                                           std::function<bool()> is_cancelled = {}) const;
 
     // Consumes prepared.generation. A PreparedRequest is single-use.
     GenerationOutcome run(PreparedRequest& prepared, const StreamSink* sink,
                           std::function<bool()> is_cancelled = {});
+
+    [[nodiscard]] bool checkpoint_enabled() const noexcept;
+    [[nodiscard]] std::optional<SessionCheckpointSaveResult>
+    save_checkpoint(std::string_view session_sha256, ResponseStore& responses);
+    [[nodiscard]] bool restore_checkpoint(std::string_view session_sha256,
+                                          std::string_view required_response_id,
+                                          ResponseStore& responses);
+    [[nodiscard]] nlohmann::json checkpoint_status(std::string_view session_sha256) const;
+    bool erase_checkpoint(std::string_view session_sha256);
 
     void warmup();
 
@@ -139,7 +151,8 @@ private:
                                                std::function<bool()> is_cancelled,
                                                ContextCacheHints context_cache,
                                                CacheParticipation cache_participation,
-                                               DeadlinePolicy deadline_policy) const;
+                                               DeadlinePolicy deadline_policy,
+                                               std::string checkpoint_tag) const;
     [[nodiscard]] std::shared_ptr<RequestLifetime>
     acquire_request_lifetime(DeadlinePolicy deadline_policy) const;
 
@@ -147,6 +160,9 @@ private:
     std::unique_ptr<ninfer::Engine> engine_;
     ninfer::PromptCapabilities prompt_capabilities_;
     std::shared_ptr<RequestCapacity> request_capacity_;
+    std::unique_ptr<SessionCheckpointStore> checkpoint_store_;
+    nlohmann::json checkpoint_runtime_fingerprint_;
+    mutable std::mutex checkpoint_mutex_;
 };
 
 } // namespace ninfer::serve

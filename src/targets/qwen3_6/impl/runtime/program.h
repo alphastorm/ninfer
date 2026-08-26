@@ -570,6 +570,16 @@ public:
     [[nodiscard]] AbortResult abort(SequenceHandle sequence) noexcept;
     [[nodiscard]] ReleaseResult release_continuation(ContinuationHandle&& continuation) noexcept;
     [[nodiscard]] ReleaseResult release_shared_prefix(SharedPrefixHandle&& shared) noexcept;
+    [[nodiscard]] std::optional<runtime::ContinuationCheckpointStats>
+    checkpoint_continuation(const ContinuationHandle& continuation,
+                            runtime::ContinuationCheckpointWriter& writer,
+                            std::size_t staging_bytes) const;
+    [[nodiscard]] std::optional<RestoredContinuation>
+    restore_continuation(const runtime::ContinuationCheckpointReader& reader,
+                         std::size_t staging_bytes);
+    [[nodiscard]] std::array<runtime::DeviceResources, 1U << kMaximumConcurrency>
+    project_protected_resources(std::span<const ProtectedPrivateOwner> private_owners,
+                                std::span<const ProtectedSharedOwner> shared_owners) const;
     void fail_all_cleanup() noexcept;
     [[nodiscard]] detail::PhysicalResources admission_capacity() const noexcept;
     [[nodiscard]] bool isolated_request_feasible(const RequestBasePlan& base) const noexcept;

@@ -113,6 +113,7 @@ struct Package {
     using FinishResult               = qwen3_6::FinishResult<detail::Variant>;
     using AbortResult                = qwen3_6::AbortResult<detail::Variant>;
     using ReleaseResult              = qwen3_6::ReleaseResult<detail::Variant>;
+    using RestoredContinuation       = qwen3_6::RestoredContinuation<detail::Variant>;
     using Program                    = qwen3_6::Program<detail::Variant>;
 
     [[nodiscard]] static ModelSamplingDefaults sampling_defaults(std::string_view model);

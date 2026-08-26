@@ -30,7 +30,8 @@ public:
 
     HostKVExtentReservation(HostKVExtentReservation&& other) noexcept
         : owner_(std::exchange(other.owner_, nullptr)), descriptor_(other.descriptor_),
-          generation_(other.generation_), page_store_(other.page_store_) {}
+          generation_(other.generation_), page_store_(other.page_store_),
+          restored_(other.restored_) {}
 
     HostKVExtentReservation& operator=(HostKVExtentReservation&&)      = delete;
     HostKVExtentReservation(const HostKVExtentReservation&)            = delete;
@@ -43,6 +44,7 @@ private:
     std::uint32_t descriptor_       = 0;
     std::uint32_t generation_       = 0;
     LogicalKVPageStore* page_store_ = nullptr;
+    bool restored_                  = false;
 
     friend class HostKVExtentStore;
 };
@@ -90,50 +92,13 @@ public:
 
     [[nodiscard]] std::optional<HostKVExtentReservation>
     prepare(LogicalKVPageStore& pages, std::span<const LogicalKVPageHandle> membership) {
-        if (membership.empty() || free_count_ == 0 || membership.size() > free_membership_count_) {
-            return std::nullopt;
-        }
-        for (const LogicalKVPageHandle page : membership) {
-            if (!pages.can_pin_source(page) || pages.host_resident(page)) { return std::nullopt; }
-        }
+        return prepare_impl(pages, membership, false);
+    }
 
-        const HostKVPageLayout& layout = page_layout(pages);
-        std::optional<HostKVAllocation> allocation =
-            arena_->allocate(layout, static_cast<std::uint32_t>(membership.size()));
-        if (!allocation) { return std::nullopt; }
-
-        const std::uint32_t descriptor = free_[--free_count_];
-        Extent& extent                 = extents_[descriptor];
-        if (extent.state != ExtentState::Free) { std::terminate(); }
-        extent.state      = ExtentState::Reserved;
-        extent.page_store = &pages;
-        extent.allocation = std::move(allocation);
-        for (const LogicalKVPageHandle page : membership) {
-            const std::uint32_t node = take_membership();
-            if (node == kInvalidIndex) { std::terminate(); }
-            Membership& entry = memberships_[node];
-            entry.page        = page;
-            entry.epoch       = pages.content_epoch(page);
-            entry.coverage    = pages.committed_columns(page);
-            entry.extent      = descriptor;
-            entry.offset      = extent.page_count;
-            entry.next        = kInvalidIndex;
-            if (extent.tail == kInvalidIndex) {
-                extent.head = node;
-            } else {
-                memberships_[extent.tail].next = node;
-            }
-            extent.tail = node;
-            ++extent.page_count;
-        }
-        for (const LogicalKVPageHandle page : membership) { pages.pin_source(page); }
-
-        HostKVExtentReservation reservation;
-        reservation.owner_      = this;
-        reservation.descriptor_ = descriptor;
-        reservation.generation_ = extent.generation;
-        reservation.page_store_ = &pages;
-        return reservation;
+    [[nodiscard]] std::optional<HostKVExtentReservation>
+    prepare_restore(LogicalKVPageStore& pages,
+                    std::span<const LogicalKVPageHandle> membership) {
+        return prepare_impl(pages, membership, true);
     }
 
     [[nodiscard]] HostKVAllocationView writable_view(HostKVExtentReservation& reservation) {
@@ -178,7 +143,9 @@ public:
         for (std::uint32_t index = 0; index < extent.page_count; ++index) {
             if (node == kInvalidIndex) { std::terminate(); }
             const Membership& entry = memberships_[node];
-            if (!extent.page_store->can_attach_host_replica(entry.page, entry.epoch,
+            if ((reservation.restored_ &&
+                 !extent.page_store->can_attach_host_restore(entry.page)) ||
+                !extent.page_store->can_attach_host_replica(entry.page, entry.epoch,
                                                             entry.coverage)) {
                 std::terminate();
             }
@@ -198,7 +165,7 @@ public:
                                                   .content_epoch     = entry.epoch,
                                                   .committed_columns = entry.coverage});
             } catch (...) { std::terminate(); }
-            extent.page_store->unpin_source(entry.page);
+            if (!reservation.restored_) { extent.page_store->unpin_source(entry.page); }
             node = entry.next;
         }
         consume(reservation);
@@ -215,12 +182,17 @@ public:
         for (std::uint32_t index = 0; index < extent.page_count; ++index) {
             if (node == kInvalidIndex) { std::terminate(); }
             const LogicalKVPageHandle page = memberships_[node].page;
-            if (!extent.page_store->valid(page) || extent.page_store->source_pins(page) == 0) {
+            if (!extent.page_store->valid(page) ||
+                (reservation.restored_
+                     ? !extent.page_store->can_attach_host_restore(page)
+                     : extent.page_store->source_pins(page) == 0)) {
                 std::terminate();
             }
-            try {
-                extent.page_store->unpin_source(page);
-            } catch (...) { std::terminate(); }
+            if (!reservation.restored_) {
+                try {
+                    extent.page_store->unpin_source(page);
+                } catch (...) { std::terminate(); }
+            }
             node = memberships_[node].next;
         }
         release_descriptor(reservation.descriptor_, extent);
@@ -431,6 +403,60 @@ private:
         bool release        = false;
     };
 
+    [[nodiscard]] std::optional<HostKVExtentReservation>
+    prepare_impl(LogicalKVPageStore& pages,
+                 std::span<const LogicalKVPageHandle> membership, bool restored) {
+        if (membership.empty() || free_count_ == 0 || membership.size() > free_membership_count_) {
+            return std::nullopt;
+        }
+        for (const LogicalKVPageHandle page : membership) {
+            if (restored ? !pages.can_attach_host_restore(page)
+                         : (!pages.can_pin_source(page) || pages.host_resident(page))) {
+                return std::nullopt;
+            }
+        }
+
+        const HostKVPageLayout& layout = page_layout(pages);
+        std::optional<HostKVAllocation> allocation =
+            arena_->allocate(layout, static_cast<std::uint32_t>(membership.size()));
+        if (!allocation) { return std::nullopt; }
+
+        const std::uint32_t descriptor = free_[--free_count_];
+        Extent& extent                 = extents_[descriptor];
+        if (extent.state != ExtentState::Free) { std::terminate(); }
+        extent.state      = ExtentState::Reserved;
+        extent.page_store = &pages;
+        extent.allocation = std::move(allocation);
+        for (const LogicalKVPageHandle page : membership) {
+            const std::uint32_t node = take_membership();
+            if (node == kInvalidIndex) { std::terminate(); }
+            Membership& entry = memberships_[node];
+            entry.page        = page;
+            entry.epoch       = pages.content_epoch(page);
+            entry.coverage    = pages.committed_columns(page);
+            entry.extent      = descriptor;
+            entry.offset      = extent.page_count;
+            entry.next        = kInvalidIndex;
+            if (extent.tail == kInvalidIndex) {
+                extent.head = node;
+            } else {
+                memberships_[extent.tail].next = node;
+            }
+            extent.tail = node;
+            ++extent.page_count;
+        }
+        if (!restored) {
+            for (const LogicalKVPageHandle page : membership) { pages.pin_source(page); }
+        }
+
+        HostKVExtentReservation reservation;
+        reservation.owner_      = this;
+        reservation.descriptor_ = descriptor;
+        reservation.generation_ = extent.generation;
+        reservation.page_store_ = &pages;
+        reservation.restored_   = restored;
+        return reservation;
+    }
     [[nodiscard]] bool valid(const HostKVExtentReservation& reservation) const noexcept {
         if (reservation.owner_ != this || reservation.descriptor_ >= extents_.size() ||
             reservation.page_store_ == nullptr) {
@@ -686,6 +712,7 @@ private:
     static void consume(HostKVExtentReservation& reservation) noexcept {
         reservation.owner_      = nullptr;
         reservation.page_store_ = nullptr;
+        reservation.restored_   = false;
     }
 
     HostKVArena* arena_ = nullptr;

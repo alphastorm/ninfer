@@ -105,6 +105,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--max-long-anchors-per-continuation N] [--max-cache-markers-per-request N] "
            "[--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
+           "[--session-checkpoint-dir DIR] [--session-checkpoint-quota-mib N] "
+           "[--session-checkpoint-staging-mib N] [--session-checkpoint-min-tokens N] "
            "[--kv-dtype bf16|int8|fp8] [--spec mtp|dflash --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
@@ -292,6 +294,32 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 throw std::invalid_argument("--response-store-max-mib is out of range");
             }
             options.response_store_max_bytes = static_cast<std::size_t>(mib << 20);
+        } else if (arg == "--session-checkpoint-dir") {
+            options.session_checkpoint_root = require_value("--session-checkpoint-dir");
+            if (options.session_checkpoint_root.empty()) {
+                throw std::invalid_argument("--session-checkpoint-dir must not be empty");
+            }
+        } else if (arg == "--session-checkpoint-quota-mib") {
+            const std::uint64_t mib = parse_u64(
+                require_value("--session-checkpoint-quota-mib"), "session-checkpoint-quota-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::uint64_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--session-checkpoint-quota-mib is out of range");
+            }
+            options.session_checkpoint_quota_bytes = mib << 20;
+        } else if (arg == "--session-checkpoint-staging-mib") {
+            const std::uint64_t mib = parse_u64(require_value("--session-checkpoint-staging-mib"),
+                                                "session-checkpoint-staging-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--session-checkpoint-staging-mib is out of range");
+            }
+            options.session_checkpoint_staging_bytes = static_cast<std::size_t>(mib << 20);
+        } else if (arg == "--session-checkpoint-min-tokens") {
+            const std::uint64_t tokens = parse_u64(require_value("--session-checkpoint-min-tokens"),
+                                                   "session-checkpoint-min-tokens");
+            if (tokens > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::invalid_argument("--session-checkpoint-min-tokens is out of range");
+            }
+            options.session_checkpoint_min_tokens = static_cast<std::uint32_t>(tokens);
         } else if (arg == "--device") {
             options.device = parse_nonnegative_int(require_value("--device"), "device");
         } else if (arg == "--kv-dtype") {
@@ -395,6 +423,21 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (default_max_tokens_explicit) {
         if (options.default_max_tokens <= 0) {
             throw std::invalid_argument("--default-max-tokens must be positive");
+        }
+    }
+    if (!options.session_checkpoint_root.empty()) {
+        if (options.api_key.empty()) {
+            throw std::invalid_argument("--session-checkpoint-dir requires --api-key");
+        }
+        if (options.binary_sha256.empty() || options.artifact_sha256.empty() ||
+            options.config_sha256.empty()) {
+            throw std::invalid_argument(
+                "--session-checkpoint-dir requires --binary-sha256, --artifact-sha256, and --config-sha256");
+        }
+        if (!options.context_cache.enabled || options.context_cache.host_state_slots == 0 ||
+            options.context_cache.host_kv_capacity_bytes == 0) {
+            throw std::invalid_argument(
+                "--session-checkpoint-dir requires enabled Host StateImage and Host KV capacity");
         }
     }
     return options;

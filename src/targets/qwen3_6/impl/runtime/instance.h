@@ -39,6 +39,8 @@ using SequenceHandle          = qwen3_6::SequenceHandle<Variant>;
 using ContinuationHandle      = qwen3_6::ContinuationHandle<Variant>;
 using SharedPrefixHandle      = qwen3_6::SharedPrefixHandle<Variant>;
 using CaptureOffer            = qwen3_6::CaptureOffer<Variant>;
+using ProtectedPrivateOwner   = qwen3_6::ProtectedPrivateOwner<Variant>;
+using ProtectedSharedOwner    = qwen3_6::ProtectedSharedOwner<Variant>;
 using CaptureAssessment       = qwen3_6::CaptureAssessment;
 using ActiveCaptureResult     = qwen3_6::ActiveCaptureResult<Variant>;
 using MaterializationResult   = qwen3_6::MaterializationResult<Variant>;
@@ -50,6 +52,7 @@ using DiscardResult           = qwen3_6::DiscardResult<Variant>;
 using FinishResult            = qwen3_6::FinishResult<Variant>;
 using AbortResult             = qwen3_6::AbortResult<Variant>;
 using ReleaseResult           = qwen3_6::ReleaseResult<Variant>;
+using RestoredContinuation    = qwen3_6::RestoredContinuation<Variant>;
 using ContractAccess          = qwen3_6::detail::RuntimeContractAccess<Variant>;
 using Program                 = qwen3_6::Program<Variant>;
 

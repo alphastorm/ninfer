@@ -365,6 +365,28 @@ public:
         release_descriptor(handle, page);
     }
 
+    [[nodiscard]] std::optional<LogicalKVPageHandle>
+    import_host_descriptor(std::uint32_t committed_columns) noexcept {
+        if (committed_columns == 0 ||
+            committed_columns > static_cast<std::uint32_t>(kPagedKVPageSize) ||
+            free_count_ == 0) {
+            return std::nullopt;
+        }
+        const std::uint32_t index = free_[--free_count_];
+        Page& page                = pages_[index];
+        if (page.occupied) {
+            free_[free_count_++] = index;
+            return std::nullopt;
+        }
+        page.content_epoch     = next_epoch(page.content_epoch);
+        page.committed_columns = committed_columns;
+        page.references        = 1;
+        page.active_references = 0;
+        page.writer_references = 0;
+        page.protected_columns = 0;
+        page.occupied          = true;
+        return LogicalKVPageHandle(this, index, page.generation);
+    }
     [[nodiscard]] bool valid(LogicalKVPageHandle handle) const noexcept {
         return handle.owner_ == this && handle.index_ < pages_.size() &&
                pages_[handle.index_].occupied &&
@@ -694,6 +716,14 @@ public:
                coverage == page.committed_columns;
     }
 
+    [[nodiscard]] bool can_attach_host_restore(LogicalKVPageHandle handle) const noexcept {
+        if (!valid(handle)) { return false; }
+        const Page& page = pages_[handle.index_];
+        return !page.device_replica && !page.pending_device_replica && !page.host_replica &&
+               page.references == 1 && page.active_references == 0 &&
+               page.writer_references == 0 && page.source_pins == 0 &&
+               !page.destination_pinned && page.committed_columns != 0;
+    }
     void attach_host_replica(LogicalKVPageHandle handle, HostKVPageReplica replica) {
         Page& page = require(handle);
         if (!replica.extent.valid() ||
@@ -870,6 +900,39 @@ public:
                addresses_[handle.index_].generation == handle.generation_;
     }
 
+    [[nodiscard]] bool restore_inactive(KVAddressSpaceHandle handle,
+                                        std::span<const LogicalKVPageHandle> restored_pages,
+                                        std::uint32_t frontier) {
+        if (!valid(handle) || frontier == 0) { return false; }
+        Address& address = addresses_[handle.index_];
+        const std::uint32_t required_pages = pages_for_tokens(frontier);
+        if (address.active || address.row || address.reservation.valid() ||
+            address.page_count != 0 || address.committed_frontier != 0 ||
+            restored_pages.size() != required_pages || required_pages > page_capacity_) {
+            return false;
+        }
+        const std::uint32_t page_size = static_cast<std::uint32_t>(kPagedKVPageSize);
+        for (std::uint32_t page = 0; page < required_pages; ++page) {
+            const LogicalKVPageHandle logical = restored_pages[page];
+            const std::uint32_t begin          = page * page_size;
+            const std::uint32_t expected       = std::min(page_size, frontier - begin);
+            if (!pages_->valid(logical) || pages_->address_references(logical) != 1 ||
+                pages_->writer_references(logical) != 0 ||
+                pages_->active_address_references(logical) != 0 ||
+                pages_->committed_columns(logical) != expected ||
+                (!pages_->device_resident(logical) && !pages_->host_resident(logical))) {
+                return false;
+            }
+        }
+        for (std::uint32_t page = 0; page < required_pages; ++page) {
+            membership(address, page) = restored_pages[page];
+        }
+        address.page_count          = required_pages;
+        address.committed_frontier  = frontier;
+        address.checkpoint_frontier = frontier;
+        rebuild_checkpoint_protection();
+        return true;
+    }
     void activate(KVAddressSpaceHandle handle, std::uint32_t entitlement,
                   std::int32_t execution_row) {
         Address& address = require(handle);

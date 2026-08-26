@@ -99,6 +99,41 @@ void ResidentPrefixIdentity::clear() noexcept {
     rewrite_execution_frontiers_.clear();
 }
 
+std::span<const std::int32_t> ResidentPrefixIdentity::position_axis(std::size_t axis) const {
+    if (axis >= positions_.size()) {
+        throw std::out_of_range("resident prefix position axis is out of range");
+    }
+    return positions_[axis];
+}
+
+void ResidentPrefixIdentity::restore(
+    std::vector<std::uint8_t> token_types,
+    std::array<std::vector<std::int32_t>, 3> positions,
+    std::vector<VisionItem> vision_items,
+    std::vector<std::uint32_t> rewrite_execution_frontiers) {
+    const std::size_t tokens = token_types.size();
+    for (const auto& axis : positions) {
+        if (axis.size() != tokens) {
+            throw std::invalid_argument("restored resident prefix position shape is invalid");
+        }
+    }
+    std::uint32_t previous = 0;
+    for (const std::uint32_t frontier : rewrite_execution_frontiers) {
+        if (frontier == 0 || frontier > tokens || frontier <= previous) {
+            throw std::invalid_argument("restored rewrite frontiers are invalid");
+        }
+        previous = frontier;
+    }
+    std::size_t retained_items = 0;
+    if (!prefix_item_count(vision_items, tokens, &retained_items) ||
+        retained_items != vision_items.size()) {
+        throw std::invalid_argument("restored Vision identity is outside the token frontier");
+    }
+    token_types_                = std::move(token_types);
+    positions_                  = std::move(positions);
+    vision_items_               = std::move(vision_items);
+    rewrite_execution_frontiers_ = std::move(rewrite_execution_frontiers);
+}
 void ResidentPrefixIdentity::assign(const PreparedPromptData& prompt) {
     const std::size_t tokens = prompt.token_ids.size();
     if (prompt.token_types.size() != tokens || prompt.positions.size() != 3 * tokens) {
@@ -243,6 +278,18 @@ void PrefixShortlistDigests::reserve(std::size_t tokens) {
 
 void PrefixShortlistDigests::clear() noexcept { digests_.clear(); }
 
+void PrefixShortlistDigests::restore(std::vector<std::uint64_t> digests,
+                                     std::size_t token_count) {
+    if (token_count == std::numeric_limits<std::size_t>::max() ||
+        digests.size() != token_count + 1U || digests.empty() ||
+        digests.front() != kDigestOffset ||
+        std::any_of(digests.begin(), digests.end(), [](std::uint64_t value) {
+            return value == 0;
+        })) {
+        throw std::invalid_argument("restored prefix shortlist digests are invalid");
+    }
+    digests_ = std::move(digests);
+}
 void PrefixShortlistDigests::assign(const PreparedPromptData& prompt) {
     const std::size_t tokens = prompt.token_ids.size();
     if (prompt.token_types.size() != tokens || prompt.positions.size() != 3U * tokens) {

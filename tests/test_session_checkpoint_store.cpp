@@ -19,6 +19,8 @@ namespace {
 
 using namespace ninfer;
 using namespace ninfer::serve;
+using ninfer::runtime::ContinuationCheckpointStats;
+using ninfer::runtime::ContinuationCheckpointWriter;
 
 int check(bool condition, const std::string& message) {
     if (condition) { return 0; }
