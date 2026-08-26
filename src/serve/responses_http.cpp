@@ -206,8 +206,8 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         request                   = parse_responses_request(parse_json_body(req), limits);
         validate_model(request.generation.model, public_model_id_);
         if (request.previous_response_id) {
-            const std::shared_ptr<const StoredResponse> previous =
-                response_store_.get(*request.previous_response_id);
+            const std::shared_ptr<const StoredResponse> previous = response_store_.get_for_session(
+                *request.previous_response_id, request.generation.client_session_sha256);
             if (!previous) {
                 throw ApiException(response_not_found(*request.previous_response_id));
             }
@@ -239,8 +239,9 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
             BuiltResponse response = make_response_object(id, created, request, runtime, outcome);
             if (request.store) {
                 StoredResponse stored;
-                stored.id                = id;
-                stored.response          = response.body;
+                stored.id                    = id;
+                stored.client_session_sha256 = request.generation.client_session_sha256;
+                stored.response              = response.body;
                 stored.input_items       = request.input_items;
                 stored.context           = terminal_context(previous_context, request, response);
                 stored.preserve_thinking = prepared.preserve_thinking;
@@ -312,8 +313,10 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                 ResponsesStreamFinish finished  = stream->encoder->finish(outcome);
                 if (stream->request.store) {
                     StoredResponse stored;
-                    stored.id          = finished.response.body.at("id").get<std::string>();
-                    stored.response    = finished.response.body;
+                    stored.id                    = finished.response.body.at("id").get<std::string>();
+                    stored.client_session_sha256 =
+                        stream->request.generation.client_session_sha256;
+                    stored.response = finished.response.body;
                     stored.input_items = stream->request.input_items;
                     stored.context     = terminal_context(stream->previous_context, stream->request,
                                                           finished.response);

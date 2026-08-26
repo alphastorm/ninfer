@@ -19,6 +19,7 @@ endfunction()
 # Device/tensor/layout/graph primitives and the model-independent request runtime.
 add_library(ninfer_core STATIC
   core/arena.cu
+  core/build_info.cpp
   core/device.cu
   core/dtype.cpp
   core/disk_state_cache.cpp
@@ -35,6 +36,7 @@ add_library(ninfer_core STATIC
   runtime/engine/public_types.cpp
   runtime/engine/request_memory.cpp)
 ninfer_internal_includes(ninfer_core)
+target_include_directories(ninfer_core PRIVATE ${PROJECT_BINARY_DIR}/generated)
 ninfer_cuda_archive(ninfer_core)
 target_link_libraries(ninfer_core PUBLIC ${NINFER_CUDART_TARGET} CUDA::nvtx3)
 if(WIN32)
@@ -325,6 +327,7 @@ add_library(ninfer::engine ALIAS ninfer_engine)
 if(NINFER_BUILD_SERVE)
   # HTTP protocol/product adapter. No serving header is part of the public API.
   add_library(ninfer_serve STATIC
+    serve/client_identity.cpp
     serve/openai_schema.cpp
     serve/responses_schema.cpp
     serve/anthropic_schema.cpp
@@ -334,6 +337,7 @@ if(NINFER_BUILD_SERVE)
     serve/console_log.cpp
     serve/generation_service.cpp
     serve/request_log.cpp
+    serve/server_identity.cpp
     serve/http_server.cpp
     serve/responses_http.cpp
     serve/serve_metrics.cpp

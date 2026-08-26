@@ -3,6 +3,7 @@
 // serialization shapes, and finish_reason mapping. This is the schema boundary
 // consumed by external OpenAI clients.
 
+#include "serve/client_identity.h"
 #include "serve/openai_schema.h"
 #include "serve/generation_service.h"
 #include "serve/request.h"
@@ -465,6 +466,36 @@ int test_parse_function_tools_and_choices() {
     failures +=
         check(throws_api([&] { (void)parse_chat_completion_request(unknown, default_limits()); }),
               "unknown named tool_choice rejected");
+
+    Json duplicate       = base;
+    duplicate["tools"] = Json::array({tool, tool});
+    failures += check(
+        throws_api([&] { (void)parse_chat_completion_request(duplicate, default_limits()); }),
+        "duplicate OpenAI tool names were accepted");
+
+    Json identified                    = base;
+    identified["ninfer_session"]     = std::string(64, 'a');
+    identified["ninfer_request_id"]  = std::string(64, 'b');
+    const GenerationRequest id_request =
+        parse_chat_completion_request(identified, default_limits());
+    failures += check(id_request.client_session_sha256 == std::string(64, 'a') &&
+                          id_request.client_request_id == std::string(64, 'b'),
+                      "hashed OpenAI client identity was not parsed");
+    std::string auth_error;
+    try {
+        require_authenticated_client_identity(id_request, false);
+    } catch (const ApiException& error) { auth_error = error.error().code; }
+    failures += check(auth_error == "authentication_required",
+                      "client identity was accepted without configured authentication");
+    bool authenticated_ok = true;
+    try {
+        require_authenticated_client_identity(id_request, true);
+    } catch (...) { authenticated_ok = false; }
+    failures += check(authenticated_ok, "authenticated client identity was rejected");
+    identified["ninfer_session"] = std::string(64, 'A');
+    failures += check(
+        throws_api([&] { (void)parse_chat_completion_request(identified, default_limits()); }),
+        "non-lowercase OpenAI identity digest was accepted");
     return failures;
 }
 

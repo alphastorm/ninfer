@@ -86,7 +86,9 @@ int test_basic_request() {
                                       {"temperature", 0.3},
                                       {"top_p", 0.8},
                                       {"reasoning", Json{{"effort", "medium"}}},
-                                      {"metadata", Json{{"trace", "abc"}}}};
+                                      {"metadata", Json{{"trace", "abc"}}},
+                                      {"ninfer_session", std::string(64, 'e')},
+                                      {"ninfer_request_id", std::string(64, 'f')}};
     const ResponsesRequest request = parse_responses_request(body, limits());
     int failures                   = 0;
     failures += check(request.generation.model == "qwen3.6-27b", "model parsed");
@@ -107,6 +109,9 @@ int test_basic_request() {
     failures += check(request.generation.reasoning_effort == RequestedReasoningEffort::Medium,
                       "medium reasoning effort was not parsed");
     failures += check(request.store && !request.stream, "Responses defaults applied");
+    failures += check(request.generation.client_session_sha256 == std::string(64, 'e') &&
+                          request.generation.client_request_id == std::string(64, 'f'),
+                      "hashed Responses client identity was not parsed");
     ResponsesRequest composed = request;
     ChatTurn previous;
     previous.role = "assistant";

@@ -77,6 +77,23 @@ int test_lru_and_delete() {
     return failures;
 }
 
+int test_session_binding() {
+    ResponseStore store(4, 1ULL << 20);
+    StoredResponse scoped = record("resp_scoped", {});
+    scoped.client_session_sha256 = std::string(64, 'a');
+    store.put(std::move(scoped));
+    store.put(record("resp_unscoped", {}));
+
+    int failures = 0;
+    failures += check(store.get_for_session("resp_scoped", std::string(64, 'a')) != nullptr,
+                      "matching session could not continue a stored response");
+    failures += check(store.get_for_session("resp_scoped", std::string(64, 'b')) == nullptr &&
+                          store.get_for_session("resp_scoped", std::nullopt) == nullptr,
+                      "stored response crossed its session boundary");
+    failures += check(store.get_for_session("resp_unscoped", std::nullopt) != nullptr,
+                      "unscoped response did not preserve unscoped continuation");
+    return failures;
+}
 int test_oversized_record() {
     ResponseStore store(4, 256);
     StoredResponse large = record(
@@ -98,6 +115,7 @@ int main() {
     int failures = 0;
     failures += test_context_dag();
     failures += test_lru_and_delete();
+    failures += test_session_binding();
     failures += test_oversized_record();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;

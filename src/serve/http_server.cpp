@@ -262,6 +262,9 @@ void HttpServer::register_routes() {
     server_.Get("/health", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(nlohmann::json{{"status", "ok"}}.dump(), "application/json");
     });
+    server_.Get("/v1/ninfer/status", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_status(req, res);
+    });
     server_.Get("/metrics", [this](const httplib::Request&, httplib::Response& res) {
         res.set_content(metrics_.render(options_.max_concurrency), "text/plain; version=0.0.4");
     });
@@ -895,17 +898,41 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
         [stream](bool) { stream->cancelled.store(true, std::memory_order_release); });
 }
 
+void HttpServer::handle_status(const httplib::Request&, httplib::Response& res) const {
+    if (options_.api_key.empty()) {
+        ApiError error;
+        error.status  = 401;
+        error.code    = "authentication_required";
+        error.message = "server status requires API authentication";
+        write_error(res, error);
+        return;
+    }
+    if (service_ == nullptr) {
+        res.status = 503;
+        res.set_content(nlohmann::json{{"artifact_type", "ninfer_server_status"},
+                                       {"schema_version", 1},
+                                       {"status", "starting"}}
+                            .dump(),
+                        "application/json");
+        return;
+    }
+    res.set_content(format_status_json(options_, public_model_id_, status_load_, status_memory_,
+                                       service_->runtime_stats()),
+                    "application/json");
+}
+
 bool HttpServer::bind() { return server_.bind_to_port(options_.host, options_.port); }
 
 void HttpServer::attach(GenerationService& service) {
     if (service_ != nullptr) {
         throw std::logic_error("HTTP generation service is already attached");
     }
-    const ninfer::LoadSummary load = service.load_summary();
-    public_model_id_               = resolve_public_model_id(options_, load.model_id);
-    service_                       = &service;
-    request_jsonl_.write_server_start(options_, service.sampling_defaults(), public_model_id_, load,
-                                      service.memory_summary());
+    status_load_           = service.load_summary();
+    status_memory_         = service.memory_summary();
+    public_model_id_       = resolve_public_model_id(options_, status_load_.model_id);
+    service_               = &service;
+    request_jsonl_.write_server_start(options_, service.sampling_defaults(), public_model_id_,
+                                      status_load_, status_memory_);
 }
 
 bool HttpServer::listen() {

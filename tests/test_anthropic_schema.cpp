@@ -319,6 +319,18 @@ int test_tools_and_choice() {
     failures +=
         check(throws_api([&] { (void)parse_messages_request(too_long_body, default_limits()); }),
               "129-character Anthropic tool name rejected");
+
+    Json duplicate       = body;
+    duplicate["tools"] = Json::array({tool, tool});
+    failures += check(throws_api([&] { (void)parse_messages_request(duplicate, default_limits()); }),
+                      "duplicate Anthropic tool names were accepted");
+    Json identified                   = body;
+    identified["ninfer_session"]    = std::string(64, 'c');
+    identified["ninfer_request_id"] = std::string(64, 'd');
+    const GenerationRequest id_request = parse_messages_request(identified, default_limits());
+    failures += check(id_request.client_session_sha256 == std::string(64, 'c') &&
+                          id_request.client_request_id == std::string(64, 'd'),
+                      "hashed Anthropic client identity was not parsed");
     return failures;
 }
 

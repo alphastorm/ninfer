@@ -1,9 +1,13 @@
 #include "serve/serve_options.h"
 #include "product/speculative_options.h"
 
+#include <algorithm>
 #include <cerrno>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -63,22 +67,68 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
     return KvCapacityPolicy::explicit_capacity(static_cast<std::uint32_t>(value));
 }
 
+std::string parse_sha256(const char* text, const char* label) {
+    const std::string value(text == nullptr ? "" : text);
+    const bool valid =
+        value.size() == 64 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        });
+    if (!valid) {
+        throw std::invalid_argument(std::string(label) +
+                                    " must be a 64-character lowercase SHA-256");
+    }
+    return value;
+}
+
+std::string parse_profile_name(const char* text) {
+    const std::string value(text == nullptr ? "" : text);
+    const bool valid = !value.empty() && value.size() <= 64 &&
+                       std::all_of(value.begin(), value.end(), [](unsigned char c) {
+                           return std::isalnum(c) != 0 || c == '.' || c == '_' || c == '-';
+                       });
+    if (!valid) {
+        throw std::invalid_argument("--deployment-profile must match [A-Za-z0-9._-]{1,64}");
+    }
+    return value;
+}
+
+std::string read_api_key_file(const char* path) {
+    if (path == nullptr || *path == '\0') {
+        throw std::invalid_argument("--api-key-file must not be empty");
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input) { throw std::invalid_argument("cannot open --api-key-file"); }
+    std::string value((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    if (!input.eof()) { throw std::invalid_argument("cannot read --api-key-file"); }
+    while (!value.empty() && (value.back() == '\n' || value.back() == '\r')) { value.pop_back(); }
+    if (value.empty() || value.find('\0') != std::string::npos ||
+        value.find('\n') != std::string::npos || value.find('\r') != std::string::npos) {
+        throw std::invalid_argument("--api-key-file must contain exactly one non-empty line");
+    }
+    return value;
+}
 } // namespace
 
 std::string serve_usage_text(const char* argv0) {
     const std::string headroom_mib =
         std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL));
     const std::string default_max_toks = std::to_string(kDefaultMaxTokens);
-    return std::string("usage: ") + argv0 + " <model.ninfer> [options]\n\n"
+    return std::string("usage: ") + argv0 + " --version\n" + "       " + argv0 +
+           " <model.ninfer> [options]\n\n"
            "High-performance OpenAI Responses/Chat Completions and Anthropic Messages server\n"
            "for native .ninfer checkpoint artifacts.\n\n"
            "Server & Network:\n"
            "  --host <H>                  HTTP listen address (default: 127.0.0.1)\n"
            "  --port <N>                  HTTP listen port (default: 8080)\n"
-           "  --api-key <KEY>             Bearer token authentication key (optional; auth disabled if omitted)\n"
+           "  --api-key <KEY>             Bearer key (prefer --api-key-file for managed releases)\n"
+           "  --api-key-file <FILE>       Read bearer key from a one-line file; secret stays outside argv\n"
            "  --cors                      Enable Cross-Origin Resource Sharing (CORS) headers for web clients\n"
            "  --ui / --no-ui              Enable or disable the embedded Web UI dashboard (default: enabled)\n"
            "  --model-id <ID>             Override model identifier in /v1/models (default: artifact identity.model_id)\n"
+           "  --binary-sha256 <SHA>       Lifecycle-measured executable SHA-256 declaration\n"
+           "  --artifact-sha256 <SHA>     Lifecycle-measured model artifact SHA-256 declaration\n"
+           "  --config-sha256 <SHA>       Lifecycle-measured canonical configuration SHA-256 declaration\n"
+           "  --deployment-profile <ID>  Stable deployment profile identity\n"
            "  --max-request-mib <N>       Maximum incoming request payload size in MiB (default: 384, enforced before parsing)\n"
            "  --request-log-jsonl <FILE>  Append full-precision server request and telemetry records to JSONL file\n"
            "  --log-stats-interval-ms <N> Periodic throughput and engine stats logging interval in ms (default: 5000; 0 disables)\n\n"
@@ -137,20 +187,15 @@ std::string serve_usage_text(const char* argv0) {
 
 ServeOptions parse_serve_options(int argc, char** argv) {
     ServeOptions options;
-    options.startup_argv.reserve(static_cast<std::size_t>(argc));
-    bool redact_next = false;
-    for (int i = 0; i < argc; ++i) {
-        if (redact_next) {
-            options.startup_argv.emplace_back("<redacted>");
-            redact_next = false;
-            continue;
-        }
-        options.startup_argv.emplace_back(argv[i] == nullptr ? "" : argv[i]);
-        redact_next = options.startup_argv.back() == "--api-key";
-    }
     bool default_max_tokens_explicit = false;
     bool kv_capacity_explicit        = false;
-    if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
+    bool api_key_direct              = false;
+    bool api_key_file                = false;
+    if (argc >= 2 && std::string_view(argv[1]) == "--version") {
+        options.version_requested = true;
+        return options;
+    }
+    if (argc >= 2 && (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
         options.help_requested = true;
         return options;
     }
@@ -167,7 +212,22 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--port") {
             options.port = parse_nonnegative_int(require_value("--port"), "port");
         } else if (arg == "--api-key") {
+            if (api_key_file) { throw std::invalid_argument("--api-key and --api-key-file are mutually exclusive"); }
             options.api_key = require_value("--api-key");
+            if (options.api_key.empty()) { throw std::invalid_argument("--api-key must not be empty"); }
+            api_key_direct = true;
+        } else if (arg == "--api-key-file") {
+            if (api_key_direct) { throw std::invalid_argument("--api-key and --api-key-file are mutually exclusive"); }
+            options.api_key = read_api_key_file(require_value("--api-key-file"));
+            api_key_file = true;
+        } else if (arg == "--binary-sha256") {
+            options.binary_sha256 = parse_sha256(require_value("--binary-sha256"), "--binary-sha256");
+        } else if (arg == "--artifact-sha256") {
+            options.artifact_sha256 = parse_sha256(require_value("--artifact-sha256"), "--artifact-sha256");
+        } else if (arg == "--config-sha256") {
+            options.config_sha256 = parse_sha256(require_value("--config-sha256"), "--config-sha256");
+        } else if (arg == "--deployment-profile") {
+            options.deployment_profile = parse_profile_name(require_value("--deployment-profile"));
         } else if (arg == "--model-id") {
             options.model_id_override = require_value("--model-id");
             if (options.model_id_override->empty()) {

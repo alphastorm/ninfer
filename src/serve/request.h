@@ -175,6 +175,8 @@ requested_reasoning_effort_name(RequestedReasoningEffort effort) noexcept {
 
 struct GenerationRequest {
     std::string model;
+    std::optional<std::string> client_session_sha256;
+    std::optional<std::string> client_request_id;
     std::vector<ChatTurn> messages;
     std::vector<ToolDefinition> tools;
     std::size_t tool_name_max_length = 64;

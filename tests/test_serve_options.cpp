@@ -1,6 +1,8 @@
 #include "serve/serve_options.h"
 #include "serve/translate.h"
 
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <string>
 #include <utility>
@@ -279,21 +281,50 @@ int main() {
                               ninfer::kDefaultKvCapacityHeadroomBytes,
                       "--kv-capacity auto did not select automatic sizing");
 
-    const ServeOptions logged = parse({"ninfer-serve", "model.ninfer", "--request-log-jsonl",
-                                       "requests.jsonl", "--api-key", "do-not-log"});
-    failures += check(logged.request_log_jsonl == "requests.jsonl",
-                      "--request-log-jsonl did not preserve its path");
+    const std::string sha256(64, 'a');
+    const ServeOptions logged =
+        parse({"ninfer-serve", "model.ninfer", "--request-log-jsonl", "requests.jsonl",
+               "--api-key", "do-not-log", "--binary-sha256", sha256,
+               "--artifact-sha256", sha256, "--config-sha256", sha256,
+               "--deployment-profile", "sf-qwen38-4090-v0.1"});
+    failures += check(logged.request_log_jsonl == "requests.jsonl" &&
+                          logged.api_key == "do-not-log",
+                      "request log or API-key option was not parsed");
+    failures += check(logged.binary_sha256 == sha256 && logged.artifact_sha256 == sha256 &&
+                          logged.config_sha256 == sha256 &&
+                          logged.deployment_profile == "sf-qwen38-4090-v0.1",
+                      "release identity declarations were not parsed");
     failures +=
-        check(serve_usage_text("ninfer-serve").find("--request-log-jsonl") != std::string::npos,
-              "serve help omits --request-log-jsonl");
-    bool secret_present    = false;
-    bool redaction_present = false;
-    for (const std::string& argument : logged.startup_argv) {
-        secret_present    = secret_present || argument == "do-not-log";
-        redaction_present = redaction_present || argument == "<redacted>";
+        check(serve_usage_text("ninfer-serve").find("--api-key-file") != std::string::npos &&
+                  serve_usage_text("ninfer-serve").find("--deployment-profile") !=
+                      std::string::npos,
+              "serve help omits managed release identity options");
+
+    bool malformed_sha_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--binary-sha256", "ABC"});
+    } catch (const std::invalid_argument&) { malformed_sha_rejected = true; }
+    failures += check(malformed_sha_rejected, "malformed release SHA-256 was accepted");
+
+    const std::filesystem::path key_path =
+        std::filesystem::temp_directory_path() / "ninfer-serve-options-api-key.txt";
+    {
+        std::ofstream key_file(key_path, std::ios::binary | std::ios::trunc);
+        key_file << "file-secret\r\n";
     }
-    failures += check(!secret_present, "startup argv retained the API key");
-    failures += check(redaction_present, "startup argv omitted the API-key redaction marker");
+    const ServeOptions from_file =
+        parse({"ninfer-serve", "model.ninfer", "--api-key-file", key_path.string()});
+    failures += check(from_file.api_key == "file-secret", "--api-key-file did not load one line");
+    bool conflicting_keys_rejected = false;
+    try {
+        (void)parse({"ninfer-serve", "model.ninfer", "--api-key", "direct", "--api-key-file",
+                     key_path.string()});
+    } catch (const std::invalid_argument&) { conflicting_keys_rejected = true; }
+    std::filesystem::remove(key_path);
+    failures += check(conflicting_keys_rejected, "API-key sources were accepted together");
+
+    const ServeOptions version = parse({"ninfer-serve", "--version"});
+    failures += check(version.version_requested, "--version required an artifact path");
 
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;

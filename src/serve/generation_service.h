@@ -7,6 +7,7 @@
 #include "ninfer/engine.h"
 #include "serve/request.h"
 #include "serve/serve_options.h"
+#include "serve/tool_call_parser.h"
 
 #include <chrono>
 #include <cstddef>
@@ -74,6 +75,7 @@ struct PreparedRequest {
     bool tool_capable                      = false;
     bool timings_per_token                 = false;
     std::size_t tool_name_max_length       = 64;
+    ToolParamTypeMap param_types;
     bool enable_thinking                   = true;
     std::optional<ninfer::ReasoningEffort> reasoning_effort;
     bool preserve_thinking                 = false;

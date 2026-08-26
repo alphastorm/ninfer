@@ -8,7 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Mapping
 
 
 # A one-pixel PNG. The target frontend performs its normal resize/patch expansion.
@@ -30,33 +30,63 @@ class Response:
     body: bytes
 
 
-def request(base_url: str, method: str, path: str, payload: Any | None = None) -> Response:
+def request(
+    base_url: str,
+    method: str,
+    path: str,
+    payload: Any | None = None,
+    *,
+    headers: Mapping[str, str] | None = None,
+    expected_status: int = 200,
+) -> Response:
     body = None
-    headers = {"Accept": "application/json"}
+    request_headers = {"Accept": "application/json", **dict(headers or {})}
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(base_url + path, data=body, headers=headers, method=method)
+        request_headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(
+        base_url + path, data=body, headers=request_headers, method=method
+    )
     try:
         with urllib.request.urlopen(req, timeout=300) as response:
-            return Response(
+            value = Response(
                 status=response.status,
                 content_type=response.headers.get_content_type(),
                 body=response.read(),
             )
     except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise ContractError(f"{method} {path} returned HTTP {error.code}: {detail}") from error
+        value = Response(
+            status=error.code,
+            content_type=error.headers.get_content_type(),
+            body=error.read(),
+        )
+    if value.status != expected_status:
+        detail = value.body.decode("utf-8", errors="replace")
+        raise ContractError(
+            f"{method} {path} returned HTTP {value.status}, expected {expected_status}: {detail}"
+        )
+    return value
 
 
 def json_response(
-    base_url: str, method: str, path: str, payload: Any | None = None
+    base_url: str,
+    method: str,
+    path: str,
+    payload: Any | None = None,
+    *,
+    headers: Mapping[str, str] | None = None,
+    expected_status: int = 200,
 ) -> dict[str, Any]:
-    response = request(base_url, method, path, payload)
-    if response.status != 200 or response.content_type != "application/json":
-        raise ContractError(
-            f"{method} {path} returned status={response.status} content-type={response.content_type}"
-        )
+    response = request(
+        base_url,
+        method,
+        path,
+        payload,
+        headers=headers,
+        expected_status=expected_status,
+    )
+    if response.content_type != "application/json":
+        raise ContractError(f"{method} {path} returned content-type={response.content_type}")
     try:
         value = json.loads(response.body)
     except json.JSONDecodeError as error:

@@ -42,7 +42,8 @@ cannot be combined with `--vision`. A later request cannot enable a capability o
 
 | Method and path | Behavior |
 |---|---|
-| `GET /health` | process health |
+| `GET /health` | process health; always unauthenticated |
+| `GET /v1/ninfer/status` | authenticated release identity and runtime capability envelope |
 | `GET /v1/models` | configured OpenAI model alias |
 | `GET /v1/models/{id}` | lookup of the configured alias |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
@@ -78,7 +79,9 @@ The endpoint supports:
 - one stop string or an array of stop strings;
 - non-streaming responses and server-sent event streams;
 - `stream_options.include_usage`;
-- function tools, tool choices, assistant tool-call history, and tool-result messages;
+- function tools, unique tool names, tool choices, assistant tool-call history, and tool-result messages;
+- schema-guided tool argument recovery for object/array, integer/number, boolean, null, and string values; numeric strings declared as strings remain strings;
+- the authenticated `ninfer_session` and `ninfer_request_id` correlation extensions;
 - the top-level `reasoning_effort` field;
 - the `enable_thinking` extension;
 - `chat_template_kwargs.preserve_thinking` and the top-level `preserve_thinking` alias.
@@ -182,7 +185,9 @@ wire response contains typed `output` Items.
 | `model` | required non-empty string; must equal the artifact-derived public model ID or explicit `--model-id` override |
 | `input` | required string or non-empty typed Item array |
 | `instructions` | optional string, inserted before the reconstructed conversation for this request only |
-| `previous_response_id` | optional ID of a retained local Response |
+| `previous_response_id` | optional ID of a retained local Response; when agent identity is present, the parent must have the exact same `ninfer_session` digest |
+| `ninfer_session` | optional authenticated 64-character lowercase SHA-256 session digest used for Responses DAG isolation and correlation |
+| `ninfer_request_id` | optional authenticated 64-character lowercase SHA-256 request digest used for correlation |
 | `max_output_tokens` | integer at least `16`; default is `--default-max-tokens` |
 | `stream` | boolean; `true` selects Responses SSE rather than a JSON body |
 | `store` | boolean, default `true`; controls local retrieval and continuation state |
@@ -318,11 +323,14 @@ Malformed tool markup is flushed back as ordinary text without losing bytes.
 LRU store. They are lost on restart and are not OpenAI's durable cloud retention service.
 
 `previous_response_id` reconstructs the complete stored input/output Item history before the new
-input. The current `instructions` value is placed first but is not saved into the continuation
-context, matching the Responses rule that previous top-level instructions do not carry forward.
-Function definitions are request configuration rather than conversation Items and must be sent
-again on tool-result turns. The reconstructed prompt follows the ordinary Engine path, so resident
-prefix reuse applies naturally.
+input. If either request carries `ninfer_session`, parent and child must carry exactly the same
+digest; a different or missing digest makes the parent unavailable with `response_not_found`.
+The digest isolates the process-local Responses DAG but does not authorize public retrieval and is
+not a prompt-cache key. The current `instructions` value is placed first but is not saved into the
+continuation context, matching the Responses rule that previous top-level instructions do not carry
+forward. Function definitions are request configuration rather than conversation Items and must be
+sent again on tool-result turns. The reconstructed prompt follows the ordinary Engine path, so
+resident prefix reuse applies naturally.
 
 A stored Response also retains its resolved `preserve_thinking` value. A child which omits the
 field inherits the parent value. An explicit different value creates a new semantic branch; prompt
@@ -402,13 +410,34 @@ curl http://127.0.0.1:8080/v1/messages/count_tokens \
   }'
 ```
 
-## Authentication and CORS
+## Authentication, release identity, and CORS
 
-Pass `--api-key VALUE` to require the same value as an OpenAI bearer token or Anthropic
-`x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated.
+Pass either `--api-key VALUE` or `--api-key-file FILE` to require the same value as an OpenAI
+bearer token or Anthropic `x-api-key` header. The file form reads exactly one non-empty line and
+keeps the secret out of the process command line; the two forms are mutually exclusive. `GET
+/health` and CORS preflight requests remain unauthenticated. Every other endpoint, including
+`GET /v1/ninfer/status`, uses normal API authentication.
+
+`ninfer_session` and `ninfer_request_id` are optional lowercase SHA-256 digests accepted by
+Chat Completions, Responses (including input-token count), and Anthropic Messages. Supplying either
+field when API authentication is not configured fails with `authentication_required`. NInfer
+logs only these already-hashed values; callers must never put raw session or request identifiers in
+them.
+
+`GET /v1/ninfer/status` returns schema version 1 with required `identity`, `runtime`, `scheduler`,
+`cache`, and `mtp` groups. `memory` is an additive group. The identity includes the compiled
+upstream base, patch stack, dirty flag, build profile/toolchain, declared deployment,
+binary/model/config SHA-256 values, target, model ID, and weights ID. A capability that exists but
+lacks aggregate telemetry is represented explicitly with `null`, `false`, or
+`telemetry_available:false`; private cache paths are never returned.
+
+Release builds expose the same compiled provenance without loading an artifact via
+`ninfer-serve --version`. The lowercase SHA-256 deployment declarations are supplied with
+`--binary-sha256`, `--artifact-sha256`, and `--config-sha256`; the immutable package workflow
+verifies those declarations against the actual files before startup.
 
 ```bash
-curl http://127.0.0.1:8080/v1/models \
+curl http://127.0.0.1:8080/v1/ninfer/status \
   -H 'Authorization: Bearer local-secret'
 ```
 
@@ -421,6 +450,7 @@ curl http://127.0.0.1:8080/v1/models \
 | `--host H` | listen address | `127.0.0.1` |
 | `--port N` | listen port | `8080` |
 | `--api-key KEY` | required bearer or `x-api-key` value | unset |
+| `--api-key-file FILE` | one-line bearer or `x-api-key` value loaded without an argv secret | unset |
 | `--model-id ID` | override the public OpenAI model alias | artifact `identity.model_id` |
 | `--max-context N` | logical context ceiling of each sequence | `8192` |
 | `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `--max-context` | `8192` |
@@ -434,7 +464,7 @@ curl http://127.0.0.1:8080/v1/models \
 | `--request-log-jsonl FILE` | append full-precision server/request records | disabled |
 | `--response-store-max-records N` | maximum locally retained Responses objects | `1024` |
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
-| `--kv-dtype bf16\|int8\|rk8v4` | KV-cache storage; `rk8v4` is experimental and lossy | `bf16` |
+| `--kv-dtype bf16\|int8\|rk8v4\|rk4v4\|rk4v4-e8\|rk2v4-e8` | KV-cache storage layout; quantized forms are lossy | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
@@ -444,6 +474,9 @@ curl http://127.0.0.1:8080/v1/models \
 | `--no-prefix-reuse` | disable compatible-prefix caching | prefix reuse on |
 | `--no-thinking` | disable thinking by default | thinking on |
 | `--preserve-thinking` | preserve closed-turn assistant reasoning by default | off |
+| `--disk-cache` | enable persistent content-addressed prompt checkpoints | off |
+| `--disk-cache-dir DIR` | persistent checkpoint directory | platform cache directory |
+| `--disk-cache-gb N` | persistent checkpoint quota in GiB | `30` |
 | `--cors` | permissive browser CORS headers | off |
 | `--temperature F` | process-level temperature override | unset |
 | `--top-p F` | process-level top-p override | unset |
@@ -561,14 +594,22 @@ therefore resets the prefix instead of reusing placeholder-token KV. Media wholl
 prefix skips Vision execution, while new suffix media is encoded normally. The completion log
 reports the reused token count as `cache=`.
 
-The shared family runtime distinguishes `full_reset`, `append_frontier`, and
-`restore_turn_checkpoint`. A turn checkpoint includes the recurrent and selected
-speculative-backend continuation state required to recompute a rewritten suffix; matching KV
-tokens alone never authorize a partial hit. Stable `preserve_thinking=true` histories normally
-append, while stable `false` histories restore the previous open-turn checkpoint when a new user
-closes that turn. The JSONL completion record exposes the selected path as `prefix_reuse_path`.
+The shared family runtime distinguishes `full_reset`, `append_frontier`,
+`restore_turn_checkpoint`, and `restore_disk_checkpoint`. A turn checkpoint includes the recurrent
+continuation state required to recompute a rewritten suffix; matching KV tokens alone never
+authorize a partial hit. Stable `preserve_thinking=true` histories normally append, while stable
+`false` histories restore the previous open-turn checkpoint when a new user closes that turn.
 Changing reasoning effort changes the rendered prompt and therefore does not reuse a prefix whose
 effort instruction differs.
+
+With `--disk-cache`, completed long-context checkpoints are stored under a content-derived key and
+can be restored after the server process restarts. `--disk-cache-gb` bounds stored bytes. Windows
+uses DirectStorage DMA when available and falls back to the ordinary checkpoint I/O path after
+clearing a failed CUDA/DirectStorage attempt; fallback never changes the checkpoint identity. The
+JSONL completion record exposes the selected path as `prefix_reuse_path` and the exact reused token
+count as `prefix_cache_hit_tokens`. A release qualification must observe
+`restore_disk_checkpoint` after a real process restart rather than treating a prior-branch metric
+as evidence for the packaged binary.
 
 Speculative decoding is an engine option and does not change protocol output shapes, stop behavior,
 or usage accounting. If a stop truncates a multi-token MTP or DFlash round, the Engine commits the

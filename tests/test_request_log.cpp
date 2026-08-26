@@ -60,7 +60,10 @@ int main() {
     options.allow_prefix_reuse             = false;
     options.preserve_thinking              = true;
     options.sampling_overrides.temperature = 0.6F;
-    options.startup_argv = {"ninfer-serve", options.artifact_path, "--api-key", "<redacted>"};
+    options.binary_sha256      = std::string(64, 'a');
+    options.artifact_sha256    = std::string(64, 'b');
+    options.config_sha256      = std::string(64, 'c');
+    options.deployment_profile = "sf-qwen38-4090-v0.1";
 
     const ninfer::ModelSamplingDefaults sampling_defaults{
         .thinking     = {.temperature = 1.0F, .top_k = 20, .top_p = 0.95F},
@@ -170,14 +173,54 @@ int main() {
                       "adaptive KV memory ledger missing");
     failures += check(server.dump().find("must-not-appear") == std::string::npos,
                       "server JSON leaked the API key");
-    failures += check(server.at("argv").at(3) == "<redacted>",
-                      "server argv did not retain the redaction marker");
+    failures += check(!server.at("artifact").contains("path") && !server.contains("argv") &&
+                          server.dump().find("/models/") == std::string::npos,
+                      "server JSON retained a local artifact path or argv");
+    failures += check(server.at("identity").at("binary_sha256") == options.binary_sha256 &&
+                          server.at("identity").at("model_artifact_sha256") ==
+                              options.artifact_sha256 &&
+                          server.at("identity").at("deployment_profile") ==
+                              options.deployment_profile,
+                      "server start record omitted release identity");
+
+    ninfer::RuntimeStats runtime;
+    runtime.running_requests          = 2;
+    runtime.prefilling_requests       = 1;
+    runtime.decode_ready_requests     = 1;
+    runtime.waiting_requests          = 3;
+    runtime.computed_prefill_tokens   = 8192;
+    runtime.committed_decode_tokens   = 512;
+    runtime.decode_rounds             = 128;
+    runtime.decode_row_rounds         = 128;
+    const Json status = Json::parse(
+        format_status_json(options, "deployment-alias", load, memory, runtime));
+    failures += check(status.at("artifact_type") == "ninfer_server_status" &&
+                          status.at("schema_version") == 1 && status.at("status") == "ok",
+                      "status envelope mismatch");
+    failures += check(status.size() == 9 && status.contains("identity") &&
+                          status.contains("runtime") && status.contains("scheduler") &&
+                          status.contains("cache") && status.contains("mtp") &&
+                          status.contains("memory"),
+                      "status top-level versioned groups changed");
+    failures += check(status.at("identity").at("config_sha256") == options.config_sha256 &&
+                          status.at("runtime").at("public_model_id") == "deployment-alias" &&
+                          status.at("scheduler").at("running") == 2 &&
+                          status.at("scheduler").at("waiting") == 3 &&
+                          status.at("cache").at("persistent").at("enabled") == false &&
+                          status.at("cache").at("telemetry_available") == false &&
+                          status.at("mtp").at("rounds").is_null(),
+                      "status identity, scheduler, cache, or MTP group missing");
+    failures += check(status.dump().find("must-not-appear") == std::string::npos &&
+                          status.dump().find("/models/") == std::string::npos,
+                      "status JSON leaked a secret or private path");
 
     GenerationRequest request;
-    request.model          = "qwen3.6-27b";
-    request.stream         = false;
-    request.max_tokens     = 4096;
-    request.max_tokens_set = true;
+    request.model                 = "qwen3.6-27b";
+    request.client_session_sha256 = std::string(64, 'd');
+    request.client_request_id     = std::string(64, 'e');
+    request.stream                = false;
+    request.max_tokens            = 4096;
+    request.max_tokens_set        = true;
     request.messages.resize(2);
 
     PreparedRequest prepared;
@@ -206,6 +249,11 @@ int main() {
                       "resolved preserve-thinking metadata missing");
     failures += check(started.at("request").at("sampling").at("seed") == 7632647173703958409ULL,
                       "resolved seed missing");
+    failures += check(started.at("request").at("client_identity").at("session_sha256") ==
+                              *request.client_session_sha256 &&
+                          started.at("request").at("client_identity").at("request_sha256") ==
+                              *request.client_request_id,
+                      "request record omitted hashed client identity");
 
     GenerationOutcome outcome;
     outcome.prompt_tokens                       = 401;

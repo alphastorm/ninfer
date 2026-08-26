@@ -2,6 +2,7 @@
 #include "product/load_progress/load_progress.h"
 #include "product/prompt_input/prompt_input.h"
 
+#include "ninfer/build_info.h"
 #include "ninfer/engine.h"
 
 #include <chrono>
@@ -262,6 +263,10 @@ int main(int argc, char** argv) {
         const ninfer::cli::Options cli = ninfer::cli::parse_options(argc, argv);
         if (cli.help_requested) {
             std::cout << ninfer::cli::usage_text(argv[0]);
+            return 0;
+        }
+        if (cli.version_requested) {
+            std::cout << ninfer::format_build_info("ninfer") << '\n';
             return 0;
         }
 

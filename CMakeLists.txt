@@ -18,6 +18,64 @@ project(ninfer LANGUAGES C CXX CUDA)
 option(NINFER_BUILD_APPS "Build the NInfer CLI and server" ON)
 option(BUILD_TESTING "Build NInfer tests" OFF)
 option(NINFER_BUILD_BENCHMARKS "Build NInfer benchmarks" OFF)
+set(NINFER_BUILD_PROFILE "generic" CACHE STRING "Deployment build profile identity")
+set(NINFER_UPSTREAM_BASE_SHA "unknown" CACHE STRING "Exact upstream base commit")
+set(NINFER_PATCH_STACK_SHA "auto" CACHE STRING "Exact patch-stack commit or auto")
+set(NINFER_SOURCE_DIRTY "auto" CACHE STRING "Source-dirty identity: auto, ON, or OFF")
+set_property(CACHE NINFER_SOURCE_DIRTY PROPERTY STRINGS auto ON OFF)
+
+set(NINFER_PATCH_STACK_SHA_RESOLVED "${NINFER_PATCH_STACK_SHA}")
+# Unknown source state is conservatively dirty. A successful Git status or an explicit lifecycle
+# declaration is required to report a clean build.
+set(NINFER_SOURCE_DIRTY_BOOL 1)
+find_package(Git QUIET)
+if(Git_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/.git")
+  if(NINFER_PATCH_STACK_SHA STREQUAL "auto")
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" -C "${PROJECT_SOURCE_DIR}" rev-parse HEAD
+      OUTPUT_VARIABLE NINFER_PATCH_STACK_SHA_RESOLVED
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE NINFER_GIT_REV_PARSE_RESULT)
+    if(NOT NINFER_GIT_REV_PARSE_RESULT EQUAL 0)
+      set(NINFER_PATCH_STACK_SHA_RESOLVED "unknown")
+    endif()
+  endif()
+  if(NINFER_SOURCE_DIRTY STREQUAL "auto")
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" -C "${PROJECT_SOURCE_DIR}" status --porcelain
+      OUTPUT_VARIABLE NINFER_GIT_STATUS
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE NINFER_GIT_STATUS_RESULT)
+    if(NINFER_GIT_STATUS_RESULT EQUAL 0 AND NINFER_GIT_STATUS STREQUAL "")
+      set(NINFER_SOURCE_DIRTY_BOOL 0)
+    endif()
+  endif()
+elseif(NINFER_PATCH_STACK_SHA STREQUAL "auto")
+  set(NINFER_PATCH_STACK_SHA_RESOLVED "unknown")
+endif()
+
+if(NINFER_SOURCE_DIRTY STREQUAL "ON")
+  set(NINFER_SOURCE_DIRTY_BOOL 1)
+elseif(NINFER_SOURCE_DIRTY STREQUAL "OFF")
+  set(NINFER_SOURCE_DIRTY_BOOL 0)
+elseif(NOT NINFER_SOURCE_DIRTY STREQUAL "auto")
+  message(FATAL_ERROR "NINFER_SOURCE_DIRTY must be auto, ON, or OFF")
+endif()
+
+if(NOT NINFER_UPSTREAM_BASE_SHA STREQUAL "unknown")
+  string(LENGTH "${NINFER_UPSTREAM_BASE_SHA}" NINFER_UPSTREAM_BASE_SHA_LENGTH)
+  if(NOT NINFER_UPSTREAM_BASE_SHA MATCHES "^[0-9a-f]+$" OR
+     NOT NINFER_UPSTREAM_BASE_SHA_LENGTH EQUAL 40)
+    message(FATAL_ERROR "NINFER_UPSTREAM_BASE_SHA must be a full lowercase Git SHA")
+  endif()
+endif()
+if(NOT NINFER_PATCH_STACK_SHA_RESOLVED STREQUAL "unknown")
+  string(LENGTH "${NINFER_PATCH_STACK_SHA_RESOLVED}" NINFER_PATCH_STACK_SHA_LENGTH)
+  if(NOT NINFER_PATCH_STACK_SHA_RESOLVED MATCHES "^[0-9a-f]+$" OR
+     NOT NINFER_PATCH_STACK_SHA_LENGTH EQUAL 40)
+    message(FATAL_ERROR "NINFER_PATCH_STACK_SHA must be auto or a full lowercase Git SHA")
+  endif()
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -146,6 +204,12 @@ if(WIN32)
     "${directstorage_SOURCE_DIR}/native/bin/x64/dstoragecore.dll"
   )
 endif()
+
+file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/generated")
+configure_file(
+  "${PROJECT_SOURCE_DIR}/cmake/ninfer_build_info_config.h.in"
+  "${PROJECT_BINARY_DIR}/generated/ninfer_build_info_config.h"
+  @ONLY)
 
 # --- Subdirectories ----------------------------------------------------------
 add_subdirectory(src)

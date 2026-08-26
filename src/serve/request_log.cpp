@@ -1,6 +1,7 @@
 #include "serve/request_log.h"
 #include "product/speculative_options.h"
 #include "serve/console_log.h"
+#include "serve/server_identity.h"
 
 #include <cuda_runtime.h>
 #include <nlohmann/json.hpp>
@@ -184,10 +185,17 @@ Json overrides_json(const ninfer::SamplingOverrides& overrides) {
     return result;
 }
 
+Json client_identity_json(const std::optional<std::string>& session,
+                          const std::optional<std::string>& request) {
+    return Json{{"session_sha256", session ? Json(*session) : Json(nullptr)},
+                {"request_sha256", request ? Json(*request) : Json(nullptr)}};
+}
 Json request_json(const RequestLogContext& context) {
     return Json{{"request_id", context.id},
                 {"protocol", context.protocol},
                 {"model", context.model},
+                {"client_identity", client_identity_json(context.client_session_sha256,
+                                                         context.client_request_sha256)},
                 {"stream", context.stream},
                 {"message_count", context.message_count},
                 {"requested_output_tokens", context.requested_output_tokens},
@@ -285,6 +293,8 @@ RequestLogContext make_request_log_context(std::uint64_t id, std::string protoco
     context.id                                 = id;
     context.protocol                           = std::move(protocol);
     context.model                              = request.model;
+    context.client_session_sha256              = request.client_session_sha256;
+    context.client_request_sha256              = request.client_request_id;
     context.stream                             = request.stream;
     context.prompt_tokens                      = prepared.prompt_tokens;
     context.message_count                      = request.messages.size();
@@ -413,8 +423,8 @@ std::string format_server_start_json(
                                          *options.default_reasoning_effort))
                                    : Json(nullptr)},
                               {"default_preserve_thinking", options.preserve_thinking}};
-    record["artifact"] = Json{{"path", options.artifact_path},
-                              {"size_bytes", std::move(artifact_size)},
+    record["identity"] = server_identity_json(options, load);
+    record["artifact"] = Json{{"size_bytes", std::move(artifact_size)},
                               {"target", load.target},
                               {"weights_id", load.weights_id},
                               {"bytes_read", load.artifact_bytes_read},
@@ -474,8 +484,75 @@ std::string format_server_start_json(
              {"cuda_compile_version", environment.cuda_compile_version},
              {"cuda_runtime_version", environment.cuda_runtime_version},
              {"cuda_driver_version", environment.cuda_driver_version}};
-    record["argv"] = options.startup_argv;
     return record.dump();
+}
+
+std::string format_status_json(const ServeOptions& options,
+                               const std::string& public_model_id,
+                               const ninfer::LoadSummary& load,
+                               const ninfer::MemorySummary& memory,
+                               const ninfer::RuntimeStats& runtime) {
+    return Json{
+        {"artifact_type", "ninfer_server_status"},
+        {"schema_version", 1},
+        {"status", "ok"},
+        {"identity", server_identity_json(options, load)},
+        {"runtime",
+         Json{{"public_model_id", public_model_id},
+              {"max_context", options.max_context},
+              {"kv_capacity_mode", kv_capacity_mode_name(memory.kv_capacity_mode)},
+              {"kv_capacity_tokens", memory.kv_capacity},
+              {"kv_cache", kv_cache_name(options.kv_cache)},
+              {"speculative_backend", product::speculative_backend_name(options.speculative.backend)},
+              {"speculative_draft_window", options.speculative.draft_tokens},
+              {"proposal_head", proposal_head_name(options.speculative.proposal_head)}}},
+        {"scheduler",
+         Json{{"max_concurrency", options.max_concurrency},
+              {"max_pending_requests", options.max_pending_requests},
+              {"running", runtime.running_requests},
+              {"prefilling", runtime.prefilling_requests},
+              {"decode_ready", runtime.decode_ready_requests},
+              {"waiting", runtime.waiting_requests},
+              {"computed_prefill_tokens", runtime.computed_prefill_tokens},
+              {"committed_decode_tokens", runtime.committed_decode_tokens},
+              {"decode_rounds", runtime.decode_rounds},
+              {"decode_row_rounds", runtime.decode_row_rounds}}},
+        {"cache",
+         Json{{"prefix_reuse", options.allow_prefix_reuse},
+              {"device_state", Json{{"occupied", nullptr}, {"capacity", nullptr}}},
+              {"host_state", Json{{"occupied", nullptr}, {"capacity", nullptr}}},
+              {"host_kv", Json{{"occupied_bytes", nullptr}, {"capacity_bytes", nullptr}}},
+              {"private_catalog", Json{{"occupied", nullptr}, {"capacity", nullptr}}},
+              {"shared_catalog", Json{{"occupied", nullptr},
+                                       {"capacity", nullptr},
+                                       {"active_references", nullptr}}},
+              {"reused_prompt_tokens", nullptr},
+              {"last_selection", Json{{"path", nullptr}, {"frontier_tokens", nullptr}}},
+              {"private_evictions", nullptr},
+              {"shared_evictions", nullptr},
+              {"last_materialization_predicted_nanoseconds", nullptr},
+              {"telemetry_available", false},
+              {"persistent", Json{{"enabled", options.enable_prompt_cache},
+                                    {"quota_bytes", options.prompt_cache_max_bytes},
+                                    {"occupied_bytes", nullptr}}}}},
+        {"memory",
+         Json{{"weights", arena_json(memory.weights)},
+              {"sequence", arena_json(memory.sequence)},
+              {"workspace", arena_json(memory.workspace)},
+              {"request_transient", arena_json(memory.request_transient)},
+              {"runtime_reservation_bytes", memory.runtime_reservation_bytes},
+              {"available_after_startup_bytes", memory.available_after_startup_bytes},
+              {"planned_slack_bytes", memory.planned_slack_bytes}}},
+        {"mtp",
+         Json{{"enabled", options.speculative.backend == ninfer::SpeculativeBackend::Mtp},
+              {"rounds", nullptr},
+              {"drafted_tokens", nullptr},
+              {"accepted_tokens", nullptr},
+              {"fallback_steps", nullptr},
+              {"acceptance_ratio", nullptr},
+              {"tokens_per_round", nullptr},
+              {"telemetry_available", false}}},
+    }.dump();
 }
 
 std::string format_request_start_json(const std::string& server_instance_id,

@@ -79,7 +79,8 @@ ReasoningEffort parse_reasoning_effort(std::string_view text) {
 std::string usage_text(const char* argv0) {
     const std::string headroom_mib =
         std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL));
-    return std::string("usage: ") + argv0 + " <model.ninfer> [input] [options]\n\n"
+    return std::string("usage: ") + argv0 + " --version\n" +
+           "       " + argv0 + " <model.ninfer> [input] [options]\n\n"
            "Single-GPU CLI inference for native .ninfer checkpoint artifacts.\n"
            "Streams answer content to stdout, and reasoning tokens plus diagnostics to stderr.\n\n"
            "Input Selection (pass exactly one):\n"
@@ -132,6 +133,10 @@ std::string usage_text(const char* argv0) {
 
 Options parse_options(int argc, char** argv) {
     Options options;
+    if (argc >= 2 && std::string_view(argv[1]) == "--version") {
+        options.version_requested = true;
+        return options;
+    }
     if (argc >= 2 && (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
         options.help_requested = true;
         return options;

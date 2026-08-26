@@ -1,5 +1,7 @@
 #include "serve/anthropic_schema.h"
 
+#include "serve/client_identity.h"
+
 #include <array>
 #include <cctype>
 #include <cstdint>
@@ -8,6 +10,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <unordered_set>
 #include <utility>
 
 namespace ninfer::serve {
@@ -141,6 +144,7 @@ void parse_tools(const Json& body, GenerationRequest& out) {
     const Json& tools = body.at("tools");
     if (!tools.is_array()) { bad_request("tools must be an array", "tools"); }
     out.tools.reserve(tools.size());
+    std::unordered_set<std::string> names;
     for (const Json& item : tools) {
         if (!item.is_object()) { bad_request("tools entries must be objects", "tools"); }
         // Anthropic server/built-in tools carry a `type` and no `input_schema`; we
@@ -154,7 +158,10 @@ void parse_tools(const Json& body, GenerationRequest& out) {
             bad_request("tool input_schema must be a JSON object", "tools");
         }
         ToolDefinition tool;
-        tool.name     = require_function_name(item, "tools");
+        tool.name = require_function_name(item, "tools");
+        if (!names.insert(tool.name).second) {
+            bad_request("duplicate tool name: " + tool.name, "tools");
+        }
         Json function = Json{{"name", tool.name}};
         if (item.contains("description") && !item.at("description").is_null()) {
             if (!item.at("description").is_string()) {
@@ -481,6 +488,7 @@ GenerationRequest parse_messages_request(const Json& body, const RequestLimits& 
         bad_request("missing required field: model", "model");
     }
     out.model = body.at("model").get<std::string>();
+    parse_client_identity(body, out);
 
     parse_tools(body, out);
     parse_tool_choice(body, out);

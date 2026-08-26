@@ -17,6 +17,7 @@ int fail(const std::string& message) {
 int check(bool condition, const std::string& message) { return condition ? 0 : fail(message); }
 
 int test_single_call() {
+    const ninfer::serve::ToolParamTypeMap types = {{"get_weather", {{"days", {"integer"}}}}};
     const ninfer::serve::ParsedToolCallOutput parsed =
         ninfer::serve::parse_qwen_tool_call_output("Calling weather.\n"
                                                    "<tool_call>\n"
@@ -25,7 +26,7 @@ int test_single_call() {
                                                    "<parameter=days>\n2\n</parameter>\n"
                                                    "</function>\n"
                                                    "</tool_call>",
-                                                   64);
+                                                   64, types);
 
     int failures = 0;
     failures += check(parsed.is_tool_call_response, "single call parsed as tool response");
@@ -40,6 +41,7 @@ int test_single_call() {
 }
 
 int test_multiple_calls_and_json_values() {
+    const ninfer::serve::ToolParamTypeMap types = {{"first", {{"payload", {"object"}}}}};
     const ninfer::serve::ParsedToolCallOutput parsed = ninfer::serve::parse_qwen_tool_call_output(
         "<tool_call>\n"
         "<function=first>\n"
@@ -51,7 +53,7 @@ int test_multiple_calls_and_json_values() {
         "<parameter=value>\nplain text\n</parameter>\n"
         "</function>\n"
         "</tool_call>",
-        64);
+        64, types);
 
     int failures = 0;
     failures += check(parsed.is_tool_call_response, "multiple calls parsed as tool response");
@@ -69,7 +71,7 @@ int test_multiple_calls_and_json_values() {
 int test_malformed_falls_back_to_text() {
     const std::string text = "<tool_call>\n<function=get_weather>\n";
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(text, 64);
+        ninfer::serve::parse_qwen_tool_call_output(text, 64, {});
     int failures = 0;
     failures += check(!parsed.is_tool_call_response, "malformed xml is not tool response");
     failures += check(parsed.content == text, "malformed xml preserved as text");
@@ -85,7 +87,7 @@ int test_suffix_after_tool_falls_back_to_text() {
                              "</tool_call>\n"
                              "extra answer";
     const ninfer::serve::ParsedToolCallOutput parsed =
-        ninfer::serve::parse_qwen_tool_call_output(text, 64);
+        ninfer::serve::parse_qwen_tool_call_output(text, 64, {});
     int failures = 0;
     failures += check(!parsed.is_tool_call_response, "non-whitespace suffix falls back to text");
     failures += check(parsed.content == text, "suffix fallback preserves text");
@@ -97,13 +99,13 @@ int test_configured_name_limit() {
     const std::string text = "<tool_call>\n<function=" + name + ">\n</function>\n</tool_call>";
 
     const ninfer::serve::ParsedToolCallOutput anthropic =
-        ninfer::serve::parse_qwen_tool_call_output(text, 128);
+        ninfer::serve::parse_qwen_tool_call_output(text, 128, {});
     const ninfer::serve::ParsedToolCallOutput openai =
-        ninfer::serve::parse_qwen_tool_call_output(text, 64);
+        ninfer::serve::parse_qwen_tool_call_output(text, 64, {});
     const std::string too_long_text =
         "<tool_call>\n<function=" + std::string(129, 'a') + ">\n</function>\n</tool_call>";
     const ninfer::serve::ParsedToolCallOutput too_long =
-        ninfer::serve::parse_qwen_tool_call_output(too_long_text, 128);
+        ninfer::serve::parse_qwen_tool_call_output(too_long_text, 128, {});
 
     int failures = 0;
     failures += check(anthropic.is_tool_call_response && anthropic.tool_calls.size() == 1 &&
@@ -116,6 +118,29 @@ int test_configured_name_limit() {
     return failures;
 }
 
+int test_schema_declared_scalar_coercion() {
+    ninfer::serve::ToolDefinition tool;
+    tool.name = "set_flags";
+    tool.parameters_json =
+        R"({"type":"object","properties":{"active":{"type":"boolean"},"count":{"type":"integer"},"label":{"type":"string"},"nothing":{"type":"null"}}})";
+    const ninfer::serve::ToolParamTypeMap types =
+        ninfer::serve::build_tool_param_type_map({tool});
+    const ninfer::serve::ParsedToolCallOutput parsed = ninfer::serve::parse_qwen_tool_call_output(
+        "<tool_call><function=set_flags><parameter=active>True</parameter>"
+        "<parameter=count>2</parameter><parameter=label>007</parameter>"
+        "<parameter=nothing>null</parameter></function></tool_call>",
+        64, types);
+    const Json args = Json::parse(parsed.tool_calls.at(0).arguments_json);
+    int failures = 0;
+    failures += check(args.at("active").is_boolean() && args.at("active") == true,
+                      "schema boolean did not coerce Python True");
+    failures += check(args.at("count").is_number_integer() && args.at("count") == 2,
+                      "schema integer did not deserialize");
+    failures += check(args.at("label").is_string() && args.at("label") == "007",
+                      "numeric-looking string was not preserved");
+    failures += check(args.at("nothing").is_null(), "schema null did not deserialize");
+    return failures;
+}
 int test_incremental_filter_valid_tool() {
     ninfer::serve::ToolCallStreamFilter filter;
     std::string visible;
@@ -160,6 +185,7 @@ int main() {
     failures += test_malformed_falls_back_to_text();
     failures += test_suffix_after_tool_falls_back_to_text();
     failures += test_configured_name_limit();
+    failures += test_schema_declared_scalar_coercion();
     failures += test_incremental_filter_valid_tool();
     failures += test_incremental_filter_fallback();
     if (failures == 0) { std::cout << "ok\n"; }

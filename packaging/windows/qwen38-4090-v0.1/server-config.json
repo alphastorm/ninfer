@@ -1,0 +1,45 @@
+{
+  "artifact_type": "ninfer_windows_server_config",
+  "schema_version": 1,
+  "release_id": "qwen38-4090-v0.1",
+  "deployment_profile": "sf-qwen38-4090-v0.1",
+  "listen": {
+    "host": "127.0.0.1",
+    "port": 18082
+  },
+  "model_id": "qwen3.8-27b",
+  "engine": {
+    "device": 0,
+    "max_context": 131072,
+    "kv_capacity": 131072,
+    "prefill_chunk": 512,
+    "kv_dtype": "rk2v4-e8",
+    "max_concurrency": 1,
+    "max_pending_requests": 16,
+    "pending_timeout_ms": 30000,
+    "cuda_graph": true,
+    "prefix_reuse": true,
+    "vision": false
+  },
+  "speculative": {
+    "backend": "none",
+    "draft_tokens": 0
+  },
+  "reasoning": {
+    "thinking": true,
+    "effort": "xhigh",
+    "preserve_thinking": true
+  },
+  "persistent_cache": {
+    "enabled": true,
+    "quota_gib": 100
+  },
+  "response_store": {
+    "max_records": 1024,
+    "max_mib": 256
+  },
+  "telemetry": {
+    "request_log_jsonl": true,
+    "stats_interval_ms": 5000
+  }
+}
