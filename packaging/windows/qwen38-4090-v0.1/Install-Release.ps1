@@ -24,11 +24,25 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$principal = [Security.Principal.WindowsPrincipal]::new(
-    [Security.Principal.WindowsIdentity]::GetCurrent()
-)
-if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    throw 'Install-Release.ps1 must run from an elevated PowerShell session'
+$script:InstallTestMode = [string]$env:NINFER_INSTALL_TEST_MODE -ceq 'transaction'
+if ($script:InstallTestMode) {
+    $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar
+    ) + [IO.Path]::DirectorySeparatorChar
+    $testStateRoot = [IO.Path]::GetFullPath($StateRoot).TrimEnd(
+        [IO.Path]::DirectorySeparatorChar
+    ) + [IO.Path]::DirectorySeparatorChar
+    if (-not $testStateRoot.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'transaction test state must remain under the operating-system temporary directory'
+    }
+}
+else {
+    $principal = [Security.Principal.WindowsPrincipal]::new(
+        [Security.Principal.WindowsIdentity]::GetCurrent()
+    )
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        throw 'Install-Release.ps1 must run from an elevated PowerShell session'
+    }
 }
 
 function Read-JsonFile([string]$Path) {
@@ -37,12 +51,57 @@ function Read-JsonFile([string]$Path) {
 
 function Write-JsonAtomic([string]$Path, [object]$Value) {
     $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
-    [IO.File]::WriteAllText(
-        $temporary,
-        ($Value | ConvertTo-Json -Depth 12),
-        [Text.UTF8Encoding]::new($false)
-    )
-    Move-Item -LiteralPath $temporary -Destination $Path -Force
+    try {
+        [IO.File]::WriteAllText(
+            $temporary,
+            ($Value | ConvertTo-Json -Depth 12),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    }
+    finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Get-FileSnapshot([string]$Path) {
+    if (Test-Path -LiteralPath $Path -PathType Leaf) {
+        return [pscustomobject]@{
+            exists = $true
+            bytes = [IO.File]::ReadAllBytes($Path)
+        }
+    }
+    return [pscustomobject]@{ exists = $false; bytes = $null }
+}
+
+function Restore-FileSnapshot([string]$Path, [object]$Snapshot) {
+    if (-not [bool]$Snapshot.exists) {
+        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+        return
+    }
+    $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).restore"
+    try {
+        [IO.File]::WriteAllBytes($temporary, [byte[]]$Snapshot.bytes)
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    }
+    finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Invoke-InstallFault([string]$Point) {
+    if ($script:InstallTestMode -and
+        [string]$env:NINFER_TEST_INSTALL_FAILURE_AFTER -ceq $Point) {
+        throw "injected install failure after $Point"
+    }
+}
+
+function Restore-ReleaseTask([string]$TaskName, [bool]$Existed, [string]$Xml) {
+    if ($Existed) {
+        Register-ScheduledTask -TaskName $TaskName -Xml $Xml -Force | Out-Null
+        return
+    }
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 }
 
 function Assert-OneLineSecret([string]$Path) {
@@ -66,7 +125,12 @@ function Assert-PayloadChecksums([string]$PayloadRoot) {
         [int]$checksums.schema_version -ne 1) {
         throw 'package checksum manifest envelope mismatch'
     }
-    $root = [IO.Path]::GetFullPath($PayloadRoot).TrimEnd('\') + '\'
+    $directorySeparators = [char[]]@(
+        [IO.Path]::DirectorySeparatorChar,
+        [IO.Path]::AltDirectorySeparatorChar
+    )
+    $root = [IO.Path]::GetFullPath($PayloadRoot).TrimEnd($directorySeparators) +
+        [IO.Path]::DirectorySeparatorChar
     foreach ($entry in $checksums.files) {
         $relative = [string]$entry.relative_path
         $candidate = [IO.Path]::GetFullPath((Join-Path $PayloadRoot $relative))
@@ -105,12 +169,32 @@ function Register-ReleaseTask([string]$TaskName, [string]$ControllerPath) {
 $package = (Resolve-Path -LiteralPath $PackagePath).Path
 $actualPackageSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $package).Hash.ToLowerInvariant()
 if ($actualPackageSha -cne $PackageSha256) { throw 'release package SHA-256 mismatch' }
-Assert-OneLineSecret (Resolve-Path -LiteralPath $ApiKeyFile).Path
+$apiKeySource = (Resolve-Path -LiteralPath $ApiKeyFile).Path
+Assert-OneLineSecret $apiKeySource
 
 New-Item -ItemType Directory -Force -Path $StateRoot | Out-Null
 $StateRoot = (Resolve-Path -LiteralPath $StateRoot).Path
+$statePath = Join-Path $StateRoot 'state.json'
+$controllerPath = Join-Path $StateRoot 'Control-Release.ps1'
+$stateSnapshot = Get-FileSnapshot $statePath
+$controllerSnapshot = Get-FileSnapshot $controllerPath
+$oldState = if ([bool]$stateSnapshot.exists) { Read-JsonFile $statePath } else { $null }
 $stage = Join-Path $StateRoot ('staging-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
+
+$instanceId = $null
+$releaseRoot = $null
+$secretDirectory = $null
+$taskName = $null
+$oldTaskExisted = $false
+$oldTaskWasRunning = $false
+$oldTaskXml = $null
+$candidateMoved = $false
+$candidateSecretCreated = $false
+$incumbentTouched = $false
+$stateActivated = $false
+$controllerTouched = $false
+$taskTouched = $false
 
 try {
     Expand-Archive -LiteralPath $package -DestinationPath $stage
@@ -134,6 +218,21 @@ try {
         throw 'release package upstream identity mismatch'
     }
 
+    $taskName = [string]$spec.lifecycle.task_name
+    if ($taskName -cne 'NInfer-Qwen38-4090-v0.1') { throw 'unexpected lifecycle task identity' }
+    if ($null -ne $oldState -and [string]$oldState.task_name -cne $taskName) {
+        throw 'installed lifecycle task identity mismatch'
+    }
+    $oldTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if ($null -eq $oldState -and $null -ne $oldTask) {
+        throw 'managed task exists without lifecycle state'
+    }
+    $oldTaskExisted = $null -ne $oldTask
+    if ($oldTaskExisted) {
+        $oldTaskWasRunning = [string]$oldTask.State -ceq 'Running'
+        $oldTaskXml = [string](Export-ScheduledTask -TaskName $taskName)
+    }
+
     $sourceModel = (Resolve-Path -LiteralPath $ModelArtifactPath).Path
     $sourceModelItem = Get-Item -LiteralPath $sourceModel
     if ([Int64]$sourceModelItem.Length -ne [Int64]$spec.model.bytes) {
@@ -147,9 +246,14 @@ try {
         throw 'release instance identity is invalid'
     }
     $releaseRoot = Join-Path (Join-Path $StateRoot 'releases') $instanceId
+    $secretDirectory = Join-Path (Join-Path $StateRoot 'secrets') $instanceId
     if (Test-Path -LiteralPath $releaseRoot) { throw 'release instance is already installed' }
+    if (Test-Path -LiteralPath $secretDirectory) { throw 'release secret instance is already installed' }
+
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $releaseRoot) | Out-Null
     Move-Item -LiteralPath $payload -Destination $releaseRoot
+    $candidateMoved = $true
+    Invoke-InstallFault 'release_move'
 
     $modelDirectory = Join-Path $releaseRoot 'model'
     New-Item -ItemType Directory -Force -Path $modelDirectory | Out-Null
@@ -157,35 +261,22 @@ try {
     Copy-Item -LiteralPath $sourceModel -Destination $installedModel
     $installedModelSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $installedModel).Hash.ToLowerInvariant()
     if ($installedModelSha -cne $modelSha) { throw 'installed model artifact SHA-256 mismatch' }
+    Invoke-InstallFault 'model_copy'
 
-    $secretDirectory = Join-Path $StateRoot 'secrets'
-    New-Item -ItemType Directory -Force -Path $secretDirectory | Out-Null
+    New-Item -ItemType Directory -Path $secretDirectory | Out-Null
+    $candidateSecretCreated = $true
     $installedKey = Join-Path $secretDirectory 'api-key.txt'
-    Copy-Item -LiteralPath (Resolve-Path -LiteralPath $ApiKeyFile).Path -Destination $installedKey -Force
+    Copy-Item -LiteralPath $apiKeySource -Destination $installedKey
     Assert-OneLineSecret $installedKey
+    Invoke-InstallFault 'secret_copy'
 
-    $serverExecutable = Join-Path $releaseRoot 'bin\ninfer-serve.exe'
+    $serverExecutable = Join-Path (Join-Path $releaseRoot 'bin') 'ninfer-serve.exe'
     $configFile = Join-Path $releaseRoot 'server-config.json'
     $binarySha = (Get-FileHash -Algorithm SHA256 -LiteralPath $serverExecutable).Hash.ToLowerInvariant()
     $configSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $configFile).Hash.ToLowerInvariant()
     if ($binarySha -cne [string]$manifest.binary_sha256 -or
         $configSha -cne [string]$manifest.config_sha256) {
         throw 'installed release file identity mismatch'
-    }
-
-    $statePath = Join-Path $StateRoot 'state.json'
-    $oldState = if (Test-Path -LiteralPath $statePath -PathType Leaf) {
-        Read-JsonFile $statePath
-    } else {
-        $null
-    }
-    $taskName = [string]$spec.lifecycle.task_name
-    if ($taskName -cne 'NInfer-Qwen38-4090-v0.1') { throw 'unexpected lifecycle task identity' }
-    if ($null -ne $oldState) {
-        $task = Get-ScheduledTask -TaskName ([string]$oldState.task_name) -ErrorAction SilentlyContinue
-        if ($null -ne $task -and $task.State -eq 'Running') {
-            & (Join-Path $StateRoot 'Control-Release.ps1') -Action Stop -StateRoot $StateRoot | Out-Null
-        }
     }
 
     $releases = [ordered]@{}
@@ -219,22 +310,86 @@ try {
         previous_release = $previous
         releases = $releases
     }
-    Write-JsonAtomic $statePath $state
-    Copy-Item -LiteralPath (Join-Path $releaseRoot 'Control-Release.ps1') `
-        -Destination (Join-Path $StateRoot 'Control-Release.ps1') -Force
 
-    & icacls.exe $StateRoot '/inheritance:r' '/grant:r' `
-        'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' "$env:USERNAME`:(OI)(CI)M" | Out-Null
+    if ($oldTaskWasRunning) {
+        $incumbentTouched = $true
+        & $controllerPath -Action Stop -StateRoot $StateRoot | Out-Null
+    }
+    Invoke-InstallFault 'incumbent_stop'
+
+    Write-JsonAtomic $statePath $state
+    $stateActivated = $true
+    Invoke-InstallFault 'state_activation'
+
+    $controllerTouched = $true
+    Copy-Item -LiteralPath (Join-Path $releaseRoot 'Control-Release.ps1') -Destination $controllerPath -Force
+    Invoke-InstallFault 'controller_copy'
+
+    & icacls.exe $StateRoot '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' ([string]::Concat($env:USERNAME, ':(OI)(CI)M')) | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'failed to restrict release state ACL' }
     & icacls.exe (Join-Path $StateRoot '*') '/reset' '/T' '/C' | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'failed to propagate release state ACL' }
-    Register-ReleaseTask $taskName (Join-Path $StateRoot 'Control-Release.ps1')
+    Invoke-InstallFault 'acl'
+
+    $taskTouched = $true
+    Register-ReleaseTask $taskName $controllerPath
+    Invoke-InstallFault 'task_registration'
 
     if (-not $NoStart) {
-        & (Join-Path $StateRoot 'Control-Release.ps1') -Action Start -StateRoot $StateRoot | Out-Null
+        & $controllerPath -Action Start -StateRoot $StateRoot | Out-Null
+        Invoke-InstallFault 'candidate_start'
     }
-    & (Join-Path $StateRoot 'Control-Release.ps1') -Action Status -StateRoot $StateRoot
+    & $controllerPath -Action Status -StateRoot $StateRoot
+}
+catch {
+    $installFailure = $_
+    $rollbackFailures = [Collections.Generic.List[string]]::new()
+
+    if ($stateActivated -and (Test-Path -LiteralPath $controllerPath -PathType Leaf)) {
+        try {
+            $activeState = Read-JsonFile $statePath
+            if ([string]$activeState.active_release -ceq [string]$instanceId) {
+                & $controllerPath -Action Stop -StateRoot $StateRoot | Out-Null
+            }
+        }
+        catch { $rollbackFailures.Add("candidate stop: $($_.Exception.Message)") }
+    }
+    if ($stateActivated) {
+        try { Restore-FileSnapshot $statePath $stateSnapshot }
+        catch { $rollbackFailures.Add("state restore: $($_.Exception.Message)") }
+    }
+    if ($controllerTouched) {
+        try { Restore-FileSnapshot $controllerPath $controllerSnapshot }
+        catch { $rollbackFailures.Add("controller restore: $($_.Exception.Message)") }
+    }
+    if ($taskTouched) {
+        try { Restore-ReleaseTask $taskName $oldTaskExisted $oldTaskXml }
+        catch { $rollbackFailures.Add("task restore: $($_.Exception.Message)") }
+    }
+    if ($candidateMoved -and $null -ne $releaseRoot) {
+        try { Remove-Item -LiteralPath $releaseRoot -Recurse -Force }
+        catch { $rollbackFailures.Add("candidate payload cleanup: $($_.Exception.Message)") }
+    }
+    if ($candidateSecretCreated -and $null -ne $secretDirectory) {
+        try { Remove-Item -LiteralPath $secretDirectory -Recurse -Force }
+        catch { $rollbackFailures.Add("candidate secret cleanup: $($_.Exception.Message)") }
+    }
+    if ($incumbentTouched) {
+        try { & $controllerPath -Action Start -StateRoot $StateRoot | Out-Null }
+        catch { $rollbackFailures.Add("incumbent restart: $($_.Exception.Message)") }
+    }
+
+    if ($rollbackFailures.Count -ne 0) {
+        $details = [string]::Join('; ', $rollbackFailures)
+        throw [InvalidOperationException]::new(
+            "release install failed and rollback was incomplete: $details",
+            $installFailure.Exception
+        )
+    }
+    throw $installFailure
 }
 finally {
-    if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }
+    if (Test-Path -LiteralPath $stage) {
+        Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }

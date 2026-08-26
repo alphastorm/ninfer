@@ -6,6 +6,15 @@ add_executable(ninfer_public_api_test test_public_api.cpp)
 target_include_directories(ninfer_public_api_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
 add_test(NAME ninfer_public_api_test COMMAND ninfer_public_api_test)
 
+if(WIN32)
+  add_test(
+    NAME ninfer_windows_release_lifecycle_test
+    COMMAND powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+      -File "${PROJECT_SOURCE_DIR}/tests/test_release_lifecycle.ps1"
+      -InstallerPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/Install-Release.ps1"
+      -ControllerPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/Control-Release.ps1")
+endif()
+
 function(ninfer_add_test name)
   cmake_parse_arguments(arg "NEEDS_SOURCE_DIR" "" "SOURCES;LIBRARIES" ${ARGN})
   add_executable(${name} ${arg_SOURCES})
