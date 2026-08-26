@@ -111,11 +111,12 @@ struct RequestRecord {
     RequestRecord(std::uint64_t request_identity, PreparedPrompt input,
                   OutputSession output_session, PromptSummary summary, double frontend_seconds,
                   ResolvedRequestOptions request_options, OutputConsumerMode output_consumer,
-                  Clock::time_point limit, Clock::time_point submit_time)
+                  Clock::time_point limit, Clock::time_point submit_time,
+                  std::string continuation_checkpoint_tag)
         : id(request_identity), prompt(std::move(input)), output(std::move(output_session)),
           prompt_summary(std::move(summary)), prepare_seconds(frontend_seconds),
           options(std::move(request_options)), consumer_mode(output_consumer), deadline(limit),
-          submitted(submit_time) {}
+          submitted(submit_time), checkpoint_tag(std::move(continuation_checkpoint_tag)) {}
 
     RequestRecord(const RequestRecord&)            = delete;
     RequestRecord& operator=(const RequestRecord&) = delete;
@@ -153,6 +154,7 @@ struct RequestRecord {
     const OutputConsumerMode consumer_mode;
     Clock::time_point deadline;
     Clock::time_point submitted;
+    std::string checkpoint_tag;
     std::optional<Clock::time_point> first_token;
     bool queue_wait_recorded = false;
     std::optional<GenerationBudget> budget;

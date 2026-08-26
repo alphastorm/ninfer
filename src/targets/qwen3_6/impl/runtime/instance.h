@@ -48,6 +48,7 @@ using DiscardResult         = qwen3_6::DiscardResult<Variant>;
 using FinishResult          = qwen3_6::FinishResult<Variant>;
 using AbortResult           = qwen3_6::AbortResult<Variant>;
 using ReleaseResult         = qwen3_6::ReleaseResult<Variant>;
+using RestoredContinuation  = qwen3_6::RestoredContinuation<Variant>;
 using ContractAccess        = qwen3_6::detail::RuntimeContractAccess<Variant>;
 using Program               = qwen3_6::Program<Variant>;
 

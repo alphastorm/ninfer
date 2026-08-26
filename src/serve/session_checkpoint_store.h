@@ -1,5 +1,6 @@
 #pragma once
 
+#include "runtime/contract/continuation_checkpoint.h"
 #include "serve/response_store.h"
 
 #include <nlohmann/json.hpp>
@@ -16,29 +17,6 @@
 #include <vector>
 
 namespace ninfer::serve {
-class ContinuationCheckpointWriter {
-public:
-    virtual ~ContinuationCheckpointWriter() = default;
-    virtual bool write_file(std::string_view path, std::uint64_t offset,
-                            std::uint64_t total_bytes,
-                            std::span<const std::byte> bytes) = 0;
-};
-
-class ContinuationCheckpointReader {
-public:
-    virtual ~ContinuationCheckpointReader() = default;
-    [[nodiscard]] virtual std::optional<std::uint64_t>
-    file_size(std::string_view path) const = 0;
-    virtual bool read_file(std::string_view path, std::uint64_t offset,
-                           std::span<std::byte> destination) const = 0;
-};
-
-struct ContinuationCheckpointStats {
-    std::uint32_t frontier_tokens = 0;
-    std::uint32_t restored_tokens = 0;
-    std::uint64_t payload_bytes   = 0;
-};
-
 inline constexpr std::uint32_t kSessionCheckpointSchemaVersion = 2;
 
 struct SessionCheckpointStoreOptions {
@@ -49,14 +27,14 @@ struct SessionCheckpointStoreOptions {
 
 struct SessionCheckpointSaveResult {
     std::string generation;
-    ContinuationCheckpointStats engine;
+    runtime::ContinuationCheckpointStats engine;
     std::uint64_t bytes = 0;
 };
 
 struct VerifiedSessionCheckpoint {
     ResponseStoreSnapshot responses;
-    std::shared_ptr<const ContinuationCheckpointReader> engine;
-    ContinuationCheckpointStats expected_engine;
+    std::shared_ptr<const runtime::ContinuationCheckpointReader> engine;
+    runtime::ContinuationCheckpointStats expected_engine;
     std::string generation;
     std::uint64_t bytes = 0;
 };
@@ -70,8 +48,8 @@ decode_response_store_snapshot(std::span<const std::byte> bytes, std::size_t byt
 
 class SessionCheckpointStore {
 public:
-    using EngineExporter = std::function<std::optional<ContinuationCheckpointStats>(
-        ContinuationCheckpointWriter&)>;
+    using EngineExporter = std::function<std::optional<runtime::ContinuationCheckpointStats>(
+        runtime::ContinuationCheckpointWriter&)>;
 
     class Impl;
     explicit SessionCheckpointStore(SessionCheckpointStoreOptions options);

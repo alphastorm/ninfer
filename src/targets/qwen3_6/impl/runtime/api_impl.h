@@ -430,6 +430,19 @@ Program<Variant>::release_shared_prefix(SharedPrefixHandle<Variant>&& shared) no
 }
 
 template <>
+std::optional<runtime::ContinuationCheckpointStats>
+Program<Variant>::checkpoint_continuation(
+    const ContinuationHandle<Variant>& continuation,
+    runtime::ContinuationCheckpointWriter& writer, std::size_t staging_bytes) const {
+    return impl_->checkpoint_continuation(continuation, writer, staging_bytes);
+}
+
+template <>
+std::optional<RestoredContinuation<Variant>> Program<Variant>::restore_continuation(
+    const runtime::ContinuationCheckpointReader& reader, std::size_t staging_bytes) {
+    return impl_->restore_continuation(reader, staging_bytes);
+}
+template <>
 std::array<runtime::DeviceResources, 1U << kMaximumConcurrency>
 Program<Variant>::project_protected_resources(
     std::span<const ProtectedPrivateOwner<Variant>> private_owners,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ninfer/types.h"
+#include "runtime/contract/continuation_checkpoint.h"
 #include "runtime/contract/types.h"
 #include <ninfer/targets/qwen3_6/prepared_prompt.h>
 
@@ -594,6 +595,13 @@ struct ReleaseResult {
 };
 
 template <class Variant>
+struct RestoredContinuation {
+    ContinuationHandle<Variant> handle;
+    ContinuationSummary summary;
+    runtime::ResourceVector resources;
+    runtime::ContinuationCheckpointStats stats;
+};
+template <class Variant>
 class Program {
 public:
     ~Program() noexcept;
@@ -717,6 +725,13 @@ public:
     release_continuation(ContinuationHandle<Variant>&& continuation) noexcept;
     [[nodiscard]] ReleaseResult<Variant>
     release_shared_prefix(SharedPrefixHandle<Variant>&& shared) noexcept;
+    [[nodiscard]] std::optional<runtime::ContinuationCheckpointStats>
+    checkpoint_continuation(const ContinuationHandle<Variant>& continuation,
+                            runtime::ContinuationCheckpointWriter& writer,
+                            std::size_t staging_bytes) const;
+    [[nodiscard]] std::optional<RestoredContinuation<Variant>>
+    restore_continuation(const runtime::ContinuationCheckpointReader& reader,
+                         std::size_t staging_bytes);
     [[nodiscard]] std::array<runtime::DeviceResources, 1U << kMaximumConcurrency>
     project_protected_resources(std::span<const ProtectedPrivateOwner<Variant>> private_owners,
                                 std::span<const ProtectedSharedOwner<Variant>> shared_owners) const;

@@ -71,6 +71,30 @@ int main() {
                       }),
                       "invalid deployment profile was accepted");
 
+    const ServeOptions checkpoints = parse(
+        {"ninfer-serve", "model.ninfer", "--api-key", "secret", "--binary-sha256", binary_sha,
+         "--artifact-sha256", artifact_sha, "--config-sha256", config_sha,
+         "--session-checkpoint-dir", "/tmp/ninfer-checkpoints", "--session-checkpoint-quota-mib",
+         "2048", "--session-checkpoint-staging-mib", "64", "--session-checkpoint-min-tokens",
+         "4096"});
+    failures += check(checkpoints.session_checkpoint_root == "/tmp/ninfer-checkpoints" &&
+                          checkpoints.session_checkpoint_quota_bytes == (2048ULL << 20) &&
+                          checkpoints.session_checkpoint_staging_bytes == (64ULL << 20) &&
+                          checkpoints.session_checkpoint_min_tokens == 4096,
+                      "session checkpoint controls were not preserved");
+    failures += check(
+        rejects([&] {
+            (void)parse({"ninfer-serve", "model.ninfer", "--binary-sha256", binary_sha,
+                         "--artifact-sha256", artifact_sha, "--config-sha256", config_sha,
+                         "--session-checkpoint-dir", "/tmp/checkpoints"});
+        }),
+        "session checkpoints were accepted without API authentication");
+    failures += check(
+        rejects([] {
+            (void)parse({"ninfer-serve", "model.ninfer", "--api-key", "secret",
+                         "--session-checkpoint-dir", "/tmp/checkpoints"});
+        }),
+        "session checkpoints were accepted without lifecycle identity hashes");
 
     const ServeOptions defaults = parse({"ninfer-serve", "model.ninfer"});
     failures += check(defaults.allow_prefix_reuse, "prefix reuse is not enabled by default");

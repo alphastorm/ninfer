@@ -4,6 +4,7 @@
 #include "runtime/contract/types.h"
 #include "runtime/engine/admission_policy.h"
 #include "runtime/engine/context_cost.h"
+#include "runtime/contract/continuation_checkpoint.h"
 
 #include <algorithm>
 #include <array>
@@ -13,6 +14,8 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -440,6 +443,17 @@ public:
         return true;
     }
 
+    [[nodiscard]] bool reserve_inactive(ResourceVector resources) noexcept {
+        if (resources.device.active_lanes != 0 || transaction_kind_) { return false; }
+        ResourceVector next;
+        if (!detail::add_resources(used_, resources, next) ||
+            !resources_fit(next, capacity_)) {
+            return false;
+        }
+        used_ = next;
+        return true;
+    }
+
     [[nodiscard]] bool release_inactive(ResourceVector resources) noexcept {
         if (resources.device.active_lanes != 0 || transaction_kind_) { return false; }
         ResourceVector next;
@@ -696,10 +710,11 @@ public:
     private:
         Choice(LaneId destination, AdmissionPlan&& plan, std::uint32_t catalog_capacity,
                std::optional<CacheSessionKey> session, RetentionClass retention,
-               bool update_session_index)
+               bool update_session_index, std::string checkpoint_tag)
             : destination_(destination) {
             plan_.emplace(std::move(plan));
             session_              = std::move(session);
+            checkpoint_tag_       = std::move(checkpoint_tag);
             retention_            = retention;
             update_session_index_ = update_session_index;
             evictions_.reserve(catalog_capacity);
@@ -732,6 +747,7 @@ public:
         std::vector<PolicyObservationKey> eligible_observations_;
         std::optional<PolicyObservationKey> selected_observation_;
         std::optional<CacheSessionKey> session_;
+        std::string checkpoint_tag_;
         RetentionClass retention_                   = RetentionClass::RecentPrivate;
         bool update_session_index_                  = true;
         bool needs_transfer_                        = false;
@@ -864,7 +880,8 @@ public:
     }
 
     [[nodiscard]] Inspection inspect(Program& program, const PreparedPrompt& prompt,
-                                     const RequestBasePlan& base) {
+                                     const RequestBasePlan& base,
+                                     std::string checkpoint_tag = {}) {
         if (!std::holds_alternative<std::monostate>(context_transaction_) ||
             program.has_context_transaction()) {
             return {.readiness = Readiness::TemporarilyBlocked};
@@ -1323,7 +1340,8 @@ public:
         }
         const auto& cache = base.context_cache();
         Choice choice(*destination, std::move(*composed), catalog_count_, cache.session_key,
-                      cache.retention, cache.update_session_index);
+                      cache.retention, cache.update_session_index,
+                      std::move(checkpoint_tag));
         choice.demand_                       = selected->demand;
         choice.source_resources_             = source_resources;
         choice.source_disposition_           = source_disposition;
@@ -1486,6 +1504,7 @@ public:
         record.eligible_observations        = std::move(choice.eligible_observations_);
         record.selected_observation         = std::move(choice.selected_observation_);
         record.session                      = std::move(choice.session_);
+        record.checkpoint_tag               = std::move(choice.checkpoint_tag_);
         record.retention                    = choice.retention_;
         record.update_session_index         = choice.update_session_index_;
         record.predicted_materialization_ns = choice.predicted_materialization_ns_;
@@ -1794,6 +1813,7 @@ public:
         publication.summary.rewrite.reset();
         publication.summary.long_anchors.clear();
         publication.active_references = 0;
+        publication.checkpoint_tag.clear();
         publication.session =
             materialization->update_session_index ? materialization->session : std::nullopt;
         publication.retention = materialization->retention;
@@ -1810,6 +1830,7 @@ public:
             .resources        = result.active_resources,
             .session   = materialization->update_session_index ? std::move(materialization->session)
                                                                : std::nullopt,
+            .checkpoint_tag = std::move(materialization->checkpoint_tag),
             .retention = materialization->retention,
             .update_session_index = materialization->update_session_index,
             .publish_continuation = materialization->publish_continuation,
@@ -2719,8 +2740,9 @@ public:
                                                                 : nullptr);
         assign_continuation_summary(publication.summary, result.summary);
         publication.handle.emplace(std::move(*result.continuation));
-        publication.session   = active_entry.session;
-        publication.retention = active_entry.retention;
+        publication.session        = active_entry.session;
+        publication.checkpoint_tag = std::move(active_entry.checkpoint_tag);
+        publication.retention      = active_entry.retention;
         result.continuation.reset();
         advance_revision(publication.revision);
         if (publication.session && active_entry.update_session_index) {
@@ -2737,6 +2759,103 @@ public:
         return result;
     }
 
+    [[nodiscard]] std::optional<ContinuationCheckpointStats> checkpoint_session(
+        Program& program, const CacheSessionKey& session, std::string_view checkpoint_tag,
+        ContinuationCheckpointWriter& writer, std::size_t staging_bytes) {
+        if (!cache_enabled_ || checkpoint_tag.empty() ||
+            !std::holds_alternative<std::monostate>(context_transaction_) ||
+            program.has_context_transaction()) {
+            return std::nullopt;
+        }
+        const std::optional<std::uint32_t> slot = lookup_session(session);
+        if (!slot) { return std::nullopt; }
+        const CatalogEntry& entry = catalog_[*slot];
+        if (entry.state != CatalogState::Catalogued || !entry.handle ||
+            entry.session != std::optional<CacheSessionKey>(session) ||
+            entry.checkpoint_tag != checkpoint_tag) {
+            return std::nullopt;
+        }
+        return program.checkpoint_continuation(*entry.handle, writer, staging_bytes);
+    }
+
+    [[nodiscard]] std::optional<ContinuationCheckpointStats> restore_session_checkpoint(
+        Program& program, const CacheSessionKey& session, std::string checkpoint_tag,
+        const ContinuationCheckpointReader& reader, std::size_t staging_bytes) {
+        if (!cache_enabled_ || checkpoint_tag.empty() ||
+            !std::holds_alternative<std::monostate>(context_transaction_) ||
+            program.has_context_transaction() || session_binding(session)) {
+            return std::nullopt;
+        }
+        std::uint32_t slot = kInvalidCatalogSlot;
+        for (std::uint32_t candidate = 0; candidate < catalog_count_; ++candidate) {
+            if (catalog_[candidate].state == CatalogState::Vacant) {
+                slot = candidate;
+                break;
+            }
+        }
+        if (slot == kInvalidCatalogSlot) { return std::nullopt; }
+
+        auto restored = program.restore_continuation(reader, staging_bytes);
+        if (!restored || restored->summary.active_references != 0 ||
+            !valid_continuation_summary(restored->summary) ||
+            restored->resources.device.active_lanes != 0 ||
+            !resources_fit(restored->resources, ledger_.capacity())) {
+            if (restored) {
+                (void)program.release_continuation(std::move(restored->handle));
+            }
+            return std::nullopt;
+        }
+
+        CatalogEntry& entry = catalog_[slot];
+        bool ledger_reserved = false;
+        try {
+            assign_continuation_summary(entry.summary, restored->summary);
+            migrate_private_observations(entry, restored->summary, RetentionClass::LiveSession,
+                                         nullptr);
+            entry.session        = session;
+            entry.checkpoint_tag = std::move(checkpoint_tag);
+            entry.retention      = RetentionClass::LiveSession;
+            if (!ledger_.reserve_inactive(restored->resources)) {
+                clear_catalog_entry(entry);
+                (void)program.release_continuation(std::move(restored->handle));
+                return std::nullopt;
+            }
+            ledger_reserved         = true;
+            entry.id                = next_continuation_id_++;
+            entry.active_references = 0;
+            entry.handle.emplace(std::move(restored->handle));
+            entry.state = CatalogState::Catalogued;
+            advance_revision(entry.revision);
+            const std::optional<SessionIndexEntry> previous =
+                exchange_session(session, slot, entry.id, entry.revision);
+            if (previous) {
+                throw std::logic_error("checkpoint restore replaced an existing session binding");
+            }
+            const ContinuationCheckpointStats stats = restored->stats;
+            invalidate_replica_policy();
+            return stats;
+        } catch (...) {
+            ResourceVector released_resources;
+            if (entry.handle) {
+                ReleaseResult released =
+                    program.release_continuation(std::move(*entry.handle));
+                entry.handle.reset();
+                if (released.status == ConsumeStatus::Consumed) {
+                    released_resources = released.resource_delta.removed;
+                }
+            } else {
+                ReleaseResult released =
+                    program.release_continuation(std::move(restored->handle));
+                if (released.status == ConsumeStatus::Consumed) {
+                    released_resources = released.resource_delta.removed;
+                }
+            }
+            if (ledger_reserved) { (void)ledger_.release_inactive(restored->resources); }
+            (void)released_resources;
+            clear_catalog_slot(slot);
+            return std::nullopt;
+        }
+    }
     [[nodiscard]] AbortResult abort(Program& program, LaneId lane, SequenceHandle sequence) {
         const ResourceVector active = require_active(lane);
         AbortResult result          = program.abort(sequence);
@@ -2970,6 +3089,7 @@ private:
         std::vector<PolicyObservationKey> eligible_observations;
         std::optional<PolicyObservationKey> selected_observation;
         std::optional<CacheSessionKey> session;
+        std::string checkpoint_tag;
         RetentionClass retention                   = RetentionClass::RecentPrivate;
         bool update_session_index                  = true;
         std::uint64_t predicted_materialization_ns = 0;
@@ -2983,6 +3103,7 @@ private:
         ContinuationSummary summary;
         std::optional<ContinuationHandle> handle;
         std::optional<CacheSessionKey> session;
+        std::string checkpoint_tag;
         std::vector<CheckpointObservation> observations;
         RetentionClass retention        = RetentionClass::RecentPrivate;
         std::uint32_t active_references = 0;
@@ -3029,6 +3150,7 @@ private:
         std::uint64_t continuation_id  = 0;
         ResourceVector resources;
         std::optional<CacheSessionKey> session;
+        std::string checkpoint_tag;
         RetentionClass retention           = RetentionClass::RecentPrivate;
         bool update_session_index          = true;
         bool publish_continuation          = true;
@@ -3707,6 +3829,7 @@ private:
         entry.summary.long_anchors.clear();
         entry.handle.reset();
         entry.session.reset();
+        entry.checkpoint_tag.clear();
         entry.observations.clear();
         entry.retention         = RetentionClass::RecentPrivate;
         entry.active_references = 0;

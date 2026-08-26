@@ -222,9 +222,16 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         apply_client_identity_cache_hints(request.generation, !options_.api_key.empty(),
                                           cache_hints);
         if (request.previous_response_id) {
-            const std::shared_ptr<const StoredResponse> previous =
+            std::shared_ptr<const StoredResponse> previous =
                 response_store_.get_for_session(*request.previous_response_id,
                                                 request.generation.client_session_sha256);
+            if (!previous && request.generation.client_session_sha256 &&
+                service_->checkpoint_enabled()) {
+                (void)service_->restore_checkpoint(*request.generation.client_session_sha256,
+                                                   *request.previous_response_id, response_store_);
+                previous = response_store_.get_for_session(
+                    *request.previous_response_id, request.generation.client_session_sha256);
+            }
             if (!previous) {
                 throw ApiException(response_not_found(*request.previous_response_id));
             }
@@ -261,7 +268,8 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
     PreparedRequest prepared;
     try {
         prepared = service_->prepare(
-            request.generation, [&req] { return disconnected(req); }, std::move(cache_hints));
+            request.generation, [&req] { return disconnected(req); }, std::move(cache_hints),
+            request.store && request.generation.client_session_sha256 ? id : std::string());
     } catch (const ApiException& exception) {
         const ApiError error = responses_error(exception.error());
         log_request_rejected(make_request_rejection_log_context(req_id, "openai_responses",
@@ -301,6 +309,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                                      std::move(response.output_history));
                 stored.preserve_thinking = prepared.preserve_thinking;
                 response_store_.put(std::move(stored));
+                maybe_checkpoint_completed_turn(request.generation.client_session_sha256, outcome);
             }
             log_request_done(log_context, outcome);
             set_owned_content(res, response.body.dump(), prepared.lifetime);
@@ -367,6 +376,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                     stored.preserve_thinking    = stream->prepared.preserve_thinking;
                     stored.previous_response_id = stream->previous_response_id;
                     response_store_.put(std::move(stored));
+                    maybe_checkpoint_completed_turn(stream->client_session_sha256, outcome);
                 }
                 write_stream_items(sink, *stream, std::move(finished.events_before_terminal));
                 log_request_done(stream->log_context, outcome);

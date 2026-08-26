@@ -16,6 +16,9 @@ inline constexpr int kDefaultMaxTokens                    = 8192;
 inline constexpr std::size_t kDefaultMaxRequestBytes      = 384ULL << 20;
 inline constexpr std::size_t kDefaultResponseStoreRecords = 1024;
 inline constexpr std::size_t kDefaultResponseStoreBytes   = 256ULL << 20;
+inline constexpr std::uint64_t kDefaultSessionCheckpointQuotaBytes = 64ULL << 30;
+inline constexpr std::size_t kDefaultSessionCheckpointStagingBytes = 256ULL << 20;
+inline constexpr std::uint32_t kDefaultSessionCheckpointMinTokens  = 32768;
 
 struct ServeOptions {
     bool help_requested    = false;
@@ -44,6 +47,10 @@ struct ServeOptions {
     std::uint32_t media_preprocess_threads = 0;
     std::size_t response_store_max_records = kDefaultResponseStoreRecords;
     std::size_t response_store_max_bytes   = kDefaultResponseStoreBytes;
+    std::filesystem::path session_checkpoint_root;
+    std::uint64_t session_checkpoint_quota_bytes = kDefaultSessionCheckpointQuotaBytes;
+    std::size_t session_checkpoint_staging_bytes = kDefaultSessionCheckpointStagingBytes;
+    std::uint32_t session_checkpoint_min_tokens  = kDefaultSessionCheckpointMinTokens;
     int device                             = 0;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;

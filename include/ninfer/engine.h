@@ -5,6 +5,10 @@
 #include <chrono>
 #include <memory>
 
+namespace ninfer::runtime {
+class CheckpointEngineAccess;
+}
+
 namespace ninfer {
 
 class PreparedPrompt {
@@ -28,6 +32,7 @@ private:
     std::unique_ptr<Impl> impl_;
 
     friend class Engine;
+    friend class runtime::CheckpointEngineAccess;
 };
 
 class GenerationHandle {
@@ -100,6 +105,8 @@ public:
 private:
     class Impl;
     std::shared_ptr<Impl> impl_;
+
+    friend class runtime::CheckpointEngineAccess;
 };
 
 } // namespace ninfer

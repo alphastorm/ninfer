@@ -135,6 +135,7 @@ int main(int argc, char** argv) {
 
         const bool ok = server.listen();
         g_server.store(nullptr);
+        server.save_all_checkpoints();
         if (!ok) {
             ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Error,
                                              "failed to bind " + options.host + ':' +

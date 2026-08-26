@@ -32,6 +32,9 @@ namespace ninfer::serve {
 namespace {
 
 using Clock = std::chrono::system_clock;
+using runtime::ContinuationCheckpointReader;
+using runtime::ContinuationCheckpointStats;
+using runtime::ContinuationCheckpointWriter;
 
 struct FileDescriptor {
     std::string path;

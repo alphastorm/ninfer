@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -34,6 +35,7 @@ public:
     void attach(GenerationService& service);
     bool listen();
     void stop();
+    void save_all_checkpoints() noexcept;
 
     [[nodiscard]] const std::string& public_model_id() const noexcept { return public_model_id_; }
 
@@ -52,6 +54,11 @@ private:
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
     void handle_status(const httplib::Request& req, httplib::Response& res) const;
+    void handle_checkpoint_get(const httplib::Request& req, httplib::Response& res) const;
+    void handle_checkpoint_save(const httplib::Request& req, httplib::Response& res);
+    void handle_checkpoint_delete(const httplib::Request& req, httplib::Response& res);
+    void maybe_checkpoint_completed_turn(const std::optional<std::string>& session_sha256,
+                                         const GenerationOutcome& outcome) noexcept;
 
     // The process-wide console logger serializes lines from request and reporter threads.
     void log_line(const std::string& line);

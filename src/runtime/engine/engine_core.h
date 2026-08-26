@@ -26,6 +26,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -45,7 +46,7 @@ public:
     using PendingBatch       = typename Package::PendingBatch;
     using PreparedPrompt     = typename Package::PreparedPrompt;
     using OutputSession      = typename Package::OutputSession;
-    using PublishedOutput    = typename Package::PublishedOutput;
+    using CacheSessionKey     = typename Package::CacheSessionKey;
     using Request            = RequestRecord<Package>;
     using Scheduling         = Scheduler<Request>;
     using FifoSnapshot       = typename Scheduling::FifoSnapshot;
@@ -150,6 +151,7 @@ public:
 
     Submission submit(PreparedPrompt prompt, PromptSummary prompt_summary, double prepare_seconds,
                       ResolvedRequestOptions options, OutputConsumerMode consumer_mode,
+                      std::string checkpoint_tag,
                       Clock::time_point pending_deadline = {}) {
         const Clock::time_point submitted = Clock::now();
         if (pending_deadline == Clock::time_point{}) {
@@ -187,9 +189,10 @@ public:
                 throw RequestError(RequestErrorKind::ThinkingBudgetCapacityInsufficient,
                                    error.what());
             }
-            request = std::make_shared<Request>(request_id, std::move(prompt), std::move(output),
-                                                prompt_summary, prepare_seconds, std::move(options),
-                                                consumer_mode, pending_deadline, submitted);
+            request = std::make_shared<Request>(
+                request_id, std::move(prompt), std::move(output), prompt_summary, prepare_seconds,
+                std::move(options), consumer_mode, pending_deadline, submitted,
+                std::move(checkpoint_tag));
         } catch (...) {
             release_reserved_capacity();
             throw;
@@ -226,6 +229,22 @@ public:
         return out;
     }
 
+    [[nodiscard]] std::optional<ContinuationCheckpointStats> checkpoint_session(
+        const CacheSessionKey& session, std::string_view checkpoint_tag,
+        ContinuationCheckpointWriter& writer, std::size_t staging_bytes) {
+        std::scoped_lock lock(execution_mutex_);
+        return resources_.checkpoint_session(*instance_.program, session, checkpoint_tag, writer,
+                                             staging_bytes);
+    }
+
+    [[nodiscard]] std::optional<ContinuationCheckpointStats> restore_session_checkpoint(
+        const CacheSessionKey& session, std::string checkpoint_tag,
+        const ContinuationCheckpointReader& reader, std::size_t staging_bytes) {
+        std::scoped_lock lock(execution_mutex_);
+        return resources_.restore_session_checkpoint(*instance_.program, session,
+                                                     std::move(checkpoint_tag), reader,
+                                                     staging_bytes);
+    }
     [[nodiscard]] RuntimeStats runtime_stats() const {
         std::lock_guard lock(stats_mutex_);
         return published_stats_;
@@ -1212,7 +1231,8 @@ private:
     }
 
     [[nodiscard]] ResourceInspection inspect_admission(const std::shared_ptr<Request>& request) {
-        return resources_.inspect(*instance_.program, request->prompt, *request->base_plan);
+        return resources_.inspect(*instance_.program, request->prompt, *request->base_plan,
+                                  request->checkpoint_tag);
     }
 
     [[nodiscard]] AdmissionProgress remove_pending_error(const std::shared_ptr<Request>& request,

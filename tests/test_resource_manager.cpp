@@ -308,6 +308,13 @@ struct FakeContinuationSummary {
                            const FakeContinuationSummary&) = default;
 };
 
+struct FakeRestoredContinuation {
+    FakeContinuationHandle handle;
+    FakeContinuationSummary summary;
+    ResourceVector resources;
+    ninfer::runtime::ContinuationCheckpointStats stats;
+};
+
 struct FakeSharedPrefixSummary {
     FakeCheckpointSummary checkpoint;
     std::uint32_t active_references = 0;
@@ -838,6 +845,29 @@ public:
 
     [[nodiscard]] bool has_context_transaction() const noexcept {
         return transaction_.has_value() || replica_transaction_.has_value();
+    }
+
+    [[nodiscard]] std::optional<ninfer::runtime::ContinuationCheckpointStats>
+    checkpoint_continuation(const FakeContinuationHandle& continuation,
+                            ninfer::runtime::ContinuationCheckpointWriter&,
+                            std::size_t staging_bytes) const {
+        if (!continuation.valid || staging_bytes == 0) { return std::nullopt; }
+        return ninfer::runtime::ContinuationCheckpointStats{
+            .frontier_tokens = 16, .restored_tokens = 16, .payload_bytes = 64};
+    }
+
+    [[nodiscard]] std::optional<FakeRestoredContinuation>
+    restore_continuation(const ninfer::runtime::ContinuationCheckpointReader&,
+                         std::size_t staging_bytes) const {
+        if (staging_bytes == 0) { return std::nullopt; }
+        const ResourceVector restored_resources =
+            resources({.state_slots = 1, .main_kv_pages = 2, .backend_kv_pages = 1});
+        return FakeRestoredContinuation{
+            .handle = FakeContinuationHandle{99, restored_resources, 1},
+            .summary = continuation_summary(),
+            .resources = restored_resources,
+            .stats = {.frontier_tokens = 16, .restored_tokens = 16, .payload_bytes = 64},
+        };
     }
 
     [[nodiscard]] std::optional<FakeReplicaTransitionOption>
@@ -1722,6 +1752,56 @@ void test_content_prefix_shortlist_bounds_exact_inspection() {
            "anonymous branch did not retain its content-matched named source");
 }
 
+void test_session_checkpoint_tag_and_restore_ledger() {
+    class Writer final : public ninfer::runtime::ContinuationCheckpointWriter {
+    public:
+        bool write_file(std::string_view, std::uint64_t, std::uint64_t,
+                        std::span<const std::byte>) override {
+            return true;
+        }
+    } writer;
+    class Reader final : public ninfer::runtime::ContinuationCheckpointReader {
+    public:
+        std::optional<std::uint64_t> file_size(std::string_view) const override {
+            return std::nullopt;
+        }
+        bool read_file(std::string_view, std::uint64_t,
+                       std::span<std::byte>) const override {
+            return false;
+        }
+    } reader;
+
+    FakeProgram source_program;
+    FakeManager source(resources({1, 4, 10, 6}), 1, 2, 0, true, 0, test_cost_model());
+    FakeRequestBasePlan seed = make_base();
+    seed.cache.session_key   = FakeCacheSessionKey{77};
+    auto inspected = source.inspect(source_program, FakePreparedPrompt{77}, seed, "resp_1");
+    auto active = materialize_and_adopt(source, source_program, std::move(*inspected.choice),
+                                        FakePreparedPrompt{77});
+    (void)source.finish(source_program, LaneId{0}, active.sequence);
+    expect(!source.checkpoint_session(source_program, FakeCacheSessionKey{77}, "resp_wrong", writer,
+                                      1024),
+           "checkpoint accepted a stale response tag");
+    const auto saved = source.checkpoint_session(source_program, FakeCacheSessionKey{77}, "resp_1",
+                                                 writer, 1024);
+    expect(saved && saved->restored_tokens == 16,
+           "checkpoint did not export the exact tagged session endpoint");
+
+    FakeProgram restored_program;
+    FakeManager restored(resources({1, 4, 10, 6}), 1, 2, 0, true, 0, test_cost_model());
+    const auto restored_stats = restored.restore_session_checkpoint(
+        restored_program, FakeCacheSessionKey{88}, "resp_2", reader, 1024);
+    expect(restored_stats && restored_stats->frontier_tokens == 16 &&
+               restored.ledger().used() == resources({0, 1, 2, 1}),
+           "restored continuation was not reserved as inactive catalog ownership");
+    expect(restored.checkpoint_session(restored_program, FakeCacheSessionKey{88}, "resp_2", writer,
+                                       1024)
+               .has_value() &&
+               !restored.checkpoint_session(restored_program, FakeCacheSessionKey{88}, "resp_1",
+                                            writer, 1024),
+           "restored session did not retain its exact response checkpoint tag");
+}
+
 } // namespace
 
 int main() {
@@ -1738,6 +1818,7 @@ int main() {
     test_clean_replica_policy_waits_for_resource_invalidation();
     test_anonymous_content_prefix_rolls_in_place();
     test_content_prefix_shortlist_bounds_exact_inspection();
+    test_session_checkpoint_tag_and_restore_ledger();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

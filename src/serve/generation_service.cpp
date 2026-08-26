@@ -1,9 +1,11 @@
 #include "serve/generation_service.h"
 
 #include "product/media_acquire/acquire.h"
+#include "runtime/engine/checkpoint_engine_access.h"
 #include "serve/client_identity.h"
 #include "serve/console_log.h"
 #include "serve/tool_call_parser.h"
+#include "serve/server_identity.h"
 #include "serve/translate.h"
 
 #include <algorithm>
@@ -255,6 +257,15 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
     prompt_capabilities_ = engine_->prompt_capabilities();
     request_capacity_    = std::make_shared<RequestCapacity>(
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
+    if (!options_.session_checkpoint_root.empty()) {
+        checkpoint_runtime_fingerprint_ = session_checkpoint_runtime_fingerprint(
+            options_, engine_->options(), engine_->load_summary());
+        checkpoint_store_ = std::make_unique<SessionCheckpointStore>(SessionCheckpointStoreOptions{
+            .root = options_.session_checkpoint_root,
+            .disk_quota_bytes = options_.session_checkpoint_quota_bytes,
+            .staging_bytes = options_.session_checkpoint_staging_bytes,
+        });
+    }
 }
 
 std::shared_ptr<RequestLifetime> GenerationService::acquire_request_lifetime() const {
@@ -280,7 +291,8 @@ std::shared_ptr<RequestLifetime> GenerationService::acquire_request_lifetime() c
 
 PreparedRequest GenerationService::prepare(const GenerationRequest& request,
                                            std::function<bool()> is_cancelled,
-                                           ContextCacheHints context_cache) const {
+                                           ContextCacheHints context_cache,
+                                           std::string checkpoint_tag) const {
     apply_client_identity_cache_hints(request, !options_.api_key.empty(), context_cache);
 
     PreparedRequest prepared;
@@ -324,6 +336,9 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
             .cancellation = CancellationView(is_cancelled),
         };
         ninfer::PreparedPrompt prompt = engine_->prepare(std::move(input), control);
+        if (!checkpoint_tag.empty()) {
+            runtime::CheckpointEngineAccess::set_checkpoint_tag(prompt, std::move(checkpoint_tag));
+        }
         check_preparation_control(prepared.lifetime->deadline, is_cancelled);
         prepared.prompt_tokens = static_cast<int>(prompt.summary().prompt_tokens);
         prepared.preparation   = prompt.preparation_stats();
@@ -436,6 +451,58 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
         outcome.streamed_content_bytes = output_sink->finish(is_tool_call_response);
     }
     return outcome;
+}
+
+bool GenerationService::checkpoint_enabled() const noexcept { return checkpoint_store_ != nullptr; }
+
+std::optional<SessionCheckpointSaveResult>
+GenerationService::save_checkpoint(std::string_view session_sha256, ResponseStore& responses) {
+    if (!checkpoint_store_) { return std::nullopt; }
+    std::lock_guard lock(checkpoint_mutex_);
+    std::optional<ResponseStoreSnapshot> snapshot = responses.snapshot_session(session_sha256);
+    if (!snapshot) { return std::nullopt; }
+    const std::string checkpoint_tag = snapshot->latest_response_id;
+    return checkpoint_store_->save(
+        *snapshot, checkpoint_runtime_fingerprint_,
+        [&](runtime::ContinuationCheckpointWriter& writer) {
+            return runtime::CheckpointEngineAccess::checkpoint_session(
+                *engine_, session_sha256, checkpoint_tag, writer,
+                checkpoint_store_->options().staging_bytes);
+        });
+}
+
+bool GenerationService::restore_checkpoint(std::string_view session_sha256,
+                                           std::string_view required_response_id,
+                                           ResponseStore& responses) {
+    if (!checkpoint_store_) { return false; }
+    std::lock_guard lock(checkpoint_mutex_);
+    try {
+        std::optional<VerifiedSessionCheckpoint> checkpoint = checkpoint_store_->load(
+            session_sha256, checkpoint_runtime_fingerprint_, required_response_id);
+        if (!checkpoint) { return false; }
+        const std::optional<runtime::ContinuationCheckpointStats> restored =
+            runtime::CheckpointEngineAccess::restore_session(
+                *engine_, session_sha256, checkpoint->responses.latest_response_id,
+                *checkpoint->engine, checkpoint_store_->options().staging_bytes);
+        return restored.has_value() && responses.restore_session(std::move(checkpoint->responses));
+    } catch (...) {
+        return false;
+    }
+}
+
+nlohmann::json GenerationService::checkpoint_status(std::string_view session_sha256) const {
+    if (!checkpoint_store_) {
+        return nlohmann::json{{"artifact_type", "ninfer_session_checkpoint_status"},
+                              {"session_sha256", session_sha256}, {"state", "disabled"}};
+    }
+    std::lock_guard lock(checkpoint_mutex_);
+    return checkpoint_store_->status(session_sha256, checkpoint_runtime_fingerprint_);
+}
+
+bool GenerationService::erase_checkpoint(std::string_view session_sha256) {
+    if (!checkpoint_store_) { return false; }
+    std::lock_guard lock(checkpoint_mutex_);
+    return checkpoint_store_->erase(session_sha256);
 }
 
 void GenerationService::warmup() {

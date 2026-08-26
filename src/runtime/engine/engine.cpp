@@ -1,4 +1,5 @@
 #include "ninfer/engine.h"
+#include "runtime/engine/checkpoint_engine_access.h"
 
 #include "core/device.h"
 #include "runtime/contract/sampling.h"
@@ -6,9 +7,11 @@
 #include "runtime/engine/engine_core.h"
 #include "targets/registry.h"
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -105,6 +108,7 @@ public:
     PromptPreparationStats prepare;
     SamplingMode sampling_mode = SamplingMode::Thinking;
     targets::qwen3_6::PreparedPrompt value;
+    std::string checkpoint_tag;
 };
 
 PreparedPrompt::PreparedPrompt() noexcept                            = default;
@@ -230,6 +234,74 @@ public:
     Core core;
 };
 
+namespace {
+
+template <class Core>
+typename Core::CacheSessionKey checkpoint_session_key(std::string_view digest) {
+    if (digest.size() != 64 ||
+        !std::all_of(digest.begin(), digest.end(), [](char value) {
+            return (value >= '0' && value <= '9') || (value >= 'a' && value <= 'f');
+        })) {
+        throw std::invalid_argument("checkpoint session digest must be 64 lowercase hex bytes");
+    }
+    constexpr std::string_view prefix = "http:";
+    typename Core::CacheSessionKey key;
+    if (prefix.size() + digest.size() > key.bytes.size()) {
+        throw std::length_error("checkpoint session key exceeds target capacity");
+    }
+    key.size = static_cast<std::uint16_t>(prefix.size() + digest.size());
+    std::copy(prefix.begin(), prefix.end(), key.bytes.begin());
+    std::copy(digest.begin(), digest.end(), key.bytes.begin() + prefix.size());
+    return key;
+}
+
+} // namespace
+
+void runtime::CheckpointEngineAccess::set_checkpoint_tag(PreparedPrompt& prompt, std::string tag) {
+    if (prompt.impl_ == nullptr || tag.empty()) {
+        throw std::invalid_argument("checkpoint-tagged prompt and tag must be non-empty");
+    }
+    prompt.impl_->checkpoint_tag = std::move(tag);
+}
+
+std::optional<runtime::ContinuationCheckpointStats>
+runtime::CheckpointEngineAccess::checkpoint_session(
+    Engine& engine, std::string_view session_sha256, std::string_view checkpoint_tag,
+    runtime::ContinuationCheckpointWriter& writer, std::size_t staging_bytes) {
+    if (engine.impl_ == nullptr || checkpoint_tag.empty()) { return std::nullopt; }
+    return std::visit(
+        [&](auto& core) -> std::optional<runtime::ContinuationCheckpointStats> {
+            using CorePointer = std::remove_cvref_t<decltype(core)>;
+            if constexpr (std::is_same_v<CorePointer, std::monostate>) {
+                return std::nullopt;
+            } else {
+                using Core = typename CorePointer::element_type;
+                return core->checkpoint_session(checkpoint_session_key<Core>(session_sha256),
+                                                checkpoint_tag, writer, staging_bytes);
+            }
+        },
+        engine.impl_->core);
+}
+
+std::optional<runtime::ContinuationCheckpointStats>
+runtime::CheckpointEngineAccess::restore_session(
+    Engine& engine, std::string_view session_sha256, std::string checkpoint_tag,
+    const runtime::ContinuationCheckpointReader& reader, std::size_t staging_bytes) {
+    if (engine.impl_ == nullptr || checkpoint_tag.empty()) { return std::nullopt; }
+    return std::visit(
+        [&](auto& core) -> std::optional<runtime::ContinuationCheckpointStats> {
+            using CorePointer = std::remove_cvref_t<decltype(core)>;
+            if constexpr (std::is_same_v<CorePointer, std::monostate>) {
+                return std::nullopt;
+            } else {
+                using Core = typename CorePointer::element_type;
+                return core->restore_session_checkpoint(
+                    checkpoint_session_key<Core>(session_sha256), std::move(checkpoint_tag),
+                    reader, staging_bytes);
+            }
+        },
+        engine.impl_->core);
+}
 Engine::Engine(EngineOptions options) : impl_(std::make_shared<Impl>(std::move(options))) {}
 
 Engine::~Engine()                            = default;
@@ -312,6 +384,7 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
     runtime::ResolvedRequestOptions resolved_options = resolve_request_options(
         impl_->sampling_defaults, prompt.impl_->sampling_mode, std::move(options));
     const ResolvedSamplingParameters resolved_sampling = resolved_options.execution.sampling;
+    std::string checkpoint_tag = std::move(prompt.impl_->checkpoint_tag);
 
     const PromptSummary prompt_summary = prompt.impl_->summary;
     if (prompt_summary.prompt_tokens > impl_->options.max_context) {
@@ -352,9 +425,10 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
             if constexpr (std::is_same_v<CoreState, std::monostate>) {
                 throw std::logic_error("Engine core is unavailable");
             } else {
-                auto submission =
-                    core->submit(std::move(prompt.impl_->value), prompt_summary, prepare_seconds,
-                                 std::move(resolved_options), consumer_mode, pending_deadline);
+                auto submission = core->submit(
+                    std::move(prompt.impl_->value), prompt_summary, prepare_seconds,
+                    std::move(resolved_options), consumer_mode, std::move(checkpoint_tag),
+                    pending_deadline);
                 return GenerationHandle(std::make_unique<GenerationHandle::Impl>(
                     impl_, std::move(submission), resolved_sampling));
             }
