@@ -161,17 +161,6 @@ bool ResponseStore::erase(const std::string& id) {
     return true;
 }
 
-bool ResponseStore::erase_for_session(const std::string& id,
-                                      const std::optional<std::string>& session_sha256) {
-    std::lock_guard lock(mutex_);
-    const auto found = records_.find(id);
-    if (found == records_.end() || found->second.response->client_session_sha256 != session_sha256) {
-        return false;
-    }
-    erase_locked(id);
-    return true;
-}
-
 std::size_t ResponseStore::size() const {
     std::lock_guard lock(mutex_);
     return records_.size();

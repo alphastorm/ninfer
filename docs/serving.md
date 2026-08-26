@@ -236,7 +236,7 @@ wire response contains typed `output` Items.
 | `input` | required string or non-empty typed Item array |
 | `instructions` | optional string, inserted before the reconstructed conversation for this request only |
 | `previous_response_id` | optional ID of a retained local Response |
-| `ninfer_session` | optional 64-character lowercase SHA-256; authenticated private Engine lineage and stored-continuation namespace |
+| `ninfer_session` | optional 64-character lowercase SHA-256; authenticated Engine lineage and continuation namespace |
 | `ninfer_request_id` | optional 64-character lowercase SHA-256 used only for request-log correlation |
 | `max_output_tokens` | integer at least `16`; default is `--default-max-tokens` |
 | `stream` | boolean; `true` selects Responses SSE rather than a JSON body |
@@ -384,10 +384,15 @@ again on tool-result turns. The reconstructed prompt follows the ordinary Engine
 checkpoint reuse applies naturally.
 When a stored Response carries `ninfer_session`, every `previous_response_id` continuation must
 send the same digest. A different or omitted session receives the same 404 `response_not_found` as
-an unknown ID, so one authenticated session cannot enumerate or continue another session's DAG.
-Every fork from the same parent and session selects the same `http:<digest>` Engine lineage. Parent
-deletion does not invalidate already stored descendants. Changing `ninfer_request_id` never changes
-lineage selection.
+an unknown ID and cannot continue that session's DAG. Every fork from the same parent and session
+selects the same `http:<digest>` Engine lineage. Parent deletion does not invalidate already stored
+descendants. Changing `ninfer_request_id` never changes lineage selection.
+
+The OpenAI-compatible retrieve, delete, input-Item, and cancel routes have no request-body identity
+carrier. They therefore use the configured API key plus the opaque Response ID as their authorization
+boundary; every holder of one configured key belongs to one storage tenant. `ninfer_session` does not
+claim to subdivide that tenant for those routes. Isolate mutually untrusted tenants behind separate
+server instances, API keys, and Response stores rather than sharing one key.
 
 
 A stored Response also retains its resolved `preserve_thinking` value. A child which omits the
