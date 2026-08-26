@@ -24,7 +24,7 @@
   ],
   "candidate_cleanup": {
     "stop_via_owned_lifecycle_only": true,
-    "remove_container": false,
+    "remove_container": true,
     "remove_image": false
   },
   "promotion": {
