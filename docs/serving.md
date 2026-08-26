@@ -44,6 +44,9 @@ cannot be combined with `--vision`. A later request cannot enable a capability o
 |---|---|
 | `GET /health` | process health |
 | `GET /v1/ninfer/status` | exact build/deployment identity, resolved runtime settings, activity, cache state, and MTP totals |
+| `GET /v1/ninfer/checkpoints/{session-sha256}` | authenticated durable-checkpoint compatibility and generation status |
+| `POST /v1/ninfer/checkpoints/{session-sha256}` | transactionally checkpoint one stored Responses session and its Engine continuation |
+| `DELETE /v1/ninfer/checkpoints/{session-sha256}` | remove that session's durable generations |
 | `GET /v1/models` | configured OpenAI model alias |
 | `GET /v1/models/{id}` | lookup of the configured alias |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
@@ -373,8 +376,10 @@ Malformed tool markup is flushed back as ordinary text without losing bytes.
 
 ### Local response state and resources
 
-`store` defaults to `true`. Stored Responses live only in this server process and are bounded by an
-LRU store. They are lost on restart and are not OpenAI's durable cloud retention service.
+`store` defaults to `true`. Stored Responses are bounded by an LRU store. Without
+`--session-checkpoint-dir`, they live only in this server process and are lost on restart. The
+optional checkpoint path described below is local NInfer acceleration state, not OpenAI durable
+cloud retention.
 
 `previous_response_id` reconstructs the complete stored input/output Item history before the new
 input. The current `instructions` value is placed first but is not saved into the continuation
@@ -421,6 +426,39 @@ Resource behavior:
 explicit deletion also make an ID unavailable. A single Response larger than the configured store
 capacity fails with `response_store_capacity_exceeded` rather than silently pretending it was
 stored.
+
+### Durable session checkpoints
+
+`--session-checkpoint-dir DIR` enables authenticated, local persistence for stored Responses that
+carry a lowercase SHA-256 `ninfer_session`. Startup then also requires `--api-key`, exact
+`--binary-sha256`, `--artifact-sha256`, and `--config-sha256` declarations, prefix reuse, at least
+one Host StateImage slot, and nonzero Host KV capacity. The checkpoint fingerprint additionally
+binds the loaded target/model/weights identity and relevant Engine/cache configuration. An
+incompatible fingerprint is a cache miss; it is never imported under a different executable,
+artifact, or configuration.
+
+The three routes use the digest in the path and the server bearer API key:
+
+| Endpoint | Contract |
+|---|---|
+| `POST /v1/ninfer/checkpoints/{digest}` | save the complete stored lineage and the exact catalogued Engine endpoint whose checkpoint tag is that lineage's latest Response ID; return HTTP 409 when no complete checkpointable endpoint exists |
+| `GET /v1/ninfer/checkpoints/{digest}` | report `available`, `missing`, `incompatible`, or `corrupt` state without prompt or response content |
+| `DELETE /v1/ninfer/checkpoints/{digest}` | delete the current and retained generations for that digest; return `deleted` or `missing` |
+
+Each save writes a new generation, flushes payloads and checksums, writes the manifest last, then
+atomically replaces `current`. An interrupted save leaves the previous generation usable. Restore
+verifies every file and the runtime fingerprint before exposing state. On the first authenticated
+`previous_response_id` lookup missing from the in-memory store, NInfer lazily imports the matching
+Engine continuation and publishes the typed Responses snapshot in one transaction; any failure
+returns the ordinary missing-response behavior so the client can perform its explicit full replay.
+Corrupt current generations are quarantined and ignored.
+
+A completed stored turn at or above `--session-checkpoint-min-tokens` is checkpointed
+automatically; the default threshold is `32768`. Graceful server shutdown attempts every live
+session. Explicit `POST` remains the crash-test boundary: do not kill the process until it returns.
+`--session-checkpoint-staging-mib` bounds transfer/codec staging and
+`--session-checkpoint-quota-mib` bounds retained generations; garbage collection never removes an
+active `current` generation.
 
 ### Responses input token count
 
@@ -551,6 +589,10 @@ curl http://127.0.0.1:8080/v1/models \
 | `--request-log-jsonl FILE` | append full-precision server/request records | disabled |
 | `--response-store-max-records N` | maximum locally retained Responses objects | `1024` |
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
+| `--session-checkpoint-dir DIR` | enable authenticated durable session generations at this root | disabled |
+| `--session-checkpoint-quota-mib N` | total retained durable-checkpoint budget | `65536` |
+| `--session-checkpoint-staging-mib N` | bounded checkpoint codec and transfer staging | `256` |
+| `--session-checkpoint-min-tokens N` | completed-turn frontier that triggers an automatic save | `32768` |
 | `--kv-dtype bf16\|int8\|fp8` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |

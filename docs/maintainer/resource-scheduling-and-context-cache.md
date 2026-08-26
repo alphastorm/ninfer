@@ -2211,6 +2211,25 @@ Inspection无副作用。
 
 这些情况进入Engine-wide cleanup/failure。所谓“cache不改变模型正确性”是指合法miss、replan和eviction只影响性能；它不意味着内部完整性错误可以降级成full prefill。
 
+### 21.5 跨进程 durable checkpoint
+
+Durable checkpoint只是本机acceleration state，不是conversation authority。Serving层保存typed
+Responses lineage；Engine只导出/导入opaque continuation。导出必须命中同一`CacheSessionKey`下处于
+`Catalogued`状态的private endpoint，且其`checkpoint_tag`精确等于lineage最新Response ID。进行中的
+context transaction、active sequence或不完整state/KV都不可导出。
+
+Program拥有state/KV的字节编码、target/layout校验和Host replica传输；ResourceManager不解释payload。
+导入先由Program建立一个尚未发布的inactive continuation，再校验summary、active references、完整resource
+vector和当前capacity。ResourceManager随后保留inactive ledger并最后原子发布catalog slot与SessionIndex。
+任一步失败都释放Program continuation、ledger reservation和catalog slot，不留下可命中的半恢复对象。已有
+session binding拒绝导入，不允许silent replacement。
+
+跨Responses与Engine的恢复使用precommit transaction：ResponseStore先完整构造并校验replacement，在持有
+store lock时调用Engine import；Engine成功后只执行不会抛异常的container swaps。这样Engine失败不会改变
+Responses state，而Engine成功后不存在Responses publication失败窗口。fingerprint不匹配、校验失败、容量
+不足或缺少checkpoint都表现为合法miss，由caller显式full replay；内部resource/accounting invariant失败仍按
+21.4处理，不能伪装成miss。
+
 ---
 
 ## 22. 正确性不变量
