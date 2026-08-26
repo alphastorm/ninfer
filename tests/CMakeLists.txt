@@ -195,6 +195,9 @@ ninfer_add_test(ninfer_responses_schema_test
 ninfer_add_test(ninfer_response_store_test
   SOURCES test_response_store.cpp
   LIBRARIES ninfer_serve)
+ninfer_add_test(ninfer_session_checkpoint_store_test
+  SOURCES test_session_checkpoint_store.cpp
+  LIBRARIES ninfer_serve)
 ninfer_add_test(ninfer_anthropic_schema_test
   SOURCES test_anthropic_schema.cpp
   LIBRARIES ninfer_serve)

@@ -37,6 +37,7 @@ struct StreamingResponse {
     ResponseContext previous_context;
     std::string session_key;
     std::optional<std::string> client_session_sha256;
+    std::optional<std::string> previous_response_id;
     RequestLogContext log_context;
     std::unique_ptr<ResponsesEventStream> encoder;
     std::atomic<bool> cancelled{false};
@@ -301,6 +302,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                 stored.id                    = id;
                 stored.session_key           = session_key;
                 stored.client_session_sha256 = request.generation.client_session_sha256;
+                stored.previous_response_id  = request.previous_response_id;
                 stored.response              = response.body;
                 stored.input_items           = std::move(request.input_items);
                 stored.context =
@@ -322,15 +324,16 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         return;
     }
 
-    auto stream                   = std::make_shared<StreamingResponse>();
-    stream->prepared              = std::move(prepared);
-    stream->input_turns           = std::move(request.input_turns);
-    stream->input_items           = std::move(request.input_items);
-    stream->previous_context      = std::move(previous_context);
-    stream->session_key           = std::move(session_key);
-    stream->client_session_sha256 = request.generation.client_session_sha256;
-    stream->log_context           = log_context;
-    stream->store                 = request.store;
+    auto stream                    = std::make_shared<StreamingResponse>();
+    stream->prepared               = std::move(prepared);
+    stream->input_turns            = std::move(request.input_turns);
+    stream->input_items            = std::move(request.input_items);
+    stream->previous_context       = std::move(previous_context);
+    stream->session_key            = std::move(session_key);
+    stream->client_session_sha256  = request.generation.client_session_sha256;
+    stream->previous_response_id   = request.previous_response_id;
+    stream->log_context            = log_context;
+    stream->store                  = request.store;
     stream->encoder = std::make_unique<ResponsesEventStream>(id, created, std::move(request),
                                                              runtime_values(stream->prepared));
 
@@ -370,7 +373,8 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                     stored.context = terminal_context(std::move(stream->previous_context),
                                                       std::move(stream->input_turns),
                                                       std::move(finished.response.output_history));
-                    stored.preserve_thinking = stream->prepared.preserve_thinking;
+                    stored.preserve_thinking    = stream->prepared.preserve_thinking;
+                    stored.previous_response_id = stream->previous_response_id;
                     response_store_.put(std::move(stored));
                 }
                 write_stream_items(sink, *stream, std::move(finished.events_before_terminal));

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <unordered_set>
 #include <utility>
 
 namespace ninfer::serve {
@@ -24,6 +25,7 @@ std::size_t estimate_turn_bytes(const ChatTurn& turn) {
 std::size_t record_envelope_bytes(const StoredResponse& record) {
     std::size_t bytes = sizeof(StoredResponse) + record.id.size() + record.session_key.size() +
                         record.response.dump().size();
+    if (record.previous_response_id) { bytes += record.previous_response_id->size(); }
     if (record.client_session_sha256) { bytes += record.client_session_sha256->size(); }
     for (const nlohmann::json& item : record.input_items) {
         bytes += sizeof(nlohmann::json) + item.dump().size();
@@ -115,35 +117,39 @@ void ResponseStore::put(StoredResponse response) {
     if (records_.contains(owned->id)) {
         throw std::logic_error("duplicate response id in response store");
     }
-    lru_.push_front(owned->id);
+    const std::uint64_t sequence = next_sequence_++;
+    if (next_sequence_ == 0) { next_sequence_ = 1; }
+    insert_locked(std::move(owned), envelope_bytes, sequence);
+
+    while (records_.size() > max_records_ || current_bytes_ > max_bytes_) {
+        if (lru_.empty()) { throw std::logic_error("response store LRU is empty"); }
+        auto victim = std::prev(lru_.end());
+        if (victim == lru_.begin() && records_.size() == 1) { throw_store_capacity(); }
+        erase_locked(*victim);
+    }
+}
+
+void ResponseStore::insert_locked(std::shared_ptr<const StoredResponse> response,
+                                  std::size_t envelope_bytes, std::uint64_t sequence) {
+    lru_.push_front(response->id);
     try {
-        records_.emplace(owned->id, Entry{owned, lru_.begin(), envelope_bytes});
+        records_.emplace(response->id,
+                         Entry{response, lru_.begin(), envelope_bytes, sequence});
     } catch (...) {
         lru_.pop_front();
         throw;
     }
     bool envelope_accounted = false;
     try {
-        current_bytes_     = checked_add(current_bytes_, envelope_bytes,
-                                         "response store byte accounting overflowed");
+        current_bytes_ = checked_add(current_bytes_, envelope_bytes,
+                                     "response store byte accounting overflowed");
         envelope_accounted = true;
-        retain_context_locked(owned->context);
+        retain_context_locked(response->context);
     } catch (...) {
         if (envelope_accounted) { current_bytes_ -= envelope_bytes; }
-        records_.erase(owned->id);
+        records_.erase(response->id);
         lru_.pop_front();
         throw;
-    }
-
-    while (records_.size() > max_records_ || current_bytes_ > max_bytes_) {
-        if (lru_.empty()) { throw std::logic_error("response store LRU is empty"); }
-        auto victim = std::prev(lru_.end());
-        if (*victim == owned->id) {
-            if (victim == lru_.begin()) { throw_store_capacity(); }
-            --victim;
-        }
-        const std::string victim_id = *victim;
-        erase_locked(victim_id);
     }
 }
 
@@ -159,6 +165,127 @@ bool ResponseStore::erase_for_session(const std::string& id,
     return true;
 }
 
+std::optional<ResponseStoreSnapshot>
+ResponseStore::snapshot_session(std::string_view client_session_sha256) const {
+    std::lock_guard lock(mutex_);
+    std::vector<std::pair<std::uint64_t, const StoredResponse*>> ordered;
+    for (const auto& [id, entry] : records_) {
+        (void)id;
+        if (entry.response->client_session_sha256 &&
+            *entry.response->client_session_sha256 == client_session_sha256) {
+            ordered.emplace_back(entry.sequence, entry.response.get());
+        }
+    }
+    if (ordered.empty()) { return std::nullopt; }
+    std::sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) {
+        return left.first < right.first;
+    });
+    ResponseStoreSnapshot snapshot;
+    snapshot.client_session_sha256.assign(client_session_sha256);
+    snapshot.latest_response_id = ordered.back().second->id;
+    snapshot.records.reserve(ordered.size());
+    for (const auto& [sequence, record] : ordered) {
+        (void)sequence;
+        snapshot.records.push_back(*record);
+    }
+    return snapshot;
+}
+
+std::vector<std::string> ResponseStore::session_digests() const {
+    std::lock_guard lock(mutex_);
+    std::unordered_set<std::string> unique;
+    for (const auto& [id, entry] : records_) {
+        (void)id;
+        if (entry.response->client_session_sha256) {
+            unique.insert(*entry.response->client_session_sha256);
+        }
+    }
+    std::vector<std::string> out(unique.begin(), unique.end());
+    std::sort(out.begin(), out.end());
+    return out;
+}
+
+bool ResponseStore::restore_session(ResponseStoreSnapshot snapshot) {
+    if (snapshot.client_session_sha256.empty() || snapshot.latest_response_id.empty() ||
+        snapshot.records.empty() || snapshot.records.size() > max_records_) {
+        return false;
+    }
+    std::unordered_set<std::string> ids;
+    bool has_latest = false;
+    for (const StoredResponse& record : snapshot.records) {
+        if (!record.client_session_sha256 ||
+            *record.client_session_sha256 != snapshot.client_session_sha256 || record.id.empty() ||
+            record.session_key.empty() ||
+            record.session_key.size() > kMaximumContextCacheSessionKeyBytes ||
+            !record.response.is_object() || !ids.insert(record.id).second) {
+            return false;
+        }
+        has_latest = has_latest || record.id == snapshot.latest_response_id;
+    }
+    if (!has_latest) { return false; }
+
+    // Validate the imported lineage and preallocate every immutable record before taking the live
+    // store lock. No failure after this point is allowed to partially install the lineage.
+    ResponseStore staged(max_records_, max_bytes_);
+    try {
+        for (const StoredResponse& record : snapshot.records) { staged.put(record); }
+    } catch (...) {
+        return false;
+    }
+    std::vector<std::shared_ptr<const StoredResponse>> owned;
+    std::vector<std::size_t> envelopes;
+    try {
+        owned.reserve(snapshot.records.size());
+        envelopes.reserve(snapshot.records.size());
+        for (StoredResponse& record : snapshot.records) {
+            envelopes.push_back(record_envelope_bytes(record));
+            owned.push_back(std::make_shared<const StoredResponse>(std::move(record)));
+        }
+    } catch (...) {
+        return false;
+    }
+
+    std::lock_guard lock(mutex_);
+    for (const auto& record : owned) {
+        if (records_.contains(record->id)) { return false; }
+    }
+    const std::size_t minimum_victims =
+        records_.size() + owned.size() > max_records_
+            ? records_.size() + owned.size() - max_records_
+            : 0;
+    try {
+        for (std::size_t victim_count = minimum_victims; victim_count <= records_.size();
+             ++victim_count) {
+            ResponseStore replacement(max_records_, max_bytes_);
+            std::size_t oldest_rank = 0;
+            // insert_locked pushes to the MRU end, so replay survivors from oldest to newest.
+            for (auto position = lru_.rbegin(); position != lru_.rend(); ++position) {
+                if (oldest_rank++ < victim_count) { continue; }
+                const Entry& entry = records_.at(*position);
+                replacement.insert_locked(entry.response, entry.envelope_bytes, entry.sequence);
+            }
+            replacement.next_sequence_ = next_sequence_;
+            for (std::size_t index = 0; index < owned.size(); ++index) {
+                const std::uint64_t sequence = replacement.next_sequence_++;
+                if (replacement.next_sequence_ == 0) { replacement.next_sequence_ = 1; }
+                replacement.insert_locked(owned[index], envelopes[index], sequence);
+            }
+            if (replacement.records_.size() > max_records_ ||
+                replacement.current_bytes_ > max_bytes_) {
+                continue;
+            }
+            records_.swap(replacement.records_);
+            lru_.swap(replacement.lru_);
+            live_context_references_.swap(replacement.live_context_references_);
+            std::swap(current_bytes_, replacement.current_bytes_);
+            std::swap(next_sequence_, replacement.next_sequence_);
+            return true;
+        }
+    } catch (...) {
+        return false;
+    }
+    return false;
+}
 std::size_t ResponseStore::size() const {
     std::lock_guard lock(mutex_);
     return records_.size();

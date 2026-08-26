@@ -24,6 +24,7 @@ add_library(ninfer_core STATIC
   core/cyclic_kv_cache.cpp
   core/host_kv_arena.cpp
   core/paged_kv_cache.cpp
+  core/sha256.cpp
   core/linear_attention_state.cpp
   core/layout.cpp
   core/tensor.cpp
@@ -367,6 +368,7 @@ if(NINFER_BUILD_SERVE)
     serve/responses_schema.cpp
     serve/anthropic_schema.cpp
     serve/response_store.cpp
+    serve/session_checkpoint_store.cpp
     serve/tool_call_parser.cpp
     serve/translate.cpp
     serve/console_log.cpp

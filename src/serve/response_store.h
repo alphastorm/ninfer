@@ -1,19 +1,19 @@
 #pragma once
 
-// Process-local bounded storage for OpenAI Responses objects and their previous_response_id
-// context DAG. Stored contexts are flattened when a continuation is submitted; the bounded session
-// key is only an Engine lookup/retention hint and this store owns no Program capability.
+// Bounded storage for OpenAI Responses objects and their previous_response_id context DAG.
 
 #include "serve/request.h"
 
 #include <nlohmann/json.hpp>
 
 #include <cstddef>
+#include <cstdint>
 #include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -36,10 +36,17 @@ struct StoredResponse {
     std::string id;
     std::string session_key;
     std::optional<std::string> client_session_sha256;
+    std::optional<std::string> previous_response_id;
     nlohmann::json response;
     std::vector<nlohmann::json> input_items;
     ResponseContext context;
     bool preserve_thinking = false;
+};
+
+struct ResponseStoreSnapshot {
+    std::string client_session_sha256;
+    std::string latest_response_id;
+    std::vector<StoredResponse> records;
 };
 
 class ResponseStore {
@@ -54,6 +61,14 @@ public:
     void put(StoredResponse response);
     bool erase_for_session(const std::string& id, const std::optional<std::string>& session_sha256);
 
+    // Snapshots are insertion ordered, parent-before-child for a normal Responses lineage. Restore
+    // publishes the complete session while holding the store lock; malformed snapshots are rejected
+    // without exposing a partial lineage.
+    [[nodiscard]] std::optional<ResponseStoreSnapshot>
+    snapshot_session(std::string_view client_session_sha256) const;
+    [[nodiscard]] std::vector<std::string> session_digests() const;
+    [[nodiscard]] bool restore_session(ResponseStoreSnapshot snapshot);
+
     [[nodiscard]] std::size_t size() const;
     [[nodiscard]] std::size_t bytes() const;
 
@@ -62,11 +77,14 @@ private:
         std::shared_ptr<const StoredResponse> response;
         std::list<std::string>::iterator lru;
         std::size_t envelope_bytes = 0;
+        std::uint64_t sequence     = 0;
     };
 
     void retain_context_locked(const ResponseContext& context);
     void release_context_locked(const ResponseContext& context);
     void erase_locked(const std::string& id);
+    void insert_locked(std::shared_ptr<const StoredResponse> response, std::size_t envelope_bytes,
+                       std::uint64_t sequence);
 
     std::size_t max_records_ = 0;
     std::size_t max_bytes_   = 0;
@@ -74,7 +92,8 @@ private:
     std::unordered_map<std::string, Entry> records_;
     std::list<std::string> lru_;
     std::unordered_map<const ResponseContextNode*, std::size_t> live_context_references_;
-    std::size_t current_bytes_ = 0;
+    std::size_t current_bytes_  = 0;
+    std::uint64_t next_sequence_ = 1;
 };
 
 } // namespace ninfer::serve
