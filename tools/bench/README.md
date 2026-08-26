@@ -168,3 +168,45 @@ python3 tools/bench/run_serve_concurrency.py \
 Use `--kv-capacity auto` when the fixed corpus needs more shared KV than the default 262,144-token
 pool. A point is intentionally not resumable: combining fragments from separate server processes
 would not preserve either a steady interval or one continuous makespan.
+
+## Guarded remote GPU profiling
+
+The remote profiling runners keep production restoration separate from experiment logic:
+
+- `run_gpu_profile_lease.sh` verifies the pinned production and rollback-container identities,
+  confirms the candidate port is free, stops production, runs one payload, and restores and checks
+  production from its exit and signal trap. It removes only containers under the configured
+  profiling prefix and never changes release locks, routes, images, tags, or promotion state.
+- `run_long_prefill_mtp3_cycle.sh` starts one `--restart no` candidate on the configured loopback
+  port, runs the fixed warmup, 128K NIAH, and MTP3 long-decode requests, and stores request-log-backed
+  receipts. `run_profile_ab.sh` executes three interleaved baseline/candidate pairs, and
+  `summarize_profile_ab.py` reports the paired deltas and its explicit conservative confidence rule.
+
+Operator-specific numerical and benchmark gates remain explicit payloads rather than a string-driven
+campaign framework. Run `run_profile_ab.sh` only after those gates select one candidate artifact.
+
+Copy `profile_lease.conf.example` to the isolated remote scratch directory and replace every
+`REPLACE_ME` value with identities observed immediately before the lease. The artifact manifest is
+a normal `sha256sum --check` file whose paths are relative to `PROFILE_ARTIFACT_ROOT`. Use a new
+`PROFILE_RESULT_DIR` for every invocation.
+
+Run the lease detached so an SSH disconnect does not terminate the restoration owner:
+
+```bash
+config=/home/operator/builds/ninfer-profile-run/profile.conf
+source=/home/operator/builds/ninfer-profile-run/source
+candidate=selected-candidate
+
+setsid nohup \
+  "$source/tools/bench/run_gpu_profile_lease.sh" "$config" \
+  "$source/tools/bench/run_profile_ab.sh" "$config" "$candidate" \
+  > /home/operator/builds/ninfer-profile-run/launcher.log 2>&1 < /dev/null &
+owner=$!
+sleep 2
+kill -0 "$owner"
+```
+
+Completion requires `exit-status.txt` equal to `0`, the final production status and inspect
+receipts, and an operator-visible routed request after the wrapper has restored direct health.
+`SIGKILL` and host power loss cannot execute a process trap; use the production controller directly
+if either occurs.
