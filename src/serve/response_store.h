@@ -8,6 +8,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -68,7 +69,11 @@ public:
     [[nodiscard]] std::optional<ResponseStoreSnapshot>
     snapshot_session(std::string_view client_session_sha256) const;
     [[nodiscard]] std::vector<std::string> session_digests() const;
-    [[nodiscard]] bool restore_session(ResponseStoreSnapshot snapshot);
+    // Builds the complete replacement first, then invokes commit_external while holding the store
+    // lock. A false result publishes neither side; a true result is followed only by no-throw
+    // swaps, making the external Engine restore and Responses publication one transaction.
+    [[nodiscard]] bool restore_session(ResponseStoreSnapshot snapshot,
+                                       const std::function<bool()>& commit_external);
 
     [[nodiscard]] std::size_t size() const;
     [[nodiscard]] std::size_t bytes() const;
