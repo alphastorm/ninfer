@@ -67,7 +67,23 @@ def receipt(result_dir: Path, variant: str, label: str, name: str) -> dict[str, 
     summary = record.get("summary")
     if not isinstance(summary, dict):
         raise SummaryError(f"{label}/{name} has no summary object")
-    return summary
+    if not isinstance(record.get("request"), dict):
+        raise SummaryError(f"{label}/{name} has no request object")
+    return record
+
+
+def require_sha256(value: Any, description: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise SummaryError(f"{description} is not a lowercase SHA-256 digest")
+    return value
+
+
+def canonical_json(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def finite_float(summary: dict[str, Any], key: str, description: str) -> float:
@@ -129,14 +145,23 @@ def summarize(result_dir: Path) -> dict[str, Any]:
     long_wall_rates: dict[str, dict[str, float]] = {"baseline": {}, "candidate": {}}
     mtp_rates: dict[str, dict[str, float]] = {"baseline": {}, "candidate": {}}
     hashes: dict[str, dict[str, str]] = {"long": {}, "mtp": {}}
+    requests: dict[str, dict[str, dict[str, Any]]] = {"long": {}, "mtp": {}}
+    token_counts: dict[str, dict[str, tuple[int, int]]] = {"long": {}, "mtp": {}}
+    binary_hashes: dict[str, dict[str, str]] = {"baseline": {}, "candidate": {}}
+    model_hashes: dict[str, str] = {}
+    role_identities: dict[str, dict[str, dict[str, Any]]] = {"baseline": {}, "candidate": {}}
+    engine_configs: dict[str, dict[str, Any]] = {}
 
     for suffix in PAIR_SUFFIXES:
         for role, variant, label in (
             ("baseline", "baseline", f"baseline-{suffix}"),
             ("candidate", candidate_variant, f"candidate-{suffix}"),
         ):
-            long = receipt(result_dir, variant, label, "long-prefill.json")
-            mtp = receipt(result_dir, variant, label, "mtp3-decode.json")
+            run_dir = result_dir / "runs" / f"{label}-{variant}"
+            long_record = receipt(result_dir, variant, label, "long-prefill.json")
+            mtp_record = receipt(result_dir, variant, label, "mtp3-decode.json")
+            long = long_record["summary"]
+            mtp = mtp_record["summary"]
             if long.get("exact_match") is not True:
                 raise SummaryError(f"{label} long-prefill exact oracle failed")
             long_rates[role][suffix] = finite_float(
@@ -150,6 +175,55 @@ def summarize(result_dir: Path) -> dict[str, Any]:
             )
             hashes["long"][label] = str(long.get("message_sha256", ""))
             hashes["mtp"][label] = str(mtp.get("message_sha256", ""))
+            requests["long"][label] = long_record["request"]
+            requests["mtp"][label] = mtp_record["request"]
+            try:
+                token_counts["long"][label] = (
+                    int(long["prompt_tokens"]),
+                    int(long["completion_tokens"]),
+                )
+                token_counts["mtp"][label] = (
+                    int(mtp["prompt_tokens"]),
+                    int(mtp["completion_tokens"]),
+                )
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SummaryError(f"{label} receipt has invalid token counts: {exc}") from exc
+
+            server_start = load_json(run_dir / "server-start.json")
+            identity = server_start.get("identity")
+            engine = server_start.get("engine")
+            if not isinstance(identity, dict) or not isinstance(engine, dict):
+                raise SummaryError(f"{label} server-start receipt lacks identity or engine")
+            binary_hashes[role][label] = require_sha256(
+                identity.get("binary_sha256"), f"{label} binary identity"
+            )
+            model_hashes[label] = require_sha256(
+                identity.get("model_artifact_sha256"), f"{label} model artifact identity"
+            )
+            stable_identity = dict(identity)
+            stable_identity.pop("deployment_profile", None)
+            role_identities[role][label] = stable_identity
+            engine_configs[label] = engine
+
+    for workload, description in (("long", "long-prefill"), ("mtp", "MTP3")):
+        if len({canonical_json(value) for value in requests[workload].values()}) != 1:
+            raise SummaryError(f"{description} request payloads differ across trials")
+        if len(set(token_counts[workload].values())) != 1:
+            raise SummaryError(f"{description} token counts differ across trials")
+        for label, value in hashes[workload].items():
+            require_sha256(value, f"{label} {description} output hash")
+        if len(set(hashes[workload].values())) != 1:
+            raise SummaryError(f"{description} output hashes differ across trials")
+
+    for role in ("baseline", "candidate"):
+        if len(set(binary_hashes[role].values())) != 1:
+            raise SummaryError(f"{role} binary identity differs across trials")
+        if len({canonical_json(value) for value in role_identities[role].values()}) != 1:
+            raise SummaryError(f"{role} server identity differs across trials")
+    if len(set(model_hashes.values())) != 1:
+        raise SummaryError("model artifact identity differs across trials")
+    if len({canonical_json(value) for value in engine_configs.values()}) != 1:
+        raise SummaryError("engine configuration differs across trials")
 
     return {
         "candidate_variant": candidate_variant,

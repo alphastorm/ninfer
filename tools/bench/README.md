@@ -174,13 +174,15 @@ would not preserve either a steady interval or one continuous makespan.
 The remote profiling runners keep production restoration separate from experiment logic:
 
 - `run_gpu_profile_lease.sh` verifies the pinned production and rollback-container identities,
-  confirms the candidate port is free, stops production, runs one payload, and restores and checks
-  production from its exit and signal trap. It removes only containers under the configured
+  checks the production controller before any stop, confirms the candidate port is free, and runs
+  the payload in its own process group. Its exit and signal traps terminate that group before they
+  restore and check production. It removes only containers under the configured
   profiling prefix and never changes release locks, routes, images, tags, or promotion state.
 - `run_long_prefill_mtp3_cycle.sh` starts one `--restart no` candidate on the configured loopback
   port, runs the fixed warmup, 128K NIAH, and MTP3 long-decode requests, and stores request-log-backed
   receipts. `run_profile_ab.sh` executes three interleaved baseline/candidate pairs, and
-  `summarize_profile_ab.py` reports the paired deltas and its explicit conservative confidence rule.
+  `summarize_profile_ab.py` rejects request, output, binary, model, or engine-configuration drift
+  before reporting paired deltas under its explicit conservative confidence rule.
 
 Operator-specific numerical and benchmark gates remain explicit payloads rather than a string-driven
 campaign framework. Run `run_profile_ab.sh` only after those gates select one candidate artifact.
@@ -205,6 +207,10 @@ owner=$!
 sleep 2
 kill -0 "$owner"
 ```
+
+Send HUP, INT, or TERM to `owner` for a controlled stop. The lease forwards the signal to the
+complete payload process group, waits `PROFILE_PAYLOAD_STOP_TIMEOUT_SECONDS` (30 seconds by
+default), force-kills an unresponsive payload, then restores production.
 
 Completion requires `exit-status.txt` equal to `0`, the final production status and inspect
 receipts, and an operator-visible routed request after the wrapper has restored direct health.

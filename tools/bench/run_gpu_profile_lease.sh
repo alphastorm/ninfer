@@ -30,6 +30,17 @@ for name in \
   require_var "$name"
 done
 
+payload_stop_timeout=${PROFILE_PAYLOAD_STOP_TIMEOUT_SECONDS:-30}
+if ! [[ $payload_stop_timeout =~ ^[0-9]+$ ]] || ((payload_stop_timeout < 1)); then
+  echo "PROFILE_PAYLOAD_STOP_TIMEOUT_SECONDS must be a positive integer" >&2
+  exit 2
+fi
+[[ -f $PRODUCTION_CONTROLLER && -x $PRODUCTION_CONTROLLER ]] || {
+  echo "PRODUCTION_CONTROLLER is not an executable file: $PRODUCTION_CONTROLLER" >&2
+  exit 2
+}
+command -v setsid >/dev/null 2>&1 || { echo "setsid is required to isolate the payload" >&2; exit 2; }
+
 [[ $CANDIDATE_PREFIX =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*-$ ]] || {
   echo "CANDIDATE_PREFIX must use alphanumeric, underscore, or hyphen characters and end in '-'" >&2
   exit 2
@@ -62,7 +73,10 @@ inspect() {
 # shellcheck disable=SC2329
 remove_candidates() {
   local -a ids=()
-  mapfile -t ids < <(docker ps -aq --filter "name=^/$CANDIDATE_PREFIX" || true)
+  local id
+  while IFS= read -r id; do
+    [[ -n $id ]] && ids+=("$id")
+  done < <(docker ps -aq --filter "name=^/$CANDIDATE_PREFIX" || true)
   if ((${#ids[@]})); then
     docker rm --force "${ids[@]}" >/dev/null 2>&1 || true
   fi
@@ -121,11 +135,37 @@ restore_production() {
 # shellcheck disable=SC2329
 on_exit() {
   local code=$?
-  trap - EXIT HUP INT TERM
+  trap - EXIT
+  trap '' HUP INT TERM
   if ! restore_production; then
     code=90
   fi
   printf '%s\n' "$code" > "$PROFILE_RESULT_DIR/exit-status.txt"
+  exit "$code"
+}
+
+payload_pid=
+
+# A foreground Bash command defers trapped signals until that command returns. Run the payload in
+# its own process group, then terminate and reap that whole group before restoring production.
+# shellcheck disable=SC2329
+terminate_payload_and_exit() {
+  local signal=$1
+  local code=$2
+  local killer_pid=
+  trap '' HUP INT TERM
+  printf '%s\t%s\n' "$signal" "$code" > "$PROFILE_RESULT_DIR/payload-signal.txt"
+  if [[ -n $payload_pid ]] && kill -0 "$payload_pid" 2>/dev/null; then
+    kill -s "$signal" -- "-$payload_pid" 2>/dev/null || kill -s "$signal" "$payload_pid" 2>/dev/null || true
+    (
+      sleep "$payload_stop_timeout"
+      kill -KILL -- "-$payload_pid" 2>/dev/null || kill -KILL "$payload_pid" 2>/dev/null || true
+    ) &
+    killer_pid=$!
+    wait "$payload_pid" 2>/dev/null || true
+    kill "$killer_pid" 2>/dev/null || true
+    wait "$killer_pid" 2>/dev/null || true
+  fi
   exit "$code"
 }
 
@@ -150,9 +190,9 @@ with socket.socket() as sock:
 PY
 
 trap on_exit EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'terminate_payload_and_exit HUP 129' HUP
+trap 'terminate_payload_and_exit INT 130' INT
+trap 'terminate_payload_and_exit TERM 143' TERM
 date -u +%Y-%m-%dT%H:%M:%SZ > "$PROFILE_RESULT_DIR/production-stop-requested-at.txt"
 docker stop --time 30 "$PRODUCTION_CONTAINER" >/dev/null
 date -u +%Y-%m-%dT%H:%M:%SZ > "$PROFILE_RESULT_DIR/production-stopped-at.txt"
@@ -164,7 +204,9 @@ nvidia-smi --query-gpu=name,temperature.gpu,pstate,memory.used,memory.total --fo
   > "$PROFILE_RESULT_DIR/gpu-after-stop.txt"
 
 set +e
-"$@"
+setsid -- "$@" &
+payload_pid=$!
+wait "$payload_pid"
 payload_status=$?
 set -e
 date -u +%Y-%m-%dT%H:%M:%SZ > "$PROFILE_RESULT_DIR/gpu-work-completed-at.txt"
