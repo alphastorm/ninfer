@@ -90,7 +90,7 @@ Options parse_options(int argc, char** argv) {
         }
     }
     if (options.device < 0) { throw std::invalid_argument("--device must be nonnegative"); }
-    if (options.warmup < 0) { throw std::invalid_argument("--warmup must be nonnegative"); }
+    if (options.warmup <= 0) { throw std::invalid_argument("--warmup must be positive"); }
     if (options.repetitions <= 0) { throw std::invalid_argument("--reps must be positive"); }
     if (options.draft_tokens == 0 || options.draft_tokens > 5) {
         throw std::invalid_argument("--draft-tokens must be in [1,5]");
@@ -104,6 +104,7 @@ Options parse_options(int argc, char** argv) {
 struct RoundMeasurement {
     float milliseconds            = 0.0F;
     std::uint32_t licensed_tokens = 0;
+    ninfer::SpeculativeStats stats;
 };
 
 RoundMeasurement measure_round(target::Package::Program& program, ninfer::DeviceContext& device,
@@ -120,9 +121,14 @@ RoundMeasurement measure_round(target::Package::Program& program, ninfer::Device
                                        : static_cast<std::uint32_t>(pending.row_counts().front());
     const std::array<ninfer::runtime::CommitDecision, 1> decisions{
         ninfer::runtime::CommitDecision{.accepted_tokens = licensed}};
-    (void)program.commit(std::move(pending), decisions);
+    const auto committed     = program.commit(std::move(pending), decisions);
     const float milliseconds = timer.stop_ms();
-    return RoundMeasurement{.milliseconds = milliseconds, .licensed_tokens = licensed};
+    if (committed.rows.size() != 1) {
+        throw std::runtime_error("benchmark round commit returned the wrong row count");
+    }
+    return RoundMeasurement{.milliseconds    = milliseconds,
+                            .licensed_tokens = licensed,
+                            .stats           = committed.rows.front().speculative};
 }
 
 int run(const Options& options) {
@@ -205,15 +211,12 @@ int run(const Options& options) {
     }
     const std::array<ninfer::runtime::CommitDecision, 1> begin_decision{
         ninfer::runtime::CommitDecision{.accepted_tokens = 1}};
-    const auto began = program->commit(std::move(*progress.pending), begin_decision);
-    if (began.rows.size() != 1) {
-        throw std::runtime_error("benchmark seed commit returned the wrong row count");
-    }
-    const ninfer::SpeculativeStats stats_before = began.rows.front().speculative;
-    const auto active_sequence                  = started.sequence;
+    (void)program->commit(std::move(*progress.pending), begin_decision);
+    const auto active_sequence = started.sequence;
 
+    RoundMeasurement warmup_state;
     for (int iteration = 0; iteration < options.warmup; ++iteration) {
-        (void)measure_round(*program, device, active_sequence, options.draft_tokens);
+        warmup_state = measure_round(*program, device, active_sequence, options.draft_tokens);
     }
 
     std::vector<RoundMeasurement> measurements;
@@ -234,16 +237,17 @@ int run(const Options& options) {
     if (aborted.status != ninfer::runtime::ConsumeStatus::Consumed) {
         throw std::runtime_error("benchmark could not release its active sequence");
     }
-    const ninfer::SpeculativeStats stats = aborted.speculative;
+    const ninfer::SpeculativeStats& stats_before = warmup_state.stats;
+    const ninfer::SpeculativeStats& stats        = measurements.back().stats;
     if (stats.rounds < stats_before.rounds || stats.fallback_steps < stats_before.fallback_steps) {
         throw std::runtime_error("benchmark speculative counters moved backward");
     }
     const std::uint64_t round_delta    = stats.rounds - stats_before.rounds;
     const std::uint64_t fallback_delta = stats.fallback_steps - stats_before.fallback_steps;
-    if (round_delta != measured_rounds || fallback_delta != 0) {
+    if (round_delta != static_cast<std::uint64_t>(options.repetitions) || fallback_delta != 0) {
         throw std::runtime_error("benchmark left the native MTP proposal/verify path: rounds=" +
                                  std::to_string(round_delta) + "/" +
-                                 std::to_string(measured_rounds) +
+                                 std::to_string(options.repetitions) +
                                  " fallback_steps=" + std::to_string(fallback_delta));
     }
 
