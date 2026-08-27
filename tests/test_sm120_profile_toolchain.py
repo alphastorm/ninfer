@@ -17,6 +17,7 @@ DOCKERFILE = REPOSITORY / "tools" / "bench" / "Dockerfile.sm120-profile-python31
 BASE_ID = "sha256:" + "a" * 64
 IMAGE_ID = "sha256:" + "b" * 64
 PYTHON_SOURCE_SHA256 = "2a9920c7a0cd236de33644ed980a13cbbc21058bfdc528febb6081575ed73be3"
+PROFILE_IMAGE_REVISION = "2"
 
 
 def write_executable(path: Path, content: str) -> None:
@@ -76,10 +77,19 @@ class Sm120ProfileToolchainTest(unittest.TestCase):
                     print("3.11.11")
                 elif "python-source-sha256" in format_value:
                     print("{PYTHON_SOURCE_SHA256}")
+                elif "org.ninfer.profile.revision" in format_value:
+                    stale = os.environ["MOCK_IMAGE_STATE"] == "stale" and not Path(
+                        os.environ["MOCK_BUILT"]
+                    ).exists()
+                    print("1" if stale else "{PROFILE_IMAGE_REVISION}")
                 else:
                     raise SystemExit(91)
                 raise SystemExit(0)
             if args[0] == "run":
+                if os.environ["MOCK_IMAGE_STATE"] == "importer-broken" and not Path(
+                    os.environ["MOCK_BUILT"]
+                ).exists():
+                    raise SystemExit(127)
                 raise SystemExit(0)
             if args[0] == "build":
                 Path(os.environ["MOCK_BUILT"]).touch()
@@ -117,6 +127,8 @@ class Sm120ProfileToolchainTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stdout.strip(), IMAGE_ID)
         self.assertFalse(any(call[2:3] == ["build"] for call in self.docker_calls()))
+        validation = next(call for call in self.docker_calls() if call[2:3] == ["run"])
+        self.assertIn("QdstrmImporter", validation[-1])
 
     def test_builds_absent_image_then_returns_exact_id(self) -> None:
         completed = self.run_helper("missing")
@@ -125,7 +137,20 @@ class Sm120ProfileToolchainTest(unittest.TestCase):
         build = next(call for call in self.docker_calls() if call[2:3] == ["build"])
         self.assertIn("--pull=false", build)
         self.assertIn(f"BASE_IMAGE_ID={BASE_ID}", build)
+        self.assertIn(f"PROFILE_IMAGE_REVISION={PROFILE_IMAGE_REVISION}", build)
         self.assertTrue(self.built.is_file())
+
+    def test_rebuilds_stale_profile_image_revision(self) -> None:
+        completed = self.run_helper("stale")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), IMAGE_ID)
+        self.assertTrue(any(call[2:3] == ["build"] for call in self.docker_calls()))
+
+    def test_rebuilds_image_with_broken_importer(self) -> None:
+        completed = self.run_helper("importer-broken")
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.stdout.strip(), IMAGE_ID)
+        self.assertTrue(any(call[2:3] == ["build"] for call in self.docker_calls()))
 
     def test_rejects_existing_image_with_wrong_provenance(self) -> None:
         completed = self.run_helper("mismatch")

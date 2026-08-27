@@ -4,11 +4,13 @@ ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
 ARG BASE_IMAGE_ID
+ARG PROFILE_IMAGE_REVISION=2
 ARG PYTHON_VERSION=3.11.11
 ARG PYTHON_SOURCE_SHA256=2a9920c7a0cd236de33644ed980a13cbbc21058bfdc528febb6081575ed73be3
 ARG DEBIAN_FRONTEND=noninteractive
 
 LABEL org.ninfer.profile.base-image-id="${BASE_IMAGE_ID}" \
+      org.ninfer.profile.revision="${PROFILE_IMAGE_REVISION}" \
       org.ninfer.profile.python-version="${PYTHON_VERSION}" \
       org.ninfer.profile.python-source-sha256="${PYTHON_SOURCE_SHA256}"
 
@@ -18,6 +20,7 @@ RUN apt-get update \
         build-essential \
         curl \
         libbz2-dev \
+        libdw1t64 \
         libffi-dev \
         liblzma-dev \
         libncursesw5-dev \
