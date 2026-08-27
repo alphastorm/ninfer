@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://github.com/neroued/NInfer/docs/qualification/fixtures/rtx5090-qwen38-v0.1.0-measurement.schema.json",
+  "$id": "https://github.com/alphastorm/ninfer/docs/qualification/fixtures/rtx5090-qwen38-v0.1.0-measurement.schema.json",
   "title": "NInfer Qwen3.8 RTX 5090 v0.1.0 qualification measurement",
   "type": "object",
   "additionalProperties": false,

@@ -700,13 +700,13 @@ def command_start(args: argparse.Namespace) -> None:
         *config.args,
     ]
     if config.api_key_file is None:
-        command.extend((config.image, "/usr/local/bin/ninfer-serve", *server_args))
+        command.extend((identity.image_id, "/usr/local/bin/ninfer-serve", *server_args))
     else:
         command.extend(
             (
                 "--volume",
                 f"{config.api_key_file}:/run/secrets/ninfer_api_key:ro",
-                config.image,
+                identity.image_id,
                 "/bin/sh",
                 "-c",
                 'exec /usr/local/bin/ninfer-serve "$@" --api-key "$(cat /run/secrets/ninfer_api_key)"',
@@ -717,6 +717,11 @@ def command_start(args: argparse.Namespace) -> None:
 
     container_id = docker(command).stdout.strip()
     try:
+        inspected = inspect_container(config.container)
+        if inspected is None:
+            fail("started container disappeared before identity verification")
+        if inspected.get("Image") != identity.image_id:
+            fail("started container image differs from the measured image id")
         wait_for_health(config, args.timeout)
         status = fetch_status(config)
         verify_status(config, identity, status)

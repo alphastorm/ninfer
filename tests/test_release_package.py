@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tarfile
@@ -14,7 +15,77 @@ from tools.release import package as release_package
 from tools.release.package import ReleaseError, ReleaseOptions, package_release
 
 
+def validate_schema_subset(value: object, schema: dict, root: dict, path: str = "$") -> None:
+    reference = schema.get("$ref")
+    if reference is not None:
+        prefix = "#/$defs/"
+        if not isinstance(reference, str) or not reference.startswith(prefix):
+            raise AssertionError(f"{path}: unsupported schema reference")
+        validate_schema_subset(value, root["$defs"][reference.removeprefix(prefix)], root, path)
+        return
+
+    if "const" in schema and value != schema["const"]:
+        raise AssertionError(f"{path}: const mismatch")
+    expected_type = schema.get("type")
+    if expected_type == "object":
+        if not isinstance(value, dict):
+            raise AssertionError(f"{path}: expected object")
+        properties = schema.get("properties", {})
+        for key in schema.get("required", []):
+            if key not in value:
+                raise AssertionError(f"{path}: missing {key}")
+        if schema.get("additionalProperties") is False:
+            unknown = set(value) - set(properties)
+            if unknown:
+                raise AssertionError(f"{path}: unknown properties {sorted(unknown)}")
+        for key, child in properties.items():
+            if key in value:
+                validate_schema_subset(value[key], child, root, f"{path}.{key}")
+    elif expected_type == "string":
+        if not isinstance(value, str):
+            raise AssertionError(f"{path}: expected string")
+        if len(value) < schema.get("minLength", 0):
+            raise AssertionError(f"{path}: shorter than minLength")
+        if len(value) > schema.get("maxLength", len(value)):
+            raise AssertionError(f"{path}: longer than maxLength")
+        pattern = schema.get("pattern")
+        if pattern is not None and re.search(pattern, value) is None:
+            raise AssertionError(f"{path}: pattern mismatch")
+    elif expected_type == "integer":
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise AssertionError(f"{path}: expected integer")
+    elif expected_type == "number":
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise AssertionError(f"{path}: expected number")
+    elif expected_type is not None:
+        raise AssertionError(f"{path}: unsupported schema type {expected_type}")
+
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value < schema.get("minimum", value):
+            raise AssertionError(f"{path}: below minimum")
+        if value > schema.get("maximum", value):
+            raise AssertionError(f"{path}: above maximum")
+
+
 class ReleasePackageTests(unittest.TestCase):
+    def test_measurement_matches_published_schema(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "docs/qualification/fixtures"
+        schema = json.loads(
+            (root / "rtx5090-qwen38-v0.1.0-measurement.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        measurement = json.loads(
+            (root / "rtx5090-qwen38-v0.1.0-measurement.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            schema["$id"],
+            "https://github.com/alphastorm/ninfer/docs/qualification/fixtures/rtx5090-qwen38-v0.1.0-measurement.schema.json",
+        )
+        validate_schema_subset(measurement, schema, schema)
+
     def test_qualification_binds_exact_release_package_receipt(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         qualification_path = (
@@ -72,6 +143,10 @@ class ReleasePackageTests(unittest.TestCase):
         ).stdout
         self.assertEqual(
             hashlib.sha256(committed_packager).hexdigest(),
+            receipt["packager_sha256"],
+        )
+        self.assertEqual(
+            hashlib.sha256((repository / "tools/release/package.py").read_bytes()).hexdigest(),
             receipt["packager_sha256"],
         )
 

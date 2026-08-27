@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import argparse
+import contextlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -9,7 +12,9 @@ from unittest import mock
 
 from tools.lifecycle.ninfer_container import (
     LifecycleError,
+    RuntimeIdentity,
     canonical_config_sha256,
+    command_start,
     inspect_container,
     load_config,
     materialize_source_archive,
@@ -35,6 +40,64 @@ def write_config(path: Path, *, restart_policy: str | None = None) -> Path:
 
 
 class LifecycleConfigTests(unittest.TestCase):
+    def test_start_uses_the_resolved_image_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = write_config(root / "runtime.json")
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            config["model_path"] = str(root / "model.ninfer")
+            config["request_log_dir"] = str(root / "logs")
+            config["api_key_file"] = str(root / "api-key")
+            config_path.write_text(json.dumps(config), encoding="utf-8")
+            image_id = "sha256:" + "1" * 64
+            identity = RuntimeIdentity(
+                image_id=image_id,
+                binary_sha256="2" * 64,
+                model_artifact_sha256="3" * 64,
+                config_sha256="4" * 64,
+            )
+            args = argparse.Namespace(
+                config=config_path,
+                timeout=1.0,
+                expect_image_id=None,
+                expect_binary_sha256=None,
+                expect_model_artifact_sha256=None,
+                expect_config_sha256=None,
+            )
+            docker_result = subprocess.CompletedProcess(
+                args=["docker", "run"], returncode=0, stdout="container-id\n", stderr=""
+            )
+            with (
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.require_gpu_idle"
+                ),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.preflight", return_value=identity
+                ),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.docker", return_value=docker_result
+                ) as docker_mock,
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.inspect_container",
+                    return_value={"Image": image_id},
+                ),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.wait_for_health"
+                ),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.fetch_status", return_value={}
+                ),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.verify_status"
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                command_start(args)
+
+            run_command = docker_mock.call_args.args[0]
+            self.assertIn(image_id, run_command)
+            self.assertNotIn("ninfer:test", run_command)
+
     def test_container_lookup_ignores_same_named_image(self) -> None:
         image_only = subprocess.CompletedProcess(
             args=["docker", "container", "inspect", "ninfer:test"],

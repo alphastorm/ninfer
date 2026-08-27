@@ -389,10 +389,11 @@ selects the same `http:<digest>` Engine lineage. Parent deletion does not invali
 descendants. Changing `ninfer_request_id` never changes lineage selection.
 
 The OpenAI-compatible retrieve, delete, input-Item, and cancel routes have no request-body identity
-carrier. They therefore use the configured API key plus the opaque Response ID as their authorization
-boundary; every holder of one configured key belongs to one storage tenant. `ninfer_session` does not
-claim to subdivide that tenant for those routes. Isolate mutually untrusted tenants behind separate
-server instances, API keys, and Response stores rather than sharing one key.
+carrier. They authenticate with the configured API key; the opaque Response ID locates an object but
+is not an additional tenant credential. Every holder of one configured key belongs to one storage
+tenant. `ninfer_session` does not claim to subdivide that tenant for those routes. Isolate mutually
+untrusted tenants behind separate server instances, API keys, and Response stores rather than
+sharing one key.
 
 
 A stored Response also retains its resolved `preserve_thinking` value. A child which omits the
@@ -614,6 +615,11 @@ status verification use the authenticated status contract. An explicit `bind_hos
 accepts that same secret-backed configuration; any other bind address is rejected. `start` refuses
 an existing container name or listening port, and `stop` refuses a container without the lifecycle
 ownership label.
+
+The supported host, Docker daemon, image, and container processes are one trusted operator boundary.
+The lifecycle mounts `api_key_file` read-only and expands its value into the server process argv; do
+not run this profile alongside untrusted local accounts or container processes. A product contract
+that admits untrusted local processes requires native file-based credential loading before use.
 
 Build the runtime image from an exact clean commit with the upstream and patch-stack identities
 embedded in both binaries. The lifecycle refuses any tracked or untracked source change, verifies
