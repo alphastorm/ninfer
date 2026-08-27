@@ -127,8 +127,13 @@ class ReleasePackageTests(unittest.TestCase):
         )
         self.assertEqual(release_assets["binary_asset"], receipt["binary_asset"])
         self.assertEqual(release_assets["sbom"], receipt["sbom"])
-        self.assertFalse(receipt["publication_authorized"])
-        self.assertFalse(release_assets["container"]["published"])
+        self.assertTrue(receipt["publication_authorized"])
+        self.assertTrue(release_assets["container"]["published"])
+        self.assertTrue(receipt["publication"]["anonymous_assets_verified"])
+        self.assertEqual(
+            release_assets["container"]["registry_reference"],
+            receipt["image"]["registry_reference"],
+        )
 
         committed_packager = subprocess.run(
             [
