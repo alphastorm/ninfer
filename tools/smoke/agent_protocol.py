@@ -93,9 +93,15 @@ def validate_status_identity(status: dict[str, Any], args: argparse.Namespace) -
     ):
         raise ProtocolError("status endpoint returned the wrong envelope")
     identity = status.get("identity")
-    server = status.get("server")
-    if not isinstance(identity, dict) or not isinstance(server, dict):
-        raise ProtocolError("status endpoint omitted identity or server data")
+    runtime = status.get("runtime")
+    if (
+        not isinstance(identity, dict)
+        or not isinstance(runtime, dict)
+        or not isinstance(status.get("scheduler"), dict)
+        or not isinstance(status.get("cache"), dict)
+        or not isinstance(status.get("mtp"), dict)
+    ):
+        raise ProtocolError("status endpoint omitted a versioned contract group")
     expected = {
         "binary_sha256": args.expect_binary_sha256,
         "model_artifact_sha256": args.expect_model_artifact_sha256,
@@ -107,7 +113,7 @@ def validate_status_identity(status: dict[str, Any], args: argparse.Namespace) -
             raise ProtocolError(
                 f"status identity field {field} differs from its expected value"
             )
-    if server.get("public_model_id") != args.model:
+    if runtime.get("public_model_id") != args.model:
         raise ProtocolError("status public_model_id differs from --model")
 
 
@@ -195,20 +201,6 @@ def authenticated_identity_checks(
     return input_tokens
 
 
-def unauthenticated_identity_check(base_url: str, model: str, session_a: str) -> None:
-    expect_error(
-        base_url,
-        "/v1/chat/completions",
-        {
-            "model": model,
-            "messages": [{"role": "user", "content": "Reply briefly."}],
-            "max_completion_tokens": 1,
-            **identity_fields(session_a, "unauthenticated"),
-        },
-        headers={},
-        status=401,
-        code="authentication_required",
-    )
 
 
 def structured_output_rejection(
@@ -419,47 +411,128 @@ def streaming_and_session_checks(
     )
 
 
+def response_id(value: dict[str, Any]) -> str:
+    identifier = value.get("id")
+    if not isinstance(identifier, str) or not identifier.startswith("resp_"):
+        raise ProtocolError("Responses object omitted its response id")
+    return identifier
+
+
+def responses_session_lifecycle(
+    base_url: str,
+    model: str,
+    headers: Mapping[str, str],
+    session_a: str,
+    session_b: str,
+) -> dict[str, Any]:
+    def create(label: str, text: str, previous: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": model,
+            "input": text,
+            "max_output_tokens": 16,
+            "temperature": 0,
+            "store": True,
+            **identity_fields(session_a, f"responses/{label}"),
+        }
+        if previous is not None:
+            payload["previous_response_id"] = previous
+        return json_response(
+            base_url, "POST", "/v1/responses", payload, headers=headers
+        )
+
+    first = create("first", "Reply with one short word.")
+    first_id = response_id(first)
+    continuation = create("continuation", "Reply with another short word.", first_id)
+    continuation_id = response_id(continuation)
+    branch = create("branch", "Reply with a different short word.", first_id)
+    branch_id = response_id(branch)
+
+    cross_tenant = {
+        "model": model,
+        "input": "This must be rejected.",
+        "previous_response_id": first_id,
+        "max_output_tokens": 16,
+        **identity_fields(session_b, "responses/cross-tenant"),
+    }
+    rejected = json_response(
+        base_url,
+        "POST",
+        "/v1/responses",
+        cross_tenant,
+        headers=headers,
+        expected_status=404,
+    )
+    if error_code(rejected) != "response_not_found":
+        raise ProtocolError("cross-session previous_response_id was not isolated")
+
+    deleted = json_response(
+        base_url, "DELETE", f"/v1/responses/{first_id}", headers=headers
+    )
+    if deleted.get("deleted") is not True or deleted.get("id") != first_id:
+        raise ProtocolError("Responses parent deletion returned the wrong object")
+    missing = json_response(
+        base_url,
+        "GET",
+        f"/v1/responses/{first_id}",
+        headers=headers,
+        expected_status=404,
+    )
+    if error_code(missing) != "response_not_found":
+        raise ProtocolError("deleted Responses parent remained addressable")
+
+    surviving = create(
+        "post-delete-continuation",
+        "Reply with one final short word.",
+        continuation_id,
+    )
+    surviving_id = response_id(surviving)
+    branch_read = json_response(
+        base_url, "GET", f"/v1/responses/{branch_id}", headers=headers
+    )
+    if response_id(branch_read) != branch_id:
+        raise ProtocolError("Responses fork disappeared after parent deletion")
+    return {
+        "first_turn_completed": True,
+        "continuation_completed": True,
+        "fork_count": 2,
+        "cross_session_status": 404,
+        "parent_delete_status": 200,
+        "parent_get_after_delete_status": 404,
+        "surviving_descendants_retrieved": True,
+        "surviving_descendant_continued": True,
+    }
+
+
 def exercise(args: argparse.Namespace) -> dict[str, Any]:
     base_url = args.base_url.rstrip("/")
     api_key = read_api_key(args.api_key_file)
     headers = auth_headers(api_key)
     wait_for_health(base_url, args.health_timeout)
 
-    if api_key is not None:
-        unauthorized = json_response(
-            base_url,
-            "GET",
-            "/v1/ninfer/status",
-            expected_status=401,
-        )
-        if error_code(unauthorized) != "invalid_api_key":
-            raise ProtocolError("status route did not reject a missing API key")
+    unauthorized = json_response(
+        base_url,
+        "GET",
+        "/v1/ninfer/status",
+        expected_status=401,
+    )
+    if error_code(unauthorized) != "invalid_api_key":
+        raise ProtocolError("status route did not reject a missing API key")
 
     status = json_response(base_url, "GET", "/v1/ninfer/status", headers=headers)
     validate_status_identity(status, args)
-    server = status.get("server")
-    if not isinstance(server, dict) or server.get("api_key_configured") != (
-        api_key is not None
-    ):
-        raise ProtocolError(
-            "status api_key_configured differs from the smoke configuration"
-        )
-
     session_a = digest("session/a")
     session_b = digest("session/b")
-    anthropic_tokens: int | None = None
-    if api_key is None:
-        unauthenticated_identity_check(base_url, args.model, session_a)
-        active_session_a = None
-        active_session_b = None
-        structured_identity: dict[str, str] = {}
-    else:
-        anthropic_tokens = authenticated_identity_checks(
-            base_url, args.model, headers, session_a
-        )
-        active_session_a = session_a
-        active_session_b = session_b
-        structured_identity = identity_fields(session_a, "structured-rejection")
+    responses = responses_session_lifecycle(
+        base_url, args.model, headers, session_a, session_b
+    )
+
+    # The same digests drive Chat/Anthropic parity checks after the Responses DAG exercise.
+    anthropic_tokens = authenticated_identity_checks(
+        base_url, args.model, headers, session_a
+    )
+    active_session_a = session_a
+    active_session_b = session_b
+    structured_identity = identity_fields(session_a, "structured-rejection")
 
     structured_output_rejection(base_url, args.model, headers, structured_identity)
     tool_finish = tool_round_trip(base_url, args.model, headers, active_session_a)
@@ -477,7 +550,7 @@ def exercise(args: argparse.Namespace) -> dict[str, Any]:
         "artifact_type": "ninfer_agent_protocol_smoke",
         "schema_version": 1,
         "status_identity_verified": True,
-        "authenticated_session_identity": api_key is not None,
+        "authenticated_session_identity": True,
         "anthropic_count_tokens": anthropic_tokens,
         "structured_output_rejected": True,
         "tool_result_array_finish_reason": tool_finish,
@@ -486,6 +559,7 @@ def exercise(args: argparse.Namespace) -> dict[str, Any]:
         "completion_tokens": completion_tokens,
         "same_session_reuse_path": private_path,
         "isolated_session_reuse_path": isolated_path,
+        "responses_session_lifecycle": responses,
     }
 
 
@@ -499,7 +573,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:18080")
     parser.add_argument("--model", required=True)
-    parser.add_argument("--api-key-file", type=Path)
+    parser.add_argument("--api-key-file", type=Path, required=True)
     parser.add_argument("--health-timeout", type=float, default=300.0)
     parser.add_argument("--expect-binary-sha256", type=sha256_argument)
     parser.add_argument("--expect-model-artifact-sha256", type=sha256_argument)

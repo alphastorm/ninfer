@@ -1,0 +1,57 @@
+{
+  "artifact_type": "ninfer_release_qualification_gate_manifest",
+  "schema_version": 1,
+  "release_version": "v0.1.0",
+  "target": "qwen3.8-27b-groupwise-int-on-rtx5090",
+  "expected_identity": {
+    "upstream_base_sha": "4eef14a7560d87a3ba717898e1d488a4c4c7246d",
+    "build_profile": "qwen38-5090-v0.1.0",
+    "build_type": "Release",
+    "source_dirty": false
+  },
+  "public_model_artifact": {
+    "model_id": "qwen3.8-27b",
+    "filename": "qwen3_8_27b.ninfer",
+    "format": "groupwise-int",
+    "bytes": 18210531328,
+    "sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e"
+  },
+  "isolated_candidate": {
+    "image": "ninfer-5090-v010-rc",
+    "container": "ninfer-5090-v010-rc",
+    "bind_host": "127.0.0.1",
+    "port": 18089,
+    "restart_policy": "no",
+    "protected_incumbent_port": 18088,
+    "protected_incumbent_container": "ninfer-5090"
+  },
+  "gates": {
+    "long_context_exact": {
+      "fixture": "examples/cli/messages/long_niah_128k.json",
+      "fixture_sha256": "8dcece5215805293490baa0d8204d59a899d8bc3f9d010b0c142ed6624260a9a",
+      "prompt_tokens": 130048,
+      "max_context": 131072,
+      "max_new_tokens": 128,
+      "expected_stdout": "ORCHID=493817; COLOR=COBALT"
+    },
+    "golden_t01": {
+      "fixture_availability": "external-approved-fixture-not-present-in-public-repository",
+      "approved_fixture_sha256": null,
+      "exact_output_required": true,
+      "maximum_elapsed_seconds": 120.9117
+    },
+    "decode_throughput": {
+      "minimum_tokens_per_second": 200.58921
+    },
+    "mtp_acceptance": {
+      "minimum_rate_inclusive": 0.72319,
+      "maximum_rate_inclusive": 0.78319
+    },
+    "process_exit_policy": {
+      "expected_restart_policy": "no",
+      "expected_state_after_grace": "exited",
+      "expected_restart_count_delta": 0,
+      "explicit_restart_must_restore_health": true
+    }
+  }
+}

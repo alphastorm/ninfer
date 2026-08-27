@@ -16,6 +16,8 @@ import socket
 import subprocess
 import sys
 import time
+import tarfile
+import tempfile
 from typing import Any, NoReturn
 import urllib.error
 import urllib.request
@@ -173,6 +175,8 @@ def load_config(path: Path) -> RuntimeConfig:
         if api_key_value is None
         else require_absolute_path(api_key_value, "api_key_file")
     )
+    if api_key_file is None:
+        fail("api_key_file is required for authenticated lifecycle status verification")
     if bind_host == "0.0.0.0" and api_key_file is None:
         fail("a non-loopback bind_host requires api_key_file")
     restart_policy = raw.get("restart_policy", "no")
@@ -233,6 +237,58 @@ def sha256_file(path: Path) -> str:
     except OSError as error:
         raise LifecycleError("failed to hash required deployment file") from error
     return digest.hexdigest()
+
+def verify_clean_source(
+    source: Path, upstream_base_sha: str, expected_patch_stack_sha: str
+) -> str:
+    head = run(["git", "-C", os.fspath(source), "rev-parse", "HEAD"]).stdout.strip()
+    if not _GIT_SHA_RE.fullmatch(head):
+        fail("source HEAD is not a full lowercase Git SHA")
+    if head != expected_patch_stack_sha:
+        fail("source HEAD differs from --expect-patch-stack-sha")
+    status = run(
+        ["git", "-C", os.fspath(source), "status", "--porcelain", "--untracked-files=all"]
+    ).stdout
+    if status:
+        fail("source tree must be clean before a release identity can report source_dirty=false")
+    ancestor = run(
+        [
+            "git",
+            "-C",
+            os.fspath(source),
+            "merge-base",
+            "--is-ancestor",
+            upstream_base_sha,
+            head,
+        ],
+        check=False,
+    )
+    if ancestor.returncode != 0:
+        fail("upstream base is unavailable or is not an ancestor of the release head")
+    return head
+
+
+def materialize_source_archive(source: Path, head: str, destination: Path) -> str:
+    archive_path = destination.parent / "source.tar"
+    run(
+        [
+            "git",
+            "-C",
+            os.fspath(source),
+            "archive",
+            "--format=tar",
+            f"--output={archive_path}",
+            head,
+        ]
+    )
+    archive_sha256 = sha256_file(archive_path)
+    try:
+        with tarfile.open(archive_path, mode="r:") as archive:
+            archive.extractall(destination, filter="data")
+    except (OSError, tarfile.TarError) as error:
+        raise LifecycleError("failed to materialize the verified source archive") from error
+    return archive_sha256
+
 
 
 def canonical_config_sha256(config: RuntimeConfig) -> str:
@@ -317,7 +373,7 @@ def verify_expected(identity: RuntimeIdentity, expected: ExpectedIdentity) -> No
 
 
 def inspect_container(name: str) -> dict[str, Any] | None:
-    result = run(["docker", "inspect", name], check=False)
+    result = run(["docker", "container", "inspect", name], check=False)
     if result.returncode != 0:
         return None
     try:
@@ -349,7 +405,9 @@ def require_gpu_idle() -> None:
     running = run(["docker", "ps", "--quiet"]).stdout.split()
     if running:
         try:
-            inspected = json.loads(run(["docker", "inspect", *running]).stdout)
+            inspected = json.loads(
+                run(["docker", "container", "inspect", *running]).stdout
+            )
         except json.JSONDecodeError as error:
             raise LifecycleError(
                 "Docker returned invalid running-container JSON"
@@ -478,9 +536,9 @@ def verify_status(
     ):
         fail("status endpoint returned the wrong envelope")
     reported = status.get("identity")
-    server = status.get("server")
-    if not isinstance(reported, dict) or not isinstance(server, dict):
-        fail("status endpoint omitted identity or server fields")
+    runtime = status.get("runtime")
+    if not isinstance(reported, dict) or not isinstance(runtime, dict):
+        fail("status endpoint omitted identity or runtime fields")
     expected = {
         "binary_sha256": identity.binary_sha256,
         "model_artifact_sha256": identity.model_artifact_sha256,
@@ -492,10 +550,8 @@ def verify_status(
             fail(
                 f"status identity field {field} differs from the lifecycle measurement"
             )
-    if server.get("public_model_id") != config.model_id:
+    if runtime.get("public_model_id") != config.model_id:
         fail("status public_model_id differs from lifecycle configuration")
-    if server.get("api_key_configured") != (config.api_key_file is not None):
-        fail("status api_key_configured differs from lifecycle configuration")
 
 
 def receipt(
@@ -529,43 +585,47 @@ def command_build(args: argparse.Namespace) -> None:
         fail("source must contain the NInfer Dockerfile")
     if not _GIT_SHA_RE.fullmatch(args.upstream_base_sha):
         fail("--upstream-base-sha must be a full lowercase Git SHA")
+    if not _GIT_SHA_RE.fullmatch(args.expect_patch_stack_sha):
+        fail("--expect-patch-stack-sha must be a full lowercase Git SHA")
     if not _PROFILE_RE.fullmatch(args.build_profile):
         fail("--build-profile must match [A-Za-z0-9._-]{1,64}")
-    head = run(["git", "-C", os.fspath(source), "rev-parse", "HEAD"]).stdout.strip()
-    if not _GIT_SHA_RE.fullmatch(head):
-        fail("source HEAD is not a full lowercase Git SHA")
-    if args.expect_patch_stack_sha is not None:
-        if not _GIT_SHA_RE.fullmatch(args.expect_patch_stack_sha):
-            fail("--expect-patch-stack-sha must be a full lowercase Git SHA")
-        if head != args.expect_patch_stack_sha:
-            fail("source HEAD differs from --expect-patch-stack-sha")
-    dirty = bool(run(["git", "-C", os.fspath(source), "status", "--porcelain"]).stdout)
-    docker(
-        [
-            "build",
-            "--tag",
-            args.image,
-            "--build-arg",
-            f"NINFER_BUILD_PROFILE={args.build_profile}",
-            "--build-arg",
-            f"NINFER_UPSTREAM_BASE_SHA={args.upstream_base_sha}",
-            "--build-arg",
-            f"NINFER_PATCH_STACK_SHA={head}",
-            "--build-arg",
-            f"NINFER_SOURCE_DIRTY={'ON' if dirty else 'OFF'}",
-            os.fspath(source),
-        ],
-        capture=False,
+    head = verify_clean_source(
+        source, args.upstream_base_sha, args.expect_patch_stack_sha
     )
+
+    with tempfile.TemporaryDirectory(prefix="ninfer-build-context-") as directory:
+        temporary = Path(directory)
+        context = temporary / "source"
+        context.mkdir()
+        archive_sha256 = materialize_source_archive(source, head, context)
+        docker(
+            [
+                "build",
+                "--tag",
+                args.image,
+                "--build-arg",
+                f"NINFER_BUILD_PROFILE={args.build_profile}",
+                "--build-arg",
+                f"NINFER_UPSTREAM_BASE_SHA={args.upstream_base_sha}",
+                "--build-arg",
+                f"NINFER_PATCH_STACK_SHA={head}",
+                "--build-arg",
+                "NINFER_SOURCE_CLEAN_VERIFIED=ON",
+                os.fspath(context),
+            ],
+            capture=False,
+        )
     value = {
         "artifact_type": "ninfer_build_receipt",
-        "schema_version": 1,
+        "schema_version": 2,
         "image": args.image,
         "image_id": image_id(args.image),
         "binary_sha256": image_binary_sha256(args.image),
         "upstream_base_sha": args.upstream_base_sha,
         "patch_stack_sha": head,
-        "source_dirty": dirty,
+        "source_archive_sha256": archive_sha256,
+        "source_dirty": False,
+        "source_clean_verified": True,
         "build_profile": args.build_profile,
     }
     print(json.dumps(value, sort_keys=True))
@@ -640,13 +700,13 @@ def command_start(args: argparse.Namespace) -> None:
         *config.args,
     ]
     if config.api_key_file is None:
-        command.extend((config.image, "/usr/local/bin/ninfer-serve", *server_args))
+        command.extend((identity.image_id, "/usr/local/bin/ninfer-serve", *server_args))
     else:
         command.extend(
             (
                 "--volume",
                 f"{config.api_key_file}:/run/secrets/ninfer_api_key:ro",
-                config.image,
+                identity.image_id,
                 "/bin/sh",
                 "-c",
                 'exec /usr/local/bin/ninfer-serve "$@" --api-key "$(cat /run/secrets/ninfer_api_key)"',
@@ -657,6 +717,11 @@ def command_start(args: argparse.Namespace) -> None:
 
     container_id = docker(command).stdout.strip()
     try:
+        inspected = inspect_container(config.container)
+        if inspected is None:
+            fail("started container disappeared before identity verification")
+        if inspected.get("Image") != identity.image_id:
+            fail("started container image differs from the measured image id")
         wait_for_health(config, args.timeout)
         status = fetch_status(config)
         verify_status(config, identity, status)
@@ -758,8 +823,8 @@ def create_parser() -> argparse.ArgumentParser:
     build.add_argument("--source", type=Path, default=Path.cwd())
     build.add_argument("--image", required=True)
     build.add_argument("--upstream-base-sha", required=True)
-    build.add_argument("--expect-patch-stack-sha")
-    build.add_argument("--build-profile", default="docker-release")
+    build.add_argument("--expect-patch-stack-sha", required=True)
+    build.add_argument("--build-profile", required=True)
     build.set_defaults(handler=command_build)
 
     preflight_parser = subparsers.add_parser(

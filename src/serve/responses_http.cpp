@@ -1,5 +1,6 @@
 #include "serve/http_server.h"
 
+#include "serve/client_identity.h"
 #include "serve/openai_schema.h"
 #include "serve/responses_schema.h"
 
@@ -35,6 +36,7 @@ struct StreamingResponse {
     std::vector<Json> input_items;
     ResponseContext previous_context;
     std::string session_key;
+    std::optional<std::string> client_session_sha256;
     RequestLogContext log_context;
     std::unique_ptr<ResponsesEventStream> encoder;
     std::atomic<bool> cancelled{false};
@@ -210,20 +212,29 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
     ResponsesRequest request;
     ResponseContext previous_context;
     std::string session_key;
+    ContextCacheHints cache_hints;
     try {
         RequestLimits limits;
         limits.default_max_tokens = options_.default_max_tokens;
         request                   = parse_responses_request(parse_json_body(req), limits);
         validate_model(request.generation.model, public_model_id_);
+        apply_client_identity_cache_hints(request.generation, !options_.api_key.empty(),
+                                          cache_hints);
         if (request.previous_response_id) {
             const std::shared_ptr<const StoredResponse> previous =
-                response_store_.get(*request.previous_response_id);
+                response_store_.get_for_session(*request.previous_response_id,
+                                                request.generation.client_session_sha256);
             if (!previous) {
                 throw ApiException(response_not_found(*request.previous_response_id));
             }
             inherit_responses_preserve_thinking(request, previous->preserve_thinking);
             previous_context = previous->context;
             session_key      = previous->session_key;
+        }
+        if (cache_hints.session_key) {
+            session_key = *cache_hints.session_key;
+        } else if (!session_key.empty()) {
+            cache_hints.session_key = session_key;
         }
         compose_responses_generation_messages(request, flatten_response_context(previous_context));
     } catch (const ApiException& exception) {
@@ -235,12 +246,15 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
     }
 
     const std::string id = new_response_id();
-    if (session_key.empty() && request.store) { session_key = id; }
-    ContextCacheHints cache_hints;
-    if (!session_key.empty()) { cache_hints.session_key = session_key; }
-    cache_hints.retention =
-        request.store ? CacheRetentionHint::LiveSession : CacheRetentionHint::Disposable;
-    cache_hints.update_session_index = request.store;
+    if (session_key.empty() && request.store) {
+        session_key             = id;
+        cache_hints.session_key = id;
+    }
+    if (!request.generation.client_session_sha256) {
+        cache_hints.retention =
+            request.store ? CacheRetentionHint::LiveSession : CacheRetentionHint::Disposable;
+        cache_hints.update_session_index = request.store;
+    }
 
     const std::uint64_t req_id = ++request_seq_;
     PreparedRequest prepared;
@@ -277,6 +291,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                 StoredResponse stored;
                 stored.id          = id;
                 stored.session_key = session_key;
+                stored.client_session_sha256 = request.generation.client_session_sha256;
                 stored.response    = response.body;
                 stored.input_items = std::move(request.input_items);
                 stored.context =
@@ -304,6 +319,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
     stream->input_items      = std::move(request.input_items);
     stream->previous_context = std::move(previous_context);
     stream->session_key      = std::move(session_key);
+    stream->client_session_sha256 = request.generation.client_session_sha256;
     stream->log_context      = log_context;
     stream->store            = request.store;
     stream->encoder = std::make_unique<ResponsesEventStream>(id, created, std::move(request),
@@ -339,6 +355,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                     StoredResponse stored;
                     stored.id                = finished.response.body.at("id").get<std::string>();
                     stored.session_key       = stream->session_key;
+                    stored.client_session_sha256 = stream->client_session_sha256;
                     stored.response          = finished.response.body;
                     stored.input_items       = std::move(stream->input_items);
                     stored.context           = terminal_context(std::move(stream->previous_context),

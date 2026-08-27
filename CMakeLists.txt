@@ -21,8 +21,10 @@ option(NINFER_BUILD_BENCHMARKS "Build NInfer benchmarks" OFF)
 set(NINFER_BUILD_PROFILE "generic" CACHE STRING "Deployment build profile identity")
 set(NINFER_UPSTREAM_BASE_SHA "unknown" CACHE STRING "Exact upstream base commit")
 set(NINFER_PATCH_STACK_SHA "auto" CACHE STRING "Exact patch-stack commit or auto")
-set(NINFER_SOURCE_DIRTY "auto" CACHE STRING "Source-dirty identity: auto, ON, or OFF")
-set_property(CACHE NINFER_SOURCE_DIRTY PROPERTY STRINGS auto ON OFF)
+set(NINFER_SOURCE_DIRTY "auto" CACHE STRING "Source-dirty identity: auto or ON")
+set_property(CACHE NINFER_SOURCE_DIRTY PROPERTY STRINGS auto ON)
+option(NINFER_SOURCE_CLEAN_VERIFIED
+  "Lifecycle verified an exact clean commit archive when Git metadata is absent" OFF)
 
 set(NINFER_PATCH_STACK_SHA_RESOLVED "${NINFER_PATCH_STACK_SHA}")
 # Unknown source state is conservatively dirty. A successful Git status or an explicit lifecycle
@@ -50,16 +52,24 @@ if(Git_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/.git")
       set(NINFER_SOURCE_DIRTY_BOOL 0)
     endif()
   endif()
-elseif(NINFER_PATCH_STACK_SHA STREQUAL "auto")
-  set(NINFER_PATCH_STACK_SHA_RESOLVED "unknown")
+else()
+  if(NINFER_PATCH_STACK_SHA STREQUAL "auto")
+    set(NINFER_PATCH_STACK_SHA_RESOLVED "unknown")
+  endif()
+  if(NINFER_SOURCE_CLEAN_VERIFIED)
+    if(NINFER_PATCH_STACK_SHA_RESOLVED STREQUAL "unknown" OR
+       NINFER_UPSTREAM_BASE_SHA STREQUAL "unknown")
+      message(FATAL_ERROR
+        "NINFER_SOURCE_CLEAN_VERIFIED requires exact upstream and patch-stack SHAs")
+    endif()
+    set(NINFER_SOURCE_DIRTY_BOOL 0)
+  endif()
 endif()
 
 if(NINFER_SOURCE_DIRTY STREQUAL "ON")
   set(NINFER_SOURCE_DIRTY_BOOL 1)
-elseif(NINFER_SOURCE_DIRTY STREQUAL "OFF")
-  set(NINFER_SOURCE_DIRTY_BOOL 0)
 elseif(NOT NINFER_SOURCE_DIRTY STREQUAL "auto")
-  message(FATAL_ERROR "NINFER_SOURCE_DIRTY must be auto, ON, or OFF")
+  message(FATAL_ERROR "NINFER_SOURCE_DIRTY must be auto or ON; clean state is verified")
 endif()
 
 if(NOT NINFER_UPSTREAM_BASE_SHA STREQUAL "unknown")
@@ -126,6 +136,20 @@ configure_file(
   "${PROJECT_SOURCE_DIR}/cmake/ninfer_build_info_config.h.in"
   "${PROJECT_BINARY_DIR}/generated/ninfer_build_info_config.h"
   @ONLY)
+
+# Recheck the configured Git identity before every compilation. CMake configuration is not rerun
+# merely because a source file becomes dirty, so configure-time provenance alone can otherwise
+# survive into a binary compiled from different bytes.
+add_custom_target(ninfer_verify_build_source ALL
+  COMMAND "${CMAKE_COMMAND}"
+    "-DNINFER_SOURCE_DIR=${PROJECT_SOURCE_DIR}"
+    "-DNINFER_CONFIGURED_PATCH_STACK_SHA=${NINFER_PATCH_STACK_SHA_RESOLVED}"
+    "-DNINFER_CONFIGURED_SOURCE_DIRTY=${NINFER_SOURCE_DIRTY_BOOL}"
+    "-DNINFER_SOURCE_DIRTY_MODE=${NINFER_SOURCE_DIRTY}"
+    "-DNINFER_GIT_EXECUTABLE=${GIT_EXECUTABLE}"
+    -P "${PROJECT_SOURCE_DIR}/cmake/verify_build_source.cmake"
+  COMMENT "Verifying NInfer build source identity"
+  VERBATIM)
 
 # --- Subdirectories ----------------------------------------------------------
 add_subdirectory(src)

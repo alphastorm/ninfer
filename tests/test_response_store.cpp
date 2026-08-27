@@ -83,6 +83,49 @@ int test_lru_and_delete() {
     return failures;
 }
 
+int test_session_continuation_and_dag_deletion() {
+    const std::string session_a(64, 'a');
+    const std::string session_b(64, 'b');
+    int failures = 0;
+    ResponseStore store(8, 1ULL << 20);
+
+    const ResponseContext first_context =
+        append_response_context({}, {text_turn(ninfer::ChatRole::User, "first")});
+    StoredResponse first = record("resp_first", first_context);
+    first.client_session_sha256 = session_a;
+    store.put(std::move(first));
+
+    const auto continuation_parent = store.get_for_session("resp_first", session_a);
+    failures += check(continuation_parent != nullptr,
+                      "same-session continuation could not read its parent");
+    if (!continuation_parent) { return failures; }
+    failures += check(!store.get_for_session("resp_first", session_b),
+                      "cross-session continuation read another session's parent");
+    failures += check(!store.get_for_session("resp_first", std::nullopt),
+                      "session omission read a session-scoped continuation parent");
+
+    const ResponseContext branch_one_context = append_response_context(
+        continuation_parent->context, {text_turn(ninfer::ChatRole::User, "branch one")});
+    const ResponseContext branch_two_context = append_response_context(
+        continuation_parent->context, {text_turn(ninfer::ChatRole::User, "branch two")});
+    StoredResponse branch_one = record("resp_branch_one", branch_one_context);
+    branch_one.client_session_sha256 = session_a;
+    StoredResponse branch_two = record("resp_branch_two", branch_two_context);
+    branch_two.client_session_sha256 = session_a;
+    store.put(std::move(branch_one));
+    store.put(std::move(branch_two));
+
+    failures += check(store.erase("resp_first"), "parent deletion failed");
+    failures += check(!store.get_for_session("resp_first", session_a),
+                      "deleted parent remained available for continuation");
+    failures += check(store.get_for_session("resp_branch_one", session_a) != nullptr &&
+                          store.get_for_session("resp_branch_two", session_a) != nullptr,
+                      "parent deletion removed stored branches");
+    failures += check(!store.get_for_session("resp_branch_one", session_b),
+                      "cross-session continuation read a surviving branch");
+    return failures;
+}
+
 int test_oversized_record() {
     ResponseStore store(4, 256);
     StoredResponse large = record(
@@ -105,6 +148,7 @@ int main() {
     int failures = 0;
     failures += test_context_dag();
     failures += test_lru_and_delete();
+    failures += test_session_continuation_and_dag_deletion();
     failures += test_oversized_record();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;

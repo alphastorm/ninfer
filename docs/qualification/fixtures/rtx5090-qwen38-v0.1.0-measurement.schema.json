@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/alphastorm/ninfer/docs/qualification/fixtures/rtx5090-qwen38-v0.1.0-measurement.schema.json",
+  "title": "NInfer Qwen3.8 RTX 5090 v0.1.0 qualification measurement",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_type",
+    "schema_version",
+    "identity",
+    "model",
+    "candidate",
+    "long_context_exact",
+    "golden_t01",
+    "decode_throughput",
+    "mtp_acceptance",
+    "process_exit_policy",
+    "responses_http_contract",
+    "machine_scope"
+  ],
+  "properties": {
+    "artifact_type": { "const": "ninfer_release_qualification_measurement" },
+    "schema_version": { "const": 1 },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "upstream_base_sha",
+        "patch_stack_sha",
+        "build_profile",
+        "build_type",
+        "cxx_compiler",
+        "cuda_compiler",
+        "cuda_toolkit",
+        "source_dirty",
+        "binary_sha256"
+      ],
+      "properties": {
+        "upstream_base_sha": {
+          "const": "4eef14a7560d87a3ba717898e1d488a4c4c7246d"
+        },
+        "patch_stack_sha": { "$ref": "#/$defs/gitSha" },
+        "build_profile": { "const": "qwen38-5090-v0.1.0" },
+        "build_type": { "const": "Release" },
+        "cxx_compiler": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "cuda_compiler": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "cuda_toolkit": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "source_dirty": { "const": false },
+        "binary_sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_sha256", "artifact_bytes"],
+      "properties": {
+        "artifact_sha256": {
+          "const": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e"
+        },
+        "artifact_bytes": { "const": 18210531328 }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "container", "bind_host", "port", "restart_policy"],
+      "properties": {
+        "image": { "const": "ninfer-5090-v010-rc" },
+        "container": { "const": "ninfer-5090-v010-rc" },
+        "bind_host": { "const": "127.0.0.1" },
+        "port": { "const": 18089 },
+        "restart_policy": { "const": "no" }
+      }
+    },
+    "long_context_exact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixture_sha256", "prompt_tokens", "stdout", "exact_match"],
+      "properties": {
+        "fixture_sha256": {
+          "const": "8dcece5215805293490baa0d8204d59a899d8bc3f9d010b0c142ed6624260a9a"
+        },
+        "prompt_tokens": { "const": 130048 },
+        "stdout": { "const": "ORCHID=493817; COLOR=COBALT" },
+        "exact_match": { "const": true }
+      }
+    },
+    "golden_t01": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixture_sha256", "exact_match", "elapsed_seconds"],
+      "properties": {
+        "fixture_sha256": { "$ref": "#/$defs/sha256" },
+        "exact_match": { "const": true },
+        "elapsed_seconds": { "type": "number", "minimum": 0, "maximum": 120.9117 }
+      }
+    },
+    "decode_throughput": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tokens_per_second"],
+      "properties": {
+        "tokens_per_second": { "type": "number", "minimum": 200.58921 }
+      }
+    },
+    "mtp_acceptance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["drafted_tokens", "accepted_tokens", "rate"],
+      "properties": {
+        "drafted_tokens": { "type": "integer", "minimum": 1 },
+        "accepted_tokens": { "type": "integer", "minimum": 0 },
+        "rate": { "type": "number", "minimum": 0.72319, "maximum": 0.78319 }
+      }
+    },
+    "process_exit_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observed_state_after_grace",
+        "restart_count_delta",
+        "explicit_restart_healthy"
+      ],
+      "properties": {
+        "observed_state_after_grace": { "const": "exited" },
+        "restart_count_delta": { "const": 0 },
+        "explicit_restart_healthy": { "const": true }
+      }
+    },
+    "responses_http_contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "first_turn_completed",
+        "continuation_completed",
+        "fork_count",
+        "cross_session_status",
+        "parent_delete_status",
+        "parent_get_after_delete_status",
+        "surviving_descendants_retrieved",
+        "surviving_descendant_continued"
+      ],
+      "properties": {
+        "first_turn_completed": { "const": true },
+        "continuation_completed": { "const": true },
+        "fork_count": { "type": "integer", "minimum": 2 },
+        "cross_session_status": { "const": 404 },
+        "parent_delete_status": { "const": 200 },
+        "parent_get_after_delete_status": { "const": 404 },
+        "surviving_descendants_retrieved": { "const": true },
+        "surviving_descendant_continued": { "const": true }
+      }
+    },
+    "machine_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gpu_model", "gpu_count", "machine_count"],
+      "properties": {
+        "gpu_model": { "const": "NVIDIA GeForce RTX 5090" },
+        "gpu_count": { "const": 1 },
+        "machine_count": { "const": 1 }
+      }
+    }
+  },
+  "$defs": {
+    "gitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}
