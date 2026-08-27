@@ -1,0 +1,43 @@
+# syntax=docker/dockerfile:1
+
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE_ID
+ARG PYTHON_VERSION=3.11.11
+ARG PYTHON_SOURCE_SHA256=2a9920c7a0cd236de33644ed980a13cbbc21058bfdc528febb6081575ed73be3
+ARG DEBIAN_FRONTEND=noninteractive
+
+LABEL org.ninfer.profile.base-image-id="${BASE_IMAGE_ID}" \
+      org.ninfer.profile.python-version="${PYTHON_VERSION}" \
+      org.ninfer.profile.python-source-sha256="${PYTHON_SOURCE_SHA256}"
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        ca-certificates \
+        build-essential \
+        curl \
+        libbz2-dev \
+        libffi-dev \
+        liblzma-dev \
+        libncursesw5-dev \
+        libreadline-dev \
+        libsqlite3-dev \
+        libssl-dev \
+        tk-dev \
+        uuid-dev \
+        xz-utils \
+        zlib1g-dev \
+    && curl --fail --silent --show-error --location \
+        --output /tmp/Python.tar.xz \
+        "https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_VERSION}.tar.xz" \
+    && printf '%s  %s\n' "${PYTHON_SOURCE_SHA256}" /tmp/Python.tar.xz | sha256sum --check --strict - \
+    && mkdir /tmp/python-source \
+    && tar --extract --xz --file /tmp/Python.tar.xz --directory /tmp/python-source --strip-components=1 \
+    && cd /tmp/python-source \
+    && ./configure --prefix=/opt/python/3.11 --with-ensurepip=no \
+    && make -j \
+    && make install \
+    && ln -s /opt/python/3.11/bin/python3.11 /usr/local/bin/python3.11 \
+    && python3.11 -c 'import sys; assert sys.version_info[:2] == (3, 11)' \
+    && rm -rf /tmp/Python.tar.xz /tmp/python-source /var/lib/apt/lists/*

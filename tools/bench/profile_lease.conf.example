@@ -1,5 +1,12 @@
-# Trusted shell configuration for run_gpu_profile_lease.sh and its profiling payload.
-# Copy this file into an isolated remote scratch directory and replace every REPLACE_ME value.
+# Trusted shell configuration for the controller, lease, and profiling payload.
+# Replace every REPLACE_ME value once. The controller workflow creates each isolated operation,
+# stages the exact clean source bundle, writes the target config, and retrieves the receipts.
+
+CONTROLLER_TARGET_HOST=REPLACE_ME
+CONTROLLER_SSH_JUMP=REPLACE_ME
+CONTROLLER_WSL_DISTRIBUTION=Ubuntu-24.04
+CONTROLLER_OPERATION_PARENT=/home/operator/builds
+CONTROLLER_RECEIPT_ROOT=/absolute/controller/path/profiles/sm120-controller
 
 PROFILE_ROOT=/home/operator/builds/ninfer-profile-run
 PROFILE_SOURCE_ROOT=$PROFILE_ROOT/source
@@ -14,9 +21,10 @@ PROFILE_DOCKER_CONFIG=$PROFILE_ROOT/docker-config/run-id
 
 # Runtime candidate image used by serving/A-B payloads.
 TOOLCHAIN_IMAGE=REPLACE_ME
-# Separate development image used only to build and capture the SM120 operator packet.
-PROFILE_TOOLCHAIN_IMAGE=REPLACE_ME
-PROFILE_TOOLCHAIN_IMAGE_ID=sha256:REPLACE_ME
+# Existing CUDA/Nsight development image extended by the controller with pinned CPython 3.11.11.
+PROFILE_TOOLCHAIN_BASE_IMAGE=REPLACE_ME
+PROFILE_TOOLCHAIN_BASE_IMAGE_ID=sha256:REPLACE_ME
+PROFILE_TOOLCHAIN_IMAGE=ninfer-sm120-profile:python3.11
 PROFILE_CONTAINER_PYTHON=python3.11
 # Use the existing WSL Docker daemon. Never enable Docker Desktop WSL integration for this run.
 PROFILE_DOCKER_CLI=/usr/bin/docker
