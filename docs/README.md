@@ -10,7 +10,7 @@ run the CLI or HTTP server.
 | [CLI](cli.md) | text, chat-history, image/video input, output streams, sampling, MTP, and common runtime options |
 | [HTTP serving](serving.md) | OpenAI Responses/Chat Completions, Anthropic Messages, state, streaming, token counting, authentication, and tool calls |
 | [Performance](performance.md) | RTX 5090 single-request and concurrent-decode results, MTP/DFlash measurements, and reproduction commands |
-| [RTX 5090 Qwen3.8 qualification](qualification/rtx5090-qwen38-v0.1.0.md) | exact v0.1 runtime identity, gates, bounded methodology, assets, and limitations |
+| [RTX 5090 Qwen3.8 qualification](qualification/rtx5090-qwen38-v0.1.0.md) | preserved behavioral gates, release-identity composition, bounded methodology, assets, and limitations |
 | [CLI examples](../examples/cli/) | committed text, multimodal, thinking, long-decode, and long-context inputs |
 
 The executable `--help` output is the exact source for command-line option spelling and defaults.

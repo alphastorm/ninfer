@@ -1,6 +1,6 @@
 # RTX 5090 × Qwen3.8 v0.1.0 qualification
 
-**Decision as of 2026-08-26: PASSED on the exact recorded candidate; external publication and promotion remain unauthorized.**
+**Decision as of 2026-08-26: behavioral qualification PASSED on the preserved measured candidate; release provenance was remediated and the exact release candidate identity was proved separately. External publication and promotion remain unauthorized.**
 
 The machine-readable authority is [`rtx5090-qwen38-v0.1.0.json`](rtx5090-qwen38-v0.1.0.json). The schema-valid bounded measurement is [`fixtures/rtx5090-qwen38-v0.1.0-measurement.json`](fixtures/rtx5090-qwen38-v0.1.0-measurement.json). No hostname, private path, container ID, API secret, request/session ID, prompt, generated Golden data, or content-bearing request log is included.
 
@@ -11,10 +11,12 @@ The machine-readable authority is [`rtx5090-qwen38-v0.1.0.json`](rtx5090-qwen38-
 | target | Qwen3.8-27B `groupwise-int` on one RTX 5090 |
 | GPU / architecture | NVIDIA GeForce RTX 5090 / `sm_120a` |
 | driver | `610.88` |
-| runtime source | `70868c658f5bd412ead5b105ec76939997bd6ca9` |
+| measured runtime source | `70868c658f5bd412ead5b105ec76939997bd6ca9` |
+| release runtime source | `da2b6b6c8e129d182370feee657b7d8b9b9bbbf5` |
 | upstream base | `4eef14a7560d87a3ba717898e1d488a4c4c7246d` |
-| image ID | `sha256:3bb6b96aaa5bb7c7345fb90caf8ea5cd3c7569f22e855be9adaed34db1cd5efb` |
-| `ninfer-serve` SHA-256 | `d54af118458d820955c6bcf53bdab7a80799343c68a37bcce7f2837f85e559e0` |
+| measured image ID | `sha256:3bb6b96aaa5bb7c7345fb90caf8ea5cd3c7569f22e855be9adaed34db1cd5efb` |
+| measured `ninfer-serve` SHA-256 | `d54af118458d820955c6bcf53bdab7a80799343c68a37bcce7f2837f85e559e0` |
+| release `ninfer-serve` SHA-256 | `af557e9b146c68b051bd29e9e7a7d172e908f4b12df4e6d3bd83c54ce58b2399` |
 | model SHA-256 | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
 | config SHA-256 | `c6b635ccab19fd712ba503cd051b5359bb9c355068706b17372860baa0de49b6` |
 | toolchain | GNU 13.3.0; CUDA compiler/toolkit 13.1.115 |
@@ -41,7 +43,20 @@ Golden used OMP 18.0.5 through the approved external t01 workload. Only the fixt
 
 ## Source and evidence boundary
 
-The executable identity is the clean runtime source commit `70868c658f5bd412ead5b105ec76939997bd6ca9`. This qualification document necessarily postdates execution. Its documentation commit is evidence metadata, not a claim that a binary rebuilt from that later commit was tested. A source tag and binary package must bind to the runtime source SHA above; changing executable input or its embedded patch-stack identity requires fresh qualification.
+The machine-readable authority remains the immutable behavioral record for clean source
+`70868c658f5bd412ead5b105ec76939997bd6ca9`; the measurements above were not rerun. Release source
+`da2b6b6c8e129d182370feee657b7d8b9b9bbbf5` closes the separately reviewed provenance class in
+which configure-time Git identity could survive an incremental compile from changed source. A fresh
+122.54-second candidate proof then verified that exact clean release source, release binary, model,
+configuration, authenticated health, candidate teardown, and exact incumbent restoration. It did
+not repeat the benchmark campaign.
+
+The independent disposition accepted that composition as release-eligible while withholding
+publication authority. The public product authority is the matching qualification summary and
+release manifest in [`alphastorm/omp-ninfer`](https://github.com/alphastorm/omp-ninfer). A source
+tag and binary package must bind to `da2b6b6c8e129d182370feee657b7d8b9b9bbbf5`; changing executable
+input beyond that commit or changing its embedded identity requires a new shipping disposition and
+the evidence appropriate to the changed behavior.
 
 ## Scope and disposition
 
