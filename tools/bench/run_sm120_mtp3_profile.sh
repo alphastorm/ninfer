@@ -157,6 +157,8 @@ if [[ $mode == prepare ]]; then
   ((${#prepare_entries[@]} == 0)) || { echo "prepare directory must be empty" >&2; exit 2; }
 
   mkdir -p "$prepare_dir/environment"
+  run_logged "$prepare_dir/environment/nsys-profile-help.log" \
+    nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop --help
   run_logged "$prepare_dir/environment/configure.log" \
     cmake -S "$source_root" -B "$build_dir" -G Ninja \
       -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -479,7 +481,7 @@ PY
 
 run_logged "$output_dir/nsys/mtp3-round.log" \
   timeout "$nsys_timeout" nsys profile --trace=cuda,nvtx,osrt --capture-range=cudaProfilerApi \
-    --stop-on-range-end=true --force-overwrite=true \
+    --capture-range-end=stop --force-overwrite=true \
     -o "$output_dir/nsys/mtp3-round" \
     "$mtp_round_bench" --artifact "$artifact" --draft-tokens 3 --proposal-head optimized \
       --warmup 2 --reps 1 --profile-measured

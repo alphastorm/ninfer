@@ -204,6 +204,11 @@ def install_tool_mocks(root: Path) -> Path:
         fi
         if [[ ${1:-} == profile ]]; then
           shift
+          if [[ " $* " == *" --help "* ]]; then
+            [[ ${MOCK_NSYS_PROFILE_HELP_FAIL:-0} != 1 ]] || exit 64
+            printf 'mock nsys profile help\n'
+            exit 0
+          fi
           output=
           while (($#)); do
             if [[ $1 == -o ]]; then
@@ -320,12 +325,17 @@ class Sm120Mtp3ProfileRunnerTest(unittest.TestCase):
         )
 
     def run_prepare(
-        self, *, source_dirty: bool = False, ancestry_invalid: bool = False
+        self,
+        *,
+        source_dirty: bool = False,
+        ancestry_invalid: bool = False,
+        nsys_profile_unsupported: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         environment = {
             **self.environment,
             "MOCK_SOURCE_DIRTY": "1" if source_dirty else "0",
             "MOCK_ANCESTRY_FAIL": "1" if ancestry_invalid else "0",
+            "MOCK_NSYS_PROFILE_HELP_FAIL": "1" if nsys_profile_unsupported else "0",
         }
         return subprocess.run(
             [
@@ -368,7 +378,7 @@ class Sm120Mtp3ProfileRunnerTest(unittest.TestCase):
         path = self.paths["tool_log"]
         return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
 
-    def test_prepares_exact_build_without_gpu_tools(self) -> None:
+    def test_prepares_exact_build_after_profiler_cli_preflight(self) -> None:
         completed = self.run_prepare()
 
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
@@ -380,7 +390,11 @@ class Sm120Mtp3ProfileRunnerTest(unittest.TestCase):
         log = self.tool_log_lines()
         self.assertTrue(any(line.startswith("cmake -S ") for line in log))
         self.assertTrue(any(line.startswith("cmake --build ") for line in log))
-        self.assertFalse(any(line.startswith(("ncu ", "nsys ", "nvidia-smi ")) for line in log))
+        self.assertIn(
+            "nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop --help",
+            log,
+        )
+        self.assertFalse(any(line.startswith(("ncu ", "nvidia-smi ")) for line in log))
 
     def test_captures_complete_fixed_packet_after_counter_gate(self) -> None:
         prepared = self.run_prepare()
@@ -422,6 +436,14 @@ class Sm120Mtp3ProfileRunnerTest(unittest.TestCase):
         self.assertLess(q5_gate, counter_gate)
         self.assertLess(counter_gate, mtp_round)
         self.assertLess(mtp_round, first_timing)
+        self.assertTrue(
+            any(
+                line.startswith("nsys profile ")
+                and "--capture-range-end=stop" in line
+                and "--stop-on-range-end" not in line
+                for line in log
+            )
+        )
         self.assertFalse(any(line.startswith("cmake --build ") for line in log))
 
     def test_rejects_any_uncommitted_source_change_before_build(self) -> None:
@@ -447,6 +469,13 @@ class Sm120Mtp3ProfileRunnerTest(unittest.TestCase):
 
         self.assertEqual(completed.returncode, 2)
         self.assertIn("required preparation command is unavailable: nsys", completed.stderr)
+        self.assertFalse((self.paths["prepare"] / "prepare-complete.txt").exists())
+        self.assertFalse(any(line.startswith("cmake ") for line in self.tool_log_lines()))
+
+    def test_rejects_unsupported_nsys_profile_cli_before_build(self) -> None:
+        completed = self.run_prepare(nsys_profile_unsupported=True)
+
+        self.assertEqual(completed.returncode, 64)
         self.assertFalse((self.paths["prepare"] / "prepare-complete.txt").exists())
         self.assertFalse(any(line.startswith("cmake ") for line in self.tool_log_lines()))
 
