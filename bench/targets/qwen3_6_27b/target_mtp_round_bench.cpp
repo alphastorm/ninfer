@@ -111,8 +111,9 @@ RoundMeasurement measure_round(target::Package::Program& program, ninfer::Device
                                target::Package::SequenceHandle sequence,
                                std::uint32_t draft_tokens) {
     const std::array<target::Package::SequenceHandle, 1> sequences{sequence};
+    // Leave budget for the retained next proposal after licensing the current MTP window.
     const std::array<ninfer::runtime::RoundBudget, 1> budgets{
-        ninfer::runtime::RoundBudget{.generated_tokens_remaining = draft_tokens + 1}};
+        ninfer::runtime::RoundBudget{.generated_tokens_remaining = 2 * draft_tokens + 1}};
     ninfer::CudaEventTimer timer(device);
     timer.start();
     auto pending                 = program.decode(sequences, budgets);
