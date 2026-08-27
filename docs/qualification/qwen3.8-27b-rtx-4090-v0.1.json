@@ -1,10 +1,14 @@
 {
   "artifact_type": "ninfer_public_windows_release_qualification",
   "schema_version": 1,
-  "status": "passed",
-  "release_tier": "beta",
+  "status": "failed",
+  "release_eligible": false,
+  "release_tier": "none",
   "qualified_utc": "2026-08-26T03:44:14.7675267Z",
+  "package_assembled_utc": "2026-08-27T10:46:01.2256642Z",
+  "latest_attempt_utc": "2026-08-27T11:16:18.6828734Z",
   "release_id": "qwen38-4090-v0.1-ea265776254a",
+  "release_version": "0.1.0",
   "qualification_target": {
     "platform": "windows-x86_64",
     "gpu": "NVIDIA GeForce RTX 4090",
@@ -32,15 +36,18 @@
     "restored_source_build": "passed"
   },
   "package": {
-    "filename": "ninfer-qwen38-4090-v0.1-windows-x86_64.zip",
-    "sha256": "acd931e26429880560af3c8a7b5b61aeef8baafe0572fbadeed7aff540547530",
-    "size_bytes": 229003945,
-    "manifest_entries": 22,
-    "runtime_dlls": 12,
-    "checksum_verification": "passed"
+    "filename": "ninfer-4090-qwen38-v0.1.0-win-x64.zip",
+    "sha256": "b2081fecd5f6ef3a9fcab3d58a0bb3129af16cca0099bd085b554d7d84ebb530",
+    "size_bytes": 227626612,
+    "manifest_entries": 21,
+    "runtime_dlls": 9,
+    "checksum_verification": "passed",
+    "release_manifest_sha256": "07d2b341767ee6a14831c7f9b60eb6a60e762edc26c810bb0276e0ba37633788",
+    "installer_sha256": "6bd36fa79051200c128e047944222a7695785c3b042b64d46c1c879fbb992aae",
+    "controller_sha256": "b01254f14f204e534473cb188218429a384fdb8e4f146b65ed710f81075e0a55"
   },
   "identity": {
-    "binary_sha256": "19b6f0bec37040c71b40b7df6213ab762004c8b4a8b039db736064d686fbf404",
+    "binary_sha256": "ea10b9a540722d1ac3f8832a8856e103c4040c599550d59dc4250eb9b5094e86",
     "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
     "model_artifact_size_bytes": 18210531328,
     "config_sha256": "d613fc71ebe30b799af4936af8f73b0f25ebd1a1486b55fdb59aaab5d884bb96",
@@ -63,72 +70,87 @@
     "concurrency": 1
   },
   "speculation_decision": {
+    "status": "not_evaluated",
     "selected_profile": "MTP0",
-    "mtp0": "qualified",
-    "bounded_mtp3": "not_attempted",
-    "reason": "The private Golden gate was not run, so the required deterministic and end-to-end promotion comparison was unavailable."
+    "promote_mtp3": false,
+    "reason": "The fresh MTP0 package installed and restarted, but the direct Golden-equivalent task failed before protocol, long-context, persistence, or performance gates. No support or speculation decision is permitted."
   },
   "protocol": {
     "artifact_type": "ninfer_agent_protocol_smoke",
     "schema_version": 1,
-    "status": "passed",
-    "checks": {
-      "anthropic_count_tokens": true,
-      "authenticated_status": true,
-      "duplicate_tool_names_rejected": true,
-      "malformed_identity_rejected": true,
-      "responses_continuation": true,
-      "responses_cross_session_isolation": true,
-      "streaming_parity": true,
-      "tool_result_array": true,
-      "typed_tool_arguments": true,
-      "unsupported_structured_output_rejected": true
-    }
+    "status": "not_run_after_golden_red",
+    "checks": {}
   },
   "persistence": {
-    "first_prompt_tokens": 105052,
-    "first_completion_tokens": 16,
-    "first_elapsed_seconds": 88.0348313,
-    "post_restart_prompt_tokens": 105089,
-    "post_restart_completion_tokens": 16,
-    "post_restart_elapsed_seconds": 16.1876186,
-    "restored_tokens": 105068,
-    "reuse_path": "restore_disk_checkpoint",
-    "post_restart_prepare_seconds": 0.0977603
+    "status": "not_run_after_golden_red"
   },
   "release_gates": {
-    "P": {
+    "B": {
       "status": "passed",
-      "scope": "installed-package protocol and tool correctness",
-      "checks_passed": 10,
-      "checks_failed": 0
+      "scope": "fresh clean sm_89 Release build and package",
+      "binary_sha256": "ea10b9a540722d1ac3f8832a8856e103c4040c599550d59dc4250eb9b5094e86",
+      "package_sha256": "b2081fecd5f6ef3a9fcab3d58a0bb3129af16cca0099bd085b554d7d84ebb530"
     },
-    "L": {
+    "I": {
       "status": "passed",
-      "scope": "installed-package 100K+ continuation across NInfer restart",
-      "omp_restart_component": "not_run"
+      "scope": "fixed external-pinned-read-only installer; model was not copied into candidate state"
+    },
+    "R": {
+      "status": "passed",
+      "scope": "fresh packaged controller start on loopback",
+      "endpoint": "127.0.0.1:18082",
+      "binary_sha256": "ea10b9a540722d1ac3f8832a8856e103c4040c599550d59dc4250eb9b5094e86"
     },
     "G": {
-      "status": "not_run",
-      "scope": "one real Golden implementation task"
+      "status": "failed",
+      "scope": "exact t01 fixture through a bounded direct-loopback tool harness",
+      "failure": "Model emitted textual tool markup instead of a typed tool call; the working fixture remained unchanged and unknown-arm execution did not reject before side effects.",
+      "output_sha256": "8e7847b76261f4ec359853261ceff5cf46093c8525481426f57441cdc9a6329e"
+    },
+    "P": {
+      "status": "not_run_after_golden_red"
+    },
+    "L": {
+      "status": "not_run_after_golden_red"
+    },
+    "performance": {
+      "status": "not_run_after_golden_red"
+    },
+    "support_claim": {
+      "status": "blocked"
+    },
+    "predecessor_restore": {
+      "status": "passed",
+      "binary_sha256": "1c12ad83435f413ceaf2f8cc9da992feb5398ec3e14dfa8f661afefa49946936",
+      "endpoint_model": "qwen38-long",
+      "docker_paused": true,
+      "candidate_absent": true,
+      "receipt_sha256": "0ab4eaf421750547a83d69c89abb5b7d9861b5a96cdcb23827ae0246ae34c7c2"
     }
   },
   "qualification_receipt": {
-    "sha256": "ef0c05d4a10974db626c35590b88ab50d720c689a537ec413008c984856fe42b",
-    "sanitized_fields_omitted": [
-      "identity.build_profile",
-      "identity.deployment_profile",
-      "protocol.identity.deployment_profile"
-    ]
+    "window_receipt_sha256": "3f92867c89cf2248b5baa01aab2bdf93f0222520b2070da6fcae2e69d0bd5dc2",
+    "restore_receipt_sha256": "0ab4eaf421750547a83d69c89abb5b7d9861b5a96cdcb23827ae0246ae34c7c2",
+    "status": "failed_at_golden_equivalent"
+  },
+  "latest_attempt": {
+    "package_sha256": "b2081fecd5f6ef3a9fcab3d58a0bb3129af16cca0099bd085b554d7d84ebb530",
+    "binary_sha256": "ea10b9a540722d1ac3f8832a8856e103c4040c599550d59dc4250eb9b5094e86",
+    "installed_package_restart": "passed",
+    "failed_stage": "golden_equivalent_typed_tool_execution",
+    "failure": "Textual tool markup was emitted instead of a typed tool call; no file edit occurred and the unknown-arm guard timed out.",
+    "protocol": "not_run",
+    "long_context": "not_run",
+    "persistence": "not_run",
+    "performance": "not_run",
+    "candidate_cleaned_up": true,
+    "incumbent_restored": true,
+    "support_claim": false
   },
   "isolation": {
-    "qualification_mode": "isolated_candidate",
-    "candidate_cleaned_up": true,
-    "incumbent_temporarily_stopped": true,
-    "incumbent_restored": true,
-    "incumbent_configuration_modified": false,
-    "production_routes_modified": false,
-    "production_locks_or_pins_modified": false,
-    "artifact_published": false
+    "candidate_loopback_port": 18082,
+    "production_route_mutated": false,
+    "docker_ownership_preserved": true,
+    "public_release_or_asset_published": false
   }
 }

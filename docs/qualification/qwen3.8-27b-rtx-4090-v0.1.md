@@ -1,106 +1,53 @@
-# Qwen3.8-27B RTX 4090 v0.1 qualification
+# Qwen3.8 27B RTX 4090 qualification
 
-This record covers the immutable native Windows package qualified on an NVIDIA GeForce RTX 4090.
-It is a **beta qualification**, not a publication announcement. The protocol (`P`) and installed-package
-NInfer restart (`L`) gates passed; the private Golden (`G`) task and the OMP-restart portion of `L`
-were not run in this lane.
+## Verdict
 
-The machine-readable record is
-[`qwen3.8-27b-rtx-4090-v0.1.json`](qwen3.8-27b-rtx-4090-v0.1.json).
+**Not qualified; no RTX 4090 support claim.** A fresh native Windows `sm_89` Release build and package installed through the external-pinned-model lifecycle and restarted successfully on loopback. The required direct Golden-equivalent gate then failed before protocol, 100K+ context/persistence, or bounded performance evidence could run.
 
-## Qualified release tuple
-
-| Item | Qualified value |
-|---|---|
-| Release ID | `qwen38-4090-v0.1-ea265776254a` |
-| Executable source commit | `ea265776254a62ab5184454ba0163cdf04aad1e5` |
-| Upstream base | `9ec1b82c7afa021314682d7a95390f8935ead7c2` |
-| Source tree at build | clean |
-| Target | native Windows x86-64, Ada `sm_89` |
-| Build | Release, MSVC 19.44.35228.0, CUDA 13.3.73 |
-| Model source | `neroued/Qwen3.8-27B-NInfer@18dfc887423fa5aabf3cb56fac41490e462b3fab` |
-| Model artifact SHA-256 | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
-| Model artifact bytes | `18,210,531,328` |
-| Config SHA-256 | `d613fc71ebe30b799af4936af8f73b0f25ebd1a1486b55fdb59aaab5d884bb96` |
-| Server binary SHA-256 | `19b6f0bec37040c71b40b7df6213ab762004c8b4a8b039db736064d686fbf404` |
-
-The documentation commit containing this record follows the executable source commit and is not part
-of the package identity.
-
-## Package integrity
+## Fresh identities
 
 | Item | Value |
 |---|---|
-| Archive | `ninfer-qwen38-4090-v0.1-windows-x86_64.zip` |
-| Archive SHA-256 | `acd931e26429880560af3c8a7b5b61aeef8baafe0572fbadeed7aff540547530` |
-| Archive bytes | `229,003,945` |
-| Manifest entries | 22, all verified |
-| Runtime DLLs | 12 |
-| Private qualification receipt SHA-256 | `ef0c05d4a10974db626c35590b88ab50d720c689a537ec413008c984856fe42b` |
+| Runtime source | `ea265776254a62ab5184454ba0163cdf04aad1e5` |
+| Lifecycle source | `09f38db0d506d09e7c381c862aeea3e243e09669` |
+| CUDA target/toolkit | `sm_89` / `13.3.73` |
+| Fresh server SHA-256 | `ea10b9a540722d1ac3f8832a8856e103c4040c599550d59dc4250eb9b5094e86` |
+| Model SHA-256 | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
+| Config SHA-256 | `d613fc71ebe30b799af4936af8f73b0f25ebd1a1486b55fdb59aaab5d884bb96` |
+| Package SHA-256 | `b2081fecd5f6ef3a9fcab3d58a0bb3129af16cca0099bd085b554d7d84ebb530` |
+| Package bytes | `227626612` |
 
-The package was installed from the immutable archive into isolated candidate state before
-qualification. It has not been published.
+The package checksum set passed. The installer retained the 18,210,531,328-byte model as an external, pinned, read-only reference; it did not copy the model into candidate-owned state. Focused lifecycle regressions passed, including ten injected transaction failures, zero restart model re-hashes, zero candidate model copies, interrupted-install repair, dead-start rejection, and release-asset identity checks.
 
-## Runtime profile
+## Live result
 
-```text
-Qwen3.8-27B groupwise-int
-131,072-token context
-rk2v4-e8 KV
-prefill chunk 512
-MTP0 (speculation disabled)
-xhigh reasoning effort
-100 GiB disk cache
-concurrency 1
-```
-
-MTP0 is the selected qualified profile. The bounded, otherwise-identical MTP3 comparison was **not
-attempted** because the private Golden gate was not run. Consequently, this record makes no MTP3
-promotion or throughput claim.
-
-## P/L/G gates
-
-| Gate | Verdict | Exact scope |
-|---|---|---|
-| **P** | **Passed** | Installed-package protocol and tool correctness; 10 passed, 0 failed. |
-| **L** | **Passed with stated boundary** | 100K+ continuation across NInfer restart restored from disk; the OMP-restart component was not run. |
-| **G** | **Not run** | No real Golden implementation task was executed in this lane. |
-
-`P` covered authenticated status, Anthropic token counting, typed tool arguments, text-part tool-result
-arrays, duplicate tool-name rejection, malformed identity rejection, fail-closed unsupported
-structured output, Responses continuation, cross-session isolation, and streaming parity.
-
-## Persistence evidence
-
-| Measurement | Cold request | After NInfer restart |
-|---|---:|---:|
-| Prompt tokens | 105,052 | 105,089 |
-| Completion tokens | 16 | 16 |
-| Elapsed time | 88.0348313 s | 16.1876186 s |
-| Restored compatible tokens | — | 105,068 |
-| Prepare time | — | 0.0977603 s |
-| Reuse path | — | `restore_disk_checkpoint` |
-
-## Source provenance
-
-| Evidence | Identity |
+| Gate | Result |
 |---|---|
-| Qualified raw patch SHA-256 | `ac8ba36da9bfc89ff97021eecba8c7ba8f88f9e7e9bfd1c9c3509b723d81d4e0` |
-| Normalized patch SHA-256 | `6cf03d7b4562165d9c7416b0878ff183dae0db00811176ead11e487f1c916898` |
-| Patch series SHA-256 | `7da9a7b244275fb306bcaf745b61ed183c60c8a85fdf272e640ba3cb95aa71a3` |
-| Bounded staging commit | `e89e415d95921cecf4cf8a00df5540a4a036ff84` |
-| DirectStorage fallback commit | `a9bb55b8e9b02ff34e4725dc8ca95d4fadeb3e0d` |
-| Configured-source identity verifier | passed before every compile target |
-| Dirty source after configure | build rejected, exit 1 |
-| Restored clean source | build target passed |
+| Fresh package install | Passed |
+| Packaged controller restart | Passed |
+| Authenticated loopback identity | Passed: clean build, exact binary/model/config identities, 131,072-token configured context, MTP0 |
+| Golden-equivalent t01 | **Failed** |
+| Protocol pack | Not run after Golden red |
+| 100K+ context and process-restart persistence | Not run after Golden red |
+| Bounded performance request | Not run after Golden red |
 
-## Isolation and sanitization
+The Golden-equivalent harness used the exact pinned t01 task, fixture, and scorer over the direct loopback endpoint. The model emitted textual `<tool_call>` markup instead of a typed tool call, so the copied fixture remained unchanged. Executing the unchanged fixture with an unknown arm did not reject before side effects and hit the 30-second bound. Output SHA-256: `8e7847b76261f4ec359853261ceff5cf46093c8525481426f57441cdc9a6329e`.
 
-Qualification used isolated candidate resources. The incumbent was temporarily stopped to release
-the GPU, then restored and verified after candidate state, task, listener, and private qualification
-inputs were removed. No production service configuration, route, lock, or pin was modified. No tag,
-push, or artifact publication occurred.
+Per the stop-on-first-red rule, no protocol, long-context, persistence, performance, MTP3, route, publication, or support decision followed.
 
-The public JSON omits private build/deployment profile identifiers. Neither public file contains host
-names, private paths, endpoint addresses, credentials, raw prompts, generated text, session IDs, or
-private route/lock data.
+## Platform blockers resolved before the gate
+
+1. Package receipt construction attempted to assign an optional `latest_attempt_utc` property directly on a strict `PSCustomObject`. The red path exited 1. The fixed path uses add-or-update property semantics and produced the fresh package above.
+2. A second `Expand-Archive` in one PowerShell runspace stalled after partial extraction. Running the installer in a fresh `pwsh` process closed the class: both 22-file expansions completed and produced the exact server binary hash.
+3. The fixed installer returns `ninfer_windows_release_install_receipt` with nested lifecycle status. The runner was corrected to validate that actual terminal contract rather than the superseded direct-status shape.
+
+## Restoration
+
+The candidate task, state root, operation root, lease, and loopback listener are absent. The predecessor controller and binary were restored exactly, its endpoint returned `qwen38-long`, Docker remains paused with its pause marker present and service stopped, and the GPU power limit remains 500 W.
+
+- Window receipt SHA-256: `3f92867c89cf2248b5baa01aab2bdf93f0222520b2070da6fcae2e69d0bd5dc2`
+- Independent restore receipt SHA-256: `0ab4eaf421750547a83d69c89abb5b7d9861b5a96cdcb23827ae0246ae34c7c2`
+
+## Next decision
+
+Keep RTX 4090 support blocked. The next bounded attempt must first reproduce and fix typed tool-call emission for the exact direct Golden-equivalent task, then rerun the fresh-package protocol, 100K+ restart-persistence, and bounded-performance gates. Do not publish or promote this package.
