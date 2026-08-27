@@ -22,8 +22,13 @@ import uuid
 
 
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_IMAGE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _VERSION_RE = re.compile(r"^v[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_IMAGE_BINARY_PATHS = {
+    "ninfer": "/usr/local/bin/ninfer",
+    "ninfer-serve": "/usr/local/bin/ninfer-serve",
+}
 _BUILD_KEYS = frozenset(
     {
         "upstream_base_sha",
@@ -142,10 +147,54 @@ def read_committed_license(source: Path, release_sha: str) -> bytes:
     return result.stdout
 
 
-def parse_build_info(binary: Path, expected_program: str) -> dict[str, str]:
-    if not binary.is_file():
-        fail(f"{expected_program} binary does not exist")
-    result = run([os.fspath(binary), "--version"])
+def resolve_image_id(image: str) -> str:
+    result = run(["docker", "image", "inspect", "--format", "{{.Id}}", image])
+    assert isinstance(result.stdout, str)
+    lines = result.stdout.strip().splitlines()
+    if len(lines) != 1 or not _IMAGE_ID_RE.fullmatch(lines[0]):
+        fail("Docker returned an invalid image identity")
+    return lines[0]
+
+
+def image_binary_sha256(image_id: str, expected_program: str) -> str:
+    path = _IMAGE_BINARY_PATHS[expected_program]
+    result = run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--entrypoint",
+            "/usr/bin/sha256sum",
+            image_id,
+            path,
+        ]
+    )
+    assert isinstance(result.stdout, str)
+    fields = result.stdout.strip().split()
+    if (
+        len(fields) != 2
+        or not re.fullmatch(r"[0-9a-f]{64}", fields[0])
+        or fields[1] != path
+    ):
+        fail(f"failed to measure {expected_program} in the release image")
+    return fields[0]
+
+
+def read_image_build_info(image_id: str, expected_program: str) -> dict[str, str]:
+    path = _IMAGE_BINARY_PATHS[expected_program]
+    result = run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "--gpus",
+            "all",
+            "--entrypoint",
+            path,
+            image_id,
+            "--version",
+        ]
+    )
     assert isinstance(result.stdout, str)
     lines = result.stdout.strip().splitlines()
     if len(lines) != 1:
@@ -172,6 +221,7 @@ class ReleaseOptions:
     source: Path
     ninfer: Path
     ninfer_serve: Path
+    image: str
     output_dir: Path
     release_version: str
     platform: str
@@ -192,17 +242,14 @@ class ReleaseFile:
     data: bytes | None = None
 
     @classmethod
-    def from_path(cls, archive_name: str, mode: int, source: Path) -> "ReleaseFile":
-        sha256, sha1, size = hash_path(source)
-        return cls(archive_name, mode, sha256, sha1, size, source=source)
-
-    @classmethod
     def from_bytes(cls, archive_name: str, mode: int, data: bytes) -> "ReleaseFile":
         sha256, sha1, size = hash_bytes(data)
         return cls(archive_name, mode, sha256, sha1, size, data=data)
 
 
-def validate_options(options: ReleaseOptions) -> tuple[dict[str, str], int]:
+def validate_options(
+    options: ReleaseOptions,
+) -> tuple[dict[str, str], int, str, dict[str, tuple[str, str, int]]]:
     if not _VERSION_RE.fullmatch(options.release_version):
         fail("release version must be a complete vMAJOR.MINOR.PATCH value")
     if not _NAME_RE.fullmatch(options.platform):
@@ -213,10 +260,21 @@ def validate_options(options: ReleaseOptions) -> tuple[dict[str, str], int]:
     commit_epoch = verify_source(
         source, options.upstream_base_sha, options.release_head_sha
     )
-    identities = [
-        parse_build_info(options.ninfer.resolve(), "ninfer"),
-        parse_build_info(options.ninfer_serve.resolve(), "ninfer-serve"),
-    ]
+    image_id = resolve_image_id(options.image)
+    binaries = {
+        "ninfer": options.ninfer.resolve(),
+        "ninfer-serve": options.ninfer_serve.resolve(),
+    }
+    measurements: dict[str, tuple[str, str, int]] = {}
+    identities: list[dict[str, str]] = []
+    for program, binary in binaries.items():
+        if not binary.is_file():
+            fail(f"{program} binary does not exist")
+        measurement = hash_path(binary)
+        if measurement[0] != image_binary_sha256(image_id, program):
+            fail(f"{program} package binary differs from the release image")
+        measurements[program] = measurement
+        identities.append(read_image_build_info(image_id, program))
     if identities[0] != identities[1]:
         fail("ninfer and ninfer-serve carry different build identities")
     identity = identities[0]
@@ -242,7 +300,7 @@ def validate_options(options: ReleaseOptions) -> tuple[dict[str, str], int]:
             epoch = commit_epoch
     if epoch < 0:
         fail("source date epoch must be a nonnegative integer")
-    return identity, epoch
+    return identity, epoch, image_id, measurements
 
 
 def add_tar_directory(archive: tarfile.TarFile, name: str, epoch: int) -> None:
@@ -370,23 +428,36 @@ def build_spdx(
 
 
 def package_release(options: ReleaseOptions) -> dict[str, object]:
-    identity, epoch = validate_options(options)
+    identity, epoch, image_id, measurements = validate_options(options)
     source = options.source.resolve()
     license_bytes = read_committed_license(source, options.release_head_sha)
     root = f"ninfer-qwen38-rtx5090-{options.release_version}-{options.platform}"
+    ninfer_sha256, ninfer_sha1, ninfer_size = measurements["ninfer"]
+    serve_sha256, serve_sha1, serve_size = measurements["ninfer-serve"]
     binary_files = [
-        ReleaseFile.from_path(
-            f"{root}/bin/ninfer", 0o755, options.ninfer.resolve()
+        ReleaseFile(
+            f"{root}/bin/ninfer",
+            0o755,
+            ninfer_sha256,
+            ninfer_sha1,
+            ninfer_size,
+            source=options.ninfer.resolve(),
         ),
-        ReleaseFile.from_path(
-            f"{root}/bin/ninfer-serve", 0o755, options.ninfer_serve.resolve()
+        ReleaseFile(
+            f"{root}/bin/ninfer-serve",
+            0o755,
+            serve_sha256,
+            serve_sha1,
+            serve_size,
+            source=options.ninfer_serve.resolve(),
         ),
     ]
     identity_value = {
         "artifact_type": "ninfer_release_build_identity",
-        "schema_version": 1,
+        "schema_version": 2,
         "release_version": options.release_version,
         "platform": options.platform,
+        "image_id": image_id,
         **identity,
         "source_dirty": False,
         "binaries": {
@@ -441,7 +512,7 @@ def package_release(options: ReleaseOptions) -> dict[str, object]:
 
     return {
         "artifact_type": "ninfer_local_release_receipt",
-        "schema_version": 1,
+        "schema_version": 2,
         "release_version": options.release_version,
         "platform": options.platform,
         "upstream_base_sha": options.upstream_base_sha,
@@ -449,6 +520,7 @@ def package_release(options: ReleaseOptions) -> dict[str, object]:
         "source_dirty": False,
         "build_profile": options.build_profile,
         "source_date_epoch": epoch,
+        "image_id": image_id,
         "asset": {"name": archive_name, "sha256": archive_sha256},
         "sbom": {"name": sbom_name, "sha256": sbom_sha256, "format": "SPDX-2.3"},
         "checksums": checksums_name,
@@ -460,6 +532,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source", type=Path, default=Path.cwd())
     parser.add_argument("--ninfer", type=Path, required=True)
     parser.add_argument("--ninfer-serve", type=Path, required=True)
+    parser.add_argument("--image", required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--release-version", required=True)
     parser.add_argument("--platform", default="linux-x86_64-cuda13.1")
@@ -478,6 +551,7 @@ def main() -> None:
                 source=args.source,
                 ninfer=args.ninfer,
                 ninfer_serve=args.ninfer_serve,
+                image=args.image,
                 output_dir=args.output_dir,
                 release_version=args.release_version,
                 platform=args.platform,

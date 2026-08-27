@@ -8,7 +8,9 @@ import subprocess
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
+from tools.release import package as release_package
 from tools.release.package import ReleaseError, ReleaseOptions, package_release
 
 
@@ -115,11 +117,39 @@ class ReleasePackageTests(unittest.TestCase):
             ninfer.chmod(0o755)
             ninfer_serve.chmod(0o755)
 
+            image_id = "sha256:" + "1" * 64
+            binaries_by_program = {"ninfer": ninfer, "ninfer-serve": ninfer_serve}
+            real_run = release_package.run
+
+            def fake_run(
+                command: list[str], *, cwd: Path | None = None, text: bool = True
+            ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
+                if command[0] != "docker":
+                    return real_run(command, cwd=cwd, text=text)
+                if command[1:3] == ["image", "inspect"]:
+                    output = image_id + "\n"
+                else:
+                    entrypoint_index = command.index("--entrypoint")
+                    self.assertEqual(command[entrypoint_index + 2], image_id)
+                    entrypoint = command[entrypoint_index + 1]
+                    if entrypoint == "/usr/bin/sha256sum":
+                        path = command[-1]
+                        program = Path(path).name
+                        digest = hashlib.sha256(
+                            binaries_by_program[program].read_bytes()
+                        ).hexdigest()
+                        output = f"{digest}  {path}\n"
+                    else:
+                        program = Path(entrypoint).name
+                        output = f"{program} {common}\n"
+                return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
             def options(output: Path) -> ReleaseOptions:
                 return ReleaseOptions(
                     source=source,
                     ninfer=ninfer,
                     ninfer_serve=ninfer_serve,
+                    image="ninfer:test",
                     output_dir=output,
                     release_version="v0.1.0",
                     platform="linux-x86_64-cuda13.1",
@@ -129,10 +159,15 @@ class ReleasePackageTests(unittest.TestCase):
                     source_date_epoch=1_700_000_000,
                 )
 
+            run_patch = mock.patch.object(release_package, "run", side_effect=fake_run)
+            run_patch.start()
+            self.addCleanup(run_patch.stop)
             first = package_release(options(root / "release-one"))
             second = package_release(options(root / "release-two"))
             self.assertEqual(first["asset"], second["asset"])
             self.assertEqual(first["sbom"], second["sbom"])
+            self.assertEqual(first["image_id"], image_id)
+            self.assertEqual(first["schema_version"], 2)
 
             output = root / "release-one"
             asset = output / first["asset"]["name"]
@@ -168,6 +203,8 @@ class ReleasePackageTests(unittest.TestCase):
                 self.assertIsNotNone(identity_stream)
                 identity = json.load(identity_stream)
             self.assertEqual(identity["patch_stack_sha"], head)
+            self.assertEqual(identity["image_id"], image_id)
+            self.assertEqual(identity["schema_version"], 2)
             self.assertFalse(identity["source_dirty"])
             self.assertNotIn(str(source), json.dumps(identity))
 
@@ -175,6 +212,14 @@ class ReleasePackageTests(unittest.TestCase):
             self.assertEqual(spdx["spdxVersion"], "SPDX-2.3")
             self.assertEqual(len(spdx["files"]), 4)
             self.assertTrue(spdx["packages"][0]["filesAnalyzed"])
+
+            with mock.patch.object(
+                release_package, "image_binary_sha256", return_value="0" * 64
+            ):
+                with self.assertRaisesRegex(
+                    ReleaseError, "package binary differs from the release image"
+                ):
+                    package_release(options(root / "mismatched-image-release"))
 
             (source / "LICENSE").write_text("dirty\n", encoding="utf-8")
             with self.assertRaisesRegex(ReleaseError, "source tree must be clean"):
