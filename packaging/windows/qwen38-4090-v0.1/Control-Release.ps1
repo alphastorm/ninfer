@@ -17,16 +17,26 @@ function Read-JsonFile([string]$Path) {
 
 function Write-JsonAtomic([string]$Path, [object]$Value) {
     $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
-    [IO.File]::WriteAllText(
-        $temporary,
-        ($Value | ConvertTo-Json -Depth 12),
-        [Text.UTF8Encoding]::new($false)
-    )
-    Move-Item -LiteralPath $temporary -Destination $Path -Force
+    try {
+        [IO.File]::WriteAllText(
+            $temporary,
+            ($Value | ConvertTo-Json -Depth 16),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    }
+    finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Get-State {
-    return Read-JsonFile (Join-Path $StateRoot 'state.json')
+    $state = Read-JsonFile (Join-Path $StateRoot 'state.json')
+    if ($state.artifact_type -cne 'ninfer_windows_lifecycle_state' -or
+        [int]$state.schema_version -ne 3) {
+        throw 'release lifecycle state envelope mismatch'
+    }
+    return $state
 }
 
 function Get-Release([object]$State, [string]$ReleaseId) {
@@ -54,6 +64,218 @@ function Assert-FileHash([string]$Path, [string]$Expected, [string]$Label) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "$Label is missing" }
     $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
     if ($actual -cne $Expected) { throw "$Label SHA-256 mismatch" }
+}
+function Test-PathWithinRoot([string]$Path, [string]$Root) {
+    $separators = [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    $fullRoot = [IO.Path]::GetFullPath($Root).TrimEnd($separators) + [IO.Path]::DirectorySeparatorChar
+    return $fullPath.StartsWith($fullRoot, [StringComparison]::OrdinalIgnoreCase)
+}
+function Test-SamePath([string]$Left, [string]$Right) {
+    return [string]::Equals(
+        [IO.Path]::GetFullPath($Left),
+        [IO.Path]::GetFullPath($Right),
+        [StringComparison]::OrdinalIgnoreCase
+    )
+}
+
+
+function Assert-InstalledModelIdentity([object]$Release) {
+    foreach ($field in @(
+            'model_reference', 'model_bytes', 'model_creation_utc_ticks',
+            'model_last_write_utc_ticks', 'cache_root', 'receipts_root'
+        )) {
+        if ($null -eq $Release.PSObject.Properties[$field]) {
+            throw 'model artifact verified metadata is missing; reinstall the release'
+        }
+    }
+    $path = [string]$Release.model_artifact
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'model artifact is missing' }
+    if ([string]$Release.model_reference -cnotin @('external-pinned-read-only', 'legacy-managed-copy')) {
+        throw 'model artifact reference kind is unsupported; reinstall the release'
+    }
+    if ([string]$Release.model_reference -ceq 'external-pinned-read-only' -and
+        (Test-PathWithinRoot $path $StateRoot)) {
+        throw 'pinned model artifact is inside operation-owned lifecycle state'
+    }
+    $item = Get-Item -LiteralPath $path
+    if ([Int64]$item.Length -ne [Int64]$Release.model_bytes -or
+        [Int64]$item.CreationTimeUtc.Ticks -ne [Int64]$Release.model_creation_utc_ticks -or
+        [Int64]$item.LastWriteTimeUtc.Ticks -ne [Int64]$Release.model_last_write_utc_ticks) {
+        throw 'model artifact changed after install; reinstall the release'
+    }
+}
+
+function Assert-CandidateLayout([object]$Release, [string]$ReleaseId) {
+    if ([string]$Release.model_reference -cne 'external-pinned-read-only') { return }
+    $root = [string]$Release.release_root
+    $expectedRoot = Join-Path (Join-Path $StateRoot 'releases') $ReleaseId
+    if (-not (Test-SamePath $root $expectedRoot)) { throw 'candidate root identity mismatch' }
+    $expected = @('bin', 'config', 'logs', 'receipts')
+    $actual = @(Get-ChildItem -LiteralPath $root -Directory -Force | Sort-Object Name | ForEach-Object Name)
+    $expectedSorted = @($expected | Sort-Object)
+    if ($actual.Count -ne $expectedSorted.Count) { throw 'candidate root layout mismatch' }
+    for ($index = 0; $index -lt $expectedSorted.Count; $index++) {
+        if ([string]$actual[$index] -cne [string]$expectedSorted[$index]) {
+            throw 'candidate root layout mismatch'
+        }
+    }
+    if (@(Get-ChildItem -LiteralPath $root -File -Force).Count -ne 0) {
+        throw 'candidate root contains an unclassified file'
+    }
+    if (-not (Test-SamePath ([string]$Release.server_executable) (Join-Path (Join-Path $root 'bin') 'ninfer-serve.exe'))) {
+        throw 'candidate server executable identity mismatch'
+    }
+    if (-not (Test-SamePath ([string]$Release.config_file) (Join-Path (Join-Path $root 'config') 'server-config.json'))) {
+        throw 'candidate server config identity mismatch'
+    }
+    if (-not (Test-SamePath ([string]$Release.receipts_root) (Join-Path $root 'receipts'))) {
+        throw 'candidate receipts root identity mismatch'
+    }
+    $expectedCacheRoot = Join-Path (Join-Path $StateRoot 'cache') $ReleaseId
+    if (-not (Test-SamePath ([string]$Release.cache_root) $expectedCacheRoot)) {
+        throw 'candidate cache root identity mismatch'
+    }
+    $expectedSecret = Join-Path (Join-Path (Join-Path $StateRoot 'secrets') $ReleaseId) 'api-key.txt'
+    if (-not (Test-SamePath ([string]$Release.api_key_file) $expectedSecret)) {
+        throw 'candidate secret identity mismatch'
+    }
+}
+
+function Get-GpuOwner([object]$State) {
+    $property = $State.PSObject.Properties['gpu_owner']
+    if ($null -eq $property -or $null -eq $property.Value) { return $null }
+    $owner = $property.Value
+    Assert-FileHash ([string]$owner.controller_path) ([string]$owner.controller_sha256) `
+        'GPU-owner controller'
+    return $owner
+}
+
+function Invoke-GpuOwner([object]$State, [ValidateSet('status', 'stop', 'start')][string]$OwnerAction) {
+    $owner = Get-GpuOwner $State
+    if ($null -eq $owner) { return $null }
+    $output = ((& ([string]$owner.controller_path) -Action $OwnerAction) | Out-String).Trim()
+    if ($OwnerAction -cne 'status') { return $null }
+    if ([string]::IsNullOrWhiteSpace($output)) { throw 'GPU-owner status returned no JSON' }
+    $status = $output | ConvertFrom-Json
+    if ($null -eq $status.PSObject.Properties['paused'] -or
+        $status.paused -isnot [bool]) {
+        throw 'GPU-owner status must expose a paused boolean'
+    }
+    return $status
+}
+
+function Get-GpuOwnerLease {
+    $path = Join-Path $StateRoot 'gpu-owner-lease.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    $lease = Read-JsonFile $path
+    if ($lease.artifact_type -cne 'ninfer_gpu_owner_lease' -or [int]$lease.schema_version -ne 1) {
+        throw 'GPU-owner lease envelope mismatch'
+    }
+    return $lease
+}
+
+function Acquire-GpuOwnerLease {
+    $state = Get-State
+    $owner = Get-GpuOwner $state
+    if ($null -eq $owner) { return }
+    $leasePath = Join-Path $StateRoot 'gpu-owner-lease.json'
+    $lease = Get-GpuOwnerLease
+    if ($null -ne $lease) {
+        if ([string]$lease.controller_sha256 -cne [string]$owner.controller_sha256) {
+            throw 'GPU-owner lease controller identity mismatch'
+        }
+        return
+    }
+
+    $before = Invoke-GpuOwner $state 'status'
+    $lease = [ordered]@{
+        artifact_type = 'ninfer_gpu_owner_lease'
+        schema_version = 1
+        release_id = [string]$state.active_release
+        controller_sha256 = [string]$owner.controller_sha256
+        prior_paused = [bool]$before.paused
+        phase = 'captured'
+        acquired_utc = [DateTime]::UtcNow.ToString('o')
+    }
+    Write-JsonAtomic $leasePath $lease
+    try {
+        if (-not [bool]$before.paused) { Invoke-GpuOwner $state 'stop' | Out-Null }
+        $after = Invoke-GpuOwner $state 'status'
+        if (-not [bool]$after.paused) { throw 'GPU owner did not release the GPU' }
+        $lease.phase = 'released'
+        Write-JsonAtomic $leasePath $lease
+    }
+    catch {
+        $acquireFailure = $_
+        try {
+            if ([bool]$lease.prior_paused) {
+                Invoke-GpuOwner $state 'stop' | Out-Null
+            }
+            else {
+                Invoke-GpuOwner $state 'start' | Out-Null
+            }
+            Remove-Item -LiteralPath $leasePath -Force
+        }
+        catch {
+            throw [InvalidOperationException]::new(
+                "GPU-owner release failed and prior state restoration failed: $($_.Exception.Message)",
+                $acquireFailure.Exception
+            )
+        }
+        throw $acquireFailure
+    }
+}
+
+function Restore-GpuOwnerLease {
+    $lease = Get-GpuOwnerLease
+    if ($null -eq $lease) { return }
+    $state = Get-State
+    $owner = Get-GpuOwner $state
+    if ($null -eq $owner -or
+        [string]$lease.controller_sha256 -cne [string]$owner.controller_sha256) {
+        throw 'cannot restore GPU owner with a different controller identity'
+    }
+    if ([bool]$lease.prior_paused) {
+        Invoke-GpuOwner $state 'stop' | Out-Null
+    }
+    else {
+        Invoke-GpuOwner $state 'start' | Out-Null
+    }
+    $after = Invoke-GpuOwner $state 'status'
+    if ([bool]$after.paused -ne [bool]$lease.prior_paused) {
+        throw 'GPU-owner prior state was not restored exactly'
+    }
+    Remove-Item -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json') -Force
+}
+
+function Get-GpuOwnerStatus([object]$State) {
+    $ownerProperty = $State.PSObject.Properties['gpu_owner']
+    if ($null -eq $ownerProperty -or $null -eq $ownerProperty.Value) {
+        return [ordered]@{ managed = $false; lease_active = $false }
+    }
+    $lease = $null
+    try { $lease = Get-GpuOwnerLease } catch { $lease = $null }
+    try {
+        $status = Invoke-GpuOwner $State 'status'
+        return [ordered]@{
+            managed = $true
+            lease_active = $null -ne $lease
+            prior_paused = if ($null -eq $lease) { $null } else { [bool]$lease.prior_paused }
+            current_paused = [bool]$status.paused
+            controller_sha256 = [string]$ownerProperty.Value.controller_sha256
+            status = 'ok'
+        }
+    }
+    catch {
+        return [ordered]@{
+            managed = $true
+            lease_active = $null -ne $lease
+            controller_sha256 = [string]$ownerProperty.Value.controller_sha256
+            status = 'error'
+            error = $_.Exception.Message
+        }
+    }
 }
 
 function Get-OwnedProcess([object]$Runtime, [object]$Release) {
@@ -100,7 +322,7 @@ function Assert-ServerIdentity([object]$Status, [object]$Release) {
         patch_stack_sha = [string]$Release.patch_stack_sha
         deployment_profile = [string]$Release.deployment_profile
         binary_sha256 = [string]$Release.binary_sha256
-        model_artifact_sha256 = [string]$Release.model_sha256
+        model_artifact_sha256 = [string]$Release.model_artifact_sha256
         config_sha256 = [string]$Release.config_sha256
     }
     foreach ($entry in $expected.GetEnumerator()) {
@@ -130,19 +352,41 @@ function Get-StatusObject {
     }
     return [ordered]@{
         artifact_type = 'ninfer_windows_lifecycle_status'
-        schema_version = 1
+        schema_version = 3
         release_id = [string]$state.active_release
         previous_release_id = if ($null -eq $state.previous_release) { $null } else { [string]$state.previous_release }
         task_name = [string]$state.task_name
+        task_start_mode = 'explicit-on-demand'
         task_state = if ($null -eq $task) { 'missing' } else { [string]$task.State }
         process_state = if ($null -eq $owned) { 'stopped' } else { 'running' }
         endpoint_state = $endpointState
+        gpu_owner = Get-GpuOwnerStatus $state
         server = $serverStatus
     }
 }
 
+function Assert-ManagedStartLiveness([object]$State, [object]$Release) {
+    $task = Get-ScheduledTask -TaskName ([string]$State.task_name) -ErrorAction SilentlyContinue
+    if ($null -eq $task) {
+        throw 'managed scheduled task disappeared before release became ready'
+    }
+    if ([string]$task.State -cne 'Running') {
+        throw "managed scheduled task exited before release became ready: $($task.State)"
+    }
+
+    $runtime = Get-RuntimeState
+    if ($null -eq $runtime) {
+        throw 'managed scheduled task did not publish process ownership before startup grace elapsed'
+    }
+    if ($null -eq (Get-OwnedProcess $runtime $Release)) {
+        throw 'owned server process exited before release became ready'
+    }
+}
+
 function Wait-Ready([int]$TimeoutSeconds) {
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $started = [DateTime]::UtcNow
+    $startupGraceDeadline = $started.AddSeconds(5)
+    $deadline = $started.AddSeconds($TimeoutSeconds)
     $lastError = $null
     while ([DateTime]::UtcNow -lt $deadline) {
         try {
@@ -154,13 +398,18 @@ function Wait-Ready([int]$TimeoutSeconds) {
         }
         catch {
             $lastError = $_.Exception.Message
+            if ([DateTime]::UtcNow -ge $startupGraceDeadline) {
+                $state = Get-State
+                $release = Get-Release $state ([string]$state.active_release)
+                Assert-ManagedStartLiveness $state $release
+            }
             Start-Sleep -Seconds 2
         }
     }
     throw "release did not become ready: $lastError"
 }
 
-function Stop-ManagedRelease {
+function Stop-ManagedProcess {
     $state = Get-State
     $release = Get-Release $state ([string]$state.active_release)
     $runtime = Get-RuntimeState
@@ -186,6 +435,11 @@ function Stop-ManagedRelease {
     Remove-Item -LiteralPath (Join-Path $StateRoot 'runtime.json') -Force -ErrorAction SilentlyContinue
 }
 
+function Stop-ManagedRelease([bool]$RestoreOwner = $true) {
+    Stop-ManagedProcess
+    if ($RestoreOwner) { Restore-GpuOwnerLease }
+}
+
 function Start-ManagedRelease {
     $state = Get-State
     $release = Get-Release $state ([string]$state.active_release)
@@ -196,56 +450,136 @@ function Start-ManagedRelease {
     }
     $listener = Get-NetTCPConnection -State Listen -LocalPort ([int]$release.port) -ErrorAction SilentlyContinue
     if ($null -ne $listener) { throw 'release listen port is already owned by another process' }
-    Start-ScheduledTask -TaskName ([string]$state.task_name)
-    Wait-Ready 600 | Out-Null
+
+    Acquire-GpuOwnerLease
+    try {
+        Start-ScheduledTask -TaskName ([string]$state.task_name)
+        Wait-Ready 600 | Out-Null
+    }
+    catch {
+        $startFailure = $_
+        $cleanupFailures = [Collections.Generic.List[string]]::new()
+        try { Stop-ManagedProcess } catch { $cleanupFailures.Add("candidate stop: $($_.Exception.Message)") }
+        try { Restore-GpuOwnerLease } catch { $cleanupFailures.Add("GPU-owner restore: $($_.Exception.Message)") }
+        if ($cleanupFailures.Count -ne 0) {
+            throw [InvalidOperationException]::new(
+                "release start failed and cleanup was incomplete: $([string]::Join('; ', $cleanupFailures))",
+                $startFailure.Exception
+            )
+        }
+        throw $startFailure
+    }
+}
+
+function Quote-NativeArgument([string]$Argument) {
+    if ($Argument.Length -eq 0) { return '""' }
+    if ($Argument -notmatch '[\s"]') { return $Argument }
+    $builder = [Text.StringBuilder]::new()
+    $builder.Append('"') | Out-Null
+    $slashes = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq '\') {
+            $slashes++
+            continue
+        }
+        if ($character -eq '"') {
+            $builder.Append([string]::new([char]92, ($slashes * 2 + 1))) | Out-Null
+            $builder.Append('"') | Out-Null
+        }
+        else {
+            if ($slashes -ne 0) { $builder.Append([string]::new([char]92, $slashes)) | Out-Null }
+            $builder.Append($character) | Out-Null
+        }
+        $slashes = 0
+    }
+    if ($slashes -ne 0) { $builder.Append([string]::new([char]92, ($slashes * 2))) | Out-Null }
+    $builder.Append('"') | Out-Null
+    return $builder.ToString()
 }
 
 function Invoke-Run {
-    $state = Get-State
-    $release = Get-Release $state ([string]$state.active_release)
-    $lockPath = Join-Path $StateRoot 'run.lock'
-    $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite,
-                           [IO.FileShare]::None)
+    $state = $null
+    $lock = $null
+    $ownerLeaseHeld = $false
     try {
+        $lockPath = Join-Path $StateRoot 'run.lock'
+        $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite,
+                               [IO.FileShare]::None)
+        Acquire-GpuOwnerLease
+        $ownerLeaseHeld = $true
+        $state = Get-State
+        $release = Get-Release $state ([string]$state.active_release)
+        Assert-CandidateLayout $release ([string]$state.active_release)
         Assert-FileHash ([string]$release.server_executable) ([string]$release.binary_sha256) 'server executable'
-        Assert-FileHash ([string]$release.model_artifact) ([string]$release.model_sha256) 'model artifact'
+        Assert-InstalledModelIdentity $release
         Assert-FileHash ([string]$release.config_file) ([string]$release.config_sha256) 'server config'
         $config = Read-JsonFile ([string]$release.config_file)
-        $cache = Join-Path ([string]$release.release_root) 'cache'
+        $cache = [string]$release.cache_root
         $logs = Join-Path ([string]$release.release_root) 'logs'
         New-Item -ItemType Directory -Force -Path $cache, $logs | Out-Null
-        $serverArguments = @(
-            [string]$release.model_artifact,
-            '--host', [string]$config.listen.host,
-            '--port', [string]$config.listen.port,
-            '--api-key-file', [string]$release.api_key_file,
-            '--model-id', [string]$config.model_id,
-            '--binary-sha256', [string]$release.binary_sha256,
-            '--artifact-sha256', [string]$release.model_sha256,
-            '--config-sha256', [string]$release.config_sha256,
-            '--deployment-profile', [string]$release.deployment_profile,
-            '--device', [string]$config.engine.device,
-            '--max-context', [string]$config.engine.max_context,
-            '--kv-capacity', [string]$config.engine.kv_capacity,
-            '--prefill-chunk', [string]$config.engine.prefill_chunk,
-            '--kv-dtype', [string]$config.engine.kv_dtype,
-            '--max-concurrency', [string]$config.engine.max_concurrency,
-            '--max-pending-requests', [string]$config.engine.max_pending_requests,
-            '--pending-timeout-ms', [string]$config.engine.pending_timeout_ms,
-            '--reasoning-effort', [string]$config.reasoning.effort,
-            '--response-store-max-records', [string]$config.response_store.max_records,
-            '--response-store-max-mib', [string]$config.response_store.max_mib,
-            '--disk-cache',
-            '--disk-cache-dir', $cache,
-            '--disk-cache-gb', [string]$config.persistent_cache.quota_gib,
-            '--preserve-thinking',
-            '--request-log-jsonl', (Join-Path $logs 'requests.jsonl'),
-            '--log-stats-interval-ms', [string]$config.telemetry.stats_interval_ms,
-            '--no-ui'
-        )
+        $serverArguments = [Collections.Generic.List[string]]::new()
+        foreach ($argument in @(
+                [string]$release.model_artifact,
+                '--host', [string]$config.listen.host,
+                '--port', [string]$config.listen.port,
+                '--api-key-file', [string]$release.api_key_file,
+                '--model-id', [string]$config.model_id,
+                '--binary-sha256', [string]$release.binary_sha256,
+                '--artifact-sha256', [string]$release.model_artifact_sha256,
+                '--config-sha256', [string]$release.config_sha256,
+                '--deployment-profile', [string]$release.deployment_profile,
+                '--device', [string]$config.engine.device,
+                '--max-context', [string]$config.engine.max_context,
+                '--kv-capacity', [string]$config.engine.kv_capacity,
+                '--prefill-chunk', [string]$config.engine.prefill_chunk,
+                '--kv-dtype', [string]$config.engine.kv_dtype,
+                '--max-concurrency', [string]$config.engine.max_concurrency,
+                '--max-pending-requests', [string]$config.engine.max_pending_requests,
+                '--pending-timeout-ms', [string]$config.engine.pending_timeout_ms,
+                '--reasoning-effort', [string]$config.reasoning.effort,
+                '--response-store-max-records', [string]$config.response_store.max_records,
+                '--response-store-max-mib', [string]$config.response_store.max_mib,
+                '--request-log-jsonl', (Join-Path $logs 'requests.jsonl'),
+                '--log-stats-interval-ms', [string]$config.telemetry.stats_interval_ms,
+                '--no-ui'
+            )) {
+            $serverArguments.Add($argument)
+        }
+        if ([bool]$config.persistent_cache.enabled) {
+            foreach ($argument in @('--disk-cache', '--disk-cache-dir', $cache,
+                                    '--disk-cache-gb', [string]$config.persistent_cache.quota_gib)) {
+                $serverArguments.Add($argument)
+            }
+        }
+        if (-not [bool]$config.engine.cuda_graph) { $serverArguments.Add('--no-cuda-graph') }
+        if (-not [bool]$config.engine.prefix_reuse) { $serverArguments.Add('--no-prefix-reuse') }
+        if ([bool]$config.reasoning.preserve_thinking) { $serverArguments.Add('--preserve-thinking') }
+        if ([bool]$config.engine.vision) { $serverArguments.Add('--vision') }
+
+        $speculativeBackend = [string]$config.speculative.backend
+        $draftTokens = [int]$config.speculative.draft_tokens
+        if ($speculativeBackend -ceq 'none') {
+            if ($draftTokens -ne 0) { throw 'MTP0 configuration must use zero draft tokens' }
+        }
+        elseif ($speculativeBackend -ceq 'mtp') {
+            if ($draftTokens -lt 1 -or $draftTokens -gt 5) {
+                throw 'MTP draft tokens must be in [1,5]'
+            }
+            foreach ($argument in @('--spec', 'mtp', '--draft-tokens', [string]$draftTokens,
+                                    '--lm-head-draft')) {
+                $serverArguments.Add($argument)
+            }
+        }
+        else {
+            throw "unsupported release speculative backend: $speculativeBackend"
+        }
+
+        $argumentLine = [string]::Join(' ', @($serverArguments | ForEach-Object {
+                    Quote-NativeArgument $_
+                }))
         $stdout = Join-Path $logs 'stdout.log'
         $stderr = Join-Path $logs 'stderr.log'
-        $process = Start-Process -FilePath ([string]$release.server_executable) -ArgumentList $serverArguments `
+        $process = Start-Process -FilePath ([string]$release.server_executable) -ArgumentList $argumentLine `
             -WorkingDirectory ([string]$release.release_root) -RedirectStandardOutput $stdout `
             -RedirectStandardError $stderr -PassThru
         Write-JsonAtomic (Join-Path $StateRoot 'runtime.json') ([ordered]@{
@@ -258,11 +592,14 @@ function Invoke-Run {
         if ($process.ExitCode -ne 0) { throw "ninfer-serve exited with code $($process.ExitCode)" }
     }
     finally {
-        $runtime = Get-RuntimeState
-        if ($null -ne $runtime -and [string]$runtime.release_id -ceq [string]$state.active_release) {
-            Remove-Item -LiteralPath (Join-Path $StateRoot 'runtime.json') -Force -ErrorAction SilentlyContinue
+        if ($null -ne $state) {
+            $runtime = Get-RuntimeState
+            if ($null -ne $runtime -and [string]$runtime.release_id -ceq [string]$state.active_release) {
+                Remove-Item -LiteralPath (Join-Path $StateRoot 'runtime.json') -Force -ErrorAction SilentlyContinue
+            }
         }
-        $lock.Dispose()
+        if ($null -ne $lock) { $lock.Dispose() }
+        if ($ownerLeaseHeld) { Restore-GpuOwnerLease }
     }
 }
 
@@ -271,20 +608,26 @@ switch ($Action) {
         Invoke-Run
     }
     'Status' {
-        Get-StatusObject | ConvertTo-Json -Depth 16
+        Get-StatusObject | ConvertTo-Json -Depth 20
     }
     'Start' {
         Start-ManagedRelease
-        Get-StatusObject | ConvertTo-Json -Depth 16
+        Get-StatusObject | ConvertTo-Json -Depth 20
     }
     'Stop' {
         Stop-ManagedRelease
-        Get-StatusObject | ConvertTo-Json -Depth 16
+        Get-StatusObject | ConvertTo-Json -Depth 20
     }
     'Restart' {
-        Stop-ManagedRelease
-        Start-ManagedRelease
-        Get-StatusObject | ConvertTo-Json -Depth 16
+        Stop-ManagedRelease $false
+        try {
+            Start-ManagedRelease
+        }
+        catch {
+            Restore-GpuOwnerLease
+            throw
+        }
+        Get-StatusObject | ConvertTo-Json -Depth 20
     }
     'Rollback' {
         $state = Get-State
@@ -309,6 +652,6 @@ switch ($Action) {
             Start-ManagedRelease
             throw
         }
-        Get-StatusObject | ConvertTo-Json -Depth 16
+        Get-StatusObject | ConvertTo-Json -Depth 20
     }
 }

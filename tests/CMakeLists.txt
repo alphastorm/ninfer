@@ -13,6 +13,18 @@ if(WIN32)
       -File "${PROJECT_SOURCE_DIR}/tests/test_release_lifecycle.ps1"
       -InstallerPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/Install-Release.ps1"
       -ControllerPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/Control-Release.ps1")
+  add_test(
+    NAME ninfer_mtp_qualification_decision_test
+    COMMAND powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+      -File "${PROJECT_SOURCE_DIR}/tests/test_mtp_qualification_decision.ps1"
+      -ComparisonPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/Compare-MtpQualification.ps1"
+      -ReceiptConstructorPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/New-QualificationReceipt.ps1")
+  add_test(
+    NAME ninfer_windows_release_assets_test
+    COMMAND powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+      -File "${PROJECT_SOURCE_DIR}/tests/test_release_assets.ps1"
+      -PackageBuilderPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/New-Package.ps1"
+      -ServerConfigPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/server-config.json")
 endif()
 
 function(ninfer_add_test name)

@@ -2,15 +2,19 @@
   "artifact_type": "ninfer_windows_release_spec",
   "schema_version": 1,
   "release_id": "qwen38-4090-v0.1",
+  "release_version": "0.1.0",
   "deployment_profile": "sf-qwen38-4090-v0.1",
   "platform": "windows-x86_64",
   "gpu": {
+    "name": "NVIDIA GeForce RTX 4090",
     "class": "rtx-4090",
-    "cuda_architecture": "89"
+    "cuda_architecture": "89",
+    "compute_capability": "8.9",
+    "minimum_driver_major": 580
   },
   "source": {
     "upstream_base_sha": "9ec1b82c7afa021314682d7a95390f8935ead7c2",
-    "qualified_source_head": "a9bb55b8e9b02ff34e4725dc8ca95d4fadeb3e0d",
+    "qualified_source_head": "ea265776254a62ab5184454ba0163cdf04aad1e5",
     "bounded_staging_commit": "e89e415d95921cecf4cf8a00df5540a4a036ff84",
     "directstorage_fallback_commit": "a9bb55b8e9b02ff34e4725dc8ca95d4fadeb3e0d",
     "qualified_patch_sha256": "ac8ba36da9bfc89ff97021eecba8c7ba8f88f9e7e9bfd1c9c3509b723d81d4e0",
@@ -39,6 +43,18 @@
     "task_name": "NInfer-Qwen38-4090-v0.1",
     "listen_port": 18082,
     "installation_scope": "isolated-version-root",
+    "candidate_root_directories": ["bin", "config", "logs", "receipts"],
+    "model_artifact_ownership": "external-pinned-read-only",
+    "cache_ownership": "state-root-per-release",
+    "interrupted_install_reentry": "repair-required",
+    "task_start_mode": "explicit-on-demand",
+    "gpu_owner_controller_protocol": {
+      "required_on_first_install": true,
+      "inherited_on_upgrade": true,
+      "actions": ["status", "stop", "start"],
+      "status_paused_field": "paused",
+      "installation": "managed-copy-with-sha256"
+    },
     "production_route_mutation": false,
     "docker_mutation": false,
     "gaming_process_mutation": false

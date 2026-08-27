@@ -4,6 +4,14 @@ param(
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
     [string]$LongPromptFile,
 
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('MTP0', 'MTP3')]
+    [string]$Profile,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$GoldenReceiptPath,
+
     [string]$StateRoot = (Join-Path $env:ProgramData 'NInfer\qwen38-4090'),
 
     [string]$Python = 'python.exe',
@@ -13,6 +21,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'New-QualificationReceipt.ps1')
 
 Add-Type -AssemblyName System.Web.Extensions
 $jsonSerializer = [Web.Script.Serialization.JavaScriptSerializer]::new()
@@ -73,23 +82,54 @@ $status = Invoke-RestMethod -Method Get -Uri "$baseUrl/v1/ninfer/status" -Header
 if ($status.artifact_type -cne 'ninfer_server_status' -or $status.status -cne 'ok') {
     throw 'release status endpoint is not ready for qualification'
 }
+$expectedBackend = if ($Profile -ceq 'MTP0') { 'none' } else { 'mtp' }
+$expectedDraftTokens = if ($Profile -ceq 'MTP0') { 0 } else { 3 }
+if ([string]$config.speculative.backend -cne $expectedBackend -or
+    [int]$config.speculative.draft_tokens -ne $expectedDraftTokens -or
+    [string]$status.runtime.speculative_backend -cne $expectedBackend -or
+    [int]$status.runtime.speculative_draft_window -ne $expectedDraftTokens -or
+    [bool]$status.mtp.enabled -ne ($Profile -ceq 'MTP3')) {
+    throw "installed release does not match the requested $Profile arm"
+}
+$comparableConfig = $jsonSerializer.DeserializeObject($jsonSerializer.Serialize($config))
+$comparableConfig['speculative']['backend'] = '<qualification-arm>'
+$comparableConfig['speculative']['draft_tokens'] = -1
+$nonspeculativeConfigSha256 = Get-Digest ($jsonSerializer.Serialize($comparableConfig))
 
-$smokePath = Join-Path ([string]$release.release_root) 'smoke\agent_protocol.py'
+$golden = Read-JsonFile (Resolve-Path -LiteralPath $GoldenReceiptPath).Path
+if ($golden.artifact_type -cne 'ninfer_golden_private_receipt' -or
+    [int]$golden.schema_version -ne 1 -or
+    $golden.oracle_passed -ne $true -or
+    [int]$golden.exit_code -ne 0 -or
+    [double]$golden.wall_seconds -le 0 -or
+    [string]$golden.binary_sha256 -cne [string]$release.binary_sha256 -or
+    [string]$golden.model_artifact_sha256 -cne [string]$release.model_artifact_sha256 -or
+    [string]$golden.config_sha256 -cne [string]$release.config_sha256 -or
+    $golden.raw_prompt_or_output_included -ne $false) {
+    throw 'Golden t01 receipt failed or does not match the installed release identity'
+}
+
+$smokePath = Join-Path $PSScriptRoot 'smoke\agent_protocol.py'
 $protocolJson = & $Python $smokePath --base-url $baseUrl --model ([string]$config.model_id) `
     --api-key-file ([string]$release.api_key_file) `
     --expect-binary-sha256 ([string]$release.binary_sha256) `
-    --expect-model-artifact-sha256 ([string]$release.model_sha256) `
+    --expect-model-artifact-sha256 ([string]$release.model_artifact_sha256) `
     --expect-config-sha256 ([string]$release.config_sha256) `
     --expect-deployment-profile ([string]$release.deployment_profile)
 if ($LASTEXITCODE -ne 0) { throw 'agent protocol smoke failed' }
 $protocol = ($protocolJson | Out-String) | ConvertFrom-Json
+if ($protocol.artifact_type -cne 'ninfer_agent_protocol_smoke' -or
+    [int]$protocol.schema_version -ne 1 -or $protocol.status -cne 'passed') {
+    throw 'agent protocol receipt envelope mismatch'
+}
 
 $longPromptPath = (Resolve-Path -LiteralPath $LongPromptFile).Path
 $longPrompt = [IO.File]::ReadAllText($longPromptPath, [Text.UTF8Encoding]::new($false, $true))
 if ([string]::IsNullOrWhiteSpace($longPrompt)) { throw 'long prompt corpus is empty' }
-$sessionDigest = Get-Digest 'ninfer-qwen38-4090-v0.1/qualification-session'
-$firstRequestDigest = Get-Digest 'ninfer-qwen38-4090-v0.1/qualification-first'
-$secondRequestDigest = Get-Digest 'ninfer-qwen38-4090-v0.1/qualification-post-restart'
+$digestPrefix = "ninfer-qwen38-4090-v0.1/$($Profile.ToLowerInvariant())"
+$sessionDigest = Get-Digest "$digestPrefix/qualification-session"
+$firstRequestDigest = Get-Digest "$digestPrefix/qualification-first"
+$secondRequestDigest = Get-Digest "$digestPrefix/qualification-post-restart"
 $chatUri = "$baseUrl/v1/chat/completions"
 $firstBody = [ordered]@{
     model = [string]$config.model_id
@@ -152,37 +192,52 @@ if ([string]::IsNullOrWhiteSpace($ReceiptPath)) {
     $receiptDirectory = Join-Path $StateRoot 'receipts'
     New-Item -ItemType Directory -Force -Path $receiptDirectory | Out-Null
     $ReceiptPath = Join-Path $receiptDirectory (
-        'qualification-' + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ') + '.json'
+        "qualification-$($Profile.ToLowerInvariant())-" + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ') + '.json'
     )
 }
-$receipt = [ordered]@{
-    artifact_type = 'ninfer_windows_release_qualification'
-    schema_version = 1
-    status = 'passed'
-    qualified_utc = [DateTime]::UtcNow.ToString('o')
-    release_id = [string]$state.active_release
-    identity = $status.identity
-    configuration = [ordered]@{
+$receiptParameters = @{
+    QualifiedUtc = [DateTime]::UtcNow.ToString('o')
+    ReleaseId = [string]$state.active_release
+    Profile = $Profile
+    Identity = $status.identity
+    Configuration = [ordered]@{
         public_model_id = [string]$config.model_id
         max_context = [int]$config.engine.max_context
+        kv_capacity = [int]$config.engine.kv_capacity
         kv_dtype = [string]$config.engine.kv_dtype
+        prefill_chunk = [int]$config.engine.prefill_chunk
         speculative_backend = [string]$config.speculative.backend
+        speculative_draft_tokens = [int]$config.speculative.draft_tokens
         reasoning_effort = [string]$config.reasoning.effort
         disk_cache_gib = [int]$config.persistent_cache.quota_gib
+        concurrency = [int]$config.engine.max_concurrency
     }
-    protocol = $protocol
-    persistence = [ordered]@{
+    NonspeculativeConfigSha256 = $nonspeculativeConfigSha256
+    Protocol = $protocol
+    LongSession = [ordered]@{
         first_prompt_tokens = [int]$first.usage.prompt_tokens
         first_completion_tokens = [int]$first.usage.completion_tokens
         first_elapsed_seconds = ($firstFinished - $firstStarted).TotalSeconds
         post_restart_prompt_tokens = [int]$second.usage.prompt_tokens
         post_restart_completion_tokens = [int]$second.usage.completion_tokens
         post_restart_elapsed_seconds = ($secondFinished - $secondStarted).TotalSeconds
+    }
+    Persistence = [ordered]@{
+        exact = $true
         restored_tokens = [int]$matchingRecord.result.prefix_cache_hit_tokens
         reuse_path = [string]$matchingRecord.result.prefix_reuse_path
         post_restart_prepare_seconds = [double]$matchingRecord.timings_seconds.prepare
     }
+    GoldenT01 = $golden
+    DeterministicGates = [ordered]@{
+        protocol = 'passed'
+        long_session = 'passed'
+        persistence = 'passed'
+        golden_oracle = 'passed'
+        malformed_tool_or_final_output = $false
+    }
 }
+$receipt = New-NInferQualificationReceipt @receiptParameters
 [IO.File]::WriteAllText(
     $ReceiptPath,
     ($receipt | ConvertTo-Json -Depth 20),
