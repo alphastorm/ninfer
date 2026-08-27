@@ -205,10 +205,13 @@ int run(const Options& options) {
     }
     const std::array<ninfer::runtime::CommitDecision, 1> begin_decision{
         ninfer::runtime::CommitDecision{.accepted_tokens = 1}};
-    (void)program->commit(std::move(*progress.pending), begin_decision);
-    const auto active_sequence = started.sequence;
+    const auto began = program->commit(std::move(*progress.pending), begin_decision);
+    if (began.rows.size() != 1) {
+        throw std::runtime_error("benchmark seed commit returned the wrong row count");
+    }
+    const ninfer::SpeculativeStats stats_before = began.rows.front().speculative;
+    const auto active_sequence                  = started.sequence;
 
-    constexpr std::uint64_t rounds_before = 0;
     for (int iteration = 0; iteration < options.warmup; ++iteration) {
         (void)measure_round(*program, device, active_sequence, options.draft_tokens);
     }
@@ -232,8 +235,16 @@ int run(const Options& options) {
         throw std::runtime_error("benchmark could not release its active sequence");
     }
     const ninfer::SpeculativeStats stats = aborted.speculative;
-    if (stats.rounds - rounds_before != measured_rounds || stats.fallback_steps != 0) {
-        throw std::runtime_error("benchmark did not stay on the native MTP proposal/verify path");
+    if (stats.rounds < stats_before.rounds || stats.fallback_steps < stats_before.fallback_steps) {
+        throw std::runtime_error("benchmark speculative counters moved backward");
+    }
+    const std::uint64_t round_delta    = stats.rounds - stats_before.rounds;
+    const std::uint64_t fallback_delta = stats.fallback_steps - stats_before.fallback_steps;
+    if (round_delta != measured_rounds || fallback_delta != 0) {
+        throw std::runtime_error("benchmark left the native MTP proposal/verify path: rounds=" +
+                                 std::to_string(round_delta) + "/" +
+                                 std::to_string(measured_rounds) +
+                                 " fallback_steps=" + std::to_string(fallback_delta));
     }
 
     std::vector<float> milliseconds;
