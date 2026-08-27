@@ -224,7 +224,13 @@ def install_tool_mocks(root: Path) -> Path:
           exit 0
         fi
         if [[ ${1:-} == stats ]]; then
-          printf 'Kernel Name,Total Time\nmock,1\n'
+          printf 'Total Time (ns),Name\n'
+          if [[ ${MOCK_NSYS_GRAPH_SUMMARY_INVALID:-0} == 1 ]]; then
+            printf '167822,recurrent_fold_kernel\n'
+          else
+            printf '12000000,q5_rowsplit_gemm_simt_split2_kernel\n'
+            printf '3000000,recurrent_fold_kernel\n'
+          fi
           exit 0
         fi
         exit 90
@@ -352,11 +358,14 @@ class Sm120Mtp3ProfileRunnerTest(unittest.TestCase):
             check=False,
         )
 
-    def run_capture(self, *, counter_denied: bool = False) -> subprocess.CompletedProcess[str]:
+    def run_capture(
+        self, *, counter_denied: bool = False, graph_summary_invalid: bool = False
+    ) -> subprocess.CompletedProcess[str]:
         environment = {
             **self.environment,
             "MOCK_SOURCE_DIRTY": "0",
             "MOCK_NCU_COUNTER_DENIED": "1" if counter_denied else "0",
+            "MOCK_NSYS_GRAPH_SUMMARY_INVALID": "1" if graph_summary_invalid else "0",
         }
         return subprocess.run(
             [
@@ -391,7 +400,8 @@ class Sm120Mtp3ProfileRunnerTest(unittest.TestCase):
         self.assertTrue(any(line.startswith("cmake -S ") for line in log))
         self.assertTrue(any(line.startswith("cmake --build ") for line in log))
         self.assertIn(
-            "nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop --help",
+            "nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop "
+            "--cuda-graph-trace=node --help",
             log,
         )
         self.assertFalse(any(line.startswith(("ncu ", "nvidia-smi ")) for line in log))
@@ -412,6 +422,7 @@ class Sm120Mtp3ProfileRunnerTest(unittest.TestCase):
             0o644,
         )
         self.assertTrue((output / "nsys" / "mtp3-round.nsys-rep").is_file())
+        self.assertTrue((output / "nsys" / "summary-verified.txt").is_file())
         for name in (
             "q5-split2-cold.ncu-rep",
             "q5-split2-q4-produced.ncu-rep",
@@ -440,6 +451,7 @@ class Sm120Mtp3ProfileRunnerTest(unittest.TestCase):
             any(
                 line.startswith("nsys profile ")
                 and "--capture-range-end=stop" in line
+                and "--cuda-graph-trace=node" in line
                 and "--stop-on-range-end" not in line
                 for line in log
             )
@@ -491,6 +503,18 @@ class Sm120Mtp3ProfileRunnerTest(unittest.TestCase):
         self.assertFalse((self.paths["output"] / "ncu" / "counter-access-verified.txt").exists())
         self.assertFalse((self.paths["output"] / "timings" / "summary.json").exists())
         self.assertFalse(any(line.startswith("nsys profile ") for line in self.tool_log_lines()))
+
+    def test_rejects_nsys_summary_without_graph_nodes(self) -> None:
+        prepared = self.run_prepare()
+        self.assertEqual(prepared.returncode, 0, prepared.stderr + prepared.stdout)
+        self.paths["tool_log"].write_text("", encoding="utf-8")
+
+        completed = self.run_capture(graph_summary_invalid=True)
+
+        self.assertNotEqual(completed.returncode, 0)
+        self.assertIn("did not expose the CUDA Graph node topology", completed.stderr)
+        self.assertFalse((self.paths["output"] / "nsys" / "summary-verified.txt").exists())
+        self.assertFalse((self.paths["output"] / "packet-complete.txt").exists())
 
 
 if __name__ == "__main__":

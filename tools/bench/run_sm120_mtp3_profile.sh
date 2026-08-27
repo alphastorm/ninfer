@@ -158,7 +158,8 @@ if [[ $mode == prepare ]]; then
 
   mkdir -p "$prepare_dir/environment"
   run_logged "$prepare_dir/environment/nsys-profile-help.log" \
-    nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop --help
+    nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop \
+      --cuda-graph-trace=node --help
   run_logged "$prepare_dir/environment/configure.log" \
     cmake -S "$source_root" -B "$build_dir" -G Ninja \
       -DCMAKE_BUILD_TYPE=RelWithDebInfo \
@@ -481,13 +482,44 @@ PY
 
 run_logged "$output_dir/nsys/mtp3-round.log" \
   timeout "$nsys_timeout" nsys profile --trace=cuda,nvtx,osrt --capture-range=cudaProfilerApi \
-    --capture-range-end=stop --force-overwrite=true \
+    --capture-range-end=stop --cuda-graph-trace=node --force-overwrite=true \
     -o "$output_dir/nsys/mtp3-round" \
     "$mtp_round_bench" --artifact "$artifact" --draft-tokens 3 --proposal-head optimized \
       --warmup 2 --reps 1 --profile-measured
 timeout "$nsys_timeout" nsys stats --report cuda_gpu_kern_sum --format csv \
   "$output_dir/nsys/mtp3-round.nsys-rep" >"$output_dir/nsys/summary.csv" \
   2>"$output_dir/nsys/summary.stderr.log"
+"$python" - "$output_dir/nsys/summary.csv" "$output_dir/nsys/summary-verified.txt" <<'PY'
+import csv
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+rows = list(csv.reader(source.read_text(encoding="utf-8").splitlines()))
+header_index = next(
+    (
+        index
+        for index, row in enumerate(rows)
+        if "Total Time (ns)" in row and "Name" in row
+    ),
+    None,
+)
+if header_index is None:
+    raise SystemExit("Nsight Systems kernel summary header was not found")
+header = rows[header_index]
+total_index = header.index("Total Time (ns)")
+name_index = header.index("Name")
+kernels = [row for row in rows[header_index + 1 :] if len(row) == len(header) and row[name_index]]
+total_ns = sum(float(row[total_index].replace(",", "")) for row in kernels)
+if len(kernels) < 2 or total_ns < 1.0e6:
+    raise SystemExit("Nsight Systems did not expose the CUDA Graph node topology")
+if not any("q5_rowsplit_gemm_simt_split2_kernel" in row[name_index] for row in kernels):
+    raise SystemExit("Nsight Systems summary omitted the profiled Q5 post-mixer kernel")
+Path(sys.argv[2]).write_text(
+    f"kernel_rows\t{len(kernels)}\ntotal_kernel_time_ns\t{total_ns:.0f}\n",
+    encoding="utf-8",
+)
+PY
 
 
 capture_q5 q5-split2-q4-produced q4-produced public

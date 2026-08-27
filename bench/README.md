@@ -765,7 +765,7 @@ the measured production MTP round with `cudaProfilerStart/Stop`. Use it with an 
 
 ```bash
 nsys profile --trace=cuda,nvtx,osrt --capture-range=cudaProfilerApi \
-  --capture-range-end=stop -o profiles/nsys/mtp3-round \
+  --capture-range-end=stop --cuda-graph-trace=node -o profiles/nsys/mtp3-round \
   ./build/bench/ninfer_qwen3_6_27b_mtp_round_bench \
     --artifact out/qwen3_6_27b.ninfer --draft-tokens 3 \
     --proposal-head optimized --warmup 2 --reps 1 --profile-measured
