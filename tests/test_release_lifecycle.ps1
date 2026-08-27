@@ -20,7 +20,7 @@ $global:NInferTestStateRoot = $null
 $global:NInferTestDeadReleaseId = $null
 $global:NInferTestDeadStartSleptMilliseconds = 0
 $global:NInferTestAclFailure = $false
-$global:NInferStateAclHardened = $false
+$global:NInferAclObservations = [Collections.Generic.List[object]]::new()
 $global:NInferTestAclResetArguments = @()
 
 function global:Get-ScheduledTask {
@@ -166,7 +166,12 @@ function global:Start-Sleep {
 
 function global:icacls.exe {
     $arguments = @($args | ForEach-Object { [string]$_ })
-    if ($arguments -contains '/inheritance:r') { $global:NInferStateAclHardened = $true }
+    if ($arguments -contains '/inheritance:r') {
+        $global:NInferAclObservations.Add([ordered]@{
+                transactions_exist = Test-Path -LiteralPath (Join-Path $global:NInferTestStateRoot 'receipts/install-transactions')
+                secrets_exist = Test-Path -LiteralPath (Join-Path $global:NInferTestStateRoot 'secrets')
+            })
+    }
     if ($arguments -contains '/reset') {
         $global:NInferTestAclResetArguments = $arguments
         if ($global:NInferTestAclFailure) {
@@ -533,7 +538,9 @@ try {
     }
     Assert-True $missingOwnerRejected 'first install accepted no GPU-owner controller'
     Invoke-FixtureInstall $basePackage $baseSecret
-    Assert-True $global:NInferStateAclHardened 'state ACL was not hardened before first-install writes'
+    $earlyAclObservations = @($global:NInferAclObservations | Where-Object { -not $_.transactions_exist -and -not $_.secrets_exist })
+    Assert-Equal $earlyAclObservations.Count 1 'first-install ACL hardening did not precede transaction and secret children'
+    Assert-True (-not [bool]$global:NInferAclObservations[0].transactions_exist -and -not [bool]$global:NInferAclObservations[0].secrets_exist) 'first ACL hardening invocation was late'
     $state = Read-State
     Assert-Equal $state.active_release 'base-release' 'base release did not activate'
     Assert-Equal ([int]$state.schema_version) 3 'base release did not publish schema 3 state'
@@ -1008,7 +1015,7 @@ try {
         candidate_model_copies = 0
         dead_start_rejections = 1
         captured_gpu_lease_reentries = 1
-        early_state_acl_hardening = 1
+        early_state_acl_hardening = $earlyAclObservations.Count
         selected_gpu_identity_bindings = 1
         dead_start_sleep_milliseconds = $global:NInferTestDeadStartSleptMilliseconds
     } | ConvertTo-Json -Compress

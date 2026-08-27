@@ -170,7 +170,6 @@
     "docker_ownership_preserved": true,
     "public_release_or_asset_published": false
   },
-  "lifecycle_source_commit": "669b729af635b55c69bfe8b5e76fd45614c96883",
   "regression_evidence": {
     "lifecycle_source_commit": "669b729af635b55c69bfe8b5e76fd45614c96883",
     "receipts": {
@@ -189,6 +188,15 @@
         "artifact_type": "ninfer_mtp_decision_regression",
         "status": "passed"
       }
-    }
+    },
+    "scope": "current focused host-side regression evidence; does not rebind the previously assembled package",
+    "current_installer_sha256": "0153ca0ff0e8efd5ba70a035366c4dd86db88b0e7adf69f33045fb430a3adf8e",
+    "current_controller_sha256": "c9d2bc0b1aea459315eb3d9ee70809cdb4811107efe53dde359a310fbf44f0f6"
+  },
+  "package_evidence": {
+    "lifecycle_source_commit": "09f38db0d506d09e7c381c862aeea3e243e09669",
+    "embedded_installer_sha256": "6bd36fa79051200c128e047944222a7695785c3b042b64d46c1c879fbb992aae",
+    "embedded_controller_sha256": "b01254f14f204e534473cb188218429a384fdb8e4f146b65ed710f81075e0a55",
+    "scope": "fresh package and live B/I/R evidence; superseded lifecycle scripts"
   }
 }
