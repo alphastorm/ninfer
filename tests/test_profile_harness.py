@@ -47,13 +47,16 @@ def wait_until(predicate: Callable[[], bool], timeout: float = 5.0) -> None:
     raise AssertionError("condition was not reached before timeout")
 
 
-def lease_fixture(tmp_path: Path, *, controller: bool) -> tuple[Path, dict[str, str], Path, Path]:
+def lease_fixture(
+    tmp_path: Path, *, controller: bool, stop_timeout_seconds: int = 1
+) -> tuple[Path, dict[str, str], Path, Path]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     state = tmp_path / "production-running"
     state.write_text("true\n", encoding="utf-8")
     docker_log = tmp_path / "docker.log"
     controller_log = tmp_path / "controller.log"
+    candidate_state = tmp_path / "candidate-running"
 
     write_executable(
         bin_dir / "docker",
@@ -64,7 +67,11 @@ from pathlib import Path
 
 state = Path(os.environ["FAKE_PRODUCTION_STATE"])
 log = Path(os.environ["FAKE_DOCKER_LOG"])
+candidate_state = Path(os.environ["FAKE_CANDIDATE_STATE"])
 args = sys.argv[1:]
+if args[:2] != ["--context", "default"]:
+    raise SystemExit(f"unexpected fake docker context: {args!r}")
+args = args[2:]
 
 
 def record(value: str) -> None:
@@ -72,6 +79,15 @@ def record(value: str) -> None:
         stream.write(value + "\\n")
 
 
+if args[:2] == ["context", "inspect"]:
+    print("unix:///var/run/docker.sock")
+    raise SystemExit(0)
+if args[0] == "info":
+    if "{{json .Runtimes}}" in args:
+        print('{}' if os.environ.get("FAKE_NO_NVIDIA_RUNTIME") == "1" else '{"nvidia": {}}')
+    else:
+        print("fake-daemon-id")
+    raise SystemExit(0)
 if args[0] == "inspect":
     fmt, container = args[2], args[3]
     if container == "production":
@@ -93,6 +109,8 @@ if args[0] == "inspect":
     print(values.get(fmt, "snapshot"))
     raise SystemExit(0)
 if args[0] == "ps":
+    if candidate_state.exists():
+        print("candidate-id")
     raise SystemExit(0)
 if args[0] == "stop":
     record("stop")
@@ -100,12 +118,18 @@ if args[0] == "stop":
     raise SystemExit(0)
 if args[0] == "rm":
     record("remove")
+    if os.environ.get("FAKE_REMOVE_FAIL") == "1":
+        raise SystemExit(1)
+    candidate_state.unlink(missing_ok=True)
     raise SystemExit(0)
 raise SystemExit(f"unsupported fake docker command: {args!r}")
 """,
     )
     write_executable(bin_dir / "curl", "#!/usr/bin/env bash\nexit 0\n")
-    write_executable(bin_dir / "nvidia-smi", "#!/usr/bin/env bash\necho 'fake gpu'\n")
+    write_executable(
+        bin_dir / "nvidia-smi",
+        "#!/usr/bin/env bash\n[[ ${FAKE_NVIDIA_SMI_FAIL:-0} != 1 ]] || exit 88\necho 'fake gpu'\n",
+    )
     write_executable(
         bin_dir / "setsid",
         """#!/usr/bin/env python3
@@ -140,8 +164,16 @@ else:
         )
 
     result_dir = tmp_path / "result"
+    docker_config = tmp_path / "docker-config"
+    docker_config.mkdir()
+    docker_config.joinpath("config.json").write_text("{}\n", encoding="utf-8")
     config_values = {
         "PROFILE_RESULT_DIR": result_dir,
+        "PROFILE_DOCKER_CLI": bin_dir / "docker",
+        "PROFILE_DOCKER_CONTEXT": "default",
+        "PROFILE_DOCKER_ENDPOINT": "unix:///var/run/docker.sock",
+        "PROFILE_DOCKER_DAEMON_ID": "fake-daemon-id",
+        "PROFILE_DOCKER_CONFIG": docker_config,
         "CANDIDATE_PREFIX": "profile-test-",
         "CANDIDATE_PORT": free_port(),
         "PRODUCTION_CONTAINER": "production",
@@ -155,7 +187,7 @@ else:
         "ROLLBACK_IMAGE_ID": "sha256:rollback-image",
         "ROLLBACK_RUNNING": "false",
         "ROLLBACK_RESTART_POLICY": "no",
-        "PROFILE_PAYLOAD_STOP_TIMEOUT_SECONDS": 1,
+        "PROFILE_PAYLOAD_STOP_TIMEOUT_SECONDS": stop_timeout_seconds,
     }
     config = tmp_path / "profile.conf"
     config.write_text(
@@ -167,6 +199,7 @@ else:
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
         "FAKE_PRODUCTION_STATE": str(state),
         "FAKE_DOCKER_LOG": str(docker_log),
+        "FAKE_CANDIDATE_STATE": str(candidate_state),
         "FAKE_CONTROLLER_LOG": str(controller_log),
     }
     return config, env, state, docker_log
@@ -252,7 +285,7 @@ class ProfileHarnessTest(unittest.TestCase):
         config, env, state, docker_log = lease_fixture(self.tmp_path, controller=False)
 
         completed = subprocess.run(
-            [LEASE_SCRIPT, config, "/usr/bin/true"],
+            [LEASE_SCRIPT, "run", config, "/usr/bin/true"],
             cwd=REPO_ROOT,
             env=env,
             check=False,
@@ -266,6 +299,181 @@ class ProfileHarnessTest(unittest.TestCase):
         self.assertEqual(state.read_text(encoding="utf-8").strip(), "true")
         self.assertFalse(docker_log.exists())
 
+    def test_lease_rejects_daemon_identity_drift_before_stopping_production(self) -> None:
+        config, env, state, docker_log = lease_fixture(self.tmp_path, controller=True)
+        config.write_text(
+            config.read_text(encoding="utf-8").replace(
+                "PROFILE_DOCKER_DAEMON_ID=fake-daemon-id",
+                "PROFILE_DOCKER_DAEMON_ID=wrong-daemon-id",
+            ),
+            encoding="utf-8",
+        )
+
+        completed = subprocess.run(
+            [LEASE_SCRIPT, "run", config, "/usr/bin/true"],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("differs from PROFILE_DOCKER_DAEMON_ID", completed.stderr)
+        self.assertEqual(state.read_text(encoding="utf-8").strip(), "true")
+        self.assertFalse(docker_log.exists())
+        self.assertFalse((self.tmp_path / "result").exists())
+
+    def test_lease_check_validates_restore_route_without_mutation(self) -> None:
+        config, env, state, docker_log = lease_fixture(self.tmp_path, controller=True)
+
+        completed = subprocess.run(
+            [LEASE_SCRIPT, "check", config],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertIn("profile lease check passed", completed.stdout)
+        self.assertEqual(state.read_text(encoding="utf-8").strip(), "true")
+        self.assertFalse(docker_log.exists())
+        self.assertFalse((self.tmp_path / "result").exists())
+
+    def test_lease_rejects_missing_nvidia_smi_before_stopping_production(self) -> None:
+        config, env, state, docker_log = lease_fixture(self.tmp_path, controller=True)
+        Path(env["PATH"].split(":", 1)[0], "nvidia-smi").unlink()
+
+        completed = subprocess.run(
+            [LEASE_SCRIPT, "run", config, "/usr/bin/true"],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("nvidia-smi is required", completed.stderr)
+        self.assertEqual(state.read_text(encoding="utf-8").strip(), "true")
+        self.assertFalse(docker_log.exists())
+        self.assertFalse((self.tmp_path / "result").exists())
+
+    def test_lease_rejects_missing_nvidia_runtime_before_stopping_production(self) -> None:
+        config, env, state, _docker_log = lease_fixture(self.tmp_path, controller=True)
+        env["FAKE_NO_NVIDIA_RUNTIME"] = "1"
+
+        completed = subprocess.run(
+            [LEASE_SCRIPT, "check", config],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        self.assertEqual(completed.returncode, 1)
+        self.assertIn("has no nvidia runtime", completed.stderr)
+        self.assertEqual(state.read_text(encoding="utf-8").strip(), "true")
+        self.assertFalse((self.tmp_path / "result").exists())
+
+    def test_lease_rejects_failed_nvidia_query_before_stopping_production(self) -> None:
+        config, env, state, docker_log = lease_fixture(self.tmp_path, controller=True)
+        env["FAKE_NVIDIA_SMI_FAIL"] = "1"
+
+        completed = subprocess.run(
+            [LEASE_SCRIPT, "run", config, "/usr/bin/true"],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("host nvidia-smi query failed before the profile outage", completed.stderr)
+        self.assertEqual(state.read_text(encoding="utf-8").strip(), "true")
+        self.assertFalse(docker_log.exists())
+        self.assertFalse((self.tmp_path / "result").exists())
+
+    def test_lease_marks_the_fixed_payload_boundary_and_restores_production(self) -> None:
+        config, env, state, _docker_log = lease_fixture(self.tmp_path, controller=True)
+        observed_marker = self.tmp_path / "observed-marker"
+        env["FAKE_OBSERVED_MARKER"] = str(observed_marker)
+        payload = self.tmp_path / "fixed-payload"
+        write_executable(
+            payload,
+            """#!/usr/bin/env python3
+import os
+from pathlib import Path
+
+Path(os.environ["FAKE_OBSERVED_MARKER"]).write_text(
+    os.environ["NINFER_PROFILE_LEASE_ACTIVE"], encoding="utf-8"
+)
+""",
+        )
+
+        completed = subprocess.run(
+            [LEASE_SCRIPT, "run", config, payload],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        result_dir = self.tmp_path / "result"
+        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
+        self.assertEqual(
+            observed_marker.read_text(encoding="utf-8"),
+            str(result_dir / "lease-active"),
+        )
+        self.assertTrue((result_dir / "production-stopped-at.txt").is_file())
+        self.assertFalse((result_dir / "lease-active").exists())
+        self.assertTrue((result_dir / "production-restored-at.txt").is_file())
+        self.assertEqual(state.read_text(encoding="utf-8").strip(), "true")
+
+    def test_lease_blocks_restart_when_candidate_removal_fails(self) -> None:
+        config, env, state, _docker_log = lease_fixture(self.tmp_path, controller=True)
+        env["FAKE_REMOVE_FAIL"] = "1"
+        payload = self.tmp_path / "leave-candidate"
+        write_executable(
+            payload,
+            """#!/usr/bin/env python3
+import os
+from pathlib import Path
+
+Path(os.environ["FAKE_CANDIDATE_STATE"]).write_text("running\\n", encoding="utf-8")
+""",
+        )
+
+        completed = subprocess.run(
+            [LEASE_SCRIPT, "run", config, payload],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        result_dir = self.tmp_path / "result"
+        self.assertEqual(completed.returncode, 90, completed.stderr + completed.stdout)
+        self.assertEqual(state.read_text(encoding="utf-8").strip(), "false")
+        self.assertTrue((result_dir / "candidate-removal-failed.txt").is_file())
+        self.assertTrue((result_dir / "production-restore-failed-at.txt").is_file())
+        self.assertFalse((result_dir / "production-restored-at.txt").exists())
+        controller_calls = Path(env["FAKE_CONTROLLER_LOG"]).read_text(encoding="utf-8")
+        self.assertNotIn("restart", controller_calls.splitlines())
+
     def test_lease_signal_terminates_payload_and_restores_production(self) -> None:
         cases = (
             (signal.SIGHUP, 129, "HUP"),
@@ -276,7 +484,9 @@ class ProfileHarnessTest(unittest.TestCase):
             with self.subTest(signal=signal_name):
                 case_path = self.tmp_path / f"signal-{index}"
                 case_path.mkdir()
-                config, env, state, docker_log = lease_fixture(case_path, controller=True)
+                config, env, state, docker_log = lease_fixture(
+                    case_path, controller=True, stop_timeout_seconds=4
+                )
                 payload_pid = case_path / "payload.pid"
                 payload_signal = case_path / "payload.signal"
                 env["FAKE_PAYLOAD_PID"] = str(payload_pid)
@@ -304,7 +514,7 @@ while True:
                 )
 
                 process = subprocess.Popen(
-                    [LEASE_SCRIPT, config, payload],
+                    [LEASE_SCRIPT, "run", config, payload],
                     cwd=REPO_ROOT,
                     env=env,
                     stdout=subprocess.DEVNULL,
@@ -317,6 +527,7 @@ while True:
                         and docker_log.exists()
                         and "stop" in docker_log.read_text(encoding="utf-8")
                     )
+                    signal_started = time.monotonic()
                     process.send_signal(sent_signal)
                     try:
                         returncode = process.wait(timeout=5)
@@ -329,6 +540,7 @@ while True:
                                 pass
                         process.wait(timeout=2)
                         self.fail("lease did not preempt the running payload")
+                    signal_elapsed = time.monotonic() - signal_started
                 finally:
                     if process.poll() is None:
                         os.killpg(process.pid, signal.SIGKILL)
@@ -336,12 +548,152 @@ while True:
 
                 result_dir = case_path / "result"
                 self.assertEqual(returncode, expected_status)
+                self.assertLess(signal_elapsed, 2.0)
                 self.assertEqual(payload_signal.read_text(encoding="utf-8"), signal_name)
                 self.assertEqual(state.read_text(encoding="utf-8").strip(), "true")
                 self.assertEqual(
                     (result_dir / "exit-status.txt").read_text(encoding="utf-8").strip(),
                     str(expected_status),
                 )
+
+    def test_lease_signal_kills_payload_descendant_group(self) -> None:
+        config, env, state, _docker_log = lease_fixture(self.tmp_path, controller=True)
+        payload_pid = self.tmp_path / "payload.pid"
+        child_pid = self.tmp_path / "child.pid"
+        payload_signal = self.tmp_path / "payload.signal"
+        env.update(
+            FAKE_PAYLOAD_PID=str(payload_pid),
+            FAKE_CHILD_PID=str(child_pid),
+            FAKE_PAYLOAD_SIGNAL=str(payload_signal),
+        )
+        payload = self.tmp_path / "payload-with-child"
+        write_executable(
+            payload,
+            """#!/usr/bin/env python3
+import os
+import signal
+import time
+from pathlib import Path
+
+child = os.fork()
+if child == 0:
+    Path(os.environ["FAKE_CHILD_PID"]).write_text(str(os.getpid()))
+    for ignored in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        signal.signal(ignored, signal.SIG_IGN)
+    while True:
+        time.sleep(1)
+
+Path(os.environ["FAKE_PAYLOAD_PID"]).write_text(str(os.getpid()))
+
+def stop(signum: int, _frame: object) -> None:
+    Path(os.environ["FAKE_PAYLOAD_SIGNAL"]).write_text(signal.Signals(signum).name.removeprefix("SIG"))
+    raise SystemExit(128 + signum)
+
+for handled in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(handled, stop)
+signal.pause()
+""",
+        )
+        process = subprocess.Popen(
+            [LEASE_SCRIPT, "run", config, payload],
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            wait_until(lambda: payload_pid.exists() and child_pid.exists())
+            process.send_signal(signal.SIGTERM)
+            self.assertEqual(process.wait(timeout=5), 143)
+            child = int(child_pid.read_text(encoding="utf-8"))
+            wait_until(lambda: self._process_gone(child), timeout=5)
+            self.assertEqual(state.read_text(encoding="utf-8").strip(), "true")
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=2)
+
+    def test_lease_normal_exit_kills_payload_descendant_group(self) -> None:
+        config, env, state, _docker_log = lease_fixture(self.tmp_path, controller=True)
+        child_pid = self.tmp_path / "normal-child.pid"
+        env["FAKE_CHILD_PID"] = str(child_pid)
+        payload = self.tmp_path / "normal-payload-with-child"
+        write_executable(
+            payload,
+            """#!/usr/bin/env python3
+import os
+import signal
+import time
+from pathlib import Path
+
+child = os.fork()
+if child == 0:
+    Path(os.environ["FAKE_CHILD_PID"]).write_text(str(os.getpid()))
+    for ignored in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+        signal.signal(ignored, signal.SIG_IGN)
+    while True:
+        time.sleep(1)
+raise SystemExit(0)
+""",
+        )
+        process = subprocess.Popen(
+            [LEASE_SCRIPT, "run", config, payload],
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            self.assertEqual(process.wait(timeout=5), 0)
+            child = int(child_pid.read_text(encoding="utf-8"))
+            wait_until(lambda: self._process_gone(child), timeout=5)
+            self.assertEqual(state.read_text(encoding="utf-8").strip(), "true")
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=2)
+
+    def test_lease_signal_force_kills_unresponsive_payload(self) -> None:
+        config, env, state, _docker_log = lease_fixture(self.tmp_path, controller=True)
+        payload_pid = self.tmp_path / "payload.pid"
+        env["FAKE_PAYLOAD_PID"] = str(payload_pid)
+        payload = self.tmp_path / "unresponsive-payload"
+        write_executable(
+            payload,
+            """#!/usr/bin/env python3
+import os
+import signal
+import time
+from pathlib import Path
+
+Path(os.environ["FAKE_PAYLOAD_PID"]).write_text(str(os.getpid()))
+for ignored in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):
+    signal.signal(ignored, signal.SIG_IGN)
+while True:
+    time.sleep(1)
+""",
+        )
+        process = subprocess.Popen(
+            [LEASE_SCRIPT, "run", config, payload],
+            cwd=REPO_ROOT,
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        try:
+            wait_until(lambda: payload_pid.exists())
+            started = time.monotonic()
+            process.send_signal(signal.SIGTERM)
+            self.assertEqual(process.wait(timeout=5), 143)
+            self.assertLess(time.monotonic() - started, 4.0)
+            self.assertEqual(state.read_text(encoding="utf-8").strip(), "true")
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=2)
 
     def test_summary_accepts_one_state_faithful_campaign(self) -> None:
         write_campaign(self.tmp_path)
@@ -363,6 +715,25 @@ while True:
                 write_campaign(result_dir, **drift)
                 with self.assertRaisesRegex(SummaryError, message):
                     summarize(result_dir)
+
+    def test_summary_rejects_non_interleaved_order(self) -> None:
+        write_campaign(self.tmp_path)
+        order = self.tmp_path / "e2e" / "order.tsv"
+        rows = order.read_text(encoding="utf-8").splitlines()
+        order.write_text("".join(f"{row}\n" for row in reversed(rows)), encoding="utf-8")
+
+        with self.assertRaisesRegex(SummaryError, "fixed interleaved campaign"):
+            summarize(self.tmp_path)
+
+    @staticmethod
+    def _process_gone(pid: int) -> bool:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        return False
 
 
 if __name__ == "__main__":

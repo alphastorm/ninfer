@@ -5,6 +5,7 @@
 #include "core/device.h"
 #include "ninfer_bench_common.h"
 #include "quantized_weight.cuh"
+#include "ops/linear_add/q5/q5_linear_add_kernels.h"
 #include "ops/linear_add/q5/q5_linear_add_plan.h"
 
 #include <cuda_runtime.h>
@@ -26,13 +27,32 @@ namespace {
 constexpr std::int32_t kRows      = 5120;
 constexpr std::size_t kFlushBytes = 256ULL << 20;
 
+enum class Candidate : std::uint8_t {
+    Public,
+    MmaR64C16,
+};
+
 struct Options {
     std::int32_t hidden = 0;
     std::vector<std::int32_t> tokens{1, 2, 4, 8, 16, 24, 25, 32, 48};
-    int warmup   = 5;
-    int repeat   = 30;
-    bool profile = false;
+    int warmup          = 5;
+    int repeat          = 30;
+    bool profile        = false;
+    Candidate candidate = Candidate::Public;
 };
+
+const char* candidate_name(Candidate candidate) noexcept {
+    return candidate == Candidate::Public ? "public" : "mma-r64-c16";
+}
+
+const char* schedule_name(const Options& options, std::int32_t tokens) {
+    if (options.candidate == Candidate::MmaR64C16) {
+        return "linear_add.q5.mma.r64.c16.cta_collective_residual";
+    }
+    const auto plan =
+        ops::detail::q5_linear_add_resolve_plan({kRows, options.hidden, options.hidden, tokens});
+    return ops::detail::q5_linear_add_schedule_name(plan.schedule);
+}
 
 std::vector<std::int32_t> parse_tokens(std::string_view raw) {
     std::vector<std::int32_t> result;
@@ -71,9 +91,18 @@ Options parse_options(int argc, char** argv) {
             options.repeat = std::stoi(std::string(next("--repeat value")));
         } else if (argument == "--profile") {
             options.profile = true;
+        } else if (argument == "--candidate") {
+            const std::string_view candidate = next("--candidate value");
+            if (candidate == "public") {
+                options.candidate = Candidate::Public;
+            } else if (candidate == "mma-r64-c16") {
+                options.candidate = Candidate::MmaR64C16;
+            } else {
+                throw std::invalid_argument("--candidate must be public or mma-r64-c16");
+            }
         } else if (argument == "--help" || argument == "-h") {
             std::printf("Usage: %s --k 6144|17408 [--t-sweep 1,2,...] [--warmup N] "
-                        "[--repeat N] [--profile]\n",
+                        "[--repeat N] [--candidate public|mma-r64-c16] [--profile]\n",
                         argv[0]);
             std::exit(0);
         } else {
@@ -88,6 +117,11 @@ Options parse_options(int argc, char** argv) {
     }
     if (options.profile && options.tokens.size() != 1) {
         throw std::invalid_argument("--profile requires exactly one T");
+    }
+    if (options.candidate == Candidate::MmaR64C16 &&
+        (options.hidden != 17408 || options.tokens.size() != 1 || options.tokens.front() != 4)) {
+        throw std::invalid_argument(
+            "mma-r64-c16 admits only the exact K=17408, T=4 directional control");
     }
     return options;
 }
@@ -116,17 +150,19 @@ int main(int argc, char** argv) {
         const auto launch = [&](std::int32_t tokens, cudaStream_t launch_stream) {
             Tensor x(input.p, DType::BF16, {options.hidden, tokens});
             Tensor out(residual.p, DType::BF16, {kRows, tokens});
-            ops::linear_add(x, packed.weight, out, workspace, launch_stream);
+            if (options.candidate == Candidate::Public) {
+                ops::linear_add(x, packed.weight, out, workspace, launch_stream);
+            } else {
+                ops::detail::q5_linear_add_mma_r64_c16_launch(x, packed.weight, out, launch_stream);
+            }
         };
 
         if (options.profile) {
             const std::int32_t tokens = options.tokens.front();
             launch(tokens, stream);
             CUDA_CHECK(cudaStreamSynchronize(stream));
-            const auto plan = ops::detail::q5_linear_add_resolve_plan(
-                {kRows, options.hidden, options.hidden, tokens});
-            std::printf("profile K=%d T=%d route=%s workspace=%zu\n", options.hidden, tokens,
-                        ops::detail::q5_linear_add_schedule_name(plan.schedule),
+            std::printf("profile K=%d T=%d candidate=%s route=%s workspace=%zu\n", options.hidden,
+                        tokens, candidate_name(options.candidate), schedule_name(options, tokens),
                         workspace_capacity);
             CUDA_CHECK(cudaStreamDestroy(stream));
             return 0;
@@ -145,9 +181,7 @@ int main(int argc, char** argv) {
                             options.hidden, tokens, route, timing.median_us,
                             bytes / seconds / 1.0e9, flops / seconds / 1.0e12);
             };
-            const auto plan = ops::detail::q5_linear_add_resolve_plan(
-                {kRows, options.hidden, options.hidden, tokens});
-            measure(ops::detail::q5_linear_add_schedule_name(plan.schedule),
+            measure(schedule_name(options, tokens),
                     [&](cudaStream_t launch_stream) { launch(tokens, launch_stream); });
         }
 

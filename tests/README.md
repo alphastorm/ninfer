@@ -34,6 +34,16 @@ benchmark-report, and external protocol behavior. Repository verification princi
 - `test_ninfer_bench_support.cpp` — product benchmark CLI, timing boundary, and schema-v12 reports;
 - `test_bench_matrix.py` — schema-v12 report consumption by the Python matrix summarizer;
 - `test_serve_corpus.py` — current serving request-log identity at the measurement consumer;
+- `test_profile_harness.py` — pinned WSL Docker/GPU-runtime admission, pre-outage restoration
+  preflight, fixed-payload boundary, verified candidate teardown, production restoration,
+  process-group teardown, and campaign identity/interleaving gates;
+- `test_sm120_q4_profile.py` — exact MTP3 Q4 shape-manifest and single-launch NCU ratio parsing;
+- `test_sm120_mtp3_profile.py` — clean committed-source preparation without GPU tools, immutable
+  prepared-build capture, counter-access gating, fixed capture inventory, and timing triage under
+  fully mocked host tools;
+- `test_sm120_profile_workflow.py` — exact WSL Docker route and distinct toolchain pins,
+  operation-owned empty Docker configuration, off-GPU preparation before the lease, live stopped-
+  production payload authority, fixed payload selection, and read-only restoration preflight;
 - device/tensor/arena tests — reusable lower-component behavior; KV tests cover the core physical
   container, family runtime tests cover dimension-driven GDN storage/view mechanics, and Op tests
   cover mathematical state transitions at their own boundary.
@@ -46,6 +56,8 @@ presets.
 `ops/quantized_weight.h` is the common packed-weight fixture for Q4/Q5/Q6/W8 and NVFP4 Op tests. It
 owns deterministic payload generation, device `Weight` views, row views, and independent logical
 weight decoding.
+The Q5 LinearAdd suite includes the production `[5120,17408]`, `T=4` point and checks the temporary
+forced C16 directional control directly against the same independent complete-formula oracle.
 
 ## Build and run
 

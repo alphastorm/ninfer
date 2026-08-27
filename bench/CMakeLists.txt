@@ -45,6 +45,8 @@ ninfer_add_op_bench(ninfer_fp8_linear_swiglu_bench SOURCES ops/fp8_linear_swiglu
 ninfer_add_op_bench(ninfer_q4_linear_swiglu_bench SOURCES ops/q4_linear_swiglu_bench.cu)
 ninfer_add_op_bench(ninfer_w8_linear_add_bench SOURCES ops/w8_linear_add_bench.cu)
 ninfer_add_op_bench(ninfer_q5_linear_add_bench SOURCES ops/q5_linear_add_bench.cu)
+ninfer_add_op_bench(ninfer_qwen3_6_27b_post_mixer_bench
+  SOURCES targets/qwen3_6_27b/post_mixer_bench.cu)
 ninfer_add_op_bench(ninfer_bf16_linear_add_bench SOURCES ops/bf16_linear_add_bench.cu)
 ninfer_add_op_bench(ninfer_nvfp4_linear_add_bench SOURCES ops/nvfp4_linear_add_bench.cu)
 ninfer_add_op_bench(ninfer_fp8_linear_add_bench SOURCES ops/fp8_linear_add_bench.cu)
@@ -105,7 +107,7 @@ target_include_directories(ninfer_qwen3_6_27b_mtp_round_bench PRIVATE
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b/export
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
 target_link_libraries(ninfer_qwen3_6_27b_mtp_round_bench PRIVATE
-  ninfer_engine ninfer_core)
+  ninfer_engine ninfer_core CUDA::cudart)
 
 # Complete production DFlash steady round: confirmed-context append, next proposal, target
 # verification/acceptance, and host publication over a real 35B artifact.

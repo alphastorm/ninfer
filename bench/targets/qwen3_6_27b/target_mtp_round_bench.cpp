@@ -6,6 +6,7 @@
 #include "core/device.h"
 #include "runtime/engine/kv_capacity.h"
 
+#include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -37,13 +38,14 @@ struct Options {
     std::uint32_t draft_tokens     = 5;
     ninfer::ProposalHead proposal  = ninfer::ProposalHead::Optimized;
     bool use_cuda_graph            = true;
+    bool profile_measured          = false;
 };
 
 void print_usage(const char* executable) {
     std::cout << "usage: " << executable
               << " [--artifact <model.ninfer>] [--device <id>] [--warmup <n>] [--reps <n>]"
                  " [--draft-tokens <1..5>] [--proposal-head full|optimized]"
-                 " [--no-cuda-graph]\n";
+                 " [--no-cuda-graph] [--profile-measured]\n";
 }
 
 Options parse_options(int argc, char** argv) {
@@ -77,6 +79,8 @@ Options parse_options(int argc, char** argv) {
             }
         } else if (argument == "--no-cuda-graph") {
             options.use_cuda_graph = false;
+        } else if (argument == "--profile-measured") {
+            options.profile_measured = true;
         } else if (argument == "-h" || argument == "--help") {
             print_usage(argc > 0 ? argv[0] : "ninfer_qwen3_6_27b_mtp_round_bench");
             std::exit(0);
@@ -89,6 +93,9 @@ Options parse_options(int argc, char** argv) {
     if (options.repetitions <= 0) { throw std::invalid_argument("--reps must be positive"); }
     if (options.draft_tokens == 0 || options.draft_tokens > 5) {
         throw std::invalid_argument("--draft-tokens must be in [1,5]");
+    }
+    if (options.profile_measured && options.repetitions != 1) {
+        throw std::invalid_argument("--profile-measured requires --reps 1");
     }
     return options;
 }
@@ -127,16 +134,16 @@ int run(const Options& options) {
     const std::uint32_t measured_rounds =
         static_cast<std::uint32_t>(options.warmup + options.repetitions);
     ninfer::EngineOptions engine;
-    engine.artifact_path       = options.artifact;
-    engine.device              = options.device;
-    engine.max_context         = static_cast<std::uint32_t>(seed.size() + 64ULL +
-                                                            static_cast<std::uint64_t>(measured_rounds) *
-                                                                (options.draft_tokens + 1ULL) +
-                                                            2ULL * options.draft_tokens);
-    engine.kv_capacity         = ninfer::KvCapacityPolicy::explicit_capacity(engine.max_context);
-    engine.prefill_chunk       = 128;
-    engine.kv_cache            = ninfer::KvCacheStorage::BFloat16;
-    engine.speculative.backend = ninfer::SpeculativeBackend::Mtp;
+    engine.artifact_path = options.artifact;
+    engine.device        = options.device;
+    engine.max_context   = static_cast<std::uint32_t>(seed.size() + 64ULL +
+                                                      static_cast<std::uint64_t>(measured_rounds) *
+                                                          (options.draft_tokens + 1ULL) +
+                                                      2ULL * options.draft_tokens);
+    engine.kv_capacity   = ninfer::KvCapacityPolicy::explicit_capacity(engine.max_context);
+    engine.prefill_chunk = 128;
+    engine.kv_cache      = ninfer::KvCacheStorage::BFloat16;
+    engine.speculative.backend       = ninfer::SpeculativeBackend::Mtp;
     engine.speculative.draft_tokens  = options.draft_tokens;
     engine.speculative.proposal_head = options.proposal;
     engine.use_cuda_graph            = options.use_cuda_graph;
@@ -206,9 +213,17 @@ int run(const Options& options) {
 
     std::vector<RoundMeasurement> measurements;
     measurements.reserve(static_cast<std::size_t>(options.repetitions));
+    if (options.profile_measured) {
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaProfilerStart());
+    }
     for (int iteration = 0; iteration < options.repetitions; ++iteration) {
         measurements.push_back(
             measure_round(*program, device, active_sequence, options.draft_tokens));
+    }
+    if (options.profile_measured) {
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaProfilerStop());
     }
     const auto aborted = program->abort(active_sequence);
     if (aborted.status != ninfer::runtime::ConsumeStatus::Consumed) {
@@ -242,6 +257,7 @@ int run(const Options& options) {
     std::cout << "cuda_graph," << (options.use_cuda_graph ? "true" : "false") << '\n';
     std::cout << "warmup," << options.warmup << '\n';
     std::cout << "repetitions," << options.repetitions << '\n';
+    std::cout << "profile_measured," << (options.profile_measured ? "true" : "false") << '\n';
     std::cout << "mtp_round_mean_ms," << mean_ms << '\n';
     std::cout << "mtp_round_min_ms," << *minimum << '\n';
     std::cout << "mtp_round_max_ms," << *maximum << '\n';

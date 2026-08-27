@@ -13,6 +13,14 @@ from typing import Any, Sequence
 
 
 PAIR_SUFFIXES = ("a", "b", "c")
+PAIR_ORDER = (
+    ("baseline", "a"),
+    ("candidate", "a"),
+    ("candidate", "b"),
+    ("baseline", "b"),
+    ("baseline", "c"),
+    ("candidate", "c"),
+)
 T_CRITICAL_95_DF2 = 4.302652729911275
 
 
@@ -45,17 +53,15 @@ def load_order(result_dir: Path) -> tuple[str, dict[str, tuple[str, str]]]:
         raise SummaryError(f"failed to load {path}: {exc}") from exc
     if any(len(row) != 2 for row in rows):
         raise SummaryError("order.tsv contains an invalid row")
+    if len(rows) != len(PAIR_ORDER) or len({label for _, label in rows}) != len(rows):
+        raise SummaryError("order.tsv does not contain six unique campaign rows")
+    if any(
+        (variant == "baseline") != (role == "baseline")
+        or label != f"{role}-{suffix}"
+        for (variant, label), (role, suffix) in zip(rows, PAIR_ORDER, strict=True)
+    ):
+        raise SummaryError("order.tsv does not match the fixed interleaved campaign")
     order = {label: (variant, label) for variant, label in rows}
-    expected_labels = {
-        "baseline-a",
-        "candidate-a",
-        "candidate-b",
-        "baseline-b",
-        "baseline-c",
-        "candidate-c",
-    }
-    if set(order) != expected_labels:
-        raise SummaryError(f"order.tsv labels differ from the fixed campaign: {sorted(order)}")
     candidates = {variant for variant, label in rows if label.startswith("candidate-")}
     if len(candidates) != 1 or "baseline" in candidates:
         raise SummaryError("order.tsv does not identify one candidate variant")
