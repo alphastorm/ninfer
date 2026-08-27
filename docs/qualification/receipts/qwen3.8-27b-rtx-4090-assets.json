@@ -1,0 +1,19 @@
+{
+  "artifact_type": "ninfer_release_asset_regression",
+  "schema_version": 1,
+  "status": "passed",
+  "assets": 5,
+  "payload_entries": 14,
+  "wrong_model_artifact_identity_rejections": 1,
+  "passed_red_gate_rejections": 1,
+  "hidden_payload_coverage": true,
+  "pinned_model_bytes": 18210531328,
+  "candidate_root_directories": 4,
+  "model_artifact_ownership": "external-pinned-read-only",
+  "interrupted_install_reentry": "repair-required",
+  "canonical_config_sha256": "d613fc71ebe30b799af4936af8f73b0f25ebd1a1486b55fdb59aaab5d884bb96",
+  "lf_config_normalizations": 1,
+  "crlf_config_normalizations": 1,
+  "wrong_config_semantic_rejections": 1,
+  "source_config_unchanged": true
+}

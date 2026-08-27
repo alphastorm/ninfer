@@ -9,7 +9,7 @@
 | Item | Value |
 |---|---|
 | Runtime source | `ea265776254a62ab5184454ba0163cdf04aad1e5` |
-| Lifecycle source | `09f38db0d506d09e7c381c862aeea3e243e09669` |
+| Lifecycle source | `669b729af635b55c69bfe8b5e76fd45614c96883` |
 | CUDA target/toolkit | `sm_89` / `13.3.73` |
 | Fresh server SHA-256 | `ea10b9a540722d1ac3f8832a8856e103c4040c599550d59dc4250eb9b5094e86` |
 | Model SHA-256 | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
@@ -17,7 +17,10 @@
 | Package SHA-256 | `b2081fecd5f6ef3a9fcab3d58a0bb3129af16cca0099bd085b554d7d84ebb530` |
 | Package bytes | `227626612` |
 
-The package checksum set passed. The installer retained the 18,210,531,328-byte model as an external, pinned, read-only reference; it did not copy the model into candidate-owned state. Focused lifecycle regressions passed, including ten injected transaction failures, zero restart model re-hashes, zero candidate model copies, interrupted-install repair, dead-start rejection, and release-asset identity checks.
+The package checksum set passed. The installer retained the 18,210,531,328-byte model as an external, pinned, read-only reference; it did not copy the model into candidate-owned state.
+Machine-readable focused receipts are bound at lifecycle `669b729af635b55c69bfe8b5e76fd45614c96883`: lifecycle `cfdb852343d765ecf3a1fe54e8c0ae70325e2b658f9708cc391e21cfe310d277`, assets `e3d732687ecec40435497b04efc08ff413d51d0fc8cf03f877f119ad76c60b57`, and MTP decision `6aebf34e142b3f5f79130fc7d0bf0e37ea1c1bd0813ea599776f523a27ab6c98`.
+
+Focused lifecycle regressions passed, including ten injected transaction failures, zero restart model re-hashes, zero candidate model copies, interrupted-install repair, dead-start rejection, and release-asset identity checks.
 
 ## Live result
 

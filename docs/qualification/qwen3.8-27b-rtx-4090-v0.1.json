@@ -41,7 +41,7 @@
     "size_bytes": 227626612,
     "manifest_entries": 21,
     "runtime_dlls": 9,
-    "checksum_verification": "passed",
+    "checksum_verification": "passed_by_release_asset_regression",
     "release_manifest_sha256": "07d2b341767ee6a14831c7f9b60eb6a60e762edc26c810bb0276e0ba37633788",
     "installer_sha256": "6bd36fa79051200c128e047944222a7695785c3b042b64d46c1c879fbb992aae",
     "controller_sha256": "b01254f14f204e534473cb188218429a384fdb8e4f146b65ed710f81075e0a55"
@@ -169,5 +169,26 @@
     "production_route_mutated": false,
     "docker_ownership_preserved": true,
     "public_release_or_asset_published": false
+  },
+  "lifecycle_source_commit": "669b729af635b55c69bfe8b5e76fd45614c96883",
+  "regression_evidence": {
+    "lifecycle_source_commit": "669b729af635b55c69bfe8b5e76fd45614c96883",
+    "receipts": {
+      "qwen3.8-27b-rtx-4090-lifecycle.json": {
+        "sha256": "cfdb852343d765ecf3a1fe54e8c0ae70325e2b658f9708cc391e21cfe310d277",
+        "artifact_type": "ninfer_release_lifecycle_regression",
+        "status": "passed"
+      },
+      "qwen3.8-27b-rtx-4090-assets.json": {
+        "sha256": "e3d732687ecec40435497b04efc08ff413d51d0fc8cf03f877f119ad76c60b57",
+        "artifact_type": "ninfer_release_asset_regression",
+        "status": "passed"
+      },
+      "qwen3.8-27b-rtx-4090-mtp-decision.json": {
+        "sha256": "6aebf34e142b3f5f79130fc7d0bf0e37ea1c1bd0813ea599776f523a27ab6c98",
+        "artifact_type": "ninfer_mtp_decision_regression",
+        "status": "passed"
+      }
+    }
   }
 }
