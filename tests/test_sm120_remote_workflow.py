@@ -204,9 +204,9 @@ class Sm120RemoteWorkflowTest(unittest.TestCase):
         )
         return config
 
-    def run_workflow(self, config: Path) -> subprocess.CompletedProcess[str]:
+    def run_workflow(self, config: Path, mode: str = "run") -> subprocess.CompletedProcess[str]:
         return subprocess.run(
-            [CONTROLLER_WORKFLOW, "run", config],
+            [CONTROLLER_WORKFLOW, mode, config],
             check=False,
             capture_output=True,
             text=True,
@@ -232,8 +232,22 @@ class Sm120RemoteWorkflowTest(unittest.TestCase):
         self.assertTrue((receipt / "results" / "sm120-mtp3" / "packet-complete.txt").is_file())
         self.assertIn("remote profile workflow complete", completed.stdout)
         log = self.ssh_log.read_text(encoding="utf-8")
-        self.assertIn("run_sm120_mtp3_workflow.sh check", log)
         self.assertIn("run_sm120_mtp3_workflow.sh run", log)
+
+    def test_stages_exact_source_and_checks_without_production_outage(self) -> None:
+        operation = "remote-workflow-check"
+        completed = self.run_workflow(self.write_config(operation), "check")
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        receipt = self.receipt_parent / operation
+        self.assertFalse((receipt / "results").exists())
+        controller_receipt = (receipt / "controller.tsv").read_text(encoding="utf-8")
+        self.assertIn("mode\tcheck\n", controller_receipt)
+        self.assertIn("remote_exit_status\t0\n", controller_receipt)
+        self.assertIn("remote profile workflow check passed", completed.stdout)
+        log = self.ssh_log.read_text(encoding="utf-8")
+        self.assertIn("run_sm120_mtp3_workflow.sh check", log)
+        self.assertNotIn("run_sm120_mtp3_workflow.sh run", log)
 
     def test_failed_target_run_retrieves_restoration_receipt(self) -> None:
         operation = "remote-workflow-failure"

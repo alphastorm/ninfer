@@ -40,11 +40,16 @@ for name in \
   PROFILE_RESULT_DIR CANDIDATE_PREFIX CANDIDATE_PORT \
   PROFILE_DOCKER_CLI PROFILE_DOCKER_CONTEXT PROFILE_DOCKER_ENDPOINT \
   PROFILE_DOCKER_DAEMON_ID PROFILE_DOCKER_CONFIG \
+  PROFILE_TOOLCHAIN_IMAGE_ID \
   PRODUCTION_CONTAINER PRODUCTION_ID PRODUCTION_IMAGE PRODUCTION_RESTART_POLICY \
   PRODUCTION_PORT PRODUCTION_CONTROLLER \
   ROLLBACK_CONTAINER ROLLBACK_ID ROLLBACK_IMAGE_ID ROLLBACK_RUNNING ROLLBACK_RESTART_POLICY; do
   require_var "$name"
 done
+[[ $PROFILE_TOOLCHAIN_IMAGE_ID =~ ^sha256:[0-9a-f]{64}$ ]] || {
+  echo "PROFILE_TOOLCHAIN_IMAGE_ID must be an exact sha256 image ID" >&2
+  exit 2
+}
 
 payload_stop_timeout=${PROFILE_PAYLOAD_STOP_TIMEOUT_SECONDS:-30}
 if ! [[ $payload_stop_timeout =~ ^[0-9]+$ ]] || ((payload_stop_timeout < 1)); then
@@ -93,7 +98,7 @@ docker_cli() {
 
 docker_endpoint=$(docker_cli context inspect "$PROFILE_DOCKER_CONTEXT" \
   --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null) || {
-  echo "pinned WSL Docker context is unavailable; do not enable Docker Desktop WSL integration" >&2
+  echo "pinned Docker Desktop Linux context is unavailable; preserve the configured WSL integration and Docker context" >&2
   exit 2
 }
 [[ $docker_endpoint == "$PROFILE_DOCKER_ENDPOINT" ]] || {
@@ -101,7 +106,7 @@ docker_endpoint=$(docker_cli context inspect "$PROFILE_DOCKER_CONTEXT" \
   exit 2
 }
 docker_daemon_id=$(docker_cli info --format '{{.ID}}' 2>/dev/null) || {
-  echo "pinned WSL Docker daemon is unavailable; use the maintained controller and leave Docker Desktop WSL integration disabled" >&2
+  echo "pinned Docker Desktop Linux daemon is unavailable; sign in interactively, start Docker Desktop, then use the maintained controller" >&2
   exit 2
 }
 [[ $docker_daemon_id == "$PROFILE_DOCKER_DAEMON_ID" ]] || {
@@ -117,7 +122,7 @@ import json
 import sys
 
 if "nvidia" not in json.loads(sys.argv[1]):
-    raise SystemExit("pinned WSL Docker daemon has no nvidia runtime for --gpus all")
+    raise SystemExit("pinned Docker Desktop Linux daemon has no nvidia runtime for --gpus all")
 PY
 
 [[ $CANDIDATE_PREFIX =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*-$ ]] || {
@@ -347,6 +352,14 @@ with socket.socket() as sock:
 PY
 if ! nvidia-smi --query-gpu=name,temperature.gpu,pstate,memory.used,memory.total --format=csv,noheader >/dev/null; then
   echo "host nvidia-smi query failed before the profile outage" >&2
+  exit 2
+fi
+admission_name="${CANDIDATE_PREFIX}gpu-admission"
+if ! docker_cli run --rm --pull never --name "$admission_name" --network none --gpus all \
+  --entrypoint nvidia-smi "$PROFILE_TOOLCHAIN_IMAGE_ID" \
+  --query-gpu=name,driver_version --format=csv,noheader >/dev/null; then
+  docker_cli rm --force "$admission_name" >/dev/null 2>&1 || true
+  echo "GPU container admission failed before the profile outage" >&2
   exit 2
 fi
 

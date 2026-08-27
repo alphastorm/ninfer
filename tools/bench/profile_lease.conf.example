@@ -29,7 +29,8 @@ PROFILE_TOOLCHAIN_BASE_IMAGE=REPLACE_ME
 PROFILE_TOOLCHAIN_BASE_IMAGE_ID=sha256:REPLACE_ME
 PROFILE_TOOLCHAIN_IMAGE=ninfer-sm120-profile:python3.11
 PROFILE_CONTAINER_PYTHON=python3.11
-# Use the existing WSL Docker daemon. Never enable Docker Desktop WSL integration for this run.
+# Use the existing Docker Desktop Linux daemon through its already-configured WSL integration.
+# Never toggle the integration, context, or daemon during an operation.
 PROFILE_DOCKER_CLI=/usr/bin/docker
 PROFILE_DOCKER_CONTEXT=default
 PROFILE_DOCKER_ENDPOINT=unix:///var/run/docker.sock

@@ -391,7 +391,7 @@ capture_q5() {
         --measure q5 --warmup 2 --repeat 1 --profile-q5 \
       >"$base.log" 2>&1; then
     if grep -Fq ERR_NVGPUCTRPERM "$base.log"; then
-      echo "NCU performance-counter access is unavailable; keep Docker Desktop WSL integration disabled and restore the configured WSL daemon before retrying" >&2
+      echo "NCU performance-counter access is unavailable; preserve the configured Docker Desktop WSL integration and restore the pinned daemon before retrying" >&2
     else
       echo "NCU capture failed: $name" >&2
     fi

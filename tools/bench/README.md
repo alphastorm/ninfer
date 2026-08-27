@@ -178,11 +178,13 @@ fragment:
 
 1. Require a completely clean `PROFILE_SOURCE_SHA` worktree descended from
    `PROFILE_UPSTREAM_BASE_SHA`, exact artifact SHA-256, a profiling image distinct from the runtime
-   candidate, `/usr/bin/docker`, the configured `default` Unix-socket context and WSL daemon ID,
+   candidate, `/usr/bin/docker`, the configured `default` Unix-socket context and Docker Desktop
+   Linux daemon ID,
    the Docker `nvidia` runtime, host `nvidia-smi`, and the executable maintained controller.
 2. Create an operation-owned Docker config containing only `{}`. This prevents inherited
-   `credsStore=desktop.exe` routing. The workflow never enables Docker Desktop WSL integration,
-   changes a Docker context, starts a daemon, or attempts daemon recovery.
+   `credsStore=desktop.exe` routing. The workflow preserves the already-configured Docker Desktop
+   WSL integration; it never toggles the integration, changes a Docker context, starts a daemon, or
+   attempts daemon recovery.
 3. Reuse or build the operation's profiling image from the exact configured CUDA/Nsight base and
    checksum-pinned CPython 3.11.11 source. Then configure and build the Q4, Q5, post-mixer,
    MTP-round, and numerical-gate targets in that pinned container with no GPU and no network.
@@ -190,8 +192,10 @@ fragment:
    native `sm_120a` identities.
 4. Enter `run_gpu_profile_lease.sh` synchronously. The lease revalidates the exact Docker route,
    host GPU tools, candidate names/port, and incumbent/rollback restoration route before stopping
-   production. Its fixed payload requires the lease's transient live-process marker and independently
-   verifies that the exact incumbent is stopped. The lease isolates the payload process group,
+   production. Immediately before the outage it also runs `nvidia-smi` in a no-network container
+   from the exact profiling image ID, while production is still healthy. Its fixed payload requires
+   the lease's transient live-process marker and independently verifies that the exact incumbent is
+   stopped. The lease isolates the payload process group,
    confirms every profiling candidate is gone before restart, and restores production on success,
    failure, HUP, INT, or TERM.
 5. Run `capture` from the read-only prepared build. The Q4/Q5 numerical gates run first. The cold Q5
@@ -220,9 +224,19 @@ and requires it to differ from the runtime image. The profiling image must conta
 CUDA 13.1, NCU, NSYS, and Python 3.11; bootstrap and `prepare` check those commands before
 compiling and before any production stop.
 
-The scheduled run is exactly one synchronous controller command. It performs source staging, target
-preflight, preparation, lease, payload, restoration, and receipt retrieval; do not detach it or
-invoke its target phases separately:
+After Docker-route recovery, prove the route without an outage by running the controller's
+`check` mode. It stages a fresh exact source/config operation, pins or builds the profiling image,
+and exercises target preflight plus the GPU-container admission while production remains running.
+It writes a controller receipt but creates no profiling result directory and never requests a
+production stop:
+
+```bash
+tools/bench/run_remote_sm120_mtp3_workflow.sh check /absolute/path/profile.conf
+```
+
+The scheduled capture is exactly one synchronous controller command. It performs source staging,
+target preflight, preparation, lease, payload, restoration, and receipt retrieval; do not detach it
+or invoke its target phases separately:
 
 ```bash
 tools/bench/run_remote_sm120_mtp3_workflow.sh run /absolute/path/profile.conf
@@ -231,5 +245,7 @@ tools/bench/run_remote_sm120_mtp3_workflow.sh run /absolute/path/profile.conf
 Completion requires lease `exit-status.txt` equal to `0`, `production-restored-at.txt`, final
 production inspect/status receipts, `sm120-mtp3/ncu/counter-access-verified.txt`, and
 `sm120-mtp3/packet-complete.txt`. `SIGKILL` and host power loss cannot execute a shell trap; use the
-already-maintained production controller for recovery. Do not enable Docker Desktop WSL integration
-as a recovery action.
+already-maintained production controller for recovery. After a Windows reboot, first sign in to the
+operator's interactive Windows session and start Docker Desktop; wait for the pinned Linux daemon
+and existing WSL integration, then use the maintained controller. Never toggle the integration,
+context, or daemon as a recovery action.

@@ -112,6 +112,11 @@ if args[0] == "ps":
     if candidate_state.exists():
         print("candidate-id")
     raise SystemExit(0)
+if args[0] == "run":
+    record("gpu-admission")
+    if os.environ.get("FAKE_GPU_CONTAINER_FAIL") == "1":
+        raise SystemExit(89)
+    raise SystemExit(0)
 if args[0] == "stop":
     record("stop")
     state.write_text("false\\n", encoding="utf-8")
@@ -174,6 +179,7 @@ else:
         "PROFILE_DOCKER_ENDPOINT": "unix:///var/run/docker.sock",
         "PROFILE_DOCKER_DAEMON_ID": "fake-daemon-id",
         "PROFILE_DOCKER_CONFIG": docker_config,
+        "PROFILE_TOOLCHAIN_IMAGE_ID": "sha256:" + "a" * 64,
         "CANDIDATE_PREFIX": "profile-test-",
         "CANDIDATE_PORT": free_port(),
         "PRODUCTION_CONTAINER": "production",
@@ -341,7 +347,7 @@ class ProfileHarnessTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         self.assertIn("profile lease check passed", completed.stdout)
         self.assertEqual(state.read_text(encoding="utf-8").strip(), "true")
-        self.assertFalse(docker_log.exists())
+        self.assertEqual(docker_log.read_text(encoding="utf-8"), "gpu-admission\n")
         self.assertFalse((self.tmp_path / "result").exists())
 
     def test_lease_rejects_missing_nvidia_smi_before_stopping_production(self) -> None:
@@ -401,6 +407,26 @@ class ProfileHarnessTest(unittest.TestCase):
         self.assertIn("host nvidia-smi query failed before the profile outage", completed.stderr)
         self.assertEqual(state.read_text(encoding="utf-8").strip(), "true")
         self.assertFalse(docker_log.exists())
+        self.assertFalse((self.tmp_path / "result").exists())
+
+    def test_lease_rejects_failed_gpu_container_admission_before_stopping_production(self) -> None:
+        config, env, state, docker_log = lease_fixture(self.tmp_path, controller=True)
+        env["FAKE_GPU_CONTAINER_FAIL"] = "1"
+
+        completed = subprocess.run(
+            [LEASE_SCRIPT, "run", config, "/usr/bin/true"],
+            cwd=REPO_ROOT,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+
+        self.assertEqual(completed.returncode, 2)
+        self.assertIn("GPU container admission failed before the profile outage", completed.stderr)
+        self.assertEqual(state.read_text(encoding="utf-8").strip(), "true")
+        self.assertEqual(docker_log.read_text(encoding="utf-8"), "gpu-admission\nremove\n")
         self.assertFalse((self.tmp_path / "result").exists())
 
     def test_lease_marks_the_fixed_payload_boundary_and_restores_production(self) -> None:

@@ -3,12 +3,13 @@ set -Eeuo pipefail
 
 usage() {
   cat >&2 <<EOF
-usage: $0 run CONFIG
+usage: $0 {check|run} CONFIG
 EOF
   exit 2
 }
 
-[[ $# -eq 2 && $1 == run ]] || usage
+[[ $# -eq 2 && ( $1 == check || $1 == run ) ]] || usage
+mode=$1
 config=$2
 [[ -f $config ]] || { echo "remote profile workflow config not found: $config" >&2; exit 2; }
 config=$(cd -- "$(dirname -- "$config")" && pwd -P)/$(basename -- "$config")
@@ -199,10 +200,9 @@ remote_workflow=$operation_root/source/$workflow_relative
 remote_config=$operation_root/profile.conf
 remote_env=(/usr/bin/env "NINFER_CONTROLLER_ID=$PROFILE_CONTROLLER_ID" "NINFER_TARGET_ID=$PROFILE_TARGET_ID")
 printf 'remote profile operation staged and verified: %s\n' "$operation_name"
-remote_wsl "${remote_env[@]}" "$remote_workflow" check "$remote_config"
 
 set +e
-remote_wsl "${remote_env[@]}" "$remote_workflow" run "$remote_config"
+remote_wsl "${remote_env[@]}" "$remote_workflow" "$mode" "$remote_config"
 run_status=$?
 set -e
 
@@ -214,6 +214,7 @@ if remote_wsl /usr/bin/test -d "$operation_root/results/run"; then
 fi
 {
   printf 'operation_name\t%s\n' "$operation_name"
+  printf 'mode\t%s\n' "$mode"
   printf 'operation_root\t%s\n' "$operation_root"
   printf 'source_sha\t%s\n' "$source_sha"
   printf 'upstream_base_sha\t%s\n' "$PROFILE_UPSTREAM_BASE_SHA"
@@ -222,6 +223,16 @@ fi
   printf 'profile_toolchain_image_id\t%s\n' "$PROFILE_TOOLCHAIN_IMAGE_ID"
   printf 'remote_exit_status\t%s\n' "$run_status"
 } >"$receipt_root/controller.tsv"
+
+if [[ $mode == check ]]; then
+  if ((run_status == 0)); then
+    printf 'remote profile workflow check passed: operation=%s receipts=%s\n' "$operation_name" "$receipt_root"
+    exit 0
+  fi
+  printf 'remote profile workflow check failed: operation=%s status=%s receipts=%s\n' \
+    "$operation_name" "$run_status" "$receipt_root" >&2
+  exit "$run_status"
+fi
 
 if ((run_status == 0)); then
   [[ $(<"$receipt_root/results/exit-status.txt") == 0 ]] || fail "successful remote workflow has a nonzero lease exit receipt"

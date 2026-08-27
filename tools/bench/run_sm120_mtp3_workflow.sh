@@ -133,12 +133,12 @@ verify_docker_route() {
   local endpoint daemon_id image_id runtime_image_id
   endpoint=$(docker_cli context inspect "$PROFILE_DOCKER_CONTEXT" \
     --format '{{(index .Endpoints "docker").Host}}' 2>/dev/null) || {
-    fail "pinned WSL Docker context is unavailable; do not enable Docker Desktop WSL integration"
+    fail "pinned Docker Desktop Linux context is unavailable; preserve the configured WSL integration and Docker context"
   }
   [[ $endpoint == "$PROFILE_DOCKER_ENDPOINT" ]] || \
     fail "Docker endpoint differs from PROFILE_DOCKER_ENDPOINT"
   daemon_id=$(docker_cli info --format '{{.ID}}' 2>/dev/null) || {
-    fail "pinned WSL Docker daemon is unavailable; use the maintained controller and leave Docker Desktop WSL integration disabled"
+    fail "pinned Docker Desktop Linux daemon is unavailable; sign in interactively, start Docker Desktop, then use the maintained controller"
   }
   [[ $daemon_id == "$PROFILE_DOCKER_DAEMON_ID" ]] || \
     fail "Docker daemon differs from PROFILE_DOCKER_DAEMON_ID"
