@@ -123,7 +123,7 @@ RoundMeasurement measure_round(target::Package::Program& program, ninfer::Device
         ninfer::runtime::CommitDecision{.accepted_tokens = licensed}};
     const auto committed     = program.commit(std::move(pending), decisions);
     const float milliseconds = timer.stop_ms();
-    if (committed.rows.size() != 1) {
+    if (committed.row_count != 1) {
         throw std::runtime_error("benchmark round commit returned the wrong row count");
     }
     return RoundMeasurement{.milliseconds    = milliseconds,
