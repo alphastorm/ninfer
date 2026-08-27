@@ -57,3 +57,5 @@ The candidate task, state root, operation root, lease, and loopback listener are
 ## Next decision
 
 Keep RTX 4090 support blocked. The next bounded attempt must first reproduce and fix typed tool-call emission for the exact direct Golden-equivalent task, then rerun the fresh-package protocol, 100K+ restart-persistence, and bounded-performance gates. Do not publish or promote this package.
+
+Final bounded affected-class rereview closure passed at `dca808b53c8ab13362aa2dce16a57751959000f7`; self-check receipt SHA-256: `ea7b99fc60bf9a452d3ada67785c0ac6d6135d11a38fcb4a77a94638ea5cbae7`. Qualification remains failed and the package remains non-release.

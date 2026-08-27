@@ -187,6 +187,11 @@
         "sha256": "6aebf34e142b3f5f79130fc7d0bf0e37ea1c1bd0813ea599776f523a27ab6c98",
         "artifact_type": "ninfer_mtp_decision_regression",
         "status": "passed"
+      },
+      "qwen3.8-27b-rtx-4090-review-closure.json": {
+        "sha256": "ea7b99fc60bf9a452d3ada67785c0ac6d6135d11a38fcb4a77a94638ea5cbae7",
+        "artifact_type": "ninfer_rtx4090_review_closure",
+        "status": "passed"
       }
     },
     "scope": "current focused host-side regression evidence; does not rebind the previously assembled package",
@@ -198,5 +203,11 @@
     "embedded_installer_sha256": "6bd36fa79051200c128e047944222a7695785c3b042b64d46c1c879fbb992aae",
     "embedded_controller_sha256": "b01254f14f204e534473cb188218429a384fdb8e4f146b65ed710f81075e0a55",
     "scope": "fresh package and live B/I/R evidence; superseded lifecycle scripts"
+  },
+  "review_closure": {
+    "status": "passed",
+    "source_commit": "dca808b53c8ab13362aa2dce16a57751959000f7",
+    "receipt_sha256": "ea7b99fc60bf9a452d3ada67785c0ac6d6135d11a38fcb4a77a94638ea5cbae7",
+    "affected_class_rereview": "closed"
   }
 }
