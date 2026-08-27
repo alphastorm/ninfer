@@ -1,6 +1,6 @@
 # RTX 5090 × Qwen3.8 v0.1.0 qualification
 
-**Decision as of 2026-08-26: behavioral qualification PASSED on the preserved measured candidate; release provenance was remediated and the exact release candidate identity was proved separately. External publication and promotion remain unauthorized.**
+**Decision as of 2026-08-27: behavioral qualification PASSED on the preserved measured candidate; release provenance and deterministic package identities were proved separately. External publication and promotion remain unauthorized.**
 
 The machine-readable authority is [`rtx5090-qwen38-v0.1.0.json`](rtx5090-qwen38-v0.1.0.json). The schema-valid bounded measurement is [`fixtures/rtx5090-qwen38-v0.1.0-measurement.json`](fixtures/rtx5090-qwen38-v0.1.0-measurement.json). No hostname, private path, container ID, API secret, request/session ID, prompt, generated Golden data, or content-bearing request log is included.
 
@@ -57,6 +57,13 @@ release manifest in [`alphastorm/omp-ninfer`](https://github.com/alphastorm/omp-
 tag and binary package must bind to `da2b6b6c8e129d182370feee657b7d8b9b9bbbf5`; changing executable
 input beyond that commit or changing its embedded identity requires a new shipping disposition and
 the evidence appropriate to the changed behavior.
+
+The exact unpublished release package is bound by
+[`rtx5090-qwen38-v0.1.0-release-package.json`](fixtures/rtx5090-qwen38-v0.1.0-release-package.json):
+image `sha256:93ab5bc7…`, OCI manifest `sha256:a19e00c5…`, binary archive `89db6e52…`,
+and SPDX 2.3 document `bb7bcf71…`. Two independent emissions from packager source
+`92545473e9aa552132e5c0a1fcb1b5535b1a717c` were byte-identical. These are local staging
+identities, not publication authority.
 
 ## Scope and disposition
 

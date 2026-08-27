@@ -1,8 +1,8 @@
 {
   "artifact_type": "ninfer_release_qualification_record",
-  "schema_version": 2,
+  "schema_version": 3,
   "release_version": "v0.1.0",
-  "as_of": "2026-08-26",
+  "as_of": "2026-08-27",
   "qualification_status": "passed",
   "publication_authorized": false,
   "target": "qwen3.8-27b-groupwise-int-on-rtx5090",
@@ -161,31 +161,58 @@
     "public_measurement": "fixtures/rtx5090-qwen38-v0.1.0-measurement.json",
     "measurement_schema": "fixtures/rtx5090-qwen38-v0.1.0-measurement.schema.json",
     "gate_manifest": "fixtures/rtx5090-qwen38-v0.1.0-gates.json",
+    "release_package_receipt": "fixtures/rtx5090-qwen38-v0.1.0-release-package.json",
+    "release_package_receipt_sha256": "b3337be7c6a35b4c2e4058f56f38a9898ed88ed940df49465aa526b73e9201f8",
     "raw_private_logs_included": false
   },
-  "runtime_source_binding": "The tested runtime source is the exact clean runtime_source_sha above. This post-measurement qualification record is metadata and is not claimed as executable source input; rebuilding from its later documentation commit would produce a different embedded patch-stack identity and requires fresh qualification.",
+  "release_identity": {
+    "release_source_sha": "da2b6b6c8e129d182370feee657b7d8b9b9bbbf5",
+    "source_archive_sha256": "31eda87bf64caf7152b71d8cfe976b30661c02347decef9935437cc76af464bd",
+    "ninfer_sha256": "f3957393ff38e41a72c1ec829606c311bb3dad202afa0c939820dde30fdeb2f0",
+    "ninfer_serve_sha256": "af557e9b146c68b051bd29e9e7a7d172e908f4b12df4e6d3bd83c54ce58b2399",
+    "configuration_sha256": "c6b635ccab19fd712ba503cd051b5359bb9c355068706b17372860baa0de49b6",
+    "fresh_identity_proof_seconds": 122.54,
+    "behavioral_campaign_repeated": false,
+    "candidate_removed": true,
+    "incumbent_exact_identity_restored": true,
+    "private_receipt_sha256": "456b596f99d7d5e12cd64df0626ac3f5f9899f040df394ddc8cb4f53b386c5ac"
+  },
+  "runtime_source_binding": "The behavioral campaign remains bound to exact clean runtime_source_sha 70868c658f5bd412ead5b105ec76939997bd6ca9. Release source da2b6b6c8e129d182370feee657b7d8b9b9bbbf5 closes the separately reviewed incremental-build provenance class and passed a fresh exact source, binary, model, configuration, teardown, and incumbent-restoration proof without repeating the benchmark campaign.",
   "release_assets": {
-    "status": "produced_locally",
-    "source_tag_target_sha": "70868c658f5bd412ead5b105ec76939997bd6ca9",
+    "status": "verified_unpublished",
+    "source_tag_target_sha": "da2b6b6c8e129d182370feee657b7d8b9b9bbbf5",
     "tag_created": false,
+    "packager_source_sha": "92545473e9aa552132e5c0a1fcb1b5535b1a717c",
+    "source_archive_sha256": "31eda87bf64caf7152b71d8cfe976b30661c02347decef9935437cc76af464bd",
     "container": {
-      "local_image_id": "sha256:3bb6b96aaa5bb7c7345fb90caf8ea5cd3c7569f22e855be9adaed34db1cd5efb",
+      "local_image_id": "sha256:93ab5bc7bda16d0ed401d049ce264a90ff2a7bba3222fd77173a932590865c82",
       "target_reference": "ghcr.io/alphastorm/ninfer:qwen38-5090-v0.1.0",
+      "oci_index_digest": "sha256:abce5ffd1ea34d169cbe7ca89200b9910c785b7fca790cdd908aaf05d4050553",
+      "oci_manifest_digest": "sha256:a19e00c5d7993d7c12341974bdc7e3d13e61d9deaf39e8ce00cf94abd6137712",
       "published": false
+    },
+    "binary_sha256": {
+      "ninfer": "f3957393ff38e41a72c1ec829606c311bb3dad202afa0c939820dde30fdeb2f0",
+      "ninfer_serve": "af557e9b146c68b051bd29e9e7a7d172e908f4b12df4e6d3bd83c54ce58b2399"
     },
     "binary_asset": {
       "name": "ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.tar.gz",
-      "sha256": "698516f2acc0a985f582dafa302623496265f85371788ef4bf5d2f6db293cb8a"
+      "bytes": 318874998,
+      "sha256": "89db6e521bd76f301bac14b881d69f9a09f8375e109b2175fa6387e7878bcfbd"
     },
     "sbom": {
       "name": "ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.spdx.json",
-      "sha256": "8ea278f1c7772589b9bf70970a0ef353d0bcd4cd933b04f072a00e820c44ae41",
+      "bytes": 3599,
+      "sha256": "bb7bcf71019b4033fcc5f26c66c8e69f19272acf8d0986d4822f26605ced7682",
       "format": "SPDX-2.3"
     },
-    "checksums": "ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.SHA256SUMS",
-    "qualification_receipt": "rtx5090-qwen38-v0.1.0.json",
+    "checksums": {
+      "name": "ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.SHA256SUMS",
+      "sha256": "9dbe55f4539438e41df7b96fa461646c7b360660b611f59d5ba088b6c9043609"
+    },
     "model_weights_bundled": false,
-    "verification_status": "verified"
+    "verification_status": "verified",
+    "deterministic_repeat": true
   },
   "production_effects": [
     "The incumbent was stopped only for the explicitly authorized bounded qualification window.",

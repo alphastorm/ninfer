@@ -15,6 +15,60 @@ from tools.release.package import ReleaseError, ReleaseOptions, package_release
 
 
 class ReleasePackageTests(unittest.TestCase):
+    def test_qualification_binds_exact_release_package_receipt(self) -> None:
+        repository = Path(__file__).resolve().parents[1]
+        qualification_path = (
+            repository / "docs/qualification/rtx5090-qwen38-v0.1.0.json"
+        )
+        receipt_path = (
+            repository
+            / "docs/qualification/fixtures/rtx5090-qwen38-v0.1.0-release-package.json"
+        )
+        qualification = json.loads(qualification_path.read_text(encoding="utf-8"))
+        receipt_bytes = receipt_path.read_bytes()
+        receipt = json.loads(receipt_bytes)
+
+        self.assertEqual(
+            qualification["evidence"]["release_package_receipt_sha256"],
+            hashlib.sha256(receipt_bytes).hexdigest(),
+        )
+        release_identity = qualification["release_identity"]
+        release_assets = qualification["release_assets"]
+        self.assertEqual(
+            release_identity["release_source_sha"], receipt["runtime_source_commit"]
+        )
+        self.assertNotEqual(
+            qualification["identity"]["runtime_source_sha"],
+            release_identity["release_source_sha"],
+        )
+        self.assertEqual(
+            release_assets["container"]["local_image_id"], receipt["image"]["image_id"]
+        )
+        self.assertEqual(
+            release_assets["container"]["oci_manifest_digest"],
+            receipt["image"]["oci_manifest_digest"],
+        )
+        self.assertEqual(release_assets["binary_asset"], receipt["binary_asset"])
+        self.assertEqual(release_assets["sbom"], receipt["sbom"])
+        self.assertFalse(receipt["publication_authorized"])
+        self.assertFalse(release_assets["container"]["published"])
+
+        committed_packager = subprocess.run(
+            [
+                "git",
+                "show",
+                f"{receipt['packager_source_commit']}:tools/release/package.py",
+            ],
+            cwd=repository,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        ).stdout
+        self.assertEqual(
+            hashlib.sha256(committed_packager).hexdigest(),
+            receipt["packager_sha256"],
+        )
+
     def test_build_rejects_source_identity_changes_after_configure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source"
