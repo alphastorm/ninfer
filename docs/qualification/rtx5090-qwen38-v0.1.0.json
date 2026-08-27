@@ -4,7 +4,7 @@
   "release_version": "v0.1.0",
   "as_of": "2026-08-27",
   "qualification_status": "passed",
-  "publication_authorized": false,
+  "publication_authorized": true,
   "target": "qwen3.8-27b-groupwise-int-on-rtx5090",
   "scope_statement": "One measured RTX 5090, one fixed runtime profile, and one resident model instance. Results are not universal hardware or deployment claims.",
   "hardware": {
@@ -162,7 +162,7 @@
     "measurement_schema": "fixtures/rtx5090-qwen38-v0.1.0-measurement.schema.json",
     "gate_manifest": "fixtures/rtx5090-qwen38-v0.1.0-gates.json",
     "release_package_receipt": "fixtures/rtx5090-qwen38-v0.1.0-release-package.json",
-    "release_package_receipt_sha256": "b3337be7c6a35b4c2e4058f56f38a9898ed88ed940df49465aa526b73e9201f8",
+    "release_package_receipt_sha256": "1fb93de8b7e6774673662937b90b05d7bd8b3742afee42da9017518194e05f23",
     "raw_private_logs_included": false
   },
   "release_identity": {
@@ -179,17 +179,20 @@
   },
   "runtime_source_binding": "The behavioral campaign remains bound to exact clean runtime_source_sha 70868c658f5bd412ead5b105ec76939997bd6ca9. Release source da2b6b6c8e129d182370feee657b7d8b9b9bbbf5 closes the separately reviewed incremental-build provenance class and passed a fresh exact source, binary, model, configuration, teardown, and incumbent-restoration proof without repeating the benchmark campaign.",
   "release_assets": {
-    "status": "verified_unpublished",
+    "status": "published_verified",
     "source_tag_target_sha": "da2b6b6c8e129d182370feee657b7d8b9b9bbbf5",
-    "tag_created": false,
+    "tag_created": true,
     "packager_source_sha": "92545473e9aa552132e5c0a1fcb1b5535b1a717c",
     "source_archive_sha256": "31eda87bf64caf7152b71d8cfe976b30661c02347decef9935437cc76af464bd",
     "container": {
       "local_image_id": "sha256:93ab5bc7bda16d0ed401d049ce264a90ff2a7bba3222fd77173a932590865c82",
       "target_reference": "ghcr.io/alphastorm/ninfer:qwen38-5090-v0.1.0",
-      "oci_index_digest": "sha256:abce5ffd1ea34d169cbe7ca89200b9910c785b7fca790cdd908aaf05d4050553",
+      "registry_reference": "ghcr.io/alphastorm/ninfer@sha256:a19e00c5d7993d7c12341974bdc7e3d13e61d9deaf39e8ce00cf94abd6137712",
+      "registry_tag_index_digest": "sha256:93ab5bc7bda16d0ed401d049ce264a90ff2a7bba3222fd77173a932590865c82",
+      "local_oci_index_digest": "sha256:abce5ffd1ea34d169cbe7ca89200b9910c785b7fca790cdd908aaf05d4050553",
       "oci_manifest_digest": "sha256:a19e00c5d7993d7c12341974bdc7e3d13e61d9deaf39e8ce00cf94abd6137712",
-      "published": false
+      "published": true,
+      "anonymous_pull_verified": true
     },
     "binary_sha256": {
       "ninfer": "f3957393ff38e41a72c1ec829606c311bb3dad202afa0c939820dde30fdeb2f0",
@@ -198,31 +201,34 @@
     "binary_asset": {
       "name": "ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.tar.gz",
       "bytes": 318874998,
-      "sha256": "89db6e521bd76f301bac14b881d69f9a09f8375e109b2175fa6387e7878bcfbd"
+      "sha256": "89db6e521bd76f301bac14b881d69f9a09f8375e109b2175fa6387e7878bcfbd",
+      "url": "https://github.com/alphastorm/ninfer/releases/download/v0.1.0-qwen38-5090/ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.tar.gz"
     },
     "sbom": {
       "name": "ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.spdx.json",
       "bytes": 3599,
       "sha256": "bb7bcf71019b4033fcc5f26c66c8e69f19272acf8d0986d4822f26605ced7682",
-      "format": "SPDX-2.3"
+      "format": "SPDX-2.3",
+      "url": "https://github.com/alphastorm/ninfer/releases/download/v0.1.0-qwen38-5090/ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.spdx.json"
     },
     "checksums": {
       "name": "ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.SHA256SUMS",
-      "sha256": "9dbe55f4539438e41df7b96fa461646c7b360660b611f59d5ba088b6c9043609"
+      "sha256": "9dbe55f4539438e41df7b96fa461646c7b360660b611f59d5ba088b6c9043609",
+      "url": "https://github.com/alphastorm/ninfer/releases/download/v0.1.0-qwen38-5090/ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.SHA256SUMS"
     },
     "model_weights_bundled": false,
-    "verification_status": "verified",
+    "verification_status": "anonymous_download_verified",
     "deterministic_repeat": true
   },
   "production_effects": [
     "The incumbent was stopped only for the explicitly authorized bounded qualification window.",
     "The exact incumbent container and image identity were restored healthy after candidate qualification.",
-    "No route, deployment lock, source tag, image registry, or remote repository was mutated."
+    "The exact image was published to public GHCR and the exact binary archive, SPDX document, and checksums were published as prerelease v0.1.0-qwen38-5090; no route, deployment lock, model artifact, or production runtime was changed."
   ],
   "limitations": [
     "The result applies to one NVIDIA GeForce RTX 5090 and the exact recorded profile; it does not establish cross-machine reproducibility.",
     "The RTX 4090 tier has a separate qualification record.",
-    "Publication, tagging, pushing, route promotion, and registry upload remain external authorization gates."
+    "OMP NInfer product-candidate publication, Homebrew promotion, external installation, and route promotion remain separate gates."
   ],
   "blockers": []
 }

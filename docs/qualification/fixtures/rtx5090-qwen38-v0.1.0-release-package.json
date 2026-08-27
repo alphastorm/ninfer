@@ -15,11 +15,14 @@
     "local_reference": "ninfer-v010-release:da2b6b6",
     "image_id": "sha256:93ab5bc7bda16d0ed401d049ce264a90ff2a7bba3222fd77173a932590865c82",
     "target_reference": "ghcr.io/alphastorm/ninfer:qwen38-5090-v0.1.0",
-    "oci_index_digest": "sha256:abce5ffd1ea34d169cbe7ca89200b9910c785b7fca790cdd908aaf05d4050553",
+    "registry_reference": "ghcr.io/alphastorm/ninfer@sha256:a19e00c5d7993d7c12341974bdc7e3d13e61d9deaf39e8ce00cf94abd6137712",
+    "registry_tag_index_digest": "sha256:93ab5bc7bda16d0ed401d049ce264a90ff2a7bba3222fd77173a932590865c82",
+    "local_oci_index_digest": "sha256:abce5ffd1ea34d169cbe7ca89200b9910c785b7fca790cdd908aaf05d4050553",
     "oci_manifest_digest": "sha256:a19e00c5d7993d7c12341974bdc7e3d13e61d9deaf39e8ce00cf94abd6137712",
     "oci_archive_sha256": "a3819f9030e4228bf79e9a3bbac7c10dd2e6aaeec29ce9941598c1d1341aa250",
     "oci_archive_bytes": 1848271872,
-    "published": false
+    "published": true,
+    "anonymous_pull_verified": true
   },
   "binaries": {
     "ninfer_sha256": "f3957393ff38e41a72c1ec829606c311bb3dad202afa0c939820dde30fdeb2f0",
@@ -28,19 +31,22 @@
   "binary_asset": {
     "name": "ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.tar.gz",
     "bytes": 318874998,
-    "sha256": "89db6e521bd76f301bac14b881d69f9a09f8375e109b2175fa6387e7878bcfbd"
+    "sha256": "89db6e521bd76f301bac14b881d69f9a09f8375e109b2175fa6387e7878bcfbd",
+    "url": "https://github.com/alphastorm/ninfer/releases/download/v0.1.0-qwen38-5090/ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.tar.gz"
   },
   "sbom": {
     "name": "ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.spdx.json",
     "bytes": 3599,
     "sha256": "bb7bcf71019b4033fcc5f26c66c8e69f19272acf8d0986d4822f26605ced7682",
-    "format": "SPDX-2.3"
+    "format": "SPDX-2.3",
+    "url": "https://github.com/alphastorm/ninfer/releases/download/v0.1.0-qwen38-5090/ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.spdx.json"
   },
   "checksums": {
     "name": "ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.SHA256SUMS",
     "bytes": 251,
     "sha256": "9dbe55f4539438e41df7b96fa461646c7b360660b611f59d5ba088b6c9043609",
-    "verified": true
+    "verified": true,
+    "url": "https://github.com/alphastorm/ninfer/releases/download/v0.1.0-qwen38-5090/ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.SHA256SUMS"
   },
   "determinism": {
     "binary_asset_repeat_byte_identical": true,
@@ -49,5 +55,13 @@
     "receipt_sha256": "9c29a3a44cabec1bbbf93f5da87755514e34b1a0f1b312a9d22bc79388db8bc7"
   },
   "model_weights_bundled": false,
-  "publication_authorized": false
+  "publication": {
+    "release_id": 377979083,
+    "tag": "v0.1.0-qwen38-5090",
+    "tag_target_commit": "da2b6b6c8e129d182370feee657b7d8b9b9bbbf5",
+    "release_url": "https://github.com/alphastorm/ninfer/releases/tag/v0.1.0-qwen38-5090",
+    "prerelease": true,
+    "anonymous_assets_verified": true
+  },
+  "publication_authorized": true
 }
