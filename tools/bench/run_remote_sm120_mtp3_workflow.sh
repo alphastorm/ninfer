@@ -31,7 +31,8 @@ require_var() {
 
 for name in \
   CONTROLLER_TARGET_HOST CONTROLLER_WSL_DISTRIBUTION CONTROLLER_OPERATION_PARENT \
-  CONTROLLER_RECEIPT_ROOT PROFILE_UPSTREAM_BASE_SHA \
+  CONTROLLER_RECEIPT_ROOT CONTROLLER_WINDOWS_STAGE_DIR CONTROLLER_WSL_STAGE_DIR \
+  PROFILE_UPSTREAM_BASE_SHA \
   PROFILE_DOCKER_CLI PROFILE_DOCKER_CONTEXT PROFILE_DOCKER_ENDPOINT \
   PROFILE_DOCKER_DAEMON_ID PROFILE_TOOLCHAIN_BASE_IMAGE PROFILE_TOOLCHAIN_BASE_IMAGE_ID \
   PROFILE_TOOLCHAIN_IMAGE \
@@ -49,6 +50,7 @@ for name in \
 done
 
 ssh_bin=${CONTROLLER_SSH_BIN:-ssh}
+scp_bin=${CONTROLLER_SCP_BIN:-scp}
 git_bin=${CONTROLLER_GIT_BIN:-git}
 sha256_bin=${CONTROLLER_SHA256_BIN:-shasum}
 source_root=${CONTROLLER_SOURCE_ROOT:-}
@@ -60,7 +62,7 @@ workflow_relative=tools/bench/run_sm120_mtp3_workflow.sh
 toolchain_relative=tools/bench/ensure_sm120_profile_toolchain.sh
 [[ -x $source_root/$workflow_relative ]] || fail "target workflow is not executable in controller source: $source_root/$workflow_relative"
 [[ -x $source_root/$toolchain_relative ]] || fail "profile toolchain bootstrap is not executable in controller source: $source_root/$toolchain_relative"
-for command in "$ssh_bin" "$git_bin" "$sha256_bin" mktemp tar; do
+for command in "$ssh_bin" "$scp_bin" "$git_bin" "$sha256_bin" mktemp tar; do
   command -v "$command" >/dev/null 2>&1 || fail "required controller command is unavailable: $command"
 done
 [[ $CONTROLLER_OPERATION_PARENT == /* ]] || fail "CONTROLLER_OPERATION_PARENT must be absolute"
@@ -84,9 +86,13 @@ operation_root=$CONTROLLER_OPERATION_PARENT/$operation_name
 receipt_root=$CONTROLLER_RECEIPT_ROOT/$operation_name
 [[ ! -e $receipt_root && ! -L $receipt_root ]] || fail "controller receipt path already exists: $receipt_root"
 
-ssh_args=("$ssh_bin" -o BatchMode=yes -o "ConnectTimeout=${CONTROLLER_SSH_CONNECT_TIMEOUT_SECONDS:-15}")
+connection_options=(-o BatchMode=yes -o "ConnectTimeout=${CONTROLLER_SSH_CONNECT_TIMEOUT_SECONDS:-15}" \
+  -o ServerAliveInterval=10 -o ServerAliveCountMax=6)
+ssh_args=("$ssh_bin" "${connection_options[@]}")
+scp_args=("$scp_bin" "${connection_options[@]}")
 if [[ -n ${CONTROLLER_SSH_JUMP:-} ]]; then
   ssh_args+=(-J "$CONTROLLER_SSH_JUMP")
+  scp_args+=(-o "ProxyJump=$CONTROLLER_SSH_JUMP")
 fi
 ssh_args+=("$CONTROLLER_TARGET_HOST")
 
@@ -94,11 +100,16 @@ remote_wsl() {
   "${ssh_args[@]}" wsl.exe -d "$CONTROLLER_WSL_DISTRIBUTION" -- "$@"
 }
 
-stage_stream() {
+stage_file() {
   local source=$1
   local target=$2
-  "${ssh_args[@]}" wsl.exe -d "$CONTROLLER_WSL_DISTRIBUTION" -- \
-    /usr/bin/tee "$target" <"$source" >/dev/null
+  local name windows_target wsl_staging
+  name="$operation_name-$(basename -- "$target")"
+  windows_target=${CONTROLLER_WINDOWS_STAGE_DIR%/}/$name
+  wsl_staging=${CONTROLLER_WSL_STAGE_DIR%/}/$name
+  "${scp_args[@]}" "$source" "$CONTROLLER_TARGET_HOST:$windows_target"
+  remote_wsl /usr/bin/install -m 0600 "$wsl_staging" "$target"
+  remote_wsl /usr/bin/rm -f "$wsl_staging"
 }
 
 hash_file() {
@@ -150,11 +161,12 @@ $git_bin -C "$source_root" bundle create "$bundle" HEAD "$PROFILE_UPSTREAM_BASE_
 $git_bin -C "$source_root" bundle verify "$bundle" >/dev/null
 bundle_sha=$(hash_file "$bundle")
 
+printf 'remote profile operation: %s\n' "$operation_name"
 if ! remote_wsl /usr/bin/test ! -e "$operation_root"; then
   fail "remote operation path already exists: $operation_root"
 fi
 remote_wsl /usr/bin/mkdir -m 0700 "$operation_root"
-stage_stream "$bundle" "$operation_root/source.bundle"
+stage_file "$bundle" "$operation_root/source.bundle"
 remote_bundle_sha=$(remote_wsl /usr/bin/sha256sum "$operation_root/source.bundle" | cut -d' ' -f1)
 [[ $remote_bundle_sha == "$bundle_sha" ]] || fail "remote source bundle SHA-256 differs from controller"
 remote_wsl /usr/bin/git clone --no-checkout "$operation_root/source.bundle" "$operation_root/source"
@@ -179,14 +191,14 @@ PROFILE_TOOLCHAIN_IMAGE_ID=$(remote_wsl /usr/bin/env \
 [[ $PROFILE_TOOLCHAIN_IMAGE_ID =~ ^sha256:[0-9a-f]{64}$ ]] || fail "profile toolchain bootstrap did not return an exact image ID"
 emit_config >"$target_config"
 config_sha=$(hash_file "$target_config")
-stage_stream "$target_config" "$operation_root/profile.conf"
+stage_file "$target_config" "$operation_root/profile.conf"
 remote_config_sha=$(remote_wsl /usr/bin/sha256sum "$operation_root/profile.conf" | cut -d' ' -f1)
 [[ $remote_config_sha == "$config_sha" ]] || fail "remote profile config SHA-256 differs from controller"
 
 remote_workflow=$operation_root/source/$workflow_relative
 remote_config=$operation_root/profile.conf
 remote_env=(/usr/bin/env "NINFER_CONTROLLER_ID=$PROFILE_CONTROLLER_ID" "NINFER_TARGET_ID=$PROFILE_TARGET_ID")
-printf 'remote profile operation staged: %s\n' "$operation_name"
+printf 'remote profile operation staged and verified: %s\n' "$operation_name"
 remote_wsl "${remote_env[@]}" "$remote_workflow" check "$remote_config"
 
 set +e

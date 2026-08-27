@@ -115,6 +115,22 @@ class Sm120RemoteWorkflowTest(unittest.TestCase):
             exec "$@"
             """,
         )
+        self.staging = self.root / "staging"
+        self.staging.mkdir()
+        self.fake_scp = self.root / "fake-scp"
+        write_executable(
+            self.fake_scp,
+            r"""
+            #!/usr/bin/env bash
+            set -Eeuo pipefail
+            while [[ $1 == -o ]]; do
+              shift 2
+            done
+            source=$1
+            target=${2#*:}
+            /bin/cp "$source" "$target"
+            """,
+        )
         self.operation_parent = self.root / "target-operations"
         self.operation_parent.mkdir()
         self.receipt_parent = self.root / "receipts"
@@ -129,9 +145,12 @@ class Sm120RemoteWorkflowTest(unittest.TestCase):
             "CONTROLLER_WSL_DISTRIBUTION": "Ubuntu-24.04",
             "CONTROLLER_OPERATION_PARENT": self.operation_parent,
             "CONTROLLER_RECEIPT_ROOT": self.receipt_parent,
+            "CONTROLLER_WINDOWS_STAGE_DIR": self.staging,
+            "CONTROLLER_WSL_STAGE_DIR": self.staging,
             "CONTROLLER_SOURCE_ROOT": self.source,
             "CONTROLLER_OPERATION_NAME": operation_name,
             "CONTROLLER_SSH_BIN": self.fake_ssh,
+            "CONTROLLER_SCP_BIN": self.fake_scp,
             "CONTROLLER_GIT_BIN": shutil.which("git"),
             "CONTROLLER_SHA256_BIN": "/usr/bin/shasum",
             "PROFILE_UPSTREAM_BASE_SHA": self.base_sha,

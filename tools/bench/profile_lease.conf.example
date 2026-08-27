@@ -7,6 +7,9 @@ CONTROLLER_SSH_JUMP=REPLACE_ME
 CONTROLLER_WSL_DISTRIBUTION=Ubuntu-24.04
 CONTROLLER_OPERATION_PARENT=/home/operator/builds
 CONTROLLER_RECEIPT_ROOT=/absolute/controller/path/profiles/sm120-controller
+# OpenSSH stages complete files on Windows; WSL installs them atomically into the operation root.
+CONTROLLER_WINDOWS_STAGE_DIR=C:/Users/REPLACE_ME
+CONTROLLER_WSL_STAGE_DIR=/mnt/c/Users/REPLACE_ME
 
 PROFILE_ROOT=/home/operator/builds/ninfer-profile-run
 PROFILE_SOURCE_ROOT=$PROFILE_ROOT/source
