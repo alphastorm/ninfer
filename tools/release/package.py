@@ -344,6 +344,40 @@ def write_archive(path: Path, root: str, files: list[ReleaseFile], epoch: int) -
                     add_tar_file(archive, item, epoch)
 
 
+def verify_archive(path: Path, root: str, files: list[ReleaseFile]) -> None:
+    ordered_files = sorted(files, key=lambda value: value.archive_name)
+    expected_names = [root, f"{root}/bin", *(item.archive_name for item in ordered_files)]
+    try:
+        with tarfile.open(path, mode="r:gz") as archive:
+            members = archive.getmembers()
+            if [member.name for member in members] != expected_names:
+                fail("release archive member set or order differs from the manifest")
+            for directory_name in expected_names[:2]:
+                member = archive.getmember(directory_name)
+                if not member.isdir() or member.mode != 0o755:
+                    fail("release archive contains an invalid directory entry")
+            for item in ordered_files:
+                member = archive.getmember(item.archive_name)
+                if (
+                    not member.isreg()
+                    or member.mode != item.mode
+                    or member.uid != 0
+                    or member.gid != 0
+                    or member.size != item.size
+                ):
+                    fail(f"release archive metadata differs for {item.archive_name}")
+                stream = archive.extractfile(member)
+                if stream is None:
+                    fail(f"release archive omitted bytes for {item.archive_name}")
+                digest = hashlib.sha256()
+                for block in iter(lambda: stream.read(8 * 1024 * 1024), b""):
+                    digest.update(block)
+                if digest.hexdigest() != item.sha256:
+                    fail(f"release archive member digest differs for {item.archive_name}")
+    except (OSError, tarfile.TarError, KeyError) as error:
+        raise ReleaseError("failed to verify the release archive") from error
+
+
 def spdx_id(name: str) -> str:
     return "SPDXRef-File-" + re.sub(r"[^A-Za-z0-9.-]", "-", name)
 
@@ -398,7 +432,7 @@ def build_spdx(
         "dataLicense": "CC0-1.0",
         "SPDXID": "SPDXRef-DOCUMENT",
         "name": f"{root}-sbom",
-        "documentNamespace": f"https://github.com/neroued/NInfer/releases/{release_version}/sbom-{namespace_id}",
+        "documentNamespace": f"https://github.com/alphastorm/ninfer/releases/{release_version}/sbom-{namespace_id}",
         "creationInfo": {
             "created": created,
             "creators": ["Tool: ninfer-release-package"],
@@ -499,6 +533,7 @@ def package_release(options: ReleaseOptions) -> dict[str, object]:
         sbom_path = temporary / sbom_name
         checksums_path = temporary / checksums_name
         write_archive(archive_path, root, files, epoch)
+        verify_archive(archive_path, root, files)
         sbom_path.write_bytes(spdx_bytes)
         archive_sha256 = hash_path(archive_path)[0]
         sbom_sha256 = hash_path(sbom_path)[0]

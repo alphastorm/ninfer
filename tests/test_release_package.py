@@ -212,6 +212,26 @@ class ReleasePackageTests(unittest.TestCase):
             self.assertEqual(spdx["spdxVersion"], "SPDX-2.3")
             self.assertEqual(len(spdx["files"]), 4)
             self.assertTrue(spdx["packages"][0]["filesAnalyzed"])
+            self.assertTrue(
+                spdx["documentNamespace"].startswith(
+                    "https://github.com/alphastorm/ninfer/releases/v0.1.0/"
+                )
+            )
+            spdx_sha256 = {
+                item["fileName"].removeprefix("./"): next(
+                    checksum["checksumValue"]
+                    for checksum in item["checksums"]
+                    if checksum["algorithm"] == "SHA256"
+                )
+                for item in spdx["files"]
+            }
+            with tarfile.open(asset, "r:gz") as archive:
+                for name, expected_sha256 in spdx_sha256.items():
+                    stream = archive.extractfile(name)
+                    self.assertIsNotNone(stream)
+                    self.assertEqual(
+                        hashlib.sha256(stream.read()).hexdigest(), expected_sha256
+                    )
 
             with mock.patch.object(
                 release_package, "image_binary_sha256", return_value="0" * 64
@@ -220,6 +240,24 @@ class ReleasePackageTests(unittest.TestCase):
                     ReleaseError, "package binary differs from the release image"
                 ):
                     package_release(options(root / "mismatched-image-release"))
+
+            real_write_archive = release_package.write_archive
+
+            def write_mutated_archive(
+                path: Path, root_name: str, files: list[release_package.ReleaseFile], epoch: int
+            ) -> None:
+                value = bytearray(ninfer.read_bytes())
+                value[0] ^= 1
+                ninfer.write_bytes(value)
+                real_write_archive(path, root_name, files, epoch)
+
+            with mock.patch.object(
+                release_package, "write_archive", side_effect=write_mutated_archive
+            ):
+                with self.assertRaisesRegex(
+                    ReleaseError, "archive member digest differs"
+                ):
+                    package_release(options(root / "mutated-binary-release"))
 
             (source / "LICENSE").write_text("dirty\n", encoding="utf-8")
             with self.assertRaisesRegex(ReleaseError, "source tree must be clean"):
