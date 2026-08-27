@@ -5,6 +5,7 @@
 #include "artifact/reader.h"
 #include "core/device.h"
 #include "runtime/engine/kv_capacity.h"
+#include "runtime/engine/options.h"
 
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
@@ -147,6 +148,7 @@ int run(const Options& options) {
     engine.speculative.draft_tokens  = options.draft_tokens;
     engine.speculative.proposal_head = options.proposal;
     engine.use_cuda_graph            = options.use_cuda_graph;
+    engine                           = ninfer::runtime::normalize_engine_options(std::move(engine));
 
     ninfer::DeviceContext device(options.device);
     ninfer::artifact::Reader reader(options.artifact);

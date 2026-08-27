@@ -393,6 +393,10 @@ class Sm120Mtp3ProfileRunnerTest(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
         self.assertTrue((output / "packet-complete.txt").is_file())
         self.assertTrue((output / "ncu" / "counter-access-verified.txt").is_file())
+        self.assertEqual(
+            (output / "preparation" / "artifacts-check.log").stat().st_mode & 0o777,
+            0o644,
+        )
         self.assertTrue((output / "nsys" / "mtp3-round.nsys-rep").is_file())
         for name in (
             "q5-split2-cold.ncu-rep",
@@ -412,10 +416,12 @@ class Sm120Mtp3ProfileRunnerTest(unittest.TestCase):
         q4_gate = log.index("ninfer_linear_swiglu_q4_a16_test")
         q5_gate = log.index("ninfer_linear_add_q5_a16_test")
         counter_gate = next(i for i, line in enumerate(log) if line.startswith("ncu --profile-from-start"))
+        mtp_round = next(i for i, line in enumerate(log) if line.startswith("mtp-round "))
         first_timing = next(i for i, line in enumerate(log) if line.startswith("post-mixer --describe"))
         self.assertLess(q4_gate, q5_gate)
         self.assertLess(q5_gate, counter_gate)
-        self.assertLess(counter_gate, first_timing)
+        self.assertLess(counter_gate, mtp_round)
+        self.assertLess(mtp_round, first_timing)
         self.assertFalse(any(line.startswith("cmake --build ") for line in log))
 
     def test_rejects_any_uncommitted_source_change_before_build(self) -> None:

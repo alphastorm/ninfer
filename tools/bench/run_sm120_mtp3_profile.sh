@@ -289,7 +289,7 @@ PY
 mkdir -p "$output_dir"/{environment,correctness,nsys,ncu,timings,preparation}
 output_dir=$(cd "$output_dir" && pwd -P)
 cp -a "$prepare_dir"/. "$output_dir/preparation/"
-cp "$artifacts_check" "$output_dir/preparation/artifacts-check.log"
+install -m 0644 "$artifacts_check" "$output_dir/preparation/artifacts-check.log"
 
 ncu_timeout=${NINFER_NCU_TIMEOUT_SECONDS:-180}
 nsys_timeout=${NINFER_NSYS_TIMEOUT_SECONDS:-300}
@@ -417,6 +417,9 @@ capture_q5 q5-split2-cold cold public
     "$output_dir/ncu/q5-split2-cold.csv"
 } >"$output_dir/ncu/counter-access-verified.txt"
 
+"$mtp_round_bench" --artifact "$artifact" --draft-tokens 3 --proposal-head optimized \
+  --warmup 2 --reps 10 >"$output_dir/timings/mtp-round.csv" \
+  2>"$output_dir/timings/mtp-round.stderr.log"
 
 "$post_mixer_bench" --describe --activation-state q4-produced --candidate public --measure q5 \
   >"$output_dir/post-mixer-manifest.json"
@@ -434,10 +437,6 @@ done
   --warmup 5 --repeat 30 >>"$output_dir/timings/post-mixer.jsonl"
 "$post_mixer_bench" --activation-state q4-produced --candidate public --measure chain \
   --warmup 5 --repeat 30 >>"$output_dir/timings/post-mixer.jsonl"
-"$mtp_round_bench" --artifact "$artifact" --draft-tokens 3 --proposal-head optimized \
-  --warmup 2 --reps 10 >"$output_dir/timings/mtp-round.csv" \
-  2>"$output_dir/timings/mtp-round.stderr.log"
-
 "$python" - "$output_dir/timings/post-mixer.jsonl" \
   "$output_dir/timings/summary.json" <<'PY'
 import json
