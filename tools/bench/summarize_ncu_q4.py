@@ -23,9 +23,7 @@ class Metric:
 
 
 _DURATION_METRICS = ("gpu__time_duration.sum", "gpu__time_duration.avg")
-_DRAM_TOTAL_METRICS = ("dram__bytes.sum",)
-_DRAM_READ_METRICS = ("dram__bytes_read.sum",)
-_DRAM_WRITE_METRICS = ("dram__bytes_write.sum",)
+_DRAM_RATE_METRICS = ("dram__bytes.sum.per_second",)
 _OPTIONAL_METRICS = (
     "launch__registers_per_thread",
     "launch__shared_mem_per_block_static",
@@ -47,59 +45,39 @@ def _number(raw: str, *, path: Path, metric: str) -> float:
     return value
 
 
-def _rows(path: Path) -> tuple[list[str], list[list[str]]]:
+def _rows(path: Path) -> tuple[list[str], list[str], list[list[str]]]:
     with path.open(newline="", encoding="utf-8-sig") as stream:
         parsed = list(csv.reader(stream))
     for index, row in enumerate(parsed):
-        if "Metric Name" in row and "Metric Value" in row:
-            return row, parsed[index + 1 :]
-    raise SummaryError(f"{path}: Nsight Compute CSV header was not found")
+        if "ID" in row and "Kernel Name" in row and any(name in row for name in _DURATION_METRICS):
+            if index + 1 >= len(parsed) or len(parsed[index + 1]) != len(row):
+                raise SummaryError(f"{path}: Nsight Compute CSV unit row is missing or malformed")
+            data = [candidate for candidate in parsed[index + 2 :] if any(candidate)]
+            if any(len(candidate) != len(row) for candidate in data):
+                raise SummaryError(f"{path}: Nsight Compute CSV data row is malformed")
+            return row, parsed[index + 1], data
+    raise SummaryError(f"{path}: Nsight Compute wide CSV header was not found")
 
 
 def _read_metrics(path: Path) -> tuple[str, dict[str, Metric]]:
-    header, rows = _rows(path)
+    header, units, rows = _rows(path)
     positions = {name: index for index, name in enumerate(header)}
-    name_index = positions["Metric Name"]
-    value_index = positions["Metric Value"]
-    unit_index = positions.get("Metric Unit")
-    id_index = positions.get("ID")
-    kernel_index = positions.get("Kernel Name")
-    width = len(header)
-
-    launches: set[tuple[str, str]] = set()
-    observed: dict[str, list[Metric]] = {}
-    for row in rows:
-        if len(row) != width or row == header:
-            continue
-        name = row[name_index].strip()
-        if not name:
-            continue
-        if id_index is not None or kernel_index is not None:
-            launches.add(
-                (
-                    row[id_index].strip() if id_index is not None else "",
-                    row[kernel_index].strip() if kernel_index is not None else "",
-                )
-            )
-        unit = row[unit_index].strip() if unit_index is not None else ""
-        observed.setdefault(name, []).append(
-            Metric(_number(row[value_index], path=path, metric=name), unit)
+    if len(rows) != 1:
+        launches = ", ".join(
+            f"{row[positions['ID']]}:{row[positions['Kernel Name']]}" for row in rows
         )
+        raise SummaryError(f"{path}: expected one profiled kernel launch, found {launches}")
 
-    if len(launches) > 1:
-        rendered = ", ".join(f"{launch_id}:{kernel}" for launch_id, kernel in sorted(launches))
-        raise SummaryError(f"{path}: expected one profiled kernel launch, found {rendered}")
-    if not observed:
+    row = rows[0]
+    requested = set(_DURATION_METRICS + _DRAM_RATE_METRICS + _OPTIONAL_METRICS)
+    metrics = {
+        name: Metric(_number(row[index], path=path, metric=name), units[index].strip())
+        for name, index in positions.items()
+        if name in requested and row[index].strip()
+    }
+    if not metrics:
         raise SummaryError(f"{path}: no Nsight Compute metrics were found")
-
-    metrics: dict[str, Metric] = {}
-    for name, values in observed.items():
-        first = values[0]
-        if any(value != first for value in values[1:]):
-            raise SummaryError(f"{path}: conflicting duplicate values for {name}")
-        metrics[name] = first
-    kernel = next(iter(launches))[1] if launches else "unknown"
-    return kernel, metrics
+    return row[positions["Kernel Name"]], metrics
 
 
 def _select(metrics: dict[str, Metric], names: Iterable[str], *, path: Path) -> Metric:
@@ -126,32 +104,29 @@ def _duration_us(metric: Metric, *, path: Path) -> float:
         raise SummaryError(f"{path}: unsupported duration unit: {metric.unit!r}") from error
 
 
-def _bytes(metric: Metric, *, path: Path) -> float:
+def _bytes_per_second(metric: Metric, *, path: Path) -> float:
     factors = {
-        "byte": 1.0,
-        "bytes": 1.0,
-        "Kbyte": 1.0e3,
-        "Mbyte": 1.0e6,
-        "Gbyte": 1.0e9,
-        "KiB": 1024.0,
-        "MiB": 1024.0**2,
-        "GiB": 1024.0**3,
+        "byte/s": 1.0,
+        "Kbyte/s": 1.0e3,
+        "Mbyte/s": 1.0e6,
+        "Gbyte/s": 1.0e9,
+        "Tbyte/s": 1.0e12,
+        "KiB/s": 1024.0,
+        "MiB/s": 1024.0**2,
+        "GiB/s": 1024.0**3,
+        "TiB/s": 1024.0**4,
     }
     try:
         return metric.value * factors[metric.unit]
     except KeyError as error:
-        raise SummaryError(f"{path}: unsupported byte unit: {metric.unit!r}") from error
+        raise SummaryError(f"{path}: unsupported byte-rate unit: {metric.unit!r}") from error
 
 
 def read_capture(path: Path) -> dict[str, object]:
     kernel, metrics = _read_metrics(path)
     duration = _duration_us(_select(metrics, _DURATION_METRICS, path=path), path=path)
-    if any(name in metrics for name in _DRAM_TOTAL_METRICS):
-        dram_bytes = _bytes(_select(metrics, _DRAM_TOTAL_METRICS, path=path), path=path)
-    else:
-        dram_bytes = _bytes(_select(metrics, _DRAM_READ_METRICS, path=path), path=path) + _bytes(
-            _select(metrics, _DRAM_WRITE_METRICS, path=path), path=path
-        )
+    dram_rate = _bytes_per_second(_select(metrics, _DRAM_RATE_METRICS, path=path), path=path)
+    dram_bytes = dram_rate * duration * 1.0e-6
     if duration <= 0.0 or dram_bytes <= 0.0:
         raise SummaryError(f"{path}: duration and DRAM bytes must be positive")
 

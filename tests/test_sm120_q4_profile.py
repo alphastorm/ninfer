@@ -19,13 +19,19 @@ def write_capture(
     write_mbytes: float,
 ) -> None:
     with path.open("w", newline="", encoding="utf-8") as stream:
-        stream.write("==PROF== synthetic fixture\n")
         writer = csv.writer(stream)
-        writer.writerow(["ID", "Kernel Name", "Metric Name", "Metric Unit", "Metric Value"])
-        writer.writerow([launch_id, kernel, "gpu__time_duration.sum", "usecond", duration_us])
-        writer.writerow([launch_id, kernel, "dram__bytes_read.sum", "Mbyte", read_mbytes])
-        writer.writerow([launch_id, kernel, "dram__bytes_write.sum", "Mbyte", write_mbytes])
-        writer.writerow([launch_id, kernel, "launch__registers_per_thread", "register/thread", 96])
+        writer.writerow(
+            [
+                "ID",
+                "Kernel Name",
+                "gpu__time_duration.sum",
+                "dram__bytes.sum.per_second",
+                "launch__registers_per_thread",
+            ]
+        )
+        writer.writerow(["", "", "us", "Gbyte/s", "register/thread"])
+        dram_gb_s = (read_mbytes + write_mbytes) / duration_us * 1.0e3
+        writer.writerow([launch_id, kernel, duration_us, dram_gb_s, 96])
 
 
 def write_manifest(path: Path, *, m4_schedule: str = "linear_swiglu.q4.mma.small_t.exact") -> None:
@@ -102,9 +108,7 @@ class Sm120Q4ProfileTest(unittest.TestCase):
                 write_mbytes=6.0,
             )
             with path.open("a", newline="", encoding="utf-8") as stream:
-                csv.writer(stream).writerow(
-                    [2, "unexpected_kernel", "gpu__time_duration.sum", "usecond", 1.0]
-                )
+                csv.writer(stream).writerow([2, "unexpected_kernel", 1.0, 1.0, 96])
 
             with self.assertRaisesRegex(SummaryError, "expected one profiled kernel launch"):
                 read_capture(path)
