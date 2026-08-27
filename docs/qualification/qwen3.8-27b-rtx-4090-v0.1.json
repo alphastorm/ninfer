@@ -105,7 +105,9 @@
       "status": "failed",
       "scope": "exact t01 fixture through a bounded direct-loopback tool harness",
       "failure": "Model emitted textual tool markup instead of a typed tool call; the working fixture remained unchanged and unknown-arm execution did not reject before side effects.",
-      "output_sha256": "8e7847b76261f4ec359853261ceff5cf46093c8525481426f57441cdc9a6329e"
+      "output_sha256": "8e7847b76261f4ec359853261ceff5cf46093c8525481426f57441cdc9a6329e",
+      "local_reproduction": "passed: captured output has 2 tool opens and 0 closes; existing malformed-output fallback is correct",
+      "project_owned_fix": false
     },
     "P": {
       "status": "not_run_after_golden_red"
@@ -145,7 +147,22 @@
     "performance": "not_run",
     "candidate_cleaned_up": true,
     "incumbent_restored": true,
-    "support_claim": false
+    "support_claim": false,
+    "local_reproduction": {
+      "status": "reproduced",
+      "receipt_sha256": "537697b43cb33cdcb85e164d83f8923eba2830e1aabf0aed73d6c7673715a150",
+      "marker_counts": {
+        "tool_open": 2,
+        "tool_close": 0,
+        "function_open": 2,
+        "function_close": 0,
+        "parameter_open": 4,
+        "parameter_close": 2
+      },
+      "existing_regression": "tests/test_tool_call_parser.cpp::test_malformed_falls_back_to_text",
+      "project_owned_fix": false,
+      "reason": "The model exhausted its output bound with two open write_file calls and no closing tool or function tag. Normalizing this into a typed call would fabricate missing arguments and could execute truncated code."
+    }
   },
   "isolation": {
     "candidate_loopback_port": 18082,

@@ -33,6 +33,8 @@ The package checksum set passed. The installer retained the 18,210,531,328-byte 
 
 The Golden-equivalent harness used the exact pinned t01 task, fixture, and scorer over the direct loopback endpoint. The model emitted textual `<tool_call>` markup instead of a typed tool call, so the copied fixture remained unchanged. Executing the unchanged fixture with an unknown arm did not reject before side effects and hit the 30-second bound. Output SHA-256: `8e7847b76261f4ec359853261ceff5cf46093c8525481426f57441cdc9a6329e`.
 
+A local deterministic reproduction found two `<tool_call>` and two `<function=...>` openings, but zero corresponding closing tags. This is already represented by `test_malformed_falls_back_to_text`: the parser must preserve incomplete markup as text. Treating it as a typed call would fabricate missing arguments and could execute truncated code, so there is no safe project-owned parser fix and no same-identity GPU rerun is justified. Reproduction receipt SHA-256: `537697b43cb33cdcb85e164d83f8923eba2830e1aabf0aed73d6c7673715a150`.
+
 Per the stop-on-first-red rule, no protocol, long-context, persistence, performance, MTP3, route, publication, or support decision followed.
 
 ## Platform blockers resolved before the gate
