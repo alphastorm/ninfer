@@ -37,6 +37,12 @@ class ReleasePackageTests(unittest.TestCase):
         self.assertEqual(
             release_identity["release_source_sha"], receipt["runtime_source_commit"]
         )
+        self.assertEqual(
+            release_assets["packager_source_sha"], receipt["packager_source_commit"]
+        )
+        self.assertEqual(
+            release_assets["source_archive_sha256"], receipt["source_archive_sha256"]
+        )
         self.assertNotEqual(
             qualification["identity"]["runtime_source_sha"],
             release_identity["release_source_sha"],
