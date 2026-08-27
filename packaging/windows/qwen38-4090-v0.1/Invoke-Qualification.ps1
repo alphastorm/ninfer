@@ -195,11 +195,16 @@ if ([string]::IsNullOrWhiteSpace($ReceiptPath)) {
         "qualification-$($Profile.ToLowerInvariant())-" + [DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ') + '.json'
     )
 }
+$receiptIdentity = [ordered]@{}
+foreach ($property in $status.identity.PSObject.Properties) { $receiptIdentity[$property.Name] = $property.Value }
+$receiptIdentity.gpu_index = [int]$release.gpu_index
+$receiptIdentity.gpu_uuid = [string]$release.gpu_uuid
+$receiptIdentity.gpu_name = [string]$release.gpu_name
 $receiptParameters = @{
     QualifiedUtc = [DateTime]::UtcNow.ToString('o')
     ReleaseId = [string]$state.active_release
     Profile = $Profile
-    Identity = $status.identity
+    Identity = $receiptIdentity
     Configuration = [ordered]@{
         public_model_id = [string]$config.model_id
         max_context = [int]$config.engine.max_context
@@ -223,7 +228,6 @@ $receiptParameters = @{
         post_restart_elapsed_seconds = ($secondFinished - $secondStarted).TotalSeconds
     }
     Persistence = [ordered]@{
-        exact = $true
         restored_tokens = [int]$matchingRecord.result.prefix_cache_hit_tokens
         reuse_path = [string]$matchingRecord.result.prefix_reuse_path
         post_restart_prepare_seconds = [double]$matchingRecord.timings_seconds.prepare
@@ -234,7 +238,6 @@ $receiptParameters = @{
         long_session = 'passed'
         persistence = 'passed'
         golden_oracle = 'passed'
-        malformed_tool_or_final_output = $false
     }
 }
 $receipt = New-NInferQualificationReceipt @receiptParameters

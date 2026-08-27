@@ -128,10 +128,14 @@ if ([string]$qualification.identity.binary_sha256 -cne $serverSha256 -or
     [string]$qualification.identity.model_artifact_sha256 -cne [string]$spec.model.sha256) {
     throw 'qualification record artifact hashes do not match the release inputs'
 }
-if ([string]$qualification.status -ceq 'passed' -and
-    ([string]$qualification.release_gates.G.status -cne 'passed' -or
-     [string]$qualification.release_gates.L.omp_restart_component -cne 'passed')) {
-    throw 'qualification record claims passed while required release gates remain incomplete'
+if ([string]$qualification.status -ceq 'passed') {
+    foreach ($gate in @('G', 'L')) {
+        $property = $qualification.release_gates.PSObject.Properties[$gate]
+        if ($null -eq $property -or $null -eq $property.Value.PSObject.Properties['status'] -or
+            [string]$property.Value.status -cne 'passed') {
+            throw 'qualification record claims passed while required release gates remain incomplete'
+        }
+    }
 }
 
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
@@ -213,8 +217,11 @@ try {
         [Text.UTF8Encoding]::new($false)
     )
 
+    foreach ($payloadFile in @(Get-ChildItem -LiteralPath $payload -File -Recurse -Force)) {
+        $payloadFile.Attributes = $payloadFile.Attributes -band (-bnot ([IO.FileAttributes]::Hidden -bor [IO.FileAttributes]::System))
+    }
     $checksumEntries = @(
-        Get-ChildItem -LiteralPath $payload -File -Recurse |
+        Get-ChildItem -LiteralPath $payload -File -Recurse -Force |
             Sort-Object FullName |
             ForEach-Object {
                 [ordered]@{

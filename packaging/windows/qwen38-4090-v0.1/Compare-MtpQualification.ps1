@@ -53,8 +53,6 @@ function Test-DeterministicGates([object]$Receipt) {
             [string]$Receipt.deterministic_gates.long_session -ceq 'passed' -and
             [string]$Receipt.deterministic_gates.persistence -ceq 'passed' -and
             [string]$Receipt.deterministic_gates.golden_oracle -ceq 'passed' -and
-            $Receipt.deterministic_gates.malformed_tool_or_final_output -eq $false -and
-            $Receipt.persistence.exact -eq $true -and
             [string]$Receipt.persistence.reuse_path -ceq 'restore_disk_checkpoint' -and
             [int]$Receipt.persistence.restored_tokens -ge 100000 -and
             $Receipt.golden_t01.oracle_passed -eq $true -and
@@ -133,12 +131,10 @@ $decision = [ordered]@{
         MTP0 = [ordered]@{
             deterministic_gates_passed = $mtp0Passed
             complete_golden_wall_seconds = $mtp0Wall
-            persistence_exact = $mtp0.persistence.exact -eq $true
         }
         MTP3 = [ordered]@{
             deterministic_gates_passed = $mtp3Passed
             complete_golden_wall_seconds = $mtp3Wall
-            persistence_exact = $mtp3.persistence.exact -eq $true
         }
     }
     complete_golden_wall_time_improvement_percent = if ($null -eq $improvement) {

@@ -20,6 +20,7 @@ $global:NInferTestStateRoot = $null
 $global:NInferTestDeadReleaseId = $null
 $global:NInferTestDeadStartSleptMilliseconds = 0
 $global:NInferTestAclFailure = $false
+$global:NInferStateAclHardened = $false
 $global:NInferTestAclResetArguments = @()
 
 function global:Get-ScheduledTask {
@@ -165,6 +166,7 @@ function global:Start-Sleep {
 
 function global:icacls.exe {
     $arguments = @($args | ForEach-Object { [string]$_ })
+    if ($arguments -contains '/inheritance:r') { $global:NInferStateAclHardened = $true }
     if ($arguments -contains '/reset') {
         $global:NInferTestAclResetArguments = $arguments
         if ($global:NInferTestAclFailure) {
@@ -178,6 +180,12 @@ function global:icacls.exe {
             return
         }
     }
+    Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1
+}
+
+function global:nvidia-smi.exe {
+    param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Arguments)
+    '0, GPU-fixture-4090, NVIDIA GeForce RTX 4090'
     Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1
 }
 
@@ -412,7 +420,7 @@ function Assert-CleanSchema3Release([object]$Release, [string]$ReleaseId) {
         'cache_root', 'receipts_root', 'api_key_file', 'host', 'port', 'deployment_profile',
         'upstream_base_sha', 'patch_stack_sha', 'binary_sha256', 'model_artifact_sha256',
         'model_bytes', 'model_creation_utc_ticks', 'model_last_write_utc_ticks',
-        'config_sha256', 'installed_utc'
+        'config_sha256', 'gpu_index', 'gpu_uuid', 'gpu_name', 'installed_utc'
     )
     $actualFields = @($Release.PSObject.Properties | ForEach-Object { $_.Name })
     Assert-Equal $actualFields.Count $expectedFields.Count "schema-3 release has unexpected fields: $ReleaseId"
@@ -483,7 +491,7 @@ $script:StateRoot = Join-Path $testRoot 'state'
 $script:ModelPath = Join-Path $testRoot 'model.ninfer'
 $script:OwnerStatePath = Join-Path $testRoot 'gpu-owner-state.json'
 $script:OwnerControllerPath = Join-Path $testRoot 'Control-GpuOwner.ps1'
-Write-Json $script:OwnerStatePath ([ordered]@{ paused = $false })
+Write-Json $script:OwnerStatePath ([ordered]@{ paused = $false; stop_calls = 0 })
 $ownerScript = @'
 [CmdletBinding()]
 param(
@@ -494,7 +502,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $statePath = '__OWNER_STATE__'
 $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
-if ($Action -ceq 'stop') { $state.paused = $true }
+if ($Action -ceq 'stop') { $state.paused = $true; $state.stop_calls = [int]$state.stop_calls + 1 }
 if ($Action -ceq 'start') { $state.paused = $false }
 [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
 $state | ConvertTo-Json -Compress
@@ -525,6 +533,7 @@ try {
     }
     Assert-True $missingOwnerRejected 'first install accepted no GPU-owner controller'
     Invoke-FixtureInstall $basePackage $baseSecret
+    Assert-True $global:NInferStateAclHardened 'state ACL was not hardened before first-install writes'
     $state = Read-State
     Assert-Equal $state.active_release 'base-release' 'base release did not activate'
     Assert-Equal ([int]$state.schema_version) 3 'base release did not publish schema 3 state'
@@ -963,6 +972,21 @@ try {
     Assert-True $global:NInferConfigHashObserved 'restart did not validate the server config'
     Assert-OwnerPaused $false 'failed runtime validation did not restore the GPU owner'
 
+    $active = Read-State
+    $capturedLeasePath = Join-Path $script:StateRoot 'gpu-owner-lease.json'
+    Write-Json $capturedLeasePath ([ordered]@{
+            artifact_type = 'ninfer_gpu_owner_lease'; schema_version = 1
+            release_id = [string]$active.active_release
+            controller_sha256 = [string]$active.gpu_owner.controller_sha256
+            prior_paused = $false; phase = 'captured'; acquired_utc = [DateTime]::UtcNow.ToString('o')
+        })
+    & $script:OwnerControllerPath -Action start | Out-Null
+    $stopCallsBefore = [int](Read-OwnerState).stop_calls
+    & $managedController -Action Start -StateRoot $script:StateRoot | Out-Null
+    Assert-True ([int](Read-OwnerState).stop_calls -gt $stopCallsBefore) 'captured GPU-owner lease did not re-drive owner stop'
+    & $managedController -Action Stop -StateRoot $script:StateRoot | Out-Null
+    Assert-OwnerPaused $false 'captured lease recovery did not restore prior GPU owner state on stop'
+
     [ordered]@{
         artifact_type = 'ninfer_release_lifecycle_regression'
         schema_version = 1
@@ -983,6 +1007,9 @@ try {
         array_cleanup_actions = 4
         candidate_model_copies = 0
         dead_start_rejections = 1
+        captured_gpu_lease_reentries = 1
+        early_state_acl_hardening = 1
+        selected_gpu_identity_bindings = 1
         dead_start_sleep_milliseconds = $global:NInferTestDeadStartSleptMilliseconds
     } | ConvertTo-Json -Compress
 }
@@ -996,7 +1023,7 @@ finally {
             'New-ScheduledTaskTrigger', 'New-ScheduledTaskSettingsSet',
             'New-ScheduledTaskPrincipal', 'Register-ScheduledTask',
             'Unregister-ScheduledTask', 'Start-ScheduledTask', 'Stop-ScheduledTask',
-            'Get-NetTCPConnection', 'Invoke-RestMethod', 'Start-Sleep', 'icacls.exe'
+            'Get-NetTCPConnection', 'Invoke-RestMethod', 'Start-Sleep', 'icacls.exe', 'nvidia-smi.exe'
         )) {
         Remove-Item -LiteralPath "Function:\global:$name" -ErrorAction SilentlyContinue
     }

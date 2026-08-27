@@ -52,7 +52,6 @@ function New-Receipt([string]$Profile, [double]$WallSeconds) {
         Protocol = [ordered]@{ status = 'passed' }
         LongSession = [ordered]@{ fixture = $true }
         Persistence = [ordered]@{
-            exact = $true
             reuse_path = 'restore_disk_checkpoint'
             restored_tokens = 105000
         }
@@ -66,7 +65,6 @@ function New-Receipt([string]$Profile, [double]$WallSeconds) {
             long_session = 'passed'
             persistence = 'passed'
             golden_oracle = 'passed'
-            malformed_tool_or_final_output = $false
         }
     }
     return New-NInferQualificationReceipt @parameters
@@ -95,13 +93,6 @@ try {
     Assert-True ([string]$decision.selected_profile -ceq 'MTP0') 'sub-threshold decision did not retain MTP0'
 
     $mtp3.golden_t01.wall_seconds = 80.0
-    $mtp3.persistence.exact = $false
-    Write-Json $mtp3Path $mtp3
-    $decision = ((& $ComparisonPath -Mtp0ReceiptPath $mtp0Path -Mtp3ReceiptPath $mtp3Path) | Out-String) | ConvertFrom-Json
-    Assert-True (-not [bool]$decision.promote_mtp3) 'inexact persistence promoted MTP3'
-    Assert-True (-not [bool]$decision.arms.MTP3.deterministic_gates_passed) 'inexact persistence passed deterministic gates'
-
-    $mtp3.persistence.exact = $true
     $mtp3.configuration.prefill_chunk = 1024
     Write-Json $mtp3Path $mtp3
     $rejected = $false
@@ -161,7 +152,7 @@ try {
         artifact_type = 'ninfer_mtp_decision_regression'
         schema_version = 1
         status = 'passed'
-        cases = 12
+        cases = 10
     } | ConvertTo-Json -Compress
 }
 finally {

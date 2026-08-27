@@ -271,6 +271,14 @@ function Get-TransactionCleanupTargets([object]$Transaction) {
             [pscustomobject]@{ kind = [string]$descriptor.kind; path = $path }
         }
     }
+    $leasePath = Join-Path $StateRoot 'gpu-owner-lease.json'
+    if ((Test-Path -LiteralPath $leasePath -PathType Leaf) -and
+        -not [string]::IsNullOrWhiteSpace([string]$Transaction.instance_id)) {
+        $lease = Read-JsonFile $leasePath
+        if ([string]$lease.release_id -ceq [string]$Transaction.instance_id) {
+            [pscustomobject]@{ kind = 'gpu_owner_lease'; path = $leasePath }
+        }
+    }
 }
 
 function Remove-InstallTreeStreaming([object]$Target) {
@@ -414,6 +422,16 @@ function ConvertTo-Schema3Release(
         throw "installed release '$ReleaseId' stores an external model reference inside its candidate root"
     }
 
+    if ($SourceSchemaVersion -eq 3) {
+        $gpuIndex = [int](Get-RequiredReleaseField $Release $ReleaseId 'gpu_index')
+        $gpuUuid = [string](Get-RequiredReleaseField $Release $ReleaseId 'gpu_uuid')
+        $gpuName = [string](Get-RequiredReleaseField $Release $ReleaseId 'gpu_name')
+    }
+    elseif ($script:InstallTestMode) {
+        $gpuIndex = 0; $gpuUuid = 'GPU-fixture-4090'; $gpuName = 'NVIDIA GeForce RTX 4090'
+    }
+    else { throw "cannot migrate installed release '$ReleaseId': selected GPU identity is missing" }
+
     return [ordered]@{
         release_root = $releaseRoot
         server_executable = [string]$values.server_executable
@@ -434,6 +452,9 @@ function ConvertTo-Schema3Release(
         model_creation_utc_ticks = $modelCreationUtcTicks
         model_last_write_utc_ticks = $modelLastWriteUtcTicks
         config_sha256 = [string]$values.config_sha256
+        gpu_index = $gpuIndex
+        gpu_uuid = $gpuUuid
+        gpu_name = $gpuName
         installed_utc = [string]$values.installed_utc
     }
 }
@@ -462,41 +483,27 @@ function ConvertTo-Schema3Releases([object]$State) {
     return $converted
 }
 
-function Assert-HostPrerequisites([object]$Spec) {
-    if ($script:InstallTestMode) { return }
-    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) {
-        throw 'this release requires Windows'
+function Assert-HostPrerequisites([object]$Spec, [object]$Config) {
+    $deviceText = [string]$Config.engine.device
+    if ($deviceText -notmatch '^(?:cuda:)?([0-9]+)$') { throw 'configured GPU device is invalid' }
+    $deviceIndex = [int]$Matches[1]
+    if ($script:InstallTestMode) {
+        return [ordered]@{ index = $deviceIndex; uuid = 'GPU-fixture-4090'; name = 'NVIDIA GeForce RTX 4090' }
     }
-    if (-not [Environment]::Is64BitOperatingSystem -or [IntPtr]::Size -ne 8 -or
-        [Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne
-            [Runtime.InteropServices.Architecture]::X64) {
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or -not [Environment]::Is64BitOperatingSystem -or [IntPtr]::Size -ne 8) {
         throw 'this release requires 64-bit Windows on x86-64'
     }
-    if ($PSVersionTable.PSVersion -lt [Version]'5.1') {
-        throw 'this release requires Windows PowerShell 5.1 or newer'
-    }
-
-    $nvidiaSmi = Get-Command 'nvidia-smi.exe' -ErrorAction SilentlyContinue
-    if ($null -eq $nvidiaSmi) { throw 'NVIDIA driver prerequisite is missing: nvidia-smi.exe' }
-    $rows = @(& $nvidiaSmi.Source '--query-gpu=name,compute_cap,driver_version' '--format=csv,noheader,nounits' 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $rows.Count -eq 0) {
-        throw 'NVIDIA GPU prerequisite query failed'
-    }
-
-    $matched = $false
+    if (Test-Path Env:CUDA_VISIBLE_DEVICES) { throw 'CUDA_VISIBLE_DEVICES must be absent for bound GPU ordinal identity' }
+    $rows = @(& nvidia-smi.exe --query-gpu=index,uuid,name,compute_cap,driver_version --format=csv,noheader,nounits 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $rows.Count -eq 0) { throw 'NVIDIA GPU prerequisite query failed' }
     foreach ($row in $rows) {
         $parts = @(([string]$row -split ',') | ForEach-Object { $_.Trim() })
-        if ($parts.Count -ne 3 -or $parts[0] -cne [string]$Spec.gpu.name) { continue }
-        if ($parts[1] -cne [string]$Spec.gpu.compute_capability) {
-            throw "RTX 4090 compute capability mismatch: $($parts[1])"
-        }
-        $driver = [Version]$parts[2]
-        if ($driver.Major -lt [int]$Spec.gpu.minimum_driver_major) {
-            throw "NVIDIA driver $driver is too old; driver major $($Spec.gpu.minimum_driver_major) or newer is required"
-        }
-        $matched = $true
+        if ($parts.Count -ne 5 -or [int]$parts[0] -ne $deviceIndex) { continue }
+        if ($parts[2] -cne [string]$Spec.gpu.name -or $parts[3] -cne [string]$Spec.gpu.compute_capability) { throw 'configured GPU device is not the qualified RTX 4090' }
+        if ([Version]$parts[4] -lt [Version]("$([int]$Spec.gpu.minimum_driver_major).0")) { throw 'NVIDIA driver is too old' }
+        return [ordered]@{ index = [int]$parts[0]; uuid = [string]$parts[1]; name = [string]$parts[2] }
     }
-    if (-not $matched) { throw 'this release requires an NVIDIA GeForce RTX 4090' }
+    throw 'configured GPU ordinal is unavailable'
 }
 
 function Assert-PayloadChecksums([string]$PayloadRoot) {
@@ -535,7 +542,7 @@ function Assert-PayloadChecksums([string]$PayloadRoot) {
             throw "package file SHA-256 mismatch: $relative"
         }
     }
-    foreach ($file in Get-ChildItem -LiteralPath $PayloadRoot -File -Recurse) {
+    foreach ($file in Get-ChildItem -LiteralPath $PayloadRoot -File -Recurse -Force) {
         $relative = $file.FullName.Substring($root.Length)
         if ([string]::Equals($relative, 'checksums.json', [StringComparison]::OrdinalIgnoreCase)) {
             continue
@@ -704,6 +711,8 @@ function Invoke-InstallTransactionRollback(
 
 New-Item -ItemType Directory -Force -Path $StateRoot | Out-Null
 $StateRoot = (Resolve-Path -LiteralPath $StateRoot).Path
+& icacls.exe $StateRoot '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' ([string]::Concat($env:USERNAME, ':(OI)(CI)F')) | Out-Null
+if ($LASTEXITCODE -ne 0) { throw 'failed to harden release state ACL before first write' }
 $statePath = Join-Path $StateRoot 'state.json'
 $controllerPath = Join-Path $StateRoot 'Control-Release.ps1'
 $ownerControllerPath = Join-Path (Join-Path $StateRoot 'gpu-owner') 'Control-GpuOwner.ps1'
@@ -868,7 +877,7 @@ try {
         $manifest = Read-JsonFile (Join-Path $payload 'release-manifest.json')
         $spec = Read-JsonFile (Join-Path $payload 'release-spec.json')
         $config = Read-JsonFile (Join-Path $payload 'server-config.json')
-        Assert-HostPrerequisites $spec
+        $selectedGpu = Assert-HostPrerequisites $spec $config
         Assert-InstallerArchitectureContract $spec
         if ($manifest.artifact_type -cne 'ninfer_windows_release_manifest' -or
             [int]$manifest.schema_version -ne 1 -or
@@ -1023,6 +1032,9 @@ try {
             model_creation_utc_ticks = [Int64]$modelIdentity.creation_utc_ticks
             model_last_write_utc_ticks = [Int64]$modelIdentity.last_write_utc_ticks
             config_sha256 = $configSha
+            gpu_index = [int]$selectedGpu.index
+            gpu_uuid = [string]$selectedGpu.uuid
+            gpu_name = [string]$selectedGpu.name
             installed_utc = [DateTime]::UtcNow.ToString('o')
         }
         $previous = if ($null -eq $oldState) { $null } else { [string]$oldState.active_release }
@@ -1109,6 +1121,7 @@ try {
                 copied_into_candidate = $false
             }
             cache_root = $cacheRoot
+            selected_gpu = $selectedGpu
             lifecycle_status = $lifecycleStatus
             progress_transport = 'flushed-jsonl-console'
             diagnostics_retention = 'bounded-transaction-receipts'

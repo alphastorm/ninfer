@@ -142,6 +142,29 @@ function Assert-CandidateLayout([object]$Release, [string]$ReleaseId) {
     }
 }
 
+function Assert-SelectedGpuIdentity([object]$Release) {
+    foreach ($field in @('gpu_index', 'gpu_uuid', 'gpu_name')) {
+        if ($null -eq $Release.PSObject.Properties[$field]) {
+            throw 'selected GPU identity is missing; reinstall the release'
+        }
+    }
+    if (Test-Path Env:CUDA_VISIBLE_DEVICES) {
+        throw 'CUDA_VISIBLE_DEVICES must be absent for bound GPU ordinal identity'
+    }
+    $rows = @(& nvidia-smi.exe --query-gpu=index,uuid,name --format=csv,noheader,nounits 2>$null)
+    if ($LASTEXITCODE -ne 0) { throw 'selected GPU identity query failed' }
+    $matched = $false
+    foreach ($row in $rows) {
+        $parts = @(([string]$row -split ',') | ForEach-Object { $_.Trim() })
+        if ($parts.Count -ne 3 -or [int]$parts[0] -ne [int]$Release.gpu_index) { continue }
+        if ($parts[1] -cne [string]$Release.gpu_uuid -or $parts[2] -cne [string]$Release.gpu_name) {
+            throw 'selected GPU identity changed after install'
+        }
+        $matched = $true
+    }
+    if (-not $matched) { throw 'selected GPU ordinal is unavailable' }
+}
+
 function Get-GpuOwner([object]$State) {
     $property = $State.PSObject.Properties['gpu_owner']
     if ($null -eq $property -or $null -eq $property.Value) { return $null }
@@ -184,6 +207,16 @@ function Acquire-GpuOwnerLease {
     if ($null -ne $lease) {
         if ([string]$lease.controller_sha256 -cne [string]$owner.controller_sha256) {
             throw 'GPU-owner lease controller identity mismatch'
+        }
+        $current = Invoke-GpuOwner $state 'status'
+        if ([string]$lease.phase -cne 'released' -or -not [bool]$current.paused) {
+            Invoke-GpuOwner $state 'stop' | Out-Null
+            $current = Invoke-GpuOwner $state 'status'
+            if (-not [bool]$current.paused) {
+                throw 'interrupted GPU-owner lease acquisition remains unsatisfied'
+            }
+            $lease.phase = 'released'
+            Write-JsonAtomic $leasePath $lease
         }
         return
     }
@@ -512,6 +545,7 @@ function Invoke-Run {
         Assert-CandidateLayout $release ([string]$state.active_release)
         Assert-FileHash ([string]$release.server_executable) ([string]$release.binary_sha256) 'server executable'
         Assert-InstalledModelIdentity $release
+        Assert-SelectedGpuIdentity $release
         Assert-FileHash ([string]$release.config_file) ([string]$release.config_sha256) 'server config'
         $config = Read-JsonFile ([string]$release.config_file)
         $cache = [string]$release.cache_root

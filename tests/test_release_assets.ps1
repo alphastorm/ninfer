@@ -60,6 +60,7 @@ try {
     $runtimeB = Join-Path $root 'runtime-b.dll'
     [IO.File]::WriteAllText($runtimeA, 'runtime-a', [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText($runtimeB, 'runtime-b', [Text.UTF8Encoding]::new($false))
+    if ($windowsFixture) { (Get-Item -LiteralPath $runtimeB).Attributes = [IO.FileAttributes]::Hidden }
     $serverSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $server).Hash.ToLowerInvariant()
     $canonicalConfigSha256 = 'd613fc71ebe30b799af4936af8f73b0f25ebd1a1486b55fdb59aaab5d884bb96'
     $configSha256 = $canonicalConfigSha256
@@ -98,9 +99,24 @@ try {
             }
             release_gates = [ordered]@{
                 G = [ordered]@{ status = 'not_run' }
-                L = [ordered]@{ omp_restart_component = 'not_run' }
+                L = [ordered]@{ status = 'not_run' }
             }
         })
+
+    $passedRedPath = Join-Path $root 'qualification-passed-red.json'
+    $passedRed = Get-Content -LiteralPath $qualificationPath -Raw | ConvertFrom-Json
+    $passedRed.status = 'passed'
+    $passedRed.release_gates.G.status = 'passed'
+    $passedRed.release_gates.L.status = 'not_run'
+    Write-Json $passedRedPath $passedRed
+    $passedRedOut = Join-Path $root 'out-passed-red'
+    $passedRedRejected = $false
+    try {
+        & $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $passedRedPath -OutputDirectory $passedRedOut | Out-Null
+    }
+    catch { $passedRedRejected = $_.Exception.Message -ceq 'qualification record claims passed while required release gates remain incomplete' }
+    Assert-True $passedRedRejected 'passed qualification with red gate was accepted'
+    Assert-True (-not (Test-Path -LiteralPath $passedRedOut)) 'red passed gate created output assets'
 
     $wrongQualificationPath = Join-Path $root 'qualification-wrong-model.json'
     $wrongQualification = Get-Content -LiteralPath $qualificationPath -Raw | ConvertFrom-Json
@@ -227,6 +243,8 @@ try {
         assets = $expectedAssets.Count
         payload_entries = $listed.Count
         wrong_model_artifact_identity_rejections = 1
+        passed_red_gate_rejections = 1
+        hidden_payload_coverage = $true
         pinned_model_bytes = [Int64]$releaseSpec.model.bytes
         candidate_root_directories = @($releaseSpec.lifecycle.candidate_root_directories).Count
         model_artifact_ownership = [string]$releaseSpec.lifecycle.model_artifact_ownership
