@@ -159,6 +159,14 @@ struct SequenceState {
     TurnCheckpoint turn_checkpoint;
     std::optional<runtime::AuthenticatedCheckpointNamespace> checkpoint_namespace;
     std::string checkpoint_tag;
+    std::uint64_t publication_order = 0;
+    bool session_published = false;
+};
+
+struct SessionPublication {
+    runtime::AuthenticatedCheckpointNamespace checkpoint_namespace;
+    std::uint64_t publication_order = 0;
+    std::optional<std::uint32_t> lane;
 };
 
 // Request/round control is not retained with a reusable SequenceState. A later concurrent Engine
@@ -286,6 +294,8 @@ public:
 
     std::array<SequenceState, kMaximumConcurrency> sequences;
     std::array<RequestControl, kMaximumConcurrency> requests;
+    std::vector<SessionPublication> session_publications;
+    std::uint64_t next_session_publication_order = 1;
 
     DecodeGraphFamily ordinary_graphs;
     DecodeGraphFamily mtp_graphs;
@@ -343,7 +353,12 @@ private:
     void trim_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
                           std::uint32_t backend_tokens = 0);
     void release_sequence_growth_entitlement(SequenceState& sequence) noexcept;
-    void publish_checkpoint_binding(SequenceState& sequence) noexcept;
+    void begin_session_publication(
+        SequenceState& sequence,
+        std::optional<runtime::AuthenticatedCheckpointNamespace> checkpoint_namespace,
+        std::string checkpoint_tag);
+    void detach_session_publication(SequenceState& sequence) noexcept;
+    void publish_session(SequenceState& sequence) noexcept;
     [[nodiscard]] qwen3_6::PagedKVCache* backend_kv_cache() noexcept;
     [[nodiscard]] const qwen3_6::PagedKVCache* backend_kv_cache() const noexcept;
     [[nodiscard]] std::uint32_t backend_kv_valid(const SequenceState& sequence) const noexcept;

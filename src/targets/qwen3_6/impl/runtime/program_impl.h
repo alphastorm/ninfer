@@ -837,9 +837,9 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
         request.lifecycle == Lifecycle::Pending) {
         throw std::logic_error("staged prefill requires a free request lane");
     }
-    if (checkpoint_namespace.has_value() != !checkpoint_tag.empty()) {
+    if (!checkpoint_namespace && !checkpoint_tag.empty()) {
         throw std::invalid_argument(
-            "checkpoint namespace and response tag must be supplied together");
+            "checkpoint response tag requires a private session namespace");
     }
 
     const std::uint32_t prompt_tokens = static_cast<std::uint32_t>(prompt.token_ids.size());
@@ -894,8 +894,8 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
     request.lifecycle = Lifecycle::Empty;
     sequence.retained = false;
     try {
-        sequence.checkpoint_namespace = std::move(checkpoint_namespace);
-        sequence.checkpoint_tag       = std::move(checkpoint_tag);
+        begin_session_publication(sequence, std::move(checkpoint_namespace),
+                                  std::move(checkpoint_tag));
         if (request_plan.reuse == ReusePath::FullReset) {
             sequence.kv.reset();
             ordered_reset(sequence);
@@ -1224,7 +1224,7 @@ void ProgramImplCore::resolve_pending_batch(std::span<const std::uint32_t> lanes
             if (terminal[row]) {
                 release_sequence_growth_entitlement(sequence);
                 unbind_sequence_kv(sequence);
-                publish_checkpoint_binding(sequence);
+                publish_session(sequence);
                 sequence.retained = true;
                 request.lifecycle = Lifecycle::Complete;
             } else {
@@ -1266,7 +1266,7 @@ SpeculativeStats ProgramImplCore::speculative_stats_lane(std::uint32_t lane) con
 bool ProgramImplCore::has_checkpoint_session(
     const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace) const noexcept {
     return std::any_of(sequences.begin(), sequences.end(), [&](const SequenceState& sequence) {
-        return sequence.checkpoint_namespace &&
+        return sequence.retained && sequence.session_published && sequence.checkpoint_namespace &&
                *sequence.checkpoint_namespace == checkpoint_namespace;
     });
 }
@@ -1284,7 +1284,8 @@ std::optional<runtime::ContinuationCheckpointStats> ProgramImplCore::checkpoint_
         const RequestControl* request = nullptr;
         for (std::uint32_t lane = 0; lane < max_concurrency; ++lane) {
             const SequenceState& candidate = sequences[lane];
-            if (!candidate.retained || !candidate.checkpoint_namespace ||
+            if (!candidate.retained || !candidate.session_published ||
+                !candidate.checkpoint_namespace ||
                 *candidate.checkpoint_namespace != checkpoint_namespace) {
                 continue;
             }
@@ -1632,6 +1633,7 @@ std::optional<runtime::ContinuationCheckpointStats> ProgramImplCore::restore_ses
         }
         device.synchronize();
 
+        begin_session_publication(destination, checkpoint_namespace, std::move(checkpoint_tag));
         destination.kv                       = std::move(restored.kv);
         destination.execution_frontier       = metadata.execution_frontier;
         destination.ledger_frontier          = metadata.ledger_frontier;
@@ -1645,26 +1647,26 @@ std::optional<runtime::ContinuationCheckpointStats> ProgramImplCore::restore_ses
         destination.mtp_draft_count          = metadata.mtp_draft_count;
         destination.tail_hidden_valid        = metadata.tail_hidden_valid;
         destination.turn_checkpoint          = metadata.turn_checkpoint;
-        destination.checkpoint_namespace     = checkpoint_namespace;
-        destination.checkpoint_tag           = std::move(checkpoint_tag);
         requests[lane].pending               = {};
         requests[lane].prefill.reset();
         requests[lane].timings               = {};
         requests[lane].speculative_stats     = {};
         requests[lane].lifecycle             = Lifecycle::Complete;
-        publish_checkpoint_binding(destination);
+        publish_session(destination);
         destination.retained = true;
         return actual;
     } catch (...) {
         try {
             device.synchronize();
         } catch (...) {}
+        clear_lane(sequences[lane], requests[lane]);
         return std::nullopt;
     }
 }
 
 void ProgramImplCore::clear_lane(SequenceState& sequence, RequestControl& request) noexcept {
     request.prefill.reset();
+    detach_session_publication(sequence);
     sequence.kv.reset();
     request.lifecycle           = Lifecycle::Empty;
     sequence.execution_frontier = 0;
@@ -1678,21 +1680,95 @@ void ProgramImplCore::clear_lane(SequenceState& sequence, RequestControl& reques
     sequence.tail_hidden_valid       = false;
     sequence.retained                = false;
     sequence.turn_checkpoint         = {};
-    sequence.checkpoint_namespace.reset();
-    sequence.checkpoint_tag.clear();
     request.pending                  = {};
 }
 
-void ProgramImplCore::publish_checkpoint_binding(SequenceState& sequence) noexcept {
+void ProgramImplCore::begin_session_publication(
+    SequenceState& sequence,
+    std::optional<runtime::AuthenticatedCheckpointNamespace> checkpoint_namespace,
+    std::string checkpoint_tag) {
+    detach_session_publication(sequence);
+    sequence.checkpoint_namespace = std::move(checkpoint_namespace);
+    sequence.checkpoint_tag       = std::move(checkpoint_tag);
     if (!sequence.checkpoint_namespace) { return; }
-    for (SequenceState& other : sequences) {
-        if (&other == &sequence || !other.retained || !other.checkpoint_namespace ||
-            *other.checkpoint_namespace != *sequence.checkpoint_namespace) {
-            continue;
-        }
-        other.checkpoint_namespace.reset();
-        other.checkpoint_tag.clear();
+    if (next_session_publication_order == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::overflow_error("private session publication order exhausted");
     }
+    sequence.publication_order = next_session_publication_order++;
+
+    const auto found = std::find_if(
+        session_publications.begin(), session_publications.end(),
+        [&](const SessionPublication& entry) {
+            return entry.checkpoint_namespace == *sequence.checkpoint_namespace;
+        });
+    if (found == session_publications.end()) {
+        if (session_publications.size() >= max_concurrency) {
+            throw std::logic_error("private session publication index exceeded lane capacity");
+        }
+        session_publications.push_back(SessionPublication{
+            .checkpoint_namespace = *sequence.checkpoint_namespace,
+            .publication_order    = sequence.publication_order,
+            .lane                 = std::nullopt,
+        });
+        return;
+    }
+    if (found->lane && *found->lane < max_concurrency) {
+        sequences[*found->lane].session_published = false;
+    }
+    found->publication_order = sequence.publication_order;
+    found->lane.reset();
+}
+
+void ProgramImplCore::detach_session_publication(SequenceState& sequence) noexcept {
+    if (!sequence.checkpoint_namespace) {
+        sequence.checkpoint_tag.clear();
+        sequence.publication_order = 0;
+        sequence.session_published = false;
+        return;
+    }
+    const auto found = std::find_if(
+        session_publications.begin(), session_publications.end(),
+        [&](const SessionPublication& entry) {
+            return entry.checkpoint_namespace == *sequence.checkpoint_namespace;
+        });
+    if (found != session_publications.end() &&
+        found->publication_order == sequence.publication_order && found->lane == sequence.lane) {
+        found->lane.reset();
+    }
+    sequence.session_published = false;
+    const bool has_other =
+        std::any_of(sequences.begin(), sequences.end(), [&](const SequenceState& other) {
+            return &other != &sequence && other.checkpoint_namespace &&
+                   *other.checkpoint_namespace == *sequence.checkpoint_namespace;
+        });
+    if (!has_other && found != session_publications.end()) {
+        *found = std::move(session_publications.back());
+        session_publications.pop_back();
+    }
+    sequence.checkpoint_namespace.reset();
+    sequence.checkpoint_tag.clear();
+    sequence.publication_order = 0;
+}
+
+void ProgramImplCore::publish_session(SequenceState& sequence) noexcept {
+    if (!sequence.checkpoint_namespace) { return; }
+    const auto found = std::find_if(
+        session_publications.begin(), session_publications.end(),
+        [&](const SessionPublication& entry) {
+            return entry.checkpoint_namespace == *sequence.checkpoint_namespace;
+        });
+    if (found == session_publications.end() ||
+        found->publication_order != sequence.publication_order) {
+        return;
+    }
+    for (SequenceState& other : sequences) {
+        if (&other != &sequence && other.checkpoint_namespace &&
+            *other.checkpoint_namespace == *sequence.checkpoint_namespace) {
+            other.session_published = false;
+        }
+    }
+    found->lane                 = sequence.lane;
+    sequence.session_published = true;
 }
 
 qwen3_6::PagedKVCache* ProgramImplCore::backend_kv_cache() noexcept {
@@ -3020,7 +3096,7 @@ void ProgramImplCore::resolve_non_speculative_pending(SequenceState& sequence,
         sequence.mtp_draft_count = 0;
         release_sequence_growth_entitlement(sequence);
         unbind_sequence_kv(sequence);
-        publish_checkpoint_binding(sequence);
+        publish_session(sequence);
         sequence.retained = true;
     }
     request.lifecycle = terminal ? Lifecycle::Complete : Lifecycle::Active;
