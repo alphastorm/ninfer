@@ -14,7 +14,7 @@
   },
   "source": {
     "upstream_base_sha": "9ec1b82c7afa021314682d7a95390f8935ead7c2",
-    "qualified_source_head": "4e67e6f96f108a17abac7a324c23c5a96e71de32",
+    "qualified_source_head": "386e564505aff88c304cfb0102451a2fe67d4f3b",
     "bounded_staging_commit": "e89e415d95921cecf4cf8a00df5540a4a036ff84",
     "directstorage_fallback_commit": "a9bb55b8e9b02ff34e4725dc8ca95d4fadeb3e0d",
     "qualified_patch_sha256": "ac8ba36da9bfc89ff97021eecba8c7ba8f88f9e7e9bfd1c9c3509b723d81d4e0",
@@ -29,7 +29,7 @@
   },
   "qualified_source_evidence": {
     "binding": "inherited-runtime-evidence-plus-final-source-bound-omp-gate",
-    "runtime_commit": "4e67e6f96f108a17abac7a324c23c5a96e71de32",
+    "runtime_commit": "386e564505aff88c304cfb0102451a2fe67d4f3b",
     "checkpoint_tokens": 102060,
     "checkpoint_reuse": "restore_disk_checkpoint",
     "protocol_receipt_sha256": "fd1778e2493f87017952bd2def6c240dbadba62d42a4e0ba72d9fd349ad188b8",
