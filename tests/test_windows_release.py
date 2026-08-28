@@ -5,6 +5,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 
 
@@ -67,24 +68,32 @@ class WindowsReleaseContractTests(unittest.TestCase):
 class PowerShellWindowsReleaseTests(unittest.TestCase):
     def run_script(self, script: Path, *arguments: str, timeout: int = 600) -> dict[str, object]:
         assert PWSH is not None
-        result = subprocess.run(
-            [
-                PWSH,
-                "-NoLogo",
-                "-NoProfile",
-                "-NonInteractive",
-                "-File",
-                str(script),
-                *arguments,
-            ],
-            cwd=ROOT,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-        )
-        self.assertEqual(result.returncode, 0, f"{result.stdout}\n{result.stderr}")
-        lines = [line for line in result.stdout.splitlines() if line.strip()]
+        with tempfile.TemporaryDirectory() as directory:
+            stdout_path = Path(directory) / "stdout.txt"
+            stderr_path = Path(directory) / "stderr.txt"
+            with stdout_path.open("w", encoding="utf-8") as stdout, stderr_path.open(
+                "w", encoding="utf-8"
+            ) as stderr:
+                result = subprocess.run(
+                    [
+                        PWSH,
+                        "-NoLogo",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-File",
+                        str(script),
+                        *arguments,
+                    ],
+                    cwd=ROOT,
+                    text=True,
+                    stdout=stdout,
+                    stderr=stderr,
+                    timeout=timeout,
+                )
+            stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
+            stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+        self.assertEqual(result.returncode, 0, f"{stdout_text}\n{stderr_text}")
+        lines = [line for line in stdout_text.splitlines() if line.strip()]
         self.assertTrue(lines, "PowerShell regression emitted no receipt")
         value = json.loads(lines[-1])
         self.assertEqual(value["status"], "passed")
