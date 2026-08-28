@@ -161,6 +161,34 @@ contained 608 complete full-batch steady intervals and had no request, CUDA, or 
 failure. At C=8, available device memory after startup was 2.66 GiB for 27B groupwise-int,
 2.18 GiB for 27B NVFP4, and 4.38 GiB for 35B-A3B.
 
+## Rejected kernel candidates
+
+The RTX 5090/CUDA 13.1.2 optimization probes below used fixed acceptance gates. Failed candidates
+were removed rather than retained behind flags or described as improvements.
+
+| Workstream | Fixed baseline | Acceptance gate | Best candidate | Decision |
+|---|---:|---:|---:|---|
+| Qwen3.6-27B Q4/Q5 post-mixer, M=4 | 126.176 us A/B/A median | <=113.499 us (>=10%) | 125.920 us (0.203% lower) | Reject |
+| Qwen3.6-27B ReplaySSM Fold, T=4/B=1/commit=3 | 167.82 us retained in-round event | <=159.43 us (>=5%) | 209.66 us isolated warm median | Reject |
+
+The post-mixer probe covered direct fusion, group-partial reduction, producer/consumer handoff,
+row-warp streaming, occupancy-capped overlap, and programmatic dependent launch. The M=1 check
+regressed from 111.808 us to 120.032 us. The removed M=4 activation is 139,264 bytes versus
+153,190,400 encoded Q4+Q5 weight bytes, so removing that activation alone did not overcome the
+weight-traffic floor. The rejected experimental implementations are not present in the source tree;
+only the public baseline remains reproducible.
+
+The ReplaySSM gate also corrected the benchmark row initializer: the old two-field initializer left
+`commit_columns=0` and timed a no-op. The committed `--exp-003` path measures all-layer Fold with
+distinct source/destination slots and returns failure unless it beats the fixed target. Its isolated
+209.66 us path does not recreate the retained full-round cache residency, so a future passing
+candidate still requires the fixed full-round Nsight capture for final attribution. Reproduce it
+with:
+
+```bash
+build/bench/ninfer_gdn_replay_bench --exp-003 --warmup 20 --repeat 100
+```
+
 ## Reproduction
 
 Build `ninfer-serve` and prepare the registered `.ninfer` artifacts. The refreshed per-target
