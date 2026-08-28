@@ -88,7 +88,7 @@ def write_fake_binaries(binaries: Path, head: str) -> tuple[Path, Path, Path]:
         "cxx_compiler=GNU-13.3.0 cuda_compiler=NVIDIA-12.8.93 "
         "cuda_toolkit=12.8.93 cuda_architecture=86 source_dirty=false"
     )
-    suffix = ".cmd" if os.name == "nt" else ""
+    suffix = ".exe" if os.name == "nt" else ""
     ninfer = binaries / f"ninfer{suffix}"
     ninfer_serve = binaries / f"ninfer-serve{suffix}"
     ninfer_bench = binaries / f"ninfer_bench{suffix}"
@@ -97,13 +97,48 @@ def write_fake_binaries(binaries: Path, head: str) -> tuple[Path, Path, Path]:
         (ninfer_serve, "ninfer-serve"),
         (ninfer_bench, "ninfer_bench"),
     )
-    for binary, name in identities:
-        content = (
-            f"@echo off\r\necho {name} {common}\r\n"
-            if os.name == "nt"
-            else f"#!/bin/sh\nprintf '%s\\n' '{name} {common}'\n"
+    if os.name == "nt":
+        compiler = shutil.which("cl.exe")
+        if compiler is None:
+            raise RuntimeError("cl.exe is required for native Windows release fixtures")
+        source = binaries / "fake_build_info.cpp"
+        template = binaries / "fake_build_info.exe"
+        source.write_text(
+            textwrap.dedent(
+                f"""\
+                #include <iostream>
+                #include <string>
+
+                int main(int argc, char** argv) {{
+                    std::string name = argc > 0 ? argv[0] : "ninfer";
+                    const auto separator = name.find_last_of("/\\");
+                    if (separator != std::string::npos) name.erase(0, separator + 1);
+                    if (name.size() >= 4 && name.substr(name.size() - 4) == ".exe") {{
+                        name.erase(name.size() - 4);
+                    }}
+                    std::cout << name << " " << {json.dumps(common)} << "\\n";
+                    return 0;
+                }}
+                """
+            ),
+            encoding="utf-8",
         )
-        binary.write_text(content, encoding="utf-8")
+        subprocess.run(
+            [compiler, "/nologo", "/EHsc", str(source), f"/Fe:{template}"],
+            cwd=binaries,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for binary, _ in identities:
+            shutil.copyfile(template, binary)
+    else:
+        for binary, name in identities:
+            binary.write_text(
+                f"#!/bin/sh\nprintf '%s\\n' '{name} {common}'\n",
+                encoding="utf-8",
+            )
     for binary in (ninfer, ninfer_serve, ninfer_bench):
         binary.chmod(0o755)
     return ninfer, ninfer_serve, ninfer_bench

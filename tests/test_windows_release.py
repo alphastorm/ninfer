@@ -65,7 +65,7 @@ class WindowsReleaseContractTests(unittest.TestCase):
 
 @unittest.skipUnless(PWSH, "pwsh is not installed")
 class PowerShellWindowsReleaseTests(unittest.TestCase):
-    def run_script(self, script: Path, *arguments: str, timeout: int = 300) -> dict[str, object]:
+    def run_script(self, script: Path, *arguments: str, timeout: int = 600) -> dict[str, object]:
         assert PWSH is not None
         result = subprocess.run(
             [
