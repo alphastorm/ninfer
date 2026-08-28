@@ -216,6 +216,24 @@ bool is_lower_hex(std::string_view value) noexcept {
     });
 }
 
+std::optional<std::string> ascii_filename(const std::filesystem::path& path) {
+    const std::filesystem::path::string_type native = path.filename().native();
+    std::string ascii;
+    ascii.reserve(native.size());
+    using NativeUnsigned = std::make_unsigned_t<std::filesystem::path::value_type>;
+    for (const std::filesystem::path::value_type byte : native) {
+        const NativeUnsigned value = static_cast<NativeUnsigned>(byte);
+        if (value > 0x7fU) { return std::nullopt; }
+        ascii.push_back(static_cast<char>(value));
+    }
+    return ascii;
+}
+
+bool is_transaction_name(std::string_view value) noexcept {
+    return value.size() == 16 + 1 + 64 && value[16] == '-' && is_lower_hex(value.substr(0, 16)) &&
+           is_lower_hex(value.substr(17));
+}
+
 bool is_generation_payload_name(std::string_view name) noexcept {
     constexpr std::string_view prefix       = "checkpoint-";
     constexpr std::string_view suffix       = ".payload";
@@ -225,8 +243,36 @@ bool is_generation_payload_name(std::string_view name) noexcept {
         return false;
     }
     const std::string_view transaction = name.substr(prefix.size(), transaction_bytes);
-    return transaction[16] == '-' && is_lower_hex(transaction.substr(0, 16)) &&
-           is_lower_hex(transaction.substr(17));
+    return is_transaction_name(transaction);
+}
+
+bool is_generation_payload_path(const std::filesystem::path& path) {
+    const std::optional<std::string> name = ascii_filename(path);
+    return name && is_generation_payload_name(*name);
+}
+
+std::optional<std::uint64_t> generation_from_payload_path(const std::filesystem::path& path) {
+    const std::optional<std::string> name = ascii_filename(path);
+    if (!name || !is_generation_payload_name(*name)) { return std::nullopt; }
+    constexpr std::size_t prefix_size = std::string_view("checkpoint-").size();
+    std::uint64_t generation          = 0;
+    for (const char byte : std::string_view(*name).substr(prefix_size, 16)) {
+        generation <<= 4U;
+        generation |= static_cast<std::uint64_t>(byte <= '9' ? byte - '0' : byte - 'a' + 10);
+    }
+    return generation;
+}
+
+bool is_staging_file_path(const std::filesystem::path& path) {
+    const std::optional<std::string> name = ascii_filename(path);
+    if (!name) { return false; }
+    constexpr std::string_view payload_suffix  = ".payload.stage";
+    constexpr std::string_view manifest_suffix = ".manifest.stage";
+    const std::string_view value(*name);
+    const std::size_t suffix_size = value.ends_with(payload_suffix)    ? payload_suffix.size()
+                                    : value.ends_with(manifest_suffix) ? manifest_suffix.size()
+                                                                       : 0;
+    return suffix_size != 0 && is_transaction_name(value.substr(0, value.size() - suffix_size));
 }
 
 std::uint64_t align_payload_offset(std::uint64_t value) {
@@ -355,7 +401,7 @@ public:
         std::optional<CommittedCheckpoint> committed;
         try {
             committed = read_committed();
-            cleanup_orphans(committed);
+            cleanup_orphans(committed, false);
         } catch (const CorruptManifestError&) {
             // Keep the object available so a later trusted stage can quarantine and replace the
             // corrupt manifest. Load remains fail-closed because it re-reads the same bytes.
@@ -392,8 +438,10 @@ public:
             file_system_->lock_directory(root_, config_.lock_timeout_ms);
         if (staged_) { fail("checkpoint backend already owns a staged transaction"); }
         const std::optional<CommittedCheckpoint> committed = recover_committed_for_stage();
-        cleanup_orphans(committed);
-        const std::uint64_t generation = committed ? committed->manifest.generation : 0;
+        cleanup_orphans(committed, preserve_orphan_payloads_);
+        const std::uint64_t generation =
+            committed ? committed->manifest.generation
+                      : shared_root_->committed_generation.load(std::memory_order_acquire);
         shared_root_->committed_generation.store(generation, std::memory_order_release);
         if (key.generation <= generation) {
             fail("checkpoint stage generation does not advance the committed manifest");
@@ -436,8 +484,11 @@ public:
             fail("checkpoint commit key does not identify the owned staged transaction");
         }
 
-        const std::optional<CommittedCheckpoint> prior = read_committed();
-        const std::uint64_t generation                 = prior ? prior->manifest.generation : 0;
+        std::optional<CommittedCheckpoint> prior;
+        try {
+            prior = read_committed();
+        } catch (const CorruptManifestError& error) { fail(error.what()); }
+        const std::uint64_t generation = prior ? prior->manifest.generation : 0;
         shared_root_->committed_generation.store(generation, std::memory_order_release);
         if (key.generation <= generation) {
             fail("checkpoint commit generation does not advance the committed manifest");
@@ -458,6 +509,7 @@ public:
         shared_root_->active_key.reset();
         staged_.reset();
         shared_root_->committed_generation.store(key.generation, std::memory_order_release);
+        preserve_orphan_payloads_ = false;
         if (!prior_payload.empty() && prior_payload != committed_payload) {
             (void)file_system_->remove_file(prior_payload);
         }
@@ -580,24 +632,36 @@ private:
             return read_committed();
         } catch (const CorruptManifestError&) {
             file_system_->atomic_replace_durable(manifest_, corrupt_manifest_);
-            shared_root_->committed_generation.store(0, std::memory_order_release);
+            shared_root_->committed_generation.store(max_payload_generation(),
+                                                     std::memory_order_release);
+            preserve_orphan_payloads_ = true;
             return std::nullopt;
         }
     }
 
-    void cleanup_orphans(const std::optional<CommittedCheckpoint>& committed) {
-        for (const std::filesystem::path& path :
-             file_system_->list_regular_files(staging_, config_.max_cleanup_entries)) {
+    [[nodiscard]] std::uint64_t max_payload_generation() {
+        std::uint64_t maximum = 0;
+        for (const std::filesystem::path& path : file_system_->list_regular_files(
+                 root_, config_.max_cleanup_entries, is_generation_payload_path)) {
+            const std::optional<std::uint64_t> generation = generation_from_payload_path(path);
+            if (generation) { maximum = std::max(maximum, *generation); }
+        }
+        return maximum;
+    }
+
+    void cleanup_orphans(const std::optional<CommittedCheckpoint>& committed,
+                         bool preserve_payloads) {
+        for (const std::filesystem::path& path : file_system_->list_regular_files(
+                 staging_, config_.max_cleanup_entries, is_staging_file_path)) {
             remove_checked(path);
         }
+        if (preserve_payloads) { return; }
 
         const std::filesystem::path committed_payload =
             committed ? committed->payload_path : std::filesystem::path{};
-        for (const std::filesystem::path& path :
-             file_system_->list_regular_files(root_, config_.max_cleanup_entries)) {
-            if (is_generation_payload_name(path.filename().string()) && path != committed_payload) {
-                remove_checked(path);
-            }
+        for (const std::filesystem::path& path : file_system_->list_regular_files(
+                 root_, config_.max_cleanup_entries, is_generation_payload_path)) {
+            if (path != committed_payload) { remove_checked(path); }
         }
     }
 
@@ -645,6 +709,7 @@ private:
     std::filesystem::path corrupt_manifest_;
     std::shared_ptr<SharedRootState> shared_root_;
     std::optional<StagedCheckpoint> staged_;
+    bool preserve_orphan_payloads_ = false;
 };
 
 DirectStorageCheckpointBackend::DirectStorageCheckpointBackend(

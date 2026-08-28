@@ -156,10 +156,13 @@ public:
     void ensure_directory(const std::filesystem::path& path) override {
         std::error_code error;
         std::filesystem::create_directories(path, error);
-        if (error || !std::filesystem::is_directory(path, error)) {
+        const DWORD attributes = GetFileAttributesW(path.c_str());
+        if (error || attributes == INVALID_FILE_ATTRIBUTES ||
+            (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
             throw CheckpointContractError(
                 "failed to create checkpoint directory: " +
-                (error ? error.message() : std::string("not a directory")));
+                (error ? error.message() : std::string("not a plain directory")));
         }
     }
 
@@ -169,7 +172,8 @@ public:
     }
 
     std::vector<std::filesystem::path> list_regular_files(const std::filesystem::path& path,
-                                                          std::size_t max_entries) override {
+                                                          std::size_t max_matches,
+                                                          PathPredicate predicate) override {
         std::vector<std::filesystem::path> files;
         std::error_code error;
         for (std::filesystem::directory_iterator iterator(path, error), end; iterator != end;
@@ -178,16 +182,17 @@ public:
                 throw CheckpointContractError("failed to enumerate checkpoint directory: " +
                                               error.message());
             }
-            if (files.size() == max_entries) {
-                throw CheckpointContractError(
-                    "checkpoint cleanup entry count exceeds its configured bound");
-            }
             const std::filesystem::file_status status = iterator->symlink_status(error);
             if (error) {
                 throw CheckpointContractError("failed to inspect checkpoint directory entry: " +
                                               error.message());
             }
             if (std::filesystem::is_regular_file(status) || std::filesystem::is_symlink(status)) {
+                if (predicate == nullptr || !predicate(iterator->path())) { continue; }
+                if (files.size() == max_matches) {
+                    throw CheckpointContractError(
+                        "checkpoint cleanup match count exceeds its configured bound");
+                }
                 files.push_back(iterator->path());
             }
         }
@@ -199,9 +204,11 @@ public:
     }
 
     bool file_exists(const std::filesystem::path& path) override {
-        const DWORD attributes = GetFileAttributesW(path.c_str());
-        if (attributes != INVALID_FILE_ATTRIBUTES) {
-            return (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+        WIN32_FIND_DATAW data{};
+        const HANDLE search = FindFirstFileW(path.c_str(), &data);
+        if (search != INVALID_HANDLE_VALUE) {
+            FindClose(search);
+            return (data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
         }
         const DWORD error = GetLastError();
         if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) { return false; }
@@ -209,10 +216,16 @@ public:
     }
 
     std::uint64_t file_size(const std::filesystem::path& path) override {
-        UniqueHandle handle(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr));
+        UniqueHandle handle(
+            CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
         if (!handle.valid()) {
             fail_windows("failed to open checkpoint file for size validation", GetLastError());
+        }
+        BY_HANDLE_FILE_INFORMATION information{};
+        if (!GetFileInformationByHandle(handle.get(), &information) ||
+            (information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            throw CheckpointContractError("checkpoint file size target is not a plain file");
         }
         LARGE_INTEGER size{};
         if (!GetFileSizeEx(handle.get(), &size) || size.QuadPart < 0) {
@@ -222,11 +235,17 @@ public:
     }
 
     void read_exact(const std::filesystem::path& path, std::span<std::byte> bytes) override {
-        UniqueHandle handle(
-            CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
+        UniqueHandle handle(CreateFileW(
+            path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT,
+            nullptr));
         if (!handle.valid()) {
             fail_windows("failed to open committed checkpoint manifest", GetLastError());
+        }
+        BY_HANDLE_FILE_INFORMATION information{};
+        if (!GetFileInformationByHandle(handle.get(), &information) ||
+            (information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            throw CheckpointContractError("committed checkpoint manifest is not a plain file");
         }
         while (!bytes.empty()) {
             const DWORD chunk = static_cast<DWORD>(

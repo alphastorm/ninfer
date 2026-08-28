@@ -48,13 +48,16 @@ public:
 
 class CheckpointFileSystem {
 public:
+    using PathPredicate = bool (*)(const std::filesystem::path&);
+
     virtual ~CheckpointFileSystem() = default;
 
     virtual void ensure_directory(const std::filesystem::path& path) = 0;
     [[nodiscard]] virtual std::unique_ptr<CheckpointDirectoryLock>
     lock_directory(const std::filesystem::path& path, std::uint32_t timeout_ms) = 0;
     [[nodiscard]] virtual std::vector<std::filesystem::path>
-    list_regular_files(const std::filesystem::path& path, std::size_t max_entries)         = 0;
+    list_regular_files(const std::filesystem::path& path, std::size_t max_matches,
+                       PathPredicate predicate)                                            = 0;
     [[nodiscard]] virtual bool file_exists(const std::filesystem::path& path)              = 0;
     [[nodiscard]] virtual std::uint64_t file_size(const std::filesystem::path& path)       = 0;
     virtual void read_exact(const std::filesystem::path& path, std::span<std::byte> bytes) = 0;

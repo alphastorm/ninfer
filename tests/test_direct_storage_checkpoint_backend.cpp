@@ -37,6 +37,15 @@ bool throws(const std::function<void()>& action) {
     return false;
 }
 
+bool throws_contract(const std::function<void()>& action) {
+    try {
+        action();
+    } catch (const CheckpointContractError&) { return true; } catch (...) {
+        return false;
+    }
+    return false;
+}
+
 std::string thrown_message(const std::function<void()>& action) {
     try {
         action();
@@ -104,7 +113,8 @@ public:
     }
 
     std::vector<std::filesystem::path> list_regular_files(const std::filesystem::path& path,
-                                                          std::size_t max_entries) override {
+                                                          std::size_t max_matches,
+                                                          PathPredicate predicate) override {
         std::lock_guard lock(mutex);
         std::vector<std::filesystem::path> result;
         const std::filesystem::path parent = path.lexically_normal();
@@ -112,7 +122,8 @@ public:
             (void)bytes;
             const std::filesystem::path candidate(name);
             if (candidate.parent_path() != parent) { continue; }
-            if (result.size() == max_entries) {
+            if (predicate == nullptr || !predicate(candidate)) { continue; }
+            if (result.size() == max_matches) {
                 throw std::runtime_error("fake cleanup bound exceeded");
             }
             result.push_back(candidate);
@@ -425,10 +436,11 @@ int test_stage_cleanup_stale_and_single_flight() {
 }
 
 int test_orphan_cleanup_and_corrupt_manifest_recovery() {
-    auto file_system                                 = std::make_shared<FakeFileSystem>();
-    auto queue                                       = std::make_shared<FakeReadQueue>(file_system);
-    const DirectStorageCheckpointConfig value_config = config("recovery");
-    const Fixture first                              = fixture(35);
+    auto file_system                           = std::make_shared<FakeFileSystem>();
+    auto queue                                 = std::make_shared<FakeReadQueue>(file_system);
+    DirectStorageCheckpointConfig value_config = config("recovery");
+    value_config.max_cleanup_entries           = 2;
+    const Fixture first                        = fixture(35);
     {
         DirectStorageCheckpointBackend backend(value_config, file_system, queue);
         stage_and_commit(backend, first);
@@ -438,9 +450,14 @@ int test_orphan_cleanup_and_corrupt_manifest_recovery() {
     const std::filesystem::path staging = root / ".ninfer-checkpoint-staging-v1";
     {
         std::lock_guard lock(file_system->mutex);
-        file_system->files[path_key(staging / "orphan.payload.stage")] = {std::byte{1}};
+        file_system->files[path_key(staging / ("0000000000000001-" + std::string(64, 'a') +
+                                               ".payload.stage"))] = {std::byte{1}};
         file_system->files[path_key(root / ("checkpoint-0000000000000001-" + std::string(64, 'a') +
-                                            ".payload"))]              = {std::byte{2}};
+                                            ".payload"))]          = {std::byte{2}};
+        for (int index = 0; index < 10; ++index) {
+            file_system->files[path_key(root / ("unrelated-" + std::to_string(index)))] = {
+                std::byte{4}};
+        }
     }
 
     int failures = 0;
@@ -458,16 +475,29 @@ int test_orphan_cleanup_and_corrupt_manifest_recovery() {
     DirectStorageCheckpointBackend recovered(value_config, file_system, queue);
     failures += check(throws([&] { (void)recovered.load(first.expectation); }),
                       "corrupt committed manifest became loadable");
+    const Fixture lower = fixture(34);
+    failures +=
+        check(throws_contract([&] { recovered.stage(lower.manifest, lower.payloads, lower.key); }),
+              "corrupt manifest reset the durable generation floor");
+    failures += check(file_system->count_suffix(".payload") == 1,
+                      "corrupt-manifest quarantine deleted its paired payload");
+
     const Fixture replacement = fixture(36);
     stage_and_commit(recovered, replacement);
     failures += check(!file_system->file_with_suffix("checkpoint.manifest.v1.corrupt").empty() &&
-                          file_system->count_suffix(".payload") == 1 &&
+                          file_system->count_suffix(".payload") == 2 &&
                           image_matches(recovered.load(replacement.expectation), replacement),
                       "trusted stage did not quarantine and replace a corrupt manifest");
+    {
+        DirectStorageCheckpointBackend pruned(value_config, file_system, queue);
+        failures += check(file_system->count_suffix(".payload") == 1,
+                          "valid replacement did not make the prior payload reclaimable");
+    }
 
     {
         std::lock_guard lock(file_system->mutex);
-        file_system->files[path_key(staging / "undeletable.payload.stage")] = {std::byte{3}};
+        file_system->files[path_key(staging / ("0000000000000002-" + std::string(64, 'b') +
+                                               ".payload.stage"))] = {std::byte{3}};
     }
     file_system->fail_remove = true;
     failures += check(
@@ -513,6 +543,27 @@ int test_preallocation_rejections() {
         check(throws([&] { (void)backend.load(value.expectation); }) && queue->submit_count == 0,
               "corrupt manifest reached DirectStorage payload submission");
     file_system->replace_file_with_suffix("checkpoint.manifest.v1", canonical);
+    return failures;
+}
+
+int test_commit_corruption_uses_public_contract_error() {
+    auto file_system = std::make_shared<FakeFileSystem>();
+    auto queue       = std::make_shared<FakeReadQueue>(file_system);
+    DirectStorageCheckpointBackend backend(config("commit-corruption"), file_system, queue);
+    const Fixture prior = fixture(70);
+    const Fixture next  = fixture(71);
+    stage_and_commit(backend, prior);
+    backend.stage(next.manifest, next.payloads, next.key);
+    std::vector<std::byte> corrupt = file_system->file_with_suffix("checkpoint.manifest.v1");
+    corrupt.front() ^= std::byte{0xff};
+    file_system->replace_file_with_suffix("checkpoint.manifest.v1", std::move(corrupt));
+
+    int failures = 0;
+    failures += check(throws_contract([&] { backend.commit(next.key); }),
+                      "commit leaked an internal corruption exception type");
+    backend.abort(next.key);
+    failures += check(file_system->count_suffix(".stage") == 0,
+                      "contract-visible commit failure retained transaction ownership");
     return failures;
 }
 
@@ -602,6 +653,7 @@ int main() {
     failures += test_stage_cleanup_stale_and_single_flight();
     failures += test_orphan_cleanup_and_corrupt_manifest_recovery();
     failures += test_preallocation_rejections();
+    failures += test_commit_corruption_uses_public_contract_error();
     failures += test_corruption_revalidated_by_coordinator();
     failures += test_explicit_queue_failures();
     if (failures == 0) {
