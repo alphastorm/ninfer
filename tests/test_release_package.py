@@ -111,7 +111,7 @@ def write_fake_binaries(binaries: Path, head: str) -> tuple[Path, Path, Path]:
 
                 int main(int argc, char** argv) {{
                     std::string name = argc > 0 ? argv[0] : "ninfer";
-                    const auto separator = name.find_last_of("/\\");
+                    const auto separator = name.find_last_of("/\\\\");
                     if (separator != std::string::npos) name.erase(0, separator + 1);
                     if (name.size() >= 4 && name.substr(name.size() - 4) == ".exe") {{
                         name.erase(name.size() - 4);
