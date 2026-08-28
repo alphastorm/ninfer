@@ -1,6 +1,8 @@
 #include "serve/serve_options.h"
 #include "serve/translate.h"
 
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <string>
@@ -298,6 +300,46 @@ int main() {
     }
     failures += check(!secret_present, "startup argv retained the API key");
     failures += check(redaction_present, "startup argv omitted the API-key redaction marker");
+
+    const std::filesystem::path key_path =
+        std::filesystem::temp_directory_path() / "ninfer-serve-options-api-key.txt";
+    {
+        std::ofstream key_file(key_path, std::ios::binary | std::ios::trunc);
+        key_file << "file-secret\r\n";
+    }
+    const ServeOptions from_file =
+        parse({"ninfer-serve", "model.ninfer", "--api-key-file", key_path.string()});
+    failures += check(from_file.api_key == "file-secret",
+                      "--api-key-file did not load one line");
+    bool file_secret_in_argv = false;
+    for (const std::string& argument : from_file.startup_argv) {
+        file_secret_in_argv = file_secret_in_argv || argument == "file-secret";
+    }
+    failures += check(!file_secret_in_argv, "--api-key-file exposed its secret in argv");
+    failures +=
+        check(rejects([&] {
+                  (void)parse({"ninfer-serve", "model.ninfer", "--api-key", "direct",
+                               "--api-key-file", key_path.string()});
+              }),
+              "API-key sources were accepted together");
+    {
+        std::ofstream key_file(key_path, std::ios::binary | std::ios::trunc);
+        key_file << "first\nsecond";
+    }
+    failures += check(
+        rejects([&] {
+            (void)parse({"ninfer-serve", "model.ninfer", "--api-key-file", key_path.string()});
+        }),
+        "multiline API-key file was accepted");
+    std::filesystem::remove(key_path);
+    failures += check(
+        rejects([&] {
+            (void)parse({"ninfer-serve", "model.ninfer", "--api-key-file", key_path.string()});
+        }),
+        "missing API-key file was accepted");
+    failures += check(serve_usage_text("ninfer-serve").find("--api-key-file") !=
+                          std::string::npos,
+                      "serve help omits --api-key-file");
 
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;

@@ -429,8 +429,10 @@ curl http://127.0.0.1:8080/v1/messages/count_tokens \
 
 ## Authentication and CORS
 
-Pass `--api-key VALUE` to require the same value as an OpenAI bearer token or Anthropic
-`x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated.
+Pass either `--api-key VALUE` or `--api-key-file FILE` to require the same value as an OpenAI
+bearer token or Anthropic `x-api-key` header. The file form reads exactly one non-empty line and
+keeps the secret out of the process command line; the two forms are mutually exclusive.
+`GET /health` and CORS preflight requests remain unauthenticated.
 
 ```bash
 curl http://127.0.0.1:8080/v1/models \
@@ -446,6 +448,7 @@ curl http://127.0.0.1:8080/v1/models \
 | `--host H` | listen address | `127.0.0.1` |
 | `--port N` | listen port | `8080` |
 | `--api-key KEY` | required bearer or `x-api-key` value | unset |
+| `--api-key-file FILE` | one-line bearer or `x-api-key` value loaded without an argv secret | unset |
 | `--model-id ID` | override the public OpenAI model alias | artifact `identity.model_id` |
 | `--binary-sha256 SHA` | lowercase executable identity supplied by deployment lifecycle | unset |
 | `--artifact-sha256 SHA` | lowercase model artifact identity supplied by deployment lifecycle | unset |

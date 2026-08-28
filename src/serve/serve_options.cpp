@@ -7,6 +7,8 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -88,11 +90,29 @@ std::string parse_profile_name(const char* text) {
     return value;
 }
 
+std::string read_api_key_file(const char* path) {
+    if (path == nullptr || *path == '\0') {
+        throw std::invalid_argument("--api-key-file must not be empty");
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input) { throw std::invalid_argument("cannot open --api-key-file"); }
+    std::string value((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    if (input.bad()) { throw std::invalid_argument("cannot read --api-key-file"); }
+    while (!value.empty() && (value.back() == '\n' || value.back() == '\r')) {
+        value.pop_back();
+    }
+    if (value.empty() || value.find('\0') != std::string::npos ||
+        value.find('\n') != std::string::npos || value.find('\r') != std::string::npos) {
+        throw std::invalid_argument("--api-key-file must contain exactly one non-empty line");
+    }
+    return value;
+}
+
 } // namespace
 
 std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
-           " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
+           " <model.ninfer> [--host H] [--port N] [--api-key KEY|--api-key-file FILE] "
            "[--model-id ID] [--binary-sha256 SHA] [--artifact-sha256 SHA] "
            "[--config-sha256 SHA] [--deployment-profile NAME] "
            "[--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
@@ -146,6 +166,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     bool default_max_tokens_explicit = false;
     bool kv_capacity_explicit        = false;
+    bool api_key_direct              = false;
+    bool api_key_file                = false;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         options.help_requested = true;
         return options;
@@ -164,7 +186,22 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--port") {
             options.port = parse_nonnegative_int(require_value("--port"), "port");
         } else if (arg == "--api-key") {
+            if (api_key_file) {
+                throw std::invalid_argument(
+                    "--api-key and --api-key-file are mutually exclusive");
+            }
             options.api_key = require_value("--api-key");
+            if (options.api_key.empty()) {
+                throw std::invalid_argument("--api-key must not be empty");
+            }
+            api_key_direct = true;
+        } else if (arg == "--api-key-file") {
+            if (api_key_direct) {
+                throw std::invalid_argument(
+                    "--api-key and --api-key-file are mutually exclusive");
+            }
+            options.api_key = read_api_key_file(require_value("--api-key-file"));
+            api_key_file = true;
         } else if (arg == "--model-id") {
             options.model_id_override = require_value("--model-id");
             if (options.model_id_override->empty()) {
