@@ -337,7 +337,9 @@ Responses custom tools accept the OpenAI free-form text and grammar format shape
 NInfer maps a custom definition to one string parameter named `input` in the Qwen tool prompt and
 maps the generated value back to `custom_tool_call.input` without JSON interpretation. Custom
 output Items use `ctc_...` Item IDs and distinct `call_...` pairing IDs. NInfer does not execute
-tools or enforce JSON Schema/grammar through constrained decoding, so `strict:true`,
+tools or enforce JSON Schema/grammar through constrained decoding. Grammar is untrusted prompt
+guidance only: NInfer echoes it for wire continuity, and clients must validate generated input
+before execution. Therefore `strict:true`,
 `tool_choice:required`, named tool choice, hosted tools, MCP tools, and unsupported custom-tool
 options are rejected.
 
@@ -390,7 +392,8 @@ The normal lifecycle is:
 2. `response.output_item.added` and `response.content_part.added`;
 3. zero or more `response.reasoning_text.delta` or `response.output_text.delta` events;
 4. matching `*.done`, `response.content_part.done`, and `response.output_item.done` events;
-5. exactly one `response.completed`, `response.incomplete`, or `response.failed` terminal event.
+5. exactly one `response.completed`, `response.incomplete`, `response.cancelled`, or
+   `response.failed` terminal event.
 
 Function arguments use `response.function_call_arguments.delta` and `.done`. IDs, output indices,
 and content indices remain stable, and concatenated deltas equal the terminal Item. Custom input

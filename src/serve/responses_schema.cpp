@@ -19,6 +19,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
@@ -308,9 +309,9 @@ ToolCall parse_tool_call_item(const Json& item, ToolKind kind, Json& canonical) 
         item.at("call_id").get<std::string>().empty()) {
         bad_request(std::string(wire_type) + " must contain a non-empty call_id", "input");
     }
-    call.id             = item.at("call_id").get<std::string>();
-    call.name           = require_function_name(item, "input");
-    call.kind           = kind;
+    call.id   = item.at("call_id").get<std::string>();
+    call.name = require_function_name(item, "input");
+    call.kind = kind;
     if (!item.contains(input_field) || !item.at(input_field).is_string()) {
         bad_request(custom ? "custom_tool_call input must be a string"
                            : "function_call arguments must be a JSON string",
@@ -426,8 +427,8 @@ void parse_input(const Json& input, ResponsesRequest& out) {
             const ToolKind kind =
                 type == "custom_tool_call" ? ToolKind::Custom : ToolKind::Function;
             ToolCall call = parse_tool_call_item(item, kind, canonical);
-            if (can_group_tool_calls && !pending_reasoning_present &&
-                !out.input_turns.empty() && out.input_turns.back().role == ChatRole::Assistant &&
+            if (can_group_tool_calls && !pending_reasoning_present && !out.input_turns.empty() &&
+                out.input_turns.back().role == ChatRole::Assistant &&
                 out.input_turns.back().content.empty() &&
                 !out.input_turns.back().tool_calls.empty()) {
                 out.input_turns.back().tool_calls.push_back(std::move(call));
@@ -475,8 +476,8 @@ std::optional<Json> parse_custom_tool_format(const Json& item) {
     if (type == "text") {
         for (auto it = format.begin(); it != format.end(); ++it) {
             if (it.key() != "type") {
-                bad_request("custom text format contains unsupported field: " + it.key(),
-                            "tools", "custom_tool_format_not_supported");
+                bad_request("custom text format contains unsupported field: " + it.key(), "tools",
+                            "custom_tool_format_not_supported");
             }
         }
         return Json{{"type", "text"}};
@@ -503,17 +504,14 @@ std::optional<Json> parse_custom_tool_format(const Json& item) {
         format.at("definition").get_ref<const std::string&>().empty()) {
         bad_request("custom grammar format must contain a non-empty string definition", "tools");
     }
-    return Json{{"type", "grammar"},
-                {"syntax", syntax},
-                {"definition", format.at("definition")}};
+    return Json{{"type", "grammar"}, {"syntax", syntax}, {"definition", format.at("definition")}};
 }
 
 Json custom_tool_parameters(const std::optional<Json>& format) {
     Json input = {{"type", "string"}};
     if (format && format->at("type") == "grammar") {
         input["description"] = "Input must match this " + format->at("syntax").get<std::string>() +
-                               " grammar:\n" +
-                               format->at("definition").get<std::string>();
+                               " grammar:\n" + format->at("definition").get<std::string>();
     }
     return Json{{"type", "object"},
                 {"properties", Json{{"input", std::move(input)}}},
@@ -560,8 +558,8 @@ void parse_tools(const Json& body, ResponsesRequest& out) {
             Json canonical             = {{"type", "custom"}, {"name", tool.name}};
             if (!tool.description.empty()) { canonical["description"] = tool.description; }
             if (format) { canonical["format"] = std::move(*format); }
-            Json function =
-                {{"name", tool.name}, {"parameters", std::move(parameters)}, {"strict", false}};
+            Json function = {
+                {"name", tool.name}, {"parameters", std::move(parameters)}, {"strict", false}};
             if (!tool.description.empty()) { function["description"] = tool.description; }
             tool.definition_json =
                 Json{{"type", "function"}, {"function", std::move(function)}}.dump();
@@ -1042,6 +1040,45 @@ Json in_progress_response(const std::string& id, std::int64_t created_at,
     return response;
 }
 
+void validate_tool_history(const std::vector<ToolDefinition>& declarations,
+                           const std::vector<ChatTurn>& messages) {
+    std::unordered_map<std::string, ToolKind> declared_kinds;
+    declared_kinds.reserve(declarations.size());
+    for (const ToolDefinition& declaration : declarations) {
+        declared_kinds.emplace(declaration.name, declaration.kind);
+    }
+
+    std::unordered_map<std::string, ToolKind> call_kinds;
+    std::unordered_set<std::string> completed_calls;
+    for (const ChatTurn& message : messages) {
+        for (const ToolCall& call : message.tool_calls) {
+            const auto declaration = declared_kinds.find(call.name);
+            if (declaration != declared_kinds.end() && declaration->second != call.kind) {
+                bad_request("tool call kind does not match the declared tool: " + call.name,
+                            "input", "tool_call_kind_mismatch");
+            }
+            if (call.id.empty() || !call_kinds.emplace(call.id, call.kind).second) {
+                bad_request("duplicate or empty tool call_id: " + call.id, "input",
+                            "invalid_tool_history");
+            }
+        }
+        if (message.role != ChatRole::Tool) { continue; }
+        const auto call = call_kinds.find(message.tool_call_id);
+        if (call == call_kinds.end()) {
+            bad_request("tool output references an unknown call_id: " + message.tool_call_id,
+                        "input", "invalid_tool_history");
+        }
+        if (call->second != message.tool_kind) {
+            bad_request("tool output kind does not match its call_id: " + message.tool_call_id,
+                        "input", "tool_call_kind_mismatch");
+        }
+        if (!completed_calls.insert(message.tool_call_id).second) {
+            bad_request("duplicate tool output for call_id: " + message.tool_call_id, "input",
+                        "invalid_tool_history");
+        }
+    }
+}
+
 } // namespace
 
 ResponsesRequest parse_responses_request(const Json& body, const RequestLimits& limits) {
@@ -1094,6 +1131,7 @@ void compose_responses_generation_messages(ResponsesRequest& request,
                     std::make_move_iterator(previous_context.end()));
     messages.insert(messages.end(), std::make_move_iterator(current_input.begin()),
                     std::make_move_iterator(current_input.end()));
+    validate_tool_history(request.generation.tools, messages);
     request.generation.messages = std::move(messages);
 }
 
@@ -1354,39 +1392,34 @@ ResponsesStreamFinish ResponsesEventStream::finish(const GenerationOutcome& outc
         impl_->ids.function_calls.push_back(item_id);
         const int output_index = impl_->next_output_index++;
         if (call.kind == ToolKind::Custom) {
-            const Json added_item = {{"id", item_id},
-                                     {"type", "custom_tool_call"},
-                                     {"status", "in_progress"},
-                                     {"call_id", call.id},
-                                     {"name", call.name},
-                                     {"input", ""}};
+            const Json added_item = {{"id", item_id},           {"type", "custom_tool_call"},
+                                     {"status", "in_progress"}, {"call_id", call.id},
+                                     {"name", call.name},       {"input", ""}};
             finished.events_before_terminal.push_back(
                 sse(impl_->event("response.output_item.added",
                                  Json{{"output_index", output_index}, {"item", added_item}})));
             if (!call.arguments_json.empty()) {
-                finished.events_before_terminal.push_back(sse(impl_->event(
-                    "response.custom_tool_call_input.delta", Json{{"item_id", item_id},
-                                                                  {"output_index", output_index},
-                                                                  {"delta", call.arguments_json}})));
+                finished.events_before_terminal.push_back(
+                    sse(impl_->event("response.custom_tool_call_input.delta",
+                                     Json{{"item_id", item_id},
+                                          {"output_index", output_index},
+                                          {"delta", call.arguments_json}})));
             }
             finished.events_before_terminal.push_back(sse(impl_->event(
                 "response.custom_tool_call_input.done", Json{{"item_id", item_id},
                                                              {"output_index", output_index},
                                                              {"input", call.arguments_json}})));
-            const Json done_item = {{"id", item_id},
-                                    {"type", "custom_tool_call"},
-                                    {"status", "completed"},
-                                    {"call_id", call.id},
-                                    {"name", call.name},
-                                    {"input", call.arguments_json}};
+            const Json done_item = {{"id", item_id},         {"type", "custom_tool_call"},
+                                    {"status", "completed"}, {"call_id", call.id},
+                                    {"name", call.name},     {"input", call.arguments_json}};
             finished.events_before_terminal.push_back(
                 sse(impl_->event("response.output_item.done",
                                  Json{{"output_index", output_index}, {"item", done_item}})));
             continue;
         }
-        const Json added_item  = {{"id", item_id},           {"type", "function_call"},
-                                  {"status", "in_progress"}, {"call_id", call.id},
-                                  {"name", call.name},       {"arguments", ""}};
+        const Json added_item = {{"id", item_id},           {"type", "function_call"},
+                                 {"status", "in_progress"}, {"call_id", call.id},
+                                 {"name", call.name},       {"arguments", ""}};
         finished.events_before_terminal.push_back(
             sse(impl_->event("response.output_item.added",
                              Json{{"output_index", output_index}, {"item", added_item}})));

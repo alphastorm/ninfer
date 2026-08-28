@@ -133,6 +133,26 @@ void append_tool_contract(ToolArgumentTypeContracts& contracts, const ToolDefini
     }
 }
 
+void append_history_tool_contract(ToolArgumentTypeContracts& contracts, const ToolCall& call) {
+    const auto existing = std::find_if(contracts.tools.begin(), contracts.tools.end(),
+                                       [&](const auto& tool) { return tool.name == call.name; });
+    if (existing != contracts.tools.end()) {
+        if (existing->kind != call.kind) {
+            existing->parameters.clear();
+            existing->unambiguous = false;
+        }
+        return;
+    }
+
+    ToolArgumentTypeContracts::Tool contract;
+    contract.name = call.name;
+    contract.kind = call.kind;
+    if (call.kind == ToolKind::Custom) {
+        contract.parameters.push_back({"input", ToolArgumentTypeContracts::Encoding::String});
+    }
+    contracts.tools.push_back(std::move(contract));
+}
+
 const ToolArgumentTypeContracts::Tool*
 find_tool_contract(const ToolArgumentTypeContracts& contracts, std::string_view tool_name) {
     const auto tool =
@@ -234,9 +254,10 @@ bool parse_one_tool_call(std::string_view block, std::size_t max_name_length,
     skip_ws(block, pos);
     if (pos != block.size()) { return false; }
 
-    out.id             = new_tool_call_id();
-    out.name           = name;
+    out.id                                          = new_tool_call_id();
+    out.name                                        = name;
     const ToolArgumentTypeContracts::Tool* contract = find_tool_contract(contracts, name);
+    if (contract == nullptr && contracts.names_authoritative) { return false; }
     if (contract != nullptr && contract->kind == ToolKind::Custom) {
         if (parameter_count != 1 || args.size() != 1 || !args.contains("input") ||
             !args.at("input").is_string()) {
@@ -260,18 +281,21 @@ ParsedToolCallOutput fallback(const std::string& text) {
 
 ToolArgumentTypeContracts build_tool_argument_type_contracts(const GenerationRequest& request) {
     ToolArgumentTypeContracts contracts;
-    if (!request.uses_tools()) { return contracts; }
-
-    if (request.tool_choice.mode == ToolChoiceMode::Named) {
+    if (request.uses_tools() && request.tool_choice.mode == ToolChoiceMode::Named) {
         const auto selected =
             std::find_if(request.tools.begin(), request.tools.end(),
                          [&](const auto& tool) { return tool.name == request.tool_choice.name; });
         if (selected != request.tools.end()) { append_tool_contract(contracts, *selected); }
-        return contracts;
+    } else if (request.uses_tools()) {
+        contracts.tools.reserve(request.tools.size());
+        for (const ToolDefinition& tool : request.tools) { append_tool_contract(contracts, tool); }
     }
-
-    contracts.tools.reserve(request.tools.size());
-    for (const ToolDefinition& tool : request.tools) { append_tool_contract(contracts, tool); }
+    for (const ChatTurn& message : request.messages) {
+        for (const ToolCall& call : message.tool_calls) {
+            append_history_tool_contract(contracts, call);
+        }
+    }
+    contracts.names_authoritative = !contracts.tools.empty();
     return contracts;
 }
 

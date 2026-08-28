@@ -39,6 +39,7 @@ struct ToolArgumentTypeContracts {
     };
 
     std::vector<Tool> tools;
+    bool names_authoritative = false;
 };
 
 ToolArgumentTypeContracts build_tool_argument_type_contracts(const GenerationRequest& request);

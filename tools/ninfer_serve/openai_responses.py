@@ -50,6 +50,7 @@ class ResponsesStreamAdapter:
         "response.completed",
         "response.incomplete",
         "response.failed",
+        "response.cancelled",
     }
 
     def consume(self, event: SseEvent) -> list[ProtocolEvent]:
