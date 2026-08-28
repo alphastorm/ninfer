@@ -88,20 +88,22 @@ def write_fake_binaries(binaries: Path, head: str) -> tuple[Path, Path, Path]:
         "cxx_compiler=GNU-13.3.0 cuda_compiler=NVIDIA-12.8.93 "
         "cuda_toolkit=12.8.93 cuda_architecture=86 source_dirty=false"
     )
-    ninfer = binaries / "ninfer"
-    ninfer_serve = binaries / "ninfer-serve"
-    ninfer_bench = binaries / "ninfer_bench"
-    ninfer.write_text(
-        f"#!/bin/sh\nprintf '%s\\n' 'ninfer {common}'\n", encoding="utf-8"
+    suffix = ".cmd" if os.name == "nt" else ""
+    ninfer = binaries / f"ninfer{suffix}"
+    ninfer_serve = binaries / f"ninfer-serve{suffix}"
+    ninfer_bench = binaries / f"ninfer_bench{suffix}"
+    identities = (
+        (ninfer, "ninfer"),
+        (ninfer_serve, "ninfer-serve"),
+        (ninfer_bench, "ninfer_bench"),
     )
-    ninfer_serve.write_text(
-        f"#!/bin/sh\nprintf '%s\\n' 'ninfer-serve {common}'\n",
-        encoding="utf-8",
-    )
-    ninfer_bench.write_text(
-        f"#!/bin/sh\nprintf '%s\n' 'ninfer_bench {common}'\n",
-        encoding="utf-8",
-    )
+    for binary, name in identities:
+        content = (
+            f"@echo off\r\necho {name} {common}\r\n"
+            if os.name == "nt"
+            else f"#!/bin/sh\nprintf '%s\\n' '{name} {common}'\n"
+        )
+        binary.write_text(content, encoding="utf-8")
     for binary in (ninfer, ninfer_serve, ninfer_bench):
         binary.chmod(0o755)
     return ninfer, ninfer_serve, ninfer_bench
@@ -211,7 +213,8 @@ class BuildIdentityTests(unittest.TestCase):
 
     def test_build_info_and_version_parser_compile_without_cuda(self) -> None:
         compiler = shutil.which(os.environ.get("CXX", "c++"))
-        self.assertIsNotNone(compiler)
+        if compiler is None:
+            self.skipTest("a host C++ compiler is unavailable")
         project = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
