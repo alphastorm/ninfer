@@ -429,7 +429,12 @@ class ReleasePackageTests(unittest.TestCase):
                 self.assertFalse(any("/.git" in name for name in names))
                 tracked_stream = archive.extractfile(f"{source_root}/tracked.txt")
                 self.assertIsNotNone(tracked_stream)
-                self.assertEqual(tracked_stream.read(), b"release bytes\n")
+                committed = subprocess.run(
+                    ["git", "-C", str(source), "show", f"{head}:tracked.txt"],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                ).stdout
+                self.assertEqual(tracked_stream.read(), committed)
 
             spdx = json.loads(sbom.read_text(encoding="utf-8"))
             self.assertEqual(spdx["spdxVersion"], "SPDX-2.3")
