@@ -1,0 +1,38 @@
+{
+  "artifact_type": "ninfer_io_uring_wsl_qualification",
+  "schema_version": 1,
+  "status": "passed",
+  "recorded_utc": "2026-08-28T10:54:28Z",
+  "source_commit": "a04bd39e5e880c2852ff2b34f5f57d28d06ff8e1",
+  "environment": {
+    "host_gpu": "NVIDIA GeForce RTX 5090",
+    "host_driver": "610.88",
+    "wsl_distribution": "Ubuntu-24.04",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2",
+    "architecture": "x86_64",
+    "filesystem": "ext2/ext3",
+    "direct_io_memory_alignment": 4,
+    "direct_io_offset_alignment": 512
+  },
+  "test_executable_sha256": "6b6cc40e534ea477847cd41651ac9b59428feb05a066ad24b5ece08d0fcd0c1f",
+  "checks": {
+    "production_source_strict_compile": "passed",
+    "io_uring_capability_probe": "passed",
+    "odirect_round_trip": "passed",
+    "logical_length_and_digest_validation": "passed",
+    "cross_process_lock_deadline": "passed",
+    "partial_submit_ring_poisoning": "passed",
+    "publication_marker_recovery": "passed",
+    "double_fsync_uncertainty": "passed",
+    "foreign_entry_preservation": "passed",
+    "corruption_truncation_and_oversize_rejection": "passed"
+  },
+  "effects": {
+    "production_route_mutated": false,
+    "qualification_root_removed": true
+  },
+  "limitations": [
+    "This proves the standalone frozen checkpoint backend on the actual NYC WSL2 ext4-on-VHDX class environment.",
+    "It does not yet prove stop/resume integration with a live model runtime, GPUDirect Storage, or NAS replication."
+  ]
+}

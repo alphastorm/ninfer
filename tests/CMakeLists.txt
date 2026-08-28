@@ -85,6 +85,16 @@ if(WIN32)
     SOURCES test_direct_storage_checkpoint_windows.cpp
     LIBRARIES ninfer_checkpoint_directstorage)
 endif()
+if(TARGET ninfer_checkpoint_io_uring_linux)
+  ninfer_add_test(ninfer_io_uring_checkpoint_backend_test
+    SOURCES test_io_uring_checkpoint_backend.cpp
+            ${PROJECT_SOURCE_DIR}/src/runtime/platform/linux/io_uring_checkpoint_backend.cpp
+    LIBRARIES ninfer_checkpoint_contract)
+  target_compile_definitions(ninfer_io_uring_checkpoint_backend_test
+    PRIVATE NINFER_IO_URING_TESTING=1)
+  set_tests_properties(ninfer_io_uring_checkpoint_backend_test
+    PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 ninfer_add_test(ninfer_kv_capacity_test SOURCES test_kv_capacity.cpp)
 ninfer_add_test(ninfer_sampling_defaults_test
   SOURCES test_sampling_defaults.cpp
