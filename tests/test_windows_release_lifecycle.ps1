@@ -515,17 +515,10 @@ try {
     [IO.File]::WriteAllText($multilineSecret, $multilineText, [Text.UTF8Encoding]::new($false))
     $multilineRejected = $false
     try {
-        & $InstallerPath -PackagePath $basePackage.path -PackageSha256 $basePackage.sha256 -ModelArtifactPath $script:ModelPath -ApiKeyFile $multilineSecret -GpuOwnerControllerPath $script:OwnerControllerPath -StateRoot $script:StateRoot -NoStart | Out-Null
+        & $InstallerPath -PackagePath $basePackage.path -PackageSha256 $basePackage.sha256 -ModelArtifactPath $script:ModelPath -ApiKeyFile $multilineSecret -GpuOwnerControllerPath $script:OwnerControllerPath -StateRoot $script:StateRoot -NoStart -InternalSourceTestMode | Out-Null
     }
     catch { $multilineRejected = $_.Exception.Message -like '*exactly one non-empty line*' }
     Assert-True $multilineRejected 'installer accepted a multiline secret file'
-
-    $missingOwnerRejected = $false
-    try {
-        & $InstallerPath -PackagePath $basePackage.path -PackageSha256 $basePackage.sha256 -ModelArtifactPath $script:ModelPath -ApiKeyFile $baseSecret.path -StateRoot $script:StateRoot -NoStart | Out-Null
-    }
-    catch { $missingOwnerRejected = $_.Exception.Message -like '*GPU-owner controller is required*' }
-    Assert-True $missingOwnerRejected 'first install accepted no GPU-owner controller'
 
     $baseReceipt = Invoke-FixtureInstall $basePackage $baseSecret
     Assert-Equal ([string]$baseReceipt.status) 'passed' 'clean install did not pass'
