@@ -79,6 +79,14 @@ int test_digest_validation() {
     body["messages"] = Json::array({Json{{"role", "user"}, {"content", "hello"}}});
 
     int failures = 0;
+    failures += check(parse_client_identity_sha256(std::string(64, 'a'), "ninfer_session") ==
+                          std::string(64, 'a'),
+                      "shared session header parser changed a valid digest");
+    failures += check(api_code([&] {
+                          (void)parse_client_identity_sha256(std::string(64, 'A'),
+                                                            "ninfer_session");
+                      }) == "invalid_ninfer_identity",
+                      "shared session header parser accepted uppercase digest bytes");
     Json uppercase = body;
     uppercase["ninfer_session"] = std::string(64, 'A');
     failures += check(api_code([&] { (void)parse_chat_completion_request(uppercase, limits()); }) ==

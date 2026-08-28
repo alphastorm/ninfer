@@ -3,15 +3,19 @@
 // SSE event sequencing.
 
 #include "serve/generation_service.h"
+#include "serve/opaque_id.h"
 #include "serve/responses_schema.h"
 #include "serve/translate.h"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <iostream>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -120,6 +124,46 @@ int test_basic_request() {
                           composed.generation.messages[1].content[0].text == "old answer" &&
                           composed.generation.messages[2].content[0].text == "hello",
                       "instructions, previous context, and current input composed in order");
+    return failures;
+}
+
+int test_response_ids_are_opaque() {
+    const auto fixed_entropy = [](unsigned char* output, int length) -> int {
+        for (int index = 0; index < length; ++index) {
+            output[index] = static_cast<unsigned char>(index);
+        }
+        return 1;
+    };
+    const auto failed_entropy = [](unsigned char*, int) -> int { return 0; };
+    int failures              = 0;
+    failures += check(new_opaque_id_with_entropy("resp_", fixed_entropy) ==
+                          "resp_000102030405060708090a0b0c0d0e0f",
+                      "opaque identifier changed its exact 128-bit hex wire format");
+    bool failed_closed = false;
+    try {
+        (void)new_opaque_id_with_entropy("resp_", failed_entropy);
+    } catch (const std::runtime_error&) { failed_closed = true; }
+    failures += check(failed_closed, "opaque identifier accepted CSPRNG failure");
+
+    std::vector<std::string> ids;
+    ids.reserve(256);
+    for (int index = 0; index < 128; ++index) {
+        ids.push_back(new_response_id());
+        ids.push_back(new_response_item_id("msg"));
+    }
+    std::sort(ids.begin(), ids.end());
+    failures += check(std::adjacent_find(ids.begin(), ids.end()) == ids.end(),
+                      "response identifiers collided in one issuance batch");
+    failures += check(
+        std::all_of(ids.begin(), ids.end(), [](const std::string& id) {
+            const std::size_t separator = id.find('_');
+            return separator != std::string::npos && id.size() == separator + 33 &&
+                   std::all_of(id.begin() + static_cast<std::ptrdiff_t>(separator + 1), id.end(),
+                               [](unsigned char c) {
+                                   return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+                               });
+        }),
+        "response identifiers lost their prefix plus 128-bit hex wire shape");
     return failures;
 }
 
@@ -493,6 +537,7 @@ int test_input_tokens_schema() {
 int main() {
     int failures = 0;
     failures += test_basic_request();
+    failures += test_response_ids_are_opaque();
     failures += test_preserve_thinking_options_and_inheritance();
     failures += test_reasoning_effort();
     failures += test_typed_items_and_tools();

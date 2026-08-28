@@ -1,10 +1,12 @@
 #include "serve/http_contract.h"
 
 #include "serve/anthropic_schema.h"
+#include "serve/client_identity.h"
 #include "serve/openai_schema.h"
 #include "serve/request.h"
 
 #include <string>
+#include <utility>
 
 namespace ninfer::serve {
 namespace {
@@ -75,6 +77,25 @@ httplib::Server::HandlerResponse authorize_http_request(const ServeOptions& opti
         write_error(response, error);
     }
     return httplib::Server::HandlerResponse::Handled;
+}
+
+std::optional<std::string> response_session_identity(const httplib::Request& request,
+                                                     bool authentication_configured) {
+    constexpr const char* header = "X-NInfer-Session";
+    const std::size_t count      = request.get_header_value_count(header);
+    if (count == 0) { return std::nullopt; }
+    if (count != 1) {
+        ApiError error;
+        error.message = "X-NInfer-Session must occur exactly once";
+        error.param   = "ninfer_session";
+        error.code    = "invalid_ninfer_identity";
+        throw ApiException(std::move(error));
+    }
+    GenerationRequest identity;
+    identity.client_session_sha256 =
+        parse_client_identity_sha256(request.get_header_value(header), "ninfer_session");
+    require_authenticated_client_identity(identity, authentication_configured);
+    return identity.client_session_sha256;
 }
 
 } // namespace ninfer::serve

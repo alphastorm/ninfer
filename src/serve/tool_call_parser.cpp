@@ -1,12 +1,13 @@
 #include "serve/tool_call_parser.h"
 
+#include "serve/opaque_id.h"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cstdio>
-#include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -50,14 +51,7 @@ bool valid_function_name(std::string_view name, std::size_t max_name_length) {
     return true;
 }
 
-std::string new_tool_call_id() {
-    static thread_local std::mt19937_64 rng{std::random_device{}()};
-    std::uniform_int_distribution<std::uint64_t> dist;
-    std::array<char, 32> buf{};
-    std::snprintf(buf.data(), buf.size(), "call_%016llx",
-                  static_cast<unsigned long long>(dist(rng)));
-    return std::string(buf.data());
-}
+std::string new_tool_call_id() { return new_opaque_id("call_"); }
 
 bool is_json_schema_type(std::string_view type) {
     return type == "string" || type == "integer" || type == "number" || type == "boolean" ||

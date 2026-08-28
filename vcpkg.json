@@ -11,6 +11,7 @@
         "zlib"
       ]
     },
+    "openssl",
     "pkgconf"
   ]
 }

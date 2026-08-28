@@ -7,17 +7,17 @@
   },
   "configurePresets": [
     {
-      "name": "release-rtx-3090-omp-v0.2",
-      "displayName": "OMP v0.2 release for RTX 3090 (sm_86)",
+      "name": "mainline-rtx-3090-omp-v0.2",
+      "displayName": "OMP v0.2 mainline for RTX 3090 (sm_86)",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/release-rtx-3090-omp-v0.2",
+      "binaryDir": "${sourceDir}/build/mainline-rtx-3090-omp-v0.2",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CMAKE_CUDA_ARCHITECTURES": "86",
         "NINFER_BUILD_APPS": "ON",
         "BUILD_TESTING": "ON",
         "NINFER_BUILD_BENCHMARKS": "ON",
-        "NINFER_BUILD_PROFILE": "omp-v0.2.0-rtx3090",
+        "NINFER_BUILD_PROFILE": "omp-v0.2-rtx3090-mainline",
         "NINFER_UPSTREAM_BASE_SHA": "ef6ecc3c139b43fc4d3e1b92df474305e8429544",
         "NINFER_PATCH_STACK_SHA": "auto",
         "NINFER_SOURCE_DIRTY": "auto"
@@ -26,15 +26,15 @@
   ],
   "buildPresets": [
     {
-      "name": "release-rtx-3090-omp-v0.2",
-      "configurePreset": "release-rtx-3090-omp-v0.2",
+      "name": "mainline-rtx-3090-omp-v0.2",
+      "configurePreset": "mainline-rtx-3090-omp-v0.2",
       "targets": ["ninfer", "ninfer-serve", "ninfer_bench"]
     }
   ],
   "testPresets": [
     {
-      "name": "release-rtx-3090-omp-v0.2",
-      "configurePreset": "release-rtx-3090-omp-v0.2",
+      "name": "mainline-rtx-3090-omp-v0.2",
+      "configurePreset": "mainline-rtx-3090-omp-v0.2",
       "output": {"outputOnFailure": true}
     }
   ]

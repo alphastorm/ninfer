@@ -117,6 +117,33 @@ def release_options(
 
 
 class BuildIdentityTests(unittest.TestCase):
+    def test_mainline_build_does_not_claim_release_profile(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        presets = json.loads((root / "CMakePresets.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(presets["configurePresets"]), 1)
+        preset = presets["configurePresets"][0]
+        self.assertEqual(preset["name"], "mainline-rtx-3090-omp-v0.2")
+        self.assertEqual(
+            preset["cacheVariables"]["NINFER_BUILD_PROFILE"],
+            "omp-v0.2-rtx3090-mainline",
+        )
+        self.assertNotEqual(
+            preset["cacheVariables"]["NINFER_BUILD_PROFILE"],
+            "omp-v0.2.0-rtx3090",
+        )
+
+    def test_crypto_dependencies_cover_windows_and_container_runtime(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        manifest = json.loads((root / "vcpkg.json").read_text(encoding="utf-8"))
+        dependency_names = {
+            dependency if isinstance(dependency, str) else dependency["name"]
+            for dependency in manifest["dependencies"]
+        }
+        self.assertIn("openssl", dependency_names)
+        dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("libssl-dev", dockerfile)
+        self.assertIn("libssl3t64", dockerfile)
+
     def test_build_rejects_source_identity_changes_after_configure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source"

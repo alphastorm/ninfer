@@ -18,8 +18,7 @@ project(ninfer LANGUAGES C CXX CUDA)
 option(NINFER_BUILD_APPS "Build the NInfer CLI and server" ON)
 option(BUILD_TESTING "Build NInfer tests" OFF)
 option(NINFER_BUILD_BENCHMARKS "Build NInfer benchmarks" OFF)
-set(NINFER_BUILD_PROFILE "omp-v0.2.0-rtx3090" CACHE STRING
-  "Deployment build profile identity")
+set(NINFER_BUILD_PROFILE "generic" CACHE STRING "Deployment build profile identity")
 set(NINFER_UPSTREAM_BASE_SHA "ef6ecc3c139b43fc4d3e1b92df474305e8429544" CACHE STRING
   "Exact upstream base commit")
 set(NINFER_PATCH_STACK_SHA "auto" CACHE STRING "Exact patch-stack commit or auto")
@@ -169,6 +168,7 @@ else()
   endif()
 endif()
 if(NINFER_BUILD_SERVE)
+  find_package(OpenSSL 3.0 REQUIRED COMPONENTS Crypto)
   find_package(Threads REQUIRED)
 endif()
 

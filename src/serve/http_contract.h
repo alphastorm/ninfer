@@ -4,6 +4,9 @@
 
 #include <httplib.h>
 
+#include <optional>
+#include <string>
+
 namespace ninfer::serve {
 
 // cpp-httplib invokes the error handler for every application response with status >= 400. Only
@@ -17,5 +20,9 @@ httplib::Server::HandlerResponse handle_unrendered_http_error(const ServeOptions
 httplib::Server::HandlerResponse authorize_http_request(const ServeOptions& options,
                                                         const httplib::Request& request,
                                                         httplib::Response& response);
+
+// Bodyless stored-response routes carry exactly one optional authenticated session digest.
+std::optional<std::string> response_session_identity(const httplib::Request& request,
+                                                     bool authentication_configured);
 
 } // namespace ninfer::serve

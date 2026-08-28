@@ -200,7 +200,7 @@ void HttpServer::register_routes() {
     if (options_.enable_cors) {
         server_.set_default_headers(
             {{"Access-Control-Allow-Origin", "*"},
-             {"Access-Control-Allow-Headers", "Authorization, Content-Type"},
+             {"Access-Control-Allow-Headers", "Authorization, Content-Type, X-NInfer-Session"},
              {"Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"}});
         // CORS preflight: browsers send OPTIONS with no credentials before the real
         // request; answer it without auth so the actual GET/POST can carry the key.

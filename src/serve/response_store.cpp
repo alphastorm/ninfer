@@ -86,20 +86,13 @@ ResponseStore::ResponseStore(std::size_t max_records, std::size_t max_bytes)
     }
 }
 
-std::shared_ptr<const StoredResponse> ResponseStore::get(const std::string& id) {
-    std::lock_guard lock(mutex_);
-    const auto found = records_.find(id);
-    if (found == records_.end()) { return {}; }
-    lru_.splice(lru_.begin(), lru_, found->second.lru);
-    return found->second.response;
-}
-
 std::shared_ptr<const StoredResponse>
 ResponseStore::get_for_session(const std::string& id,
                                const std::optional<std::string>& session_sha256) {
     std::lock_guard lock(mutex_);
     const auto found = records_.find(id);
-    if (found == records_.end() || found->second.response->client_session_sha256 != session_sha256) {
+    if (found == records_.end() ||
+        found->second.response->client_session_sha256 != session_sha256) {
         return {};
     }
     lru_.splice(lru_.begin(), lru_, found->second.lru);
@@ -107,7 +100,7 @@ ResponseStore::get_for_session(const std::string& id,
 }
 
 void ResponseStore::put(StoredResponse response) {
-    if (response.id.empty() ||
+    if (response.id.empty() || response.session_key.empty() ||
         response.session_key.size() > kMaximumContextCacheSessionKeyBytes ||
         !response.response.is_object()) {
         throw std::invalid_argument(
@@ -160,9 +153,14 @@ void ResponseStore::insert_locked(std::shared_ptr<const StoredResponse> response
     }
 }
 
-bool ResponseStore::erase(const std::string& id) {
+bool ResponseStore::erase_for_session(const std::string& id,
+                                      const std::optional<std::string>& session_sha256) {
     std::lock_guard lock(mutex_);
-    if (!records_.contains(id)) { return false; }
+    const auto found = records_.find(id);
+    if (found == records_.end() ||
+        found->second.response->client_session_sha256 != session_sha256) {
+        return false;
+    }
     erase_locked(id);
     return true;
 }

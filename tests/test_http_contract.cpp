@@ -1,4 +1,5 @@
 #include "serve/http_contract.h"
+#include "serve/request.h"
 
 #include <nlohmann/json.hpp>
 
@@ -125,6 +126,36 @@ int main() {
                 HandlerResponse::Unhandled &&
             authored_response.body == authored_body,
         "application-authored 413 was overwritten by the transport error handler");
+
+    const std::string session_digest(64, 'a');
+    httplib::Request session_request;
+    session_request.headers.emplace("X-NInfer-Session", session_digest);
+    failures += check(
+        ninfer::serve::response_session_identity(session_request, true) == session_digest,
+        "single stored-response session header was not accepted");
+    httplib::Request ordinary_stored_route;
+    failures += check(!ninfer::serve::response_session_identity(ordinary_stored_route, false),
+                      "missing stored-response session header did not stay absent");
+
+    httplib::Request duplicate_session = session_request;
+    duplicate_session.headers.emplace("x-ninfer-session", std::string(64, 'b'));
+    std::string duplicate_code;
+    try {
+        (void)ninfer::serve::response_session_identity(duplicate_session, true);
+    } catch (const ninfer::serve::ApiException& exception) {
+        duplicate_code = exception.error().code;
+    }
+    failures += check(duplicate_code == "invalid_ninfer_identity",
+                      "duplicate stored-response session headers were accepted");
+
+    std::string unauthenticated_code;
+    try {
+        (void)ninfer::serve::response_session_identity(session_request, false);
+    } catch (const ninfer::serve::ApiException& exception) {
+        unauthenticated_code = exception.error().code;
+    }
+    failures += check(unauthenticated_code == "authentication_required",
+                      "stored-response session header bypassed API authentication");
 
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;

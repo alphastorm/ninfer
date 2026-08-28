@@ -35,6 +35,7 @@
         buildInputs = [
           pkgs.ffmpeg_6-full # libavformat60/avcodec60/avutil58/swscale7, as validated in the container
           pkgs.curl
+          pkgs.openssl
         ];
 
         # The project hard-requires CMAKE_CUDA_ARCHITECTURES=86 (see

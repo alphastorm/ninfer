@@ -321,6 +321,7 @@ if(NINFER_BUILD_SERVE)
   # HTTP protocol/product adapter. No serving header is part of the public API.
   add_library(ninfer_serve STATIC
     serve/client_identity.cpp
+    serve/opaque_id.cpp
     serve/server_identity.cpp
     serve/http_contract.cpp
     serve/openai_schema.cpp
@@ -341,5 +342,5 @@ if(NINFER_BUILD_SERVE)
     ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
   target_link_libraries(ninfer_serve
     PUBLIC ninfer_engine Threads::Threads
-    PRIVATE ninfer_media_acquire ${NINFER_CUDART_TARGET})
+    PRIVATE ninfer_media_acquire ${NINFER_CUDART_TARGET} OpenSSL::Crypto)
 endif()

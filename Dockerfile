@@ -11,6 +11,7 @@ RUN apt-get update \
         libavformat-dev \
         libavutil-dev \
         libcurl4-openssl-dev \
+        libssl-dev \
         libswscale-dev \
         ninja-build \
         pkg-config \
@@ -19,7 +20,7 @@ RUN apt-get update \
 WORKDIR /src
 COPY . .
 
-ARG NINFER_BUILD_PROFILE=omp-v0.2.0-rtx3090
+ARG NINFER_BUILD_PROFILE=omp-v0.2-rtx3090-mainline
 ARG NINFER_UPSTREAM_BASE_SHA=ef6ecc3c139b43fc4d3e1b92df474305e8429544
 ARG NINFER_PATCH_STACK_SHA
 ARG NINFER_SOURCE_CLEAN_VERIFIED=OFF
@@ -45,6 +46,7 @@ RUN apt-get update \
         libavformat60 \
         libavutil58 \
         libcurl4t64 \
+        libssl3t64 \
         libswscale7 \
     && rm -rf /var/lib/apt/lists/*
 

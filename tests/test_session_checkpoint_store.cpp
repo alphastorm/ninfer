@@ -286,8 +286,10 @@ int test_codec_round_trip() {
                           return true;
                       }) &&
                           !duplicate_external_commit && live.size() == 1 &&
-                          live.get("resp_private_first") != nullptr &&
-                          live.get("resp_private_second") == nullptr,
+                          live.get_for_session("resp_private_first",
+                                               original.client_session_sha256) != nullptr &&
+                          live.get_for_session("resp_private_second",
+                                               original.client_session_sha256) == nullptr,
                       "invalid ResponseStore restore leaves both transaction sides unchanged");
 
     ResponseStore gated(4, 1ULL << 20);
@@ -299,8 +301,10 @@ int test_codec_round_trip() {
                           failed_external_commit && gated.size() == 0,
                       "failed external restore does not publish Responses state");
     failures += check(gated.restore_session(original, [] { return true; }) && gated.size() == 2 &&
-                          gated.get("resp_private_first") != nullptr &&
-                          gated.get("resp_private_second") != nullptr,
+                          gated.get_for_session("resp_private_first",
+                                                original.client_session_sha256) != nullptr &&
+                          gated.get_for_session("resp_private_second",
+                                                original.client_session_sha256) != nullptr,
                       "successful external restore atomically publishes Responses state");
     return failures;
 }
