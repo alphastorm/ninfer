@@ -473,8 +473,8 @@ def responses_session_lifecycle(
         headers=headers,
         expected_status=404,
     )
-    if error_code(rejected) != "response_not_found":
-        raise ProtocolError("cross-session previous_response_id was not isolated")
+    if error_code(rejected) != "previous_response_not_found":
+        raise ProtocolError("cross-session previous_response_id used the wrong not-found contract")
 
     def expect_stored_not_found(
         method: str, path: str, session: str | None, label: str
