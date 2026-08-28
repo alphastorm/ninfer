@@ -84,7 +84,7 @@ try {
     Assert-Equal ([int]$config.session_checkpoint.quota_mib) 65536 'checkpoint quota changed'
     Assert-Equal ([int]$config.session_checkpoint.staging_mib) 256 'checkpoint staging bound changed'
     Assert-True ($config.PSObject.Properties.Name -notcontains 'persistent_cache') 'unsupported persistent prompt cache is configured'
-    Assert-Equal ([string]::Join(',', @($spec.qualification.required_gates))) 'gpu-only-thermal-envelope,sm86-driver-hardware-identity,authenticated-real-client-protocol,advertised-context-retrieval,process-restart-session-continuation,frozen-role-corpus,bounded-gpu-performance-at-qualified-cap,gaming-drain-restart-rollback' 'qualification gate contract changed'
+    Assert-Equal ([string]::Join(',', @($spec.qualification.required_gates))) 'gpu-only-thermal-envelope,sm86-driver-hardware-identity,authenticated-real-client-protocol,advertised-context-retrieval,process-restart-session-continuation,omp-client-end-to-end,bounded-gpu-performance-at-qualified-cap,gaming-drain-restart-rollback' 'qualification gate contract changed'
 
     $releaseHead = ((& git -C $SourceRoot rev-parse HEAD) | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $releaseHead -cnotmatch '^[0-9a-f]{40}$') {

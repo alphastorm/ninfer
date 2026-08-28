@@ -640,18 +640,23 @@ try {
     $upgradeKeyPath = [string]$state.releases.PSObject.Properties[$upgradeId].Value.api_key_file
     Assert-Equal (Get-Sha256 $upgradeKeyPath) ([string]$upgradeSecret.sha256) 'upgrade secret identity mismatch'
     Assert-Equal ([string]$upgradeReceipt.identity.package_sha256) ([string]$upgradePackage.sha256) 'upgrade receipt lost package identity'
-    $stateRootAcl = @($global:NInferAclCalls | Where-Object {
-            $_.Count -gt 0 -and [string]::Equals(
-                [IO.Path]::GetFullPath([string]$_[0]),
-                [IO.Path]::GetFullPath($script:StateRoot),
-                [StringComparison]::OrdinalIgnoreCase
-            ) -and $_ -contains '/inheritance:r'
-        })
+    $stateRootAcl = [Collections.Generic.List[object]]::new()
+    foreach ($call in $global:NInferAclCalls) {
+        $arguments = @($call)
+        if ($arguments -contains $script:StateRoot -and $arguments -contains '/inheritance:r') {
+            $stateRootAcl.Add($arguments)
+        }
+    }
     Assert-True ($stateRootAcl.Count -ge 1) 'installer did not apply the final state-root ACL'
-    Assert-True (@($stateRootAcl | Where-Object {
-                $_ -contains ([string]::Concat($env:USERNAME, ':(OI)(CI)RX')) -and
-                $_ -notcontains ([string]::Concat($env:USERNAME, ':(OI)(CI)M'))
-            }).Count -ge 1) 'retained release state remained user-writable after upgrade'
+    $readOnlyRootAclFound = $false
+    foreach ($call in $stateRootAcl) {
+        $arguments = @($call)
+        if ($arguments -contains ([string]::Concat($env:USERNAME, ':(OI)(CI)RX')) -and
+            $arguments -notcontains ([string]::Concat($env:USERNAME, ':(OI)(CI)M'))) {
+            $readOnlyRootAclFound = $true
+        }
+    }
+    Assert-True $readOnlyRootAclFound 'retained release state remained user-writable after upgrade'
 
     $global:NInferTestDeadReleaseId = $baseId
     $global:NInferTestDeadStartSleptMilliseconds = 0
