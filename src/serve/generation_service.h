@@ -117,10 +117,13 @@ public:
     [[nodiscard]] SessionCheckpointRestoreState
     restore_checkpoint(std::string_view session_sha256, std::string_view required_response_id,
                        ResponseStore& responses);
+    [[nodiscard]] SessionCheckpointEraseResult erase_checkpoint(std::string_view session_sha256);
 
     void warmup();
 
 private:
+    friend class HttpServer;
+
     [[nodiscard]] std::shared_ptr<RequestLifetime> acquire_request_lifetime() const;
     [[nodiscard]] HostInputLease
     acquire_media_input(std::chrono::steady_clock::time_point deadline,

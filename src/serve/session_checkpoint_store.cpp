@@ -1416,4 +1416,18 @@ SessionCheckpointManager::restore(std::string_view session_sha256,
     }
 }
 
+SessionCheckpointEraseResult SessionCheckpointManager::erase(std::string_view session_sha256) {
+    if (!store_) { return SessionCheckpointEraseResult::Missing; }
+    if (!AuthenticatedCheckpointNamespace::valid_sha256(session_sha256)) {
+        return SessionCheckpointEraseResult::Conflict;
+    }
+    std::lock_guard lock(mutex_);
+    try {
+        return store_->erase(AuthenticatedCheckpointNamespace::authenticated(
+            tenant_sha256_, std::string(session_sha256)));
+    } catch (...) {
+        return SessionCheckpointEraseResult::Conflict;
+    }
+}
+
 } // namespace ninfer::serve

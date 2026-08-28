@@ -115,6 +115,10 @@ int test_session_continuation_and_dag_deletion() {
     branch_two.client_session_sha256 = session_a;
     store.put(std::move(branch_one));
     store.put(std::move(branch_two));
+    failures += check(store.latest_response_id_for_session(session_a) ==
+                          std::optional<std::string>("resp_branch_two") &&
+                          !store.latest_response_id_for_session(std::string(64, 'c')),
+                      "latest response lookup crossed session insertion order");
 
     failures += check(!store.erase_for_session("resp_first", session_b),
                       "cross-session delete removed another session's parent");
@@ -126,6 +130,9 @@ int test_session_continuation_and_dag_deletion() {
                       "same-session parent deletion failed");
     failures += check(!store.get_for_session("resp_first", session_a),
                       "deleted parent remained available for continuation");
+    failures += check(store.latest_response_id_for_session(session_a) ==
+                          std::optional<std::string>("resp_branch_two"),
+                      "latest response lookup changed after parent deletion");
     failures += check(store.get_for_session("resp_branch_one", session_a) != nullptr &&
                           store.get_for_session("resp_branch_two", session_a) != nullptr,
                       "parent deletion removed stored branches");

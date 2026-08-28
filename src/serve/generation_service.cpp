@@ -640,6 +640,12 @@ GenerationService::restore_checkpoint(std::string_view session_sha256,
     return checkpoint_manager_->restore(session_sha256, required_response_id, responses);
 }
 
+SessionCheckpointEraseResult
+GenerationService::erase_checkpoint(std::string_view session_sha256) {
+    if (!checkpoint_manager_) { return SessionCheckpointEraseResult::Missing; }
+    return checkpoint_manager_->erase(session_sha256);
+}
+
 void GenerationService::warmup() {
     try {
         GenerationRequest request;

@@ -165,6 +165,22 @@ bool ResponseStore::erase_for_session(const std::string& id,
     return true;
 }
 
+std::optional<std::string>
+ResponseStore::latest_response_id_for_session(std::string_view client_session_sha256) const {
+    std::lock_guard lock(mutex_);
+    const Entry* latest = nullptr;
+    for (const auto& [id, entry] : records_) {
+        (void)id;
+        if (entry.response->client_session_sha256 &&
+            *entry.response->client_session_sha256 == client_session_sha256 &&
+            (latest == nullptr || entry.sequence > latest->sequence)) {
+            latest = &entry;
+        }
+    }
+    return latest == nullptr ? std::nullopt
+                             : std::optional<std::string>(latest->response->id);
+}
+
 std::optional<ResponseStoreSnapshot>
 ResponseStore::snapshot_session(std::string_view client_session_sha256) const {
     std::lock_guard lock(mutex_);

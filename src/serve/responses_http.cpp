@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -540,10 +541,48 @@ void HttpServer::handle_response_get(const httplib::Request& req, httplib::Respo
 void HttpServer::handle_response_delete(const httplib::Request& req, httplib::Response& res) {
     try {
         const std::string id = path_response_id(req);
-        if (!response_store_.erase_for_session(
-                id, response_session_identity(req, !options_.api_key.empty()))) {
+        const std::optional<std::string> session =
+            response_session_identity(req, !options_.api_key.empty());
+        std::shared_ptr<ClientSessionLease> session_lease;
+        if (session && service_ != nullptr) {
+            session_lease = service_->acquire_client_session(
+                *session,
+                std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(options_.pending_timeout_ms),
+                [&req] { return disconnected(req); });
+        }
+        if (!response_store_.get_for_session(id, session)) {
             write_error(res, response_not_found(id));
             return;
+        }
+        if (session && service_ != nullptr && service_->checkpoint_enabled()) {
+            const SessionCheckpointEraseResult erased = service_->erase_checkpoint(*session);
+            if (erased == SessionCheckpointEraseResult::Conflict) {
+                ApiError error;
+                error.status  = 503;
+                error.type    = "server_error";
+                error.param   = "response_id";
+                error.code    = "checkpoint_unavailable";
+                error.message = "stored continuation could not be removed atomically";
+                throw ApiException(std::move(error));
+            }
+        }
+        if (!response_store_.erase_for_session(id, session)) {
+            write_error(res, response_not_found(id));
+            return;
+        }
+        if (session && service_ != nullptr && service_->checkpoint_enabled()) {
+            const std::optional<std::string> latest =
+                response_store_.latest_response_id_for_session(*session);
+            if (latest) {
+                const SessionCheckpointSaveOutcome saved =
+                    service_->save_checkpoint(*session, *latest, response_store_);
+                if (saved.state != SessionCheckpointSaveState::Saved) {
+                    write_console_log(ConsoleLogLevel::Warning,
+                                      "checkpoint resave after delete response=" + id +
+                                          " state=" + checkpoint_save_state_name(saved.state));
+                }
+            }
         }
         res.set_content(Json{{"id", id}, {"object", "response.deleted"}, {"deleted", true}}.dump(),
                         "application/json");
