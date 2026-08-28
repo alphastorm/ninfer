@@ -1,6 +1,7 @@
 #pragma once
 
 #include "serve/serve_options.h"
+#include "serve/request.h"
 
 #include <httplib.h>
 
@@ -24,5 +25,7 @@ httplib::Server::HandlerResponse authorize_http_request(const ServeOptions& opti
 // Bodyless stored-response routes carry exactly one optional authenticated session digest.
 std::optional<std::string> response_session_identity(const httplib::Request& request,
                                                      bool authentication_configured);
+void apply_response_session_identity(const httplib::Request& request,
+                                     bool authentication_configured, GenerationRequest& generation);
 
 } // namespace ninfer::serve

@@ -18,9 +18,9 @@ if(NOT NINFER_SOURCE_DIRTY_MODE STREQUAL "auto" AND
   message(FATAL_ERROR "NINFER_SOURCE_DIRTY_MODE must be auto or ON")
 endif()
 
-# A source archive without Git metadata was already bound and checked by the release tool before
-# configuration. A live worktree must still match the identity captured at configure time whenever
-# compilation runs, or an incremental build could label different source bytes as clean.
+# A source tree without Git metadata is always configured dirty and cannot enter release packaging.
+# A live worktree must still match the identity captured at configure time whenever compilation
+# runs, or an incremental build could label different source bytes as clean.
 if(NOT EXISTS "${NINFER_SOURCE_DIR}/.git")
   return()
 endif()

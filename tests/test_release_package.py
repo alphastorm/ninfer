@@ -11,6 +11,7 @@ import tarfile
 import tempfile
 import textwrap
 import unittest
+from unittest.mock import patch
 
 from tools.release.package import (
     ReleaseError,
@@ -23,6 +24,7 @@ from tools.release.package import (
 _COMMIT_DATE = "2023-11-14T22:13:20+00:00"
 _EPOCH = 1_700_000_000
 _SUPPORT_CONTENT = {
+    "README.md": "NInfer RTX 3090 fixture\n",
     "VERSION": "0.6.1-rtx3090\n",
     "LICENSE": "Apache License fixture\n",
     "RELEASE_NOTES_0.6.1.md": "Release notes fixture\n",
@@ -79,7 +81,7 @@ def write_fake_binaries(binaries: Path, head: str) -> tuple[Path, Path, Path]:
         f"upstream_base_sha={head} patch_stack_sha={head} "
         "build_profile=omp-v0.2.0-rtx3090 build_type=Release "
         "cxx_compiler=GNU-13.3.0 cuda_compiler=NVIDIA-12.8.93 "
-        "cuda_toolkit=12.8.93 source_dirty=false"
+        "cuda_toolkit=12.8.93 cuda_architecture=86 source_dirty=false"
     )
     ninfer = binaries / "ninfer"
     ninfer_serve = binaries / "ninfer-serve"
@@ -91,7 +93,10 @@ def write_fake_binaries(binaries: Path, head: str) -> tuple[Path, Path, Path]:
         f"#!/bin/sh\nprintf '%s\\n' 'ninfer-serve {common}'\n",
         encoding="utf-8",
     )
-    ninfer_bench.write_text("benchmark fixture\n", encoding="utf-8")
+    ninfer_bench.write_text(
+        f"#!/bin/sh\nprintf '%s\n' 'ninfer_bench {common}'\n",
+        encoding="utf-8",
+    )
     for binary in (ninfer, ninfer_serve, ninfer_bench):
         binary.chmod(0o755)
     return ninfer, ninfer_serve, ninfer_bench
@@ -220,6 +225,7 @@ class BuildIdentityTests(unittest.TestCase):
                     #define NINFER_BUILD_CXX_COMPILER "AppleClang-18.0.0"
                     #define NINFER_BUILD_CUDA_COMPILER "NVIDIA-12.8.93"
                     #define NINFER_BUILD_CUDA_TOOLKIT "12.8.93"
+                    #define NINFER_BUILD_CUDA_ARCHITECTURE "86"
                     #define NINFER_BUILD_SOURCE_DIRTY 0
                     """
                 ),
@@ -272,6 +278,7 @@ class BuildIdentityTests(unittest.TestCase):
             self.assertEqual(values["upstream_base_sha"], upstream)
             self.assertEqual(values["patch_stack_sha"], patch)
             self.assertEqual(values["cuda_toolkit"], "12.8.93")
+            self.assertEqual(values["cuda_architecture"], "86")
             self.assertEqual(values["source_dirty"], "false")
 
 
@@ -366,6 +373,67 @@ class ReleasePackageTests(unittest.TestCase):
                 package_release(
                     release_options(source, binaries, head, root / "dirty-release")
                 )
+
+    def test_publication_is_one_retryable_directory_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, binaries, head = create_release_fixture(root)
+            output = root / "release"
+            options = release_options(source, binaries, head, output)
+            with patch("tools.release.package.os.replace", side_effect=OSError("injected")):
+                with self.assertRaises(OSError):
+                    package_release(options)
+            self.assertFalse(output.exists())
+
+            receipt = package_release(options)
+            self.assertEqual(receipt["artifact_type"], "ninfer_local_release_receipt")
+            self.assertEqual(len(list(output.iterdir())), 4)
+
+    def test_release_rejects_wrong_architecture_and_unbound_benchmark(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, binaries, head = create_release_fixture(root)
+            options = release_options(source, binaries, head, root / "wrong-arch")
+            for binary in (options.ninfer, options.ninfer_serve, options.ninfer_bench):
+                binary.write_text(
+                    binary.read_text(encoding="utf-8").replace(
+                        "cuda_architecture=86", "cuda_architecture=89"
+                    ),
+                    encoding="utf-8",
+                )
+            with self.assertRaisesRegex(ReleaseError, "cuda_architecture"):
+                package_release(options)
+
+            options = release_options(source, binaries, head, root / "unbound-bench")
+            options.ninfer_bench.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            with self.assertRaisesRegex(ReleaseError, "ninfer_bench"):
+                package_release(options)
+
+    def test_windows_package_includes_only_declared_app_local_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, binaries, head = create_release_fixture(root)
+            dependency_a = binaries / "libcrypto-3-x64.dll"
+            dependency_b = binaries / "avcodec-62.dll"
+            dependency_a.write_bytes(b"crypto fixture")
+            dependency_b.write_bytes(b"codec fixture")
+            output = root / "windows-release"
+            options = dataclasses.replace(
+                release_options(source, binaries, head, output),
+                platform="windows-x86_64-cuda13.3-rtx3090",
+                runtime_dependencies=(dependency_a, dependency_b),
+            )
+            package_release(options)
+            root_name = "ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda13.3-rtx3090"
+            archive = output / f"{root_name}.tar.gz"
+            with tarfile.open(archive, "r:gz") as tar:
+                names = set(tar.getnames())
+            self.assertIn(f"{root_name}/bin/ninfer.exe", names)
+            self.assertIn(f"{root_name}/bin/ninfer-serve.exe", names)
+            self.assertIn(f"{root_name}/bin/ninfer_bench.exe", names)
+            self.assertIn(f"{root_name}/bin/libcrypto-3-x64.dll", names)
+            self.assertIn(f"{root_name}/bin/avcodec-62.dll", names)
+            self.assertNotIn(f"{root_name}/run-qwen38-c1.sh", names)
 
     def test_release_requires_exact_available_commits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

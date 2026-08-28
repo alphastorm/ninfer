@@ -63,9 +63,7 @@ httplib::Server::HandlerResponse authorize_http_request(const ServeOptions& opti
         const bool bearer_ok =
             request.get_header_value("Authorization") == ("Bearer " + options.api_key);
         const bool x_api_key_ok = request.get_header_value("x-api-key") == options.api_key;
-        if (bearer_ok || x_api_key_ok) {
-            return httplib::Server::HandlerResponse::Unhandled;
-        }
+        if (bearer_ok || x_api_key_ok) { return httplib::Server::HandlerResponse::Unhandled; }
         error.status  = 401;
         error.code    = "invalid_api_key";
         error.message = "missing or invalid API key";
@@ -96,6 +94,22 @@ std::optional<std::string> response_session_identity(const httplib::Request& req
         parse_client_identity_sha256(request.get_header_value(header), "ninfer_session");
     require_authenticated_client_identity(identity, authentication_configured);
     return identity.client_session_sha256;
+}
+
+void apply_response_session_identity(const httplib::Request& request,
+                                     bool authentication_configured,
+                                     GenerationRequest& generation) {
+    const std::optional<std::string> header =
+        response_session_identity(request, authentication_configured);
+    if (!header) { return; }
+    if (generation.client_session_sha256 && generation.client_session_sha256 != header) {
+        ApiError error;
+        error.message = "X-NInfer-Session and ninfer_session must identify the same session";
+        error.param   = "ninfer_session";
+        error.code    = "invalid_ninfer_identity";
+        throw ApiException(std::move(error));
+    }
+    generation.client_session_sha256 = header;
 }
 
 } // namespace ninfer::serve

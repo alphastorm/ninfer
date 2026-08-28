@@ -24,8 +24,6 @@ set(NINFER_UPSTREAM_BASE_SHA "ef6ecc3c139b43fc4d3e1b92df474305e8429544" CACHE ST
 set(NINFER_PATCH_STACK_SHA "auto" CACHE STRING "Exact patch-stack commit or auto")
 set(NINFER_SOURCE_DIRTY "auto" CACHE STRING "Source-dirty identity: auto or ON")
 set_property(CACHE NINFER_SOURCE_DIRTY PROPERTY STRINGS auto ON)
-option(NINFER_SOURCE_CLEAN_VERIFIED
-  "Release tooling verified an exact clean commit archive without Git metadata" OFF)
 
 string(LENGTH "${NINFER_BUILD_PROFILE}" NINFER_BUILD_PROFILE_LENGTH)
 if(NOT NINFER_BUILD_PROFILE MATCHES "^[A-Za-z0-9][A-Za-z0-9._-]*$" OR
@@ -64,14 +62,6 @@ if(Git_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/.git")
 else()
   if(NINFER_PATCH_STACK_SHA STREQUAL "auto")
     set(NINFER_PATCH_STACK_SHA_RESOLVED "unknown")
-  endif()
-  if(NINFER_SOURCE_CLEAN_VERIFIED)
-    if(NINFER_PATCH_STACK_SHA_RESOLVED STREQUAL "unknown" OR
-       NINFER_UPSTREAM_BASE_SHA STREQUAL "unknown")
-      message(FATAL_ERROR
-        "NINFER_SOURCE_CLEAN_VERIFIED requires exact upstream and patch-stack SHAs")
-    endif()
-    set(NINFER_SOURCE_DIRTY_BOOL 0)
   endif()
 endif()
 

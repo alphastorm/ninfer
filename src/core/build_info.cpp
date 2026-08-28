@@ -15,6 +15,7 @@ BuildInfo build_info() noexcept {
         .cxx_compiler      = NINFER_BUILD_CXX_COMPILER,
         .cuda_compiler     = NINFER_BUILD_CUDA_COMPILER,
         .cuda_toolkit      = NINFER_BUILD_CUDA_TOOLKIT,
+        .cuda_architecture = NINFER_BUILD_CUDA_ARCHITECTURE,
         .source_dirty      = NINFER_BUILD_SOURCE_DIRTY != 0,
     };
 }
@@ -26,6 +27,7 @@ std::string format_build_info(std::string_view program_name) {
         << " patch_stack_sha=" << info.patch_stack_sha << " build_profile=" << info.build_profile
         << " build_type=" << info.build_type << " cxx_compiler=" << info.cxx_compiler
         << " cuda_compiler=" << info.cuda_compiler << " cuda_toolkit=" << info.cuda_toolkit
+        << " cuda_architecture=" << info.cuda_architecture
         << " source_dirty=" << (info.source_dirty ? "true" : "false");
     return out.str();
 }

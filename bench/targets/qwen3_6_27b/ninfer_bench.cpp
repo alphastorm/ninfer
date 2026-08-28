@@ -1,6 +1,7 @@
 #include "ninfer_bench_support.h"
 
 #include "ninfer/engine.h"
+#include "ninfer/build_info.h"
 
 #include <cuda_profiler_api.h>
 #include <cuda_runtime.h>
@@ -12,6 +13,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -123,6 +125,10 @@ void write_output(const ninfer::bench::BenchOptions& options, const std::string&
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--version") {
+        std::cout << ninfer::format_build_info("ninfer_bench") << '\n';
+        return 0;
+    }
     ninfer::bench::BenchOptions options;
     try {
         options = ninfer::bench::parse_args(argc, argv);

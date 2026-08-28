@@ -217,12 +217,12 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         RequestLimits limits;
         limits.default_max_tokens = options_.default_max_tokens;
         request                   = parse_responses_request(parse_json_body(req), limits);
+        apply_response_session_identity(req, !options_.api_key.empty(), request.generation);
         validate_model(request.generation.model, public_model_id_);
         require_authenticated_client_identity(request.generation, !options_.api_key.empty());
         if (request.previous_response_id) {
-            const std::shared_ptr<const StoredResponse> previous =
-                response_store_.get_for_session(*request.previous_response_id,
-                                                request.generation.client_session_sha256);
+            const std::shared_ptr<const StoredResponse> previous = response_store_.get_for_session(
+                *request.previous_response_id, request.generation.client_session_sha256);
             if (!previous) {
                 throw ApiException(response_not_found(*request.previous_response_id));
             }
@@ -342,8 +342,8 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                 ResponsesStreamFinish finished  = stream->encoder->finish(outcome);
                 if (stream->store) {
                     StoredResponse stored;
-                    stored.id = finished.response.body.at("id").get<std::string>();
-                    stored.session_key           = stream->session_key;
+                    stored.id          = finished.response.body.at("id").get<std::string>();
+                    stored.session_key = stream->session_key;
                     stored.client_session_sha256 = stream->client_session_sha256;
                     stored.previous_response_id  = stream->previous_response_id;
                     stored.response              = finished.response.body;

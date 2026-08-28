@@ -16,6 +16,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 from typing import NoReturn
@@ -34,6 +35,7 @@ _BUILD_KEYS = frozenset(
         "cxx_compiler",
         "cuda_compiler",
         "cuda_toolkit",
+        "cuda_architecture",
         "source_dirty",
     }
 )
@@ -54,6 +56,12 @@ _SUPPORT_FILES = (
         0o755,
     ),
     ("scripts/run-qwen36-35b-vision.sh", "run-qwen36-35b-vision.sh", 0o755),
+)
+_WINDOWS_SUPPORT_FILES = (
+    ("VERSION", "VERSION", 0o644),
+    ("LICENSE", "LICENSE", 0o644),
+    ("RELEASE_NOTES_0.6.1.md", "RELEASE_NOTES.md", 0o644),
+    ("README.md", "README.md", 0o644),
 )
 
 
@@ -201,6 +209,7 @@ class ReleaseOptions:
     release_head_sha: str
     build_profile: str
     source_date_epoch: int | None = None
+    runtime_dependencies: tuple[Path, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -227,10 +236,29 @@ class ReleaseFile:
 def validate_options(options: ReleaseOptions) -> tuple[dict[str, str], int]:
     if not _VERSION_RE.fullmatch(options.release_version):
         fail("release version must be a complete vMAJOR.MINOR.PATCH value")
-    if not _NAME_RE.fullmatch(options.platform) or not options.platform.startswith("linux-"):
-        fail("platform must be a release-safe Linux platform name")
+    if not _NAME_RE.fullmatch(options.platform) or not options.platform.startswith(
+        ("linux-", "windows-")
+    ):
+        fail("platform must be a release-safe Linux or Windows platform name")
     if not _NAME_RE.fullmatch(options.build_profile):
         fail("build profile must contain only release-safe name characters")
+    windows = options.platform.startswith("windows-")
+    if windows and not options.runtime_dependencies:
+        fail("Windows release requires app-local runtime dependencies")
+    if not windows and options.runtime_dependencies:
+        fail("runtime dependencies are only accepted for Windows releases")
+    dependency_names: set[str] = set()
+    for dependency in options.runtime_dependencies:
+        resolved = dependency.resolve()
+        if (
+            not resolved.is_file()
+            or resolved.is_symlink()
+            or resolved.suffix.lower() != ".dll"
+            or not _NAME_RE.fullmatch(resolved.name)
+            or resolved.name.lower() in dependency_names
+        ):
+            fail("Windows runtime dependency is missing, duplicated, or unsafe")
+        dependency_names.add(resolved.name.lower())
     source = options.source.resolve()
     output = options.output_dir.resolve()
     if output == source or source in output.parents:
@@ -241,11 +269,10 @@ def validate_options(options: ReleaseOptions) -> tuple[dict[str, str], int]:
     identities = [
         parse_build_info(options.ninfer.resolve(), "ninfer"),
         parse_build_info(options.ninfer_serve.resolve(), "ninfer-serve"),
+        parse_build_info(options.ninfer_bench.resolve(), "ninfer_bench"),
     ]
-    if identities[0] != identities[1]:
-        fail("ninfer and ninfer-serve carry different build identities")
-    if not options.ninfer_bench.resolve().is_file():
-        fail("ninfer_bench binary does not exist")
+    if identities[0] != identities[1] or identities[0] != identities[2]:
+        fail("release binaries carry different build identities")
     identity = identities[0]
     expected = {
         "upstream_base_sha": options.upstream_base_sha,
@@ -253,6 +280,7 @@ def validate_options(options: ReleaseOptions) -> tuple[dict[str, str], int]:
         "build_profile": options.build_profile,
         "build_type": "Release",
         "source_dirty": "false",
+        "cuda_architecture": "86",
     }
     for key, value in expected.items():
         if identity[key] != value:
@@ -467,23 +495,19 @@ def package_release(options: ReleaseOptions) -> dict[str, object]:
     checksums_name = f"{binary_root}.SHA256SUMS"
 
     output = options.output_dir.resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    destinations = [
-        output / binary_name,
-        output / source_name,
-        output / sbom_name,
-        output / checksums_name,
-    ]
-    existing = [path.name for path in destinations if path.exists()]
-    if existing:
-        fail("release outputs already exist: " + ", ".join(existing))
-
-    with tempfile.TemporaryDirectory(prefix=".ninfer-release-", dir=output) as directory:
+    output.parent.mkdir(parents=True, exist_ok=True)
+    if output.exists():
+        fail("release output directory already exists: " + str(output))
+    with tempfile.TemporaryDirectory(
+        prefix=".ninfer-release-", dir=output.parent
+    ) as directory:
         temporary = Path(directory)
-        binary_path = temporary / binary_name
-        source_path = temporary / source_name
-        sbom_path = temporary / sbom_name
-        checksums_path = temporary / checksums_name
+        published = temporary / "published"
+        published.mkdir()
+        binary_path = published / binary_name
+        source_path = published / source_name
+        sbom_path = published / sbom_name
+        checksums_path = published / checksums_name
 
         staged_ninfer = stage_binary(options.ninfer, temporary / "ninfer", "ninfer")
         staged_ninfer_serve = stage_binary(
@@ -492,9 +516,17 @@ def package_release(options: ReleaseOptions) -> dict[str, object]:
         staged_ninfer_bench = stage_binary(
             options.ninfer_bench, temporary / "ninfer_bench", "ninfer_bench"
         )
-        if (
-            parse_build_info(staged_ninfer, "ninfer") != identity
-            or parse_build_info(staged_ninfer_serve, "ninfer-serve") != identity
+        staged_dependencies = [
+            stage_binary(dependency, temporary / dependency.name, dependency.name)
+            for dependency in options.runtime_dependencies
+        ]
+        if any(
+            staged_identity != identity
+            for staged_identity in (
+                parse_build_info(staged_ninfer, "ninfer"),
+                parse_build_info(staged_ninfer_serve, "ninfer-serve"),
+                parse_build_info(staged_ninfer_bench, "ninfer_bench"),
+            )
         ):
             fail("binary build identity changed while staging release inputs")
 
@@ -503,28 +535,40 @@ def package_release(options: ReleaseOptions) -> dict[str, object]:
         )
         source_sha256 = hash_path(source_path)[0]
 
+        executable_suffix = ".exe" if options.platform.startswith("windows-") else ""
         binary_files = [
             ReleaseFile.from_path(
-                f"{binary_root}/bin/ninfer", 0o755, staged_ninfer
+                f"{binary_root}/bin/ninfer{executable_suffix}", 0o755, staged_ninfer
             ),
             ReleaseFile.from_path(
-                f"{binary_root}/bin/ninfer-serve",
+                f"{binary_root}/bin/ninfer-serve{executable_suffix}",
                 0o755,
                 staged_ninfer_serve,
             ),
             ReleaseFile.from_path(
-                f"{binary_root}/bin/ninfer_bench",
+                f"{binary_root}/bin/ninfer_bench{executable_suffix}",
                 0o755,
                 staged_ninfer_bench,
             ),
         ]
+        dependency_files = [
+            ReleaseFile.from_path(
+                f"{binary_root}/bin/{dependency.name}", 0o755, dependency
+            )
+            for dependency in staged_dependencies
+        ]
+        support_manifest = (
+            _WINDOWS_SUPPORT_FILES
+            if options.platform.startswith("windows-")
+            else _SUPPORT_FILES
+        )
         support_files = [
             ReleaseFile.from_bytes(
                 f"{binary_root}/{destination}",
                 mode,
                 read_committed_file(source, options.release_head_sha, committed),
             )
-            for committed, destination, mode in _SUPPORT_FILES
+            for committed, destination, mode in support_manifest
         ]
         identity_value = {
             "artifact_type": "ninfer_release_build_identity",
@@ -539,12 +583,18 @@ def package_release(options: ReleaseOptions) -> dict[str, object]:
                 "ninfer-serve": binary_files[1].sha256,
                 "ninfer_bench": binary_files[2].sha256,
             },
+            "runtime_dependencies": {
+                dependency.source.name: dependency.sha256
+                for dependency in dependency_files
+                if dependency.source is not None
+            },
         }
         identity_bytes = (
             json.dumps(identity_value, sort_keys=True, separators=(",", ":")) + "\n"
         ).encode("utf-8")
         payload = [
             *binary_files,
+            *dependency_files,
             *support_files,
             ReleaseFile.from_bytes(
                 f"{binary_root}/build-identity.json", 0o644, identity_bytes
@@ -575,12 +625,7 @@ def package_release(options: ReleaseOptions) -> dict[str, object]:
             f"{sbom_sha256}  {sbom_name}\n",
             encoding="ascii",
         )
-        for temporary_path, destination in zip(
-            [binary_path, source_path, sbom_path, checksums_path],
-            destinations,
-            strict=True,
-        ):
-            os.replace(temporary_path, destination)
+        os.replace(published, output)
 
     return {
         "artifact_type": "ninfer_local_release_receipt",
@@ -612,6 +657,9 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--release-head-sha", required=True)
     parser.add_argument("--build-profile", required=True)
     parser.add_argument("--source-date-epoch", type=int)
+    parser.add_argument(
+        "--runtime-dependency", type=Path, action="append", default=[]
+    )
     return parser
 
 
@@ -631,10 +679,11 @@ def main() -> None:
                 release_head_sha=args.release_head_sha,
                 build_profile=args.build_profile,
                 source_date_epoch=args.source_date_epoch,
+                runtime_dependencies=tuple(args.runtime_dependency),
             )
         )
     except ReleaseError as error:
-        print(f"error: {error}", file=os.sys.stderr)
+        print(f"error: {error}", file=sys.stderr)
         raise SystemExit(2) from error
     print(json.dumps(value, sort_keys=True))
 
