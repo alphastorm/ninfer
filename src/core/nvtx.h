@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdlib>
+
 #include <nvtx3/nvToolsExt.h>
 
 #include <array>
