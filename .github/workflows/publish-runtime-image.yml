@@ -40,7 +40,7 @@ jobs:
       RELEASE_TAG: ${{ inputs.release_tag }}
       BINARY_ASSET: ${{ inputs.binary_asset }}
       BINARY_SHA256: ${{ inputs.binary_sha256 }}
-      IMAGE_REPOSITORY: ghcr.io/alphastorm/ninfer
+      IMAGE_REPOSITORY: ghcr.io/alphastorm/ninfer-runtime
       BASE_IMAGE: ghcr.io/alphastorm/ninfer@sha256:a19e00c5d7993d7c12341974bdc7e3d13e61d9deaf39e8ce00cf94abd6137712
       BASE_IMAGE_DIGEST: sha256:a19e00c5d7993d7c12341974bdc7e3d13e61d9deaf39e8ce00cf94abd6137712
     steps:
