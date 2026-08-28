@@ -18,6 +18,84 @@ project(ninfer LANGUAGES C CXX CUDA)
 option(NINFER_BUILD_APPS "Build the NInfer CLI and server" ON)
 option(BUILD_TESTING "Build NInfer tests" OFF)
 option(NINFER_BUILD_BENCHMARKS "Build NInfer benchmarks" OFF)
+set(NINFER_BUILD_PROFILE "omp-v0.2.0-rtx3090" CACHE STRING
+  "Deployment build profile identity")
+set(NINFER_UPSTREAM_BASE_SHA "ef6ecc3c139b43fc4d3e1b92df474305e8429544" CACHE STRING
+  "Exact upstream base commit")
+set(NINFER_PATCH_STACK_SHA "auto" CACHE STRING "Exact patch-stack commit or auto")
+set(NINFER_SOURCE_DIRTY "auto" CACHE STRING "Source-dirty identity: auto or ON")
+set_property(CACHE NINFER_SOURCE_DIRTY PROPERTY STRINGS auto ON)
+option(NINFER_SOURCE_CLEAN_VERIFIED
+  "Release tooling verified an exact clean commit archive without Git metadata" OFF)
+
+string(LENGTH "${NINFER_BUILD_PROFILE}" NINFER_BUILD_PROFILE_LENGTH)
+if(NOT NINFER_BUILD_PROFILE MATCHES "^[A-Za-z0-9][A-Za-z0-9._-]*$" OR
+   NINFER_BUILD_PROFILE_LENGTH GREATER 64)
+  message(FATAL_ERROR
+    "NINFER_BUILD_PROFILE must contain 1..64 release-safe name characters")
+endif()
+
+set(NINFER_PATCH_STACK_SHA_RESOLVED "${NINFER_PATCH_STACK_SHA}")
+# Unknown source state is conservatively dirty. Only a successful Git status or a release-tool
+# attestation for an exact archive may identify a build as clean.
+set(NINFER_SOURCE_DIRTY_BOOL 1)
+find_package(Git QUIET)
+if(Git_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/.git")
+  if(NINFER_PATCH_STACK_SHA STREQUAL "auto")
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" -C "${PROJECT_SOURCE_DIR}" rev-parse HEAD
+      OUTPUT_VARIABLE NINFER_PATCH_STACK_SHA_RESOLVED
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE NINFER_GIT_REV_PARSE_RESULT)
+    if(NOT NINFER_GIT_REV_PARSE_RESULT EQUAL 0)
+      set(NINFER_PATCH_STACK_SHA_RESOLVED "unknown")
+    endif()
+  endif()
+  if(NINFER_SOURCE_DIRTY STREQUAL "auto")
+    execute_process(
+      COMMAND "${GIT_EXECUTABLE}" -C "${PROJECT_SOURCE_DIR}"
+              status --porcelain --untracked-files=all
+      OUTPUT_VARIABLE NINFER_GIT_STATUS
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE NINFER_GIT_STATUS_RESULT)
+    if(NINFER_GIT_STATUS_RESULT EQUAL 0 AND NINFER_GIT_STATUS STREQUAL "")
+      set(NINFER_SOURCE_DIRTY_BOOL 0)
+    endif()
+  endif()
+else()
+  if(NINFER_PATCH_STACK_SHA STREQUAL "auto")
+    set(NINFER_PATCH_STACK_SHA_RESOLVED "unknown")
+  endif()
+  if(NINFER_SOURCE_CLEAN_VERIFIED)
+    if(NINFER_PATCH_STACK_SHA_RESOLVED STREQUAL "unknown" OR
+       NINFER_UPSTREAM_BASE_SHA STREQUAL "unknown")
+      message(FATAL_ERROR
+        "NINFER_SOURCE_CLEAN_VERIFIED requires exact upstream and patch-stack SHAs")
+    endif()
+    set(NINFER_SOURCE_DIRTY_BOOL 0)
+  endif()
+endif()
+
+if(NINFER_SOURCE_DIRTY STREQUAL "ON")
+  set(NINFER_SOURCE_DIRTY_BOOL 1)
+elseif(NOT NINFER_SOURCE_DIRTY STREQUAL "auto")
+  message(FATAL_ERROR "NINFER_SOURCE_DIRTY must be auto or ON; clean state is verified")
+endif()
+
+if(NOT NINFER_UPSTREAM_BASE_SHA STREQUAL "unknown")
+  string(LENGTH "${NINFER_UPSTREAM_BASE_SHA}" NINFER_UPSTREAM_BASE_SHA_LENGTH)
+  if(NOT NINFER_UPSTREAM_BASE_SHA MATCHES "^[0-9a-f]+$" OR
+     NOT NINFER_UPSTREAM_BASE_SHA_LENGTH EQUAL 40)
+    message(FATAL_ERROR "NINFER_UPSTREAM_BASE_SHA must be a full lowercase Git SHA")
+  endif()
+endif()
+if(NOT NINFER_PATCH_STACK_SHA_RESOLVED STREQUAL "unknown")
+  string(LENGTH "${NINFER_PATCH_STACK_SHA_RESOLVED}" NINFER_PATCH_STACK_SHA_LENGTH)
+  if(NOT NINFER_PATCH_STACK_SHA_RESOLVED MATCHES "^[0-9a-f]+$" OR
+     NOT NINFER_PATCH_STACK_SHA_LENGTH EQUAL 40)
+    message(FATAL_ERROR "NINFER_PATCH_STACK_SHA must be auto or a full lowercase Git SHA")
+  endif()
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -93,6 +171,25 @@ endif()
 if(NINFER_BUILD_SERVE)
   find_package(Threads REQUIRED)
 endif()
+
+file(MAKE_DIRECTORY "${PROJECT_BINARY_DIR}/generated")
+configure_file(
+  "${PROJECT_SOURCE_DIR}/cmake/ninfer_build_info_config.h.in"
+  "${PROJECT_BINARY_DIR}/generated/ninfer_build_info_config.h"
+  @ONLY)
+
+# Source edits do not necessarily retrigger CMake configuration. Recheck the configured commit and
+# dirty state before compiling so a binary can never retain provenance for different source bytes.
+add_custom_target(ninfer_verify_build_source ALL
+  COMMAND "${CMAKE_COMMAND}"
+    "-DNINFER_SOURCE_DIR=${PROJECT_SOURCE_DIR}"
+    "-DNINFER_CONFIGURED_PATCH_STACK_SHA=${NINFER_PATCH_STACK_SHA_RESOLVED}"
+    "-DNINFER_CONFIGURED_SOURCE_DIRTY=${NINFER_SOURCE_DIRTY_BOOL}"
+    "-DNINFER_SOURCE_DIRTY_MODE=${NINFER_SOURCE_DIRTY}"
+    "-DNINFER_GIT_EXECUTABLE=${GIT_EXECUTABLE}"
+    -P "${PROJECT_SOURCE_DIR}/cmake/verify_build_source.cmake"
+  COMMENT "Verifying NInfer build source identity"
+  VERBATIM)
 
 # --- Subdirectories ----------------------------------------------------------
 add_subdirectory(src)

@@ -4,6 +4,8 @@
 #include "serve/http_server.h"
 #include "serve/serve_options.h"
 
+#include "ninfer/build_info.h"
+
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -12,6 +14,7 @@
 #include <iomanip>
 #include <iostream>
 #include <sstream>
+#include <string_view>
 #include <utility>
 
 namespace {
@@ -39,6 +42,10 @@ std::string format_bytes(std::size_t bytes) {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc >= 2 && std::string_view(argv[1]) == "--version") {
+        std::cout << ninfer::format_build_info("ninfer-serve") << '\n';
+        return 0;
+    }
     try {
         const ninfer::serve::ServeOptions options = ninfer::serve::parse_serve_options(argc, argv);
         if (options.help_requested) {

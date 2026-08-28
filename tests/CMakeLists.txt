@@ -1,5 +1,10 @@
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+add_test(NAME ninfer_release_package_contract_test
+  COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_release_package)
+set_tests_properties(ninfer_release_package_contract_test PROPERTIES
+  WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+
 # This target deliberately receives no src/, CUDA, artifact, kernel, or target
 # include root. It proves that the installed product headers stand alone.
 add_executable(ninfer_public_api_test test_public_api.cpp)
