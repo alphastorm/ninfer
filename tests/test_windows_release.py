@@ -51,9 +51,18 @@ class WindowsReleaseContractTests(unittest.TestCase):
             {"enabled": True, "quota_mib": 65536, "staging_mib": 256},
         )
         self.assertNotIn("persistent_cache", config)
-        self.assertIn(
-            "process-restart-session-continuation",
+        self.assertEqual(
             spec["qualification"]["required_gates"],
+            [
+                "gpu-only-thermal-envelope",
+                "sm86-driver-hardware-identity",
+                "authenticated-real-client-protocol",
+                "advertised-context-retrieval",
+                "process-restart-session-continuation",
+                "frozen-role-corpus",
+                "bounded-gpu-performance-at-qualified-cap",
+                "gaming-drain-restart-rollback",
+            ],
         )
 
     def test_controller_server_options_match_runtime(self) -> None:
@@ -114,6 +123,7 @@ class WindowsReleaseContractTests(unittest.TestCase):
             "Install-Release.ps1",
             "Control-Release.ps1",
             "New-QualificationReceipt.ps1",
+            "agent_protocol.py",
             "release-spec.json",
         ):
             self.assertIn(name, package_source)

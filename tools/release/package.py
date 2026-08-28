@@ -78,6 +78,12 @@ _WINDOWS_SUPPORT_FILES = (
         0o644,
     ),
     (
+        "packaging/windows/qwen38-3090-omp-v0.2/agent_protocol.py",
+        "smoke/agent_protocol.py",
+        0o644,
+    ),
+    ("tools/smoke/serve_contract.py", "smoke/serve_contract.py", 0o644),
+    (
         "packaging/windows/qwen38-3090-omp-v0.2/release-spec.json",
         "release-spec.json",
         0o644,

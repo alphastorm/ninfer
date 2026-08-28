@@ -38,8 +38,10 @@ _SUPPORT_CONTENT = {
     "packaging/windows/qwen38-3090-omp-v0.2/Install-Release.ps1": "# installer fixture\n",
     "packaging/windows/qwen38-3090-omp-v0.2/Control-Release.ps1": "# controller fixture\n",
     "packaging/windows/qwen38-3090-omp-v0.2/New-QualificationReceipt.ps1": "# receipt fixture\n",
+    "packaging/windows/qwen38-3090-omp-v0.2/agent_protocol.py": "# protocol fixture\n",
     "packaging/windows/qwen38-3090-omp-v0.2/release-spec.json": "{}\n",
     "packaging/windows/qwen38-3090-omp-v0.2/server-config.json": "{\"fixture\":true}\n",
+    "tools/smoke/serve_contract.py": "# smoke contract fixture\n",
 }
 
 
@@ -524,6 +526,8 @@ class ReleasePackageTests(unittest.TestCase):
             self.assertIn(f"{root_name}/New-QualificationReceipt.ps1", names)
             self.assertIn(f"{root_name}/release-spec.json", names)
             self.assertIn(f"{root_name}/server-config.json", names)
+            self.assertIn(f"{root_name}/smoke/agent_protocol.py", names)
+            self.assertIn(f"{root_name}/smoke/serve_contract.py", names)
             self.assertNotIn(f"{root_name}/run-qwen38-c1.sh", names)
             config_bytes = (
                 source

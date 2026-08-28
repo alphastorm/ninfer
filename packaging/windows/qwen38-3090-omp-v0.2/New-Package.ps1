@@ -240,6 +240,11 @@ try {
             throw "generated package omitted lifecycle asset: $name"
         }
     }
+    foreach ($name in @('agent_protocol.py', 'serve_contract.py')) {
+        if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $payload 'smoke') $name) -PathType Leaf)) {
+            throw "generated package omitted smoke asset: $name"
+        }
+    }
 
     foreach ($name in @('Install-Release.ps1', 'Control-Release.ps1')) {
         Copy-Item -LiteralPath (Join-Path $payload $name) -Destination (Join-Path $packageOutput $name)

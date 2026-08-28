@@ -39,12 +39,12 @@ function New-NInferQualificationReceipt {
         [Parameter(Mandatory = $true)][object]$Identity,
         [Parameter(Mandatory = $true)][object]$Configuration,
         [Parameter(Mandatory = $true)][object]$Hardware,
-        [Parameter(Mandatory = $true)][object]$Thermal,
+        [Parameter(Mandatory = $true)][object]$GpuThermal,
         [Parameter(Mandatory = $true)][object]$Protocol,
         [Parameter(Mandatory = $true)][object]$LongContext,
         [Parameter(Mandatory = $true)][object]$CheckpointRestart,
         [Parameter(Mandatory = $true)][object]$RoleCorpus,
-        [Parameter(Mandatory = $true)][object]$PowerSweep,
+        [Parameter(Mandatory = $true)][object]$Performance,
         [Parameter(Mandatory = $true)][object]$Lifecycle
     )
 
@@ -109,12 +109,13 @@ function New-NInferQualificationReceipt {
     }
 
     $gates = [ordered]@{
-        post_service_thermal_matrix = Get-NInferQualificationGate 'post-service thermal matrix' $Thermal
+        gpu_only_thermal_envelope = Get-NInferQualificationGate 'GPU-only thermal envelope' $GpuThermal
+        sm86_driver_hardware_identity = Get-NInferQualificationGate 'sm86 driver hardware identity' $Hardware
         authenticated_real_client_protocol = Get-NInferQualificationGate 'authenticated real-client protocol' $Protocol
         advertised_context_retrieval = Get-NInferQualificationGate 'advertised context retrieval' $LongContext
         process_restart_session_continuation = Get-NInferQualificationGate 'process-restart session continuation' $CheckpointRestart
         frozen_role_corpus = Get-NInferQualificationGate 'frozen role corpus' $RoleCorpus
-        power_sweep_280_320_370_watts = Get-NInferQualificationGate '280/320/370 W power sweep' $PowerSweep
+        bounded_gpu_performance_at_qualified_cap = Get-NInferQualificationGate 'bounded GPU performance at qualified cap' $Performance
         gaming_drain_restart_rollback = Get-NInferQualificationGate 'gaming drain/restart/rollback' $Lifecycle
     }
     $allPassed = $true

@@ -66,13 +66,13 @@
   "qualification": {
     "status": "hardware-pending",
     "required_gates": [
-      "post-service-thermal-matrix",
+      "gpu-only-thermal-envelope",
       "sm86-driver-hardware-identity",
       "authenticated-real-client-protocol",
       "advertised-context-retrieval",
       "process-restart-session-continuation",
       "frozen-role-corpus",
-      "power-sweep-280-320-370-watts",
+      "bounded-gpu-performance-at-qualified-cap",
       "gaming-drain-restart-rollback"
     ]
   }

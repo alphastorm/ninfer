@@ -30,6 +30,11 @@ session checkpoints with a 64 GiB total quota and 256 MiB staging bound. A packa
 configuration may instead bind to an IPv4 address in Tailscale's **100.64.0.0/10** range. Wildcard,
 LAN, and public listen addresses are rejected, and CORS remains disabled.
 
+Hardware qualification is GPU-only at the host's qualified 300 W cap. It covers correctness,
+context, process restart, performance, and lifecycle rollback while the existing FanControl/HWiNFO
+policy remains authoritative. CPU-heavy, mixed-load, and overnight thermal claims are outside this
+release gate and require their own serviced-loop evidence.
+
 Run the installer from an elevated PowerShell session with the exact package hash from the emitted
 SHA256SUMS file:
 

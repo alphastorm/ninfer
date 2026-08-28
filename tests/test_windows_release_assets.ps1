@@ -84,7 +84,7 @@ try {
     Assert-Equal ([int]$config.session_checkpoint.quota_mib) 65536 'checkpoint quota changed'
     Assert-Equal ([int]$config.session_checkpoint.staging_mib) 256 'checkpoint staging bound changed'
     Assert-True ($config.PSObject.Properties.Name -notcontains 'persistent_cache') 'unsupported persistent prompt cache is configured'
-    Assert-True (@($spec.qualification.required_gates) -contains 'process-restart-session-continuation') 'checkpoint restart gate is missing'
+    Assert-Equal ([string]::Join(',', @($spec.qualification.required_gates))) 'gpu-only-thermal-envelope,sm86-driver-hardware-identity,authenticated-real-client-protocol,advertised-context-retrieval,process-restart-session-continuation,frozen-role-corpus,bounded-gpu-performance-at-qualified-cap,gaming-drain-restart-rollback' 'qualification gate contract changed'
 
     $releaseHead = ((& git -C $SourceRoot rev-parse HEAD) | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $releaseHead -cnotmatch '^[0-9a-f]{40}$') {
@@ -136,7 +136,8 @@ try {
             'bin/ninfer.exe', 'bin/ninfer-serve.exe', 'bin/ninfer_bench.exe',
             'bin/runtime-a.dll', 'bin/runtime-b.dll', 'Install-Release.ps1',
             'Control-Release.ps1', 'New-QualificationReceipt.ps1', 'release-spec.json',
-            'server-config.json', 'build-identity.json', 'SHA256SUMS.txt'
+            'server-config.json', 'build-identity.json', 'SHA256SUMS.txt',
+            'smoke/agent_protocol.py', 'smoke/serve_contract.py'
         )) {
         Assert-True ($members -contains "$rootName/$name") "generated package omitted $name"
     }
@@ -199,18 +200,20 @@ try {
         checkpoint_staging_mib = 256
     }
     $hardware = [pscustomobject]@{
+        status = 'passed'
+        evidence_sha256 = ('b' * 64)
         gpu_name = 'NVIDIA GeForce RTX 3090'
         gpu_uuid = 'GPU-fixture-3090'
         driver_version = '570.00'
         compute_capability = '8.6'
     }
     $notRun = [pscustomobject]@{ status = 'not_run'; evidence_sha256 = $null }
-    $incomplete = New-NInferQualificationReceipt -QualifiedUtc ([DateTimeOffset]::UtcNow.ToString('o')) -ReleaseId 'fixture' -Identity $identity -Configuration $configuration -Hardware $hardware -Thermal $notRun -Protocol $notRun -LongContext $notRun -CheckpointRestart $notRun -RoleCorpus $notRun -PowerSweep $notRun -Lifecycle $notRun
+    $incomplete = New-NInferQualificationReceipt -QualifiedUtc ([DateTimeOffset]::UtcNow.ToString('o')) -ReleaseId 'fixture' -Identity $identity -Configuration $configuration -Hardware $hardware -GpuThermal $notRun -Protocol $notRun -LongContext $notRun -CheckpointRestart $notRun -RoleCorpus $notRun -Performance $notRun -Lifecycle $notRun
     Assert-Equal ([string]$incomplete.status) 'incomplete' 'receipt constructor passed unrun hardware gates'
     $incompleteText = $incomplete | ConvertTo-Json -Depth 16 -Compress
     Assert-True (-not $incompleteText.Contains('must-not-appear')) 'qualification receipt copied an undeclared secret field'
     $passedGate = [pscustomobject]@{ status = 'passed'; evidence_sha256 = ('a' * 64) }
-    $passed = New-NInferQualificationReceipt -QualifiedUtc ([DateTimeOffset]::UtcNow.ToString('o')) -ReleaseId 'fixture' -Identity $identity -Configuration $configuration -Hardware $hardware -Thermal $passedGate -Protocol $passedGate -LongContext $passedGate -CheckpointRestart $passedGate -RoleCorpus $passedGate -PowerSweep $passedGate -Lifecycle $passedGate
+    $passed = New-NInferQualificationReceipt -QualifiedUtc ([DateTimeOffset]::UtcNow.ToString('o')) -ReleaseId 'fixture' -Identity $identity -Configuration $configuration -Hardware $hardware -GpuThermal $passedGate -Protocol $passedGate -LongContext $passedGate -CheckpointRestart $passedGate -RoleCorpus $passedGate -Performance $passedGate -Lifecycle $passedGate
     Assert-Equal ([string]$passed.status) 'passed' 'receipt constructor did not pass complete gates'
 
     [ordered]@{
@@ -218,7 +221,7 @@ try {
         schema_version = 2
         status = 'passed'
         deterministic_packages = 2
-        package_members_verified = 12
+        package_members_verified = 14
         public_listen_rejections = 1
         secret_free_receipts = 3
     } | ConvertTo-Json -Compress
