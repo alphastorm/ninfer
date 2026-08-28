@@ -408,9 +408,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     terminal_responses = [
         event.get("response")
         for event in responses_events
-        if event.get("type") == "response.completed" and isinstance(event.get("response"), dict)
+        if event.get("type") in ("response.completed", "response.incomplete")
+        and isinstance(event.get("response"), dict)
     ]
-    require(len(terminal_responses) == 1, "Responses stream omitted its completed response")
+    require(len(terminal_responses) == 1, "Responses stream omitted its terminal response")
     streamed = terminal_responses[0]
     streamed_id = response_id(streamed)
     require(streamed.get("previous_response_id") == continued_id, "streamed continuation link missing")
