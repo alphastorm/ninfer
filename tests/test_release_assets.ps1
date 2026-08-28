@@ -26,7 +26,7 @@ function Write-Json([string]$Path, [object]$Value) {
 
 $root = Join-Path ([IO.Path]::GetTempPath()) ('ninfer-release-assets-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root | Out-Null
-$patchSha = '9a22fbbb1b4abba67f7342b1e5d35d903ba523c2'
+$patchSha = 'aa1030e5d1d2b91e374ffc84d087c6fa3ec8371f'
 $assetStem = 'ninfer-4090-qwen38-v0.1.0-win-x64'
 
 try {
