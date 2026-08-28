@@ -1,0 +1,21 @@
+{
+  "artifact_type": "ninfer_omp_golden_equivalent_contract",
+  "schema_version": 1,
+  "contract_id": "qwen38-4090-omp-golden-equivalent-v1",
+  "fixture_provenance": "source-controlled synthetic fixture; the unavailable historical private corpus was not reused",
+  "historical_private_corpus_reused": false,
+  "system_prompt": "You are executing a deterministic qualification. The only enabled tool is ninfer_golden_weather_lookup. Call it exactly once with a JSON object whose city is the string Paris, days is the integer 3, and metric is the boolean true. Do not emit textual tool markup. After the tool result, return exactly the final_visible_answer value from that result, with no quotes, prefix, suffix, punctuation, Markdown, or other text.",
+  "user_prompt": "Execute the qualification now. Call ninfer_golden_weather_lookup exactly once with city=Paris, days=3, and metric=true. Then return only the final_visible_answer supplied by the tool result.",
+  "tool": {
+    "name": "ninfer_golden_weather_lookup",
+    "label": "NInfer Golden weather lookup",
+    "description": "Return the fixed source-controlled weather observation used by the NInfer RTX 4090 Golden-equivalent qualification.",
+    "expected_arguments": {
+      "city": "Paris",
+      "days": 3,
+      "metric": true
+    },
+    "result": "weather_lookup_result={\"city\":\"Paris\",\"days\":3,\"metric\":true,\"temperature_c\":18,\"conditions\":\"clear\"}; final_visible_answer=NINFER_GOLDEN_EQUIVALENT_OK|Paris|3|metric=true|18C|clear"
+  },
+  "final_visible_answer": "NINFER_GOLDEN_EQUIVALENT_OK|Paris|3|metric=true|18C|clear"
+}

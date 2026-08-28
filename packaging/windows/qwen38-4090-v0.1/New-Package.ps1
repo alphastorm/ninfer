@@ -188,7 +188,14 @@ try {
     $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../../..')).Path
     $smokeDirectory = Join-Path $payload 'smoke'
     New-Item -ItemType Directory -Force -Path $smokeDirectory | Out-Null
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'agent_protocol.py') -Destination $smokeDirectory
+    foreach ($name in @(
+            'agent_protocol.py',
+            'golden_equivalent.py',
+            'golden_equivalent_extension.ts',
+            'golden_equivalent_contract.json'
+        )) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $smokeDirectory
+    }
     foreach ($name in @('serve_contract.py', '__init__.py')) {
         Copy-Item -LiteralPath (Join-Path $repoRoot "tools/smoke/$name") -Destination $smokeDirectory
     }

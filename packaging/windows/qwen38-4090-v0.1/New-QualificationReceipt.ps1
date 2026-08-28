@@ -30,7 +30,7 @@ function New-NInferQualificationReceipt {
         [object]$Persistence,
 
         [Parameter(Mandatory = $true)]
-        [object]$GoldenT01,
+        [object]$GoldenEquivalent,
 
         [Parameter(Mandatory = $true)]
         [object]$DeterministicGates
@@ -64,7 +64,7 @@ function New-NInferQualificationReceipt {
         protocol = $Protocol
         long_session = $LongSession
         persistence = $Persistence
-        golden_t01 = $GoldenT01
+        golden_equivalent = $GoldenEquivalent
         deterministic_gates = $DeterministicGates
     }
 }

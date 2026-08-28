@@ -39,6 +39,17 @@
     "final_verdict_sha256": "67e9596634d3b43e81dba0a47a4beb75111ef9cb2b0542eba961419f726f6232",
     "release_binding": "not-valid-until-invoke-qualification-emits-a-receipt-for-the-installed-release"
   },
+  "golden_equivalent": {
+    "artifact_type": "ninfer_omp_golden_equivalent_contract",
+    "schema_version": 1,
+    "contract_id": "qwen38-4090-omp-golden-equivalent-v1",
+    "contract_file": "smoke/golden_equivalent_contract.json",
+    "runner_file": "smoke/golden_equivalent.py",
+    "extension_file": "smoke/golden_equivalent_extension.ts",
+    "execution": "exact typed-tool invocation and tool-result continuation through OMP with an exact visible final-answer oracle",
+    "fixture_provenance": "source-controlled synthetic fixture; the unavailable historical private corpus was not reused",
+    "historical_private_corpus_reused": false
+  },
   "lifecycle": {
     "task_name": "NInfer-Qwen38-4090-v0.1",
     "listen_port": 18082,

@@ -55,16 +55,16 @@ function New-Receipt([string]$Profile, [double]$WallSeconds) {
             reuse_path = 'restore_disk_checkpoint'
             restored_tokens = 105000
         }
-        GoldenT01 = [ordered]@{
-            oracle_passed = $true
-            exit_code = 0
-            wall_seconds = $WallSeconds
+        GoldenEquivalent = [ordered]@{
+            status = 'passed'
+            omp = [ordered]@{ wall_seconds = $WallSeconds }
+            contract = [ordered]@{ historical_private_corpus_reused = $false }
         }
         DeterministicGates = [ordered]@{
             protocol = 'passed'
             long_session = 'passed'
             persistence = 'passed'
-            golden_oracle = 'passed'
+            golden_equivalent = 'passed'
         }
     }
     return New-NInferQualificationReceipt @parameters
@@ -86,13 +86,13 @@ try {
     Assert-True ([bool]$decision.promote_mtp3) 'MTP3 did not promote above the 10% threshold'
     Assert-True ([string]$decision.selected_profile -ceq 'MTP3') 'promoted profile is not MTP3'
 
-    $mtp3.golden_t01.wall_seconds = 90.001
+    $mtp3.golden_equivalent.omp.wall_seconds = 90.001
     Write-Json $mtp3Path $mtp3
     $decision = ((& $ComparisonPath -Mtp0ReceiptPath $mtp0Path -Mtp3ReceiptPath $mtp3Path) | Out-String) | ConvertFrom-Json
     Assert-True (-not [bool]$decision.promote_mtp3) 'MTP3 promoted below the 10% threshold'
     Assert-True ([string]$decision.selected_profile -ceq 'MTP0') 'sub-threshold decision did not retain MTP0'
 
-    $mtp3.golden_t01.wall_seconds = 80.0
+    $mtp3.golden_equivalent.omp.wall_seconds = 80.0
     $mtp3.configuration.prefill_chunk = 1024
     Write-Json $mtp3Path $mtp3
     $rejected = $false

@@ -52,12 +52,12 @@ function Test-DeterministicGates([object]$Receipt) {
             [string]$Receipt.deterministic_gates.protocol -ceq 'passed' -and
             [string]$Receipt.deterministic_gates.long_session -ceq 'passed' -and
             [string]$Receipt.deterministic_gates.persistence -ceq 'passed' -and
-            [string]$Receipt.deterministic_gates.golden_oracle -ceq 'passed' -and
+            [string]$Receipt.deterministic_gates.golden_equivalent -ceq 'passed' -and
             [string]$Receipt.persistence.reuse_path -ceq 'restore_disk_checkpoint' -and
             [int]$Receipt.persistence.restored_tokens -ge 100000 -and
-            $Receipt.golden_t01.oracle_passed -eq $true -and
-            [int]$Receipt.golden_t01.exit_code -eq 0 -and
-            [double]$Receipt.golden_t01.wall_seconds -gt 0
+            [string]$Receipt.golden_equivalent.status -ceq 'passed' -and
+            [double]$Receipt.golden_equivalent.omp.wall_seconds -gt 0 -and
+            $Receipt.golden_equivalent.contract.historical_private_corpus_reused -eq $false
         )
     }
     catch {
@@ -97,8 +97,8 @@ if ([string]$mtp0.configuration.speculative_backend -cne 'none' -or
 
 $mtp0Passed = Test-DeterministicGates $mtp0
 $mtp3Passed = Test-DeterministicGates $mtp3
-$mtp0Wall = if ($mtp0Passed) { [double]$mtp0.golden_t01.wall_seconds } else { $null }
-$mtp3Wall = if ($mtp3Passed) { [double]$mtp3.golden_t01.wall_seconds } else { $null }
+$mtp0Wall = if ($mtp0Passed) { [double]$mtp0.golden_equivalent.omp.wall_seconds } else { $null }
+$mtp3Wall = if ($mtp3Passed) { [double]$mtp3.golden_equivalent.omp.wall_seconds } else { $null }
 $improvement = $null
 if ($null -ne $mtp0Wall -and $null -ne $mtp3Wall) {
     $improvement = (($mtp0Wall - $mtp3Wall) / $mtp0Wall) * 100.0
@@ -106,16 +106,16 @@ if ($null -ne $mtp0Wall -and $null -ne $mtp3Wall) {
 $promote = $mtp0Passed -and $mtp3Passed -and $null -ne $improvement -and $improvement -ge 10.0
 
 $reason = if ($promote) {
-    'MTP3 passed every deterministic, output, persistence, and Golden gate and improved complete Golden wall time by at least 10%.'
+    'MTP3 passed every deterministic, output, persistence, and Golden-equivalent gate and improved complete Golden-equivalent wall time by at least 10%.'
 }
 elseif (-not $mtp0Passed) {
     'MTP0 baseline gates did not all pass; no speculative promotion is permitted.'
 }
 elseif (-not $mtp3Passed) {
-    'MTP3 did not pass every deterministic, output, persistence, and Golden gate.'
+    'MTP3 did not pass every deterministic, output, persistence, and Golden-equivalent gate.'
 }
 else {
-    'MTP3 complete Golden wall-time improvement was below 10%.'
+    'MTP3 complete Golden-equivalent wall-time improvement was below 10%.'
 }
 
 $decision = [ordered]@{
@@ -126,18 +126,18 @@ $decision = [ordered]@{
     selected_profile = if ($promote) { 'MTP3' } else { 'MTP0' }
     promote_mtp3 = $promote
     release_eligible = $mtp0Passed
-    threshold_complete_golden_wall_time_percent = 10.0
+    threshold_complete_golden_equivalent_wall_time_percent = 10.0
     arms = [ordered]@{
         MTP0 = [ordered]@{
             deterministic_gates_passed = $mtp0Passed
-            complete_golden_wall_seconds = $mtp0Wall
+            complete_golden_equivalent_wall_seconds = $mtp0Wall
         }
         MTP3 = [ordered]@{
             deterministic_gates_passed = $mtp3Passed
-            complete_golden_wall_seconds = $mtp3Wall
+            complete_golden_equivalent_wall_seconds = $mtp3Wall
         }
     }
-    complete_golden_wall_time_improvement_percent = if ($null -eq $improvement) {
+    complete_golden_equivalent_wall_time_improvement_percent = if ($null -eq $improvement) {
         $null
     }
     else {

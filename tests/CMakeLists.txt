@@ -5,6 +5,9 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_executable(ninfer_public_api_test test_public_api.cpp)
 target_include_directories(ninfer_public_api_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
 add_test(NAME ninfer_public_api_test COMMAND ninfer_public_api_test)
+add_test(
+  NAME ninfer_golden_equivalent_test
+  COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_golden_equivalent.py")
 
 if(WIN32)
   add_test(

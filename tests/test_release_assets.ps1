@@ -72,6 +72,8 @@ try {
     Assert-True ([string]$releaseSpec.lifecycle.cache_ownership -ceq 'state-root-per-release') 'release spec permits candidate-owned caches'
     Assert-True ([string]$releaseSpec.lifecycle.interrupted_install_reentry -ceq 'repair-required') 'release spec permits qualification retry after an interrupted install'
     Assert-True ([string]::Join(',', @($releaseSpec.lifecycle.candidate_root_directories)) -ceq 'bin,config,logs,receipts') 'release spec candidate root contract changed'
+    Assert-True ([string]$releaseSpec.golden_equivalent.contract_id -ceq 'qwen38-4090-omp-golden-equivalent-v1') 'release spec lost the source-controlled Golden-equivalent contract'
+    Assert-True ($releaseSpec.golden_equivalent.historical_private_corpus_reused -eq $false) 'release spec claims reuse of the unavailable historical private corpus'
     $sourceConfigSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $ServerConfigPath).Hash.ToLowerInvariant()
     $encoding = [Text.UTF8Encoding]::new($false, $true)
     $configText = $encoding.GetString([IO.File]::ReadAllBytes($ServerConfigPath))
@@ -199,6 +201,9 @@ try {
     Assert-True ($payloads.Count -eq 1) 'archive does not contain exactly one release root'
     $payload = $payloads[0].FullName
     Assert-True (Test-Path -LiteralPath (Join-Path $payload 'New-QualificationReceipt.ps1') -PathType Leaf) 'package omitted the qualification receipt constructor'
+    foreach ($name in @('golden_equivalent.py', 'golden_equivalent_extension.ts', 'golden_equivalent_contract.json')) {
+        Assert-True (Test-Path -LiteralPath (Join-Path $payload "smoke\$name") -PathType Leaf) "package omitted source-controlled Golden-equivalent asset: $name"
+    }
     $manifest = Get-Content -LiteralPath (Join-Path $payload 'release-manifest.json') -Raw | ConvertFrom-Json
     Assert-True ([string]$manifest.release_version -ceq '0.1.0') 'manifest semantic version mismatch'
     Assert-True ([string]$manifest.asset_filename -ceq "$assetStem.zip") 'manifest asset filename mismatch'
@@ -249,6 +254,7 @@ try {
         candidate_root_directories = @($releaseSpec.lifecycle.candidate_root_directories).Count
         model_artifact_ownership = [string]$releaseSpec.lifecycle.model_artifact_ownership
         interrupted_install_reentry = [string]$releaseSpec.lifecycle.interrupted_install_reentry
+        historical_private_corpus_reused = [bool]$releaseSpec.golden_equivalent.historical_private_corpus_reused
         canonical_config_sha256 = $canonicalConfigSha256
         lf_config_normalizations = 1
         crlf_config_normalizations = 1

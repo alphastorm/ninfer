@@ -8,13 +8,11 @@ param(
     [ValidateSet('MTP0', 'MTP3')]
     [string]$Profile,
 
-    [Parameter(Mandatory = $true)]
-    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
-    [string]$GoldenReceiptPath,
-
     [string]$StateRoot = (Join-Path $env:ProgramData 'NInfer\qwen38-4090'),
 
     [string]$Python = 'python.exe',
+
+    [string]$Omp = 'omp.exe',
 
     [string]$ReceiptPath
 )
@@ -96,17 +94,31 @@ $comparableConfig['speculative']['backend'] = '<qualification-arm>'
 $comparableConfig['speculative']['draft_tokens'] = -1
 $nonspeculativeConfigSha256 = Get-Digest ($jsonSerializer.Serialize($comparableConfig))
 
-$golden = Read-JsonFile (Resolve-Path -LiteralPath $GoldenReceiptPath).Path
-if ($golden.artifact_type -cne 'ninfer_golden_private_receipt' -or
-    [int]$golden.schema_version -ne 1 -or
-    $golden.oracle_passed -ne $true -or
-    [int]$golden.exit_code -ne 0 -or
-    [double]$golden.wall_seconds -le 0 -or
-    [string]$golden.binary_sha256 -cne [string]$release.binary_sha256 -or
-    [string]$golden.model_artifact_sha256 -cne [string]$release.model_artifact_sha256 -or
-    [string]$golden.config_sha256 -cne [string]$release.config_sha256 -or
-    $golden.raw_prompt_or_output_included -ne $false) {
-    throw 'Golden t01 receipt failed or does not match the installed release identity'
+$goldenPath = Join-Path $PSScriptRoot 'smoke\golden_equivalent.py'
+$goldenJson = & $Python $goldenPath --omp $Omp --base-url $baseUrl `
+    --model ([string]$config.model_id) --api-key-file ([string]$release.api_key_file) `
+    --expect-source-commit ([string]$release.patch_stack_sha) `
+    --expect-binary-sha256 ([string]$release.binary_sha256) `
+    --expect-model-artifact-sha256 ([string]$release.model_artifact_sha256) `
+    --expect-config-sha256 ([string]$release.config_sha256) `
+    --expect-deployment-profile ([string]$release.deployment_profile)
+if ($LASTEXITCODE -ne 0) { throw 'OMP Golden-equivalent failed' }
+$golden = ($goldenJson | Out-String) | ConvertFrom-Json
+if ($golden.artifact_type -cne 'ninfer_omp_golden_equivalent_receipt' -or
+    [int]$golden.schema_version -ne 1 -or $golden.status -cne 'passed' -or
+    [string]$golden.identity.patch_stack_sha -cne [string]$release.patch_stack_sha -or
+    [string]$golden.identity.binary_sha256 -cne [string]$release.binary_sha256 -or
+    [string]$golden.identity.model_artifact_sha256 -cne [string]$release.model_artifact_sha256 -or
+    [string]$golden.identity.config_sha256 -cne [string]$release.config_sha256 -or
+    [string]$golden.identity.deployment_profile -cne [string]$release.deployment_profile -or
+    [string]$golden.oracles.typed_tool_invocation -cne 'passed' -or
+    [string]$golden.oracles.typed_argument_oracle -cne 'passed' -or
+    [string]$golden.oracles.tool_result_continuation -cne 'passed' -or
+    [string]$golden.oracles.exact_visible_final_answer -cne 'passed' -or
+    [double]$golden.omp.wall_seconds -le 0 -or
+    $golden.contract.historical_private_corpus_reused -ne $false -or
+    $golden.raw_transcript_included -ne $false) {
+    throw 'OMP Golden-equivalent receipt failed or does not match the installed release identity'
 }
 
 $smokePath = Join-Path $PSScriptRoot 'smoke\agent_protocol.py'
@@ -224,12 +236,12 @@ $receiptParameters = @{
         reuse_path = [string]$matchingRecord.result.prefix_reuse_path
         post_restart_prepare_seconds = [double]$matchingRecord.timings_seconds.prepare
     }
-    GoldenT01 = $golden
+    GoldenEquivalent = $golden
     DeterministicGates = [ordered]@{
         protocol = 'passed'
         long_session = 'passed'
         persistence = 'passed'
-        golden_oracle = 'passed'
+        golden_equivalent = 'passed'
     }
 }
 $receipt = New-NInferQualificationReceipt @receiptParameters
