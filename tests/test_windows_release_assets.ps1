@@ -152,10 +152,17 @@ try {
     $badConfig.listen.host = '0.0.0.0'
     [IO.File]::WriteAllText($badConfigPath, ($badConfig | ConvertTo-Json -Depth 12), [Text.UTF8Encoding]::new($false))
     $badOut = Join-Path $root 'bad-out'
+    $badCommon = $common.Clone()
+    $badCommon.ServerConfig = $badConfigPath
+    $badCommon.OutputDirectory = $badOut
     $badRejected = $false
-    try { & $PackageBuilderPath @common -ServerConfig $badConfigPath -OutputDirectory $badOut | Out-Null }
-    catch { $badRejected = $_.Exception.Message -like '*IPv4 loopback or Tailscale*' }
-    Assert-True $badRejected 'package builder accepted a public wildcard listen host'
+    $badError = 'none'
+    try { & $PackageBuilderPath @badCommon | Out-Null }
+    catch {
+        $badError = $_.Exception.Message
+        $badRejected = $badError -like '*IPv4 loopback or Tailscale*'
+    }
+    Assert-True $badRejected "package builder accepted a public wildcard listen host; observed error: $badError"
     Assert-True (-not (Test-Path -LiteralPath $badOut)) 'rejected network config published output'
 
     $identity = [pscustomobject]@{
