@@ -2,12 +2,10 @@
   "artifact_type": "ninfer_public_windows_release_qualification",
   "schema_version": 1,
   "status": "failed",
+  "qualification_level": "beta",
+  "beta_support_qualified": false,
   "release_eligible": false,
-  "release_tier": "none",
-  "qualified_utc": "2026-08-26T03:44:14.7675267Z",
-  "package_assembled_utc": "2026-08-27T10:46:01.2256642Z",
-  "latest_attempt_utc": "2026-08-27T11:16:18.6828734Z",
-  "release_id": "qwen38-4090-v0.1-ea265776254a",
+  "release_id": "qwen38-4090-v0.1",
   "release_version": "0.1.0",
   "qualification_target": {
     "platform": "windows-x86_64",
@@ -15,199 +13,97 @@
     "cuda_architecture": "sm_89"
   },
   "source": {
-    "qualified_commit": "ea265776254a62ab5184454ba0163cdf04aad1e5",
-    "upstream_base_sha": "9ec1b82c7afa021314682d7a95390f8935ead7c2",
+    "qualified_commit": "40580cc703b03197573789923b5866007aba0a68",
+    "package_source_commit": "7a425890a10fe31c207816697b4bd89d8f5b319c",
     "source_dirty": false,
-    "model_repository": "neroued/Qwen3.8-27B-NInfer",
-    "model_revision": "18dfc887423fa5aabf3cb56fac41490e462b3fab",
-    "patch_provenance": {
-      "raw_patch_sha256": "ac8ba36da9bfc89ff97021eecba8c7ba8f88f9e7e9bfd1c9c3509b723d81d4e0",
-      "normalized_patch_sha256": "6cf03d7b4562165d9c7416b0878ff183dae0db00811176ead11e487f1c916898",
-      "series_sha256": "7da9a7b244275fb306bcaf745b61ed183c60c8a85fdf272e640ba3cb95aa71a3",
-      "bounded_staging_commit": "e89e415d95921cecf4cf8a00df5540a4a036ff84",
-      "direct_storage_fallback_commit": "a9bb55b8e9b02ff34e4725dc8ca95d4fadeb3e0d"
-    }
-  },
-  "build_provenance": {
-    "configured_source_identity_verifier": "passed",
-    "clean_target_build": "passed",
-    "dirty_source_build": "rejected",
-    "dirty_source_build_exit_code": 1,
-    "restored_source_build": "passed"
-  },
-  "package": {
-    "filename": "ninfer-4090-qwen38-v0.1.0-win-x64.zip",
-    "sha256": "b2081fecd5f6ef3a9fcab3d58a0bb3129af16cca0099bd085b554d7d84ebb530",
-    "size_bytes": 227626612,
-    "manifest_entries": 21,
-    "runtime_dlls": 9,
-    "checksum_verification": "passed_by_release_asset_regression",
-    "release_manifest_sha256": "07d2b341767ee6a14831c7f9b60eb6a60e762edc26c810bb0276e0ba37633788",
-    "installer_sha256": "6bd36fa79051200c128e047944222a7695785c3b042b64d46c1c879fbb992aae",
-    "controller_sha256": "b01254f14f204e534473cb188218429a384fdb8e4f146b65ed710f81075e0a55"
+    "source_archive_sha256": "9c595ca0aa4d932c9fc60f7dc5a484ad8c56dd3e1d85dae3d99ae3f08bc0d020",
+    "source_archive_bytes": 5226191
   },
   "identity": {
-    "binary_sha256": "ea10b9a540722d1ac3f8832a8856e103c4040c599550d59dc4250eb9b5094e86",
+    "binary_sha256": "66fb8187e70df2e842b6cb23a8e7ee0392ecec868c5265ac737c98084bb0b9f2",
+    "binary_bytes": 230290432,
+    "config_sha256": "e7f86a4da23d17bc50b3c261263a636df2cf317a82f84b22bcae5d6a186e7623",
     "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
-    "model_artifact_size_bytes": 18210531328,
-    "config_sha256": "d613fc71ebe30b799af4936af8f73b0f25ebd1a1486b55fdb59aaab5d884bb96",
+    "deployment_profile": "sf-qwen38-4090-v0.1",
     "build_type": "Release",
-    "cxx_compiler": "MSVC-19.44.35228.0",
-    "cuda_compiler": "NVIDIA-13.3.73",
-    "cuda_toolkit": "13.3.73",
-    "target": "qwen3_8_27b",
-    "model_id": "qwen3.8-27b",
-    "weights_id": "groupwise-int"
+    "cuda_toolkit": "13.3.73"
   },
-  "configuration": {
-    "public_model_id": "qwen3.8-27b",
-    "max_context": 131072,
-    "kv_dtype": "rk2v4-e8",
-    "prefill_chunk": 512,
-    "speculative_backend": "none",
-    "reasoning_effort": "xhigh",
-    "disk_cache_gib": 100,
-    "concurrency": 1
+  "package": {
+    "sha256": "f9c5aa0f5a005c70474b4b4ee5f8fa4bc4ed61d91283543e176a2683dfd5d885",
+    "bytes": 227425120,
+    "runtime_dlls": 9
   },
-  "speculation_decision": {
-    "status": "not_evaluated",
-    "selected_profile": "MTP0",
-    "promote_mtp3": false,
-    "reason": "The fresh MTP0 package installed and restarted, but the direct Golden-equivalent task failed before protocol, long-context, persistence, or performance gates. No support or speculation decision is permitted."
-  },
-  "protocol": {
-    "artifact_type": "ninfer_agent_protocol_smoke",
+  "golden_equivalent": {
+    "artifact_type": "ninfer_omp_golden_equivalent_failure_receipt",
     "schema_version": 1,
-    "status": "not_run_after_golden_red",
-    "checks": {}
+    "status": "failed",
+    "contract_id": "qwen38-4090-omp-golden-equivalent-v1",
+    "runner_sha256": "3150416b0353b03e5c3048783f70e3e05f4d1c322d86afe918393b387a761ceb",
+    "contract_file_sha256": "7cffbd6ccf8edd010be505687dc77683240d9c92e9262cd0a3f207be5a8863cb",
+    "extension_sha256": "c2778f0fa6d62ba44640ce77df28093abf4eba299c844bcff149c3d41021b0ce",
+    "fixture_provenance": "source-controlled synthetic fixture; the unavailable historical private corpus was not reused",
+    "historical_private_corpus_reused": false,
+    "omp_version": "omp/18.0.6",
+    "raw_transcript_included": false,
+    "gates": {
+      "typed_tool_invocation": "passed",
+      "typed_argument_oracle": "failed",
+      "tool_result_continuation": "not_evaluated_after_first_red",
+      "exact_visible_final_answer": "not_evaluated_after_first_red"
+    },
+    "first_blocker": {
+      "stage": "typed_argument_oracle",
+      "message": "typed argument oracle rejected OMP output",
+      "actual_arguments_retained": false
+    },
+    "receipt": "receipts/qwen3.8-27b-rtx-4090-golden-equivalent.json",
+    "receipt_sha256": "5c6a1cdb0fe14d3bac582b9151ca26717d962caa917ccca8b5fe287b28f3a5cc"
   },
-  "persistence": {
-    "status": "not_run_after_golden_red"
+  "inherited_live_evidence": {
+    "protocol": {
+      "status": "passed",
+      "checks": 15,
+      "receipt_sha256": "fd1778e2493f87017952bd2def6c240dbadba62d42a4e0ba72d9fd349ad188b8"
+    },
+    "long_process_restart": {
+      "status": "passed",
+      "first_prompt_tokens": 102060,
+      "post_restart_prompt_tokens": 102097,
+      "reuse_path": "restore_disk_checkpoint",
+      "receipt_sha256": "cf87019c2a8258aa8e05aae5d8b0d2f4908fddcffa0344e902da2488c47b75b6"
+    },
+    "bounded_performance": {
+      "status": "passed",
+      "decode_tokens_per_second": 52.076320930183705,
+      "prefix_cache_hit_tokens": 0,
+      "receipt_sha256": "c73b1d4dd9d1482c4c7d1ede6355b5edd7d3fbc15039007df3ead948f3a2309d"
+    }
   },
   "release_gates": {
-    "B": {
-      "status": "passed",
-      "scope": "fresh clean sm_89 Release build and package",
-      "binary_sha256": "ea10b9a540722d1ac3f8832a8856e103c4040c599550d59dc4250eb9b5094e86",
-      "package_sha256": "b2081fecd5f6ef3a9fcab3d58a0bb3129af16cca0099bd085b554d7d84ebb530"
+    "G": {
+      "status": "failed",
+      "failure": "typed argument oracle rejected OMP output"
     },
-    "I": {
+    "L": {
       "status": "passed",
-      "scope": "fixed external-pinned-read-only installer; model was not copied into candidate state"
+      "clean_build_receipt_sha256": "e9a6b0deb0ee2179ba38d4c20e370f7795109057b8403b1e5bfaccc496f6d452",
+      "package_receipt_sha256": "5607f6c7f79286c9041c8515ab3d2bcd70de9645c4a76d01fb99858818493d75"
     },
     "R": {
       "status": "passed",
-      "scope": "fresh packaged controller start on loopback",
-      "endpoint": "127.0.0.1:18082",
-      "binary_sha256": "ea10b9a540722d1ac3f8832a8856e103c4040c599550d59dc4250eb9b5094e86"
-    },
-    "G": {
-      "status": "failed",
-      "scope": "exact t01 fixture through a bounded direct-loopback tool harness",
-      "failure": "Model emitted textual tool markup instead of a typed tool call; the working fixture remained unchanged and unknown-arm execution did not reject before side effects.",
-      "output_sha256": "8e7847b76261f4ec359853261ceff5cf46093c8525481426f57441cdc9a6329e",
-      "local_reproduction": "passed: captured output has 2 tool opens and 0 closes; existing malformed-output fallback is correct",
-      "project_owned_fix": false
-    },
-    "P": {
-      "status": "not_run_after_golden_red"
-    },
-    "L": {
-      "status": "not_run_after_golden_red"
-    },
-    "performance": {
-      "status": "not_run_after_golden_red"
-    },
-    "support_claim": {
-      "status": "blocked"
-    },
-    "predecessor_restore": {
-      "status": "passed",
-      "binary_sha256": "1c12ad83435f413ceaf2f8cc9da992feb5398ec3e14dfa8f661afefa49946936",
-      "endpoint_model": "qwen38-long",
-      "docker_paused": true,
-      "candidate_absent": true,
-      "receipt_sha256": "0ab4eaf421750547a83d69c89abb5b7d9861b5a96cdcb23827ae0246ae34c7c2"
+      "restore_receipt_sha256": "79d0f4be4684c96ca735bc743e0e3d2002f547a4a7aa4afe81eac45f3afe330b"
     }
   },
-  "qualification_receipt": {
-    "window_receipt_sha256": "3f92867c89cf2248b5baa01aab2bdf93f0222520b2070da6fcae2e69d0bd5dc2",
-    "restore_receipt_sha256": "0ab4eaf421750547a83d69c89abb5b7d9861b5a96cdcb23827ae0246ae34c7c2",
-    "status": "failed_at_golden_equivalent"
-  },
-  "latest_attempt": {
-    "package_sha256": "b2081fecd5f6ef3a9fcab3d58a0bb3129af16cca0099bd085b554d7d84ebb530",
-    "binary_sha256": "ea10b9a540722d1ac3f8832a8856e103c4040c599550d59dc4250eb9b5094e86",
-    "installed_package_restart": "passed",
-    "failed_stage": "golden_equivalent_typed_tool_execution",
-    "failure": "Textual tool markup was emitted instead of a typed tool call; no file edit occurred and the unknown-arm guard timed out.",
-    "protocol": "not_run",
-    "long_context": "not_run",
-    "persistence": "not_run",
-    "performance": "not_run",
-    "candidate_cleaned_up": true,
-    "incumbent_restored": true,
-    "support_claim": false,
-    "local_reproduction": {
-      "status": "reproduced",
-      "receipt_sha256": "537697b43cb33cdcb85e164d83f8923eba2830e1aabf0aed73d6c7673715a150",
-      "marker_counts": {
-        "tool_open": 2,
-        "tool_close": 0,
-        "function_open": 2,
-        "function_close": 0,
-        "parameter_open": 4,
-        "parameter_close": 2
-      },
-      "existing_regression": "tests/test_tool_call_parser.cpp::test_malformed_falls_back_to_text",
-      "project_owned_fix": false,
-      "reason": "The model exhausted its output bound with two open write_file calls and no closing tool or function tag. Normalizing this into a typed call would fabricate missing arguments and could execute truncated code."
-    }
-  },
-  "isolation": {
-    "candidate_loopback_port": 18082,
-    "production_route_mutated": false,
-    "docker_ownership_preserved": true,
-    "public_release_or_asset_published": false
-  },
-  "regression_evidence": {
-    "lifecycle_source_commit": "669b729af635b55c69bfe8b5e76fd45614c96883",
-    "receipts": {
-      "qwen3.8-27b-rtx-4090-lifecycle.json": {
-        "sha256": "cfdb852343d765ecf3a1fe54e8c0ae70325e2b658f9708cc391e21cfe310d277",
-        "artifact_type": "ninfer_release_lifecycle_regression",
-        "status": "passed"
-      },
-      "qwen3.8-27b-rtx-4090-assets.json": {
-        "sha256": "e3d732687ecec40435497b04efc08ff413d51d0fc8cf03f877f119ad76c60b57",
-        "artifact_type": "ninfer_release_asset_regression",
-        "status": "passed"
-      },
-      "qwen3.8-27b-rtx-4090-mtp-decision.json": {
-        "sha256": "6aebf34e142b3f5f79130fc7d0bf0e37ea1c1bd0813ea599776f523a27ab6c98",
-        "artifact_type": "ninfer_mtp_decision_regression",
-        "status": "passed"
-      },
-      "qwen3.8-27b-rtx-4090-review-closure.json": {
-        "sha256": "ea7b99fc60bf9a452d3ada67785c0ac6d6135d11a38fcb4a77a94638ea5cbae7",
-        "artifact_type": "ninfer_rtx4090_review_closure",
-        "status": "passed"
-      }
-    },
-    "scope": "current focused host-side regression evidence; does not rebind the previously assembled package",
-    "current_installer_sha256": "0153ca0ff0e8efd5ba70a035366c4dd86db88b0e7adf69f33045fb430a3adf8e",
-    "current_controller_sha256": "c9d2bc0b1aea459315eb3d9ee70809cdb4811107efe53dde359a310fbf44f0f6"
-  },
-  "package_evidence": {
-    "lifecycle_source_commit": "09f38db0d506d09e7c381c862aeea3e243e09669",
-    "embedded_installer_sha256": "6bd36fa79051200c128e047944222a7695785c3b042b64d46c1c879fbb992aae",
-    "embedded_controller_sha256": "b01254f14f204e534473cb188218429a384fdb8e4f146b65ed710f81075e0a55",
-    "scope": "fresh package and live B/I/R evidence; superseded lifecycle scripts"
-  },
-  "review_closure": {
+  "restoration": {
     "status": "passed",
-    "source_commit": "dca808b53c8ab13362aa2dce16a57751959000f7",
-    "receipt_sha256": "ea7b99fc60bf9a452d3ada67785c0ac6d6135d11a38fcb4a77a94638ea5cbae7",
-    "affected_class_rereview": "closed"
-  }
+    "incumbent_profile": "sf-long-persistent-candidate",
+    "incumbent_controller_sha256": "79f14e4b9bde6d05e744c10757d39d1ad95e394d0673725606c584463edec711",
+    "incumbent_model_id": "qwen38-long",
+    "candidate_listener_present": false,
+    "candidate_state_present": false,
+    "candidate_task_present": false
+  },
+  "stable_promotion_performed": false,
+  "permanent_route_mutation": false,
+  "decision": "RTX 4090 beta support remains blocked at the exact typed argument oracle; no stable release or route change was performed."
 }

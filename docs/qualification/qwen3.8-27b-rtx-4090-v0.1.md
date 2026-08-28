@@ -2,60 +2,70 @@
 
 ## Verdict
 
-**Not qualified; no RTX 4090 support claim.** A fresh native Windows `sm_89` Release build and package installed through the external-pinned-model lifecycle and restarted successfully on loopback. The required direct Golden-equivalent gate then failed before protocol, 100K+ context/persistence, or bounded performance evidence could run.
+**Not beta-qualified; no RTX 4090 support claim.** The reproducible, source-controlled Golden-equivalent reached an exact typed OMP tool call on the final clean `sm_89` candidate, but its typed argument oracle rejected the model output. Per the stop-on-first-red rule, tool-result continuation and the exact visible final-answer oracle were not credited.
 
-## Fresh identities
+The historical private corpus is unavailable and was not reused, read, copied, hashed, or transmitted. This qualification used only the synthetic fixture committed as `golden_equivalent_contract.json`.
+
+## Final candidate identities
 
 | Item | Value |
 |---|---|
-| Runtime source | `ea265776254a62ab5184454ba0163cdf04aad1e5` |
-| Package-producing lifecycle source | `09f38db0d506d09e7c381c862aeea3e243e09669` |
-| Focused-regression lifecycle source | `669b729af635b55c69bfe8b5e76fd45614c96883` |
-| CUDA target/toolkit | `sm_89` / `13.3.73` |
-| Fresh server SHA-256 | `ea10b9a540722d1ac3f8832a8856e103c4040c599550d59dc4250eb9b5094e86` |
+| Runtime source | `40580cc703b03197573789923b5866007aba0a68` |
+| Package source | `7a425890a10fe31c207816697b4bd89d8f5b319c` |
+| Source archive SHA-256 | `9c595ca0aa4d932c9fc60f7dc5a484ad8c56dd3e1d85dae3d99ae3f08bc0d020` |
+| Server SHA-256 | `66fb8187e70df2e842b6cb23a8e7ee0392ecec868c5265ac737c98084bb0b9f2` |
+| Config SHA-256 | `e7f86a4da23d17bc50b3c261263a636df2cf317a82f84b22bcae5d6a186e7623` |
 | Model SHA-256 | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
-| Config SHA-256 | `d613fc71ebe30b799af4936af8f73b0f25ebd1a1486b55fdb59aaab5d884bb96` |
-| Package SHA-256 | `b2081fecd5f6ef3a9fcab3d58a0bb3129af16cca0099bd085b554d7d84ebb530` |
-| Package bytes | `227626612` |
+| Package SHA-256 | `f9c5aa0f5a005c70474b4b4ee5f8fa4bc4ed61d91283543e176a2683dfd5d885` |
+| Package bytes | `227425120` |
+| CUDA target/toolkit | `sm_89` / `13.3.73` |
 
-The package checksum set passed. Its embedded installer (`6bd36fa790…`) and controller (`b01254f14…`) came from package-producing lifecycle commit `09f38db0d506d09e7c381c862aeea3e243e09669`; those scripts are superseded by the focused-regression lifecycle source `669b729af635b55c69bfe8b5e76fd45614c96883` and do not inherit its fixes. The installer retained the 18,210,531,328-byte model as an external, pinned, read-only reference; it did not copy the model into candidate-owned state.
-Machine-readable focused receipts are bound at lifecycle `669b729af635b55c69bfe8b5e76fd45614c96883`: lifecycle `cfdb852343d765ecf3a1fe54e8c0ae70325e2b658f9708cc391e21cfe310d277`, assets `e3d732687ecec40435497b04efc08ff413d51d0fc8cf03f877f119ad76c60b57`, and MTP decision `6aebf34e142b3f5f79130fc7d0bf0e37ea1c1bd0813ea599776f523a27ab6c98`.
+The build started from an empty build directory and embedded `patch_stack_sha=40580cc703b03197573789923b5866007aba0a68`, `source_dirty=false`, `build_type=Release`, and `cuda_architecture=89`. The focused native Responses test, Python Golden-equivalent tests, Python compile checks, MTP decision regression, and package asset regression passed. The package contains the runner, extension, and contract under `smoke/`, covered by package checksums.
 
-Focused lifecycle regressions passed, including ten injected transaction failures, zero restart model re-hashes, zero candidate model copies, interrupted-install repair, dead-start rejection, and release-asset identity checks.
+## Source-controlled Golden-equivalent
+
+Contract `qwen38-4090-omp-golden-equivalent-v1` defines one fixed tool invocation:
+
+- tool: `ninfer_golden_weather_lookup`;
+- arguments: string `city="Paris"`, integer `days=3`, boolean `metric=true`;
+- one fixed tool result;
+- one exact visible final answer: `NINFER_GOLDEN_EQUIVALENT_OK|Paris|3|metric=true|18C|clear`.
+
+The gate ran through standard OMP `18.0.6` over the final package's OpenAI-compatible endpoint. Ambient rules, skills, extensions, MCP discovery, sessions, and built-in tools were disabled; only the source-controlled tool schema was exposed.
 
 ## Live result
 
 | Gate | Result |
 |---|---|
-| Fresh package install | Passed |
-| Packaged controller restart | Passed |
-| Authenticated loopback identity | Passed: clean build, exact binary/model/config identities, 131,072-token configured context, MTP0 |
-| Golden-equivalent t01 | **Failed** |
-| Protocol pack | Not run after Golden red |
-| 100K+ context and process-restart persistence | Not run after Golden red |
-| Bounded performance request | Not run after Golden red |
+| Exact clean source/build/package identity | Passed |
+| Authenticated loopback status identity | Passed |
+| Typed OMP tool invocation | Passed |
+| Typed argument oracle | **Failed: `typed argument oracle rejected OMP output`** |
+| Tool-result continuation | Not evaluated after first red |
+| Exact visible final-answer oracle | Not evaluated after first red |
+| Beta support decision | Blocked |
 
-The Golden-equivalent harness used the exact pinned t01 task, fixture, and scorer over the direct loopback endpoint. The model emitted textual `<tool_call>` markup instead of a typed tool call, so the copied fixture remained unchanged. Executing the unchanged fixture with an unknown arm did not reject before side effects and hit the 30-second bound. Output SHA-256: `8e7847b76261f4ec359853261ceff5cf46093c8525481426f57441cdc9a6329e`.
+The sanitized no-session runner deliberately retained no raw transcript, so it did not retain the rejected actual argument object. It did retain the exact first failing stage and message. No private prompt or output exists in the receipt.
 
-A local deterministic reproduction found two `<tool_call>` and two `<function=...>` openings, but zero corresponding closing tags. This is already represented by `test_malformed_falls_back_to_text`: the parser must preserve incomplete markup as text. Treating it as a typed call would fabricate missing arguments and could execute truncated code, so there is no safe project-owned parser fix and no same-identity GPU rerun is justified. Reproduction receipt SHA-256: `537697b43cb33cdcb85e164d83f8923eba2830e1aabf0aed73d6c7673715a150`.
-
-Per the stop-on-first-red rule, no protocol, long-context, persistence, performance, MTP3, route, publication, or support decision followed.
-
-## Platform blockers resolved before the gate
-
-1. Package receipt construction attempted to assign an optional `latest_attempt_utc` property directly on a strict `PSCustomObject`. The red path exited 1. The fixed path uses add-or-update property semantics and produced the fresh package above.
-2. A second `Expand-Archive` in one PowerShell runspace stalled after partial extraction. Running the installer in a fresh `pwsh` process closed the class: both 22-file expansions completed and produced the exact server binary hash.
-3. The fixed installer returns `ninfer_windows_release_install_receipt` with nested lifecycle status. The runner was corrected to validate that actual terminal contract rather than the superseded direct-status shape.
+Previously completed protocol, 102K process-restart persistence, and bounded performance receipts remain valid inherited engineering evidence for the unchanged runtime lineage, but they cannot override a red required Golden-equivalent gate on this final candidate.
 
 ## Restoration
 
-The candidate task, state root, operation root, lease, and loopback listener are absent. The predecessor controller and binary were restored exactly, its endpoint returned `qwen38-long`, Docker remains paused with its pause marker present and service stopped, and the GPU power limit remains 500 W.
+The bounded lease used a hash-pinned adapter whose only stop/start effects invoked the existing tracked `sf-long-persistent-control.ps1` controller (`79f14e4b…`). Restoration passed:
 
-- Window receipt SHA-256: `3f92867c89cf2248b5baa01aab2bdf93f0222520b2070da6fcae2e69d0bd5dc2`
-- Independent restore receipt SHA-256: `0ab4eaf421750547a83d69c89abb5b7d9861b5a96cdcb23827ae0246ae34c7c2`
+- `sf-long-persistent-candidate` is running again on `100.116.135.24:18081` as `qwen38-long`;
+- the predecessor runtime/model/controller identities match the pre-lease state;
+- the candidate listener, state root, scheduled task, and GPU-owner lease are absent;
+- the base controller remains paused/Ready and Docker remains paused;
+- no stable promotion or permanent route mutation occurred.
 
-## Next decision
+## Receipts
 
-Keep RTX 4090 support blocked. The next bounded attempt must first reproduce and fix typed tool-call emission for the exact direct Golden-equivalent task, then rerun the fresh-package protocol, 100K+ restart-persistence, and bounded-performance gates. Do not publish or promote this package.
+The source-bound sanitized Golden-equivalent failure receipt is `receipts/qwen3.8-27b-rtx-4090-golden-equivalent.json`, SHA-256 `5c6a1cdb0fe14d3bac582b9151ca26717d962caa917ccca8b5fe287b28f3a5cc`.
 
-Final bounded affected-class rereview closure passed at `dca808b53c8ab13362aa2dce16a57751959000f7`; self-check receipt SHA-256: `ea7b99fc60bf9a452d3ada67785c0ac6d6135d11a38fcb4a77a94638ea5cbae7`. Qualification remains failed and the package remains non-release.
+Supporting on-host receipt SHA-256 values:
+
+- clean build: `e9a6b0deb0ee2179ba38d4c20e370f7795109057b8403b1e5bfaccc496f6d452`;
+- final package: `5607f6c7f79286c9041c8515ab3d2bcd70de9645c4a76d01fb99858818493d75`;
+- lease ready: `ca37013f50fe8046bd94c86928c67419308e8e41b247191e0c3a71d14510f6fb`;
+- final restore: `79d0f4be4684c96ca735bc743e0e3d2002f547a4a7aa4afe81eac45f3afe330b`.

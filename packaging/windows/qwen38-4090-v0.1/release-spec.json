@@ -28,16 +28,15 @@
     "bytes": 18210531328
   },
   "qualified_source_evidence": {
-    "binding": "qualified-source-only",
-    "runtime_commit": "a9bb55b8e9b02ff34e4725dc8ca95d4fadeb3e0d",
-    "checkpoint_tokens": 120403,
-    "checkpoint_new_pages": 1882,
-    "checkpoint_payload_megabytes_reported": 1675.9,
-    "checkpoint_save_milliseconds": 966,
-    "checkpoint_restore_milliseconds": 6980,
+    "binding": "inherited-runtime-evidence-plus-final-source-bound-omp-gate",
+    "runtime_commit": "40580cc703b03197573789923b5866007aba0a68",
+    "checkpoint_tokens": 102060,
     "checkpoint_reuse": "restore_disk_checkpoint",
-    "final_verdict_sha256": "67e9596634d3b43e81dba0a47a4beb75111ef9cb2b0542eba961419f726f6232",
-    "release_binding": "not-valid-until-invoke-qualification-emits-a-receipt-for-the-installed-release"
+    "protocol_receipt_sha256": "fd1778e2493f87017952bd2def6c240dbadba62d42a4e0ba72d9fd349ad188b8",
+    "checkpoint_receipt_sha256": "cf87019c2a8258aa8e05aae5d8b0d2f4908fddcffa0344e902da2488c47b75b6",
+    "performance_receipt_sha256": "c73b1d4dd9d1482c4c7d1ede6355b5edd7d3fbc15039007df3ead948f3a2309d",
+    "golden_equivalent_receipt_sha256": "5c6a1cdb0fe14d3bac582b9151ca26717d962caa917ccca8b5fe287b28f3a5cc",
+    "release_binding": "blocked-by-failed-omp-golden-equivalent-typed-argument-oracle"
   },
   "golden_equivalent": {
     "artifact_type": "ninfer_omp_golden_equivalent_contract",
