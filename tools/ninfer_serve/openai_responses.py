@@ -44,11 +44,13 @@ class ResponsesStreamAdapter:
         "response.output_text.delta",
         "response.reasoning_text.delta",
         "response.function_call_arguments.delta",
+        "response.custom_tool_call_input.delta",
     }
     _TERMINAL_TYPES = {
         "response.completed",
         "response.incomplete",
         "response.failed",
+        "response.cancelled",
     }
 
     def consume(self, event: SseEvent) -> list[ProtocolEvent]:

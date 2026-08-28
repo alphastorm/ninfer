@@ -62,16 +62,6 @@ ApiError internal_error(const std::exception& exception) {
     return error;
 }
 
-ApiError response_not_found(const std::string& id) {
-    ApiError error;
-    error.status  = 404;
-    error.type    = "invalid_request_error";
-    error.param   = "response_id";
-    error.code    = "response_not_found";
-    error.message = "response '" + id + "' not found";
-    return error;
-}
-
 void validate_model(const std::string& requested, const std::string& available) {
     if (requested == available) { return; }
     ApiError error;
@@ -243,7 +233,8 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
             const std::shared_ptr<const StoredResponse> previous = response_store_.get_for_session(
                 *request.previous_response_id, request.generation.client_session_sha256);
             if (!previous) {
-                throw ApiException(response_not_found(*request.previous_response_id));
+                throw ApiException(
+                    make_previous_response_not_found_error(*request.previous_response_id));
             }
             inherit_responses_preserve_thinking(request, previous->preserve_thinking);
             previous_context = previous->context;
@@ -417,6 +408,7 @@ void HttpServer::handle_response_input_tokens(const httplib::Request& req, httpl
         limits.default_max_tokens = options_.default_max_tokens;
         ResponsesRequest request =
             parse_response_input_tokens_request(parse_json_body(req), limits);
+        compose_responses_generation_messages(request, {});
         validate_model(request.generation.model, public_model_id_);
         const int tokens =
             service_->count_prompt_tokens(request.generation, [&req] { return disconnected(req); });
@@ -432,7 +424,7 @@ void HttpServer::handle_response_get(const httplib::Request& req, httplib::Respo
         const std::shared_ptr<const StoredResponse> stored = response_store_.get_for_session(
             id, path_response_session(req, !options_.api_key.empty()));
         if (!stored) {
-            write_error(res, response_not_found(id));
+            write_error(res, make_response_not_found_error(id));
             return;
         }
         res.set_content(stored->response.dump(), "application/json");
@@ -446,7 +438,7 @@ void HttpServer::handle_response_delete(const httplib::Request& req, httplib::Re
         const std::string id = path_response_id(req);
         if (!response_store_.erase_for_session(
                 id, path_response_session(req, !options_.api_key.empty()))) {
-            write_error(res, response_not_found(id));
+            write_error(res, make_response_not_found_error(id));
             return;
         }
         res.set_content(Json{{"id", id}, {"object", "response.deleted"}, {"deleted", true}}.dump(),
@@ -462,7 +454,7 @@ void HttpServer::handle_response_input_items(const httplib::Request& req, httpli
         const std::shared_ptr<const StoredResponse> stored = response_store_.get_for_session(
             id, path_response_session(req, !options_.api_key.empty()));
         if (!stored) {
-            write_error(res, response_not_found(id));
+            write_error(res, make_response_not_found_error(id));
             return;
         }
         res.set_content(paginated_input_items(req, stored->input_items).dump(), "application/json");
@@ -476,7 +468,7 @@ void HttpServer::handle_response_cancel(const httplib::Request& req, httplib::Re
         const std::string id = path_response_id(req);
         if (!response_store_.get_for_session(
                 id, path_response_session(req, !options_.api_key.empty()))) {
-            write_error(res, response_not_found(id));
+            write_error(res, make_response_not_found_error(id));
             return;
         }
         ApiError error;

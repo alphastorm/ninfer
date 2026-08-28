@@ -35,9 +35,11 @@ struct ToolArgumentTypeContracts {
         std::string name;
         std::vector<Parameter> parameters;
         bool unambiguous = true;
+        ToolKind kind    = ToolKind::Function;
     };
 
     std::vector<Tool> tools;
+    bool names_authoritative = false;
 };
 
 ToolArgumentTypeContracts build_tool_argument_type_contracts(const GenerationRequest& request);

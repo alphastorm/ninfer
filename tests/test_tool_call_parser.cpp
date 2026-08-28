@@ -18,12 +18,14 @@ int fail(const std::string& message) {
 
 int check(bool condition, const std::string& message) { return condition ? 0 : fail(message); }
 
-ninfer::serve::ToolArgumentTypeContracts contracts_for(const std::string& tool_name,
-                                                       Json properties) {
+ninfer::serve::ToolArgumentTypeContracts
+contracts_for(const std::string& tool_name, Json properties,
+              ninfer::serve::ToolKind kind = ninfer::serve::ToolKind::Function) {
     ninfer::serve::GenerationRequest request;
     ninfer::serve::ToolDefinition tool;
     tool.name            = tool_name;
     tool.parameters_json = Json{{"type", "object"}, {"properties", std::move(properties)}}.dump();
+    tool.kind            = kind;
     request.tools.push_back(std::move(tool));
     return ninfer::serve::build_tool_argument_type_contracts(request);
 }
@@ -279,6 +281,77 @@ int test_unknown_schema_keeps_legacy_inference() {
     return failures;
 }
 
+int test_custom_tool_raw_input() {
+    const auto contracts        = contracts_for("eval", Json{{"input", Json{{"type", "string"}}}},
+                                                ninfer::serve::ToolKind::Custom);
+    const std::string raw_input = R"INPUT(print('ok')
+literal = "</parameter> </function> </tool_call>"
+{"looks":"like json"}
+)INPUT";
+    const std::string text      = "<tool_call>\n<function=eval>\n<parameter=input>\n" + raw_input +
+                                  "\n</parameter>\n</function>\n</tool_call>";
+    const ninfer::serve::ParsedToolCallOutput parsed =
+        ninfer::serve::parse_qwen_tool_call_output(text, 64, contracts);
+
+    int failures = 0;
+    failures += check(parsed.is_tool_call_response && parsed.tool_calls.size() == 1,
+                      "custom tool call parsed");
+    failures += check(parsed.tool_calls[0].kind == ninfer::serve::ToolKind::Custom,
+                      "requested custom tool kind retained");
+    failures += check(parsed.tool_calls[0].arguments_json == raw_input,
+                      "custom input retained as one raw string (expected bytes=" +
+                          std::to_string(raw_input.size()) + ", observed bytes=" +
+                          std::to_string(parsed.tool_calls[0].arguments_json.size()) + ")");
+
+    const std::string malformed = R"TOOL(<tool_call>
+<function=eval>
+<parameter=code>print('wrong')</parameter>
+</function>
+</tool_call>)TOOL";
+    const ninfer::serve::ParsedToolCallOutput rejected =
+        ninfer::serve::parse_qwen_tool_call_output(malformed, 64, contracts);
+    failures += check(!rejected.is_tool_call_response && rejected.content == malformed,
+                      "custom call without the sole input parameter fails closed");
+    return failures;
+}
+
+int test_custom_tool_kind_survives_history_only_generation() {
+    ninfer::serve::GenerationRequest request;
+    request.tool_choice.mode = ninfer::serve::ToolChoiceMode::None;
+    ninfer::serve::ChatTurn prior;
+    prior.role = ninfer::ChatRole::Assistant;
+    ninfer::serve::ToolCall prior_call;
+    prior_call.id             = "call_prior";
+    prior_call.name           = "eval";
+    prior_call.arguments_json = "print('prior')";
+    prior_call.kind           = ninfer::serve::ToolKind::Custom;
+    prior.tool_calls.push_back(std::move(prior_call));
+    request.messages.push_back(std::move(prior));
+
+    const auto contracts        = ninfer::serve::build_tool_argument_type_contracts(request);
+    const std::string raw_input = R"INPUT({"a":1}
+print('next'))INPUT";
+    const std::string text      = "<tool_call>\n<function=eval>\n<parameter=input>\n" + raw_input +
+                                  "\n</parameter>\n</function>\n</tool_call>";
+    const auto parsed           = ninfer::serve::parse_qwen_tool_call_output(text, 64, contracts);
+
+    int failures = 0;
+    failures += check(parsed.is_tool_call_response && parsed.tool_calls.size() == 1,
+                      "history-only custom call parsed");
+    failures += check(parsed.tool_calls[0].kind == ninfer::serve::ToolKind::Custom,
+                      "history-only call silently changed to function kind");
+    failures += check(parsed.tool_calls[0].arguments_json == raw_input,
+                      "history-only custom input was JSON-coerced or wrapped");
+
+    const std::string unknown =
+        "<tool_call>\n<function=other>\n<parameter=input>\nx\n</parameter>\n"
+        "</function>\n</tool_call>";
+    const auto rejected = ninfer::serve::parse_qwen_tool_call_output(unknown, 64, contracts);
+    failures += check(!rejected.is_tool_call_response && rejected.content == unknown,
+                      "history-authoritative parser accepted an unknown tool name");
+    return failures;
+}
+
 int test_incremental_filter_valid_tool() {
     ninfer::serve::ToolCallStreamFilter filter;
     std::string visible;
@@ -336,6 +409,8 @@ int main() {
     failures += test_declared_non_string_values_are_json_decoded();
     failures += test_declared_type_mismatches_are_forwarded_without_coercion();
     failures += test_unknown_schema_keeps_legacy_inference();
+    failures += test_custom_tool_raw_input();
+    failures += test_custom_tool_kind_survives_history_only_generation();
     failures += test_incremental_filter_valid_tool();
     failures += test_incremental_filter_fallback();
     if (failures == 0) { std::cout << "ok\n"; }

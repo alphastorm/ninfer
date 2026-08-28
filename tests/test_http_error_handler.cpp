@@ -1,4 +1,5 @@
 #include "serve/http_server.h"
+#include "serve/responses_schema.h"
 
 #include <nlohmann/json.hpp>
 
@@ -48,6 +49,18 @@ int main() {
             ninfer::RequestErrorKind::Cancelled, "request cancelled during preparation"));
     failures += check(cancelled.status == 499 && cancelled.code == "client_disconnected",
                       "preparation cancellation did not retain its HTTP classification");
+
+    const ninfer::serve::ApiError continuation =
+        ninfer::serve::make_previous_response_not_found_error("resp_missing");
+    failures += check(continuation.status == 404 &&
+                          continuation.code == "previous_response_not_found" &&
+                          continuation.param == "previous_response_id",
+                      "failed previous_response_id continuation used the generic lookup error");
+    const ninfer::serve::ApiError retrieval =
+        ninfer::serve::make_response_not_found_error("resp_missing");
+    failures += check(retrieval.status == 404 && retrieval.code == "response_not_found" &&
+                          retrieval.param == "response_id",
+                      "retrieval route lookup error changed with continuation handling");
 
     httplib::Request messages_request;
     messages_request.path = "/v1/messages";

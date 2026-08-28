@@ -72,6 +72,9 @@ BuiltResponse make_response_object(const std::string& id, std::int64_t created_a
 
 std::string make_response_input_tokens_body(int input_tokens);
 
+ApiError make_response_not_found_error(const std::string& id);
+ApiError make_previous_response_not_found_error(const std::string& id);
+
 struct ResponsesStreamFinish {
     BuiltResponse response;
     std::vector<std::string> events_before_terminal;

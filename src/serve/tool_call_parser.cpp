@@ -90,6 +90,7 @@ bool explicit_parameter_encoding(const Json& property,
 ToolArgumentTypeContracts::Tool compile_tool_contract(const ToolDefinition& definition) {
     ToolArgumentTypeContracts::Tool contract;
     contract.name = definition.name;
+    contract.kind = definition.kind;
 
     const Json schema = Json::parse(definition.parameters_json, nullptr, false);
     if (!schema.is_object()) { return contract; }
@@ -107,7 +108,7 @@ ToolArgumentTypeContracts::Tool compile_tool_contract(const ToolDefinition& defi
 
 bool same_contract(const ToolArgumentTypeContracts::Tool& lhs,
                    const ToolArgumentTypeContracts::Tool& rhs) {
-    if (lhs.parameters.size() != rhs.parameters.size()) { return false; }
+    if (lhs.kind != rhs.kind || lhs.parameters.size() != rhs.parameters.size()) { return false; }
     for (std::size_t i = 0; i < lhs.parameters.size(); ++i) {
         if (lhs.parameters[i].name != rhs.parameters[i].name ||
             lhs.parameters[i].encoding != rhs.parameters[i].encoding) {
@@ -132,13 +133,39 @@ void append_tool_contract(ToolArgumentTypeContracts& contracts, const ToolDefini
     }
 }
 
-const ToolArgumentTypeContracts::Parameter*
-find_parameter_contract(const ToolArgumentTypeContracts& contracts, std::string_view tool_name,
-                        std::string_view parameter_name) {
+void append_history_tool_contract(ToolArgumentTypeContracts& contracts, const ToolCall& call) {
+    const auto existing = std::find_if(contracts.tools.begin(), contracts.tools.end(),
+                                       [&](const auto& tool) { return tool.name == call.name; });
+    if (existing != contracts.tools.end()) {
+        if (existing->kind != call.kind) {
+            existing->parameters.clear();
+            existing->unambiguous = false;
+        }
+        return;
+    }
+
+    ToolArgumentTypeContracts::Tool contract;
+    contract.name = call.name;
+    contract.kind = call.kind;
+    if (call.kind == ToolKind::Custom) {
+        contract.parameters.push_back({"input", ToolArgumentTypeContracts::Encoding::String});
+    }
+    contracts.tools.push_back(std::move(contract));
+}
+
+const ToolArgumentTypeContracts::Tool*
+find_tool_contract(const ToolArgumentTypeContracts& contracts, std::string_view tool_name) {
     const auto tool =
         std::find_if(contracts.tools.begin(), contracts.tools.end(),
                      [&](const auto& candidate) { return candidate.name == tool_name; });
-    if (tool == contracts.tools.end() || !tool->unambiguous) { return nullptr; }
+    return tool == contracts.tools.end() || !tool->unambiguous ? nullptr : &*tool;
+}
+
+const ToolArgumentTypeContracts::Parameter*
+find_parameter_contract(const ToolArgumentTypeContracts& contracts, std::string_view tool_name,
+                        std::string_view parameter_name) {
+    const ToolArgumentTypeContracts::Tool* tool = find_tool_contract(contracts, tool_name);
+    if (tool == nullptr) { return nullptr; }
     const auto parameter =
         std::find_if(tool->parameters.begin(), tool->parameters.end(),
                      [&](const auto& candidate) { return candidate.name == parameter_name; });
@@ -210,24 +237,54 @@ bool parse_one_tool_call(std::string_view block, std::size_t max_name_length,
     if (!valid_function_name(name, max_name_length)) { return false; }
     pos = name_end + 1;
 
-    const std::size_t function_end = block.find(kFunctionClose, pos);
+    const ToolArgumentTypeContracts::Tool* contract = find_tool_contract(contracts, name);
+    if (contract == nullptr && contracts.names_authoritative) { return false; }
+    const bool custom = contract != nullptr && contract->kind == ToolKind::Custom;
+    const std::size_t function_end =
+        custom ? block.rfind(kFunctionClose) : block.find(kFunctionClose, pos);
     if (function_end == std::string_view::npos) { return false; }
     const std::string_view params = block.substr(pos, function_end - pos);
     Json args                     = Json::object();
     std::size_t param_pos         = 0;
-    for (;;) {
+    std::size_t parameter_count   = 0;
+    if (custom) {
+        constexpr std::string_view kCustomOpen = "<parameter=input>";
         skip_ws(params, param_pos);
-        if (param_pos >= params.size()) { break; }
-        if (!parse_parameter(params, param_pos, args, name, contracts)) { return false; }
+        if (!starts_with_at(params, param_pos, kCustomOpen)) { return false; }
+        const std::size_t value_begin = param_pos + kCustomOpen.size();
+        const std::size_t value_end   = params.rfind("</parameter>");
+        if (value_end == std::string_view::npos || value_end < value_begin) { return false; }
+        param_pos = value_end + std::string_view("</parameter>").size();
+        skip_ws(params, param_pos);
+        if (param_pos != params.size()) { return false; }
+        args["input"] = std::string(
+            remove_parameter_framing_newlines(params.substr(value_begin, value_end - value_begin)));
+        parameter_count = 1;
+    } else {
+        for (;;) {
+            skip_ws(params, param_pos);
+            if (param_pos >= params.size()) { break; }
+            if (!parse_parameter(params, param_pos, args, name, contracts)) { return false; }
+            ++parameter_count;
+        }
     }
 
     pos = function_end + kFunctionClose.size();
     skip_ws(block, pos);
     if (pos != block.size()) { return false; }
 
-    out.id             = new_tool_call_id();
-    out.name           = name;
-    out.arguments_json = args.dump();
+    out.id   = new_tool_call_id();
+    out.name = name;
+    if (custom) {
+        if (parameter_count != 1 || args.size() != 1 || !args.contains("input") ||
+            !args.at("input").is_string()) {
+            return false;
+        }
+        out.arguments_json = args.at("input").get<std::string>();
+        out.kind           = ToolKind::Custom;
+    } else {
+        out.arguments_json = args.dump();
+    }
     return true;
 }
 
@@ -241,18 +298,21 @@ ParsedToolCallOutput fallback(const std::string& text) {
 
 ToolArgumentTypeContracts build_tool_argument_type_contracts(const GenerationRequest& request) {
     ToolArgumentTypeContracts contracts;
-    if (!request.uses_tools()) { return contracts; }
-
-    if (request.tool_choice.mode == ToolChoiceMode::Named) {
+    if (request.uses_tools() && request.tool_choice.mode == ToolChoiceMode::Named) {
         const auto selected =
             std::find_if(request.tools.begin(), request.tools.end(),
                          [&](const auto& tool) { return tool.name == request.tool_choice.name; });
         if (selected != request.tools.end()) { append_tool_contract(contracts, *selected); }
-        return contracts;
+    } else if (request.uses_tools()) {
+        contracts.tools.reserve(request.tools.size());
+        for (const ToolDefinition& tool : request.tools) { append_tool_contract(contracts, tool); }
     }
-
-    contracts.tools.reserve(request.tools.size());
-    for (const ToolDefinition& tool : request.tools) { append_tool_contract(contracts, tool); }
+    for (const ChatTurn& message : request.messages) {
+        for (const ToolCall& call : message.tool_calls) {
+            append_history_tool_contract(contracts, call);
+        }
+    }
+    contracts.names_authoritative = !contracts.tools.empty();
     return contracts;
 }
 
@@ -274,13 +334,25 @@ ParsedToolCallOutput parse_qwen_tool_call_output(const std::string& text,
         if (pos >= text.size()) { break; }
         if (!starts_with_at(text, pos, kToolOpen)) { return fallback(text); }
         const std::size_t inner_begin = pos + kToolOpen.size();
-        const std::size_t close       = text.find(kToolClose, inner_begin);
-        if (close == std::string::npos) { return fallback(text); }
+        std::size_t close             = text.find(kToolClose, inner_begin);
         ToolCall call;
-        if (!parse_one_tool_call(std::string_view(text).substr(inner_begin, close - inner_begin),
-                                 max_tool_name_length, contracts, call)) {
-            return fallback(text);
+        bool parsed = false;
+        while (close != std::string::npos) {
+            ToolCall candidate;
+            std::size_t after = close + kToolClose.size();
+            skip_ws(text, after);
+            const bool valid_boundary =
+                after == text.size() || starts_with_at(text, after, kToolOpen);
+            if (valid_boundary &&
+                parse_one_tool_call(std::string_view(text).substr(inner_begin, close - inner_begin),
+                                    max_tool_name_length, contracts, candidate)) {
+                call   = std::move(candidate);
+                parsed = true;
+                break;
+            }
+            close = text.find(kToolClose, close + kToolClose.size());
         }
+        if (!parsed) { return fallback(text); }
         out.tool_calls.push_back(std::move(call));
         pos = close + kToolClose.size();
     }

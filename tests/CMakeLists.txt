@@ -1,4 +1,8 @@
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME ninfer_openai_responses_adapter_test
+  COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_openai_responses_adapter)
+set_tests_properties(ninfer_openai_responses_adapter_test PROPERTIES
+  WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 
 # This target deliberately receives no src/, CUDA, artifact, kernel, or target
 # include root. It proves that the installed product headers stand alone.
@@ -14,6 +18,7 @@ function(ninfer_add_test name)
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/third_party
+    ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib
     ${PROJECT_SOURCE_DIR}/third_party/utf8proc)
   if(arg_LIBRARIES)
     target_link_libraries(${name} PRIVATE ${arg_LIBRARIES})

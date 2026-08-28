@@ -1,5 +1,7 @@
 #include "serve/translate.h"
 
+#include <nlohmann/json.hpp>
+
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -171,7 +173,11 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
         message.tool_call_id      = turn.tool_call_id;
         message.tool_calls.reserve(turn.tool_calls.size());
         for (const ToolCall& call : turn.tool_calls) {
-            message.tool_calls.push_back(ninfer::ToolCall{call.id, call.name, call.arguments_json});
+            std::string arguments = call.kind == ToolKind::Custom
+                                        ? nlohmann::json{{"input", call.arguments_json}}.dump()
+                                        : call.arguments_json;
+            message.tool_calls.push_back(
+                ninfer::ToolCall{call.id, call.name, std::move(arguments)});
         }
 
         std::uint64_t text_bytes = 0;
