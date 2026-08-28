@@ -46,7 +46,7 @@ def _load_tokenizer(path: Path) -> Any:
     from transformers import AutoTokenizer
 
     return AutoTokenizer.from_pretrained(
-        str(path), local_files_only=True, trust_remote_code=True, use_fast=True
+        str(path), local_files_only=True, trust_remote_code=False, use_fast=True
     )
 
 
@@ -488,7 +488,6 @@ def build(tokenizer_path: Path) -> None:
         "schema_version": 1,
         "tokenizer": {
             "identity": "Qwen/Qwen3.6-family",
-            "local_qualification_path_name": tokenizer_path.name,
             "enable_thinking": False,
             "add_generation_prompt": True,
         },
@@ -615,6 +614,12 @@ def check() -> None:
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("artifact_type") != "ninfer_serve_ttft_corpus":
         raise RuntimeError("TTFT corpus manifest has the wrong artifact_type")
+    if set(manifest.get("tokenizer", {})) != {
+        "identity",
+        "enable_thinking",
+        "add_generation_prompt",
+    }:
+        raise RuntimeError("TTFT tokenizer identity contains local or unknown fields")
 
     records: list[dict[str, Any]] = []
     records.extend(manifest["shapes"].values())

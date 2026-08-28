@@ -3,7 +3,6 @@
   "schema_version": 1,
   "tokenizer": {
     "identity": "Qwen/Qwen3.6-family",
-    "local_qualification_path_name": "base-hf-bf16",
     "enable_thinking": false,
     "add_generation_prompt": true
   },

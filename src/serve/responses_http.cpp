@@ -142,10 +142,19 @@ std::string path_response_id(const httplib::Request& request) {
 
 std::optional<std::string> path_response_session(const httplib::Request& request,
                                                  bool authentication_configured) {
-    if (!request.has_param("ninfer_session")) { return std::nullopt; }
+    constexpr const char* header = "X-NInfer-Session";
+    const std::size_t count      = request.get_header_value_count(header);
+    if (count == 0) { return std::nullopt; }
+    if (count != 1) {
+        ApiError error;
+        error.message = "X-NInfer-Session must occur exactly once";
+        error.param   = "ninfer_session";
+        error.code    = "invalid_ninfer_identity";
+        throw ApiException(std::move(error));
+    }
     GenerationRequest identity;
     identity.client_session_sha256 =
-        parse_client_identity_sha256(request.get_param_value("ninfer_session"), "ninfer_session");
+        parse_client_identity_sha256(request.get_header_value(header), "ninfer_session");
     require_authenticated_client_identity(identity, authentication_configured);
     return identity.client_session_sha256;
 }
@@ -254,20 +263,20 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         return;
     }
 
-    const std::string id = new_response_id();
-    if (session_key.empty() && request.store) {
-        session_key             = id;
-        cache_hints.session_key = id;
-    }
-    if (!request.generation.client_session_sha256) {
-        cache_hints.retention =
-            request.store ? CacheRetentionHint::LiveSession : CacheRetentionHint::Disposable;
-        cache_hints.update_session_index = request.store;
-    }
-
     const std::uint64_t req_id = ++request_seq_;
+    std::string id;
     PreparedRequest prepared;
     try {
+        id = new_response_id();
+        if (session_key.empty() && request.store) {
+            session_key             = id;
+            cache_hints.session_key = id;
+        }
+        if (!request.generation.client_session_sha256) {
+            cache_hints.retention =
+                request.store ? CacheRetentionHint::LiveSession : CacheRetentionHint::Disposable;
+            cache_hints.update_session_index = request.store;
+        }
         prepared = service_->prepare(
             request.generation, [&req] { return disconnected(req); }, std::move(cache_hints));
     } catch (const ApiException& exception) {

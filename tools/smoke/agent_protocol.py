@@ -37,9 +37,15 @@ def digest(label: str) -> str:
     return hashlib.sha256(f"ninfer-agent-protocol-v1/{label}".encode()).hexdigest()
 
 
-def stored_response_path(response_id: str, session: str | None, suffix: str = "") -> str:
-    path = f"/v1/responses/{response_id}{suffix}"
-    return path if session is None else f"{path}?ninfer_session={session}"
+def stored_response_path(response_id: str, suffix: str = "") -> str:
+    return f"/v1/responses/{response_id}{suffix}"
+
+
+def stored_response_headers(headers: Mapping[str, str], session: str | None) -> dict[str, str]:
+    scoped = dict(headers)
+    if session is not None:
+        scoped["X-NInfer-Session"] = session
+    return scoped
 
 
 def read_api_key(path: Path | None) -> str | None:
@@ -470,9 +476,15 @@ def responses_session_lifecycle(
     if error_code(rejected) != "response_not_found":
         raise ProtocolError("cross-session previous_response_id was not isolated")
 
-    def expect_stored_not_found(method: str, path: str, label: str) -> None:
+    def expect_stored_not_found(
+        method: str, path: str, session: str | None, label: str
+    ) -> None:
         result = json_response(
-            base_url, method, path, headers=headers, expected_status=404
+            base_url,
+            method,
+            path,
+            headers=stored_response_headers(headers, session),
+            expected_status=404,
         )
         if error_code(result) != "response_not_found":
             raise ProtocolError(f"{label} was not isolated")
@@ -481,33 +493,38 @@ def responses_session_lifecycle(
                           ("cancel", "/cancel")):
         expect_stored_not_found(
             "GET" if route != "cancel" else "POST",
-            stored_response_path(first_id, None, suffix),
+            stored_response_path(first_id, suffix),
+            None,
             f"session omission on Responses {route}",
         )
         expect_stored_not_found(
             "GET" if route != "cancel" else "POST",
-            stored_response_path(first_id, session_b, suffix),
+            stored_response_path(first_id, suffix),
+            session_b,
             f"cross-session Responses {route}",
         )
 
     scoped_read = json_response(
-        base_url, "GET", stored_response_path(first_id, session_a), headers=headers
+        base_url,
+        "GET",
+        stored_response_path(first_id),
+        headers=stored_response_headers(headers, session_a),
     )
     if response_id(scoped_read) != first_id:
         raise ProtocolError("same-session Responses retrieve returned the wrong object")
     scoped_items = json_response(
         base_url,
         "GET",
-        stored_response_path(first_id, session_a, "/input_items"),
-        headers=headers,
+        stored_response_path(first_id, "/input_items"),
+        headers=stored_response_headers(headers, session_a),
     )
     if scoped_items.get("object") != "list":
         raise ProtocolError("same-session Responses input-items returned the wrong object")
     scoped_cancel = json_response(
         base_url,
         "POST",
-        stored_response_path(first_id, session_a, "/cancel"),
-        headers=headers,
+        stored_response_path(first_id, "/cancel"),
+        headers=stored_response_headers(headers, session_a),
         expected_status=400,
     )
     if error_code(scoped_cancel) != "background_not_supported":
@@ -515,24 +532,29 @@ def responses_session_lifecycle(
 
     expect_stored_not_found(
         "DELETE",
-        stored_response_path(first_id, None),
+        stored_response_path(first_id),
+        None,
         "session omission on Responses delete",
     )
     expect_stored_not_found(
         "DELETE",
-        stored_response_path(first_id, session_b),
+        stored_response_path(first_id),
+        session_b,
         "cross-session Responses delete",
     )
     deleted = json_response(
-        base_url, "DELETE", stored_response_path(first_id, session_a), headers=headers
+        base_url,
+        "DELETE",
+        stored_response_path(first_id),
+        headers=stored_response_headers(headers, session_a),
     )
     if deleted.get("deleted") is not True or deleted.get("id") != first_id:
         raise ProtocolError("Responses parent deletion returned the wrong object")
     missing = json_response(
         base_url,
         "GET",
-        stored_response_path(first_id, session_a),
-        headers=headers,
+        stored_response_path(first_id),
+        headers=stored_response_headers(headers, session_a),
         expected_status=404,
     )
     if error_code(missing) != "response_not_found":
@@ -545,7 +567,10 @@ def responses_session_lifecycle(
     )
     surviving_id = response_id(surviving)
     branch_read = json_response(
-        base_url, "GET", stored_response_path(branch_id, session_a), headers=headers
+        base_url,
+        "GET",
+        stored_response_path(branch_id),
+        headers=stored_response_headers(headers, session_a),
     )
     if response_id(branch_read) != branch_id:
         raise ProtocolError("Responses fork disappeared after parent deletion")

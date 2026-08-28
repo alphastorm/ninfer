@@ -390,16 +390,21 @@ Function definitions are request configuration rather than conversation Items an
 again on tool-result turns. The reconstructed prompt follows the ordinary Engine path, so compatible
 checkpoint reuse applies naturally.
 When a stored Response carries `ninfer_session`, every `previous_response_id` continuation must
-send the same digest. A different or omitted session receives the same 404 `response_not_found` as
-an unknown ID and cannot continue that session's DAG. Every fork from the same parent and session
-selects the same `http:<digest>` Engine lineage. Parent deletion does not invalidate already stored
-descendants. Changing `ninfer_request_id` never changes lineage selection.
+send the same digest. Retrieve, delete, input-Item, and cancel requests carry that digest in the
+`X-NInfer-Session` header because those routes have no request body. A different, duplicated, malformed,
+or omitted session receives the same 404 `response_not_found` as an unknown ID and cannot read, delete,
+or continue that session's DAG. The header is accepted only when API authentication is configured and
+is included in the CORS allowlist. Every fork from the same parent and session selects the same
+`http:<digest>` Engine lineage. Parent deletion does not invalidate already stored descendants.
+Changing `ninfer_request_id` never changes lineage selection.
 
-The OpenAI-compatible retrieve, delete, input-Item, and cancel routes have no request-body identity
-carrier. They therefore use the configured API key plus the opaque Response ID as their authorization
-boundary; every holder of one configured key belongs to one storage tenant. `ninfer_session` does not
-claim to subdivide that tenant for those routes. Isolate mutually untrusted tenants behind separate
-server instances, API keys, and Response stores rather than sharing one key.
+Treat `ninfer_session` as a credential, not a label. Compute the 64-character lowercase digest from a
+raw session identifier with at least 128 bits of CSPRNG entropy (or an equivalent keyed construction),
+never from a user name or other guessable value, and never place the digest in a URL or access log.
+Callers sharing one API key and process still share the bounded global Response-store capacity and can
+evict one another's least-recently-used records; the session boundary protects confidentiality and
+integrity, not availability. Use separate server instances/API keys when availability isolation is
+required.
 
 
 A stored Response also retains its resolved `preserve_thinking` value. A child which omits the
@@ -418,10 +423,10 @@ Resource behavior:
 
 | Endpoint | Contract |
 |---|---|
-| `GET /v1/responses/{id}` | returns the stored terminal object, or 404 `response_not_found` |
-| `DELETE /v1/responses/{id}` | removes public retrieval and returns `response.deleted`; descendant contexts already retained by other Responses remain usable |
-| `GET /v1/responses/{id}/input_items` | returns normalized Items supplied to that request; supports `after`, `limit` `1..100` (default `20`), and `order` `asc|desc` (default `desc`) |
-| `POST /v1/responses/{id}/cancel` | explicitly fails because background execution is unsupported |
+| `GET /v1/responses/{id}` | returns the stored terminal object, or 404 `response_not_found`; scoped records require matching `X-NInfer-Session` |
+| `DELETE /v1/responses/{id}` | requires matching `X-NInfer-Session` for scoped records, removes public retrieval, and returns `response.deleted`; descendant contexts already retained by other Responses remain usable |
+| `GET /v1/responses/{id}/input_items` | requires matching `X-NInfer-Session` for scoped records and returns normalized Items supplied to that request; supports `after`, `limit` `1..100` (default `20`), and `order` `asc|desc` (default `desc`) |
+| `POST /v1/responses/{id}/cancel` | requires matching `X-NInfer-Session` for scoped records, then explicitly fails because background execution is unsupported |
 | `POST /v1/responses/compact` | explicitly fails with `compaction_not_supported` |
 
 `store:false` Responses cannot be retrieved or used as `previous_response_id`. LRU eviction and
