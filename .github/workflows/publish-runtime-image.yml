@@ -45,10 +45,13 @@ jobs:
       BASE_IMAGE_DIGEST: sha256:a19e00c5d7993d7c12341974bdc7e3d13e61d9deaf39e8ce00cf94abd6137712
     steps:
       - name: Check out complete public source history
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      - name: Set up isolated Docker Buildx builder
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Validate immutable publication inputs
         shell: bash
@@ -57,14 +60,23 @@ jobs:
           [[ "$GITHUB_REPOSITORY" == "alphastorm/ninfer" ]]
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-qwen38-5090-beta\.[1-9][0-9]*$ ]]
-          [[ "$BINARY_ASSET" =~ ^ninfer-qwen38-rtx5090-v[0-9]+\.[0-9]+\.[0-9]+-linux-x86_64-cuda13\.1\.tar\.gz$ ]]
+          [[ "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-qwen38-5090-beta\.[1-9][0-9]*$ ]]
+          release_version="${BASH_REMATCH[1]}"
+          [[ "$BINARY_ASSET" =~ ^ninfer-qwen38-rtx5090-v([0-9]+\.[0-9]+\.[0-9]+)-linux-x86_64-cuda13\.1\.tar\.gz$ ]]
+          [[ "${BASH_REMATCH[1]}" == "$release_version" ]]
           git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
           tag_commit="$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
           [[ "$tag_commit" == "$SOURCE_COMMIT" ]]
           [[ "$(gh release view "$RELEASE_TAG" --json tagName --jq .tagName)" == "$RELEASE_TAG" ]]
           [[ "$(gh release view "$RELEASE_TAG" --json isPrerelease --jq .isPrerelease)" == "true" ]]
-          printf 'IMAGE_TAG=%s\n' "$RELEASE_TAG" >> "$GITHUB_ENV"
+          [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" == "false" ]]
+          receipt_name="ninfer-runtime-image-$RELEASE_TAG.json"
+          release_assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
+          if grep -Fqx "$receipt_name" <<<"$release_assets"; then
+            echo "refusing to replace existing image receipt" >&2
+            exit 1
+          fi
+          printf 'RELEASE_VERSION=%s\n' "$release_version" >> "$GITHUB_ENV"
 
       - name: Download and verify binary release
         shell: bash
@@ -116,6 +128,7 @@ jobs:
           [[ "$(jq -r .artifact_type "$payload/build-identity.json")" == "ninfer_release_build_identity" ]]
           [[ "$(jq -r .patch_stack_sha "$payload/build-identity.json")" == "$SOURCE_COMMIT" ]]
           [[ "$(jq -r .source_dirty "$payload/build-identity.json")" == "false" ]]
+          [[ "$(jq -r .release_version "$payload/build-identity.json")" == "v$RELEASE_VERSION" ]]
           for executable in ninfer ninfer-serve; do
             expected="$(jq -er --arg executable "$executable" '.binaries[$executable] | select(test("^[0-9a-f]{64}$"))' "$payload/build-identity.json")"
             actual="$(sha256sum "$payload/bin/$executable" | cut -d' ' -f1)"
@@ -140,15 +153,11 @@ jobs:
           CMD ["ninfer-serve", "--help"]
           EOF
           printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          if docker buildx imagetools inspect "$IMAGE_REPOSITORY:$IMAGE_TAG" >/dev/null 2>&1; then
-            echo "refusing to replace existing image tag: $IMAGE_TAG" >&2
-            exit 1
-          fi
           docker buildx build \
             --platform linux/amd64 \
             --label "org.opencontainers.image.source=https://github.com/alphastorm/ninfer" \
             --label "org.opencontainers.image.revision=$SOURCE_COMMIT" \
-            --label "org.opencontainers.image.version=$IMAGE_TAG" \
+            --label "org.opencontainers.image.version=$RELEASE_TAG" \
             --label "org.opencontainers.image.base.digest=$BASE_IMAGE_DIGEST" \
             --provenance=mode=max \
             --sbom=true \
@@ -159,11 +168,11 @@ jobs:
           docker buildx imagetools inspect "$IMAGE_REPOSITORY@$digest" >/dev/null
           printf 'IMAGE_DIGEST=%s\n' "$digest" >> "$GITHUB_ENV"
 
-      - name: Publish digest receipt before assigning tag
+      - name: Create secret-free digest receipt
         shell: bash
         run: |
           set -euo pipefail
-          receipt="$RUNTIME_ROOT/ninfer-runtime-image-$IMAGE_TAG.json"
+          receipt="$RUNTIME_ROOT/ninfer-runtime-image-$RELEASE_TAG.json"
           jq -n \
             --arg source_commit "$SOURCE_COMMIT" \
             --arg release_tag "$RELEASE_TAG" \
@@ -171,7 +180,6 @@ jobs:
             --arg binary_sha256 "$BINARY_SHA256" \
             --arg base_image "$BASE_IMAGE" \
             --arg base_image_digest "$BASE_IMAGE_DIGEST" \
-            --arg image_tag "$IMAGE_TAG" \
             --arg image_reference "$IMAGE_REPOSITORY@$IMAGE_DIGEST" \
             --arg image_digest "$IMAGE_DIGEST" \
             --arg workflow_url "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
@@ -184,27 +192,25 @@ jobs:
               binary_sha256: $binary_sha256,
               base_image: $base_image,
               base_image_digest: $base_image_digest,
-              image_tag: $image_tag,
               image_reference: $image_reference,
               image_digest: $image_digest,
               workflow_url: $workflow_url,
               secret_free: true
             }' > "$receipt"
-          if gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' | grep -Fqx "$(basename "$receipt")"; then
-            echo "refusing to replace existing image receipt" >&2
-            exit 1
-          fi
-          gh release upload "$RELEASE_TAG" "$receipt"
 
-      - name: Assign prerelease tag to receipted digest
+      - name: Upload publication receipt
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4
+        with:
+          name: ninfer-runtime-image-${{ inputs.release_tag }}
+          path: ${{ runner.temp }}/ninfer-runtime/ninfer-runtime-image-${{ inputs.release_tag }}.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish immutable digest receipt
         shell: bash
         run: |
           set -euo pipefail
-          docker buildx imagetools create \
-            --tag "$IMAGE_REPOSITORY:$IMAGE_TAG" \
-            "$IMAGE_REPOSITORY@$IMAGE_DIGEST"
-          promoted="$(docker buildx imagetools inspect "$IMAGE_REPOSITORY:$IMAGE_TAG" --format '{{.Manifest.Digest}}')"
-          [[ "$promoted" == "$IMAGE_DIGEST" ]]
+          receipt="$RUNTIME_ROOT/ninfer-runtime-image-$RELEASE_TAG.json"
           {
             echo '## NInfer runtime image'
             echo
@@ -212,12 +218,4 @@ jobs:
             echo "- Image: \`$IMAGE_REPOSITORY@$IMAGE_DIGEST\`"
             echo "- Release: \`$RELEASE_TAG\`"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload publication receipt
-        if: always()
-        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4
-        with:
-          name: ninfer-runtime-image-${{ inputs.release_tag }}
-          path: ${{ runner.temp }}/ninfer-runtime/ninfer-runtime-image-${{ inputs.release_tag }}.json
-          if-no-files-found: ignore
-          retention-days: 30
+          gh release upload "$RELEASE_TAG" "$receipt"
