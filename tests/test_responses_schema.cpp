@@ -560,6 +560,31 @@ int test_explicit_rejections() {
                           "invalid_tool_history",
                       "orphan custom output did not fail closed");
 
+    const Json custom_call_same_name   = {{"type", "custom_tool_call"},
+                                          {"call_id", "call_custom_eval"},
+                                          {"name", "eval"},
+                                          {"input", "raw"}};
+    const Json function_call_same_name = {{"type", "function_call"},
+                                          {"call_id", "call_function_eval"},
+                                          {"name", "eval"},
+                                          {"arguments", "{}"}};
+    ResponsesRequest ambiguous_history = parse_responses_request(
+        Json{{"model", "qwen3.6-27b"},
+             {"input", Json::array({custom_call_same_name, function_call_same_name})},
+             {"max_output_tokens", 32}},
+        limits());
+    failures += check(api_code([&] {
+                          compose_responses_generation_messages(ambiguous_history, {});
+                      }) == "tool_call_kind_mismatch",
+                      "same-name mixed-kind history reached generation");
+
+    ResponsesRequest token_count_orphan = parse_response_input_tokens_request(
+        Json{{"model", "qwen3.6-27b"}, {"input", Json::array({custom_output})}}, limits());
+    failures += check(api_code([&] {
+                          compose_responses_generation_messages(token_count_orphan, {});
+                      }) == "invalid_tool_history",
+                      "input_tokens accepted history the generation route rejects");
+
     Json too_small                 = base;
     too_small["max_output_tokens"] = 15;
     failures += check(api_code([&] { (void)parse_responses_request(too_small, limits()); }) ==

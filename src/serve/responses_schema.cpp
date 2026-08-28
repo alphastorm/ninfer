@@ -1049,9 +1049,16 @@ void validate_tool_history(const std::vector<ToolDefinition>& declarations,
     }
 
     std::unordered_map<std::string, ToolKind> call_kinds;
+    std::unordered_map<std::string, ToolKind> history_name_kinds;
     std::unordered_set<std::string> completed_calls;
     for (const ChatTurn& message : messages) {
         for (const ToolCall& call : message.tool_calls) {
+            const auto [history_name, first_history_kind] =
+                history_name_kinds.emplace(call.name, call.kind);
+            if (!first_history_kind && history_name->second != call.kind) {
+                bad_request("tool history reuses a name with a different kind: " + call.name,
+                            "input", "tool_call_kind_mismatch");
+            }
             const auto declaration = declared_kinds.find(call.name);
             if (declaration != declared_kinds.end() && declaration->second != call.kind) {
                 bad_request("tool call kind does not match the declared tool: " + call.name,

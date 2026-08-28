@@ -408,6 +408,7 @@ void HttpServer::handle_response_input_tokens(const httplib::Request& req, httpl
         limits.default_max_tokens = options_.default_max_tokens;
         ResponsesRequest request =
             parse_response_input_tokens_request(parse_json_body(req), limits);
+        compose_responses_generation_messages(request, {});
         validate_model(request.generation.model, public_model_id_);
         const int tokens =
             service_->count_prompt_tokens(request.generation, [&req] { return disconnected(req); });

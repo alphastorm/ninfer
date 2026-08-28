@@ -285,15 +285,11 @@ int test_custom_tool_raw_input() {
     const auto contracts        = contracts_for("eval", Json{{"input", Json{{"type", "string"}}}},
                                                 ninfer::serve::ToolKind::Custom);
     const std::string raw_input = R"INPUT(print('ok')
-{"looks":"like json"})INPUT";
-    const std::string text      = R"TOOL(<tool_call>
-<function=eval>
-<parameter=input>
-print('ok')
+literal = "</parameter> </function> </tool_call>"
 {"looks":"like json"}
-</parameter>
-</function>
-</tool_call>)TOOL";
+)INPUT";
+    const std::string text      = "<tool_call>\n<function=eval>\n<parameter=input>\n" + raw_input +
+                                  "\n</parameter>\n</function>\n</tool_call>";
     const ninfer::serve::ParsedToolCallOutput parsed =
         ninfer::serve::parse_qwen_tool_call_output(text, 64, contracts);
 
@@ -303,7 +299,9 @@ print('ok')
     failures += check(parsed.tool_calls[0].kind == ninfer::serve::ToolKind::Custom,
                       "requested custom tool kind retained");
     failures += check(parsed.tool_calls[0].arguments_json == raw_input,
-                      "custom input retained as one raw string");
+                      "custom input retained as one raw string (expected bytes=" +
+                          std::to_string(raw_input.size()) + ", observed bytes=" +
+                          std::to_string(parsed.tool_calls[0].arguments_json.size()) + ")");
 
     const std::string malformed = R"TOOL(<tool_call>
 <function=eval>
