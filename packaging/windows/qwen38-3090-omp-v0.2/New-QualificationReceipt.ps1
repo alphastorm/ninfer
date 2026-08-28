@@ -42,6 +42,7 @@ function New-NInferQualificationReceipt {
         [Parameter(Mandatory = $true)][object]$Thermal,
         [Parameter(Mandatory = $true)][object]$Protocol,
         [Parameter(Mandatory = $true)][object]$LongContext,
+        [Parameter(Mandatory = $true)][object]$CheckpointRestart,
         [Parameter(Mandatory = $true)][object]$RoleCorpus,
         [Parameter(Mandatory = $true)][object]$PowerSweep,
         [Parameter(Mandatory = $true)][object]$Lifecycle
@@ -88,7 +89,10 @@ function New-NInferQualificationReceipt {
         [int]$Configuration.prefill_chunk -ne 1024 -or
         [int]$Configuration.concurrency -ne 1 -or
         [string]$Configuration.speculative_backend -cne 'mtp' -or
-        [int]$Configuration.speculative_draft_tokens -ne 3) {
+        [int]$Configuration.speculative_draft_tokens -ne 3 -or
+        [string]$Configuration.reasoning_effort -cne 'xhigh' -or
+        [int]$Configuration.checkpoint_quota_mib -ne 65536 -or
+        [int]$Configuration.checkpoint_staging_mib -ne 256) {
         throw 'qualification configuration does not match the immutable C1 profile'
     }
     $hardwareReceipt = [ordered]@{
@@ -108,6 +112,7 @@ function New-NInferQualificationReceipt {
         post_service_thermal_matrix = Get-NInferQualificationGate 'post-service thermal matrix' $Thermal
         authenticated_real_client_protocol = Get-NInferQualificationGate 'authenticated real-client protocol' $Protocol
         advertised_context_retrieval = Get-NInferQualificationGate 'advertised context retrieval' $LongContext
+        process_restart_session_continuation = Get-NInferQualificationGate 'process-restart session continuation' $CheckpointRestart
         frozen_role_corpus = Get-NInferQualificationGate 'frozen role corpus' $RoleCorpus
         power_sweep_280_320_370_watts = Get-NInferQualificationGate '280/320/370 W power sweep' $PowerSweep
         gaming_drain_restart_rollback = Get-NInferQualificationGate 'gaming drain/restart/rollback' $Lifecycle
@@ -133,6 +138,9 @@ function New-NInferQualificationReceipt {
             concurrency = [int]$Configuration.concurrency
             speculative_backend = [string]$Configuration.speculative_backend
             speculative_draft_tokens = [int]$Configuration.speculative_draft_tokens
+            reasoning_effort = [string]$Configuration.reasoning_effort
+            checkpoint_quota_mib = [int]$Configuration.checkpoint_quota_mib
+            checkpoint_staging_mib = [int]$Configuration.checkpoint_staging_mib
         }
         hardware = $hardwareReceipt
         gates = $gates
