@@ -79,6 +79,15 @@ class WindowsReleaseContractTests(unittest.TestCase):
             )
         )
 
+    def test_streaming_continuation_identity_reaches_encoder(self) -> None:
+        source = (ROOT / "src/serve/responses_http.cpp").read_text(encoding="utf-8")
+        self.assertIn(
+            "stream->previous_response_id  = request.previous_response_id;", source
+        )
+        self.assertNotIn(
+            "stream->previous_response_id  = std::move(request.previous_response_id);", source
+        )
+
     def test_release_sources_contain_no_old_hardware_or_cache_identity(self) -> None:
         forbidden = ("4090", "DirectStorage", "directstorage", "legacy-managed-copy")
         for path in RELEASE.iterdir():
