@@ -17,6 +17,7 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -247,11 +248,12 @@ int run(const Options& options) {
     for (std::uint32_t lane = 0; lane < options.batch_size; ++lane) {
         auto prompt       = frontend.prepare_tokens(prompt_tokens(options.context_tokens), false);
         auto request_base = program->plan_request_base(prompt, execution);
-        auto request_plan = program->plan_request_for_lane(lane, prompt, request_base);
+        auto request_plan =
+            program->plan_request_for_lane(lane, prompt, request_base, std::nullopt);
         request_memory.activate(request_plan.summary().transient_bytes,
                                 request_plan.summary().transient_alignment);
         auto prefill = program->start_prefill_lane(lane, std::move(prompt), std::move(request_plan),
-                                                   request_memory.region());
+                                                   request_memory.region(), std::nullopt, {});
         while (!prefill.complete) { prefill = program->advance_prefill_lane(lane); }
         request_memory.deactivate();
         if (prefill.round.tokens.size() != 1) {
