@@ -74,6 +74,16 @@ ApiError response_not_found(const std::string& id) {
     return error;
 }
 
+ApiError previous_response_not_found(const std::string& id) {
+    ApiError error;
+    error.status  = 404;
+    error.type    = "invalid_request_error";
+    error.param   = "previous_response_id";
+    error.code    = "previous_response_not_found";
+    error.message = "previous response '" + id + "' not found";
+    return error;
+}
+
 const char* checkpoint_save_state_name(SessionCheckpointSaveState state) noexcept {
     switch (state) {
     case SessionCheckpointSaveState::Disabled:
@@ -91,7 +101,9 @@ const char* checkpoint_save_state_name(SessionCheckpointSaveState state) noexcep
 }
 
 ApiError checkpoint_restore_error(SessionCheckpointRestoreState state, const std::string& id) {
-    if (state == SessionCheckpointRestoreState::Missing) { return response_not_found(id); }
+    if (state == SessionCheckpointRestoreState::Missing) {
+        return previous_response_not_found(id);
+    }
     ApiError error;
     error.type  = "server_error";
     error.param = "previous_response_id";
@@ -312,7 +324,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                 }
             }
             if (!previous) {
-                throw ApiException(response_not_found(*request.previous_response_id));
+                throw ApiException(previous_response_not_found(*request.previous_response_id));
             }
             inherit_responses_preserve_thinking(request, previous->preserve_thinking);
             previous_context = previous->context;
