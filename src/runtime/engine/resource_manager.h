@@ -289,6 +289,7 @@ public:
                         entry.active_references != 0) {
                         continue;
                     }
+                    if (entry.session != base.context_cache().session_key) { continue; }
                     const bool retain =
                         entry.session && (!base.context_cache().session_key ||
                                           *entry.session != *base.context_cache().session_key ||
