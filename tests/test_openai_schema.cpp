@@ -447,6 +447,12 @@ int test_parse_function_tools_and_choices() {
     failures +=
         check(throws_api([&] { (void)parse_chat_completion_request(unknown, default_limits()); }),
               "unknown named tool_choice rejected");
+
+    Json duplicate  = base;
+    duplicate["tools"] = Json::array({tool, tool});
+    failures += check(
+        throws_api([&] { (void)parse_chat_completion_request(duplicate, default_limits()); }),
+        "duplicate OpenAI tool names were accepted");
     return failures;
 }
 
