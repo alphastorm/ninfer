@@ -27,6 +27,7 @@ _PRIVATE_REUSE_PATHS = {
     "private_response_replay",
     "private_long_anchor",
 }
+_ISOLATED_REUSE_PATHS = {"root", "shared_stable_prefix"}
 
 
 class ProtocolError(RuntimeError):
@@ -363,6 +364,32 @@ def streaming_and_session_checks(
     if not isinstance(expected_content, str) or not isinstance(expected_reasoning, str):
         raise ProtocolError("non-streaming response content has the wrong type")
     _, completion_tokens = require_usage(first)
+    decode_before_repeat: int | None = None
+    if session_a is not None and session_b is not None:
+        status_before_repeat = json_response(
+            base_url, "GET", "/v1/ninfer/status", headers=status_headers
+        )
+        scheduler = status_before_repeat.get("scheduler")
+        if not isinstance(scheduler, dict) or scheduler.get("max_concurrency") != 1:
+            raise ProtocolError(
+                "session-isolation telemetry requires an exclusive max_concurrency=1 endpoint"
+            )
+        if any(
+            scheduler.get(field) != 0
+            for field in (
+                "running",
+                "prefilling",
+                "decode_ready",
+                "waiting",
+                "materializing",
+                "capture_pending",
+            )
+        ):
+            raise ProtocolError("session-isolation telemetry endpoint was not quiescent")
+        value = scheduler.get("committed_decode_tokens")
+        if not isinstance(value, int):
+            raise ProtocolError("status omitted committed_decode_tokens")
+        decode_before_repeat = value
 
     stream_payload = {
         **common,
@@ -412,6 +439,11 @@ def streaming_and_session_checks(
         decode_before = scheduler_before.get("committed_decode_tokens")
         if not isinstance(decode_before, int):
             raise ProtocolError("status omitted committed_decode_tokens")
+        if (
+            decode_before_repeat is None
+            or decode_before - decode_before_repeat != max(0, completion_tokens - 1)
+        ):
+            raise ProtocolError("same-session telemetry was not request-correlated")
         private_path = cache_reuse_path(status_after_repeat)
         if private_path not in _PRIVATE_REUSE_PATHS:
             raise ProtocolError(
@@ -448,9 +480,9 @@ def streaming_and_session_checks(
         ):
             raise ProtocolError("session-isolation telemetry was not request-correlated")
         isolated_path = cache_reuse_path(status_after_isolated)
-        if isolated_path in _PRIVATE_REUSE_PATHS:
+        if isolated_path not in _ISOLATED_REUSE_PATHS:
             raise ProtocolError(
-                "a new session selected another session's private continuation"
+                "a new session selected a non-public continuation path"
             )
 
     return (
