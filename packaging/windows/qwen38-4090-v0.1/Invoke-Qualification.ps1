@@ -130,46 +130,38 @@ $digestPrefix = "ninfer-qwen38-4090-v0.1/$($Profile.ToLowerInvariant())"
 $sessionDigest = Get-Digest "$digestPrefix/qualification-session"
 $firstRequestDigest = Get-Digest "$digestPrefix/qualification-first"
 $secondRequestDigest = Get-Digest "$digestPrefix/qualification-post-restart"
-$chatUri = "$baseUrl/v1/chat/completions"
+$responsesUri = "$baseUrl/v1/responses"
 $firstBody = [ordered]@{
     model = [string]$config.model_id
-    messages = @([ordered]@{ role = 'user'; content = $longPrompt })
-    max_completion_tokens = 16
+    input = $longPrompt
+    max_output_tokens = 16
     temperature = 0
+    store = $true
     stream = $false
     ninfer_session = $sessionDigest
     ninfer_request_id = $firstRequestDigest
 }
 $firstStarted = [DateTime]::UtcNow
-$first = Invoke-Chat $chatUri $headers $firstBody
+$first = Invoke-Chat $responsesUri $headers $firstBody
 $firstFinished = [DateTime]::UtcNow
-if ([int]$first.usage.prompt_tokens -lt 100000) {
+if ([int]$first.usage.input_tokens -lt 100000) {
     throw 'long qualification prompt did not reach 100000 input tokens'
-}
-$assistant = $first.choices[0].message
-$assistantTurn = [ordered]@{ role = 'assistant'; content = [string]$assistant.content }
-$reasoningProperty = $assistant.PSObject.Properties['reasoning_content']
-if ($null -ne $reasoningProperty -and
-    -not [string]::IsNullOrEmpty([string]$reasoningProperty.Value)) {
-    $assistantTurn.reasoning_content = [string]$reasoningProperty.Value
 }
 
 & $controller -Action Restart -StateRoot $StateRoot | Out-Null
 $secondBody = [ordered]@{
     model = [string]$config.model_id
-    messages = @(
-        [ordered]@{ role = 'user'; content = $longPrompt },
-        $assistantTurn,
-        [ordered]@{ role = 'user'; content = 'Continue with one short sentence.' }
-    )
-    max_completion_tokens = 16
+    previous_response_id = [string]$first.id
+    input = 'Continue with one short sentence.'
+    max_output_tokens = 16
     temperature = 0
+    store = $true
     stream = $false
     ninfer_session = $sessionDigest
     ninfer_request_id = $secondRequestDigest
 }
 $secondStarted = [DateTime]::UtcNow
-$second = Invoke-Chat $chatUri $headers $secondBody
+$second = Invoke-Chat $responsesUri $headers $secondBody
 $secondFinished = [DateTime]::UtcNow
 
 $logPath = Join-Path ([string]$release.release_root) 'logs\requests.jsonl'
@@ -220,11 +212,11 @@ $receiptParameters = @{
     NonspeculativeConfigSha256 = $nonspeculativeConfigSha256
     Protocol = $protocol
     LongSession = [ordered]@{
-        first_prompt_tokens = [int]$first.usage.prompt_tokens
-        first_completion_tokens = [int]$first.usage.completion_tokens
+        first_prompt_tokens = [int]$first.usage.input_tokens
+        first_completion_tokens = [int]$first.usage.output_tokens
         first_elapsed_seconds = ($firstFinished - $firstStarted).TotalSeconds
-        post_restart_prompt_tokens = [int]$second.usage.prompt_tokens
-        post_restart_completion_tokens = [int]$second.usage.completion_tokens
+        post_restart_prompt_tokens = [int]$second.usage.input_tokens
+        post_restart_completion_tokens = [int]$second.usage.output_tokens
         post_restart_elapsed_seconds = ($secondFinished - $secondStarted).TotalSeconds
     }
     Persistence = [ordered]@{
