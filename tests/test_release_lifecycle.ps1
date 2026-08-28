@@ -887,8 +887,8 @@ try {
     }
     Assert-True ($null -ne $deadRollbackFailure) 'rollback accepted a release whose scheduled task exited immediately'
     Assert-True ($deadRollbackFailure.Exception.Message -like '*managed scheduled task exited before release became ready: Ready*') 'dead rollback returned the wrong liveness failure'
-    Assert-True ($global:NInferTestDeadStartSleptMilliseconds -le 6000) 'dead rollback exceeded the startup-grace detection bound'
-    Assert-True ($deadStartWatch.Elapsed.TotalSeconds -lt 10) 'dead rollback was not detected promptly'
+    Assert-True ($global:NInferTestDeadStartSleptMilliseconds -le 31000) 'dead rollback exceeded the startup-grace detection bound'
+    Assert-True ($deadStartWatch.Elapsed.TotalSeconds -lt 35) 'dead rollback was not detected promptly'
     $restoredAfterDeadRollback = Read-State
     Assert-Equal $restoredAfterDeadRollback.active_release 'dead-rollback-current' 'failed rollback did not restore the current release'
     Assert-Equal $restoredAfterDeadRollback.previous_release 'base-release' 'failed rollback changed the prior release identity'

@@ -418,7 +418,7 @@ function Assert-ManagedStartLiveness([object]$State, [object]$Release) {
 
 function Wait-Ready([int]$TimeoutSeconds) {
     $started = [DateTime]::UtcNow
-    $startupGraceDeadline = $started.AddSeconds(5)
+    $startupGraceDeadline = $started.AddSeconds(30)
     $deadline = $started.AddSeconds($TimeoutSeconds)
     $lastError = $null
     while ([DateTime]::UtcNow -lt $deadline) {
