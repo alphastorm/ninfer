@@ -2,7 +2,7 @@
   "artifact_type": "ninfer_windows_server_config",
   "schema_version": 1,
   "release_id": "qwen38-4090-v0.1",
-  "deployment_profile": "sf-qwen38-4090-v0.1",
+  "deployment_profile": "qwen38-4090-v0.1",
   "listen": {
     "host": "127.0.0.1",
     "port": 18082

@@ -4,7 +4,7 @@
   "status": "passed",
   "qualification_level": "beta",
   "beta_support_qualified": true,
-  "release_eligible": false,
+  "release_eligible": true,
   "release_id": "qwen38-4090-v0.1",
   "release_version": "0.1.0",
   "qualification_target": {
@@ -18,6 +18,8 @@
     "source_dirty": false,
     "source_archive_sha256": "54d6ef81c134e2405a00e5a2a60885fde3d5431f206a2be9fef6986c8c27f0da",
     "source_archive_bytes": 5225635,
+    "package_source_archive_sha256": "33da5cc5531238b1ba3822bf583e27d05d515980e1465e25f8e84429ed554ec5",
+    "package_source_archive_bytes": 5225598,
     "runtime_cpp_changed_by_argument_fix": false
   },
   "identity": {
@@ -25,7 +27,7 @@
     "binary_bytes": 230268416,
     "config_sha256": "e7f86a4da23d17bc50b3c261263a636df2cf317a82f84b22bcae5d6a186e7623",
     "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
-    "deployment_profile": "sf-qwen38-4090-v0.1",
+    "deployment_profile": "qwen38-4090-v0.1",
     "build_type": "Release",
     "cuda_toolkit": "13.3.73"
   },
@@ -33,7 +35,13 @@
     "source_commit": "69f03550d5c068ec5b89a75b1380bdeb96f45cc6",
     "sha256": "24b18e8949e08e049b87e60adb5c18eff3110cffb8db61c1e4743cde4005bbf7",
     "bytes": 227410510,
-    "runtime_dlls": 9
+    "runtime_dlls": 9,
+    "sbom": {
+      "filename": "ninfer-4090-qwen38-v0.1.0-win-x64.spdx.json",
+      "sha256": "8cf49b2fd693b0e6bf9892e4759b052170dd53bfb5ec4d11db01ad758adac6a3",
+      "files_analyzed": 25,
+      "scope": "Complete file inventory of the immutable release ZIP; dependency package enumeration is not claimed."
+    }
   },
   "sequential_unmasking": {
     "first_red": "typed argument oracle rejected OMP output",
@@ -95,12 +103,9 @@
   },
   "restoration": {
     "status": "passed",
-    "incumbent_profile": "sf-long-persistent-candidate",
-    "incumbent_controller_sha256": "79f14e4b9bde6d05e744c10757d39d1ad95e394d0673725606c584463edec711",
-    "incumbent_model_id": "qwen38-long",
-    "candidate_listener_present": false,
-    "candidate_state_present": false,
-    "candidate_task_present": false
+    "incumbent_route_restored": true,
+    "candidate_effects_absent": true,
+    "private_fleet_projection_included": false
   },
   "stable_release_performed": false,
   "stable_promotion_performed": false,

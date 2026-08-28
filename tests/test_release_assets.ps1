@@ -38,7 +38,7 @@ try {
             '@echo off',
             'echo upstream_base_sha=9ec1b82c7afa021314682d7a95390f8935ead7c2',
             "echo patch_stack_sha=$patchSha",
-            'echo build_profile=sf-qwen38-4090-v0.1',
+            'echo build_profile=qwen38-4090-v0.1',
             'echo source_dirty=false'
         )
     }
@@ -47,7 +47,7 @@ try {
             '#!/bin/sh',
             'echo upstream_base_sha=9ec1b82c7afa021314682d7a95390f8935ead7c2',
             "echo patch_stack_sha=$patchSha",
-            'echo build_profile=sf-qwen38-4090-v0.1',
+            'echo build_profile=qwen38-4090-v0.1',
             'echo source_dirty=false'
         )
     }

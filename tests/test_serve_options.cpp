@@ -42,7 +42,7 @@ int main() {
     const ServeOptions checkpoints = parse(
         {"ninfer-serve", "model.ninfer", "--api-key", "checkpoint-secret",
          "--binary-sha256", binary_sha, "--artifact-sha256", artifact_sha, "--config-sha256",
-         config_sha, "--deployment-profile", "sf-qwen38-4090-v0.1", "--session-checkpoint-dir",
+         config_sha, "--deployment-profile", "qwen38-4090-v0.1", "--session-checkpoint-dir",
          "/tmp/ninfer-checkpoints", "--session-checkpoint-quota-mib", "2048",
          "--session-checkpoint-staging-mib", "64"});
     failures += check(checkpoints.session_checkpoint_root == "/tmp/ninfer-checkpoints" &&
@@ -53,7 +53,7 @@ int main() {
         rejects([&] {
             (void)parse({"ninfer-serve", "model.ninfer", "--binary-sha256", binary_sha,
                          "--artifact-sha256", artifact_sha, "--config-sha256", config_sha,
-                         "--deployment-profile", "sf-qwen38-4090-v0.1", "--session-checkpoint-dir",
+                         "--deployment-profile", "qwen38-4090-v0.1", "--session-checkpoint-dir",
                          "/tmp/checkpoints"});
         }),
         "session checkpoints were accepted without API authentication");
@@ -69,7 +69,7 @@ int main() {
         rejects([&] {
             (void)parse({"ninfer-serve", "model.ninfer", "--api-key", "secret",
                          "--binary-sha256", binary_sha, "--artifact-sha256", artifact_sha,
-                         "--deployment-profile", "sf-qwen38-4090-v0.1", "--session-checkpoint-dir",
+                         "--deployment-profile", "qwen38-4090-v0.1", "--session-checkpoint-dir",
                          "/tmp/checkpoints"});
         }),
         "session checkpoints were accepted without every lifecycle hash");
@@ -77,7 +77,7 @@ int main() {
         rejects([&] {
             (void)parse({"ninfer-serve", "model.ninfer", "--api-key", "secret",
                          "--binary-sha256", binary_sha, "--artifact-sha256", artifact_sha,
-                         "--config-sha256", config_sha, "--deployment-profile", "sf-qwen38-4090-v0.1",
+                         "--config-sha256", config_sha, "--deployment-profile", "qwen38-4090-v0.1",
                          "--session-checkpoint-dir", "/tmp/checkpoints",
                          "--session-checkpoint-quota-mib", "32",
                          "--session-checkpoint-staging-mib", "64"});
@@ -342,13 +342,13 @@ int main() {
         parse({"ninfer-serve", "model.ninfer", "--request-log-jsonl", "requests.jsonl",
                "--api-key", "do-not-log", "--binary-sha256", sha256,
                "--artifact-sha256", sha256, "--config-sha256", sha256,
-               "--deployment-profile", "sf-qwen38-4090-v0.1"});
+               "--deployment-profile", "qwen38-4090-v0.1"});
     failures += check(logged.request_log_jsonl == "requests.jsonl" &&
                           logged.api_key == "do-not-log",
                       "request log or API-key option was not parsed");
     failures += check(logged.binary_sha256 == sha256 && logged.artifact_sha256 == sha256 &&
                           logged.config_sha256 == sha256 &&
-                          logged.deployment_profile == "sf-qwen38-4090-v0.1",
+                          logged.deployment_profile == "qwen38-4090-v0.1",
                       "release identity declarations were not parsed");
     failures +=
         check(serve_usage_text("ninfer-serve").find("--api-key-file") != std::string::npos &&

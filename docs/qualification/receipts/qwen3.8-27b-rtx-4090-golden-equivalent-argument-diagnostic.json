@@ -9,11 +9,11 @@
   },
   "identity": {
     "binary_sha256": "66fb8187e70df2e842b6cb23a8e7ee0392ecec868c5265ac737c98084bb0b9f2",
-    "build_profile": "sf-qwen38-4090-v0.1",
+    "build_profile": "qwen38-4090-v0.1",
     "build_type": "Release",
     "config_sha256": "e7f86a4da23d17bc50b3c261263a636df2cf317a82f84b22bcae5d6a186e7623",
     "cuda_architecture": "89",
-    "deployment_profile": "sf-qwen38-4090-v0.1",
+    "deployment_profile": "qwen38-4090-v0.1",
     "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
     "patch_stack_sha": "40580cc703b03197573789923b5866007aba0a68",
     "source_dirty": false,

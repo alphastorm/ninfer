@@ -139,7 +139,7 @@ class GoldenEquivalentTests(unittest.TestCase):
         binary = "2" * 64
         model = "3" * 64
         config = "4" * 64
-        profile = "sf-qwen38-4090-v0.1"
+        profile = "qwen38-4090-v0.1"
         status = {
             "artifact_type": "ninfer_server_status",
             "schema_version": 1,

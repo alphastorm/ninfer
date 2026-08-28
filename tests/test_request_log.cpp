@@ -63,7 +63,7 @@ int main() {
     options.binary_sha256      = std::string(64, 'a');
     options.artifact_sha256    = std::string(64, 'b');
     options.config_sha256      = std::string(64, 'c');
-    options.deployment_profile = "sf-qwen38-4090-v0.1";
+    options.deployment_profile = "qwen38-4090-v0.1";
 
     const ninfer::ModelSamplingDefaults sampling_defaults{
         .thinking     = {.temperature = 1.0F, .top_k = 20, .top_p = 0.95F},

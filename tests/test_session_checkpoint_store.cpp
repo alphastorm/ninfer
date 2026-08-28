@@ -204,7 +204,7 @@ nlohmann::json production_fingerprint(const BuildInfo& build,
     options.binary_sha256       = std::string(64, '1');
     options.artifact_sha256     = std::string(64, '2');
     options.config_sha256       = std::string(64, '3');
-    options.deployment_profile  = "sf-qwen38-4090-v0.1";
+    options.deployment_profile  = "qwen38-4090-v0.1";
     options.allow_prefix_reuse  = true;
     options.max_context         = 131072;
     options.kv_capacity         = KvCapacityPolicy::explicit_capacity(131072);
@@ -602,7 +602,7 @@ int test_production_manager_restart_and_identity_isolation() {
     const BuildInfo build{
         .upstream_base_sha = "upstream-sha",
         .patch_stack_sha = "patch-sha",
-        .build_profile = "sf-qwen38-4090-v0.1",
+        .build_profile = "qwen38-4090-v0.1",
         .build_type = "Release",
         .cxx_compiler = "GNU-13.3.0",
         .cuda_compiler = "NVIDIA-12.8.93",
@@ -627,7 +627,7 @@ int test_production_manager_restart_and_identity_isolation() {
     failures += check(runtime.at("identity").at("model_id") == "qwen3.8-27b" &&
                           runtime.at("identity").at("artifact_sha256") == std::string(64, '2') &&
                           runtime.at("build").at("patch_stack_sha") == "patch-sha" &&
-                          runtime.at("build").at("build_profile") == "sf-qwen38-4090-v0.1" &&
+                          runtime.at("build").at("build_profile") == "qwen38-4090-v0.1" &&
                           runtime.at("build").at("cuda_architecture") == "89" &&
                           runtime.at("engine").at("max_context") == 131072 &&
                           runtime.at("engine").at("kv_cache") ==

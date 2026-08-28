@@ -52,11 +52,11 @@ Previously completed protocol, 102K process-restart persistence, and uncontamina
 
 ## Restoration
 
-Every GPU-owner stop/start effect went through the hash-pinned adapter and the existing tracked `sf-long-persistent-control.ps1` controller (`79f14e4b…`). Final restoration passed:
+Every GPU-owner stop/start effect went through the hash-pinned adapter and tracked incumbent controller. Final restoration passed:
 
-- `sf-long-persistent-candidate` is healthy on `100.116.135.24:18081` as `qwen38-long`;
+- the incumbent route is healthy;
 - the candidate listener, state root, task, and lease are absent;
-- the base controller remains paused/Ready and Docker remains paused;
+- the private fleet identity is intentionally omitted from this public receipt;
 - no stable promotion or permanent route mutation occurred.
 
 ## Receipts
