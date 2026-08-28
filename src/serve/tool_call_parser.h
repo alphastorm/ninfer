@@ -35,6 +35,7 @@ struct ToolArgumentTypeContracts {
         std::string name;
         std::vector<Parameter> parameters;
         bool unambiguous = true;
+        ToolKind kind    = ToolKind::Function;
     };
 
     std::vector<Tool> tools;

@@ -68,6 +68,11 @@ struct ContentPart {
     ninfer::product::media_acquire::Source source;
 };
 
+enum class ToolKind : std::uint8_t {
+    Function,
+    Custom,
+};
+
 struct ToolDefinition {
     std::string name;
     std::string description;
@@ -75,12 +80,15 @@ struct ToolDefinition {
     std::string definition_json; // normalized OpenAI function-tool object for Qwen prompt rendering
     bool strict               = false;
     bool cache_boundary_after = false;
+    ToolKind kind             = ToolKind::Function;
 };
 
 struct ToolCall {
     std::string id;
     std::string name;
+    // Function calls carry a serialized JSON object; custom calls carry their raw string input.
     std::string arguments_json;
+    ToolKind kind = ToolKind::Function;
 };
 
 enum class ToolChoiceMode {
@@ -101,6 +109,7 @@ struct ChatTurn {
         content; // one or more parts; assistant content may be empty with tool_calls
     std::vector<ToolCall> tool_calls;
     std::string tool_call_id;      // populated for role=tool
+    ToolKind tool_kind = ToolKind::Function; // populated for role=tool
     std::string reasoning_content; // assistant thinking carried across turns (round-tripped to the
                                    // template)
     std::vector<std::uint32_t> shared_cache_boundaries_after_text_bytes;

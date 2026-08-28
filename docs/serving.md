@@ -255,7 +255,7 @@ wire response contains typed `output` Items.
 | `chat_template_kwargs.preserve_thinking` | optional boolean controlling whether closed-turn reasoning remains in reconstructed prompts |
 | `preserve_thinking` | top-level alias for the same option; conflicting values are rejected |
 | `text.format` | omitted or `{"type":"text"}` only |
-| `tools` | flat Responses function definitions; see below |
+| `tools` | flat Responses `function` or `custom` definitions; see below |
 | `tool_choice` | `auto` or `none` |
 | `parallel_tool_calls` | omitted or `true` |
 | `truncation` | omitted or `disabled`; overlong input fails instead of silently dropping Items |
@@ -282,10 +282,12 @@ String `input` is normalized to one user `message` with an `input_text` part. Ar
 | `reasoning` | raw replay Item with an empty `summary` and `reasoning_text` content parts |
 | `function_call` | completed assistant call with optional `id`, and required `call_id`, `name`, and JSON-object string `arguments` |
 | `function_call_output` | completed tool result with required `call_id` and string `output` |
+| `custom_tool_call` | completed assistant call with optional `id`, and required `call_id`, `name`, and raw string `input` |
+| `custom_tool_call_output` | completed custom-tool result with required `call_id` and string `output` |
 
-Adjacent function-call Items are grouped into one assistant history turn. A reasoning Item attaches
-to the following assistant message or function call. Input Item IDs are preserved when supplied and
-generated otherwise; duplicate IDs fail.
+Adjacent function/custom-call Items are grouped into one assistant history turn. A reasoning Item
+attaches to the following assistant message or tool call. Input Item IDs are preserved when
+supplied and generated otherwise; duplicate IDs fail.
 
 System and developer message Items retain their positions in the input array. Top-level
 `instructions` is represented as a leading developer turn for the current request; target-specific
@@ -296,7 +298,7 @@ encrypted reasoning, message `phase`, and other Item/content types are not suppo
 URLs stored in a response chain are fetched again when that chain is continued; use data URIs when
 the historical media bytes must be immutable.
 
-### Function tools
+### Function and custom tools
 
 Responses function definitions are flat rather than Chat Completions' nested `function` object:
 
@@ -317,9 +319,27 @@ Responses function definitions are flat rather than Chat Completions' nested `fu
 NInfer renders these definitions in the Qwen prompt and parses model output into separate
 `function_call` output Items. Each output has a protocol Item `id` (`fc_...`) and a distinct
 `call_id` (`call_...`). The client executes the function and sends a `function_call_output` Item in
-a later request. NInfer does not execute functions or enforce JSON Schema through constrained
-decoding, so `strict:true`, `tool_choice:required`, named tool choice, hosted tools, MCP tools, and
-custom free-form tools are rejected.
+a later request.
+
+Responses custom tools accept the OpenAI free-form text and grammar format shapes:
+
+```json
+{
+  "type": "custom",
+  "name": "eval",
+  "description": "Evaluate one code cell",
+  "format": {"type": "grammar", "syntax": "lark", "definition": "start: /.+/"}
+}
+```
+
+`format` may be omitted or use `{"type":"text"}`. Grammar formats require a non-empty
+`definition` and `syntax` of `lark` or `regex`; malformed and unknown formats fail explicitly.
+NInfer maps a custom definition to one string parameter named `input` in the Qwen tool prompt and
+maps the generated value back to `custom_tool_call.input` without JSON interpretation. Custom
+output Items use `ctc_...` Item IDs and distinct `call_...` pairing IDs. NInfer does not execute
+tools or enforce JSON Schema/grammar through constrained decoding, so `strict:true`,
+`tool_choice:required`, named tool choice, hosted tools, MCP tools, and unsupported custom-tool
+options are rejected.
 
 ### Response object and usage
 
@@ -328,7 +348,7 @@ A terminal wire response has `object: "response"`, one of `completed`, `incomple
 
 - a `reasoning` Item containing raw `reasoning_text` and an empty summary;
 - an assistant `message` containing an `output_text` part;
-- one or more `function_call` Items.
+- one or more `function_call` or `custom_tool_call` Items.
 
 Ordinary model/string stops produce `completed`. Output-token or context-capacity exhaustion
 produces `incomplete` with `incomplete_details.reason: "max_output_tokens"`. Errors accepted after
@@ -373,10 +393,11 @@ The normal lifecycle is:
 5. exactly one `response.completed`, `response.incomplete`, or `response.failed` terminal event.
 
 Function arguments use `response.function_call_arguments.delta` and `.done`. IDs, output indices,
-and content indices remain stable, and concatenated deltas equal the terminal Item. Responses SSE
-does not emit the Chat Completions `[DONE]` sentinel. With tools enabled, ordinary answer text still
-streams immediately; only an ambiguous `<tool_call>` suffix or the structured tool region is held.
-Malformed tool markup is flushed back as ordinary text without losing bytes.
+and content indices remain stable, and concatenated deltas equal the terminal Item. Custom input
+uses `response.custom_tool_call_input.delta` and `.done`, with the same stable Item and call IDs.
+Responses SSE does not emit the Chat Completions `[DONE]` sentinel. With tools enabled, ordinary
+answer text still streams immediately; only an ambiguous `<tool_call>` suffix or the structured
+tool region is held. Malformed tool markup is flushed back as ordinary text without losing bytes.
 
 ### Local response state and resources
 
@@ -392,11 +413,12 @@ checkpoint reuse applies naturally.
 When a stored Response carries `ninfer_session`, every `previous_response_id` continuation must
 send the same digest. Retrieve, delete, input-Item, and cancel requests carry that digest in the
 `X-NInfer-Session` header because those routes have no request body. A different, duplicated, malformed,
-or omitted session receives the same 404 `response_not_found` as an unknown ID and cannot read, delete,
-or continue that session's DAG. The header is accepted only when API authentication is configured and
-is included in the CORS allowlist. Every fork from the same parent and session selects the same
-`http:<digest>` Engine lineage. Parent deletion does not invalidate already stored descendants.
-Changing `ninfer_request_id` never changes lineage selection.
+or omitted session cannot read, delete, or continue that session's DAG. Failed
+`previous_response_id` continuation returns 404 `previous_response_not_found`; retrieval, delete,
+input-Item, and cancel routes retain 404 `response_not_found`. The header is accepted only when API
+authentication is configured and is included in the CORS allowlist. Every fork from the same parent
+and session selects the same `http:<digest>` Engine lineage. Parent deletion does not invalidate
+already stored descendants. Changing `ninfer_request_id` never changes lineage selection.
 
 Treat `ninfer_session` as a credential, not a label. Compute the 64-character lowercase digest from a
 raw session identifier with at least 128 bits of CSPRNG entropy (or an equivalent keyed construction),
@@ -452,8 +474,8 @@ curl http://127.0.0.1:8080/v1/responses/input_tokens \
 
 Unsupported Create fields include Conversations, prompt templates, context management, hosted
 moderation, prompt-cache controls, safety/user identifiers, Structured Outputs/JSON mode,
-non-empty `include`, background execution, compaction, files/audio, and OpenAI-hosted/MCP/custom
-tools. These are compatibility boundaries, not silently accepted placeholders.
+non-empty `include`, background execution, compaction, files/audio, and OpenAI-hosted/MCP tools.
+These are compatibility boundaries, not silently accepted placeholders.
 
 ## Anthropic Messages
 

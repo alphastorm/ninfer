@@ -298,57 +298,70 @@ std::string parse_reasoning_item(const Json& item, Json& canonical) {
     return text;
 }
 
-ToolCall parse_function_call_item(const Json& item, Json& canonical) {
+ToolCall parse_tool_call_item(const Json& item, ToolKind kind, Json& canonical) {
+    const bool custom          = kind == ToolKind::Custom;
+    const char* wire_type      = custom ? "custom_tool_call" : "function_call";
+    const char* input_field    = custom ? "input" : "arguments";
+    const char* item_id_prefix = custom ? "ctc" : "fc";
     ToolCall call;
     if (!item.contains("call_id") || !item.at("call_id").is_string() ||
         item.at("call_id").get<std::string>().empty()) {
-        bad_request("function_call must contain a non-empty call_id", "input");
+        bad_request(std::string(wire_type) + " must contain a non-empty call_id", "input");
     }
-    call.id   = item.at("call_id").get<std::string>();
-    call.name = require_function_name(item, "input");
-    if (!item.contains("arguments") || !item.at("arguments").is_string()) {
-        bad_request("function_call arguments must be a JSON string", "input");
+    call.id             = item.at("call_id").get<std::string>();
+    call.name           = require_function_name(item, "input");
+    call.kind           = kind;
+    if (!item.contains(input_field) || !item.at(input_field).is_string()) {
+        bad_request(custom ? "custom_tool_call input must be a string"
+                           : "function_call arguments must be a JSON string",
+                    "input");
     }
-    call.arguments_json  = item.at("arguments").get<std::string>();
-    const Json arguments = Json::parse(call.arguments_json, nullptr, false);
-    if (arguments.is_discarded() || !arguments.is_object()) {
-        bad_request("function_call arguments must encode a JSON object", "input");
+    call.arguments_json = item.at(input_field).get<std::string>();
+    if (!custom) {
+        const Json arguments = Json::parse(call.arguments_json, nullptr, false);
+        if (arguments.is_discarded() || !arguments.is_object()) {
+            bad_request("function_call arguments must encode a JSON object", "input");
+        }
     }
     if (item.contains("status") && !item.at("status").is_null() &&
         (!item.at("status").is_string() || item.at("status").get<std::string>() != "completed")) {
-        bad_request("function_call status must be 'completed'", "input");
+        bad_request(std::string(wire_type) + " status must be 'completed'", "input");
     }
-    canonical = {{"id", item_id(item, "fc", "input")},
-                 {"type", "function_call"},
+    canonical = {{"id", item_id(item, item_id_prefix, "input")},
+                 {"type", wire_type},
                  {"status", "completed"},
                  {"call_id", call.id},
                  {"name", call.name},
-                 {"arguments", call.arguments_json}};
+                 {input_field, call.arguments_json}};
     return call;
 }
 
-ChatTurn parse_function_call_output_item(const Json& item, Json& canonical) {
+ChatTurn parse_tool_call_output_item(const Json& item, ToolKind kind, Json& canonical) {
+    const bool custom          = kind == ToolKind::Custom;
+    const char* wire_type      = custom ? "custom_tool_call_output" : "function_call_output";
+    const char* item_id_prefix = custom ? "ctco" : "fco";
     if (!item.contains("call_id") || !item.at("call_id").is_string() ||
         item.at("call_id").get<std::string>().empty()) {
-        bad_request("function_call_output must contain a non-empty call_id", "input");
+        bad_request(std::string(wire_type) + " must contain a non-empty call_id", "input");
     }
     if (!item.contains("output") || !item.at("output").is_string()) {
-        bad_request("function_call_output output must be a string", "input");
+        bad_request(std::string(wire_type) + " output must be a string", "input");
     }
     if (item.contains("status") && !item.at("status").is_null() &&
         (!item.at("status").is_string() || item.at("status").get<std::string>() != "completed")) {
-        bad_request("function_call_output status must be 'completed'", "input");
+        bad_request(std::string(wire_type) + " status must be 'completed'", "input");
     }
     ChatTurn turn;
     turn.role         = ChatRole::Tool;
     turn.tool_call_id = item.at("call_id").get<std::string>();
+    turn.tool_kind    = kind;
     ContentPart content;
     content.kind     = ContentKind::Text;
     content.type_raw = "input_text";
     content.text     = item.at("output").get<std::string>();
     turn.content.push_back(std::move(content));
-    canonical = {{"id", item_id(item, "fco", "input")},
-                 {"type", "function_call_output"},
+    canonical = {{"id", item_id(item, item_id_prefix, "input")},
+                 {"type", wire_type},
                  {"status", "completed"},
                  {"call_id", turn.tool_call_id},
                  {"output", item.at("output")}};
@@ -368,7 +381,7 @@ void parse_input(const Json& input, ResponsesRequest& out) {
 
     std::string pending_reasoning;
     bool pending_reasoning_present = false;
-    bool can_group_function_calls  = false;
+    bool can_group_tool_calls      = false;
     std::unordered_set<std::string> ids;
     for (std::size_t index = 0; index < values.size(); ++index) {
         const Json& item = values.at(index);
@@ -400,18 +413,20 @@ void parse_input(const Json& input, ResponsesRequest& out) {
                 pending_reasoning_present = false;
             }
             out.input_turns.push_back(std::move(message.turn));
-            canonical                = std::move(message.canonical);
-            can_group_function_calls = false;
+            canonical            = std::move(message.canonical);
+            can_group_tool_calls = false;
         } else if (type == "reasoning") {
             if (pending_reasoning_present) {
                 bad_request("adjacent reasoning Items are not supported", "input");
             }
             pending_reasoning         = parse_reasoning_item(item, canonical);
             pending_reasoning_present = true;
-            can_group_function_calls  = false;
-        } else if (type == "function_call") {
-            ToolCall call = parse_function_call_item(item, canonical);
-            if (can_group_function_calls && !pending_reasoning_present &&
+            can_group_tool_calls      = false;
+        } else if (type == "function_call" || type == "custom_tool_call") {
+            const ToolKind kind =
+                type == "custom_tool_call" ? ToolKind::Custom : ToolKind::Function;
+            ToolCall call = parse_tool_call_item(item, kind, canonical);
+            if (can_group_tool_calls && !pending_reasoning_present &&
                 !out.input_turns.empty() && out.input_turns.back().role == ChatRole::Assistant &&
                 out.input_turns.back().content.empty() &&
                 !out.input_turns.back().tool_calls.empty()) {
@@ -425,14 +440,16 @@ void parse_input(const Json& input, ResponsesRequest& out) {
                 turn.tool_calls.push_back(std::move(call));
                 out.input_turns.push_back(std::move(turn));
             }
-            can_group_function_calls = true;
-        } else if (type == "function_call_output") {
+            can_group_tool_calls = true;
+        } else if (type == "function_call_output" || type == "custom_tool_call_output") {
             if (pending_reasoning_present) {
                 bad_request("a reasoning Item must be followed by an assistant output Item",
                             "input");
             }
-            out.input_turns.push_back(parse_function_call_output_item(item, canonical));
-            can_group_function_calls = false;
+            const ToolKind kind =
+                type == "custom_tool_call_output" ? ToolKind::Custom : ToolKind::Function;
+            out.input_turns.push_back(parse_tool_call_output_item(item, kind, canonical));
+            can_group_tool_calls = false;
         } else if (type == "input_file") {
             bad_request("input_file is not supported", "input", "file_inputs_not_supported");
         } else {
@@ -448,6 +465,62 @@ void parse_input(const Json& input, ResponsesRequest& out) {
     }
 }
 
+std::optional<Json> parse_custom_tool_format(const Json& item) {
+    if (!item.contains("format") || item.at("format").is_null()) { return std::nullopt; }
+    const Json& format = item.at("format");
+    if (!format.is_object() || !format.contains("type") || !format.at("type").is_string()) {
+        bad_request("custom tool format must be an object with a string type", "tools");
+    }
+    const std::string type = format.at("type").get<std::string>();
+    if (type == "text") {
+        for (auto it = format.begin(); it != format.end(); ++it) {
+            if (it.key() != "type") {
+                bad_request("custom text format contains unsupported field: " + it.key(),
+                            "tools", "custom_tool_format_not_supported");
+            }
+        }
+        return Json{{"type", "text"}};
+    }
+    if (type != "grammar") {
+        bad_request("custom tool format type is not supported: " + type, "tools",
+                    "custom_tool_format_not_supported");
+    }
+    for (auto it = format.begin(); it != format.end(); ++it) {
+        if (it.key() != "type" && it.key() != "syntax" && it.key() != "definition") {
+            bad_request("custom grammar format contains unsupported field: " + it.key(), "tools",
+                        "custom_tool_format_not_supported");
+        }
+    }
+    if (!format.contains("syntax") || !format.at("syntax").is_string()) {
+        bad_request("custom grammar format must contain a string syntax", "tools");
+    }
+    const std::string syntax = format.at("syntax").get<std::string>();
+    if (syntax != "lark" && syntax != "regex") {
+        bad_request("custom grammar syntax must be 'lark' or 'regex'", "tools",
+                    "custom_tool_format_not_supported");
+    }
+    if (!format.contains("definition") || !format.at("definition").is_string() ||
+        format.at("definition").get_ref<const std::string&>().empty()) {
+        bad_request("custom grammar format must contain a non-empty string definition", "tools");
+    }
+    return Json{{"type", "grammar"},
+                {"syntax", syntax},
+                {"definition", format.at("definition")}};
+}
+
+Json custom_tool_parameters(const std::optional<Json>& format) {
+    Json input = {{"type", "string"}};
+    if (format && format->at("type") == "grammar") {
+        input["description"] = "Input must match this " + format->at("syntax").get<std::string>() +
+                               " grammar:\n" +
+                               format->at("definition").get<std::string>();
+    }
+    return Json{{"type", "object"},
+                {"properties", Json{{"input", std::move(input)}}},
+                {"required", Json::array({"input"})},
+                {"additionalProperties", false}};
+}
+
 void parse_tools(const Json& body, ResponsesRequest& out) {
     if (!body.contains("tools") || body.at("tools").is_null()) { return; }
     if (!body.at("tools").is_array()) { bad_request("tools must be an array", "tools"); }
@@ -456,19 +529,45 @@ void parse_tools(const Json& body, ResponsesRequest& out) {
         if (!item.is_object() || !item.contains("type") || !item.at("type").is_string()) {
             bad_request("tools entries must be objects with a string type", "tools");
         }
-        if (item.at("type").get<std::string>() != "function") {
-            bad_request("only function tools are supported", "tools", "tool_type_not_supported");
+        const std::string type = item.at("type").get<std::string>();
+        if (type != "function" && type != "custom") {
+            bad_request("only function and custom tools are supported", "tools",
+                        "tool_type_not_supported");
         }
         ToolDefinition tool;
+        tool.kind = type == "custom" ? ToolKind::Custom : ToolKind::Function;
         tool.name = require_function_name(item, "tools");
         if (!names.insert(tool.name).second) {
-            bad_request("duplicate function tool name: " + tool.name, "tools");
+            bad_request("duplicate " + type + " tool name: " + tool.name, "tools");
         }
         if (item.contains("description") && !item.at("description").is_null()) {
             if (!item.at("description").is_string()) {
-                bad_request("function description must be a string", "tools");
+                bad_request(type + " description must be a string", "tools");
             }
             tool.description = item.at("description").get<std::string>();
+        }
+        if (tool.kind == ToolKind::Custom) {
+            for (auto it = item.begin(); it != item.end(); ++it) {
+                if (it.key() != "type" && it.key() != "name" && it.key() != "description" &&
+                    it.key() != "format") {
+                    bad_request("custom tool contains unsupported field: " + it.key(), "tools",
+                                "custom_tool_option_not_supported");
+                }
+            }
+            std::optional<Json> format = parse_custom_tool_format(item);
+            Json parameters            = custom_tool_parameters(format);
+            tool.parameters_json       = parameters.dump();
+            Json canonical             = {{"type", "custom"}, {"name", tool.name}};
+            if (!tool.description.empty()) { canonical["description"] = tool.description; }
+            if (format) { canonical["format"] = std::move(*format); }
+            Json function =
+                {{"name", tool.name}, {"parameters", std::move(parameters)}, {"strict", false}};
+            if (!tool.description.empty()) { function["description"] = tool.description; }
+            tool.definition_json =
+                Json{{"type", "function"}, {"function", std::move(function)}}.dump();
+            out.generation.tools.push_back(std::move(tool));
+            out.tools.push_back(std::move(canonical));
+            continue;
         }
         Json parameters = Json{{"type", "object"}, {"properties", Json::object()}};
         if (item.contains("parameters") && !item.at("parameters").is_null()) {
@@ -871,10 +970,20 @@ BuiltResponse build_response(const std::string& id, std::int64_t created_at,
 
     ids.function_calls.resize(outcome.tool_calls.size());
     for (std::size_t index = 0; index < outcome.tool_calls.size(); ++index) {
-        if (ids.function_calls[index].empty()) {
-            ids.function_calls[index] = new_response_item_id("fc");
-        }
         const ToolCall& call = outcome.tool_calls[index];
+        if (ids.function_calls[index].empty()) {
+            ids.function_calls[index] =
+                new_response_item_id(call.kind == ToolKind::Custom ? "ctc" : "fc");
+        }
+        if (call.kind == ToolKind::Custom) {
+            built.output_items.push_back(Json{{"id", ids.function_calls[index]},
+                                              {"type", "custom_tool_call"},
+                                              {"status", "completed"},
+                                              {"call_id", call.id},
+                                              {"name", call.name},
+                                              {"input", call.arguments_json}});
+            continue;
+        }
         built.output_items.push_back(Json{{"id", ids.function_calls[index]},
                                           {"type", "function_call"},
                                           {"status", "completed"},
@@ -997,6 +1106,26 @@ BuiltResponse make_response_object(const std::string& id, std::int64_t created_a
 
 std::string make_response_input_tokens_body(int input_tokens) {
     return Json{{"object", "response.input_tokens"}, {"input_tokens", input_tokens}}.dump();
+}
+
+ApiError make_response_not_found_error(const std::string& id) {
+    ApiError error;
+    error.status  = 404;
+    error.type    = "invalid_request_error";
+    error.param   = "response_id";
+    error.code    = "response_not_found";
+    error.message = "response '" + id + "' not found";
+    return error;
+}
+
+ApiError make_previous_response_not_found_error(const std::string& id) {
+    ApiError error;
+    error.status  = 404;
+    error.type    = "invalid_request_error";
+    error.param   = "previous_response_id";
+    error.code    = "previous_response_not_found";
+    error.message = "previous response '" + id + "' not found";
+    return error;
 }
 
 class ResponsesEventStream::Impl {
@@ -1220,9 +1349,41 @@ ResponsesStreamFinish ResponsesEventStream::finish(const GenerationOutcome& outc
 
     impl_->ids.function_calls.reserve(outcome.tool_calls.size());
     for (const ToolCall& call : outcome.tool_calls) {
-        const std::string item_id = new_response_item_id("fc");
+        const std::string item_id =
+            new_response_item_id(call.kind == ToolKind::Custom ? "ctc" : "fc");
         impl_->ids.function_calls.push_back(item_id);
         const int output_index = impl_->next_output_index++;
+        if (call.kind == ToolKind::Custom) {
+            const Json added_item = {{"id", item_id},
+                                     {"type", "custom_tool_call"},
+                                     {"status", "in_progress"},
+                                     {"call_id", call.id},
+                                     {"name", call.name},
+                                     {"input", ""}};
+            finished.events_before_terminal.push_back(
+                sse(impl_->event("response.output_item.added",
+                                 Json{{"output_index", output_index}, {"item", added_item}})));
+            if (!call.arguments_json.empty()) {
+                finished.events_before_terminal.push_back(sse(impl_->event(
+                    "response.custom_tool_call_input.delta", Json{{"item_id", item_id},
+                                                                  {"output_index", output_index},
+                                                                  {"delta", call.arguments_json}})));
+            }
+            finished.events_before_terminal.push_back(sse(impl_->event(
+                "response.custom_tool_call_input.done", Json{{"item_id", item_id},
+                                                             {"output_index", output_index},
+                                                             {"input", call.arguments_json}})));
+            const Json done_item = {{"id", item_id},
+                                    {"type", "custom_tool_call"},
+                                    {"status", "completed"},
+                                    {"call_id", call.id},
+                                    {"name", call.name},
+                                    {"input", call.arguments_json}};
+            finished.events_before_terminal.push_back(
+                sse(impl_->event("response.output_item.done",
+                                 Json{{"output_index", output_index}, {"item", done_item}})));
+            continue;
+        }
         const Json added_item  = {{"id", item_id},           {"type", "function_call"},
                                   {"status", "in_progress"}, {"call_id", call.id},
                                   {"name", call.name},       {"arguments", ""}};

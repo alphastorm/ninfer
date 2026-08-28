@@ -81,6 +81,12 @@ Json parse_event(const std::string& event) {
     return payload;
 }
 
+Json normalize_custom_call_ids(Json item) {
+    item["id"]      = "<ITEM_ID>";
+    item["call_id"] = "<CALL_ID>";
+    return item;
+}
+
 int test_basic_request() {
     const Json body                = {{"model", "qwen3.6-27b"},
                                       {"input", "hello"},
@@ -418,6 +424,73 @@ int test_typed_items_and_tools() {
     return failures;
 }
 
+int test_custom_tools_and_omp_replay() {
+    const std::string custom_input = "print('ok')";
+    const Json custom_call         = {{"type", "custom_tool_call"},
+                                      {"id", "ctc_eval_1"},
+                                      {"status", "completed"},
+                                      {"call_id", "call_eval_1"},
+                                      {"name", "eval"},
+                                      {"input", custom_input}};
+    const Json custom_output       = {{"type", "custom_tool_call_output"},
+                                      {"call_id", "call_eval_1"},
+                                      {"output", "ok"}};
+    const Json custom_tool         = {{"type", "custom"},
+                                      {"name", "eval"},
+                                      {"description", "Evaluate one code cell"},
+                                      {"format", Json{{"type", "grammar"},
+                                                       {"syntax", "lark"},
+                                                       {"definition", "start: /.+/"}}}};
+    const ResponsesRequest request = parse_responses_request(
+        Json{{"model", "qwen3.6-27b"},
+             {"input", Json::array({custom_call, custom_output})},
+             {"tools", Json::array({custom_tool})},
+             {"max_output_tokens", 32}},
+        limits());
+
+    int failures = 0;
+    failures += check(request.input_turns.size() == 2 &&
+                          request.input_turns[0].role == ninfer::ChatRole::Assistant &&
+                          request.input_turns[0].tool_calls.size() == 1,
+                      "OMP custom call became one assistant tool turn");
+    const ToolCall& call = request.input_turns[0].tool_calls[0];
+    failures += check(call.kind == ToolKind::Custom && call.id == "call_eval_1" &&
+                          call.name == "eval" && call.arguments_json == custom_input,
+                      "custom call_id, name, and raw input retained");
+    failures += check(request.input_turns[1].role == ninfer::ChatRole::Tool &&
+                          request.input_turns[1].tool_kind == ToolKind::Custom &&
+                          request.input_turns[1].tool_call_id == "call_eval_1" &&
+                          request.input_turns[1].content[0].text == "ok",
+                      "custom output call_id and output retained");
+    failures += check(request.input_items[0] == custom_call &&
+                          request.input_items[1].at("type") == "custom_tool_call_output" &&
+                          request.input_items[1].at("call_id") == "call_eval_1" &&
+                          request.input_items[1].at("output") == "ok" &&
+                          request.input_items[1].at("id").get<std::string>().starts_with("ctco_"),
+                      "real OMP replay shape canonicalized without semantic loss");
+
+    failures += check(request.generation.tools.size() == 1 &&
+                          request.generation.tools[0].kind == ToolKind::Custom &&
+                          request.tools[0].at("type") == "custom" &&
+                          request.tools[0].at("format").at("syntax") == "lark",
+                      "custom definition and format retained on the Responses wire");
+    const Json prompt_tool = Json::parse(request.generation.tools[0].definition_json);
+    const Json& parameters = prompt_tool.at("function").at("parameters");
+    failures += check(prompt_tool.at("type") == "function" &&
+                          parameters.at("properties").size() == 1 &&
+                          parameters.at("properties").at("input").at("type") == "string" &&
+                          parameters.at("required") == Json::array({"input"}),
+                      "custom definition maps to one Qwen raw string input parameter");
+
+    ResolvedPromptSemantics semantics;
+    const ninfer::PromptInput prompt = to_prompt_input(request.generation, semantics, {});
+    failures += check(prompt.messages[0].tool_calls.size() == 1 &&
+                          Json::parse(prompt.messages[0].tool_calls[0].arguments_json).at("input") ==
+                              custom_input,
+                      "retained custom call maps back through the Qwen input parameter");
+    return failures;
+}
+
 int test_explicit_rejections() {
     const Json base = {{"model", "qwen3.6-27b"}, {"input", "hello"}, {"max_output_tokens", 32}};
     int failures    = 0;
@@ -471,6 +544,44 @@ int test_explicit_rejections() {
                                      {"strict", false}}});
     failures += check(throws_api([&] { (void)parse_responses_request(dup, limits()); }),
                       "duplicate function tool names rejected");
+
+    Json malformed_format     = base;
+    malformed_format["tools"] = Json::array({Json{{"type", "custom"},
+                                                    {"name", "eval"},
+                                                    {"format", Json{{"type", "grammar"},
+                                                                    {"definition", "start: x"}}}}});
+    failures += check(
+        throws_api([&] { (void)parse_responses_request(malformed_format, limits()); }),
+        "custom grammar without syntax rejected");
+
+    Json unsupported_format     = base;
+    unsupported_format["tools"] = Json::array({Json{{"type", "custom"},
+                                                      {"name", "eval"},
+                                                      {"format", Json{{"type", "grammar"},
+                                                                      {"syntax", "peg"},
+                                                                      {"definition", "x"}}}}});
+    failures += check(api_code([&] {
+                          (void)parse_responses_request(unsupported_format, limits());
+                      }) == "custom_tool_format_not_supported",
+                      "unsupported custom grammar syntax rejected explicitly");
+
+    Json malformed_custom_call = base;
+    malformed_custom_call["input"] = Json::array({Json{{"type", "custom_tool_call"},
+                                                         {"id", "ctc_bad"},
+                                                         {"status", "completed"},
+                                                         {"call_id", "call_bad"},
+                                                         {"name", "eval"},
+                                                         {"input", Json::object()}}});
+    failures += check(
+        throws_api([&] { (void)parse_responses_request(malformed_custom_call, limits()); }),
+        "non-string custom call input rejected");
+
+    Json unsupported_item = base;
+    unsupported_item["input"] =
+        Json::array({Json{{"type", "custom_tool_result"}, {"call_id", "call_bad"}}});
+    failures += check(api_code([&] { (void)parse_responses_request(unsupported_item, limits()); }) ==
+                          "item_type_not_supported",
+                      "unsupported Item types fail closed");
     return failures;
 }
 
@@ -628,6 +739,92 @@ int test_sse_function_call() {
     return failures;
 }
 
+int test_custom_response_and_sse() {
+    const std::string custom_input = "print('ok')";
+    ResponsesRequest request = parse_responses_request(
+        Json{{"model", "qwen3.6-27b"},
+             {"input", "run it"},
+             {"tools", Json::array({Json{{"type", "custom"},
+                                          {"name", "eval"},
+                                          {"description", "Evaluate code"},
+                                          {"format", Json{{"type", "text"}}}}})},
+             {"max_output_tokens", 32},
+             {"stream", true}},
+        limits());
+    GenerationOutcome outcome;
+    outcome.prompt_tokens     = 8;
+    outcome.completion_tokens = 4;
+    outcome.finish_reason     = ninfer::FinishReason::StopToken;
+    outcome.tool_calls.push_back(
+        ToolCall{"call_eval_1", "eval", custom_input, ToolKind::Custom});
+
+    const Json expected = {{"id", "<ITEM_ID>"},
+                           {"type", "custom_tool_call"},
+                           {"status", "completed"},
+                           {"call_id", "<CALL_ID>"},
+                           {"name", "eval"},
+                           {"input", custom_input}};
+    const BuiltResponse built = make_response_object("resp_custom", 123, request, {}, outcome);
+    int failures              = 0;
+    failures += check(built.body.at("output").size() == 1 &&
+                          normalize_custom_call_ids(built.body.at("output").at(0)) == expected,
+                      "terminal JSON matches normalized Codex custom_tool_call fixture");
+    failures += check(built.body.at("output").at(0).at("id").get<std::string>().starts_with(
+                          "ctc_") &&
+                          built.output_history[0].tool_calls[0].kind == ToolKind::Custom,
+                      "terminal custom Item and continuation retain custom identity");
+
+    ResponsesEventStream encoder("resp_custom_stream", 123, request, {});
+    (void)encoder.start();
+    ResponsesStreamFinish finish = encoder.finish(outcome);
+    Json added_item;
+    Json done_item;
+    std::string delta;
+    std::string item_id;
+    bool saw_input_done    = false;
+    bool saw_function_wire = false;
+    for (const std::string& event : finish.events_before_terminal) {
+        const Json payload = parse_event(event);
+        const std::string type = payload.at("type").get<std::string>();
+        saw_function_wire = saw_function_wire || type == "response.function_call_arguments.delta" ||
+                            type == "response.function_call_arguments.done";
+        if (type == "response.output_item.added" &&
+            payload.at("item").at("type") == "custom_tool_call") {
+            added_item = payload.at("item");
+            item_id    = added_item.at("id").get<std::string>();
+        } else if (type == "response.custom_tool_call_input.delta") {
+            delta += payload.at("delta").get<std::string>();
+            failures += check(payload.at("item_id") == item_id,
+                              "custom input delta changed Item id");
+        } else if (type == "response.custom_tool_call_input.done") {
+            saw_input_done = true;
+            failures += check(payload.at("item_id") == item_id &&
+                                  payload.at("input") == custom_input,
+                              "custom input done changed Item id or input");
+        } else if (type == "response.output_item.done" &&
+                   payload.at("item").at("type") == "custom_tool_call") {
+            done_item = payload.at("item");
+        }
+    }
+    const Json& terminal_item = finish.response.body.at("output").at(0);
+    failures += check(!added_item.is_null() && added_item.at("id") == item_id &&
+                          added_item.at("call_id") == "call_eval_1" &&
+                          added_item.at("input") == "",
+                      "custom output_item.added carries stable item and call IDs");
+    failures += check(delta == custom_input && saw_input_done && !saw_function_wire,
+                      "custom SSE uses custom input delta/done events only");
+    failures += check(normalize_custom_call_ids(done_item) == expected &&
+                          done_item.at("id") == item_id && done_item.at("call_id") == "call_eval_1" &&
+                          terminal_item.at("id") == item_id &&
+                          terminal_item.at("call_id") == "call_eval_1" &&
+                          normalize_custom_call_ids(terminal_item) == expected,
+                      "SSE done and terminal Items share stable IDs and normalized shape");
+    const Json terminal_event = parse_event(encoder.terminal(finish.response));
+    failures += check(terminal_event.at("response").at("output").at(0).at("id") == item_id,
+                      "response.completed retained the streamed custom Item id");
+    return failures;
+}
+
 int test_input_tokens_schema() {
     const ResponsesRequest request = parse_response_input_tokens_request(
         Json{{"model", "qwen3.6-27b"}, {"input", "hello"}}, limits());
@@ -657,10 +854,12 @@ int main() {
     failures += test_preserve_thinking_options_and_inheritance();
     failures += test_reasoning_effort();
     failures += test_typed_items_and_tools();
+    failures += test_custom_tools_and_omp_replay();
     failures += test_explicit_rejections();
     failures += test_response_object();
     failures += test_sse_sequence();
     failures += test_sse_function_call();
+    failures += test_custom_response_and_sse();
     failures += test_input_tokens_schema();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;

@@ -90,6 +90,7 @@ bool explicit_parameter_encoding(const Json& property,
 ToolArgumentTypeContracts::Tool compile_tool_contract(const ToolDefinition& definition) {
     ToolArgumentTypeContracts::Tool contract;
     contract.name = definition.name;
+    contract.kind = definition.kind;
 
     const Json schema = Json::parse(definition.parameters_json, nullptr, false);
     if (!schema.is_object()) { return contract; }
@@ -107,7 +108,7 @@ ToolArgumentTypeContracts::Tool compile_tool_contract(const ToolDefinition& defi
 
 bool same_contract(const ToolArgumentTypeContracts::Tool& lhs,
                    const ToolArgumentTypeContracts::Tool& rhs) {
-    if (lhs.parameters.size() != rhs.parameters.size()) { return false; }
+    if (lhs.kind != rhs.kind || lhs.parameters.size() != rhs.parameters.size()) { return false; }
     for (std::size_t i = 0; i < lhs.parameters.size(); ++i) {
         if (lhs.parameters[i].name != rhs.parameters[i].name ||
             lhs.parameters[i].encoding != rhs.parameters[i].encoding) {
@@ -132,13 +133,19 @@ void append_tool_contract(ToolArgumentTypeContracts& contracts, const ToolDefini
     }
 }
 
-const ToolArgumentTypeContracts::Parameter*
-find_parameter_contract(const ToolArgumentTypeContracts& contracts, std::string_view tool_name,
-                        std::string_view parameter_name) {
+const ToolArgumentTypeContracts::Tool*
+find_tool_contract(const ToolArgumentTypeContracts& contracts, std::string_view tool_name) {
     const auto tool =
         std::find_if(contracts.tools.begin(), contracts.tools.end(),
                      [&](const auto& candidate) { return candidate.name == tool_name; });
-    if (tool == contracts.tools.end() || !tool->unambiguous) { return nullptr; }
+    return tool == contracts.tools.end() || !tool->unambiguous ? nullptr : &*tool;
+}
+
+const ToolArgumentTypeContracts::Parameter*
+find_parameter_contract(const ToolArgumentTypeContracts& contracts, std::string_view tool_name,
+                        std::string_view parameter_name) {
+    const ToolArgumentTypeContracts::Tool* tool = find_tool_contract(contracts, tool_name);
+    if (tool == nullptr) { return nullptr; }
     const auto parameter =
         std::find_if(tool->parameters.begin(), tool->parameters.end(),
                      [&](const auto& candidate) { return candidate.name == parameter_name; });
@@ -215,10 +222,12 @@ bool parse_one_tool_call(std::string_view block, std::size_t max_name_length,
     const std::string_view params = block.substr(pos, function_end - pos);
     Json args                     = Json::object();
     std::size_t param_pos         = 0;
+    std::size_t parameter_count   = 0;
     for (;;) {
         skip_ws(params, param_pos);
         if (param_pos >= params.size()) { break; }
         if (!parse_parameter(params, param_pos, args, name, contracts)) { return false; }
+        ++parameter_count;
     }
 
     pos = function_end + kFunctionClose.size();
@@ -227,7 +236,17 @@ bool parse_one_tool_call(std::string_view block, std::size_t max_name_length,
 
     out.id             = new_tool_call_id();
     out.name           = name;
-    out.arguments_json = args.dump();
+    const ToolArgumentTypeContracts::Tool* contract = find_tool_contract(contracts, name);
+    if (contract != nullptr && contract->kind == ToolKind::Custom) {
+        if (parameter_count != 1 || args.size() != 1 || !args.contains("input") ||
+            !args.at("input").is_string()) {
+            return false;
+        }
+        out.arguments_json = args.at("input").get<std::string>();
+        out.kind           = ToolKind::Custom;
+    } else {
+        out.arguments_json = args.dump();
+    }
     return true;
 }
 
