@@ -24,9 +24,6 @@ param(
     [Parameter(ParameterSetName = 'Install')]
     [switch]$NoStart,
 
-    [Parameter(DontShow = $true)]
-    [switch]$InternalSourceTestMode,
-
     [Parameter(Mandatory = $true, ParameterSetName = 'Repair')]
     [switch]$RepairInterruptedInstall
 )
@@ -34,19 +31,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:InstallTestMode = [bool]$InternalSourceTestMode
+$script:InstallTestMode = $false
 if ($script:InstallTestMode) {
-    $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
-    $gitRoot = @(& git -C $PSScriptRoot rev-parse --show-toplevel 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $gitRoot.Count -ne 1 -or
-        -not [string]::Equals(
-            [IO.Path]::GetFullPath([string]$gitRoot[0]),
-            $sourceRoot,
-            [StringComparison]::OrdinalIgnoreCase
-        ) -or
-        -not (Test-Path -LiteralPath (Join-Path $sourceRoot 'tests\test_windows_release_lifecycle.ps1') -PathType Leaf)) {
-        throw 'internal installer test mode is available only from the source worktree'
-    }
     $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd(
         [IO.Path]::DirectorySeparatorChar
     ) + [IO.Path]::DirectorySeparatorChar

@@ -144,8 +144,8 @@ class WindowsReleaseContractTests(unittest.TestCase):
         guide = (ROOT / "docs/rtx-3090-windows.md").read_text(encoding="utf-8")
 
         self.assertNotIn("NINFER_INSTALL_TEST_MODE", installer)
-        self.assertIn("InternalSourceTestMode", installer)
-        self.assertIn("available only from the source worktree", installer)
+        self.assertIn("$script:InstallTestMode = $false", installer)
+        self.assertNotIn("[switch]$InternalSourceTestMode", installer)
         self.assertIn("Control-GpuOwner.ps1", installer)
         self.assertIn("':(OI)(CI)RX'", installer)
         self.assertNotIn("':(OI)(CI)M'", installer)

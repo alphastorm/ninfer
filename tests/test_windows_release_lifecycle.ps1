@@ -424,7 +424,6 @@ function Invoke-FixtureInstall(
             ApiKeyFile = $Secret.path
             GpuOwnerControllerPath = $script:OwnerControllerPath
             StateRoot = $script:StateRoot
-            InternalSourceTestMode = $true
         }
         if ($NoStart) { $parameters.NoStart = $true }
         $output = @(& $InstallerPath @parameters)
@@ -438,7 +437,7 @@ function Invoke-FixtureInstall(
 }
 
 function Invoke-InstallerRepair {
-    $output = @(& $InstallerPath -RepairInterruptedInstall -StateRoot $script:StateRoot -InternalSourceTestMode)
+    $output = @(& $InstallerPath -RepairInterruptedInstall -StateRoot $script:StateRoot)
     if ($output.Count -eq 0) { throw 'installer repair returned no receipt' }
     return ([string]$output[-1] | ConvertFrom-Json)
 }
@@ -475,6 +474,14 @@ function Assert-CandidateLayout([object]$Release, [string]$ReleaseId) {
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('ninfer-release-lifecycle-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot | Out-Null
+$installerSource = Get-Content -LiteralPath $InstallerPath -Raw -Encoding UTF8
+$testModeNeedle = '$script:InstallTestMode = $false'
+if ([regex]::Matches($installerSource, [regex]::Escape($testModeNeedle)).Count -ne 1) {
+    throw 'production installer test-mode invariant changed'
+}
+$installerSource = $installerSource.Replace($testModeNeedle, '$script:InstallTestMode = $true')
+$InstallerPath = Join-Path $testRoot 'Install-Release.test.ps1'
+[IO.File]::WriteAllText($InstallerPath, $installerSource, [Text.UTF8Encoding]::new($false))
 $script:StateRoot = Join-Path $testRoot 'state'
 $script:ModelPath = Join-Path $testRoot 'external-model.ninfer'
 $script:OwnerStatePath = Join-Path $testRoot 'owner-state.json'
@@ -515,7 +522,7 @@ try {
     [IO.File]::WriteAllText($multilineSecret, $multilineText, [Text.UTF8Encoding]::new($false))
     $multilineRejected = $false
     try {
-        & $InstallerPath -PackagePath $basePackage.path -PackageSha256 $basePackage.sha256 -ModelArtifactPath $script:ModelPath -ApiKeyFile $multilineSecret -GpuOwnerControllerPath $script:OwnerControllerPath -StateRoot $script:StateRoot -NoStart -InternalSourceTestMode | Out-Null
+        & $InstallerPath -PackagePath $basePackage.path -PackageSha256 $basePackage.sha256 -ModelArtifactPath $script:ModelPath -ApiKeyFile $multilineSecret -GpuOwnerControllerPath $script:OwnerControllerPath -StateRoot $script:StateRoot -NoStart | Out-Null
     }
     catch { $multilineRejected = $_.Exception.Message -like '*exactly one non-empty line*' }
     Assert-True $multilineRejected 'installer accepted a multiline secret file'
