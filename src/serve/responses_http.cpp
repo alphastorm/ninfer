@@ -140,6 +140,16 @@ std::string path_response_id(const httplib::Request& request) {
     return request.matches.size() > 1 ? request.matches[1].str() : std::string();
 }
 
+std::optional<std::string> path_response_session(const httplib::Request& request,
+                                                 bool authentication_configured) {
+    if (!request.has_param("ninfer_session")) { return std::nullopt; }
+    GenerationRequest identity;
+    identity.client_session_sha256 =
+        parse_client_identity_sha256(request.get_param_value("ninfer_session"), "ninfer_session");
+    require_authenticated_client_identity(identity, authentication_configured);
+    return identity.client_session_sha256;
+}
+
 int parse_limit(const httplib::Request& request) {
     if (!request.has_param("limit")) { return 20; }
     const std::string value = request.get_param_value("limit");
@@ -221,9 +231,8 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         apply_client_identity_cache_hints(request.generation, !options_.api_key.empty(),
                                           cache_hints);
         if (request.previous_response_id) {
-            const std::shared_ptr<const StoredResponse> previous =
-                response_store_.get_for_session(*request.previous_response_id,
-                                                request.generation.client_session_sha256);
+            const std::shared_ptr<const StoredResponse> previous = response_store_.get_for_session(
+                *request.previous_response_id, request.generation.client_session_sha256);
             if (!previous) {
                 throw ApiException(response_not_found(*request.previous_response_id));
             }
@@ -289,11 +298,11 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
             BuiltResponse response = make_response_object(id, created, request, runtime, outcome);
             if (request.store) {
                 StoredResponse stored;
-                stored.id          = id;
-                stored.session_key = session_key;
+                stored.id                    = id;
+                stored.session_key           = session_key;
                 stored.client_session_sha256 = request.generation.client_session_sha256;
-                stored.response    = response.body;
-                stored.input_items = std::move(request.input_items);
+                stored.response              = response.body;
+                stored.input_items           = std::move(request.input_items);
                 stored.context =
                     terminal_context(std::move(previous_context), std::move(request.input_turns),
                                      std::move(response.output_history));
@@ -313,15 +322,15 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         return;
     }
 
-    auto stream              = std::make_shared<StreamingResponse>();
-    stream->prepared         = std::move(prepared);
-    stream->input_turns      = std::move(request.input_turns);
-    stream->input_items      = std::move(request.input_items);
-    stream->previous_context = std::move(previous_context);
-    stream->session_key      = std::move(session_key);
+    auto stream                   = std::make_shared<StreamingResponse>();
+    stream->prepared              = std::move(prepared);
+    stream->input_turns           = std::move(request.input_turns);
+    stream->input_items           = std::move(request.input_items);
+    stream->previous_context      = std::move(previous_context);
+    stream->session_key           = std::move(session_key);
     stream->client_session_sha256 = request.generation.client_session_sha256;
-    stream->log_context      = log_context;
-    stream->store            = request.store;
+    stream->log_context           = log_context;
+    stream->store                 = request.store;
     stream->encoder = std::make_unique<ResponsesEventStream>(id, created, std::move(request),
                                                              runtime_values(stream->prepared));
 
@@ -353,14 +362,14 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                 ResponsesStreamFinish finished  = stream->encoder->finish(outcome);
                 if (stream->store) {
                     StoredResponse stored;
-                    stored.id                = finished.response.body.at("id").get<std::string>();
-                    stored.session_key       = stream->session_key;
+                    stored.id          = finished.response.body.at("id").get<std::string>();
+                    stored.session_key = stream->session_key;
                     stored.client_session_sha256 = stream->client_session_sha256;
-                    stored.response          = finished.response.body;
-                    stored.input_items       = std::move(stream->input_items);
-                    stored.context           = terminal_context(std::move(stream->previous_context),
-                                                                std::move(stream->input_turns),
-                                                                std::move(finished.response.output_history));
+                    stored.response              = finished.response.body;
+                    stored.input_items           = std::move(stream->input_items);
+                    stored.context = terminal_context(std::move(stream->previous_context),
+                                                      std::move(stream->input_turns),
+                                                      std::move(finished.response.output_history));
                     stored.preserve_thinking = stream->prepared.preserve_thinking;
                     response_store_.put(std::move(stored));
                 }
@@ -409,50 +418,68 @@ void HttpServer::handle_response_input_tokens(const httplib::Request& req, httpl
 }
 
 void HttpServer::handle_response_get(const httplib::Request& req, httplib::Response& res) {
-    const std::string id                               = path_response_id(req);
-    const std::shared_ptr<const StoredResponse> stored = response_store_.get(id);
-    if (!stored) {
-        write_error(res, response_not_found(id));
-        return;
+    try {
+        const std::string id                               = path_response_id(req);
+        const std::shared_ptr<const StoredResponse> stored = response_store_.get_for_session(
+            id, path_response_session(req, !options_.api_key.empty()));
+        if (!stored) {
+            write_error(res, response_not_found(id));
+            return;
+        }
+        res.set_content(stored->response.dump(), "application/json");
+    } catch (const ApiException& exception) {
+        write_error(res, responses_error(exception.error()));
     }
-    res.set_content(stored->response.dump(), "application/json");
 }
 
 void HttpServer::handle_response_delete(const httplib::Request& req, httplib::Response& res) {
-    const std::string id = path_response_id(req);
-    if (!response_store_.erase(id)) {
-        write_error(res, response_not_found(id));
-        return;
+    try {
+        const std::string id = path_response_id(req);
+        if (!response_store_.erase_for_session(
+                id, path_response_session(req, !options_.api_key.empty()))) {
+            write_error(res, response_not_found(id));
+            return;
+        }
+        res.set_content(Json{{"id", id}, {"object", "response.deleted"}, {"deleted", true}}.dump(),
+                        "application/json");
+    } catch (const ApiException& exception) {
+        write_error(res, responses_error(exception.error()));
     }
-    res.set_content(Json{{"id", id}, {"object", "response.deleted"}, {"deleted", true}}.dump(),
-                    "application/json");
 }
 
 void HttpServer::handle_response_input_items(const httplib::Request& req, httplib::Response& res) {
-    const std::string id                               = path_response_id(req);
-    const std::shared_ptr<const StoredResponse> stored = response_store_.get(id);
-    if (!stored) {
-        write_error(res, response_not_found(id));
-        return;
-    }
     try {
+        const std::string id                               = path_response_id(req);
+        const std::shared_ptr<const StoredResponse> stored = response_store_.get_for_session(
+            id, path_response_session(req, !options_.api_key.empty()));
+        if (!stored) {
+            write_error(res, response_not_found(id));
+            return;
+        }
         res.set_content(paginated_input_items(req, stored->input_items).dump(), "application/json");
-    } catch (const ApiException& exception) { write_error(res, exception.error()); }
+    } catch (const ApiException& exception) {
+        write_error(res, responses_error(exception.error()));
+    }
 }
 
 void HttpServer::handle_response_cancel(const httplib::Request& req, httplib::Response& res) {
-    const std::string id = path_response_id(req);
-    if (!response_store_.get(id)) {
-        write_error(res, response_not_found(id));
-        return;
+    try {
+        const std::string id = path_response_id(req);
+        if (!response_store_.get_for_session(
+                id, path_response_session(req, !options_.api_key.empty()))) {
+            write_error(res, response_not_found(id));
+            return;
+        }
+        ApiError error;
+        error.status  = 400;
+        error.type    = "invalid_request_error";
+        error.code    = "background_not_supported";
+        error.message = "only background responses can be cancelled; NInfer does not support "
+                        "background execution";
+        write_error(res, error);
+    } catch (const ApiException& exception) {
+        write_error(res, responses_error(exception.error()));
     }
-    ApiError error;
-    error.status  = 400;
-    error.type    = "invalid_request_error";
-    error.code    = "background_not_supported";
-    error.message = "only background responses can be cancelled; NInfer does not support "
-                    "background execution";
-    write_error(res, error);
 }
 
 void HttpServer::handle_response_compact(const httplib::Request&, httplib::Response& res) {

@@ -1,5 +1,7 @@
 #include "serve/openai_schema.h"
 
+#include "serve/opaque_id.h"
+
 #include "serve/client_identity.h"
 
 #include <array>
@@ -8,7 +10,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
-#include <random>
 #include <string>
 #include <unordered_set>
 
@@ -489,9 +490,9 @@ Json tool_calls_json(const std::vector<ToolCall>& tool_calls, bool include_index
     Json out = Json::array();
     for (std::size_t i = 0; i < tool_calls.size(); ++i) {
         const ToolCall& call = tool_calls[i];
-        Json item            = {{"id", call.id},
-                                {"type", "function"},
-                                {"function", Json{{"name", call.name}, {"arguments", call.arguments_json}}}};
+        Json item = {{"id", call.id},
+                     {"type", "function"},
+                     {"function", Json{{"name", call.name}, {"arguments", call.arguments_json}}}};
         if (include_index) { item["index"] = static_cast<int>(i); }
         out.push_back(std::move(item));
     }
@@ -727,13 +728,7 @@ std::string make_error_body(const ApiError& error) {
     return Json{{"error", err}}.dump();
 }
 
-std::string new_chat_completion_id() {
-    static thread_local std::mt19937_64 rng{std::random_device{}()};
-    std::uniform_int_distribution<std::uint64_t> dist;
-    std::array<char, 32> buf{};
-    std::snprintf(buf.data(), buf.size(), "%016llx", static_cast<unsigned long long>(dist(rng)));
-    return "chatcmpl-" + std::string(buf.data());
-}
+std::string new_chat_completion_id() { return new_opaque_id("chatcmpl-"); }
 
 std::int64_t unix_time_now() {
     return std::chrono::duration_cast<std::chrono::seconds>(

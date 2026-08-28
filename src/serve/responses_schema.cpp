@@ -1,5 +1,7 @@
 #include "serve/responses_schema.h"
 
+#include "serve/opaque_id.h"
+
 #include "serve/client_identity.h"
 
 #include "serve/generation_service.h"
@@ -14,7 +16,6 @@
 #include <cstdio>
 #include <iterator>
 #include <limits>
-#include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -774,15 +775,7 @@ ResponsesRequest parse_request_impl(const Json& body, const RequestLimits& limit
     return out;
 }
 
-std::string random_id(const char* prefix) {
-    static thread_local std::mt19937_64 rng{std::random_device{}()};
-    std::uniform_int_distribution<std::uint64_t> distribution;
-    std::array<char, 48> buffer{};
-    std::snprintf(buffer.data(), buffer.size(), "%016llx%016llx",
-                  static_cast<unsigned long long>(distribution(rng)),
-                  static_cast<unsigned long long>(distribution(rng)));
-    return std::string(prefix) + "_" + buffer.data();
-}
+std::string random_id(const char* prefix) { return new_opaque_id(std::string(prefix) + '_'); }
 
 std::int64_t completion_time_now() {
     return std::chrono::duration_cast<std::chrono::seconds>(

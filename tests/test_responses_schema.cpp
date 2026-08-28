@@ -4,12 +4,15 @@
 
 #include "serve/client_identity.h"
 #include "serve/generation_service.h"
+#include "serve/opaque_id.h"
 #include "serve/responses_schema.h"
 #include "serve/translate.h"
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <iostream>
@@ -136,7 +139,15 @@ int test_client_identity() {
     };
 
     const ResponsesRequest request = parse_responses_request(body, limits());
-    int failures = 0;
+    int failures                   = 0;
+    failures +=
+        check(parse_client_identity_sha256(session_digest, "ninfer_session") == session_digest,
+              "shared client identity parser changed a valid digest");
+    failures +=
+        check(api_code([&] {
+                  (void)parse_client_identity_sha256(std::string(64, 'A'), "ninfer_session");
+              }) == "invalid_ninfer_identity",
+              "shared client identity parser accepted uppercase digest bytes");
     failures += check(request.generation.client_session_sha256 == session_digest,
                       "Responses did not parse ninfer_session");
     failures += check(request.generation.client_request_id == request_digest,
@@ -146,12 +157,12 @@ int test_client_identity() {
                           counted.generation.client_request_id == request_digest,
                       "Responses input_tokens did not preserve client identity");
 
-    Json uppercase = body;
+    Json uppercase              = body;
     uppercase["ninfer_session"] = std::string(64, 'A');
     failures += check(api_code([&] { (void)parse_responses_request(uppercase, limits()); }) ==
                           "invalid_ninfer_identity",
                       "Responses accepted a non-lowercase session digest");
-    Json non_string = body;
+    Json non_string                 = body;
     non_string["ninfer_request_id"] = 7;
     failures += check(api_code([&] { (void)parse_responses_request(non_string, limits()); }) ==
                           "invalid_ninfer_identity",
@@ -167,17 +178,59 @@ int test_client_identity() {
     another_request.client_request_id = std::string(64, 'c');
     ninfer::ContextCacheHints continuation_hints;
     apply_client_identity_cache_hints(another_request, true, continuation_hints);
-    failures += check(first_hints.session_key == "http:" + session_digest &&
-                          continuation_hints.session_key == first_hints.session_key &&
-                          first_hints.update_session_index &&
-                          continuation_hints.update_session_index,
-                      "request correlation changed the stable session lineage");
+    failures +=
+        check(first_hints.session_key == "http:" + session_digest &&
+                  continuation_hints.session_key == first_hints.session_key &&
+                  first_hints.update_session_index && continuation_hints.update_session_index,
+              "request correlation changed the stable session lineage");
     GenerationRequest correlation_only;
     correlation_only.client_request_id = request_digest;
     ninfer::ContextCacheHints correlation_hints;
     apply_client_identity_cache_hints(correlation_only, true, correlation_hints);
-    failures += check(!correlation_hints.session_key,
-                      "ninfer_request_id selected an Engine lineage");
+    failures +=
+        check(!correlation_hints.session_key, "ninfer_request_id selected an Engine lineage");
+    return failures;
+}
+
+int test_response_ids_are_opaque() {
+    const auto fixed_entropy = [](unsigned char* output, int length) -> int {
+        for (int index = 0; index < length; ++index) {
+            output[index] = static_cast<unsigned char>(index);
+        }
+        return 1;
+    };
+    const auto failed_entropy = [](unsigned char*, int) -> int { return 0; };
+    int failures              = 0;
+    failures += check(new_opaque_id_with_entropy("resp_", fixed_entropy) ==
+                          "resp_000102030405060708090a0b0c0d0e0f",
+                      "opaque identifier changed its exact 128-bit hex wire format");
+    bool failed_closed = false;
+    try {
+        (void)new_opaque_id_with_entropy("resp_", failed_entropy);
+    } catch (const std::runtime_error&) { failed_closed = true; }
+    failures += check(failed_closed, "opaque identifier accepted CSPRNG failure");
+
+    std::vector<std::string> ids;
+    ids.reserve(256);
+    for (int index = 0; index < 128; ++index) {
+        ids.push_back(new_response_id());
+        ids.push_back(new_response_item_id("msg"));
+    }
+    std::sort(ids.begin(), ids.end());
+    failures += check(std::adjacent_find(ids.begin(), ids.end()) == ids.end(),
+                      "response identifiers collided in one issuance batch");
+    failures += check(
+        std::all_of(ids.begin(), ids.end(),
+                    [](const std::string& id) {
+                        const std::size_t separator = id.find('_');
+                        return separator != std::string::npos && id.size() == separator + 33 &&
+                               std::all_of(id.begin() + static_cast<std::ptrdiff_t>(separator + 1),
+                                           id.end(), [](unsigned char c) {
+                                               return (c >= '0' && c <= '9') ||
+                                                      (c >= 'a' && c <= 'f');
+                                           });
+                    }),
+        "response identifiers lost their prefix plus 128-bit hex wire shape");
     return failures;
 }
 
@@ -312,32 +365,32 @@ int test_typed_items_and_tools() {
     const Json body     = {
         {"model", "qwen3.6-27b"},
         {"input",
-             Json::array({Json{{"id", "rs_old"},
-                               {"type", "reasoning"},
-                               {"summary", Json::array()},
-                               {"content", Json::array({Json{{"type", "reasoning_text"},
-                                                             {"text", "need tools"}}})}},
-                          Json{{"id", "fc_old_1"},
-                               {"type", "function_call"},
-                               {"call_id", "call_1"},
-                               {"name", "weather"},
-                               {"arguments", R"({"city":"Paris"})"}},
-                          Json{{"id", "fc_old_2"},
-                               {"type", "function_call"},
-                               {"call_id", "call_2"},
-                               {"name", "weather"},
-                               {"arguments", R"({"city":"Rome"})"}},
-                          Json{{"id", "fco_old"},
-                               {"type", "function_call_output"},
-                               {"call_id", "call_1"},
-                               {"output", R"({"temp":20})"}},
-                          Json{{"type", "message"},
-                               {"role", "user"},
-                               {"content",
-                                Json::array({Json{{"type", "input_image"},
-                                                  {"image_url", "data:image/png;base64,AA=="},
-                                                  {"detail", "auto"}},
-                                             Json{{"type", "input_text"}, {"text", "describe"}}})}}})},
+         Json::array({Json{{"id", "rs_old"},
+                           {"type", "reasoning"},
+                           {"summary", Json::array()},
+                           {"content", Json::array({Json{{"type", "reasoning_text"},
+                                                         {"text", "need tools"}}})}},
+                      Json{{"id", "fc_old_1"},
+                           {"type", "function_call"},
+                           {"call_id", "call_1"},
+                           {"name", "weather"},
+                           {"arguments", R"({"city":"Paris"})"}},
+                      Json{{"id", "fc_old_2"},
+                           {"type", "function_call"},
+                           {"call_id", "call_2"},
+                           {"name", "weather"},
+                           {"arguments", R"({"city":"Rome"})"}},
+                      Json{{"id", "fco_old"},
+                           {"type", "function_call_output"},
+                           {"call_id", "call_1"},
+                           {"output", R"({"temp":20})"}},
+                      Json{{"type", "message"},
+                           {"role", "user"},
+                           {"content",
+                            Json::array({Json{{"type", "input_image"},
+                                              {"image_url", "data:image/png;base64,AA=="},
+                                              {"detail", "auto"}},
+                                         Json{{"type", "input_text"}, {"text", "describe"}}})}}})},
         {"tools", Json::array({function})},
         {"tool_choice", "auto"},
         {"parallel_tool_calls", true},
@@ -599,6 +652,7 @@ int main() {
     int failures = 0;
     failures += test_basic_request();
     failures += test_client_identity();
+    failures += test_response_ids_are_opaque();
     failures += test_instruction_message_order();
     failures += test_preserve_thinking_options_and_inheritance();
     failures += test_reasoning_effort();

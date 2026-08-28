@@ -1,5 +1,7 @@
 #include "serve/anthropic_schema.h"
 
+#include "serve/opaque_id.h"
+
 #include "serve/client_identity.h"
 
 #include <array>
@@ -8,7 +10,6 @@
 #include <cstdio>
 #include <limits>
 #include <optional>
-#include <random>
 #include <string>
 #include <unordered_set>
 #include <utility>
@@ -737,12 +738,6 @@ std::string make_count_tokens_response(int input_tokens) {
     return Json{{"input_tokens", input_tokens}}.dump();
 }
 
-std::string new_message_id() {
-    static thread_local std::mt19937_64 rng{std::random_device{}()};
-    std::uniform_int_distribution<std::uint64_t> dist;
-    std::array<char, 32> buf{};
-    std::snprintf(buf.data(), buf.size(), "%016llx", static_cast<unsigned long long>(dist(rng)));
-    return "msg_" + std::string(buf.data());
-}
+std::string new_message_id() { return new_opaque_id("msg_"); }
 
 } // namespace ninfer::serve

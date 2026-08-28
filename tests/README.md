@@ -74,6 +74,14 @@ cmake --build build --parallel --target ninfer_sampling_test
 ctest --test-dir build -R ninfer_sampling_test --output-on-failure
 ```
 
+The Qwen3.6 frontend contract uses the official tokenizer files as external test data. Point the
+test at that directory explicitly; no developer-specific path is compiled into the binary:
+
+```bash
+NINFER_QWEN3_6_TOKENIZER_DIR=/path/to/Qwen3.6-27B/base-hf-bf16 \
+  ctest --test-dir build -R ninfer_qwen3_6_frontend_test --output-on-failure
+```
+
 Enable uniform floating-point error records when establishing or reviewing an Op criterion:
 
 ```bash

@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -63,21 +64,26 @@ int test_lru_and_delete() {
     const ResponseContext child =
         append_response_context(root, {text_turn(ninfer::ChatRole::Assistant, "child")});
     store.put(record("resp_2", child));
-    (void)store.get("resp_1"); // resp_2 becomes the least-recently used entry.
+    (void)store.get_for_session("resp_1", std::nullopt); // resp_2 becomes least-recently used.
     store.put(record("resp_3",
                      append_response_context(root, {text_turn(ninfer::ChatRole::User, "fork")})));
 
     int failures = 0;
-    failures += check(store.get("resp_1") != nullptr, "get refreshes LRU recency");
-    failures += check(store.get("resp_2") == nullptr, "least-recent response evicted");
-    failures += check(store.get("resp_3") != nullptr, "new response retained");
+    failures += check(store.get_for_session("resp_1", std::nullopt) != nullptr,
+                      "get refreshes LRU recency");
+    failures += check(store.get_for_session("resp_2", std::nullopt) == nullptr,
+                      "least-recent response evicted");
+    failures +=
+        check(store.get_for_session("resp_3", std::nullopt) != nullptr, "new response retained");
     failures += check(store.size() == 2 && store.bytes() != 0, "store reports bounded usage");
-    failures += check(store.erase("resp_1"), "stored response deleted");
-    failures += check(!store.erase("resp_1") && store.get("resp_1") == nullptr,
+    failures += check(store.erase_for_session("resp_1", std::nullopt), "stored response deleted");
+    failures += check(!store.erase_for_session("resp_1", std::nullopt) &&
+                          store.get_for_session("resp_1", std::nullopt) == nullptr,
                       "deleted response is no longer addressable");
     // The child/fork context owns a shared parent even when the parent's public
     // response entry is deleted.
-    const std::shared_ptr<const StoredResponse> fork = store.get("resp_3");
+    const std::shared_ptr<const StoredResponse> fork =
+        store.get_for_session("resp_3", std::nullopt);
     failures += check(fork && flatten_response_context(fork->context).size() == 2,
                       "descendant context survives parent response deletion");
     return failures;
@@ -91,7 +97,7 @@ int test_session_continuation_and_dag_deletion() {
 
     const ResponseContext first_context =
         append_response_context({}, {text_turn(ninfer::ChatRole::User, "first")});
-    StoredResponse first = record("resp_first", first_context);
+    StoredResponse first        = record("resp_first", first_context);
     first.client_session_sha256 = session_a;
     store.put(std::move(first));
 
@@ -108,14 +114,21 @@ int test_session_continuation_and_dag_deletion() {
         continuation_parent->context, {text_turn(ninfer::ChatRole::User, "branch one")});
     const ResponseContext branch_two_context = append_response_context(
         continuation_parent->context, {text_turn(ninfer::ChatRole::User, "branch two")});
-    StoredResponse branch_one = record("resp_branch_one", branch_one_context);
+    StoredResponse branch_one        = record("resp_branch_one", branch_one_context);
     branch_one.client_session_sha256 = session_a;
-    StoredResponse branch_two = record("resp_branch_two", branch_two_context);
+    StoredResponse branch_two        = record("resp_branch_two", branch_two_context);
     branch_two.client_session_sha256 = session_a;
     store.put(std::move(branch_one));
     store.put(std::move(branch_two));
 
-    failures += check(store.erase("resp_first"), "parent deletion failed");
+    failures += check(!store.erase_for_session("resp_first", session_b),
+                      "cross-session delete removed another session's parent");
+    failures += check(!store.erase_for_session("resp_first", std::nullopt),
+                      "session omission deleted a session-scoped parent");
+    failures += check(store.get_for_session("resp_first", session_a) != nullptr,
+                      "rejected deletes mutated the scoped parent");
+    failures += check(store.erase_for_session("resp_first", session_a),
+                      "same-session parent deletion failed");
     failures += check(!store.get_for_session("resp_first", session_a),
                       "deleted parent remained available for continuation");
     failures += check(store.get_for_session("resp_branch_one", session_a) != nullptr &&

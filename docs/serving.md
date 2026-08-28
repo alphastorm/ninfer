@@ -631,7 +631,7 @@ python3 tools/lifecycle/ninfer_container.py build \
   --image ninfer:canary \
   --upstream-base-sha 6e8b2e2ad5d53597c3ba8e7989f9546d40b921fc \
   --expect-patch-stack-sha "$(git rev-parse HEAD)" \
-  --build-profile qwen38-5090-v0.1.0
+  --build-profile qwen38-5090-mainline
 ```
 
 Runtime configuration is one JSON object. `args` contains individual server argv elements; the

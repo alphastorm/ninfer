@@ -37,6 +37,11 @@ def digest(label: str) -> str:
     return hashlib.sha256(f"ninfer-agent-protocol-v1/{label}".encode()).hexdigest()
 
 
+def stored_response_path(response_id: str, session: str | None, suffix: str = "") -> str:
+    path = f"/v1/responses/{response_id}{suffix}"
+    return path if session is None else f"{path}?ninfer_session={session}"
+
+
 def read_api_key(path: Path | None) -> str | None:
     if path is None:
         return None
@@ -465,15 +470,68 @@ def responses_session_lifecycle(
     if error_code(rejected) != "response_not_found":
         raise ProtocolError("cross-session previous_response_id was not isolated")
 
+    def expect_stored_not_found(method: str, path: str, label: str) -> None:
+        result = json_response(
+            base_url, method, path, headers=headers, expected_status=404
+        )
+        if error_code(result) != "response_not_found":
+            raise ProtocolError(f"{label} was not isolated")
+
+    for route, suffix in (("retrieve", ""), ("input-items", "/input_items"),
+                          ("cancel", "/cancel")):
+        expect_stored_not_found(
+            "GET" if route != "cancel" else "POST",
+            stored_response_path(first_id, None, suffix),
+            f"session omission on Responses {route}",
+        )
+        expect_stored_not_found(
+            "GET" if route != "cancel" else "POST",
+            stored_response_path(first_id, session_b, suffix),
+            f"cross-session Responses {route}",
+        )
+
+    scoped_read = json_response(
+        base_url, "GET", stored_response_path(first_id, session_a), headers=headers
+    )
+    if response_id(scoped_read) != first_id:
+        raise ProtocolError("same-session Responses retrieve returned the wrong object")
+    scoped_items = json_response(
+        base_url,
+        "GET",
+        stored_response_path(first_id, session_a, "/input_items"),
+        headers=headers,
+    )
+    if scoped_items.get("object") != "list":
+        raise ProtocolError("same-session Responses input-items returned the wrong object")
+    scoped_cancel = json_response(
+        base_url,
+        "POST",
+        stored_response_path(first_id, session_a, "/cancel"),
+        headers=headers,
+        expected_status=400,
+    )
+    if error_code(scoped_cancel) != "background_not_supported":
+        raise ProtocolError("same-session Responses cancel did not reach the retained record")
+
+    expect_stored_not_found(
+        "DELETE",
+        stored_response_path(first_id, None),
+        "session omission on Responses delete",
+    )
+    expect_stored_not_found(
+        "DELETE",
+        stored_response_path(first_id, session_b),
+        "cross-session Responses delete",
+    )
     deleted = json_response(
-        base_url, "DELETE", f"/v1/responses/{first_id}", headers=headers
+        base_url, "DELETE", stored_response_path(first_id, session_a), headers=headers
     )
     if deleted.get("deleted") is not True or deleted.get("id") != first_id:
         raise ProtocolError("Responses parent deletion returned the wrong object")
     missing = json_response(
         base_url,
         "GET",
-        f"/v1/responses/{first_id}",
+        stored_response_path(first_id, session_a),
         headers=headers,
         expected_status=404,
     )
@@ -487,7 +545,7 @@ def responses_session_lifecycle(
     )
     surviving_id = response_id(surviving)
     branch_read = json_response(
-        base_url, "GET", f"/v1/responses/{branch_id}", headers=headers
+        base_url, "GET", stored_response_path(branch_id, session_a), headers=headers
     )
     if response_id(branch_read) != branch_id:
         raise ProtocolError("Responses fork disappeared after parent deletion")
@@ -496,6 +554,7 @@ def responses_session_lifecycle(
         "continuation_completed": True,
         "fork_count": 2,
         "cross_session_status": 404,
+        "stored_route_isolation_status": 404,
         "parent_delete_status": 200,
         "parent_get_after_delete_status": 404,
         "surviving_descendants_retrieved": True,
