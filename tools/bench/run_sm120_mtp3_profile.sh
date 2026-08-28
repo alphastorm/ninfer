@@ -170,8 +170,7 @@ if [[ $mode == prepare ]]; then
       -DNINFER_BUILD_BENCHMARKS=ON \
       -DNINFER_BUILD_PROFILE=profile \
       -DNINFER_UPSTREAM_BASE_SHA="$NINFER_UPSTREAM_BASE_SHA" \
-      -DNINFER_PATCH_STACK_SHA="$NINFER_EXPECTED_SOURCE_SHA" \
-      -DNINFER_SOURCE_CLEAN_VERIFIED=ON
+      -DNINFER_PATCH_STACK_SHA="$NINFER_EXPECTED_SOURCE_SHA"
   run_logged "$prepare_dir/environment/build.log" \
     cmake --build "$build_dir" -j --target \
       ninfer_q4_linear_swiglu_bench \

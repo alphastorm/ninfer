@@ -16,7 +16,6 @@ import socket
 import subprocess
 import sys
 import time
-import tarfile
 import tempfile
 from typing import Any, NoReturn
 import urllib.error
@@ -282,11 +281,46 @@ def materialize_source_archive(source: Path, head: str, destination: Path) -> st
         ]
     )
     archive_sha256 = sha256_file(archive_path)
-    try:
-        with tarfile.open(archive_path, mode="r:") as archive:
-            archive.extractall(destination, filter="data")
-    except (OSError, tarfile.TarError) as error:
-        raise LifecycleError("failed to materialize the verified source archive") from error
+    run(["git", "-C", os.fspath(destination), "init", "--quiet"])
+    run(
+        [
+            "git",
+            "-C",
+            os.fspath(destination),
+            "fetch",
+            "--quiet",
+            "--depth=1",
+            "--no-tags",
+            os.fspath(source),
+            head,
+        ]
+    )
+    run(
+        [
+            "git",
+            "-C",
+            os.fspath(destination),
+            "checkout",
+            "--quiet",
+            "--detach",
+            "FETCH_HEAD",
+        ]
+    )
+    materialized_head = run(
+        ["git", "-C", os.fspath(destination), "rev-parse", "HEAD"]
+    ).stdout.strip()
+    materialized_status = run(
+        [
+            "git",
+            "-C",
+            os.fspath(destination),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ]
+    ).stdout
+    if materialized_head != head or materialized_status:
+        fail("materialized Docker source is not the exact clean release commit")
     return archive_sha256
 
 
@@ -609,8 +643,6 @@ def command_build(args: argparse.Namespace) -> None:
                 f"NINFER_UPSTREAM_BASE_SHA={args.upstream_base_sha}",
                 "--build-arg",
                 f"NINFER_PATCH_STACK_SHA={head}",
-                "--build-arg",
-                "NINFER_SOURCE_CLEAN_VERIFIED=ON",
                 os.fspath(context),
             ],
             capture=False,

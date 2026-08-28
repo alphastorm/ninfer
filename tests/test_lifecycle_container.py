@@ -35,6 +35,17 @@ def write_config(path: Path, *, restart_policy: str | None = None) -> Path:
 
 
 class LifecycleConfigTests(unittest.TestCase):
+    def test_container_release_cannot_self_declare_clean_without_git(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        self.assertNotIn(
+            "NINFER_SOURCE_CLEAN_VERIFIED",
+            (root / "CMakeLists.txt").read_text(encoding="utf-8"),
+        )
+        ignored = (root / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        self.assertNotIn(".git", ignored)
+        dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
+        self.assertNotIn("NINFER_SOURCE_CLEAN_VERIFIED", dockerfile)
+
     def test_container_lookup_ignores_same_named_image(self) -> None:
         image_only = subprocess.CompletedProcess(
             args=["docker", "container", "inspect", "ninfer:test"],
@@ -109,6 +120,25 @@ class LifecycleConfigTests(unittest.TestCase):
             self.assertEqual(
                 (first_context / "tracked.txt").read_text(encoding="utf-8"),
                 "release bytes\n",
+            )
+            self.assertTrue((first_context / ".git").is_dir())
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "-C", str(first_context), "rev-parse", "HEAD"],
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                ).stdout.strip(),
+                head,
+            )
+            self.assertEqual(
+                subprocess.run(
+                    ["git", "-C", str(first_context), "status", "--porcelain"],
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                ).stdout,
+                "",
             )
 
             (source / "tracked.txt").write_text("dirty bytes\n", encoding="utf-8")
