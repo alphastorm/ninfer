@@ -86,7 +86,8 @@
       "neutral_clean_build_receipt_sha256": "40fe2600f6e10d8aaa6a4b7e51ad4c1c8e2c3a6f5b675c884d3976132e255ed7",
       "classifier_build_receipt_sha256": "ceda47f030f58f4746f43abd23d1196a6bafe7c75ce183fe2e2efde8af921258",
       "package_receipt_sha256": "422a8c637a0bac29b52af94842b74732c4c729bb05389c60805ae85cc03ceffd",
-      "private_identifier_scan_receipt_sha256": "e04f8e098e56ede6889622eabee0c0e5247fac1bf0dfed044025e2331541f4e7"
+      "private_identifier_scan_receipt_sha256": "e04f8e098e56ede6889622eabee0c0e5247fac1bf0dfed044025e2331541f4e7",
+      "release_lifecycle_receipt_sha256": "89cef9d271a8b1946aeebac3786cf1b6042c92f74f894c58a780016b9918807b"
     },
     "R": {"status": "passed", "restore_receipt_sha256": "488cb5b6bfc0445b121c9bad8c419eb62cc0cf3da59e6efa59c9862818928aaa"}
   },

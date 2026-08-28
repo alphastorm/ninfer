@@ -49,14 +49,15 @@
     {"filename": "Install-Release.ps1", "sha256": "817c4b0cfd0a36a7fd5c23bf97e989d476dfbfea9e7651000e5c4bc7a303c639", "bytes": 57907},
     {"filename": "ninfer-4090-qwen38-v0.1.0-win-x64.spdx.json", "sha256": "1826aadc5ef7edc0ce2900ec491d5c1e80331050985653dbcdf4a6c5dfc3b5d4", "bytes": 21597},
     {"filename": "ninfer-4090-qwen38-v0.1.0-win-x64.zip", "sha256": "9967166bc3c45ffe546933e2531a90c26d5225b271359201d10ea3b7c34d2a6f", "bytes": 227349917},
-    {"filename": "ninfer-4090-qwen38-v0.1.0-win-x64-qualification.json", "sha256": "920fe5d4c7f0d20f6a6a4c7385799497cf933ffb8257f166de7c1740d1409107", "bytes": 5230},
-    {"filename": "SHA256SUMS", "sha256": "945f348a6ada9ffb6b361ace992a61aaa4043b1b0ddd2f35e74cd3188437cdcc", "bytes": 592}
+    {"filename": "ninfer-4090-qwen38-v0.1.0-win-x64-qualification.json", "sha256": "e88e8d84b574b8df64df5ba3346d2565b93ae6d7e4c08a1084c9a9880b3c1f00", "bytes": 5340},
+    {"filename": "SHA256SUMS", "sha256": "dad5e052a8243cb0bb8ea62412fcf96a345157282eb79d891bf45a6de75cb336", "bytes": 592}
   ],
   "source_bound_receipts": {
     "neutral_clean_build_sha256": "40fe2600f6e10d8aaa6a4b7e51ad4c1c8e2c3a6f5b675c884d3976132e255ed7",
     "classifier_build_sha256": "ceda47f030f58f4746f43abd23d1196a6bafe7c75ce183fe2e2efde8af921258",
     "package_sha256": "422a8c637a0bac29b52af94842b74732c4c729bb05389c60805ae85cc03ceffd",
-    "private_identifier_scan_sha256": "e04f8e098e56ede6889622eabee0c0e5247fac1bf0dfed044025e2331541f4e7"
+    "private_identifier_scan_sha256": "e04f8e098e56ede6889622eabee0c0e5247fac1bf0dfed044025e2331541f4e7",
+    "release_lifecycle_sha256": "89cef9d271a8b1946aeebac3786cf1b6042c92f74f894c58a780016b9918807b"
   },
   "private_identifier_scan": {
     "status": "passed",

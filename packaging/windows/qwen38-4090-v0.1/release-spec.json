@@ -41,6 +41,7 @@
     "checkpoint_receipt_sha256": "cf87019c2a8258aa8e05aae5d8b0d2f4908fddcffa0344e902da2488c47b75b6",
     "performance_receipt_sha256": "c73b1d4dd9d1482c4c7d1ede6355b5edd7d3fbc15039007df3ead948f3a2309d",
     "golden_equivalent_receipt_sha256": "2146d764ae300e54486e85e970343d126b48efb74432d16d18851b56df5ccb6a",
+    "release_lifecycle_receipt_sha256": "89cef9d271a8b1946aeebac3786cf1b6042c92f74f894c58a780016b9918807b",
     "release_binding": "beta-qualified-no-stable-promotion"
   },
   "golden_equivalent": {
@@ -66,7 +67,7 @@
     "package_bytes": 227349917,
     "sbom_sha256": "1826aadc5ef7edc0ce2900ec491d5c1e80331050985653dbcdf4a6c5dfc3b5d4",
     "sbom_files_analyzed": 26,
-    "sha256sums_sha256": "945f348a6ada9ffb6b361ace992a61aaa4043b1b0ddd2f35e74cd3188437cdcc",
+    "sha256sums_sha256": "dad5e052a8243cb0bb8ea62412fcf96a345157282eb79d891bf45a6de75cb336",
     "generic_gpu_owner_controller_sha256": "c51e287216743dd4becd56f44678c27d9c5de3c5950014695afdc40c39b1aa82",
     "private_identifier_scan": "passed"
   },

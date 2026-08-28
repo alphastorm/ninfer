@@ -42,7 +42,7 @@ Focused checks passed:
 - MTP decision and release-asset PowerShell regressions;
 - generic GPU-owner controller regression.
 
-The broader synthetic lifecycle test still has its pre-existing `dead rollback returned the wrong liveness failure` expectation mismatch; it did not affect the exact clean build/package/live path above.
+The complete synthetic release-lifecycle regression passes. Its dead-start mock now matches the production 30-second startup grace, observes the intended `managed scheduled task exited before release became ready: Ready` failure, and proves failed rollback restores the current release. The first-install fixture also reflects the published default GPU-owner controller contract.
 
 ## Final Golden-equivalent
 
@@ -65,10 +65,11 @@ Every live GPU-owner stop/start effect used the hash-pinned operator controller.
 
 ## Receipts
 
-- public asset receipt: `70ae8a335f6cb65fa8c9f2af4f1ba83d7acd7bb6a78bc0502c6235bd5bcbf0cd`;
+- public asset receipt: `f8e6b594ec22ccb71da550f6e02b3853f6587679c35ed09aeaffe5faf437ceca`;
 - neutral clean build: `40fe2600f6e10d8aaa6a4b7e51ad4c1c8e2c3a6f5b675c884d3976132e255ed7`;
 - classifier build: `ceda47f030f58f4746f43abd23d1196a6bafe7c75ce183fe2e2efde8af921258`;
 - package: `422a8c637a0bac29b52af94842b74732c4c729bb05389c60805ae85cc03ceffd`;
 - private-identifier scan: `e04f8e098e56ede6889622eabee0c0e5247fac1bf0dfed044025e2331541f4e7`;
+- release lifecycle: `89cef9d271a8b1946aeebac3786cf1b6042c92f74f894c58a780016b9918807b`;
 - lease ready: `d6acd022842b97dbfb535fd0ec46cb807e176b07c1df9fe328455edb108eb22a`;
 - final restore: `488cb5b6bfc0445b121c9bad8c419eb62cc0cf3da59e6efa59c9862818928aaa`.

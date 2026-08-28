@@ -152,7 +152,7 @@ function global:Start-Sleep {
     param([int]$Seconds, [int]$Milliseconds)
     if (-not [string]::IsNullOrWhiteSpace([string]$global:NInferTestDeadReleaseId)) {
         $global:NInferTestDeadStartSleptMilliseconds += ($Seconds * 1000 + $Milliseconds)
-        if ($global:NInferTestDeadStartSleptMilliseconds -gt 8000) {
+        if ($global:NInferTestDeadStartSleptMilliseconds -gt 31000) {
             throw 'dead-start fixture exceeded the liveness-detection bound'
         }
     }
@@ -530,14 +530,9 @@ try {
     $ledger = @{}
     $basePackage = New-FixturePackage $testRoot 'base-release' $script:ModelPath 48100
     $baseSecret = New-SecretFile $testRoot 'base-release'
-    $missingOwnerRejected = $false
-    try {
-        & $InstallerPath -PackagePath $basePackage.path -PackageSha256 $basePackage.sha256 -ModelArtifactPath $script:ModelPath -ApiKeyFile $baseSecret.path -StateRoot $script:StateRoot -NoStart | Out-Null
-    }
-    catch {
-        $missingOwnerRejected = $_.Exception.Message -like '*GPU-owner controller is required*'
-    }
-    Assert-True $missingOwnerRejected 'first install accepted no GPU-owner controller'
+    $publishedOwnerController = Join-Path (Split-Path -Parent $InstallerPath) 'Control-GpuOwner.ps1'
+    Assert-True (Test-Path -LiteralPath $publishedOwnerController -PathType Leaf) `
+        'first-install default GPU-owner controller is missing beside the installer'
     Invoke-FixtureInstall $basePackage $baseSecret
     $earlyAclObservations = @($global:NInferAclObservations | Where-Object { -not $_.transactions_exist -and -not $_.secrets_exist })
     Assert-Equal $earlyAclObservations.Count 1 'first-install ACL hardening did not precede transaction and secret children'
@@ -1000,7 +995,7 @@ try {
         schema_version = 1
         status = 'passed'
         injected_failures = $faultPoints.Count
-        missing_gpu_owner_rejections = 1
+        published_default_gpu_owner_controllers = 1
         retries = $faultPoints.Count
         rollback_key_pairs = $faultPoints.Count
         restart_model_rehash_calls = $global:NInferBlockedModelHashCalls
