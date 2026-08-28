@@ -1,6 +1,7 @@
 #pragma once
 
 #include "serve/generation_service.h"
+#include "serve/http_contract.h"
 #include "serve/response_store.h"
 #include "serve/request_log.h"
 #include "serve/serve_options.h"
@@ -44,6 +45,7 @@ private:
     void handle_response_compact(const httplib::Request& req, httplib::Response& res);
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
+    void handle_status(const httplib::Request& req, httplib::Response& res) const;
 
     // The process-wide console logger serializes lines from request and reporter threads.
     void log_line(const std::string& line);
@@ -58,9 +60,13 @@ private:
     ServeOptions options_;
     std::string public_model_id_;
     ResponseStore response_store_;
+    ninfer::LoadSummary status_load_;
+    ninfer::MemorySummary status_memory_;
     JsonlRequestLog request_jsonl_;
     httplib::Server server_;
     std::atomic<std::uint64_t> request_seq_{0};
+    mutable std::mutex status_metrics_mutex_;
+    ServerStatusMetrics status_metrics_;
     std::mutex stats_mutex_;
     std::condition_variable stats_cv_;
     std::thread stats_thread_;

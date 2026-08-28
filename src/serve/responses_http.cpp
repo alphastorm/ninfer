@@ -1,5 +1,6 @@
 #include "serve/http_server.h"
 
+#include "serve/client_identity.h"
 #include "serve/openai_schema.h"
 #include "serve/responses_schema.h"
 
@@ -212,9 +213,11 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         limits.default_max_tokens = options_.default_max_tokens;
         request                   = parse_responses_request(parse_json_body(req), limits);
         validate_model(request.generation.model, public_model_id_);
+        require_authenticated_client_identity(request.generation, !options_.api_key.empty());
         if (request.previous_response_id) {
             const std::shared_ptr<const StoredResponse> previous =
-                response_store_.get(*request.previous_response_id);
+                response_store_.get_for_session(*request.previous_response_id,
+                                                request.generation.client_session_sha256);
             if (!previous) {
                 throw ApiException(response_not_found(*request.previous_response_id));
             }
@@ -247,6 +250,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
             if (request.store) {
                 StoredResponse stored;
                 stored.id                = id;
+                stored.client_session_sha256 = request.generation.client_session_sha256;
                 stored.response          = response.body;
                 stored.input_items       = request.input_items;
                 stored.context           = terminal_context(previous_context, request, response);
@@ -303,6 +307,8 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                 if (stream->request.store) {
                     StoredResponse stored;
                     stored.id          = finished.response.body.at("id").get<std::string>();
+                    stored.client_session_sha256 =
+                        stream->request.generation.client_session_sha256;
                     stored.response    = finished.response.body;
                     stored.input_items = stream->request.input_items;
                     stored.context     = terminal_context(stream->previous_context, stream->request,

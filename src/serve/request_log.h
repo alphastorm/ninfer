@@ -24,6 +24,8 @@ struct RequestLogContext {
     std::uint64_t id = 0;
     std::string protocol;
     std::string model;
+    std::optional<std::string> client_session_sha256;
+    std::optional<std::string> client_request_sha256;
     bool stream                             = false;
     std::size_t message_count               = 0;
     int requested_output_tokens             = 0;
@@ -58,6 +60,16 @@ struct ThroughputReport {
     ninfer::RuntimeStats scheduler;
 };
 
+struct ServerStatusMetrics {
+    std::uint64_t reused_prompt_tokens          = 0;
+    ninfer::PrefixReusePath last_reuse_path     = ninfer::PrefixReusePath::FullReset;
+    std::uint32_t last_reused_prompt_tokens     = 0;
+    std::uint64_t speculative_rounds            = 0;
+    std::uint64_t speculative_drafted_tokens    = 0;
+    std::uint64_t speculative_accepted_tokens   = 0;
+    std::uint64_t speculative_fallback_steps    = 0;
+};
+
 RequestLogContext make_request_log_context(std::uint64_t id, std::string protocol,
                                            const GenerationRequest& request,
                                            const PreparedRequest& prepared);
@@ -78,6 +90,11 @@ std::string format_server_start_json(const std::string& server_instance_id,
                                      const ninfer::MemorySummary& memory,
                                      const ServerLogEnvironment& environment,
                                      std::optional<std::uint64_t> artifact_size_bytes);
+std::string format_status_json(const ServeOptions& options, const std::string& public_model_id,
+                               const ninfer::LoadSummary& load,
+                               const ninfer::MemorySummary& memory,
+                               const ninfer::RuntimeStats& runtime,
+                               const ServerStatusMetrics& metrics);
 std::string format_request_start_json(const std::string& server_instance_id,
                                       std::uint64_t timestamp_unix_ms,
                                       const RequestLogContext& context);

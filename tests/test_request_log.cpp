@@ -48,6 +48,10 @@ int main() {
     options.api_key                        = "must-not-appear";
     options.model_id_override              = "deployment-alias";
     options.request_log_jsonl              = "requests.jsonl";
+    options.binary_sha256                  = std::string(64, '1');
+    options.artifact_sha256                = std::string(64, '2');
+    options.config_sha256                  = std::string(64, '3');
+    options.deployment_profile             = "rtx-3090-release";
     options.max_context                    = 262144;
     options.kv_capacity                    = ninfer::KvCapacityPolicy::explicit_capacity(524288);
     options.prefill_chunk                  = 1024;
@@ -119,6 +123,16 @@ int main() {
     failures += check(server.at("schema_version") == kRequestLogSchemaVersion,
                       "server record schema mismatch");
     failures += check(server.at("event") == "server_start", "server event mismatch");
+    failures += check(server.at("identity").at("binary_sha256") == options.binary_sha256 &&
+                          server.at("identity").at("model_artifact_sha256") ==
+                              options.artifact_sha256 &&
+                          server.at("identity").at("config_sha256") == options.config_sha256 &&
+                          server.at("identity").at("deployment_profile") ==
+                              options.deployment_profile &&
+                          server.at("identity").at("target") == "qwen3_6_27b" &&
+                          server.at("identity").at("model_id") == "qwen3.6-27b" &&
+                          server.at("identity").at("weights_id") == "groupwise-int",
+                      "server lifecycle identity missing");
     failures += check(server.at("server").at("public_model_id") == "deployment-alias",
                       "resolved public model id missing");
     failures += check(server.at("artifact").at("target") == "qwen3_6_27b", "server target missing");
@@ -173,8 +187,57 @@ int main() {
     failures += check(server.at("argv").at(3) == "<redacted>",
                       "server argv did not retain the redaction marker");
 
+    ninfer::RuntimeStats runtime;
+    runtime.running_requests      = 2;
+    runtime.prefilling_requests   = 1;
+    runtime.decode_ready_requests = 1;
+    runtime.waiting_requests      = 3;
+    runtime.computed_prefill_tokens = 8192;
+    runtime.committed_decode_tokens = 512;
+    runtime.decode_rounds           = 128;
+    runtime.decode_row_rounds       = 192;
+    ServerStatusMetrics status_metrics;
+    status_metrics.reused_prompt_tokens        = 4096;
+    status_metrics.last_reuse_path             = ninfer::PrefixReusePath::RestoreTurnCheckpoint;
+    status_metrics.last_reused_prompt_tokens   = 2048;
+    status_metrics.speculative_rounds          = 300;
+    status_metrics.speculative_drafted_tokens  = 900;
+    status_metrics.speculative_accepted_tokens = 720;
+    status_metrics.speculative_fallback_steps  = 2;
+    const Json status = Json::parse(format_status_json(options, "deployment-alias", load, memory,
+                                                       runtime, status_metrics));
+    failures += check(status.at("artifact_type") == "ninfer_server_status" &&
+                          status.at("schema_version") == 1 && status.at("status") == "ok",
+                      "status envelope mismatch");
+    failures += check(status.size() == 8 && status.contains("identity") &&
+                          status.contains("runtime") && status.contains("scheduler") &&
+                          status.contains("cache") && status.contains("mtp"),
+                      "status top-level versioned groups changed");
+    failures += check(status.at("identity").at("binary_sha256") == options.binary_sha256 &&
+                          status.at("identity").at("model_artifact_sha256") ==
+                              options.artifact_sha256 &&
+                          status.at("runtime").at("public_model_id") == "deployment-alias" &&
+                          status.at("runtime").at("max_context") == options.max_context &&
+                          status.at("runtime").at("kv_cache") == "int8-group64",
+                      "status identity or runtime configuration missing");
+    failures += check(status.at("scheduler").at("running") == 2 &&
+                          status.at("scheduler").at("waiting") == 3 &&
+                          status.at("cache").at("reused_prompt_tokens") == 4096 &&
+                          status.at("cache").at("last_selection").at("path") ==
+                              "restore_turn_checkpoint" &&
+                          status.at("cache").at("last_selection").at("frontier_tokens") == 2048,
+                      "status scheduler or cache gauges missing");
+    failures += check(status.at("mtp").at("accepted_tokens") == 720 &&
+                          status.at("mtp").at("acceptance_ratio") == 0.8 &&
+                          status.at("mtp").at("tokens_per_round") == 3.4,
+                      "status MTP totals missing");
+    failures += check(status.dump().find("must-not-appear") == std::string::npos,
+                      "status JSON leaked the API key");
+
     GenerationRequest request;
     request.model          = "qwen3.6-27b";
+    request.client_session_sha256 = std::string(64, 'e');
+    request.client_request_id     = std::string(64, 'f');
     request.stream         = false;
     request.max_tokens     = 4096;
     request.max_tokens_set = true;
@@ -206,6 +269,11 @@ int main() {
                       "resolved preserve-thinking metadata missing");
     failures += check(started.at("request").at("sampling").at("seed") == 7632647173703958409ULL,
                       "resolved seed missing");
+    failures += check(started.at("request").at("client_identity").at("session_sha256") ==
+                              *request.client_session_sha256 &&
+                          started.at("request").at("client_identity").at("request_sha256") ==
+                              *request.client_request_id,
+                      "request correlation digests missing");
 
     GenerationOutcome outcome;
     outcome.prompt_tokens                       = 401;

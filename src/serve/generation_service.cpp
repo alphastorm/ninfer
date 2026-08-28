@@ -1,6 +1,7 @@
 #include "serve/generation_service.h"
 
 #include "product/media_acquire/acquire.h"
+#include "serve/client_identity.h"
 #include "serve/console_log.h"
 #include "serve/tool_call_parser.h"
 #include "serve/translate.h"
@@ -351,11 +352,13 @@ GenerationService::acquire_media_input(Clock::time_point deadline,
 
 PreparedRequest GenerationService::prepare(const GenerationRequest& request,
                                            std::function<bool()> is_cancelled) const {
+    require_authenticated_client_identity(request, !options_.api_key.empty());
     PreparedRequest prepared;
     ninfer::RequestOptions request_options = to_request_options(request, options_);
     prepared.include_usage                 = request.include_usage;
     prepared.tool_capable                  = request.uses_tools() || request.has_tool_history();
     prepared.tool_name_max_length          = request.tool_name_max_length;
+    prepared.tool_argument_types           = build_tool_argument_type_contracts(request);
     const ResolvedPromptSemantics semantics =
         resolve_prompt_semantics(request, options_, prompt_capabilities_);
     prepared.enable_thinking                   = semantics.enable_thinking;
@@ -401,6 +404,7 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
 
 int GenerationService::count_prompt_tokens(const GenerationRequest& request,
                                            std::function<bool()> is_cancelled) const {
+    require_authenticated_client_identity(request, !options_.api_key.empty());
     const std::size_t media_items = media_item_count(request);
     const bool request_has_media  = media_items != 0;
     if (request_has_media && !options_.enable_vision) {
@@ -482,8 +486,8 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
 
     bool is_tool_call_response = false;
     if (prepared.tool_capable) {
-        ParsedToolCallOutput parsed =
-            parse_qwen_tool_call_output(outcome.text, prepared.tool_name_max_length);
+        ParsedToolCallOutput parsed = parse_qwen_tool_call_output(
+            outcome.text, prepared.tool_name_max_length, prepared.tool_argument_types);
         outcome.text          = std::move(parsed.content);
         is_tool_call_response = parsed.is_tool_call_response;
         if (is_tool_call_response) { outcome.tool_calls = std::move(parsed.tool_calls); }

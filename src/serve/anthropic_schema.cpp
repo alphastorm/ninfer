@@ -1,5 +1,7 @@
 #include "serve/anthropic_schema.h"
 
+#include "serve/client_identity.h"
+
 #include <array>
 #include <cctype>
 #include <cstdint>
@@ -490,6 +492,7 @@ GenerationRequest parse_messages_request(const Json& body, const RequestLimits& 
         bad_request("missing required field: model", "model");
     }
     out.model = body.at("model").get<std::string>();
+    parse_client_identity(body, out);
 
     parse_tools(body, out);
     parse_tool_choice(body, out);

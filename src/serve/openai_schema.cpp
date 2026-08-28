@@ -1,5 +1,7 @@
 #include "serve/openai_schema.h"
 
+#include "serve/client_identity.h"
+
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -140,6 +142,11 @@ void parse_content_parts(const Json& content, ChatTurn& turn, std::size_t index)
                         "messages");
         }
         const std::string type = part.at("type").get<std::string>();
+        if (turn.role == "tool" && type != "text") {
+            bad_request("tool message " + std::to_string(index) +
+                            " content parts must have type 'text'",
+                        "messages");
+        }
         ContentPart out;
         out.type_raw = type;
         if (type == "text") {
@@ -244,12 +251,11 @@ void parse_messages(const Json& body, GenerationRequest& out) {
                 item.at("tool_call_id").get<std::string>().empty()) {
                 bad_request("tool messages must contain a string tool_call_id", "messages");
             }
-            if (!item.contains("content") || !item.at("content").is_string()) {
-                bad_request("tool messages must contain string content", "messages");
+            if (!item.contains("content") || item.at("content").is_null()) {
+                bad_request("tool messages must contain content", "messages");
             }
             turn.tool_call_id = item.at("tool_call_id").get<std::string>();
-            turn.content.push_back(
-                ContentPart{ContentKind::Text, item.at("content").get<std::string>(), "text"});
+            parse_content_parts(item.at("content"), turn, i);
             out.messages.push_back(std::move(turn));
             continue;
         }
@@ -536,6 +542,7 @@ GenerationRequest parse_chat_completion_request(const Json& body, const RequestL
         bad_request("missing required field: model", "model");
     }
     out.model = body.at("model").get<std::string>();
+    parse_client_identity(body, out);
 
     parse_tools(body, out);
     parse_tool_choice(body, out);

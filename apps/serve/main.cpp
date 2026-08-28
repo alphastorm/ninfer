@@ -3,6 +3,7 @@
 #include "serve/generation_service.h"
 #include "serve/http_server.h"
 #include "serve/serve_options.h"
+#include "serve/server_identity.h"
 
 #include "ninfer/build_info.h"
 
@@ -71,11 +72,13 @@ int main(int argc, char** argv) {
                                                             std::move(load_progress_options));
         const auto load_start = Clock::now();
         ninfer::serve::GenerationService service(options, load_progress.callback());
-        server.attach(service);
         std::ostringstream loaded;
         loaded << "model loaded in "
                << std::chrono::duration<double>(Clock::now() - load_start).count() << " s";
         ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Info, loaded.str());
+        ninfer::serve::write_console_log(
+            ninfer::serve::ConsoleLogLevel::Info,
+            ninfer::serve::format_server_identity(options, service.load_summary()));
 
         const ninfer::MemorySummary memory = service.memory_summary();
         std::ostringstream capacity;
@@ -96,6 +99,7 @@ int main(int argc, char** argv) {
 
         ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Info, "warming up...");
         service.warmup();
+        server.attach(service);
 
         g_server.store(&server);
         std::signal(SIGINT, handle_signal);

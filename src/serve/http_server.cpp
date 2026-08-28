@@ -128,6 +128,16 @@ void HttpServer::log_request_start(const RequestLogContext& context) {
 
 void HttpServer::log_request_done(const RequestLogContext& context,
                                   const GenerationOutcome& outcome) {
+    {
+        std::lock_guard lock(status_metrics_mutex_);
+        status_metrics_.reused_prompt_tokens += outcome.metrics.prefix_cache_hit_tokens;
+        status_metrics_.last_reuse_path = outcome.metrics.prefix_reuse_path;
+        status_metrics_.last_reused_prompt_tokens = outcome.metrics.prefix_cache_hit_tokens;
+        status_metrics_.speculative_rounds += outcome.metrics.speculative_rounds;
+        status_metrics_.speculative_drafted_tokens += outcome.metrics.speculative_draft_tokens;
+        status_metrics_.speculative_accepted_tokens += outcome.metrics.speculative_accepted_tokens;
+        status_metrics_.speculative_fallback_steps += outcome.metrics.speculative_fallback_steps;
+    }
     log_line(format_request_done(context, outcome));
     request_jsonl_.write_request_done(context, outcome);
 }
@@ -184,18 +194,8 @@ void HttpServer::stop_stats_reporter() {
 }
 
 void HttpServer::register_routes() {
-    server_.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
-        if (res.status != 413) { return; }
-        ApiError error;
-        error.status  = 413;
-        error.type    = "invalid_request_error";
-        error.code    = "request_too_large";
-        error.message = "request body exceeds the configured payload limit";
-        if (req.path.rfind("/v1/messages", 0) == 0) {
-            write_messages_error(res, error);
-        } else {
-            write_error(res, error);
-        }
+    server_.set_error_handler([this](const httplib::Request& req, httplib::Response& res) {
+        return handle_unrendered_http_error(options_, req, res);
     });
     if (options_.enable_cors) {
         server_.set_default_headers(
@@ -209,30 +209,7 @@ void HttpServer::register_routes() {
     }
 
     server_.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
-        if (options_.api_key.empty() || req.path == "/health" || req.method == "OPTIONS") {
-            return httplib::Server::HandlerResponse::Unhandled;
-        }
-        // Accept both the OpenAI-style bearer token and the Anthropic-style
-        // x-api-key header so OpenAI clients and Claude Code (ANTHROPIC_API_KEY
-        // -> x-api-key, ANTHROPIC_AUTH_TOKEN -> Authorization: Bearer) both work.
-        const bool bearer_ok =
-            req.get_header_value("Authorization") == ("Bearer " + options_.api_key);
-        const bool x_api_key_ok = req.get_header_value("x-api-key") == options_.api_key;
-        if (!bearer_ok && !x_api_key_ok) {
-            ApiError error;
-            error.status  = 401;
-            error.type    = "invalid_request_error";
-            error.code    = "invalid_api_key";
-            error.message = "missing or invalid API key";
-            // Render the 401 in the shape the target endpoint speaks.
-            if (req.path.rfind("/v1/messages", 0) == 0) {
-                write_messages_error(res, error);
-            } else {
-                write_error(res, error);
-            }
-            return httplib::Server::HandlerResponse::Handled;
-        }
-        return httplib::Server::HandlerResponse::Unhandled;
+        return authorize_http_request(options_, req, res);
     });
 
     server_.set_exception_handler(
@@ -252,6 +229,9 @@ void HttpServer::register_routes() {
 
     server_.Get("/health", [](const httplib::Request&, httplib::Response& res) {
         res.set_content(nlohmann::json{{"status", "ok"}}.dump(), "application/json");
+    });
+    server_.Get("/v1/ninfer/status", [this](const httplib::Request& req, httplib::Response& res) {
+        handle_status(req, res);
     });
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
@@ -315,6 +295,31 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
         return;
     }
     res.set_content(make_model_object(public_model_id_, unix_time_now()), "application/json");
+}
+
+void HttpServer::handle_status(const httplib::Request&, httplib::Response& res) const {
+    if (options_.api_key.empty()) {
+        ApiError error;
+        error.status  = 401;
+        error.code    = "authentication_required";
+        error.message = "server status requires API authentication";
+        write_error(res, error);
+        return;
+    }
+    if (service_ == nullptr) {
+        res.status = 503;
+        res.set_content(nlohmann::json{{"status", "loading"}}.dump(), "application/json");
+        return;
+    }
+
+    ServerStatusMetrics metrics;
+    {
+        std::lock_guard lock(status_metrics_mutex_);
+        metrics = status_metrics_;
+    }
+    res.set_content(format_status_json(options_, public_model_id_, status_load_, status_memory_,
+                                       service_->runtime_stats(), metrics),
+                    "application/json");
 }
 
 void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::Response& res) {
@@ -713,11 +718,12 @@ void HttpServer::attach(GenerationService& service) {
     if (service_ != nullptr) {
         throw std::logic_error("HTTP generation service is already attached");
     }
-    const ninfer::LoadSummary load = service.load_summary();
-    public_model_id_               = resolve_public_model_id(options_, load.model_id);
-    service_                       = &service;
-    request_jsonl_.write_server_start(options_, service.sampling_defaults(), public_model_id_, load,
-                                      service.memory_summary());
+    status_load_     = service.load_summary();
+    status_memory_   = service.memory_summary();
+    public_model_id_ = resolve_public_model_id(options_, status_load_.model_id);
+    request_jsonl_.write_server_start(options_, service.sampling_defaults(), public_model_id_,
+                                      status_load_, status_memory_);
+    service_ = &service;
 }
 
 bool HttpServer::listen() {
