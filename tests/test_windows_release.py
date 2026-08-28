@@ -11,7 +11,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE = ROOT / "packaging/windows/qwen38-3090-omp-v0.2"
-PWSH = shutil.which("pwsh")
+PWSH = shutil.which("powershell.exe" if sys.platform == "win32" else "pwsh")
 
 
 class WindowsReleaseContractTests(unittest.TestCase):
@@ -80,6 +80,7 @@ class PowerShellWindowsReleaseTests(unittest.TestCase):
                         "-NoLogo",
                         "-NoProfile",
                         "-NonInteractive",
+                        *(["-ExecutionPolicy", "Bypass"] if sys.platform == "win32" else []),
                         "-File",
                         str(script),
                         *arguments,
