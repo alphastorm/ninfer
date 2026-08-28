@@ -629,7 +629,7 @@ head rather than the working tree. Only that verified archive can set `source_di
 ```bash
 python3 tools/lifecycle/ninfer_container.py build \
   --image ninfer:canary \
-  --upstream-base-sha 4eef14a7560d87a3ba717898e1d488a4c4c7246d \
+  --upstream-base-sha 6e8b2e2ad5d53597c3ba8e7989f9546d40b921fc \
   --expect-patch-stack-sha "$(git rev-parse HEAD)" \
   --build-profile qwen38-5090-v0.1.0
 ```
