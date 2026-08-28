@@ -89,6 +89,8 @@ if(TARGET ninfer_checkpoint_io_uring_linux)
   ninfer_add_test(ninfer_io_uring_checkpoint_backend_test
     SOURCES test_io_uring_checkpoint_backend.cpp
     LIBRARIES ninfer_checkpoint_io_uring_linux)
+  target_compile_definitions(ninfer_io_uring_checkpoint_backend_test
+    PRIVATE NINFER_IO_URING_TESTING=1)
   set_tests_properties(ninfer_io_uring_checkpoint_backend_test
     PROPERTIES SKIP_RETURN_CODE 77)
 endif()

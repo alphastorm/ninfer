@@ -10,6 +10,7 @@
 
 #include <array>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -38,9 +39,7 @@ int check(bool condition, const std::string& message) {
 bool throws_checkpoint(const std::function<void()>& action) {
     try {
         action();
-    } catch (const CheckpointContractError&) {
-        return true;
-    }
+    } catch (const CheckpointContractError&) { return true; }
     return false;
 }
 
@@ -55,7 +54,7 @@ CheckpointDigest digest(std::uint8_t seed) {
 class TempDirectory {
 public:
     TempDirectory() {
-        const char* configured = std::getenv("NINFER_CHECKPOINT_TEST_ROOT");
+        const char* configured           = std::getenv("NINFER_CHECKPOINT_TEST_ROOT");
         const std::filesystem::path base = configured == nullptr
                                                ? std::filesystem::path("/tmp")
                                                : std::filesystem::path(configured);
@@ -92,16 +91,16 @@ struct Fixture {
 Fixture fixture(std::uint64_t generation,
                 std::initializer_list<std::pair<CheckpointPayloadKind, std::size_t>> shapes) {
     Fixture result;
-    result.manifest.magic           = kCheckpointMagic;
-    result.manifest.schema_version  = kCheckpointSchemaVersion;
-    result.manifest.journal_version = kCheckpointJournalVersion;
-    result.manifest.generation      = generation;
+    result.manifest.magic                       = kCheckpointMagic;
+    result.manifest.schema_version              = kCheckpointSchemaVersion;
+    result.manifest.journal_version             = kCheckpointJournalVersion;
+    result.manifest.generation                  = generation;
     result.manifest.identity.model              = digest(1);
     result.manifest.identity.runtime_source     = digest(2);
     result.manifest.identity.deployment_profile = digest(3);
     result.manifest.identity.layout             = digest(4);
-    result.manifest.identity.token_count         = 73;
-    result.manifest.identity.context_capacity    = 4096;
+    result.manifest.identity.token_count        = 73;
+    result.manifest.identity.context_capacity   = 4096;
 
     std::uint8_t seed = 11;
     for (const auto& [kind, size] : shapes) {
@@ -118,7 +117,7 @@ Fixture fixture(std::uint64_t generation,
     }
 
     const CheckpointDigest manifest_digest = checkpoint_manifest_sha256(result.manifest);
-    result.key = {kCheckpointJournalVersion, generation, manifest_digest};
+    result.key         = {kCheckpointJournalVersion, generation, manifest_digest};
     result.expectation = {result.manifest, manifest_digest};
     return result;
 }
@@ -159,8 +158,7 @@ std::filesystem::path payload_path(const TempDirectory& root, const Fixture& che
                                    std::size_t descriptor_index = 0) {
     const unsigned kind =
         static_cast<unsigned>(checkpoint.manifest.payloads[descriptor_index].kind);
-    return root.path() / generation_name(checkpoint) /
-           ("payload-" + std::to_string(kind));
+    return root.path() / generation_name(checkpoint) / ("payload-" + std::to_string(kind));
 }
 
 std::size_t count_prefixed_entries(const std::filesystem::path& root, std::string_view prefix) {
@@ -200,13 +198,13 @@ public:
         if (::sigaction(SIGXFSZ, nullptr, &original_action_) != 0) {
             throw std::runtime_error(std::strerror(errno));
         }
-        struct sigaction ignored {};
+        struct sigaction ignored{};
         ignored.sa_handler = SIG_IGN;
         ::sigemptyset(&ignored.sa_mask);
         if (::sigaction(SIGXFSZ, &ignored, nullptr) != 0) {
             throw std::runtime_error(std::strerror(errno));
         }
-        rlimit limited = original_limit_;
+        rlimit limited   = original_limit_;
         limited.rlim_cur = std::min(bytes, original_limit_.rlim_max);
         if (limited.rlim_cur < bytes || ::setrlimit(RLIMIT_FSIZE, &limited) != 0) {
             ::sigaction(SIGXFSZ, &original_action_, nullptr);
@@ -226,7 +224,7 @@ public:
 
 private:
     rlimit original_limit_{};
-    struct sigaction original_action_ {};
+    struct sigaction original_action_{};
     bool active_ = false;
 };
 
@@ -261,9 +259,9 @@ int test_transaction_and_trusted_abort() {
     int failures = 0;
     TempDirectory root;
     IoUringCheckpointBackend backend(root.path());
-    const Fixture checkpoint = fixture(
-        1, {{CheckpointPayloadKind::StateImage, 5003},
-            {CheckpointPayloadKind::MainKv, 4U * 1024U * 1024U + 9001U}});
+    const Fixture checkpoint =
+        fixture(1, {{CheckpointPayloadKind::StateImage, 5003},
+                    {CheckpointPayloadKind::MainKv, 4U * 1024U * 1024U + 9001U}});
 
     const CheckpointBackendCapabilities capabilities = backend.capabilities();
     failures += check(capabilities.atomic_replace && capabilities.durable_flush &&
@@ -274,8 +272,7 @@ int test_transaction_and_trusted_abort() {
                       "stage must not publish the authoritative manifest");
     failures += check(count_prefixed_entries(root.path(), ".stage-") == 1,
                       "stage must create exactly one transactional generation");
-    const int contender =
-        ::open((root.path() / ".checkpoint.lock").c_str(), O_RDWR | O_CLOEXEC);
+    const int contender = ::open((root.path() / ".checkpoint.lock").c_str(), O_RDWR | O_CLOEXEC);
     if (contender < 0) { throw std::runtime_error(std::strerror(errno)); }
     errno = 0;
     failures += check(::flock(contender, LOCK_EX | LOCK_NB) != 0 &&
@@ -296,8 +293,8 @@ int test_transaction_and_trusted_abort() {
                       "commit must consume the staging generation");
     failures += check(count_prefixed_entries(root.path(), "generation-") == 1,
                       "commit must leave exactly one authoritative generation");
-    failures += check(backend.committed_generation() == 1,
-                      "commit must advance the backend generation");
+    failures +=
+        check(backend.committed_generation() == 1, "commit must advance the backend generation");
     failures += check(images_equal(backend.load(checkpoint.expectation), checkpoint),
                       "a committed logical-length checkpoint must round-trip exactly");
 
@@ -323,13 +320,69 @@ int test_cross_instance_stale_generation() {
                       "committed generation must refresh across backend instances");
 
     const Fixture stale = fixture(1, {{CheckpointPayloadKind::StateImage, 7001}});
-    failures += check(
-        throws_checkpoint([&] { second.stage(stale.manifest, stale.payloads, stale.key); }),
-        "a pre-existing backend instance must reject a generation stale on disk");
+    failures +=
+        check(throws_checkpoint([&] { second.stage(stale.manifest, stale.payloads, stale.key); }),
+              "a pre-existing backend instance must reject a generation stale on disk");
     failures += check(count_prefixed_entries(root.path(), ".stage-") == 0,
                       "stale-generation rejection must not leave staging state");
     failures += check(images_equal(second.load(current.expectation), current),
                       "the stale-rejecting instance must observe the committed generation");
+
+    IoUringCheckpointLimits short_lock;
+    short_lock.lock_timeout_ms = 25;
+    TempDirectory contended_root;
+    IoUringCheckpointBackend owner(contended_root.path(), short_lock);
+    IoUringCheckpointBackend observer(contended_root.path(), short_lock);
+    const Fixture staged = fixture(3, {{CheckpointPayloadKind::StateImage, 4097}});
+    owner.stage(staged.manifest, staged.payloads, staged.key);
+    const auto started = std::chrono::steady_clock::now();
+    failures += check(observer.committed_generation() == 0,
+                      "contended noexcept generation query changed its cached value");
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    failures += check(elapsed < std::chrono::seconds(1),
+                      "contended generation query blocked beyond its configured deadline");
+    failures += check(
+        throws_checkpoint([&] { observer.stage(staged.manifest, staged.payloads, staged.key); }),
+        "contended stage did not reject at its configured deadline");
+    owner.abort(staged.key);
+    return failures;
+}
+
+int test_uncertain_marker_and_foreign_entries_fail_safe() {
+    int failures = 0;
+    TempDirectory root;
+    const std::filesystem::path foreign = root.path() / "generation-x";
+    {
+        const int fd = ::open(foreign.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+        if (fd < 0) { throw std::runtime_error(std::strerror(errno)); }
+        ::close(fd);
+    }
+    const Fixture current = fixture(7, {{CheckpointPayloadKind::StateImage, 5001}});
+    {
+        IoUringCheckpointBackend backend(root.path());
+        save(backend, current);
+    }
+    failures += check(std::filesystem::is_regular_file(foreign),
+                      "orphan cleanup claimed a foreign generation-prefixed file");
+    failures += check(!std::filesystem::exists(root.path() / ".publication-uncertain"),
+                      "successful commit retained its uncertainty marker");
+
+    const std::filesystem::path marker = root.path() / ".publication-uncertain";
+    {
+        const int fd = ::open(marker.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+        if (fd < 0) { throw std::runtime_error(std::strerror(errno)); }
+        const std::byte value{1};
+        if (::write(fd, &value, 1) != 1 || ::fsync(fd) != 0) {
+            const int error = errno;
+            ::close(fd);
+            throw std::runtime_error(std::strerror(error));
+        }
+        ::close(fd);
+    }
+    failures += check(throws_checkpoint([&] { IoUringCheckpointBackend blocked(root.path()); }),
+                      "persistent publication uncertainty was silently promoted");
+    failures += check(count_prefixed_entries(root.path(), "generation-") == 2,
+                      "uncertain construction deleted a prior or foreign generation entry");
     return failures;
 }
 
@@ -358,6 +411,33 @@ int test_partial_failure_cleanup() {
     return failures;
 }
 
+int test_partial_submit_failure_poison_and_recovery() {
+    int failures = 0;
+    TempDirectory root;
+    const Fixture checkpoint =
+        fixture(1, {{CheckpointPayloadKind::StateImage, 4U * 1024U * 1024U + 8193U}});
+    {
+        IoUringCheckpointBackend backend(root.path());
+        io_uring_checkpoint_test_fail_next_submitted_batch();
+        failures +=
+            check(throws_checkpoint([&] {
+                      backend.stage(checkpoint.manifest, checkpoint.payloads, checkpoint.key);
+                  }),
+                  "a partially submitted io_uring batch did not fail stage");
+        failures +=
+            check(throws_checkpoint([&] {
+                      backend.stage(checkpoint.manifest, checkpoint.payloads, checkpoint.key);
+                  }),
+                  "a failed io_uring context was reused after closing outstanding requests");
+    }
+
+    IoUringCheckpointBackend recovered(root.path());
+    save(recovered, checkpoint);
+    failures += check(images_equal(recovered.load(checkpoint.expectation), checkpoint),
+                      "a new backend could not recover after failed-ring cleanup");
+    return failures;
+}
+
 int test_commit_failure_preserves_prior_generation() {
     int failures = 0;
     TempDirectory root;
@@ -369,8 +449,7 @@ int test_commit_failure_preserves_prior_generation() {
     backend.stage(candidate.manifest, candidate.payloads, candidate.key);
     const std::filesystem::path blocker =
         root.path() / (".publish-" + sha256_hex(candidate.key.manifest_sha256));
-    const int blocker_fd =
-        ::open(blocker.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
+    const int blocker_fd = ::open(blocker.c_str(), O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC, 0600);
     if (blocker_fd < 0) { throw std::runtime_error(std::strerror(errno)); }
     ::close(blocker_fd);
 
@@ -383,6 +462,43 @@ int test_commit_failure_preserves_prior_generation() {
                       "abort after commit failure must remove only the failed generation");
     failures += check(images_equal(backend.load(current.expectation), current),
                       "commit failure must leave the prior manifest authoritative");
+    return failures;
+}
+
+int test_double_fsync_failure_persists_uncertainty() {
+    int failures = 0;
+    TempDirectory root;
+    const Fixture current   = fixture(1, {{CheckpointPayloadKind::StateImage, 5001}});
+    const Fixture candidate = fixture(2, {{CheckpointPayloadKind::StateImage, 6001}});
+    {
+        IoUringCheckpointBackend backend(root.path());
+        save(backend, current);
+        backend.stage(candidate.manifest, candidate.payloads, candidate.key);
+        io_uring_checkpoint_test_fail_publication_and_rollback_fsync();
+        failures += check(throws_checkpoint([&] { backend.commit(candidate.key); }),
+                          "double fsync fault did not fail commit");
+        backend.abort(candidate.key);
+    }
+
+    const std::filesystem::path marker = root.path() / ".publication-uncertain";
+    failures += check(std::filesystem::is_regular_file(marker) &&
+                          count_prefixed_entries(root.path(), "generation-") == 2,
+                      "uncertain commit lost its durable marker or prior generation");
+    failures += check(throws_checkpoint([&] { IoUringCheckpointBackend blocked(root.path()); }),
+                      "restart silently promoted a reported-failed generation");
+
+    std::filesystem::remove(marker);
+    const int root_fd = ::open(root.path().c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (root_fd < 0 || ::fsync(root_fd) != 0) {
+        const int error = errno;
+        if (root_fd >= 0) { ::close(root_fd); }
+        throw std::runtime_error(std::strerror(error));
+    }
+    ::close(root_fd);
+    IoUringCheckpointBackend recovered(root.path());
+    failures += check(images_equal(recovered.load(current.expectation), current) &&
+                          count_prefixed_entries(root.path(), "generation-") == 1,
+                      "operator-cleared marker did not recover the prior committed generation");
     return failures;
 }
 
@@ -428,7 +544,7 @@ int test_truncation_and_oversize_rejection() {
         const Fixture checkpoint = fixture(1, {{CheckpointPayloadKind::StateImage, 7003}});
         save(backend, checkpoint);
         const std::filesystem::path path = payload_path(root, checkpoint);
-        const int fd = ::open(path.c_str(), O_WRONLY | O_APPEND | O_CLOEXEC);
+        const int fd                     = ::open(path.c_str(), O_WRONLY | O_APPEND | O_CLOEXEC);
         if (fd < 0) { throw std::runtime_error(std::strerror(errno)); }
         const std::byte extra{0x7f};
         if (::write(fd, &extra, 1) != 1 || ::fsync(fd) != 0) {
@@ -446,7 +562,7 @@ int test_truncation_and_oversize_rejection() {
         const Fixture checkpoint = fixture(1, {{CheckpointPayloadKind::StateImage, 7003}});
         save(backend, checkpoint);
         const std::filesystem::path path = root.path() / "manifest";
-        const int fd = ::open(path.c_str(), O_WRONLY | O_APPEND | O_CLOEXEC);
+        const int fd                     = ::open(path.c_str(), O_WRONLY | O_APPEND | O_CLOEXEC);
         if (fd < 0) { throw std::runtime_error(std::strerror(errno)); }
         std::array<std::byte, 512> extra{};
         if (::write(fd, extra.data(), extra.size()) != static_cast<ssize_t>(extra.size()) ||
@@ -465,14 +581,13 @@ int test_truncation_and_oversize_rejection() {
 int test_expected_allocation_bound() {
     int failures = 0;
     TempDirectory root;
-    IoUringCheckpointBackend backend(
-        root.path(), IoUringCheckpointLimits{8192, 16384});
+    IoUringCheckpointBackend backend(root.path(), IoUringCheckpointLimits{8192, 16384});
     const Fixture checkpoint = fixture(1, {{CheckpointPayloadKind::StateImage, 6001}});
     save(backend, checkpoint);
 
-    CheckpointExpectation oversized = checkpoint.expectation;
+    CheckpointExpectation oversized      = checkpoint.expectation;
     oversized.manifest.payloads[0].bytes = 9000;
-    oversized.manifest_sha256 = checkpoint_manifest_sha256(oversized.manifest);
+    oversized.manifest_sha256            = checkpoint_manifest_sha256(oversized.manifest);
     failures += check(throws_checkpoint([&] { backend.load(oversized); }),
                       "trusted expected sizes above configured bounds must fail before allocation");
     return failures;
@@ -502,16 +617,19 @@ int main() {
 
         failures += test_transaction_and_trusted_abort();
         failures += test_cross_instance_stale_generation();
+        failures += test_uncertain_marker_and_foreign_entries_fail_safe();
         failures += test_partial_failure_cleanup();
+        failures += test_partial_submit_failure_poison_and_recovery();
         failures += test_commit_failure_preserves_prior_generation();
+        failures += test_double_fsync_failure_persists_uncertainty();
         failures += test_corruption_rejection();
         failures += test_truncation_and_oversize_rejection();
         failures += test_expected_allocation_bound();
         if (failures == 0) {
             const char* environment =
                 capability.environment == LinuxCheckpointEnvironment::Wsl ? "WSL" : "Linux";
-            std::cout << "io_uring checkpoint backend tests passed ("
-                      << environment << ", memory alignment " << capability.memory_alignment
+            std::cout << "io_uring checkpoint backend tests passed (" << environment
+                      << ", memory alignment " << capability.memory_alignment
                       << ", offset alignment " << capability.offset_alignment << ")\n";
         }
         return failures == 0 ? 0 : 1;

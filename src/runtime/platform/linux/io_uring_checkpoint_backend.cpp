@@ -1,5 +1,5 @@
 #ifndef _GNU_SOURCE
-#define _GNU_SOURCE
+#    define _GNU_SOURCE
 #endif
 
 #include "runtime/platform/linux/io_uring_checkpoint_backend.h"
@@ -24,6 +24,7 @@
 #include <atomic>
 #include <bit>
 #include <cerrno>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -38,43 +39,50 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
 
 #ifndef STATX_DIOALIGN
-#define STATX_DIOALIGN 0x00002000U
+#    define STATX_DIOALIGN 0x00002000U
 #endif
 
 #ifndef RENAME_NOREPLACE
-#define RENAME_NOREPLACE (1U << 0U)
+#    define RENAME_NOREPLACE (1U << 0U)
 #endif
 
 #ifndef RENAME_EXCHANGE
-#define RENAME_EXCHANGE (1U << 1U)
+#    define RENAME_EXCHANGE (1U << 1U)
 #endif
 
 namespace ninfer::runtime {
 namespace {
 
-constexpr std::size_t kPayloadKindCount    = 4;
-constexpr std::size_t kManifestBaseBytes   = 164;
-constexpr std::size_t kDescriptorBytes     = 41;
+constexpr std::size_t kPayloadKindCount  = 4;
+constexpr std::size_t kManifestBaseBytes = 164;
+constexpr std::size_t kDescriptorBytes   = 41;
 constexpr std::size_t kMaximumManifestBytes =
     kManifestBaseBytes + kPayloadKindCount * kDescriptorBytes;
-constexpr unsigned kRequestedRingEntries = 16;
-constexpr std::size_t kIoQueueDepth       = 8;
-constexpr std::size_t kDirectChunkBytes   = 4U * 1024U * 1024U;
-constexpr std::size_t kMaximumDioAlignment = 1U * 1024U * 1024U;
+constexpr unsigned kRequestedRingEntries         = 16;
+constexpr std::size_t kIoQueueDepth              = 8;
+constexpr std::size_t kDirectChunkBytes          = 4U * 1024U * 1024U;
+constexpr std::size_t kMaximumDioAlignment       = 1U * 1024U * 1024U;
+constexpr std::string_view kPublicationUncertain = ".publication-uncertain";
 
-constexpr long kExt4SuperMagic   = 0xef53;
-constexpr long kXfsSuperMagic    = 0x58465342;
-constexpr long kBtrfsSuperMagic  = 0x9123683e;
-constexpr long kF2fsSuperMagic   = 0xf2f52010;
-constexpr long kZfsSuperMagic    = 0x2fc12fc1;
-constexpr long kWslFsSuperMagic  = 0x53464846;
-constexpr long kPlan9SuperMagic  = 0x01021997;
-constexpr long kFuseSuperMagic   = 0x65735546;
+#if defined(NINFER_IO_URING_TESTING)
+std::atomic<bool> fail_next_submitted_batch{false};
+std::atomic<int> fail_publication_fsyncs{0};
+#endif
+
+constexpr long kExt4SuperMagic    = 0xef53;
+constexpr long kXfsSuperMagic     = 0x58465342;
+constexpr long kBtrfsSuperMagic   = 0x9123683e;
+constexpr long kF2fsSuperMagic    = 0xf2f52010;
+constexpr long kZfsSuperMagic     = 0x2fc12fc1;
+constexpr long kWslFsSuperMagic   = 0x53464846;
+constexpr long kPlan9SuperMagic   = 0x01021997;
+constexpr long kFuseSuperMagic    = 0x65735546;
 constexpr long kOverlaySuperMagic = 0x794c7630;
 
 [[noreturn]] void throw_system_error(std::string_view operation, int error) {
@@ -86,9 +94,22 @@ constexpr long kOverlaySuperMagic = 0x794c7630;
     throw_system_error(operation, errno);
 }
 
+int submit_io_uring(int ring_fd, unsigned submissions) {
+    const int result =
+        static_cast<int>(::syscall(SYS_io_uring_enter, ring_fd, submissions, 0U, 0U, nullptr, 0U));
+#if defined(NINFER_IO_URING_TESTING)
+    if (result > 0 && fail_next_submitted_batch.exchange(false, std::memory_order_acq_rel)) {
+        errno = EIO;
+        return -1;
+    }
+#endif
+    return result;
+}
+
 class UniqueFd {
 public:
     UniqueFd() = default;
+
     explicit UniqueFd(int fd) noexcept : fd_(fd) {}
 
     ~UniqueFd() { reset(); }
@@ -97,6 +118,7 @@ public:
     UniqueFd& operator=(const UniqueFd&) = delete;
 
     UniqueFd(UniqueFd&& other) noexcept : fd_(std::exchange(other.fd_, -1)) {}
+
     UniqueFd& operator=(UniqueFd&& other) noexcept {
         if (this != &other) {
             reset();
@@ -106,6 +128,7 @@ public:
     }
 
     [[nodiscard]] int get() const noexcept { return fd_; }
+
     [[nodiscard]] explicit operator bool() const noexcept { return fd_ >= 0; }
 
     void reset(int fd = -1) noexcept {
@@ -118,17 +141,18 @@ private:
 };
 
 struct RingRequest {
-    std::uint8_t opcode = 0;
-    int fd              = -1;
-    std::uint64_t offset = 0;
-    void* address       = nullptr;
-    std::uint32_t length = 0;
+    std::uint8_t opcode       = 0;
+    int fd                    = -1;
+    std::uint64_t offset      = 0;
+    void* address             = nullptr;
+    std::uint32_t length      = 0;
     std::uint32_t fsync_flags = 0;
 };
 
 class NativeIoUring {
 public:
     NativeIoUring() = default;
+
     ~NativeIoUring() { reset(); }
 
     NativeIoUring(const NativeIoUring&)            = delete;
@@ -138,8 +162,8 @@ public:
         if (ring_fd_) { throw CheckpointContractError("io_uring is already initialized"); }
 
         io_uring_params params{};
-        const int fd = static_cast<int>(
-            ::syscall(SYS_io_uring_setup, kRequestedRingEntries, &params));
+        const int fd =
+            static_cast<int>(::syscall(SYS_io_uring_setup, kRequestedRingEntries, &params));
         if (fd < 0) { throw_last_error("io_uring_setup"); }
         ring_fd_.reset(fd);
 
@@ -154,10 +178,10 @@ public:
 
         if ((params.features & IORING_FEAT_SINGLE_MMAP) != 0U) {
             sq_ring_bytes_ = std::max(sq_ring_bytes_, cq_ring_bytes_);
-            sq_ring_ = ::mmap(nullptr, sq_ring_bytes_, PROT_READ | PROT_WRITE, MAP_SHARED,
-                              ring_fd_.get(), IORING_OFF_SQ_RING);
+            sq_ring_       = ::mmap(nullptr, sq_ring_bytes_, PROT_READ | PROT_WRITE, MAP_SHARED,
+                                    ring_fd_.get(), IORING_OFF_SQ_RING);
             if (sq_ring_ == MAP_FAILED) {
-                sq_ring_ = nullptr;
+                sq_ring_        = nullptr;
                 const int error = errno;
                 reset();
                 throw_system_error("mmap io_uring shared rings", error);
@@ -169,7 +193,7 @@ public:
             sq_ring_ = ::mmap(nullptr, sq_ring_bytes_, PROT_READ | PROT_WRITE, MAP_SHARED,
                               ring_fd_.get(), IORING_OFF_SQ_RING);
             if (sq_ring_ == MAP_FAILED) {
-                sq_ring_ = nullptr;
+                sq_ring_        = nullptr;
                 const int error = errno;
                 reset();
                 throw_system_error("mmap io_uring submission ring", error);
@@ -177,17 +201,17 @@ public:
             cq_ring_ = ::mmap(nullptr, cq_ring_bytes_, PROT_READ | PROT_WRITE, MAP_SHARED,
                               ring_fd_.get(), IORING_OFF_CQ_RING);
             if (cq_ring_ == MAP_FAILED) {
-                cq_ring_ = nullptr;
+                cq_ring_        = nullptr;
                 const int error = errno;
                 reset();
                 throw_system_error("mmap io_uring completion ring", error);
             }
         }
 
-        sqes_map_ = ::mmap(nullptr, sqes_bytes_, PROT_READ | PROT_WRITE, MAP_SHARED,
-                           ring_fd_.get(), IORING_OFF_SQES);
+        sqes_map_ = ::mmap(nullptr, sqes_bytes_, PROT_READ | PROT_WRITE, MAP_SHARED, ring_fd_.get(),
+                           IORING_OFF_SQES);
         if (sqes_map_ == MAP_FAILED) {
-            sqes_map_ = nullptr;
+            sqes_map_       = nullptr;
             const int error = errno;
             reset();
             throw_system_error("mmap io_uring submission entries", error);
@@ -214,12 +238,29 @@ public:
     }
 
     void execute(std::span<const RingRequest> requests, std::span<std::int32_t> results) {
+        try {
+            execute_unchecked(requests, results);
+        } catch (...) {
+            // Closing the ring cancels and joins every request owned by this io_uring context
+            // before caller-owned bounce buffers and descriptors unwind. The ring is poisoned and
+            // deliberately cannot be reused after an attribution or syscall failure.
+            reset();
+            throw;
+        }
+    }
+
+    void execute_unchecked(std::span<const RingRequest> requests, std::span<std::int32_t> results) {
         if (requests.empty() || requests.size() != results.size()) {
             throw CheckpointContractError("io_uring request/result batch is invalid");
         }
         if (requests.size() > capacity()) {
             throw CheckpointContractError("io_uring request batch exceeds the queue capacity");
         }
+        if (next_batch_id_ == std::numeric_limits<std::uint32_t>::max()) {
+            throw CheckpointContractError("io_uring completion batch identity is exhausted");
+        }
+        const std::uint32_t batch_id  = ++next_batch_id_;
+        const std::uint64_t batch_tag = static_cast<std::uint64_t>(batch_id) << 32U;
 
         const std::uint32_t head = std::atomic_ref(*sq_head_).load(std::memory_order_acquire);
         const std::uint32_t tail = std::atomic_ref(*sq_tail_).load(std::memory_order_relaxed);
@@ -232,24 +273,23 @@ public:
             io_uring_sqe& sqe             = sqes_[sqe_index];
             std::memset(&sqe, 0, sizeof(sqe));
             const RingRequest& request = requests[index];
-            sqe.opcode      = request.opcode;
-            sqe.fd          = request.fd;
-            sqe.off         = request.offset;
-            sqe.addr        = reinterpret_cast<std::uint64_t>(request.address);
-            sqe.len         = request.length;
-            sqe.fsync_flags = request.fsync_flags;
-            sqe.user_data   = index + 1U;
+            sqe.opcode                 = request.opcode;
+            sqe.fd                     = request.fd;
+            sqe.off                    = request.offset;
+            sqe.addr                   = reinterpret_cast<std::uint64_t>(request.address);
+            sqe.len                    = request.length;
+            sqe.fsync_flags            = request.fsync_flags;
+            sqe.user_data              = batch_tag | (index + 1U);
             sq_array_[(tail + static_cast<std::uint32_t>(index)) & *sq_mask_] = sqe_index;
             results[index] = std::numeric_limits<std::int32_t>::min();
         }
-        std::atomic_ref(*sq_tail_)
-            .store(tail + static_cast<std::uint32_t>(requests.size()), std::memory_order_release);
+        std::atomic_ref(*sq_tail_).store(tail + static_cast<std::uint32_t>(requests.size()),
+                                         std::memory_order_release);
 
         std::size_t submitted = 0;
         while (submitted < requests.size()) {
             const unsigned remaining = static_cast<unsigned>(requests.size() - submitted);
-            const int result = static_cast<int>(
-                ::syscall(SYS_io_uring_enter, ring_fd_.get(), remaining, 0U, 0U, nullptr, 0U));
+            const int result         = submit_io_uring(ring_fd_.get(), remaining);
             if (result < 0) {
                 if (errno == EINTR) { continue; }
                 throw_last_error("io_uring_enter submit");
@@ -268,10 +308,12 @@ public:
                 std::atomic_ref(*cq_tail_).load(std::memory_order_acquire);
             while (cq_head != cq_tail && completed < requests.size()) {
                 const io_uring_cqe& cqe = cqes_[cq_head & *cq_mask_];
-                if (cqe.user_data == 0 || cqe.user_data > requests.size()) {
+                if ((cqe.user_data >> 32U) != batch_id || (cqe.user_data & 0xffffffffULL) == 0 ||
+                    (cqe.user_data & 0xffffffffULL) > requests.size()) {
                     throw CheckpointContractError("io_uring returned an unknown completion key");
                 }
-                const std::size_t index = static_cast<std::size_t>(cqe.user_data - 1U);
+                const std::size_t index =
+                    static_cast<std::size_t>((cqe.user_data & 0xffffffffULL) - 1U);
                 if (observed[index]) {
                     throw CheckpointContractError("io_uring returned a duplicate completion");
                 }
@@ -297,8 +339,15 @@ public:
     }
 
     void fsync(int fd, std::string_view context) {
-        const std::int32_t result = execute_one(
-            RingRequest{IORING_OP_FSYNC, fd, 0, nullptr, 0, 0});
+#if defined(NINFER_IO_URING_TESTING)
+        if ((context == "io_uring fsync checkpoint manifest publication" ||
+             context == "io_uring fsync checkpoint manifest rollback") &&
+            fail_publication_fsyncs.load(std::memory_order_acquire) > 0) {
+            fail_publication_fsyncs.fetch_sub(1, std::memory_order_acq_rel);
+            throw CheckpointContractError("injected checkpoint publication fsync failure");
+        }
+#endif
+        const std::int32_t result = execute_one(RingRequest{IORING_OP_FSYNC, fd, 0, nullptr, 0, 0});
         require_result(result, 0, context);
     }
 
@@ -314,6 +363,9 @@ public:
 
 private:
     void reset() noexcept {
+        // Closing first synchronously tears down/cancels the io_uring context while every submitted
+        // request still references live caller storage. Mappings are released only afterward.
+        ring_fd_.reset();
         if (sqes_map_ != nullptr) { ::munmap(sqes_map_, sqes_bytes_); }
         if (single_mmap_) {
             if (sq_ring_ != nullptr) { ::munmap(sq_ring_, sq_ring_bytes_); }
@@ -321,17 +373,31 @@ private:
             if (cq_ring_ != nullptr) { ::munmap(cq_ring_, cq_ring_bytes_); }
             if (sq_ring_ != nullptr) { ::munmap(sq_ring_, sq_ring_bytes_); }
         }
-        sqes_map_ = nullptr;
-        sq_ring_  = nullptr;
-        cq_ring_  = nullptr;
-        single_mmap_ = false;
-        ring_fd_.reset();
+        sqes_map_      = nullptr;
+        sq_ring_       = nullptr;
+        cq_ring_       = nullptr;
+        sq_ring_bytes_ = 0;
+        cq_ring_bytes_ = 0;
+        sqes_bytes_    = 0;
+        single_mmap_   = false;
+        sq_head_       = nullptr;
+        sq_tail_       = nullptr;
+        sq_mask_       = nullptr;
+        sq_entries_    = nullptr;
+        sq_array_      = nullptr;
+        sqes_          = nullptr;
+        cq_head_       = nullptr;
+        cq_tail_       = nullptr;
+        cq_mask_       = nullptr;
+        cq_entries_    = nullptr;
+        cqes_          = nullptr;
+        next_batch_id_ = 0;
     }
 
     UniqueFd ring_fd_;
-    void* sq_ring_  = nullptr;
-    void* cq_ring_  = nullptr;
-    void* sqes_map_ = nullptr;
+    void* sq_ring_             = nullptr;
+    void* cq_ring_             = nullptr;
+    void* sqes_map_            = nullptr;
     std::size_t sq_ring_bytes_ = 0;
     std::size_t cq_ring_bytes_ = 0;
     std::size_t sqes_bytes_    = 0;
@@ -344,11 +410,12 @@ private:
     std::uint32_t* sq_array_   = nullptr;
     io_uring_sqe* sqes_        = nullptr;
 
-    std::uint32_t* cq_head_    = nullptr;
-    std::uint32_t* cq_tail_    = nullptr;
-    std::uint32_t* cq_mask_    = nullptr;
-    std::uint32_t* cq_entries_ = nullptr;
-    io_uring_cqe* cqes_        = nullptr;
+    std::uint32_t* cq_head_      = nullptr;
+    std::uint32_t* cq_tail_      = nullptr;
+    std::uint32_t* cq_mask_      = nullptr;
+    std::uint32_t* cq_entries_   = nullptr;
+    io_uring_cqe* cqes_          = nullptr;
+    std::uint32_t next_batch_id_ = 0;
 };
 
 class AlignedBuffer {
@@ -367,6 +434,7 @@ public:
 
     AlignedBuffer(AlignedBuffer&& other) noexcept
         : data_(std::exchange(other.data_, nullptr)), bytes_(std::exchange(other.bytes_, 0)) {}
+
     AlignedBuffer& operator=(AlignedBuffer&& other) noexcept {
         if (this != &other) {
             std::free(data_);
@@ -377,6 +445,7 @@ public:
     }
 
     [[nodiscard]] std::byte* data() noexcept { return data_; }
+
     [[nodiscard]] std::size_t size() const noexcept { return bytes_; }
 
 private:
@@ -398,7 +467,7 @@ template <typename Integer>
 void append_integer(EncodedManifest& encoded, Integer value) {
     static_assert(std::is_unsigned_v<Integer>);
     for (std::size_t index = 0; index < sizeof(Integer); ++index) {
-        const unsigned shift = static_cast<unsigned>((sizeof(Integer) - 1U - index) * 8U);
+        const unsigned shift          = static_cast<unsigned>((sizeof(Integer) - 1U - index) * 8U);
         encoded.bytes[encoded.size++] = static_cast<std::byte>((value >> shift) & 0xffU);
     }
 }
@@ -415,8 +484,8 @@ Integer take_integer(std::span<const std::byte> encoded, std::size_t& cursor) {
     }
     Integer value = 0;
     for (std::size_t index = 0; index < sizeof(Integer); ++index) {
-        value = static_cast<Integer>((value << 8U) |
-                                     std::to_integer<std::uint8_t>(encoded[cursor++]));
+        value =
+            static_cast<Integer>((value << 8U) | std::to_integer<std::uint8_t>(encoded[cursor++]));
     }
     return value;
 }
@@ -426,9 +495,7 @@ CheckpointDigest take_digest(std::span<const std::byte> encoded, std::size_t& cu
         throw CheckpointContractError("checkpoint manifest digest is truncated");
     }
     CheckpointDigest digest{};
-    for (std::uint8_t& byte : digest) {
-        byte = std::to_integer<std::uint8_t>(encoded[cursor++]);
-    }
+    for (std::uint8_t& byte : digest) { byte = std::to_integer<std::uint8_t>(encoded[cursor++]); }
     return digest;
 }
 
@@ -504,17 +571,17 @@ CheckpointManifestV1 decode_manifest(std::span<const std::byte> encoded,
 
     std::size_t cursor = 0;
     CheckpointManifestV1 manifest;
-    manifest.magic           = take_integer<std::uint64_t>(encoded, cursor);
-    manifest.schema_version  = take_integer<std::uint32_t>(encoded, cursor);
-    manifest.journal_version = take_integer<std::uint32_t>(encoded, cursor);
-    manifest.generation      = take_integer<std::uint64_t>(encoded, cursor);
+    manifest.magic                       = take_integer<std::uint64_t>(encoded, cursor);
+    manifest.schema_version              = take_integer<std::uint32_t>(encoded, cursor);
+    manifest.journal_version             = take_integer<std::uint32_t>(encoded, cursor);
+    manifest.generation                  = take_integer<std::uint64_t>(encoded, cursor);
     manifest.identity.model              = take_digest(encoded, cursor);
     manifest.identity.runtime_source     = take_digest(encoded, cursor);
     manifest.identity.deployment_profile = take_digest(encoded, cursor);
     manifest.identity.layout             = take_digest(encoded, cursor);
-    manifest.identity.token_count = take_integer<std::uint32_t>(encoded, cursor);
-    manifest.identity.context_capacity = take_integer<std::uint32_t>(encoded, cursor);
-    const std::uint32_t payload_count = take_integer<std::uint32_t>(encoded, cursor);
+    manifest.identity.token_count        = take_integer<std::uint32_t>(encoded, cursor);
+    manifest.identity.context_capacity   = take_integer<std::uint32_t>(encoded, cursor);
+    const std::uint32_t payload_count    = take_integer<std::uint32_t>(encoded, cursor);
     if (payload_count == 0 || payload_count > kPayloadKindCount ||
         encoded.size() != kManifestBaseBytes + payload_count * kDescriptorBytes) {
         throw CheckpointContractError("checkpoint manifest payload count is invalid");
@@ -523,8 +590,8 @@ CheckpointManifestV1 decode_manifest(std::span<const std::byte> encoded,
     manifest.payloads.reserve(payload_count);
     for (std::uint32_t index = 0; index < payload_count; ++index) {
         CheckpointPayloadDescriptor descriptor;
-        descriptor.kind = static_cast<CheckpointPayloadKind>(
-            take_integer<std::uint8_t>(encoded, cursor));
+        descriptor.kind =
+            static_cast<CheckpointPayloadKind>(take_integer<std::uint8_t>(encoded, cursor));
         descriptor.bytes  = take_integer<std::uint64_t>(encoded, cursor);
         descriptor.sha256 = take_digest(encoded, cursor);
         manifest.payloads.push_back(descriptor);
@@ -584,8 +651,37 @@ std::string payload_name(CheckpointPayloadKind kind) {
     return "payload-" + std::to_string(static_cast<unsigned>(kind));
 }
 
-[[nodiscard]] bool starts_with(std::string_view value, std::string_view prefix) noexcept {
-    return value.size() >= prefix.size() && value.substr(0, prefix.size()) == prefix;
+[[nodiscard]] bool decimal_digits(std::string_view value) noexcept {
+    return std::all_of(value.begin(), value.end(),
+                       [](char byte) { return byte >= '0' && byte <= '9'; });
+}
+
+[[nodiscard]] bool lower_hex(std::string_view value) noexcept {
+    return std::all_of(value.begin(), value.end(), [](char byte) {
+        return (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
+    });
+}
+
+[[nodiscard]] bool owned_generation_name(std::string_view name) noexcept {
+    constexpr std::string_view prefix = "generation-";
+    if (!name.starts_with(prefix) || name.size() != prefix.size() + 20 + 1 + 64) { return false; }
+    const std::string_view suffix = name.substr(prefix.size());
+    return suffix[20] == '-' && decimal_digits(suffix.substr(0, 20)) &&
+           lower_hex(suffix.substr(21));
+}
+
+[[nodiscard]] bool owned_stage_name(std::string_view name) noexcept {
+    constexpr std::string_view prefix = ".stage-";
+    if (!name.starts_with(prefix) || name.size() != prefix.size() + 20 + 1 + 64) { return false; }
+    const std::string_view suffix = name.substr(prefix.size());
+    return suffix[20] == '-' && decimal_digits(suffix.substr(0, 20)) &&
+           lower_hex(suffix.substr(21));
+}
+
+[[nodiscard]] bool owned_publish_name(std::string_view name) noexcept {
+    constexpr std::string_view prefix = ".publish-";
+    return name.starts_with(prefix) && name.size() == prefix.size() + 64 &&
+           lower_hex(name.substr(prefix.size()));
 }
 
 [[nodiscard]] std::uint64_t round_up(std::uint64_t value, std::size_t alignment) {
@@ -606,9 +702,8 @@ LinuxCheckpointEnvironment detect_environment() noexcept {
         }
         return static_cast<char>(character);
     });
-    return release.find("microsoft") == std::string::npos
-               ? LinuxCheckpointEnvironment::NativeLinux
-               : LinuxCheckpointEnvironment::Wsl;
+    return release.find("microsoft") == std::string::npos ? LinuxCheckpointEnvironment::NativeLinux
+                                                          : LinuxCheckpointEnvironment::Wsl;
 }
 
 UniqueFd open_root(const std::filesystem::path& root) {
@@ -618,7 +713,7 @@ UniqueFd open_root(const std::filesystem::path& root) {
 }
 
 void require_local_filesystem(int root_fd, LinuxCheckpointEnvironment environment) {
-    struct statfs filesystem {};
+    struct statfs filesystem{};
     if (::fstatfs(root_fd, &filesystem) != 0) { throw_last_error("inspect checkpoint filesystem"); }
     const long type = static_cast<long>(filesystem.f_type);
     if (type == kExt4SuperMagic || type == kXfsSuperMagic || type == kBtrfsSuperMagic ||
@@ -663,6 +758,14 @@ void unlink_if_exists(int directory_fd, std::string_view name, int flags = 0) {
     }
 }
 
+bool entry_exists(int directory_fd, std::string_view name) {
+    const std::string path(name);
+    struct stat status{};
+    if (::fstatat(directory_fd, path.c_str(), &status, AT_SYMLINK_NOFOLLOW) == 0) { return true; }
+    if (errno == ENOENT) { return false; }
+    throw_last_error("inspect checkpoint publication marker");
+}
+
 DirectIoAlignment verify_storage_capabilities(int root_fd, NativeIoUring& ring) {
     static std::atomic<std::uint64_t> sequence{0};
     const std::string nonce = std::to_string(static_cast<unsigned long long>(::getpid())) + "-" +
@@ -674,15 +777,14 @@ DirectIoAlignment verify_storage_capabilities(int root_fd, NativeIoUring& ring) 
     UniqueFd other;
     bool direct_exists = false;
     bool other_exists  = false;
-    auto cleanup = [&]() noexcept {
+    auto cleanup       = [&]() noexcept {
         direct.reset();
         other.reset();
         if (direct_exists) { ::unlinkat(root_fd, direct_name.c_str(), 0); }
         if (other_exists) { ::unlinkat(root_fd, other_name.c_str(), 0); }
         try {
             ring.fsync(root_fd, "fsync checkpoint root after capability probe cleanup");
-        } catch (...) {
-        }
+        } catch (...) {}
     };
 
     try {
@@ -693,7 +795,7 @@ DirectIoAlignment verify_storage_capabilities(int root_fd, NativeIoUring& ring) 
         direct.reset(direct_fd);
         direct_exists = true;
 
-        struct statx status {};
+        struct statx status{};
         if (::syscall(SYS_statx, direct.get(), "", AT_EMPTY_PATH, STATX_DIOALIGN, &status) != 0) {
             throw_last_error("statx checkpoint direct-I/O alignment");
         }
@@ -724,9 +826,9 @@ DirectIoAlignment verify_storage_capabilities(int root_fd, NativeIoUring& ring) 
         }
         buffer.data()[logical_bytes] = std::byte{0};
 
-        std::int32_t result = ring.execute_one(
-            RingRequest{IORING_OP_WRITE, direct.get(), 0, buffer.data(),
-                        static_cast<std::uint32_t>(io_bytes), 0});
+        std::int32_t result =
+            ring.execute_one(RingRequest{IORING_OP_WRITE, direct.get(), 0, buffer.data(),
+                                         static_cast<std::uint32_t>(io_bytes), 0});
         NativeIoUring::require_result(result, io_bytes, "io_uring O_DIRECT capability write");
         if (::ftruncate(direct.get(), static_cast<off_t>(logical_bytes)) != 0) {
             throw_last_error("truncate checkpoint capability probe to logical length");
@@ -752,8 +854,7 @@ DirectIoAlignment verify_storage_capabilities(int root_fd, NativeIoUring& ring) 
         other.reset(other_fd);
         other_exists = true;
         std::byte marker{0x5a};
-        result = ring.execute_one(
-            RingRequest{IORING_OP_WRITE, other.get(), 0, &marker, 1, 0});
+        result = ring.execute_one(RingRequest{IORING_OP_WRITE, other.get(), 0, &marker, 1, 0});
         NativeIoUring::require_result(result, 1, "io_uring checkpoint manifest capability write");
         ring.fsync(other.get(), "io_uring fsync checkpoint manifest capability probe");
         ring.fsync(root_fd, "io_uring fsync checkpoint rename capability entries");
@@ -793,7 +894,7 @@ std::optional<StoredManifest> read_manifest_file(NativeIoUring& ring, int direct
     }
     UniqueFd fd(raw_fd);
 
-    struct stat status {};
+    struct stat status{};
     if (::fstat(fd.get(), &status) != 0) { throw_last_error("stat checkpoint manifest"); }
     if (!S_ISREG(status.st_mode) || status.st_size < 0 ||
         static_cast<std::uint64_t>(status.st_size) > kMaximumManifestBytes ||
@@ -803,16 +904,16 @@ std::optional<StoredManifest> read_manifest_file(NativeIoUring& ring, int direct
 
     EncodedManifest encoded;
     encoded.size = static_cast<std::size_t>(status.st_size);
-    const std::int32_t result = ring.execute_one(
-        RingRequest{IORING_OP_READ, fd.get(), 0, encoded.bytes.data(),
-                    static_cast<std::uint32_t>(encoded.size), 0});
+    const std::int32_t result =
+        ring.execute_one(RingRequest{IORING_OP_READ, fd.get(), 0, encoded.bytes.data(),
+                                     static_cast<std::uint32_t>(encoded.size), 0});
     NativeIoUring::require_result(result, encoded.size, "io_uring checkpoint manifest read");
 
     const std::span<const std::byte> bytes = std::span(encoded.bytes).first(encoded.size);
     StoredManifest stored;
-    stored.digest   = sha256(bytes);
-    stored.manifest = decode_manifest(bytes, limits);
-    stored.encoded  = encoded;
+    stored.digest                   = sha256(bytes);
+    stored.manifest                 = decode_manifest(bytes, limits);
+    stored.encoded                  = encoded;
     const EncodedManifest canonical = encode_manifest(stored.manifest, limits);
     if (canonical.size != encoded.size ||
         !std::equal(canonical.bytes.begin(), canonical.bytes.begin() + canonical.size,
@@ -831,8 +932,7 @@ void write_buffered_file(NativeIoUring& ring, int directory_fd, std::string_view
     if (raw_fd < 0) { throw_last_error("create checkpoint manifest staging file"); }
     UniqueFd fd(raw_fd);
     const std::int32_t result = ring.execute_one(
-        RingRequest{IORING_OP_WRITE, fd.get(), 0,
-                    const_cast<std::byte*>(encoded.bytes.data()),
+        RingRequest{IORING_OP_WRITE, fd.get(), 0, const_cast<std::byte*>(encoded.bytes.data()),
                     static_cast<std::uint32_t>(encoded.size), 0});
     NativeIoUring::require_result(result, encoded.size, "io_uring checkpoint manifest write");
     ring.fsync(fd.get(), "io_uring fsync checkpoint manifest");
@@ -844,8 +944,8 @@ struct DirectWriteFile {
 };
 
 struct DirectReadFile {
-    int fd = -1;
-    CheckpointPayload* payload = nullptr;
+    int fd                                        = -1;
+    CheckpointPayload* payload                    = nullptr;
     const CheckpointPayloadDescriptor* descriptor = nullptr;
 };
 
@@ -878,21 +978,21 @@ void direct_write_payloads(NativeIoUring& ring, std::span<const DirectWriteFile>
         lengths[index] = files[index].bytes.size();
     }
     const std::span<const std::uint64_t> active_lengths = std::span(lengths).first(files.size());
-    const std::size_t depth = batch_buffer_count(active_lengths);
+    const std::size_t depth                             = batch_buffer_count(active_lengths);
     const std::uint64_t largest = *std::max_element(active_lengths.begin(), active_lengths.end());
     const std::size_t buffer_bytes = static_cast<std::size_t>(
         round_up(std::min<std::uint64_t>(largest, kDirectChunkBytes), alignment.offset));
-    std::vector<AlignedBuffer> buffers =
-        make_batch_buffers(depth, alignment, buffer_bytes);
+    std::vector<AlignedBuffer> buffers = make_batch_buffers(depth, alignment, buffer_bytes);
     std::array<std::uint64_t, kPayloadKindCount> offsets{};
     std::size_t cursor = 0;
 
     struct Work {
-        std::size_t file = 0;
-        std::uint64_t offset = 0;
-        std::size_t logical = 0;
+        std::size_t file      = 0;
+        std::uint64_t offset  = 0;
+        std::size_t logical   = 0;
         std::size_t submitted = 0;
     };
+
     std::array<RingRequest, kIoQueueDepth> requests{};
     std::array<std::int32_t, kIoQueueDepth> results{};
     std::array<Work, kIoQueueDepth> work{};
@@ -910,10 +1010,10 @@ void direct_write_payloads(NativeIoUring& ring, std::span<const DirectWriteFile>
             }
             if (!selected.has_value()) { break; }
 
-            const std::size_t file = *selected;
+            const std::size_t file        = *selected;
             const std::uint64_t remaining = files[file].bytes.size() - offsets[file];
-            const std::size_t logical = static_cast<std::size_t>(
-                std::min<std::uint64_t>(remaining, kDirectChunkBytes));
+            const std::size_t logical =
+                static_cast<std::size_t>(std::min<std::uint64_t>(remaining, kDirectChunkBytes));
             const std::size_t submitted =
                 static_cast<std::size_t>(round_up(logical, alignment.offset));
             if (submitted > buffers[count].size()) {
@@ -924,10 +1024,13 @@ void direct_write_payloads(NativeIoUring& ring, std::span<const DirectWriteFile>
             if (submitted > logical) {
                 std::memset(buffers[count].data() + logical, 0, submitted - logical);
             }
-            work[count] = Work{file, offsets[file], logical, submitted};
-            requests[count] = RingRequest{IORING_OP_WRITE, files[file].fd, offsets[file],
+            work[count]     = Work{file, offsets[file], logical, submitted};
+            requests[count] = RingRequest{IORING_OP_WRITE,
+                                          files[file].fd,
+                                          offsets[file],
                                           buffers[count].data(),
-                                          static_cast<std::uint32_t>(submitted), 0};
+                                          static_cast<std::uint32_t>(submitted),
+                                          0};
             offsets[file] += logical;
             ++count;
         }
@@ -953,22 +1056,22 @@ void direct_read_payloads(NativeIoUring& ring, std::span<const DirectReadFile> f
         lengths[index] = files[index].descriptor->bytes;
     }
     const std::span<const std::uint64_t> active_lengths = std::span(lengths).first(files.size());
-    const std::size_t depth = batch_buffer_count(active_lengths);
+    const std::size_t depth                             = batch_buffer_count(active_lengths);
     const std::uint64_t largest = *std::max_element(active_lengths.begin(), active_lengths.end());
     const std::size_t buffer_bytes = static_cast<std::size_t>(
         round_up(std::min<std::uint64_t>(largest, kDirectChunkBytes), alignment.offset));
-    std::vector<AlignedBuffer> buffers =
-        make_batch_buffers(depth, alignment, buffer_bytes);
+    std::vector<AlignedBuffer> buffers = make_batch_buffers(depth, alignment, buffer_bytes);
     std::array<std::uint64_t, kPayloadKindCount> offsets{};
     std::array<Sha256, kPayloadKindCount> hashers{};
     std::size_t cursor = 0;
 
     struct Work {
-        std::size_t file = 0;
-        std::uint64_t offset = 0;
-        std::size_t logical = 0;
+        std::size_t file      = 0;
+        std::uint64_t offset  = 0;
+        std::size_t logical   = 0;
         std::size_t requested = 0;
     };
+
     std::array<RingRequest, kIoQueueDepth> requests{};
     std::array<std::int32_t, kIoQueueDepth> results{};
     std::array<Work, kIoQueueDepth> work{};
@@ -986,16 +1089,19 @@ void direct_read_payloads(NativeIoUring& ring, std::span<const DirectReadFile> f
             }
             if (!selected.has_value()) { break; }
 
-            const std::size_t file = *selected;
+            const std::size_t file        = *selected;
             const std::uint64_t remaining = files[file].descriptor->bytes - offsets[file];
-            const std::size_t logical = static_cast<std::size_t>(
-                std::min<std::uint64_t>(remaining, kDirectChunkBytes));
+            const std::size_t logical =
+                static_cast<std::size_t>(std::min<std::uint64_t>(remaining, kDirectChunkBytes));
             const std::size_t requested =
                 static_cast<std::size_t>(round_up(logical, alignment.offset));
-            work[count] = Work{file, offsets[file], logical, requested};
-            requests[count] = RingRequest{IORING_OP_READ, files[file].fd, offsets[file],
+            work[count]     = Work{file, offsets[file], logical, requested};
+            requests[count] = RingRequest{IORING_OP_READ,
+                                          files[file].fd,
+                                          offsets[file],
                                           buffers[count].data(),
-                                          static_cast<std::uint32_t>(requested), 0};
+                                          static_cast<std::uint32_t>(requested),
+                                          0};
             offsets[file] += logical;
             ++count;
         }
@@ -1022,11 +1128,24 @@ void direct_read_payloads(NativeIoUring& ring, std::span<const DirectReadFile> f
 
 } // namespace
 
+#if defined(NINFER_IO_URING_TESTING)
+void io_uring_checkpoint_test_fail_next_submitted_batch() noexcept {
+    fail_next_submitted_batch.store(true, std::memory_order_release);
+}
+
+void io_uring_checkpoint_test_fail_publication_and_rollback_fsync() noexcept {
+    fail_publication_fsyncs.store(2, std::memory_order_release);
+}
+#endif
+
 class IoUringCheckpointBackend::Impl {
 public:
     Impl(std::filesystem::path root, IoUringCheckpointLimits limits)
         : root_path_(std::move(root)), limits_(limits), environment_(detect_environment()),
           root_fd_(open_root(root_path_)) {
+        if (limits_.lock_timeout_ms == 0) {
+            throw CheckpointContractError("checkpoint lock timeout must be nonzero");
+        }
         require_local_filesystem(root_fd_.get(), environment_);
         ring_.initialize();
 
@@ -1034,7 +1153,7 @@ public:
                                      O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
         if (lock_fd < 0) { throw_last_error("open checkpoint single-flight lock"); }
         lock_fd_.reset(lock_fd);
-        struct stat lock_status {};
+        struct stat lock_status{};
         if (::fstat(lock_fd_.get(), &lock_status) != 0) {
             throw_last_error("stat checkpoint single-flight lock");
         }
@@ -1044,6 +1163,7 @@ public:
 
         acquire_lock(LOCK_EX);
         try {
+            ensure_no_uncertain_publication();
             alignment_ = verify_storage_capabilities(root_fd_.get(), ring_);
             const std::optional<StoredManifest> current = read_current_manifest();
             cleanup_orphans(current);
@@ -1063,8 +1183,7 @@ public:
             ::unlinkat(root_fd_.get(), active_->publish_path.c_str(), 0);
             try {
                 ring_.fsync(root_fd_.get(), "fsync checkpoint root during backend teardown");
-            } catch (...) {
-            }
+            } catch (...) {}
         }
         active_.reset();
         release_lock_noexcept();
@@ -1079,9 +1198,9 @@ public:
             }
             acquire_lock(LOCK_SH);
             acquired = true;
+            ensure_no_uncertain_publication();
             const std::optional<StoredManifest> current = read_current_manifest();
-            const std::uint64_t generation =
-                current.has_value() ? current->manifest.generation : 0;
+            const std::uint64_t generation = current.has_value() ? current->manifest.generation : 0;
             committed_generation_.store(generation, std::memory_order_release);
             release_lock_noexcept();
             return generation;
@@ -1091,8 +1210,7 @@ public:
         }
     }
 
-    void stage(const CheckpointManifestV1& manifest,
-               std::span<const CheckpointPayload> payloads,
+    void stage(const CheckpointManifestV1& manifest, std::span<const CheckpointPayload> payloads,
                const CheckpointStageKey& key) {
         validate_manifest(manifest, limits_);
         validate_stage_key(manifest, key);
@@ -1107,6 +1225,7 @@ public:
 
         acquire_lock(LOCK_EX);
         try {
+            ensure_no_uncertain_publication();
             const std::optional<StoredManifest> current = read_current_manifest();
             const std::uint64_t current_generation =
                 current.has_value() ? current->manifest.generation : 0;
@@ -1144,10 +1263,9 @@ public:
             writes.reserve(payloads.size());
             for (const CheckpointPayload& payload : payloads) {
                 const std::string name = payload_name(payload.kind);
-                const int fd = ::openat(directory.get(), name.c_str(),
-                                        O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW |
-                                            O_DIRECT,
-                                        0600);
+                const int fd =
+                    ::openat(directory.get(), name.c_str(),
+                             O_CREAT | O_EXCL | O_WRONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECT, 0600);
                 if (fd < 0) { throw_last_error("create O_DIRECT checkpoint payload"); }
                 payload_fds.emplace_back(fd);
                 writes.push_back(DirectWriteFile{fd, payload.bytes});
@@ -1175,8 +1293,7 @@ public:
             if (active_.has_value()) {
                 try {
                     remove_known_directory(active_->path_name);
-                    ring_.fsync(root_fd_.get(),
-                                "io_uring fsync failed checkpoint stage cleanup");
+                    ring_.fsync(root_fd_.get(), "io_uring fsync failed checkpoint stage cleanup");
                 } catch (...) {
                     active_.reset();
                     release_lock_noexcept();
@@ -1203,12 +1320,20 @@ public:
 
         write_buffered_file(ring_, root_fd_.get(), active_->publish_path, active_->encoded);
         ring_.fsync(root_fd_.get(), "io_uring fsync checkpoint manifest staging entry");
+        write_buffered_file(ring_, root_fd_.get(), kPublicationUncertain, active_->encoded);
+        ring_.fsync(root_fd_.get(), "io_uring fsync checkpoint publication marker");
 
         const bool replacing = active_->old_generation.has_value();
-        if (replacing) {
-            rename_exchange(root_fd_.get(), active_->publish_path, "manifest");
-        } else {
-            rename_noreplace(root_fd_.get(), active_->publish_path, "manifest");
+        try {
+            if (replacing) {
+                rename_exchange(root_fd_.get(), active_->publish_path, "manifest");
+            } else {
+                rename_noreplace(root_fd_.get(), active_->publish_path, "manifest");
+            }
+        } catch (...) {
+            unlink_if_exists(root_fd_.get(), kPublicationUncertain);
+            ring_.fsync(root_fd_.get(), "io_uring fsync failed publication marker cleanup");
+            throw;
         }
         try {
             ring_.fsync(root_fd_.get(), "io_uring fsync checkpoint manifest publication");
@@ -1224,16 +1349,17 @@ public:
                     }
                 }
                 ring_.fsync(root_fd_.get(), "io_uring fsync checkpoint manifest rollback");
+                unlink_if_exists(root_fd_.get(), kPublicationUncertain);
+                ring_.fsync(root_fd_.get(), "io_uring fsync checkpoint rollback marker cleanup");
             } catch (const std::exception& rollback_failure) {
                 active_->publication_uncertain = true;
-                poisoned_ = true;
+                poisoned_                      = true;
                 try {
-                    poisoned_reason_ = std::string(
-                                           "checkpoint manifest publication failed and rollback "
-                                           "was not durable: ") +
-                                       rollback_failure.what();
-                } catch (...) {
-                }
+                    poisoned_reason_ =
+                        std::string("checkpoint manifest publication failed and rollback "
+                                    "was not durable: ") +
+                        rollback_failure.what();
+                } catch (...) {}
                 throw CheckpointContractError(
                     poisoned_reason_.empty()
                         ? "checkpoint manifest publication failed and rollback was not durable"
@@ -1243,6 +1369,16 @@ public:
         }
 
         committed_generation_.store(active_->manifest.generation, std::memory_order_release);
+        try {
+            unlink_if_exists(root_fd_.get(), kPublicationUncertain);
+            ring_.fsync(root_fd_.get(), "io_uring fsync checkpoint publication marker cleanup");
+        } catch (...) {
+            // The manifest itself is already durable and commit therefore succeeds. A marker that
+            // survives a crash forces the next process to fail closed instead of guessing.
+            poisoned_ = true;
+            poisoned_reason_ =
+                "checkpoint committed but publication-marker cleanup did not complete";
+        }
         // Publication is now durable. Cleanup cannot be reported as a failed commit; any residue is
         // removed under the same cross-instance lock by the next constructor/stage operation.
         ::unlinkat(root_fd_.get(), active_->publish_path.c_str(), 0);
@@ -1251,8 +1387,7 @@ public:
         }
         try {
             ring_.fsync(root_fd_.get(), "io_uring fsync checkpoint post-commit cleanup");
-        } catch (...) {
-        }
+        } catch (...) {}
         active_.reset();
         release_lock_noexcept();
     }
@@ -1266,13 +1401,11 @@ public:
                 ::unlinkat(root_fd_.get(), active_->publish_path.c_str(), 0);
                 try {
                     ring_.fsync(root_fd_.get(), "io_uring fsync checkpoint abort cleanup");
-                } catch (...) {
-                }
+                } catch (...) {}
             }
             active_.reset();
             release_lock_noexcept();
-        } catch (...) {
-        }
+        } catch (...) {}
     }
 
     CheckpointImage load(const CheckpointExpectation& expected) {
@@ -1289,6 +1422,7 @@ public:
         }
         acquire_lock(LOCK_SH);
         try {
+            ensure_no_uncertain_publication();
             const std::optional<StoredManifest> current = read_current_manifest();
             if (!current.has_value()) {
                 throw CheckpointContractError("no committed checkpoint manifest exists");
@@ -1327,11 +1461,11 @@ public:
             payload_fds.reserve(current->manifest.payloads.size());
             for (const CheckpointPayloadDescriptor& descriptor : current->manifest.payloads) {
                 const std::string name = payload_name(descriptor.kind);
-                const int fd = ::openat(directory.get(), name.c_str(),
-                                        O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECT);
+                const int fd           = ::openat(directory.get(), name.c_str(),
+                                                  O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECT);
                 if (fd < 0) { throw_last_error("open committed O_DIRECT checkpoint payload"); }
                 payload_fds.emplace_back(fd);
-                struct stat status {};
+                struct stat status{};
                 if (::fstat(fd, &status) != 0) { throw_last_error("stat checkpoint payload"); }
                 if (!S_ISREG(status.st_mode) || status.st_size < 0 ||
                     static_cast<std::uint64_t>(status.st_size) != descriptor.bytes) {
@@ -1380,9 +1514,9 @@ private:
 
     void ensure_ready() const {
         if (poisoned_) {
-            throw CheckpointContractError(
-                poisoned_reason_.empty() ? "checkpoint backend publication state is uncertain"
-                                         : poisoned_reason_);
+            throw CheckpointContractError(poisoned_reason_.empty()
+                                              ? "checkpoint backend publication state is uncertain"
+                                              : poisoned_reason_);
         }
     }
 
@@ -1393,16 +1527,32 @@ private:
         }
     }
 
+    void ensure_no_uncertain_publication() const {
+        if (entry_exists(root_fd_.get(), kPublicationUncertain)) {
+            throw CheckpointContractError(
+                "checkpoint manifest publication is persistently marked uncertain");
+        }
+    }
+
     void acquire_lock(int operation) {
         if (lock_held_) {
             throw CheckpointContractError("checkpoint single-flight lock is already held");
         }
+        const auto deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(limits_.lock_timeout_ms);
         for (;;) {
-            if (::flock(lock_fd_.get(), operation) == 0) {
+            if (::flock(lock_fd_.get(), operation | LOCK_NB) == 0) {
                 lock_held_ = true;
                 return;
             }
-            if (errno != EINTR) { throw_last_error("acquire checkpoint single-flight lock"); }
+            if (errno == EINTR) { continue; }
+            if (errno != EWOULDBLOCK && errno != EAGAIN) {
+                throw_last_error("acquire checkpoint single-flight lock");
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                throw CheckpointContractError("timed out acquiring checkpoint single-flight lock");
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
     }
 
@@ -1418,8 +1568,8 @@ private:
 
     void remove_known_directory(std::string_view name) {
         const std::string path(name);
-        const int fd = ::openat(root_fd_.get(), path.c_str(),
-                                O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+        const int fd =
+            ::openat(root_fd_.get(), path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (fd < 0) {
             if (errno == ENOENT) { return; }
             throw_last_error("open checkpoint generation for cleanup");
@@ -1436,16 +1586,14 @@ private:
     void remove_known_directory_noexcept(std::string_view name) noexcept {
         try {
             remove_known_directory(name);
-        } catch (...) {
-        }
+        } catch (...) {}
     }
 
     void cleanup_orphans(const std::optional<StoredManifest>& current) {
         const std::optional<std::string> current_generation =
-            current.has_value()
-                ? std::optional<std::string>(
-                      generation_name(current->manifest.generation, current->digest))
-                : std::nullopt;
+            current.has_value() ? std::optional<std::string>(generation_name(
+                                      current->manifest.generation, current->digest))
+                                : std::nullopt;
 
         const int duplicate = ::dup(root_fd_.get());
         if (duplicate < 0) { throw_last_error("duplicate checkpoint root for cleanup"); }
@@ -1462,12 +1610,12 @@ private:
         while (dirent* entry = ::readdir(directory.get())) {
             const std::string_view name(entry->d_name);
             if (name == "." || name == "..") { continue; }
-            if (starts_with(name, ".stage-")) {
+            if (owned_stage_name(name)) {
                 stale_directories.emplace_back(name);
-            } else if (starts_with(name, "generation-") &&
+            } else if (owned_generation_name(name) &&
                        (!current_generation.has_value() || name != *current_generation)) {
                 stale_directories.emplace_back(name);
-            } else if (starts_with(name, ".publish-")) {
+            } else if (owned_publish_name(name)) {
                 stale_files.emplace_back(name);
             }
         }
@@ -1506,12 +1654,10 @@ probe_io_uring_checkpoint_capability(const std::filesystem::path& root) noexcept
         NativeIoUring ring;
         ring.initialize();
         const DirectIoAlignment alignment = verify_storage_capabilities(root_fd.get(), ring);
-        capability.available        = true;
-        capability.memory_alignment = alignment.memory;
-        capability.offset_alignment = alignment.offset;
-    } catch (const std::exception& error) {
-        capability.reason = error.what();
-    } catch (...) {
+        capability.available              = true;
+        capability.memory_alignment       = alignment.memory;
+        capability.offset_alignment       = alignment.offset;
+    } catch (const std::exception& error) { capability.reason = error.what(); } catch (...) {
         capability.reason = "unknown Linux checkpoint capability failure";
     }
     return capability;
@@ -1538,13 +1684,9 @@ void IoUringCheckpointBackend::stage(const CheckpointManifestV1& manifest,
     impl_->stage(manifest, payloads, key);
 }
 
-void IoUringCheckpointBackend::commit(const CheckpointStageKey& key) {
-    impl_->commit(key);
-}
+void IoUringCheckpointBackend::commit(const CheckpointStageKey& key) { impl_->commit(key); }
 
-void IoUringCheckpointBackend::abort(const CheckpointStageKey& key) noexcept {
-    impl_->abort(key);
-}
+void IoUringCheckpointBackend::abort(const CheckpointStageKey& key) noexcept { impl_->abort(key); }
 
 CheckpointImage IoUringCheckpointBackend::load(const CheckpointExpectation& expected) {
     return impl_->load(expected);
