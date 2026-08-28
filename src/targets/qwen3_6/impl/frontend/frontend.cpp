@@ -281,20 +281,33 @@ std::vector<fi::ChatMessage> convert_messages(std::vector<ChatMessage> messages)
         }
         target.parts.reserve(source.parts.size());
         for (MessagePart& part : source.parts) {
-            if (part.kind == MessagePartKind::Text) {
+            switch (part.kind) {
+            case MessagePartKind::Text:
                 target.parts.push_back(fi::ChatPart::text_part(std::move(part.text)));
-                continue;
+                break;
+            case MessagePartKind::Media: {
+                if (part.media.bytes.empty()) {
+                    throw std::invalid_argument("frontend media input contains no owning bytes");
+                }
+                fi::MediaData media;
+                media.source_name = std::move(part.media.source_name);
+                media.media_type  = std::move(part.media.media_type);
+                media.bytes       = std::move(part.media.bytes);
+                switch (part.media.kind) {
+                case MediaKind::Image:
+                    target.parts.push_back(fi::ChatPart::image(std::move(media)));
+                    break;
+                case MediaKind::Video:
+                    target.parts.push_back(fi::ChatPart::video(std::move(media)));
+                    break;
+                default:
+                    throw std::invalid_argument("frontend media kind is invalid");
+                }
+                break;
             }
-            if (part.media.bytes.empty()) {
-                throw std::invalid_argument("frontend media input contains no owning bytes");
+            default:
+                throw std::invalid_argument("frontend message-part kind is invalid");
             }
-            fi::MediaData media;
-            media.source_name = std::move(part.media.source_name);
-            media.media_type  = std::move(part.media.media_type);
-            media.bytes       = std::move(part.media.bytes);
-            target.parts.push_back(part.media.kind == MediaKind::Image
-                                       ? fi::ChatPart::image(std::move(media))
-                                       : fi::ChatPart::video(std::move(media)));
         }
         result.push_back(std::move(target));
     }

@@ -288,6 +288,33 @@ bool throws_invalid_argument(Callable&& callable) {
     return false;
 }
 
+int test_invalid_public_part_enums(const Frontend& frontend) {
+    ninfer::ChatMessage invalid_part_message;
+    invalid_part_message.role = ninfer::ChatRole::User;
+    invalid_part_message.parts.push_back(ninfer::MessagePart{
+        .kind = static_cast<ninfer::MessagePartKind>(255), .text = "invalid", .media = {}});
+    ninfer::PromptInput invalid_part;
+    invalid_part.messages.push_back(std::move(invalid_part_message));
+
+    ninfer::MessagePart media;
+    media.kind       = ninfer::MessagePartKind::Media;
+    media.media.kind = static_cast<ninfer::MediaKind>(255);
+    media.media.bytes.push_back(0);
+    ninfer::ChatMessage invalid_media_message;
+    invalid_media_message.role = ninfer::ChatRole::User;
+    invalid_media_message.parts.push_back(std::move(media));
+    ninfer::PromptInput invalid_media;
+    invalid_media.messages.push_back(std::move(invalid_media_message));
+
+    int failures =
+        check(throws_invalid_argument([&] { (void)frontend.prepare(std::move(invalid_part)); }),
+              "invalid public message-part kind was accepted");
+    failures +=
+        check(throws_invalid_argument([&] { (void)frontend.prepare(std::move(invalid_media)); }),
+              "invalid public media kind was accepted as video");
+    return failures;
+}
+
 template <class Callable>
 bool throws_processor_budget(Callable&& callable) {
     try {
@@ -1878,6 +1905,7 @@ int main() {
     failures += test_rewrite_checkpoint_trace();
     failures += test_adjacent_tool_message_boundary();
     failures += test_official_resource_guards();
+    failures += test_invalid_public_part_enums(frontend);
     failures += test_text_and_image_prepare(frontend);
     failures += test_literal_control_tokens_with_media();
     failures += test_explicit_leading_instruction_cache_boundary();
