@@ -307,9 +307,13 @@ endif()
 
 # One cold closed registry plus the opaque public product Engine. Family and exact-target
 # directories contribute their sources directly to this single compile owner below.
+add_library(ninfer_checkpoint_contract STATIC
+  runtime/contract/checkpoint_io.cpp
+  runtime/contract/checkpoint_sha256.cpp)
+ninfer_internal_includes(ninfer_checkpoint_contract)
+
 add_library(ninfer_engine STATIC
   targets/registry.cpp
-  runtime/contract/checkpoint_io.cpp
   runtime/contract/sampling.cpp
   runtime/engine/engine.cpp)
 ninfer_internal_includes(ninfer_engine)
@@ -321,6 +325,7 @@ add_subdirectory(targets/qwen3_6_35b_a3b)
 
 target_link_libraries(ninfer_engine
   PRIVATE
+    ninfer_checkpoint_contract
     ninfer_artifact
     ninfer_core
     ninfer_ops

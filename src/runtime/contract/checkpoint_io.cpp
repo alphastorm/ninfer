@@ -3,6 +3,8 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <mutex>
 #include <string>
 
 namespace ninfer::runtime {
@@ -10,6 +12,32 @@ namespace {
 
 CheckpointCompatibility mismatch(CheckpointCompatibilityError error, std::string_view field) {
     return CheckpointCompatibility{error, field};
+}
+
+template <typename Integer>
+void hash_integer(Sha256& hasher, Integer value) {
+    static_assert(std::is_unsigned_v<Integer>);
+    std::array<std::byte, sizeof(Integer)> bytes{};
+    std::uint64_t remaining = value;
+    for (std::size_t index = 0; index < bytes.size(); ++index) {
+        bytes[bytes.size() - 1 - index] = static_cast<std::byte>(remaining & 0xffU);
+        remaining >>= 8U;
+    }
+    hasher.update(bytes);
+}
+
+void hash_digest(Sha256& hasher, const CheckpointDigest& digest) {
+    hasher.update(std::as_bytes(std::span(digest)));
+}
+
+bool descriptors_well_formed(const std::vector<CheckpointPayloadDescriptor>& descriptors) {
+    std::array<bool, 4> observed{};
+    for (const CheckpointPayloadDescriptor& descriptor : descriptors) {
+        const std::size_t kind = static_cast<std::size_t>(descriptor.kind);
+        if (kind >= observed.size() || observed[kind] || descriptor.bytes == 0) { return false; }
+        observed[kind] = true;
+    }
+    return !descriptors.empty();
 }
 
 bool payload_descriptors_equal(const std::vector<CheckpointPayloadDescriptor>& expected,
@@ -25,18 +53,14 @@ bool payload_descriptors_equal(const std::vector<CheckpointPayloadDescriptor>& e
     return true;
 }
 
-bool loaded_payloads_match(const std::vector<CheckpointPayloadDescriptor>& descriptors,
-                           const std::vector<CheckpointPayload>& payloads) {
-    if (descriptors.size() != payloads.size()) { return false; }
-    for (std::size_t index = 0; index < descriptors.size(); ++index) {
-        const CheckpointPayloadDescriptor& descriptor = descriptors[index];
-        const CheckpointPayload& payload              = payloads[index];
-        if (descriptor.kind != payload.kind || descriptor.bytes != payload.bytes.size() ||
-            descriptor.sha256 != payload.sha256) {
-            return false;
-        }
+void require_manifest_shape(const CheckpointManifestV1& manifest) {
+    if (manifest.magic != kCheckpointMagic || manifest.schema_version != kCheckpointSchemaVersion ||
+        manifest.journal_version != kCheckpointJournalVersion || manifest.generation == 0 ||
+        manifest.identity.token_count == 0 || manifest.identity.context_capacity == 0 ||
+        manifest.identity.token_count > manifest.identity.context_capacity ||
+        !descriptors_well_formed(manifest.payloads)) {
+        throw CheckpointContractError("checkpoint manifest structure is invalid");
     }
-    return true;
 }
 
 void require_backend_capabilities(const CheckpointBackendCapabilities capabilities) {
@@ -46,28 +70,41 @@ void require_backend_capabilities(const CheckpointBackendCapabilities capabiliti
     }
 }
 
-void require_save_manifest(const CheckpointManifestV1& manifest,
+void require_save_payloads(const CheckpointManifestV1& manifest,
                            std::span<const CheckpointPayloadView> payloads) {
-    if (manifest.magic != kCheckpointMagic || manifest.schema_version != kCheckpointSchemaVersion ||
-        manifest.journal_version != kCheckpointJournalVersion || manifest.generation == 0) {
-        throw CheckpointContractError("checkpoint save manifest identity is invalid");
-    }
     if (manifest.payloads.size() != payloads.size()) {
         throw CheckpointContractError("checkpoint payload count differs from the manifest");
     }
-    std::array<bool, 4> observed{};
     for (std::size_t index = 0; index < payloads.size(); ++index) {
         const CheckpointPayloadView& payload          = payloads[index];
         const CheckpointPayloadDescriptor& descriptor = manifest.payloads[index];
-        const std::size_t kind                        = static_cast<std::size_t>(payload.kind);
-        if (kind >= observed.size() || observed[kind]) {
-            throw CheckpointContractError("checkpoint payload kinds must be unique and known");
-        }
-        observed[kind] = true;
-        if (descriptor.kind != payload.kind || descriptor.bytes != payload.bytes.size()) {
-            throw CheckpointContractError("checkpoint payload shape differs from the manifest");
+        if (descriptor.kind != payload.kind || descriptor.bytes != payload.bytes.size() ||
+            descriptor.sha256 != sha256(payload.bytes)) {
+            throw CheckpointContractError("checkpoint payload bytes differ from the manifest");
         }
     }
+}
+
+bool loaded_payloads_match(const std::vector<CheckpointPayloadDescriptor>& descriptors,
+                           const std::vector<CheckpointPayload>& payloads) {
+    if (descriptors.size() != payloads.size()) { return false; }
+    for (std::size_t index = 0; index < descriptors.size(); ++index) {
+        const CheckpointPayloadDescriptor& descriptor = descriptors[index];
+        const CheckpointPayload& payload              = payloads[index];
+        if (descriptor.kind != payload.kind || descriptor.bytes != payload.bytes.size() ||
+            descriptor.sha256 != sha256(payload.bytes)) {
+            return false;
+        }
+    }
+    return descriptors_well_formed(descriptors);
+}
+
+CheckpointPauseToken pause(CheckpointQuiescence& quiescence) {
+    const CheckpointPauseToken token = quiescence.pause_admission();
+    if (token.generation == 0) {
+        throw CheckpointContractError("checkpoint admission pause returned an invalid token");
+    }
+    return token;
 }
 
 class ResumeGuard {
@@ -96,6 +133,30 @@ private:
 
 } // namespace
 
+CheckpointDigest checkpoint_manifest_sha256(const CheckpointManifestV1& manifest) {
+    Sha256 hasher;
+    hash_integer(hasher, manifest.magic);
+    hash_integer(hasher, manifest.schema_version);
+    hash_integer(hasher, manifest.journal_version);
+    hash_integer(hasher, manifest.generation);
+    hash_digest(hasher, manifest.identity.model);
+    hash_digest(hasher, manifest.identity.runtime_source);
+    hash_digest(hasher, manifest.identity.deployment_profile);
+    hash_digest(hasher, manifest.identity.layout);
+    hash_integer(hasher, manifest.identity.token_count);
+    hash_integer(hasher, manifest.identity.context_capacity);
+    if (manifest.payloads.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw CheckpointContractError("checkpoint payload count exceeds the canonical schema");
+    }
+    hash_integer(hasher, static_cast<std::uint32_t>(manifest.payloads.size()));
+    for (const CheckpointPayloadDescriptor& payload : manifest.payloads) {
+        hash_integer(hasher, static_cast<std::uint8_t>(payload.kind));
+        hash_integer(hasher, payload.bytes);
+        hash_digest(hasher, payload.sha256);
+    }
+    return hasher.finish();
+}
+
 CheckpointCompatibility
 validate_checkpoint_compatibility(const CheckpointManifestV1& expected,
                                   const CheckpointManifestV1& observed) noexcept {
@@ -110,6 +171,9 @@ validate_checkpoint_compatibility(const CheckpointManifestV1& expected,
         expected.journal_version != kCheckpointJournalVersion) {
         return mismatch(CheckpointCompatibilityError::JournalVersion, "journal_version");
     }
+    if (observed.generation == 0 || observed.generation != expected.generation) {
+        return mismatch(CheckpointCompatibilityError::Generation, "generation");
+    }
     if (observed.identity.model != expected.identity.model) {
         return mismatch(CheckpointCompatibilityError::Model, "model");
     }
@@ -122,10 +186,17 @@ validate_checkpoint_compatibility(const CheckpointManifestV1& expected,
     if (observed.identity.layout != expected.identity.layout) {
         return mismatch(CheckpointCompatibilityError::Layout, "layout");
     }
-    if (observed.identity.context_capacity > expected.identity.context_capacity) {
+    if (observed.identity.token_count == 0 ||
+        observed.identity.token_count > observed.identity.context_capacity ||
+        observed.identity.token_count != expected.identity.token_count) {
+        return mismatch(CheckpointCompatibilityError::TokenCount, "token_count");
+    }
+    if (observed.identity.context_capacity != expected.identity.context_capacity) {
         return mismatch(CheckpointCompatibilityError::ContextCapacity, "context_capacity");
     }
-    if (!payload_descriptors_equal(expected.payloads, observed.payloads)) {
+    if (!descriptors_well_formed(expected.payloads) ||
+        !descriptors_well_formed(observed.payloads) ||
+        !payload_descriptors_equal(expected.payloads, observed.payloads)) {
         return mismatch(CheckpointCompatibilityError::PayloadSet, "payloads");
     }
     return {};
@@ -134,52 +205,72 @@ validate_checkpoint_compatibility(const CheckpointManifestV1& expected,
 CheckpointOperationReceipt
 CheckpointCoordinator::save(const CheckpointManifestV1& manifest,
                             std::span<const CheckpointPayloadView> payloads) {
+    std::lock_guard operation_lock(operation_mutex_);
     require_backend_capabilities(backend_.capabilities());
-    require_save_manifest(manifest, payloads);
+    require_manifest_shape(manifest);
+    require_save_payloads(manifest, payloads);
+    const CheckpointDigest manifest_digest = checkpoint_manifest_sha256(manifest);
 
     CheckpointOperationReceipt operation;
+    operation.operation              = CheckpointOperationKind::Save;
     operation.generation             = manifest.generation;
-    const CheckpointPauseToken token = quiescence_.pause_admission();
+    const CheckpointPauseToken token = pause(quiescence_);
     operation.terminal_phase         = CheckpointPhase::AdmissionPaused;
     ResumeGuard resume(quiescence_, token);
 
     quiescence_.drain_transactions(token);
     operation.terminal_phase = CheckpointPhase::TransactionsDrained;
     quiescence_.fence_device(token);
-    operation.terminal_phase = CheckpointPhase::DeviceFenced;
-    operation.journal        = backend_.store_atomic(manifest, payloads);
-    if (!operation.journal.committed ||
-        operation.journal.journal_version != kCheckpointJournalVersion ||
-        operation.journal.generation != manifest.generation) {
-        throw CheckpointContractError("checkpoint backend returned an invalid commit receipt");
+    operation.terminal_phase            = CheckpointPhase::DeviceFenced;
+    const CheckpointStageReceipt staged = backend_.stage(manifest, payloads);
+    if (staged.journal_version != kCheckpointJournalVersion ||
+        staged.generation != manifest.generation || staged.manifest_sha256 != manifest_digest) {
+        backend_.abort(staged);
+        throw CheckpointContractError("checkpoint backend returned an invalid stage receipt");
     }
+    operation.terminal_phase = CheckpointPhase::BackendStaged;
+    try {
+        backend_.commit(staged);
+    } catch (...) {
+        backend_.abort(staged);
+        throw;
+    }
+    operation.journal =
+        CheckpointJournalReceipt{kCheckpointJournalVersion, manifest.generation, manifest_digest};
     operation.terminal_phase = CheckpointPhase::BackendCommitted;
     resume.resume();
     operation.terminal_phase = CheckpointPhase::Resumed;
     return operation;
 }
 
-CheckpointOperationReceipt CheckpointCoordinator::restore(const CheckpointManifestV1& expected,
+CheckpointOperationReceipt CheckpointCoordinator::restore(const CheckpointExpectation& expected,
                                                           CheckpointRestorer& restorer) {
+    std::lock_guard operation_lock(operation_mutex_);
     require_backend_capabilities(backend_.capabilities());
+    require_manifest_shape(expected.manifest);
+    if (checkpoint_manifest_sha256(expected.manifest) != expected.manifest_sha256) {
+        throw CheckpointContractError("trusted checkpoint expectation digest is invalid");
+    }
+
     CheckpointImage image = backend_.load();
     const CheckpointCompatibility compatibility =
-        validate_checkpoint_compatibility(expected, image.manifest);
+        validate_checkpoint_compatibility(expected.manifest, image.manifest);
     if (!compatibility.compatible()) {
         throw CheckpointContractError("checkpoint is incompatible at " +
                                       std::string(compatibility.field));
+    }
+    if (checkpoint_manifest_sha256(image.manifest) != expected.manifest_sha256) {
+        throw CheckpointContractError("checkpoint manifest differs from the trusted journal");
     }
     if (!loaded_payloads_match(image.manifest.payloads, image.payloads)) {
         throw CheckpointContractError("checkpoint payload bytes do not match the manifest");
     }
 
     CheckpointOperationReceipt operation;
-    operation.generation              = image.manifest.generation;
-    operation.journal.journal_version = image.manifest.journal_version;
-    operation.journal.generation      = image.manifest.generation;
-    operation.journal.committed       = true;
-    const CheckpointPauseToken token  = quiescence_.pause_admission();
-    operation.terminal_phase          = CheckpointPhase::AdmissionPaused;
+    operation.operation              = CheckpointOperationKind::Restore;
+    operation.generation             = image.manifest.generation;
+    const CheckpointPauseToken token = pause(quiescence_);
+    operation.terminal_phase         = CheckpointPhase::AdmissionPaused;
     ResumeGuard resume(quiescence_, token);
 
     quiescence_.drain_transactions(token);
