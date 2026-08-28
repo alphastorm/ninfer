@@ -67,6 +67,51 @@ int main() {
                       }),
                       "invalid deployment profile was accepted");
 
+    const ServeOptions checkpoints = parse(
+        {"ninfer-serve", "model.ninfer", "--api-key", "checkpoint-secret",
+         "--binary-sha256", binary_sha, "--artifact-sha256", artifact_sha, "--config-sha256",
+         config_sha, "--deployment-profile", "rtx-3090-release", "--session-checkpoint-dir",
+         "/tmp/ninfer-checkpoints", "--session-checkpoint-quota-mib", "2048",
+         "--session-checkpoint-staging-mib", "64"});
+    failures += check(checkpoints.session_checkpoint_root == "/tmp/ninfer-checkpoints" &&
+                          checkpoints.session_checkpoint_quota_bytes == (2048ULL << 20) &&
+                          checkpoints.session_checkpoint_staging_bytes == (64ULL << 20),
+                      "session checkpoint controls were not preserved");
+    failures += check(
+        rejects([&] {
+            (void)parse({"ninfer-serve", "model.ninfer", "--binary-sha256", binary_sha,
+                         "--artifact-sha256", artifact_sha, "--config-sha256", config_sha,
+                         "--deployment-profile", "rtx-3090-release", "--session-checkpoint-dir",
+                         "/tmp/checkpoints"});
+        }),
+        "session checkpoints were accepted without API authentication");
+    failures += check(
+        rejects([&] {
+            (void)parse({"ninfer-serve", "model.ninfer", "--api-key", "secret",
+                         "--binary-sha256", binary_sha, "--artifact-sha256", artifact_sha,
+                         "--config-sha256", config_sha, "--session-checkpoint-dir",
+                         "/tmp/checkpoints"});
+        }),
+        "session checkpoints were accepted without a deployment identity");
+    failures += check(
+        rejects([&] {
+            (void)parse({"ninfer-serve", "model.ninfer", "--api-key", "secret",
+                         "--binary-sha256", binary_sha, "--artifact-sha256", artifact_sha,
+                         "--deployment-profile", "rtx-3090-release", "--session-checkpoint-dir",
+                         "/tmp/checkpoints"});
+        }),
+        "session checkpoints were accepted without every lifecycle hash");
+    failures += check(
+        rejects([&] {
+            (void)parse({"ninfer-serve", "model.ninfer", "--api-key", "secret",
+                         "--binary-sha256", binary_sha, "--artifact-sha256", artifact_sha,
+                         "--config-sha256", config_sha, "--deployment-profile", "rtx-3090-release",
+                         "--session-checkpoint-dir", "/tmp/checkpoints",
+                         "--session-checkpoint-quota-mib", "32",
+                         "--session-checkpoint-staging-mib", "64"});
+        }),
+        "checkpoint staging larger than quota was accepted");
+
     const ServeOptions defaults = parse({"ninfer-serve", "model.ninfer"});
     failures += check(defaults.allow_prefix_reuse, "prefix reuse is not enabled by default");
     failures +=
@@ -84,6 +129,8 @@ int main() {
     failures += check(defaults.response_store_max_records == kDefaultResponseStoreRecords &&
                           defaults.response_store_max_bytes == kDefaultResponseStoreBytes,
                       "Responses store defaults mismatch");
+    failures += check(defaults.session_checkpoint_root.empty(),
+                      "session checkpoints are not disabled by default");
     failures += check(!defaults.model_id_override.has_value(),
                       "model id override is unexpectedly configured by default");
     failures += check(

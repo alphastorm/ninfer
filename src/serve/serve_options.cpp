@@ -1,5 +1,6 @@
 #include "serve/serve_options.h"
 #include "product/speculative_options.h"
+#include "runtime/contract/continuation_checkpoint.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -99,6 +100,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
            "[--max-request-mib N] [--request-log-jsonl FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
+           "[--session-checkpoint-dir DIR] [--session-checkpoint-quota-mib N] "
+           "[--session-checkpoint-staging-mib N] "
            "[--kv-dtype bf16|int8|rk8v4] [--spec mtp|dflash --draft-tokens N] "
            "[--default-max-tokens N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
@@ -115,6 +118,8 @@ std::string serve_usage_text(const char* argv0) {
            "       Responses state is process-local and bounded to 1024 records / 256 MiB by "
            "default\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
+           "       --session-checkpoint-dir enables authenticated restart continuation; lifecycle "
+           "identities are required\n"
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
@@ -223,6 +228,25 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 throw std::invalid_argument("--response-store-max-mib is out of range");
             }
             options.response_store_max_bytes = static_cast<std::size_t>(mib << 20);
+        } else if (arg == "--session-checkpoint-dir") {
+            options.session_checkpoint_root = require_value("--session-checkpoint-dir");
+            if (options.session_checkpoint_root.empty()) {
+                throw std::invalid_argument("--session-checkpoint-dir must not be empty");
+            }
+        } else if (arg == "--session-checkpoint-quota-mib") {
+            const std::uint64_t mib = parse_u64(
+                require_value("--session-checkpoint-quota-mib"), "session-checkpoint-quota-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::uint64_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--session-checkpoint-quota-mib is out of range");
+            }
+            options.session_checkpoint_quota_bytes = mib << 20;
+        } else if (arg == "--session-checkpoint-staging-mib") {
+            const std::uint64_t mib = parse_u64(require_value("--session-checkpoint-staging-mib"),
+                                                "session-checkpoint-staging-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--session-checkpoint-staging-mib is out of range");
+            }
+            options.session_checkpoint_staging_bytes = static_cast<std::size_t>(mib << 20);
         } else if (arg == "--device") {
             options.device = parse_nonnegative_int(require_value("--device"), "device");
         } else if (arg == "--kv-dtype") {
@@ -312,7 +336,29 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             throw std::invalid_argument("--default-max-tokens must be positive");
         }
     }
+    validate_session_checkpoint_options(options);
     return options;
+}
+
+void validate_session_checkpoint_options(const ServeOptions& options) {
+    if (options.session_checkpoint_root.empty()) { return; }
+    if (options.api_key.empty()) {
+        throw std::invalid_argument("--session-checkpoint-dir requires --api-key");
+    }
+    if (!runtime::AuthenticatedCheckpointNamespace::valid_sha256(options.binary_sha256) ||
+        !runtime::AuthenticatedCheckpointNamespace::valid_sha256(options.artifact_sha256) ||
+        !runtime::AuthenticatedCheckpointNamespace::valid_sha256(options.config_sha256) ||
+        options.deployment_profile.empty()) {
+        throw std::invalid_argument(
+            "--session-checkpoint-dir requires nonempty --binary-sha256, --artifact-sha256, "
+            "--config-sha256, and --deployment-profile identities");
+    }
+    if (options.session_checkpoint_quota_bytes == 0 ||
+        options.session_checkpoint_staging_bytes == 0 ||
+        options.session_checkpoint_staging_bytes > options.session_checkpoint_quota_bytes) {
+        throw std::invalid_argument(
+            "session checkpoint quota and staging must be positive with staging no larger than quota");
+    }
 }
 
 std::string resolve_public_model_id(const ServeOptions& options,

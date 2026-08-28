@@ -1,4 +1,5 @@
 #include "core/sha256.h"
+#include "serve/server_identity.h"
 #include "serve/session_checkpoint_store.h"
 
 #include <nlohmann/json.hpp>
@@ -196,6 +197,114 @@ bool write_chunked(ContinuationCheckpointWriter& writer, std::string_view path,
     }
     return true;
 }
+
+nlohmann::json production_fingerprint(const BuildInfo& build,
+                                      std::size_t sequence_capacity_bytes = 32ULL << 20) {
+    ServeOptions options;
+    options.binary_sha256       = std::string(64, '1');
+    options.artifact_sha256     = std::string(64, '2');
+    options.config_sha256       = std::string(64, '3');
+    options.deployment_profile  = "rtx-3090-release";
+    options.allow_prefix_reuse  = true;
+    options.max_context         = 65536;
+    options.kv_capacity         = KvCapacityPolicy::explicit_capacity(65536);
+    options.max_concurrency     = 2;
+    options.prefill_chunk       = 1024;
+    options.kv_cache            = KvCacheStorage::RotatedInt8KeyInt4ValueGroup64;
+    options.speculative.backend = SpeculativeBackend::Mtp;
+    options.speculative.draft_tokens = 3;
+
+    EngineOptions engine;
+    engine.max_context     = options.max_context;
+    engine.kv_capacity     = options.kv_capacity;
+    engine.max_concurrency = options.max_concurrency;
+    engine.prefill_chunk   = options.prefill_chunk;
+    engine.kv_cache        = options.kv_cache;
+    engine.speculative     = options.speculative;
+    engine.use_cuda_graph  = true;
+
+    LoadSummary load;
+    load.target     = "qwen3_6_27b";
+    load.model_id   = "qwen3.6-27b";
+    load.weights_id = "groupwise-int";
+
+    MemorySummary memory;
+    memory.max_context                       = engine.max_context;
+    memory.kv_capacity_mode                  = KvCapacityMode::Explicit;
+    memory.kv_capacity                       = 65536;
+    memory.kv_capacity_page_groups           = 256;
+    memory.kv_cache                          = engine.kv_cache;
+    memory.sequence.capacity_bytes           = sequence_capacity_bytes;
+    memory.workspace.capacity_bytes          = 64ULL << 20;
+    memory.request_transient.capacity_bytes  = 8ULL << 20;
+    memory.minimum_runtime_reservation_bytes = 512ULL << 20;
+    memory.runtime_reservation_bytes         = 768ULL << 20;
+    memory.kv_capacity_increment_bytes       = 4ULL << 20;
+    memory.kv_payload_bytes                  = 384ULL << 20;
+    return session_checkpoint_runtime_fingerprint(options, engine, load, memory, build);
+}
+
+SessionCheckpointStoreOptions manager_options(const std::filesystem::path& root) {
+    return {.root = root,
+            .disk_quota_bytes = 8ULL << 20,
+            .staging_bytes = 1ULL << 20,
+            .tombstone_cleanup = {}};
+}
+
+class FakeCheckpointEngine {
+public:
+    SessionCheckpointEngine access() {
+        SessionCheckpointEngine out;
+        out.checkpoint =
+            [this](const AuthenticatedCheckpointNamespace& checkpoint_namespace,
+                   std::string_view checkpoint_tag, ContinuationCheckpointWriter& writer,
+                   std::size_t) -> std::optional<ContinuationCheckpointStats> {
+            ++checkpoint_calls;
+            tenant = checkpoint_namespace.tenant_sha256();
+            session = checkpoint_namespace.session_sha256();
+            tag.assign(checkpoint_tag);
+            if (fail_checkpoint ||
+                !write_chunked(writer, "engine/state.bin", payload)) {
+                return std::nullopt;
+            }
+            return ContinuationCheckpointStats{.frontier_tokens = 4096,
+                                               .restored_tokens = 4096,
+                                               .payload_bytes = payload.size()};
+        };
+        out.restore =
+            [this](const AuthenticatedCheckpointNamespace& checkpoint_namespace,
+                   std::string_view checkpoint_tag, const runtime::ContinuationCheckpointReader& reader,
+                   ContinuationCheckpointStats expected,
+                   std::size_t) -> std::optional<ContinuationCheckpointStats> {
+            ++restore_calls;
+            tenant = checkpoint_namespace.tenant_sha256();
+            session = checkpoint_namespace.session_sha256();
+            tag.assign(checkpoint_tag);
+            if (fail_restore ||
+                reader.file_size("engine/state.bin") !=
+                    std::optional<std::uint64_t>(payload.size())) {
+                return std::nullopt;
+            }
+            restored_payload.resize(payload.size());
+            if (!reader.read_file("engine/state.bin", 0, std::span(restored_payload)) ||
+                restored_payload != payload) {
+                return std::nullopt;
+            }
+            return expected;
+        };
+        return out;
+    }
+
+    std::vector<std::byte> payload = engine_payload();
+    std::vector<std::byte> restored_payload;
+    std::string tenant;
+    std::string session;
+    std::string tag;
+    int checkpoint_calls = 0;
+    int restore_calls    = 0;
+    bool fail_checkpoint = false;
+    bool fail_restore    = false;
+};
 
 int test_sha256_streaming() {
     const std::string input = "abc";
@@ -486,6 +595,186 @@ int test_transaction_restart_compatibility_and_corruption() {
     return failures;
 }
 
+int test_production_manager_restart_and_identity_isolation() {
+    TemporaryDirectory temporary;
+    const std::string api_key = "checkpoint-api-key";
+    const std::string tenant  = session_checkpoint_tenant_sha256(api_key);
+    const BuildInfo build{
+        .upstream_base_sha = "upstream-sha",
+        .patch_stack_sha = "patch-sha",
+        .build_profile = "omp-v0.2-rtx3090",
+        .build_type = "Release",
+        .cxx_compiler = "GNU-13.3.0",
+        .cuda_compiler = "NVIDIA-12.8.93",
+        .cuda_toolkit = "12.8.93",
+        .cuda_architecture = "86",
+        .source_dirty = false,
+    };
+    const nlohmann::json runtime = production_fingerprint(build);
+    ResponseStoreSnapshot snapshot = sample_snapshot();
+    for (StoredResponse& response : snapshot.records) {
+        response.session_key = "stable-checkpoint-session-tag";
+    }
+    ResponseStore source(8, 8ULL << 20);
+    for (const StoredResponse& response : snapshot.records) { source.put(response); }
+
+    int failures = 0;
+    failures += check(
+        tenant == "db1ab03f8e85eb9ea5f0e20bcb0bbaff8518cbe2b935820dfbaffba3a9c71deb" &&
+            tenant != session_checkpoint_tenant_sha256("checkpoint-api-key-2") &&
+            AuthenticatedCheckpointNamespace::valid_sha256(tenant),
+        "API key tenant derivation is deterministic, domain-separated, and nonidentity");
+    failures += check(runtime.at("identity").at("model_id") == "qwen3.6-27b" &&
+                          runtime.at("identity").at("artifact_sha256") == std::string(64, '2') &&
+                          runtime.at("build").at("patch_stack_sha") == "patch-sha" &&
+                          runtime.at("build").at("build_profile") == "omp-v0.2-rtx3090" &&
+                          runtime.at("build").at("cuda_architecture") == "86" &&
+                          runtime.at("engine").at("max_context") == 65536 &&
+                          runtime.at("engine").at("kv_cache") ==
+                              static_cast<int>(KvCacheStorage::RotatedInt8KeyInt4ValueGroup64) &&
+                          runtime.at("engine").at("speculative_backend") ==
+                              static_cast<int>(SpeculativeBackend::Mtp) &&
+                          runtime.at("target_layout").at("kv_capacity_tokens") == 65536 &&
+                          runtime.at("target_layout").at("sequence_capacity_bytes") ==
+                              (32ULL << 20),
+                      "runtime fingerprint omits a required identity or target layout field");
+
+    SessionCheckpointManager disabled;
+    const std::size_t source_size = source.size();
+    failures += check(!disabled.enabled() &&
+                          disabled.save(snapshot.client_session_sha256,
+                                        snapshot.latest_response_id, source).state ==
+                              SessionCheckpointSaveState::Disabled &&
+                          disabled.restore(snapshot.client_session_sha256,
+                                           snapshot.latest_response_id, source) ==
+                              SessionCheckpointRestoreState::Disabled &&
+                          source.size() == source_size,
+                      "disabled checkpoint manager changed ordinary Responses state");
+
+    FakeCheckpointEngine exporter;
+    SessionCheckpointManager manager(manager_options(temporary.path), runtime, tenant,
+                                     exporter.access());
+    failures += check(manager.save(snapshot.client_session_sha256, "resp_not_completed", source)
+                                  .state == SessionCheckpointSaveState::Missing &&
+                          exporter.checkpoint_calls == 0,
+                      "checkpoint export was not bound to the completed stored response");
+    const SessionCheckpointSaveOutcome saved =
+        manager.save(snapshot.client_session_sha256, snapshot.latest_response_id, source);
+    failures += check(saved.state == SessionCheckpointSaveState::Saved && saved.checkpoint &&
+                          exporter.checkpoint_calls == 1 && exporter.tenant == tenant &&
+                          exporter.session == snapshot.client_session_sha256 &&
+                          exporter.tag == "stable-checkpoint-session-tag",
+                      "production manager did not export the complete stable-tagged session");
+    if (!saved.checkpoint) { return failures; }
+
+    bool api_key_persisted = false;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(temporary.path)) {
+        if (entry.is_regular_file() &&
+            read_file_bytes(entry.path()).find(api_key) != std::string::npos) {
+            api_key_persisted = true;
+        }
+    }
+    failures += check(!api_key_persisted, "checkpoint files persisted the API key");
+
+    FakeCheckpointEngine restorer;
+    SessionCheckpointManager restarted(manager_options(temporary.path), runtime, tenant,
+                                       restorer.access());
+    ResponseStore restored_responses(8, 8ULL << 20);
+    const SessionCheckpointRestoreState restored = restarted.restore(
+        snapshot.client_session_sha256, snapshot.latest_response_id, restored_responses);
+    const std::shared_ptr<const StoredResponse> required = restored_responses.get_for_session(
+        snapshot.latest_response_id, snapshot.client_session_sha256);
+    failures += check(restored == SessionCheckpointRestoreState::Restored && required &&
+                          required->previous_response_id == "resp_private_first" &&
+                          restorer.restore_calls == 1 && restorer.restored_payload == restorer.payload &&
+                          restorer.tenant == tenant &&
+                          restorer.tag == "stable-checkpoint-session-tag",
+                      "restart did not atomically restore Engine and re-readable Responses state");
+
+    FakeCheckpointEngine rejected_engine;
+    rejected_engine.fail_restore = true;
+    SessionCheckpointManager rejected(manager_options(temporary.path), runtime, tenant,
+                                      rejected_engine.access());
+    ResponseStore rejected_responses(8, 8ULL << 20);
+    failures += check(rejected.restore(snapshot.client_session_sha256, snapshot.latest_response_id,
+                                       rejected_responses) == SessionCheckpointRestoreState::Failed &&
+                          rejected_engine.restore_calls == 1 && rejected_responses.size() == 0,
+                      "failed Engine restore published partial Responses state");
+
+    FakeCheckpointEngine wrong_response_engine;
+    SessionCheckpointManager wrong_response(manager_options(temporary.path), runtime, tenant,
+                                            wrong_response_engine.access());
+    ResponseStore wrong_response_store(8, 8ULL << 20);
+    failures += check(wrong_response.restore(snapshot.client_session_sha256, "resp_wrong",
+                                             wrong_response_store) ==
+                              SessionCheckpointRestoreState::Missing &&
+                          wrong_response_engine.restore_calls == 0 && wrong_response_store.size() == 0,
+                      "wrong response id reached Engine restore");
+
+    FakeCheckpointEngine other_tenant_engine;
+    SessionCheckpointManager other_tenant(
+        manager_options(temporary.path), runtime,
+        session_checkpoint_tenant_sha256("another-api-key"), other_tenant_engine.access());
+    ResponseStore other_tenant_store(8, 8ULL << 20);
+    failures += check(other_tenant.restore(snapshot.client_session_sha256,
+                                           snapshot.latest_response_id, other_tenant_store) ==
+                              SessionCheckpointRestoreState::Missing &&
+                          other_tenant_engine.restore_calls == 0 && other_tenant_store.size() == 0,
+                      "same session digest crossed an authenticated tenant namespace");
+
+    const auto incompatible_restore = [&](const nlohmann::json& incompatible,
+                                          const std::string& message) {
+        FakeCheckpointEngine engine;
+        SessionCheckpointManager drifted(manager_options(temporary.path), incompatible, tenant,
+                                         engine.access());
+        ResponseStore responses(8, 8ULL << 20);
+        return check(drifted.restore(snapshot.client_session_sha256, snapshot.latest_response_id,
+                                     responses) == SessionCheckpointRestoreState::Incompatible &&
+                         engine.restore_calls == 0 && responses.size() == 0,
+                     message);
+    };
+    BuildInfo architecture_drift = build;
+    architecture_drift.cuda_architecture = "89";
+    failures += incompatible_restore(production_fingerprint(architecture_drift),
+                                     "CUDA architecture drift was restored");
+    BuildInfo source_drift       = build;
+    source_drift.patch_stack_sha = "different-patch";
+    failures += incompatible_restore(production_fingerprint(source_drift),
+                                     "patch stack drift was restored");
+    BuildInfo profile_drift     = build;
+    profile_drift.build_profile = "different-profile";
+    failures += incompatible_restore(production_fingerprint(profile_drift),
+                                     "build profile drift was restored");
+    failures += incompatible_restore(production_fingerprint(build, (32ULL << 20) + 1),
+                                     "target layout drift was restored");
+
+    const AuthenticatedCheckpointNamespace checkpoint_namespace =
+        AuthenticatedCheckpointNamespace::authenticated(tenant,
+                                                        snapshot.client_session_sha256);
+    const std::filesystem::path session =
+        temporary.path / "sessions" / namespace_storage_digest(checkpoint_namespace);
+    std::string generation = read_file_bytes(session / "current");
+    generation.pop_back();
+    std::fstream corrupt(session / "generations" / generation / "engine/state.bin",
+                         std::ios::in | std::ios::out | std::ios::binary);
+    char byte = 0;
+    corrupt.read(&byte, 1);
+    byte ^= 0x33;
+    corrupt.seekp(0);
+    corrupt.write(&byte, 1);
+    corrupt.close();
+    FakeCheckpointEngine corrupt_engine;
+    SessionCheckpointManager corrupt_manager(manager_options(temporary.path), runtime, tenant,
+                                             corrupt_engine.access());
+    ResponseStore corrupt_responses(8, 8ULL << 20);
+    failures += check(corrupt_manager.restore(snapshot.client_session_sha256,
+                                              snapshot.latest_response_id, corrupt_responses) ==
+                              SessionCheckpointRestoreState::Corrupt &&
+                          corrupt_engine.restore_calls == 0 && corrupt_responses.size() == 0,
+                      "corruption reached Engine or Responses publication");
+    return failures;
+}
+
 int test_active_reader_delete_and_gc() {
     TemporaryDirectory temporary;
     const ResponseStoreSnapshot responses = sample_snapshot();
@@ -742,6 +1031,7 @@ int main() {
     failures += test_authenticated_namespace_validation();
     failures += test_codec_round_trip();
     failures += test_transaction_restart_compatibility_and_corruption();
+    failures += test_production_manager_restart_and_identity_isolation();
     failures += test_active_reader_delete_and_gc();
     failures += test_store_wide_quota_across_sessions();
     if (failures == 0) { std::cout << "ok\n"; }

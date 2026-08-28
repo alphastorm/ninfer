@@ -310,8 +310,9 @@ Malformed tool markup is flushed back as ordinary text without losing bytes.
 
 ### Local response state and resources
 
-`store` defaults to `true`. Stored Responses live only in this server process and are bounded by an
-LRU store. They are lost on restart and are not OpenAI's durable cloud retention service.
+`store` defaults to `true`. Stored Responses are bounded by an LRU store. Without
+`--session-checkpoint-dir`, they live only in this server process and are lost on restart. The
+optional checkpoint path below is local NInfer continuation state, not OpenAI cloud retention.
 
 `previous_response_id` reconstructs the complete stored input/output Item history before the new
 input. The current `instructions` value is placed first but is not saved into the continuation
@@ -338,6 +339,34 @@ Resource behavior:
 explicit deletion also make an ID unavailable. A single Response larger than the configured store
 capacity fails with `response_store_capacity_exceeded` rather than silently pretending it was
 stored.
+
+### Durable process-restart continuation
+
+`--session-checkpoint-dir DIR` enables optional persistence for stored Responses carrying an
+authenticated lowercase SHA-256 `ninfer_session` (or matching `X-NInfer-Session`). It is disabled by
+default. Enabling it requires `--api-key` plus nonempty `--binary-sha256`, `--artifact-sha256`,
+`--config-sha256`, and `--deployment-profile` identities. The API key is reduced to a
+domain-separated tenant SHA-256 in memory; the key itself is never written to the checkpoint.
+
+After each eligible stored Response completes, the server snapshots that session's complete local
+Responses lineage and the matching Engine continuation into one checksummed generation. Streaming
+sends its terminal event only after this save attempt, so it never reports completion before the
+durability decision. A save failure is logged. If the request itself used `previous_response_id`,
+the new Response is removed and the request fails rather than returning a continuation that could
+not be committed.
+
+After a process restart, an in-memory miss for `previous_response_id` loads only the namespace for
+the authenticated tenant and supplied session. The manifest, response ID, all payload checksums,
+and the complete runtime fingerprint are validated before Engine state is touched. Response state
+is published only if Engine restore succeeds in the same transaction. Missing or wrong tenant,
+session, and response IDs remain ordinary `response_not_found`; incompatible builds, corruption,
+filesystem unavailability, and failed atomic restore return explicit checkpoint errors. The
+fingerprint binds model/artifact/config/binary/deployment identity, source and build profile,
+`cuda_architecture`, context/KV/speculation settings, and resolved target memory layout.
+
+`--session-checkpoint-quota-mib` bounds all retained generations under the root. The staging limit
+bounds response encoding and each host transfer and must not exceed the quota. Existing ordinary
+Responses behavior is unchanged when `--session-checkpoint-dir` is omitted.
 
 ### Responses input token count
 
@@ -418,6 +447,10 @@ curl http://127.0.0.1:8080/v1/models \
 | `--port N` | listen port | `8080` |
 | `--api-key KEY` | required bearer or `x-api-key` value | unset |
 | `--model-id ID` | override the public OpenAI model alias | artifact `identity.model_id` |
+| `--binary-sha256 SHA` | lowercase executable identity supplied by deployment lifecycle | unset |
+| `--artifact-sha256 SHA` | lowercase model artifact identity supplied by deployment lifecycle | unset |
+| `--config-sha256 SHA` | lowercase canonical runtime configuration identity | unset |
+| `--deployment-profile NAME` | operator-selected deployment identity | unset |
 | `--max-context N` | logical context ceiling of each sequence | `8192` |
 | `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `--max-context` | `8192` |
 | `--max-concurrency N` | maximum admitted requests; valid range `1..8` | `1` |
@@ -430,6 +463,9 @@ curl http://127.0.0.1:8080/v1/models \
 | `--request-log-jsonl FILE` | append full-precision server/request records | disabled |
 | `--response-store-max-records N` | maximum locally retained Responses objects | `1024` |
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
+| `--session-checkpoint-dir DIR` | enable authenticated process-restart continuation at this root | disabled |
+| `--session-checkpoint-quota-mib N` | total retained checkpoint budget | `65536` |
+| `--session-checkpoint-staging-mib N` | bounded response codec and host transfer staging | `256` |
 | `--kv-dtype bf16\|int8\|rk8v4` | KV-cache storage; `rk8v4` is experimental and lossy | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |

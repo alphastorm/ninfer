@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -106,6 +107,68 @@ private:
 
     SessionCheckpointStoreOptions options_;
     std::shared_ptr<Impl> impl_;
+};
+
+// Injectable boundary around the two Engine operations that touch device continuation state. The
+// production adapter calls runtime::CheckpointEngineAccess; host tests provide a deterministic
+// in-memory codec without constructing an Engine or loading a model.
+struct SessionCheckpointEngine {
+    using Checkpoint = std::function<std::optional<runtime::ContinuationCheckpointStats>(
+        const runtime::AuthenticatedCheckpointNamespace&, std::string_view,
+        runtime::ContinuationCheckpointWriter&, std::size_t)>;
+    using Restore = std::function<std::optional<runtime::ContinuationCheckpointStats>(
+        const runtime::AuthenticatedCheckpointNamespace&, std::string_view,
+        const runtime::ContinuationCheckpointReader&, runtime::ContinuationCheckpointStats,
+        std::size_t)>;
+
+    Checkpoint checkpoint;
+    Restore restore;
+};
+
+enum class SessionCheckpointSaveState : std::uint8_t {
+    Disabled,
+    Saved,
+    Missing,
+    Failed,
+    Unavailable,
+};
+
+struct SessionCheckpointSaveOutcome {
+    SessionCheckpointSaveState state = SessionCheckpointSaveState::Disabled;
+    std::optional<SessionCheckpointSaveResult> checkpoint;
+};
+
+enum class SessionCheckpointRestoreState : std::uint8_t {
+    Disabled,
+    Restored,
+    Missing,
+    Incompatible,
+    Corrupt,
+    Unavailable,
+    Failed,
+};
+
+class SessionCheckpointManager {
+public:
+    SessionCheckpointManager() = default;
+    SessionCheckpointManager(SessionCheckpointStoreOptions options,
+                             nlohmann::json runtime_fingerprint, std::string tenant_sha256,
+                             SessionCheckpointEngine engine);
+
+    [[nodiscard]] bool enabled() const noexcept { return store_ != nullptr; }
+    [[nodiscard]] SessionCheckpointSaveOutcome
+    save(std::string_view session_sha256, std::string_view required_response_id,
+         ResponseStore& responses);
+    [[nodiscard]] SessionCheckpointRestoreState
+    restore(std::string_view session_sha256, std::string_view required_response_id,
+            ResponseStore& responses);
+
+private:
+    std::unique_ptr<SessionCheckpointStore> store_;
+    nlohmann::json runtime_fingerprint_;
+    std::string tenant_sha256_;
+    SessionCheckpointEngine engine_;
+    std::mutex mutex_;
 };
 
 } // namespace ninfer::serve

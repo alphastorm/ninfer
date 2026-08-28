@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -43,6 +44,9 @@ private:
     void handle_response_input_items(const httplib::Request& req, httplib::Response& res);
     void handle_response_cancel(const httplib::Request& req, httplib::Response& res);
     void handle_response_compact(const httplib::Request& req, httplib::Response& res);
+    void checkpoint_stored_response(const std::optional<std::string>& session_sha256,
+                                    const std::string& response_id,
+                                    bool depends_on_previous_response);
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
     void handle_status(const httplib::Request& req, httplib::Response& res) const;

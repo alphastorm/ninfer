@@ -1303,4 +1303,117 @@ void SessionCheckpointStore::collect_garbage() {
     (void)enforce_disk_quota_locked(options_, *impl_);
 }
 
+SessionCheckpointManager::SessionCheckpointManager(SessionCheckpointStoreOptions options,
+                                                   nlohmann::json runtime_fingerprint,
+                                                   std::string tenant_sha256,
+                                                   SessionCheckpointEngine engine)
+    : runtime_fingerprint_(std::move(runtime_fingerprint)),
+      tenant_sha256_(std::move(tenant_sha256)), engine_(std::move(engine)) {
+    if (!runtime_fingerprint_.is_object() ||
+        !AuthenticatedCheckpointNamespace::valid_sha256(tenant_sha256_) || !engine_.checkpoint ||
+        !engine_.restore) {
+        throw std::invalid_argument("checkpoint manager identity and Engine access must be valid");
+    }
+    store_ = std::make_unique<SessionCheckpointStore>(std::move(options));
+}
+
+SessionCheckpointSaveOutcome SessionCheckpointManager::save(
+    std::string_view session_sha256, std::string_view required_response_id,
+    ResponseStore& responses) {
+    if (!store_) {
+        return {.state = SessionCheckpointSaveState::Disabled, .checkpoint = std::nullopt};
+    }
+    if (!AuthenticatedCheckpointNamespace::valid_sha256(session_sha256) ||
+        required_response_id.empty()) {
+        return {.state = SessionCheckpointSaveState::Failed, .checkpoint = std::nullopt};
+    }
+    std::lock_guard lock(mutex_);
+    try {
+        std::optional<ResponseStoreSnapshot> snapshot = responses.snapshot_session(session_sha256);
+        if (!snapshot) {
+            return {.state = SessionCheckpointSaveState::Missing, .checkpoint = std::nullopt};
+        }
+        if (snapshot->latest_response_id != required_response_id) {
+            return {.state = SessionCheckpointSaveState::Missing, .checkpoint = std::nullopt};
+        }
+        const auto latest = std::find_if(
+            snapshot->records.begin(), snapshot->records.end(), [&](const StoredResponse& response) {
+                return response.id == snapshot->latest_response_id;
+            });
+        if (latest == snapshot->records.end() || latest->session_key.empty() ||
+            latest->session_key.size() > kMaximumContextCacheSessionKeyBytes) {
+            return {.state = SessionCheckpointSaveState::Failed, .checkpoint = std::nullopt};
+        }
+        const AuthenticatedCheckpointNamespace checkpoint_namespace =
+            AuthenticatedCheckpointNamespace::authenticated(tenant_sha256_,
+                                                            std::string(session_sha256));
+        const std::string checkpoint_tag = latest->session_key;
+        std::optional<SessionCheckpointSaveResult> saved = store_->save(
+            checkpoint_namespace, *snapshot, runtime_fingerprint_,
+            [&](ContinuationCheckpointWriter& writer) {
+                return engine_.checkpoint(checkpoint_namespace, checkpoint_tag, writer,
+                                          store_->options().staging_bytes);
+            });
+        if (!saved) {
+            return {.state = SessionCheckpointSaveState::Failed, .checkpoint = std::nullopt};
+        }
+        return {.state = SessionCheckpointSaveState::Saved, .checkpoint = std::move(saved)};
+    } catch (...) {
+        return {.state = SessionCheckpointSaveState::Unavailable, .checkpoint = std::nullopt};
+    }
+}
+
+SessionCheckpointRestoreState
+SessionCheckpointManager::restore(std::string_view session_sha256,
+                                  std::string_view required_response_id,
+                                  ResponseStore& responses) {
+    if (!store_) { return SessionCheckpointRestoreState::Disabled; }
+    if (!AuthenticatedCheckpointNamespace::valid_sha256(session_sha256) ||
+        required_response_id.empty()) {
+        return SessionCheckpointRestoreState::Missing;
+    }
+    std::lock_guard lock(mutex_);
+    try {
+        const AuthenticatedCheckpointNamespace checkpoint_namespace =
+            AuthenticatedCheckpointNamespace::authenticated(tenant_sha256_,
+                                                            std::string(session_sha256));
+        SessionCheckpointLoadResult loaded =
+            store_->load(checkpoint_namespace, runtime_fingerprint_, required_response_id);
+        switch (loaded.state) {
+        case SessionCheckpointLoadState::Missing:
+            return SessionCheckpointRestoreState::Missing;
+        case SessionCheckpointLoadState::Incompatible:
+            return SessionCheckpointRestoreState::Incompatible;
+        case SessionCheckpointLoadState::Corrupt:
+            return SessionCheckpointRestoreState::Corrupt;
+        case SessionCheckpointLoadState::Unavailable:
+            return SessionCheckpointRestoreState::Unavailable;
+        case SessionCheckpointLoadState::Available:
+            break;
+        }
+        if (!loaded.checkpoint) { return SessionCheckpointRestoreState::Failed; }
+        VerifiedSessionCheckpoint& checkpoint = *loaded.checkpoint;
+        const auto latest = std::find_if(
+            checkpoint.responses.records.begin(), checkpoint.responses.records.end(),
+            [&](const StoredResponse& response) {
+                return response.id == checkpoint.responses.latest_response_id;
+            });
+        if (latest == checkpoint.responses.records.end() || latest->session_key.empty() ||
+            latest->session_key.size() > kMaximumContextCacheSessionKeyBytes) {
+            return SessionCheckpointRestoreState::Failed;
+        }
+        const std::string checkpoint_tag = latest->session_key;
+        const bool committed = responses.restore_session(std::move(checkpoint.responses), [&] {
+            const std::optional<ContinuationCheckpointStats> restored = engine_.restore(
+                checkpoint_namespace, checkpoint_tag, *checkpoint.engine,
+                checkpoint.expected_engine, store_->options().staging_bytes);
+            return restored && *restored == checkpoint.expected_engine;
+        });
+        return committed ? SessionCheckpointRestoreState::Restored
+                         : SessionCheckpointRestoreState::Failed;
+    } catch (...) {
+        return SessionCheckpointRestoreState::Unavailable;
+    }
+}
+
 } // namespace ninfer::serve

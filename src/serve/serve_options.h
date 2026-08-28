@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -17,6 +18,8 @@ inline constexpr int kDefaultMaxTokens                    = 8192;
 inline constexpr std::size_t kDefaultMaxRequestBytes      = 384ULL << 20;
 inline constexpr std::size_t kDefaultResponseStoreRecords = 1024;
 inline constexpr std::size_t kDefaultResponseStoreBytes   = 256ULL << 20;
+inline constexpr std::uint64_t kDefaultSessionCheckpointQuotaBytes = 64ULL << 30;
+inline constexpr std::size_t kDefaultSessionCheckpointStagingBytes = 256ULL << 20;
 
 struct ServeOptions {
     bool help_requested = false;
@@ -40,6 +43,9 @@ struct ServeOptions {
     std::size_t max_request_bytes          = kDefaultMaxRequestBytes;
     std::size_t response_store_max_records = kDefaultResponseStoreRecords;
     std::size_t response_store_max_bytes   = kDefaultResponseStoreBytes;
+    std::filesystem::path session_checkpoint_root; // empty => durable continuation disabled
+    std::uint64_t session_checkpoint_quota_bytes = kDefaultSessionCheckpointQuotaBytes;
+    std::size_t session_checkpoint_staging_bytes = kDefaultSessionCheckpointStagingBytes;
     int device                             = 0;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
@@ -62,6 +68,7 @@ struct ServeOptions {
 };
 
 ServeOptions parse_serve_options(int argc, char** argv);
+void validate_session_checkpoint_options(const ServeOptions& options);
 std::string resolve_public_model_id(const ServeOptions& options,
                                     std::string_view artifact_model_id);
 std::string serve_usage_text(const char* argv0);
