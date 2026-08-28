@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import tempfile
 import unittest
 from typing import Any
 
@@ -85,6 +86,24 @@ class GoldenEquivalentTests(unittest.TestCase):
                 events[1]["message"]["content"][0]["arguments"] = arguments
                 with self.assertRaisesRegex(MODULE.QualificationError, "typed argument oracle"):
                     MODULE.validate_transcript(events, self.contract)
+
+    def test_observed_omp_arguments_fail_before_fixed_domain_arguments_pass(self) -> None:
+        expected = self.contract["tool"]["expected_arguments"]
+        observed = {
+            "city": "Paris",
+            "days": "3",
+            "metric": "true",
+            "i": "Looking up fixed weather",
+        }
+        self.assertFalse(MODULE.exact_arguments(observed, expected))
+        self.assertTrue(MODULE.exact_arguments(dict(expected), expected))
+
+    def test_isolated_omp_config_disables_intent_argument_injection(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.yml"
+            MODULE.write_agent_config(path)
+            text = path.read_text(encoding="utf-8")
+        self.assertIn("tools:\n  intentTracing: false\n", text)
 
     def test_tool_result_must_link_and_continue_exactly(self) -> None:
         broken_link = self.transcript()

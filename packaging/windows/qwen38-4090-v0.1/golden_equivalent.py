@@ -274,6 +274,23 @@ def write_models(path: Path, api_base: str, model: str) -> None:
     )
 
 
+def write_agent_config(path: Path) -> None:
+    path.write_text(
+        "disabledProviders:\n"
+        "  - native\n"
+        "  - claude\n"
+        "  - codex\n"
+        "  - gemini\n"
+        "  - github\n"
+        "  - opencode\n"
+        "  - cursor\n"
+        "  - agents-md\n"
+        "tools:\n"
+        "  intentTracing: false\n",
+        encoding="utf-8",
+    )
+
+
 def parse_events(stdout: str) -> list[Mapping[str, object]]:
     events: list[Mapping[str, object]] = []
     for line_number, line in enumerate(stdout.splitlines(), start=1):
@@ -317,18 +334,7 @@ def invoke_omp(
         agent_dir.mkdir(mode=0o700)
         workspace.mkdir(mode=0o700)
         write_models(agent_dir / "models.yml", api_base, model)
-        (agent_dir / "config.yml").write_text(
-            "disabledProviders:\n"
-            "  - native\n"
-            "  - claude\n"
-            "  - codex\n"
-            "  - gemini\n"
-            "  - github\n"
-            "  - opencode\n"
-            "  - cursor\n"
-            "  - agents-md\n",
-            encoding="utf-8",
-        )
+        write_agent_config(agent_dir / "config.yml")
         (agent_dir / "mcp.json").write_text(
             '{"mcpServers":{},"disabledServers":[]}\n', encoding="utf-8"
         )

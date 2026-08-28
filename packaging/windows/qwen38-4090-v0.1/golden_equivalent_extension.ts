@@ -73,9 +73,9 @@ export default function registerGoldenEquivalent(pi: ExtensionAPI) {
     approval: "read",
     parameters: z
       .object({
-        city: z.literal(expected.city).describe("The city string; it must be Paris."),
-        days: z.literal(expected.days).describe("The integer forecast length; it must be 3."),
-        metric: z.literal(expected.metric).describe("The metric-unit boolean; it must be true."),
+        city: z.string().describe("The city string; it must be Paris."),
+        days: z.number().int().describe("The integer forecast length; it must be 3."),
+        metric: z.boolean().describe("The metric-unit boolean; it must be true."),
       })
       .strict(),
     async execute(_toolCallId: string, params: unknown) {
