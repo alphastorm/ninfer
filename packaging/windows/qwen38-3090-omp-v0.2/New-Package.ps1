@@ -123,7 +123,11 @@ if ($config.artifact_type -cne 'ninfer_windows_server_config' -or
     [string]$config.engine.kv_dtype -cne 'int8' -or
     [int]$config.engine.max_concurrency -ne 1 -or
     [string]$config.speculative.backend -cne 'mtp' -or
-    [int]$config.speculative.draft_tokens -ne 3) {
+    [int]$config.speculative.draft_tokens -ne 3 -or
+    -not [bool]$config.session_checkpoint.enabled -or
+    [int]$config.session_checkpoint.quota_mib -ne 65536 -or
+    [int]$config.session_checkpoint.staging_mib -ne 256 -or
+    $null -ne $config.PSObject.Properties['persistent_cache']) {
     throw 'server configuration is not the immutable authenticated C1 profile'
 }
 Assert-AllowedListenHost $spec $config

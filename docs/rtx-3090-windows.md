@@ -25,7 +25,8 @@ the inner and outer SHA-256 manifests. Package and checksum values are emitted i
 **package-build-receipt.json** at build time; hardware qualification remains a separate gate.
 
 The default C1 profile binds to **127.0.0.1**, requires a one-line API-key file, uses 65,536 maximum
-context, automatic INT8 KV capacity, a 1,024-token prefill chunk, and MTP3. A package-specific
+context, automatic INT8 KV capacity, a 1,024-token prefill chunk, MTP3, and authenticated durable
+session checkpoints with a 64 GiB total quota and 256 MiB staging bound. A package-specific
 configuration may instead bind to an IPv4 address in Tailscale's **100.64.0.0/10** range. Wildcard,
 LAN, and public listen addresses are rejected, and CORS remains disabled.
 

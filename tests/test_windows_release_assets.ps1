@@ -80,6 +80,11 @@ try {
     Assert-Equal ([string]$config.engine.kv_dtype) 'int8' 'default KV profile changed'
     Assert-Equal ([string]$config.speculative.backend) 'mtp' 'default speculative profile changed'
     Assert-Equal ([int]$config.speculative.draft_tokens) 3 'default MTP draft count changed'
+    Assert-True ([bool]$config.session_checkpoint.enabled) 'durable session checkpoints are disabled'
+    Assert-Equal ([int]$config.session_checkpoint.quota_mib) 65536 'checkpoint quota changed'
+    Assert-Equal ([int]$config.session_checkpoint.staging_mib) 256 'checkpoint staging bound changed'
+    Assert-True ($config.PSObject.Properties.Name -notcontains 'persistent_cache') 'unsupported persistent prompt cache is configured'
+    Assert-True (@($spec.qualification.required_gates) -contains 'process-restart-session-continuation') 'checkpoint restart gate is missing'
 
     $releaseHead = ((& git -C $SourceRoot rev-parse HEAD) | Out-String).Trim()
     if ($LASTEXITCODE -ne 0 -or $releaseHead -cnotmatch '^[0-9a-f]{40}$') {

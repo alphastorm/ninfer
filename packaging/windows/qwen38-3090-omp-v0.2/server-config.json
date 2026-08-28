@@ -34,9 +34,10 @@
     "effort": "xhigh",
     "preserve_thinking": true
   },
-  "persistent_cache": {
+  "session_checkpoint": {
     "enabled": true,
-    "quota_gib": 100
+    "quota_mib": 65536,
+    "staging_mib": 256
   },
   "response_store": {
     "max_records": 1024,

@@ -596,8 +596,12 @@ function Invoke-Run {
         Assert-FileHash ([string]$release.config_file) ([string]$release.config_sha256) 'server config'
         $config = Read-JsonFile ([string]$release.config_file)
         $cache = [string]$release.cache_root
+        if (-not [bool]$config.session_checkpoint.enabled) {
+            throw 'managed release requires durable session checkpoints'
+        }
+        $checkpointRoot = Join-Path $cache 'session-checkpoints'
         $logs = Join-Path ([string]$release.release_root) 'logs'
-        New-Item -ItemType Directory -Force -Path $cache, $logs | Out-Null
+        New-Item -ItemType Directory -Force -Path $cache, $checkpointRoot, $logs | Out-Null
         $serverArguments = [Collections.Generic.List[string]]::new()
         foreach ($argument in @(
                 [string]$release.model_artifact,
@@ -620,17 +624,15 @@ function Invoke-Run {
                 '--reasoning-effort', [string]$config.reasoning.effort,
                 '--response-store-max-records', [string]$config.response_store.max_records,
                 '--response-store-max-mib', [string]$config.response_store.max_mib,
+                '--session-checkpoint-dir', $checkpointRoot,
+                '--session-checkpoint-quota-mib',
+                    [string]$config.session_checkpoint.quota_mib,
+                '--session-checkpoint-staging-mib',
+                    [string]$config.session_checkpoint.staging_mib,
                 '--request-log-jsonl', (Join-Path $logs 'requests.jsonl'),
-                '--log-stats-interval-ms', [string]$config.telemetry.stats_interval_ms,
-                '--no-ui'
+                '--log-stats-interval-ms', [string]$config.telemetry.stats_interval_ms
             )) {
             $serverArguments.Add($argument)
-        }
-        if ([bool]$config.persistent_cache.enabled) {
-            foreach ($argument in @('--disk-cache', '--disk-cache-dir', $cache,
-                                    '--disk-cache-gb', [string]$config.persistent_cache.quota_gib)) {
-                $serverArguments.Add($argument)
-            }
         }
         if (-not [bool]$config.engine.cuda_graph) { $serverArguments.Add('--no-cuda-graph') }
         if (-not [bool]$config.engine.prefix_reuse) { $serverArguments.Add('--no-prefix-reuse') }

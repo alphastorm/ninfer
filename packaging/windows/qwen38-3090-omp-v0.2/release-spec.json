@@ -70,6 +70,7 @@
       "sm86-driver-hardware-identity",
       "authenticated-real-client-protocol",
       "advertised-context-retrieval",
+      "process-restart-session-continuation",
       "frozen-role-corpus",
       "power-sweep-280-320-370-watts",
       "gaming-drain-restart-rollback"

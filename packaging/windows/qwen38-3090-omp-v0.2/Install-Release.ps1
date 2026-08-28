@@ -648,7 +648,11 @@ function Assert-InstallerArchitectureContract([object]$Spec, [object]$Config) {
             [int]$Config.engine.prefill_chunk -ne 1024 -or
             [int]$Config.engine.max_concurrency -ne 1 -or
             [string]$Config.speculative.backend -cne 'mtp' -or
-            [int]$Config.speculative.draft_tokens -ne 3) {
+            [int]$Config.speculative.draft_tokens -ne 3 -or
+            -not [bool]$Config.session_checkpoint.enabled -or
+            [int]$Config.session_checkpoint.quota_mib -ne 65536 -or
+            [int]$Config.session_checkpoint.staging_mib -ne 256 -or
+            $null -ne $Config.PSObject.Properties['persistent_cache']) {
             throw 'release server configuration is not the immutable C1 profile'
         }
     }

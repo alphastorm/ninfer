@@ -288,7 +288,7 @@ function New-FixturePackage(
         speculative = [ordered]@{ backend = 'mtp'; draft_tokens = 3 }
         reasoning = [ordered]@{ effort = 'xhigh'; preserve_thinking = $true }
         response_store = [ordered]@{ max_records = 16; max_mib = 8 }
-        persistent_cache = [ordered]@{ enabled = $true; quota_gib = 1 }
+        session_checkpoint = [ordered]@{ enabled = $true; quota_mib = 65536; staging_mib = 256 }
         telemetry = [ordered]@{ stats_interval_ms = 1000 }
     }
     $configPath = Join-Path $payload 'server-config.json'

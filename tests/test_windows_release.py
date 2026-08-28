@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -45,6 +46,38 @@ class WindowsReleaseContractTests(unittest.TestCase):
         self.assertEqual(config["engine"]["kv_dtype"], "int8")
         self.assertEqual(config["engine"]["max_concurrency"], 1)
         self.assertEqual(config["speculative"], {"backend": "mtp", "draft_tokens": 3})
+        self.assertEqual(
+            config["session_checkpoint"],
+            {"enabled": True, "quota_mib": 65536, "staging_mib": 256},
+        )
+        self.assertNotIn("persistent_cache", config)
+        self.assertIn(
+            "process-restart-session-continuation",
+            spec["qualification"]["required_gates"],
+        )
+
+    def test_controller_server_options_match_runtime(self) -> None:
+        controller = (RELEASE / "Control-Release.ps1").read_text(encoding="utf-8")
+        start = controller.index("$serverArguments =")
+        end = controller.index("$argumentLine =", start)
+        controller_flags = set(re.findall(r"'(--[a-z0-9-]+)'", controller[start:end]))
+        parser = (ROOT / "src/serve/serve_options.cpp").read_text(encoding="utf-8")
+        runtime_flags = set(re.findall(r'arg == "(--[a-z0-9-]+)"', parser))
+        self.assertEqual(controller_flags - runtime_flags, set())
+        self.assertTrue(
+            {
+                "--api-key-file",
+                "--reasoning-effort",
+                "--session-checkpoint-dir",
+                "--session-checkpoint-quota-mib",
+                "--session-checkpoint-staging-mib",
+            }.issubset(controller_flags)
+        )
+        self.assertTrue(
+            {"--disk-cache", "--disk-cache-dir", "--disk-cache-gb", "--no-ui"}.isdisjoint(
+                controller_flags
+            )
+        )
 
     def test_release_sources_contain_no_old_hardware_or_cache_identity(self) -> None:
         forbidden = ("4090", "DirectStorage", "directstorage", "legacy-managed-copy")
