@@ -81,12 +81,18 @@ def create_release_fixture(root: Path) -> tuple[Path, Path, str]:
     return source, binaries, run_git(source, "rev-parse", "HEAD")
 
 
-def write_fake_binaries(binaries: Path, head: str) -> tuple[Path, Path, Path]:
+def write_fake_binaries(
+    binaries: Path,
+    head: str,
+    *,
+    cuda_architecture: str = "86",
+    benchmark_bound: bool = True,
+) -> tuple[Path, Path, Path]:
     common = (
         f"upstream_base_sha={head} patch_stack_sha={head} "
         "build_profile=omp-v0.2.0-rtx3090 build_type=Release "
         "cxx_compiler=GNU-13.3.0 cuda_compiler=NVIDIA-12.8.93 "
-        "cuda_toolkit=12.8.93 cuda_architecture=86 source_dirty=false"
+        f"cuda_toolkit=12.8.93 cuda_architecture={cuda_architecture} source_dirty=false"
     )
     suffix = ".exe" if os.name == "nt" else ""
     ninfer = binaries / f"ninfer{suffix}"
@@ -101,8 +107,9 @@ def write_fake_binaries(binaries: Path, head: str) -> tuple[Path, Path, Path]:
         compiler = shutil.which("cl.exe")
         if compiler is None:
             raise RuntimeError("cl.exe is required for native Windows release fixtures")
-        source = binaries / "fake_build_info.cpp"
-        template = binaries / "fake_build_info.exe"
+        fixture_id = f"{cuda_architecture}-{int(benchmark_bound)}"
+        source = binaries / f"fake_build_info-{fixture_id}.cpp"
+        template = binaries / f"fake_build_info-{fixture_id}.exe"
         source.write_text(
             textwrap.dedent(
                 f"""\
@@ -116,6 +123,9 @@ def write_fake_binaries(binaries: Path, head: str) -> tuple[Path, Path, Path]:
                     if (name.size() >= 4 && name.substr(name.size() - 4) == ".exe") {{
                         name.erase(name.size() - 4);
                     }}
+                    if (name == "ninfer_bench" && {str(benchmark_bound).lower()} == false) {{
+                        return 0;
+                    }}
                     std::cout << name << " " << {json.dumps(common)} << "\\n";
                     return 0;
                 }}
@@ -123,31 +133,46 @@ def write_fake_binaries(binaries: Path, head: str) -> tuple[Path, Path, Path]:
             ),
             encoding="utf-8",
         )
-        subprocess.run(
-            [compiler, "/nologo", "/EHsc", str(source), f"/Fe:{template}"],
-            cwd=binaries,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        if not template.exists():
+            subprocess.run(
+                [compiler, "/nologo", "/EHsc", str(source), f"/Fe:{template}"],
+                cwd=binaries,
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
         for binary, _ in identities:
             shutil.copyfile(template, binary)
     else:
         for binary, name in identities:
-            binary.write_text(
-                f"#!/bin/sh\nprintf '%s\\n' '{name} {common}'\n",
-                encoding="utf-8",
-            )
+            if name == "ninfer_bench" and not benchmark_bound:
+                binary.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            else:
+                binary.write_text(
+                    f"#!/bin/sh\nprintf '%s\\n' '{name} {common}'\n",
+                    encoding="utf-8",
+                )
     for binary in (ninfer, ninfer_serve, ninfer_bench):
         binary.chmod(0o755)
     return ninfer, ninfer_serve, ninfer_bench
 
 
 def release_options(
-    source: Path, binaries: Path, head: str, output: Path
+    source: Path,
+    binaries: Path,
+    head: str,
+    output: Path,
+    *,
+    cuda_architecture: str = "86",
+    benchmark_bound: bool = True,
 ) -> ReleaseOptions:
-    ninfer, ninfer_serve, ninfer_bench = write_fake_binaries(binaries, head)
+    ninfer, ninfer_serve, ninfer_bench = write_fake_binaries(
+        binaries,
+        head,
+        cuda_architecture=cuda_architecture,
+        benchmark_bound=benchmark_bound,
+    )
     return ReleaseOptions(
         source=source,
         ninfer=ninfer,
@@ -436,19 +461,23 @@ class ReleasePackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source, binaries, head = create_release_fixture(root)
-            options = release_options(source, binaries, head, root / "wrong-arch")
-            for binary in (options.ninfer, options.ninfer_serve, options.ninfer_bench):
-                binary.write_text(
-                    binary.read_text(encoding="utf-8").replace(
-                        "cuda_architecture=86", "cuda_architecture=89"
-                    ),
-                    encoding="utf-8",
-                )
+            options = release_options(
+                source,
+                binaries,
+                head,
+                root / "wrong-arch",
+                cuda_architecture="89",
+            )
             with self.assertRaisesRegex(ReleaseError, "cuda_architecture"):
                 package_release(options)
 
-            options = release_options(source, binaries, head, root / "unbound-bench")
-            options.ninfer_bench.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            options = release_options(
+                source,
+                binaries,
+                head,
+                root / "unbound-bench",
+                benchmark_bound=False,
+            )
             with self.assertRaisesRegex(ReleaseError, "ninfer_bench"):
                 package_release(options)
 
