@@ -313,6 +313,16 @@ add_library(ninfer_checkpoint_contract STATIC
 ninfer_internal_includes(ninfer_checkpoint_contract)
 target_link_libraries(ninfer_checkpoint_contract PUBLIC Threads::Threads)
 
+if(WIN32)
+  add_library(ninfer_checkpoint_directstorage STATIC
+    runtime/windows/direct_storage_checkpoint_backend.cpp
+    runtime/windows/direct_storage_checkpoint_windows.cpp)
+  ninfer_internal_includes(ninfer_checkpoint_directstorage)
+  target_link_libraries(ninfer_checkpoint_directstorage
+    PUBLIC ninfer_checkpoint_contract
+    PRIVATE ninfer_directstorage CUDA::cudart d3d12.lib dxgi.lib)
+endif()
+
 add_library(ninfer_engine STATIC
   targets/registry.cpp
   runtime/contract/sampling.cpp
@@ -332,6 +342,9 @@ target_link_libraries(ninfer_engine
     ninfer_ops
     ninfer_text
     ninfer_media_decode)
+if(WIN32)
+  target_link_libraries(ninfer_engine PRIVATE ninfer_checkpoint_directstorage)
+endif()
 add_library(ninfer::engine ALIAS ninfer_engine)
 
 if(NINFER_BUILD_SERVE)
