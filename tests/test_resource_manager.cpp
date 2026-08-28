@@ -1646,16 +1646,48 @@ void test_private_source_is_scoped_to_its_session() {
         manager, program, 9, make_base(9, first_session, RetentionClass::LiveSession), 1);
     (void)finish_active(manager, program, seed);
 
-    const ActiveRequest fork = start_active(
+    const ActiveRequest foreign_named = start_active(
         manager, program, 9, make_base(9, second_session, RetentionClass::LiveSession), 2);
     require(program.started_source_id == 0 &&
-                program.started_source_disposition == ClaimDisposition::ConsumedToActive,
+                manager.catalog_state(0) == FakeManager::CatalogState::Catalogued,
             "different session reused a private continuation");
-    (void)manager.abort(program, fork.lane, fork.sequence);
+    (void)manager.abort(program, foreign_named.lane, foreign_named.sequence);
+
+    const ActiveRequest anonymous =
+        start_active(manager, program, 9, make_base(9), 3);
+    require(program.started_source_id == 0 &&
+                manager.catalog_state(0) == FakeManager::CatalogState::Catalogued,
+            "anonymous request reused or destroyed a named private continuation");
+    (void)manager.abort(program, anonymous.lane, anonymous.sequence);
+
+    const ActiveRequest owner = start_active(
+        manager, program, 9, make_base(9, first_session, RetentionClass::LiveSession), 4);
+    require(program.started_source_id == seed.sequence.id,
+            "owning session could not reuse its private continuation");
+    (void)manager.abort(program, owner.lane, owner.sequence);
+
+    FakeManager anonymous_manager = make_manager(2, 3);
+    FakeProgram anonymous_program;
+    const ActiveRequest anonymous_seed =
+        start_active(anonymous_manager, anonymous_program, 11, make_base(11), 1);
+    (void)finish_active(anonymous_manager, anonymous_program, anonymous_seed);
+    const ActiveRequest named = start_active(
+        anonymous_manager, anonymous_program, 11,
+        make_base(11, first_session, RetentionClass::LiveSession), 2);
+    require(anonymous_program.started_source_id == 0 &&
+                anonymous_manager.catalog_state(0) == FakeManager::CatalogState::Catalogued,
+            "named session reused or destroyed an anonymous private continuation");
+    (void)anonymous_manager.abort(anonymous_program, named.lane, named.sequence);
+    const ActiveRequest anonymous_owner =
+        start_active(anonymous_manager, anonymous_program, 11, make_base(11), 3);
+    require(anonymous_program.started_source_id == anonymous_seed.sequence.id,
+            "anonymous request could not reuse anonymous private continuation");
+    (void)anonymous_manager.abort(anonymous_program, anonymous_owner.lane,
+                                  anonymous_owner.sequence);
 }
 
 void test_session_publication_order_controls_tied_source() {
-    FakeManager manager = make_manager(2, 3);
+    FakeManager manager = make_manager(2, 4);
     FakeProgram program;
     const FakeCacheSessionKey session{42};
     const FakeRequestBasePlan base = make_base(42, session, RetentionClass::LiveSession, true);
@@ -1683,7 +1715,16 @@ void test_session_publication_order_controls_tied_source() {
     require(manager.catalog_state(0) == FakeManager::CatalogState::Catalogued &&
                 manager.catalog_state(1) == FakeManager::CatalogState::Catalogued &&
                 manager.catalog_state(2) == FakeManager::CatalogState::Catalogued,
-            "session replacement did not retain its old binding as anonymous cache");
+            "session replacement did not retain its old private history");
+
+    const ActiveRequest anonymous =
+        start_active(manager, program, 42, make_base(42), 50);
+    require(program.started_source_id == 0 &&
+                manager.catalog_state(0) == FakeManager::CatalogState::Catalogued &&
+                manager.catalog_state(1) == FakeManager::CatalogState::Catalogued &&
+                manager.catalog_state(2) == FakeManager::CatalogState::Catalogued,
+            "anonymous request reused or destroyed demoted session history");
+    (void)manager.abort(program, anonymous.lane, anonymous.sequence);
 }
 
 void test_canonical_pressure_starts_with_disposable_owner() {

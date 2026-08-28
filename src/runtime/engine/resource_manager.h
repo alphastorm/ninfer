@@ -637,8 +637,7 @@ public:
         if (publication.session && active.update_session_index) {
             if (!publish_session(*publication.session, active.publication_slot, publication.id,
                                  publication.revision, active.publication_order)) {
-                publication.session.reset();
-                publication.checkpoint_tag.clear();
+
                 publication.retention = RetentionClass::RecentPrivate;
             }
         }
@@ -1297,6 +1296,10 @@ private:
             owner_policies.reserve(catalog_count_ + shared_catalog_count_);
             checkpoint_policies.reserve(prefix_index_.size());
 
+            // Admission above may read private state only from the same session. Pressure is a
+            // different boundary: every inactive owner consumes the same bounded device/host pools
+            // and must remain evictable, or one session could pin capacity against every other
+            // session. These inputs expose no continuation payload outside this process.
             for (std::uint32_t slot = 0; slot < catalog_count_; ++slot) {
                 const CatalogEntry& entry = catalog_[slot];
                 if (entry.state != CatalogState::Catalogued || !entry.handle ||
@@ -2234,7 +2237,6 @@ private:
             prior.id != previous.owner_id || prior.revision != previous.revision) {
             return;
         }
-        prior.session.reset();
         prior.retention = RetentionClass::RecentPrivate;
         for (CheckpointObservation& observation : prior.observations) {
             observation.observation.retention_class = RetentionClass::RecentPrivate;
