@@ -35,8 +35,8 @@
     "protocol_receipt_sha256": "fd1778e2493f87017952bd2def6c240dbadba62d42a4e0ba72d9fd349ad188b8",
     "checkpoint_receipt_sha256": "cf87019c2a8258aa8e05aae5d8b0d2f4908fddcffa0344e902da2488c47b75b6",
     "performance_receipt_sha256": "c73b1d4dd9d1482c4c7d1ede6355b5edd7d3fbc15039007df3ead948f3a2309d",
-    "golden_equivalent_receipt_sha256": "5c6a1cdb0fe14d3bac582b9151ca26717d962caa917ccca8b5fe287b28f3a5cc",
-    "release_binding": "blocked-by-failed-omp-golden-equivalent-typed-argument-oracle"
+    "golden_equivalent_receipt_sha256": "e51f351dead50f9d2d3254c9c6542cf7baf9e7b678af4a546e5aba1883f38076",
+    "release_binding": "beta-qualified-no-stable-promotion"
   },
   "golden_equivalent": {
     "artifact_type": "ninfer_omp_golden_equivalent_contract",
@@ -44,7 +44,10 @@
     "contract_id": "qwen38-4090-omp-golden-equivalent-v1",
     "contract_file": "smoke/golden_equivalent_contract.json",
     "runner_file": "smoke/golden_equivalent.py",
+    "runner_sha256": "da13ef87ab4294795d7ddc89d0b054dee1af2b9c08d48c870a999ed3bb975d5d",
     "extension_file": "smoke/golden_equivalent_extension.ts",
+    "extension_sha256": "2902db7da21b6fb28c9320594a3eda2a306f2a57c627cc97a3ce5f842ef05a33",
+    "contract_file_sha256": "7cffbd6ccf8edd010be505687dc77683240d9c92e9262cd0a3f207be5a8863cb",
     "execution": "exact typed-tool invocation and tool-result continuation through OMP with an exact visible final-answer oracle",
     "fixture_provenance": "source-controlled synthetic fixture; the unavailable historical private corpus was not reused",
     "historical_private_corpus_reused": false

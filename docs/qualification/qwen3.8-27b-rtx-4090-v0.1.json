@@ -1,9 +1,9 @@
 {
   "artifact_type": "ninfer_public_windows_release_qualification",
   "schema_version": 1,
-  "status": "failed",
+  "status": "passed",
   "qualification_level": "beta",
-  "beta_support_qualified": false,
+  "beta_support_qualified": true,
   "release_eligible": false,
   "release_id": "qwen38-4090-v0.1",
   "release_version": "0.1.0",
@@ -13,15 +13,16 @@
     "cuda_architecture": "sm_89"
   },
   "source": {
-    "qualified_commit": "40580cc703b03197573789923b5866007aba0a68",
-    "package_source_commit": "7a425890a10fe31c207816697b4bd89d8f5b319c",
+    "qualified_commit": "4e67e6f96f108a17abac7a324c23c5a96e71de32",
+    "package_source_commit": "69f03550d5c068ec5b89a75b1380bdeb96f45cc6",
     "source_dirty": false,
-    "source_archive_sha256": "9c595ca0aa4d932c9fc60f7dc5a484ad8c56dd3e1d85dae3d99ae3f08bc0d020",
-    "source_archive_bytes": 5226191
+    "source_archive_sha256": "54d6ef81c134e2405a00e5a2a60885fde3d5431f206a2be9fef6986c8c27f0da",
+    "source_archive_bytes": 5225635,
+    "runtime_cpp_changed_by_argument_fix": false
   },
   "identity": {
-    "binary_sha256": "66fb8187e70df2e842b6cb23a8e7ee0392ecec868c5265ac737c98084bb0b9f2",
-    "binary_bytes": 230290432,
+    "binary_sha256": "bb77a5be24fcd2b8f78d598887bfe7c7516d78c4b7d33086c28deb639ac76388",
+    "binary_bytes": 230268416,
     "config_sha256": "e7f86a4da23d17bc50b3c261263a636df2cf317a82f84b22bcae5d6a186e7623",
     "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
     "deployment_profile": "sf-qwen38-4090-v0.1",
@@ -29,69 +30,67 @@
     "cuda_toolkit": "13.3.73"
   },
   "package": {
-    "sha256": "f9c5aa0f5a005c70474b4b4ee5f8fa4bc4ed61d91283543e176a2683dfd5d885",
-    "bytes": 227425120,
+    "source_commit": "69f03550d5c068ec5b89a75b1380bdeb96f45cc6",
+    "sha256": "24b18e8949e08e049b87e60adb5c18eff3110cffb8db61c1e4743cde4005bbf7",
+    "bytes": 227410510,
     "runtime_dlls": 9
   },
+  "sequential_unmasking": {
+    "first_red": "typed argument oracle rejected OMP output",
+    "diagnostic_receipt": "receipts/qwen3.8-27b-rtx-4090-golden-equivalent-argument-diagnostic.json",
+    "diagnostic_receipt_sha256": "8702fcd4aefccef8c35ee220a6a626cfdd4a48b1a9499e46efc5328157ac10d0",
+    "observed": {
+      "tool_calls": 2,
+      "extra_argument": "i",
+      "days_type": "string",
+      "metric_type": "string"
+    },
+    "nearest_cause": "OMP intent tracing injected i and z.literal emitted const-only schemas; NInfer correctly preserved absent-type values as strings.",
+    "fix": "Disable intent tracing in the isolated OMP profile and emit explicit string/integer/boolean schemas without weakening the exact-value scorer.",
+    "local_red_to_green_regression": "passed"
+  },
   "golden_equivalent": {
-    "artifact_type": "ninfer_omp_golden_equivalent_failure_receipt",
+    "artifact_type": "ninfer_omp_golden_equivalent_receipt",
     "schema_version": 1,
-    "status": "failed",
+    "status": "passed",
     "contract_id": "qwen38-4090-omp-golden-equivalent-v1",
-    "runner_sha256": "3150416b0353b03e5c3048783f70e3e05f4d1c322d86afe918393b387a761ceb",
+    "runner_sha256": "da13ef87ab4294795d7ddc89d0b054dee1af2b9c08d48c870a999ed3bb975d5d",
     "contract_file_sha256": "7cffbd6ccf8edd010be505687dc77683240d9c92e9262cd0a3f207be5a8863cb",
-    "extension_sha256": "c2778f0fa6d62ba44640ce77df28093abf4eba299c844bcff149c3d41021b0ce",
+    "extension_sha256": "2902db7da21b6fb28c9320594a3eda2a306f2a57c627cc97a3ce5f842ef05a33",
     "fixture_provenance": "source-controlled synthetic fixture; the unavailable historical private corpus was not reused",
     "historical_private_corpus_reused": false,
     "omp_version": "omp/18.0.6",
+    "wall_seconds": 6.282964,
     "raw_transcript_included": false,
     "gates": {
       "typed_tool_invocation": "passed",
-      "typed_argument_oracle": "failed",
-      "tool_result_continuation": "not_evaluated_after_first_red",
-      "exact_visible_final_answer": "not_evaluated_after_first_red"
+      "typed_argument_oracle": "passed",
+      "tool_result_continuation": "passed",
+      "exact_visible_final_answer": "passed"
     },
-    "first_blocker": {
-      "stage": "typed_argument_oracle",
-      "message": "typed argument oracle rejected OMP output",
-      "actual_arguments_retained": false
-    },
+    "final_visible_answer": "NINFER_GOLDEN_EQUIVALENT_OK|Paris|3|metric=true|18C|clear",
+    "transcript_projection_sha256": "77f581081492b5a0b15a9667c557c20532e5461f998d854347e3019a19552a5a",
     "receipt": "receipts/qwen3.8-27b-rtx-4090-golden-equivalent.json",
-    "receipt_sha256": "5c6a1cdb0fe14d3bac582b9151ca26717d962caa917ccca8b5fe287b28f3a5cc"
+    "receipt_sha256": "e51f351dead50f9d2d3254c9c6542cf7baf9e7b678af4a546e5aba1883f38076"
   },
   "inherited_live_evidence": {
-    "protocol": {
-      "status": "passed",
-      "checks": 15,
-      "receipt_sha256": "fd1778e2493f87017952bd2def6c240dbadba62d42a4e0ba72d9fd349ad188b8"
-    },
-    "long_process_restart": {
-      "status": "passed",
-      "first_prompt_tokens": 102060,
-      "post_restart_prompt_tokens": 102097,
-      "reuse_path": "restore_disk_checkpoint",
-      "receipt_sha256": "cf87019c2a8258aa8e05aae5d8b0d2f4908fddcffa0344e902da2488c47b75b6"
-    },
-    "bounded_performance": {
-      "status": "passed",
-      "decode_tokens_per_second": 52.076320930183705,
-      "prefix_cache_hit_tokens": 0,
-      "receipt_sha256": "c73b1d4dd9d1482c4c7d1ede6355b5edd7d3fbc15039007df3ead948f3a2309d"
-    }
+    "protocol_receipt_sha256": "fd1778e2493f87017952bd2def6c240dbadba62d42a4e0ba72d9fd349ad188b8",
+    "checkpoint_receipt_sha256": "cf87019c2a8258aa8e05aae5d8b0d2f4908fddcffa0344e902da2488c47b75b6",
+    "performance_receipt_sha256": "c73b1d4dd9d1482c4c7d1ede6355b5edd7d3fbc15039007df3ead948f3a2309d"
   },
   "release_gates": {
     "G": {
-      "status": "failed",
-      "failure": "typed argument oracle rejected OMP output"
+      "status": "passed",
+      "receipt_sha256": "e51f351dead50f9d2d3254c9c6542cf7baf9e7b678af4a546e5aba1883f38076"
     },
     "L": {
       "status": "passed",
-      "clean_build_receipt_sha256": "e9a6b0deb0ee2179ba38d4c20e370f7795109057b8403b1e5bfaccc496f6d452",
-      "package_receipt_sha256": "5607f6c7f79286c9041c8515ab3d2bcd70de9645c4a76d01fb99858818493d75"
+      "build_receipt_sha256": "3690afc6e65ea0ab653fb48409ba0882b646d06d34dbb34b163babcaac8343b7",
+      "package_receipt_sha256": "924920cf7cb3421ba6f30c6e7e0940a0828e37dce388f4e8330077d18b02d8c1"
     },
     "R": {
       "status": "passed",
-      "restore_receipt_sha256": "79d0f4be4684c96ca735bc743e0e3d2002f547a4a7aa4afe81eac45f3afe330b"
+      "restore_receipt_sha256": "32a8e9c7da48e4dd046c9706c0539e3cc41b572eee21d3ed40b7bbfcc7876057"
     }
   },
   "restoration": {
@@ -103,7 +102,8 @@
     "candidate_state_present": false,
     "candidate_task_present": false
   },
+  "stable_release_performed": false,
   "stable_promotion_performed": false,
   "permanent_route_mutation": false,
-  "decision": "RTX 4090 beta support remains blocked at the exact typed argument oracle; no stable release or route change was performed."
+  "decision": "RTX 4090 support is beta-qualified at the exact identities above; no stable release or route mutation was performed."
 }

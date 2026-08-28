@@ -1,74 +1,47 @@
 {
-  "artifact_type": "ninfer_omp_golden_equivalent_failure_receipt",
-  "schema_version": 1,
-  "status": "failed",
-  "qualified_utc": "2026-08-28T20:33:00Z",
-  "qualification_level": "beta",
-  "beta_support_qualified": false,
-  "identity": {
-    "source_commit": "40580cc703b03197573789923b5866007aba0a68",
-    "source_dirty": false,
-    "source_archive_sha256": "9c595ca0aa4d932c9fc60f7dc5a484ad8c56dd3e1d85dae3d99ae3f08bc0d020",
-    "binary_sha256": "66fb8187e70df2e842b6cb23a8e7ee0392ecec868c5265ac737c98084bb0b9f2",
-    "binary_bytes": 230290432,
-    "config_sha256": "e7f86a4da23d17bc50b3c261263a636df2cf317a82f84b22bcae5d6a186e7623",
-    "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
-    "deployment_profile": "sf-qwen38-4090-v0.1",
-    "cuda_architecture": "89"
-  },
-  "package": {
-    "source_commit": "7a425890a10fe31c207816697b4bd89d8f5b319c",
-    "sha256": "f9c5aa0f5a005c70474b4b4ee5f8fa4bc4ed61d91283543e176a2683dfd5d885",
-    "bytes": 227425120
-  },
-  "source_controlled_contract": {
-    "contract_id": "qwen38-4090-omp-golden-equivalent-v1",
-    "runner_sha256": "3150416b0353b03e5c3048783f70e3e05f4d1c322d86afe918393b387a761ceb",
+  "artifact_type": "ninfer_omp_golden_equivalent_receipt",
+  "contract": {
     "contract_file_sha256": "7cffbd6ccf8edd010be505687dc77683240d9c92e9262cd0a3f207be5a8863cb",
-    "contract_canonical_sha256": "0f02d656312f98b795fb7972a1739a46ab0897692b923cd24d7d680a17cdc958",
-    "extension_sha256": "c2778f0fa6d62ba44640ce77df28093abf4eba299c844bcff149c3d41021b0ce",
+    "contract_id": "qwen38-4090-omp-golden-equivalent-v1",
+    "contract_sha256": "0f02d656312f98b795fb7972a1739a46ab0897692b923cd24d7d680a17cdc958",
+    "extension_sha256": "2902db7da21b6fb28c9320594a3eda2a306f2a57c627cc97a3ce5f842ef05a33",
     "fixture_provenance": "source-controlled synthetic fixture; the unavailable historical private corpus was not reused",
     "historical_private_corpus_reused": false
   },
+  "identity": {
+    "binary_sha256": "bb77a5be24fcd2b8f78d598887bfe7c7516d78c4b7d33086c28deb639ac76388",
+    "build_profile": "sf-qwen38-4090-v0.1",
+    "build_type": "Release",
+    "config_sha256": "e7f86a4da23d17bc50b3c261263a636df2cf317a82f84b22bcae5d6a186e7623",
+    "cuda_architecture": "89",
+    "deployment_profile": "sf-qwen38-4090-v0.1",
+    "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
+    "patch_stack_sha": "4e67e6f96f108a17abac7a324c23c5a96e71de32",
+    "source_dirty": false,
+    "upstream_base_sha": "9ec1b82c7afa021314682d7a95390f8935ead7c2"
+  },
   "omp": {
-    "version": "omp/18.0.6",
+    "tool_name": "ninfer_golden_weather_lookup",
     "transport": "openai-completions",
-    "wall_seconds": 19.15,
-    "raw_transcript_included": false
+    "version": "omp/18.0.6",
+    "wall_seconds": 6.282964
   },
-  "gates": {
-    "typed_tool_invocation": "passed",
-    "typed_argument_oracle": "failed",
-    "tool_result_continuation": "not_evaluated_after_first_red",
-    "exact_visible_final_answer": "not_evaluated_after_first_red"
-  },
-  "first_blocker": {
-    "stage": "typed_argument_oracle",
-    "message": "typed argument oracle rejected OMP output",
+  "oracles": {
+    "exact_visible_final_answer": "passed",
     "expected_arguments": {
       "city": "Paris",
       "days": 3,
       "metric": true
     },
-    "actual_arguments_retained": false,
-    "reason_actual_arguments_not_retained": "The sanitized no-session OMP runner intentionally retained no raw transcript."
+    "final_visible_answer": "NINFER_GOLDEN_EQUIVALENT_OK|Paris|3|metric=true|18C|clear",
+    "final_visible_answer_sha256": "75d6a2553f0e9aa729b9da13a79530e830d1701b8eaa45d366a1f70922b9673e",
+    "tool_result_continuation": "passed",
+    "transcript_projection_sha256": "77f581081492b5a0b15a9667c557c20532e5461f998d854347e3019a19552a5a",
+    "typed_argument_oracle": "passed",
+    "typed_tool_invocation": "passed"
   },
-  "evidence": {
-    "clean_build_receipt_sha256": "e9a6b0deb0ee2179ba38d4c20e370f7795109057b8403b1e5bfaccc496f6d452",
-    "final_package_receipt_sha256": "5607f6c7f79286c9041c8515ab3d2bcd70de9645c4a76d01fb99858818493d75",
-    "lease_ready_receipt_sha256": "ca37013f50fe8046bd94c86928c67419308e8e41b247191e0c3a71d14510f6fb",
-    "restore_receipt_sha256": "79d0f4be4684c96ca735bc743e0e3d2002f547a4a7aa4afe81eac45f3afe330b"
-  },
-  "restoration": {
-    "status": "passed",
-    "incumbent_profile": "sf-long-persistent-candidate",
-    "incumbent_controller_sha256": "79f14e4b9bde6d05e744c10757d39d1ad95e394d0673725606c584463edec711",
-    "incumbent_listener": "100.116.135.24:18081",
-    "incumbent_model_id": "qwen38-long",
-    "candidate_listener_present": false,
-    "candidate_state_present": false,
-    "candidate_task_present": false
-  },
-  "stable_promotion_performed": false,
-  "permanent_route_mutation": false
+  "qualified_utc": "2026-08-28T21:07:11.075146+00:00",
+  "raw_transcript_included": false,
+  "schema_version": 1,
+  "status": "passed"
 }

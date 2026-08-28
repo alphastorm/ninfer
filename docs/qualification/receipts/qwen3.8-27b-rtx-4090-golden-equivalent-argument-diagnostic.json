@@ -1,0 +1,126 @@
+{
+  "api_key_retained": false,
+  "artifact_type": "ninfer_omp_golden_equivalent_argument_diagnostic",
+  "contract": {
+    "contract_file_sha256": "7cffbd6ccf8edd010be505687dc77683240d9c92e9262cd0a3f207be5a8863cb",
+    "contract_id": "qwen38-4090-omp-golden-equivalent-v1",
+    "contract_sha256": "0f02d656312f98b795fb7972a1739a46ab0897692b923cd24d7d680a17cdc958",
+    "historical_private_corpus_reused": false
+  },
+  "identity": {
+    "binary_sha256": "66fb8187e70df2e842b6cb23a8e7ee0392ecec868c5265ac737c98084bb0b9f2",
+    "build_profile": "sf-qwen38-4090-v0.1",
+    "build_type": "Release",
+    "config_sha256": "e7f86a4da23d17bc50b3c261263a636df2cf317a82f84b22bcae5d6a186e7623",
+    "cuda_architecture": "89",
+    "deployment_profile": "sf-qwen38-4090-v0.1",
+    "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
+    "patch_stack_sha": "40580cc703b03197573789923b5866007aba0a68",
+    "source_dirty": false,
+    "upstream_base_sha": "9ec1b82c7afa021314682d7a95390f8935ead7c2"
+  },
+  "omp": {
+    "version": "omp/18.0.6",
+    "wall_seconds": 19.328503
+  },
+  "raw_prompt_retained": false,
+  "raw_transcript_retained": false,
+  "schema_version": 1,
+  "status": "observed",
+  "typed_tool": {
+    "assistant_tool_turns": 2,
+    "call_count": 2,
+    "calls": [
+      {
+        "arguments": {
+          "container_type": "object",
+          "exact_match": false,
+          "extra_keys": [
+            "i"
+          ],
+          "extra_values_retained": false,
+          "fields": {
+            "city": {
+              "length": 5,
+              "type": "string",
+              "value": "Paris"
+            },
+            "days": {
+              "length": 1,
+              "type": "string",
+              "value": "3"
+            },
+            "metric": {
+              "length": 4,
+              "type": "string",
+              "value": "true"
+            }
+          },
+          "mismatches": [
+            {
+              "actual": "string",
+              "expected": "integer",
+              "field": "days",
+              "kind": "type"
+            },
+            {
+              "actual": "string",
+              "expected": "boolean",
+              "field": "metric",
+              "kind": "type"
+            }
+          ],
+          "missing_keys": []
+        },
+        "assistant_ordinal": 1,
+        "call_ordinal": 1,
+        "name": "ninfer_golden_weather_lookup"
+      },
+      {
+        "arguments": {
+          "container_type": "object",
+          "exact_match": false,
+          "extra_keys": [
+            "i"
+          ],
+          "extra_values_retained": false,
+          "fields": {
+            "city": {
+              "length": 5,
+              "type": "string",
+              "value": "Paris"
+            },
+            "days": {
+              "length": 1,
+              "type": "string",
+              "value": "3"
+            },
+            "metric": {
+              "length": 4,
+              "type": "string",
+              "value": "true"
+            }
+          },
+          "mismatches": [
+            {
+              "actual": "string",
+              "expected": "integer",
+              "field": "days",
+              "kind": "type"
+            },
+            {
+              "actual": "string",
+              "expected": "boolean",
+              "field": "metric",
+              "kind": "type"
+            }
+          ],
+          "missing_keys": []
+        },
+        "assistant_ordinal": 2,
+        "call_ordinal": 1,
+        "name": "ninfer_golden_weather_lookup"
+      }
+    ]
+  }
+}
