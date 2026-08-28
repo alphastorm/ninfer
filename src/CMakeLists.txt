@@ -323,6 +323,14 @@ if(WIN32)
     PRIVATE ninfer_directstorage CUDA::cudart d3d12.lib dxgi.lib)
 endif()
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_library(ninfer_checkpoint_io_uring_linux STATIC
+    runtime/platform/linux/io_uring_checkpoint_backend.cpp)
+  ninfer_internal_includes(ninfer_checkpoint_io_uring_linux)
+  target_link_libraries(ninfer_checkpoint_io_uring_linux
+    PUBLIC ninfer_checkpoint_contract)
+endif()
+
 add_library(ninfer_engine STATIC
   targets/registry.cpp
   runtime/contract/sampling.cpp
@@ -344,6 +352,9 @@ target_link_libraries(ninfer_engine
     ninfer_media_decode)
 if(WIN32)
   target_link_libraries(ninfer_engine PRIVATE ninfer_checkpoint_directstorage)
+endif()
+if(TARGET ninfer_checkpoint_io_uring_linux)
+  target_link_libraries(ninfer_engine PRIVATE ninfer_checkpoint_io_uring_linux)
 endif()
 add_library(ninfer::engine ALIAS ninfer_engine)
 
