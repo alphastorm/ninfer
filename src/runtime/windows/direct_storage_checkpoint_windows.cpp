@@ -1,5 +1,9 @@
 #if defined(_WIN32)
 
+#    ifndef NOMINMAX
+#        define NOMINMAX
+#    endif
+
 #    include "runtime/windows/direct_storage_checkpoint_backend.h"
 
 #    include <d3d12.h>
