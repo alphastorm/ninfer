@@ -626,14 +626,21 @@ public:
         publication.retention = active.retention;
         migrate_observations(publication, result.summary, active.retention);
         advance_revision(publication.revision);
-        if (publication.session && active.update_session_index) {
-            if (!publish_session(*publication.session, active.publication_slot, publication.id,
-                                 publication.revision, active.publication_order)) {
-                publication.retention = RetentionClass::RecentPrivate;
-            }
-        }
+        const bool update_session_index = publication.session && active.update_session_index;
+        const std::uint32_t publication_slot = active.publication_slot;
+        const std::uint64_t publication_order = active.publication_order;
         active             = {};
         lanes_[lane.value] = LogicalLaneState::Free;
+        if (update_session_index) {
+            if (!publish_session(*publication.session, publication_slot, publication.id,
+                                 publication.revision, publication_order)) {
+                publication.retention =
+                    std::max(publication.retention, RetentionClass::RecentPrivate);
+                for (CheckpointObservation& observation : publication.observations) {
+                    observation.observation.retention_class = publication.retention;
+                }
+            }
+        }
         return result;
     }
 
@@ -769,6 +776,13 @@ public:
 
     [[nodiscard]] CatalogState catalog_state(std::uint32_t slot) const noexcept {
         return slot < catalog_count_ ? catalog_[slot].state : CatalogState::Vacant;
+    }
+
+    [[nodiscard]] std::optional<std::uint64_t>
+    session_publication_order(const CacheSessionKey& key) const noexcept {
+        const std::optional<std::size_t> cell = find_session_cell(key);
+        return cell ? std::optional<std::uint64_t>{session_index_[*cell].publication_order}
+                    : std::nullopt;
     }
 
     [[nodiscard]] LogicalLaneState lane_state(LaneId lane) const noexcept {
@@ -2050,6 +2064,7 @@ private:
             const std::size_t cell         = (begin + probe) % session_index_.size();
             const SessionIndexEntry& entry = session_index_[cell];
             if (entry.state == SessionIndexState::Occupied && entry.key == key) { return cell; }
+            if (entry.state == SessionIndexState::Deleted && entry.key == key) { return cell; }
             if (entry.state == SessionIndexState::Deleted && !deleted) { deleted = cell; }
             if (entry.state == SessionIndexState::Empty) { return deleted.value_or(cell); }
         }
@@ -2065,7 +2080,6 @@ private:
                 entry.slot              = kInvalidCatalogSlot;
                 entry.owner_id          = 0;
                 entry.revision          = 0;
-                entry.publication_order = 0;
             }
         }
     }
@@ -2088,12 +2102,14 @@ private:
         const std::size_t cell   = session_insert_cell(key);
         SessionIndexEntry& entry = session_index_[cell];
         std::optional<SessionIndexEntry> previous;
+        if (entry.state == SessionIndexState::Deleted && entry.key == key &&
+            entry.publication_order >= publication_order) {
+            return false;
+        }
         if (entry.state == SessionIndexState::Occupied) {
             if (entry.publication_order > publication_order) { return false; }
             if (entry.publication_order == publication_order) {
-                if (entry.slot != slot || entry.owner_id != owner_id) {
-                    throw std::logic_error("equal publication order names two continuations");
-                }
+                if (entry.slot != slot || entry.owner_id != owner_id) { return false; }
                 entry.revision = revision;
                 return true;
             }
@@ -2124,9 +2140,9 @@ private:
             prior.id != previous.owner_id || prior.revision != previous.revision) {
             return;
         }
-        prior.retention = RetentionClass::RecentPrivate;
+        prior.retention = std::max(prior.retention, RetentionClass::RecentPrivate);
         for (CheckpointObservation& observation : prior.observations) {
-            observation.observation.retention_class = RetentionClass::RecentPrivate;
+            observation.observation.retention_class = prior.retention;
         }
     }
 

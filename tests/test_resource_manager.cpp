@@ -1681,6 +1681,46 @@ void test_session_publication_order_controls_tied_source() {
     (void)manager.abort(program, anonymous.lane, anonymous.sequence);
 }
 
+void test_publication_order_is_monotonic_across_duplicates_and_tombstones() {
+    const FakeCacheSessionKey session{73};
+    {
+        FakeManager manager = make_manager(2, 3);
+        FakeProgram program;
+        const ActiveRequest first = start_active(
+            manager, program, 1, make_base(1, session, RetentionClass::LiveSession), 10);
+        const ActiveRequest duplicate = start_active(
+            manager, program, 2, make_base(2, session, RetentionClass::LiveSession), 10);
+        (void)finish_active(manager, program, first);
+        (void)finish_active(manager, program, duplicate);
+        require(manager.session_publication_order(session) == 10 &&
+                    manager.lane_state(duplicate.lane) ==
+                        ninfer::runtime::LogicalLaneState::Free,
+                "duplicate publication order displaced the owner or stranded its lane");
+    }
+
+    {
+        FakeManager manager = make_manager(2, 3);
+        FakeProgram program;
+        const ActiveRequest stale = start_active(
+            manager, program, 7, make_base(7, session, RetentionClass::LiveSession), 10);
+        const ActiveRequest fresh = start_active(
+            manager, program, 9, make_base(9, session, RetentionClass::LiveSession), 20);
+        (void)finish_active(manager, program, fresh);
+        require(manager.session_publication_order(session) == 20,
+                "fresh session publication did not become current");
+        const ActiveRequest consumer = start_active(
+            manager, program, 9, make_base(9, session, RetentionClass::LiveSession), 30);
+        require(!manager.session_publication_order(session),
+                "consumed session owner did not leave an ordered tombstone");
+        (void)finish_active(manager, program, stale);
+        require(!manager.session_publication_order(session),
+                "stale finish reoccupied an ordered session tombstone");
+        (void)finish_active(manager, program, consumer);
+        require(manager.session_publication_order(session) == 30,
+                "newer finish did not replace its ordered tombstone");
+    }
+}
+
 void test_canonical_pressure_starts_with_disposable_owner() {
     FakeManager manager = make_manager(1, 3);
     FakeProgram program;
@@ -1951,6 +1991,8 @@ int main() {
              test_aborted_source_selection_does_not_create_hit_history);
     run_test("private source session isolation", test_private_source_is_scoped_to_its_session);
     run_test("session publication order", test_session_publication_order_controls_tied_source);
+    run_test("monotonic publication order",
+             test_publication_order_is_monotonic_across_duplicates_and_tombstones);
     run_test("canonical pressure", test_canonical_pressure_starts_with_disposable_owner);
     run_test("all preserving pressure alternatives",
              test_pressure_tries_every_preserving_alternative_before_eviction);

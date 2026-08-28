@@ -64,7 +64,14 @@ void apply_client_identity_cache_hints(const GenerationRequest& request,
                                        bool authentication_configured,
                                        ContextCacheHints& cache_hints) {
     require_authenticated_client_identity(request, authentication_configured);
-    if (!request.client_session_sha256) { return; }
+    if (!request.client_session_sha256) {
+        // Omission deliberately selects the single-principal anonymous cache pool. It provides no
+        // ownership or retrieval boundary; callers that need isolation must send ninfer_session.
+        return;
+    }
+    // NInfer currently has one configured API key and therefore one authenticated principal. The
+    // client-supplied digest is a subordinate session capability inside that principal, not an
+    // independent tenant credential; callers must keep it unguessable and private.
 
     cache_hints.session_key          = "http:" + *request.client_session_sha256;
     cache_hints.retention            = CacheRetentionHint::LiveSession;
