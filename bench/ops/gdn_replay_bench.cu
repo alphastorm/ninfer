@@ -36,6 +36,8 @@ constexpr std::int32_t kStateDim       = 128;
 constexpr std::int32_t kRecordCapacity = 8;
 constexpr std::int32_t kStateSlots     = 11;
 constexpr std::size_t kDefaultFlush    = 256ULL << 20;
+constexpr double kExp003BaselineUs     = 167.82;
+constexpr double kExp003MinimumGain    = 0.05;
 
 enum class ProfileSelection : std::uint8_t {
     Qwen27B,
@@ -47,6 +49,7 @@ enum class CommitSelection : std::uint8_t {
     One,
     Dense,
     Mixed,
+    Exp003,
     All,
 };
 
@@ -80,6 +83,7 @@ struct Options {
     int warmup                   = 10;
     int repeat                   = 50;
     std::size_t flush_bytes      = kDefaultFlush;
+    bool exp003                  = false;
 };
 
 struct Measurement {
@@ -138,6 +142,8 @@ void print_help(const char* program) {
                 "  --commits one|dense|mixed|all\n"
                 "                              Commit policy (default all).\n"
                 "  --valid dense|mixed|all     Recurrent valid-prefix policy (default all).\n"
+                "  --exp-003                   Fixed 27B T=4, B=1, commit=3 Fold gate against the\n"
+                "                              retained 167.82 us Nsight result (requires >=5%%).\n"
                 "  --warmup N                  Warmups per point (default 10).\n"
                 "  --repeat N                  Samples per point (default 50).\n"
                 "  --flush-mib N               Cold-L2 eviction storage (default 256 MiB).\n"
@@ -165,6 +171,8 @@ Options parse_options(int argc, char** argv) {
             options.commits = parse_commits(next("commit policy"));
         } else if (argument == "--valid") {
             options.valid = parse_valid(next("valid policy"));
+        } else if (argument == "--exp-003") {
+            options.exp003 = true;
         } else if (argument == "--warmup") {
             options.warmup = parse_i32(next("warmup"), "warmup", 0, INT32_MAX);
         } else if (argument == "--repeat") {
@@ -178,6 +186,13 @@ Options parse_options(int argc, char** argv) {
         } else {
             throw std::invalid_argument("unknown argument: " + std::string(argument));
         }
+    }
+    if (options.exp003) {
+        options.profiles    = ProfileSelection::Qwen27B;
+        options.commits     = CommitSelection::Exp003;
+        options.component   = ComponentSelection::Fold;
+        options.exact_width = 4;
+        options.exact_batch = 1;
     }
     return options;
 }
@@ -239,6 +254,8 @@ const char* commit_name(CommitSelection selection) {
         return "dense";
     case CommitSelection::Mixed:
         return "mixed";
+    case CommitSelection::Exp003:
+        return "exp003";
     case CommitSelection::All:
         break;
     }
@@ -256,8 +273,11 @@ std::vector<ops::GdnReplayFoldRow> make_rows(std::int32_t batch, std::int32_t wi
         } else if (selection == CommitSelection::Mixed) {
             constexpr std::int32_t kMixed[kRecordCapacity] = {0, 1, 2, 3, 16, 7, 12, 5};
             commit                                         = std::min(width, kMixed[row]);
+        } else if (selection == CommitSelection::Exp003) {
+            commit = 3;
         }
-        rows[static_cast<std::size_t>(row)] = {kSlots[row], commit};
+        const std::int32_t destination = selection == CommitSelection::Exp003 ? 0 : kSlots[row];
+        rows[static_cast<std::size_t>(row)] = {kSlots[row], destination, commit};
     }
     return rows;
 }
@@ -531,8 +551,21 @@ void print_result(const Profile& profile, std::int32_t width, std::int32_t batch
                 ns_per_transition);
 }
 
+bool print_exp003_gate(const Measurement& measurement) {
+    const double target_us   = kExp003BaselineUs * (1.0 - kExp003MinimumGain);
+    const double observed_us = measurement.warm.median_us;
+    const double gain        = (kExp003BaselineUs - observed_us) / kExp003BaselineUs;
+    const bool passed        = observed_us <= target_us;
+    std::printf("gate=exp-003 retained_nsys=%7.2f us required_gain=%5.2f%% target=%7.2f us "
+                "observed_gpu_warm=%7.2f us gain=%6.2f%% result=%s\n",
+                kExp003BaselineUs, kExp003MinimumGain * 100.0, target_us, observed_us, gain * 100.0,
+                passed ? "pass" : "fail");
+    return passed;
+}
+
 int run(const Options& options) {
     DeviceBuffer flush(options.flush_bytes);
+    bool exp003_passed = !options.exp003;
     for (const Profile& profile : selected_profiles(options.profiles)) {
         for (const std::int32_t width : selected_widths(profile, options.exact_width)) {
             const bool run_fold = options.component == ComponentSelection::Fold ||
@@ -549,6 +582,7 @@ int run(const Options& options) {
                         const Measurement measurement =
                             measure_fold(resources, rows, flush, options.warmup, options.repeat);
                         print_result(profile, width, batch, commits, rows, measurement);
+                        if (options.exp003) { exp003_passed = print_exp003_gate(measurement); }
                     }
                 }
             }
@@ -561,7 +595,7 @@ int run(const Options& options) {
             }
         }
     }
-    return 0;
+    return exp003_passed ? 0 : 2;
 }
 
 } // namespace
