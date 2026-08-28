@@ -117,7 +117,9 @@ public:
     [[nodiscard]] SessionCheckpointRestoreState
     restore_checkpoint(std::string_view session_sha256, std::string_view required_response_id,
                        ResponseStore& responses);
-    [[nodiscard]] SessionCheckpointEraseResult erase_checkpoint(std::string_view session_sha256);
+    [[nodiscard]] SessionCheckpointEraseResult
+    erase_checkpoint_response(std::string_view session_sha256, std::string_view response_id,
+                              ResponseStore& responses);
 
     void warmup();
 

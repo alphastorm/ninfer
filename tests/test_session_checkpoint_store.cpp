@@ -263,8 +263,7 @@ public:
             tenant = checkpoint_namespace.tenant_sha256();
             session = checkpoint_namespace.session_sha256();
             tag.assign(checkpoint_tag);
-            if (fail_checkpoint ||
-                !write_chunked(writer, "engine/state.bin", payload)) {
+            if (!write_chunked(writer, "engine/state.bin", payload) || fail_checkpoint) {
                 return std::nullopt;
             }
             return ContinuationCheckpointStats{.frontier_tokens = 4096,
@@ -775,6 +774,80 @@ int test_production_manager_restart_and_identity_isolation() {
     return failures;
 }
 
+int test_delete_checkpoint_update_fails_closed() {
+    TemporaryDirectory temporary;
+    const std::string tenant = session_checkpoint_tenant_sha256("checkpoint-delete-api-key");
+    const nlohmann::json runtime = fingerprint();
+    ResponseStoreSnapshot snapshot = sample_snapshot();
+    ResponseStore responses(8, 8ULL << 20);
+    for (const StoredResponse& response : snapshot.records) { responses.put(response); }
+
+    FakeCheckpointEngine engine;
+    SessionCheckpointManager manager(manager_options(temporary.path), runtime, tenant,
+                                     engine.access());
+    const SessionCheckpointSaveOutcome baseline = manager.save(
+        snapshot.client_session_sha256, snapshot.latest_response_id, responses);
+    int failures = 0;
+    failures += check(baseline.state == SessionCheckpointSaveState::Saved &&
+                          baseline.checkpoint && engine.checkpoint_calls == 1,
+                      "delete failure fixture did not publish its restart baseline");
+    if (!baseline.checkpoint) { return failures; }
+
+    const std::filesystem::path session = stored_session_path(temporary.path, snapshot);
+    const std::string current_before = read_file_bytes(session / "current");
+    engine.fail_checkpoint = true;
+    const SessionCheckpointEraseResult failed = manager.erase_response(
+        snapshot.client_session_sha256, snapshot.records.front().id, responses);
+    const auto parent = responses.get_for_session(snapshot.records.front().id,
+                                                  snapshot.client_session_sha256);
+    const auto descendant = responses.get_for_session(snapshot.latest_response_id,
+                                                      snapshot.client_session_sha256);
+    failures += check(
+        failed == SessionCheckpointEraseResult::Conflict && engine.checkpoint_calls == 2 &&
+            parent && descendant && read_file_bytes(session / "current") == current_before,
+        "failed post-delete checkpoint publication mutated memory or the durable current pointer");
+
+    FakeCheckpointEngine restart_engine;
+    SessionCheckpointManager restarted(manager_options(temporary.path), runtime, tenant,
+                                       restart_engine.access());
+    ResponseStore restarted_responses(8, 8ULL << 20);
+    const SessionCheckpointRestoreState restored = restarted.restore(
+        snapshot.client_session_sha256, snapshot.latest_response_id, restarted_responses);
+    const auto restarted_descendant = restarted_responses.get_for_session(
+        snapshot.latest_response_id, snapshot.client_session_sha256);
+    failures += check(
+        restored == SessionCheckpointRestoreState::Restored && restarted_descendant &&
+            restarted_descendant->previous_response_id == snapshot.records.front().id &&
+            restart_engine.restore_calls == 1,
+        "restart after failed DELETE lost the surviving descendant checkpoint");
+
+    engine.fail_checkpoint = false;
+    const SessionCheckpointEraseResult erased = manager.erase_response(
+        snapshot.client_session_sha256, snapshot.records.front().id, responses);
+    failures += check(
+        erased == SessionCheckpointEraseResult::Erased && engine.checkpoint_calls == 3 &&
+            !responses.get_for_session(snapshot.records.front().id,
+                                       snapshot.client_session_sha256) &&
+            responses.get_for_session(snapshot.latest_response_id,
+                                      snapshot.client_session_sha256),
+        "successful parent DELETE did not retain its in-memory descendant");
+
+    FakeCheckpointEngine committed_restart_engine;
+    SessionCheckpointManager committed_restart(manager_options(temporary.path), runtime, tenant,
+                                               committed_restart_engine.access());
+    ResponseStore committed_responses(8, 8ULL << 20);
+    const SessionCheckpointRestoreState committed_restored = committed_restart.restore(
+        snapshot.client_session_sha256, snapshot.latest_response_id, committed_responses);
+    failures += check(
+        committed_restored == SessionCheckpointRestoreState::Restored &&
+            !committed_responses.get_for_session(snapshot.records.front().id,
+                                                 snapshot.client_session_sha256) &&
+            committed_responses.get_for_session(snapshot.latest_response_id,
+                                                snapshot.client_session_sha256),
+        "successful parent DELETE did not durably retain only its surviving descendant");
+    return failures;
+}
+
 int test_active_reader_delete_and_gc() {
     TemporaryDirectory temporary;
     const ResponseStoreSnapshot responses = sample_snapshot();
@@ -1032,6 +1105,7 @@ int main() {
     failures += test_codec_round_trip();
     failures += test_transaction_restart_compatibility_and_corruption();
     failures += test_production_manager_restart_and_identity_isolation();
+    failures += test_delete_checkpoint_update_fails_closed();
     failures += test_active_reader_delete_and_gc();
     failures += test_store_wide_quota_across_sessions();
     if (failures == 0) { std::cout << "ok\n"; }

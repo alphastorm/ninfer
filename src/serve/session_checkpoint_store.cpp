@@ -1416,15 +1416,52 @@ SessionCheckpointManager::restore(std::string_view session_sha256,
     }
 }
 
-SessionCheckpointEraseResult SessionCheckpointManager::erase(std::string_view session_sha256) {
+SessionCheckpointEraseResult SessionCheckpointManager::erase_response(
+    std::string_view session_sha256, std::string_view response_id, ResponseStore& responses) {
     if (!store_) { return SessionCheckpointEraseResult::Missing; }
-    if (!AuthenticatedCheckpointNamespace::valid_sha256(session_sha256)) {
+    if (!AuthenticatedCheckpointNamespace::valid_sha256(session_sha256) || response_id.empty()) {
         return SessionCheckpointEraseResult::Conflict;
     }
     std::lock_guard lock(mutex_);
     try {
-        return store_->erase(AuthenticatedCheckpointNamespace::authenticated(
-            tenant_sha256_, std::string(session_sha256)));
+        std::optional<ResponseStoreSnapshot> snapshot = responses.snapshot_session(session_sha256);
+        if (!snapshot) { return SessionCheckpointEraseResult::Missing; }
+        const auto deleted = std::find_if(
+            snapshot->records.begin(), snapshot->records.end(),
+            [&](const StoredResponse& response) { return response.id == response_id; });
+        if (deleted == snapshot->records.end()) { return SessionCheckpointEraseResult::Missing; }
+        snapshot->records.erase(deleted);
+
+        // Publish the durable post-delete state before touching the live store. save() keeps the
+        // prior current generation intact on every pre-publication failure.
+        const AuthenticatedCheckpointNamespace checkpoint_namespace =
+            AuthenticatedCheckpointNamespace::authenticated(tenant_sha256_,
+                                                            std::string(session_sha256));
+        if (snapshot->records.empty()) {
+            if (store_->erase(checkpoint_namespace) == SessionCheckpointEraseResult::Conflict) {
+                return SessionCheckpointEraseResult::Conflict;
+            }
+        } else {
+            const StoredResponse& latest = snapshot->records.back();
+            snapshot->latest_response_id = latest.id;
+            if (latest.session_key.empty() ||
+                latest.session_key.size() > kMaximumContextCacheSessionKeyBytes) {
+                return SessionCheckpointEraseResult::Conflict;
+            }
+            const std::string checkpoint_tag = latest.session_key;
+            const std::optional<SessionCheckpointSaveResult> saved = store_->save(
+                checkpoint_namespace, *snapshot, runtime_fingerprint_,
+                [&](ContinuationCheckpointWriter& writer) {
+                    return engine_.checkpoint(checkpoint_namespace, checkpoint_tag, writer,
+                                              store_->options().staging_bytes);
+                });
+            if (!saved) { return SessionCheckpointEraseResult::Conflict; }
+        }
+
+        return responses.erase_for_session(std::string(response_id),
+                                           std::optional<std::string>(session_sha256))
+                   ? SessionCheckpointEraseResult::Erased
+                   : SessionCheckpointEraseResult::Conflict;
     } catch (...) {
         return SessionCheckpointEraseResult::Conflict;
     }
