@@ -1125,6 +1125,19 @@ try {
         elseif (-not $script:InstallTestMode) {
             throw 'release package is missing its qualification receipt constructor'
         }
+        $smokeSource = Join-Path $payload 'smoke'
+        foreach ($name in @('agent_protocol.py', 'serve_contract.py')) {
+            $source = Join-Path $smokeSource $name
+            if (Test-Path -LiteralPath $source -PathType Leaf) {
+                Move-Item -LiteralPath $source -Destination $qualificationBin
+            }
+            elseif (-not $script:InstallTestMode) {
+                throw "release package is missing its qualification smoke asset: $name"
+            }
+        }
+        if (Test-Path -LiteralPath $smokeSource -PathType Container) {
+            Remove-Item -LiteralPath $smokeSource -Force
+        }
         Move-Item -LiteralPath (Join-Path $payload 'server-config.json') -Destination (Join-Path $configRoot 'server-config.json')
         foreach ($name in @('build-identity.json', 'release-spec.json', 'SHA256SUMS.txt')) {
             Move-Item -LiteralPath (Join-Path $payload $name) -Destination (Join-Path $candidateReceiptsRoot $name)
