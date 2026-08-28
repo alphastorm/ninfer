@@ -24,8 +24,8 @@ namespace ninfer::serve {
 struct RequestLifetime;
 struct RequestCapacity;
 struct MediaInputCapacity;
-struct CheckpointSessionLocks;
-struct CheckpointSessionLease;
+struct ClientSessionLocks;
+struct ClientSessionLease;
 
 struct GenerationMetrics {
     double prepare_seconds = 0.0;
@@ -81,7 +81,7 @@ struct PreparedRequest {
     bool preserve_thinking                 = false;
     bool preserve_thinking_semantic_change = false;
     std::shared_ptr<RequestLifetime> lifetime;
-    std::shared_ptr<CheckpointSessionLease> checkpoint_session;
+    std::shared_ptr<ClientSessionLease> client_session;
 };
 
 class GenerationService {
@@ -125,18 +125,18 @@ private:
     [[nodiscard]] HostInputLease
     acquire_media_input(std::chrono::steady_clock::time_point deadline,
                         const std::function<bool()>& is_cancelled) const;
-    [[nodiscard]] std::shared_ptr<CheckpointSessionLease>
-    acquire_checkpoint_session(std::string_view session_sha256,
-                               std::chrono::steady_clock::time_point deadline,
-                               const std::function<bool()>& is_cancelled) const;
+    [[nodiscard]] std::shared_ptr<ClientSessionLease>
+    acquire_client_session(std::string_view session_sha256,
+                           std::chrono::steady_clock::time_point deadline,
+                           const std::function<bool()>& is_cancelled) const;
 
     ServeOptions options_;
     std::unique_ptr<ninfer::Engine> engine_;
     ninfer::PromptCapabilities prompt_capabilities_;
     std::shared_ptr<RequestCapacity> request_capacity_;
     std::shared_ptr<MediaInputCapacity> media_input_capacity_;
-    std::shared_ptr<CheckpointSessionLocks> checkpoint_session_locks_;
-    std::string checkpoint_tenant_sha256_;
+    std::shared_ptr<ClientSessionLocks> client_session_locks_;
+    std::string session_tenant_sha256_;
     std::unique_ptr<SessionCheckpointManager> checkpoint_manager_;
 };
 

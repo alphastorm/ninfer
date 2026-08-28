@@ -16,6 +16,8 @@ namespace ninfer::runtime {
 
 class CheckpointEngineAccess {
 public:
+    static void bind_cache_session(PreparedPrompt& prompt,
+                                   AuthenticatedCheckpointNamespace checkpoint_namespace);
     static void bind_checkpoint_session(PreparedPrompt& prompt,
                                         AuthenticatedCheckpointNamespace checkpoint_namespace,
                                         std::string tag);

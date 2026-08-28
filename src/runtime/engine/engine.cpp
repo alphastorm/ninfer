@@ -232,14 +232,23 @@ ModelSamplingDefaults Engine::sampling_defaults() const {
     return impl_->sampling_defaults;
 }
 
+void runtime::CheckpointEngineAccess::bind_cache_session(
+    PreparedPrompt& prompt, runtime::AuthenticatedCheckpointNamespace checkpoint_namespace) {
+    if (prompt.impl_ == nullptr) {
+        throw std::invalid_argument("cache-bound prompt must be valid");
+    }
+    prompt.impl_->checkpoint_namespace = std::move(checkpoint_namespace);
+    prompt.impl_->checkpoint_tag.clear();
+}
+
 void runtime::CheckpointEngineAccess::bind_checkpoint_session(
     PreparedPrompt& prompt, runtime::AuthenticatedCheckpointNamespace checkpoint_namespace,
     std::string tag) {
-    if (prompt.impl_ == nullptr || tag.empty() || tag.size() > 4096) {
+    if (tag.empty() || tag.size() > 4096) {
         throw std::invalid_argument("checkpoint-bound prompt and response tag must be valid");
     }
-    prompt.impl_->checkpoint_namespace = std::move(checkpoint_namespace);
-    prompt.impl_->checkpoint_tag       = std::move(tag);
+    bind_cache_session(prompt, std::move(checkpoint_namespace));
+    prompt.impl_->checkpoint_tag = std::move(tag);
 }
 
 std::optional<runtime::ContinuationCheckpointStats>

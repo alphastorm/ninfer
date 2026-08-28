@@ -67,13 +67,13 @@ struct MediaInputPermit {
     std::shared_ptr<MediaInputCapacity> capacity;
 };
 
-struct CheckpointSessionLocks {
+struct ClientSessionLocks {
     std::mutex mutex;
     std::unordered_map<std::string, std::weak_ptr<std::timed_mutex>> sessions;
 };
 
-struct CheckpointSessionLease {
-    explicit CheckpointSessionLease(std::shared_ptr<std::timed_mutex> session_mutex)
+struct ClientSessionLease {
+    explicit ClientSessionLease(std::shared_ptr<std::timed_mutex> session_mutex)
         : owner(std::move(session_mutex)), lock(*owner, std::defer_lock) {}
 
     std::shared_ptr<std::timed_mutex> owner;
@@ -307,9 +307,11 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
     request_capacity_    = std::make_shared<RequestCapacity>(
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
     media_input_capacity_ = std::make_shared<MediaInputCapacity>();
+    if (!options_.api_key.empty()) {
+        session_tenant_sha256_ = session_checkpoint_tenant_sha256(options_.api_key);
+        client_session_locks_  = std::make_shared<ClientSessionLocks>();
+    }
     if (!options_.session_checkpoint_root.empty()) {
-        checkpoint_tenant_sha256_ = session_checkpoint_tenant_sha256(options_.api_key);
-        checkpoint_session_locks_ = std::make_shared<CheckpointSessionLocks>();
         nlohmann::json fingerprint = session_checkpoint_runtime_fingerprint(
             options_, engine_->options(), engine_->load_summary(), engine_->memory_summary(),
             ninfer::build_info());
@@ -337,7 +339,7 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
                 .staging_bytes = options_.session_checkpoint_staging_bytes,
                 .tombstone_cleanup = {},
             },
-            std::move(fingerprint), checkpoint_tenant_sha256_, std::move(checkpoint_engine));
+            std::move(fingerprint), session_tenant_sha256_, std::move(checkpoint_engine));
     }
 }
 
@@ -399,41 +401,41 @@ GenerationService::acquire_media_input(Clock::time_point deadline,
     }
 }
 
-std::shared_ptr<CheckpointSessionLease> GenerationService::acquire_checkpoint_session(
+std::shared_ptr<ClientSessionLease> GenerationService::acquire_client_session(
     std::string_view session_sha256, Clock::time_point deadline,
     const std::function<bool()>& is_cancelled) const {
-    if (!checkpoint_session_locks_) {
-        throw std::logic_error("checkpoint session locks are unavailable");
+    if (!client_session_locks_) {
+        throw std::logic_error("authenticated client session locks are unavailable");
     }
     std::shared_ptr<std::timed_mutex> session_mutex;
     {
-        std::lock_guard lock(checkpoint_session_locks_->mutex);
-        if (checkpoint_session_locks_->sessions.size() >= 1024) {
-            for (auto entry = checkpoint_session_locks_->sessions.begin();
-                 entry != checkpoint_session_locks_->sessions.end();) {
+        std::lock_guard lock(client_session_locks_->mutex);
+        if (client_session_locks_->sessions.size() >= 1024) {
+            for (auto entry = client_session_locks_->sessions.begin();
+                 entry != client_session_locks_->sessions.end();) {
                 if (entry->second.expired()) {
-                    entry = checkpoint_session_locks_->sessions.erase(entry);
+                    entry = client_session_locks_->sessions.erase(entry);
                 } else {
                     ++entry;
                 }
             }
         }
         std::weak_ptr<std::timed_mutex>& stored =
-            checkpoint_session_locks_->sessions[std::string(session_sha256)];
+            client_session_locks_->sessions[std::string(session_sha256)];
         session_mutex = stored.lock();
         if (!session_mutex) {
             session_mutex = std::make_shared<std::timed_mutex>();
             stored        = session_mutex;
         }
     }
-    auto lease = std::make_shared<CheckpointSessionLease>(std::move(session_mutex));
+    auto lease = std::make_shared<ClientSessionLease>(std::move(session_mutex));
     for (;;) {
         if (is_cancelled && is_cancelled()) { throw_preparation_cancelled(); }
         const Clock::time_point now = Clock::now();
         if (now >= deadline) {
             throw_request_error(ninfer::RequestError(
                 RequestErrorKind::QueueTimeout,
-                "inference request expired while waiting for its checkpoint session"));
+                "inference request expired while waiting for its private session"));
         }
         if (lease->lock.try_lock_until(
                 std::min(deadline, now + std::chrono::milliseconds(10)))) {
@@ -477,8 +479,8 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
                                                  "request exceeds the 16-item media limit"));
     }
     prepared.lifetime = acquire_request_lifetime();
-    if (!checkpoint_tag.empty()) {
-        prepared.checkpoint_session = acquire_checkpoint_session(
+    if (request.client_session_sha256) {
+        prepared.client_session = acquire_client_session(
             *request.client_session_sha256, prepared.lifetime->deadline, is_cancelled);
     }
     HostInputLease host_input;
@@ -495,12 +497,17 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
             });
         check_preparation_control(prepared.lifetime->deadline, is_cancelled);
         ninfer::PreparedPrompt prompt = engine_->prepare(std::move(input));
-        if (!checkpoint_tag.empty()) {
-            runtime::CheckpointEngineAccess::bind_checkpoint_session(
-                prompt,
+        if (request.client_session_sha256) {
+            runtime::AuthenticatedCheckpointNamespace checkpoint_namespace =
                 runtime::AuthenticatedCheckpointNamespace::authenticated(
-                    checkpoint_tenant_sha256_, *request.client_session_sha256),
-                std::move(checkpoint_tag));
+                    session_tenant_sha256_, *request.client_session_sha256);
+            if (checkpoint_tag.empty()) {
+                runtime::CheckpointEngineAccess::bind_cache_session(
+                    prompt, std::move(checkpoint_namespace));
+            } else {
+                runtime::CheckpointEngineAccess::bind_checkpoint_session(
+                    prompt, std::move(checkpoint_namespace), std::move(checkpoint_tag));
+            }
         }
         check_preparation_control(prepared.lifetime->deadline, is_cancelled);
         prepared.prompt_tokens = static_cast<int>(prompt.summary().prompt_tokens);
