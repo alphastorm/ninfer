@@ -35,11 +35,16 @@ function Write-FakeBinary(
 ) {
     $identity = "$Program upstream_base_sha=$UpstreamSha patch_stack_sha=$ReleaseSha build_profile=omp-v0.2.0-rtx3090 build_type=Release cxx_compiler=fixture cuda_compiler=fixture cuda_toolkit=12.8 cuda_architecture=86 source_dirty=false"
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-        [IO.File]::WriteAllLines(
-            $Path,
-            @('@echo off', "echo $identity"),
-            [Text.UTF8Encoding]::new($false)
-        )
+        $typeName = 'NInferFixture_' + ($Program -replace '[^A-Za-z0-9]', '_')
+        $source = @"
+using System;
+public static class $typeName {
+    public static void Main(string[] args) {
+        Console.WriteLine(@"$identity");
+    }
+}
+"@
+        Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $Path -OutputType ConsoleApplication
     }
     else {
         [IO.File]::WriteAllLines(
@@ -80,7 +85,7 @@ try {
     $upstream = 'ef6ecc3c139b43fc4d3e1b92df474305e8429544'
     $binaryDirectory = Join-Path $root 'bin'
     New-Item -ItemType Directory -Path $binaryDirectory | Out-Null
-    $extension = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { '.cmd' } else { '' }
+    $extension = if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) { '.exe' } else { '' }
     $ninfer = Join-Path $binaryDirectory "ninfer$extension"
     $server = Join-Path $binaryDirectory "ninfer-serve$extension"
     $benchmark = Join-Path $binaryDirectory "ninfer_bench$extension"
