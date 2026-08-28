@@ -18,6 +18,7 @@ function(ninfer_add_test name)
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/third_party
+    ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib
     ${PROJECT_SOURCE_DIR}/third_party/utf8proc)
   if(arg_LIBRARIES)
     target_link_libraries(${name} PRIVATE ${arg_LIBRARIES})
