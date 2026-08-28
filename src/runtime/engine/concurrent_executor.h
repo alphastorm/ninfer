@@ -207,7 +207,11 @@ public:
         std::scoped_lock lock(execution_mutex_);
         if (instance_.program->has_checkpoint_session(checkpoint_namespace)) { return std::nullopt; }
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
-            if (slots_[lane] != nullptr || instance_.program->has_retained_lane(lane)) { continue; }
+            if (slots_[lane] != nullptr) { continue; }
+            if (instance_.program->has_retained_lane(lane)) {
+                instance_.program->evict_retained_lane(lane);
+                invalidate_lane_plans(lane);
+            }
             std::optional<ContinuationCheckpointStats> restored = instance_.program->restore_session(
                 lane, checkpoint_namespace, std::move(checkpoint_tag), reader, expected,
                 staging_bytes);

@@ -88,6 +88,19 @@ class WindowsReleaseContractTests(unittest.TestCase):
             "stream->previous_response_id  = std::move(request.previous_response_id);", source
         )
 
+    def test_checkpoint_restore_evicts_idle_warmup_lane(self) -> None:
+        source = (ROOT / "src/runtime/engine/concurrent_executor.h").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("restore_session(")
+        end = source.index("[[nodiscard]] RuntimeStats runtime_stats()", start)
+        restore = source[start:end]
+        self.assertIn("instance_.program->evict_retained_lane(lane);", restore)
+        self.assertNotIn(
+            "slots_[lane] != nullptr || instance_.program->has_retained_lane(lane)",
+            restore,
+        )
+
     def test_release_sources_contain_no_old_hardware_or_cache_identity(self) -> None:
         forbidden = ("4090", "DirectStorage", "directstorage", "legacy-managed-copy")
         for path in RELEASE.iterdir():
