@@ -1,29 +1,30 @@
 #if defined(_WIN32)
 
-#include "runtime/windows/direct_storage_checkpoint_backend.h"
+#    include "runtime/windows/direct_storage_checkpoint_backend.h"
 
-#include <d3d12.h>
-#include <dxgi1_6.h>
-#include <dstorage.h>
-#include <windows.h>
-#include <wrl/client.h>
+#    include <d3d12.h>
+#    include <dxgi1_6.h>
+#    include <dstorage.h>
+#    include <windows.h>
+#    include <wrl/client.h>
 
-#include <cuda_runtime.h>
+#    include <cuda_runtime.h>
 
-#include <algorithm>
-#include <array>
-#include <cstddef>
-#include <cstdint>
-#include <cstring>
-#include <filesystem>
-#include <limits>
-#include <memory>
-#include <mutex>
-#include <span>
-#include <sstream>
-#include <string>
-#include <utility>
-#include <vector>
+#    include <algorithm>
+#    include <array>
+#    include <cstddef>
+#    include <cstdint>
+#    include <cstring>
+#    include <exception>
+#    include <filesystem>
+#    include <limits>
+#    include <memory>
+#    include <mutex>
+#    include <span>
+#    include <sstream>
+#    include <string>
+#    include <utility>
+#    include <vector>
 
 namespace ninfer::runtime::windows {
 namespace {
@@ -39,9 +40,7 @@ constexpr std::size_t kWindowsIoChunkBytes = 32ULL << 20;
 }
 
 void require_hresult(HRESULT result, const std::string& operation) {
-    if (FAILED(result)) {
-        fail_windows(operation, static_cast<std::uint32_t>(result));
-    }
+    if (FAILED(result)) { fail_windows(operation, static_cast<std::uint32_t>(result)); }
 }
 
 void require_cuda(cudaError_t result, const std::string& operation) {
@@ -53,19 +52,23 @@ void require_cuda(cudaError_t result, const std::string& operation) {
 class UniqueHandle {
 public:
     UniqueHandle() = default;
+
     explicit UniqueHandle(HANDLE handle) : handle_(handle) {}
+
     ~UniqueHandle() { reset(); }
 
     UniqueHandle(const UniqueHandle&)            = delete;
     UniqueHandle& operator=(const UniqueHandle&) = delete;
 
     UniqueHandle(UniqueHandle&& other) noexcept : handle_(other.release()) {}
+
     UniqueHandle& operator=(UniqueHandle&& other) noexcept {
         if (this != &other) { reset(other.release()); }
         return *this;
     }
 
     [[nodiscard]] HANDLE get() const noexcept { return handle_; }
+
     [[nodiscard]] bool valid() const noexcept {
         return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE;
     }
@@ -86,10 +89,9 @@ private:
 };
 
 UniqueHandle open_new_durable_file(const std::filesystem::path& path) {
-    UniqueHandle handle(CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
-                                    FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN |
-                                        FILE_FLAG_WRITE_THROUGH,
-                                    nullptr));
+    UniqueHandle handle(CreateFileW(
+        path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_WRITE_THROUGH, nullptr));
     if (!handle.valid()) {
         fail_windows("failed to create private checkpoint staging file", GetLastError());
     }
@@ -98,8 +100,8 @@ UniqueHandle open_new_durable_file(const std::filesystem::path& path) {
 
 void write_all(HANDLE handle, std::span<const std::byte> bytes) {
     while (!bytes.empty()) {
-        const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(
-            bytes.size(), kWindowsIoChunkBytes));
+        const DWORD chunk =
+            static_cast<DWORD>(std::min<std::size_t>(bytes.size(), kWindowsIoChunkBytes));
         DWORD written = 0;
         if (!WriteFile(handle, bytes.data(), chunk, &written, nullptr) || written != chunk) {
             fail_windows("failed to write checkpoint staging bytes", GetLastError());
@@ -110,7 +112,7 @@ void write_all(HANDLE handle, std::span<const std::byte> bytes) {
 
 class WindowsDirectoryLock final : public CheckpointDirectoryLock {
 public:
-    explicit WindowsDirectoryLock(const std::filesystem::path& directory) {
+    WindowsDirectoryLock(const std::filesystem::path& directory, std::uint32_t timeout_ms) {
         const std::filesystem::path lock_path = directory / ".checkpoint.lock";
         handle_.reset(CreateFileW(lock_path.c_str(), GENERIC_READ | GENERIC_WRITE,
                                   FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
@@ -118,8 +120,21 @@ public:
         if (!handle_.valid()) {
             fail_windows("failed to open checkpoint directory lock", GetLastError());
         }
-        if (!LockFileEx(handle_.get(), LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlapped_)) {
-            fail_windows("failed to acquire checkpoint directory lock", GetLastError());
+        const ULONGLONG deadline = GetTickCount64() + timeout_ms;
+        for (;;) {
+            if (LockFileEx(handle_.get(), LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1,
+                           0, &overlapped_)) {
+                break;
+            }
+            const DWORD error = GetLastError();
+            if (error != ERROR_LOCK_VIOLATION) {
+                fail_windows("failed to acquire checkpoint directory lock", error);
+            }
+            if (GetTickCount64() >= deadline) {
+                throw CheckpointContractError(
+                    "timed out acquiring checkpoint directory single-flight lock");
+            }
+            Sleep(10);
         }
         locked_ = true;
     }
@@ -142,14 +157,45 @@ public:
         std::error_code error;
         std::filesystem::create_directories(path, error);
         if (error || !std::filesystem::is_directory(path, error)) {
-            throw CheckpointContractError("failed to create checkpoint directory: " +
-                                          (error ? error.message() : std::string("not a directory")));
+            throw CheckpointContractError(
+                "failed to create checkpoint directory: " +
+                (error ? error.message() : std::string("not a directory")));
         }
     }
 
-    std::unique_ptr<CheckpointDirectoryLock>
-    lock_directory(const std::filesystem::path& path) override {
-        return std::make_unique<WindowsDirectoryLock>(path);
+    std::unique_ptr<CheckpointDirectoryLock> lock_directory(const std::filesystem::path& path,
+                                                            std::uint32_t timeout_ms) override {
+        return std::make_unique<WindowsDirectoryLock>(path, timeout_ms);
+    }
+
+    std::vector<std::filesystem::path> list_regular_files(const std::filesystem::path& path,
+                                                          std::size_t max_entries) override {
+        std::vector<std::filesystem::path> files;
+        std::error_code error;
+        for (std::filesystem::directory_iterator iterator(path, error), end; iterator != end;
+             iterator.increment(error)) {
+            if (error) {
+                throw CheckpointContractError("failed to enumerate checkpoint directory: " +
+                                              error.message());
+            }
+            if (files.size() == max_entries) {
+                throw CheckpointContractError(
+                    "checkpoint cleanup entry count exceeds its configured bound");
+            }
+            const std::filesystem::file_status status = iterator->symlink_status(error);
+            if (error) {
+                throw CheckpointContractError("failed to inspect checkpoint directory entry: " +
+                                              error.message());
+            }
+            if (std::filesystem::is_regular_file(status) || std::filesystem::is_symlink(status)) {
+                files.push_back(iterator->path());
+            }
+        }
+        if (error) {
+            throw CheckpointContractError("failed to enumerate checkpoint directory: " +
+                                          error.message());
+        }
+        return files;
     }
 
     bool file_exists(const std::filesystem::path& path) override {
@@ -176,16 +222,15 @@ public:
     }
 
     void read_exact(const std::filesystem::path& path, std::span<std::byte> bytes) override {
-        UniqueHandle handle(CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
-                                        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL |
-                                                           FILE_FLAG_SEQUENTIAL_SCAN,
-                                        nullptr));
+        UniqueHandle handle(
+            CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+                        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
         if (!handle.valid()) {
             fail_windows("failed to open committed checkpoint manifest", GetLastError());
         }
         while (!bytes.empty()) {
-            const DWORD chunk = static_cast<DWORD>(std::min<std::size_t>(
-                bytes.size(), std::numeric_limits<DWORD>::max()));
+            const DWORD chunk = static_cast<DWORD>(
+                std::min<std::size_t>(bytes.size(), std::numeric_limits<DWORD>::max()));
             DWORD read = 0;
             if (!ReadFile(handle.get(), bytes.data(), chunk, &read, nullptr)) {
                 fail_windows("failed to read committed checkpoint manifest", GetLastError());
@@ -214,11 +259,13 @@ public:
         }
     }
 
-    void write_payloads_durable(
-        const std::filesystem::path& path, std::span<const CheckpointPayload> payloads,
-        std::span<const std::uint64_t> payload_offsets, std::uint64_t total_bytes) override {
+    void write_payloads_durable(const std::filesystem::path& path,
+                                std::span<const CheckpointPayload> payloads,
+                                std::span<const std::uint64_t> payload_offsets,
+                                std::uint64_t total_bytes) override {
         if (payloads.size() != payload_offsets.size()) {
-            throw CheckpointContractError("checkpoint payload writer received inconsistent offsets");
+            throw CheckpointContractError(
+                "checkpoint payload writer received inconsistent offsets");
         }
 
         UniqueHandle handle;
@@ -232,8 +279,8 @@ public:
                 }
                 std::uint64_t padding = payload_offsets[index] - cursor;
                 while (padding != 0) {
-                    const std::size_t chunk = static_cast<std::size_t>(
-                        std::min<std::uint64_t>(padding, zeros.size()));
+                    const std::size_t chunk =
+                        static_cast<std::size_t>(std::min<std::uint64_t>(padding, zeros.size()));
                     write_all(handle.get(), std::span(zeros).first(chunk));
                     padding -= chunk;
                     cursor += chunk;
@@ -242,7 +289,8 @@ public:
                 cursor += payloads[index].bytes.size();
             }
             if (cursor != total_bytes) {
-                throw CheckpointContractError("checkpoint payload writer produced the wrong file size");
+                throw CheckpointContractError(
+                    "checkpoint payload writer produced the wrong file size");
             }
             if (!FlushFileBuffers(handle.get())) {
                 fail_windows("failed to flush checkpoint payload staging file", GetLastError());
@@ -263,10 +311,10 @@ public:
         }
     }
 
-    void remove_file(const std::filesystem::path& path) noexcept override {
-        if (DeleteFileW(path.c_str())) { return; }
+    bool remove_file(const std::filesystem::path& path) noexcept override {
+        if (DeleteFileW(path.c_str())) { return true; }
         const DWORD error = GetLastError();
-        if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) { return; }
+        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
     }
 };
 
@@ -279,8 +327,8 @@ struct DirectStorageState {
     ComPtr<IDStorageQueue3> queue;
     ComPtr<IDStorageStatusArray> status;
     cudaExternalSemaphore_t cuda_fence = nullptr;
-    cudaStream_t cuda_stream            = nullptr;
-    std::uint64_t fence_value           = 0;
+    cudaStream_t cuda_stream           = nullptr;
+    std::uint64_t fence_value          = 0;
 
     ~DirectStorageState() {
         if (cuda_stream != nullptr) {
@@ -292,29 +340,33 @@ struct DirectStorageState {
     }
 };
 
-bool drain_d3d_fence(DirectStorageState& state, std::uint64_t value) noexcept {
+bool drain_d3d_fence(DirectStorageState& state, std::uint64_t value,
+                     std::uint32_t timeout_ms) noexcept {
     std::uint64_t completed = state.fence->GetCompletedValue();
     if (completed == std::numeric_limits<std::uint64_t>::max()) { return false; }
     if (completed >= value) { return true; }
     UniqueHandle event(CreateEventExW(nullptr, nullptr, 0, EVENT_ALL_ACCESS));
     if (event.valid() && SUCCEEDED(state.fence->SetEventOnCompletion(value, event.get())) &&
-        WaitForSingleObject(event.get(), INFINITE) == WAIT_OBJECT_0) {
+        WaitForSingleObject(event.get(), timeout_ms) == WAIT_OBJECT_0) {
         completed = state.fence->GetCompletedValue();
         return completed != std::numeric_limits<std::uint64_t>::max() && completed >= value;
     }
 
     // Event setup failure must not release a buffer still targeted by DMA. Polling is only a
-    // no-fail safety drain; device removal is terminal and guarantees the queue cannot keep writing.
+    // no-fail safety drain; device removal is terminal and guarantees the queue cannot keep
+    // writing.
+    const ULONGLONG deadline = GetTickCount64() + timeout_ms;
     for (;;) {
         completed = state.fence->GetCompletedValue();
         if (completed == std::numeric_limits<std::uint64_t>::max()) { return false; }
         if (completed >= value) { return true; }
+        if (GetTickCount64() >= deadline) { return false; }
         Sleep(1);
     }
 }
 
 std::string direct_storage_failure(DirectStorageState& state, HRESULT status) {
-    HRESULT result = status;
+    HRESULT result           = status;
     const HANDLE error_event = state.queue->GetErrorEvent();
     if (error_event != nullptr && WaitForSingleObject(error_event, 0) == WAIT_OBJECT_0) {
         DSTORAGE_ERROR_RECORD record{};
@@ -330,17 +382,16 @@ std::string direct_storage_failure(DirectStorageState& state, HRESULT status) {
 class WindowsReadCompletion final : public CheckpointReadCompletion {
 public:
     WindowsReadCompletion(std::shared_ptr<DirectStorageState> state,
-                          std::unique_lock<std::mutex> queue_lock,
-                          ComPtr<IDStorageFile> file, std::uint64_t fence_value)
+                          std::unique_lock<std::mutex> queue_lock, ComPtr<IDStorageFile> file,
+                          std::uint64_t fence_value, std::uint32_t timeout_ms)
         : state_(std::move(state)), queue_lock_(std::move(queue_lock)), file_(std::move(file)),
-          fence_value_(fence_value) {}
+          fence_value_(fence_value), timeout_ms_(timeout_ms) {}
 
     ~WindowsReadCompletion() override {
         if (!done_) {
             try {
                 wait();
-            } catch (...) {
-            }
+            } catch (...) {}
         }
     }
 
@@ -348,25 +399,34 @@ public:
         if (done_) { return; }
 
         cudaExternalSemaphoreWaitParams parameters{};
-        parameters.params.fence.value = fence_value_;
+        parameters.params.fence.value    = fence_value_;
         const cudaError_t enqueue_result = cudaWaitExternalSemaphoresAsync(
             &state_->cuda_fence, &parameters, 1, state_->cuda_stream);
         cudaError_t synchronize_result = enqueue_result;
         if (enqueue_result == cudaSuccess) {
-            synchronize_result = cudaStreamSynchronize(state_->cuda_stream);
+            const ULONGLONG deadline = GetTickCount64() + timeout_ms_;
+            for (;;) {
+                synchronize_result = cudaStreamQuery(state_->cuda_stream);
+                if (synchronize_result != cudaErrorNotReady || GetTickCount64() >= deadline) {
+                    break;
+                }
+                Sleep(1);
+            }
         }
         const std::uint64_t completed_value = state_->fence->GetCompletedValue();
-        bool fence_completed = true;
+        bool fence_completed                = true;
         if (synchronize_result != cudaSuccess ||
             completed_value == std::numeric_limits<std::uint64_t>::max() ||
             completed_value < fence_value_) {
             // This is a safety drain, not an operational fallback: the read still fails below if
             // CUDA/D3D interop failed, but its destination cannot be released while DMA is active.
-            fence_completed = drain_d3d_fence(*state_, fence_value_);
+            fence_completed = drain_d3d_fence(*state_, fence_value_, timeout_ms_);
         }
+        // Returning without a completed D3D fence would release host buffers that DirectStorage
+        // may still target. Device loss or a fence timeout is therefore fail-stop, not recoverable.
+        if (!fence_completed) { std::terminate(); }
 
-        const HRESULT status = fence_completed ? state_->status->GetHResult(0) :
-                                                 DXGI_ERROR_DEVICE_REMOVED;
+        const HRESULT status = state_->status->GetHResult(0);
         std::string failure;
         if (FAILED(status)) {
             failure = direct_storage_failure(*state_, status);
@@ -384,12 +444,14 @@ private:
     std::unique_lock<std::mutex> queue_lock_;
     ComPtr<IDStorageFile> file_;
     std::uint64_t fence_value_ = 0;
-    bool done_                  = false;
+    std::uint32_t timeout_ms_  = 0;
+    bool done_                 = false;
 };
 
 class WindowsDirectStorageReadQueue final : public CheckpointReadQueue {
 public:
-    WindowsDirectStorageReadQueue() : state_(std::make_shared<DirectStorageState>()) {
+    explicit WindowsDirectStorageReadQueue(std::uint32_t timeout_ms)
+        : state_(std::make_shared<DirectStorageState>()), timeout_ms_(timeout_ms) {
         int cuda_device = 0;
         require_cuda(cudaGetDevice(&cuda_device), "failed to query the active CUDA device");
         cudaDeviceProp cuda_properties{};
@@ -413,15 +475,15 @@ public:
             }
         }
         if (!matched_adapter) {
-            throw CheckpointContractError(
-                "Windows DirectStorage is unavailable: no DXGI adapter matches the active CUDA device");
+            throw CheckpointContractError("Windows DirectStorage is unavailable: no DXGI adapter "
+                                          "matches the active CUDA device");
         }
 
         require_hresult(D3D12CreateDevice(matched_adapter.Get(), D3D_FEATURE_LEVEL_11_0,
                                           IID_PPV_ARGS(&state_->d3d_device)),
                         "failed to create the CUDA-matched D3D12 device");
-        require_hresult(state_->d3d_device->CreateFence(
-                            0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&state_->fence)),
+        require_hresult(state_->d3d_device->CreateFence(0, D3D12_FENCE_FLAG_SHARED,
+                                                        IID_PPV_ARGS(&state_->fence)),
                         "failed to create the shared DirectStorage fence");
 
         UniqueHandle shared_fence;
@@ -452,12 +514,13 @@ public:
         queue_desc.Device     = state_->d3d_device.Get();
         require_hresult(state_->factory->CreateQueue(&queue_desc, IID_PPV_ARGS(&state_->queue)),
                         "Windows DirectStorage 1.3 queue is unavailable");
-        require_hresult(state_->factory->CreateStatusArray(
-                            1, "NInferCheckpointStatus", IID_PPV_ARGS(&state_->status)),
+        require_hresult(state_->factory->CreateStatusArray(1, "NInferCheckpointStatus",
+                                                           IID_PPV_ARGS(&state_->status)),
                         "failed to create the DirectStorage completion status");
     }
 
     bool available() const noexcept override { return true; }
+
     std::string_view unavailable_reason() const noexcept override { return {}; }
 
     std::unique_ptr<CheckpointReadCompletion>
@@ -507,11 +570,11 @@ public:
             throw CheckpointContractError("DirectStorage checkpoint fence value is exhausted");
         }
         const std::uint64_t fence_value = ++state_->fence_value;
-        auto completion = std::make_unique<WindowsReadCompletion>(
-            state_, std::move(queue_lock), file, fence_value);
-        state_->queue->EnqueueRequests(
-            direct_storage_requests.data(), static_cast<UINT>(direct_storage_requests.size()),
-            nullptr, 0, DSTORAGE_ENQUEUE_REQUEST_FLAG_NONE);
+        auto completion = std::make_unique<WindowsReadCompletion>(state_, std::move(queue_lock),
+                                                                  file, fence_value, timeout_ms_);
+        state_->queue->EnqueueRequests(direct_storage_requests.data(),
+                                       static_cast<UINT>(direct_storage_requests.size()), nullptr,
+                                       0, DSTORAGE_ENQUEUE_REQUEST_FLAG_NONE);
         state_->queue->EnqueueStatus(state_->status.Get(), 0);
         state_->queue->EnqueueSignal(state_->fence.Get(), fence_value);
         state_->queue->Submit();
@@ -520,6 +583,7 @@ public:
 
 private:
     std::shared_ptr<DirectStorageState> state_;
+    std::uint32_t timeout_ms_ = 0;
 };
 
 } // namespace
@@ -527,7 +591,7 @@ private:
 std::unique_ptr<DirectStorageCheckpointBackend>
 make_direct_storage_checkpoint_backend(DirectStorageCheckpointConfig config) {
     auto file_system = std::make_shared<WindowsCheckpointFileSystem>();
-    auto read_queue  = std::make_shared<WindowsDirectStorageReadQueue>();
+    auto read_queue  = std::make_shared<WindowsDirectStorageReadQueue>(config.io_timeout_ms);
     return std::make_unique<DirectStorageCheckpointBackend>(
         std::move(config), std::move(file_system), std::move(read_queue));
 }

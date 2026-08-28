@@ -19,7 +19,7 @@
 #include <vector>
 
 #if defined(_WIN32)
-#include <cwctype>
+#    include <cwctype>
 #endif
 
 namespace ninfer::runtime::windows {
@@ -34,8 +34,15 @@ constexpr std::size_t kMaxManifestBytes =
     kManifestPrefixBytes + kPayloadKindCount * kManifestDescriptorBytes;
 constexpr std::size_t kMaxDirectStorageRequests = 0x2000 - 2;
 
-[[noreturn]] void fail(std::string message) {
-    throw CheckpointContractError(std::move(message));
+[[noreturn]] void fail(std::string message) { throw CheckpointContractError(std::move(message)); }
+
+class CorruptManifestError final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+[[noreturn]] void corrupt_manifest(std::string message) {
+    throw CorruptManifestError(std::move(message));
 }
 
 bool keys_equal(const CheckpointStageKey& left, const CheckpointStageKey& right) noexcept {
@@ -67,8 +74,7 @@ void append_integer(std::array<std::byte, kMaxManifestBytes>& output, std::size_
     static_assert(std::is_unsigned_v<Integer>);
     std::uint64_t remaining = value;
     for (std::size_t index = 0; index < sizeof(Integer); ++index) {
-        output[cursor + sizeof(Integer) - 1 - index] =
-            static_cast<std::byte>(remaining & 0xffU);
+        output[cursor + sizeof(Integer) - 1 - index] = static_cast<std::byte>(remaining & 0xffU);
         remaining >>= 8U;
     }
     cursor += sizeof(Integer);
@@ -120,7 +126,7 @@ public:
     [[nodiscard]] Integer integer() {
         static_assert(std::is_unsigned_v<Integer>);
         if (bytes_.size() - cursor_ < sizeof(Integer)) {
-            fail("committed checkpoint manifest is truncated");
+            corrupt_manifest("committed checkpoint manifest is truncated");
         }
         Integer value = 0;
         for (std::size_t index = 0; index < sizeof(Integer); ++index) {
@@ -132,7 +138,7 @@ public:
 
     [[nodiscard]] CheckpointDigest digest() {
         if (bytes_.size() - cursor_ < CheckpointDigest{}.size()) {
-            fail("committed checkpoint manifest is truncated");
+            corrupt_manifest("committed checkpoint manifest is truncated");
         }
         CheckpointDigest value{};
         for (std::uint8_t& byte : value) {
@@ -151,7 +157,7 @@ private:
 CheckpointManifestV1 parse_manifest(std::span<const std::byte> bytes) {
     if (bytes.size() < kManifestPrefixBytes + kManifestDescriptorBytes ||
         bytes.size() > kMaxManifestBytes) {
-        fail("committed checkpoint manifest has an invalid bounded size");
+        corrupt_manifest("committed checkpoint manifest has an invalid bounded size");
     }
 
     ManifestCursor cursor(bytes);
@@ -169,21 +175,23 @@ CheckpointManifestV1 parse_manifest(std::span<const std::byte> bytes) {
     const std::uint32_t count            = cursor.integer<std::uint32_t>();
     if (count == 0 || count > kPayloadKindCount ||
         bytes.size() != kManifestPrefixBytes + count * kManifestDescriptorBytes) {
-        fail("committed checkpoint manifest has an invalid descriptor count");
+        corrupt_manifest("committed checkpoint manifest has an invalid descriptor count");
     }
 
     manifest.payloads.reserve(count);
     for (std::uint32_t index = 0; index < count; ++index) {
         CheckpointPayloadDescriptor descriptor;
         const std::uint8_t kind = cursor.integer<std::uint8_t>();
-        if (kind >= kPayloadKindCount) { fail("committed checkpoint manifest has an invalid payload kind"); }
+        if (kind >= kPayloadKindCount) {
+            corrupt_manifest("committed checkpoint manifest has an invalid payload kind");
+        }
         descriptor.kind   = static_cast<CheckpointPayloadKind>(kind);
         descriptor.bytes  = cursor.integer<std::uint64_t>();
         descriptor.sha256 = cursor.digest();
         manifest.payloads.push_back(descriptor);
     }
     if (!cursor.finished() || !manifest_well_formed(manifest)) {
-        fail("committed checkpoint manifest structure is invalid");
+        corrupt_manifest("committed checkpoint manifest structure is invalid");
     }
     return manifest;
 }
@@ -202,6 +210,25 @@ std::string transaction_name(const CheckpointStageKey& key) {
     return generation_hex(key.generation) + "-" + sha256_hex(key.manifest_sha256);
 }
 
+bool is_lower_hex(std::string_view value) noexcept {
+    return std::all_of(value.begin(), value.end(), [](char byte) {
+        return (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
+    });
+}
+
+bool is_generation_payload_name(std::string_view name) noexcept {
+    constexpr std::string_view prefix       = "checkpoint-";
+    constexpr std::string_view suffix       = ".payload";
+    constexpr std::size_t transaction_bytes = 16 + 1 + 64;
+    if (!name.starts_with(prefix) || !name.ends_with(suffix) ||
+        name.size() != prefix.size() + transaction_bytes + suffix.size()) {
+        return false;
+    }
+    const std::string_view transaction = name.substr(prefix.size(), transaction_bytes);
+    return transaction[16] == '-' && is_lower_hex(transaction.substr(0, 16)) &&
+           is_lower_hex(transaction.substr(17));
+}
+
 std::uint64_t align_payload_offset(std::uint64_t value) {
     if (value > std::numeric_limits<std::uint64_t>::max() - (kPayloadAlignment - 1)) {
         fail("checkpoint payload layout overflows its canonical offset domain");
@@ -211,9 +238,9 @@ std::uint64_t align_payload_offset(std::uint64_t value) {
 
 struct PayloadLayout {
     std::array<std::uint64_t, kPayloadKindCount> offsets{};
-    std::size_t count      = 0;
-    std::uint64_t bytes    = 0;
-    std::size_t requests   = 0;
+    std::size_t count    = 0;
+    std::uint64_t bytes  = 0;
+    std::size_t requests = 0;
 };
 
 PayloadLayout payload_layout(const std::vector<CheckpointPayloadDescriptor>& descriptors,
@@ -236,7 +263,8 @@ PayloadLayout payload_layout(const std::vector<CheckpointPayloadDescriptor>& des
             descriptor.bytes / kDirectStorageChunkBytes +
             (descriptor.bytes % kDirectStorageChunkBytes != 0 ? 1 : 0);
         if (request_count > kMaxDirectStorageRequests - layout.requests) {
-            fail("checkpoint payload requires more DirectStorage requests than one transaction allows");
+            fail("checkpoint payload requires more DirectStorage requests than one transaction "
+                 "allows");
         }
         layout.requests += static_cast<std::size_t>(request_count);
     }
@@ -293,14 +321,15 @@ std::shared_ptr<SharedRootState> shared_root_state(const std::filesystem::path& 
 
 class DirectStorageCheckpointBackend::Impl {
 public:
-    Impl(DirectStorageCheckpointConfig config,
-         std::shared_ptr<CheckpointFileSystem> file_system,
+    Impl(DirectStorageCheckpointConfig config, std::shared_ptr<CheckpointFileSystem> file_system,
          std::shared_ptr<CheckpointReadQueue> read_queue)
         : config_(std::move(config)), file_system_(std::move(file_system)),
           read_queue_(std::move(read_queue)) {
         if (config_.directory.empty()) { fail("checkpoint directory must be non-empty"); }
-        if (config_.max_checkpoint_bytes == 0) {
-            fail("checkpoint load bound must be nonzero");
+        if (config_.max_checkpoint_bytes == 0) { fail("checkpoint load bound must be nonzero"); }
+        if (config_.lock_timeout_ms == 0 || config_.io_timeout_ms == 0 ||
+            config_.max_cleanup_entries == 0) {
+            fail("checkpoint lock, I/O, and cleanup bounds must be nonzero");
         }
         if (!file_system_) { fail("checkpoint filesystem is unavailable"); }
         if (!read_queue_) { fail("Windows DirectStorage 1.3 queue is unavailable"); }
@@ -309,10 +338,11 @@ public:
                  std::string(read_queue_->unavailable_reason()));
         }
 
-        root_       = std::filesystem::absolute(config_.directory).lexically_normal();
-        staging_    = root_ / ".ninfer-checkpoint-staging-v1";
-        manifest_   = root_ / "checkpoint.manifest.v1";
-        shared_root_ = shared_root_state(root_);
+        root_             = std::filesystem::absolute(config_.directory).lexically_normal();
+        staging_          = root_ / ".ninfer-checkpoint-staging-v1";
+        manifest_         = root_ / "checkpoint.manifest.v1";
+        corrupt_manifest_ = root_ / "checkpoint.manifest.v1.corrupt";
+        shared_root_      = shared_root_state(root_);
 
         file_system_->ensure_directory(root_);
         file_system_->ensure_directory(staging_);
@@ -321,10 +351,17 @@ public:
             fail("checkpoint backend construction overlaps a staged transaction");
         }
         std::unique_ptr<CheckpointDirectoryLock> directory_lock =
-            file_system_->lock_directory(root_);
-        const std::optional<CommittedCheckpoint> committed = read_committed();
-        shared_root_->committed_generation.store(
-            committed ? committed->manifest.generation : 0, std::memory_order_release);
+            file_system_->lock_directory(root_, config_.lock_timeout_ms);
+        std::optional<CommittedCheckpoint> committed;
+        try {
+            committed = read_committed();
+            cleanup_orphans(committed);
+        } catch (const CorruptManifestError&) {
+            // Keep the object available so a later trusted stage can quarantine and replace the
+            // corrupt manifest. Load remains fail-closed because it re-reads the same bytes.
+        }
+        shared_root_->committed_generation.store(committed ? committed->manifest.generation : 0,
+                                                 std::memory_order_release);
     }
 
     ~Impl() { cleanup_staged_noexcept(); }
@@ -333,8 +370,7 @@ public:
         return shared_root_->committed_generation.load(std::memory_order_acquire);
     }
 
-    void stage(const CheckpointManifestV1& manifest,
-               std::span<const CheckpointPayload> payloads,
+    void stage(const CheckpointManifestV1& manifest, std::span<const CheckpointPayload> payloads,
                const CheckpointStageKey& key) {
         const CanonicalManifestBytes encoded = serialize_manifest(manifest);
         const CheckpointDigest digest        = sha256(encoded.bytes());
@@ -345,16 +381,18 @@ public:
             fail("checkpoint stage key does not identify the canonical manifest");
         }
         require_payload_shapes(manifest, payloads);
-        const PayloadLayout layout = payload_layout(manifest.payloads, config_.max_checkpoint_bytes);
+        const PayloadLayout layout =
+            payload_layout(manifest.payloads, config_.max_checkpoint_bytes);
 
         std::lock_guard root_lock(shared_root_->mutex);
         if (shared_root_->active_owner != nullptr) {
             fail("another checkpoint backend instance owns the staged transaction");
         }
         std::unique_ptr<CheckpointDirectoryLock> directory_lock =
-            file_system_->lock_directory(root_);
+            file_system_->lock_directory(root_, config_.lock_timeout_ms);
         if (staged_) { fail("checkpoint backend already owns a staged transaction"); }
-        const std::optional<CommittedCheckpoint> committed = read_committed();
+        const std::optional<CommittedCheckpoint> committed = recover_committed_for_stage();
+        cleanup_orphans(committed);
         const std::uint64_t generation = committed ? committed->manifest.generation : 0;
         shared_root_->committed_generation.store(generation, std::memory_order_release);
         if (key.generation <= generation) {
@@ -372,9 +410,9 @@ public:
         remove_checked(candidate.staged_payload);
         remove_checked(candidate.staged_manifest);
         try {
-            file_system_->write_payloads_durable(
-                candidate.staged_payload, payloads,
-                std::span(layout.offsets).first(layout.count), layout.bytes);
+            file_system_->write_payloads_durable(candidate.staged_payload, payloads,
+                                                 std::span(layout.offsets).first(layout.count),
+                                                 layout.bytes);
             file_system_->write_bytes_durable(candidate.staged_manifest, encoded.bytes());
         } catch (...) {
             const std::exception_ptr original = std::current_exception();
@@ -386,21 +424,20 @@ public:
             }
             std::rethrow_exception(original);
         }
-        staged_ = std::move(candidate);
+        staged_                    = std::move(candidate);
         shared_root_->active_owner = this;
         shared_root_->active_key   = key;
     }
 
     void commit(const CheckpointStageKey& key) {
         std::lock_guard root_lock(shared_root_->mutex);
-        if (!staged_ || !keys_equal(staged_->key, key) ||
-            shared_root_->active_owner != this || !shared_root_->active_key ||
-            !keys_equal(*shared_root_->active_key, key)) {
+        if (!staged_ || !keys_equal(staged_->key, key) || shared_root_->active_owner != this ||
+            !shared_root_->active_key || !keys_equal(*shared_root_->active_key, key)) {
             fail("checkpoint commit key does not identify the owned staged transaction");
         }
 
         const std::optional<CommittedCheckpoint> prior = read_committed();
-        const std::uint64_t generation = prior ? prior->manifest.generation : 0;
+        const std::uint64_t generation                 = prior ? prior->manifest.generation : 0;
         shared_root_->committed_generation.store(generation, std::memory_order_release);
         if (key.generation <= generation) {
             fail("checkpoint commit generation does not advance the committed manifest");
@@ -409,8 +446,10 @@ public:
         const std::filesystem::path prior_payload =
             prior ? prior->payload_path : std::filesystem::path{};
         const std::filesystem::path committed_payload = staged_->final_payload;
-        file_system_->atomic_replace_durable(staged_->staged_payload, staged_->final_payload);
-        staged_->payload_published = true;
+        if (!staged_->payload_published) {
+            file_system_->atomic_replace_durable(staged_->staged_payload, staged_->final_payload);
+            staged_->payload_published = true;
+        }
 
         // No throwing work may follow this publication. A successful replacement makes the new
         // manifest authoritative and its generation visible to every in-process backend instance.
@@ -420,26 +459,26 @@ public:
         staged_.reset();
         shared_root_->committed_generation.store(key.generation, std::memory_order_release);
         if (!prior_payload.empty() && prior_payload != committed_payload) {
-            file_system_->remove_file(prior_payload);
+            (void)file_system_->remove_file(prior_payload);
         }
     }
 
     void abort(const CheckpointStageKey& key) noexcept {
         try {
             std::lock_guard root_lock(shared_root_->mutex);
-            if (!staged_ || !keys_equal(staged_->key, key) ||
-                shared_root_->active_owner != this || !shared_root_->active_key ||
-                !keys_equal(*shared_root_->active_key, key)) {
+            if (!staged_ || !keys_equal(staged_->key, key) || shared_root_->active_owner != this ||
+                !shared_root_->active_key || !keys_equal(*shared_root_->active_key, key)) {
                 return;
             }
-            file_system_->remove_file(staged_->staged_manifest);
-            file_system_->remove_file(staged_->staged_payload);
-            if (staged_->payload_published) { file_system_->remove_file(staged_->final_payload); }
+            (void)file_system_->remove_file(staged_->staged_manifest);
+            (void)file_system_->remove_file(staged_->staged_payload);
+            if (staged_->payload_published) {
+                (void)file_system_->remove_file(staged_->final_payload);
+            }
             shared_root_->active_owner = nullptr;
             shared_root_->active_key.reset();
             staged_.reset();
-        } catch (...) {
-        }
+        } catch (...) {}
     }
 
     CheckpointImage load(const CheckpointExpectation& expected) {
@@ -456,11 +495,14 @@ public:
             fail("checkpoint load cannot overlap an owned staged transaction");
         }
         std::unique_ptr<CheckpointDirectoryLock> directory_lock =
-            file_system_->lock_directory(root_);
-        const std::optional<CommittedCheckpoint> committed = read_committed();
+            file_system_->lock_directory(root_, config_.lock_timeout_ms);
+        std::optional<CommittedCheckpoint> committed;
+        try {
+            committed = read_committed();
+        } catch (const CorruptManifestError& error) { fail(error.what()); }
         if (!committed) { fail("no committed checkpoint manifest is available"); }
         shared_root_->committed_generation.store(committed->manifest.generation,
-                                                  std::memory_order_release);
+                                                 std::memory_order_release);
 
         const CheckpointCompatibility compatibility =
             validate_checkpoint_compatibility(expected.manifest, committed->manifest);
@@ -491,10 +533,11 @@ public:
 
         std::vector<CheckpointReadRequest> requests;
         requests.reserve(expected_layout.requests);
-        for (std::size_t payload_index = 0; payload_index < image.payloads.size(); ++payload_index) {
-            CheckpointPayload& payload = image.payloads[payload_index];
-            std::uint64_t remaining    = payload.bytes.size();
-            std::uint64_t file_offset  = expected_layout.offsets[payload_index];
+        for (std::size_t payload_index = 0; payload_index < image.payloads.size();
+             ++payload_index) {
+            CheckpointPayload& payload     = image.payloads[payload_index];
+            std::uint64_t remaining        = payload.bytes.size();
+            std::uint64_t file_offset      = expected_layout.offsets[payload_index];
             std::size_t destination_offset = 0;
             while (remaining != 0) {
                 const std::size_t chunk = static_cast<std::size_t>(
@@ -532,35 +575,59 @@ private:
         bool payload_published = false;
     };
 
+    [[nodiscard]] std::optional<CommittedCheckpoint> recover_committed_for_stage() {
+        try {
+            return read_committed();
+        } catch (const CorruptManifestError&) {
+            file_system_->atomic_replace_durable(manifest_, corrupt_manifest_);
+            shared_root_->committed_generation.store(0, std::memory_order_release);
+            return std::nullopt;
+        }
+    }
+
+    void cleanup_orphans(const std::optional<CommittedCheckpoint>& committed) {
+        for (const std::filesystem::path& path :
+             file_system_->list_regular_files(staging_, config_.max_cleanup_entries)) {
+            remove_checked(path);
+        }
+
+        const std::filesystem::path committed_payload =
+            committed ? committed->payload_path : std::filesystem::path{};
+        for (const std::filesystem::path& path :
+             file_system_->list_regular_files(root_, config_.max_cleanup_entries)) {
+            if (is_generation_payload_name(path.filename().string()) && path != committed_payload) {
+                remove_checked(path);
+            }
+        }
+    }
+
     [[nodiscard]] std::optional<CommittedCheckpoint> read_committed() {
         if (!file_system_->file_exists(manifest_)) { return std::nullopt; }
         const std::uint64_t size = file_system_->file_size(manifest_);
-        if (size < kManifestPrefixBytes + kManifestDescriptorBytes ||
-            size > kMaxManifestBytes) {
-            fail("committed checkpoint manifest exceeds its bounded canonical size");
+        if (size < kManifestPrefixBytes + kManifestDescriptorBytes || size > kMaxManifestBytes) {
+            corrupt_manifest("committed checkpoint manifest exceeds its bounded canonical size");
         }
 
         std::array<std::byte, kMaxManifestBytes> bytes{};
         const std::span<std::byte> manifest_bytes =
             std::span(bytes).first(static_cast<std::size_t>(size));
         file_system_->read_exact(manifest_, manifest_bytes);
-        CheckpointManifestV1 parsed = parse_manifest(manifest_bytes);
+        CheckpointManifestV1 parsed   = parse_manifest(manifest_bytes);
         const CheckpointDigest digest = sha256(std::as_bytes(std::span(manifest_bytes)));
         if (digest != checkpoint_manifest_sha256(parsed)) {
-            fail("committed checkpoint manifest is not canonical");
+            corrupt_manifest("committed checkpoint manifest is not canonical");
         }
 
         CheckpointStageKey key{parsed.journal_version, parsed.generation, digest};
         const std::string name = transaction_name(key);
-        return CommittedCheckpoint{
-            std::move(parsed), key, root_ / ("checkpoint-" + name + ".payload")};
+        return CommittedCheckpoint{std::move(parsed), key,
+                                   root_ / ("checkpoint-" + name + ".payload")};
     }
 
     void remove_checked(const std::filesystem::path& path) {
         if (!file_system_->file_exists(path)) { return; }
-        file_system_->remove_file(path);
-        if (file_system_->file_exists(path)) {
-            fail("checkpoint private staging file could not be removed");
+        if (!file_system_->remove_file(path) || file_system_->file_exists(path)) {
+            fail("checkpoint-owned file could not be removed");
         }
     }
 
@@ -575,6 +642,7 @@ private:
     std::filesystem::path root_;
     std::filesystem::path staging_;
     std::filesystem::path manifest_;
+    std::filesystem::path corrupt_manifest_;
     std::shared_ptr<SharedRootState> shared_root_;
     std::optional<StagedCheckpoint> staged_;
 };
@@ -603,9 +671,7 @@ void DirectStorageCheckpointBackend::stage(const CheckpointManifestV1& manifest,
     impl_->stage(manifest, payloads, key);
 }
 
-void DirectStorageCheckpointBackend::commit(const CheckpointStageKey& key) {
-    impl_->commit(key);
-}
+void DirectStorageCheckpointBackend::commit(const CheckpointStageKey& key) { impl_->commit(key); }
 
 void DirectStorageCheckpointBackend::abort(const CheckpointStageKey& key) noexcept {
     impl_->abort(key);
