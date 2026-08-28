@@ -6,6 +6,7 @@
 #include <limits>
 #include <mutex>
 #include <string>
+#include <type_traits>
 
 namespace ninfer::runtime {
 namespace {
@@ -70,19 +71,34 @@ void require_backend_capabilities(const CheckpointBackendCapabilities capabiliti
     }
 }
 
-void require_save_payloads(const CheckpointManifestV1& manifest,
-                           std::span<const CheckpointPayloadView> payloads) {
+void require_save_payload_shapes(const CheckpointManifestV1& manifest,
+                                 std::span<const CheckpointPayloadView> payloads) {
     if (manifest.payloads.size() != payloads.size()) {
         throw CheckpointContractError("checkpoint payload count differs from the manifest");
     }
     for (std::size_t index = 0; index < payloads.size(); ++index) {
-        const CheckpointPayloadView& payload          = payloads[index];
-        const CheckpointPayloadDescriptor& descriptor = manifest.payloads[index];
-        if (descriptor.kind != payload.kind || descriptor.bytes != payload.bytes.size() ||
-            descriptor.sha256 != sha256(payload.bytes)) {
-            throw CheckpointContractError("checkpoint payload bytes differ from the manifest");
+        if (manifest.payloads[index].kind != payloads[index].kind ||
+            manifest.payloads[index].bytes != payloads[index].bytes.size()) {
+            throw CheckpointContractError("checkpoint payload shape differs from the manifest");
         }
     }
+}
+
+std::vector<CheckpointPayload> snapshot_payloads(const CheckpointManifestV1& manifest,
+                                                 std::span<const CheckpointPayloadView> payloads) {
+    std::vector<CheckpointPayload> owned;
+    owned.reserve(payloads.size());
+    for (std::size_t index = 0; index < payloads.size(); ++index) {
+        const CheckpointPayloadView& payload = payloads[index];
+        CheckpointPayload snapshot;
+        snapshot.kind = payload.kind;
+        snapshot.bytes.assign(payload.bytes.begin(), payload.bytes.end());
+        if (manifest.payloads[index].sha256 != sha256(snapshot.bytes)) {
+            throw CheckpointContractError("checkpoint payload bytes differ from the manifest");
+        }
+        owned.push_back(std::move(snapshot));
+    }
+    return owned;
 }
 
 bool loaded_payloads_match(const std::vector<CheckpointPayloadDescriptor>& descriptors,
@@ -97,14 +113,6 @@ bool loaded_payloads_match(const std::vector<CheckpointPayloadDescriptor>& descr
         }
     }
     return descriptors_well_formed(descriptors);
-}
-
-CheckpointPauseToken pause(CheckpointQuiescence& quiescence) {
-    const CheckpointPauseToken token = quiescence.pause_admission();
-    if (token.generation == 0) {
-        throw CheckpointContractError("checkpoint admission pause returned an invalid token");
-    }
-    return token;
 }
 
 class ResumeGuard {
@@ -132,6 +140,12 @@ private:
 };
 
 } // namespace
+
+CheckpointPauseToken::CheckpointPauseToken(std::uint64_t generation) : generation_(generation) {
+    if (generation == 0) {
+        throw CheckpointContractError("checkpoint pause token must be nonzero");
+    }
+}
 
 CheckpointDigest checkpoint_manifest_sha256(const CheckpointManifestV1& manifest) {
     Sha256 hasher;
@@ -208,39 +222,29 @@ CheckpointCoordinator::save(const CheckpointManifestV1& manifest,
     std::lock_guard operation_lock(operation_mutex_);
     require_backend_capabilities(backend_.capabilities());
     require_manifest_shape(manifest);
-    require_save_payloads(manifest, payloads);
-    const CheckpointDigest manifest_digest = checkpoint_manifest_sha256(manifest);
-
-    CheckpointOperationReceipt operation;
-    operation.operation              = CheckpointOperationKind::Save;
-    operation.generation             = manifest.generation;
-    const CheckpointPauseToken token = pause(quiescence_);
-    operation.terminal_phase         = CheckpointPhase::AdmissionPaused;
-    ResumeGuard resume(quiescence_, token);
-
-    quiescence_.drain_transactions(token);
-    operation.terminal_phase = CheckpointPhase::TransactionsDrained;
-    quiescence_.fence_device(token);
-    operation.terminal_phase            = CheckpointPhase::DeviceFenced;
-    const CheckpointStageReceipt staged = backend_.stage(manifest, payloads);
-    if (staged.journal_version != kCheckpointJournalVersion ||
-        staged.generation != manifest.generation || staged.manifest_sha256 != manifest_digest) {
-        backend_.abort(staged);
-        throw CheckpointContractError("checkpoint backend returned an invalid stage receipt");
+    require_save_payload_shapes(manifest, payloads);
+    if (manifest.generation <= backend_.committed_generation()) {
+        throw CheckpointContractError("checkpoint generation must advance the committed journal");
     }
-    operation.terminal_phase = CheckpointPhase::BackendStaged;
+    const CheckpointDigest manifest_digest = checkpoint_manifest_sha256(manifest);
+    const CheckpointStageKey key{kCheckpointJournalVersion, manifest.generation, manifest_digest};
+
+    const CheckpointPauseToken token = quiescence_.pause_admission();
+    ResumeGuard resume(quiescence_, token);
+    quiescence_.drain_transactions(token);
+    quiescence_.fence_device(token);
+    const std::vector<CheckpointPayload> owned = snapshot_payloads(manifest, payloads);
+    backend_.stage(manifest, owned, key);
     try {
-        backend_.commit(staged);
+        backend_.commit(key);
     } catch (...) {
-        backend_.abort(staged);
+        backend_.abort(key);
         throw;
     }
-    operation.journal =
-        CheckpointJournalReceipt{kCheckpointJournalVersion, manifest.generation, manifest_digest};
-    operation.terminal_phase = CheckpointPhase::BackendCommitted;
     resume.resume();
-    operation.terminal_phase = CheckpointPhase::Resumed;
-    return operation;
+    return {
+        CheckpointOperationKind::Save, manifest.generation,
+        CheckpointJournalReceipt{kCheckpointJournalVersion, manifest.generation, manifest_digest}};
 }
 
 CheckpointOperationReceipt CheckpointCoordinator::restore(const CheckpointExpectation& expected,
@@ -252,7 +256,7 @@ CheckpointOperationReceipt CheckpointCoordinator::restore(const CheckpointExpect
         throw CheckpointContractError("trusted checkpoint expectation digest is invalid");
     }
 
-    CheckpointImage image = backend_.load();
+    CheckpointImage image = backend_.load(expected);
     const CheckpointCompatibility compatibility =
         validate_checkpoint_compatibility(expected.manifest, image.manifest);
     if (!compatibility.compatible()) {
@@ -266,22 +270,13 @@ CheckpointOperationReceipt CheckpointCoordinator::restore(const CheckpointExpect
         throw CheckpointContractError("checkpoint payload bytes do not match the manifest");
     }
 
-    CheckpointOperationReceipt operation;
-    operation.operation              = CheckpointOperationKind::Restore;
-    operation.generation             = image.manifest.generation;
-    const CheckpointPauseToken token = pause(quiescence_);
-    operation.terminal_phase         = CheckpointPhase::AdmissionPaused;
+    const CheckpointPauseToken token = quiescence_.pause_admission();
     ResumeGuard resume(quiescence_, token);
-
     quiescence_.drain_transactions(token);
-    operation.terminal_phase = CheckpointPhase::TransactionsDrained;
     quiescence_.fence_device(token);
-    operation.terminal_phase = CheckpointPhase::DeviceFenced;
     restorer.apply(image);
-    operation.terminal_phase = CheckpointPhase::StateApplied;
     resume.resume();
-    operation.terminal_phase = CheckpointPhase::Resumed;
-    return operation;
+    return {CheckpointOperationKind::Restore, image.manifest.generation, std::nullopt};
 }
 
 } // namespace ninfer::runtime

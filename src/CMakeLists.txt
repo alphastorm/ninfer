@@ -311,6 +311,7 @@ add_library(ninfer_checkpoint_contract STATIC
   runtime/contract/checkpoint_io.cpp
   runtime/contract/checkpoint_sha256.cpp)
 ninfer_internal_includes(ninfer_checkpoint_contract)
+target_link_libraries(ninfer_checkpoint_contract PUBLIC Threads::Threads)
 
 add_library(ninfer_engine STATIC
   targets/registry.cpp
