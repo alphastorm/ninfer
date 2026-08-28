@@ -443,6 +443,7 @@ int test_response_object() {
 int test_sse_sequence() {
     ResponsesRequest request = parse_responses_request(Json{{"model", "qwen3.6-27b"},
                                                             {"input", "hello"},
+                                                            {"previous_response_id", "resp_previous"},
                                                             {"max_output_tokens", 32},
                                                             {"stream", true}},
                                                        limits());
@@ -475,8 +476,12 @@ int test_sse_sequence() {
     }
     failures += check(parse_event(wire.front()).at("type") == "response.created",
                       "stream starts with response.created");
-    failures += check(parse_event(wire.back()).at("type") == "response.completed",
+    const Json terminal = parse_event(wire.back());
+    failures += check(terminal.at("type") == "response.completed",
                       "stream ends with response.completed");
+    failures += check(terminal.at("response").at("previous_response_id") ==
+                          "resp_previous",
+                      "streaming continuation preserves its previous response link");
     failures += check(text_deltas == "answer", "text deltas reconstruct terminal output");
     failures += check(saw_reasoning_delta, "raw reasoning delta emitted");
     return failures;

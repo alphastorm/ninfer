@@ -432,7 +432,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
     stream->previous_context      = std::move(previous_context);
     stream->session_key           = std::move(session_key);
     stream->client_session_sha256 = request.generation.client_session_sha256;
-    stream->previous_response_id  = std::move(request.previous_response_id);
+    stream->previous_response_id  = request.previous_response_id;
     stream->log_context           = log_context;
     stream->store                 = request.store;
     stream->encoder = std::make_unique<ResponsesEventStream>(id, created, std::move(request),
