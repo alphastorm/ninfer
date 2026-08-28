@@ -35,16 +35,19 @@ function Write-FakeBinary(
 ) {
     $identity = "$Program upstream_base_sha=$UpstreamSha patch_stack_sha=$ReleaseSha build_profile=omp-v0.2.0-rtx3090 build_type=Release cxx_compiler=fixture cuda_compiler=fixture cuda_toolkit=12.8 cuda_architecture=86 source_dirty=false"
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
-        $typeName = 'NInferFixture_' + ($Program -replace '[^A-Za-z0-9]', '_')
+        $compiler = (Get-Command cl.exe -ErrorAction Stop).Source
+        $sourcePath = [IO.Path]::ChangeExtension($Path, '.cpp')
+        $objectPath = [IO.Path]::ChangeExtension($Path, '.obj')
         $source = @"
-using System;
-public static class $typeName {
-    public static void Main(string[] args) {
-        Console.WriteLine(@"$identity");
-    }
+#include <iostream>
+int main() {
+    std::cout << R"NINFER($identity)NINFER" << std::endl;
+    return 0;
 }
 "@
-        Add-Type -TypeDefinition $source -Language CSharp -OutputAssembly $Path -OutputType ConsoleApplication
+        [IO.File]::WriteAllText($sourcePath, $source, [Text.UTF8Encoding]::new($false))
+        & $compiler /nologo /EHsc $sourcePath "/Fe:$Path" "/Fo:$objectPath" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "failed to compile fixture executable: $Program" }
     }
     else {
         [IO.File]::WriteAllLines(

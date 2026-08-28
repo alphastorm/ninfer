@@ -85,6 +85,7 @@ class PowerShellWindowsReleaseTests(unittest.TestCase):
                         *arguments,
                     ],
                     cwd=ROOT,
+                    stdin=subprocess.DEVNULL,
                     text=True,
                     stdout=stdout,
                     stderr=stderr,
