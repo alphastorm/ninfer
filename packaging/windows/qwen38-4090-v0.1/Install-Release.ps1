@@ -960,7 +960,7 @@ try {
         $lifecycleBin = Join-Path (Join-Path $releaseRoot 'bin') 'lifecycle'
         $qualificationBin = Join-Path (Join-Path $releaseRoot 'bin') 'qualification'
         New-Item -ItemType Directory -Path $lifecycleBin, $qualificationBin | Out-Null
-        foreach ($name in @('Control-Release.ps1', 'Install-Release.ps1')) {
+        foreach ($name in @('Control-Release.ps1', 'Control-GpuOwner.ps1', 'Install-Release.ps1')) {
             $source = Join-Path $payload $name
             if (Test-Path -LiteralPath $source -PathType Leaf) {
                 Move-Item -LiteralPath $source -Destination (Join-Path $lifecycleBin $name)
