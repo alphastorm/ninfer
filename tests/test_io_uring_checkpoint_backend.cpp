@@ -16,6 +16,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <stdexcept>
@@ -41,6 +42,13 @@ bool throws_checkpoint(const std::function<void()>& action) {
         action();
     } catch (const CheckpointContractError&) { return true; }
     return false;
+}
+
+std::string thrown_checkpoint_message(const std::function<void()>& action) {
+    try {
+        action();
+    } catch (const CheckpointContractError& error) { return error.what(); }
+    return {};
 }
 
 CheckpointDigest digest(std::uint8_t seed) {
@@ -357,13 +365,18 @@ int test_uncertain_marker_and_foreign_entries_fail_safe() {
         if (fd < 0) { throw std::runtime_error(std::strerror(errno)); }
         ::close(fd);
     }
+    const std::filesystem::path exact_foreign =
+        root.path() / ("generation-00000000000000000009-" + std::string(64, 'c'));
+    std::filesystem::create_directory(exact_foreign);
+    std::ofstream(exact_foreign / "foreign-entry") << "preserve";
     const Fixture current = fixture(7, {{CheckpointPayloadKind::StateImage, 5001}});
     {
         IoUringCheckpointBackend backend(root.path());
         save(backend, current);
     }
-    failures += check(std::filesystem::is_regular_file(foreign),
-                      "orphan cleanup claimed a foreign generation-prefixed file");
+    failures += check(std::filesystem::is_regular_file(foreign) &&
+                          std::filesystem::is_regular_file(exact_foreign / "foreign-entry"),
+                      "orphan cleanup claimed a foreign generation-prefixed entry");
     failures += check(!std::filesystem::exists(root.path() / ".publication-uncertain"),
                       "successful commit retained its uncertainty marker");
 
@@ -381,7 +394,7 @@ int test_uncertain_marker_and_foreign_entries_fail_safe() {
     }
     failures += check(throws_checkpoint([&] { IoUringCheckpointBackend blocked(root.path()); }),
                       "persistent publication uncertainty was silently promoted");
-    failures += check(count_prefixed_entries(root.path(), "generation-") == 2,
+    failures += check(count_prefixed_entries(root.path(), "generation-") == 3,
                       "uncertain construction deleted a prior or foreign generation entry");
     return failures;
 }
@@ -419,16 +432,14 @@ int test_partial_submit_failure_poison_and_recovery() {
     {
         IoUringCheckpointBackend backend(root.path());
         io_uring_checkpoint_test_fail_next_submitted_batch();
-        failures +=
-            check(throws_checkpoint([&] {
-                      backend.stage(checkpoint.manifest, checkpoint.payloads, checkpoint.key);
-                  }),
-                  "a partially submitted io_uring batch did not fail stage");
-        failures +=
-            check(throws_checkpoint([&] {
-                      backend.stage(checkpoint.manifest, checkpoint.payloads, checkpoint.key);
-                  }),
-                  "a failed io_uring context was reused after closing outstanding requests");
+        const std::string first_failure = thrown_checkpoint_message(
+            [&] { backend.stage(checkpoint.manifest, checkpoint.payloads, checkpoint.key); });
+        failures += check(first_failure.find("io_uring_enter submit") != std::string::npos,
+                          "partial submit failure lost the originating EIO");
+        const std::string poisoned_failure = thrown_checkpoint_message(
+            [&] { backend.stage(checkpoint.manifest, checkpoint.payloads, checkpoint.key); });
+        failures += check(poisoned_failure.find("backend is unusable") != std::string::npos,
+                          "a failed io_uring context was reused or hid its dead state");
     }
 
     IoUringCheckpointBackend recovered(root.path());
@@ -499,6 +510,28 @@ int test_double_fsync_failure_persists_uncertainty() {
     failures += check(images_equal(recovered.load(current.expectation), current) &&
                           count_prefixed_entries(root.path(), "generation-") == 1,
                       "operator-cleared marker did not recover the prior committed generation");
+    return failures;
+}
+
+int test_marker_fsync_failure_does_not_lock_out_root() {
+    int failures = 0;
+    TempDirectory root;
+    const Fixture current   = fixture(1, {{CheckpointPayloadKind::StateImage, 5001}});
+    const Fixture candidate = fixture(2, {{CheckpointPayloadKind::StateImage, 6001}});
+    {
+        IoUringCheckpointBackend backend(root.path());
+        save(backend, current);
+        backend.stage(candidate.manifest, candidate.payloads, candidate.key);
+        io_uring_checkpoint_test_fail_publication_marker_fsync();
+        failures += check(throws_checkpoint([&] { backend.commit(candidate.key); }),
+                          "publication-marker fsync fault did not fail commit");
+        backend.abort(candidate.key);
+    }
+    failures += check(!std::filesystem::exists(root.path() / ".publication-uncertain"),
+                      "pre-publication failure left a false uncertainty marker");
+    IoUringCheckpointBackend recovered(root.path());
+    failures += check(images_equal(recovered.load(current.expectation), current),
+                      "pre-publication marker failure made the prior checkpoint unavailable");
     return failures;
 }
 
@@ -622,6 +655,7 @@ int main() {
         failures += test_partial_submit_failure_poison_and_recovery();
         failures += test_commit_failure_preserves_prior_generation();
         failures += test_double_fsync_failure_persists_uncertainty();
+        failures += test_marker_fsync_failure_does_not_lock_out_root();
         failures += test_corruption_rejection();
         failures += test_truncation_and_oversize_rejection();
         failures += test_expected_allocation_bound();

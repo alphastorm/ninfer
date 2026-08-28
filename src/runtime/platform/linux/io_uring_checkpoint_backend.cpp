@@ -72,6 +72,8 @@ constexpr std::string_view kPublicationUncertain = ".publication-uncertain";
 
 #if defined(NINFER_IO_URING_TESTING)
 std::atomic<bool> fail_next_submitted_batch{false};
+std::atomic<bool> fail_submit_followup{false};
+std::atomic<bool> fail_publication_marker_fsync{false};
 std::atomic<int> fail_publication_fsyncs{0};
 #endif
 
@@ -95,14 +97,20 @@ constexpr long kOverlaySuperMagic = 0x794c7630;
 }
 
 int submit_io_uring(int ring_fd, unsigned submissions) {
-    const int result =
-        static_cast<int>(::syscall(SYS_io_uring_enter, ring_fd, submissions, 0U, 0U, nullptr, 0U));
 #if defined(NINFER_IO_URING_TESTING)
-    if (result > 0 && fail_next_submitted_batch.exchange(false, std::memory_order_acq_rel)) {
+    if (fail_submit_followup.exchange(false, std::memory_order_acq_rel)) {
         errno = EIO;
         return -1;
     }
+    if (submissions > 1 && fail_next_submitted_batch.exchange(false, std::memory_order_acq_rel)) {
+        const int partial = static_cast<int>(
+            ::syscall(SYS_io_uring_enter, ring_fd, submissions - 1U, 0U, 0U, nullptr, 0U));
+        if (partial > 0) { fail_submit_followup.store(true, std::memory_order_release); }
+        return partial;
+    }
 #endif
+    const int result =
+        static_cast<int>(::syscall(SYS_io_uring_enter, ring_fd, submissions, 0U, 0U, nullptr, 0U));
     return result;
 }
 
@@ -237,6 +245,8 @@ public:
         return sq_entries_ == nullptr ? 0 : *sq_entries_;
     }
 
+    [[nodiscard]] bool available() const noexcept { return static_cast<bool>(ring_fd_); }
+
     void execute(std::span<const RingRequest> requests, std::span<std::int32_t> results) {
         try {
             execute_unchecked(requests, results);
@@ -340,6 +350,10 @@ public:
 
     void fsync(int fd, std::string_view context) {
 #if defined(NINFER_IO_URING_TESTING)
+        if (context == "io_uring fsync checkpoint publication marker" &&
+            fail_publication_marker_fsync.exchange(false, std::memory_order_acq_rel)) {
+            throw CheckpointContractError("injected checkpoint publication marker failure");
+        }
         if ((context == "io_uring fsync checkpoint manifest publication" ||
              context == "io_uring fsync checkpoint manifest rollback") &&
             fail_publication_fsyncs.load(std::memory_order_acquire) > 0) {
@@ -1136,6 +1150,10 @@ void io_uring_checkpoint_test_fail_next_submitted_batch() noexcept {
 void io_uring_checkpoint_test_fail_publication_and_rollback_fsync() noexcept {
     fail_publication_fsyncs.store(2, std::memory_order_release);
 }
+
+void io_uring_checkpoint_test_fail_publication_marker_fsync() noexcept {
+    fail_publication_marker_fsync.store(true, std::memory_order_release);
+}
 #endif
 
 class IoUringCheckpointBackend::Impl {
@@ -1290,14 +1308,24 @@ public:
             ring_.fsync(directory.get(), "io_uring fsync checkpoint staging generation");
         } catch (...) {
             std::exception_ptr failure = std::current_exception();
-            if (active_.has_value()) {
+            if (!ring_.available()) {
+                poisoned_ = true;
                 try {
-                    remove_known_directory(active_->path_name);
-                    ring_.fsync(root_fd_.get(), "io_uring fsync failed checkpoint stage cleanup");
-                } catch (...) {
-                    active_.reset();
-                    release_lock_noexcept();
-                    throw;
+                    std::rethrow_exception(failure);
+                } catch (const std::exception& error) {
+                    try {
+                        poisoned_reason_ =
+                            std::string("io_uring checkpoint backend is unusable: ") + error.what();
+                    } catch (...) {}
+                } catch (...) {}
+            }
+            if (active_.has_value()) {
+                remove_known_directory_noexcept(active_->path_name);
+                if (ring_.available()) {
+                    try {
+                        ring_.fsync(root_fd_.get(),
+                                    "io_uring fsync failed checkpoint stage cleanup");
+                    } catch (...) {}
                 }
                 active_.reset();
             }
@@ -1320,8 +1348,17 @@ public:
 
         write_buffered_file(ring_, root_fd_.get(), active_->publish_path, active_->encoded);
         ring_.fsync(root_fd_.get(), "io_uring fsync checkpoint manifest staging entry");
-        write_buffered_file(ring_, root_fd_.get(), kPublicationUncertain, active_->encoded);
-        ring_.fsync(root_fd_.get(), "io_uring fsync checkpoint publication marker");
+        try {
+            write_buffered_file(ring_, root_fd_.get(), kPublicationUncertain, active_->encoded);
+            ring_.fsync(root_fd_.get(), "io_uring fsync checkpoint publication marker");
+        } catch (...) {
+            const std::exception_ptr marker_failure = std::current_exception();
+            unlink_if_exists(root_fd_.get(), kPublicationUncertain);
+            try {
+                ring_.fsync(root_fd_.get(), "io_uring fsync failed publication marker cleanup");
+            } catch (...) {}
+            std::rethrow_exception(marker_failure);
+        }
 
         const bool replacing = active_->old_generation.has_value();
         try {
@@ -1376,8 +1413,10 @@ public:
             // The manifest itself is already durable and commit therefore succeeds. A marker that
             // survives a crash forces the next process to fail closed instead of guessing.
             poisoned_ = true;
-            poisoned_reason_ =
-                "checkpoint committed but publication-marker cleanup did not complete";
+            try {
+                poisoned_reason_ =
+                    "checkpoint committed but publication-marker cleanup did not complete";
+            } catch (...) {}
         }
         // Publication is now durable. Cleanup cannot be reported as a failed commit; any residue is
         // removed under the same cross-instance lock by the next constructor/stage operation.
@@ -1566,12 +1605,13 @@ private:
         return read_manifest_file(ring_, root_fd_.get(), "manifest", limits_, true);
     }
 
-    void remove_known_directory(std::string_view name) {
+    bool remove_known_directory(std::string_view name, bool tolerate_foreign = false) {
         const std::string path(name);
         const int fd =
             ::openat(root_fd_.get(), path.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
         if (fd < 0) {
-            if (errno == ENOENT) { return; }
+            if (errno == ENOENT) { return true; }
+            if (tolerate_foreign && (errno == ENOTDIR || errno == ELOOP)) { return false; }
             throw_last_error("open checkpoint generation for cleanup");
         }
         UniqueFd directory(fd);
@@ -1580,12 +1620,17 @@ private:
         }
         unlink_if_exists(directory.get(), "manifest");
         directory.reset();
-        unlink_if_exists(root_fd_.get(), path, AT_REMOVEDIR);
+        if (::unlinkat(root_fd_.get(), path.c_str(), AT_REMOVEDIR) != 0) {
+            if (errno == ENOENT) { return true; }
+            if (tolerate_foreign && errno == ENOTEMPTY) { return false; }
+            throw_last_error("remove checkpoint generation directory");
+        }
+        return true;
     }
 
     void remove_known_directory_noexcept(std::string_view name) noexcept {
         try {
-            remove_known_directory(name);
+            (void)remove_known_directory(name);
         } catch (...) {}
     }
 
@@ -1622,11 +1667,13 @@ private:
         if (errno != 0) { throw_last_error("enumerate checkpoint root for cleanup"); }
         directory.reset();
 
-        for (const std::string& name : stale_directories) { remove_known_directory(name); }
-        for (const std::string& name : stale_files) { unlink_if_exists(root_fd_.get(), name); }
-        if (!stale_directories.empty() || !stale_files.empty()) {
-            ring_.fsync(root_fd_.get(), "io_uring fsync checkpoint orphan cleanup");
+        bool changed = false;
+        for (const std::string& name : stale_directories) {
+            changed |= remove_known_directory(name, true);
         }
+        for (const std::string& name : stale_files) { unlink_if_exists(root_fd_.get(), name); }
+        changed |= !stale_files.empty();
+        if (changed) { ring_.fsync(root_fd_.get(), "io_uring fsync checkpoint orphan cleanup"); }
     }
 
     std::filesystem::path root_path_;

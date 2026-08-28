@@ -329,10 +329,6 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   ninfer_internal_includes(ninfer_checkpoint_io_uring_linux)
   target_link_libraries(ninfer_checkpoint_io_uring_linux
     PUBLIC ninfer_checkpoint_contract)
-  if(BUILD_TESTING)
-    target_compile_definitions(ninfer_checkpoint_io_uring_linux
-      PRIVATE NINFER_IO_URING_TESTING=1)
-  endif()
 endif()
 
 add_library(ninfer_engine STATIC
