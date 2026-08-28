@@ -1,0 +1,167 @@
+name: Publish NInfer runtime image
+run-name: Publish NInfer runtime image / ${{ inputs.image_tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact NInfer source commit bound by the release binaries
+        required: true
+        type: string
+      release_tag:
+        description: Existing GitHub prerelease containing the binary archive
+        required: true
+        type: string
+      binary_asset:
+        description: Exact binary archive asset name
+        required: true
+        type: string
+      binary_sha256:
+        description: Expected binary archive SHA-256
+        required: true
+        type: string
+      image_tag:
+        description: GHCR prerelease tag
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: ninfer-runtime-image-${{ inputs.image_tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify binary release and publish runtime image
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      BINARY_ASSET: ${{ inputs.binary_asset }}
+      BINARY_SHA256: ${{ inputs.binary_sha256 }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      IMAGE_REPOSITORY: ghcr.io/alphastorm/ninfer
+    steps:
+      - name: Check out complete public source history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate immutable publication inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-[0-9A-Za-z._-]+$ ]]
+          [[ "$BINARY_ASSET" =~ ^ninfer-[A-Za-z0-9._-]+\.tar\.gz$ ]]
+          [[ "$IMAGE_TAG" =~ ^[a-z0-9][a-z0-9._-]{0,127}$ ]]
+          git cat-file -e "$SOURCE_COMMIT^{commit}"
+          target="$(gh release view "$RELEASE_TAG" --json targetCommitish --jq .targetCommitish)"
+          resolved="$(git rev-parse "$target^{commit}")"
+          [[ "$resolved" == "$SOURCE_COMMIT" ]]
+
+      - name: Download and verify binary release
+        shell: bash
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/ninfer-runtime"
+          mkdir -p "$root/download" "$root/context"
+          gh release download "$RELEASE_TAG" --pattern "$BINARY_ASSET" --dir "$root/download"
+          archive="$root/download/$BINARY_ASSET"
+          printf '%s  %s\n' "$BINARY_SHA256" "$archive" | sha256sum -c -
+          tar -xzf "$archive" -C "$root/context"
+          mapfile -t roots < <(tar -tzf "$archive" | cut -d/ -f1 | sort -u)
+          [[ "${#roots[@]}" -eq 1 && -n "${roots[0]}" ]]
+          payload="$root/context/${roots[0]}"
+          test -x "$payload/bin/ninfer"
+          test -x "$payload/bin/ninfer-serve"
+          test -f "$payload/SHA256SUMS.txt"
+          (cd "$payload" && sha256sum -c SHA256SUMS.txt)
+          printf 'PAYLOAD=%s\n' "$payload" >> "$GITHUB_ENV"
+          printf 'RUNTIME_ROOT=%s\n' "$root" >> "$GITHUB_ENV"
+
+      - name: Build and push digest-addressed runtime image
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp "$PAYLOAD/bin/ninfer" "$RUNTIME_ROOT/context/ninfer"
+          cp "$PAYLOAD/bin/ninfer-serve" "$RUNTIME_ROOT/context/ninfer-serve"
+          cat > "$RUNTIME_ROOT/context/Dockerfile" <<'EOF'
+          FROM nvidia/cuda:13.1.2-runtime-ubuntu24.04
+          ARG DEBIAN_FRONTEND=noninteractive
+          RUN apt-get update \
+              && apt-get install --yes --no-install-recommends \
+                  ca-certificates libavcodec60 libavformat60 libavutil58 \
+                  libcurl4t64 libssl3t64 libswscale7 \
+              && rm -rf /var/lib/apt/lists/*
+          COPY --chmod=0755 ninfer /usr/local/bin/ninfer
+          COPY --chmod=0755 ninfer-serve /usr/local/bin/ninfer-serve
+          WORKDIR /workspace
+          EXPOSE 8080
+          STOPSIGNAL SIGTERM
+          CMD ["ninfer-serve", "--help"]
+          EOF
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx build \
+            --platform linux/amd64 \
+            --label "org.opencontainers.image.source=https://github.com/alphastorm/ninfer" \
+            --label "org.opencontainers.image.revision=$SOURCE_COMMIT" \
+            --label "org.opencontainers.image.version=$IMAGE_TAG" \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file "$RUNTIME_ROOT/build-metadata.json" \
+            --tag "$IMAGE_REPOSITORY:$IMAGE_TAG" \
+            --push \
+            "$RUNTIME_ROOT/context"
+          digest="$(jq -r '."containerimage.digest"' "$RUNTIME_ROOT/build-metadata.json")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'IMAGE_DIGEST=%s\n' "$digest" >> "$GITHUB_ENV"
+
+      - name: Publish secret-free image receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNTIME_ROOT/ninfer-runtime-image-$IMAGE_TAG.json"
+          jq -n \
+            --arg source_commit "$SOURCE_COMMIT" \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg binary_asset "$BINARY_ASSET" \
+            --arg binary_sha256 "$BINARY_SHA256" \
+            --arg image_reference "$IMAGE_REPOSITORY@$IMAGE_DIGEST" \
+            --arg image_digest "$IMAGE_DIGEST" \
+            --arg workflow_url "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            '{
+              artifact_type: "ninfer_runtime_image_publication_receipt",
+              schema_version: 1,
+              source_commit: $source_commit,
+              release_tag: $release_tag,
+              binary_asset: $binary_asset,
+              binary_sha256: $binary_sha256,
+              image_reference: $image_reference,
+              image_digest: $image_digest,
+              workflow_url: $workflow_url,
+              secret_free: true
+            }' > "$receipt"
+          gh release upload "$RELEASE_TAG" "$receipt" --clobber
+          {
+            echo '## NInfer runtime image'
+            echo
+            echo "- Source: \`$SOURCE_COMMIT\`"
+            echo "- Image: \`$IMAGE_REPOSITORY@$IMAGE_DIGEST\`"
+            echo "- Release: \`$RELEASE_TAG\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload publication receipt
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4
+        with:
+          name: ninfer-runtime-image-${{ inputs.image_tag }}
+          path: ${{ runner.temp }}/ninfer-runtime/ninfer-runtime-image-${{ inputs.image_tag }}.json
+          if-no-files-found: error
+          retention-days: 30
