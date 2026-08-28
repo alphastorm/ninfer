@@ -1,4 +1,5 @@
 #include "ninfer/engine.h"
+#include "runtime/engine/checkpoint_engine_access.h"
 
 #include "core/device.h"
 #include "runtime/contract/sampling.h"
@@ -39,6 +40,8 @@ public:
     double prepare_seconds     = 0.0;
     SamplingMode sampling_mode = SamplingMode::Thinking;
     targets::qwen3_6::PreparedPrompt value;
+    std::optional<runtime::AuthenticatedCheckpointNamespace> checkpoint_namespace;
+    std::string checkpoint_tag;
 };
 
 PreparedPrompt::PreparedPrompt() noexcept                            = default;
@@ -229,6 +232,58 @@ ModelSamplingDefaults Engine::sampling_defaults() const {
     return impl_->sampling_defaults;
 }
 
+void runtime::CheckpointEngineAccess::bind_checkpoint_session(
+    PreparedPrompt& prompt, runtime::AuthenticatedCheckpointNamespace checkpoint_namespace,
+    std::string tag) {
+    if (prompt.impl_ == nullptr || tag.empty() || tag.size() > 4096) {
+        throw std::invalid_argument("checkpoint-bound prompt and response tag must be valid");
+    }
+    prompt.impl_->checkpoint_namespace = std::move(checkpoint_namespace);
+    prompt.impl_->checkpoint_tag       = std::move(tag);
+}
+
+std::optional<runtime::ContinuationCheckpointStats>
+runtime::CheckpointEngineAccess::checkpoint_session(
+    Engine& engine, const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
+    std::string_view checkpoint_tag, runtime::ContinuationCheckpointWriter& writer,
+    std::size_t staging_bytes) {
+    if (engine.impl_ == nullptr || checkpoint_tag.empty() || staging_bytes == 0) {
+        return std::nullopt;
+    }
+    return std::visit(
+        [&](auto& executor) -> std::optional<runtime::ContinuationCheckpointStats> {
+            using Executor = std::remove_cvref_t<decltype(executor)>;
+            if constexpr (std::is_same_v<Executor, std::monostate>) {
+                return std::nullopt;
+            } else {
+                return executor->checkpoint_session(checkpoint_namespace, checkpoint_tag, writer,
+                                                    staging_bytes);
+            }
+        },
+        engine.impl_->executor);
+}
+
+std::optional<runtime::ContinuationCheckpointStats>
+runtime::CheckpointEngineAccess::restore_session(
+    Engine& engine, const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
+    std::string checkpoint_tag, const runtime::ContinuationCheckpointReader& reader,
+    runtime::ContinuationCheckpointStats expected, std::size_t staging_bytes) {
+    if (engine.impl_ == nullptr || checkpoint_tag.empty() || staging_bytes == 0) {
+        return std::nullopt;
+    }
+    return std::visit(
+        [&](auto& executor) -> std::optional<runtime::ContinuationCheckpointStats> {
+            using Executor = std::remove_cvref_t<decltype(executor)>;
+            if constexpr (std::is_same_v<Executor, std::monostate>) {
+                return std::nullopt;
+            } else {
+                return executor->restore_session(checkpoint_namespace, std::move(checkpoint_tag),
+                                                 reader, expected, staging_bytes);
+            }
+        },
+        engine.impl_->executor);
+}
+
 GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
                                 std::chrono::steady_clock::time_point pending_deadline,
                                 HostInputLease host_input) {
@@ -250,6 +305,9 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
     runtime::ResolvedRequestOptions resolved_options = resolve_request_options(
         impl_->sampling_defaults, prompt.impl_->sampling_mode, std::move(options));
     const ResolvedSamplingParameters resolved_sampling = resolved_options.execution.sampling;
+    std::optional<runtime::AuthenticatedCheckpointNamespace> checkpoint_namespace =
+        std::move(prompt.impl_->checkpoint_namespace);
+    std::string checkpoint_tag = std::move(prompt.impl_->checkpoint_tag);
 
     const PromptSummary prompt_summary = prompt.impl_->summary;
     if (prompt_summary.prompt_tokens > impl_->options.max_context) {
@@ -285,7 +343,9 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
             } else {
                 auto submission = executor->submit(std::move(prompt.impl_->value), prompt_summary,
                                                    prepare_seconds, std::move(resolved_options),
-                                                   pending_deadline, std::move(host_input));
+                                                   std::move(checkpoint_namespace),
+                                                   std::move(checkpoint_tag), pending_deadline,
+                                                   std::move(host_input));
                 return GenerationHandle(std::make_unique<GenerationHandle::Impl>(
                     impl_, std::move(submission), resolved_sampling));
             }

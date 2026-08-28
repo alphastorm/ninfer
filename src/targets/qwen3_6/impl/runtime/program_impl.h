@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <chrono>
 #include <cstring>
 #include <limits>
@@ -172,6 +173,434 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
         }
         if (topology.installed_profile != *first_profile) {
             install_and_upload(topology, *first_profile);
+        }
+    }
+}
+
+inline constexpr std::uint64_t kContinuationCheckpointMagic = 0x32363863636e696eULL;
+inline constexpr std::uint32_t kContinuationCheckpointVersion = 1;
+inline constexpr std::size_t kMaximumCheckpointTagBytes = 4096;
+
+class CheckpointEncoder {
+public:
+    explicit CheckpointEncoder(std::size_t limit) : limit_(limit) {}
+
+    void u8(std::uint8_t value) { append(value); }
+    void u32(std::uint32_t value) {
+        for (std::uint32_t shift = 0; shift < 32; shift += 8) {
+            append(static_cast<std::uint8_t>(value >> shift));
+        }
+    }
+    void i32(std::int32_t value) { u32(static_cast<std::uint32_t>(value)); }
+    void u64(std::uint64_t value) {
+        for (std::uint32_t shift = 0; shift < 64; shift += 8) {
+            append(static_cast<std::uint8_t>(value >> shift));
+        }
+    }
+    void f64(double value) { u64(std::bit_cast<std::uint64_t>(value)); }
+    void raw(std::span<const std::byte> bytes) {
+        if (bytes.size() > limit_ - data_.size()) {
+            throw std::length_error("continuation checkpoint metadata exceeds staging limit");
+        }
+        data_.insert(data_.end(), bytes.begin(), bytes.end());
+    }
+    [[nodiscard]] std::span<const std::byte> bytes() const noexcept { return data_; }
+
+private:
+    void append(std::uint8_t value) {
+        if (data_.size() == limit_) {
+            throw std::length_error("continuation checkpoint metadata exceeds staging limit");
+        }
+        data_.push_back(static_cast<std::byte>(value));
+    }
+
+    std::vector<std::byte> data_;
+    std::size_t limit_ = 0;
+};
+
+class CheckpointDecoder {
+public:
+    explicit CheckpointDecoder(std::span<const std::byte> bytes) : bytes_(bytes) {}
+
+    [[nodiscard]] std::uint8_t u8() {
+        return std::to_integer<std::uint8_t>(take(1).front());
+    }
+    [[nodiscard]] std::uint32_t u32() {
+        const auto bytes = take(4);
+        std::uint32_t value = 0;
+        for (std::uint32_t index = 0; index < 4; ++index) {
+            value |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(bytes[index]))
+                     << (8U * index);
+        }
+        return value;
+    }
+    [[nodiscard]] std::int32_t i32() { return static_cast<std::int32_t>(u32()); }
+    [[nodiscard]] std::uint64_t u64() {
+        const auto bytes = take(8);
+        std::uint64_t value = 0;
+        for (std::uint32_t index = 0; index < 8; ++index) {
+            value |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(bytes[index]))
+                     << (8U * index);
+        }
+        return value;
+    }
+    [[nodiscard]] double f64() { return std::bit_cast<double>(u64()); }
+    [[nodiscard]] std::uint32_t count(std::uint32_t maximum) {
+        const std::uint32_t value = u32();
+        if (value > maximum) {
+            throw std::invalid_argument("continuation checkpoint collection exceeds capacity");
+        }
+        return value;
+    }
+    [[nodiscard]] std::span<const std::byte> raw(std::size_t count) { return take(count); }
+    [[nodiscard]] bool done() const noexcept { return offset_ == bytes_.size(); }
+
+private:
+    [[nodiscard]] std::span<const std::byte> take(std::size_t count) {
+        if (count > bytes_.size() - offset_) {
+            throw std::invalid_argument("continuation checkpoint metadata is truncated");
+        }
+        const auto out = bytes_.subspan(offset_, count);
+        offset_ += count;
+        return out;
+    }
+
+    std::span<const std::byte> bytes_;
+    std::size_t offset_ = 0;
+};
+
+void encode_vision_item(CheckpointEncoder& encoder, const qwen3_6::VisionItem& item) {
+    encoder.u8(static_cast<std::uint8_t>(item.modality));
+    encoder.i32(item.grid.temporal);
+    encoder.i32(item.grid.height);
+    encoder.i32(item.grid.width);
+    encoder.u64(item.patch_begin);
+    encoder.u64(item.patch_count);
+    encoder.raw(std::as_bytes(std::span(item.content_digest)));
+    if (item.timestamps.size() > std::numeric_limits<std::uint32_t>::max() ||
+        item.token_spans.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::overflow_error("continuation checkpoint Vision identity exceeds uint32");
+    }
+    encoder.u32(static_cast<std::uint32_t>(item.timestamps.size()));
+    for (double timestamp : item.timestamps) { encoder.f64(timestamp); }
+    encoder.u32(static_cast<std::uint32_t>(item.token_spans.size()));
+    for (const qwen3_6::TokenSpan span : item.token_spans) {
+        encoder.u64(span.begin);
+        encoder.u64(span.count);
+    }
+}
+
+qwen3_6::VisionItem decode_vision_item(CheckpointDecoder& decoder, std::uint32_t capacity) {
+    qwen3_6::VisionItem item;
+    const std::uint8_t modality = decoder.u8();
+    if (modality != static_cast<std::uint8_t>(qwen3_6::PromptModality::Image) &&
+        modality != static_cast<std::uint8_t>(qwen3_6::PromptModality::Video)) {
+        throw std::invalid_argument("continuation checkpoint Vision modality is invalid");
+    }
+    item.modality      = static_cast<qwen3_6::PromptModality>(modality);
+    item.grid.temporal = decoder.i32();
+    item.grid.height   = decoder.i32();
+    item.grid.width    = decoder.i32();
+    const std::uint64_t patch_begin = decoder.u64();
+    const std::uint64_t patch_count = decoder.u64();
+    if (patch_begin > std::numeric_limits<std::size_t>::max() ||
+        patch_count > std::numeric_limits<std::size_t>::max()) {
+        throw std::overflow_error("continuation checkpoint Vision patch span overflows size_t");
+    }
+    item.patch_begin = static_cast<std::size_t>(patch_begin);
+    item.patch_count = static_cast<std::size_t>(patch_count);
+    const auto digest = decoder.raw(item.content_digest.size());
+    std::memcpy(item.content_digest.data(), digest.data(), digest.size());
+    item.timestamps.resize(decoder.count(capacity));
+    for (double& timestamp : item.timestamps) { timestamp = decoder.f64(); }
+    item.token_spans.resize(decoder.count(capacity));
+    for (qwen3_6::TokenSpan& span : item.token_spans) {
+        const std::uint64_t begin = decoder.u64();
+        const std::uint64_t count = decoder.u64();
+        if (begin > std::numeric_limits<std::size_t>::max() ||
+            count > std::numeric_limits<std::size_t>::max()) {
+            throw std::overflow_error("continuation checkpoint Vision token span overflows size_t");
+        }
+        span.begin = static_cast<std::size_t>(begin);
+        span.count = static_cast<std::size_t>(count);
+    }
+    return item;
+}
+
+void encode_prefix_identity(CheckpointEncoder& encoder,
+                            const qwen3_6::detail::ResidentPrefixIdentity& identity) {
+    if (identity.size() > std::numeric_limits<std::uint32_t>::max() ||
+        identity.vision_items().size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::overflow_error("continuation checkpoint prefix identity exceeds uint32");
+    }
+    encoder.u32(static_cast<std::uint32_t>(identity.size()));
+    encoder.raw(std::as_bytes(identity.token_types()));
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+        for (const std::int32_t position : identity.position_axis(axis)) {
+            encoder.i32(position);
+        }
+    }
+    encoder.u32(static_cast<std::uint32_t>(identity.vision_items().size()));
+    for (const qwen3_6::VisionItem& item : identity.vision_items()) {
+        encode_vision_item(encoder, item);
+    }
+}
+
+qwen3_6::detail::ResidentPrefixIdentity decode_prefix_identity(CheckpointDecoder& decoder,
+                                                                std::uint32_t capacity) {
+    const std::uint32_t tokens = decoder.count(capacity);
+    std::vector<std::uint8_t> token_types(tokens);
+    const auto token_bytes = decoder.raw(tokens);
+    std::memcpy(token_types.data(), token_bytes.data(), token_bytes.size());
+    std::array<std::vector<std::int32_t>, 3> positions;
+    for (auto& axis : positions) {
+        axis.resize(tokens);
+        for (std::int32_t& position : axis) { position = decoder.i32(); }
+    }
+    const std::uint32_t vision_count = decoder.count(capacity);
+    std::vector<qwen3_6::VisionItem> vision_items;
+    vision_items.reserve(vision_count);
+    for (std::uint32_t index = 0; index < vision_count; ++index) {
+        vision_items.push_back(decode_vision_item(decoder, capacity));
+    }
+    qwen3_6::detail::ResidentPrefixIdentity identity;
+    identity.restore(std::move(token_types), std::move(positions), std::move(vision_items));
+    return identity;
+}
+
+struct ContinuationCheckpointMetadata {
+    std::uint32_t capacity = 0;
+    std::uint32_t model_layers = 0;
+    std::uint32_t model_hidden = 0;
+    SpeculativeBackend speculative_backend = SpeculativeBackend::None;
+    DType kv_dtype = DType::BF16;
+    std::int32_t kv_quant_group = 0;
+    std::uint32_t draft_window = 0;
+    bool kv_packed_v = false;
+    bool kv_rotate_k = false;
+    bool kv_rotate_v = false;
+    std::string tenant_sha256;
+    std::string session_sha256;
+    std::string checkpoint_tag;
+    std::uint32_t execution_frontier = 0;
+    std::uint32_t ledger_frontier = 0;
+    std::vector<TokenId> ledger;
+    qwen3_6::detail::ResidentPrefixIdentity prefix_identity;
+    std::int32_t rope_delta = 0;
+    std::uint32_t text_kv_valid = 0;
+    std::uint32_t mtp_kv_valid = 0;
+    std::uint32_t dflash_context_frontier = 0;
+    std::array<TokenId, qwen3_6::kMtpDecodeMaximumDrafts> mtp_drafts{};
+    std::uint32_t mtp_draft_count = 0;
+    bool tail_hidden_valid = false;
+    TurnCheckpoint turn_checkpoint;
+};
+
+CheckpointEncoder encode_continuation_metadata(
+    const SequenceState& sequence, std::uint32_t capacity, SpeculativeBackend backend,
+    DType kv_dtype, std::int32_t kv_quant_group, bool kv_packed_v, bool kv_rotate_k,
+    bool kv_rotate_v, std::uint32_t draft_window, std::size_t staging_bytes) {
+    if (!sequence.checkpoint_namespace || sequence.checkpoint_tag.empty() ||
+        sequence.checkpoint_tag.size() > kMaximumCheckpointTagBytes ||
+        sequence.ledger.size() > std::numeric_limits<std::uint32_t>::max()) {
+        throw std::invalid_argument("continuation checkpoint binding or ledger is invalid");
+    }
+    CheckpointEncoder encoder(staging_bytes);
+    encoder.u64(kContinuationCheckpointMagic);
+    encoder.u32(kContinuationCheckpointVersion);
+    encoder.u32(capacity);
+    encoder.u32(TextConfig::layers);
+    encoder.u32(TextConfig::hidden);
+    encoder.u8(static_cast<std::uint8_t>(backend));
+    encoder.u8(static_cast<std::uint8_t>(kv_dtype));
+    encoder.i32(kv_quant_group);
+    encoder.u32(draft_window);
+    encoder.u8(kv_packed_v ? 1U : 0U);
+    encoder.u8(kv_rotate_k ? 1U : 0U);
+    encoder.u8(kv_rotate_v ? 1U : 0U);
+    encoder.raw(std::as_bytes(std::span(sequence.checkpoint_namespace->tenant_sha256().data(),
+                                        sequence.checkpoint_namespace->tenant_sha256().size())));
+    encoder.raw(std::as_bytes(std::span(sequence.checkpoint_namespace->session_sha256().data(),
+                                        sequence.checkpoint_namespace->session_sha256().size())));
+    encoder.u32(static_cast<std::uint32_t>(sequence.checkpoint_tag.size()));
+    encoder.raw(std::as_bytes(
+        std::span(sequence.checkpoint_tag.data(), sequence.checkpoint_tag.size())));
+    encoder.u32(sequence.execution_frontier);
+    encoder.u32(sequence.ledger_frontier);
+    encoder.u32(static_cast<std::uint32_t>(sequence.ledger.size()));
+    for (const TokenId token : sequence.ledger) { encoder.u32(static_cast<std::uint32_t>(token)); }
+    encode_prefix_identity(encoder, sequence.prefix_identity);
+    encoder.i32(sequence.rope_delta);
+    encoder.u32(sequence.text_kv_valid);
+    encoder.u32(sequence.mtp_kv_valid);
+    encoder.u32(sequence.dflash_context_frontier);
+    encoder.u32(sequence.mtp_draft_count);
+    for (std::uint32_t index = 0; index < sequence.mtp_draft_count; ++index) {
+        encoder.u32(static_cast<std::uint32_t>(sequence.mtp_drafts[index]));
+    }
+    encoder.u8(sequence.tail_hidden_valid ? 1U : 0U);
+    encoder.u8(sequence.turn_checkpoint.valid ? 1U : 0U);
+    if (sequence.turn_checkpoint.valid) { encoder.u32(sequence.turn_checkpoint.frontier); }
+    return encoder;
+}
+
+ContinuationCheckpointMetadata decode_continuation_metadata(std::span<const std::byte> bytes,
+                                                             std::uint32_t capacity) {
+    CheckpointDecoder decoder(bytes);
+    if (decoder.u64() != kContinuationCheckpointMagic ||
+        decoder.u32() != kContinuationCheckpointVersion) {
+        throw std::invalid_argument("continuation checkpoint metadata identity is incompatible");
+    }
+    ContinuationCheckpointMetadata metadata;
+    metadata.capacity            = decoder.u32();
+    metadata.model_layers        = decoder.u32();
+    metadata.model_hidden        = decoder.u32();
+    metadata.speculative_backend = static_cast<SpeculativeBackend>(decoder.u8());
+    metadata.kv_dtype            = static_cast<DType>(decoder.u8());
+    metadata.kv_quant_group      = decoder.i32();
+    metadata.draft_window        = decoder.u32();
+    const std::uint8_t packed_v  = decoder.u8();
+    const std::uint8_t rotate_k  = decoder.u8();
+    const std::uint8_t rotate_v  = decoder.u8();
+    if (packed_v > 1U || rotate_k > 1U || rotate_v > 1U) {
+        throw std::invalid_argument("continuation checkpoint KV flags are invalid");
+    }
+    metadata.kv_packed_v = packed_v != 0;
+    metadata.kv_rotate_k = rotate_k != 0;
+    metadata.kv_rotate_v = rotate_v != 0;
+    const auto tenant = decoder.raw(64);
+    const auto session = decoder.raw(64);
+    metadata.tenant_sha256.assign(reinterpret_cast<const char*>(tenant.data()), tenant.size());
+    metadata.session_sha256.assign(reinterpret_cast<const char*>(session.data()), session.size());
+    const std::uint32_t tag_bytes = decoder.count(kMaximumCheckpointTagBytes);
+    const auto tag = decoder.raw(tag_bytes);
+    metadata.checkpoint_tag.assign(reinterpret_cast<const char*>(tag.data()), tag.size());
+    metadata.execution_frontier = decoder.u32();
+    metadata.ledger_frontier    = decoder.u32();
+    const std::uint32_t maximum_ledger =
+        capacity == std::numeric_limits<std::uint32_t>::max() ? capacity : capacity + 1U;
+    metadata.ledger.resize(decoder.count(maximum_ledger));
+    for (TokenId& token : metadata.ledger) { token = static_cast<TokenId>(decoder.u32()); }
+    metadata.prefix_identity         = decode_prefix_identity(decoder, maximum_ledger);
+    metadata.rope_delta              = decoder.i32();
+    metadata.text_kv_valid           = decoder.u32();
+    metadata.mtp_kv_valid            = decoder.u32();
+    metadata.dflash_context_frontier = decoder.u32();
+    metadata.mtp_draft_count = decoder.count(qwen3_6::kMtpDecodeMaximumDrafts);
+    for (std::uint32_t index = 0; index < metadata.mtp_draft_count; ++index) {
+        metadata.mtp_drafts[index] = static_cast<TokenId>(decoder.u32());
+    }
+    const std::uint8_t tail_hidden = decoder.u8();
+    const std::uint8_t turn_valid  = decoder.u8();
+    if (tail_hidden > 1U || turn_valid > 1U) {
+        throw std::invalid_argument("continuation checkpoint state flags are invalid");
+    }
+    metadata.tail_hidden_valid      = tail_hidden != 0;
+    metadata.turn_checkpoint.valid  = turn_valid != 0;
+    if (metadata.turn_checkpoint.valid) {
+        metadata.turn_checkpoint.frontier = decoder.u32();
+    }
+    if (!decoder.done()) {
+        throw std::invalid_argument("continuation checkpoint metadata has trailing bytes");
+    }
+    return metadata;
+}
+
+struct DeviceCheckpointSegment {
+    std::byte* data   = nullptr;
+    std::size_t bytes = 0;
+};
+
+std::uint64_t checked_payload_product(std::uint32_t count, std::size_t bytes) {
+    if (bytes != 0 && count > std::numeric_limits<std::uint64_t>::max() / bytes) {
+        throw std::overflow_error("continuation checkpoint payload size overflows uint64");
+    }
+    return static_cast<std::uint64_t>(count) * bytes;
+}
+
+template <class Enumerate>
+std::uint64_t checkpoint_payload_bytes(Enumerate&& enumerate) {
+    std::uint64_t total = 0;
+    enumerate([&](DeviceCheckpointSegment segment) {
+        if (segment.data == nullptr || segment.bytes == 0 ||
+            segment.bytes > std::numeric_limits<std::uint64_t>::max() - total) {
+            throw std::overflow_error("continuation checkpoint device payload is invalid");
+        }
+        total += segment.bytes;
+    });
+    if (total == 0) {
+        throw std::invalid_argument("continuation checkpoint device payload is empty");
+    }
+    return total;
+}
+
+template <class Enumerate>
+bool write_device_payload(std::string_view path, Enumerate&& enumerate,
+                          runtime::ContinuationCheckpointWriter& writer,
+                          PinnedHostBuffer& staging, cudaStream_t stream) {
+    const std::uint64_t total = checkpoint_payload_bytes(enumerate);
+    std::uint64_t file_offset = 0;
+    bool ok = true;
+    enumerate([&](DeviceCheckpointSegment segment) {
+        if (!ok) { return; }
+        std::size_t segment_offset = 0;
+        while (segment_offset < segment.bytes) {
+            const std::size_t amount =
+                std::min(staging.size(), segment.bytes - segment_offset);
+            CUDA_CHECK(cudaMemcpyAsync(staging.data(), segment.data + segment_offset, amount,
+                                       cudaMemcpyDeviceToHost, stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            if (!writer.write_file(
+                    path, file_offset, total,
+                    std::span<const std::byte>(static_cast<const std::byte*>(staging.data()),
+                                               amount))) {
+                ok = false;
+                return;
+            }
+            segment_offset += amount;
+            file_offset += amount;
+        }
+    });
+    return ok && file_offset == total;
+}
+
+template <class Enumerate>
+bool read_device_payload(std::string_view path, Enumerate&& enumerate,
+                         const runtime::ContinuationCheckpointReader& reader,
+                         PinnedHostBuffer& staging, cudaStream_t stream) {
+    const std::uint64_t total = checkpoint_payload_bytes(enumerate);
+    if (reader.file_size(path) != std::optional<std::uint64_t>(total)) { return false; }
+    std::uint64_t file_offset = 0;
+    bool ok = true;
+    enumerate([&](DeviceCheckpointSegment segment) {
+        if (!ok) { return; }
+        std::size_t segment_offset = 0;
+        while (segment_offset < segment.bytes) {
+            const std::size_t amount =
+                std::min(staging.size(), segment.bytes - segment_offset);
+            auto destination = std::span<std::byte>(static_cast<std::byte*>(staging.data()), amount);
+            if (!reader.read_file(path, file_offset, destination)) {
+                ok = false;
+                return;
+            }
+            CUDA_CHECK(cudaMemcpyAsync(segment.data + segment_offset, staging.data(), amount,
+                                       cudaMemcpyHostToDevice, stream));
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            segment_offset += amount;
+            file_offset += amount;
+        }
+    });
+    return ok && file_offset == total;
+}
+
+template <class Sink>
+void enumerate_kv_segments(const PagedKVPool& pool, const PagedKVAllocation& allocation, Sink&& sink) {
+    for (const std::int32_t page : allocation.page_ids()) {
+        for (std::size_t plane = 0; plane < pool.plane_count(); ++plane) {
+            for (std::size_t segment = 0; segment < pool.page_segment_count(plane); ++segment) {
+                const PagedKVPageSegment view = pool.page_segment(plane, page, segment);
+                sink(DeviceCheckpointSegment{.data = view.data, .bytes = view.bytes});
+            }
         }
     }
 }
@@ -394,7 +823,11 @@ runtime::AdmissionResources ProgramImplCore::admission_capacity() const noexcept
 runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lane,
                                                                PreparedPromptData&& prompt,
                                                                RequestPlan&& plan,
-                                                               runtime::TransientRegion transient) {
+                                                               runtime::TransientRegion transient,
+                                                               std::optional<
+                                                                   runtime::AuthenticatedCheckpointNamespace>
+                                                                   checkpoint_namespace,
+                                                               std::string checkpoint_tag) {
     if (lane >= max_concurrency) { throw std::out_of_range("request lane is out of range"); }
     SequenceState& sequence = sequences[lane];
     RequestControl& request = requests[lane];
@@ -403,6 +836,10 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
     if (request.lifecycle == Lifecycle::Prefilling || request.lifecycle == Lifecycle::Active ||
         request.lifecycle == Lifecycle::Pending) {
         throw std::logic_error("staged prefill requires a free request lane");
+    }
+    if (checkpoint_namespace.has_value() != !checkpoint_tag.empty()) {
+        throw std::invalid_argument(
+            "checkpoint namespace and response tag must be supplied together");
     }
 
     const std::uint32_t prompt_tokens = static_cast<std::uint32_t>(prompt.token_ids.size());
@@ -422,7 +859,7 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
         throw std::invalid_argument("request transient region does not satisfy the plan");
     }
     if (request_plan.reuse != ReusePath::FullReset &&
-        (!sequence.retained ||
+        (!sequence.retained || sequence.checkpoint_namespace != checkpoint_namespace ||
          !qwen3_6::detail::prefix_matches(prompt, sequence.ledger, sequence.prefix_identity,
                                           request_plan.reuse_base))) {
         throw std::logic_error("planned resident prefix is no longer reusable");
@@ -457,6 +894,8 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
     request.lifecycle = Lifecycle::Empty;
     sequence.retained = false;
     try {
+        sequence.checkpoint_namespace = std::move(checkpoint_namespace);
+        sequence.checkpoint_tag       = std::move(checkpoint_tag);
         if (request_plan.reuse == ReusePath::FullReset) {
             sequence.kv.reset();
             ordered_reset(sequence);
@@ -785,6 +1224,7 @@ void ProgramImplCore::resolve_pending_batch(std::span<const std::uint32_t> lanes
             if (terminal[row]) {
                 release_sequence_growth_entitlement(sequence);
                 unbind_sequence_kv(sequence);
+                publish_checkpoint_binding(sequence);
                 sequence.retained = true;
                 request.lifecycle = Lifecycle::Complete;
             } else {
@@ -823,6 +1263,406 @@ SpeculativeStats ProgramImplCore::speculative_stats_lane(std::uint32_t lane) con
     return lane < max_concurrency ? requests[lane].speculative_stats : SpeculativeStats{};
 }
 
+bool ProgramImplCore::has_checkpoint_session(
+    const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace) const noexcept {
+    return std::any_of(sequences.begin(), sequences.end(), [&](const SequenceState& sequence) {
+        return sequence.checkpoint_namespace &&
+               *sequence.checkpoint_namespace == checkpoint_namespace;
+    });
+}
+
+std::optional<runtime::ContinuationCheckpointStats> ProgramImplCore::checkpoint_session(
+    const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
+    std::string_view checkpoint_tag, runtime::ContinuationCheckpointWriter& writer,
+    std::size_t staging_bytes) const {
+    try {
+        if (checkpoint_tag.empty() || checkpoint_tag.size() > kMaximumCheckpointTagBytes ||
+            staging_bytes == 0) {
+            return std::nullopt;
+        }
+        const SequenceState* sequence = nullptr;
+        const RequestControl* request = nullptr;
+        for (std::uint32_t lane = 0; lane < max_concurrency; ++lane) {
+            const SequenceState& candidate = sequences[lane];
+            if (!candidate.retained || !candidate.checkpoint_namespace ||
+                *candidate.checkpoint_namespace != checkpoint_namespace) {
+                continue;
+            }
+            if (sequence != nullptr) { return std::nullopt; }
+            sequence = &candidate;
+            request  = &requests[lane];
+        }
+        if (sequence == nullptr || request == nullptr ||
+            request->lifecycle != Lifecycle::Complete || request->pending.kind != PendingKind::None ||
+            sequence->checkpoint_tag != checkpoint_tag || !sequence->kv ||
+            sequence->execution_frontier == 0 ||
+            sequence->execution_frontier > capacity ||
+            (sequence->ledger_frontier != sequence->execution_frontier &&
+             sequence->ledger_frontier != sequence->execution_frontier + 1U) ||
+            sequence->ledger.size() != sequence->ledger_frontier ||
+            sequence->prefix_identity.size() != sequence->ledger.size() ||
+            sequence->text_kv_valid != sequence->execution_frontier ||
+            !sequence->tail_hidden_valid || sequence->mtp_draft_count != 0 ||
+            sequence->kv->text.bound_row() >= 0) {
+            return std::nullopt;
+        }
+        const bool expects_backend = speculative_backend != SpeculativeBackend::None;
+        if (sequence->kv->backend.has_value() != expects_backend ||
+            (sequence->kv->backend && sequence->kv->backend->bound_row() >= 0) ||
+            (speculative_backend == SpeculativeBackend::None &&
+             (sequence->mtp_kv_valid != 0 || sequence->dflash_context_frontier != 0)) ||
+            (speculative_backend == SpeculativeBackend::Mtp &&
+             (sequence->mtp_kv_valid != sequence->execution_frontier ||
+              sequence->dflash_context_frontier != 0)) ||
+            (speculative_backend == SpeculativeBackend::DFlash &&
+             (sequence->mtp_kv_valid != 0 ||
+              sequence->dflash_context_frontier != sequence->execution_frontier)) ||
+            (sequence->turn_checkpoint.valid &&
+             (sequence->turn_checkpoint.frontier == 0 ||
+              sequence->turn_checkpoint.frontier >= sequence->execution_frontier))) {
+            return std::nullopt;
+        }
+        const auto pages_for = [](std::uint32_t frontier) {
+            return frontier == 0
+                       ? 0U
+                       : 1U + (frontier - 1U) / static_cast<std::uint32_t>(kPagedKVPageSize);
+        };
+        if (sequence->kv->text.mapped_page_count() != pages_for(sequence->text_kv_valid) ||
+            sequence->kv->text.page_entitlement() !=
+                sequence->kv->text.mapped_page_count() ||
+            (sequence->kv->backend &&
+             (sequence->kv->backend->mapped_page_count() !=
+                  pages_for(backend_kv_valid(*sequence)) ||
+              sequence->kv->backend->page_entitlement() !=
+                  sequence->kv->backend->mapped_page_count()))) {
+            return std::nullopt;
+        }
+
+        CheckpointEncoder metadata = encode_continuation_metadata(
+            *sequence, capacity, speculative_backend, kv_dtype, kv_quant_group, kv_packed_v,
+            kv_rotate_k, kv_rotate_v, draft_window, staging_bytes);
+        if (!writer.write_file("engine/continuation.bin", 0, metadata.bytes().size(),
+                               metadata.bytes())) {
+            return std::nullopt;
+        }
+
+        const auto linear_segments = [&](auto&& sink) {
+            const std::array<std::int32_t, 2> slots{
+                LinearStateSlots::current_state_slot(sequence->lane, max_concurrency),
+                LinearStateSlots::turn_checkpoint_state_slot(sequence->lane, max_concurrency)};
+            const std::size_t slot_count = sequence->turn_checkpoint.valid ? 2U : 1U;
+            for (std::size_t slot_index = 0; slot_index < slot_count; ++slot_index) {
+                for (std::uint32_t layer = 0; layer < decoder->linear_attention.layer_count();
+                     ++layer) {
+                    const Tensor conv = decoder->linear_attention.conv_slot(layer, slots[slot_index]);
+                    const Tensor recurrent =
+                        decoder->linear_attention.recurrent_slot(layer, slots[slot_index]);
+                    sink(DeviceCheckpointSegment{static_cast<std::byte*>(conv.data), conv.bytes()});
+                    sink(DeviceCheckpointSegment{static_cast<std::byte*>(recurrent.data),
+                                                 recurrent.bytes()});
+                }
+            }
+        };
+        const auto hidden_segments = [&](auto&& sink) {
+            sink(DeviceCheckpointSegment{static_cast<std::byte*>(sequence->tail_hidden.data),
+                                         sequence->tail_hidden.bytes()});
+            if (sequence->turn_checkpoint.valid) {
+                sink(DeviceCheckpointSegment{
+                    static_cast<std::byte*>(sequence->turn_checkpoint_hidden.data),
+                    sequence->turn_checkpoint_hidden.bytes()});
+            }
+        };
+        const auto dflash_segments = [&](auto&& sink) {
+            if (!dflash) { return; }
+            const std::array<const CyclicKVCache*, 2> caches{&dflash->local,
+                                                             &dflash->turn_checkpoint_local};
+            const std::size_t cache_count = sequence->turn_checkpoint.valid ? 2U : 1U;
+            for (std::size_t cache = 0; cache < cache_count; ++cache) {
+                for (std::uint32_t layer = 0; layer < caches[cache]->layer_count(); ++layer) {
+                    const CyclicKVCacheLayerView view = caches[cache]->layer_view(layer);
+                    const Tensor k = view.k.slice(3, static_cast<std::int32_t>(sequence->lane), 1);
+                    const Tensor v = view.v.slice(3, static_cast<std::int32_t>(sequence->lane), 1);
+                    sink(DeviceCheckpointSegment{static_cast<std::byte*>(k.data), k.bytes()});
+                    sink(DeviceCheckpointSegment{static_cast<std::byte*>(v.data), v.bytes()});
+                }
+            }
+        };
+        const auto text_kv_segments = [&](auto&& sink) {
+            enumerate_kv_segments(decoder->text_kv.pool(), sequence->kv->text, sink);
+        };
+        const auto backend_segments = [&](auto&& sink) {
+            if (sequence->kv->backend) {
+                enumerate_kv_segments(backend_kv_cache()->pool(), *sequence->kv->backend, sink);
+            }
+        };
+
+        constexpr std::size_t kTransferChunkBytes = 8ULL << 20;
+        PinnedHostBuffer staging(std::min(staging_bytes, kTransferChunkBytes));
+        if (!write_device_payload("engine/linear.bin", linear_segments, writer, staging,
+                                  device.stream) ||
+            !write_device_payload("engine/hidden.bin", hidden_segments, writer, staging,
+                                  device.stream) ||
+            (speculative_backend == SpeculativeBackend::DFlash &&
+             !write_device_payload("engine/dflash-local.bin", dflash_segments, writer, staging,
+                                   device.stream)) ||
+            !write_device_payload("engine/text-kv.bin", text_kv_segments, writer, staging,
+                                  device.stream) ||
+            (expects_backend &&
+             !write_device_payload("engine/backend-kv.bin", backend_segments, writer, staging,
+                                   device.stream))) {
+            return std::nullopt;
+        }
+        std::uint64_t payload_bytes = metadata.bytes().size();
+        const auto add_payload = [&](std::uint64_t bytes) {
+            if (bytes > std::numeric_limits<std::uint64_t>::max() - payload_bytes) {
+                throw std::overflow_error("continuation checkpoint payload size overflows uint64");
+            }
+            payload_bytes += bytes;
+        };
+        add_payload(checkpoint_payload_bytes(linear_segments));
+        add_payload(checkpoint_payload_bytes(hidden_segments));
+        if (speculative_backend == SpeculativeBackend::DFlash) {
+            add_payload(checkpoint_payload_bytes(dflash_segments));
+        }
+        add_payload(checkpoint_payload_bytes(text_kv_segments));
+        if (expects_backend) { add_payload(checkpoint_payload_bytes(backend_segments)); }
+        return runtime::ContinuationCheckpointStats{
+            .frontier_tokens = sequence->execution_frontier,
+            .restored_tokens = sequence->execution_frontier,
+            .payload_bytes   = payload_bytes,
+        };
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+std::optional<runtime::ContinuationCheckpointStats> ProgramImplCore::restore_session(
+    std::uint32_t lane,
+    const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
+    std::string checkpoint_tag, const runtime::ContinuationCheckpointReader& reader,
+    runtime::ContinuationCheckpointStats expected, std::size_t staging_bytes) {
+    if (lane >= max_concurrency || checkpoint_tag.empty() ||
+        checkpoint_tag.size() > kMaximumCheckpointTagBytes || staging_bytes == 0 ||
+        has_checkpoint_session(checkpoint_namespace) || sequences[lane].retained ||
+        sequences[lane].kv || requests[lane].lifecycle != Lifecycle::Empty) {
+        return std::nullopt;
+    }
+    try {
+        const std::optional<std::uint64_t> metadata_size =
+            reader.file_size("engine/continuation.bin");
+        if (!metadata_size || *metadata_size == 0 || *metadata_size > staging_bytes ||
+            *metadata_size > std::numeric_limits<std::size_t>::max()) {
+            return std::nullopt;
+        }
+        std::vector<std::byte> metadata_bytes(static_cast<std::size_t>(*metadata_size));
+        if (!reader.read_file("engine/continuation.bin", 0, metadata_bytes)) {
+            return std::nullopt;
+        }
+        ContinuationCheckpointMetadata metadata =
+            decode_continuation_metadata(metadata_bytes, capacity);
+        if (metadata.capacity != capacity || metadata.model_layers != TextConfig::layers ||
+            metadata.model_hidden != TextConfig::hidden ||
+            metadata.speculative_backend != speculative_backend ||
+            metadata.kv_dtype != kv_dtype || metadata.kv_quant_group != kv_quant_group ||
+            metadata.draft_window != draft_window || metadata.kv_packed_v != kv_packed_v ||
+            metadata.kv_rotate_k != kv_rotate_k || metadata.kv_rotate_v != kv_rotate_v ||
+            metadata.tenant_sha256 != checkpoint_namespace.tenant_sha256() ||
+            metadata.session_sha256 != checkpoint_namespace.session_sha256() ||
+            metadata.checkpoint_tag != checkpoint_tag || metadata.execution_frontier == 0 ||
+            metadata.execution_frontier > capacity ||
+            (metadata.ledger_frontier != metadata.execution_frontier &&
+             metadata.ledger_frontier != metadata.execution_frontier + 1U) ||
+            metadata.ledger.size() != metadata.ledger_frontier ||
+            metadata.prefix_identity.size() != metadata.ledger.size() ||
+            metadata.text_kv_valid != metadata.execution_frontier ||
+            !metadata.tail_hidden_valid || metadata.mtp_draft_count != 0 ||
+            !runtime::AuthenticatedCheckpointNamespace::valid_sha256(metadata.tenant_sha256) ||
+            !runtime::AuthenticatedCheckpointNamespace::valid_sha256(metadata.session_sha256) ||
+            (metadata.turn_checkpoint.valid &&
+             (metadata.turn_checkpoint.frontier == 0 ||
+              metadata.turn_checkpoint.frontier >= metadata.execution_frontier))) {
+            return std::nullopt;
+        }
+        if (std::any_of(metadata.ledger.begin(), metadata.ledger.end(), [](TokenId token) {
+                return token < 0 || token >= TextConfig::token_domain;
+            })) {
+            return std::nullopt;
+        }
+        const bool expects_backend = speculative_backend != SpeculativeBackend::None;
+        if ((speculative_backend == SpeculativeBackend::None &&
+             (metadata.mtp_kv_valid != 0 || metadata.dflash_context_frontier != 0)) ||
+            (speculative_backend == SpeculativeBackend::Mtp &&
+             (metadata.mtp_kv_valid != metadata.execution_frontier ||
+              metadata.dflash_context_frontier != 0)) ||
+            (speculative_backend == SpeculativeBackend::DFlash &&
+             (metadata.mtp_kv_valid != 0 ||
+              metadata.dflash_context_frontier != metadata.execution_frontier))) {
+            return std::nullopt;
+        }
+        const auto pages_for = [](std::uint32_t frontier) {
+            return frontier == 0
+                       ? 0U
+                       : 1U + (frontier - 1U) / static_cast<std::uint32_t>(kPagedKVPageSize);
+        };
+        const std::uint32_t text_pages = pages_for(metadata.text_kv_valid);
+        const std::uint32_t backend_frontier = speculative_backend == SpeculativeBackend::Mtp
+                                                   ? metadata.mtp_kv_valid
+                                                   : metadata.dflash_context_frontier;
+        const std::uint32_t backend_pages = pages_for(backend_frontier);
+        if (text_pages == 0 || (expects_backend && backend_pages == 0)) { return std::nullopt; }
+
+        SequenceState& destination = sequences[lane];
+        const auto linear_segments = [&](auto&& sink) {
+            const std::array<std::int32_t, 2> slots{
+                LinearStateSlots::current_state_slot(lane, max_concurrency),
+                LinearStateSlots::turn_checkpoint_state_slot(lane, max_concurrency)};
+            const std::size_t slot_count = metadata.turn_checkpoint.valid ? 2U : 1U;
+            for (std::size_t slot_index = 0; slot_index < slot_count; ++slot_index) {
+                for (std::uint32_t layer = 0; layer < decoder->linear_attention.layer_count();
+                     ++layer) {
+                    const Tensor conv = decoder->linear_attention.conv_slot(layer, slots[slot_index]);
+                    const Tensor recurrent =
+                        decoder->linear_attention.recurrent_slot(layer, slots[slot_index]);
+                    sink(DeviceCheckpointSegment{static_cast<std::byte*>(conv.data), conv.bytes()});
+                    sink(DeviceCheckpointSegment{static_cast<std::byte*>(recurrent.data),
+                                                 recurrent.bytes()});
+                }
+            }
+        };
+        const auto hidden_segments = [&](auto&& sink) {
+            sink(DeviceCheckpointSegment{static_cast<std::byte*>(destination.tail_hidden.data),
+                                         destination.tail_hidden.bytes()});
+            if (metadata.turn_checkpoint.valid) {
+                sink(DeviceCheckpointSegment{
+                    static_cast<std::byte*>(destination.turn_checkpoint_hidden.data),
+                    destination.turn_checkpoint_hidden.bytes()});
+            }
+        };
+        const auto dflash_segments = [&](auto&& sink) {
+            if (!dflash) { return; }
+            const std::array<CyclicKVCache*, 2> caches{&dflash->local,
+                                                       &dflash->turn_checkpoint_local};
+            const std::size_t cache_count = metadata.turn_checkpoint.valid ? 2U : 1U;
+            for (std::size_t cache = 0; cache < cache_count; ++cache) {
+                for (std::uint32_t layer = 0; layer < caches[cache]->layer_count(); ++layer) {
+                    const CyclicKVCacheLayerView view = caches[cache]->layer_view(layer);
+                    const Tensor k = view.k.slice(3, static_cast<std::int32_t>(lane), 1);
+                    const Tensor v = view.v.slice(3, static_cast<std::int32_t>(lane), 1);
+                    sink(DeviceCheckpointSegment{static_cast<std::byte*>(k.data), k.bytes()});
+                    sink(DeviceCheckpointSegment{static_cast<std::byte*>(v.data), v.bytes()});
+                }
+            }
+        };
+
+        std::uint64_t payload_bytes = *metadata_size;
+        const auto add_payload = [&](std::uint64_t bytes) {
+            if (bytes > std::numeric_limits<std::uint64_t>::max() - payload_bytes) {
+                throw std::overflow_error("continuation checkpoint payload size overflows uint64");
+            }
+            payload_bytes += bytes;
+        };
+        const std::uint64_t linear_bytes = checkpoint_payload_bytes(linear_segments);
+        const std::uint64_t hidden_bytes = checkpoint_payload_bytes(hidden_segments);
+        add_payload(linear_bytes);
+        add_payload(hidden_bytes);
+        std::uint64_t dflash_bytes = 0;
+        if (speculative_backend == SpeculativeBackend::DFlash) {
+            dflash_bytes = checkpoint_payload_bytes(dflash_segments);
+            add_payload(dflash_bytes);
+        }
+        const std::uint64_t text_kv_bytes =
+            checked_payload_product(text_pages, decoder->text_kv.pool().packed_page_bytes());
+        add_payload(text_kv_bytes);
+        std::uint64_t backend_kv_bytes = 0;
+        if (expects_backend) {
+            backend_kv_bytes = checked_payload_product(
+                backend_pages, backend_kv_cache()->pool().packed_page_bytes());
+            add_payload(backend_kv_bytes);
+        }
+        const runtime::ContinuationCheckpointStats actual{
+            .frontier_tokens = metadata.execution_frontier,
+            .restored_tokens = metadata.execution_frontier,
+            .payload_bytes   = payload_bytes,
+        };
+        if (actual != expected ||
+            reader.file_size("engine/linear.bin") !=
+                std::optional<std::uint64_t>(linear_bytes) ||
+            reader.file_size("engine/hidden.bin") !=
+                std::optional<std::uint64_t>(hidden_bytes) ||
+            reader.file_size("engine/text-kv.bin") !=
+                std::optional<std::uint64_t>(text_kv_bytes) ||
+            (speculative_backend == SpeculativeBackend::DFlash &&
+             reader.file_size("engine/dflash-local.bin") !=
+                 std::optional<std::uint64_t>(dflash_bytes)) ||
+            (expects_backend &&
+             reader.file_size("engine/backend-kv.bin") !=
+                 std::optional<std::uint64_t>(backend_kv_bytes))) {
+            return std::nullopt;
+        }
+
+        SequenceState restored;
+        restored.lane = lane;
+        reserve_sequence_kv(restored, text_pages, backend_pages);
+        materialize_sequence_kv(restored, metadata.text_kv_valid, backend_frontier);
+        const auto text_kv_segments = [&](auto&& sink) {
+            enumerate_kv_segments(decoder->text_kv.pool(), restored.kv->text, sink);
+        };
+        const auto backend_segments = [&](auto&& sink) {
+            if (restored.kv->backend) {
+                enumerate_kv_segments(backend_kv_cache()->pool(), *restored.kv->backend, sink);
+            }
+        };
+        constexpr std::size_t kTransferChunkBytes = 8ULL << 20;
+        PinnedHostBuffer transfer_staging(std::min(staging_bytes, kTransferChunkBytes));
+        if (!read_device_payload("engine/linear.bin", linear_segments, reader, transfer_staging,
+                                 device.stream) ||
+            !read_device_payload("engine/hidden.bin", hidden_segments, reader, transfer_staging,
+                                 device.stream) ||
+            (speculative_backend == SpeculativeBackend::DFlash &&
+             !read_device_payload("engine/dflash-local.bin", dflash_segments, reader,
+                                  transfer_staging,
+                                  device.stream)) ||
+            !read_device_payload("engine/text-kv.bin", text_kv_segments, reader, transfer_staging,
+                                 device.stream) ||
+            (expects_backend &&
+             !read_device_payload("engine/backend-kv.bin", backend_segments, reader,
+                                  transfer_staging,
+                                  device.stream))) {
+            return std::nullopt;
+        }
+        device.synchronize();
+
+        destination.kv                       = std::move(restored.kv);
+        destination.execution_frontier       = metadata.execution_frontier;
+        destination.ledger_frontier          = metadata.ledger_frontier;
+        destination.ledger                   = std::move(metadata.ledger);
+        destination.prefix_identity          = std::move(metadata.prefix_identity);
+        destination.rope_delta               = metadata.rope_delta;
+        destination.text_kv_valid            = metadata.text_kv_valid;
+        destination.mtp_kv_valid             = metadata.mtp_kv_valid;
+        destination.dflash_context_frontier  = metadata.dflash_context_frontier;
+        destination.mtp_drafts               = metadata.mtp_drafts;
+        destination.mtp_draft_count          = metadata.mtp_draft_count;
+        destination.tail_hidden_valid        = metadata.tail_hidden_valid;
+        destination.turn_checkpoint          = metadata.turn_checkpoint;
+        destination.checkpoint_namespace     = checkpoint_namespace;
+        destination.checkpoint_tag           = std::move(checkpoint_tag);
+        requests[lane].pending               = {};
+        requests[lane].prefill.reset();
+        requests[lane].timings               = {};
+        requests[lane].speculative_stats     = {};
+        requests[lane].lifecycle             = Lifecycle::Complete;
+        publish_checkpoint_binding(destination);
+        destination.retained = true;
+        return actual;
+    } catch (...) {
+        try {
+            device.synchronize();
+        } catch (...) {}
+        return std::nullopt;
+    }
+}
+
 void ProgramImplCore::clear_lane(SequenceState& sequence, RequestControl& request) noexcept {
     request.prefill.reset();
     sequence.kv.reset();
@@ -838,7 +1678,21 @@ void ProgramImplCore::clear_lane(SequenceState& sequence, RequestControl& reques
     sequence.tail_hidden_valid       = false;
     sequence.retained                = false;
     sequence.turn_checkpoint         = {};
+    sequence.checkpoint_namespace.reset();
+    sequence.checkpoint_tag.clear();
     request.pending                  = {};
+}
+
+void ProgramImplCore::publish_checkpoint_binding(SequenceState& sequence) noexcept {
+    if (!sequence.checkpoint_namespace) { return; }
+    for (SequenceState& other : sequences) {
+        if (&other == &sequence || !other.retained || !other.checkpoint_namespace ||
+            *other.checkpoint_namespace != *sequence.checkpoint_namespace) {
+            continue;
+        }
+        other.checkpoint_namespace.reset();
+        other.checkpoint_tag.clear();
+    }
 }
 
 qwen3_6::PagedKVCache* ProgramImplCore::backend_kv_cache() noexcept {
@@ -2166,6 +3020,7 @@ void ProgramImplCore::resolve_non_speculative_pending(SequenceState& sequence,
         sequence.mtp_draft_count = 0;
         release_sequence_growth_entitlement(sequence);
         unbind_sequence_kv(sequence);
+        publish_checkpoint_binding(sequence);
         sequence.retained = true;
     }
     request.lifecycle = terminal ? Lifecycle::Complete : Lifecycle::Active;

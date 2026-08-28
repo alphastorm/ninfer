@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ninfer/types.h"
+#include "runtime/contract/continuation_checkpoint.h"
 #include "runtime/contract/transient_region.h"
 #include "runtime/contract/types.h"
 #include <ninfer/targets/qwen3_6/prepared_prompt.h>
@@ -8,7 +9,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 
 namespace ninfer {
 struct DeviceContext;
@@ -148,7 +152,10 @@ public:
                       const runtime::ResolvedExecutionOptions& options);
     [[nodiscard]] RequestPlan<Variant> plan_request_for_lane(std::uint32_t lane,
                                                              const PreparedPrompt& prompt,
-                                                             const RequestBasePlan<Variant>& base);
+                                                             const RequestBasePlan<Variant>& base,
+                                                             const std::optional<
+                                                                 runtime::AuthenticatedCheckpointNamespace>&
+                                                                 checkpoint_namespace);
     [[nodiscard]] bool can_admit_lane(std::uint32_t lane,
                                       const RequestPlan<Variant>& plan) const noexcept;
     [[nodiscard]] bool
@@ -158,7 +165,11 @@ public:
     [[nodiscard]] runtime::PrefillStepResult start_prefill_lane(std::uint32_t lane,
                                                                 PreparedPrompt&& prompt,
                                                                 RequestPlan<Variant>&& plan,
-                                                                runtime::TransientRegion transient);
+                                                                runtime::TransientRegion transient,
+                                                                std::optional<
+                                                                    runtime::AuthenticatedCheckpointNamespace>
+                                                                    checkpoint_namespace,
+                                                                std::string checkpoint_tag);
     [[nodiscard]] runtime::PrefillStepResult advance_prefill_lane(std::uint32_t lane);
     [[nodiscard]] runtime::BatchedGeneratedRound
     decode_batch(std::span<const std::uint32_t> lanes,
@@ -173,6 +184,19 @@ public:
     void evict_retained_lane(std::uint32_t lane) noexcept;
     [[nodiscard]] GenerationTimings generation_timings_lane(std::uint32_t lane) const noexcept;
     [[nodiscard]] SpeculativeStats speculative_stats_lane(std::uint32_t lane) const noexcept;
+    [[nodiscard]] std::optional<runtime::ContinuationCheckpointStats>
+    checkpoint_session(const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
+                       std::string_view checkpoint_tag,
+                       runtime::ContinuationCheckpointWriter& writer,
+                       std::size_t staging_bytes) const;
+    [[nodiscard]] std::optional<runtime::ContinuationCheckpointStats>
+    restore_session(std::uint32_t lane,
+                    const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
+                    std::string checkpoint_tag,
+                    const runtime::ContinuationCheckpointReader& reader,
+                    runtime::ContinuationCheckpointStats expected, std::size_t staging_bytes);
+    [[nodiscard]] bool has_checkpoint_session(
+        const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace) const noexcept;
 
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
     void reset_memory_peaks() noexcept;

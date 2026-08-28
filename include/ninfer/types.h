@@ -17,6 +17,7 @@ namespace ninfer {
 using TokenId = std::int32_t;
 
 inline constexpr std::uint32_t kMaximumConcurrency = 8;
+inline constexpr std::size_t kMaximumContextCacheSessionKeyBytes = 256;
 
 enum class KvCacheStorage : std::uint8_t {
     BFloat16,

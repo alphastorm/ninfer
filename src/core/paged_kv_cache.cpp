@@ -138,6 +138,50 @@ Tensor PagedKVPool::block_table_row(std::int32_t row) const {
         {static_cast<std::int32_t>(logical_page_capacity())});
 }
 
+std::size_t PagedKVPool::page_segment_count(std::size_t plane_index) const {
+    const Tensor& storage = planes_.at(plane_index);
+    return spec_.plane_order == PagedKVPlaneOrder::PageMajor
+               ? 1U
+               : static_cast<std::size_t>(storage.ne[3]);
+}
+
+PagedKVPageSegment PagedKVPool::page_segment(std::size_t plane_index, std::int32_t page,
+                                             std::size_t segment) const {
+    if (page < 0 || static_cast<std::uint32_t>(page) >= page_group_count()) {
+        throw std::out_of_range("Paged KV physical page is out of range");
+    }
+    const Tensor& storage = planes_.at(plane_index);
+    const std::size_t segments = page_segment_count(plane_index);
+    if (segment >= segments) {
+        throw std::out_of_range("Paged KV page segment is out of range");
+    }
+    auto* base = static_cast<std::byte*>(storage.data);
+    if (spec_.plane_order == PagedKVPlaneOrder::PageMajor) {
+        return {.data = base + static_cast<std::size_t>(page) *
+                                   static_cast<std::size_t>(storage.nb[3]),
+                .bytes = static_cast<std::size_t>(storage.nb[3])};
+    }
+    return {.data = base + segment * static_cast<std::size_t>(storage.nb[3]) +
+                         static_cast<std::size_t>(page) *
+                             static_cast<std::size_t>(storage.nb[2]),
+            .bytes = static_cast<std::size_t>(storage.nb[2])};
+}
+
+std::size_t PagedKVPool::packed_page_bytes() const {
+    std::size_t total = 0;
+    for (std::size_t plane_index = 0; plane_index < plane_count(); ++plane_index) {
+        const PagedKVPageSegment segment = page_segment(plane_index, 0, 0);
+        const std::size_t count = page_segment_count(plane_index);
+        if (segment.bytes != 0 && count >
+                                      (std::numeric_limits<std::size_t>::max() - total) /
+                                          segment.bytes) {
+            throw std::overflow_error("Paged KV packed page size overflows size_t");
+        }
+        total += count * segment.bytes;
+    }
+    return total;
+}
+
 std::uint32_t PagedKVPool::entitled_pages() const noexcept { return entitled_pages_; }
 
 std::uint32_t PagedKVPool::mapped_pages() const noexcept { return mapped_pages_; }

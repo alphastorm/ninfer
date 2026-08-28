@@ -21,6 +21,8 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
 namespace ninfer::targets::qwen3_6::detail::NINFER_QWEN36_RUNTIME_NS {
@@ -155,6 +157,8 @@ struct SequenceState {
     bool tail_hidden_valid        = false;
     bool retained                 = false;
     TurnCheckpoint turn_checkpoint;
+    std::optional<runtime::AuthenticatedCheckpointNamespace> checkpoint_namespace;
+    std::string checkpoint_tag;
 };
 
 // Request/round control is not retained with a reusable SequenceState. A later concurrent Engine
@@ -197,7 +201,10 @@ public:
                       const runtime::ResolvedExecutionOptions& options);
     [[nodiscard]] RequestPlan plan_request_for_lane(std::uint32_t lane,
                                                     const PreparedPromptData& prompt,
-                                                    const RequestBasePlan& base);
+                                                    const RequestBasePlan& base,
+                                                    const std::optional<
+                                                        runtime::AuthenticatedCheckpointNamespace>&
+                                                        checkpoint_namespace);
     [[nodiscard]] bool can_admit_lane(std::uint32_t lane, const RequestPlan& plan) const noexcept;
     [[nodiscard]] bool
     can_admit_lane_after_retained_eviction(std::uint32_t lane,
@@ -206,7 +213,11 @@ public:
     [[nodiscard]] runtime::PrefillStepResult start_prefill_lane(std::uint32_t lane,
                                                                 PreparedPromptData&& prompt,
                                                                 RequestPlan&& plan,
-                                                                runtime::TransientRegion transient);
+                                                                runtime::TransientRegion transient,
+                                                                std::optional<
+                                                                    runtime::AuthenticatedCheckpointNamespace>
+                                                                    checkpoint_namespace,
+                                                                std::string checkpoint_tag);
     [[nodiscard]] runtime::PrefillStepResult advance_prefill_lane(std::uint32_t lane);
     [[nodiscard]] runtime::BatchedGeneratedRound
     decode_batch(std::span<const std::uint32_t> lanes,
@@ -221,6 +232,19 @@ public:
     void evict_retained_lane(std::uint32_t lane) noexcept;
     [[nodiscard]] GenerationTimings generation_timings_lane(std::uint32_t lane) const noexcept;
     [[nodiscard]] SpeculativeStats speculative_stats_lane(std::uint32_t lane) const noexcept;
+    [[nodiscard]] std::optional<runtime::ContinuationCheckpointStats>
+    checkpoint_session(const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
+                       std::string_view checkpoint_tag,
+                       runtime::ContinuationCheckpointWriter& writer,
+                       std::size_t staging_bytes) const;
+    [[nodiscard]] std::optional<runtime::ContinuationCheckpointStats>
+    restore_session(std::uint32_t lane,
+                    const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
+                    std::string checkpoint_tag,
+                    const runtime::ContinuationCheckpointReader& reader,
+                    runtime::ContinuationCheckpointStats expected, std::size_t staging_bytes);
+    [[nodiscard]] bool has_checkpoint_session(
+        const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace) const noexcept;
 
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
 
@@ -319,6 +343,7 @@ private:
     void trim_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
                           std::uint32_t backend_tokens = 0);
     void release_sequence_growth_entitlement(SequenceState& sequence) noexcept;
+    void publish_checkpoint_binding(SequenceState& sequence) noexcept;
     [[nodiscard]] qwen3_6::PagedKVCache* backend_kv_cache() noexcept;
     [[nodiscard]] const qwen3_6::PagedKVCache* backend_kv_cache() const noexcept;
     [[nodiscard]] std::uint32_t backend_kv_valid(const SequenceState& sequence) const noexcept;

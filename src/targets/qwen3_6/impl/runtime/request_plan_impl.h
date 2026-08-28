@@ -162,7 +162,10 @@ ProgramImplCore::plan_request_base(const PreparedPromptData& prompt,
 
 RequestPlan ProgramImplCore::plan_request_for_lane(std::uint32_t lane,
                                                    const PreparedPromptData& prompt,
-                                                   const RequestBasePlan& base_plan) {
+                                                   const RequestBasePlan& base_plan,
+                                                   const std::optional<
+                                                       runtime::AuthenticatedCheckpointNamespace>&
+                                                       checkpoint_namespace) {
     if (lane >= max_concurrency) { throw std::out_of_range("request lane is out of range"); }
     const RequestControl& request = requests[lane];
     const SequenceState& sequence = sequences[lane];
@@ -179,7 +182,9 @@ RequestPlan ProgramImplCore::plan_request_for_lane(std::uint32_t lane,
     plan->text_kv_page_entitlement    = base.text_kv_page_entitlement;
     plan->backend_kv_page_entitlement = base.backend_kv_page_entitlement;
 
-    if (base.allow_prefix_reuse && prompt.identity.reusable && sequence.retained) {
+    const bool namespace_compatible = sequence.checkpoint_namespace == checkpoint_namespace;
+    if (base.allow_prefix_reuse && prompt.identity.reusable && sequence.retained &&
+        namespace_compatible) {
         const bool dflash_append_ready =
             speculative_backend != SpeculativeBackend::DFlash ||
             sequence.dflash_context_frontier == sequence.execution_frontier;

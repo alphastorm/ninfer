@@ -92,6 +92,13 @@ struct PagedKVPoolLayout {
     [[nodiscard]] std::size_t metadata_bytes() const noexcept;
 };
 
+// One contiguous slice of a physical page. Page-major planes have one segment; head-major planes
+// expose one segment per head so checkpoint transfer preserves the exact INT8/scale plane bytes.
+struct PagedKVPageSegment {
+    std::byte* data   = nullptr;
+    std::size_t bytes = 0;
+};
+
 [[nodiscard]] PagedKVPoolLayout plan_paged_kv_pool(LayoutBuilder& builder,
                                                    const PagedKVPoolSpec& spec);
 
@@ -114,6 +121,10 @@ public:
     [[nodiscard]] const Tensor& plane(std::size_t index) const;
     [[nodiscard]] const Tensor& block_tables() const noexcept;
     [[nodiscard]] Tensor block_table_row(std::int32_t row) const;
+    [[nodiscard]] std::size_t packed_page_bytes() const;
+    [[nodiscard]] std::size_t page_segment_count(std::size_t plane) const;
+    [[nodiscard]] PagedKVPageSegment page_segment(std::size_t plane, std::int32_t page,
+                                                  std::size_t segment) const;
 
     [[nodiscard]] std::uint32_t entitled_pages() const noexcept;
     [[nodiscard]] std::uint32_t mapped_pages() const noexcept;
