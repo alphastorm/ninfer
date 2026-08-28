@@ -1,5 +1,7 @@
 #include "serve/responses_schema.h"
 
+#include "serve/client_identity.h"
+
 #include "serve/generation_service.h"
 #include "serve/openai_schema.h"
 
@@ -584,6 +586,8 @@ void reject_unknown_top_level(const Json& body) {
         "model",
         "moderation",
         "parallel_tool_calls",
+        "ninfer_request_id",
+        "ninfer_session",
         "previous_response_id",
         "preserve_thinking",
         "prompt",
@@ -717,6 +721,7 @@ ResponsesRequest parse_request_impl(const Json& body, const RequestLimits& limit
         bad_request("missing required field: model", "model");
     }
     out.generation.model = body.at("model").get<std::string>();
+    parse_client_identity(body, out.generation);
     if (!body.contains("input")) { bad_request("missing required field: input", "input"); }
     parse_input(body.at("input"), out);
 
@@ -946,7 +951,8 @@ ResponsesRequest parse_response_input_tokens_request(const Json& body,
     require_object(body);
     for (auto it = body.begin(); it != body.end(); ++it) {
         if (it.key() != "model" && it.key() != "input" && it.key() != "chat_template_kwargs" &&
-            it.key() != "preserve_thinking") {
+            it.key() != "preserve_thinking" && it.key() != "ninfer_session" &&
+            it.key() != "ninfer_request_id") {
             bad_request("unknown parameter: " + it.key(), it.key(), "unknown_parameter");
         }
     }

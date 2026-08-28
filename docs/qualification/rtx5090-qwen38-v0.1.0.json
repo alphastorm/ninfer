@@ -1,0 +1,201 @@
+{
+  "artifact_type": "ninfer_release_qualification_record",
+  "schema_version": 2,
+  "release_version": "v0.1.0",
+  "as_of": "2026-08-26",
+  "qualification_status": "passed",
+  "publication_authorized": false,
+  "target": "qwen3.8-27b-groupwise-int-on-rtx5090",
+  "scope_statement": "One measured RTX 5090, one fixed runtime profile, and one resident model instance. Results are not universal hardware or deployment claims.",
+  "hardware": {
+    "gpu_model": "NVIDIA GeForce RTX 5090",
+    "gpu_count": 1,
+    "gpu_architecture": "sm_120a",
+    "driver_version": "610.88",
+    "host_architecture": "x86_64",
+    "operating_system": "Ubuntu 24.04.4 LTS on WSL2",
+    "kernel": "6.18.33.2-microsoft-standard-WSL2"
+  },
+  "toolchain": {
+    "cxx_compiler": "GNU-13.3.0",
+    "cuda_compiler": "NVIDIA-13.1.115",
+    "cuda_toolkit": "13.1.115"
+  },
+  "identity": {
+    "upstream_base_sha": "4eef14a7560d87a3ba717898e1d488a4c4c7246d",
+    "runtime_source_sha": "70868c658f5bd412ead5b105ec76939997bd6ca9",
+    "source_archive_sha256": "6691381e4447b3970fb89a3e5719bef69e91bac3b5a85c19576aa7211e5f5f24",
+    "source_clean_verified": true,
+    "source_dirty": false,
+    "build_profile": "qwen38-5090-v0.1.0",
+    "build_type": "Release",
+    "image_id": "sha256:3bb6b96aaa5bb7c7345fb90caf8ea5cd3c7569f22e855be9adaed34db1cd5efb",
+    "binary_sha256": {
+      "ninfer": "d3747a27831120bd19cf68af45257e1af3b7014b77bbc69e0ad7d6d78cdf5172",
+      "ninfer_serve": "d54af118458d820955c6bcf53bdab7a80799343c68a37bcce7f2837f85e559e0"
+    },
+    "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
+    "model_artifact_bytes": 18210531328,
+    "config_sha256": "c6b635ccab19fd712ba503cd051b5359bb9c355068706b17372860baa0de49b6"
+  },
+  "runtime_profile": {
+    "public_model_id": "q38-ninfer",
+    "max_context": 131072,
+    "kv_capacity": "auto",
+    "prefill_chunk": 1024,
+    "kv_dtype": "bf16",
+    "max_concurrency": 1,
+    "speculative_backend": "mtp",
+    "draft_tokens": 3,
+    "lm_head_draft": true,
+    "vision": true,
+    "preserve_thinking": true,
+    "bind_host": "127.0.0.1",
+    "candidate_port": 18089,
+    "restart_policy": "no"
+  },
+  "gates": {
+    "long_context_exact": {
+      "status": "passed",
+      "fixture_sha256": "8dcece5215805293490baa0d8204d59a899d8bc3f9d010b0c142ed6624260a9a",
+      "prompt_tokens": 130048,
+      "completion_tokens": 17,
+      "exact_output": "ORCHID=493817; COLOR=COBALT",
+      "elapsed_seconds": 58.546667
+    },
+    "golden_t01": {
+      "status": "passed",
+      "fixture_sha256": "e131e7c62412fd124d4cb759fd30edf89fcda8831d8b893454ed52308c983e3c",
+      "exact_match": true,
+      "elapsed_seconds": 100.227,
+      "maximum_elapsed_seconds": 120.9117,
+      "runner": {
+        "name": "omp",
+        "version": "18.0.5",
+        "launcher_sha256": "8313c19e67e2d961bde5bbab31f283d56456fab17bdb3ed3471a9bdd15ed0b68"
+      }
+    },
+    "decode_throughput": {
+      "status": "passed",
+      "fixture": "long_decode_aime26_01",
+      "fixture_sha256": "2f5f3e05f805aece8a7ef26a6d686cf21b1fd6e7a0b995ad9b7f1274882ecb23",
+      "seed": 7632647173703959000,
+      "request_count": 1,
+      "completion_tokens": 1143,
+      "decode_seconds": 5.467908612000004,
+      "tokens_per_second": 209.03787555840722,
+      "minimum_tokens_per_second": 200.58921
+    },
+    "mtp_acceptance": {
+      "status": "passed",
+      "drafted_tokens": 1038,
+      "accepted_tokens": 799,
+      "rate": 0.7697495183044316,
+      "minimum_rate_inclusive": 0.72319,
+      "maximum_rate_inclusive": 0.78319
+    },
+    "serving_contract": {
+      "status": "passed",
+      "openai_finish_reason": "length",
+      "anthropic_stop_reason": "max_tokens",
+      "responses_input_tokens": 59,
+      "responses_output_tokens": 16,
+      "count_tokens": 55,
+      "image_prompt_tokens": 125
+    },
+    "responses_http_contract": {
+      "status": "passed",
+      "authenticated_session_identity": true,
+      "status_identity_verified": true,
+      "first_turn_completed": true,
+      "continuation_completed": true,
+      "fork_count": 2,
+      "cross_session_status": 404,
+      "parent_delete_status": 200,
+      "parent_get_after_delete_status": 404,
+      "surviving_descendants_retrieved": true,
+      "surviving_descendant_continued": true,
+      "structured_output_rejected": true
+    },
+    "cache_reuse": {
+      "status": "passed",
+      "same_session_reuse_path": "private_response_replay",
+      "isolated_session_reuse_path": "root",
+      "telemetry_request_count": 31,
+      "cache_hit_request_count": 18,
+      "maximum_prefix_cache_hit_tokens": 37591,
+      "reuse_path_counts": {
+        "private_response_replay": 16,
+        "private_endpoint": 2
+      }
+    },
+    "process_exit_policy": {
+      "status": "passed",
+      "restart_policy": "no",
+      "initial_state": "running",
+      "observed_state_after_grace": "exited",
+      "observation_grace_seconds": 5,
+      "restart_count_before": 0,
+      "restart_count_after_grace": 0,
+      "automatic_restart_observed": false,
+      "explicit_repromotion_healthy": true
+    },
+    "exact_rollback": {
+      "status": "passed",
+      "candidate_removed": true,
+      "incumbent_exact_identity_verified": true,
+      "incumbent_restart_policy": "unless-stopped",
+      "incumbent_authenticated_status": "ok",
+      "previous_rollback_runtime_running": false,
+      "safety_watchdog_cancelled": true
+    }
+  },
+  "benchmark_methodology": {
+    "decode_and_mtp": "One committed public fixture, one fixed seed, one request, and server-reported decode time/speculative counters. The process was already warm from preceding protocol and Golden gates. Both thresholds passed on the first measured request; no performance retry campaign ran.",
+    "long_context": "One exact committed 130,048-token NIAH fixture at max-context 131,072 with thinking disabled and an exact string oracle.",
+    "golden": "One approved external t01 workload through OMP 18.0.5. Only fixture identity, oracle result, and wall time are public; prompt and generated private data are excluded.",
+    "cache_reuse": "Aggregate content-free telemetry from the isolated candidate request log plus the Responses protocol smoke's named reuse paths.",
+    "lifecycle": "Terminate candidate PID 1 with restart policy no, observe a fixed five-second grace and zero restart-count delta, explicitly re-promote the same candidate, then remove it through the lifecycle owner and restore the exact incumbent."
+  },
+  "evidence": {
+    "public_measurement": "fixtures/rtx5090-qwen38-v0.1.0-measurement.json",
+    "measurement_schema": "fixtures/rtx5090-qwen38-v0.1.0-measurement.schema.json",
+    "gate_manifest": "fixtures/rtx5090-qwen38-v0.1.0-gates.json",
+    "raw_private_logs_included": false
+  },
+  "runtime_source_binding": "The tested runtime source is the exact clean runtime_source_sha above. This post-measurement qualification record is metadata and is not claimed as executable source input; rebuilding from its later documentation commit would produce a different embedded patch-stack identity and requires fresh qualification.",
+  "release_assets": {
+    "status": "produced_locally",
+    "source_tag_target_sha": "70868c658f5bd412ead5b105ec76939997bd6ca9",
+    "tag_created": false,
+    "container": {
+      "local_image_id": "sha256:3bb6b96aaa5bb7c7345fb90caf8ea5cd3c7569f22e855be9adaed34db1cd5efb",
+      "target_reference": "ghcr.io/alphastorm/ninfer:qwen38-5090-v0.1.0",
+      "published": false
+    },
+    "binary_asset": {
+      "name": "ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.tar.gz",
+      "sha256": "698516f2acc0a985f582dafa302623496265f85371788ef4bf5d2f6db293cb8a"
+    },
+    "sbom": {
+      "name": "ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.spdx.json",
+      "sha256": "8ea278f1c7772589b9bf70970a0ef353d0bcd4cd933b04f072a00e820c44ae41",
+      "format": "SPDX-2.3"
+    },
+    "checksums": "ninfer-qwen38-rtx5090-v0.1.0-linux-x86_64-cuda13.1.SHA256SUMS",
+    "qualification_receipt": "rtx5090-qwen38-v0.1.0.json",
+    "model_weights_bundled": false,
+    "verification_status": "verified"
+  },
+  "production_effects": [
+    "The incumbent was stopped only for the explicitly authorized bounded qualification window.",
+    "The exact incumbent container and image identity were restored healthy after candidate qualification.",
+    "No route, deployment lock, source tag, image registry, or remote repository was mutated."
+  ],
+  "limitations": [
+    "The result applies to one NVIDIA GeForce RTX 5090 and the exact recorded profile; it does not establish cross-machine reproducibility.",
+    "The RTX 4090 tier has a separate qualification record.",
+    "Publication, tagging, pushing, route promotion, and registry upload remain external authorization gates."
+  ],
+  "blockers": []
+}

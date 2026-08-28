@@ -1,0 +1,65 @@
+{
+  "artifact_type": "ninfer_release_qualification_measurement",
+  "schema_version": 1,
+  "identity": {
+    "upstream_base_sha": "4eef14a7560d87a3ba717898e1d488a4c4c7246d",
+    "patch_stack_sha": "70868c658f5bd412ead5b105ec76939997bd6ca9",
+    "build_profile": "qwen38-5090-v0.1.0",
+    "build_type": "Release",
+    "cxx_compiler": "GNU-13.3.0",
+    "cuda_compiler": "NVIDIA-13.1.115",
+    "cuda_toolkit": "13.1.115",
+    "source_dirty": false,
+    "binary_sha256": "d54af118458d820955c6bcf53bdab7a80799343c68a37bcce7f2837f85e559e0"
+  },
+  "model": {
+    "artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
+    "artifact_bytes": 18210531328
+  },
+  "candidate": {
+    "image": "ninfer-5090-v010-rc",
+    "container": "ninfer-5090-v010-rc",
+    "bind_host": "127.0.0.1",
+    "port": 18089,
+    "restart_policy": "no"
+  },
+  "long_context_exact": {
+    "fixture_sha256": "8dcece5215805293490baa0d8204d59a899d8bc3f9d010b0c142ed6624260a9a",
+    "prompt_tokens": 130048,
+    "stdout": "ORCHID=493817; COLOR=COBALT",
+    "exact_match": true
+  },
+  "golden_t01": {
+    "fixture_sha256": "e131e7c62412fd124d4cb759fd30edf89fcda8831d8b893454ed52308c983e3c",
+    "exact_match": true,
+    "elapsed_seconds": 100.227
+  },
+  "decode_throughput": {
+    "tokens_per_second": 209.03787555840722
+  },
+  "mtp_acceptance": {
+    "drafted_tokens": 1038,
+    "accepted_tokens": 799,
+    "rate": 0.7697495183044316
+  },
+  "process_exit_policy": {
+    "observed_state_after_grace": "exited",
+    "restart_count_delta": 0,
+    "explicit_restart_healthy": true
+  },
+  "responses_http_contract": {
+    "first_turn_completed": true,
+    "continuation_completed": true,
+    "fork_count": 2,
+    "cross_session_status": 404,
+    "parent_delete_status": 200,
+    "parent_get_after_delete_status": 404,
+    "surviving_descendants_retrieved": true,
+    "surviving_descendant_continued": true
+  },
+  "machine_scope": {
+    "gpu_model": "NVIDIA GeForce RTX 5090",
+    "gpu_count": 1,
+    "machine_count": 1
+  }
+}

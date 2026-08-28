@@ -1,0 +1,75 @@
+# Trusted shell configuration for the controller, lease, and profiling payload.
+# Replace every REPLACE_ME value once. The controller workflow creates each isolated operation,
+# stages the exact clean source bundle, writes the target config, and retrieves the receipts.
+
+CONTROLLER_TARGET_HOST=REPLACE_ME
+CONTROLLER_SSH_JUMP=REPLACE_ME
+CONTROLLER_WSL_DISTRIBUTION=Ubuntu-24.04
+CONTROLLER_OPERATION_PARENT=/home/operator/builds
+CONTROLLER_RECEIPT_ROOT=/absolute/controller/path/profiles/sm120-controller
+# OpenSSH stages complete files on Windows; WSL installs them atomically into the operation root.
+CONTROLLER_WINDOWS_STAGE_DIR=C:/Users/REPLACE_ME
+CONTROLLER_WSL_STAGE_DIR=/mnt/c/Users/REPLACE_ME
+
+PROFILE_ROOT=/home/operator/builds/ninfer-profile-run
+PROFILE_SOURCE_ROOT=$PROFILE_ROOT/source
+PROFILE_SOURCE_SHA=REPLACE_ME
+PROFILE_UPSTREAM_BASE_SHA=REPLACE_ME
+PROFILE_ARTIFACT_ROOT=$PROFILE_ROOT/artifacts
+PROFILE_ARTIFACT_MANIFEST=$PROFILE_ROOT/artifact-sha256.txt
+PROFILE_BUILD_DIR=$PROFILE_ROOT/build/run-id
+PROFILE_PREPARE_DIR=$PROFILE_ROOT/prepared/run-id
+PROFILE_RESULT_DIR=$PROFILE_ROOT/results/run-id
+PROFILE_DOCKER_CONFIG=$PROFILE_ROOT/docker-config/run-id
+
+# Runtime candidate image used by serving/A-B payloads.
+TOOLCHAIN_IMAGE=REPLACE_ME
+# Existing CUDA/Nsight development image extended by the controller with pinned CPython 3.11.11.
+PROFILE_TOOLCHAIN_BASE_IMAGE=REPLACE_ME
+PROFILE_TOOLCHAIN_BASE_IMAGE_ID=sha256:REPLACE_ME
+PROFILE_TOOLCHAIN_IMAGE=ninfer-sm120-profile:python3.11
+PROFILE_CONTAINER_PYTHON=python3.11
+# Use the existing Docker Desktop Linux daemon through its already-configured WSL integration.
+# Never toggle the integration, context, or daemon during an operation.
+PROFILE_DOCKER_CLI=/usr/bin/docker
+PROFILE_DOCKER_CONTEXT=default
+PROFILE_DOCKER_ENDPOINT=unix:///var/run/docker.sock
+PROFILE_DOCKER_DAEMON_ID=REPLACE_ME
+CANDIDATE_PREFIX=ninfer-profile-run-
+CANDIDATE_PORT=18089
+
+PRODUCTION_CONTAINER=ninfer-5090
+PRODUCTION_ID=REPLACE_ME
+PRODUCTION_IMAGE=REPLACE_ME
+PRODUCTION_RESTART_POLICY=unless-stopped
+PRODUCTION_PORT=18088
+PRODUCTION_CONTROLLER=/home/operator/services/ninfer-5090/ninfer-production-control.sh
+
+ROLLBACK_CONTAINER=REPLACE_ME
+ROLLBACK_ID=REPLACE_ME
+ROLLBACK_IMAGE_ID=sha256:REPLACE_ME
+ROLLBACK_RUNNING=false
+ROLLBACK_RESTART_POLICY=no
+
+MODEL_PATH=/home/operator/builds/models/qwen3_8_27b.ninfer
+MODEL_SHA256=REPLACE_ME
+MODEL_ID=q38-ninfer
+PROFILE_CONTROLLER_ID=REPLACE_ME
+PROFILE_TARGET_ID=REPLACE_ME
+PROFILE_DEPLOYMENT_PREFIX=profile-run
+PROFILE_MAX_CONTEXT=131072
+PROFILE_PREFILL_CHUNK=1024
+PROFILE_KV_DTYPE=bf16
+PROFILE_MAX_CONCURRENCY=1
+PROFILE_DRAFT_TOKENS=3
+PROFILE_SEED=7632647173703959000
+PROFILE_STARTUP_TIMEOUT_SECONDS=600
+PROFILE_PAYLOAD_STOP_TIMEOUT_SECONDS=30
+PROFILE_NCU_TIMEOUT_SECONDS=180
+PROFILE_NSYS_TIMEOUT_SECONDS=300
+
+PROFILE_WARMUP_MESSAGES=examples/cli/messages/text_smoke_zh.json
+PROFILE_LONG_MESSAGES=examples/cli/messages/long_niah_128k.json
+PROFILE_DECODE_MESSAGES=examples/cli/messages/long_decode_aime26_01.json
+PROFILE_WARMUP_EXPECTED=42
+PROFILE_LONG_EXPECTED='ORCHID=493817; COLOR=COBALT'

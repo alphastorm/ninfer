@@ -3,6 +3,7 @@
 // serialization shapes, and finish_reason mapping. This is the schema boundary
 // consumed by external OpenAI clients.
 
+#include "serve/client_identity.h"
 #include "serve/openai_schema.h"
 #include "serve/request.h"
 #include "serve/translate.h"
@@ -377,6 +378,17 @@ int test_reject_unsupported() {
     } catch (...) { text_ok = false; }
     failures += check(text_ok, "text response_format accepted");
 
+    for (const char* key :
+         {"grammar", "structured_outputs", "json_schema", "regex", "ebnf", "structural_tag",
+          "guided_json", "guided_regex", "guided_choice", "guided_grammar",
+          "guided_decoding_backend", "guided_whitespace_pattern"}) {
+        Json structured = base;
+        structured[key] = Json::object();
+        failures += check(api_code([&] {
+                              (void)parse_chat_completion_request(structured, default_limits());
+                          }) == "structured_output_not_supported",
+                          std::string("unsupported structured field accepted: ") + key);
+    }
     Json no_model = {{"messages", Json::array({Json{{"role", "user"}, {"content", "hi"}}})}};
     failures +=
         check(throws_api([&] { (void)parse_chat_completion_request(no_model, default_limits()); }),
@@ -444,6 +456,13 @@ int test_parse_function_tools_and_choices() {
     failures +=
         check(throws_api([&] { (void)parse_chat_completion_request(unknown, default_limits()); }),
               "unknown named tool_choice rejected");
+
+    // Duplicate function tool names are rejected (matches Responses behavior).
+    Json dup     = base;
+    dup["tools"] = Json::array({tool, tool});
+    failures +=
+        check(throws_api([&] { (void)parse_chat_completion_request(dup, default_limits()); }),
+              "duplicate function tool names rejected");
     return failures;
 }
 
@@ -743,11 +762,72 @@ int test_finish_reason_wire() {
     return failures;
 }
 
+int test_client_identity() {
+    const std::string session_digest(64, 'a');
+    const std::string request_digest(64, 'b');
+    Json body = {
+        {"model", "m"},
+        {"messages", Json::array({Json{{"role", "user"}, {"content", "hello"}}})},
+        {"ninfer_session", session_digest},
+        {"ninfer_request_id", request_digest},
+    };
+
+    int failures                    = 0;
+    const GenerationRequest request = parse_chat_completion_request(body, default_limits());
+    failures += check(request.client_session_sha256 == session_digest,
+                      "ninfer_session digest was not parsed");
+    failures += check(request.client_request_id == request_digest,
+                      "ninfer_request_id digest was not parsed");
+
+    ninfer::ContextCacheHints cache_hints;
+    cache_hints.retention            = ninfer::CacheRetentionHint::Disposable;
+    cache_hints.update_session_index = false;
+    cache_hints.markers.emplace_back();
+    apply_client_identity_cache_hints(request, true, cache_hints);
+    failures += check(cache_hints.session_key == "http:" + session_digest,
+                      "authenticated session digest did not become a private cache key");
+    failures += check(cache_hints.retention == ninfer::CacheRetentionHint::LiveSession &&
+                          cache_hints.update_session_index,
+                      "authenticated session cache retention is not live/indexed");
+    failures += check(cache_hints.markers.size() == 1,
+                      "client session hints discarded protocol cache markers");
+
+    GenerationRequest session_only;
+    session_only.client_session_sha256 = session_digest;
+    failures += check(api_code([&] {
+                          ninfer::ContextCacheHints hints;
+                          apply_client_identity_cache_hints(session_only, false, hints);
+                      }) == "authentication_required",
+                      "unauthenticated ninfer_session was accepted");
+    GenerationRequest request_only;
+    request_only.client_request_id = request_digest;
+    failures += check(api_code([&] {
+                          ninfer::ContextCacheHints hints;
+                          apply_client_identity_cache_hints(request_only, false, hints);
+                      }) == "authentication_required",
+                      "unauthenticated ninfer_request_id was accepted");
+
+    Json malformed              = body;
+    malformed["ninfer_session"] = std::string(64, 'A');
+    failures += check(api_code([&] {
+                          (void)parse_chat_completion_request(malformed, default_limits());
+                      }) == "invalid_ninfer_identity",
+                      "non-lowercase ninfer_session was accepted");
+    Json non_string                 = body;
+    non_string["ninfer_request_id"] = 7;
+    failures += check(api_code([&] {
+                          (void)parse_chat_completion_request(non_string, default_limits());
+                      }) == "invalid_ninfer_identity",
+                      "non-string ninfer_request_id was accepted");
+    return failures;
+}
+
 } // namespace
 
 int main() {
     int failures = 0;
     failures += test_parse_string_content();
+    failures += test_client_identity();
     failures += test_preserve_thinking_options();
     failures += test_reasoning_effort();
     failures += test_parse_parts_and_flatten();

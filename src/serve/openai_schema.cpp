@@ -1,5 +1,7 @@
 #include "serve/openai_schema.h"
 
+#include "serve/client_identity.h"
+
 #include <array>
 #include <cctype>
 #include <chrono>
@@ -8,6 +10,7 @@
 #include <limits>
 #include <random>
 #include <string>
+#include <unordered_set>
 
 namespace ninfer::serve {
 namespace {
@@ -302,6 +305,7 @@ void parse_tools(const Json& body, GenerationRequest& out) {
     const Json& tools = body.at("tools");
     if (!tools.is_array()) { bad_request("tools must be an array", "tools"); }
     out.tools.reserve(tools.size());
+    std::unordered_set<std::string> names;
     for (std::size_t i = 0; i < tools.size(); ++i) {
         const Json& item = tools.at(i);
         if (!item.is_object()) { bad_request("tools entries must be objects", "tools"); }
@@ -318,6 +322,9 @@ void parse_tools(const Json& body, GenerationRequest& out) {
         Json& fn        = normalized["function"];
         ToolDefinition tool;
         tool.name = require_function_name(fn, "tools");
+        if (!names.insert(tool.name).second) {
+            bad_request("duplicate function tool name: " + tool.name, "tools");
+        }
         if (fn.contains("description") && !fn.at("description").is_null()) {
             if (!fn.at("description").is_string()) {
                 bad_request("function description must be a string", "tools");
@@ -446,6 +453,18 @@ void reject_unsupported_features(const Json& body) {
             throw ApiException(std::move(error));
         }
     }
+    for (const char* key :
+         {"grammar", "structured_outputs", "json_schema", "regex", "ebnf", "structural_tag",
+          "guided_json", "guided_regex", "guided_choice", "guided_grammar",
+          "guided_decoding_backend", "guided_whitespace_pattern"}) {
+        if (body.contains(key) && !body.at(key).is_null()) {
+            ApiError error;
+            error.message = std::string(key) + " requires unsupported structured decoding";
+            error.param   = key;
+            error.code    = "structured_output_not_supported";
+            throw ApiException(std::move(error));
+        }
+    }
     if (body.contains("response_format") && !body.at("response_format").is_null()) {
         const Json& fmt  = body.at("response_format");
         std::string type = fmt.is_object() && fmt.contains("type") && fmt.at("type").is_string()
@@ -546,6 +565,7 @@ GenerationRequest parse_chat_completion_request(const Json& body, const RequestL
         bad_request("missing required field: model", "model");
     }
     out.model = body.at("model").get<std::string>();
+    parse_client_identity(body, out);
 
     parse_tools(body, out);
     parse_tool_choice(body, out);

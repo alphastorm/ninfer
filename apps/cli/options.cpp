@@ -74,7 +74,7 @@ ReasoningEffort parse_reasoning_effort(std::string_view text) {
 } // namespace
 
 std::string usage_text(const char* argv0) {
-    return std::string("usage: ") + argv0 +
+    return std::string("usage: ") + argv0 + " --version\n" + "       " + argv0 +
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
            "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
            "       [--device N]\n"
@@ -104,6 +104,10 @@ Options parse_options(int argc, char** argv) {
     Options options;
     if (argc >= 2 && (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
         options.help_requested = true;
+        return options;
+    }
+    if (argc >= 2 && std::string_view(argv[1]) == "--version") {
+        options.version_requested = true;
         return options;
     }
     if (argc < 2) { throw std::invalid_argument(".ninfer model path is required"); }

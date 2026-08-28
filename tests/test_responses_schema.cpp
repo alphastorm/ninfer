@@ -2,6 +2,7 @@
 // input Items, explicit capability rejection, terminal objects, and semantic
 // SSE event sequencing.
 
+#include "serve/client_identity.h"
 #include "serve/generation_service.h"
 #include "serve/responses_schema.h"
 #include "serve/translate.h"
@@ -121,6 +122,62 @@ int test_basic_request() {
                           composed.generation.messages[1].content[0].text == "old answer" &&
                           composed.generation.messages[2].content[0].text == "hello",
                       "instructions, previous context, and current input composed in order");
+    return failures;
+}
+
+int test_client_identity() {
+    const std::string session_digest(64, 'a');
+    const std::string request_digest(64, 'b');
+    const Json body = {
+        {"model", "qwen3.6-27b"},
+        {"input", "hello"},
+        {"ninfer_session", session_digest},
+        {"ninfer_request_id", request_digest},
+    };
+
+    const ResponsesRequest request = parse_responses_request(body, limits());
+    int failures = 0;
+    failures += check(request.generation.client_session_sha256 == session_digest,
+                      "Responses did not parse ninfer_session");
+    failures += check(request.generation.client_request_id == request_digest,
+                      "Responses did not parse ninfer_request_id");
+    const ResponsesRequest counted = parse_response_input_tokens_request(body, limits());
+    failures += check(counted.generation.client_session_sha256 == session_digest &&
+                          counted.generation.client_request_id == request_digest,
+                      "Responses input_tokens did not preserve client identity");
+
+    Json uppercase = body;
+    uppercase["ninfer_session"] = std::string(64, 'A');
+    failures += check(api_code([&] { (void)parse_responses_request(uppercase, limits()); }) ==
+                          "invalid_ninfer_identity",
+                      "Responses accepted a non-lowercase session digest");
+    Json non_string = body;
+    non_string["ninfer_request_id"] = 7;
+    failures += check(api_code([&] { (void)parse_responses_request(non_string, limits()); }) ==
+                          "invalid_ninfer_identity",
+                      "Responses accepted a non-string request digest");
+    failures += check(api_code([&] {
+                          require_authenticated_client_identity(request.generation, false);
+                      }) == "authentication_required",
+                      "Responses identity was accepted without configured authentication");
+
+    ninfer::ContextCacheHints first_hints;
+    apply_client_identity_cache_hints(request.generation, true, first_hints);
+    GenerationRequest another_request = request.generation;
+    another_request.client_request_id = std::string(64, 'c');
+    ninfer::ContextCacheHints continuation_hints;
+    apply_client_identity_cache_hints(another_request, true, continuation_hints);
+    failures += check(first_hints.session_key == "http:" + session_digest &&
+                          continuation_hints.session_key == first_hints.session_key &&
+                          first_hints.update_session_index &&
+                          continuation_hints.update_session_index,
+                      "request correlation changed the stable session lineage");
+    GenerationRequest correlation_only;
+    correlation_only.client_request_id = request_digest;
+    ninfer::ContextCacheHints correlation_hints;
+    apply_client_identity_cache_hints(correlation_only, true, correlation_hints);
+    failures += check(!correlation_hints.session_key,
+                      "ninfer_request_id selected an Engine lineage");
     return failures;
 }
 
@@ -349,6 +406,18 @@ int test_explicit_rejections() {
     failures += check(api_code([&] { (void)parse_responses_request(too_small, limits()); }) ==
                           "invalid_value",
                       "OpenAI minimum max_output_tokens enforced");
+
+    Json dup     = base;
+    dup["tools"] = Json::array({Json{{"type", "function"},
+                                     {"name", "f"},
+                                     {"parameters", Json::object()},
+                                     {"strict", false}},
+                                Json{{"type", "function"},
+                                     {"name", "f"},
+                                     {"parameters", Json::object()},
+                                     {"strict", false}}});
+    failures += check(throws_api([&] { (void)parse_responses_request(dup, limits()); }),
+                      "duplicate function tool names rejected");
     return failures;
 }
 
@@ -529,6 +598,7 @@ int test_input_tokens_schema() {
 int main() {
     int failures = 0;
     failures += test_basic_request();
+    failures += test_client_identity();
     failures += test_instruction_message_order();
     failures += test_preserve_thinking_options_and_inheritance();
     failures += test_reasoning_effort();

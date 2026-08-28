@@ -740,18 +740,28 @@ public:
         out.historical_fork_hits            = context_stats_.historical_fork_hits;
         out.actual_context_transfer_seconds = context_stats_.actual_context_transfer_seconds;
 
+        out.last_predicted_materialization_ns = context_stats_.last_predicted_materialization_ns;
+
         const auto usage                     = program.physical_usage();
         out.device_state_occupied_slots      = usage.device_state_slots;
         out.host_state_occupied_slots        = usage.host_state_slots;
         out.device_main_kv_occupied_pages    = usage.device_main_kv_pages;
         out.device_backend_kv_occupied_pages = usage.device_backend_kv_pages;
         out.host_kv_occupied_bytes           = usage.host_kv_bytes;
-        std::uint64_t shared_references      = 0;
+        std::uint32_t private_occupied       = 0;
+        for (const CatalogEntry& entry : catalog_) {
+            if (entry.state != CatalogState::Vacant) { ++private_occupied; }
+        }
+        std::uint32_t shared_occupied   = 0;
+        std::uint64_t shared_references = 0;
         for (const SharedCatalogEntry& entry : shared_catalog_) {
+            if (entry.state != SharedCatalogState::Vacant) { ++shared_occupied; }
             if (entry.state == SharedCatalogState::Catalogued) {
                 shared_references += entry.summary.active_references;
             }
         }
+        out.private_catalog_occupied = private_occupied;
+        out.shared_catalog_occupied  = shared_occupied;
         out.shared_active_references = shared_references > std::numeric_limits<std::uint32_t>::max()
                                            ? std::numeric_limits<std::uint32_t>::max()
                                            : static_cast<std::uint32_t>(shared_references);
@@ -1522,6 +1532,7 @@ private:
     }
 
     void observe_planner_diagnostics(const MaterializationDiagnostics& diagnostics) noexcept {
+        context_stats_.last_predicted_materialization_ns = diagnostics.predicted_total_ns;
         if (diagnostics.stop_reason != MaterializationStopReason::NoPressure) {
             saturating_increment(context_stats_.pressure_searches);
         }

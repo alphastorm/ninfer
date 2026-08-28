@@ -2,6 +2,7 @@
 
 #include "ninfer/ops/linear_add.h"
 #include "ops/direct_bf16_weight.h"
+#include "ops/linear_add/q5/q5_linear_add_kernels.h"
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
 
@@ -27,6 +28,11 @@ namespace {
 
 constexpr std::size_t kOutputScanWords = 1U << 20;
 constexpr double kBf16UnitRoundoff     = 1.0 / 256.0;
+
+enum class TestRoute : std::uint8_t {
+    Public,
+    Q5MmaR64C16,
+};
 
 // One criterion for the complete A16 fused Op. It is not selected by T, route, or kernel.
 constexpr ReductionCriterion kLinearAddA16Tolerance{
@@ -289,8 +295,8 @@ std::vector<float> materialize_weight_rows(const HostWeight& weight,
 
 bool cuda_available() { return !test::cuda_unavailable(); }
 
-int run_shape(std::string_view label, WeightFormat format, const ShapeCase& shape) {
-    const std::vector<std::int32_t> tokens = conformance_tokens(shape);
+int run_tokens(std::string_view label, WeightFormat format, const ShapeCase& shape,
+               std::span<const std::int32_t> tokens, TestRoute route) {
     if (tokens.empty()) { throw std::invalid_argument("linear_add test: no token cases"); }
     const std::int32_t maximum_t = tokens.back();
 
@@ -331,7 +337,11 @@ int run_shape(std::string_view label, WeightFormat format, const ShapeCase& shap
         const std::string case_label = std::string(label) + " [" + std::to_string(shape.n) + "," +
                                        std::to_string(shape.k) + "] T=" + std::to_string(t);
         try {
-            ops::linear_add(input, weight, residual_out, workspace, nullptr);
+            if (route == TestRoute::Public) {
+                ops::linear_add(input, weight, residual_out, workspace, nullptr);
+            } else {
+                ops::detail::q5_linear_add_mma_r64_c16_launch(input, weight, residual_out, nullptr);
+            }
             test::cuda_check(cudaDeviceSynchronize(), "synchronize linear_add");
         } catch (const std::exception& error) {
             std::cerr << case_label << ": unexpected exception: " << error.what() << '\n';
@@ -371,6 +381,19 @@ int run_shape(std::string_view label, WeightFormat format, const ShapeCase& shap
         "linear_add activation");
     failures += verify_preserved(device_weight, host_payload, "linear_add weight");
     return failures;
+}
+
+int run_shape(std::string_view label, WeightFormat format, const ShapeCase& shape) {
+    const std::vector<std::int32_t> tokens = conformance_tokens(shape);
+    return run_tokens(label, format, shape, tokens, TestRoute::Public);
+}
+
+int run_q5_mma_r64_c16_t4(std::string_view label, const ShapeCase& shape) {
+    if (shape.n != 5120 || shape.k != 17408) {
+        throw std::invalid_argument("Q5 MMA R64C16 test admits only the [5120,17408] T=4 control");
+    }
+    constexpr std::array<std::int32_t, 1> kTokens{4};
+    return run_tokens(label, WeightFormat::Q5G64F16S, shape, kTokens, TestRoute::Q5MmaR64C16);
 }
 
 } // namespace ninfer::test::linear_add

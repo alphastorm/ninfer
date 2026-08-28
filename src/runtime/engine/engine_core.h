@@ -411,8 +411,8 @@ private:
         record_program_timing(timing, measurement.exposed);
     }
 
-    void record_detail(std::uint64_t RuntimeHostWorkStats::*elapsed_member,
-                       std::uint64_t RuntimeHostWorkStats::*invocation_member,
+    void record_detail(std::uint64_t RuntimeHostWorkStats::* elapsed_member,
+                       std::uint64_t RuntimeHostWorkStats::* invocation_member,
                        Clock::time_point started) noexcept {
         RuntimeHostWorkStats& stats = cumulative_stats_.host_work;
         stats.*elapsed_member += elapsed_ns(started, Clock::now());
@@ -421,8 +421,8 @@ private:
 
     class DetailScope {
     public:
-        DetailScope(EngineCore& owner, std::uint64_t RuntimeHostWorkStats::*elapsed_member,
-                    std::uint64_t RuntimeHostWorkStats::*invocation_member,
+        DetailScope(EngineCore& owner, std::uint64_t RuntimeHostWorkStats::* elapsed_member,
+                    std::uint64_t RuntimeHostWorkStats::* invocation_member,
                     nvtx::Name range_name) noexcept
             : owner_(owner), elapsed_member_(elapsed_member), invocation_member_(invocation_member),
               started_(Clock::now()) {
@@ -439,8 +439,8 @@ private:
 
     private:
         EngineCore& owner_;
-        std::uint64_t RuntimeHostWorkStats::*elapsed_member_;
-        std::uint64_t RuntimeHostWorkStats::*invocation_member_;
+        std::uint64_t RuntimeHostWorkStats::* elapsed_member_;
+        std::uint64_t RuntimeHostWorkStats::* invocation_member_;
         Clock::time_point started_;
         std::optional<nvtx::ScopedRange> range_;
     };
@@ -563,6 +563,7 @@ private:
             break;
         }
         cumulative_stats_.reused_prompt_tokens += summary.reusable_prompt_tokens;
+        cumulative_stats_.last_selected_reuse_path      = summary.prefix_reuse_path;
         cumulative_stats_.last_selected_frontier_tokens = summary.reusable_prompt_tokens;
     }
 
@@ -745,9 +746,13 @@ private:
         }
         result.timings                 = request->generation_timings;
         result.timings.prepare_seconds = request->prepare_seconds;
-        result.speculative             = std::move(request->speculative_stats);
-        result.thinking                = request->output.thinking_stats();
-        result.materialization         = request->materialization_diagnostics;
+        cumulative_stats_.speculative_rounds += request->speculative_stats.rounds;
+        cumulative_stats_.speculative_drafted_tokens += request->speculative_stats.drafted_tokens;
+        cumulative_stats_.speculative_accepted_tokens += request->speculative_stats.accepted_tokens;
+        cumulative_stats_.speculative_fallback_steps += request->speculative_stats.fallback_steps;
+        result.speculative     = std::move(request->speculative_stats);
+        result.thinking        = request->output.thinking_stats();
+        result.materialization = request->materialization_diagnostics;
         if (request->first_token) {
             result.timings.first_token_seconds =
                 request->prepare_seconds +

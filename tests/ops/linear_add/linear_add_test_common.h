@@ -25,5 +25,6 @@ struct ShapeCase {
 bool cuda_available();
 
 int run_shape(std::string_view label, WeightFormat format, const ShapeCase& shape);
+int run_q5_mma_r64_c16_t4(std::string_view label, const ShapeCase& shape);
 
 } // namespace ninfer::test::linear_add

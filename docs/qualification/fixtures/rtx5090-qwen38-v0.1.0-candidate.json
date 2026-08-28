@@ -1,0 +1,35 @@
+{
+  "artifact_type": "ninfer_isolated_candidate_contract",
+  "schema_version": 1,
+  "release_version": "v0.1.0",
+  "candidate": {
+    "image": "ninfer-5090-v010-rc",
+    "container": "ninfer-5090-v010-rc",
+    "bind_host": "127.0.0.1",
+    "port": 18089,
+    "restart_policy": "no",
+    "deployment_profile": "qwen38-5090-v0.1.0"
+  },
+  "protected_incumbent": {
+    "container": "ninfer-5090",
+    "port": 18088,
+    "allowed_mutations": []
+  },
+  "required_distinct_resources": [
+    "image",
+    "container",
+    "port",
+    "configuration",
+    "request_log"
+  ],
+  "candidate_cleanup": {
+    "stop_via_owned_lifecycle_only": true,
+    "remove_container": true,
+    "remove_image": false
+  },
+  "promotion": {
+    "automatic": false,
+    "requires_all_gates_passed": true,
+    "route_owner": "external-omp-handoff"
+  }
+}

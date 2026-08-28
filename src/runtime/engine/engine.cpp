@@ -4,6 +4,7 @@
 #include "runtime/contract/sampling.h"
 #include "runtime/contract/types.h"
 #include "runtime/engine/engine_core.h"
+#include "runtime/engine/options.h"
 #include "targets/registry.h"
 
 #include <limits>
@@ -14,7 +15,7 @@
 #include <variant>
 
 namespace ninfer {
-namespace {
+namespace runtime {
 
 EngineOptions normalize_engine_options(EngineOptions options) {
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
@@ -70,6 +71,10 @@ EngineOptions normalize_engine_options(EngineOptions options) {
     }
     return options;
 }
+
+} // namespace runtime
+
+namespace {
 
 runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefaults& defaults,
                                                         SamplingMode mode, RequestOptions options) {
@@ -195,7 +200,8 @@ public:
     using Core   = std::variant<std::monostate, std::unique_ptr<Core27>, std::unique_ptr<Core35>>;
 
     explicit Impl(EngineOptions engine_options)
-        : options(normalize_engine_options(std::move(engine_options))), device(options.device) {
+        : options(runtime::normalize_engine_options(std::move(engine_options))),
+          device(options.device) {
         auto constructed  = targets::construct_target(options, device);
         active            = std::move(constructed.active);
         load              = std::move(constructed.load);

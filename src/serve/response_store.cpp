@@ -24,6 +24,7 @@ std::size_t estimate_turn_bytes(const ChatTurn& turn) {
 std::size_t record_envelope_bytes(const StoredResponse& record) {
     std::size_t bytes = sizeof(StoredResponse) + record.id.size() + record.session_key.size() +
                         record.response.dump().size();
+    if (record.client_session_sha256) { bytes += record.client_session_sha256->size(); }
     for (const nlohmann::json& item : record.input_items) {
         bytes += sizeof(nlohmann::json) + item.dump().size();
     }
@@ -87,6 +88,18 @@ std::shared_ptr<const StoredResponse> ResponseStore::get(const std::string& id) 
     std::lock_guard lock(mutex_);
     const auto found = records_.find(id);
     if (found == records_.end()) { return {}; }
+    lru_.splice(lru_.begin(), lru_, found->second.lru);
+    return found->second.response;
+}
+
+std::shared_ptr<const StoredResponse>
+ResponseStore::get_for_session(const std::string& id,
+                               const std::optional<std::string>& session_sha256) {
+    std::lock_guard lock(mutex_);
+    const auto found = records_.find(id);
+    if (found == records_.end() || found->second.response->client_session_sha256 != session_sha256) {
+        return {};
+    }
     lru_.splice(lru_.begin(), lru_, found->second.lru);
     return found->second.response;
 }

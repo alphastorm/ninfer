@@ -49,6 +49,7 @@ cannot be combined with `--vision`. A later request cannot enable a capability o
 | Method and path | Behavior |
 |---|---|
 | `GET /health` | process health |
+| `GET /v1/ninfer/status` | exact build/deployment identity, resolved runtime settings, activity, cache state, and MTP totals |
 | `GET /v1/models` | configured OpenAI model alias |
 | `GET /v1/models/{id}` | lookup of the configured alias |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
@@ -89,6 +90,11 @@ The endpoint supports:
 - the top-level `reasoning_effort` field;
 - the `enable_thinking` extension;
 - `chat_template_kwargs.preserve_thinking` and the top-level `preserve_thinking` alias.
+
+Tool-result `content` accepts either a string or an array of `text` content parts. Tool-result
+media parts are rejected. Structured-decoding extensions—including `grammar`,
+`structured_outputs`, JSON-schema/regex/EBNF fields, and `guided_*` variants—are rejected rather
+than silently ignored; only `response_format: {"type":"text"}` is accepted.
 
 The request `model` must equal the public model ID: the artifact `identity.model_id` by default, or
 the explicit `--model-id` override. Reasoning is returned separately as `reasoning_content`; answer
@@ -237,6 +243,8 @@ wire response contains typed `output` Items.
 | `input` | required string or non-empty typed Item array |
 | `instructions` | optional string, inserted before the reconstructed conversation for this request only |
 | `previous_response_id` | optional ID of a retained local Response |
+| `ninfer_session` | optional 64-character lowercase SHA-256; authenticated Engine lineage and continuation namespace |
+| `ninfer_request_id` | optional 64-character lowercase SHA-256 used only for request-log correlation |
 | `max_output_tokens` | integer at least `16`; default is `--default-max-tokens` |
 | `stream` | boolean; `true` selects Responses SSE rather than a JSON body |
 | `store` | boolean, default `true`; controls local retrieval and continuation state |
@@ -381,6 +389,18 @@ context, matching the Responses rule that previous top-level instructions do not
 Function definitions are request configuration rather than conversation Items and must be sent
 again on tool-result turns. The reconstructed prompt follows the ordinary Engine path, so compatible
 checkpoint reuse applies naturally.
+When a stored Response carries `ninfer_session`, every `previous_response_id` continuation must
+send the same digest. A different or omitted session receives the same 404 `response_not_found` as
+an unknown ID and cannot continue that session's DAG. Every fork from the same parent and session
+selects the same `http:<digest>` Engine lineage. Parent deletion does not invalidate already stored
+descendants. Changing `ninfer_request_id` never changes lineage selection.
+
+The OpenAI-compatible retrieve, delete, input-Item, and cancel routes have no request-body identity
+carrier. They therefore use the configured API key plus the opaque Response ID as their authorization
+boundary; every holder of one configured key belongs to one storage tenant. `ninfer_session` does not
+claim to subdivide that tenant for those routes. Isolate mutually untrusted tenants behind separate
+server instances, API keys, and Response stores rather than sharing one key.
+
 
 A stored Response also retains its resolved `preserve_thinking` value. A child which omits the
 field inherits the parent value. An explicit different value creates a new semantic branch; prompt
@@ -411,8 +431,9 @@ stored.
 
 ### Responses input token count
 
-`POST /v1/responses/input_tokens` accepts exactly `model` and `input`, performs the same typed Item,
-template, and media expansion, and does not run generation:
+`POST /v1/responses/input_tokens` accepts `model`, `input`, the two authenticated NInfer identity
+fields, and the thinking-history option, performs the same typed Item, template, and media expansion,
+and does not run generation:
 
 ```bash
 curl http://127.0.0.1:8080/v1/responses/input_tokens \
@@ -488,6 +509,23 @@ curl http://127.0.0.1:8080/v1/messages/count_tokens \
 Pass `--api-key VALUE` to require the same value as an OpenAI bearer token or Anthropic
 `x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated.
 
+OpenAI Chat Completions, OpenAI Responses, and Anthropic Messages accept optional top-level
+`ninfer_session` and `ninfer_request_id` fields for trusted local-agent clients. Each value must be
+a caller-computed 64-character lowercase SHA-256 digest; raw session or request identifiers must
+not be sent. A valid `ninfer_session` selects the private `http:<digest>` cache lineage with
+live-session retention, while `ninfer_request_id` provides request-log correlation only. Either
+field is rejected with HTTP 401 unless the server was started with `--api-key`; normal endpoint
+authentication then ensures only authenticated callers can select those cache and log identities.
+
+`GET /v1/ninfer/status` is always authenticated: it returns HTTP 401 when the server has no
+configured API key, and the ordinary API-key pre-route rejects a missing or invalid credential. Its
+`ninfer_server_status` schema-v1 body has stable `identity`, `runtime`, `scheduler`, `cache`, and
+`mtp` groups. Those groups contain declared release/deployment/model digests, resolved static
+runtime settings, published scheduler counters, bounded cache gauges, and aggregate MTP totals. The
+route performs no filesystem hashing, device query, prompt lookup, or response-store traversal and
+contains no paths, credentials, prompts, generated text, GPU UUID, or process arguments.
+`GET /health` remains unauthenticated.
+
 ```bash
 curl http://127.0.0.1:8080/v1/models \
   -H 'Authorization: Bearer local-secret'
@@ -505,6 +543,10 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--port N` | listen port | `8080` |
 | `--api-key KEY` | required bearer or `x-api-key` value | unset |
 | `--model-id ID` | override the public OpenAI model alias | artifact `identity.model_id` |
+| `--binary-sha256 SHA` | lifecycle-measured executable SHA-256 declaration | unset |
+| `--artifact-sha256 SHA` | lifecycle-measured model artifact SHA-256 declaration | unset |
+| `--config-sha256 SHA` | lifecycle-measured canonical configuration SHA-256 declaration | unset |
+| `--deployment-profile NAME` | generic deployment identity matching `[A-Za-z0-9._-]{1,64}` | unset |
 | `--max-context N` | logical context ceiling of each sequence | `8192` |
 | `--kv-capacity N\|auto` | explicit shared Main Text KV capacity, or maximize it from remaining GPU memory; omitted means `--max-context` | `8192` |
 | `--max-concurrency N` | maximum admitted requests; valid range `1..8` | `1` |
@@ -569,6 +611,87 @@ zero-valued flags.
 
 Run `./build/apps/ninfer-serve --help` for the exact option contract.
 
+## Reproducible container lifecycle
+
+`tools/lifecycle/ninfer_container.py` builds and operates one isolated Docker candidate from a
+Linux or WSL host. It never changes a shared route or stops another container. Candidate ports bind
+to loopback by default. Every lifecycle configuration requires `api_key_file` because startup and
+status verification use the authenticated status contract. An explicit `bind_host` of `0.0.0.0`
+accepts that same secret-backed configuration; any other bind address is rejected. `start` refuses
+an existing container name or listening port, and `stop` refuses a container without the lifecycle
+ownership label.
+
+Build the runtime image from an exact clean commit with the upstream and patch-stack identities
+embedded in both binaries. The lifecycle refuses any tracked or untracked source change, verifies
+that the upstream commit is an ancestor, and gives Docker a Git archive of the measured release
+head rather than the working tree. Only that verified archive can set `source_dirty` to `false`:
+
+```bash
+python3 tools/lifecycle/ninfer_container.py build \
+  --image ninfer:canary \
+  --upstream-base-sha 4eef14a7560d87a3ba717898e1d488a4c4c7246d \
+  --expect-patch-stack-sha "$(git rev-parse HEAD)" \
+  --build-profile qwen38-5090-v0.1.0
+```
+
+Runtime configuration is one JSON object. `args` contains individual server argv elements; the
+lifecycle-owned model, network, identity, authentication, and request-log options are rejected
+there to prevent ambiguous duplicates.
+
+```json
+{
+  "image": "ninfer:canary",
+  "bind_host": "127.0.0.1",
+  "container": "ninfer-canary",
+  "model_path": "/srv/ninfer/models/model.ninfer",
+  "model_id": "registered-model",
+  "deployment_profile": "rtx-5090-int8-mtp3",
+  "port": 18088,
+  "request_log_dir": "/srv/ninfer/logs/canary",
+  "api_key_file": "/run/secrets/ninfer_api_key",
+  "restart_policy": "no",
+  "args": [
+    "--max-context", "131072",
+    "--kv-capacity", "auto",
+    "--kv-dtype", "int8",
+    "--max-concurrency", "1",
+    "--spec", "mtp",
+    "--draft-tokens", "3",
+    "--lm-head-draft"
+  ]
+}
+```
+
+All paths are absolute host paths visible to Docker. The API-key value is read from a read-only
+secret mount inside the container; it is not placed in Docker argv, labels, receipts, or the
+canonical configuration identity. `restart_policy` defaults to `no`; use `unless-stopped` only for
+a promoted appliance that Docker must restart with its daemon. `start` applies the declared policy,
+and `status` rejects policy drift. The canonical configuration SHA-256 covers model ID, deployment
+profile, bind address and port, API-auth presence, request-log presence, restart policy, and ordered
+server args. Binary and model bytes have separate SHA-256 identities.
+
+```bash
+python3 tools/lifecycle/ninfer_container.py preflight --config candidate.json
+python3 tools/lifecycle/ninfer_container.py start --config candidate.json
+python3 tools/lifecycle/ninfer_container.py health --config candidate.json
+python3 tools/lifecycle/ninfer_container.py status --config candidate.json
+
+python3 tools/smoke/serve_contract.py \
+  --base-url http://127.0.0.1:18088 --model registered-model \
+  --api-key-file /run/secrets/ninfer_api_key
+python3 tools/smoke/agent_protocol.py \
+  --base-url http://127.0.0.1:18088 \
+  --model registered-model \
+  --api-key-file /run/secrets/ninfer_api_key
+
+python3 tools/lifecycle/ninfer_container.py stop --config candidate.json
+```
+
+`preflight`, `start`, and `status` accept optional `--expect-image-id`,
+`--expect-binary-sha256`, `--expect-model-artifact-sha256`, and
+`--expect-config-sha256` pins. Receipts and status output contain identities and counters but omit
+model/log paths, process argv, API-key values, prompts, and generated text.
+
 ## Structured request log
 
 `--request-log-jsonl FILE` enables the machine-readable measurement log. The server opens `FILE`
@@ -587,12 +710,12 @@ they do not infer request behavior from process-global counter deltas.
 
 | Event | Contents |
 |---|---|
-| `server_start` | target/weights identity and artifact, resolved Engine and context-cache capacities, registered thinking/non-thinking sampler defaults plus process overrides, thinking-history and thinking-budget defaults, Device arenas, the optional non-additive Vision layout inside the unified workspace, Host State/KV capacity and occupancy, KV sizing ledger, CUDA Graph allowance, CUDA/GPU environment, and redacted argv |
-| `request_start` | protocol, resolved sampler and seed, thinking mode and optional budget, Responses semantic-change flag, output budget, stream/message/tool shape |
-| `request_rejected` | parsed request shape, media-item count, `phase: "prepare"`, and the exact HTTP status/type/code/parameter/message for a synchronous preparation rejection |
-| `request_done` | finish reason, prompt/completion/cache/computed-prefill tokens, prefix reuse path, request-owned materialization cost/search/bound diagnostics, thinking-budget application counters, unrounded request-stage seconds, per-request Engine Host exposure, and complete speculative-decoding counters |
-| `request_error` | the resolved request configuration and generation error message |
-| `throughput` | interval token/decode/context-cache pressure counter deltas, authoritative worker Host-work deltas, current scheduler/resource gauges, and decode-round batch statistics |
+| `server_start` | exact build/deployment/model identity and artifact, resolved Engine and context-cache capacities, registered thinking/non-thinking sampler defaults plus process overrides, thinking-history and thinking-budget defaults, Device arenas, the optional non-additive Vision layout inside the unified workspace, Host State/KV capacity and occupancy, KV sizing ledger, CUDA Graph observed/allowance bytes, CUDA/GPU environment, and redacted argv |
+| `request_start` | protocol, optional client session/request SHA-256 correlation, resolved sampler and seed, thinking mode and optional budget, Responses semantic-change flag, output budget, stream/message/tool shape |
+| `request_rejected` | parsed request shape, optional client session/request SHA-256 correlation, media-item count, `phase: "prepare"`, and the exact HTTP status/type/code/parameter/message for a synchronous preparation rejection |
+| `request_done` | optional client session/request SHA-256 correlation, finish reason, prompt/completion/cache/computed-prefill tokens, prefix reuse path, request-owned materialization cost/search/bound diagnostics, thinking-budget application counters, unrounded request-stage seconds, per-request Engine Host exposure, and complete speculative-decoding counters |
+| `request_error` | optional client session/request SHA-256 correlation, the resolved request configuration, and generation error message |
+| `throughput` | interval token/decode/context-cache pressure counter deltas, authoritative worker Host-work deltas, current scheduler/resource gauges, latest materialization prediction, complete MTP counters, and decode-round batch statistics |
 
 `request_done.materialization` is the immutable decision committed for that request. It reports predicted immediate,
 future-loss and total nanoseconds; evaluated targets and projection work; planning/search nanoseconds; stop reason;
@@ -621,9 +744,12 @@ round count; `units` reports its prefill/control unit counts. In a compact batch
 request is delayed by the full round, so these values explain request latency but **must not be
 summed across concurrent requests**.
 
-The JSONL file contains no generated response text and never records an API-key value; `argv`
-replaces that value with `<redacted>`. The existing stderr summaries remain available for operators
-but are rounded and are not the aggregation source. Console lines use local
+The JSONL file contains no prompt, message, tool payload, generated response text, raw client
+identifier, username, authentication token, or API-key value. Process argv and model/log paths are
+also omitted. When supplied, only the validated client session/request SHA-256 digests appear under
+`request.client_identity`; API-key configuration is represented only as a boolean. The existing
+stderr summaries remain available for operators but are rounded and are not the aggregation source.
+Console lines use local
 `[YYYY-MM-DD HH:MM:SS.mmm] [level]` timestamps. OpenAI Responses, OpenAI Chat, and Anthropic
 generation requests receive a request ID when they enter synchronous preparation. Successful
 preparation produces `request_start`; a preparation failure produces `request_rejected` without a
@@ -729,8 +855,19 @@ a following compatible turn can reuse it. Output-limit and context-capacity fini
 `length`/ `max_tokens`; ordinary model or string stops map to `stop`/ `end_turn`.
 
 Function tools are rendered into the model prompt and generated calls are parsed into protocol
-responses. NInfer does not execute tools and does not enforce client JSON Schema through constrained
-decoding.
+responses. NInfer does not execute tools and does not validate tool arguments against the full
+client JSON Schema through constrained decoding; that remains the client's responsibility. When
+parsing a generated call, NInfer does consult the top-level parameter `"type"` declared in each
+tool's schema to decide whether a parameter value that is valid JSON may be deserialized into the
+corresponding JSON type (number, boolean, array, object, null): only parameters whose declared
+type(s) are all valid non-string JSON Schema types are deserialized. Parameters typed as `"string"`
+(or declared via a type array that includes `"string"`), parameters with an unknown or misspelled
+`"type"`, and parameters absent from the schema preserve the model's raw text so the string
+contract reaches the client intact. Full JSON Schema validation (constraints, required sets,
+formats, nested keywords) is not performed server-side and remains the client's job.
+Duplicate tool names within a single request are rejected with a 400 on all three
+protocol surfaces (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages),
+keeping the per-tool parameter type map unambiguous.
 
 Prompt-token usage includes chat-template and expanded media tokens. Generated-token usage comes
 from accepted output token IDs, including a stop token whose decoded text may be withheld.

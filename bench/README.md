@@ -532,12 +532,19 @@ cmake --build build --parallel --target ninfer_w8_linear_swiglu_bench
 ## Q4 LinearSwiGLU Op benchmark
 
 `ninfer_q4_linear_swiglu_bench` measures the public Q4 `[34816,5120] -> [17408,T]` profile and
-queries workspace capacity for the requested aggregate interval.
+queries workspace capacity for the requested aggregate interval. Three MTP drafts produce a
+four-column target-verification call, so `T=4` is the exact MTP3 operator shape. `--describe`
+emits a JSONL shape/route manifest without initializing CUDA. `--route materialized` is the
+explicit Linear-plus-SwiGLU control; it is not a production selector.
 
 ```bash
 cmake --build build --parallel --target ninfer_q4_linear_swiglu_bench
 ./build/bench/ninfer_q4_linear_swiglu_bench \
   --t-sweep 1,2,4,8,16,24,32,40,48 --warmup 10 --repeat 50
+./build/bench/ninfer_q4_linear_swiglu_bench \
+  --describe --route public --t-sweep 1,4
+./build/bench/ninfer_q4_linear_swiglu_bench \
+  --route materialized --t-sweep 1,4 --warmup 10 --repeat 50
 ```
 
 ## FP8 LinearSwiGLU Op benchmark
@@ -560,7 +567,11 @@ cmake --build build --parallel --target ninfer_fp8_linear_swiglu_bench
 
 `ninfer_q5_linear_add_bench` measures the public Q5 `[5120,6144]` and `[5120,17408]`
 LinearAdd profiles. Every cold-cache sample is one production-dispatched public call, with the
-workspace capacity queried for the requested interval.
+workspace capacity queried for the requested interval. The temporary `mma-r64-c16` directional
+control admits only exact `[5120,17408]`, `T=4`, calls the existing private C16 launcher, and does
+not alter production dispatch. The Q5 conformance target checks both the public `T=4` route and
+this forced control directly against the independent LinearAdd oracle. Remove the selector after
+the measurement decision unless C16 becomes a production route.
 
 ```bash
 cmake --build build --parallel --target ninfer_q5_linear_add_bench
@@ -568,6 +579,29 @@ cmake --build build --parallel --target ninfer_q5_linear_add_bench
   --k 6144 --t-sweep 1,2,4,8,16,24,32,48 --warmup 10 --repeat 50
 ./build/bench/ninfer_q5_linear_add_bench \
   --k 17408 --t-sweep 1,2,4,8,16,24,32,48 --warmup 10 --repeat 50
+./build/bench/ninfer_q5_linear_add_bench \
+  --k 17408 --t-sweep 4 --candidate mma-r64-c16 --warmup 10 --repeat 50
+```
+
+## Qwen3.6 27B post-mixer state benchmark
+
+`ninfer_qwen3_6_27b_post_mixer_bench` composes the exact groupwise-int `T=4` public Q4
+LinearSwiGLU producer with the Q5 LinearAdd down projection on one stream. `cold` flushes L2 before
+Q5, `q4-produced` flushes L2 and immediately runs Q4 before Q5, and `hot` primes Q5 before the
+measured Q5 launch as an upper-bound control. `--measure q5` records events after the producer so
+Q4 is excluded without destroying its cache state; `--measure chain` times Q4 plus Q5. This is a
+deterministic state experiment, not a replacement for the captured production-round benchmark.
+`--profile-q5` synchronizes after state preparation, then brackets exactly one Q5 launch with the
+CUDA profiler API for `ncu --profile-from-start off`.
+
+```bash
+cmake --build build --parallel --target ninfer_qwen3_6_27b_post_mixer_bench
+./build/bench/ninfer_qwen3_6_27b_post_mixer_bench --describe
+./build/bench/ninfer_qwen3_6_27b_post_mixer_bench \
+  --activation-state q4-produced --candidate public --measure q5
+ncu --profile-from-start off --set full \
+  ./build/bench/ninfer_qwen3_6_27b_post_mixer_bench \
+    --activation-state q4-produced --candidate mma-r64-c16 --measure q5 --profile-q5
 ```
 
 ## BF16 LinearAdd Op benchmark
@@ -727,6 +761,18 @@ Frontend, and reports draft/accept statistics for the target-owned MTP schedule:
 cmake --build build --parallel --target ninfer_qwen3_6_27b_mtp_round_bench
 ./build/bench/ninfer_qwen3_6_27b_mtp_round_bench \
   --artifact out/qwen3_6_27b.ninfer
+```
+
+`--profile-measured` requires `--reps 1`, runs normal construction and warmup, then brackets only
+the measured production MTP round with `cudaProfilerStart/Stop`. Use it with an Nsight Systems
+`cudaProfilerApi` capture range to exclude artifact load, graph construction, and warmup:
+
+```bash
+nsys profile --trace=cuda,nvtx,osrt --capture-range=cudaProfilerApi \
+  --capture-range-end=stop --cuda-graph-trace=node -o profiles/nsys/mtp3-round \
+  ./build/bench/ninfer_qwen3_6_27b_mtp_round_bench \
+    --artifact out/qwen3_6_27b.ninfer --draft-tokens 3 \
+    --proposal-head optimized --warmup 2 --reps 1 --profile-measured
 ```
 
 ## 35B complete DFlash round benchmark

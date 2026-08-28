@@ -6,6 +6,7 @@
 #include "core/device.h"
 #include "runtime/engine/context_cost.h"
 #include "runtime/engine/kv_capacity.h"
+#include "runtime/engine/options.h"
 
 #include <algorithm>
 #include <array>
@@ -211,6 +212,7 @@ int run(const Options& options) {
     engine.speculative.proposal_head = options.proposal;
     engine.use_cuda_graph            = options.use_cuda_graph;
     engine.max_concurrency           = options.batch_size;
+    engine                           = ninfer::runtime::normalize_engine_options(std::move(engine));
 
     ninfer::DeviceContext device(options.device);
     ninfer::artifact::Reader reader(options.artifact);

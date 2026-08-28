@@ -184,3 +184,84 @@ python3 tools/bench/run_serve_concurrency.py \
 Use `--kv-capacity auto` when the fixed corpus needs more shared KV than the default 262,144-token
 pool. A point is intentionally not resumable: combining fragments from separate server processes
 would not preserve either a steady interval or one continuous makespan.
+
+## Guarded remote GPU profiling
+
+`run_remote_sm120_mtp3_workflow.sh` is the sole operator entry point for the deferred RTX 5090
+packet. It stages and invokes `run_sm120_mtp3_workflow.sh` as the target-side implementation. The
+controller entry point runs one fixed, versioned sequence; it accepts no payload command or shell
+fragment:
+
+1. Require a completely clean `PROFILE_SOURCE_SHA` worktree descended from
+   `PROFILE_UPSTREAM_BASE_SHA`, exact artifact SHA-256, a profiling image distinct from the runtime
+   candidate, `/usr/bin/docker`, the configured `default` Unix-socket context and Docker Desktop
+   Linux daemon ID,
+   the Docker `nvidia` runtime, host `nvidia-smi`, and the executable maintained controller.
+2. Create an operation-owned Docker config containing only `{}`. This prevents inherited
+   `credsStore=desktop.exe` routing. The workflow preserves the already-configured Docker Desktop
+   WSL integration; it never toggles the integration, changes a Docker context, starts a daemon, or
+   attempts daemon recovery.
+3. Reuse or build the operation's profiling image from the exact configured CUDA/Nsight base and
+   checksum-pinned CPython 3.11.11 source. Then configure and build the Q4, Q5, post-mixer,
+   MTP-round, and numerical-gate targets in that pinned container with no GPU and no network.
+   `prepare` records exact source, upstream base, artifact, toolchain, binary, CMake, CUDA, and
+   native `sm_120a` identities.
+4. Enter `run_gpu_profile_lease.sh` synchronously. The lease revalidates the exact Docker route,
+   host GPU tools, candidate names/port, and incumbent/rollback restoration route before stopping
+   production. Immediately before the outage it also runs `nvidia-smi` in a no-network container
+   from the exact profiling image ID, while production is still healthy. Its fixed payload requires
+   the lease's transient live-process marker and independently verifies that the exact incumbent is
+   stopped. The lease isolates the payload process group,
+   confirms every profiling candidate is gone before restart, and restores production on success,
+   failure, HUP, INT, or TERM.
+5. Run `capture` from the read-only prepared build. The Q4/Q5 numerical gates run first. The cold Q5
+   NCU launch is then the counter-access gate: the packet must contain a nonempty `.ncu-rep` and CSV
+   without `ERR_NVGPUCTRPERM` before timings, Nsight Systems, remaining Q5 captures, or the nested Q4
+   packet can run. Every NCU/NSYS capture is bounded by the configured timeout.
+
+`run_sm120_mtp3_profile.sh prepare` and `capture` are internal workflow phases, not operator
+commands. Preparation occurs before the production stop; the GPU lease contains no compilation.
+`run_sm120_q4_mtp3_profile.sh`, `run_long_prefill_mtp3_cycle.sh`, and `run_profile_ab.sh` remain
+versioned payloads for their own explicitly selected experiments.
+Do not construct another launcher, heredoc, inline Python shim, or remote shell script around any
+payload or target workflow.
+
+Copy `profile_lease.conf.example` to the controller once and replace every `REPLACE_ME` with
+identities from maintained-controller receipts and current target state. Do not put the populated
+file in Git. The controller workflow requires a clean committed source, creates a unique remote
+operation, transfers and verifies a complete Git bundle and generated target config, runs target
+preflight, executes the synchronous target workflow, then retrieves receipts. Every
+`PROFILE_BUILD_DIR`, `PROFILE_PREPARE_DIR`, `PROFILE_RESULT_DIR`, and `PROFILE_DOCKER_CONFIG` is
+generated fresh. `PROFILE_TOOLCHAIN_IMAGE_ID`, `MODEL_SHA256`, `PROFILE_SOURCE_SHA`, Docker endpoint,
+and Docker daemon ID are equality gates, not descriptive metadata. The configured profiling base
+and `TOOLCHAIN_IMAGE` runtime candidate must exist locally. The controller builds the final
+profiling image only when its tag is absent, pins its resulting image ID into the operation config,
+and requires it to differ from the runtime image. The profiling image must contain CMake, Ninja,
+CUDA 13.1, NCU, NSYS, and Python 3.11; bootstrap and `prepare` check those commands before
+compiling and before any production stop.
+
+After Docker-route recovery, prove the route without an outage by running the controller's
+`check` mode. It stages a fresh exact source/config operation, pins or builds the profiling image,
+and exercises target preflight plus the GPU-container admission while production remains running.
+It writes a controller receipt but creates no profiling result directory and never requests a
+production stop:
+
+```bash
+tools/bench/run_remote_sm120_mtp3_workflow.sh check /absolute/path/profile.conf
+```
+
+The scheduled capture is exactly one synchronous controller command. It performs source staging,
+target preflight, preparation, lease, payload, restoration, and receipt retrieval; do not detach it
+or invoke its target phases separately:
+
+```bash
+tools/bench/run_remote_sm120_mtp3_workflow.sh run /absolute/path/profile.conf
+```
+
+Completion requires lease `exit-status.txt` equal to `0`, `production-restored-at.txt`, final
+production inspect/status receipts, `sm120-mtp3/ncu/counter-access-verified.txt`, and
+`sm120-mtp3/packet-complete.txt`. `SIGKILL` and host power loss cannot execute a shell trap; use the
+already-maintained production controller for recovery. After a Windows reboot, first sign in to the
+operator's interactive Windows session and start Docker Desktop; wait for the pinned Linux daemon
+and existing WSL integration, then use the maintained controller. Never toggle the integration,
+context, or daemon as a recovery action.

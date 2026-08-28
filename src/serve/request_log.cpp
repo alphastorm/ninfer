@@ -1,6 +1,7 @@
 #include "serve/request_log.h"
 #include "product/speculative_options.h"
 #include "serve/console_log.h"
+#include "serve/server_identity.h"
 
 #include <cuda_runtime.h>
 #include <nlohmann/json.hpp>
@@ -179,12 +180,20 @@ Json overrides_json(const ninfer::SamplingOverrides& overrides) {
     return result;
 }
 
+Json client_identity_json(const std::optional<std::string>& session_sha256,
+                          const std::optional<std::string>& request_sha256) {
+    return Json{{"session_sha256", session_sha256 ? Json(*session_sha256) : Json(nullptr)},
+                {"request_sha256", request_sha256 ? Json(*request_sha256) : Json(nullptr)}};
+}
+
 Json request_json(const RequestLogContext& context) {
     Json thinking_budget = nullptr;
     if (context.thinking_budget) { thinking_budget = *context.thinking_budget; }
     return Json{{"request_id", context.id},
                 {"protocol", context.protocol},
                 {"model", context.model},
+                {"client_identity", client_identity_json(context.client_session_sha256,
+                                                         context.client_request_sha256)},
                 {"stream", context.stream},
                 {"message_count", context.message_count},
                 {"media_item_count", context.media_item_count},
@@ -224,6 +233,8 @@ Json rejected_request_json(const RequestRejectionLogContext& context) {
     return Json{{"request_id", context.id},
                 {"protocol", context.protocol},
                 {"model", context.model},
+                {"client_identity", client_identity_json(context.client_session_sha256,
+                                                         context.client_request_sha256)},
                 {"stream", context.stream},
                 {"message_count", context.message_count},
                 {"media_item_count", context.media_item_count},
@@ -432,6 +443,8 @@ RequestLogContext make_request_log_context(std::uint64_t id, std::string protoco
     context.id                                 = id;
     context.protocol                           = std::move(protocol);
     context.model                              = request.model;
+    context.client_session_sha256              = request.client_session_sha256;
+    context.client_request_sha256              = request.client_request_id;
     context.stream                             = request.stream;
     context.message_count                      = request.messages.size();
     context.media_item_count                   = request.media_item_count();
@@ -458,6 +471,8 @@ RequestRejectionLogContext make_request_rejection_log_context(std::uint64_t id,
     context.id                                 = id;
     context.protocol                           = std::move(protocol);
     context.model                              = request.model;
+    context.client_session_sha256              = request.client_session_sha256;
+    context.client_request_sha256              = request.client_request_id;
     context.stream                             = request.stream;
     context.message_count                      = request.messages.size();
     context.media_item_count                   = request.media_item_count();
@@ -633,8 +648,8 @@ std::string format_server_start_json(
                                                           {"default_thinking", options.enable_thinking},
                                                           {"default_thinking_budget", std::move(default_thinking_budget)},
                                                           {"default_preserve_thinking", options.preserve_thinking}};
-    record["artifact"]                             = Json{{"path", options.artifact_path},
-                                                          {"size_bytes", std::move(artifact_size)},
+    record["identity"]                             = server_identity_json(options, load);
+    record["artifact"]                             = Json{{"size_bytes", std::move(artifact_size)},
                                                           {"target", load.target},
                                                           {"weights_id", load.weights_id},
                                                           {"bytes_read", load.artifact_bytes_read},
@@ -722,8 +737,89 @@ std::string format_server_start_json(
              {"cuda_compile_version", environment.cuda_compile_version},
              {"cuda_runtime_version", environment.cuda_runtime_version},
              {"cuda_driver_version", environment.cuda_driver_version}};
-    record["argv"] = options.startup_argv;
     return record.dump();
+}
+
+std::string format_status_json(const ServeOptions& options,
+                               const ninfer::EngineOptions& engine_options,
+                               const std::string& public_model_id, const ninfer::LoadSummary& load,
+                               const ninfer::MemorySummary& memory,
+                               const ninfer::RuntimeStats& runtime) {
+    const ninfer::ContextCacheOptions& cache = engine_options.context_cache;
+    const std::uint64_t device_state_capacity =
+        static_cast<std::uint64_t>(engine_options.max_concurrency) +
+        cache.device_state_slots.value_or(0);
+    Json acceptance_ratio = nullptr;
+    if (runtime.speculative_drafted_tokens != 0) {
+        acceptance_ratio = static_cast<double>(runtime.speculative_accepted_tokens) /
+                           static_cast<double>(runtime.speculative_drafted_tokens);
+    }
+    Json tokens_per_round = nullptr;
+    if (runtime.speculative_rounds != 0) {
+        tokens_per_round = 1.0 + static_cast<double>(runtime.speculative_accepted_tokens) /
+                                     static_cast<double>(runtime.speculative_rounds);
+    }
+
+    return Json{
+        {"artifact_type", "ninfer_server_status"},
+        {"schema_version", 1},
+        {"status", "ok"},
+        {"identity", server_identity_json(options, load)},
+        {"runtime",
+         Json{{"public_model_id", public_model_id},
+              {"max_context", engine_options.max_context},
+              {"kv_capacity_mode", kv_capacity_mode_name(memory.kv_capacity_mode)},
+              {"kv_capacity_tokens", memory.kv_capacity},
+              {"kv_cache", kv_cache_name(engine_options.kv_cache)},
+              {"speculative_backend",
+               product::speculative_backend_name(engine_options.speculative.backend)},
+              {"speculative_draft_window", engine_options.speculative.draft_tokens},
+              {"proposal_head", proposal_head_name(engine_options.speculative.proposal_head)}}},
+        {"scheduler",
+         Json{{"max_concurrency", engine_options.max_concurrency},
+              {"max_pending_requests", engine_options.max_pending_requests},
+              {"running", runtime.running_requests},
+              {"prefilling", runtime.prefilling_requests},
+              {"decode_ready", runtime.decode_ready_requests},
+              {"waiting", runtime.waiting_requests},
+              {"materializing", runtime.materializing_requests},
+              {"capture_pending", runtime.capture_pending_requests},
+              {"computed_prefill_tokens", runtime.computed_prefill_tokens},
+              {"committed_decode_tokens", runtime.committed_decode_tokens},
+              {"decode_rounds", runtime.decode_rounds},
+              {"decode_row_rounds", runtime.decode_row_rounds},
+              {"prefill_host_nanoseconds", runtime.host_work.prefill_host_ns},
+              {"prefill_device_wait_nanoseconds", runtime.host_work.prefill_device_wait_ns},
+              {"decode_host_nanoseconds", runtime.host_work.decode_host_ns},
+              {"decode_device_wait_nanoseconds", runtime.host_work.decode_device_wait_ns}}},
+        {"cache",
+         Json{{"device_state", Json{{"occupied", runtime.device_state_occupied_slots},
+                                    {"capacity", device_state_capacity}}},
+              {"host_state", Json{{"occupied", runtime.host_state_occupied_slots},
+                                  {"capacity", memory.host_state_capacity_slots}}},
+              {"host_kv", Json{{"occupied_bytes", runtime.host_kv_occupied_bytes},
+                               {"capacity_bytes", memory.host_kv_capacity_bytes}}},
+              {"private_catalog", Json{{"occupied", runtime.private_catalog_occupied},
+                                       {"capacity", cache.max_private_continuations.value_or(0)}}},
+              {"shared_catalog", Json{{"occupied", runtime.shared_catalog_occupied},
+                                      {"capacity", cache.max_shared_prefixes.value_or(0)},
+                                      {"active_references", runtime.shared_active_references}}},
+              {"reused_prompt_tokens", runtime.reused_prompt_tokens},
+              {"last_selection",
+               Json{{"path", prefix_reuse_path_name(runtime.last_selected_reuse_path)},
+                    {"frontier_tokens", runtime.last_selected_frontier_tokens}}},
+              {"private_evictions", runtime.pressure_private_owners_evicted},
+              {"shared_evictions", runtime.pressure_shared_owners_evicted},
+              {"last_materialization_predicted_nanoseconds",
+               runtime.last_predicted_materialization_ns}}},
+        {"mtp",
+         Json{{"rounds", runtime.speculative_rounds},
+              {"drafted_tokens", runtime.speculative_drafted_tokens},
+              {"accepted_tokens", runtime.speculative_accepted_tokens},
+              {"fallback_steps", runtime.speculative_fallback_steps},
+              {"acceptance_ratio", std::move(acceptance_ratio)},
+              {"tokens_per_round", std::move(tokens_per_round)}}},
+    }.dump();
 }
 
 std::string format_request_start_json(const std::string& server_instance_id,

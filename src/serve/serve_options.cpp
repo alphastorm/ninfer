@@ -1,7 +1,9 @@
 #include "serve/serve_options.h"
 #include "product/speculative_options.h"
 
+#include <algorithm>
 #include <cerrno>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <limits>
@@ -60,12 +62,39 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
     return KvCapacityPolicy::explicit_capacity(static_cast<std::uint32_t>(value));
 }
 
+std::string parse_sha256(const char* text, const char* label) {
+    const std::string value(text == nullptr ? "" : text);
+    const bool valid =
+        value.size() == 64 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        });
+    if (!valid) {
+        throw std::invalid_argument(std::string(label) +
+                                    " must be a 64-character lowercase SHA-256");
+    }
+    return value;
+}
+
+std::string parse_profile_name(const char* text) {
+    const std::string value(text == nullptr ? "" : text);
+    const bool valid = !value.empty() && value.size() <= 64 &&
+                       std::all_of(value.begin(), value.end(), [](unsigned char c) {
+                           return std::isalnum(c) != 0 || c == '.' || c == '_' || c == '-';
+                       });
+    if (!valid) {
+        throw std::invalid_argument("--deployment-profile must match [A-Za-z0-9._-]{1,64}");
+    }
+    return value;
+}
+
 } // namespace
 
 std::string serve_usage_text(const char* argv0) {
-    return std::string("usage: ") + argv0 +
+    return std::string("usage: ") + argv0 + " --version\n" + "       " + argv0 +
            " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
-           "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
+           "[--model-id ID] [--binary-sha256 SHA] [--artifact-sha256 SHA] "
+           "[--config-sha256 SHA] [--deployment-profile NAME] "
+           "[--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
            "[--context-cost-presets FILE] "
@@ -114,22 +143,15 @@ std::string serve_usage_text(const char* argv0) {
 
 ServeOptions parse_serve_options(int argc, char** argv) {
     ServeOptions options;
-    options.startup_argv.reserve(static_cast<std::size_t>(argc));
-    bool redact_next = false;
-    for (int i = 0; i < argc; ++i) {
-        if (redact_next) {
-            options.startup_argv.emplace_back("<redacted>");
-            redact_next = false;
-            continue;
-        }
-        options.startup_argv.emplace_back(argv[i] == nullptr ? "" : argv[i]);
-        redact_next = options.startup_argv.back() == "--api-key";
-    }
     bool default_max_tokens_explicit = false;
     bool kv_capacity_explicit        = false;
     bool context_capacity_explicit   = false;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         options.help_requested = true;
+        return options;
+    }
+    if (argc >= 2 && std::string_view(argv[1]) == "--version") {
+        options.version_requested = true;
         return options;
     }
     if (argc < 2) { throw std::invalid_argument("artifact path is required"); }
@@ -151,6 +173,17 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             if (options.model_id_override->empty()) {
                 throw std::invalid_argument("--model-id must not be empty");
             }
+        } else if (arg == "--binary-sha256") {
+            options.binary_sha256 =
+                parse_sha256(require_value("--binary-sha256"), "--binary-sha256");
+        } else if (arg == "--artifact-sha256") {
+            options.artifact_sha256 =
+                parse_sha256(require_value("--artifact-sha256"), "--artifact-sha256");
+        } else if (arg == "--config-sha256") {
+            options.config_sha256 =
+                parse_sha256(require_value("--config-sha256"), "--config-sha256");
+        } else if (arg == "--deployment-profile") {
+            options.deployment_profile = parse_profile_name(require_value("--deployment-profile"));
         } else if (arg == "--max-context") {
             options.max_context = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--max-context"), "max-context"));

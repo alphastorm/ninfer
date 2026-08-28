@@ -664,17 +664,21 @@ struct RuntimeStats {
     // Tokens committed by decode rounds; the first token emitted by prefill is excluded.
     std::uint64_t committed_decode_tokens = 0;
     // Decode batch executions and the sum of their batch sizes.
-    std::uint64_t decode_rounds             = 0;
-    std::uint64_t decode_row_rounds         = 0;
-    std::uint32_t running_requests          = 0;
-    std::uint32_t prefilling_requests       = 0;
-    std::uint32_t decode_ready_requests     = 0;
-    std::uint32_t waiting_requests          = 0;
-    std::uint32_t materializing_requests    = 0;
-    std::uint32_t capture_pending_requests  = 0;
-    std::uint32_t terminal_pending_requests = 0;
-    std::uint64_t active_captures_completed = 0;
-    std::uint64_t active_captures_aborted   = 0;
+    std::uint64_t decode_rounds               = 0;
+    std::uint64_t decode_row_rounds           = 0;
+    std::uint64_t speculative_rounds          = 0;
+    std::uint64_t speculative_drafted_tokens  = 0;
+    std::uint64_t speculative_accepted_tokens = 0;
+    std::uint64_t speculative_fallback_steps  = 0;
+    std::uint32_t running_requests            = 0;
+    std::uint32_t prefilling_requests         = 0;
+    std::uint32_t decode_ready_requests       = 0;
+    std::uint32_t waiting_requests            = 0;
+    std::uint32_t materializing_requests      = 0;
+    std::uint32_t capture_pending_requests    = 0;
+    std::uint32_t terminal_pending_requests   = 0;
+    std::uint64_t active_captures_completed   = 0;
+    std::uint64_t active_captures_aborted     = 0;
 
     std::uint64_t root_selections                    = 0;
     std::uint64_t private_endpoint_selections        = 0;
@@ -683,6 +687,7 @@ struct RuntimeStats {
     std::uint64_t private_long_anchor_selections     = 0;
     std::uint64_t shared_stable_prefix_selections    = 0;
     std::uint64_t reused_prompt_tokens               = 0;
+    PrefixReusePath last_selected_reuse_path         = PrefixReusePath::Root;
     std::uint32_t last_selected_frontier_tokens      = 0;
 
     std::uint64_t state_moves     = 0;
@@ -732,8 +737,11 @@ struct RuntimeStats {
     std::uint64_t pressure_searches                    = 0;
     std::uint64_t pressure_search_budget_exhaustions   = 0;
     std::uint64_t pressure_maximal_fallback_selections = 0;
+    std::uint32_t private_catalog_occupied             = 0;
+    std::uint32_t shared_catalog_occupied              = 0;
     std::uint32_t shared_active_references             = 0;
     std::uint64_t historical_fork_hits                 = 0;
+    std::uint64_t last_predicted_materialization_ns    = 0;
     double actual_context_transfer_seconds             = 0.0;
 };
 

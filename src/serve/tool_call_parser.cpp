@@ -6,10 +6,15 @@
 #include <array>
 #include <cctype>
 #include <cstdio>
+#include <optional>
 #include <random>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <utility>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
 
 namespace ninfer::serve {
 namespace {
