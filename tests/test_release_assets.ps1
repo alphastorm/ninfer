@@ -173,6 +173,7 @@ try {
     Assert-True ([string]$crlfReceipt.package_file -ceq "$assetStem.zip") 'CRLF package filename mismatch'
 
     $expectedAssets = @(
+        'Control-GpuOwner.ps1',
         'Control-Release.ps1',
         'Install-Release.ps1',
         'SHA256SUMS',
@@ -186,7 +187,7 @@ try {
     }
 
     $sumLines = @(Get-Content -LiteralPath (Join-Path $out 'SHA256SUMS') -Encoding UTF8)
-    Assert-True ($sumLines.Count -eq 4) 'SHA256SUMS must cover four non-self assets'
+    Assert-True ($sumLines.Count -eq 5) 'SHA256SUMS must cover five non-self assets'
     foreach ($line in $sumLines) {
         if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw 'invalid SHA256SUMS line' }
         $asset = Join-Path $out $Matches[2]
@@ -201,12 +202,14 @@ try {
     Assert-True ($payloads.Count -eq 1) 'archive does not contain exactly one release root'
     $payload = $payloads[0].FullName
     Assert-True (Test-Path -LiteralPath (Join-Path $payload 'New-QualificationReceipt.ps1') -PathType Leaf) 'package omitted the qualification receipt constructor'
+    Assert-True (Test-Path -LiteralPath (Join-Path $payload 'Control-GpuOwner.ps1') -PathType Leaf) 'package omitted the generic GPU-owner controller'
     foreach ($name in @('golden_equivalent.py', 'golden_equivalent_extension.ts', 'golden_equivalent_contract.json')) {
         Assert-True (Test-Path -LiteralPath (Join-Path $payload "smoke\$name") -PathType Leaf) "package omitted source-controlled Golden-equivalent asset: $name"
     }
     $manifest = Get-Content -LiteralPath (Join-Path $payload 'release-manifest.json') -Raw | ConvertFrom-Json
     Assert-True ([string]$manifest.release_version -ceq '0.1.0') 'manifest semantic version mismatch'
     Assert-True ([string]$manifest.asset_filename -ceq "$assetStem.zip") 'manifest asset filename mismatch'
+    Assert-True ([string]$manifest.gpu_owner_controller_sha256 -cmatch '^[0-9a-f]{64}$') 'manifest omitted the generic GPU-owner controller identity'
 
     $packagedConfigPath = Join-Path $payload 'server-config.json'
     Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $packagedConfigPath).Hash.ToLowerInvariant() -ceq $canonicalConfigSha256) 'LF input did not produce the qualified config bytes'

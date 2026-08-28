@@ -28,6 +28,11 @@ if(WIN32)
       -File "${PROJECT_SOURCE_DIR}/tests/test_release_assets.ps1"
       -PackageBuilderPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/New-Package.ps1"
       -ServerConfigPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/server-config.json")
+  add_test(
+    NAME ninfer_generic_gpu_owner_test
+    COMMAND powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+      -File "${PROJECT_SOURCE_DIR}/tests/test_generic_gpu_owner.ps1"
+      -ControllerPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/Control-GpuOwner.ps1")
 endif()
 
 function(ninfer_add_test name)

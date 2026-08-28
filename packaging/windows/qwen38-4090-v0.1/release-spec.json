@@ -66,7 +66,9 @@
       "inherited_on_upgrade": true,
       "actions": ["status", "stop", "start"],
       "status_paused_field": "paused",
-      "installation": "managed-copy-with-sha256"
+      "installation": "managed-copy-with-sha256",
+      "published_default": "Control-GpuOwner.ps1",
+      "published_default_mode": "idle-host-fail-closed-on-active-compute-owner"
     },
     "production_route_mutation": false,
     "docker_mutation": false,

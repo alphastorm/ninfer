@@ -17,7 +17,7 @@ param(
     [string]$ApiKeyFile,
 
     [Parameter(ParameterSetName = 'Install')]
-    [string]$GpuOwnerControllerPath,
+    [string]$GpuOwnerControllerPath = (Join-Path $PSScriptRoot 'Control-GpuOwner.ps1'),
 
     [string]$StateRoot = (Join-Path $env:ProgramData 'NInfer\qwen38-4090'),
 
