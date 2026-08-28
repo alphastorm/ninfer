@@ -60,8 +60,9 @@ jobs:
           [[ "$GITHUB_REPOSITORY" == "alphastorm/ninfer" ]]
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          [[ "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-qwen38-5090-beta\.[1-9][0-9]*$ ]]
+          [[ "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-qwen38-5090-beta\.([1-9][0-9]*)$ ]]
           release_version="${BASH_REMATCH[1]}"
+          beta_number="${BASH_REMATCH[2]}"
           [[ "$BINARY_ASSET" =~ ^ninfer-qwen38-rtx5090-v([0-9]+\.[0-9]+\.[0-9]+)-linux-x86_64-cuda13\.1\.tar\.gz$ ]]
           [[ "${BASH_REMATCH[1]}" == "$release_version" ]]
           git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
@@ -70,13 +71,9 @@ jobs:
           [[ "$(gh release view "$RELEASE_TAG" --json tagName --jq .tagName)" == "$RELEASE_TAG" ]]
           [[ "$(gh release view "$RELEASE_TAG" --json isPrerelease --jq .isPrerelease)" == "true" ]]
           [[ "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" == "false" ]]
-          receipt_name="ninfer-runtime-image-$RELEASE_TAG.json"
-          release_assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
-          if grep -Fqx "$receipt_name" <<<"$release_assets"; then
-            echo "refusing to replace existing image receipt" >&2
-            exit 1
-          fi
+          runtime_release_tag="v$release_version-qwen38-5090-runtime-beta.$beta_number"
           printf 'RELEASE_VERSION=%s\n' "$release_version" >> "$GITHUB_ENV"
+          printf 'RUNTIME_RELEASE_TAG=%s\n' "$runtime_release_tag" >> "$GITHUB_ENV"
 
       - name: Download and verify binary release
         shell: bash
@@ -176,6 +173,7 @@ jobs:
           jq -n \
             --arg source_commit "$SOURCE_COMMIT" \
             --arg release_tag "$RELEASE_TAG" \
+            --arg runtime_release_tag "$RUNTIME_RELEASE_TAG" \
             --arg binary_asset "$BINARY_ASSET" \
             --arg binary_sha256 "$BINARY_SHA256" \
             --arg base_image "$BASE_IMAGE" \
@@ -185,9 +183,10 @@ jobs:
             --arg workflow_url "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             '{
               artifact_type: "ninfer_runtime_image_publication_receipt",
-              schema_version: 2,
+              schema_version: 3,
               source_commit: $source_commit,
               release_tag: $release_tag,
+              runtime_release_tag: $runtime_release_tag,
               binary_asset: $binary_asset,
               binary_sha256: $binary_sha256,
               base_image: $base_image,
@@ -206,16 +205,30 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish immutable digest receipt
+      - name: Publish immutable runtime attestation prerelease
         shell: bash
         run: |
           set -euo pipefail
           receipt="$RUNTIME_ROOT/ninfer-runtime-image-$RELEASE_TAG.json"
+          gh release create "$RUNTIME_RELEASE_TAG" "$receipt" \
+            --target "$SOURCE_COMMIT" \
+            --draft \
+            --prerelease \
+            --title "NInfer $RELEASE_VERSION Qwen3.8 RTX 5090 runtime beta" \
+            --notes "Digest-addressed linux/amd64 CUDA 13.1 runtime image built from $RELEASE_TAG. No mutable consumer tag is published; use image_reference from the receipt."
+          release_json="$(gh release view "$RUNTIME_RELEASE_TAG" --json isDraft,isPrerelease,targetCommitish,assets)"
+          [[ "$(jq -r .isDraft <<<"$release_json")" == "true" ]]
+          [[ "$(jq -r .isPrerelease <<<"$release_json")" == "true" ]]
+          [[ "$(jq -r .targetCommitish <<<"$release_json")" == "$SOURCE_COMMIT" ]]
+          receipt_sha256="$(sha256sum "$receipt" | cut -d' ' -f1)"
+          asset_digest="$(jq -er --arg name "$(basename "$receipt")" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
+          [[ "$asset_digest" == "sha256:$receipt_sha256" ]]
           {
             echo '## NInfer runtime image'
             echo
             echo "- Source: \`$SOURCE_COMMIT\`"
             echo "- Image: \`$IMAGE_REPOSITORY@$IMAGE_DIGEST\`"
-            echo "- Release: \`$RELEASE_TAG\`"
+            echo "- Binary release: \`$RELEASE_TAG\`"
+            echo "- Runtime release: \`$RUNTIME_RELEASE_TAG\`"
           } >> "$GITHUB_STEP_SUMMARY"
-          gh release upload "$RELEASE_TAG" "$receipt"
+          gh release edit "$RUNTIME_RELEASE_TAG" --draft=false --prerelease
