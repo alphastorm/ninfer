@@ -309,6 +309,7 @@ endif()
 # directories contribute their sources directly to this single compile owner below.
 add_library(ninfer_engine STATIC
   targets/registry.cpp
+  runtime/contract/checkpoint_io.cpp
   runtime/contract/sampling.cpp
   runtime/engine/engine.cpp)
 ninfer_internal_includes(ninfer_engine)
