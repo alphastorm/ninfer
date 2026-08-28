@@ -76,6 +76,15 @@ ninfer_add_test(ninfer_resource_manager_test SOURCES test_resource_manager.cpp)
 ninfer_add_test(ninfer_checkpoint_io_contract_test
   SOURCES test_checkpoint_io_contract.cpp
   LIBRARIES ninfer_checkpoint_contract)
+ninfer_add_test(ninfer_direct_storage_checkpoint_backend_test
+  SOURCES test_direct_storage_checkpoint_backend.cpp
+          ${PROJECT_SOURCE_DIR}/src/runtime/windows/direct_storage_checkpoint_backend.cpp
+  LIBRARIES ninfer_checkpoint_contract)
+if(WIN32)
+  ninfer_add_test(ninfer_direct_storage_checkpoint_windows_test
+    SOURCES test_direct_storage_checkpoint_windows.cpp
+    LIBRARIES ninfer_checkpoint_directstorage)
+endif()
 ninfer_add_test(ninfer_kv_capacity_test SOURCES test_kv_capacity.cpp)
 ninfer_add_test(ninfer_sampling_defaults_test
   SOURCES test_sampling_defaults.cpp

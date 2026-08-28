@@ -1,0 +1,37 @@
+{
+  "artifact_type": "ninfer_directstorage_windows_qualification",
+  "schema_version": 1,
+  "status": "passed",
+  "recorded_utc": "2026-08-28T10:26:58Z",
+  "source_commit": "fdb81a20ea0fd0942e062d747501bb424376b9ba",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "driver": "610.88",
+    "storage": "local NTFS temporary qualification root"
+  },
+  "toolchain": {
+    "msvc": "19.44.35228",
+    "cuda": "13.3.73",
+    "directstorage": "1.3.0",
+    "directstorage_package_sha256": "8ab6c1082537565388b79050d94fdd7f5f437cd0f1d909e7b19f786042b97177"
+  },
+  "test_executable_sha256": "08abcf85e968c09b62af2f26e25d9b36cd4b756e37de93f4c821551cb8553755",
+  "checks": {
+    "directstorage_host_memory_round_trip": "passed",
+    "canonical_manifest_and_payload_integrity": "passed",
+    "corrupt_manifest_load_rejection": "passed",
+    "corrupt_manifest_generation_floor": "passed",
+    "trusted_replacement_after_quarantine": "passed",
+    "cross_process_lock_timeout": "passed",
+    "reparse_staging_rejection": "passed",
+    "external_target_preserved": "passed"
+  },
+  "effects": {
+    "production_route_mutated": false,
+    "qualification_root_removed": true
+  },
+  "limitations": [
+    "This proves the standalone frozen checkpoint backend on physical Windows, NTFS, DirectStorage, D3D12, CUDA, and local NVMe-class storage.",
+    "It does not yet prove stop/resume integration with a live model runtime or a forced TDR fail-stop path."
+  ]
+}
