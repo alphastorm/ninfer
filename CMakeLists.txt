@@ -23,8 +23,6 @@ set(NINFER_UPSTREAM_BASE_SHA "unknown" CACHE STRING "Exact upstream base commit"
 set(NINFER_PATCH_STACK_SHA "auto" CACHE STRING "Exact patch-stack commit or auto")
 set(NINFER_SOURCE_DIRTY "auto" CACHE STRING "Source-dirty identity: auto or ON")
 set_property(CACHE NINFER_SOURCE_DIRTY PROPERTY STRINGS auto ON)
-option(NINFER_SOURCE_CLEAN_VERIFIED
-  "Lifecycle verified an exact clean commit archive when Git metadata is absent" OFF)
 
 set(NINFER_PATCH_STACK_SHA_RESOLVED "${NINFER_PATCH_STACK_SHA}")
 # Unknown source state is conservatively dirty. A successful Git status or an explicit lifecycle
@@ -55,14 +53,6 @@ if(Git_FOUND AND EXISTS "${PROJECT_SOURCE_DIR}/.git")
 else()
   if(NINFER_PATCH_STACK_SHA STREQUAL "auto")
     set(NINFER_PATCH_STACK_SHA_RESOLVED "unknown")
-  endif()
-  if(NINFER_SOURCE_CLEAN_VERIFIED)
-    if(NINFER_PATCH_STACK_SHA_RESOLVED STREQUAL "unknown" OR
-       NINFER_UPSTREAM_BASE_SHA STREQUAL "unknown")
-      message(FATAL_ERROR
-        "NINFER_SOURCE_CLEAN_VERIFIED requires exact upstream and patch-stack SHAs")
-    endif()
-    set(NINFER_SOURCE_DIRTY_BOOL 0)
   endif()
 endif()
 
