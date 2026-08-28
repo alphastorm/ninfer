@@ -40,6 +40,11 @@ release gate and require their own serviced-loop evidence.
 
 ### Qualified beta result
 
+> [!IMPORTANT]
+> The post-review source candidate is pending the complete requalification listed in the adjacent
+> machine-readable receipt. The values below are the prior qualified baseline, not a claim for
+> remediated source bytes.
+
 The immutable `a796e21d057f` package is beta-qualified on one RTX 3090 with driver 616.56:
 
 | Gate | Result |

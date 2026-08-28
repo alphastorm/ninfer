@@ -1,123 +1,28 @@
 {
   "artifact_type": "ninfer_rtx3090_beta_qualification",
   "schema_version": 1,
-  "status": "passed",
-  "beta_qualified": true,
-  "qualified_utc": "2026-08-28T21:31:31Z",
-  "support_level": "beta",
-  "identity": {
+  "status": "candidate_pending_requalification",
+  "beta_qualified": false,
+  "invalidated_utc": "2026-08-28T22:37:25Z",
+  "reason": "Post-review source remediation changed checkpoint deletion semantics and the public Windows package/lifecycle contract; prior package evidence cannot qualify the new candidate.",
+  "previous_qualified_candidate": {
     "source_commit": "a796e21d057f4c57910d5d6af79eb682bd99cf5c",
-    "source_dirty": false,
     "server_binary_sha256": "381c65d142f9c9ab8c5c9f17c6e80d87658ebb667ff60f55f25c960f986df8f3",
-    "cli_binary_sha256": "ac56ad0e0226bf92c3e48f57f148c69ebb689372cf8c4eef70aa0dbe1d43a303",
-    "benchmark_binary_sha256": "3024f17807bb8ebfde52589695b8ab2bb7b204485b14585fe76f2c8f3cb28cd8",
-    "configuration_sha256": "9a6ddc78992d6342913d991d26dfae26fc1a58f228746aa6d3b914067f4a1479",
-    "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
-    "deployment_profile": "qwen38-3090-omp-v0.2.0-c1",
-    "cuda_architecture": "sm_86",
-    "hardware": "NVIDIA GeForce RTX 3090",
-    "vram_mib": 24576,
-    "driver_version": "616.56",
-    "qualified_power_limit_w": 300
+    "package_sha256": "96c09f6b6f813328ecf38e0e5dcb2e7ea59e887dec7dd319b64d03d34e4b7325"
   },
-  "package": {
-    "filename": "ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.tar.gz",
-    "sha256": "96c09f6b6f813328ecf38e0e5dcb2e7ea59e887dec7dd319b64d03d34e4b7325",
-    "bytes": 813803399,
-    "source_archive": {
-      "filename": "ninfer-rtx3090-omp-v0.2.0-source.tar.gz",
-      "sha256": "0480e31776c741405efc671952dcdc1dcaf2f92ba53d2768be2409ef28e5ca18"
-    },
-    "sbom": {
-      "filename": "ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.spdx.json",
-      "sha256": "7c315b64b95bc8f0012c9f5edb5635b87ae93fb683e08a5827b59f66c52850bb"
-    },
-    "checksums_sha256": "bf942e2406e7ab4ba942a8ebe8d1e93d3b31901de79f239359120c06df3bce59",
-    "build_receipt_sha256": "0a04f5de1f7a6a856222c626405a2c6a0f02d82e0a0e15831b78d5f28f3d76e5"
-  },
-  "gates": {
-    "packaged_agent_protocol": {
-      "status": "passed",
-      "checks_passed": 15,
-      "checks_total": 15,
-      "server_binary_sha256": "381c65d142f9c9ab8c5c9f17c6e80d87658ebb667ff60f55f25c960f986df8f3",
-      "receipt_sha256": "40ea58437b52fdce19c9ab1553b0863a1b888c8212f4f6bb843f6141e0d2d9f7"
-    },
-    "omp_client_end_to_end": {
-      "status": "passed",
-      "omp_version": "omp/18.0.9",
-      "platform": "windows-x64",
-      "client_archive_sha256": "0256dc25174766c5cdaca23e4e4361e0b95295cd05a075089a6bbf10de170ef9",
-      "client_binary_sha256": "cd107c9b89d351d0a6c2243ba9f89a7db97a5e2cbb60213a6f984399bd135a81",
-      "typed_read_tool_call": true,
-      "linked_tool_result": true,
-      "exact_visible_final_answer": true,
-      "agent_end": true,
-      "raw_transcript_included": false
-    },
-    "exact_context_64k": {
-      "status": "passed",
-      "prompt_tokens": 64512,
-      "completion_tokens": 17,
-      "exact_retrieval": true,
-      "elapsed_seconds": 81.40393249999761,
-      "fixture_sha256": "7160fdf1aff52cd79b5e35efa829e7ef43004fe61aa86136a3bf0adef9cc03f4",
-      "receipt_sha256": "6fdf4331dac97229b07c8b265117526692c60759609a4fd5d138f15a51dde216"
-    },
-    "process_restart_checkpoint": {
-      "status": "passed",
-      "checkpoint_files": 17,
-      "checkpoint_bytes": 622726133,
-      "input_tokens": 69,
-      "cached_tokens": 45,
-      "completion_tokens": 15,
-      "continuation_elapsed_seconds": 3.3513291999988724,
-      "receipt_sha256": "750d5543d05d3caaf06a8b96ec369bbc167cde533e695165e9e78fe2d45f96a6"
-    },
-    "bounded_performance": {
-      "status": "passed",
-      "power_limit_w": 300,
-      "decode_tokens_per_second": 76.4328650511634,
-      "end_to_end_output_tokens_per_second": 75.49321100761018,
-      "mtp_acceptance_percent": 71.34083930399181,
-      "prefill_tokens_per_second": 947.5717360549367,
-      "peak_gpu_memory_mib": 20511,
-      "receipt_sha256": "28153f1e45209090e92d496412b7c92c488ce0a062e01a10d0105197a5fc80a4"
-    },
-    "managed_rollback": {
-      "status": "passed",
-      "directions": 2,
-      "health_after_each_transition": "ok",
-      "gpu_owner_paused_during_candidate": true,
-      "receipt_sha256": "2b561861b389ef639c1843a96448940bf5b1449501a88e6e68fe983327346049"
-    }
-  },
-  "evidence_reuse": {
-    "behavioral_source_commit": "2ec58924d9e0cb64ff702da35ceda7c3fc30f5fd",
-    "behavioral_server_binary_sha256": "e1b988d760a330eaa6511ee2c75bd75c33f9b365fb095264735cfcb48266f0fe",
-    "final_source_commit": "a796e21d057f4c57910d5d6af79eb682bd99cf5c",
-    "runtime_source_paths_changed": false,
-    "post_qualification_scope": "Packaging, qualification assets, tests, release tooling, and operator documentation only",
-    "final_binary_relinked_for_source_identity": true,
-    "final_packaged_protocol_repeated": true
-  },
-  "automatic_role_corpus": {
-    "status": "not-qualified-not-a-product-gate",
-    "corpus_sha256": "7be1bd85dca30c3689ed351d6a60546b46ed6c430269d0786e28b551778a7617",
-    "reasoning_mode": "no-think",
-    "supported_responses_completed": 84,
-    "structured_output_requests_rejected": 5,
-    "automatic_route_activation_allowed": false,
-    "interpretation": "This internal corpus gates unattended evidence-role activation, not interactive OMP beta support. The route remains disabled because its automatic-use quality floor did not pass."
-  },
-  "limitations": [
-    "Windows 11 x64 and one active request are the qualified runtime topology.",
-    "Structured response_format JSON-schema output is unsupported and fails closed.",
-    "CPU-heavy, mixed-load, and overnight thermal behavior was not qualified; the GPU-only gate used the existing host cooling policy at 300 W.",
-    "The internal unattended evidence-role corpus did not pass its separate automatic-use gate, so this release does not authorize that route."
+  "required_requalification": [
+    "clean sm_86 build and Windows release tests",
+    "immutable package and public support-asset hashes",
+    "packaged authenticated agent protocol",
+    "exact 64K context retrieval",
+    "process-restart checkpoint continuation including failed-delete durability",
+    "bounded performance at the qualified GPU cap",
+    "bidirectional managed rollback",
+    "OMP client typed-tool continuation",
+    "public-byte disclosure and credential scan"
   ],
-  "historical_private_corpus_reused": false,
+  "automatic_route_activation_allowed": false,
   "stable_promotion_performed": false,
-  "permanent_route_mutation": false,
-  "raw_prompts_outputs_or_secrets_included": false
+  "production_route_activation_performed": false,
+  "private_fleet_projection_included": false
 }
