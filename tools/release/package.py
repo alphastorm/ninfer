@@ -419,6 +419,10 @@ def write_source_archive(
         run(
             [
                 "git",
+                "-c",
+                "core.autocrlf=false",
+                "-c",
+                "core.eol=lf",
                 "archive",
                 "--format=tar",
                 f"--prefix={root}/",

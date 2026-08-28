@@ -67,6 +67,7 @@ def create_release_fixture(root: Path) -> tuple[Path, Path, str]:
     source.mkdir()
     binaries.mkdir()
     run_git(source, "init", "--quiet")
+    run_git(source, "config", "core.autocrlf", "false")
     run_git(source, "config", "user.name", "NInfer Test")
     run_git(source, "config", "user.email", "ninfer-test@example.invalid")
     for name, content in _SUPPORT_CONTENT.items():
