@@ -392,6 +392,26 @@ def streaming_and_session_checks(
         status_after_repeat = json_response(
             base_url, "GET", "/v1/ninfer/status", headers=status_headers
         )
+        scheduler_before = status_after_repeat.get("scheduler")
+        if not isinstance(scheduler_before, dict) or scheduler_before.get("max_concurrency") != 1:
+            raise ProtocolError(
+                "session-isolation telemetry requires an exclusive max_concurrency=1 endpoint"
+            )
+        if any(
+            scheduler_before.get(field) != 0
+            for field in (
+                "running",
+                "prefilling",
+                "decode_ready",
+                "waiting",
+                "materializing",
+                "capture_pending",
+            )
+        ):
+            raise ProtocolError("session-isolation telemetry endpoint was not quiescent")
+        decode_before = scheduler_before.get("committed_decode_tokens")
+        if not isinstance(decode_before, int):
+            raise ProtocolError("status omitted committed_decode_tokens")
         private_path = cache_reuse_path(status_after_repeat)
         if private_path not in _PRIVATE_REUSE_PATHS:
             raise ProtocolError(
@@ -403,10 +423,30 @@ def streaming_and_session_checks(
         isolated = json_response(
             base_url, "POST", "/v1/chat/completions", isolated_payload, headers=headers
         )
-        require_usage(isolated)
+        _, isolated_completion_tokens = require_usage(isolated)
         status_after_isolated = json_response(
             base_url, "GET", "/v1/ninfer/status", headers=status_headers
         )
+        scheduler_after = status_after_isolated.get("scheduler")
+        if not isinstance(scheduler_after, dict):
+            raise ProtocolError("status omitted scheduler after isolated request")
+        decode_after = scheduler_after.get("committed_decode_tokens")
+        if (
+            not isinstance(decode_after, int)
+            or decode_after - decode_before != max(0, isolated_completion_tokens - 1)
+            or any(
+                scheduler_after.get(field) != 0
+                for field in (
+                    "running",
+                    "prefilling",
+                    "decode_ready",
+                    "waiting",
+                    "materializing",
+                    "capture_pending",
+                )
+            )
+        ):
+            raise ProtocolError("session-isolation telemetry was not request-correlated")
         isolated_path = cache_reuse_path(status_after_isolated)
         if isolated_path in _PRIVATE_REUSE_PATHS:
             raise ProtocolError(
@@ -436,7 +476,13 @@ def responses_session_lifecycle(
     session_a: str,
     session_b: str,
 ) -> dict[str, Any]:
-    def create(label: str, text: str, previous: str | None = None) -> dict[str, Any]:
+    def create(
+        label: str,
+        text: str,
+        previous: str | None = None,
+        *,
+        expected_status: int = 200,
+    ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": model,
             "input": text,
@@ -448,7 +494,12 @@ def responses_session_lifecycle(
         if previous is not None:
             payload["previous_response_id"] = previous
         return json_response(
-            base_url, "POST", "/v1/responses", payload, headers=headers
+            base_url,
+            "POST",
+            "/v1/responses",
+            payload,
+            headers=headers,
+            expected_status=expected_status,
         )
 
     first = create("first", "Reply with one short word.")
@@ -559,6 +610,14 @@ def responses_session_lifecycle(
     )
     if error_code(missing) != "response_not_found":
         raise ProtocolError("deleted Responses parent remained addressable")
+    deleted_parent = create(
+        "deleted-parent",
+        "This continuation must be rejected.",
+        first_id,
+        expected_status=404,
+    )
+    if error_code(deleted_parent) != "previous_response_not_found":
+        raise ProtocolError("deleted parent used the wrong continuation not-found contract")
 
     surviving = create(
         "post-delete-continuation",
