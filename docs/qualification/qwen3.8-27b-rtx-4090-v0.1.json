@@ -13,49 +13,41 @@
     "cuda_architecture": "sm_89"
   },
   "source": {
-    "qualified_commit": "4e67e6f96f108a17abac7a324c23c5a96e71de32",
-    "package_source_commit": "69f03550d5c068ec5b89a75b1380bdeb96f45cc6",
+    "qualified_commit": "aa1030e5d1d2b91e374ffc84d087c6fa3ec8371f",
+    "package_source_commit": "f5c6bb9d5c5b9b73ef1496ef97a7282fa3b8cbda",
     "source_dirty": false,
-    "source_archive_sha256": "54d6ef81c134e2405a00e5a2a60885fde3d5431f206a2be9fef6986c8c27f0da",
-    "source_archive_bytes": 5225635,
-    "package_source_archive_sha256": "33da5cc5531238b1ba3822bf583e27d05d515980e1465e25f8e84429ed554ec5",
-    "package_source_archive_bytes": 5225598,
-    "runtime_cpp_changed_by_argument_fix": false
+    "source_archive_sha256": "9d43f5f83789dbce053aabddf3f6ff4e1e28eebd25601b2231d8dc1945b7cfbf",
+    "source_archive_bytes": 5227404,
+    "package_source_archive_sha256": "63c5c3cb9a0b80b58e411c140e789fb27f1e00a44e3abf38020fd219c0c2ff7e",
+    "package_source_archive_bytes": 5227381,
+    "runtime_cpp_changed_from_4e67e6f9": false,
+    "runtime_evidence_reusable": true
   },
   "identity": {
-    "binary_sha256": "bb77a5be24fcd2b8f78d598887bfe7c7516d78c4b7d33086c28deb639ac76388",
-    "binary_bytes": 230268416,
-    "config_sha256": "e7f86a4da23d17bc50b3c261263a636df2cf317a82f84b22bcae5d6a186e7623",
+    "binary_sha256": "43eff1c19fb788534466a51458e357f8f02bbee949ca4d6f3b605cfae177fa28",
+    "binary_bytes": 230208000,
+    "config_sha256": "ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db",
     "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
     "deployment_profile": "qwen38-4090-v0.1",
     "build_type": "Release",
     "cuda_toolkit": "13.3.73"
   },
   "package": {
-    "source_commit": "69f03550d5c068ec5b89a75b1380bdeb96f45cc6",
-    "sha256": "24b18e8949e08e049b87e60adb5c18eff3110cffb8db61c1e4743cde4005bbf7",
-    "bytes": 227410510,
+    "source_commit": "f5c6bb9d5c5b9b73ef1496ef97a7282fa3b8cbda",
+    "filename": "ninfer-4090-qwen38-v0.1.0-win-x64.zip",
+    "sha256": "9967166bc3c45ffe546933e2531a90c26d5225b271359201d10ea3b7c34d2a6f",
+    "bytes": 227349917,
     "runtime_dlls": 9,
     "sbom": {
       "filename": "ninfer-4090-qwen38-v0.1.0-win-x64.spdx.json",
-      "sha256": "8cf49b2fd693b0e6bf9892e4759b052170dd53bfb5ec4d11db01ad758adac6a3",
-      "files_analyzed": 25,
-      "scope": "Complete file inventory of the immutable release ZIP; dependency package enumeration is not claimed."
-    }
-  },
-  "sequential_unmasking": {
-    "first_red": "typed argument oracle rejected OMP output",
-    "diagnostic_receipt": "receipts/qwen3.8-27b-rtx-4090-golden-equivalent-argument-diagnostic.json",
-    "diagnostic_receipt_sha256": "8702fcd4aefccef8c35ee220a6a626cfdd4a48b1a9499e46efc5328157ac10d0",
-    "observed": {
-      "tool_calls": 2,
-      "extra_argument": "i",
-      "days_type": "string",
-      "metric_type": "string"
+      "spdx_version": "SPDX-2.3",
+      "sha256": "1826aadc5ef7edc0ce2900ec491d5c1e80331050985653dbcdf4a6c5dfc3b5d4",
+      "bytes": 21597,
+      "files_analyzed": 26,
+      "deterministic_regeneration": "passed"
     },
-    "nearest_cause": "OMP intent tracing injected i and z.literal emitted const-only schemas; NInfer correctly preserved absent-type values as strings.",
-    "fix": "Disable intent tracing in the isolated OMP profile and emit explicit string/integer/boolean schemas without weakening the exact-value scorer.",
-    "local_red_to_green_regression": "passed"
+    "generic_gpu_owner_controller_sha256": "c51e287216743dd4becd56f44678c27d9c5de3c5950014695afdc40c39b1aa82",
+    "asset_receipt": "receipts/qwen3.8-27b-rtx-4090-assets.json"
   },
   "golden_equivalent": {
     "artifact_type": "ninfer_omp_golden_equivalent_receipt",
@@ -68,7 +60,7 @@
     "fixture_provenance": "source-controlled synthetic fixture; the unavailable historical private corpus was not reused",
     "historical_private_corpus_reused": false,
     "omp_version": "omp/18.0.6",
-    "wall_seconds": 6.282964,
+    "wall_seconds": 7.262045,
     "raw_transcript_included": false,
     "gates": {
       "typed_tool_invocation": "passed",
@@ -79,27 +71,24 @@
     "final_visible_answer": "NINFER_GOLDEN_EQUIVALENT_OK|Paris|3|metric=true|18C|clear",
     "transcript_projection_sha256": "77f581081492b5a0b15a9667c557c20532e5461f998d854347e3019a19552a5a",
     "receipt": "receipts/qwen3.8-27b-rtx-4090-golden-equivalent.json",
-    "receipt_sha256": "e51f351dead50f9d2d3254c9c6542cf7baf9e7b678af4a546e5aba1883f38076"
+    "receipt_sha256": "2146d764ae300e54486e85e970343d126b48efb74432d16d18851b56df5ccb6a"
   },
   "inherited_live_evidence": {
+    "runtime_diff_class": "no CMake/include/src/apps/vcpkg manifest changes from qualified 4e67e6f9 runtime",
     "protocol_receipt_sha256": "fd1778e2493f87017952bd2def6c240dbadba62d42a4e0ba72d9fd349ad188b8",
     "checkpoint_receipt_sha256": "cf87019c2a8258aa8e05aae5d8b0d2f4908fddcffa0344e902da2488c47b75b6",
     "performance_receipt_sha256": "c73b1d4dd9d1482c4c7d1ede6355b5edd7d3fbc15039007df3ead948f3a2309d"
   },
   "release_gates": {
-    "G": {
-      "status": "passed",
-      "receipt_sha256": "e51f351dead50f9d2d3254c9c6542cf7baf9e7b678af4a546e5aba1883f38076"
-    },
+    "G": {"status": "passed", "receipt_sha256": "2146d764ae300e54486e85e970343d126b48efb74432d16d18851b56df5ccb6a"},
     "L": {
       "status": "passed",
-      "build_receipt_sha256": "3690afc6e65ea0ab653fb48409ba0882b646d06d34dbb34b163babcaac8343b7",
-      "package_receipt_sha256": "924920cf7cb3421ba6f30c6e7e0940a0828e37dce388f4e8330077d18b02d8c1"
+      "neutral_clean_build_receipt_sha256": "40fe2600f6e10d8aaa6a4b7e51ad4c1c8e2c3a6f5b675c884d3976132e255ed7",
+      "classifier_build_receipt_sha256": "ceda47f030f58f4746f43abd23d1196a6bafe7c75ce183fe2e2efde8af921258",
+      "package_receipt_sha256": "422a8c637a0bac29b52af94842b74732c4c729bb05389c60805ae85cc03ceffd",
+      "private_identifier_scan_receipt_sha256": "e04f8e098e56ede6889622eabee0c0e5247fac1bf0dfed044025e2331541f4e7"
     },
-    "R": {
-      "status": "passed",
-      "restore_receipt_sha256": "32a8e9c7da48e4dd046c9706c0539e3cc41b572eee21d3ed40b7bbfcc7876057"
-    }
+    "R": {"status": "passed", "restore_receipt_sha256": "488cb5b6bfc0445b121c9bad8c419eb62cc0cf3da59e6efa59c9862818928aaa"}
   },
   "restoration": {
     "status": "passed",
@@ -107,8 +96,14 @@
     "candidate_effects_absent": true,
     "private_fleet_projection_included": false
   },
+  "publication": {
+    "private_identifier_scan": "passed",
+    "staged_asset_findings": 0,
+    "tracked_source_findings": 0,
+    "public_release_performed": false
+  },
   "stable_release_performed": false,
   "stable_promotion_performed": false,
   "permanent_route_mutation": false,
-  "decision": "RTX 4090 support is beta-qualified at the exact identities above; no stable release or route mutation was performed."
+  "decision": "RTX 4090 support is beta-qualified at the exact generic-profile identities above; no stable or public release was performed."
 }

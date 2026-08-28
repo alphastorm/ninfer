@@ -1,19 +1,70 @@
 {
-  "artifact_type": "ninfer_release_asset_regression",
-  "schema_version": 1,
+  "artifact_type": "ninfer_public_release_asset_receipt",
+  "schema_version": 2,
   "status": "passed",
-  "assets": 5,
-  "payload_entries": 14,
-  "wrong_model_artifact_identity_rejections": 1,
-  "passed_red_gate_rejections": 1,
-  "hidden_payload_coverage": true,
-  "pinned_model_bytes": 18210531328,
-  "candidate_root_directories": 4,
-  "model_artifact_ownership": "external-pinned-read-only",
-  "interrupted_install_reentry": "repair-required",
-  "canonical_config_sha256": "d613fc71ebe30b799af4936af8f73b0f25ebd1a1486b55fdb59aaab5d884bb96",
-  "lf_config_normalizations": 1,
-  "crlf_config_normalizations": 1,
-  "wrong_config_semantic_rejections": 1,
-  "source_config_unchanged": true
+  "release_id": "qwen38-4090-v0.1",
+  "runtime_source": {
+    "commit": "aa1030e5d1d2b91e374ffc84d087c6fa3ec8371f",
+    "archive_sha256": "9d43f5f83789dbce053aabddf3f6ff4e1e28eebd25601b2231d8dc1945b7cfbf",
+    "archive_bytes": 5227404,
+    "runtime_cpp_changed_from_4e67e6f9": false
+  },
+  "package_source": {
+    "commit": "f5c6bb9d5c5b9b73ef1496ef97a7282fa3b8cbda",
+    "archive_sha256": "63c5c3cb9a0b80b58e411c140e789fb27f1e00a44e3abf38020fd219c0c2ff7e",
+    "archive_bytes": 5227381
+  },
+  "identity": {
+    "binary_sha256": "43eff1c19fb788534466a51458e357f8f02bbee949ca4d6f3b605cfae177fa28",
+    "binary_bytes": 230208000,
+    "config_sha256": "ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db",
+    "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
+    "deployment_profile": "qwen38-4090-v0.1"
+  },
+  "package": {
+    "filename": "ninfer-4090-qwen38-v0.1.0-win-x64.zip",
+    "sha256": "9967166bc3c45ffe546933e2531a90c26d5225b271359201d10ea3b7c34d2a6f",
+    "bytes": 227349917,
+    "files": 26
+  },
+  "sbom": {
+    "filename": "ninfer-4090-qwen38-v0.1.0-win-x64.spdx.json",
+    "spdx_version": "SPDX-2.3",
+    "sha256": "1826aadc5ef7edc0ce2900ec491d5c1e80331050985653dbcdf4a6c5dfc3b5d4",
+    "bytes": 21597,
+    "files_analyzed": 26,
+    "deterministic_regeneration": "passed"
+  },
+  "published_gpu_owner_controller": {
+    "filename": "Control-GpuOwner.ps1",
+    "sha256": "c51e287216743dd4becd56f44678c27d9c5de3c5950014695afdc40c39b1aa82",
+    "bytes": 2984,
+    "mode": "idle-host-fail-closed-on-active-compute-owner",
+    "actions": ["status", "stop", "start"],
+    "focused_test": "passed"
+  },
+  "assets": [
+    {"filename": "Control-GpuOwner.ps1", "sha256": "c51e287216743dd4becd56f44678c27d9c5de3c5950014695afdc40c39b1aa82", "bytes": 2984},
+    {"filename": "Control-Release.ps1", "sha256": "b754033d591f5141913bb57117b1ba86eefc7cdb913e98d04f553d407e02e529", "bytes": 29863},
+    {"filename": "Install-Release.ps1", "sha256": "817c4b0cfd0a36a7fd5c23bf97e989d476dfbfea9e7651000e5c4bc7a303c639", "bytes": 57907},
+    {"filename": "ninfer-4090-qwen38-v0.1.0-win-x64.spdx.json", "sha256": "1826aadc5ef7edc0ce2900ec491d5c1e80331050985653dbcdf4a6c5dfc3b5d4", "bytes": 21597},
+    {"filename": "ninfer-4090-qwen38-v0.1.0-win-x64.zip", "sha256": "9967166bc3c45ffe546933e2531a90c26d5225b271359201d10ea3b7c34d2a6f", "bytes": 227349917},
+    {"filename": "ninfer-4090-qwen38-v0.1.0-win-x64-qualification.json", "sha256": "920fe5d4c7f0d20f6a6a4c7385799497cf933ffb8257f166de7c1740d1409107", "bytes": 5230},
+    {"filename": "SHA256SUMS", "sha256": "945f348a6ada9ffb6b361ace992a61aaa4043b1b0ddd2f35e74cd3188437cdcc", "bytes": 592}
+  ],
+  "source_bound_receipts": {
+    "neutral_clean_build_sha256": "40fe2600f6e10d8aaa6a4b7e51ad4c1c8e2c3a6f5b675c884d3976132e255ed7",
+    "classifier_build_sha256": "ceda47f030f58f4746f43abd23d1196a6bafe7c75ce183fe2e2efde8af921258",
+    "package_sha256": "422a8c637a0bac29b52af94842b74732c4c729bb05389c60805ae85cc03ceffd",
+    "private_identifier_scan_sha256": "e04f8e098e56ede6889622eabee0c0e5247fac1bf0dfed044025e2331541f4e7"
+  },
+  "private_identifier_scan": {
+    "status": "passed",
+    "tracked_source_findings": 0,
+    "staged_asset_findings": 0,
+    "zip_members_scanned": 26,
+    "patterns_sha256": "a0c762d6f86f1141da7ccabd4b8492e60657784b1495a01079ddfc4f4f06b1e8"
+  },
+  "historical_private_corpus_reused": false,
+  "stable_release_performed": false
 }

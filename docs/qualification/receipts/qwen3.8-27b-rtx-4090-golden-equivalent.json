@@ -9,14 +9,14 @@
     "historical_private_corpus_reused": false
   },
   "identity": {
-    "binary_sha256": "bb77a5be24fcd2b8f78d598887bfe7c7516d78c4b7d33086c28deb639ac76388",
+    "binary_sha256": "43eff1c19fb788534466a51458e357f8f02bbee949ca4d6f3b605cfae177fa28",
     "build_profile": "qwen38-4090-v0.1",
     "build_type": "Release",
-    "config_sha256": "e7f86a4da23d17bc50b3c261263a636df2cf317a82f84b22bcae5d6a186e7623",
+    "config_sha256": "ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db",
     "cuda_architecture": "89",
     "deployment_profile": "qwen38-4090-v0.1",
     "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
-    "patch_stack_sha": "4e67e6f96f108a17abac7a324c23c5a96e71de32",
+    "patch_stack_sha": "aa1030e5d1d2b91e374ffc84d087c6fa3ec8371f",
     "source_dirty": false,
     "upstream_base_sha": "9ec1b82c7afa021314682d7a95390f8935ead7c2"
   },
@@ -24,7 +24,7 @@
     "tool_name": "ninfer_golden_weather_lookup",
     "transport": "openai-completions",
     "version": "omp/18.0.6",
-    "wall_seconds": 6.282964
+    "wall_seconds": 7.262045
   },
   "oracles": {
     "exact_visible_final_answer": "passed",
@@ -40,7 +40,7 @@
     "typed_argument_oracle": "passed",
     "typed_tool_invocation": "passed"
   },
-  "qualified_utc": "2026-08-28T21:07:11.075146+00:00",
+  "qualified_utc": "2026-08-28T23:09:56.810266+00:00",
   "raw_transcript_included": false,
   "schema_version": 1,
   "status": "passed"
