@@ -22,7 +22,10 @@ payload by **packaging/windows/qwen38-3090-omp-v0.2/New-Package.ps1**. The relea
 profile **omp-v0.2.0-rtx3090**, CUDA architecture **sm_86**, and the pinned Qwen3.8 artifact identity
 in the release specification. The three executables and every declared app-local DLL are covered by
 the inner and outer SHA-256 manifests. Package and checksum values are emitted in
-**package-build-receipt.json** at build time; hardware qualification remains a separate gate.
+**package-build-receipt.json** at build time. That immutable build receipt deliberately remains
+`hardware-pending`; the external
+[beta qualification receipt](qualification/receipts/qwen3.8-27b-rtx-3090-v0.2.0.json) closes the
+hardware gate without rebuilding or rebinding the package.
 
 The default C1 profile binds to **127.0.0.1**, requires a one-line API-key file, uses 65,536 maximum
 context, automatic INT8 KV capacity, a 1,024-token prefill chunk, MTP3, and authenticated durable
@@ -34,6 +37,25 @@ Hardware qualification is GPU-only at the host's qualified 300 W cap. It covers 
 context, process restart, performance, and lifecycle rollback while the existing FanControl/HWiNFO
 policy remains authoritative. CPU-heavy, mixed-load, and overnight thermal claims are outside this
 release gate and require their own serviced-loop evidence.
+
+### Qualified beta result
+
+The immutable `a796e21d057f` package is beta-qualified on one RTX 3090 with driver 616.56:
+
+| Gate | Result |
+| --- | --- |
+| Packaged serving protocol | 15/15 checks, including authenticated stateful continuation |
+| OMP client | OMP 18.0.9 emitted one typed `read` call, linked its result, and returned the exact visible marker |
+| Long context | 64,512 prompt tokens with exact retrieval |
+| Process restart | 622,726,133 checkpoint bytes restored; 45 cached tokens; 3.35 s continuation |
+| Decode | 76.43 tok/s for 1,024 output tokens at 71.34% MTP acceptance |
+| Prefill | 947.57 tok/s over 4,403 prompt tokens |
+| Peak GPU memory | 20,511 MiB |
+| Rollback | both active/previous directions returned healthy at the 300 W cap |
+
+This support claim is interactive OMP beta support, not authorization for an unattended evidence
+role. The separate frozen automatic-use corpus did not meet its quality floor, so that route remains
+disabled. JSON-schema `response_format` is also unsupported and rejected rather than ignored.
 
 Run the installer from an elevated PowerShell session with the exact package hash from the emitted
 SHA256SUMS file:
