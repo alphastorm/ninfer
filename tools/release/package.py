@@ -62,6 +62,26 @@ _WINDOWS_SUPPORT_FILES = (
     ("LICENSE", "LICENSE", 0o644),
     ("RELEASE_NOTES_0.6.1.md", "RELEASE_NOTES.md", 0o644),
     ("README.md", "README.md", 0o644),
+    (
+        "packaging/windows/qwen38-3090-omp-v0.2/Install-Release.ps1",
+        "Install-Release.ps1",
+        0o644,
+    ),
+    (
+        "packaging/windows/qwen38-3090-omp-v0.2/Control-Release.ps1",
+        "Control-Release.ps1",
+        0o644,
+    ),
+    (
+        "packaging/windows/qwen38-3090-omp-v0.2/New-QualificationReceipt.ps1",
+        "New-QualificationReceipt.ps1",
+        0o644,
+    ),
+    (
+        "packaging/windows/qwen38-3090-omp-v0.2/release-spec.json",
+        "release-spec.json",
+        0o644,
+    ),
 )
 
 
@@ -208,8 +228,10 @@ class ReleaseOptions:
     upstream_base_sha: str
     release_head_sha: str
     build_profile: str
+    lineage_base_sha: str | None = None
     source_date_epoch: int | None = None
     runtime_dependencies: tuple[Path, ...] = ()
+    windows_server_config: Path | None = None
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -247,12 +269,20 @@ def validate_options(options: ReleaseOptions) -> tuple[dict[str, str], int]:
         fail("Windows release requires app-local runtime dependencies")
     if not windows and options.runtime_dependencies:
         fail("runtime dependencies are only accepted for Windows releases")
+    if windows and options.windows_server_config is None:
+        fail("Windows release requires an exact server configuration")
+    if not windows and options.windows_server_config is not None:
+        fail("server configuration is only accepted for Windows releases")
+    if options.lineage_base_sha is not None and not _GIT_SHA_RE.fullmatch(
+        options.lineage_base_sha
+    ):
+        fail("lineage base must be a full lowercase Git SHA")
     dependency_names: set[str] = set()
     for dependency in options.runtime_dependencies:
         resolved = dependency.resolve()
         if (
             not resolved.is_file()
-            or resolved.is_symlink()
+            or dependency.is_symlink()
             or resolved.suffix.lower() != ".dll"
             or not _NAME_RE.fullmatch(resolved.name)
             or resolved.name.lower() in dependency_names
@@ -266,6 +296,40 @@ def validate_options(options: ReleaseOptions) -> tuple[dict[str, str], int]:
     commit_epoch = verify_source(
         source, options.upstream_base_sha, options.release_head_sha
     )
+    if options.lineage_base_sha is not None:
+        try:
+            lineage = subprocess.run(
+                [
+                    "git",
+                    "merge-base",
+                    "--is-ancestor",
+                    options.lineage_base_sha,
+                    options.release_head_sha,
+                ],
+                cwd=source,
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except FileNotFoundError as error:
+            raise ReleaseError("required executable is unavailable: git") from error
+        if lineage.returncode != 0:
+            fail("lineage base is unavailable or is not an ancestor of the release head")
+    if options.windows_server_config is not None:
+        config = options.windows_server_config
+        resolved_config = config.resolve()
+        if (
+            not resolved_config.is_file()
+            or config.is_symlink()
+            or resolved_config.suffix.lower() != ".json"
+        ):
+            fail("Windows server configuration is missing or unsafe")
+        try:
+            config_value = json.loads(resolved_config.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            raise ReleaseError("Windows server configuration is not valid UTF-8 JSON") from error
+        if not isinstance(config_value, dict):
+            fail("Windows server configuration must be a JSON object")
     identities = [
         parse_build_info(options.ninfer.resolve(), "ninfer"),
         parse_build_info(options.ninfer_serve.resolve(), "ninfer-serve"),
@@ -570,6 +634,20 @@ def package_release(options: ReleaseOptions) -> dict[str, object]:
             )
             for committed, destination, mode in support_manifest
         ]
+        configuration_file = None
+        if options.windows_server_config is not None:
+            try:
+                configuration_bytes = options.windows_server_config.resolve().read_bytes()
+                configuration_value = json.loads(configuration_bytes.decode("utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError) as error:
+                raise ReleaseError(
+                    "Windows server configuration changed or became unreadable while packaging"
+                ) from error
+            if not isinstance(configuration_value, dict):
+                fail("Windows server configuration must remain a JSON object")
+            configuration_file = ReleaseFile.from_bytes(
+                f"{binary_root}/server-config.json", 0o644, configuration_bytes
+            )
         identity_value = {
             "artifact_type": "ninfer_release_build_identity",
             "schema_version": 2,
@@ -589,6 +667,10 @@ def package_release(options: ReleaseOptions) -> dict[str, object]:
                 if dependency.source is not None
             },
         }
+        if options.lineage_base_sha is not None:
+            identity_value["lineage_base_sha"] = options.lineage_base_sha
+        if configuration_file is not None:
+            identity_value["configuration_sha256"] = configuration_file.sha256
         identity_bytes = (
             json.dumps(identity_value, sort_keys=True, separators=(",", ":")) + "\n"
         ).encode("utf-8")
@@ -596,6 +678,7 @@ def package_release(options: ReleaseOptions) -> dict[str, object]:
             *binary_files,
             *dependency_files,
             *support_files,
+            *([] if configuration_file is None else [configuration_file]),
             ReleaseFile.from_bytes(
                 f"{binary_root}/build-identity.json", 0o644, identity_bytes
             ),
@@ -627,7 +710,7 @@ def package_release(options: ReleaseOptions) -> dict[str, object]:
         )
         os.replace(published, output)
 
-    return {
+    receipt: dict[str, object] = {
         "artifact_type": "ninfer_local_release_receipt",
         "schema_version": 2,
         "release_version": options.release_version,
@@ -642,6 +725,11 @@ def package_release(options: ReleaseOptions) -> dict[str, object]:
         "sbom": {"name": sbom_name, "sha256": sbom_sha256, "format": "SPDX-2.3"},
         "checksums": checksums_name,
     }
+    if options.lineage_base_sha is not None:
+        receipt["lineage_base_sha"] = options.lineage_base_sha
+    if configuration_file is not None:
+        receipt["configuration_sha256"] = configuration_file.sha256
+    return receipt
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -656,10 +744,12 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--upstream-base-sha", required=True)
     parser.add_argument("--release-head-sha", required=True)
     parser.add_argument("--build-profile", required=True)
+    parser.add_argument("--lineage-base-sha")
     parser.add_argument("--source-date-epoch", type=int)
     parser.add_argument(
         "--runtime-dependency", type=Path, action="append", default=[]
     )
+    parser.add_argument("--windows-server-config", type=Path)
     return parser
 
 
@@ -678,8 +768,10 @@ def main() -> None:
                 upstream_base_sha=args.upstream_base_sha,
                 release_head_sha=args.release_head_sha,
                 build_profile=args.build_profile,
+                lineage_base_sha=args.lineage_base_sha,
                 source_date_epoch=args.source_date_epoch,
                 runtime_dependencies=tuple(args.runtime_dependency),
+                windows_server_config=args.windows_server_config,
             )
         )
     except ReleaseError as error:

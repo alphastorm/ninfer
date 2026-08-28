@@ -35,6 +35,11 @@ _SUPPORT_CONTENT = {
     "scripts/run-qwen38-vision.sh": "#!/bin/sh\nexit 0\n",
     "scripts/download-qwen36-35b-vision.sh": "#!/bin/sh\nexit 0\n",
     "scripts/run-qwen36-35b-vision.sh": "#!/bin/sh\nexit 0\n",
+    "packaging/windows/qwen38-3090-omp-v0.2/Install-Release.ps1": "# installer fixture\n",
+    "packaging/windows/qwen38-3090-omp-v0.2/Control-Release.ps1": "# controller fixture\n",
+    "packaging/windows/qwen38-3090-omp-v0.2/New-QualificationReceipt.ps1": "# receipt fixture\n",
+    "packaging/windows/qwen38-3090-omp-v0.2/release-spec.json": "{}\n",
+    "packaging/windows/qwen38-3090-omp-v0.2/server-config.json": "{\"fixture\":true}\n",
 }
 
 
@@ -420,20 +425,43 @@ class ReleasePackageTests(unittest.TestCase):
             output = root / "windows-release"
             options = dataclasses.replace(
                 release_options(source, binaries, head, output),
-                platform="windows-x86_64-cuda13.3-rtx3090",
+                platform="windows-x86_64-cuda12.8-rtx3090",
+                lineage_base_sha=head,
                 runtime_dependencies=(dependency_a, dependency_b),
+                windows_server_config=(
+                    source
+                    / "packaging/windows/qwen38-3090-omp-v0.2/server-config.json"
+                ),
             )
-            package_release(options)
-            root_name = "ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda13.3-rtx3090"
+            receipt = package_release(options)
+            root_name = "ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090"
             archive = output / f"{root_name}.tar.gz"
             with tarfile.open(archive, "r:gz") as tar:
                 names = set(tar.getnames())
+                identity_stream = tar.extractfile(f"{root_name}/build-identity.json")
+                self.assertIsNotNone(identity_stream)
+                identity = json.load(identity_stream)
             self.assertIn(f"{root_name}/bin/ninfer.exe", names)
             self.assertIn(f"{root_name}/bin/ninfer-serve.exe", names)
             self.assertIn(f"{root_name}/bin/ninfer_bench.exe", names)
             self.assertIn(f"{root_name}/bin/libcrypto-3-x64.dll", names)
             self.assertIn(f"{root_name}/bin/avcodec-62.dll", names)
+            self.assertIn(f"{root_name}/Install-Release.ps1", names)
+            self.assertIn(f"{root_name}/Control-Release.ps1", names)
+            self.assertIn(f"{root_name}/New-QualificationReceipt.ps1", names)
+            self.assertIn(f"{root_name}/release-spec.json", names)
+            self.assertIn(f"{root_name}/server-config.json", names)
             self.assertNotIn(f"{root_name}/run-qwen38-c1.sh", names)
+            config_bytes = (
+                source
+                / "packaging/windows/qwen38-3090-omp-v0.2/server-config.json"
+            ).read_bytes()
+            self.assertEqual(identity["lineage_base_sha"], head)
+            self.assertEqual(
+                identity["configuration_sha256"],
+                hashlib.sha256(config_bytes).hexdigest(),
+            )
+            self.assertEqual(receipt["configuration_sha256"], identity["configuration_sha256"])
 
     def test_release_requires_exact_available_commits(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

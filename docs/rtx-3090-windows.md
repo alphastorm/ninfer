@@ -15,6 +15,47 @@ OpenAI/Anthropic serving APIs.
 The bundled applications and dependency DLLs are native Windows executables. Model artifacts are
 not included in the release archive.
 
+## OMP v0.2 transactional package
+
+The OMP v0.2 native package is built from the deterministic **tools/release/package.py** Windows
+payload by **packaging/windows/qwen38-3090-omp-v0.2/New-Package.ps1**. The release is fixed to build
+profile **omp-v0.2.0-rtx3090**, CUDA architecture **sm_86**, and the pinned Qwen3.8 artifact identity
+in the release specification. The three executables and every declared app-local DLL are covered by
+the inner and outer SHA-256 manifests. Package and checksum values are emitted in
+**package-build-receipt.json** at build time; hardware qualification remains a separate gate.
+
+The default C1 profile binds to **127.0.0.1**, requires a one-line API-key file, uses 65,536 maximum
+context, automatic INT8 KV capacity, a 1,024-token prefill chunk, and MTP3. A package-specific
+configuration may instead bind to an IPv4 address in Tailscale's **100.64.0.0/10** range. Wildcard,
+LAN, and public listen addresses are rejected, and CORS remains disabled.
+
+Run the installer from an elevated PowerShell session with the exact package hash from the emitted
+SHA256SUMS file:
+
+~~~powershell
+$package = '.\ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.tar.gz'
+$packageSha = ((Get-Content .\SHA256SUMS | Where-Object { $_.EndsWith("  $([IO.Path]::GetFileName($package))") }) -split '  ')[0]
+.\Install-Release.ps1 -PackagePath $package -PackageSha256 $packageSha -ModelArtifactPath (Resolve-Path .\models\qwen3_8_27b.ninfer) -ApiKeyFile .\api-key.txt -GpuOwnerControllerPath .\Control-GpuOwner.ps1
+~~~
+
+The model stays at the supplied external path and is never copied into a candidate release. The
+installer hashes it once, records immutable size/time/hash metadata, copies the one-line secret into
+a release-scoped ACL-restricted file, prepares the candidate, and atomically advances
+**prepared_release**, **active_release**, and **previous_release**. A repeated exact install returns
+**already_installed** without rehashing the model. An interrupted transaction blocks re-entry until
+the explicit repair command completes:
+
+~~~powershell
+.\Install-Release.ps1 -RepairInterruptedInstall
+~~~
+
+The installed controller supports **Status**, **Start**, **Stop**, **Restart**, **Rollback**, and
+**Uninstall**. Restart validates the three executables and configuration without rehashing the
+model. Rollback swaps only the exact active and previous release identities and restores the
+original release if the target does not become ready. Uninstall removes package files, app-local
+DLLs, caches, managed secret copies, state, and the scheduled task while preserving the external
+model and restoring the prior GPU owner.
+
 ## Download the compatible Qwen3.6-35B artifact
 
 The published RTX 3090 measurements use the compact 20.84 GiB container-v1 artifact. Pin its

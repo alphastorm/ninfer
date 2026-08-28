@@ -5,6 +5,11 @@ add_test(NAME ninfer_release_package_contract_test
 set_tests_properties(ninfer_release_package_contract_test PROPERTIES
   WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 
+add_test(NAME ninfer_windows_release_lifecycle_test
+  COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_windows_release)
+set_tests_properties(ninfer_windows_release_lifecycle_test PROPERTIES
+  WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+
 # This target deliberately receives no src/, CUDA, artifact, kernel, or target
 # include root. It proves that the installed product headers stand alone.
 add_executable(ninfer_public_api_test test_public_api.cpp)

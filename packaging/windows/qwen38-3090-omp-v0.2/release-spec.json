@@ -1,0 +1,78 @@
+{
+  "artifact_type": "ninfer_windows_release_spec",
+  "schema_version": 2,
+  "release_id": "qwen38-3090-omp-v0.2.0",
+  "release_version": "0.2.0",
+  "deployment_profile": "qwen38-3090-omp-v0.2.0-c1",
+  "build_profile": "omp-v0.2.0-rtx3090",
+  "platform": "windows-x86_64-cuda12.8-rtx3090",
+  "gpu": {
+    "name": "NVIDIA GeForce RTX 3090",
+    "class": "rtx-3090",
+    "cuda_architecture": "sm_86",
+    "cmake_cuda_architecture": "86",
+    "compute_capability": "8.6",
+    "minimum_driver_major": 570
+  },
+  "source": {
+    "repository": "https://github.com/Don-Chad/ninfer-3090",
+    "upstream_base_sha": "ef6ecc3c139b43fc4d3e1b92df474305e8429544",
+    "lineage_base_sha": "c467349e375d6aa76afca63c0042bbc0869549aa",
+    "release_head_binding": "exact-descendant-supplied-at-package-build"
+  },
+  "model": {
+    "repository": "neroued/Qwen3.8-27B-NInfer",
+    "revision": "18dfc887423fa5aabf3cb56fac41490e462b3fab",
+    "filename": "qwen3_8_27b.ninfer",
+    "sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
+    "bytes": 18210531328
+  },
+  "package_identity": {
+    "binding": "supplied-by-New-Package.ps1",
+    "required_receipt_fields": [
+      "package.filename",
+      "package.sha256",
+      "package.bytes",
+      "checksums.filename",
+      "checksums.sha256"
+    ]
+  },
+  "network": {
+    "allowed_listen_host_classes": ["loopback", "tailscale-ipv4"],
+    "authentication": "required-api-key-file",
+    "cors": false
+  },
+  "lifecycle": {
+    "task_name": "NInfer-Qwen38-3090-OMP-v0.2",
+    "listen_port": 18082,
+    "installation_scope": "isolated-version-root",
+    "candidate_root_directories": ["bin", "config", "logs", "receipts"],
+    "model_artifact_ownership": "external-pinned-read-only",
+    "cache_ownership": "state-root-per-release",
+    "interrupted_install_reentry": "repair-required",
+    "task_start_mode": "explicit-on-demand",
+    "state_pointers": ["prepared_release", "active_release", "previous_release"],
+    "gpu_owner_controller_protocol": {
+      "required_on_first_install": true,
+      "inherited_on_upgrade": true,
+      "actions": ["status", "stop", "start"],
+      "status_paused_field": "paused",
+      "installation": "managed-copy-with-sha256"
+    },
+    "production_route_mutation": false,
+    "container_runtime_mutation": false,
+    "gaming_process_mutation": false
+  },
+  "qualification": {
+    "status": "hardware-pending",
+    "required_gates": [
+      "post-service-thermal-matrix",
+      "sm86-driver-hardware-identity",
+      "authenticated-real-client-protocol",
+      "advertised-context-retrieval",
+      "frozen-role-corpus",
+      "power-sweep-280-320-370-watts",
+      "gaming-drain-restart-rollback"
+    ]
+  }
+}
