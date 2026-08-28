@@ -4,6 +4,7 @@
 
 #include "core/disk_state_cache.h"
 #include "ninfer/types.h"
+#include "runtime/contract/continuation_checkpoint.h"
 #include "runtime/contract/types.h"
 #include "runtime/engine/admission_policy.h"
 #include "runtime/engine/request_memory.h"
@@ -25,6 +26,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -131,7 +133,9 @@ public:
 
     Submission submit(targets::qwen3_6::PreparedPrompt prompt, PromptSummary prompt_summary,
                       double prepare_seconds, ResolvedRequestOptions options,
-                      Clock::time_point pending_deadline = {}, HostInputLease host_input = {}) {
+                      std::optional<AuthenticatedCheckpointNamespace> checkpoint_namespace,
+                      std::string checkpoint_tag, Clock::time_point pending_deadline = {},
+                      HostInputLease host_input = {}) {
         const Clock::time_point submitted = Clock::now();
         if (pending_deadline == Clock::time_point{}) {
             pending_deadline = submitted + pending_timeout_;
@@ -165,7 +169,9 @@ public:
                                                                          options.output);
             request = std::make_shared<Request>(request_id, std::move(prompt), std::move(output),
                                                 prompt_summary, prepare_seconds, std::move(options),
-                                                pending_deadline, submitted, std::move(host_input));
+                                                std::move(checkpoint_namespace),
+                                                std::move(checkpoint_tag), pending_deadline, submitted,
+                                                std::move(host_input));
         } catch (...) {
             release_reserved_capacity();
             throw;
@@ -200,6 +206,35 @@ public:
         out.kv_capacity_headroom_bytes         = resolution.automatic_headroom_bytes;
         out.planned_slack_bytes                = resolution.planned_slack_bytes;
         return out;
+    }
+
+    [[nodiscard]] std::optional<ContinuationCheckpointStats> checkpoint_session(
+        const AuthenticatedCheckpointNamespace& checkpoint_namespace,
+        std::string_view checkpoint_tag, ContinuationCheckpointWriter& writer,
+        std::size_t staging_bytes) const {
+        std::scoped_lock lock(execution_mutex_);
+        return instance_.program->checkpoint_session(checkpoint_namespace, checkpoint_tag, writer,
+                                                     staging_bytes);
+    }
+
+    [[nodiscard]] std::optional<ContinuationCheckpointStats> restore_session(
+        const AuthenticatedCheckpointNamespace& checkpoint_namespace, std::string checkpoint_tag,
+        const ContinuationCheckpointReader& reader, ContinuationCheckpointStats expected,
+        std::size_t staging_bytes) {
+        std::scoped_lock lock(execution_mutex_);
+        if (instance_.program->has_checkpoint_session(checkpoint_namespace)) { return std::nullopt; }
+        for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
+            if (slots_[lane] != nullptr || instance_.program->has_retained_lane(lane)) { continue; }
+            std::optional<ContinuationCheckpointStats> restored = instance_.program->restore_session(
+                lane, checkpoint_namespace, std::move(checkpoint_tag), reader, expected,
+                staging_bytes);
+            if (restored) {
+                invalidate_lane_plans(lane);
+                publish_runtime_stats();
+            }
+            return restored;
+        }
+        return std::nullopt;
     }
 
     [[nodiscard]] RuntimeStats runtime_stats() const {
@@ -289,10 +324,15 @@ private:
         Request(std::uint64_t request_identity, targets::qwen3_6::PreparedPrompt input,
                 targets::qwen3_6::OutputSession output_session, PromptSummary summary,
                 double frontend_seconds, ResolvedRequestOptions request_options,
+                std::optional<AuthenticatedCheckpointNamespace> checkpoint_namespace_value,
+                std::string checkpoint_tag_value,
                 Clock::time_point limit, Clock::time_point submit_time, HostInputLease input_lease)
             : id(request_identity), host_input(std::move(input_lease)), prompt(std::move(input)),
               output(std::move(output_session)), prompt_summary(summary),
               prepare_seconds(frontend_seconds), options(std::move(request_options)),
+              checkpoint_namespace(std::move(checkpoint_namespace_value)),
+              private_session(checkpoint_namespace.has_value()),
+              checkpoint_tag(std::move(checkpoint_tag_value)),
               deadline(limit), submitted(submit_time) {}
 
         const std::uint64_t id;
@@ -302,6 +342,9 @@ private:
         PromptSummary prompt_summary;
         double prepare_seconds = 0.0;
         ResolvedRequestOptions options;
+        std::optional<AuthenticatedCheckpointNamespace> checkpoint_namespace;
+        bool private_session = false;
+        std::string checkpoint_tag;
         Clock::time_point deadline;
         Clock::time_point submitted;
         std::optional<Clock::time_point> first_token;
@@ -458,7 +501,8 @@ private:
             result.timings = instance_.program->generation_timings_lane(*request->lane);
             result.timings.prepare_seconds = request->prepare_seconds;
             result.speculative = instance_.program->speculative_stats_lane(*request->lane);
-            if (disk_cache_ && disk_cache_->enabled() && reason != FinishReason::Cancelled) {
+            if (disk_cache_ && disk_cache_->enabled() && !request->private_session &&
+                reason != FinishReason::Cancelled) {
                 instance_.program->snapshot_turn_checkpoint_to_disk(*request->lane, *disk_cache_);
                 instance_.program->snapshot_lane_to_disk(*request->lane, *disk_cache_);
             }
@@ -718,7 +762,8 @@ private:
         }
         request->lane_plans[lane].reset();
         request->lane_plans[lane].emplace(
-            instance_.program->plan_request_for_lane(lane, request->prompt, *request->base_plan));
+            instance_.program->plan_request_for_lane(lane, request->prompt, *request->base_plan,
+                                                     request->checkpoint_namespace));
         request->lane_plan_versions[lane] = lane_plan_versions_[lane];
     }
 
@@ -854,7 +899,8 @@ private:
             publish_runtime_stats();
             target_started                = true;
             const PrefillStepResult first = instance_.program->start_prefill_lane(
-                lane, std::move(request->prompt), std::move(selected_plan), transient);
+                lane, std::move(request->prompt), std::move(selected_plan), transient,
+                std::move(request->checkpoint_namespace), std::move(request->checkpoint_tag));
             if (!first.complete && (!prefill_lane_ || *prefill_lane_ != lane)) {
                 throw std::logic_error("partial prefill did not retain its execution owner");
             }

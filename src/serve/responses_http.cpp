@@ -1,5 +1,8 @@
 #include "serve/http_server.h"
 
+#include "serve/client_identity.h"
+#include "serve/console_log.h"
+#include "serve/http_contract.h"
 #include "serve/openai_schema.h"
 #include "serve/responses_schema.h"
 
@@ -8,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <charconv>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -31,11 +35,16 @@ public:
 
 struct StreamingResponse {
     PreparedRequest prepared;
-    ResponsesRequest request;
+    std::vector<ChatTurn> input_turns;
+    std::vector<Json> input_items;
     ResponseContext previous_context;
+    std::string session_key;
+    std::optional<std::string> client_session_sha256;
+    std::optional<std::string> previous_response_id;
     RequestLogContext log_context;
     std::unique_ptr<ResponsesEventStream> encoder;
     std::atomic<bool> cancelled{false};
+    bool store   = false;
     bool started = false;
 };
 
@@ -67,8 +76,78 @@ ApiError response_not_found(const std::string& id) {
     return error;
 }
 
+ApiError previous_response_not_found(const std::string& id) {
+    ApiError error;
+    error.status  = 404;
+    error.type    = "invalid_request_error";
+    error.param   = "previous_response_id";
+    error.code    = "previous_response_not_found";
+    error.message = "previous response '" + id + "' not found";
+    return error;
+}
+
+const char* checkpoint_save_state_name(SessionCheckpointSaveState state) noexcept {
+    switch (state) {
+    case SessionCheckpointSaveState::Disabled:
+        return "disabled";
+    case SessionCheckpointSaveState::Saved:
+        return "saved";
+    case SessionCheckpointSaveState::Missing:
+        return "missing_session_state";
+    case SessionCheckpointSaveState::Failed:
+        return "failed";
+    case SessionCheckpointSaveState::Unavailable:
+        return "unavailable";
+    }
+    return "unknown";
+}
+
+ApiError checkpoint_restore_error(SessionCheckpointRestoreState state, const std::string& id) {
+    if (state == SessionCheckpointRestoreState::Missing) {
+        return previous_response_not_found(id);
+    }
+    ApiError error;
+    error.type  = "server_error";
+    error.param = "previous_response_id";
+    switch (state) {
+    case SessionCheckpointRestoreState::Incompatible:
+        error.status  = 409;
+        error.code    = "checkpoint_incompatible";
+        error.message = "stored continuation is incompatible with this server runtime";
+        break;
+    case SessionCheckpointRestoreState::Corrupt:
+        error.status  = 500;
+        error.code    = "checkpoint_corrupt";
+        error.message = "stored continuation failed integrity validation";
+        break;
+    case SessionCheckpointRestoreState::Unavailable:
+        error.status  = 503;
+        error.code    = "checkpoint_unavailable";
+        error.message = "stored continuation is temporarily unavailable";
+        break;
+    case SessionCheckpointRestoreState::Disabled:
+    case SessionCheckpointRestoreState::Failed:
+    case SessionCheckpointRestoreState::Restored:
+        error.status  = 503;
+        error.code    = "checkpoint_restore_failed";
+        error.message = "stored continuation could not be restored atomically";
+        break;
+    case SessionCheckpointRestoreState::Missing:
+        break;
+    }
+    return error;
+}
+
 void validate_model(std::string& requested, const std::string& available) {
     if (requested.empty()) { requested = available; }
+    if (requested == available) { return; }
+    ApiError error;
+    error.status  = 404;
+    error.type    = "invalid_request_error";
+    error.param   = "model";
+    error.code    = "model_not_found";
+    error.message = "model '" + requested + "' not found";
+    throw ApiException(std::move(error));
 }
 
 Json parse_json_body(const httplib::Request& request) {
@@ -107,10 +186,10 @@ void set_owned_content(httplib::Response& response, std::string body,
     response.hold_resource(std::move(lifetime));
 }
 
-ResponseContext terminal_context(const ResponseContext& previous, const ResponsesRequest& request,
-                                 const BuiltResponse& response) {
-    ResponseContext input = append_response_context(previous, request.input_turns);
-    return append_response_context(std::move(input), response.output_history);
+ResponseContext terminal_context(ResponseContext previous, std::vector<ChatTurn> input_turns,
+                                 std::vector<ChatTurn> output_history) {
+    ResponseContext input = append_response_context(std::move(previous), std::move(input_turns));
+    return append_response_context(std::move(input), std::move(output_history));
 }
 
 ResponsesRuntimeValues runtime_values(const PreparedRequest& prepared,
@@ -196,26 +275,65 @@ Json paginated_input_items(const httplib::Request& request, const std::vector<Js
 
 } // namespace
 
+void HttpServer::checkpoint_stored_response(
+    const std::optional<std::string>& session_sha256, const std::string& response_id,
+    bool depends_on_previous_response) {
+    if (service_ == nullptr || !service_->checkpoint_enabled() || !session_sha256) { return; }
+    const SessionCheckpointSaveOutcome saved =
+        service_->save_checkpoint(*session_sha256, response_id, response_store_);
+    if (saved.state == SessionCheckpointSaveState::Saved) { return; }
+    write_console_log(ConsoleLogLevel::Warning,
+                      "checkpoint save response=" + response_id + " state=" +
+                          checkpoint_save_state_name(saved.state));
+    if (!depends_on_previous_response) { return; }
+    (void)response_store_.erase_for_session(response_id, session_sha256);
+    ApiError error;
+    error.status  = saved.state == SessionCheckpointSaveState::Unavailable ? 503 : 500;
+    error.type    = "server_error";
+    error.param   = "previous_response_id";
+    error.code    = "checkpoint_save_failed";
+    error.message = "completed continuation could not be saved atomically";
+    throw ApiException(std::move(error));
+}
+
 void HttpServer::handle_responses(const httplib::Request& req, httplib::Response& res) {
     ResponsesRequest request;
     ResponseContext previous_context;
-    PreparedRequest prepared;
+    std::string session_key;
     try {
         RequestLimits limits;
         limits.default_max_tokens = options_.default_max_tokens;
         request                   = parse_responses_request(parse_json_body(req), limits);
+        apply_response_session_identity(req, !options_.api_key.empty(), request.generation);
         validate_model(request.generation.model, public_model_id_);
+        require_authenticated_client_identity(request.generation, !options_.api_key.empty());
         if (request.previous_response_id) {
-            const std::shared_ptr<const StoredResponse> previous = response_store_.get_for_session(
+            std::shared_ptr<const StoredResponse> previous = response_store_.get_for_session(
                 *request.previous_response_id, request.generation.client_session_sha256);
+            if (!previous && request.generation.client_session_sha256 &&
+                service_->checkpoint_enabled()) {
+                const SessionCheckpointRestoreState restored = service_->restore_checkpoint(
+                    *request.generation.client_session_sha256, *request.previous_response_id,
+                    response_store_);
+                previous = response_store_.get_for_session(
+                    *request.previous_response_id, request.generation.client_session_sha256);
+                if (!previous && restored == SessionCheckpointRestoreState::Restored) {
+                    throw ApiException(checkpoint_restore_error(
+                        SessionCheckpointRestoreState::Failed, *request.previous_response_id));
+                }
+                if (!previous && restored != SessionCheckpointRestoreState::Missing) {
+                    throw ApiException(
+                        checkpoint_restore_error(restored, *request.previous_response_id));
+                }
+            }
             if (!previous) {
-                throw ApiException(response_not_found(*request.previous_response_id));
+                throw ApiException(previous_response_not_found(*request.previous_response_id));
             }
             inherit_responses_preserve_thinking(request, previous->preserve_thinking);
             previous_context = previous->context;
+            session_key      = previous->session_key;
         }
         compose_responses_generation_messages(request, flatten_response_context(previous_context));
-        prepared = service_->prepare(request.generation, [&req] { return disconnected(req); });
     } catch (const ApiException& exception) {
         write_error(res, responses_error(exception.error()));
         return;
@@ -224,12 +342,53 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         return;
     }
 
-    const std::string id       = new_response_id();
-    const std::int64_t created = unix_time_now();
+    std::string id;
+    const bool needs_new_checkpoint_tag =
+        service_->checkpoint_enabled() && request.generation.client_session_sha256 &&
+        request.store && session_key.empty();
+    if (needs_new_checkpoint_tag) {
+        try {
+            id          = new_response_id();
+            session_key = id;
+        } catch (const std::exception& exception) {
+            write_error(res, internal_error(exception));
+            return;
+        }
+    }
+    const std::string checkpoint_tag =
+        service_->checkpoint_enabled() && request.generation.client_session_sha256
+            ? session_key
+            : std::string();
+    PreparedRequest prepared;
+    try {
+        prepared = service_->prepare(request.generation, [&req] { return disconnected(req); },
+                                     checkpoint_tag);
+    } catch (const ApiException& exception) {
+        write_error(res, responses_error(exception.error()));
+        return;
+    } catch (const std::exception& exception) {
+        write_error(res, internal_error(exception));
+        return;
+    }
+
     const std::uint64_t req_id = ++request_seq_;
     const RequestLogContext log_context =
         make_request_log_context(req_id, "openai_responses", request.generation, prepared);
+    request.generation.messages.clear();
     log_request_start(log_context);
+
+    if (id.empty()) {
+        try {
+            id = new_response_id();
+            if (session_key.empty() && request.store) { session_key = id; }
+        } catch (const std::exception& exception) {
+            const ApiError error = internal_error(exception);
+            log_request_error(log_context, error.message);
+            write_error(res, error);
+            return;
+        }
+    }
+    const std::int64_t created = unix_time_now();
 
     if (!request.stream) {
         try {
@@ -240,12 +399,18 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
             if (request.store) {
                 StoredResponse stored;
                 stored.id                    = id;
+                stored.session_key           = session_key;
                 stored.client_session_sha256 = request.generation.client_session_sha256;
+                stored.previous_response_id  = request.previous_response_id;
                 stored.response              = response.body;
-                stored.input_items       = request.input_items;
-                stored.context           = terminal_context(previous_context, request, response);
+                stored.input_items           = std::move(request.input_items);
+                stored.context =
+                    terminal_context(std::move(previous_context), std::move(request.input_turns),
+                                     std::move(response.output_history));
                 stored.preserve_thinking = prepared.preserve_thinking;
                 response_store_.put(std::move(stored));
+                checkpoint_stored_response(request.generation.client_session_sha256, id,
+                                           request.previous_response_id.has_value());
             }
             log_request_done(log_context, outcome);
             set_owned_content(res, response.body.dump(), prepared.lifetime);
@@ -260,13 +425,18 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         return;
     }
 
-    auto stream              = std::make_shared<StreamingResponse>();
-    stream->prepared         = std::move(prepared);
-    stream->request          = std::move(request);
-    stream->previous_context = std::move(previous_context);
-    stream->log_context      = log_context;
-    stream->encoder          = std::make_unique<ResponsesEventStream>(id, created, stream->request,
-                                                                      runtime_values(stream->prepared));
+    auto stream                   = std::make_shared<StreamingResponse>();
+    stream->prepared              = std::move(prepared);
+    stream->input_turns           = std::move(request.input_turns);
+    stream->input_items           = std::move(request.input_items);
+    stream->previous_context      = std::move(previous_context);
+    stream->session_key           = std::move(session_key);
+    stream->client_session_sha256 = request.generation.client_session_sha256;
+    stream->previous_response_id  = std::move(request.previous_response_id);
+    stream->log_context           = log_context;
+    stream->store                 = request.store;
+    stream->encoder = std::make_unique<ResponsesEventStream>(id, created, std::move(request),
+                                                             runtime_values(stream->prepared));
 
     res.set_header("Cache-Control", "no-cache");
     res.set_header("X-Accel-Buffering", "no");
@@ -311,17 +481,22 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
 
                 const GenerationOutcome outcome = service_->run(stream->prepared, &output);
                 ResponsesStreamFinish finished  = stream->encoder->finish(outcome);
-                if (stream->request.store) {
+                if (stream->store) {
                     StoredResponse stored;
-                    stored.id                    = finished.response.body.at("id").get<std::string>();
-                    stored.client_session_sha256 =
-                        stream->request.generation.client_session_sha256;
-                    stored.response = finished.response.body;
-                    stored.input_items = stream->request.input_items;
-                    stored.context     = terminal_context(stream->previous_context, stream->request,
-                                                          finished.response);
+                    stored.id = finished.response.body.at("id").get<std::string>();
+                    stored.session_key           = stream->session_key;
+                    stored.client_session_sha256 = stream->client_session_sha256;
+                    stored.previous_response_id  = stream->previous_response_id;
+                    stored.response              = finished.response.body;
+                    stored.input_items           = std::move(stream->input_items);
+                    stored.context = terminal_context(std::move(stream->previous_context),
+                                                      std::move(stream->input_turns),
+                                                      std::move(finished.response.output_history));
                     stored.preserve_thinking = stream->prepared.preserve_thinking;
                     response_store_.put(std::move(stored));
+                    checkpoint_stored_response(stream->client_session_sha256,
+                                               finished.response.body.at("id").get<std::string>(),
+                                               stream->previous_response_id.has_value());
                 }
                 write_stream_items(sink, *stream, std::move(finished.events_before_terminal));
                 log_request_done(stream->log_context, outcome);
@@ -368,50 +543,106 @@ void HttpServer::handle_response_input_tokens(const httplib::Request& req, httpl
 }
 
 void HttpServer::handle_response_get(const httplib::Request& req, httplib::Response& res) {
-    const std::string id                               = path_response_id(req);
-    const std::shared_ptr<const StoredResponse> stored = response_store_.get(id);
-    if (!stored) {
-        write_error(res, response_not_found(id));
-        return;
+    try {
+        const std::string id                               = path_response_id(req);
+        const std::shared_ptr<const StoredResponse> stored = response_store_.get_for_session(
+            id, response_session_identity(req, !options_.api_key.empty()));
+        if (!stored) {
+            write_error(res, response_not_found(id));
+            return;
+        }
+        res.set_content(stored->response.dump(), "application/json");
+    } catch (const ApiException& exception) {
+        write_error(res, responses_error(exception.error()));
     }
-    res.set_content(stored->response.dump(), "application/json");
 }
 
 void HttpServer::handle_response_delete(const httplib::Request& req, httplib::Response& res) {
-    const std::string id = path_response_id(req);
-    if (!response_store_.erase(id)) {
-        write_error(res, response_not_found(id));
-        return;
+    try {
+        const std::string id = path_response_id(req);
+        const std::optional<std::string> session =
+            response_session_identity(req, !options_.api_key.empty());
+        std::shared_ptr<ClientSessionLease> session_lease;
+        if (session && service_ != nullptr) {
+            session_lease = service_->acquire_client_session(
+                *session,
+                std::chrono::steady_clock::now() +
+                    std::chrono::milliseconds(options_.pending_timeout_ms),
+                [&req] { return disconnected(req); });
+        }
+        if (!response_store_.get_for_session(id, session)) {
+            write_error(res, response_not_found(id));
+            return;
+        }
+        if (session && service_ != nullptr && service_->checkpoint_enabled()) {
+            const SessionCheckpointEraseResult erased = service_->erase_checkpoint(*session);
+            if (erased == SessionCheckpointEraseResult::Conflict) {
+                ApiError error;
+                error.status  = 503;
+                error.type    = "server_error";
+                error.param   = "response_id";
+                error.code    = "checkpoint_unavailable";
+                error.message = "stored continuation could not be removed atomically";
+                throw ApiException(std::move(error));
+            }
+        }
+        if (!response_store_.erase_for_session(id, session)) {
+            write_error(res, response_not_found(id));
+            return;
+        }
+        if (session && service_ != nullptr && service_->checkpoint_enabled()) {
+            const std::optional<std::string> latest =
+                response_store_.latest_response_id_for_session(*session);
+            if (latest) {
+                const SessionCheckpointSaveOutcome saved =
+                    service_->save_checkpoint(*session, *latest, response_store_);
+                if (saved.state != SessionCheckpointSaveState::Saved) {
+                    write_console_log(ConsoleLogLevel::Warning,
+                                      "checkpoint resave after delete response=" + id + " state=" +
+                                          checkpoint_save_state_name(saved.state));
+                }
+            }
+        }
+        res.set_content(Json{{"id", id}, {"object", "response.deleted"}, {"deleted", true}}.dump(),
+                        "application/json");
+    } catch (const ApiException& exception) {
+        write_error(res, responses_error(exception.error()));
     }
-    res.set_content(Json{{"id", id}, {"object", "response.deleted"}, {"deleted", true}}.dump(),
-                    "application/json");
 }
 
 void HttpServer::handle_response_input_items(const httplib::Request& req, httplib::Response& res) {
-    const std::string id                               = path_response_id(req);
-    const std::shared_ptr<const StoredResponse> stored = response_store_.get(id);
-    if (!stored) {
-        write_error(res, response_not_found(id));
-        return;
-    }
     try {
+        const std::string id                               = path_response_id(req);
+        const std::shared_ptr<const StoredResponse> stored = response_store_.get_for_session(
+            id, response_session_identity(req, !options_.api_key.empty()));
+        if (!stored) {
+            write_error(res, response_not_found(id));
+            return;
+        }
         res.set_content(paginated_input_items(req, stored->input_items).dump(), "application/json");
-    } catch (const ApiException& exception) { write_error(res, exception.error()); }
+    } catch (const ApiException& exception) {
+        write_error(res, responses_error(exception.error()));
+    }
 }
 
 void HttpServer::handle_response_cancel(const httplib::Request& req, httplib::Response& res) {
-    const std::string id = path_response_id(req);
-    if (!response_store_.get(id)) {
-        write_error(res, response_not_found(id));
-        return;
+    try {
+        const std::string id = path_response_id(req);
+        if (!response_store_.get_for_session(
+                id, response_session_identity(req, !options_.api_key.empty()))) {
+            write_error(res, response_not_found(id));
+            return;
+        }
+        ApiError error;
+        error.status  = 400;
+        error.type    = "invalid_request_error";
+        error.code    = "background_not_supported";
+        error.message = "only background responses can be cancelled; NInfer does not support "
+                        "background execution";
+        write_error(res, error);
+    } catch (const ApiException& exception) {
+        write_error(res, responses_error(exception.error()));
     }
-    ApiError error;
-    error.status  = 400;
-    error.type    = "invalid_request_error";
-    error.code    = "background_not_supported";
-    error.message = "only background responses can be cancelled; NInfer does not support "
-                    "background execution";
-    write_error(res, error);
 }
 
 void HttpServer::handle_response_compact(const httplib::Request&, httplib::Response& res) {

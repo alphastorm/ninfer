@@ -6,6 +6,9 @@
 #include <memory>
 
 namespace ninfer {
+namespace runtime {
+class CheckpointEngineAccess;
+}
 
 class PreparedPrompt {
 public:
@@ -27,6 +30,7 @@ private:
     std::unique_ptr<Impl> impl_;
 
     friend class Engine;
+    friend class runtime::CheckpointEngineAccess;
 };
 
 class GenerationHandle {
@@ -94,6 +98,8 @@ public:
 private:
     class Impl;
     std::shared_ptr<Impl> impl_;
+
+    friend class runtime::CheckpointEngineAccess;
 };
 
 } // namespace ninfer

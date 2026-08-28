@@ -7,7 +7,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from serve_contract import ContractError, json_response, request
 
@@ -19,6 +19,39 @@ def require(condition: bool, message: str) -> None:
 
 def digest(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
+
+
+def error_code(value: dict[str, Any]) -> str | None:
+    error = value.get("error")
+    if not isinstance(error, dict):
+        return None
+    code = error.get("code")
+    return code if isinstance(code, str) else None
+
+
+def stored_response_headers(headers: Mapping[str, str], session: str | None) -> dict[str, str]:
+    scoped = dict(headers)
+    if session is not None:
+        scoped["X-NInfer-Session"] = session
+    return scoped
+
+
+def metric_counter(base_url: str, headers: Mapping[str, str], name: str) -> int:
+    response = request(base_url, "GET", "/metrics", headers=headers)
+    prefix = f"{name} "
+    for line in response.body.decode("utf-8").splitlines():
+        if line.startswith(prefix):
+            return int(float(line[len(prefix) :]))
+    raise ContractError(f"metrics omitted {name}")
+
+
+def response_id(value: dict[str, Any]) -> str:
+    identifier = value.get("id")
+    require(
+        isinstance(identifier, str) and identifier.startswith("resp_"),
+        "Responses id missing",
+    )
+    return identifier
 
 
 def read_key(path: Path) -> str:
@@ -187,6 +220,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         args.base_url, "POST", "/v1/chat/completions", nonstream_payload, headers=headers
     )
     expected_text = nonstream["choices"][0]["message"]["content"]
+    cache_hits_before_repeat = metric_counter(
+        args.base_url, headers, "ninfer:prefix_cache_hit_tokens_total"
+    )
     stream_payload = chat_payload(
         args.model, parity_prompt, digest("parity-session"), digest("parity-stream")
     )
@@ -209,54 +245,218 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
     )
     require(stream_text == expected_text, "stream and nonstream content diverged")
     require(any(isinstance(event.get("usage"), dict) for event in stream_events), "stream usage missing")
+    cache_hits_after_repeat = metric_counter(
+        args.base_url, headers, "ninfer:prefix_cache_hit_tokens_total"
+    )
+    require(
+        cache_hits_after_repeat > cache_hits_before_repeat,
+        "same-session repeat did not use its private cache",
+    )
+    isolated_payload = chat_payload(
+        args.model, parity_prompt, digest("isolated-session"), digest("isolated-request")
+    )
+    json_response(
+        args.base_url, "POST", "/v1/chat/completions", isolated_payload, headers=headers
+    )
+    cache_hits_after_isolated = metric_counter(
+        args.base_url, headers, "ninfer:prefix_cache_hit_tokens_total"
+    )
+    require(
+        cache_hits_after_isolated == cache_hits_after_repeat,
+        "a different session reused private cached tokens",
+    )
 
     responses_session = digest("responses-session")
-    create = json_response(
+    other_responses_session = digest("other-responses-session")
+
+    def create_response(
+        label: str,
+        text: str,
+        previous: str | None = None,
+        *,
+        expected_status: int = 200,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": args.model,
+            "input": text,
+            "max_output_tokens": 16,
+            "temperature": 0,
+            "store": True,
+            "ninfer_session": responses_session,
+            "ninfer_request_id": digest(f"responses-{label}"),
+        }
+        if previous is not None:
+            payload["previous_response_id"] = previous
+        return json_response(
+            args.base_url,
+            "POST",
+            "/v1/responses",
+            payload,
+            headers=headers,
+            expected_status=expected_status,
+        )
+
+    first = create_response("first", "Reply with one word: ready")
+    first_id = response_id(first)
+    continued = create_response("continue", "Now reply with one word: done", first_id)
+    continued_id = response_id(continued)
+    require(continued.get("previous_response_id") == first_id, "Responses continuation link missing")
+    branch = create_response("branch", "Reply with a different one-word answer", first_id)
+    branch_id = response_id(branch)
+
+    conflict = json_response(
         args.base_url,
         "POST",
         "/v1/responses",
         {
             "model": args.model,
-            "input": "Reply with one word: ready",
+            "input": "This identity conflict must fail.",
             "max_output_tokens": 16,
             "ninfer_session": responses_session,
-            "ninfer_request_id": digest("responses-create"),
+            "ninfer_request_id": digest("responses-identity-conflict"),
         },
-        headers=headers,
+        headers=stored_response_headers(headers, other_responses_session),
+        expected_status=400,
     )
-    response_id = create.get("id")
-    require(isinstance(response_id, str) and response_id.startswith("resp_"), "Responses id missing")
-    continued = json_response(
-        args.base_url,
-        "POST",
-        "/v1/responses",
-        {
-            "model": args.model,
-            "previous_response_id": response_id,
-            "input": "Now reply with one word: done",
-            "max_output_tokens": 16,
-            "ninfer_session": responses_session,
-            "ninfer_request_id": digest("responses-continue"),
-        },
-        headers=headers,
-    )
-    require(continued.get("previous_response_id") == response_id, "Responses continuation link missing")
+    require(error_code(conflict) == "invalid_ninfer_identity", "Responses identity conflict used the wrong error")
+
     cross_session = json_response(
         args.base_url,
         "POST",
         "/v1/responses",
         {
             "model": args.model,
-            "previous_response_id": response_id,
+            "previous_response_id": first_id,
             "input": "This must not resolve.",
             "max_output_tokens": 16,
-            "ninfer_session": digest("other-responses-session"),
+            "ninfer_session": other_responses_session,
             "ninfer_request_id": digest("responses-cross-session"),
         },
         headers=headers,
         expected_status=404,
     )
-    require("error" in cross_session, "cross-session Responses DAG access was accepted")
+    require(
+        error_code(cross_session) == "previous_response_not_found",
+        "cross-session previous_response_id used the wrong error",
+    )
+
+    def expect_stored_not_found(method: str, path: str, session: str | None, label: str) -> None:
+        value = json_response(
+            args.base_url,
+            method,
+            path,
+            headers=stored_response_headers(headers, session),
+            expected_status=404,
+        )
+        require(error_code(value) == "response_not_found", f"{label} was not isolated")
+
+    for route, suffix, method in (
+        ("retrieve", "", "GET"),
+        ("input-items", "/input_items", "GET"),
+        ("cancel", "/cancel", "POST"),
+    ):
+        path = f"/v1/responses/{first_id}{suffix}"
+        expect_stored_not_found(method, path, None, f"session omission on Responses {route}")
+        expect_stored_not_found(
+            method, path, other_responses_session, f"cross-session Responses {route}"
+        )
+
+    scoped_headers = stored_response_headers(headers, responses_session)
+    scoped_read = json_response(
+        args.base_url, "GET", f"/v1/responses/{first_id}", headers=scoped_headers
+    )
+    require(response_id(scoped_read) == first_id, "same-session Responses retrieve returned the wrong object")
+    scoped_items = json_response(
+        args.base_url,
+        "GET",
+        f"/v1/responses/{first_id}/input_items",
+        headers=scoped_headers,
+    )
+    require(scoped_items.get("object") == "list", "same-session input-items returned the wrong object")
+    scoped_cancel = json_response(
+        args.base_url,
+        "POST",
+        f"/v1/responses/{first_id}/cancel",
+        headers=scoped_headers,
+        expected_status=400,
+    )
+    require(
+        error_code(scoped_cancel) == "background_not_supported",
+        "same-session cancel did not reach the retained response",
+    )
+
+    streaming_payload = {
+        "model": args.model,
+        "previous_response_id": continued_id,
+        "input": "Reply with one word: streamed",
+        "max_output_tokens": 16,
+        "temperature": 0,
+        "store": True,
+        "stream": True,
+        "ninfer_session": responses_session,
+        "ninfer_request_id": digest("responses-stream"),
+    }
+    responses_stream = request(
+        args.base_url,
+        "POST",
+        "/v1/responses",
+        streaming_payload,
+        headers=headers,
+    )
+    require(responses_stream.content_type == "text/event-stream", "Responses stream content type mismatch")
+    responses_events = parse_sse(responses_stream.body)
+    terminal_responses = [
+        event.get("response")
+        for event in responses_events
+        if event.get("type") == "response.completed" and isinstance(event.get("response"), dict)
+    ]
+    require(len(terminal_responses) == 1, "Responses stream omitted its completed response")
+    streamed = terminal_responses[0]
+    streamed_id = response_id(streamed)
+    require(streamed.get("previous_response_id") == continued_id, "streamed continuation link missing")
+    streamed_read = json_response(
+        args.base_url, "GET", f"/v1/responses/{streamed_id}", headers=scoped_headers
+    )
+    require(response_id(streamed_read) == streamed_id, "streamed response was not retained")
+
+    expect_stored_not_found(
+        "DELETE", f"/v1/responses/{first_id}", None, "session omission on Responses delete"
+    )
+    expect_stored_not_found(
+        "DELETE",
+        f"/v1/responses/{first_id}",
+        other_responses_session,
+        "cross-session Responses delete",
+    )
+    deleted = json_response(
+        args.base_url, "DELETE", f"/v1/responses/{first_id}", headers=scoped_headers
+    )
+    require(
+        deleted.get("deleted") is True and deleted.get("id") == first_id,
+        "Responses parent deletion returned the wrong object",
+    )
+    expect_stored_not_found(
+        "GET", f"/v1/responses/{first_id}", responses_session, "deleted Responses parent"
+    )
+    deleted_parent = create_response(
+        "deleted-parent",
+        "This continuation must be rejected.",
+        first_id,
+        expected_status=404,
+    )
+    require(
+        error_code(deleted_parent) == "previous_response_not_found",
+        "deleted parent used the wrong continuation error",
+    )
+    surviving = create_response(
+        "post-delete-continuation", "Reply with one final short word", continued_id
+    )
+    surviving_id = response_id(surviving)
+    require(bool(surviving_id), "surviving descendant could not continue")
+    branch_read = json_response(
+        args.base_url, "GET", f"/v1/responses/{branch_id}", headers=scoped_headers
+    )
+    require(response_id(branch_read) == branch_id, "Responses branch disappeared after parent deletion")
 
     count = json_response(
         args.base_url,
@@ -280,8 +480,13 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "typed_tool_arguments": True,
             "tool_result_array": True,
             "streaming_parity": True,
+            "private_cache_session_isolation": True,
             "responses_continuation": True,
+            "responses_streaming_checkpoint": True,
             "responses_cross_session_isolation": True,
+            "responses_stored_route_isolation": True,
+            "responses_parent_deletion": True,
+            "responses_descendant_survival": True,
             "anthropic_count_tokens": True,
         },
     }

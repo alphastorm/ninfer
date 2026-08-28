@@ -4,6 +4,7 @@
 
 #include <functional>
 #include <iostream>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -30,7 +31,8 @@ ChatTurn text_turn(std::string role, std::string text) {
 
 StoredResponse record(std::string id, ResponseContext context) {
     StoredResponse value;
-    value.id = std::move(id);
+    value.id          = std::move(id);
+    value.session_key = "session-" + value.id;
     value.response =
         nlohmann::json{{"id", value.id}, {"object", "response"}, {"status", "completed"}};
     value.input_items.push_back(nlohmann::json{{"id", "msg_" + value.id}, {"type", "message"}});
@@ -58,30 +60,41 @@ int test_lru_and_delete() {
     store.put(record("resp_1", root));
     const ResponseContext child = append_response_context(root, {text_turn("assistant", "child")});
     store.put(record("resp_2", child));
-    (void)store.get("resp_1"); // resp_2 becomes the least-recently used entry.
+    (void)store.get_for_session("resp_1", std::nullopt); // resp_2 becomes least-recently used.
     store.put(record("resp_3", append_response_context(root, {text_turn("user", "fork")})));
 
     int failures = 0;
-    failures += check(store.get("resp_1") != nullptr, "get refreshes LRU recency");
-    failures += check(store.get("resp_2") == nullptr, "least-recent response evicted");
-    failures += check(store.get("resp_3") != nullptr, "new response retained");
+    failures += check(store.get_for_session("resp_1", std::nullopt) != nullptr,
+                      "get refreshes LRU recency");
+    failures += check(store.get_for_session("resp_2", std::nullopt) == nullptr,
+                      "least-recent response evicted");
+    failures +=
+        check(store.get_for_session("resp_3", std::nullopt) != nullptr, "new response retained");
     failures += check(store.size() == 2 && store.bytes() != 0, "store reports bounded usage");
-    failures += check(store.erase("resp_1"), "stored response deleted");
-    failures += check(!store.erase("resp_1") && store.get("resp_1") == nullptr,
+    failures += check(store.erase_for_session("resp_1", std::nullopt), "stored response deleted");
+    failures += check(!store.erase_for_session("resp_1", std::nullopt) &&
+                          store.get_for_session("resp_1", std::nullopt) == nullptr,
                       "deleted response is no longer addressable");
     // The child/fork context owns a shared parent even when the parent's public
     // response entry is deleted.
-    const std::shared_ptr<const StoredResponse> fork = store.get("resp_3");
+    const std::shared_ptr<const StoredResponse> fork =
+        store.get_for_session("resp_3", std::nullopt);
     failures += check(fork && flatten_response_context(fork->context).size() == 2,
                       "descendant context survives parent response deletion");
     return failures;
 }
 
 int test_session_binding() {
-    ResponseStore store(4, 1ULL << 20);
+    ResponseStore store(6, 1ULL << 20);
     StoredResponse scoped = record("resp_scoped", {});
     scoped.client_session_sha256 = std::string(64, 'a');
     store.put(std::move(scoped));
+    StoredResponse scoped_latest = record("resp_scoped_latest", {});
+    scoped_latest.client_session_sha256 = std::string(64, 'a');
+    store.put(std::move(scoped_latest));
+    StoredResponse other = record("resp_other", {});
+    other.client_session_sha256 = std::string(64, 'b');
+    store.put(std::move(other));
     store.put(record("resp_unscoped", {}));
 
     int failures = 0;
@@ -92,6 +105,17 @@ int test_session_binding() {
                       "stored response crossed its session boundary");
     failures += check(store.get_for_session("resp_unscoped", std::nullopt) != nullptr,
                       "unscoped response did not preserve unscoped continuation");
+    failures += check(store.latest_response_id_for_session(std::string(64, 'a')) ==
+                          std::optional<std::string>("resp_scoped_latest") &&
+                          store.latest_response_id_for_session(std::string(64, 'b')) ==
+                              std::optional<std::string>("resp_other"),
+                      "latest response lookup crossed session insertion order");
+    failures += check(
+        store.erase_for_session("resp_scoped_latest", std::string(64, 'a')) &&
+            store.latest_response_id_for_session(std::string(64, 'a')) ==
+                std::optional<std::string>("resp_scoped") &&
+            !store.latest_response_id_for_session(std::string(64, 'c')),
+        "latest response lookup did not follow deletion without crossing sessions");
     return failures;
 }
 int test_oversized_record() {

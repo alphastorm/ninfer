@@ -38,6 +38,11 @@
     "max_records": 1024,
     "max_mib": 256
   },
+  "session_checkpoint": {
+    "enabled": true,
+    "quota_mib": 8192,
+    "staging_mib": 256
+  },
   "telemetry": {
     "request_log_jsonl": true,
     "stats_interval_ms": 5000

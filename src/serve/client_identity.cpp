@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace ninfer::serve {
@@ -19,7 +20,12 @@ std::optional<std::string> parse_sha256_field(const nlohmann::json& body, const 
         error.code    = "invalid_ninfer_identity";
         throw ApiException(std::move(error));
     }
-    std::string value = body.at(field).get<std::string>();
+    return parse_client_identity_sha256(body.at(field).get<std::string>(), field);
+}
+
+} // namespace
+
+std::string parse_client_identity_sha256(std::string_view value, std::string_view field) {
     const bool valid =
         value.size() == 64 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
             return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
@@ -27,14 +33,12 @@ std::optional<std::string> parse_sha256_field(const nlohmann::json& body, const 
     if (!valid) {
         ApiError error;
         error.message = std::string(field) + " must be a 64-character lowercase SHA-256";
-        error.param   = field;
+        error.param   = std::string(field);
         error.code    = "invalid_ninfer_identity";
         throw ApiException(std::move(error));
     }
-    return value;
+    return std::string(value);
 }
-
-} // namespace
 
 void parse_client_identity(const nlohmann::json& body, GenerationRequest& request) {
     request.client_session_sha256 = parse_sha256_field(body, "ninfer_session");

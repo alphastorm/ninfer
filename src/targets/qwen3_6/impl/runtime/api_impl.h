@@ -143,8 +143,12 @@ Program<Variant>::plan_request_base(const PreparedPrompt& prompt,
 template <>
 RequestPlan<Variant> Program<Variant>::plan_request_for_lane(std::uint32_t lane,
                                                              const PreparedPrompt& prompt,
-                                                             const RequestBasePlan<Variant>& base) {
-    return impl_->plan_request_for_lane(lane, PreparedPromptAccess::view(prompt), base);
+                                                             const RequestBasePlan<Variant>& base,
+                                                             const std::optional<
+                                                                 runtime::AuthenticatedCheckpointNamespace>&
+                                                                 checkpoint_namespace) {
+    return impl_->plan_request_for_lane(lane, PreparedPromptAccess::view(prompt), base,
+                                        checkpoint_namespace);
 }
 
 template <>
@@ -168,9 +172,13 @@ template <>
 runtime::PrefillStepResult
 Program<Variant>::start_prefill_lane(std::uint32_t lane, PreparedPrompt&& prompt,
                                      RequestPlan<Variant>&& plan,
-                                     runtime::TransientRegion transient) {
+                                     runtime::TransientRegion transient,
+                                     std::optional<runtime::AuthenticatedCheckpointNamespace>
+                                         checkpoint_namespace,
+                                     std::string checkpoint_tag) {
     return impl_->start_prefill_lane(lane, PreparedPromptAccess::take(std::move(prompt)),
-                                     std::move(plan), transient);
+                                     std::move(plan), transient, std::move(checkpoint_namespace),
+                                     std::move(checkpoint_tag));
 }
 
 template <>
@@ -246,6 +254,30 @@ void Program<Variant>::set_disk_state_cache(DiskStateCache* cache) noexcept {
 template <>
 std::string Program<Variant>::config_signature_slug() const {
     return impl_->config_signature_slug();
+}
+
+template <>
+std::optional<runtime::ContinuationCheckpointStats> Program<Variant>::checkpoint_session(
+    const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
+    std::string_view checkpoint_tag, runtime::ContinuationCheckpointWriter& writer,
+    std::size_t staging_bytes) const {
+    return impl_->checkpoint_session(checkpoint_namespace, checkpoint_tag, writer, staging_bytes);
+}
+
+template <>
+std::optional<runtime::ContinuationCheckpointStats> Program<Variant>::restore_session(
+    std::uint32_t lane,
+    const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
+    std::string checkpoint_tag, const runtime::ContinuationCheckpointReader& reader,
+    runtime::ContinuationCheckpointStats expected, std::size_t staging_bytes) {
+    return impl_->restore_session(lane, checkpoint_namespace, std::move(checkpoint_tag), reader,
+                                  expected, staging_bytes);
+}
+
+template <>
+bool Program<Variant>::has_checkpoint_session(
+    const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace) const noexcept {
+    return impl_->has_checkpoint_session(checkpoint_namespace);
 }
 
 template <>

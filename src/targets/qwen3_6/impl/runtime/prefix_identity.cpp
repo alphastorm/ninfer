@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace ninfer::targets::qwen3_6::detail {
 namespace {
@@ -64,6 +65,33 @@ void ResidentPrefixIdentity::clear() noexcept {
     token_types_.clear();
     for (auto& axis : positions_) { axis.clear(); }
     vision_items_.clear();
+}
+
+std::span<const std::int32_t> ResidentPrefixIdentity::position_axis(std::size_t axis) const {
+    if (axis >= positions_.size()) {
+        throw std::out_of_range("resident prefix position axis is out of range");
+    }
+    return positions_[axis];
+}
+
+void ResidentPrefixIdentity::restore(
+    std::vector<std::uint8_t> token_types,
+    std::array<std::vector<std::int32_t>, 3> positions,
+    std::vector<VisionItem> vision_items) {
+    const std::size_t tokens = token_types.size();
+    for (const auto& axis : positions) {
+        if (axis.size() != tokens) {
+            throw std::invalid_argument("restored resident prefix position shape is invalid");
+        }
+    }
+    std::size_t retained_items = 0;
+    if (!prefix_item_count(vision_items, tokens, &retained_items) ||
+        retained_items != vision_items.size()) {
+        throw std::invalid_argument("restored Vision identity is outside the token frontier");
+    }
+    token_types_  = std::move(token_types);
+    positions_    = std::move(positions);
+    vision_items_ = std::move(vision_items);
 }
 
 void ResidentPrefixIdentity::assign(const PreparedPromptData& prompt) {

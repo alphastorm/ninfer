@@ -162,7 +162,10 @@ ProgramImplCore::plan_request_base(const PreparedPromptData& prompt,
 
 RequestPlan ProgramImplCore::plan_request_for_lane(std::uint32_t lane,
                                                    const PreparedPromptData& prompt,
-                                                   const RequestBasePlan& base_plan) {
+                                                   const RequestBasePlan& base_plan,
+                                                   const std::optional<
+                                                       runtime::AuthenticatedCheckpointNamespace>&
+                                                       checkpoint_namespace) {
     if (lane >= max_concurrency) { throw std::out_of_range("request lane is out of range"); }
     const RequestControl& request = requests[lane];
     const SequenceState& sequence = sequences[lane];
@@ -179,34 +182,35 @@ RequestPlan ProgramImplCore::plan_request_for_lane(std::uint32_t lane,
     plan->text_kv_page_entitlement    = base.text_kv_page_entitlement;
     plan->backend_kv_page_entitlement = base.backend_kv_page_entitlement;
 
-    if (base.allow_prefix_reuse && prompt.identity.reusable) {
-        if (sequence.retained) {
-            const bool dflash_append_ready =
-                speculative_backend != SpeculativeBackend::DFlash ||
-                sequence.dflash_context_frontier == sequence.execution_frontier;
-            if (sequence.execution_frontier != 0 && dflash_append_ready &&
-                qwen3_6::detail::prefix_matches(prompt, sequence.ledger, sequence.prefix_identity,
-                                                sequence.execution_frontier)) {
-                plan->reuse      = ReusePath::AppendAtFrontier;
-                plan->reuse_base = sequence.execution_frontier;
-            } else if (sequence.turn_checkpoint.valid && sequence.turn_checkpoint.frontier != 0 &&
-                       sequence.turn_checkpoint.frontier < prompt.token_ids.size() &&
-                       qwen3_6::detail::prefix_matches(prompt, sequence.ledger,
-                                                       sequence.prefix_identity,
-                                                       sequence.turn_checkpoint.frontier)) {
-                plan->reuse      = ReusePath::RestoreTurnCheckpoint;
-                plan->reuse_base = sequence.turn_checkpoint.frontier;
-            }
+    const bool namespace_compatible = sequence.checkpoint_namespace == checkpoint_namespace;
+    if (base.allow_prefix_reuse && prompt.identity.reusable && sequence.retained &&
+        namespace_compatible) {
+        const bool dflash_append_ready =
+            speculative_backend != SpeculativeBackend::DFlash ||
+            sequence.dflash_context_frontier == sequence.execution_frontier;
+        if (sequence.execution_frontier != 0 && dflash_append_ready &&
+            qwen3_6::detail::prefix_matches(prompt, sequence.ledger, sequence.prefix_identity,
+                                            sequence.execution_frontier)) {
+            plan->reuse      = ReusePath::AppendAtFrontier;
+            plan->reuse_base = sequence.execution_frontier;
+        } else if (sequence.turn_checkpoint.valid && sequence.turn_checkpoint.frontier != 0 &&
+                   sequence.turn_checkpoint.frontier < prompt.token_ids.size() &&
+                   qwen3_6::detail::prefix_matches(prompt, sequence.ledger,
+                                                   sequence.prefix_identity,
+                                                   sequence.turn_checkpoint.frontier)) {
+            plan->reuse      = ReusePath::RestoreTurnCheckpoint;
+            plan->reuse_base = sequence.turn_checkpoint.frontier;
         }
-        if (plan->reuse == ReusePath::FullReset && disk_state_cache && disk_state_cache->enabled()) {
-            const std::uint64_t model_hash = model_identity_hash();
-            auto disk_match = disk_state_cache->find_longest_matching_prefix(model_hash, prompt.token_ids);
-            if (disk_match && disk_match->matched_tokens > 0 &&
-                disk_match->matched_tokens < prompt.token_ids.size()) {
-                plan->reuse              = ReusePath::RestoreDiskCheckpoint;
-                plan->reuse_base         = disk_match->matched_tokens;
-                plan->disk_snapshot_path = disk_match->file_path;
-            }
+    }
+    if (!checkpoint_namespace && plan->reuse == ReusePath::FullReset && disk_state_cache &&
+        disk_state_cache->enabled()) {
+        const std::uint64_t model_hash = model_identity_hash();
+        auto disk_match = disk_state_cache->find_longest_matching_prefix(model_hash, prompt.token_ids);
+        if (disk_match && disk_match->matched_tokens > 0 &&
+            disk_match->matched_tokens < prompt.token_ids.size()) {
+            plan->reuse              = ReusePath::RestoreDiskCheckpoint;
+            plan->reuse_base         = disk_match->matched_tokens;
+            plan->disk_snapshot_path = disk_match->file_path;
         }
     }
 

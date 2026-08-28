@@ -112,6 +112,12 @@ if ($config.artifact_type -cne 'ninfer_windows_server_config' -or
     [string]$config.deployment_profile -cne $profile) {
     throw 'server configuration identity mismatch'
 }
+if ([bool]$config.session_checkpoint.enabled -ne $true -or
+    [int]$config.session_checkpoint.quota_mib -lt 2048 -or
+    [int]$config.session_checkpoint.staging_mib -lt 64 -or
+    [int]$config.session_checkpoint.staging_mib -gt [int]$config.session_checkpoint.quota_mib) {
+    throw 'server session checkpoint configuration is not release-safe'
+}
 if ($qualification.artifact_type -cne 'ninfer_public_windows_release_qualification' -or
     [int]$qualification.schema_version -ne 1 -or
     [string]$qualification.source.qualified_commit -cne $PatchStackSha) {

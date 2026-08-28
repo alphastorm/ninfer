@@ -27,6 +27,7 @@ add_library(ninfer_core STATIC
   core/gdn_replay_records.cpp
   core/cyclic_kv_cache.cpp
   core/paged_kv_cache.cu
+  core/sha256.cpp
   core/linear_attention_state.cpp
   core/layout.cpp
   core/tensor.cpp
@@ -329,10 +330,13 @@ if(NINFER_BUILD_SERVE)
   # HTTP protocol/product adapter. No serving header is part of the public API.
   add_library(ninfer_serve STATIC
     serve/client_identity.cpp
+    serve/opaque_id.cpp
+    serve/http_contract.cpp
     serve/openai_schema.cpp
     serve/responses_schema.cpp
     serve/anthropic_schema.cpp
     serve/response_store.cpp
+    serve/session_checkpoint_store.cpp
     serve/tool_call_parser.cpp
     serve/translate.cpp
     serve/console_log.cpp
@@ -352,4 +356,7 @@ if(NINFER_BUILD_SERVE)
   target_link_libraries(ninfer_serve
     PUBLIC ninfer_engine Threads::Threads
     PRIVATE ninfer_media_acquire ${NINFER_CUDART_TARGET})
+  if(WIN32)
+    target_link_libraries(ninfer_serve PRIVATE bcrypt)
+  endif()
 endif()

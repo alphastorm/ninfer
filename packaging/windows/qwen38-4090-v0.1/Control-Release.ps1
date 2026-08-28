@@ -549,8 +549,9 @@ function Invoke-Run {
         Assert-FileHash ([string]$release.config_file) ([string]$release.config_sha256) 'server config'
         $config = Read-JsonFile ([string]$release.config_file)
         $cache = [string]$release.cache_root
+        $sessionCheckpoints = Join-Path $cache 'responses'
         $logs = Join-Path ([string]$release.release_root) 'logs'
-        New-Item -ItemType Directory -Force -Path $cache, $logs | Out-Null
+        New-Item -ItemType Directory -Force -Path $cache, $sessionCheckpoints, $logs | Out-Null
         $serverArguments = [Collections.Generic.List[string]]::new()
         foreach ($argument in @(
                 [string]$release.model_artifact,
@@ -578,6 +579,18 @@ function Invoke-Run {
                 '--no-ui'
             )) {
             $serverArguments.Add($argument)
+        }
+        if ([bool]$config.session_checkpoint.enabled) {
+            if ([int]$config.session_checkpoint.quota_mib -lt 2048 -or
+                [int]$config.session_checkpoint.staging_mib -lt 64 -or
+                [int]$config.session_checkpoint.staging_mib -gt [int]$config.session_checkpoint.quota_mib) {
+                throw 'release session checkpoint configuration is invalid'
+            }
+            foreach ($argument in @('--session-checkpoint-dir', $sessionCheckpoints,
+                                    '--session-checkpoint-quota-mib', [string]$config.session_checkpoint.quota_mib,
+                                    '--session-checkpoint-staging-mib', [string]$config.session_checkpoint.staging_mib)) {
+                $serverArguments.Add($argument)
+            }
         }
         if ([bool]$config.persistent_cache.enabled) {
             foreach ($argument in @('--disk-cache', '--disk-cache-dir', $cache,

@@ -7,6 +7,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 namespace ninfer::targets::qwen3_6::detail {
@@ -20,6 +21,16 @@ public:
     void truncate(std::size_t tokens);
 
     [[nodiscard]] std::size_t size() const noexcept { return token_types_.size(); }
+    [[nodiscard]] std::span<const std::uint8_t> token_types() const noexcept {
+        return token_types_;
+    }
+    [[nodiscard]] std::span<const std::int32_t> position_axis(std::size_t axis) const;
+    [[nodiscard]] const std::vector<VisionItem>& vision_items() const noexcept {
+        return vision_items_;
+    }
+    void restore(std::vector<std::uint8_t> token_types,
+                 std::array<std::vector<std::int32_t>, 3> positions,
+                 std::vector<VisionItem> vision_items);
 
     [[nodiscard]] bool matches(const PreparedPromptData& prompt, std::size_t count) const;
 

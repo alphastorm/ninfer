@@ -2,6 +2,7 @@
 
 #include "serve/anthropic_schema.h"
 #include "serve/console_log.h"
+#include "serve/http_contract.h"
 #include "serve/openai_schema.h"
 #include "serve/request_log.h"
 #include "serve/translate.h"
@@ -189,27 +190,13 @@ void HttpServer::stop_stats_reporter() {
 }
 
 void HttpServer::register_routes() {
-    server_.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
-        // httplib invokes this for EVERY status >= 400, including 413s that
-        // route handlers already answered with a specific error body (e.g.
-        // media_budget_exceeded). Only synthesize the generic payload-limit
-        // error for the bare 413 httplib itself produces on oversized bodies.
-        if (res.status != 413 || !res.body.empty()) { return; }
-        ApiError error;
-        error.status  = 413;
-        error.type    = "invalid_request_error";
-        error.code    = "request_too_large";
-        error.message = "request body exceeds the configured payload limit";
-        if (req.path.rfind("/v1/messages", 0) == 0) {
-            write_messages_error(res, error);
-        } else {
-            write_error(res, error);
-        }
+    server_.set_error_handler([this](const httplib::Request& req, httplib::Response& res) {
+        return handle_unrendered_http_error(options_, req, res);
     });
     if (options_.enable_cors) {
         server_.set_default_headers(
             {{"Access-Control-Allow-Origin", "*"},
-             {"Access-Control-Allow-Headers", "Authorization, Content-Type"},
+             {"Access-Control-Allow-Headers", "Authorization, Content-Type, X-NInfer-Session"},
              {"Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"}});
         // CORS preflight: browsers send OPTIONS with no credentials before the real
         // request; answer it without auth so the actual GET/POST can carry the key.
@@ -218,30 +205,7 @@ void HttpServer::register_routes() {
     }
 
     server_.set_pre_routing_handler([this](const httplib::Request& req, httplib::Response& res) {
-        if (options_.api_key.empty() || req.path == "/health" || req.method == "OPTIONS") {
-            return httplib::Server::HandlerResponse::Unhandled;
-        }
-        // Accept both the OpenAI-style bearer token and the Anthropic-style
-        // x-api-key header so OpenAI clients and Claude Code (ANTHROPIC_API_KEY
-        // -> x-api-key, ANTHROPIC_AUTH_TOKEN -> Authorization: Bearer) both work.
-        const bool bearer_ok =
-            req.get_header_value("Authorization") == ("Bearer " + options_.api_key);
-        const bool x_api_key_ok = req.get_header_value("x-api-key") == options_.api_key;
-        if (!bearer_ok && !x_api_key_ok) {
-            ApiError error;
-            error.status  = 401;
-            error.type    = "invalid_request_error";
-            error.code    = "invalid_api_key";
-            error.message = "missing or invalid API key";
-            // Render the 401 in the shape the target endpoint speaks.
-            if (req.path.rfind("/v1/messages", 0) == 0) {
-                write_messages_error(res, error);
-            } else {
-                write_error(res, error);
-            }
-            return httplib::Server::HandlerResponse::Handled;
-        }
-        return httplib::Server::HandlerResponse::Unhandled;
+        return authorize_http_request(options_, req, res);
     });
 
     server_.set_exception_handler(
@@ -899,14 +863,6 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
 }
 
 void HttpServer::handle_status(const httplib::Request&, httplib::Response& res) const {
-    if (options_.api_key.empty()) {
-        ApiError error;
-        error.status  = 401;
-        error.code    = "authentication_required";
-        error.message = "server status requires API authentication";
-        write_error(res, error);
-        return;
-    }
     if (service_ == nullptr) {
         res.status = 503;
         res.set_content(nlohmann::json{{"artifact_type", "ninfer_server_status"},

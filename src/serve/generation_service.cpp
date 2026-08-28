@@ -1,8 +1,10 @@
 #include "serve/generation_service.h"
 
 #include "product/media_acquire/acquire.h"
+#include "runtime/engine/checkpoint_engine_access.h"
 #include "serve/client_identity.h"
 #include "serve/console_log.h"
+#include "serve/server_identity.h"
 #include "serve/tool_call_parser.h"
 #include "serve/translate.h"
 
@@ -13,6 +15,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 
 namespace ninfer::serve {
@@ -85,6 +88,19 @@ struct MediaInputPermit {
     std::shared_ptr<MediaInputCapacity> capacity;
 };
 
+struct ClientSessionLocks {
+    std::mutex mutex;
+    std::unordered_map<std::string, std::weak_ptr<std::timed_mutex>> sessions;
+};
+
+struct ClientSessionLease {
+    explicit ClientSessionLease(std::shared_ptr<std::timed_mutex> session_mutex)
+        : owner(std::move(session_mutex)), lock(*owner, std::defer_lock) {}
+
+    std::shared_ptr<std::timed_mutex> owner;
+    std::unique_lock<std::timed_mutex> lock;
+};
+
 namespace {
 
 using Clock                              = std::chrono::steady_clock;
@@ -137,7 +153,7 @@ constexpr std::size_t kMaximumMediaItems = 16;
     error.status  = 499;
     error.type    = "request_cancelled";
     error.code    = "client_disconnected";
-    error.message = "client disconnected during media preparation";
+    error.message = "client disconnected during request preparation";
     throw ApiException(std::move(error));
 }
 
@@ -274,6 +290,7 @@ private:
 
 GenerationService::GenerationService(ServeOptions options, LoadProgress load_progress)
     : options_(std::move(options)) {
+    validate_session_checkpoint_options(options_);
     ninfer::EngineOptions engine_options;
     engine_options.artifact_path        = options_.artifact_path;
     engine_options.device               = options_.device;
@@ -297,6 +314,40 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
     request_capacity_    = std::make_shared<RequestCapacity>(
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
     media_input_capacity_ = std::make_shared<MediaInputCapacity>();
+    if (!options_.api_key.empty()) {
+        session_tenant_sha256_ = session_checkpoint_tenant_sha256(options_.api_key);
+        client_session_locks_  = std::make_shared<ClientSessionLocks>();
+    }
+    if (!options_.session_checkpoint_root.empty()) {
+        nlohmann::json fingerprint = session_checkpoint_runtime_fingerprint(
+            options_, engine_->options(), engine_->load_summary(), engine_->memory_summary(),
+            ninfer::build_info());
+        SessionCheckpointEngine checkpoint_engine;
+        checkpoint_engine.checkpoint =
+            [this](const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
+                   std::string_view checkpoint_tag,
+                   runtime::ContinuationCheckpointWriter& writer, std::size_t staging_bytes) {
+                return runtime::CheckpointEngineAccess::checkpoint_session(
+                    *engine_, checkpoint_namespace, checkpoint_tag, writer, staging_bytes);
+            };
+        checkpoint_engine.restore =
+            [this](const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
+                   std::string_view checkpoint_tag,
+                   const runtime::ContinuationCheckpointReader& reader,
+                   runtime::ContinuationCheckpointStats expected, std::size_t staging_bytes) {
+                return runtime::CheckpointEngineAccess::restore_session(
+                    *engine_, checkpoint_namespace, std::string(checkpoint_tag), reader, expected,
+                    staging_bytes);
+            };
+        checkpoint_manager_ = std::make_unique<SessionCheckpointManager>(
+            SessionCheckpointStoreOptions{
+                .root = options_.session_checkpoint_root,
+                .disk_quota_bytes = options_.session_checkpoint_quota_bytes,
+                .staging_bytes = options_.session_checkpoint_staging_bytes,
+                .tombstone_cleanup = {},
+            },
+            std::move(fingerprint), session_tenant_sha256_, std::move(checkpoint_engine));
+    }
 }
 
 std::shared_ptr<RequestLifetime> GenerationService::acquire_request_lifetime() const {
@@ -357,9 +408,61 @@ GenerationService::acquire_media_input(Clock::time_point deadline,
     }
 }
 
+std::shared_ptr<ClientSessionLease> GenerationService::acquire_client_session(
+    std::string_view session_sha256, Clock::time_point deadline,
+    const std::function<bool()>& is_cancelled) const {
+    if (!client_session_locks_) {
+        throw std::logic_error("authenticated client session locks are unavailable");
+    }
+    std::shared_ptr<std::timed_mutex> session_mutex;
+    {
+        std::lock_guard lock(client_session_locks_->mutex);
+        if (client_session_locks_->sessions.size() >= 1024) {
+            for (auto entry = client_session_locks_->sessions.begin();
+                 entry != client_session_locks_->sessions.end();) {
+                if (entry->second.expired()) {
+                    entry = client_session_locks_->sessions.erase(entry);
+                } else {
+                    ++entry;
+                }
+            }
+        }
+        std::weak_ptr<std::timed_mutex>& stored =
+            client_session_locks_->sessions[std::string(session_sha256)];
+        session_mutex = stored.lock();
+        if (!session_mutex) {
+            session_mutex = std::make_shared<std::timed_mutex>();
+            stored        = session_mutex;
+        }
+    }
+    auto lease = std::make_shared<ClientSessionLease>(std::move(session_mutex));
+    for (;;) {
+        if (is_cancelled && is_cancelled()) { throw_preparation_cancelled(); }
+        const Clock::time_point now = Clock::now();
+        if (now >= deadline) {
+            throw_request_error(ninfer::RequestError(
+                RequestErrorKind::QueueTimeout,
+                "inference request expired while waiting for its private session"));
+        }
+        if (lease->lock.try_lock_until(
+                std::min(deadline, now + std::chrono::milliseconds(10)))) {
+            return lease;
+        }
+    }
+}
+
 PreparedRequest GenerationService::prepare(const GenerationRequest& request,
-                                           std::function<bool()> is_cancelled) const {
+                                           std::function<bool()> is_cancelled,
+                                           std::string checkpoint_tag) const {
     require_authenticated_client_identity(request, !options_.api_key.empty());
+    if (!checkpoint_tag.empty() &&
+        (!checkpoint_manager_ || !request.client_session_sha256 ||
+         !runtime::AuthenticatedCheckpointNamespace::valid_sha256(
+             *request.client_session_sha256))) {
+        const std::invalid_argument error(
+            "checkpoint-bound prompts require an authenticated session");
+        throw_invalid_input(error);
+    }
     PreparedRequest prepared;
     ninfer::RequestOptions request_options = to_request_options(request, options_);
     prepared.include_usage                 = request.include_usage;
@@ -384,6 +487,10 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
                                                  "request exceeds the 16-item media limit"));
     }
     prepared.lifetime = acquire_request_lifetime();
+    if (request.client_session_sha256) {
+        prepared.client_session = acquire_client_session(
+            *request.client_session_sha256, prepared.lifetime->deadline, is_cancelled);
+    }
     HostInputLease host_input;
     if (request_has_media) {
         host_input = acquire_media_input(prepared.lifetime->deadline, is_cancelled);
@@ -398,6 +505,18 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
             });
         check_preparation_control(prepared.lifetime->deadline, is_cancelled);
         ninfer::PreparedPrompt prompt = engine_->prepare(std::move(input));
+        if (request.client_session_sha256) {
+            runtime::AuthenticatedCheckpointNamespace checkpoint_namespace =
+                runtime::AuthenticatedCheckpointNamespace::authenticated(
+                    session_tenant_sha256_, *request.client_session_sha256);
+            if (checkpoint_tag.empty()) {
+                runtime::CheckpointEngineAccess::bind_cache_session(
+                    prompt, std::move(checkpoint_namespace));
+            } else {
+                runtime::CheckpointEngineAccess::bind_checkpoint_session(
+                    prompt, std::move(checkpoint_namespace), std::move(checkpoint_tag));
+            }
+        }
         check_preparation_control(prepared.lifetime->deadline, is_cancelled);
         prepared.prompt_tokens = static_cast<int>(prompt.summary().prompt_tokens);
         prepared.prepare_seconds =
@@ -505,6 +624,34 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
         outcome.streamed_content_bytes = output_sink->finish(is_tool_call_response);
     }
     return outcome;
+}
+
+bool GenerationService::checkpoint_enabled() const noexcept {
+    return checkpoint_manager_ != nullptr && checkpoint_manager_->enabled();
+}
+
+SessionCheckpointSaveOutcome
+GenerationService::save_checkpoint(std::string_view session_sha256,
+                                   std::string_view required_response_id,
+                                   ResponseStore& responses) {
+    if (!checkpoint_manager_) {
+        return {.state = SessionCheckpointSaveState::Disabled, .checkpoint = std::nullopt};
+    }
+    return checkpoint_manager_->save(session_sha256, required_response_id, responses);
+}
+
+SessionCheckpointRestoreState
+GenerationService::restore_checkpoint(std::string_view session_sha256,
+                                      std::string_view required_response_id,
+                                      ResponseStore& responses) {
+    if (!checkpoint_manager_) { return SessionCheckpointRestoreState::Disabled; }
+    return checkpoint_manager_->restore(session_sha256, required_response_id, responses);
+}
+
+SessionCheckpointEraseResult
+GenerationService::erase_checkpoint(std::string_view session_sha256) {
+    if (!checkpoint_manager_) { return SessionCheckpointEraseResult::Missing; }
+    return checkpoint_manager_->erase(session_sha256);
 }
 
 void GenerationService::warmup() {

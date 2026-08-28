@@ -111,6 +111,7 @@ struct ChatTurn {
     std::string tool_call_id;      // populated for role=tool
     std::string reasoning_content; // assistant thinking carried across turns (round-tripped to the
                                    // template)
+    std::vector<std::uint32_t> shared_cache_boundaries_after_text_bytes;
 };
 
 // OpenAI sampling fields carried by the protocol adapter. `logit_bias` remains

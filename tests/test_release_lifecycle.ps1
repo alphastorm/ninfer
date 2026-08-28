@@ -260,6 +260,7 @@ function New-FixturePackage(
         }
         reasoning = [ordered]@{ effort = 'low' }
         response_store = [ordered]@{ max_records = 1; max_mib = 1 }
+        session_checkpoint = [ordered]@{ enabled = $true; quota_mib = 2048; staging_mib = 64 }
         persistent_cache = [ordered]@{ quota_gib = 1 }
         telemetry = [ordered]@{ stats_interval_ms = 1000 }
     }

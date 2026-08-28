@@ -35,6 +35,7 @@ function(ninfer_add_test name)
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/third_party
+    ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib
     ${PROJECT_SOURCE_DIR}/third_party/utf8proc
     ${NINFER_UI_GEN_DIR})
   if(TARGET ninfer_ui_assets)
@@ -182,6 +183,15 @@ ninfer_add_test(ninfer_serve_metrics_test
   LIBRARIES ninfer_serve)
 ninfer_add_test(ninfer_response_store_test
   SOURCES test_response_store.cpp
+  LIBRARIES ninfer_serve)
+ninfer_add_test(ninfer_session_checkpoint_store_test
+  SOURCES test_session_checkpoint_store.cpp
+  LIBRARIES ninfer_serve)
+ninfer_add_test(ninfer_client_identity_test
+  SOURCES test_client_identity.cpp
+  LIBRARIES ninfer_serve)
+ninfer_add_test(ninfer_http_contract_test
+  SOURCES test_http_contract.cpp
   LIBRARIES ninfer_serve)
 ninfer_add_test(ninfer_anthropic_schema_test
   SOURCES test_anthropic_schema.cpp

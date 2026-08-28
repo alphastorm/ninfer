@@ -62,7 +62,7 @@ try {
     [IO.File]::WriteAllText($runtimeB, 'runtime-b', [Text.UTF8Encoding]::new($false))
     if ($windowsFixture) { (Get-Item -LiteralPath $runtimeB).Attributes = [IO.FileAttributes]::Hidden }
     $serverSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $server).Hash.ToLowerInvariant()
-    $canonicalConfigSha256 = 'd613fc71ebe30b799af4936af8f73b0f25ebd1a1486b55fdb59aaab5d884bb96'
+    $canonicalConfigSha256 = 'e7f86a4da23d17bc50b3c261263a636df2cf317a82f84b22bcae5d6a186e7623'
     $configSha256 = $canonicalConfigSha256
     $specPath = Join-Path (Split-Path -Parent $PackageBuilderPath) 'release-spec.json'
     $releaseSpec = Get-Content -LiteralPath $specPath -Raw | ConvertFrom-Json
@@ -205,14 +205,14 @@ try {
 
     $packagedConfigPath = Join-Path $payload 'server-config.json'
     Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $packagedConfigPath).Hash.ToLowerInvariant() -ceq $canonicalConfigSha256) 'LF input did not produce the qualified config bytes'
-    Assert-True ([Int64](Get-Item -LiteralPath $packagedConfigPath).Length -eq 992) 'qualified config byte count changed'
+    Assert-True ([Int64](Get-Item -LiteralPath $packagedConfigPath).Length -eq 1095) 'qualified config byte count changed'
     $expandedCrlf = Join-Path $root 'expanded-crlf'
     Expand-Archive -LiteralPath (Join-Path $crlfOut "$assetStem.zip") -DestinationPath $expandedCrlf
     $crlfPayloads = @(Get-ChildItem -LiteralPath $expandedCrlf -Directory)
     Assert-True ($crlfPayloads.Count -eq 1) 'CRLF archive does not contain exactly one release root'
     $packagedCrlfConfigPath = Join-Path $crlfPayloads[0].FullName 'server-config.json'
     Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $packagedCrlfConfigPath).Hash.ToLowerInvariant() -ceq $canonicalConfigSha256) 'CRLF input did not preserve the qualified config bytes'
-    Assert-True ([Int64](Get-Item -LiteralPath $packagedCrlfConfigPath).Length -eq 992) 'CRLF qualified config byte count changed'
+    Assert-True ([Int64](Get-Item -LiteralPath $packagedCrlfConfigPath).Length -eq 1095) 'CRLF qualified config byte count changed'
     Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $ServerConfigPath).Hash.ToLowerInvariant() -ceq $sourceConfigSha256) 'package builder changed its source config'
 
     $checksums = Get-Content -LiteralPath (Join-Path $payload 'checksums.json') -Raw | ConvertFrom-Json

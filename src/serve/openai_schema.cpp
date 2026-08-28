@@ -1,5 +1,7 @@
 #include "serve/openai_schema.h"
 
+#include "serve/opaque_id.h"
+
 #include "serve/client_identity.h"
 
 #include <algorithm>
@@ -9,7 +11,6 @@
 #include <cstdint>
 #include <cstdio>
 #include <limits>
-#include <random>
 #include <string>
 #include <unordered_set>
 namespace ninfer::serve {
@@ -752,13 +753,7 @@ std::string make_error_body(const ApiError& error) {
     return Json{{"error", err}}.dump();
 }
 
-std::string new_chat_completion_id() {
-    static thread_local std::mt19937_64 rng{std::random_device{}()};
-    std::uniform_int_distribution<std::uint64_t> dist;
-    std::array<char, 32> buf{};
-    std::snprintf(buf.data(), buf.size(), "%016llx", static_cast<unsigned long long>(dist(rng)));
-    return "chatcmpl-" + std::string(buf.data());
-}
+std::string new_chat_completion_id() { return new_opaque_id("chatcmpl-"); }
 
 std::int64_t unix_time_now() {
     return std::chrono::duration_cast<std::chrono::seconds>(

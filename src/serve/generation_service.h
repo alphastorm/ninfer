@@ -6,6 +6,7 @@
 
 #include "ninfer/engine.h"
 #include "serve/request.h"
+#include "serve/session_checkpoint_store.h"
 #include "serve/serve_options.h"
 #include "serve/tool_call_parser.h"
 
@@ -15,6 +16,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ninfer::serve {
@@ -22,6 +24,8 @@ namespace ninfer::serve {
 struct RequestLifetime;
 struct RequestCapacity;
 struct MediaInputCapacity;
+struct ClientSessionLocks;
+struct ClientSessionLease;
 
 struct GenerationMetrics {
     double prepare_seconds = 0.0;
@@ -81,6 +85,7 @@ struct PreparedRequest {
     bool preserve_thinking                 = false;
     bool preserve_thinking_semantic_change = false;
     std::shared_ptr<RequestLifetime> lifetime;
+    std::shared_ptr<ClientSessionLease> client_session;
 };
 
 class GenerationService {
@@ -100,7 +105,8 @@ public:
     }
 
     [[nodiscard]] PreparedRequest prepare(const GenerationRequest& req,
-                                          std::function<bool()> is_cancelled = {}) const;
+                                          std::function<bool()> is_cancelled = {},
+                                          std::string checkpoint_tag = {}) const;
     [[nodiscard]] int count_prompt_tokens(const GenerationRequest& req,
                                           std::function<bool()> is_cancelled = {}) const;
 
@@ -108,19 +114,37 @@ public:
     GenerationOutcome run(PreparedRequest& prepared, const StreamSink* sink,
                           std::function<bool()> is_cancelled = {});
 
+    [[nodiscard]] bool checkpoint_enabled() const noexcept;
+    [[nodiscard]] SessionCheckpointSaveOutcome
+    save_checkpoint(std::string_view session_sha256, std::string_view required_response_id,
+                    ResponseStore& responses);
+    [[nodiscard]] SessionCheckpointRestoreState
+    restore_checkpoint(std::string_view session_sha256, std::string_view required_response_id,
+                       ResponseStore& responses);
+    [[nodiscard]] SessionCheckpointEraseResult erase_checkpoint(std::string_view session_sha256);
+
     void warmup();
 
 private:
+    friend class HttpServer;
+
     [[nodiscard]] std::shared_ptr<RequestLifetime> acquire_request_lifetime() const;
     [[nodiscard]] HostInputLease
     acquire_media_input(std::chrono::steady_clock::time_point deadline,
                         const std::function<bool()>& is_cancelled) const;
+    [[nodiscard]] std::shared_ptr<ClientSessionLease>
+    acquire_client_session(std::string_view session_sha256,
+                           std::chrono::steady_clock::time_point deadline,
+                           const std::function<bool()>& is_cancelled) const;
 
     ServeOptions options_;
     std::unique_ptr<ninfer::Engine> engine_;
     ninfer::PromptCapabilities prompt_capabilities_;
     std::shared_ptr<RequestCapacity> request_capacity_;
     std::shared_ptr<MediaInputCapacity> media_input_capacity_;
+    std::shared_ptr<ClientSessionLocks> client_session_locks_;
+    std::string session_tenant_sha256_;
+    std::unique_ptr<SessionCheckpointManager> checkpoint_manager_;
 };
 
 } // namespace ninfer::serve
