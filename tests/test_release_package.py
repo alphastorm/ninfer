@@ -72,10 +72,10 @@ def create_release_fixture(root: Path) -> tuple[Path, Path, str]:
     for name, content in _SUPPORT_CONTENT.items():
         path = source / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        path.write_bytes(content.encode("utf-8"))
         if name.startswith("scripts/"):
             path.chmod(0o755)
-    (source / "tracked.txt").write_text("release bytes\n", encoding="utf-8")
+    (source / "tracked.txt").write_bytes(b"release bytes\n")
     run_git(source, "add", ".")
     run_git(source, "commit", "--quiet", "-m", "release fixture", commit_date=True)
     return source, binaries, run_git(source, "rev-parse", "HEAD")
