@@ -1637,7 +1637,7 @@ void test_aborted_source_selection_does_not_create_hit_history() {
             "aborted source selection incorrectly biased later retention policy");
 }
 
-void test_retained_source_is_protected_until_terminal() {
+void test_private_source_is_scoped_to_its_session() {
     FakeManager manager = make_manager(2, 3);
     FakeProgram program;
     const FakeCacheSessionKey first_session{1};
@@ -1648,23 +1648,10 @@ void test_retained_source_is_protected_until_terminal() {
 
     const ActiveRequest fork = start_active(
         manager, program, 9, make_base(9, second_session, RetentionClass::LiveSession), 2);
-    require(program.started_source_disposition == ClaimDisposition::Retained,
-            "different-session source was destructively moved");
-
-    program.required_pressure_actions = 1;
-    auto blocked = manager.inspect(program, FakePreparedPrompt{77}, make_base(77), 3);
-    require(blocked.readiness == Readiness::TemporarilyBlocked && !blocked.choice,
-            "active retained source was exposed as a pressure victim");
-
+    require(program.started_source_id == 0 &&
+                program.started_source_disposition == ClaimDisposition::ConsumedToActive,
+            "different session reused a private continuation");
     (void)manager.abort(program, fork.lane, fork.sequence);
-    program.abort_start = true;
-    auto available      = manager.inspect(program, FakePreparedPrompt{77}, make_base(77), 4);
-    require(available.choice.has_value(),
-            "terminal release did not return retained source to pressure policy");
-    (void)manager.reserve_materialization(program, std::move(*available.choice),
-                                          FakePreparedPrompt{77}, {});
-    require(!program.started_action_ids.empty(),
-            "released source did not participate in the sealed pressure plan");
 }
 
 void test_session_publication_order_controls_tied_source() {
@@ -2127,7 +2114,7 @@ int main() {
              test_uncommitted_pressure_acknowledgement_is_not_degradation);
     run_test("aborted source is not a hit",
              test_aborted_source_selection_does_not_create_hit_history);
-    run_test("retained source protection", test_retained_source_is_protected_until_terminal);
+    run_test("private source session isolation", test_private_source_is_scoped_to_its_session);
     run_test("session publication order", test_session_publication_order_controls_tied_source);
     run_test("canonical pressure", test_canonical_pressure_starts_with_disposable_owner);
     run_test("all preserving pressure alternatives",
