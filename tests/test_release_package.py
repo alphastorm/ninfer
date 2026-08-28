@@ -37,6 +37,7 @@ _SUPPORT_CONTENT = {
     "scripts/run-qwen36-35b-vision.sh": "#!/bin/sh\nexit 0\n",
     "packaging/windows/qwen38-3090-omp-v0.2/Install-Release.ps1": "# installer fixture\n",
     "packaging/windows/qwen38-3090-omp-v0.2/Control-Release.ps1": "# controller fixture\n",
+    "packaging/windows/qwen38-3090-omp-v0.2/Control-GpuOwner.ps1": "# gpu owner fixture\n",
     "packaging/windows/qwen38-3090-omp-v0.2/New-QualificationReceipt.ps1": "# receipt fixture\n",
     "packaging/windows/qwen38-3090-omp-v0.2/agent_protocol.py": "# protocol fixture\n",
     "packaging/windows/qwen38-3090-omp-v0.2/release-spec.json": "{}\n",
@@ -523,6 +524,7 @@ class ReleasePackageTests(unittest.TestCase):
             self.assertIn(f"{root_name}/bin/avcodec-62.dll", names)
             self.assertIn(f"{root_name}/Install-Release.ps1", names)
             self.assertIn(f"{root_name}/Control-Release.ps1", names)
+            self.assertIn(f"{root_name}/Control-GpuOwner.ps1", names)
             self.assertIn(f"{root_name}/New-QualificationReceipt.ps1", names)
             self.assertIn(f"{root_name}/release-spec.json", names)
             self.assertIn(f"{root_name}/server-config.json", names)

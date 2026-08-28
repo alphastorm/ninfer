@@ -111,7 +111,7 @@ Add `--kv-dtype rk8v4` to either `ninfer.exe` or `ninfer-serve.exe`. For example
 Prompt:
 
 ```bat
-ninfer-serve.exe qwen3_8_27b.ninfer --max-context 131072 --kv-capacity auto --max-concurrency 1 --prefill-chunk 1024 --kv-dtype rk8v4 --spec mtp --draft-tokens 3 --lm-head-draft
+ninfer-serve.exe qwen3_8_27b.ninfer --api-key-file api-key.txt --max-context 131072 --kv-capacity auto --max-concurrency 1 --prefill-chunk 1024 --kv-dtype rk8v4 --spec mtp --draft-tokens 3 --lm-head-draft
 ```
 
 On the development RTX 3090, C1 with MTP and CUDA Graphs disabled fit a **226,560-token** logical

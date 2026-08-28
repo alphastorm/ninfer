@@ -57,13 +57,18 @@ This support claim is interactive OMP beta support, not authorization for an una
 role. The separate frozen automatic-use corpus did not meet its quality floor, so that route remains
 disabled. JSON-schema `response_format` is also unsupported and rejected rather than ignored.
 
-Run the installer from an elevated PowerShell session with the exact package hash from the emitted
-SHA256SUMS file:
+Run the installer from an elevated PowerShell session with the package hash from the immutable OMP
+NInfer product manifest. A `SHA256SUMS` file delivered beside the archive is useful for local
+diagnosis but is not an independent trust root:
 
 ~~~powershell
+$manifestUrl = 'https://raw.githubusercontent.com/alphastorm/omp-ninfer/v0.2.0-beta.1/releases/v0.2.0-beta.1/manifest.json'
+$manifest = Invoke-RestMethod -Uri $manifestUrl
+$variant = @($manifest.components.ninfer_variants | Where-Object { $_.id -ceq 'rtx3090-windows-native' })
+if ($variant.Count -ne 1) { throw 'RTX 3090 variant is absent or duplicated' }
 $package = '.\ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.tar.gz'
-$packageSha = ((Get-Content .\SHA256SUMS | Where-Object { $_.EndsWith("  $([IO.Path]::GetFileName($package))") }) -split '  ')[0]
-.\Install-Release.ps1 -PackagePath $package -PackageSha256 $packageSha -ModelArtifactPath (Resolve-Path .\models\qwen3_8_27b.ninfer) -ApiKeyFile .\api-key.txt -GpuOwnerControllerPath .\Control-GpuOwner.ps1
+$packageSha = [string]$variant[0].package_sha256
+.\Install-Release.ps1 -PackagePath $package -PackageSha256 $packageSha -ModelArtifactPath (Resolve-Path .\models\qwen3_8_27b.ninfer) -ApiKeyFile .\api-key.txt
 ~~~
 
 The model stays at the supplied external path and is never copied into a candidate release. The
@@ -116,6 +121,7 @@ headroom and may reject an otherwise viable compact-35B configuration.
 ```powershell
 .\ninfer-serve.exe models\qwen3_6_35b_a3b.ninfer `
   --host 127.0.0.1 --port 8080 `
+  --api-key-file .\api-key.txt `
   --max-context 4096 --kv-capacity 4096 `
   --max-concurrency 4 --max-pending-requests 32 `
   --prefill-chunk 512 --kv-dtype int8 `
@@ -137,6 +143,7 @@ to use MTP3:
 ```powershell
 .\ninfer-serve.exe models\qwen3_8_27b.ninfer `
   --host 127.0.0.1 --port 8080 `
+  --api-key-file .\api-key.txt `
   --max-context 8192 --kv-capacity 8192 `
   --max-concurrency 8 --max-pending-requests 32 `
   --prefill-chunk 1024 --kv-dtype int8 `

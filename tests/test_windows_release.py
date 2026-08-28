@@ -59,10 +59,18 @@ class WindowsReleaseContractTests(unittest.TestCase):
                 "authenticated-real-client-protocol",
                 "advertised-context-retrieval",
                 "process-restart-session-continuation",
-                "frozen-role-corpus",
+                "omp-client-end-to-end",
                 "bounded-gpu-performance-at-qualified-cap",
                 "gaming-drain-restart-rollback",
             ],
+        )
+        self.assertEqual(
+            spec["lifecycle"]["gpu_owner_controller_protocol"]["bundled_default"],
+            "Control-GpuOwner.ps1",
+        )
+        self.assertEqual(
+            spec["lifecycle"]["gpu_owner_controller_protocol"]["qualified_power_limit_w"],
+            300,
         )
 
     def test_controller_server_options_match_runtime(self) -> None:
@@ -122,11 +130,40 @@ class WindowsReleaseContractTests(unittest.TestCase):
         for name in (
             "Install-Release.ps1",
             "Control-Release.ps1",
+            "Control-GpuOwner.ps1",
             "New-QualificationReceipt.ps1",
             "agent_protocol.py",
             "release-spec.json",
         ):
             self.assertIn(name, package_source)
+
+    def test_public_installer_and_examples_preserve_security_boundaries(self) -> None:
+        installer = (RELEASE / "Install-Release.ps1").read_text(encoding="utf-8")
+        controller = (RELEASE / "Control-Release.ps1").read_text(encoding="utf-8")
+        gpu_owner = (RELEASE / "Control-GpuOwner.ps1").read_text(encoding="utf-8")
+        guide = (ROOT / "docs/rtx-3090-windows.md").read_text(encoding="utf-8")
+
+        self.assertNotIn("NINFER_INSTALL_TEST_MODE", installer)
+        self.assertIn("InternalSourceTestMode", installer)
+        self.assertIn("available only from the source worktree", installer)
+        self.assertIn("Control-GpuOwner.ps1", installer)
+        self.assertIn("':(OI)(CI)RX'", installer)
+        self.assertNotIn("':(OI)(CI)M'", installer)
+        self.assertGreaterEqual(controller.count("server executable"), 2)
+        self.assertGreaterEqual(controller.count("server config"), 2)
+        self.assertIn(r"NInfer\qwen38-3090-gpu-owner", gpu_owner)
+        self.assertIn("qualifiedPowerLimitW = 300", gpu_owner)
+        self.assertNotIn("Get-Content .\\SHA256SUMS", guide)
+        self.assertIn("components.ninfer_variants", guide)
+
+        packaged_readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        command_blocks = re.findall(
+            r"```(?:powershell|bat)\n(.*?)```", guide + "\n" + packaged_readme, re.DOTALL
+        )
+        serving_blocks = [block for block in command_blocks if "ninfer-serve.exe" in block]
+        self.assertGreaterEqual(len(serving_blocks), 2)
+        for block in serving_blocks:
+            self.assertIn("--api-key-file", block)
 
 
 @unittest.skipUnless(PWSH, "pwsh is not installed")

@@ -24,6 +24,9 @@ param(
     [Parameter(ParameterSetName = 'Install')]
     [switch]$NoStart,
 
+    [Parameter(DontShow = $true)]
+    [switch]$InternalSourceTestMode,
+
     [Parameter(Mandatory = $true, ParameterSetName = 'Repair')]
     [switch]$RepairInterruptedInstall
 )
@@ -31,8 +34,19 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:InstallTestMode = [string]$env:NINFER_INSTALL_TEST_MODE -ceq 'transaction'
+$script:InstallTestMode = [bool]$InternalSourceTestMode
 if ($script:InstallTestMode) {
+    $sourceRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..\..'))
+    $gitRoot = @(& git -C $PSScriptRoot rev-parse --show-toplevel 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $gitRoot.Count -ne 1 -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$gitRoot[0]),
+            $sourceRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not (Test-Path -LiteralPath (Join-Path $sourceRoot 'tests\test_windows_release_lifecycle.ps1') -PathType Leaf)) {
+        throw 'internal installer test mode is available only from the source worktree'
+    }
     $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd(
         [IO.Path]::DirectorySeparatorChar
     ) + [IO.Path]::DirectorySeparatorChar
@@ -787,7 +801,7 @@ function Invoke-InstallTransactionRollback(
 
 New-Item -ItemType Directory -Force -Path $StateRoot | Out-Null
 $StateRoot = (Resolve-Path -LiteralPath $StateRoot).Path
-& icacls.exe $StateRoot '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' ([string]::Concat($env:USERNAME, ':(OI)(CI)F')) | Out-Null
+& icacls.exe $StateRoot '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' ([string]::Concat($env:USERNAME, ':(OI)(CI)RX')) | Out-Null
 if ($LASTEXITCODE -ne 0) { throw 'failed to harden release state ACL before first write' }
 $statePath = Join-Path $StateRoot 'state.json'
 $controllerPath = Join-Path $StateRoot 'Control-Release.ps1'
@@ -871,6 +885,12 @@ try {
     $installedReleases = if ($null -eq $oldState) { [ordered]@{} } else { Get-InstalledReleases $oldState }
     $ownerControllerSource = $null
     $ownerRecord = $null
+    if ([string]::IsNullOrWhiteSpace($GpuOwnerControllerPath) -and $null -eq $oldState) {
+        $bundledOwnerController = Join-Path $PSScriptRoot 'Control-GpuOwner.ps1'
+        if (Test-Path -LiteralPath $bundledOwnerController -PathType Leaf) {
+            $GpuOwnerControllerPath = $bundledOwnerController
+        }
+    }
     if (-not [string]::IsNullOrWhiteSpace($GpuOwnerControllerPath)) {
         if (-not (Test-Path -LiteralPath $GpuOwnerControllerPath -PathType Leaf)) {
             throw 'GPU-owner controller does not exist'
@@ -1247,7 +1267,7 @@ try {
         }
         Invoke-InstallFault 'owner_controller_copy'
 
-        & icacls.exe $StateRoot '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' ([string]::Concat($env:USERNAME, ':(OI)(CI)M')) | Out-Null
+        & icacls.exe $StateRoot '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' ([string]::Concat($env:USERNAME, ':(OI)(CI)RX')) | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'failed to restrict release state ACL' }
         & icacls.exe (Join-Path $StateRoot '*') '/reset' '/T' | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'failed to propagate release state ACL' }

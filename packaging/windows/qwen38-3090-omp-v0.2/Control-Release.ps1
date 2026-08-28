@@ -662,6 +662,8 @@ function Invoke-Run {
                 }))
         $stdout = Join-Path $logs 'stdout.log'
         $stderr = Join-Path $logs 'stderr.log'
+        Assert-FileHash ([string]$release.server_executable) ([string]$release.binary_sha256) 'server executable before launch'
+        Assert-FileHash ([string]$release.config_file) ([string]$release.config_sha256) 'server config before launch'
         $process = Start-Process -FilePath ([string]$release.server_executable) -ArgumentList $argumentLine `
             -WorkingDirectory ([string]$release.release_root) -RedirectStandardOutput $stdout `
             -RedirectStandardError $stderr -PassThru

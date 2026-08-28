@@ -123,6 +123,9 @@ try {
     Assert-Equal ([string]$receiptOne.package.sha256) ([string]$receiptTwo.package.sha256) 'deterministic package SHA-256 changed between runs'
     Assert-Equal ([Int64]$receiptOne.package.bytes) ([Int64]$receiptTwo.package.bytes) 'deterministic package size changed between runs'
     Assert-Equal ([string]$receiptOne.config_sha256) (Get-Sha256 $ServerConfigPath) 'package receipt config identity mismatch'
+    Assert-Equal ([string]$receiptOne.support_assets.installer_sha256) (Get-Sha256 (Join-Path $outOne 'Install-Release.ps1')) 'installer support asset hash mismatch'
+    Assert-Equal ([string]$receiptOne.support_assets.controller_sha256) (Get-Sha256 (Join-Path $outOne 'Control-Release.ps1')) 'controller support asset hash mismatch'
+    Assert-Equal ([string]$receiptOne.support_assets.gpu_owner_controller_sha256) (Get-Sha256 (Join-Path $outOne 'Control-GpuOwner.ps1')) 'GPU-owner support asset hash mismatch'
     Assert-Equal ([string]$receiptOne.qualification_status) 'hardware-pending' 'package claimed unperformed hardware qualification'
     Assert-Equal ([int]$receiptOne.secret_values_recorded) 0 'package receipt recorded a secret value'
 
@@ -135,7 +138,7 @@ try {
     foreach ($name in @(
             'bin/ninfer.exe', 'bin/ninfer-serve.exe', 'bin/ninfer_bench.exe',
             'bin/runtime-a.dll', 'bin/runtime-b.dll', 'Install-Release.ps1',
-            'Control-Release.ps1', 'New-QualificationReceipt.ps1', 'release-spec.json',
+            'Control-Release.ps1', 'Control-GpuOwner.ps1', 'New-QualificationReceipt.ps1', 'release-spec.json',
             'server-config.json', 'build-identity.json', 'SHA256SUMS.txt',
             'smoke/agent_protocol.py', 'smoke/serve_contract.py'
         )) {
@@ -208,13 +211,15 @@ try {
         compute_capability = '8.6'
     }
     $notRun = [pscustomobject]@{ status = 'not_run'; evidence_sha256 = $null }
-    $incomplete = New-NInferQualificationReceipt -QualifiedUtc ([DateTimeOffset]::UtcNow.ToString('o')) -ReleaseId 'fixture' -Identity $identity -Configuration $configuration -Hardware $hardware -GpuThermal $notRun -Protocol $notRun -LongContext $notRun -CheckpointRestart $notRun -RoleCorpus $notRun -Performance $notRun -Lifecycle $notRun
+    $incomplete = New-NInferQualificationReceipt -QualifiedUtc ([DateTimeOffset]::UtcNow.ToString('o')) -ReleaseId 'fixture' -Identity $identity -Configuration $configuration -Hardware $hardware -GpuThermal $notRun -Protocol $notRun -LongContext $notRun -CheckpointRestart $notRun -AutomaticRoleCorpus $notRun -Performance $notRun -Lifecycle $notRun
     Assert-Equal ([string]$incomplete.status) 'incomplete' 'receipt constructor passed unrun hardware gates'
     $incompleteText = $incomplete | ConvertTo-Json -Depth 16 -Compress
     Assert-True (-not $incompleteText.Contains('must-not-appear')) 'qualification receipt copied an undeclared secret field'
     $passedGate = [pscustomobject]@{ status = 'passed'; evidence_sha256 = ('a' * 64) }
-    $passed = New-NInferQualificationReceipt -QualifiedUtc ([DateTimeOffset]::UtcNow.ToString('o')) -ReleaseId 'fixture' -Identity $identity -Configuration $configuration -Hardware $hardware -GpuThermal $passedGate -Protocol $passedGate -LongContext $passedGate -CheckpointRestart $passedGate -RoleCorpus $passedGate -Performance $passedGate -Lifecycle $passedGate
+    $passed = New-NInferQualificationReceipt -QualifiedUtc ([DateTimeOffset]::UtcNow.ToString('o')) -ReleaseId 'fixture' -Identity $identity -Configuration $configuration -Hardware $hardware -GpuThermal $passedGate -Protocol $passedGate -LongContext $passedGate -CheckpointRestart $passedGate -AutomaticRoleCorpus $notRun -Performance $passedGate -Lifecycle $passedGate
     Assert-Equal ([string]$passed.status) 'passed' 'receipt constructor did not pass complete gates'
+    Assert-Equal ([bool]$passed.automatic_route_activation_allowed) $false 'receipt authorized an unqualified automatic role'
+    Assert-True (-not (($passed | ConvertTo-Json -Depth 16 -Compress).Contains('GPU-fixture-3090'))) 'receipt exposed the GPU UUID'
 
     [ordered]@{
         artifact_type = 'ninfer_windows_release_assets_regression'

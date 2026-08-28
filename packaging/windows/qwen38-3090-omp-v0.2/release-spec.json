@@ -54,6 +54,9 @@
     "state_pointers": ["prepared_release", "active_release", "previous_release"],
     "gpu_owner_controller_protocol": {
       "required_on_first_install": true,
+      "bundled_default": "Control-GpuOwner.ps1",
+      "qualified_power_limit_w": 300,
+      "interactive_gpu_memory_threshold_bytes": 1073741824,
       "inherited_on_upgrade": true,
       "actions": ["status", "stop", "start"],
       "status_paused_field": "paused",
@@ -71,7 +74,7 @@
       "authenticated-real-client-protocol",
       "advertised-context-retrieval",
       "process-restart-session-continuation",
-      "frozen-role-corpus",
+      "omp-client-end-to-end",
       "bounded-gpu-performance-at-qualified-cap",
       "gaming-drain-restart-rollback"
     ]

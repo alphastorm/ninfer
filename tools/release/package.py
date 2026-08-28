@@ -73,6 +73,11 @@ _WINDOWS_SUPPORT_FILES = (
         0o644,
     ),
     (
+        "packaging/windows/qwen38-3090-omp-v0.2/Control-GpuOwner.ps1",
+        "Control-GpuOwner.ps1",
+        0o644,
+    ),
+    (
         "packaging/windows/qwen38-3090-omp-v0.2/New-QualificationReceipt.ps1",
         "New-QualificationReceipt.ps1",
         0o644,

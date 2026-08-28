@@ -424,6 +424,7 @@ function Invoke-FixtureInstall(
             ApiKeyFile = $Secret.path
             GpuOwnerControllerPath = $script:OwnerControllerPath
             StateRoot = $script:StateRoot
+            InternalSourceTestMode = $true
         }
         if ($NoStart) { $parameters.NoStart = $true }
         $output = @(& $InstallerPath @parameters)
@@ -437,7 +438,7 @@ function Invoke-FixtureInstall(
 }
 
 function Invoke-InstallerRepair {
-    $output = @(& $InstallerPath -RepairInterruptedInstall -StateRoot $script:StateRoot)
+    $output = @(& $InstallerPath -RepairInterruptedInstall -StateRoot $script:StateRoot -InternalSourceTestMode)
     if ($output.Count -eq 0) { throw 'installer repair returned no receipt' }
     return ([string]$output[-1] | ConvertFrom-Json)
 }
@@ -499,8 +500,6 @@ $ownerScript = $ownerScript.Replace('__OWNER_STATE__', $script:OwnerStatePath.Re
 $global:NInferTestStateRoot = $script:StateRoot
 $originalFault = [Environment]::GetEnvironmentVariable('NINFER_TEST_INSTALL_FAILURE_AFTER', 'Process')
 $originalInterrupt = [Environment]::GetEnvironmentVariable('NINFER_TEST_INSTALL_INTERRUPTION_AFTER', 'Process')
-$originalTestMode = [Environment]::GetEnvironmentVariable('NINFER_INSTALL_TEST_MODE', 'Process')
-[Environment]::SetEnvironmentVariable('NINFER_INSTALL_TEST_MODE', 'transaction', 'Process')
 
 try {
     $modelBytes = New-Object byte[] 1024
@@ -648,6 +647,18 @@ try {
     $upgradeKeyPath = [string]$state.releases.PSObject.Properties[$upgradeId].Value.api_key_file
     Assert-Equal (Get-Sha256 $upgradeKeyPath) ([string]$upgradeSecret.sha256) 'upgrade secret identity mismatch'
     Assert-Equal ([string]$upgradeReceipt.identity.package_sha256) ([string]$upgradePackage.sha256) 'upgrade receipt lost package identity'
+    $stateRootAcl = @($global:NInferAclCalls | Where-Object {
+            $_.Count -gt 0 -and [string]::Equals(
+                [IO.Path]::GetFullPath([string]$_[0]),
+                [IO.Path]::GetFullPath($script:StateRoot),
+                [StringComparison]::OrdinalIgnoreCase
+            ) -and $_ -contains '/inheritance:r'
+        })
+    Assert-True ($stateRootAcl.Count -ge 1) 'installer did not apply the final state-root ACL'
+    Assert-True (@($stateRootAcl | Where-Object {
+                $_ -contains ([string]::Concat($env:USERNAME, ':(OI)(CI)RX')) -and
+                $_ -notcontains ([string]::Concat($env:USERNAME, ':(OI)(CI)M'))
+            }).Count -ge 1) 'retained release state remained user-writable after upgrade'
 
     $global:NInferTestDeadReleaseId = $baseId
     $global:NInferTestDeadStartSleptMilliseconds = 0
@@ -735,7 +746,6 @@ try {
 finally {
     [Environment]::SetEnvironmentVariable('NINFER_TEST_INSTALL_FAILURE_AFTER', $originalFault, 'Process')
     [Environment]::SetEnvironmentVariable('NINFER_TEST_INSTALL_INTERRUPTION_AFTER', $originalInterrupt, 'Process')
-    [Environment]::SetEnvironmentVariable('NINFER_INSTALL_TEST_MODE', $originalTestMode, 'Process')
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
     foreach ($name in @(
             'Get-ScheduledTask', 'Export-ScheduledTask', 'New-ScheduledTaskAction',

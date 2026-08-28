@@ -43,7 +43,7 @@ function New-NInferQualificationReceipt {
         [Parameter(Mandatory = $true)][object]$Protocol,
         [Parameter(Mandatory = $true)][object]$LongContext,
         [Parameter(Mandatory = $true)][object]$CheckpointRestart,
-        [Parameter(Mandatory = $true)][object]$RoleCorpus,
+        [Parameter(Mandatory = $true)][object]$AutomaticRoleCorpus,
         [Parameter(Mandatory = $true)][object]$Performance,
         [Parameter(Mandatory = $true)][object]$Lifecycle
     )
@@ -97,13 +97,12 @@ function New-NInferQualificationReceipt {
     }
     $hardwareReceipt = [ordered]@{
         gpu_name = [string]$Hardware.gpu_name
-        gpu_uuid = [string]$Hardware.gpu_uuid
         driver_version = [string]$Hardware.driver_version
         compute_capability = [string]$Hardware.compute_capability
     }
     if ($hardwareReceipt.gpu_name -cne 'NVIDIA GeForce RTX 3090' -or
         $hardwareReceipt.compute_capability -cne '8.6' -or
-        [string]::IsNullOrWhiteSpace($hardwareReceipt.gpu_uuid) -or
+        [string]::IsNullOrWhiteSpace([string]$Hardware.gpu_uuid) -or
         [string]::IsNullOrWhiteSpace($hardwareReceipt.driver_version)) {
         throw 'qualification hardware does not identify the bound RTX 3090'
     }
@@ -114,10 +113,10 @@ function New-NInferQualificationReceipt {
         authenticated_real_client_protocol = Get-NInferQualificationGate 'authenticated real-client protocol' $Protocol
         advertised_context_retrieval = Get-NInferQualificationGate 'advertised context retrieval' $LongContext
         process_restart_session_continuation = Get-NInferQualificationGate 'process-restart session continuation' $CheckpointRestart
-        frozen_role_corpus = Get-NInferQualificationGate 'frozen role corpus' $RoleCorpus
         bounded_gpu_performance_at_qualified_cap = Get-NInferQualificationGate 'bounded GPU performance at qualified cap' $Performance
         gaming_drain_restart_rollback = Get-NInferQualificationGate 'gaming drain/restart/rollback' $Lifecycle
     }
+    $automaticRole = Get-NInferQualificationGate 'automatic role corpus' $AutomaticRoleCorpus
     $allPassed = $true
     foreach ($gate in $gates.Values) {
         if ([string]$gate.status -cne 'passed') { $allPassed = $false }
@@ -145,5 +144,7 @@ function New-NInferQualificationReceipt {
         }
         hardware = $hardwareReceipt
         gates = $gates
+        automatic_role_corpus = $automaticRole
+        automatic_route_activation_allowed = [string]$automaticRole.status -ceq 'passed'
     }
 }
