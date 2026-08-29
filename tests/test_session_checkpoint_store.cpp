@@ -948,11 +948,13 @@ int test_delete_checkpoint_transaction_race_and_quota() {
         ResponseStoreSnapshot snapshot = sample_snapshot('d');
         ResponseStore responses(8, 8ULL << 20);
         for (const StoredResponse& response : snapshot.records) { responses.put(response); }
-        FakeCheckpointEngine baseline_engine;
-        const SessionCheckpointStoreOptions generous = manager_options(temporary.path);
-        SessionCheckpointManager baseline_manager(generous, runtime, tenant,
-                                                  baseline_engine.access());
-        const SessionCheckpointSaveOutcome baseline = baseline_manager.save(
+        SessionCheckpointStoreOptions constrained = manager_options(temporary.path);
+        constrained.disk_quota_bytes = 64ULL << 10;
+        FakeCheckpointEngine engine;
+        engine.payload.resize(1024, std::byte{0x2a});
+        const std::vector<std::byte> baseline_payload = engine.payload;
+        SessionCheckpointManager manager(constrained, runtime, tenant, engine.access());
+        const SessionCheckpointSaveOutcome baseline = manager.save(
             snapshot.client_session_sha256, snapshot.latest_response_id, responses);
         failures += check(baseline.state == SessionCheckpointSaveState::Saved &&
                               baseline.checkpoint,
@@ -961,14 +963,10 @@ int test_delete_checkpoint_transaction_race_and_quota() {
         const std::filesystem::path session = stored_session_path(temporary.path, snapshot);
         const std::string current_before = read_file_bytes(session / "current");
 
-        SessionCheckpointStoreOptions constrained = generous;
-        constrained.disk_quota_bytes = baseline_engine.payload.size();
-        FakeCheckpointEngine constrained_engine;
-        SessionCheckpointManager constrained_manager(constrained, runtime, tenant,
-                                                     constrained_engine.access());
-        const SessionCheckpointEraseResult quota_result = constrained_manager.erase_response(
+        engine.payload.resize(128ULL << 10, std::byte{0x5a});
+        const SessionCheckpointEraseResult quota_result = manager.erase_response(
             snapshot.client_session_sha256, snapshot.records.front().id, responses);
-        SessionCheckpointStore inspection(generous);
+        SessionCheckpointStore inspection(constrained);
         const nlohmann::json status = inspection.status(
             AuthenticatedCheckpointNamespace::authenticated(tenant,
                                                             snapshot.client_session_sha256),
@@ -984,7 +982,8 @@ int test_delete_checkpoint_transaction_race_and_quota() {
             "disk-quota rejection reported Erased or lost the durable pre-delete generation");
 
         FakeCheckpointEngine restart_engine;
-        SessionCheckpointManager restarted(generous, runtime, tenant, restart_engine.access());
+        restart_engine.payload = baseline_payload;
+        SessionCheckpointManager restarted(constrained, runtime, tenant, restart_engine.access());
         ResponseStore restarted_responses(8, 8ULL << 20);
         failures += check(
             restarted.restore(snapshot.client_session_sha256, snapshot.latest_response_id,
