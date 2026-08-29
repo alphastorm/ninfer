@@ -626,6 +626,31 @@ int test_expected_allocation_bound() {
     return failures;
 }
 
+int test_continuation_read_queue() {
+    TempDirectory root;
+    IoUringCheckpointBackend backend(root.path());
+    const Fixture checkpoint = fixture(1, {{CheckpointPayloadKind::StateImage, 7003}});
+    save(backend, checkpoint);
+
+    std::shared_ptr<ContinuationCheckpointReadQueue> queue =
+        make_io_uring_checkpoint_read_queue(root.path());
+    std::vector<std::byte> restored(4097);
+    const ContinuationCheckpointReadRequest request{.file_offset = 37, .destination = restored};
+    std::unique_ptr<ContinuationCheckpointReadCompletion> completion =
+        queue->submit(payload_path(root, checkpoint), std::span(&request, 1));
+    if (!completion) { return check(false, "io_uring continuation queue returned no completion"); }
+    completion->wait();
+    const auto expected = std::span(checkpoint.payloads[0].bytes).subspan(37, restored.size());
+    int failures        = check(std::equal(restored.begin(), restored.end(), expected.begin()),
+                                "io_uring continuation queue changed an unaligned payload range");
+    failures += check(throws_checkpoint([&] {
+                          (void)queue->submit(root.path().parent_path() / "escaped-checkpoint",
+                                              std::span(&request, 1));
+                      }),
+                      "io_uring continuation queue accepted a path outside its configured root");
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -659,6 +684,7 @@ int main() {
         failures += test_corruption_rejection();
         failures += test_truncation_and_oversize_rejection();
         failures += test_expected_allocation_bound();
+        failures += test_continuation_read_queue();
         if (failures == 0) {
             const char* environment =
                 capability.environment == LinuxCheckpointEnvironment::Wsl ? "WSL" : "Linux";

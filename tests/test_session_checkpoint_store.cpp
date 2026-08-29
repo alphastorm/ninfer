@@ -11,8 +11,10 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -44,6 +46,46 @@ public:
     }
 
     std::filesystem::path path;
+};
+
+class TestReadQueue final : public runtime::ContinuationCheckpointReadQueue {
+public:
+    class Completion final : public runtime::ContinuationCheckpointReadCompletion {
+    public:
+        explicit Completion(TestReadQueue& owner) : owner_(owner) {}
+
+        void wait() override { ++owner_.wait_count; }
+
+    private:
+        TestReadQueue& owner_;
+    };
+
+    [[nodiscard]] bool available() const noexcept override { return true; }
+
+    [[nodiscard]] std::string_view backend_name() const noexcept override { return "test-queue"; }
+
+    [[nodiscard]] std::string_view unavailable_reason() const noexcept override { return {}; }
+
+    [[nodiscard]] std::unique_ptr<runtime::ContinuationCheckpointReadCompletion>
+    submit(const std::filesystem::path& path,
+           std::span<const runtime::ContinuationCheckpointReadRequest> requests) override {
+        ++submit_count;
+        for (const runtime::ContinuationCheckpointReadRequest& request : requests) {
+            std::ifstream input(path, std::ios::binary);
+            input.seekg(static_cast<std::streamoff>(request.file_offset));
+            input.read(reinterpret_cast<char*>(request.destination.data()),
+                       static_cast<std::streamsize>(request.destination.size()));
+            if (!input ||
+                input.gcount() != static_cast<std::streamsize>(request.destination.size())) {
+                throw std::runtime_error(
+                    "test checkpoint queue could not read the requested range");
+            }
+        }
+        return std::make_unique<Completion>(*this);
+    }
+
+    std::size_t submit_count = 0;
+    std::size_t wait_count   = 0;
 };
 
 ChatTurn rich_turn() {
@@ -294,8 +336,11 @@ int test_transaction_restart_compatibility_and_corruption() {
     const std::filesystem::path interrupted = session / "generations" / ".staging-interrupted";
     std::filesystem::create_directories(interrupted);
     std::ofstream(interrupted / "partial.bin", std::ios::binary) << "partial";
-    SessionCheckpointStore restarted(
-        {.root = temporary.path, .disk_quota_bytes = 8ULL << 20, .staging_bytes = 1ULL << 20});
+    auto read_queue = std::make_shared<TestReadQueue>();
+    SessionCheckpointStore restarted({.root             = temporary.path,
+                                      .disk_quota_bytes = 8ULL << 20,
+                                      .staging_bytes    = 1ULL << 20,
+                                      .read_queue       = read_queue});
     SessionCheckpointLoadResult loaded = restarted.load(
         responses.client_session_sha256, fingerprint(), responses.latest_response_id);
     failures += check(loaded.state == SessionCheckpointLoadState::Available && loaded.checkpoint &&
@@ -305,7 +350,8 @@ int test_transaction_restart_compatibility_and_corruption() {
     std::vector<std::byte> restored(payload.size());
     failures += check(loaded.checkpoint->engine->read_file("engine/state-0.bin", 0, restored) &&
                           restored == payload &&
-                          loaded.checkpoint->expected_engine.restored_tokens == 97500,
+                          loaded.checkpoint->expected_engine.restored_tokens == 97500 &&
+                          read_queue->submit_count == 1 && read_queue->wait_count == 1,
                       "verified engine reader restores exact payload and token summary");
     ResponseStore response_store(8, 1ULL << 20);
     failures +=
@@ -345,6 +391,7 @@ int test_transaction_restart_compatibility_and_corruption() {
     const nlohmann::json after_cancel =
         restarted.status(responses.client_session_sha256, fingerprint());
     failures += check(after_cancel.at("state") == "available" &&
+                          after_cancel.at("read_backend") == "test-queue" &&
                           after_cancel.at("generation") == saved->generation,
                       "cancelled export leaves prior current unchanged");
     const std::string public_status = after_cancel.dump();

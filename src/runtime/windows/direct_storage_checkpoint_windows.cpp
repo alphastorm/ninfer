@@ -402,7 +402,7 @@ std::string direct_storage_failure(DirectStorageState& state, HRESULT status) {
     return message.str();
 }
 
-class WindowsReadCompletion final : public CheckpointReadCompletion {
+class WindowsReadCompletion final : public ContinuationCheckpointReadCompletion {
 public:
     WindowsReadCompletion(std::shared_ptr<DirectStorageState> state,
                           std::unique_lock<std::mutex> queue_lock, ComPtr<IDStorageFile> file,
@@ -471,7 +471,7 @@ private:
     bool done_                 = false;
 };
 
-class WindowsDirectStorageReadQueue final : public CheckpointReadQueue {
+class WindowsDirectStorageReadQueue final : public ContinuationCheckpointReadQueue {
 public:
     explicit WindowsDirectStorageReadQueue(std::uint32_t timeout_ms)
         : state_(std::make_shared<DirectStorageState>()), timeout_ms_(timeout_ms) {
@@ -544,11 +544,13 @@ public:
 
     bool available() const noexcept override { return true; }
 
+    std::string_view backend_name() const noexcept override { return "directstorage-1.3"; }
+
     std::string_view unavailable_reason() const noexcept override { return {}; }
 
-    std::unique_ptr<CheckpointReadCompletion>
+    std::unique_ptr<ContinuationCheckpointReadCompletion>
     submit(const std::filesystem::path& path,
-           std::span<const CheckpointReadRequest> requests) override {
+           std::span<const ContinuationCheckpointReadRequest> requests) override {
         if (requests.empty() || requests.size() > DSTORAGE_MAX_QUEUE_CAPACITY - 2) {
             throw CheckpointContractError("DirectStorage checkpoint request batch is invalid");
         }
@@ -566,7 +568,7 @@ public:
 
         std::vector<DSTORAGE_REQUEST> direct_storage_requests;
         direct_storage_requests.reserve(requests.size());
-        for (const CheckpointReadRequest& source : requests) {
+        for (const ContinuationCheckpointReadRequest& source : requests) {
             if (source.destination.empty() ||
                 source.destination.size() > std::numeric_limits<UINT32>::max() ||
                 source.file_offset > file_bytes ||
@@ -611,10 +613,15 @@ private:
 
 } // namespace
 
+std::shared_ptr<ContinuationCheckpointReadQueue>
+make_direct_storage_checkpoint_read_queue(std::uint32_t timeout_ms) {
+    return std::make_shared<WindowsDirectStorageReadQueue>(timeout_ms);
+}
+
 std::unique_ptr<DirectStorageCheckpointBackend>
 make_direct_storage_checkpoint_backend(DirectStorageCheckpointConfig config) {
     auto file_system = std::make_shared<WindowsCheckpointFileSystem>();
-    auto read_queue  = std::make_shared<WindowsDirectStorageReadQueue>(config.io_timeout_ms);
+    auto read_queue  = make_direct_storage_checkpoint_read_queue(config.io_timeout_ms);
     return std::make_unique<DirectStorageCheckpointBackend>(
         std::move(config), std::move(file_system), std::move(read_queue));
 }

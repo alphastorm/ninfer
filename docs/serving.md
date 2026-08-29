@@ -474,6 +474,14 @@ binds the loaded target/model/weights identity and relevant Engine/cache configu
 incompatible fingerprint is a cache miss; it is never imported under a different executable,
 artifact, or configuration.
 
+Restore I/O is platform-native and fail-closed. Native Windows uses DirectStorage 1.3; Linux and
+the primary WSL2/container lane use `io_uring` with `O_DIRECT` on a supported local filesystem.
+Server startup rejects a configured checkpoint directory when that backend's exact capability
+probe fails. Status reports the selected `read_backend`. DirectStorage does not read SMB/NAS, S3,
+VHDX, or WSL paths: any future remote replication must first materialize and verify an immutable
+generation on eligible local storage. Save publication remains manifest-last durable filesystem
+I/O because DirectStorage queues are read-only.
+
 The routes require the server bearer API key. Save takes the digest only in one exact JSON body;
 malformed JSON, a missing or non-string digest, a non-lowercase/non-SHA-256 digest, or any extra
 field is HTTP 400:

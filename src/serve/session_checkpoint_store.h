@@ -23,6 +23,7 @@ struct SessionCheckpointStoreOptions {
     std::filesystem::path root;
     std::uint64_t disk_quota_bytes = 64ULL << 30;
     std::size_t staging_bytes      = 256ULL << 20;
+    std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue;
     std::function<bool(const std::filesystem::path&)> tombstone_cleanup;
 };
 

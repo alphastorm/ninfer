@@ -1691,6 +1691,114 @@ private:
     bool lock_held_ = false;
 };
 
+namespace {
+
+class CompletedCheckpointRead final : public ContinuationCheckpointReadCompletion {
+public:
+    void wait() override {}
+};
+
+class IoUringContinuationReadQueue final : public ContinuationCheckpointReadQueue {
+public:
+    explicit IoUringContinuationReadQueue(const std::filesystem::path& root)
+        : root_(std::filesystem::weakly_canonical(root)) {
+        const LinuxCheckpointEnvironment environment = detect_environment();
+        UniqueFd root_fd                             = open_root(root_);
+        require_local_filesystem(root_fd.get(), environment);
+        ring_.initialize();
+        alignment_ = verify_storage_capabilities(root_fd.get(), ring_);
+    }
+
+    [[nodiscard]] bool available() const noexcept override { return true; }
+
+    [[nodiscard]] std::string_view backend_name() const noexcept override {
+        return "io_uring-odirect";
+    }
+
+    [[nodiscard]] std::string_view unavailable_reason() const noexcept override { return {}; }
+
+    [[nodiscard]] std::unique_ptr<ContinuationCheckpointReadCompletion>
+    submit(const std::filesystem::path& path,
+           std::span<const ContinuationCheckpointReadRequest> requests) override {
+        if (requests.empty()) {
+            throw CheckpointContractError("io_uring checkpoint read batch is empty");
+        }
+        const std::filesystem::path canonical = std::filesystem::weakly_canonical(path);
+        if (!contains(canonical)) {
+            throw CheckpointContractError("io_uring checkpoint read escaped its configured root");
+        }
+
+        UniqueFd file(::open(canonical.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECT));
+        if (!file) { throw_last_error("open io_uring checkpoint payload"); }
+        struct stat status{};
+        if (::fstat(file.get(), &status) != 0) {
+            throw_last_error("stat io_uring checkpoint payload");
+        }
+        if (!S_ISREG(status.st_mode) || status.st_size < 0) {
+            throw CheckpointContractError("io_uring checkpoint payload is not a regular file");
+        }
+        const std::uint64_t file_bytes = static_cast<std::uint64_t>(status.st_size);
+        const std::size_t allocation_alignment =
+            std::max(alignment_.memory, static_cast<std::size_t>(alignof(std::max_align_t)));
+        const std::size_t buffer_bytes = static_cast<std::size_t>(
+            round_up(kDirectChunkBytes + alignment_.offset, alignment_.offset));
+        AlignedBuffer buffer(allocation_alignment, buffer_bytes);
+
+        std::lock_guard lock(mutex_);
+        for (const ContinuationCheckpointReadRequest& request : requests) {
+            if (request.destination.empty() || request.file_offset > file_bytes ||
+                request.destination.size() > file_bytes - request.file_offset) {
+                throw CheckpointContractError("io_uring checkpoint read exceeds the payload file");
+            }
+            std::uint64_t offset = request.file_offset;
+            std::size_t copied   = 0;
+            while (copied < request.destination.size()) {
+                const std::uint64_t aligned_offset =
+                    offset & ~(static_cast<std::uint64_t>(alignment_.offset) - 1U);
+                const std::size_t prefix = static_cast<std::size_t>(offset - aligned_offset);
+                const std::size_t logical =
+                    std::min(request.destination.size() - copied,
+                             std::min(kDirectChunkBytes, buffer.size() - prefix));
+                const std::size_t required = prefix + logical;
+                const std::size_t submitted =
+                    static_cast<std::size_t>(round_up(required, alignment_.offset));
+                if (submitted > buffer.size() ||
+                    submitted > std::numeric_limits<std::uint32_t>::max()) {
+                    throw CheckpointContractError("io_uring checkpoint read chunk is invalid");
+                }
+                const std::int32_t result = ring_.execute_one(
+                    RingRequest{IORING_OP_READ, file.get(), aligned_offset, buffer.data(),
+                                static_cast<std::uint32_t>(submitted), 0});
+                if (result < 0) { throw_system_error("io_uring checkpoint payload read", -result); }
+                if (static_cast<std::size_t>(result) < required) {
+                    throw CheckpointContractError("io_uring checkpoint payload read was short");
+                }
+                std::memcpy(request.destination.data() + copied, buffer.data() + prefix, logical);
+                copied += logical;
+                offset += logical;
+            }
+        }
+        return std::make_unique<CompletedCheckpointRead>();
+    }
+
+private:
+    [[nodiscard]] bool contains(const std::filesystem::path& path) const {
+        auto root      = root_.begin();
+        auto candidate = path.begin();
+        for (; root != root_.end(); ++root, ++candidate) {
+            if (candidate == path.end() || *candidate != *root) { return false; }
+        }
+        return candidate != path.end();
+    }
+
+    std::filesystem::path root_;
+    NativeIoUring ring_;
+    DirectIoAlignment alignment_;
+    std::mutex mutex_;
+};
+
+} // namespace
+
 IoUringCheckpointCapability
 probe_io_uring_checkpoint_capability(const std::filesystem::path& root) noexcept {
     IoUringCheckpointCapability capability;
@@ -1708,6 +1816,16 @@ probe_io_uring_checkpoint_capability(const std::filesystem::path& root) noexcept
         capability.reason = "unknown Linux checkpoint capability failure";
     }
     return capability;
+}
+
+std::shared_ptr<ContinuationCheckpointReadQueue>
+make_io_uring_checkpoint_read_queue(const std::filesystem::path& root) {
+    std::error_code error;
+    std::filesystem::create_directories(root, error);
+    if (error) {
+        throw CheckpointContractError("create io_uring checkpoint root: " + error.message());
+    }
+    return std::make_shared<IoUringContinuationReadQueue>(root);
 }
 
 IoUringCheckpointBackend::IoUringCheckpointBackend(std::filesystem::path root,

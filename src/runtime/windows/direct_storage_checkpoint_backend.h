@@ -1,6 +1,7 @@
 #pragma once
 
 #include "runtime/contract/checkpoint_io.h"
+#include "runtime/contract/continuation_checkpoint.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -18,27 +19,6 @@ struct DirectStorageCheckpointConfig {
     std::uint32_t lock_timeout_ms      = 30'000;
     std::uint32_t io_timeout_ms        = 30'000;
     std::size_t max_cleanup_entries    = 4'096;
-};
-
-struct CheckpointReadRequest {
-    std::uint64_t file_offset = 0;
-    std::span<std::byte> destination;
-};
-
-class CheckpointReadCompletion {
-public:
-    virtual ~CheckpointReadCompletion() = default;
-    virtual void wait()                 = 0;
-};
-
-class CheckpointReadQueue {
-public:
-    virtual ~CheckpointReadQueue() = default;
-
-    [[nodiscard]] virtual bool available() const noexcept                      = 0;
-    [[nodiscard]] virtual std::string_view unavailable_reason() const noexcept = 0;
-    [[nodiscard]] virtual std::unique_ptr<CheckpointReadCompletion>
-    submit(const std::filesystem::path& path, std::span<const CheckpointReadRequest> requests) = 0;
 };
 
 class CheckpointDirectoryLock {
@@ -78,7 +58,7 @@ class DirectStorageCheckpointBackend final : public CheckpointBackend {
 public:
     DirectStorageCheckpointBackend(DirectStorageCheckpointConfig config,
                                    std::shared_ptr<CheckpointFileSystem> file_system,
-                                   std::shared_ptr<CheckpointReadQueue> read_queue);
+                                   std::shared_ptr<ContinuationCheckpointReadQueue> read_queue);
     ~DirectStorageCheckpointBackend() override;
 
     DirectStorageCheckpointBackend(const DirectStorageCheckpointBackend&)            = delete;
@@ -100,6 +80,8 @@ private:
 };
 
 #if defined(_WIN32)
+[[nodiscard]] std::shared_ptr<ContinuationCheckpointReadQueue>
+make_direct_storage_checkpoint_read_queue(std::uint32_t timeout_ms);
 [[nodiscard]] std::unique_ptr<DirectStorageCheckpointBackend>
 make_direct_storage_checkpoint_backend(DirectStorageCheckpointConfig config);
 #endif

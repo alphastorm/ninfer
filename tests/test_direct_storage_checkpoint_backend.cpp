@@ -252,19 +252,21 @@ public:
     bool fail_remove           = false;
 };
 
-class FakeReadQueue final : public CheckpointReadQueue {
+class FakeReadQueue final : public ContinuationCheckpointReadQueue {
 public:
     explicit FakeReadQueue(std::shared_ptr<FakeFileSystem> file_system)
         : file_system(std::move(file_system)) {}
 
     bool available() const noexcept override { return is_available; }
 
+    std::string_view backend_name() const noexcept override { return "fake-directstorage"; }
+
     std::string_view unavailable_reason() const noexcept override { return reason; }
 
-    class Completion final : public CheckpointReadCompletion {
+    class Completion final : public ContinuationCheckpointReadCompletion {
     public:
         Completion(FakeReadQueue& owner, std::filesystem::path path,
-                   std::span<const CheckpointReadRequest> requests)
+                   std::span<const ContinuationCheckpointReadRequest> requests)
             : owner(owner), path(std::move(path)), requests(requests.begin(), requests.end()) {}
 
         void wait() override {
@@ -274,7 +276,7 @@ public:
             if (owner.fail_wait) {
                 throw std::runtime_error("injected DirectStorage completion failure");
             }
-            for (const CheckpointReadRequest& request : requests) {
+            for (const ContinuationCheckpointReadRequest& request : requests) {
                 owner.file_system->copy_range(path, request.file_offset, request.destination);
             }
             if (owner.corrupt_after_read && !requests.empty() &&
@@ -286,13 +288,13 @@ public:
     private:
         FakeReadQueue& owner;
         std::filesystem::path path;
-        std::vector<CheckpointReadRequest> requests;
+        std::vector<ContinuationCheckpointReadRequest> requests;
         bool finished = false;
     };
 
-    std::unique_ptr<CheckpointReadCompletion>
+    std::unique_ptr<ContinuationCheckpointReadCompletion>
     submit(const std::filesystem::path& path,
-           std::span<const CheckpointReadRequest> requests) override {
+           std::span<const ContinuationCheckpointReadRequest> requests) override {
         ++submit_count;
         if (fail_submit) { throw std::runtime_error("injected DirectStorage submission failure"); }
         return std::make_unique<Completion>(*this, path, requests);

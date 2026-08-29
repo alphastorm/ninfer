@@ -368,7 +368,7 @@ std::shared_ptr<SharedRootState> shared_root_state(const std::filesystem::path& 
 class DirectStorageCheckpointBackend::Impl {
 public:
     Impl(DirectStorageCheckpointConfig config, std::shared_ptr<CheckpointFileSystem> file_system,
-         std::shared_ptr<CheckpointReadQueue> read_queue)
+         std::shared_ptr<ContinuationCheckpointReadQueue> read_queue)
         : config_(std::move(config)), file_system_(std::move(file_system)),
           read_queue_(std::move(read_queue)) {
         if (config_.directory.empty()) { fail("checkpoint directory must be non-empty"); }
@@ -583,7 +583,7 @@ public:
             image.payloads.push_back(std::move(payload));
         }
 
-        std::vector<CheckpointReadRequest> requests;
+        std::vector<ContinuationCheckpointReadRequest> requests;
         requests.reserve(expected_layout.requests);
         for (std::size_t payload_index = 0; payload_index < image.payloads.size();
              ++payload_index) {
@@ -604,7 +604,7 @@ public:
             }
         }
 
-        std::unique_ptr<CheckpointReadCompletion> completion =
+        std::unique_ptr<ContinuationCheckpointReadCompletion> completion =
             read_queue_->submit(committed->payload_path, requests);
         if (!completion) { fail("DirectStorage queue returned no completion object"); }
         completion->wait();
@@ -702,7 +702,7 @@ private:
 
     DirectStorageCheckpointConfig config_;
     std::shared_ptr<CheckpointFileSystem> file_system_;
-    std::shared_ptr<CheckpointReadQueue> read_queue_;
+    std::shared_ptr<ContinuationCheckpointReadQueue> read_queue_;
     std::filesystem::path root_;
     std::filesystem::path staging_;
     std::filesystem::path manifest_;
@@ -714,7 +714,7 @@ private:
 
 DirectStorageCheckpointBackend::DirectStorageCheckpointBackend(
     DirectStorageCheckpointConfig config, std::shared_ptr<CheckpointFileSystem> file_system,
-    std::shared_ptr<CheckpointReadQueue> read_queue)
+    std::shared_ptr<ContinuationCheckpointReadQueue> read_queue)
     : impl_(std::make_unique<Impl>(std::move(config), std::move(file_system),
                                    std::move(read_queue))) {}
 

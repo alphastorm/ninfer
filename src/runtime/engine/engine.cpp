@@ -8,6 +8,12 @@
 #include "runtime/engine/options.h"
 #include "targets/registry.h"
 
+#if defined(_WIN32)
+#    include "runtime/windows/direct_storage_checkpoint_backend.h"
+#elif defined(__linux__)
+#    include "runtime/platform/linux/io_uring_checkpoint_backend.h"
+#endif
+
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
@@ -268,6 +274,20 @@ void runtime::CheckpointEngineAccess::set_checkpoint_tag(PreparedPrompt& prompt,
         throw std::invalid_argument("checkpoint-tagged prompt and tag must be non-empty");
     }
     prompt.impl_->checkpoint_tag = std::move(tag);
+}
+
+std::shared_ptr<runtime::ContinuationCheckpointReadQueue>
+runtime::CheckpointEngineAccess::make_read_queue(Engine& engine,
+                                                 const std::filesystem::path& root) {
+    if (engine.impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+#if defined(_WIN32)
+    return runtime::windows::make_direct_storage_checkpoint_read_queue(30'000);
+#elif defined(__linux__)
+    return runtime::make_io_uring_checkpoint_read_queue(root);
+#else
+    (void)root;
+    return {};
+#endif
 }
 
 std::optional<runtime::ContinuationCheckpointStats>

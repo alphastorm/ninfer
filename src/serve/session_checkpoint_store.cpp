@@ -697,10 +697,11 @@ class DirectoryCheckpointReader final : public ContinuationCheckpointReader {
 public:
     DirectoryCheckpointReader(std::filesystem::path root,
                               std::map<std::string, std::uint64_t> files,
+                              std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue,
                               std::shared_ptr<SessionCheckpointStore::Impl> owner,
                               std::string active_key)
-        : root_(std::move(root)), files_(std::move(files)), owner_(std::move(owner)),
-          active_key_(std::move(active_key)) {
+        : root_(std::move(root)), files_(std::move(files)), read_queue_(std::move(read_queue)),
+          owner_(std::move(owner)), active_key_(std::move(active_key)) {
         // Constructed by SessionCheckpointStore::load while Impl::mutex is held.
         ++owner_->active_generations[active_key_];
     }
@@ -724,6 +725,18 @@ public:
             destination.size() > found->second - offset) {
             return false;
         }
+        if (read_queue_) {
+            if (!read_queue_->available()) { return false; }
+            try {
+                const runtime::ContinuationCheckpointReadRequest request{
+                    .file_offset = offset, .destination = destination};
+                std::unique_ptr<runtime::ContinuationCheckpointReadCompletion> completion =
+                    read_queue_->submit(root_ / found->first, std::span(&request, 1));
+                if (!completion) { return false; }
+                completion->wait();
+                return true;
+            } catch (...) { return false; }
+        }
         std::FILE* file = open_binary_read(root_ / found->first);
         if (file == nullptr) { return false; }
 #ifdef _WIN32
@@ -743,6 +756,7 @@ public:
 private:
     std::filesystem::path root_;
     std::map<std::string, std::uint64_t> files_;
+    std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue_;
     std::shared_ptr<SessionCheckpointStore::Impl> owner_;
     std::string active_key_;
 };
@@ -1123,8 +1137,8 @@ SessionCheckpointStore::load(std::string_view session_sha256,
             throw CheckpointCorruption("checkpoint engine summary is corrupt");
         }
         const std::string active_key = std::string(session_sha256) + "/" + *generation;
-        auto reader = std::make_shared<DirectoryCheckpointReader>(root, std::move(allowed), impl_,
-                                                                  active_key);
+        auto reader                  = std::make_shared<DirectoryCheckpointReader>(
+            root, std::move(allowed), options_.read_queue, impl_, active_key);
         return {.state      = SessionCheckpointLoadState::Available,
                 .checkpoint = VerifiedSessionCheckpoint{.responses       = std::move(*responses),
                                                         .engine          = std::move(reader),
@@ -1144,6 +1158,9 @@ nlohmann::json SessionCheckpointStore::status(std::string_view session_sha256,
                                               const nlohmann::json& runtime_fingerprint) const {
     nlohmann::json result = {{"artifact_type", "ninfer_session_checkpoint_status"},
                              {"schema_version", kSessionCheckpointSchemaVersion},
+                             {"read_backend", options_.read_queue
+                                                  ? std::string(options_.read_queue->backend_name())
+                                                  : std::string("buffered")},
                              {"state", "missing"}};
     if (!valid_digest(session_sha256) || !runtime_fingerprint.is_object()) { return result; }
     std::lock_guard lock(impl_->mutex);

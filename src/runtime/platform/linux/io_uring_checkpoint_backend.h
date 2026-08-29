@@ -1,6 +1,7 @@
 #pragma once
 
 #include "runtime/contract/checkpoint_io.h"
+#include "runtime/contract/continuation_checkpoint.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -33,6 +34,9 @@ struct IoUringCheckpointLimits {
     std::uint64_t max_total_payload_bytes = 4ULL << 40U;
     std::uint32_t lock_timeout_ms         = 30'000;
 };
+
+[[nodiscard]] std::shared_ptr<ContinuationCheckpointReadQueue>
+make_io_uring_checkpoint_read_queue(const std::filesystem::path& root);
 
 class IoUringCheckpointBackend final : public CheckpointBackend {
 public:

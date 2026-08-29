@@ -2,11 +2,36 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string_view>
 
 namespace ninfer::runtime {
+
+struct ContinuationCheckpointReadRequest {
+    std::uint64_t file_offset = 0;
+    std::span<std::byte> destination;
+};
+
+class ContinuationCheckpointReadCompletion {
+public:
+    virtual ~ContinuationCheckpointReadCompletion() = default;
+    virtual void wait()                             = 0;
+};
+
+class ContinuationCheckpointReadQueue {
+public:
+    virtual ~ContinuationCheckpointReadQueue() = default;
+
+    [[nodiscard]] virtual std::string_view backend_name() const noexcept       = 0;
+    [[nodiscard]] virtual bool available() const noexcept                      = 0;
+    [[nodiscard]] virtual std::string_view unavailable_reason() const noexcept = 0;
+    [[nodiscard]] virtual std::unique_ptr<ContinuationCheckpointReadCompletion>
+    submit(const std::filesystem::path& path,
+           std::span<const ContinuationCheckpointReadRequest> requests) = 0;
+};
 
 class ContinuationCheckpointWriter {
 public:

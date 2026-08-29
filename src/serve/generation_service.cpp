@@ -257,12 +257,24 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
     request_capacity_    = std::make_shared<RequestCapacity>(
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
     if (!options_.session_checkpoint_root.empty()) {
+        std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue =
+            runtime::CheckpointEngineAccess::make_read_queue(*engine_,
+                                                             options_.session_checkpoint_root);
+        if (!read_queue) {
+            throw std::invalid_argument(
+                "session checkpoints require native Windows DirectStorage or Linux io_uring");
+        }
+        if (!read_queue->available()) {
+            throw std::invalid_argument("session checkpoint read backend is unavailable: " +
+                                        std::string(read_queue->unavailable_reason()));
+        }
         checkpoint_runtime_fingerprint_ = session_checkpoint_runtime_fingerprint(
             options_, engine_->options(), engine_->load_summary());
         checkpoint_store_ = std::make_unique<SessionCheckpointStore>(SessionCheckpointStoreOptions{
             .root             = options_.session_checkpoint_root,
             .disk_quota_bytes = options_.session_checkpoint_quota_bytes,
             .staging_bytes    = options_.session_checkpoint_staging_bytes,
+            .read_queue       = std::move(read_queue),
         });
     }
 }
