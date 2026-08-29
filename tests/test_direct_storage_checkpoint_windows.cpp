@@ -4,7 +4,6 @@
 
 #include "runtime/windows/direct_storage_checkpoint_backend.h"
 
-#include <cuda_runtime.h>
 #include <windows.h>
 
 #include <algorithm>
@@ -267,12 +266,6 @@ int test_native_read_queue_root_confinement() {
 
 int main() {
     try {
-        int cuda_devices              = 0;
-        const cudaError_t cuda_status = cudaGetDeviceCount(&cuda_devices);
-        if (cuda_status != cudaSuccess || cuda_devices == 0) {
-            std::cout << "SKIP: native CUDA device unavailable for DirectStorage test\n";
-            return 77;
-        }
         int failures = 0;
         failures += test_native_round_trip_and_corruption();
         failures += test_native_lock_timeout();
@@ -283,6 +276,16 @@ int main() {
             return 0;
         }
         std::cerr << failures << " Windows DirectStorage native checkpoint tests failed\n";
+        return 1;
+    } catch (const CheckpointContractError& error) {
+        const std::string message = error.what();
+        if (message.find("failed to query the active CUDA device") != std::string::npos ||
+            message.find("no DXGI adapter matches the active CUDA device") != std::string::npos ||
+            message.find("DirectStorage 1.3 factory is unavailable") != std::string::npos) {
+            std::cout << "SKIP: native DirectStorage capability unavailable: " << message << '\n';
+            return 77;
+        }
+        std::cerr << "FAIL: " << message << '\n';
         return 1;
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';
