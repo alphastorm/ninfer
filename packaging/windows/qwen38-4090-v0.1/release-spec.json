@@ -14,9 +14,9 @@
   },
   "source": {
     "upstream_base_sha": "9ec1b82c7afa021314682d7a95390f8935ead7c2",
-    "qualified_source_head": "028030476c96c71f783b6d8b1abb90684e0b8066",
-    "source_archive_sha256": "77eb4ccb48dc022ea027e526ee1c28a23a745bb0364c77e3978edcde11d1044f",
-    "source_archive_bytes": 5239266,
+    "qualified_source_head": "6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f",
+    "source_archive_sha256": "83ed4cc9fff62929942186176ab7fcc360ac8e99926fb955a3e971b2c8b543f5",
+    "source_archive_bytes": 5254811,
     "bounded_staging_commit": "e89e415d95921cecf4cf8a00df5540a4a036ff84",
     "directstorage_fallback_commit": "a9bb55b8e9b02ff34e4725dc8ca95d4fadeb3e0d",
     "qualified_patch_sha256": "ac8ba36da9bfc89ff97021eecba8c7ba8f88f9e7e9bfd1c9c3509b723d81d4e0",
@@ -31,7 +31,7 @@
   },
   "qualified_source_evidence": {
     "binding": "all-runtime-dependent-live-evidence-rerun-required",
-    "runtime_commit": "028030476c96c71f783b6d8b1abb90684e0b8066",
+    "runtime_commit": "6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f",
     "prior_runtime_evidence_reused": false,
     "protocol": "rerun-required",
     "checkpoint_102k_restart": "rerun-required",
@@ -63,12 +63,12 @@
   },
   "qualified_artifacts": {
     "deployment_profile": "qwen38-4090-v0.1",
-    "binary_sha256": "e5fce224529d7eeb3da4b685a842824a376856817c03f161dc23e780797bca6c",
-    "binary_bytes": 230245888,
+    "binary_sha256": "8e63c6a90b54913d8aa0c4d660f67ff1fab036e5435a144d450ff7dc1ce664a3",
+    "binary_bytes": 230262272,
     "config_sha256": "ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db",
-    "generic_gpu_owner_controller_sha256": "b6a44ecdb177dae538d667937edb6a03bddf262d34815ae6153daf58351db9ab",
-    "state_protection_sha256": "40af12d55f5bce58384728c6649a507e04aca8b66824da60c070e76b26a429f6",
-    "installer_sha256": "3038e6d0bb5df3ab5eb990271473de5abbb8fb3d009f04fb9c269691d8e9c8a2"
+    "generic_gpu_owner_controller_sha256": "3e3ae54c71c7534064ceff1dae59acfd2ea546a8c920fcc6c9fb1d46296ba5e0",
+    "state_protection_sha256": "c431cdd55a764526d6d9b720909b2a706e0df2b8f75d871900e4d74616af8463",
+    "installer_sha256": "f83612bd419998709dd366a06ee6c7ebf680094bf4e43977510ee64d3805c8ae"
   },
   "asset_manifest": {
     "producer": "New-Package.ps1",

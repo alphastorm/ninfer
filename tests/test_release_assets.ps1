@@ -26,7 +26,7 @@ function Write-Json([string]$Path, [object]$Value) {
 
 $root = Join-Path ([IO.Path]::GetTempPath()) ('ninfer-release-assets-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root | Out-Null
-$patchSha = '028030476c96c71f783b6d8b1abb90684e0b8066'
+$patchSha = '6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f'
 $assetStem = 'ninfer-4090-qwen38-v0.1.0-win-x64'
 $sbomCreatedUtc = '2026-08-29T00:00:00Z'
 
@@ -295,6 +295,34 @@ try {
     Assert-True ($receipt.external_final_qualification_required -eq $true) 'package receipt omitted external final authority requirement'
     Assert-True ($receipt.candidate_status_superseded -eq $false) 'package receipt claims candidate status was already superseded'
 
+    $finalQualificationPath = Join-Path $root 'qualification-final.json'
+    $finalQualification = Get-Content -LiteralPath (Join-Path $out "$assetStem-qualification.json") -Raw | ConvertFrom-Json
+    $finalQualification.status = 'passed'
+    $finalQualification.release_eligible = $true
+    $finalQualification.authority.supersedes_package_candidate_status = $true
+    $finalQualification.release_gates.G.status = 'passed'
+    $finalQualification.release_gates.L.status = 'passed'
+    $finalQualification.release_gates.R.status = 'passed'
+    Write-Json $finalQualificationPath $finalQualification
+    $zipBeforeFinalization = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out "$assetStem.zip")).Hash.ToLowerInvariant()
+    $sbomBeforeFinalization = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out "$assetStem.spdx.json")).Hash.ToLowerInvariant()
+    $tamperOut = Join-Path $root 'out-finalizer-tamper'
+    New-Item -ItemType Directory -Path $tamperOut | Out-Null
+    Copy-Item -Path (Join-Path $out '*') -Destination $tamperOut -Recurse
+    [IO.File]::AppendAllText((Join-Path $tamperOut 'Control-Release.ps1'), 'tamper')
+    $tamperRejected = $false
+    try {
+        & $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $finalQualificationPath -SbomCreatedUtc $sbomCreatedUtc -FinalizeExistingAssets -OutputDirectory $tamperOut | Out-Null
+    }
+    catch { $tamperRejected = $_.Exception.Message -like '*immutable release asset changed after candidate assembly*' }
+    Assert-True $tamperRejected 'finalizer accepted a mutated immutable release script'
+    $finalization = ((& $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $finalQualificationPath -SbomCreatedUtc $sbomCreatedUtc -FinalizeExistingAssets -OutputDirectory $out) | Out-String) | ConvertFrom-Json
+    Assert-True ([string]$finalization.mode -ceq 'finalized-existing-assets' -and $finalization.release_eligible -eq $true -and $finalization.candidate_status_superseded -eq $true) 'packager finalization did not supersede candidate authority'
+    Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out "$assetStem.zip")).Hash.ToLowerInvariant() -ceq $zipBeforeFinalization) 'final authority mutated the live-qualified ZIP'
+    Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out "$assetStem.spdx.json")).Hash.ToLowerInvariant() -ceq $sbomBeforeFinalization) 'final authority mutated the package-owned SPDX'
+    Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out "$assetStem-qualification.json")).Hash.ToLowerInvariant() -ceq (Get-FileHash -Algorithm SHA256 -LiteralPath $finalQualificationPath).Hash.ToLowerInvariant()) 'packager did not publish the exact final authority bytes'
+    Assert-True ([int]$finalization.checksum_entries -eq 7 -and [string]$finalization.checksum_line_ending -ceq 'LF') 'final authority manifest contract mismatch'
+
     [ordered]@{
         artifact_type = 'ninfer_release_asset_regression'
         schema_version = 1
@@ -314,6 +342,9 @@ try {
         crlf_config_normalizations = 1
         wrong_config_semantic_rejections = 1
         source_config_unchanged = $true
+        packager_owned_sbom = $true
+        packager_finalization_modes = 1
+        immutable_asset_tamper_rejections = 1
     } | ConvertTo-Json -Compress
 }
 finally {

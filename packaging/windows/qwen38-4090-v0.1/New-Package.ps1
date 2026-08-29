@@ -19,6 +19,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string]$SbomCreatedUtc,
 
+    [switch]$FinalizeExistingAssets,
+
     [string]$OutputDirectory = (Join-Path $PSScriptRoot 'out')
 )
 
@@ -178,10 +180,6 @@ elseif ($qualification.release_eligible -ne $false -or
 
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $outputRoot = (Resolve-Path -LiteralPath $OutputDirectory).Path
-$stage = Join-Path $outputRoot ('.stage-' + [Guid]::NewGuid().ToString('N'))
-$payload = Join-Path $stage $releaseId
-$bin = Join-Path $payload 'bin'
-New-Item -ItemType Directory -Force -Path $bin | Out-Null
 
 $zipPath = Join-Path $outputRoot "$assetStem.zip"
 $sbomPath = Join-Path $outputRoot "$assetStem.spdx.json"
@@ -191,6 +189,92 @@ $controllerAsset = Join-Path $outputRoot 'Control-Release.ps1'
 $gpuOwnerAsset = Join-Path $outputRoot 'Control-GpuOwner.ps1'
 $stateProtectionAsset = Join-Path $outputRoot 'Protect-StateRoot.ps1'
 $shaSumsPath = Join-Path $outputRoot 'SHA256SUMS'
+if ($FinalizeExistingAssets) {
+    if ([string]$qualification.status -cne 'passed' -or
+        $qualification.release_eligible -ne $true -or
+        $qualification.authority.supersedes_package_candidate_status -ne $true) {
+        throw 'only a passed final authority may finalize existing package assets'
+    }
+    foreach ($path in @(
+            $zipPath, $sbomPath, $installerAsset, $controllerAsset,
+            $gpuOwnerAsset, $stateProtectionAsset
+        )) {
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "existing immutable release asset is missing: $path"
+        }
+    }
+    if (-not (Test-Path -LiteralPath $shaSumsPath -PathType Leaf)) {
+        throw 'candidate SHA256SUMS is missing before final authority publication'
+    }
+    $candidateSums = @{}
+    foreach ($line in @(Get-Content -LiteralPath $shaSumsPath -Encoding UTF8)) {
+        if ($line -notmatch '^([0-9a-f]{64})  (.+)$' -or $candidateSums.ContainsKey($Matches[2])) {
+            throw 'candidate SHA256SUMS is malformed or contains duplicates'
+        }
+        $candidateSums[$Matches[2]] = $Matches[1]
+    }
+    foreach ($path in @(
+            $zipPath, $sbomPath, $installerAsset, $controllerAsset,
+            $gpuOwnerAsset, $stateProtectionAsset
+        )) {
+        $name = [IO.Path]::GetFileName($path)
+        if (-not $candidateSums.ContainsKey($name) -or
+            [string]$candidateSums[$name] -cne
+                (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()) {
+            throw "immutable release asset changed after candidate assembly: $name"
+        }
+    }
+    $expectedPackageBytes = if ($null -ne $qualification.package.PSObject.Properties['bytes']) {
+        [Int64]$qualification.package.bytes
+    }
+    else { [Int64]$qualification.package.size_bytes }
+    $expectedSbomBytes = if ($null -ne $qualification.package.sbom.PSObject.Properties['bytes']) {
+        [Int64]$qualification.package.sbom.bytes
+    }
+    else { [Int64]$qualification.package.sbom.size_bytes }
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant() -cne
+            [string]$qualification.package.sha256 -or
+        (Get-Item -LiteralPath $zipPath).Length -ne $expectedPackageBytes -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $sbomPath).Hash.ToLowerInvariant() -cne
+            [string]$qualification.package.sbom.sha256 -or
+        (Get-Item -LiteralPath $sbomPath).Length -ne $expectedSbomBytes) {
+        throw 'final authority does not match existing immutable ZIP or SPDX assets'
+    }
+    [IO.File]::WriteAllBytes($qualificationPath, [IO.File]::ReadAllBytes($qualificationSource))
+    $assets = @(
+        $zipPath, $sbomPath, $qualificationPath, $installerAsset,
+        $controllerAsset, $gpuOwnerAsset, $stateProtectionAsset
+    ) | Sort-Object { [IO.Path]::GetFileName($_) }
+    $sumLines = foreach ($asset in $assets) {
+        "$((Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($asset))"
+    }
+    $lineFeed = [string][char]10
+    [IO.File]::WriteAllText(
+        $shaSumsPath,
+        ([string]::Join($lineFeed, $sumLines) + $lineFeed),
+        [Text.UTF8Encoding]::new($false)
+    )
+    [ordered]@{
+        artifact_type = 'ninfer_package_finalization_receipt'
+        schema_version = 1
+        status = 'passed'
+        mode = 'finalized-existing-assets'
+        patch_stack_sha = $PatchStackSha
+        package_sha256 = [string]$qualification.package.sha256
+        sbom_sha256 = [string]$qualification.package.sbom.sha256
+        qualification_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $qualificationPath).Hash.ToLowerInvariant()
+        checksum_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $shaSumsPath).Hash.ToLowerInvariant()
+        checksum_entries = $sumLines.Count
+        checksum_line_ending = 'LF'
+        candidate_status_superseded = $true
+        release_eligible = $true
+    } | ConvertTo-Json -Depth 6
+    return
+}
+$stage = Join-Path $outputRoot ('.stage-' + [Guid]::NewGuid().ToString('N'))
+$payload = Join-Path $stage $releaseId
+$bin = Join-Path $payload 'bin'
+New-Item -ItemType Directory -Force -Path $bin | Out-Null
 foreach ($path in @($zipPath, $sbomPath, $qualificationPath, $installerAsset, $controllerAsset, $gpuOwnerAsset, $stateProtectionAsset, $shaSumsPath)) {
     Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
 }
