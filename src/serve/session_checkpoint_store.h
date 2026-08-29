@@ -162,7 +162,9 @@ public:
     [[nodiscard]] SessionCheckpointRestoreState
     restore(std::string_view session_sha256, std::string_view required_response_id,
             ResponseStore& responses);
-    [[nodiscard]] SessionCheckpointEraseResult erase(std::string_view session_sha256);
+    [[nodiscard]] SessionCheckpointEraseResult
+    erase_response(std::string_view session_sha256, std::string_view response_id,
+                   ResponseStore& responses);
 
 private:
     std::unique_ptr<SessionCheckpointStore> store_;

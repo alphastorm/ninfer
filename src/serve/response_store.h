@@ -65,8 +65,6 @@ public:
     void put(StoredResponse response);
     bool erase_for_session(const std::string& id,
                            const std::optional<std::string>& session_sha256);
-    [[nodiscard]] std::optional<std::string>
-    latest_response_id_for_session(std::string_view client_session_sha256) const;
 
     // Snapshots are insertion ordered, parent-before-child for a normal Responses lineage. Restore
     // publishes the complete session while holding the store lock; malformed snapshots are rejected

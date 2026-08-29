@@ -105,17 +105,12 @@ int test_session_binding() {
                       "stored response crossed its session boundary");
     failures += check(store.get_for_session("resp_unscoped", std::nullopt) != nullptr,
                       "unscoped response did not preserve unscoped continuation");
-    failures += check(store.latest_response_id_for_session(std::string(64, 'a')) ==
-                          std::optional<std::string>("resp_scoped_latest") &&
-                          store.latest_response_id_for_session(std::string(64, 'b')) ==
-                              std::optional<std::string>("resp_other"),
-                      "latest response lookup crossed session insertion order");
     failures += check(
         store.erase_for_session("resp_scoped_latest", std::string(64, 'a')) &&
-            store.latest_response_id_for_session(std::string(64, 'a')) ==
-                std::optional<std::string>("resp_scoped") &&
-            !store.latest_response_id_for_session(std::string(64, 'c')),
-        "latest response lookup did not follow deletion without crossing sessions");
+            !store.get_for_session("resp_scoped_latest", std::string(64, 'a')) &&
+            store.get_for_session("resp_scoped", std::string(64, 'a')) &&
+            store.get_for_session("resp_other", std::string(64, 'b')),
+        "scoped deletion crossed a session boundary or removed a surviving response");
     return failures;
 }
 int test_oversized_record() {
