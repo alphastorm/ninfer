@@ -5,11 +5,14 @@ from pathlib import Path
 import tempfile
 import subprocess
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 
 from tools.lifecycle.ninfer_container import (
     LifecycleError,
+    RuntimeIdentity,
     canonical_config_sha256,
+    command_start,
     inspect_container,
     load_config,
     materialize_source_archive,
@@ -17,7 +20,14 @@ from tools.lifecycle.ninfer_container import (
 )
 
 
-def write_config(path: Path, *, restart_policy: str | None = None) -> Path:
+def write_config(
+    path: Path,
+    *,
+    restart_policy: str | None = None,
+    checkpoint_dir: str | None = None,
+    request_log_dir: str = "/srv/ninfer/logs",
+    args: list[str] | None = None,
+) -> Path:
     config = {
         "image": "ninfer:test",
         "container": "ninfer-test",
@@ -25,11 +35,15 @@ def write_config(path: Path, *, restart_policy: str | None = None) -> Path:
         "model_id": "test-model",
         "deployment_profile": "test-profile",
         "port": 18088,
-        "request_log_dir": "/srv/ninfer/logs",
+        "request_log_dir": request_log_dir,
         "api_key_file": "/run/secrets/ninfer-test-api-key",
     }
     if restart_policy is not None:
         config["restart_policy"] = restart_policy
+    if checkpoint_dir is not None:
+        config["checkpoint_dir"] = checkpoint_dir
+    if args is not None:
+        config["args"] = args
     path.write_text(json.dumps(config), encoding="utf-8")
     return path
 
@@ -82,6 +96,84 @@ class LifecycleConfigTests(unittest.TestCase):
                 load_config(
                     write_config(root / "invalid.json", restart_policy="always")
                 )
+
+    def test_checkpoint_directory_is_mounted_by_lifecycle_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ordinary = load_config(write_config(root / "ordinary.json"))
+            durable = load_config(
+                write_config(
+                    root / "durable.json", checkpoint_dir="/srv/ninfer/checkpoints"
+                )
+            )
+
+            self.assertIsNone(ordinary.checkpoint_dir)
+            self.assertEqual(durable.checkpoint_dir, Path("/srv/ninfer/checkpoints"))
+            self.assertNotEqual(
+                canonical_config_sha256(ordinary), canonical_config_sha256(durable)
+            )
+            with self.assertRaisesRegex(LifecycleError, "lifecycle-owned option"):
+                load_config(
+                    write_config(
+                        root / "override.json",
+                        args=["--session-checkpoint-dir", "/unmanaged"],
+                    )
+                )
+
+    def test_start_mounts_checkpoint_directory_at_owned_server_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config_path = write_config(
+                root / "durable.json",
+                checkpoint_dir=str(root / "checkpoints"),
+                request_log_dir=str(root / "logs"),
+            )
+            identity = RuntimeIdentity(
+                image_id="sha256:" + "1" * 64,
+                binary_sha256="2" * 64,
+                model_artifact_sha256="3" * 64,
+                config_sha256="4" * 64,
+            )
+            args = SimpleNamespace(
+                config=config_path,
+                timeout=1.0,
+                expect_image_id=None,
+                expect_binary_sha256=None,
+                expect_model_artifact_sha256=None,
+                expect_config_sha256=None,
+            )
+            started = subprocess.CompletedProcess(
+                args=["docker", "run"], returncode=0, stdout="container-id\n", stderr=""
+            )
+            with (
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.require_gpu_idle"
+                ),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.preflight", return_value=identity
+                ),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.docker", return_value=started
+                ) as docker_mock,
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.wait_for_health"
+                ),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.fetch_status", return_value={}
+                ),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.verify_status"
+                ),
+                mock.patch("builtins.print"),
+            ):
+                command_start(args)
+
+            command = docker_mock.call_args.args[0]
+            self.assertIn(f"{root / 'checkpoints'}:/checkpoints", command)
+            option = command.index("--session-checkpoint-dir")
+            self.assertEqual(command[option + 1], "/checkpoints")
+            self.assertTrue((root / "checkpoints").is_dir())
+            self.assertEqual((root / "checkpoints").stat().st_mode & 0o777, 0o700)
 
 
     def test_clean_source_attestation_and_archive(self) -> None:

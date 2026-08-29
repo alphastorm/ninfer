@@ -39,6 +39,7 @@ _RESERVED_SERVER_ARGS = {
     "--config-sha256",
     "--deployment-profile",
     "--request-log-jsonl",
+    "--session-checkpoint-dir",
 }
 _CONFIG_KEYS = {
     "image",
@@ -49,6 +50,7 @@ _CONFIG_KEYS = {
     "deployment_profile",
     "port",
     "request_log_dir",
+    "checkpoint_dir",
     "api_key_file",
     "restart_policy",
     "args",
@@ -56,6 +58,7 @@ _CONFIG_KEYS = {
 _REQUIRED_CONFIG_KEYS = _CONFIG_KEYS - {
     "bind_host",
     "api_key_file",
+    "checkpoint_dir",
     "restart_policy",
     "args",
 }
@@ -75,6 +78,7 @@ class RuntimeConfig:
     port: int
     bind_host: str
     request_log_dir: Path
+    checkpoint_dir: Path | None
     api_key_file: Path | None
     restart_policy: str
     args: tuple[str, ...]
@@ -88,6 +92,7 @@ class RuntimeConfig:
             "model_id": self.model_id,
             "port": self.port,
             "request_log_configured": True,
+            "checkpoint_configured": self.checkpoint_dir is not None,
             "restart_policy": self.restart_policy,
         }
 
@@ -168,6 +173,13 @@ def load_config(path: Path) -> RuntimeConfig:
             fail(f"args must not override lifecycle-owned option {argument}")
         args.append(argument)
 
+    checkpoint_value = raw.get("checkpoint_dir")
+    checkpoint_dir = (
+        None
+        if checkpoint_value is None
+        else require_absolute_path(checkpoint_value, "checkpoint_dir")
+    )
+
     api_key_value = raw.get("api_key_file")
     api_key_file = (
         None
@@ -192,6 +204,7 @@ def load_config(path: Path) -> RuntimeConfig:
         request_log_dir=require_absolute_path(
             raw["request_log_dir"], "request_log_dir"
         ),
+        checkpoint_dir=checkpoint_dir,
         api_key_file=api_key_file,
         restart_policy=restart_policy,
         args=tuple(args),
@@ -677,6 +690,14 @@ def command_start(args: argparse.Namespace) -> None:
         config.request_log_dir.mkdir(parents=True, exist_ok=True)
     except OSError as error:
         raise LifecycleError("failed to create request_log_dir") from error
+    if config.checkpoint_dir is not None:
+        try:
+            config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            if config.checkpoint_dir.is_symlink() or not config.checkpoint_dir.is_dir():
+                fail("checkpoint_dir must be a non-symlink directory")
+            config.checkpoint_dir.chmod(0o700)
+        except OSError as error:
+            raise LifecycleError("failed to prepare checkpoint_dir") from error
     timestamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S.%fZ")
     request_log_name = f"requests-{timestamp}.jsonl"
     labels = [
@@ -711,6 +732,8 @@ def command_start(args: argparse.Namespace) -> None:
             f"{config.request_log_dir}:/logs",
         )
     )
+    if config.checkpoint_dir is not None:
+        command.extend(("--volume", f"{config.checkpoint_dir}:/checkpoints"))
     server_args = [
         "/models/model.ninfer",
         "--host",
@@ -729,8 +752,10 @@ def command_start(args: argparse.Namespace) -> None:
         config.deployment_profile,
         "--request-log-jsonl",
         f"/logs/{request_log_name}",
-        *config.args,
     ]
+    if config.checkpoint_dir is not None:
+        server_args.extend(("--session-checkpoint-dir", "/checkpoints"))
+    server_args.extend(config.args)
     if config.api_key_file is None:
         command.extend((config.image, "/usr/local/bin/ninfer-serve", *server_args))
     else:

@@ -739,8 +739,8 @@ python3 tools/lifecycle/ninfer_container.py build \
 ```
 
 Runtime configuration is one JSON object. `args` contains individual server argv elements; the
-lifecycle-owned model, network, identity, authentication, and request-log options are rejected
-there to prevent ambiguous duplicates.
+lifecycle-owned model, network, identity, authentication, request-log, and checkpoint-path options
+are rejected there to prevent ambiguous duplicates.
 
 ```json
 {
@@ -752,6 +752,7 @@ there to prevent ambiguous duplicates.
   "deployment_profile": "rtx-5090-int8-mtp3",
   "port": 18088,
   "request_log_dir": "/srv/ninfer/logs/canary",
+  "checkpoint_dir": "/srv/ninfer/checkpoints/canary",
   "api_key_file": "/run/secrets/ninfer_api_key",
   "restart_policy": "no",
   "args": [
@@ -761,18 +762,22 @@ there to prevent ambiguous duplicates.
     "--max-concurrency", "1",
     "--spec", "mtp",
     "--draft-tokens", "3",
-    "--lm-head-draft"
+    "--lm-head-draft",
+    "--session-checkpoint-quota-mib", "65536",
+    "--session-checkpoint-staging-mib", "2048"
   ]
 }
 ```
 
-All paths are absolute host paths visible to Docker. The API-key value is read from a read-only
-secret mount inside the container; it is not placed in Docker argv, labels, receipts, or the
-canonical configuration identity. `restart_policy` defaults to `no`; use `unless-stopped` only for
-a promoted appliance that Docker must restart with its daemon. `start` applies the declared policy,
-and `status` rejects policy drift. The canonical configuration SHA-256 covers model ID, deployment
-profile, bind address and port, API-auth presence, request-log presence, restart policy, and ordered
-server args. Binary and model bytes have separate SHA-256 identities.
+All paths are absolute host paths visible to Docker. When `checkpoint_dir` is present, `start`
+creates it with mode `0700`, mounts it at `/checkpoints`, and owns the corresponding
+`--session-checkpoint-dir`; `args` cannot redirect durable state elsewhere. The API-key value is
+read from a read-only secret mount inside the container; it is not placed in Docker argv, labels,
+receipts, or the canonical configuration identity. `restart_policy` defaults to `no`; use
+`unless-stopped` only for a promoted appliance that Docker must restart with its daemon. `start`
+applies the declared policy, and `status` rejects policy drift. The canonical configuration SHA-256 covers model ID, deployment
+profile, bind address and port, API-auth presence, request-log presence, checkpoint-mount presence,
+restart policy, and ordered server args. Binary and model bytes have separate SHA-256 identities.
 
 ```bash
 python3 tools/lifecycle/ninfer_container.py preflight --config candidate.json
