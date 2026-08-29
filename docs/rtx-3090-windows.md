@@ -42,23 +42,21 @@ release gate and require their own serviced-loop evidence.
 
 ### Qualified beta result
 
-> [!IMPORTANT]
-> The post-review source candidate is pending the complete requalification listed in the adjacent
-> machine-readable receipt. The values below are the prior qualified baseline, not a claim for
-> remediated source bytes.
-
-The immutable `a796e21d057f` package is beta-qualified on one RTX 3090 with driver 616.56:
+The immutable `7555db29d2e5` package is beta-qualified on one RTX 3090 with driver 616.56. The
+adjacent machine-readable receipt binds the exact package, source archive, SPDX SBOM, checksum
+manifest, package-build receipt, lifecycle scripts, and every gate receipt by SHA-256:
 
 | Gate | Result |
 | --- | --- |
 | Packaged serving protocol | 15/15 checks, including authenticated stateful continuation |
 | OMP client | OMP 18.0.9 emitted one typed `read` call, linked its result, and returned the exact visible marker |
-| Long context | 64,512 prompt tokens with exact retrieval |
-| Process restart | 622,726,133 checkpoint bytes restored; 45 cached tokens; 3.35 s continuation |
-| Decode | 76.43 tok/s for 1,024 output tokens at 71.34% MTP acceptance |
-| Prefill | 947.57 tok/s over 4,403 prompt tokens |
-| Peak GPU memory | 20,511 MiB |
-| Rollback | both active/previous directions returned healthy at the 300 W cap |
+| Long context | 64,512 prompt tokens with exact retrieval in 81.39 s |
+| Process restart | 2,500,115,877 checkpoint bytes across 66 files; 45 cached tokens; 3.29 s continuation |
+| Decode | 76.15 tok/s for 1,024 output tokens |
+| Prefill | 943.11 tok/s over 4,403 prompt tokens |
+| Peak GPU memory | 20,515 MiB |
+| State security | atomic protected-root creation, NULL-DACL rejection, retained-secret effective denial, and populated-root status in 874 ms |
+| Upgrade/rollback | exact shipped installer plus both active/previous directions passed at the 300 W cap |
 
 This support claim is interactive OMP beta support, not authorization for an unattended evidence
 role. The separate frozen automatic-use corpus did not meet its quality floor, so that route remains
