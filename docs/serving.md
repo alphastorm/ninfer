@@ -771,7 +771,11 @@ are rejected there to prevent ambiguous duplicates.
 
 All paths are absolute host paths visible to Docker. When `checkpoint_dir` is present, `start`
 creates it with mode `0700`, mounts it at `/checkpoints`, and owns the corresponding
-`--session-checkpoint-dir`; `args` cannot redirect durable state elsewhere. The API-key value is
+`--session-checkpoint-dir`; `args` cannot redirect durable state elsewhere. The same path activates
+a repository-owned seccomp profile based on Moby `moby/profiles` commit
+`b7711bef4ad769a13fd40fe1ba710ad0f796fcfd`: Docker's default allowlist plus only
+`io_uring_setup`, `io_uring_enter`, and `io_uring_register` on `amd64`. The lifecycle verifies the
+profile SHA-256 before start and never disables seccomp. The API-key value is
 read from a read-only secret mount inside the container; it is not placed in Docker argv, labels,
 receipts, or the canonical configuration identity. `restart_policy` defaults to `no`; use
 `unless-stopped` only for a promoted appliance that Docker must restart with its daemon. `start`

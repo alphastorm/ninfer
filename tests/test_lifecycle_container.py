@@ -12,11 +12,13 @@ from tools.lifecycle.ninfer_container import (
     LifecycleError,
     RuntimeIdentity,
     canonical_config_sha256,
+    checkpoint_seccomp_profile,
     command_start,
     inspect_container,
     load_config,
     materialize_source_archive,
     verify_clean_source,
+    wait_for_health,
 )
 
 
@@ -112,6 +114,30 @@ class LifecycleConfigTests(unittest.TestCase):
             self.assertNotEqual(
                 canonical_config_sha256(ordinary), canonical_config_sha256(durable)
             )
+            profile_path = checkpoint_seccomp_profile(durable)
+            self.assertIsNotNone(profile_path)
+            profile = json.loads(profile_path.read_text(encoding="utf-8"))
+            self.assertEqual(profile["defaultAction"], "SCMP_ACT_ERRNO")
+            additions = [
+                block
+                for block in profile["syscalls"]
+                if set(block.get("names", []))
+                & {"io_uring_setup", "io_uring_enter", "io_uring_register"}
+            ]
+            self.assertEqual(
+                additions,
+                [
+                    {
+                        "names": [
+                            "io_uring_setup",
+                            "io_uring_enter",
+                            "io_uring_register",
+                        ],
+                        "action": "SCMP_ACT_ALLOW",
+                        "includes": {"arches": ["amd64"]},
+                    }
+                ],
+            )
             with self.assertRaisesRegex(LifecycleError, "lifecycle-owned option"):
                 load_config(
                     write_config(
@@ -170,10 +196,43 @@ class LifecycleConfigTests(unittest.TestCase):
 
             command = docker_mock.call_args.args[0]
             self.assertIn(f"{root / 'checkpoints'}:/checkpoints", command)
+            security_option = command.index("--security-opt")
+            self.assertEqual(
+                command[security_option + 1],
+                f"seccomp={checkpoint_seccomp_profile(load_config(config_path))}",
+            )
             option = command.index("--session-checkpoint-dir")
             self.assertEqual(command[option + 1], "/checkpoints")
             self.assertTrue((root / "checkpoints").is_dir())
             self.assertEqual((root / "checkpoints").stat().st_mode & 0o777, 0o700)
+
+    def test_health_wait_reports_the_first_container_exit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = load_config(
+                write_config(
+                    Path(directory) / "candidate.json",
+                    request_log_dir=str(Path(directory) / "logs"),
+                )
+            )
+            logs = subprocess.CompletedProcess(
+                args=["docker", "logs"],
+                returncode=0,
+                stdout="",
+                stderr="[error] io_uring_setup: Operation not permitted\n",
+            )
+            with (
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.inspect_container",
+                    return_value={"State": {"Running": False}},
+                ),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.run", return_value=logs
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    LifecycleError, "io_uring_setup: Operation not permitted"
+                ):
+                    wait_for_health(config, 10)
 
 
     def test_clean_source_attestation_and_archive(self) -> None:

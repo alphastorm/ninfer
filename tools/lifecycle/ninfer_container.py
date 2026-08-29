@@ -24,6 +24,12 @@ import urllib.request
 
 _LIFECYCLE_LABEL = "org.ninfer.lifecycle"
 _LIFECYCLE_VALUE = "tools.lifecycle.ninfer_container"
+_CHECKPOINT_SECCOMP_PROFILE = Path(__file__).with_name(
+    "ninfer_io_uring_seccomp.json"
+)
+_CHECKPOINT_SECCOMP_PROFILE_SHA256 = (
+    "3b7bf1e9fa71bfd8ed536c8aaaa2d40e4f133a0c853d226efd9b9e4966dd1506"
+)
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _GIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PROFILE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -499,6 +505,16 @@ def port_is_open(port: int) -> bool:
         return connection.connect_ex(("127.0.0.1", port)) == 0
 
 
+def checkpoint_seccomp_profile(config: RuntimeConfig) -> Path | None:
+    if config.checkpoint_dir is None:
+        return None
+    if not _CHECKPOINT_SECCOMP_PROFILE.is_file():
+        fail("repository-owned io_uring seccomp profile is unavailable")
+    if sha256_file(_CHECKPOINT_SECCOMP_PROFILE) != _CHECKPOINT_SECCOMP_PROFILE_SHA256:
+        fail("repository-owned io_uring seccomp profile identity changed")
+    return _CHECKPOINT_SECCOMP_PROFILE
+
+
 def preflight(config: RuntimeConfig, expected: ExpectedIdentity) -> RuntimeIdentity:
     if shutil.which("docker") is None:
         fail("docker is unavailable")
@@ -506,6 +522,7 @@ def preflight(config: RuntimeConfig, expected: ExpectedIdentity) -> RuntimeIdent
         fail("container already exists")
     if port_is_open(config.port):
         fail("configured loopback port is already accepting connections")
+    checkpoint_seccomp_profile(config)
     identity = measure_runtime(config)
     verify_expected(identity, expected)
     return identity
@@ -539,6 +556,18 @@ def wait_for_health(config: RuntimeConfig, timeout: float) -> None:
     deadline = time.monotonic() + timeout
     url = f"http://127.0.0.1:{config.port}/health"
     while time.monotonic() < deadline:
+        inspected = inspect_container(config.container)
+        if inspected is None:
+            fail("managed container disappeared before becoming healthy")
+        state = inspected.get("State", {})
+        if not state.get("Running", False):
+            logs = run(
+                ["docker", "logs", "--tail", "80", config.container],
+                check=False,
+            )
+            lines = (logs.stderr or logs.stdout or "").strip().splitlines()
+            detail = f": {lines[-1]}" if lines else ""
+            fail("managed container exited before becoming healthy" + detail)
         try:
             if request_json(url, None, timeout=2.0) == {"status": "ok"}:
                 return
@@ -734,6 +763,10 @@ def command_start(args: argparse.Namespace) -> None:
     )
     if config.checkpoint_dir is not None:
         command.extend(("--volume", f"{config.checkpoint_dir}:/checkpoints"))
+        seccomp_profile = checkpoint_seccomp_profile(config)
+        if seccomp_profile is None:
+            fail("checkpoint seccomp profile was not resolved")
+        command.extend(("--security-opt", f"seccomp={seccomp_profile}"))
     server_args = [
         "/models/model.ninfer",
         "--host",
