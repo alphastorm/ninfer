@@ -162,7 +162,10 @@ try {
 
     $outerSums = Join-Path $outOne 'SHA256SUMS'
     Assert-Equal (Get-Sha256 $outerSums) ([string]$receiptOne.checksums.sha256) 'outer checksum identity mismatch'
-    foreach ($line in [IO.File]::ReadAllLines($outerSums, [Text.Encoding]::ASCII)) {
+    $outerLines = [IO.File]::ReadAllLines($outerSums, [Text.Encoding]::ASCII)
+    $spdxName = 'ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.spdx.json'
+    Assert-Equal @($outerLines | Where-Object { $_.EndsWith("  $spdxName") }).Count 1 'outer checksum manifest omitted or duplicated the SPDX SBOM'
+    foreach ($line in $outerLines) {
         if ($line -cnotmatch '^([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._-]*)$') {
             throw 'outer checksum line is malformed'
         }
@@ -268,8 +271,11 @@ try {
         status = 'passed'; evidence_class = 'generated-instrumented-transaction-harness'
         production_installer_sha256 = [string]$releaseAssets.installer_sha256
         instrumented_installer_sha256 = ('d' * 64); production_installer_executed = $false
+        instrumented_state_protection_sha256 = ('e' * 64)
+        state_protection_evidence_class = 'generated-stub-no-acl-semantics'
+        production_state_protection_executed = $false
         effective_acl_evidence = $false; injected_failures = 10; interrupted_repairs = 2
-        receipt_sha256 = ('e' * 64)
+        receipt_sha256 = ('f' * 64)
     }
     $shippedLifecycle = [pscustomobject]@{
         status = 'passed'; installer_sha256 = [string]$releaseAssets.installer_sha256
@@ -284,11 +290,13 @@ try {
     $stateSecurity = [pscustomobject]@{
         status = 'passed'; root_dacl_protected = $true; atomic_race_collision_rejections = 1
         raced_state_recursive_deletions = 0; low_privilege_effective_read_denials = 2
+        null_dacl_rejections = 1
         low_privilege_effective_write_denials = 2; precreated_or_unowned_root_rejections = 2
         root_or_child_junction_rejections = 2; installer_prewrite_root_rejections = 3
         active_interactive_gpu_rejections = 1; request_log_effective_access_denials = 2
         managed_release_acl_state_assertions = 6; managed_request_log_acl_state_assertions = 1
         managed_rollback_directions = 2; shipped_test_bypass = $false; restored_power_limit_w = 370
+        populated_root_status_milliseconds = 1
         receipt_sha256 = ('2' * 64)
     }
     $ompClient = [pscustomobject]@{

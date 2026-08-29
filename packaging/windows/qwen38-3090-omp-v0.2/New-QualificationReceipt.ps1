@@ -241,7 +241,10 @@ function New-NInferQualificationReceipt {
         evidence_class = [string](Get-NInferQualificationProperty $InstrumentedLifecycle 'evidence_class' 'windows_lifecycle_instrumented')
         production_installer_sha256 = Get-NInferQualificationSha256 $InstrumentedLifecycle 'production_installer_sha256' 'windows_lifecycle_instrumented'
         instrumented_installer_sha256 = Get-NInferQualificationSha256 $InstrumentedLifecycle 'instrumented_installer_sha256' 'windows_lifecycle_instrumented'
+        instrumented_state_protection_sha256 = Get-NInferQualificationSha256 $InstrumentedLifecycle 'instrumented_state_protection_sha256' 'windows_lifecycle_instrumented'
+        state_protection_evidence_class = [string](Get-NInferQualificationProperty $InstrumentedLifecycle 'state_protection_evidence_class' 'windows_lifecycle_instrumented')
         production_installer_executed = [bool](Get-NInferQualificationProperty $InstrumentedLifecycle 'production_installer_executed' 'windows_lifecycle_instrumented')
+        production_state_protection_executed = [bool](Get-NInferQualificationProperty $InstrumentedLifecycle 'production_state_protection_executed' 'windows_lifecycle_instrumented')
         effective_acl_evidence = [bool](Get-NInferQualificationProperty $InstrumentedLifecycle 'effective_acl_evidence' 'windows_lifecycle_instrumented')
         injected_failures = [int](Get-NInferQualificationProperty $InstrumentedLifecycle 'injected_failures' 'windows_lifecycle_instrumented')
         interrupted_repairs = [int](Get-NInferQualificationProperty $InstrumentedLifecycle 'interrupted_repairs' 'windows_lifecycle_instrumented')
@@ -250,7 +253,9 @@ function New-NInferQualificationReceipt {
     if ($instrumentedStatus -ceq 'passed' -and
         ($instrumentedReceipt.evidence_class -cne 'generated-instrumented-transaction-harness' -or
          $instrumentedReceipt.production_installer_sha256 -ceq $instrumentedReceipt.instrumented_installer_sha256 -or
+         $instrumentedReceipt.state_protection_evidence_class -cne 'generated-stub-no-acl-semantics' -or
          $instrumentedReceipt.production_installer_executed -or
+         $instrumentedReceipt.production_state_protection_executed -or
          $instrumentedReceipt.effective_acl_evidence -or
          $instrumentedReceipt.injected_failures -ne 10 -or
          $instrumentedReceipt.interrupted_repairs -ne 2)) {
@@ -300,6 +305,7 @@ function New-NInferQualificationReceipt {
         root_dacl_protected = [bool](Get-NInferQualificationProperty $StateSecurity 'root_dacl_protected' 'windows_state_security')
         atomic_race_collision_rejections = [int](Get-NInferQualificationProperty $StateSecurity 'atomic_race_collision_rejections' 'windows_state_security')
         raced_state_recursive_deletions = [int](Get-NInferQualificationProperty $StateSecurity 'raced_state_recursive_deletions' 'windows_state_security')
+        null_dacl_rejections = [int](Get-NInferQualificationProperty $StateSecurity 'null_dacl_rejections' 'windows_state_security')
         low_privilege_effective_read_denials = [int](Get-NInferQualificationProperty $StateSecurity 'low_privilege_effective_read_denials' 'windows_state_security')
         low_privilege_effective_write_denials = [int](Get-NInferQualificationProperty $StateSecurity 'low_privilege_effective_write_denials' 'windows_state_security')
         precreated_or_unowned_root_rejections = [int](Get-NInferQualificationProperty $StateSecurity 'precreated_or_unowned_root_rejections' 'windows_state_security')
@@ -310,6 +316,7 @@ function New-NInferQualificationReceipt {
         managed_release_acl_state_assertions = [int](Get-NInferQualificationProperty $StateSecurity 'managed_release_acl_state_assertions' 'windows_state_security')
         managed_request_log_acl_state_assertions = [int](Get-NInferQualificationProperty $StateSecurity 'managed_request_log_acl_state_assertions' 'windows_state_security')
         managed_rollback_directions = [int](Get-NInferQualificationProperty $StateSecurity 'managed_rollback_directions' 'windows_state_security')
+        populated_root_status_milliseconds = [int](Get-NInferQualificationProperty $StateSecurity 'populated_root_status_milliseconds' 'windows_state_security')
         shipped_test_bypass = [bool](Get-NInferQualificationProperty $StateSecurity 'shipped_test_bypass' 'windows_state_security')
         restored_power_limit_w = [int](Get-NInferQualificationProperty $StateSecurity 'restored_power_limit_w' 'windows_state_security')
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $StateSecurity 'windows_state_security'
@@ -318,6 +325,7 @@ function New-NInferQualificationReceipt {
         (-not $securityReceipt.root_dacl_protected -or
          $securityReceipt.atomic_race_collision_rejections -lt 1 -or
          $securityReceipt.raced_state_recursive_deletions -ne 0 -or
+         $securityReceipt.null_dacl_rejections -lt 1 -or
          $securityReceipt.low_privilege_effective_read_denials -lt 2 -or
          $securityReceipt.low_privilege_effective_write_denials -lt 2 -or
          $securityReceipt.precreated_or_unowned_root_rejections -lt 2 -or
@@ -328,6 +336,8 @@ function New-NInferQualificationReceipt {
          $securityReceipt.managed_release_acl_state_assertions -lt 6 -or
          $securityReceipt.managed_request_log_acl_state_assertions -lt 1 -or
          $securityReceipt.managed_rollback_directions -lt 2 -or
+         $securityReceipt.populated_root_status_milliseconds -le 0 -or
+         $securityReceipt.populated_root_status_milliseconds -gt 5000 -or
          $securityReceipt.shipped_test_bypass -or
          $securityReceipt.restored_power_limit_w -ne 370)) {
         throw 'windows_state_security does not prove the complete effective-access contract'

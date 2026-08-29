@@ -509,12 +509,18 @@ function Assert-NInferProtectedStateTree([string]$Path) {
         throw 'instrumented protected state root is missing'
     }
 }
+function Assert-NInferProtectedStateRoot([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw 'instrumented protected state root is missing'
+    }
+}
 '@
 [IO.File]::WriteAllText(
     $script:StateHelperPath,
     $instrumentedProtection,
     [Text.UTF8Encoding]::new($false)
 )
+$instrumentedStateProtectionSha256 = Get-Sha256 $script:StateHelperPath
 $productionInstallerPath = $InstallerPath
 $productionInstallerSha256 = Get-Sha256 $productionInstallerPath
 $productionInstallerSource = Get-Content -LiteralPath $productionInstallerPath -Raw -Encoding UTF8
@@ -676,7 +682,8 @@ $ownerScript = @'
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('status', 'stop', 'start')]
-    [string]$Action
+    [string]$Action,
+    [string]$StateRoot
 )
 $ErrorActionPreference = 'Stop'
 $statePath = '__OWNER_STATE__'
@@ -907,7 +914,10 @@ try {
         evidence_class = 'generated-instrumented-transaction-harness'
         production_installer_sha256 = $productionInstallerSha256
         instrumented_installer_sha256 = $instrumentedInstallerSha256
+        instrumented_state_protection_sha256 = $instrumentedStateProtectionSha256
+        state_protection_evidence_class = 'generated-stub-no-acl-semantics'
         production_installer_executed = $false
+        production_state_protection_executed = $false
         production_static_identity_gate_markers_verified = 8
         effective_acl_evidence = $false
         clean_installs = 1

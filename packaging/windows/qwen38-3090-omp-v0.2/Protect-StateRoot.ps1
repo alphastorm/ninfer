@@ -106,6 +106,12 @@ function Test-NInferWriteCapableRights([Security.AccessControl.FileSystemRights]
 function Assert-NInferTrustedMigrationAcl([string]$Path, [bool]$RequireProtectedDacl = $false) {
     $allowed = Get-NInferAllowedOwnerSidValues
     $acl = Get-Acl -LiteralPath $Path
+    $raw = [Security.AccessControl.RawSecurityDescriptor]::new(
+        $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
+    )
+    if ($null -eq $raw.DiscretionaryAcl) {
+        throw "protected state has a NULL DACL: $Path"
+    }
     $ownerSid = ConvertFrom-NInferOwnerString ([string]$acl.Owner)
     if ($allowed -cnotcontains $ownerSid) {
         throw "protected state owner is not SYSTEM or Administrators: $Path"
@@ -125,9 +131,21 @@ function Assert-NInferTrustedMigrationAcl([string]$Path, [bool]$RequireProtected
     }
 }
 
+function Assert-NInferProtectedStateRoot([string]$Path) {
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    Assert-NInferNoReparseAncestors $fullPath
+    Assert-NInferProtectedAcl $fullPath $true
+}
+
 function Assert-NInferProtectedAcl([string]$Path, [bool]$RequireProtectedDacl = $false) {
     $allowed = Get-NInferAllowedOwnerSidValues
     $acl = Get-Acl -LiteralPath $Path
+    $raw = [Security.AccessControl.RawSecurityDescriptor]::new(
+        $acl.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
+    )
+    if ($null -eq $raw.DiscretionaryAcl) {
+        throw "protected state has a NULL DACL: $Path"
+    }
     $ownerSid = ConvertFrom-NInferOwnerString ([string]$acl.Owner)
     if ($allowed -cnotcontains $ownerSid) {
         throw "protected state owner is not SYSTEM or Administrators: $Path"

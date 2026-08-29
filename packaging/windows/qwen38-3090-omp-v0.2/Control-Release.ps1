@@ -14,11 +14,22 @@ if (-not (Test-Path -LiteralPath $StateRoot -PathType Container)) {
     throw 'protected release state root is missing'
 }
 $StateRoot = Initialize-NInferProtectedStateRoot $StateRoot
-Assert-NInferProtectedStateTree $StateRoot
+Assert-NInferProtectedStateRoot $StateRoot
 
 function Read-JsonFile([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "missing state file" }
     return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+}
+
+function Get-TrustedNvidiaSmiPath {
+    $path = Join-Path ([Environment]::GetFolderPath('System')) 'nvidia-smi.exe'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        $path = Join-Path $env:ProgramFiles 'NVIDIA Corporation\NVSMI\nvidia-smi.exe'
+    }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw 'trusted nvidia-smi installation is missing'
+    }
+    return $path
 }
 
 function Write-JsonAtomic([string]$Path, [object]$Value) {
@@ -199,12 +210,16 @@ function Assert-SelectedGpuIdentity([object]$Release) {
     if (Test-Path Env:CUDA_VISIBLE_DEVICES) {
         throw 'CUDA_VISIBLE_DEVICES must be absent for bound GPU ordinal identity'
     }
-    $rows = @(& nvidia-smi.exe --query-gpu=index,uuid,name --format=csv,noheader,nounits 2>$null)
+    $rows = @(& (Get-TrustedNvidiaSmiPath) --query-gpu=index,uuid,name --format=csv,noheader,nounits 2>&1)
     if ($LASTEXITCODE -ne 0) { throw 'selected GPU identity query failed' }
     $matched = $false
     foreach ($row in $rows) {
         $parts = @(([string]$row -split ',') | ForEach-Object { $_.Trim() })
-        if ($parts.Count -ne 3 -or [int]$parts[0] -ne [int]$Release.gpu_index) { continue }
+        $rowIndex = -1
+        if ($parts.Count -ne 3 -or -not [int]::TryParse($parts[0], [ref]$rowIndex)) {
+            throw 'selected GPU identity query returned an invalid row'
+        }
+        if ($rowIndex -ne [int]$Release.gpu_index) { continue }
         if ($parts[1] -cne [string]$Release.gpu_uuid -or $parts[2] -cne [string]$Release.gpu_name) {
             throw 'selected GPU identity changed after install'
         }
@@ -217,6 +232,15 @@ function Get-GpuOwner([object]$State) {
     $property = $State.PSObject.Properties['gpu_owner']
     if ($null -eq $property -or $null -eq $property.Value) { return $null }
     $owner = $property.Value
+    $expectedStateRoot = Join-Path $StateRoot 'gpu-owner-state'
+    if ($null -eq $owner.PSObject.Properties['state_root'] -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$owner.state_root),
+            [IO.Path]::GetFullPath($expectedStateRoot),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'GPU-owner state root is outside the managed release root'
+    }
     Assert-FileHash ([string]$owner.controller_path) ([string]$owner.controller_sha256) `
         'GPU-owner controller'
     return $owner
@@ -225,7 +249,7 @@ function Get-GpuOwner([object]$State) {
 function Invoke-GpuOwner([object]$State, [ValidateSet('status', 'stop', 'start')][string]$OwnerAction) {
     $owner = Get-GpuOwner $State
     if ($null -eq $owner) { return $null }
-    $output = ((& ([string]$owner.controller_path) -Action $OwnerAction) | Out-String).Trim()
+    $output = ((& ([string]$owner.controller_path) -Action $OwnerAction -StateRoot ([string]$owner.state_root)) | Out-String).Trim()
     if ($OwnerAction -cne 'status') { return $null }
     if ([string]::IsNullOrWhiteSpace($output)) { throw 'GPU-owner status returned no JSON' }
     $status = $output | ConvertFrom-Json

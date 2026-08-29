@@ -43,6 +43,17 @@ function Read-JsonFile([string]$Path) {
     return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
+function Get-TrustedNvidiaSmiPath {
+    $path = Join-Path ([Environment]::GetFolderPath('System')) 'nvidia-smi.exe'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        $path = Join-Path $env:ProgramFiles 'NVIDIA Corporation\NVSMI\nvidia-smi.exe'
+    }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw 'trusted nvidia-smi installation is missing'
+    }
+    return $path
+}
+
 function Write-JsonAtomic([string]$Path, [object]$Value) {
     $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
     try {
@@ -448,11 +459,15 @@ function Assert-HostPrerequisites([object]$Spec, [object]$Config) {
         throw 'this release requires 64-bit Windows on x86-64'
     }
     if (Test-Path Env:CUDA_VISIBLE_DEVICES) { throw 'CUDA_VISIBLE_DEVICES must be absent for bound GPU ordinal identity' }
-    $rows = @(& nvidia-smi.exe --query-gpu=index,uuid,name,compute_cap,driver_version --format=csv,noheader,nounits 2>$null)
+    $rows = @(& (Get-TrustedNvidiaSmiPath) --query-gpu=index,uuid,name,compute_cap,driver_version --format=csv,noheader,nounits 2>&1)
     if ($LASTEXITCODE -ne 0 -or $rows.Count -eq 0) { throw 'NVIDIA GPU prerequisite query failed' }
     foreach ($row in $rows) {
         $parts = @(([string]$row -split ',') | ForEach-Object { $_.Trim() })
-        if ($parts.Count -ne 5 -or [int]$parts[0] -ne $deviceIndex) { continue }
+        $rowIndex = -1
+        if ($parts.Count -ne 5 -or -not [int]::TryParse($parts[0], [ref]$rowIndex)) {
+            throw 'NVIDIA GPU prerequisite query returned an invalid row'
+        }
+        if ($rowIndex -ne $deviceIndex) { continue }
         if ($parts[2] -cne [string]$Spec.gpu.name -or $parts[3] -cne [string]$Spec.gpu.compute_capability) { throw 'configured GPU device is not the qualified RTX 3090' }
         if ([Version]$parts[4] -lt [Version]("$([int]$Spec.gpu.minimum_driver_major).0")) { throw 'NVIDIA driver is too old' }
         return [ordered]@{ index = [int]$parts[0]; uuid = [string]$parts[1]; name = [string]$parts[2] }
@@ -761,6 +776,7 @@ Assert-NInferProtectedStateTree $StateRoot
 $statePath = Join-Path $StateRoot 'state.json'
 $controllerPath = Join-Path $StateRoot 'Control-Release.ps1'
 $ownerControllerPath = Join-Path (Join-Path $StateRoot 'gpu-owner') 'Control-GpuOwner.ps1'
+$ownerStateRoot = Join-Path $StateRoot 'gpu-owner-state'
 $receiptsStateRoot = Join-Path $StateRoot 'receipts'
 $transactionsRoot = Join-Path $receiptsStateRoot 'install-transactions'
 New-Item -ItemType Directory -Force -Path $transactionsRoot | Out-Null
@@ -850,7 +866,7 @@ try {
             throw 'GPU-owner controller does not exist'
         }
         $ownerControllerSource = (Resolve-Path -LiteralPath $GpuOwnerControllerPath).Path
-        $ownerStatusOutput = @(& $ownerControllerSource -Action status)
+        $ownerStatusOutput = @(& $ownerControllerSource -Action status -StateRoot $ownerStateRoot)
         $ownerStatus = Convert-CommandOutputToJson $ownerStatusOutput 'GPU-owner controller status'
         if ($null -eq $ownerStatus.PSObject.Properties['paused'] -or
             $ownerStatus.paused -isnot [bool]) {
@@ -859,10 +875,15 @@ try {
         $ownerRecord = [ordered]@{
             controller_path = $ownerControllerPath
             controller_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $ownerControllerSource).Hash.ToLowerInvariant()
+            state_root = $ownerStateRoot
         }
     }
     elseif ($null -ne $oldState -and $null -ne $oldState.PSObject.Properties['gpu_owner']) {
-        $ownerRecord = $oldState.gpu_owner
+        $ownerRecord = [ordered]@{
+            controller_path = [string]$oldState.gpu_owner.controller_path
+            controller_sha256 = [string]$oldState.gpu_owner.controller_sha256
+            state_root = $ownerStateRoot
+        }
     }
     if ($null -eq $ownerRecord) {
         throw 'a GPU-owner controller is required for the first install; upgrades inherit the managed adapter'

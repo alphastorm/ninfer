@@ -162,6 +162,15 @@ try {
     Assert-True ([bool]$protectedDenials.read_denied -and [bool]$protectedDenials.write_denied) `
         'protected root allowed real low-privilege read or write access'
 
+    $nullDaclPath = Join-Path $protected 'null-dacl.txt'
+    [IO.File]::WriteAllText($nullDaclPath, 'must remain protected', [Text.UTF8Encoding]::new($false))
+    $nullDacl = [Security.AccessControl.FileSecurity]::new()
+    $nullDacl.SetSecurityDescriptorSddlForm('D:NO_ACCESS_CONTROL')
+    Set-Acl -LiteralPath $nullDaclPath -AclObject $nullDacl
+    Assert-Rejected { Assert-NInferProtectedStateTree $protected } `
+        '*NULL DACL*' 'protected state accepted a NULL DACL file'
+    Set-NInferProtectedFileAcl $nullDaclPath
+
     $precreated = Join-Path $testRoot 'precreated'
     New-Item -ItemType Directory -Path $precreated | Out-Null
     Assert-Rejected { Initialize-NInferProtectedStateRoot $precreated | Out-Null } `
@@ -227,6 +236,7 @@ try {
     $managedReleasesVerified = 0
     $managedRequestLogsVerified = 0
     $managedRollbackDirections = 0
+    $managedStatusMilliseconds = 0
     if (-not [string]::IsNullOrWhiteSpace($ManagedStateRoot)) {
         if (-not (Test-Path -LiteralPath $ManagedStateRoot -PathType Container)) {
             throw 'managed upgrade state root is missing'
@@ -282,6 +292,12 @@ try {
         $initialActive = [string]$initialManagedState.active_release
         $initialPrevious = [string]$initialManagedState.previous_release
         $secretHashes = & $assertManagedSecrets $initialManagedState
+        $statusTimer = [Diagnostics.Stopwatch]::StartNew()
+        & $managedController -Action Status -StateRoot $managedRoot | Out-Null
+        $statusTimer.Stop()
+        $managedStatusMilliseconds = [int][Math]::Ceiling($statusTimer.Elapsed.TotalMilliseconds)
+        Assert-True ($managedStatusMilliseconds -le 5000) `
+            "populated protected-root status exceeded 5 seconds: $managedStatusMilliseconds ms"
 
         if ($ExerciseManagedRollback) {
             & $managedController -Action Rollback -StateRoot $managedRoot | Out-Null
@@ -307,6 +323,10 @@ try {
                     "reverse rollback changed a retained release secret: $releaseId"
             }
             $managedRollbackDirections++
+            & $managedController -Action Stop -StateRoot $managedRoot | Out-Null
+            $managedOwner = $restoredManagedState.gpu_owner
+            & ([string]$managedOwner.controller_path) -Action start `
+                -StateRoot ([string]$managedOwner.state_root) | Out-Null
         }
     }
 
@@ -363,13 +383,31 @@ try {
         & $GpuOwnerControllerPath -Action status -StateRoot $preplantedGpu | Out-Null
     } '*protected state inherits an external DACL*' 'preplanted generic GPU-owner state was accepted'
 
-    $installerSource = Get-Content -LiteralPath $InstallerPath -Raw -Encoding UTF8
-    foreach ($forbidden in @(
-            'InstallTestMode', 'Invoke-InstallFault', 'NINFER_TEST_INSTALL_',
-            'NInferSimulatedInterruption', 'NInferLifecycleHarness'
-        )) {
-        Assert-True (-not $installerSource.Contains($forbidden)) `
-            "shipped installer contains a test bypass or fault hook: $forbidden"
+    $releaseScriptRoot = Split-Path -Parent $InstallerPath
+    $releaseScripts = [Collections.Generic.List[IO.FileInfo]]::new()
+    foreach ($scriptFile in @(Get-ChildItem -LiteralPath $releaseScriptRoot -File | Where-Object {
+            $_.Name -in @(
+                'Install-Release.ps1', 'Control-Release.ps1', 'Control-GpuOwner.ps1',
+                'Protect-StateRoot.ps1', 'New-Package.ps1', 'New-QualificationReceipt.ps1'
+            )
+        })) { $releaseScripts.Add($scriptFile) }
+    $installedConstructor = Join-Path (Join-Path (Split-Path -Parent $releaseScriptRoot) 'qualification') 'New-QualificationReceipt.ps1'
+    if (Test-Path -LiteralPath $installedConstructor -PathType Leaf) {
+        $releaseScripts.Add((Get-Item -LiteralPath $installedConstructor))
+    }
+    Assert-True ($releaseScripts.Count -ge 5) 'published release script inventory is incomplete'
+    $forbiddenHookPatterns = @(
+        'InstallTestMode', 'Invoke-InstallFault', 'NINFER_TEST_INSTALL_',
+        'NInferSimulatedInterruption', 'NInferLifecycleHarness',
+        'InternalSourceTestMode', 'TestBypass', 'FaultInjection',
+        'SimulatedFailure', 'SimulatedInterruption'
+    )
+    foreach ($scriptFile in $releaseScripts) {
+        $scriptSource = Get-Content -LiteralPath $scriptFile.FullName -Raw -Encoding UTF8
+        foreach ($forbidden in $forbiddenHookPatterns) {
+            Assert-True (-not $scriptSource.Contains($forbidden)) `
+                "published release script contains a test bypass or fault hook: $($scriptFile.Name):$forbidden"
+        }
     }
 
     $receipt = [ordered]@{
@@ -381,6 +419,7 @@ try {
         clean_default_managed_parent_creations = 2
         atomic_race_collision_rejections = 1
         raced_state_recursive_deletions = 0
+        null_dacl_rejections = 1
         low_privilege_effective_read_denials = 2
         low_privilege_effective_write_denials = 2
         precreated_root_rejections = 1
@@ -397,7 +436,10 @@ try {
         managed_release_acl_state_assertions = $managedReleasesVerified
         managed_request_log_acl_state_assertions = $managedRequestLogsVerified
         managed_rollback_directions = $managedRollbackDirections
+        populated_root_status_milliseconds = $managedStatusMilliseconds
         shipped_test_bypass = $false
+        shipped_scripts_scanned = $releaseScripts.Count
+        forbidden_hook_patterns_scanned = $forbiddenHookPatterns.Count
     }
     if (-not [string]::IsNullOrWhiteSpace($ReceiptPath)) { Write-JsonAtomic $ReceiptPath $receipt }
     $receipt | ConvertTo-Json -Compress

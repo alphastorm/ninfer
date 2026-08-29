@@ -263,6 +263,9 @@ class WindowsReleaseContractTests(unittest.TestCase):
         self.assertIn("Control-GpuOwner.ps1", installer)
         self.assertIn("Initialize-NInferProtectedStateRoot", installer)
         self.assertIn("Protect-NInferRetainedSecretAcls", installer)
+        self.assertIn("state_root = $ownerStateRoot", installer)
+        self.assertIn("-StateRoot ([string]$owner.state_root)", controller)
+        self.assertIn("Assert-NInferProtectedStateRoot $StateRoot", controller)
         self.assertIn("Set-NInferProtectedFileAcl $installedKey", installer)
         self.assertNotIn("$env:USERNAME", installer)
         self.assertNotIn("':(OI)(CI)M'", installer)
@@ -276,6 +279,21 @@ class WindowsReleaseContractTests(unittest.TestCase):
         self.assertIn("CreateDirectoryW", state_protection)
         self.assertNotIn("-Recurse -Force -ErrorAction SilentlyContinue", state_protection)
         self.assertIn("grants access outside SYSTEM or Administrators", state_protection)
+        self.assertIn("protected state has a NULL DACL", state_protection)
+        self.assertIn("GetFolderPath('System')", installer)
+        self.assertIn("GetFolderPath('System')", controller)
+        self.assertIn("GetFolderPath('System')", gpu_owner)
+        for source in (installer, controller, gpu_owner):
+            self.assertNotIn("& nvidia-smi.exe", source)
+        forbidden_hooks = (
+            "InstallTestMode", "Invoke-InstallFault", "NINFER_TEST_INSTALL_",
+            "NInferSimulatedInterruption", "InternalSourceTestMode", "TestBypass",
+            "FaultInjection", "SimulatedFailure", "SimulatedInterruption",
+        )
+        for path in RELEASE.glob("*.ps1"):
+            source = path.read_text(encoding="utf-8")
+            for marker in forbidden_hooks:
+                self.assertNotIn(marker, source, f"{path.name} contains {marker}")
         self.assertNotIn("Get-Content .\\SHA256SUMS", guide)
         self.assertIn("components.ninfer_variants", guide)
 
@@ -344,6 +362,10 @@ class PowerShellWindowsReleaseTests(unittest.TestCase):
         )
         self.assertEqual(value["evidence_class"], "generated-instrumented-transaction-harness")
         self.assertFalse(value["production_installer_executed"])
+        self.assertFalse(value["production_state_protection_executed"])
+        self.assertEqual(
+            value["state_protection_evidence_class"], "generated-stub-no-acl-semantics"
+        )
         self.assertFalse(value["effective_acl_evidence"])
         self.assertRegex(value["production_installer_sha256"], r"^[0-9a-f]{64}$")
         self.assertRegex(value["instrumented_installer_sha256"], r"^[0-9a-f]{64}$")

@@ -911,6 +911,40 @@ int test_delete_pins_session_across_cross_session_lru_eviction() {
     return failures;
 }
 
+int test_delete_rejects_post_delete_generation_over_disk_quota() {
+    TemporaryDirectory temporary;
+    ResponseStoreSnapshot snapshot = sample_snapshot();
+    ResponseStore responses(8, 8ULL << 20);
+    for (const StoredResponse& response : snapshot.records) { responses.put(response); }
+    FakeCheckpointEngine engine;
+    SessionCheckpointStoreOptions options = manager_options(temporary.path);
+    options.disk_quota_bytes = 1;
+    SessionCheckpointManager manager(
+        options, fingerprint(), session_checkpoint_tenant_sha256("delete-quota-api-key"),
+        engine.access());
+
+    const SessionCheckpointEraseResult result = manager.erase_response(
+        snapshot.client_session_sha256, snapshot.records.front().id, responses);
+    int failures = 0;
+    failures += check(
+        result == SessionCheckpointEraseResult::Conflict &&
+            responses.get_for_session(snapshot.records.front().id,
+                                      snapshot.client_session_sha256) &&
+            responses.get_for_session(snapshot.latest_response_id,
+                                      snapshot.client_session_sha256),
+        "over-quota post-delete generation returned Erased or changed the live lineage");
+    FakeCheckpointEngine restarted_engine;
+    SessionCheckpointManager restarted(
+        options, fingerprint(), session_checkpoint_tenant_sha256("delete-quota-api-key"),
+        restarted_engine.access());
+    ResponseStore restarted_responses(8, 8ULL << 20);
+    failures += check(
+        restarted.restore(snapshot.client_session_sha256, snapshot.latest_response_id,
+                          restarted_responses) == SessionCheckpointRestoreState::Missing,
+        "rejected over-quota DELETE exposed a partial durable generation");
+    return failures;
+}
+
 int test_active_reader_delete_and_gc() {
     TemporaryDirectory temporary;
     const ResponseStoreSnapshot responses = sample_snapshot();
@@ -1170,6 +1204,7 @@ int main() {
     failures += test_production_manager_restart_and_identity_isolation();
     failures += test_delete_checkpoint_update_fails_closed();
     failures += test_delete_pins_session_across_cross_session_lru_eviction();
+    failures += test_delete_rejects_post_delete_generation_over_disk_quota();
     failures += test_active_reader_delete_and_gc();
     failures += test_store_wide_quota_across_sessions();
     if (failures == 0) { std::cout << "ok\n"; }

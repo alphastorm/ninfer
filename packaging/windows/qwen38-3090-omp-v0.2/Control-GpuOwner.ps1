@@ -16,9 +16,16 @@ Assert-NInferProtectedStateTree $StateRoot
 $statePath = Join-Path $StateRoot 'lease.json'
 $qualifiedPowerLimitW = 300
 $interactiveGpuMemoryThresholdBytes = 1GB
+$nvidiaSmi = Join-Path ([Environment]::GetFolderPath('System')) 'nvidia-smi.exe'
+if (-not (Test-Path -LiteralPath $nvidiaSmi -PathType Leaf)) {
+    $nvidiaSmi = Join-Path $env:ProgramFiles 'NVIDIA Corporation\NVSMI\nvidia-smi.exe'
+}
+if (-not (Test-Path -LiteralPath $nvidiaSmi -PathType Leaf)) {
+    throw 'trusted nvidia-smi installation is missing'
+}
 
 function Invoke-NvidiaSmi([string[]]$Arguments) {
-    $output = @(& nvidia-smi.exe @Arguments 2>&1)
+    $output = @(& $nvidiaSmi @Arguments 2>&1)
     if ($LASTEXITCODE -ne 0) { throw "nvidia-smi failed with exit $LASTEXITCODE" }
     return $output
 }
@@ -46,8 +53,17 @@ function Get-InteractiveGpuWorkloadCount {
         -ErrorAction Stop)
     $owners = [Collections.Generic.HashSet[int]]::new()
     foreach ($row in $rows) {
-        if ([string]$row.Name -notmatch '^pid_(\d+)') { continue }
-        if ([Int64]$row.DedicatedUsage -lt $interactiveGpuMemoryThresholdBytes) { continue }
+        $usage = 0L
+        if (-not [Int64]::TryParse([string]$row.DedicatedUsage, [ref]$usage) -or $usage -lt 0) {
+            throw 'GPU process-memory counters returned an invalid dedicated-usage value'
+        }
+        if ([string]$row.Name -notmatch '^pid_(\d+)') {
+            if ($usage -ge $interactiveGpuMemoryThresholdBytes) {
+                throw 'GPU process-memory counters returned an unparseable active owner'
+            }
+            continue
+        }
+        if ($usage -lt $interactiveGpuMemoryThresholdBytes) { continue }
         [void]$owners.Add([int]$Matches[1])
     }
     return $owners.Count
