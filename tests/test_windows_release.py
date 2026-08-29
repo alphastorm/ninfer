@@ -25,8 +25,8 @@ class WindowsReleaseContractTests(unittest.TestCase):
         receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
         self.assertEqual(receipt["artifact_type"], "ninfer_rtx3090_beta_qualification")
         self.assertEqual(receipt["schema_version"], 3)
-        self.assertEqual(receipt["status"], "passed")
-        self.assertTrue(receipt["beta_qualified"])
+        self.assertEqual(receipt["status"], "incomplete")
+        self.assertFalse(receipt["beta_qualified"])
         self.assertFalse(receipt["automatic_route_activation_allowed"])
         self.assertFalse(receipt["stable_promotion_performed"])
         self.assertFalse(receipt["production_route_activation_performed"])
@@ -82,20 +82,12 @@ class WindowsReleaseContractTests(unittest.TestCase):
         self.assertRegex(receipt["candidate"]["config_sha256"], r"^[0-9a-f]{64}$")
 
         authority = receipt["qualification_authority"]
-        self.assertEqual(authority["authority"], "this-exact-beta-receipt")
+        self.assertEqual(authority["authority"], "pending-deferred-windows-gate")
         self.assertEqual(authority["exact_package_sha256"], assets["package"]["sha256"])
-        self.assertEqual(
-            authority["supersedes_package_build_receipt_qualification_status"],
-            "hardware-pending",
-        )
-        self.assertEqual(
-            authority["supersedes_packaged_release_spec_qualification_status"],
-            "hardware-pending",
-        )
-        self.assertEqual(
-            authority["supersedes_source_archive_receipt_status"],
-            "pending-requalification",
-        )
+        self.assertFalse(authority["supersession_performed"])
+        self.assertIsNone(authority["supersedes_package_build_receipt_qualification_status"])
+        self.assertIsNone(authority["supersedes_packaged_release_spec_qualification_status"])
+        self.assertIsNone(authority["supersedes_source_archive_receipt_status"])
         self.assertFalse(authority["historical_build_receipts_mutated"])
 
         instrumented = receipt["qualification"]["windows_lifecycle_instrumented"]
@@ -105,9 +97,17 @@ class WindowsReleaseContractTests(unittest.TestCase):
         )
         self.assertFalse(instrumented["production_installer_executed"])
         self.assertFalse(instrumented["effective_acl_evidence"])
-        self.assertTrue(shipped["production_installer_executed"])
+        self.assertEqual(shipped["status"], "not_run")
+        self.assertTrue(shipped["fresh_package_gate_deferred"])
+        self.assertEqual(
+            shipped["deferred_reason"],
+            "fresh-windows-rtx3090-unavailable-after-user-handoff",
+        )
         self.assertFalse(shipped["instrumented_harness_used"])
         self.assertEqual(shipped["installer_sha256"], assets["installer_sha256"])
+        security = receipt["qualification"]["windows_state_security"]
+        self.assertEqual(security["status"], "not_run")
+        self.assertTrue(security["fresh_package_gate_deferred"])
 
         disclosure = receipt["public_disclosure"]
         self.assertEqual(disclosure["policy_version"], 1)

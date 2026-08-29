@@ -361,6 +361,7 @@ if (-not (Test-Path -LiteralPath $nvidiaSmi -PathType Leaf)) {
         $gpuOwnerSource = $gpuOwnerSource.Replace($trustedResolver, $fixtureResolver)
         $instrumentedGpuOwner = Join-Path $testRoot 'Control-GpuOwner.instrumented.ps1'
         [IO.File]::WriteAllText($instrumentedGpuOwner, $gpuOwnerSource, [Text.UTF8Encoding]::new($false))
+        Copy-Item -LiteralPath $StateProtectionPath -Destination (Join-Path $testRoot 'Protect-StateRoot.ps1')
         $GpuOwnerControllerPath = $instrumentedGpuOwner
     }
 
