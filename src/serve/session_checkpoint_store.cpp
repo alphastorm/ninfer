@@ -840,7 +840,11 @@ public:
     ~DirectoryCheckpointReader() override {
         std::lock_guard lock(owner_->mutex);
         const auto found = owner_->active_generations.find(active_key_);
-        if (found == owner_->active_generations.end() || found->second == 0) { std::terminate(); }
+        if (found == owner_->active_generations.end() || found->second == 0) {
+            std::fputs("checkpoint reader ownership invariant failed\n", stderr);
+            std::fflush(stderr);
+            std::terminate();
+        }
         if (--found->second == 0) { owner_->active_generations.erase(found); }
     }
 

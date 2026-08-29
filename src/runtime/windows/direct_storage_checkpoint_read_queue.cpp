@@ -18,6 +18,7 @@
 #    include <array>
 #    include <cstddef>
 #    include <cstdint>
+#    include <cstdio>
 #    include <cstring>
 #    include <cwchar>
 #    include <exception>
@@ -199,7 +200,12 @@ public:
         }
         // Returning without a completed D3D fence would release host buffers that DirectStorage
         // may still target. Device loss or a fence timeout is therefore fail-stop, not recoverable.
-        if (!fence_completed) { std::terminate(); }
+        if (!fence_completed) {
+            std::fputs("DirectStorage checkpoint fence did not reach a safe terminal state\n",
+                       stderr);
+            std::fflush(stderr);
+            std::terminate();
+        }
 
         const HRESULT status = state_->status->GetHResult(0);
         std::string failure;
