@@ -286,7 +286,7 @@ try {
         production_controller_sha256 = ('c' * 64); instrumented_controller_sha256 = ('d' * 64)
         instrumented_state_protection_sha256 = ('e' * 64)
         state_protection_evidence_class = 'generated-stub-no-acl-semantics'
-        substitution_manifest_sha256 = ('0' * 64); substitution_count = 21
+        substitution_manifest_sha256 = ('0' * 64); substitution_count = 22
         security_claims_included = $false
         production_state_protection_executed = $false
         effective_acl_evidence = $false; injected_failures = 10; interrupted_repairs = 2

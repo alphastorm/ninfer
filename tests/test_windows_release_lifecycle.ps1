@@ -163,9 +163,13 @@ function global:Start-Sleep {
     }
 }
 
-function global:nvidia-smi.exe {
+function global:nvidia-smi-installer.exe {
     param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Arguments)
     '0, GPU-fixture-3090, NVIDIA GeForce RTX 3090, 8.6, 616.56'
+    Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1
+}
+function global:nvidia-smi-controller.exe {
+    param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Arguments)
     '0, GPU-fixture-3090, NVIDIA GeForce RTX 3090'
     Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1
 }
@@ -564,13 +568,18 @@ function Get-TrustedNvidiaSmiPath {
     return $path
 }
 '@
-$instrumentedNvidiaResolver = @'
+$instrumentedInstallerNvidiaResolver = @'
 function Get-TrustedNvidiaSmiPath {
-    return 'nvidia-smi.exe'
+    return 'nvidia-smi-installer.exe'
+}
+'@
+$instrumentedControllerNvidiaResolver = @'
+function Get-TrustedNvidiaSmiPath {
+    return 'nvidia-smi-controller.exe'
 }
 '@
 $installerSource = Replace-Exactly $installerSource $trustedNvidiaResolver `
-    $instrumentedNvidiaResolver 'installer nvidia query boundary'
+    $instrumentedInstallerNvidiaResolver 'installer nvidia query boundary'
 $administratorGate = @'
 $principal = [Security.Principal.WindowsPrincipal]::new(
     [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -701,7 +710,7 @@ $controllerSource = (Get-Content -LiteralPath $productionControllerPath -Raw -En
     [string]([char]13 + [char]10), [string][char]10
 )
 $controllerSource = Replace-Exactly $controllerSource $trustedNvidiaResolver `
-    $instrumentedNvidiaResolver 'controller nvidia query boundary'
+    $instrumentedControllerNvidiaResolver 'controller nvidia query boundary'
 $ControllerPath = Join-Path $testRoot 'Control-Release.instrumented.ps1'
 [IO.File]::WriteAllText($ControllerPath, $controllerSource, [Text.UTF8Encoding]::new($false))
 $instrumentedControllerSha256 = Get-Sha256 $ControllerPath
@@ -984,7 +993,8 @@ try {
             'New-ScheduledTaskTrigger', 'New-ScheduledTaskSettingsSet',
             'New-ScheduledTaskPrincipal', 'Register-ScheduledTask',
             'Unregister-ScheduledTask', 'Start-ScheduledTask', 'Stop-ScheduledTask',
-            'Get-NetTCPConnection', 'Invoke-RestMethod', 'Start-Sleep', 'nvidia-smi.exe'
+            'Get-NetTCPConnection', 'Invoke-RestMethod', 'Start-Sleep',
+            'nvidia-smi-installer.exe', 'nvidia-smi-controller.exe'
         )) {
         $command = Get-Command $functionName -CommandType Function -ErrorAction Stop
         $substitutions.Add([ordered]@{
@@ -1044,7 +1054,8 @@ finally {
             'New-ScheduledTaskTrigger', 'New-ScheduledTaskSettingsSet',
             'New-ScheduledTaskPrincipal', 'Register-ScheduledTask',
             'Unregister-ScheduledTask', 'Start-ScheduledTask', 'Stop-ScheduledTask',
-            'Get-NetTCPConnection', 'Invoke-RestMethod', 'Start-Sleep', 'nvidia-smi.exe'
+            'Get-NetTCPConnection', 'Invoke-RestMethod', 'Start-Sleep',
+            'nvidia-smi-installer.exe', 'nvidia-smi-controller.exe'
         )) {
         Remove-Item -LiteralPath "Function:\$name" -ErrorAction SilentlyContinue
     }

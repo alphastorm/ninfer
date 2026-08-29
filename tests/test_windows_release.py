@@ -385,8 +385,8 @@ class PowerShellWindowsReleaseTests(unittest.TestCase):
         self.assertEqual(
             value["state_protection_evidence_class"], "generated-stub-no-acl-semantics"
         )
-        self.assertEqual(value["substitution_count"], 21)
-        self.assertEqual(len(value["substitution_manifest"]), 21)
+        self.assertEqual(value["substitution_count"], 22)
+        self.assertEqual(len(value["substitution_manifest"]), 22)
         self.assertFalse(value["security_claims_included"])
         self.assertFalse(value["effective_acl_evidence"])
         self.assertRegex(value["production_installer_sha256"], r"^[0-9a-f]{64}$")

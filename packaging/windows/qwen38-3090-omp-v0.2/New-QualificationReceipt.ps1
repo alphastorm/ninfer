@@ -277,7 +277,7 @@ function New-NInferQualificationReceipt {
          $instrumentedReceipt.production_installer_sha256 -ceq $instrumentedReceipt.instrumented_installer_sha256 -or
          $instrumentedReceipt.state_protection_evidence_class -cne 'generated-stub-no-acl-semantics' -or
          $instrumentedReceipt.production_controller_sha256 -ceq $instrumentedReceipt.instrumented_controller_sha256 -or
-         $instrumentedReceipt.substitution_count -ne 21 -or
+         $instrumentedReceipt.substitution_count -ne 22 -or
          $instrumentedReceipt.security_claims_included -or
          $instrumentedReceipt.production_installer_executed -or
          $instrumentedReceipt.production_state_protection_executed -or
