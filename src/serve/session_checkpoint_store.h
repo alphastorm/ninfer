@@ -88,7 +88,7 @@ public:
     [[nodiscard]] std::optional<SessionCheckpointSaveResult>
     save(const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
          const ResponseStoreSnapshot& responses, const nlohmann::json& runtime_fingerprint,
-         const EngineExporter& exporter);
+         const EngineExporter& exporter, bool retire_previous = false);
 
     // Verifies identity, manifest schema, every size/checksum, and the requested response id before
     // exposing either ResponseStore state or an Engine reader. Verified corruption is quarantined;

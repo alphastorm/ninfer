@@ -1122,6 +1122,52 @@ int test_delete_checkpoint_transaction_race_and_quota() {
                                                     snapshot.client_session_sha256),
             "restart resurrected a response deleted only from the durable checkpoint");
     }
+
+    {
+        TemporaryDirectory temporary;
+        const std::string tenant =
+            session_checkpoint_tenant_sha256("checkpoint-delete-deferred-cleanup-key");
+        const nlohmann::json runtime = fingerprint();
+        ResponseStoreSnapshot snapshot = sample_snapshot('7');
+        ResponseStore responses(8, 8ULL << 20);
+        for (const StoredResponse& response : snapshot.records) { responses.put(response); }
+        bool refuse_cleanup = false;
+        SessionCheckpointStoreOptions options = manager_options(temporary.path);
+        options.tombstone_cleanup = [&](const std::filesystem::path& path) {
+            if (refuse_cleanup) { return false; }
+            std::error_code error;
+            std::filesystem::remove_all(path, error);
+            return !error;
+        };
+        FakeCheckpointEngine engine;
+        SessionCheckpointManager manager(options, runtime, tenant, engine.access());
+        const SessionCheckpointSaveOutcome baseline = manager.save(
+            snapshot.client_session_sha256, snapshot.latest_response_id, responses);
+        failures += check(baseline.state == SessionCheckpointSaveState::Saved &&
+                              baseline.checkpoint,
+                          "deferred cleanup fixture did not save its baseline");
+        if (!baseline.checkpoint) { return failures; }
+
+        refuse_cleanup = true;
+        const SessionCheckpointEraseResult erased = manager.erase_response(
+            snapshot.client_session_sha256, snapshot.records.front().id, responses);
+        const std::filesystem::path tombstone =
+            temporary.path / ".tombstones" /
+            (namespace_storage_digest(checkpoint_namespace(snapshot)) + "--" +
+             baseline.checkpoint->generation);
+        const std::filesystem::path retained_responses = tombstone / "responses.cbor";
+        failures += check(
+            erased == SessionCheckpointEraseResult::Erased &&
+                std::filesystem::is_regular_file(retained_responses) &&
+                read_file_bytes(retained_responses).find(snapshot.records.front().id) !=
+                    std::string::npos,
+            "failed eager cleanup did not disclose retention of the complete old response body");
+
+        refuse_cleanup = false;
+        SessionCheckpointStore collector(options);
+        failures += check(!std::filesystem::exists(tombstone),
+                          "deferred pre-delete body was not reclaimed by the next collection");
+    }
     return failures;
 }
 
@@ -1186,20 +1232,7 @@ int test_active_reader_delete_and_gc() {
                                                   newer->generation) &&
                           std::filesystem::exists(session / "current"),
                       "quota GC removes stale LRU data but protects active and current generations");
-    const std::filesystem::path retained_stale =
-        temporary.path / ".tombstones" /
-        (namespace_storage_digest(checkpoint_namespace(responses)) + "--" + saved->generation);
-    refuse_cleanup = true;
     loaded.checkpoint.reset();
-    store.collect_garbage();
-    failures += check(
-        !std::filesystem::exists(session / "generations" / saved->generation) &&
-            std::filesystem::is_regular_file(retained_stale / "responses.cbor"),
-        "active stale generation was not retained in protected deferred cleanup state");
-    refuse_cleanup = false;
-    store.collect_garbage();
-    failures += check(!std::filesystem::exists(retained_stale),
-                      "released stale generation was not reclaimed on the next collection");
     const std::filesystem::path tombstone =
         temporary.path / ".tombstones" /
         namespace_storage_digest(checkpoint_namespace(responses));

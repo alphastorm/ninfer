@@ -781,8 +781,7 @@ void retire_generation_locked(const SessionCheckpointStoreOptions& options,
         inventory_generations(options, impl, protected_generation, protected_session);
     for (const GenerationCandidate& candidate : inventory.candidates) {
         const bool unconditional = candidate.kind == CandidateKind::Tombstone ||
-                                   candidate.kind == CandidateKind::AbandonedStaging ||
-                                   candidate.kind == CandidateKind::StaleGeneration;
+                                   candidate.kind == CandidateKind::AbandonedStaging;
         if (inventory.used <= options.disk_quota_bytes && !unconditional) { continue; }
         if (candidate.kind == CandidateKind::Tombstone) {
             if (cleanup_tombstone(options, candidate.path)) {
@@ -1032,7 +1031,7 @@ std::optional<SessionCheckpointSaveResult>
 SessionCheckpointStore::save(const AuthenticatedCheckpointNamespace& checkpoint_namespace,
                              const ResponseStoreSnapshot& responses,
                              const nlohmann::json& runtime_fingerprint,
-                             const EngineExporter& exporter) {
+                             const EngineExporter& exporter, bool retire_previous) {
     if (responses.client_session_sha256 != checkpoint_namespace.session_sha256() ||
         !runtime_fingerprint.is_object() ||
         !exporter) {
@@ -1173,7 +1172,8 @@ SessionCheckpointStore::save(const AuthenticatedCheckpointNamespace& checkpoint_
                 return std::nullopt;
             }
             if (pointer_readable && actual_generation && *actual_generation == generation) {
-                if (previous_generation && *previous_generation != generation) {
+                if (retire_previous && previous_generation &&
+                    *previous_generation != generation) {
                     retire_generation_locked(options_, *impl_, session, *previous_generation);
                 }
                 return SessionCheckpointSaveResult{
@@ -1182,7 +1182,7 @@ SessionCheckpointStore::save(const AuthenticatedCheckpointNamespace& checkpoint_
             throw;
         }
 
-        if (previous_generation && *previous_generation != generation) {
+        if (retire_previous && previous_generation && *previous_generation != generation) {
             retire_generation_locked(options_, *impl_, session, *previous_generation);
         }
 
@@ -1542,7 +1542,7 @@ SessionCheckpointEraseResult SessionCheckpointManager::erase_response(
                                    return engine_.checkpoint(
                                        checkpoint_namespace, checkpoint_tag, writer,
                                        store_->options().staging_bytes);
-                               })
+                               }, true)
                         .has_value();
                 });
         switch (erased) {
@@ -1588,7 +1588,7 @@ SessionCheckpointEraseResult SessionCheckpointManager::erase_response(
                                   return engine_.checkpoint(
                                       checkpoint_namespace, checkpoint_tag, writer,
                                       store_->options().staging_bytes);
-                              })
+                              }, true)
                        .has_value()
                    ? SessionCheckpointEraseResult::Erased
                    : SessionCheckpointEraseResult::Conflict;
