@@ -101,6 +101,37 @@ class WindowsReleaseContractTests(unittest.TestCase):
         self.assertIsNone(authority["supersedes_source_archive_receipt_status"])
         self.assertFalse(authority["historical_build_receipts_mutated"])
 
+        platform = receipt["platform"]
+        self.assertEqual(platform["role"], "target-deployment-profile")
+        self.assertFalse(platform["fresh_exact_package_windows_gates_passed"])
+        remote_native = receipt["qualification"]["remote_linux_sm86_native"]
+        self.assertEqual(remote_native["status"], "passed")
+        self.assertEqual(remote_native["source_commit"], runtime_source)
+        self.assertEqual(remote_native["gpu"], "NVIDIA GeForce RTX 3090")
+        self.assertEqual(remote_native["vram_mib"], 24576)
+        self.assertEqual(remote_native["cuda_architecture"], "sm_86")
+        self.assertEqual(
+            sorted(remote_native["focused_tests"]),
+            [
+                "ninfer_http_contract_test",
+                "ninfer_response_store_test",
+                "ninfer_session_checkpoint_store_test",
+            ],
+        )
+        self.assertTrue(remote_native["pod_deleted"])
+        self.assertLessEqual(remote_native["hourly_price_usd"], 0.70)
+        self.assertRegex(remote_native["receipt_sha256"], r"^[0-9a-f]{64}$")
+        for gate in (
+            "authenticated_agent_protocol",
+            "long_context_64k",
+            "checkpoint_process_restart",
+            "performance",
+        ):
+            self.assertEqual(
+                receipt["qualification"][gate]["evidence_platform"],
+                "remote-linux-rtx3090-runtime",
+            )
+
         instrumented = receipt["qualification"]["windows_lifecycle_instrumented"]
         shipped = receipt["qualification"]["windows_lifecycle_shipped"]
         self.assertEqual(
@@ -116,6 +147,11 @@ class WindowsReleaseContractTests(unittest.TestCase):
         )
         self.assertFalse(shipped["instrumented_harness_used"])
         self.assertEqual(shipped["installer_sha256"], assets["installer_sha256"])
+        self.assertEqual(shipped["evidence_scope"], "exact-current-package-deferred")
+        self.assertEqual(shipped["clean_installs"], 0)
+        self.assertEqual(shipped["upgrades"], 0)
+        self.assertEqual(shipped["rollback_directions"], 0)
+        self.assertIsNone(shipped["receipt_sha256"])
         security = receipt["qualification"]["windows_state_security"]
         self.assertEqual(security["status"], "not_run")
         self.assertTrue(security["fresh_package_gate_deferred"])
@@ -124,6 +160,8 @@ class WindowsReleaseContractTests(unittest.TestCase):
         self.assertEqual(security["null_dacl_rejections"], 0)
         self.assertIsNone(security["restored_power_limit_w"])
         self.assertIsNone(security["gpu_power_evidence_class"])
+        self.assertEqual(security["evidence_scope"], "exact-current-package-deferred")
+        self.assertIsNone(security["receipt_sha256"])
         security_fixture = receipt["qualification"]["windows_state_security_fixture"]
         self.assertEqual(security_fixture["status"], "passed")
         self.assertEqual(
@@ -133,6 +171,7 @@ class WindowsReleaseContractTests(unittest.TestCase):
         self.assertFalse(security_fixture["hardware_claimed"])
         historical = receipt["qualification"]["historical_windows_rtx3090_evidence"]
         self.assertEqual(historical["status"], "historical-passed")
+        self.assertEqual(historical["evidence_scope"], "previous-exact-package-only")
         self.assertEqual(
             historical["package_sha256"],
             "e74c097f064279f860a0d6a738bb4470503f63df0e8b531ccaeb48402c923ef9",
@@ -142,6 +181,23 @@ class WindowsReleaseContractTests(unittest.TestCase):
             "7555db29d2e5d517f74bd05d45020028d0f454c9",
         )
         self.assertFalse(historical["applies_to_current_package"])
+        self.assertRegex(historical["omp_client_receipt_sha256"], r"^[0-9a-f]{64}$")
+
+        omp = receipt["qualification"]["omp_windows_client"]
+        self.assertEqual(omp["status"], "not_run")
+        self.assertEqual(omp["evidence_scope"], "exact-current-package-deferred")
+        self.assertTrue(omp["fresh_package_gate_deferred"])
+        self.assertIsNone(omp["archive_sha256"])
+        self.assertIsNone(omp["binary_sha256"])
+        self.assertEqual(omp["events"], 0)
+        self.assertIsNone(omp["typed_tool_name"])
+        self.assertEqual(omp["tool_results"], 0)
+        self.assertFalse(omp["exact_final_answer"])
+        self.assertIsNone(omp["receipt_sha256"])
+        scope = receipt["scope"]
+        self.assertEqual(scope["target_clients"], ["OMP 18.0.9 Windows x64"])
+        self.assertEqual(scope["supported_clients"], [])
+        self.assertEqual(scope["supported_api_surfaces"], [])
 
         disclosure = receipt["public_disclosure"]
         self.assertEqual(disclosure["policy_version"], 1)
