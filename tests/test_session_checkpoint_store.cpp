@@ -599,6 +599,72 @@ int test_transaction_restart_compatibility_and_corruption() {
     return failures;
 }
 
+int test_current_pointer_sync_failure_resolution() {
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot('f');
+    const std::vector<std::byte> payload = engine_payload();
+    const auto checkpoint_namespace_value = checkpoint_namespace(responses);
+    const std::filesystem::path session = stored_session_path(temporary.path, responses);
+    bool inject_final_sync_failure = false;
+    bool reject_rollback_replace = false;
+    int session_sync_attempts = 0;
+    int current_replace_attempts = 0;
+    SessionCheckpointStoreOptions options{
+        .root = temporary.path,
+        .disk_quota_bytes = 8ULL << 20,
+        .staging_bytes = 1ULL << 20,
+        .tombstone_cleanup = {},
+        .before_directory_sync = [&](const std::filesystem::path& path) {
+            if (inject_final_sync_failure && path == session && ++session_sync_attempts == 1) {
+                throw std::runtime_error("deterministic directory sync rejection");
+            }
+        },
+        .before_current_pointer_replace =
+            [&](const std::filesystem::path&, const std::filesystem::path& destination) {
+                if (inject_final_sync_failure && destination == session / "current" &&
+                    ++current_replace_attempts == 2 && reject_rollback_replace) {
+                    throw std::runtime_error("deterministic rollback replacement rejection");
+                }
+            },
+    };
+    SessionCheckpointStore store(std::move(options));
+    const auto exporter = [&](ContinuationCheckpointWriter& writer)
+        -> std::optional<ContinuationCheckpointStats> {
+        if (!write_chunked(writer, "engine/state.bin", payload)) { return std::nullopt; }
+        return ContinuationCheckpointStats{.frontier_tokens = 4096,
+                                           .restored_tokens = 4096,
+                                           .payload_bytes = payload.size()};
+    };
+
+    int failures = 0;
+    const auto baseline =
+        store.save(checkpoint_namespace_value, responses, fingerprint(), exporter);
+    failures += check(baseline.has_value(), "sync-failure fixture baseline saves");
+    if (!baseline) { return failures; }
+    const std::string current_before = read_file_bytes(session / "current");
+
+    inject_final_sync_failure = true;
+    session_sync_attempts = 0;
+    current_replace_attempts = 0;
+    const auto rolled_back =
+        store.save(checkpoint_namespace_value, responses, fingerprint(), exporter);
+    failures += check(!rolled_back && session_sync_attempts == 2 &&
+                          current_replace_attempts == 2 &&
+                          read_file_bytes(session / "current") == current_before,
+                      "post-rename sync failure did not roll back to the prior current pointer");
+
+    session_sync_attempts = 0;
+    current_replace_attempts = 0;
+    reject_rollback_replace = true;
+    const auto committed =
+        store.save(checkpoint_namespace_value, responses, fingerprint(), exporter);
+    failures += check(committed.has_value() && session_sync_attempts == 1 &&
+                          current_replace_attempts == 2 &&
+                          read_file_bytes(session / "current") == committed->generation + "\n",
+                      "failed rollback did not report the newly committed current pointer");
+    return failures;
+}
+
 int test_production_manager_restart_and_identity_isolation() {
     TemporaryDirectory temporary;
     const std::string api_key = "checkpoint-api-key";
@@ -996,6 +1062,66 @@ int test_delete_checkpoint_transaction_race_and_quota() {
                                                     snapshot.client_session_sha256),
             "restart after quota-rejected DELETE lost the durable baseline lineage");
     }
+
+    {
+        TemporaryDirectory temporary;
+        const std::string tenant =
+            session_checkpoint_tenant_sha256("checkpoint-delete-evicted-key");
+        const nlohmann::json runtime = fingerprint();
+        ResponseStoreSnapshot snapshot = sample_snapshot('e');
+        ResponseStore responses(2, 8ULL << 20);
+        for (const StoredResponse& response : snapshot.records) { responses.put(response); }
+        FakeCheckpointEngine engine;
+        SessionCheckpointManager manager(manager_options(temporary.path), runtime, tenant,
+                                         engine.access());
+        const SessionCheckpointSaveOutcome baseline = manager.save(
+            snapshot.client_session_sha256, snapshot.latest_response_id, responses);
+        failures += check(baseline.state == SessionCheckpointSaveState::Saved &&
+                              baseline.checkpoint,
+                          "durable-only delete fixture did not save its baseline");
+        if (!baseline.checkpoint) { return failures; }
+
+        StoredResponse foreign;
+        foreign.id                    = "resp_foreign_eviction";
+        foreign.session_key           = std::string(64, '9');
+        foreign.client_session_sha256 = std::string(64, '9');
+        foreign.response =
+            {{"id", foreign.id}, {"object", "response"}, {"status", "completed"}};
+        foreign.context = snapshot.records.front().context;
+        responses.put(std::move(foreign));
+        failures += check(
+            !responses.get_for_session(snapshot.records.front().id,
+                                       snapshot.client_session_sha256) &&
+                responses.get_for_session(snapshot.latest_response_id,
+                                          snapshot.client_session_sha256),
+            "durable-only delete fixture did not evict only the addressed live response");
+
+        const std::filesystem::path session = stored_session_path(temporary.path, snapshot);
+        const SessionCheckpointEraseResult erased = manager.erase_response(
+            snapshot.client_session_sha256, snapshot.records.front().id, responses);
+        failures += check(
+            erased == SessionCheckpointEraseResult::Erased && engine.checkpoint_calls == 2 &&
+                !responses.get_for_session(snapshot.records.front().id,
+                                           snapshot.client_session_sha256) &&
+                responses.get_for_session(snapshot.latest_response_id,
+                                          snapshot.client_session_sha256) &&
+                !std::filesystem::exists(session / "generations" /
+                                         baseline.checkpoint->generation),
+            "DELETE of an LRU-evicted live response did not commit and retire its durable body");
+
+        FakeCheckpointEngine restart_engine;
+        SessionCheckpointManager restarted(manager_options(temporary.path), runtime, tenant,
+                                           restart_engine.access());
+        ResponseStore restarted_responses(2, 8ULL << 20);
+        failures += check(
+            restarted.restore(snapshot.client_session_sha256, snapshot.latest_response_id,
+                              restarted_responses) == SessionCheckpointRestoreState::Restored &&
+                !restarted_responses.get_for_session(snapshot.records.front().id,
+                                                     snapshot.client_session_sha256) &&
+                restarted_responses.get_for_session(snapshot.latest_response_id,
+                                                    snapshot.client_session_sha256),
+            "restart resurrected a response deleted only from the durable checkpoint");
+    }
     return failures;
 }
 
@@ -1060,7 +1186,20 @@ int test_active_reader_delete_and_gc() {
                                                   newer->generation) &&
                           std::filesystem::exists(session / "current"),
                       "quota GC removes stale LRU data but protects active and current generations");
+    const std::filesystem::path retained_stale =
+        temporary.path / ".tombstones" /
+        (namespace_storage_digest(checkpoint_namespace(responses)) + "--" + saved->generation);
+    refuse_cleanup = true;
     loaded.checkpoint.reset();
+    store.collect_garbage();
+    failures += check(
+        !std::filesystem::exists(session / "generations" / saved->generation) &&
+            std::filesystem::is_regular_file(retained_stale / "responses.cbor"),
+        "active stale generation was not retained in protected deferred cleanup state");
+    refuse_cleanup = false;
+    store.collect_garbage();
+    failures += check(!std::filesystem::exists(retained_stale),
+                      "released stale generation was not reclaimed on the next collection");
     const std::filesystem::path tombstone =
         temporary.path / ".tombstones" /
         namespace_storage_digest(checkpoint_namespace(responses));
@@ -1255,6 +1394,7 @@ int main() {
     failures += test_authenticated_namespace_validation();
     failures += test_codec_round_trip();
     failures += test_transaction_restart_compatibility_and_corruption();
+    failures += test_current_pointer_sync_failure_resolution();
     failures += test_production_manager_restart_and_identity_isolation();
     failures += test_delete_checkpoint_update_fails_closed();
     failures += test_delete_checkpoint_transaction_race_and_quota();

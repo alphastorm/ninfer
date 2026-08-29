@@ -2,7 +2,7 @@
 
 ## Verdict
 
-**Qualified for beta support as a source-bound release candidate.** Gates G, L, and R passed on the final binary and finalized asset set. No stable promotion, public release, or permanent route change was performed.
+**Final closure review is red; this qualification and package must not ship.** The prior candidate is quarantined while the runtime, Windows trust boundary, disclosure scan, and outer asset manifest are rebuilt and all runtime-dependent gates rerun. No stable promotion, public release, or permanent route change was performed.
 
 The unavailable historical private corpus was not reused, read, copied, hashed, or transmitted. Golden-equivalent coverage uses only the source-controlled synthetic typed-tool contract and deterministic final-answer oracle.
 

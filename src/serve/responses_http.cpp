@@ -570,10 +570,6 @@ void HttpServer::handle_response_delete(const httplib::Request& req, httplib::Re
                     std::chrono::milliseconds(options_.pending_timeout_ms),
                 [&req] { return disconnected(req); });
         }
-        if (!response_store_.get_for_session(id, session)) {
-            write_error(res, response_not_found(id));
-            return;
-        }
         if (session && service_ != nullptr && service_->checkpoint_enabled()) {
             const SessionCheckpointEraseResult erased =
                 service_->erase_checkpoint_response(*session, id, response_store_);
@@ -590,9 +586,12 @@ void HttpServer::handle_response_delete(const httplib::Request& req, httplib::Re
                 error.message = "stored continuation could not be removed atomically";
                 throw ApiException(std::move(error));
             }
-        } else if (!response_store_.erase_for_session(id, session)) {
-            write_error(res, response_not_found(id));
-            return;
+        } else {
+            if (!response_store_.get_for_session(id, session) ||
+                !response_store_.erase_for_session(id, session)) {
+                write_error(res, response_not_found(id));
+                return;
+            }
         }
         res.set_content(Json{{"id", id}, {"object", "response.deleted"}, {"deleted", true}}.dump(),
                         "application/json");

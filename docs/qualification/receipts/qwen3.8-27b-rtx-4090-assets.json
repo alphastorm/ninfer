@@ -1,7 +1,7 @@
 {
   "artifact_type": "ninfer_public_release_asset_receipt",
   "schema_version": 4,
-  "status": "passed",
+  "status": "review_red",
   "release_id": "qwen38-4090-v0.1",
   "runtime_source": {
     "commit": "6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f",

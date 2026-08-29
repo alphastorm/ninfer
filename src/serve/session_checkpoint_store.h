@@ -25,6 +25,11 @@ struct SessionCheckpointStoreOptions {
     std::uint64_t disk_quota_bytes = 64ULL << 30;
     std::size_t staging_bytes      = 256ULL << 20;
     std::function<bool(const std::filesystem::path&)> tombstone_cleanup;
+    // Empty callbacks use the platform implementation. Host tests inject deterministic filesystem
+    // outcomes at these two durability boundaries without changing production behavior.
+    std::function<void(const std::filesystem::path&)> before_directory_sync;
+    std::function<void(const std::filesystem::path&, const std::filesystem::path&)>
+        before_current_pointer_replace;
 };
 
 struct SessionCheckpointSaveResult {

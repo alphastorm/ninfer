@@ -347,22 +347,30 @@ Resource behavior:
 | `POST /v1/responses/{id}/cancel` | explicitly fails because background execution is unsupported |
 | `POST /v1/responses/compact` | explicitly fails with `compaction_not_supported` |
 
-`store:false` Responses cannot be retrieved or used as `previous_response_id`. LRU eviction and
-explicit deletion also make an ID unavailable. A single Response larger than the configured store
-capacity fails with `response_store_capacity_exceeded` rather than silently pretending it was
-stored.
+`store:false` Responses cannot be retrieved or used as `previous_response_id`. LRU eviction makes
+an ID unavailable to GET, but DELETE still checks the authenticated durable checkpoint and removes
+an evicted record there rather than letting a 404 become a restart resurrection. Explicit deletion
+makes the ID unavailable in both stores. A single Response larger than the configured store
+capacity fails with `response_store_capacity_exceeded` rather than silently pretending it was stored.
 
 With session checkpoints enabled, DELETE constructs the post-delete durable snapshot and complete
 replacement live store while holding the response-store lock. The durable callback must succeed
 before no-throw swaps publish the live deletion. A foreign-session LRU insertion therefore waits
-for the whole transaction; checkpoint, quota, or filesystem failure returns
-`checkpoint_unavailable` without changing either live state or the durable `current` generation.
+for the whole transaction. Checkpoint and quota failures leave both stores unchanged. On POSIX, a
+directory-sync failure after replacing `current` first attempts to restore and sync the prior
+pointer. If that rollback cannot be established, the result follows the pointer that is actually
+readable: a new `current` is reported committed rather than returning a false conflict.
 
 DELETE is record and addressability deletion, not cryptographic erasure of content still reachable
 through a surviving descendant. The replacement Engine checkpoint is rooted at the latest
 surviving response's session key and can intentionally retain ancestor token/KV state required by
 that descendant. The deleted response record is absent from `responses.cbor`, direct retrieval and
-new continuation from its ID fail, and surviving descendants remain restart-durable.
+new continuation from its ID fail, and surviving descendants remain restart-durable. After the new
+`current` pointer commits, the store makes one bounded eager attempt to retire the immediately
+superseded generation. An active reader or failed tombstone cleanup can therefore leave a protected
+stale generation containing the complete old `responses.cbor`, including the logically deleted
+body. Such bytes remain inaccessible through the API and are reclaimed after the reader releases
+and the next save, explicit collection, or quota pass succeeds; DELETE is not a secure-erasure API.
 
 ### Durable process-restart continuation
 

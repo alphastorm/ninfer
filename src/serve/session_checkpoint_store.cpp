@@ -160,6 +160,21 @@ void replace_path(const std::filesystem::path& source, const std::filesystem::pa
 #endif
 }
 
+void sync_checkpoint_directory(const SessionCheckpointStoreOptions& options,
+                               const std::filesystem::path& path) {
+    if (options.before_directory_sync) { options.before_directory_sync(path); }
+    sync_directory(path);
+}
+
+void replace_current_pointer(const SessionCheckpointStoreOptions& options,
+                             const std::filesystem::path& source,
+                             const std::filesystem::path& destination) {
+    if (options.before_current_pointer_replace) {
+        options.before_current_pointer_replace(source, destination);
+    }
+    replace_path(source, destination);
+}
+
 void write_synced(const std::filesystem::path& path, std::span<const std::byte> bytes) {
     std::FILE* file = open_binary_write(path);
     if (file == nullptr) { throw std::runtime_error("checkpoint file creation failed"); }
@@ -736,6 +751,28 @@ void sync_rename_parents(const std::filesystem::path& source,
     } catch (...) {}
 }
 
+void retire_generation_locked(const SessionCheckpointStoreOptions& options,
+                              const SessionCheckpointStore::Impl& impl,
+                              const std::filesystem::path& session,
+                              std::string_view generation) noexcept {
+    try {
+        const std::string digest = session.filename().string();
+        if (impl.active_generations.contains(digest + "/" + std::string(generation))) { return; }
+        const std::filesystem::path source = session / "generations" / generation;
+        std::error_code error;
+        if (!std::filesystem::is_directory(source, error) || error) { return; }
+        const std::filesystem::path tombstone =
+            options.root / ".tombstones" / (digest + "--" + std::string(generation));
+        if (std::filesystem::exists(tombstone, error)) {
+            if (error || !cleanup_tombstone(options, tombstone)) { return; }
+        }
+        std::filesystem::rename(source, tombstone, error);
+        if (error) { return; }
+        sync_rename_parents(source, tombstone);
+        (void)cleanup_tombstone(options, tombstone);
+    } catch (...) {}
+}
+
 [[nodiscard]] bool enforce_disk_quota_locked(
     const SessionCheckpointStoreOptions& options, const SessionCheckpointStore::Impl& impl,
     const std::optional<std::filesystem::path>& protected_generation = std::nullopt,
@@ -744,7 +781,8 @@ void sync_rename_parents(const std::filesystem::path& source,
         inventory_generations(options, impl, protected_generation, protected_session);
     for (const GenerationCandidate& candidate : inventory.candidates) {
         const bool unconditional = candidate.kind == CandidateKind::Tombstone ||
-                                   candidate.kind == CandidateKind::AbandonedStaging;
+                                   candidate.kind == CandidateKind::AbandonedStaging ||
+                                   candidate.kind == CandidateKind::StaleGeneration;
         if (inventory.used <= options.disk_quota_bytes && !unconditional) { continue; }
         if (candidate.kind == CandidateKind::Tombstone) {
             if (cleanup_tombstone(options, candidate.path)) {
@@ -1004,6 +1042,13 @@ SessionCheckpointStore::save(const AuthenticatedCheckpointNamespace& checkpoint_
     const std::filesystem::path session = session_path(checkpoint_namespace);
     const std::filesystem::path generations = session / "generations";
     std::filesystem::create_directories(generations);
+    std::optional<std::string> previous_generation;
+    try {
+        previous_generation = current_generation(session);
+    } catch (...) {
+        // A malformed prior pointer cannot be restored. If the new pointer's final directory sync
+        // fails, the readable pointer after rollback determines the truthful save result.
+    }
     const std::uint64_t ordinal = impl_->sequence.fetch_add(1, std::memory_order_relaxed);
     const std::string generation = std::to_string(unix_milliseconds()) + "-" +
                                    std::to_string(ordinal);
@@ -1077,7 +1122,7 @@ SessionCheckpointStore::save(const AuthenticatedCheckpointNamespace& checkpoint_
         };
         const std::string manifest_text = manifest.dump();
         write_synced(staging / "manifest.json", manifest_text);
-        sync_directory(staging);
+        sync_checkpoint_directory(options_, staging);
         // Reclaim before changing current. The staging generation and its session are protected,
         // so quota or cleanup failure leaves the previously published generation untouched.
         const std::uint64_t total_bytes = directory_bytes(staging);
@@ -1088,12 +1133,58 @@ SessionCheckpointStore::save(const AuthenticatedCheckpointNamespace& checkpoint_
         }
 
         std::filesystem::rename(staging, published);
-        sync_directory(generations);
+        sync_checkpoint_directory(options_, generations);
         const std::filesystem::path current_staging =
             session / (".current-" + generation);
         write_synced(current_staging, generation + "\n");
-        replace_path(current_staging, session / "current");
-        sync_directory(session);
+        replace_current_pointer(options_, current_staging, session / "current");
+        try {
+            sync_checkpoint_directory(options_, session);
+        } catch (...) {
+            const std::filesystem::path rollback_staging =
+                session / (".rollback-current-" + generation);
+            std::filesystem::remove(rollback_staging, cleanup_error);
+            try {
+                if (previous_generation) {
+                    write_synced(rollback_staging, *previous_generation + "\n");
+                    replace_current_pointer(options_, rollback_staging, session / "current");
+                } else {
+                    std::filesystem::remove(session / "current", cleanup_error);
+                    if (cleanup_error) {
+                        throw std::runtime_error("checkpoint current rollback failed");
+                    }
+                }
+                sync_checkpoint_directory(options_, session);
+            } catch (...) {}
+            std::filesystem::remove(rollback_staging, cleanup_error);
+
+            std::optional<std::string> actual_generation;
+            bool pointer_readable = true;
+            try {
+                actual_generation = current_generation(session);
+            } catch (...) {
+                pointer_readable = false;
+            }
+            if (pointer_readable && actual_generation == previous_generation) {
+                std::filesystem::remove_all(published, cleanup_error);
+                try {
+                    sync_directory(generations);
+                } catch (...) {}
+                return std::nullopt;
+            }
+            if (pointer_readable && actual_generation && *actual_generation == generation) {
+                if (previous_generation && *previous_generation != generation) {
+                    retire_generation_locked(options_, *impl_, session, *previous_generation);
+                }
+                return SessionCheckpointSaveResult{
+                    .generation = generation, .engine = *engine, .bytes = total_bytes};
+            }
+            throw;
+        }
+
+        if (previous_generation && *previous_generation != generation) {
+            retire_generation_locked(options_, *impl_, session, *previous_generation);
+        }
 
         return SessionCheckpointSaveResult{
             .generation = generation, .engine = *engine, .bytes = total_bytes};
@@ -1456,13 +1547,51 @@ SessionCheckpointEraseResult SessionCheckpointManager::erase_response(
                 });
         switch (erased) {
         case ResponseStoreTransactionalEraseResult::Missing:
-            return SessionCheckpointEraseResult::Missing;
+            break;
         case ResponseStoreTransactionalEraseResult::Conflict:
             return SessionCheckpointEraseResult::Conflict;
         case ResponseStoreTransactionalEraseResult::Erased:
             return SessionCheckpointEraseResult::Erased;
         }
-        return SessionCheckpointEraseResult::Conflict;
+
+        // A response may have fallen out of the bounded live LRU while remaining in the durable
+        // checkpoint. Delete from that verified snapshot instead of returning a 404 that would let
+        // the response reappear after restart.
+        SessionCheckpointLoadResult loaded =
+            store_->load(checkpoint_namespace, runtime_fingerprint_, response_id);
+        if (loaded.state == SessionCheckpointLoadState::Missing) {
+            return SessionCheckpointEraseResult::Missing;
+        }
+        if (loaded.state != SessionCheckpointLoadState::Available || !loaded.checkpoint) {
+            return SessionCheckpointEraseResult::Conflict;
+        }
+        ResponseStoreSnapshot durable = std::move(loaded.checkpoint->responses);
+        loaded.checkpoint.reset();
+        const auto durable_target = std::find_if(
+            durable.records.begin(), durable.records.end(),
+            [&](const StoredResponse& response) { return response.id == response_id; });
+        if (durable_target == durable.records.end()) {
+            return SessionCheckpointEraseResult::Missing;
+        }
+        durable.records.erase(durable_target);
+        if (durable.records.empty()) { return store_->erase(checkpoint_namespace); }
+        durable.latest_response_id = durable.records.back().id;
+        const StoredResponse& latest = durable.records.back();
+        if (latest.session_key.empty() ||
+            latest.session_key.size() > kMaximumContextCacheSessionKeyBytes) {
+            return SessionCheckpointEraseResult::Conflict;
+        }
+        const std::string checkpoint_tag = latest.session_key;
+        return store_
+                       ->save(checkpoint_namespace, durable, runtime_fingerprint_,
+                              [&](ContinuationCheckpointWriter& writer) {
+                                  return engine_.checkpoint(
+                                      checkpoint_namespace, checkpoint_tag, writer,
+                                      store_->options().staging_bytes);
+                              })
+                       .has_value()
+                   ? SessionCheckpointEraseResult::Erased
+                   : SessionCheckpointEraseResult::Conflict;
     } catch (...) {
         return SessionCheckpointEraseResult::Conflict;
     }
