@@ -283,15 +283,21 @@ try {
         packaged_release_spec_qualification_status = 'hardware-pending'
     }
     $protocol = [pscustomobject]@{
-        status = 'passed'; checks_passed = 15; checks_total = 15; receipt_sha256 = ('9' * 64)
+        status = 'passed'; evidence_platform = 'remote-linux-rtx3090-runtime'
+        checks_passed = 15; checks_total = 15; receipt_sha256 = ('9' * 64)
+    }
+    $remoteNative = [pscustomobject]@{
+        status = 'passed'; source_commit = $releaseHead; gpu = 'NVIDIA GeForce RTX 3090'
+        cuda_architecture = 'sm_86'; focused_tests = 3; pod_deleted = $true
+        hourly_price_usd = 0.22; receipt_sha256 = ('6' * 64)
     }
     $longContext = [pscustomobject]@{
-        status = 'passed'; prompt_tokens = 64512; completion_tokens = 17
+        status = 'passed'; evidence_platform = 'remote-linux-rtx3090-runtime'; prompt_tokens = 64512; completion_tokens = 17
         elapsed_seconds = 1.0; exact_output = 'ORCHID=493817; COLOR=COBALT'
         receipt_sha256 = ('a' * 64)
     }
     $checkpointRestart = [pscustomobject]@{
-        status = 'passed'; checkpoint_files = 2; checkpoint_bytes = 1024
+        status = 'passed'; evidence_platform = 'remote-linux-rtx3090-runtime'; checkpoint_files = 2; checkpoint_bytes = 1024
         cached_input_tokens = 45; continuation_elapsed_seconds = 1.0
         exact_output = 'CHECKPOINT-3090-731942'; failed_delete_commit_regression = 'passed'
         cross_session_eviction_regression = 'passed'; receipt_sha256 = ('b' * 64)
@@ -304,7 +310,7 @@ try {
         deletion_semantics = 'logical-object-deletion'; secure_erasure_claimed = $false
     }
     $performance = [pscustomobject]@{
-        status = 'passed'; cohort = 1; generation_tokens = 1024
+        status = 'passed'; evidence_platform = 'remote-linux-rtx3090-runtime'; cohort = 1; generation_tokens = 1024
         decode_tokens_per_second = 1.0; prefill_prompt_tokens = 4403
         prefill_tokens_per_second = 1.0; max_power_w = 300.0; max_temperature_c = 50
         max_gpu_utilization_percent = 100; max_memory_used_mib = 20000
@@ -333,7 +339,8 @@ try {
     }
     $releaseAssetTests = [pscustomobject]@{
         status = 'passed'; deterministic_packages = 2; package_members_verified = 16
-        public_listen_rejections = 1; secret_free_receipts = 3; receipt_sha256 = ('1' * 64)
+        public_listen_rejections = 1; secret_free_receipts = 3; published_scripts_hook_scanned = 5
+        receipt_sha256 = ('1' * 64)
     }
     $stateSecurity = [pscustomobject]@{
         status = 'passed'; root_dacl_protected = $true; atomic_race_collision_rejections = 1
@@ -363,16 +370,18 @@ try {
         receipt_sha256 = ('7' * 64)
     }
     $historicalWindowsEvidence = [pscustomobject]@{
-        status = 'historical-passed'
+        status = 'historical-passed'; evidence_scope = 'previous-exact-package-only'
         package_sha256 = 'e74c097f064279f860a0d6a738bb4470503f63df0e8b531ccaeb48402c923ef9'
         package_source_commit = '7555db29d2e5d517f74bd05d45020028d0f454c9'
         runtime_source_commit = '7555db29d2e5d517f74bd05d45020028d0f454c9'
         state_security_receipt_sha256 = ('8' * 64)
         shipped_lifecycle_receipt_sha256 = ('9' * 64)
+        omp_client_receipt_sha256 = ('a' * 64)
         applies_to_current_package = $false
     }
     $ompClient = [pscustomobject]@{
         status = 'passed'; omp_version = 'omp/18.0.9'; archive_sha256 = ('3' * 64)
+        evidence_scope = 'exact-current-package'; fresh_package_gate_deferred = $false; deferred_reason = ''
         binary_sha256 = ('4' * 64); events = 1; typed_tool_name = 'read'; tool_results = 1
         exact_final_answer = $true; receipt_sha256 = ('5' * 64)
     }
@@ -386,7 +395,7 @@ try {
     $receiptArguments = @{
         QualifiedUtc = [DateTimeOffset]::UtcNow.ToString('o')
         Candidate = $candidate; Platform = $platform; ReleaseAssets = $releaseAssets
-        Protocol = $protocol; LongContext = $longContext; CheckpointRestart = $checkpointRestart
+        Protocol = $protocol; RemoteNative = $remoteNative; LongContext = $longContext; CheckpointRestart = $checkpointRestart
         Performance = $performance; InstrumentedLifecycle = $instrumentedLifecycle
         ShippedLifecycle = $shippedLifecycle; ReleaseAssetTests = $releaseAssetTests
         StateSecurityFixture = $stateSecurityFixture; StateSecurity = $stateSecurity
@@ -404,6 +413,20 @@ try {
     Assert-Equal ([string]$incomplete.status) 'incomplete' 'receipt constructor passed an unrun gate'
     Assert-Equal ([bool]$incomplete.beta_qualified) $false 'incomplete receipt claimed beta qualification'
     Assert-Equal ([bool]$incomplete.qualification_authority.supersession_performed) $false 'incomplete receipt superseded pending build authority'
+
+    $ompClient.status = 'not_run'
+    $ompClient.fresh_package_gate_deferred = $true
+    $ompClient.deferred_reason = 'fresh-windows-rtx3090-unavailable-after-user-handoff'
+    $ompClient.receipt_sha256 = $null
+    $deferredOmp = New-NInferQualificationReceipt @receiptArguments
+    Assert-Equal ([string]$deferredOmp.status) 'incomplete' 'receipt constructor passed a deferred OMP gate'
+    Assert-Equal $deferredOmp.qualification.omp_windows_client.archive_sha256 $null 'deferred OMP gate retained a pass-shaped archive hash'
+    Assert-Equal ([int]$deferredOmp.qualification.omp_windows_client.events) 0 'deferred OMP gate retained passed event counters'
+    Assert-Equal ([bool]$deferredOmp.qualification.omp_windows_client.exact_final_answer) $false 'deferred OMP gate retained passed acceptance'
+    $ompClient.status = 'passed'
+    $ompClient.fresh_package_gate_deferred = $false
+    $ompClient.deferred_reason = ''
+    $ompClient.receipt_sha256 = ('5' * 64)
 
     $passed = New-NInferQualificationReceipt @receiptArguments
     Assert-Equal ([string]$passed.artifact_type) 'ninfer_rtx3090_beta_qualification' 'constructor emitted the wrong public receipt type'

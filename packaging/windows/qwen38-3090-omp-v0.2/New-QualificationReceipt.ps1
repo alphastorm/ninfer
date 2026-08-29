@@ -127,6 +127,7 @@ function New-NInferQualificationReceipt {
         [Parameter(Mandatory = $true)][object]$Platform,
         [Parameter(Mandatory = $true)][object]$ReleaseAssets,
         [Parameter(Mandatory = $true)][object]$Protocol,
+        [Parameter(Mandatory = $true)][object]$RemoteNative,
         [Parameter(Mandatory = $true)][object]$LongContext,
         [Parameter(Mandatory = $true)][object]$CheckpointRestart,
         [Parameter(Mandatory = $true)][object]$Performance,
@@ -151,7 +152,7 @@ function New-NInferQualificationReceipt {
         throw 'qualified UTC must use the round-trip timestamp format'
     }
     foreach ($input in @(
-            $Candidate, $Platform, $ReleaseAssets, $Protocol, $LongContext,
+            $Candidate, $Platform, $ReleaseAssets, $Protocol, $RemoteNative, $LongContext,
             $CheckpointRestart, $Performance, $InstrumentedLifecycle, $ShippedLifecycle,
             $ReleaseAssetTests, $StateSecurityFixture, $StateSecurity,
             $HistoricalWindowsEvidence, $OmpClient, $PublicDisclosure
@@ -219,18 +220,42 @@ function New-NInferQualificationReceipt {
     $protocolStatus = Get-NInferQualificationStatus $Protocol 'authenticated_agent_protocol'
     $protocolReceipt = [ordered]@{
         status = $protocolStatus
+        evidence_platform = [string](Get-NInferQualificationProperty $Protocol 'evidence_platform' 'authenticated_agent_protocol')
         checks_passed = [int](Get-NInferQualificationProperty $Protocol 'checks_passed' 'authenticated_agent_protocol')
         checks_total = [int](Get-NInferQualificationProperty $Protocol 'checks_total' 'authenticated_agent_protocol')
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $Protocol 'authenticated_agent_protocol'
     }
     if ($protocolStatus -ceq 'passed' -and
-        ($protocolReceipt.checks_passed -ne 15 -or $protocolReceipt.checks_total -ne 15)) {
+        ($protocolReceipt.evidence_platform -cne 'remote-linux-rtx3090-runtime' -or
+         $protocolReceipt.checks_passed -ne 15 -or $protocolReceipt.checks_total -ne 15)) {
         throw 'authenticated_agent_protocol must bind the complete 15/15 protocol'
+    }
+
+    $remoteNativeStatus = Get-NInferQualificationStatus $RemoteNative 'remote_linux_sm86_native'
+    $remoteNativeReceipt = [ordered]@{
+        status = $remoteNativeStatus
+        source_commit = Get-NInferQualificationGitSha $RemoteNative 'source_commit' 'remote_linux_sm86_native'
+        gpu = [string](Get-NInferQualificationProperty $RemoteNative 'gpu' 'remote_linux_sm86_native')
+        cuda_architecture = [string](Get-NInferQualificationProperty $RemoteNative 'cuda_architecture' 'remote_linux_sm86_native')
+        focused_tests = [int](Get-NInferQualificationProperty $RemoteNative 'focused_tests' 'remote_linux_sm86_native')
+        pod_deleted = [bool](Get-NInferQualificationProperty $RemoteNative 'pod_deleted' 'remote_linux_sm86_native')
+        hourly_price_usd = [double](Get-NInferQualificationProperty $RemoteNative 'hourly_price_usd' 'remote_linux_sm86_native')
+        receipt_sha256 = Get-NInferQualificationEvidenceSha256 $RemoteNative 'remote_linux_sm86_native'
+    }
+    if ($remoteNativeStatus -ceq 'passed' -and
+        ($remoteNativeReceipt.source_commit -cne $candidateReceipt.runtime_source_commit -or
+         $remoteNativeReceipt.gpu -cne 'NVIDIA GeForce RTX 3090' -or
+         $remoteNativeReceipt.cuda_architecture -cne 'sm_86' -or
+         $remoteNativeReceipt.focused_tests -lt 3 -or
+         -not $remoteNativeReceipt.pod_deleted -or
+         $remoteNativeReceipt.hourly_price_usd -gt 0.70)) {
+        throw 'remote_linux_sm86_native does not bind the authorized ephemeral RTX 3090 lane'
     }
 
     $longContextStatus = Get-NInferQualificationStatus $LongContext 'long_context_64k'
     $longContextReceipt = [ordered]@{
         status = $longContextStatus
+        evidence_platform = [string](Get-NInferQualificationProperty $LongContext 'evidence_platform' 'long_context_64k')
         prompt_tokens = [int](Get-NInferQualificationProperty $LongContext 'prompt_tokens' 'long_context_64k')
         completion_tokens = [int](Get-NInferQualificationProperty $LongContext 'completion_tokens' 'long_context_64k')
         elapsed_seconds = [double](Get-NInferQualificationProperty $LongContext 'elapsed_seconds' 'long_context_64k')
@@ -238,7 +263,8 @@ function New-NInferQualificationReceipt {
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $LongContext 'long_context_64k'
     }
     if ($longContextStatus -ceq 'passed' -and
-        ($longContextReceipt.prompt_tokens -ne 64512 -or
+        ($longContextReceipt.evidence_platform -cne 'remote-linux-rtx3090-runtime' -or
+         $longContextReceipt.prompt_tokens -ne 64512 -or
          $longContextReceipt.completion_tokens -le 0 -or
          $longContextReceipt.elapsed_seconds -le 0 -or
          [string]::IsNullOrWhiteSpace($longContextReceipt.exact_output))) {
@@ -248,6 +274,7 @@ function New-NInferQualificationReceipt {
     $checkpointStatus = Get-NInferQualificationStatus $CheckpointRestart 'checkpoint_process_restart'
     $checkpointReceipt = [ordered]@{
         status = $checkpointStatus
+        evidence_platform = [string](Get-NInferQualificationProperty $CheckpointRestart 'evidence_platform' 'checkpoint_process_restart')
         checkpoint_files = [int](Get-NInferQualificationProperty $CheckpointRestart 'checkpoint_files' 'checkpoint_process_restart')
         checkpoint_bytes = [Int64](Get-NInferQualificationProperty $CheckpointRestart 'checkpoint_bytes' 'checkpoint_process_restart')
         cached_input_tokens = [int](Get-NInferQualificationProperty $CheckpointRestart 'cached_input_tokens' 'checkpoint_process_restart')
@@ -266,7 +293,8 @@ function New-NInferQualificationReceipt {
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $CheckpointRestart 'checkpoint_process_restart'
     }
     if ($checkpointStatus -ceq 'passed' -and
-        ($checkpointReceipt.checkpoint_files -le 0 -or
+        ($checkpointReceipt.evidence_platform -cne 'remote-linux-rtx3090-runtime' -or
+         $checkpointReceipt.checkpoint_files -le 0 -or
          $checkpointReceipt.checkpoint_bytes -le 0 -or
          $checkpointReceipt.cached_input_tokens -le 0 -or
          $checkpointReceipt.continuation_elapsed_seconds -le 0 -or
@@ -287,6 +315,7 @@ function New-NInferQualificationReceipt {
     $performanceStatus = Get-NInferQualificationStatus $Performance 'performance'
     $performanceReceipt = [ordered]@{
         status = $performanceStatus
+        evidence_platform = [string](Get-NInferQualificationProperty $Performance 'evidence_platform' 'performance')
         cohort = [int](Get-NInferQualificationProperty $Performance 'cohort' 'performance')
         generation_tokens = [int](Get-NInferQualificationProperty $Performance 'generation_tokens' 'performance')
         decode_tokens_per_second = [double](Get-NInferQualificationProperty $Performance 'decode_tokens_per_second' 'performance')
@@ -299,7 +328,8 @@ function New-NInferQualificationReceipt {
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $Performance 'performance'
     }
     if ($performanceStatus -ceq 'passed' -and
-        ($performanceReceipt.cohort -ne 1 -or $performanceReceipt.generation_tokens -ne 1024 -or
+        ($performanceReceipt.evidence_platform -cne 'remote-linux-rtx3090-runtime' -or
+         $performanceReceipt.cohort -ne 1 -or $performanceReceipt.generation_tokens -ne 1024 -or
          $performanceReceipt.decode_tokens_per_second -le 0 -or
          $performanceReceipt.prefill_tokens_per_second -le 0 -or
          $performanceReceipt.max_power_w -gt 301.0)) {
@@ -488,14 +518,17 @@ function New-NInferQualificationReceipt {
 
     $historicalWindowsReceipt = [ordered]@{
         status = [string](Get-NInferQualificationProperty $HistoricalWindowsEvidence 'status' 'historical_windows_rtx3090_evidence')
+        evidence_scope = [string](Get-NInferQualificationProperty $HistoricalWindowsEvidence 'evidence_scope' 'historical_windows_rtx3090_evidence')
         package_sha256 = Get-NInferQualificationSha256 $HistoricalWindowsEvidence 'package_sha256' 'historical_windows_rtx3090_evidence'
         package_source_commit = Get-NInferQualificationGitSha $HistoricalWindowsEvidence 'package_source_commit' 'historical_windows_rtx3090_evidence'
         runtime_source_commit = Get-NInferQualificationGitSha $HistoricalWindowsEvidence 'runtime_source_commit' 'historical_windows_rtx3090_evidence'
         state_security_receipt_sha256 = Get-NInferQualificationSha256 $HistoricalWindowsEvidence 'state_security_receipt_sha256' 'historical_windows_rtx3090_evidence'
         shipped_lifecycle_receipt_sha256 = Get-NInferQualificationSha256 $HistoricalWindowsEvidence 'shipped_lifecycle_receipt_sha256' 'historical_windows_rtx3090_evidence'
+        omp_client_receipt_sha256 = Get-NInferQualificationSha256 $HistoricalWindowsEvidence 'omp_client_receipt_sha256' 'historical_windows_rtx3090_evidence'
         applies_to_current_package = [bool](Get-NInferQualificationProperty $HistoricalWindowsEvidence 'applies_to_current_package' 'historical_windows_rtx3090_evidence')
     }
     if ($historicalWindowsReceipt.status -cne 'historical-passed' -or
+        $historicalWindowsReceipt.evidence_scope -cne 'previous-exact-package-only' -or
         $historicalWindowsReceipt.package_sha256 -cne 'e74c097f064279f860a0d6a738bb4470503f63df0e8b531ccaeb48402c923ef9' -or
         $historicalWindowsReceipt.package_source_commit -cne '7555db29d2e5d517f74bd05d45020028d0f454c9' -or
         $historicalWindowsReceipt.runtime_source_commit -cne '7555db29d2e5d517f74bd05d45020028d0f454c9' -or
@@ -507,9 +540,12 @@ function New-NInferQualificationReceipt {
     $ompStatus = Get-NInferQualificationStatus $OmpClient 'omp_windows_client'
     $ompReceipt = [ordered]@{
         status = $ompStatus
+        evidence_scope = [string](Get-NInferQualificationProperty $OmpClient 'evidence_scope' 'omp_windows_client')
+        fresh_package_gate_deferred = [bool](Get-NInferQualificationProperty $OmpClient 'fresh_package_gate_deferred' 'omp_windows_client')
+        deferred_reason = [string](Get-NInferQualificationProperty $OmpClient 'deferred_reason' 'omp_windows_client')
         omp_version = [string](Get-NInferQualificationProperty $OmpClient 'omp_version' 'omp_windows_client')
-        archive_sha256 = Get-NInferQualificationSha256 $OmpClient 'archive_sha256' 'omp_windows_client'
-        binary_sha256 = Get-NInferQualificationSha256 $OmpClient 'binary_sha256' 'omp_windows_client'
+        archive_sha256 = $(if ($ompStatus -ceq 'passed') { Get-NInferQualificationSha256 $OmpClient 'archive_sha256' 'omp_windows_client' } else { $null })
+        binary_sha256 = $(if ($ompStatus -ceq 'passed') { Get-NInferQualificationSha256 $OmpClient 'binary_sha256' 'omp_windows_client' } else { $null })
         events = [int](Get-NInferQualificationProperty $OmpClient 'events' 'omp_windows_client')
         typed_tool_name = [string](Get-NInferQualificationProperty $OmpClient 'typed_tool_name' 'omp_windows_client')
         tool_results = [int](Get-NInferQualificationProperty $OmpClient 'tool_results' 'omp_windows_client')
@@ -517,10 +553,24 @@ function New-NInferQualificationReceipt {
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $OmpClient 'omp_windows_client'
     }
     if ($ompStatus -ceq 'passed' -and
-        ($ompReceipt.omp_version -cne 'omp/18.0.9' -or $ompReceipt.events -le 0 -or
+        ($ompReceipt.fresh_package_gate_deferred -or
+         $ompReceipt.omp_version -cne 'omp/18.0.9' -or $ompReceipt.events -le 0 -or
          $ompReceipt.typed_tool_name -cne 'read' -or $ompReceipt.tool_results -lt 1 -or
          -not $ompReceipt.exact_final_answer)) {
         throw 'omp_windows_client does not bind exact typed-tool/final-answer acceptance'
+    }
+    if ($ompStatus -ceq 'not_run') {
+        if (-not $ompReceipt.fresh_package_gate_deferred -or
+            $ompReceipt.deferred_reason -cne 'fresh-windows-rtx3090-unavailable-after-user-handoff') {
+            throw 'deferred OMP Windows gate lacks the authorized evidence boundary'
+        }
+        $ompReceipt.archive_sha256 = $null
+        $ompReceipt.binary_sha256 = $null
+        $ompReceipt.events = 0
+        $ompReceipt.typed_tool_name = $null
+        $ompReceipt.tool_results = 0
+        $ompReceipt.exact_final_answer = $false
+        $ompReceipt.receipt_sha256 = $null
     }
 
     $disclosureStatus = [string](Get-NInferQualificationProperty $PublicDisclosure 'status' 'public_disclosure')
@@ -561,6 +611,7 @@ function New-NInferQualificationReceipt {
 
     $statuses = @(
         $protocolStatus,
+        $remoteNativeStatus,
         $longContextStatus,
         $checkpointStatus,
         $performanceStatus,
@@ -593,6 +644,7 @@ function New-NInferQualificationReceipt {
         }
         qualification = [ordered]@{
             authenticated_agent_protocol = $protocolReceipt
+            remote_linux_sm86_native = $remoteNativeReceipt
             long_context_64k = $longContextReceipt
             checkpoint_process_restart = $checkpointReceipt
             performance = $performanceReceipt
