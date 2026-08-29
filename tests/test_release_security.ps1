@@ -366,6 +366,7 @@ try {
     $global:NInferTestPowerLimitW = 370
     $global:NInferTestInteractiveGpuActive = $false
     $global:NInferNvidiaShimCalls = 0
+    $preparedLeaseRestoreAssertions = 0
     function global:nvidia-smi.exe {
         [CmdletBinding()]
         param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Remaining)
@@ -417,6 +418,18 @@ try {
     & $GpuOwnerControllerPath -Action start -StateRoot $gpuRoot | Out-Null
     $restoredStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot) | Out-String).Trim() | ConvertFrom-Json)
     Assert-True (-not [bool]$restoredStatus.paused -and [int]$restoredStatus.power_limit_w -eq 370) 'GPU owner did not restore the prior power limit'
+    if ($InstrumentGpuPowerFixture) {
+        [IO.File]::WriteAllText(
+            (Join-Path $gpuRoot 'lease.json'),
+            '{"schema_version":1,"paused":true,"phase":"prepared","qualified_power_limit_w":300,"prior_power_limit_w":370}',
+            [Text.UTF8Encoding]::new($false)
+        )
+        $global:NInferTestPowerLimitW = 300
+        & $GpuOwnerControllerPath -Action start -StateRoot $gpuRoot | Out-Null
+        Assert-True ($global:NInferTestPowerLimitW -eq 370 -and
+            -not (Test-Path -LiteralPath (Join-Path $gpuRoot 'lease.json'))) 'prepared GPU-owner lease did not restore its prior limit'
+        $preparedLeaseRestoreAssertions = 1
+    }
 
     $preplantedGpu = Join-Path $testRoot 'preplanted-gpu-owner'
     New-Item -ItemType Directory -Path $preplantedGpu | Out-Null
@@ -480,6 +493,7 @@ try {
         gpu_power_evidence_class = $(if ($InstrumentGpuPowerFixture) { 'instrumented-function-shim-no-hardware-claim' } else { 'real-trusted-absolute-nvidia-smi' })
         absolute_nvidia_shim_interceptions = $absoluteNvidiaShimInterceptions
         gpu_power_fixture_calls = $(if ($InstrumentGpuPowerFixture) { $global:NInferNvidiaShimCalls } else { 0 })
+        prepared_lease_restore_assertions = $preparedLeaseRestoreAssertions
         request_jsonl_under_protected_state = $true
         request_jsonl_effective_access_denials = 2
         managed_release_acl_state_assertions = $managedReleasesVerified

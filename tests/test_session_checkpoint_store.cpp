@@ -832,7 +832,9 @@ int test_delete_checkpoint_update_fails_closed() {
             !responses.get_for_session(snapshot.records.front().id,
                                        snapshot.client_session_sha256) &&
             responses.get_for_session(snapshot.latest_response_id,
-                                      snapshot.client_session_sha256),
+                                      snapshot.client_session_sha256) &&
+            !std::filesystem::exists(session / "generations" /
+                                     baseline.checkpoint->generation),
         "successful parent DELETE did not retain its in-memory descendant");
 
     FakeCheckpointEngine committed_restart_engine;
@@ -942,6 +944,102 @@ int test_delete_rejects_post_delete_generation_over_disk_quota() {
         restarted.restore(snapshot.client_session_sha256, snapshot.latest_response_id,
                           restarted_responses) == SessionCheckpointRestoreState::Missing,
         "rejected over-quota DELETE exposed a partial durable generation");
+    return failures;
+}
+
+int test_delete_survives_post_commit_directory_sync_failure() {
+    TemporaryDirectory temporary;
+    ResponseStoreSnapshot snapshot = sample_snapshot();
+    ResponseStore responses(8, 8ULL << 20);
+    for (const StoredResponse& response : snapshot.records) { responses.put(response); }
+    const std::string tenant = session_checkpoint_tenant_sha256("delete-sync-api-key");
+    FakeCheckpointEngine baseline_engine;
+    SessionCheckpointManager baseline_manager(
+        manager_options(temporary.path), fingerprint(), tenant, baseline_engine.access());
+    const SessionCheckpointSaveOutcome baseline = baseline_manager.save(
+        snapshot.client_session_sha256, snapshot.latest_response_id, responses);
+    int failures = 0;
+    failures += check(baseline.state == SessionCheckpointSaveState::Saved && baseline.checkpoint,
+                      "directory-sync fixture baseline save failed");
+    if (!baseline.checkpoint) { return failures; }
+
+    int sync_calls = 0;
+    SessionCheckpointStoreOptions options = manager_options(temporary.path);
+    options.current_pointer_sync = [&](const std::filesystem::path&) {
+        ++sync_calls;
+        throw std::runtime_error("injected post-commit directory sync failure");
+    };
+    FakeCheckpointEngine engine;
+    SessionCheckpointManager manager(options, fingerprint(), tenant, engine.access());
+    failures += check(
+        manager.erase_response(snapshot.client_session_sha256, snapshot.records.front().id,
+                               responses) == SessionCheckpointEraseResult::Erased &&
+            sync_calls == 1 &&
+            !responses.get_for_session(snapshot.records.front().id,
+                                       snapshot.client_session_sha256),
+        "post-commit directory sync failure reported Conflict or retained the live response");
+    FakeCheckpointEngine restart_engine;
+    SessionCheckpointManager restarted(
+        manager_options(temporary.path), fingerprint(), tenant, restart_engine.access());
+    ResponseStore restarted_responses(8, 8ULL << 20);
+    failures += check(
+        restarted.restore(snapshot.client_session_sha256, snapshot.latest_response_id,
+                          restarted_responses) == SessionCheckpointRestoreState::Restored &&
+            !restarted_responses.get_for_session(snapshot.records.front().id,
+                                                 snapshot.client_session_sha256) &&
+            restarted_responses.get_for_session(snapshot.latest_response_id,
+                                                snapshot.client_session_sha256),
+        "restart disagreed with DELETE committed before directory sync failure");
+    return failures;
+}
+
+int test_delete_restores_durable_response_after_live_lru_eviction() {
+    TemporaryDirectory temporary;
+    ResponseStoreSnapshot snapshot = sample_snapshot();
+    ResponseStore responses(2, 8ULL << 20);
+    for (const StoredResponse& response : snapshot.records) { responses.put(response); }
+    const std::string tenant = session_checkpoint_tenant_sha256("delete-durable-lru-api-key");
+    FakeCheckpointEngine engine;
+    SessionCheckpointManager manager(
+        manager_options(temporary.path), fingerprint(), tenant, engine.access());
+    int failures = 0;
+    failures += check(
+        manager.save(snapshot.client_session_sha256, snapshot.latest_response_id, responses).state ==
+            SessionCheckpointSaveState::Saved,
+        "durable-only DELETE fixture baseline save failed");
+
+    for (char digest_byte : {'b', 'c'}) {
+        ResponseStoreSnapshot foreign = sample_snapshot(digest_byte);
+        StoredResponse record = foreign.records.front();
+        record.id = std::string("resp_foreign_") + digest_byte;
+        record.response["id"] = record.id;
+        responses.put(std::move(record));
+    }
+    failures += check(
+        !responses.get_for_session(snapshot.records.front().id,
+                                   snapshot.client_session_sha256) &&
+            !responses.get_for_session(snapshot.latest_response_id,
+                                       snapshot.client_session_sha256),
+        "foreign-session LRU pressure did not evict the durable session from live memory");
+
+    failures += check(
+        manager.erase_response(snapshot.client_session_sha256, snapshot.records.front().id,
+                               responses) == SessionCheckpointEraseResult::Erased &&
+            !responses.get_for_session(snapshot.records.front().id,
+                                       snapshot.client_session_sha256) &&
+            responses.get_for_session(snapshot.latest_response_id,
+                                      snapshot.client_session_sha256),
+        "durable-only response DELETE reported Missing or failed to remove the restored response");
+    FakeCheckpointEngine restart_engine;
+    SessionCheckpointManager restarted(
+        manager_options(temporary.path), fingerprint(), tenant, restart_engine.access());
+    ResponseStore restarted_responses(2, 8ULL << 20);
+    failures += check(
+        restarted.restore(snapshot.client_session_sha256, snapshot.latest_response_id,
+                          restarted_responses) == SessionCheckpointRestoreState::Restored &&
+            !restarted_responses.get_for_session(snapshot.records.front().id,
+                                                 snapshot.client_session_sha256),
+        "durable-only deleted response resurrected after restart");
     return failures;
 }
 
@@ -1286,6 +1384,8 @@ int main() {
     failures += test_delete_checkpoint_update_fails_closed();
     failures += test_delete_pins_session_across_cross_session_lru_eviction();
     failures += test_delete_rejects_post_delete_generation_over_disk_quota();
+    failures += test_delete_survives_post_commit_directory_sync_failure();
+    failures += test_delete_restores_durable_response_after_live_lru_eviction();
     failures += test_delete_middle_latest_and_standalone_checkpoint_state();
     failures += test_active_reader_delete_and_gc();
     failures += test_store_wide_quota_across_sessions();

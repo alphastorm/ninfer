@@ -739,12 +739,15 @@ void sync_rename_parents(const std::filesystem::path& source,
 [[nodiscard]] bool enforce_disk_quota_locked(
     const SessionCheckpointStoreOptions& options, const SessionCheckpointStore::Impl& impl,
     const std::optional<std::filesystem::path>& protected_generation = std::nullopt,
-    const std::optional<std::filesystem::path>& protected_session = std::nullopt) {
+    const std::optional<std::filesystem::path>& protected_session = std::nullopt,
+    bool reclaim_stale_generations = false) {
     GenerationInventory inventory =
         inventory_generations(options, impl, protected_generation, protected_session);
     for (const GenerationCandidate& candidate : inventory.candidates) {
         const bool unconditional = candidate.kind == CandidateKind::Tombstone ||
-                                   candidate.kind == CandidateKind::AbandonedStaging;
+                                   candidate.kind == CandidateKind::AbandonedStaging ||
+                                   (reclaim_stale_generations &&
+                                    candidate.kind == CandidateKind::StaleGeneration);
         if (inventory.used <= options.disk_quota_bytes && !unconditional) { continue; }
         if (candidate.kind == CandidateKind::Tombstone) {
             if (cleanup_tombstone(options, candidate.path)) {
@@ -994,7 +997,8 @@ std::optional<SessionCheckpointSaveResult>
 SessionCheckpointStore::save(const AuthenticatedCheckpointNamespace& checkpoint_namespace,
                              const ResponseStoreSnapshot& responses,
                              const nlohmann::json& runtime_fingerprint,
-                             const EngineExporter& exporter) {
+                             const EngineExporter& exporter,
+                             bool reclaim_superseded_generation) {
     if (responses.client_session_sha256 != checkpoint_namespace.session_sha256() ||
         !runtime_fingerprint.is_object() ||
         !exporter) {
@@ -1093,7 +1097,26 @@ SessionCheckpointStore::save(const AuthenticatedCheckpointNamespace& checkpoint_
             session / (".current-" + generation);
         write_synced(current_staging, generation + "\n");
         replace_path(current_staging, session / "current");
-        sync_directory(session);
+        try {
+            if (options_.current_pointer_sync) {
+                options_.current_pointer_sync(session);
+            } else {
+                sync_directory(session);
+            }
+        } catch (...) {
+            // The current pointer already names the complete post-save generation. A parent
+            // directory sync failure may weaken crash durability, but it cannot turn this
+            // committed in-process state transition into a reported rejection.
+        }
+        try {
+            // A successful logical delete must not leave the superseded response body in an
+            // inactive generation merely because the store remains below quota. Active readers
+            // stay protected; their generation can remain until a later DELETE, quota pass, or
+            // whole-session removal, which is part of the documented logical-delete boundary.
+            if (reclaim_superseded_generation) {
+                (void)enforce_disk_quota_locked(options_, *impl_, published, session, true);
+            }
+        } catch (...) {}
 
         return SessionCheckpointSaveResult{
             .generation = generation, .engine = *engine, .bytes = total_bytes};
@@ -1373,6 +1396,13 @@ SessionCheckpointManager::restore(std::string_view session_sha256,
         return SessionCheckpointRestoreState::Missing;
     }
     std::lock_guard lock(mutex_);
+    return restore_locked(session_sha256, required_response_id, responses);
+}
+
+SessionCheckpointRestoreState
+SessionCheckpointManager::restore_locked(std::string_view session_sha256,
+                                         std::string_view required_response_id,
+                                         ResponseStore& responses) {
     try {
         const AuthenticatedCheckpointNamespace checkpoint_namespace =
             AuthenticatedCheckpointNamespace::authenticated(tenant_sha256_,
@@ -1427,8 +1457,8 @@ SessionCheckpointEraseResult SessionCheckpointManager::erase_response(
         const AuthenticatedCheckpointNamespace checkpoint_namespace =
             AuthenticatedCheckpointNamespace::authenticated(tenant_sha256_,
                                                             std::string(session_sha256));
-        const ResponseStoreTransactionState transaction =
-            responses.erase_for_session_transactionally(
+        const auto erase_transaction = [&] {
+            return responses.erase_for_session_transactionally(
                 std::string(response_id), session_sha256,
                 [&](const std::optional<ResponseStoreSnapshot>& post_delete) {
                     // Keep the prior durable generation intact on every failed publication. The
@@ -1450,9 +1480,26 @@ SessionCheckpointEraseResult SessionCheckpointManager::erase_response(
                                    return engine_.checkpoint(
                                        checkpoint_namespace, checkpoint_tag, writer,
                                        store_->options().staging_bytes);
-                               })
+                               }, true)
                         .has_value();
                 });
+        };
+        ResponseStoreTransactionState transaction = erase_transaction();
+        if (transaction == ResponseStoreTransactionState::Missing) {
+            // Global LRU eviction is a live-cache event, not durable deletion. Restore the
+            // authenticated checkpoint while the per-session caller lease and manager mutex are
+            // held, then execute the same pinned live+durable delete transaction. This prevents a
+            // 404 followed by response resurrection after restart.
+            const SessionCheckpointRestoreState restored =
+                restore_locked(session_sha256, response_id, responses);
+            if (restored == SessionCheckpointRestoreState::Missing) {
+                return SessionCheckpointEraseResult::Missing;
+            }
+            if (restored != SessionCheckpointRestoreState::Restored) {
+                return SessionCheckpointEraseResult::Conflict;
+            }
+            transaction = erase_transaction();
+        }
         switch (transaction) {
         case ResponseStoreTransactionState::Committed:
             return SessionCheckpointEraseResult::Erased;

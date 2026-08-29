@@ -30,6 +30,13 @@ does not supersede either pending authority. A final receipt does not rewrite th
 historical build receipt or the packaged release specification: consumers with only the archive
 must still treat it as hardware-pending until they verify the hash-bound external beta receipt.
 
+The three checksum roles are distinct. Archive member **SHA256SUMS.txt** authenticates every file
+inside the binary package. The product-stem `.SHA256SUMS` emitted by `package.py` binds the binary
+package, source archive, and SPDX SBOM triad. The LF-only outer **SHA256SUMS** is the one closed
+distribution set: it lists that inner triad manifest, the triad itself, all four separately
+published lifecycle scripts, and **package-build-receipt.json**, each exactly once. The outer
+manifest cannot and does not self-hash.
+
 The default C1 profile binds to **127.0.0.1**, requires a one-line API-key file, uses 65,536 maximum
 context, automatic INT8 KV capacity, a 1,024-token prefill chunk, MTP3, and authenticated durable
 session checkpoints with a 64 GiB total quota and 256 MiB staging bound. A package-specific
@@ -43,11 +50,11 @@ release gate and require their own serviced-loop evidence.
 
 ### Preserved runtime evidence and deferred fresh-package gate
 
-The definitive rebuilt archive is package source `a69652982f6f`, package SHA-256
-`09a9f24a4904360e7bc00ef946702c07e9e096aac638bb30776f511c5ab70afd` (813,776,623 bytes),
-and runtime source `7555db29d2e5`. The runtime binary evidence remains valid because the subsequent
-changes are confined to packaging, lifecycle scripts, tests, and disclosure text; repository tests
-require an empty diff across `src`, `include`, `apps`, `cmake`, and top-level build configuration.
+Package `09a9f24a4904360e7bc00ef946702c07e9e096aac638bb30776f511c5ab70afd`
+from package source `a69652982f6f` is superseded and must not ship. Subsequent checkpoint durability
+changes affect runtime source, so a fresh sm_86 build and authorized remote Linux RTX 3090 runtime
+gates are required before a replacement preview can be frozen. Linux runtime evidence will not be
+used as a substitute for the separately deferred Windows package/lifecycle gate.
 The local Windows RTX 3090 was then released for user servicing. Therefore the rebuilt archive's
 fresh exact Windows install/security/bidirectional-rollback gate is explicitly deferred rather than
 being replaced with Linux or instrumented evidence. The adjacent machine-readable receipt remains
@@ -77,6 +84,11 @@ retain the ancestor token/KV state needed for that continuation. Delete descenda
 ancestors, then remove the appliance checkpoint/state root under the protected lifecycle, when
 secure erasure of the complete session context is required. Deleting a standalone or latest response
 leaves that response non-restorable; native tests cover middle, latest, and standalone shapes.
+After a committed delete, the superseded inactive generation is eagerly tombstoned and reclaimed
+even below quota. An active checkpoint reader or filesystem cleanup failure can defer physical stale
+bytes until later quota pressure or whole-session/state-root removal; this is another reason not to
+treat per-response deletion as secure erasure. A live LRU miss is restored from the authenticated
+checkpoint before deletion, preventing a 404 followed by restart resurrection.
 
 Run the installer from an elevated PowerShell session with the package hash from the immutable OMP
 NInfer product manifest. A `SHA256SUMS` file delivered beside the archive is useful for local

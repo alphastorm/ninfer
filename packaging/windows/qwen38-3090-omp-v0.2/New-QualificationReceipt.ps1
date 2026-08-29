@@ -81,6 +81,44 @@ function Get-NInferQualificationAsset {
     }
 }
 
+function Assert-NInferQualificationDisclosureInput([object]$Value) {
+    $queue = [Collections.Generic.Queue[object]]::new()
+    $queue.Enqueue($Value)
+    $visited = 0
+    while ($queue.Count -ne 0) {
+        if (++$visited -gt 100000) { throw 'qualification disclosure input is too large' }
+        $current = $queue.Dequeue()
+        if ($null -eq $current) { continue }
+        if ($current -is [string]) {
+            if ([string]$current -match '(?i)(?:[A-Z]:\\Users\\|/Users/|/home/)') {
+                throw 'qualification receipt contains a private path or credential value'
+            }
+            continue
+        }
+        if ($current -is [Collections.IDictionary]) {
+            foreach ($key in $current.Keys) {
+                if ([string]$key -match '^(?i:gpu_uuid|api_key|controller_path|health_url|private_host)$') {
+                    throw "qualification disclosure input contains forbidden property: $key"
+                }
+                $queue.Enqueue($current[$key])
+            }
+            continue
+        }
+        if ($current -is [Collections.IEnumerable]) {
+            foreach ($child in $current) { $queue.Enqueue($child) }
+            continue
+        }
+        if ($current -is [Management.Automation.PSCustomObject]) {
+            foreach ($property in $current.PSObject.Properties) {
+                if ([string]$property.Name -match '^(?i:gpu_uuid|api_key|controller_path|health_url|private_host)$') {
+                    throw "qualification disclosure input contains forbidden property: $($property.Name)"
+                }
+                $queue.Enqueue($property.Value)
+            }
+        }
+    }
+}
+
 function New-NInferQualificationReceipt {
     [CmdletBinding()]
     param(
@@ -97,6 +135,7 @@ function New-NInferQualificationReceipt {
         [Parameter(Mandatory = $true)][object]$ReleaseAssetTests,
         [Parameter(Mandatory = $true)][object]$StateSecurityFixture,
         [Parameter(Mandatory = $true)][object]$StateSecurity,
+        [Parameter(Mandatory = $true)][object]$HistoricalWindowsEvidence,
         [Parameter(Mandatory = $true)][object]$OmpClient,
         [Parameter(Mandatory = $true)][object]$PublicDisclosure
     )
@@ -110,6 +149,14 @@ function New-NInferQualificationReceipt {
             [ref]$qualified
         )) {
         throw 'qualified UTC must use the round-trip timestamp format'
+    }
+    foreach ($input in @(
+            $Candidate, $Platform, $ReleaseAssets, $Protocol, $LongContext,
+            $CheckpointRestart, $Performance, $InstrumentedLifecycle, $ShippedLifecycle,
+            $ReleaseAssetTests, $StateSecurityFixture, $StateSecurity,
+            $HistoricalWindowsEvidence, $OmpClient, $PublicDisclosure
+        )) {
+        Assert-NInferQualificationDisclosureInput $input
     }
 
     $candidateReceipt = [ordered]@{
@@ -211,6 +258,9 @@ function New-NInferQualificationReceipt {
         middle_delete_restart_regression = [string](Get-NInferQualificationProperty $CheckpointRestart 'middle_delete_restart_regression' 'checkpoint_process_restart')
         latest_delete_nonrestorable_regression = [string](Get-NInferQualificationProperty $CheckpointRestart 'latest_delete_nonrestorable_regression' 'checkpoint_process_restart')
         standalone_delete_nonrestorable_regression = [string](Get-NInferQualificationProperty $CheckpointRestart 'standalone_delete_nonrestorable_regression' 'checkpoint_process_restart')
+        durable_only_lru_delete_regression = [string](Get-NInferQualificationProperty $CheckpointRestart 'durable_only_lru_delete_regression' 'checkpoint_process_restart')
+        post_commit_sync_regression = [string](Get-NInferQualificationProperty $CheckpointRestart 'post_commit_sync_regression' 'checkpoint_process_restart')
+        superseded_generation_reclamation = [string](Get-NInferQualificationProperty $CheckpointRestart 'superseded_generation_reclamation' 'checkpoint_process_restart')
         deletion_semantics = [string](Get-NInferQualificationProperty $CheckpointRestart 'deletion_semantics' 'checkpoint_process_restart')
         secure_erasure_claimed = [bool](Get-NInferQualificationProperty $CheckpointRestart 'secure_erasure_claimed' 'checkpoint_process_restart')
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $CheckpointRestart 'checkpoint_process_restart'
@@ -226,6 +276,9 @@ function New-NInferQualificationReceipt {
          $checkpointReceipt.middle_delete_restart_regression -cne 'passed' -or
          $checkpointReceipt.latest_delete_nonrestorable_regression -cne 'passed' -or
          $checkpointReceipt.standalone_delete_nonrestorable_regression -cne 'passed' -or
+         $checkpointReceipt.durable_only_lru_delete_regression -cne 'passed' -or
+         $checkpointReceipt.post_commit_sync_regression -cne 'passed' -or
+         $checkpointReceipt.superseded_generation_reclamation -cne 'eager-unless-active-reader-or-cleanup-failure' -or
          $checkpointReceipt.deletion_semantics -cne 'logical-object-deletion' -or
          $checkpointReceipt.secure_erasure_claimed)) {
         throw 'checkpoint_process_restart does not bind restart and atomic-delete regressions'
@@ -326,11 +379,14 @@ function New-NInferQualificationReceipt {
         package_members_verified = [int](Get-NInferQualificationProperty $ReleaseAssetTests 'package_members_verified' 'windows_release_assets')
         public_listen_rejections = [int](Get-NInferQualificationProperty $ReleaseAssetTests 'public_listen_rejections' 'windows_release_assets')
         secret_free_receipts = [int](Get-NInferQualificationProperty $ReleaseAssetTests 'secret_free_receipts' 'windows_release_assets')
+        published_scripts_hook_scanned = [int](Get-NInferQualificationProperty $ReleaseAssetTests 'published_scripts_hook_scanned' 'windows_release_assets')
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $ReleaseAssetTests 'windows_release_assets'
     }
     if ($assetStatus -ceq 'passed' -and
         ($assetReceipt.deterministic_packages -ne 2 -or $assetReceipt.package_members_verified -lt 16 -or
-         $assetReceipt.public_listen_rejections -ne 1 -or $assetReceipt.secret_free_receipts -lt 3)) {
+         $assetReceipt.public_listen_rejections -ne 1 -or
+         $assetReceipt.secret_free_receipts -lt 3 -or
+         $assetReceipt.published_scripts_hook_scanned -lt 5)) {
         throw 'windows_release_assets does not bind deterministic final assets'
     }
 
@@ -341,6 +397,7 @@ function New-NInferQualificationReceipt {
         evidence_class = [string](Get-NInferQualificationProperty $StateSecurityFixture 'gpu_power_evidence_class' 'windows_state_security_fixture')
         hardware_claimed = [bool](Get-NInferQualificationProperty $StateSecurityFixture 'hardware_claimed' 'windows_state_security_fixture')
         gpu_power_fixture_calls = [int](Get-NInferQualificationProperty $StateSecurityFixture 'gpu_power_fixture_calls' 'windows_state_security_fixture')
+        prepared_lease_restore_assertions = [int](Get-NInferQualificationProperty $StateSecurityFixture 'prepared_lease_restore_assertions' 'windows_state_security_fixture')
         null_dacl_rejections = [int](Get-NInferQualificationProperty $StateSecurityFixture 'null_dacl_rejections' 'windows_state_security_fixture')
         atomic_race_collision_rejections = [int](Get-NInferQualificationProperty $StateSecurityFixture 'atomic_race_collision_rejections' 'windows_state_security_fixture')
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $StateSecurityFixture 'windows_state_security_fixture'
@@ -349,6 +406,7 @@ function New-NInferQualificationReceipt {
         ($securityFixtureReceipt.evidence_class -cne 'instrumented-function-shim-no-hardware-claim' -or
          $securityFixtureReceipt.hardware_claimed -or
          $securityFixtureReceipt.gpu_power_fixture_calls -lt 1 -or
+         $securityFixtureReceipt.prepared_lease_restore_assertions -lt 1 -or
          $securityFixtureReceipt.null_dacl_rejections -lt 1 -or
          $securityFixtureReceipt.atomic_race_collision_rejections -lt 1)) {
         throw 'windows_state_security_fixture overclaims or omits instrumented controls'
@@ -409,6 +467,41 @@ function New-NInferQualificationReceipt {
         (-not $securityReceipt.fresh_package_gate_deferred -or
          $securityReceipt.deferred_reason -cne 'fresh-windows-rtx3090-unavailable-after-user-handoff')) {
         throw 'deferred Windows state-security gate lacks the authorized evidence boundary'
+    }
+    if ($securityStatus -ceq 'not_run') {
+        $securityReceipt.root_dacl_protected = $null
+        foreach ($name in @(
+                'atomic_race_collision_rejections', 'raced_state_recursive_deletions',
+                'null_dacl_rejections', 'low_privilege_effective_read_denials',
+                'low_privilege_effective_write_denials', 'precreated_or_unowned_root_rejections',
+                'root_or_child_junction_rejections', 'installer_prewrite_root_rejections',
+                'active_interactive_gpu_rejections', 'request_log_effective_access_denials',
+                'managed_release_acl_state_assertions', 'managed_request_log_acl_state_assertions',
+                'managed_rollback_directions', 'retained_state_helper_hash_assertions',
+                'populated_root_status_milliseconds', 'absolute_nvidia_shim_interceptions'
+            )) { $securityReceipt[$name] = 0 }
+        $securityReceipt.gpu_power_evidence_class = $null
+        $securityReceipt.shipped_test_bypass = $null
+        $securityReceipt.restored_power_limit_w = $null
+        $securityReceipt.receipt_sha256 = $null
+    }
+
+    $historicalWindowsReceipt = [ordered]@{
+        status = [string](Get-NInferQualificationProperty $HistoricalWindowsEvidence 'status' 'historical_windows_rtx3090_evidence')
+        package_sha256 = Get-NInferQualificationSha256 $HistoricalWindowsEvidence 'package_sha256' 'historical_windows_rtx3090_evidence'
+        package_source_commit = Get-NInferQualificationGitSha $HistoricalWindowsEvidence 'package_source_commit' 'historical_windows_rtx3090_evidence'
+        runtime_source_commit = Get-NInferQualificationGitSha $HistoricalWindowsEvidence 'runtime_source_commit' 'historical_windows_rtx3090_evidence'
+        state_security_receipt_sha256 = Get-NInferQualificationSha256 $HistoricalWindowsEvidence 'state_security_receipt_sha256' 'historical_windows_rtx3090_evidence'
+        shipped_lifecycle_receipt_sha256 = Get-NInferQualificationSha256 $HistoricalWindowsEvidence 'shipped_lifecycle_receipt_sha256' 'historical_windows_rtx3090_evidence'
+        applies_to_current_package = [bool](Get-NInferQualificationProperty $HistoricalWindowsEvidence 'applies_to_current_package' 'historical_windows_rtx3090_evidence')
+    }
+    if ($historicalWindowsReceipt.status -cne 'historical-passed' -or
+        $historicalWindowsReceipt.package_sha256 -cne 'e74c097f064279f860a0d6a738bb4470503f63df0e8b531ccaeb48402c923ef9' -or
+        $historicalWindowsReceipt.package_source_commit -cne '7555db29d2e5d517f74bd05d45020028d0f454c9' -or
+        $historicalWindowsReceipt.runtime_source_commit -cne '7555db29d2e5d517f74bd05d45020028d0f454c9' -or
+        $historicalWindowsReceipt.applies_to_current_package -or
+        $historicalWindowsReceipt.package_sha256 -ceq $releaseAssetsReceipt.package.sha256) {
+        throw 'historical Windows evidence is not isolated from the current package'
     }
 
     $ompStatus = Get-NInferQualificationStatus $OmpClient 'omp_windows_client'
@@ -508,6 +601,7 @@ function New-NInferQualificationReceipt {
             windows_release_assets = $assetReceipt
             windows_state_security_fixture = $securityFixtureReceipt
             windows_state_security = $securityReceipt
+            historical_windows_rtx3090_evidence = $historicalWindowsReceipt
             omp_windows_client = $ompReceipt
         }
         public_disclosure = $disclosureReceipt
@@ -524,7 +618,7 @@ function New-NInferQualificationReceipt {
                 'Single RTX 3090 at cohort 1 is qualified; multi-GPU and higher-concurrency claims are excluded.',
                 'CPU, mixed CPU/GPU, and overnight thermal qualification are excluded.',
                 'The 64K retrieval gate qualifies 64,512 prompt tokens; it is not a 128K claim.',
-                'Responses DELETE is logical object deletion, not secure erasure; a surviving descendant checkpoint may retain ancestor token/KV context required for continuation.'
+                'Responses DELETE is logical object deletion, not secure erasure; a surviving descendant checkpoint may retain ancestor token/KV context required for continuation, and an active reader or cleanup failure may defer physical stale-generation reclamation.'
             )
         }
         automatic_route_activation_allowed = $false

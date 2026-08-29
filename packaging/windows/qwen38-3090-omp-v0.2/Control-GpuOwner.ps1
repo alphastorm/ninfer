@@ -80,7 +80,7 @@ function Read-State {
     return Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
-function Write-State([int]$PriorPowerLimitW) {
+function Write-State([int]$PriorPowerLimitW, [ValidateSet('prepared', 'paused')][string]$Phase) {
     $temporary = Join-Path $StateRoot ('.lease-' + [Guid]::NewGuid().ToString('N') + '.json')
     try {
         [IO.File]::WriteAllText(
@@ -88,6 +88,7 @@ function Write-State([int]$PriorPowerLimitW) {
             (([ordered]@{
                 schema_version = 1
                 paused = $true
+                phase = $Phase
                 qualified_power_limit_w = $qualifiedPowerLimitW
                 prior_power_limit_w = $PriorPowerLimitW
             } | ConvertTo-Json -Compress) + [Environment]::NewLine),
@@ -116,15 +117,31 @@ switch ($Action) {
         $state = Read-State
         $limit = Get-PowerLimitW
         if ($null -ne $state) {
+            $phase = if ($null -eq $state.PSObject.Properties['phase']) { 'paused' } else { [string]$state.phase }
             if ([int]$state.schema_version -ne 1 -or
                 -not [bool]$state.paused -or
+                $phase -cnotin @('prepared', 'paused') -or
                 [int]$state.qualified_power_limit_w -ne $qualifiedPowerLimitW -or
                 [int]$state.prior_power_limit_w -lt 100 -or
-                [int]$state.prior_power_limit_w -gt 390 -or
-                $limit -ne $qualifiedPowerLimitW) {
+                [int]$state.prior_power_limit_w -gt 390) {
                 throw 'GPU-owner lease state is invalid or the safe power cap drifted'
             }
-            Write-Status $true $limit
+            if ($phase -ceq 'prepared') {
+                if ($limit -eq $qualifiedPowerLimitW) {
+                    Write-State ([int]$state.prior_power_limit_w) 'paused'
+                    Write-Status $true $limit
+                }
+                elseif ($limit -eq [int]$state.prior_power_limit_w) {
+                    Write-Status $false $limit
+                }
+                else {
+                    throw 'prepared GPU-owner lease has an unrecoverable power-limit drift'
+                }
+            }
+            elseif ($limit -ne $qualifiedPowerLimitW) {
+                throw 'GPU-owner lease state is invalid or the safe power cap drifted'
+            }
+            else { Write-Status $true $limit }
         }
         else {
             Write-Status $false $limit
@@ -134,16 +151,44 @@ switch ($Action) {
         $state = Read-State
         if ($null -ne $state) {
             Assert-InteractiveGpuWorkloadAbsent
+            $phase = if ($null -eq $state.PSObject.Properties['phase']) { 'paused' } else { [string]$state.phase }
+            if ($phase -ceq 'prepared') {
+                if ((Get-PowerLimitW) -ne $qualifiedPowerLimitW) {
+                    Invoke-NvidiaSmi @('-pl', [string]$qualifiedPowerLimitW) | Out-Null
+                }
+                if ((Get-PowerLimitW) -ne $qualifiedPowerLimitW) {
+                    throw 'GPU did not enter the qualified safe power cap'
+                }
+                Write-State ([int]$state.prior_power_limit_w) 'paused'
+            }
             & $PSCommandPath -Action status -StateRoot $StateRoot
             break
         }
         Assert-InteractiveGpuWorkloadAbsent
         $prior = Get-PowerLimitW
-        Invoke-NvidiaSmi @('-pl', [string]$qualifiedPowerLimitW) | Out-Null
-        if ((Get-PowerLimitW) -ne $qualifiedPowerLimitW) {
-            throw 'GPU did not enter the qualified safe power cap'
+        Write-State $prior 'prepared'
+        try {
+            Invoke-NvidiaSmi @('-pl', [string]$qualifiedPowerLimitW) | Out-Null
+            if ((Get-PowerLimitW) -ne $qualifiedPowerLimitW) {
+                throw 'GPU did not enter the qualified safe power cap'
+            }
+            Write-State $prior 'paused'
         }
-        Write-State $prior
+        catch {
+            $failure = $_
+            try {
+                Invoke-NvidiaSmi @('-pl', [string]$prior) | Out-Null
+                if ((Get-PowerLimitW) -ne $prior) { throw 'prior GPU power limit restore failed' }
+                Remove-Item -LiteralPath $statePath -Force
+            }
+            catch {
+                throw [InvalidOperationException]::new(
+                    "GPU cap acquisition failed and prepared lease restoration is required: $($_.Exception.Message)",
+                    $failure.Exception
+                )
+            }
+            throw $failure
+        }
         Write-Status $true $qualifiedPowerLimitW
     }
     'start' {

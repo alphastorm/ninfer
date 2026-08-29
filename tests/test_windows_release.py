@@ -63,22 +63,33 @@ class WindowsReleaseContractTests(unittest.TestCase):
             self.assertRegex(assets[name]["sha256"], r"^[0-9a-f]{64}$")
             self.assertGreater(assets[name]["bytes"], 0)
 
-        def sha256(path: Path) -> str:
-            digest = hashlib.sha256()
-            with path.open("rb") as stream:
-                for block in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(block)
-            return digest.hexdigest()
-
         source_assets = {
-            "installer_sha256": RELEASE / "Install-Release.ps1",
-            "lifecycle_controller_sha256": RELEASE / "Control-Release.ps1",
-            "gpu_owner_controller_sha256": RELEASE / "Control-GpuOwner.ps1",
-            "state_protection_helper_sha256": RELEASE / "Protect-StateRoot.ps1",
-            "qualification_constructor_sha256": RELEASE / "New-QualificationReceipt.ps1",
+            "installer_sha256": "packaging/windows/qwen38-3090-omp-v0.2/Install-Release.ps1",
+            "lifecycle_controller_sha256": "packaging/windows/qwen38-3090-omp-v0.2/Control-Release.ps1",
+            "gpu_owner_controller_sha256": "packaging/windows/qwen38-3090-omp-v0.2/Control-GpuOwner.ps1",
+            "state_protection_helper_sha256": "packaging/windows/qwen38-3090-omp-v0.2/Protect-StateRoot.ps1",
+            "qualification_constructor_sha256": "packaging/windows/qwen38-3090-omp-v0.2/New-QualificationReceipt.ps1",
         }
-        for field, path in source_assets.items():
-            self.assertEqual(assets[field], sha256(path), field)
+        for field, relative in source_assets.items():
+            committed = subprocess.check_output(
+                ["git", "show", f"{package_source}:{relative}"], cwd=ROOT
+            )
+            self.assertEqual(assets[field], hashlib.sha256(committed).hexdigest(), field)
+        receipt_only_changes = set(
+            subprocess.check_output(
+                ["git", "diff", "--name-only", package_source, "HEAD"],
+                cwd=ROOT,
+                text=True,
+            ).splitlines()
+        )
+        self.assertTrue(
+            receipt_only_changes
+            <= {
+                "docs/qualification/receipts/qwen3.8-27b-rtx-3090-v0.2.0.json",
+                "docs/rtx-3090-windows.md",
+            },
+            receipt_only_changes,
+        )
         self.assertRegex(receipt["candidate"]["config_sha256"], r"^[0-9a-f]{64}$")
 
         authority = receipt["qualification_authority"]
@@ -108,6 +119,11 @@ class WindowsReleaseContractTests(unittest.TestCase):
         security = receipt["qualification"]["windows_state_security"]
         self.assertEqual(security["status"], "not_run")
         self.assertTrue(security["fresh_package_gate_deferred"])
+        self.assertIsNone(security["root_dacl_protected"])
+        self.assertEqual(security["managed_rollback_directions"], 0)
+        self.assertEqual(security["null_dacl_rejections"], 0)
+        self.assertIsNone(security["restored_power_limit_w"])
+        self.assertIsNone(security["gpu_power_evidence_class"])
         security_fixture = receipt["qualification"]["windows_state_security_fixture"]
         self.assertEqual(security_fixture["status"], "passed")
         self.assertEqual(
@@ -115,6 +131,17 @@ class WindowsReleaseContractTests(unittest.TestCase):
             "instrumented-function-shim-no-hardware-claim",
         )
         self.assertFalse(security_fixture["hardware_claimed"])
+        historical = receipt["qualification"]["historical_windows_rtx3090_evidence"]
+        self.assertEqual(historical["status"], "historical-passed")
+        self.assertEqual(
+            historical["package_sha256"],
+            "e74c097f064279f860a0d6a738bb4470503f63df0e8b531ccaeb48402c923ef9",
+        )
+        self.assertEqual(
+            historical["package_source_commit"],
+            "7555db29d2e5d517f74bd05d45020028d0f454c9",
+        )
+        self.assertFalse(historical["applies_to_current_package"])
 
         disclosure = receipt["public_disclosure"]
         self.assertEqual(disclosure["policy_version"], 1)

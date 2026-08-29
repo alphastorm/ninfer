@@ -25,6 +25,7 @@ struct SessionCheckpointStoreOptions {
     std::uint64_t disk_quota_bytes = 64ULL << 30;
     std::size_t staging_bytes      = 256ULL << 20;
     std::function<bool(const std::filesystem::path&)> tombstone_cleanup;
+    std::function<void(const std::filesystem::path&)> current_pointer_sync;
 };
 
 struct SessionCheckpointSaveResult {
@@ -83,7 +84,7 @@ public:
     [[nodiscard]] std::optional<SessionCheckpointSaveResult>
     save(const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
          const ResponseStoreSnapshot& responses, const nlohmann::json& runtime_fingerprint,
-         const EngineExporter& exporter);
+         const EngineExporter& exporter, bool reclaim_superseded_generation = false);
 
     // Verifies identity, manifest schema, every size/checksum, and the requested response id before
     // exposing either ResponseStore state or an Engine reader. Verified corruption is quarantined;
@@ -167,6 +168,10 @@ public:
                    ResponseStore& responses);
 
 private:
+    [[nodiscard]] SessionCheckpointRestoreState
+    restore_locked(std::string_view session_sha256, std::string_view required_response_id,
+                   ResponseStore& responses);
+
     std::unique_ptr<SessionCheckpointStore> store_;
     nlohmann::json runtime_fingerprint_;
     std::string tenant_sha256_;

@@ -255,24 +255,8 @@ try {
         Copy-Item -LiteralPath (Join-Path $payload $name) -Destination (Join-Path $packageOutput $name)
     }
 
-    $checksumAssetNames = [Collections.Generic.List[string]]::new()
-    foreach ($item in @(Get-ChildItem -LiteralPath $packageOutput -File)) {
-        $checksumAssetNames.Add($item.Name)
-    }
-    $checksumNames = $checksumAssetNames.ToArray()
-    [Array]::Sort($checksumNames, [StringComparer]::Ordinal)
-    $checksumLines = foreach ($name in $checksumNames) {
-        "$(Get-LowerSha256 (Join-Path $packageOutput $name))  $name"
-    }
     $checksumsPath = Join-Path $packageOutput 'SHA256SUMS'
     $lf = [string][char]10
-    [IO.File]::WriteAllText(
-        $checksumsPath,
-        ([string]::Join($lf, $checksumLines) + $lf),
-        [Text.Encoding]::ASCII
-    )
-    $checksumsSha = Get-LowerSha256 $checksumsPath
-
     $buildReceipt = [ordered]@{
         artifact_type = 'ninfer_windows_package_build_receipt'
         schema_version = 2
@@ -300,7 +284,9 @@ try {
         }
         checksums = [ordered]@{
             filename = 'SHA256SUMS'
-            sha256 = $checksumsSha
+            role = 'closed-outer-distribution-set'
+            entries = 9
+            line_ending = 'LF'
         }
         support_assets = [ordered]@{
             installer_sha256 = Get-LowerSha256 (Join-Path $packageOutput 'Install-Release.ps1')
@@ -324,6 +310,36 @@ try {
         (Join-Path $packageOutput 'package-build-receipt.json'),
         (($buildReceipt | ConvertTo-Json -Depth 12) + $lf),
         [Text.UTF8Encoding]::new($false)
+    )
+
+    $expectedChecksumNames = @(
+        'Control-GpuOwner.ps1',
+        'Control-Release.ps1',
+        'Install-Release.ps1',
+        'Protect-StateRoot.ps1',
+        [IO.Path]::GetFileName($packagePath),
+        [string]$packageReceipt.source_archive.name,
+        [string]$packageReceipt.sbom.name,
+        [string]$packageReceipt.checksums,
+        'package-build-receipt.json'
+    )
+    [Array]::Sort($expectedChecksumNames, [StringComparer]::Ordinal)
+    $checksumNames = @(
+        Get-ChildItem -LiteralPath $packageOutput -File |
+            ForEach-Object { $_.Name }
+    )
+    [Array]::Sort($checksumNames, [StringComparer]::Ordinal)
+    if ([string]::Join($lf, $checksumNames) -cne
+        [string]::Join($lf, $expectedChecksumNames)) {
+        throw 'outer checksum asset set is incomplete, duplicated, or contains an unclassified file'
+    }
+    $checksumLines = foreach ($name in $checksumNames) {
+        "$(Get-LowerSha256 (Join-Path $packageOutput $name))  $name"
+    }
+    [IO.File]::WriteAllText(
+        $checksumsPath,
+        ([string]::Join($lf, $checksumLines) + $lf),
+        [Text.Encoding]::ASCII
     )
 
     Move-Item -LiteralPath $packageOutput -Destination $output

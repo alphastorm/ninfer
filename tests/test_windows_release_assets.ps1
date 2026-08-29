@@ -154,16 +154,44 @@ try {
     }
     $innerChecksumLines = @(& $tar '-xOf' $packagePath "$rootName/SHA256SUMS.txt")
     if ($LASTEXITCODE -ne 0) { throw 'generated package checksum manifest extraction failed' }
-    $constructorChecksum = @($innerChecksumLines | Where-Object {
-            $_ -match '^([0-9a-f]{64})  New-QualificationReceipt[.]ps1$'
-        })
-    Assert-Equal $constructorChecksum.Count 1 'qualification constructor checksum is absent or duplicated'
-    [void]($constructorChecksum[0] -match '^([0-9a-f]{64})  ')
-    Assert-Equal ([string]$receiptOne.support_assets.qualification_constructor_sha256) $Matches[1] 'qualification-constructor support asset hash mismatch'
+    $innerChecksums = @{}
+    foreach ($line in $innerChecksumLines) {
+        if ($line -cnotmatch '^([0-9a-f]{64})  (.+)$' -or $innerChecksums.ContainsKey($Matches[2])) {
+            throw 'inner package checksum manifest is malformed or duplicated'
+        }
+        $innerChecksums[$Matches[2]] = $Matches[1]
+    }
+    $scriptMemberHashes = [ordered]@{
+        'Install-Release.ps1' = [string]$receiptOne.support_assets.installer_sha256
+        'Control-Release.ps1' = [string]$receiptOne.support_assets.controller_sha256
+        'Control-GpuOwner.ps1' = [string]$receiptOne.support_assets.gpu_owner_controller_sha256
+        'Protect-StateRoot.ps1' = [string]$receiptOne.support_assets.state_protection_sha256
+        'New-QualificationReceipt.ps1' = [string]$receiptOne.support_assets.qualification_constructor_sha256
+    }
+    foreach ($entry in $scriptMemberHashes.GetEnumerator()) {
+        Assert-True $innerChecksums.ContainsKey([string]$entry.Key) "inner manifest omitted shipped script: $($entry.Key)"
+        Assert-Equal ([string]$innerChecksums[[string]$entry.Key]) ([string]$entry.Value) "shipped script member hash mismatch: $($entry.Key)"
+    }
+    $forbiddenHookLiterals = @(
+        'InstallTestMode', 'Invoke-InstallFault', 'NINFER_TEST_INSTALL_',
+        'NInferSimulatedInterruption', 'NInferLifecycleHarness',
+        'InternalSourceTestMode', 'TestBypass', 'FaultInjection',
+        'SimulatedFailure', 'SimulatedInterruption'
+    )
+    foreach ($scriptName in $scriptMemberHashes.Keys) {
+        $scriptLines = @(& $tar '-xOf' $packagePath "$rootName/$scriptName")
+        if ($LASTEXITCODE -ne 0) { throw "published script extraction failed: $scriptName" }
+        $scriptText = [string]::Join([string][char]10, $scriptLines)
+        foreach ($literal in $forbiddenHookLiterals) {
+            Assert-True (-not $scriptText.Contains($literal)) "published script contains test/fault hook: ${scriptName}:$literal"
+        }
+    }
     Assert-True (@($members | Where-Object { $_ -match '4090|DirectStorage|directstorage' }).Count -eq 0) 'generated package contains a forbidden old identity'
 
     $outerSums = Join-Path $outOne 'SHA256SUMS'
-    Assert-Equal (Get-Sha256 $outerSums) ([string]$receiptOne.checksums.sha256) 'outer checksum identity mismatch'
+    Assert-Equal ([string]$receiptOne.checksums.role) 'closed-outer-distribution-set' 'outer checksum role mismatch'
+    Assert-Equal ([int]$receiptOne.checksums.entries) 9 'outer checksum entry count mismatch'
+    Assert-Equal ([string]$receiptOne.checksums.line_ending) 'LF' 'outer checksum line-ending claim mismatch'
     $outerSumBytes = [IO.File]::ReadAllBytes($outerSums)
     Assert-True ($outerSumBytes.Length -gt 0 -and $outerSumBytes[-1] -eq 10) 'outer checksum manifest lacks a terminal LF'
     Assert-True (-not ($outerSumBytes -contains 13)) 'outer checksum manifest contains checkout-dependent CR bytes'
@@ -176,6 +204,7 @@ try {
         }
         Assert-Equal (Get-Sha256 (Join-Path $outOne $Matches[2])) $Matches[1] "outer checksum mismatch: $($Matches[2])"
     }
+    Assert-Equal @($outerLines | Where-Object { $_.EndsWith('  package-build-receipt.json') }).Count 1 'outer checksum manifest omitted or duplicated the package-build receipt'
     Assert-True (Test-Path -LiteralPath (Join-Path $outOne 'package-build-receipt.json') -PathType Leaf) 'package build receipt was not published'
 
     $badConfigPath = Join-Path $root 'bad-server-config.json'
@@ -208,7 +237,6 @@ try {
         benchmark_binary_sha256 = ('3' * 64)
         config_sha256 = ('4' * 64)
         model_artifact_sha256 = ('5' * 64)
-        api_key = 'must-not-appear'
     }
     $platform = [pscustomobject]@{
         gpu = 'NVIDIA GeForce RTX 3090'
@@ -237,7 +265,7 @@ try {
         }
         checksums = [pscustomobject]@{
             filename = 'SHA256SUMS'
-            sha256 = [string]$receiptOne.checksums.sha256
+            sha256 = Get-Sha256 $outerSums
             bytes = [Int64](Get-Item -LiteralPath $outerSums).Length
         }
         package_build_receipt = [pscustomobject]@{
@@ -270,6 +298,9 @@ try {
         middle_delete_restart_regression = 'passed'
         latest_delete_nonrestorable_regression = 'passed'
         standalone_delete_nonrestorable_regression = 'passed'
+        durable_only_lru_delete_regression = 'passed'
+        post_commit_sync_regression = 'passed'
+        superseded_generation_reclamation = 'eager-unless-active-reader-or-cleanup-failure'
         deletion_semantics = 'logical-object-deletion'; secure_erasure_claimed = $false
     }
     $performance = [pscustomobject]@{
@@ -326,9 +357,19 @@ try {
         gpu_power_evidence_class = 'instrumented-function-shim-no-hardware-claim'
         hardware_claimed = $false
         gpu_power_fixture_calls = 1
+        prepared_lease_restore_assertions = 1
         null_dacl_rejections = 1
         atomic_race_collision_rejections = 1
         receipt_sha256 = ('7' * 64)
+    }
+    $historicalWindowsEvidence = [pscustomobject]@{
+        status = 'historical-passed'
+        package_sha256 = 'e74c097f064279f860a0d6a738bb4470503f63df0e8b531ccaeb48402c923ef9'
+        package_source_commit = '7555db29d2e5d517f74bd05d45020028d0f454c9'
+        runtime_source_commit = '7555db29d2e5d517f74bd05d45020028d0f454c9'
+        state_security_receipt_sha256 = ('8' * 64)
+        shipped_lifecycle_receipt_sha256 = ('9' * 64)
+        applies_to_current_package = $false
     }
     $ompClient = [pscustomobject]@{
         status = 'passed'; omp_version = 'omp/18.0.9'; archive_sha256 = ('3' * 64)
@@ -349,6 +390,7 @@ try {
         Performance = $performance; InstrumentedLifecycle = $instrumentedLifecycle
         ShippedLifecycle = $shippedLifecycle; ReleaseAssetTests = $releaseAssetTests
         StateSecurityFixture = $stateSecurityFixture; StateSecurity = $stateSecurity
+        HistoricalWindowsEvidence = $historicalWindowsEvidence
         OmpClient = $ompClient; PublicDisclosure = $publicDisclosure
     }
 
@@ -377,13 +419,19 @@ try {
     Assert-Equal ([bool]$passed.qualification_authority.historical_build_receipts_mutated) $false 'beta authority claimed to mutate build history'
     Assert-Equal ([string]::Join(',', @($passed.public_disclosure.forbidden_marker_classes))) 'private-fleet-identifiers,private-home-paths,credential-material' 'public disclosure marker policy changed'
     $passedText = $passed | ConvertTo-Json -Depth 24 -Compress
-    Assert-True (-not $passedText.Contains('must-not-appear')) 'qualification receipt copied an undeclared secret field'
     Assert-True (-not $passedText.Contains('GPU-fixture-3090')) 'qualification receipt exposed a GPU UUID'
+
+    $candidate | Add-Member -NotePropertyName api_key -NotePropertyValue 'must-not-appear'
+    $credentialPropertyRejected = $false
+    try { New-NInferQualificationReceipt @receiptArguments | Out-Null }
+    catch { $credentialPropertyRejected = $_.Exception.Message -like '*forbidden property*' }
+    $candidate.PSObject.Properties.Remove('api_key')
+    Assert-True $credentialPropertyRejected 'qualification constructor accepted an undeclared credential property'
 
     $platform | Add-Member -NotePropertyName gpu_uuid -NotePropertyValue 'GPU-fixture-3090'
     $gpuUuidRejected = $false
     try { New-NInferQualificationReceipt @receiptArguments | Out-Null }
-    catch { $gpuUuidRejected = $_.Exception.Message -like '*public single-RTX-3090*' }
+    catch { $gpuUuidRejected = $_.Exception.Message -like '*forbidden property*' }
     $platform.PSObject.Properties.Remove('gpu_uuid')
     Assert-True $gpuUuidRejected 'qualification constructor accepted a GPU UUID input'
 
@@ -394,6 +442,21 @@ try {
     catch { $privateWindowsPathRejected = $_.Exception.Message -like '*private path or credential*' }
     $platform.operating_system = $originalOperatingSystem
     Assert-True $privateWindowsPathRejected 'qualification constructor accepted a JSON-escaped canonical Windows home path'
+
+    $deepRoot = [pscustomobject]@{}
+    $deepCursor = $deepRoot
+    foreach ($depth in 1..35) {
+        $child = [pscustomobject]@{}
+        $deepCursor | Add-Member -NotePropertyName child -NotePropertyValue $child
+        $deepCursor = $child
+    }
+    $deepCursor | Add-Member -NotePropertyName gpu_uuid -NotePropertyValue 'GPU-deep-fixture'
+    $candidate | Add-Member -NotePropertyName deep_disclosure_fixture -NotePropertyValue $deepRoot
+    $deepForbiddenRejected = $false
+    try { New-NInferQualificationReceipt @receiptArguments | Out-Null }
+    catch { $deepForbiddenRejected = $_.Exception.Message -like '*forbidden property*' }
+    $candidate.PSObject.Properties.Remove('deep_disclosure_fixture')
+    Assert-True $deepForbiddenRejected 'qualification constructor accepted a forbidden property below depth 32'
 
     $originalPackageFilename = $releaseAssets.package.filename
     $releaseAssets.package.filename = 'subdirectory\package.tar.gz'
@@ -411,6 +474,7 @@ try {
         package_members_verified = 16
         public_listen_rejections = 1
         secret_free_receipts = 3
+        published_scripts_hook_scanned = $scriptMemberHashes.Count
     } | ConvertTo-Json -Compress
 }
 finally {
