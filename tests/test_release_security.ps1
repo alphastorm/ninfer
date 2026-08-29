@@ -8,6 +8,10 @@ param(
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
     [string]$GpuOwnerControllerPath,
 
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$InstallerPath,
+
     [switch]$RequireActiveCompute,
 
     [string]$ReceiptPath
@@ -29,6 +33,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 $StateProtectionPath = (Resolve-Path -LiteralPath $StateProtectionPath).Path
 $GpuOwnerControllerPath = (Resolve-Path -LiteralPath $GpuOwnerControllerPath).Path
+$InstallerPath = (Resolve-Path -LiteralPath $InstallerPath).Path
 . $StateProtectionPath
 
 function Assert-True([bool]$Condition, [string]$Message) {
@@ -137,6 +142,25 @@ try {
     Assert-Rejected { Initialize-NInferProtectedStateRoot $junctionRoot | Out-Null } `
         '*traverses a reparse point*' 'junction state root was accepted'
 
+    $dummyPackage = Join-Path $testRoot 'dummy-package.zip'
+    $dummyModel = Join-Path $testRoot 'dummy-model.ninfer'
+    $dummyKey = Join-Path $testRoot 'dummy-key.txt'
+    [IO.File]::WriteAllText($dummyPackage, 'not-a-package', [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($dummyModel, 'not-a-model', [Text.UTF8Encoding]::new($false))
+    [IO.File]::WriteAllText($dummyKey, "fixture-key`n", [Text.UTF8Encoding]::new($false))
+    $dummyPackageSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $dummyPackage).Hash.ToLowerInvariant()
+    foreach ($fixture in @(
+            [ordered]@{ path = $precreated; pattern = '*inherits an external DACL*' },
+            [ordered]@{ path = $unowned; pattern = '*owner is not SYSTEM or Administrators*' },
+            [ordered]@{ path = $junctionRoot; pattern = '*traverses a reparse point*' }
+        )) {
+        Assert-Rejected {
+            & $InstallerPath -PackagePath $dummyPackage -PackageSha256 $dummyPackageSha `
+                -ModelArtifactPath $dummyModel -ApiKeyFile $dummyKey `
+                -StateRoot ([string]$fixture.path) -NoStart | Out-Null
+        } ([string]$fixture.pattern) 'installer crossed an unsafe state root before package or secret validation'
+    }
+
     $childRoot = Initialize-NInferProtectedStateRoot (Join-Path $testRoot 'child-root')
     $childTarget = Join-Path $testRoot 'child-target'
     $childJunction = Join-Path $childRoot 'redirected-child'
@@ -194,6 +218,7 @@ try {
         root_junction_rejections = 1
         child_junction_rejections = 1
         preplanted_gpu_owner_rejections = 1
+        installer_prewrite_root_rejections = 3
         active_compute_owner_observed = [int]$gpuStatus.active_compute_owner_count -gt 0
         active_compute_owner_rejections = if ($activeComputeRejected) { 1 } else { 0 }
         gpu_owner_status_rejected_active_service = $false

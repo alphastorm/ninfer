@@ -42,7 +42,8 @@ if(WIN32)
     COMMAND powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
       -File "${PROJECT_SOURCE_DIR}/tests/test_release_security.ps1"
       -StateProtectionPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/Protect-StateRoot.ps1"
-      -GpuOwnerControllerPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/Control-GpuOwner.ps1")
+      -GpuOwnerControllerPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/Control-GpuOwner.ps1"
+      -InstallerPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/Install-Release.ps1")
   set_tests_properties(ninfer_windows_state_security_test PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 

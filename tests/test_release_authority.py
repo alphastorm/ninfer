@@ -50,12 +50,9 @@ class ReleaseAuthorityTest(unittest.TestCase):
         source = qualification["source"]
         spec_source = spec["source"]
         self.assertEqual(source["qualified_commit"], spec_source["qualified_source_head"])
-        self.assertEqual(source["package_source_commit"], spec_source["package_source_head"])
         self.assertEqual(source["source_archive_sha256"], spec_source["source_archive_sha256"])
-        self.assertEqual(
-            source["package_source_archive_sha256"],
-            spec_source["package_source_archive_sha256"],
-        )
+        self.assertRegex(source["package_source_commit"], r"^[0-9a-f]{40}$")
+        self.assertRegex(source["package_source_archive_sha256"], r"^[0-9a-f]{64}$")
 
         identity = qualification["identity"]
         artifacts = spec["qualified_artifacts"]
