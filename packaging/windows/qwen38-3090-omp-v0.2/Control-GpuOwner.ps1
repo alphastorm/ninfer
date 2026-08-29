@@ -2,14 +2,18 @@
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('status', 'stop', 'start')]
-    [string]$Action
+    [string]$Action,
+
+    [string]$StateRoot = (Join-Path $env:ProgramData 'NInfer\qwen38-3090-gpu-owner')
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Protect-StateRoot.ps1')
 
-$stateRoot = Join-Path $env:ProgramData 'NInfer\qwen38-3090-gpu-owner'
-$statePath = Join-Path $stateRoot 'lease.json'
+$StateRoot = Initialize-NInferProtectedStateRoot $StateRoot
+Assert-NInferProtectedStateTree $StateRoot
+$statePath = Join-Path $StateRoot 'lease.json'
 $qualifiedPowerLimitW = 300
 $interactiveGpuMemoryThresholdBytes = 1GB
 
@@ -55,21 +59,13 @@ function Assert-InteractiveGpuWorkloadAbsent {
     }
 }
 
-function Protect-StateRoot {
-    New-Item -ItemType Directory -Force -Path $stateRoot | Out-Null
-    & icacls.exe $stateRoot '/inheritance:r' '/grant:r' `
-        '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'failed to protect GPU-owner lease state' }
-}
-
 function Read-State {
     if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { return $null }
     return Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
 function Write-State([int]$PriorPowerLimitW) {
-    Protect-StateRoot
-    $temporary = Join-Path $stateRoot ('.lease-' + [Guid]::NewGuid().ToString('N') + '.json')
+    $temporary = Join-Path $StateRoot ('.lease-' + [Guid]::NewGuid().ToString('N') + '.json')
     try {
         [IO.File]::WriteAllText(
             $temporary,
@@ -82,6 +78,7 @@ function Write-State([int]$PriorPowerLimitW) {
             [Text.UTF8Encoding]::new($false)
         )
         Move-Item -LiteralPath $temporary -Destination $statePath -Force
+        Assert-NInferProtectedStateTree $StateRoot
     }
     finally {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
@@ -120,6 +117,7 @@ switch ($Action) {
     'stop' {
         $state = Read-State
         if ($null -ne $state) {
+            Assert-InteractiveGpuWorkloadAbsent
             & $PSCommandPath -Action status
             break
         }

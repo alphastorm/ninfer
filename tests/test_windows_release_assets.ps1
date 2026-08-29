@@ -126,6 +126,7 @@ try {
     Assert-Equal ([string]$receiptOne.support_assets.installer_sha256) (Get-Sha256 (Join-Path $outOne 'Install-Release.ps1')) 'installer support asset hash mismatch'
     Assert-Equal ([string]$receiptOne.support_assets.controller_sha256) (Get-Sha256 (Join-Path $outOne 'Control-Release.ps1')) 'controller support asset hash mismatch'
     Assert-Equal ([string]$receiptOne.support_assets.gpu_owner_controller_sha256) (Get-Sha256 (Join-Path $outOne 'Control-GpuOwner.ps1')) 'GPU-owner support asset hash mismatch'
+    Assert-Equal ([string]$receiptOne.support_assets.state_protection_sha256) (Get-Sha256 (Join-Path $outOne 'Protect-StateRoot.ps1')) 'state-protection support asset hash mismatch'
     Assert-Equal ([string]$receiptOne.qualification_status) 'hardware-pending' 'package claimed unperformed hardware qualification'
     Assert-Equal ([int]$receiptOne.secret_values_recorded) 0 'package receipt recorded a secret value'
 
@@ -138,7 +139,7 @@ try {
     foreach ($name in @(
             'bin/ninfer.exe', 'bin/ninfer-serve.exe', 'bin/ninfer_bench.exe',
             'bin/runtime-a.dll', 'bin/runtime-b.dll', 'Install-Release.ps1',
-            'Control-Release.ps1', 'Control-GpuOwner.ps1', 'New-QualificationReceipt.ps1', 'release-spec.json',
+            'Control-Release.ps1', 'Control-GpuOwner.ps1', 'Protect-StateRoot.ps1', 'New-QualificationReceipt.ps1', 'release-spec.json',
             'server-config.json', 'build-identity.json', 'SHA256SUMS.txt',
             'smoke/agent_protocol.py', 'smoke/serve_contract.py'
         )) {

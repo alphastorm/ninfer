@@ -55,6 +55,7 @@
     "gpu_owner_controller_protocol": {
       "required_on_first_install": true,
       "bundled_default": "Control-GpuOwner.ps1",
+      "state_protection_helper": "Protect-StateRoot.ps1",
       "qualified_power_limit_w": 300,
       "interactive_gpu_memory_threshold_bytes": 1073741824,
       "inherited_on_upgrade": true,

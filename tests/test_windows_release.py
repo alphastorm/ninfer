@@ -69,6 +69,10 @@ class WindowsReleaseContractTests(unittest.TestCase):
             "Control-GpuOwner.ps1",
         )
         self.assertEqual(
+            spec["lifecycle"]["gpu_owner_controller_protocol"]["state_protection_helper"],
+            "Protect-StateRoot.ps1",
+        )
+        self.assertEqual(
             spec["lifecycle"]["gpu_owner_controller_protocol"]["qualified_power_limit_w"],
             300,
         )
@@ -141,18 +145,22 @@ class WindowsReleaseContractTests(unittest.TestCase):
         installer = (RELEASE / "Install-Release.ps1").read_text(encoding="utf-8")
         controller = (RELEASE / "Control-Release.ps1").read_text(encoding="utf-8")
         gpu_owner = (RELEASE / "Control-GpuOwner.ps1").read_text(encoding="utf-8")
+        state_protection = (RELEASE / "Protect-StateRoot.ps1").read_text(encoding="utf-8")
         guide = (ROOT / "docs/rtx-3090-windows.md").read_text(encoding="utf-8")
 
         self.assertNotIn("NINFER_INSTALL_TEST_MODE", installer)
         self.assertIn("$script:InstallTestMode = $false", installer)
         self.assertNotIn("[switch]$InternalSourceTestMode", installer)
         self.assertIn("Control-GpuOwner.ps1", installer)
-        self.assertIn("':(OI)(CI)RX'", installer)
+        self.assertIn("Initialize-NInferProtectedStateRoot", installer)
         self.assertNotIn("':(OI)(CI)M'", installer)
+        self.assertNotIn("':(OI)(CI)RX'", installer)
         self.assertGreaterEqual(controller.count("server executable"), 2)
         self.assertGreaterEqual(controller.count("server config"), 2)
         self.assertIn(r"NInfer\qwen38-3090-gpu-owner", gpu_owner)
         self.assertIn("qualifiedPowerLimitW = 300", gpu_owner)
+        self.assertIn("Assert-NInferNoReparseTree", state_protection)
+        self.assertIn("SetOwner($administrators)", state_protection)
         self.assertNotIn("Get-Content .\\SHA256SUMS", guide)
         self.assertIn("components.ninfer_variants", guide)
 

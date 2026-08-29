@@ -9,6 +9,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Protect-StateRoot.ps1')
+if (-not (Test-Path -LiteralPath $StateRoot -PathType Container)) {
+    throw 'protected release state root is missing'
+}
+$StateRoot = Initialize-NInferProtectedStateRoot $StateRoot
+Assert-NInferProtectedStateTree $StateRoot
 
 function Read-JsonFile([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "missing state file" }

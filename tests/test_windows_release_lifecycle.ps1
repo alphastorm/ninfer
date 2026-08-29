@@ -254,6 +254,7 @@ function New-FixturePackage(
     )
     Copy-Item -LiteralPath $ControllerPath -Destination (Join-Path $payload 'Control-Release.ps1')
     Copy-Item -LiteralPath $InstallerPath -Destination (Join-Path $payload 'Install-Release.ps1')
+    Copy-Item -LiteralPath $script:StateHelperPath -Destination (Join-Path $payload 'Protect-StateRoot.ps1')
     [IO.File]::WriteAllText(
         (Join-Path $payload 'New-QualificationReceipt.ps1'),
         '# qualification receipt fixture',
@@ -474,6 +475,27 @@ function Assert-CandidateLayout([object]$Release, [string]$ReleaseId) {
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('ninfer-release-lifecycle-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot | Out-Null
+$stateHelperSource = Join-Path (Split-Path -Parent $InstallerPath) 'Protect-StateRoot.ps1'
+if (-not (Test-Path -LiteralPath $stateHelperSource -PathType Leaf)) {
+    throw 'production installer omitted the protected-state helper'
+}
+$script:StateHelperPath = Join-Path $testRoot 'Protect-StateRoot.ps1'
+$instrumentedProtection = @'
+function Initialize-NInferProtectedStateRoot([string]$Path) {
+    New-Item -ItemType Directory -Force -Path $Path | Out-Null
+    return (Resolve-Path -LiteralPath $Path).Path
+}
+function Assert-NInferProtectedStateTree([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw 'instrumented protected state root is missing'
+    }
+}
+'@
+[IO.File]::WriteAllText(
+    $script:StateHelperPath,
+    $instrumentedProtection,
+    [Text.UTF8Encoding]::new($false)
+)
 $installerSource = Get-Content -LiteralPath $InstallerPath -Raw -Encoding UTF8
 $testModeNeedle = '$script:InstallTestMode = $false'
 if ([regex]::Matches($installerSource, [regex]::Escape($testModeNeedle)).Count -ne 1) {

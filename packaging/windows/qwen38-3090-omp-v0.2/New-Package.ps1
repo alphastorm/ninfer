@@ -235,7 +235,7 @@ try {
             throw "generated package omitted app-local DLL: $runtimeName"
         }
     }
-    foreach ($name in @('Install-Release.ps1', 'Control-Release.ps1', 'Control-GpuOwner.ps1', 'New-QualificationReceipt.ps1', 'SHA256SUMS.txt')) {
+    foreach ($name in @('Install-Release.ps1', 'Control-Release.ps1', 'Control-GpuOwner.ps1', 'Protect-StateRoot.ps1', 'New-QualificationReceipt.ps1', 'SHA256SUMS.txt')) {
         if (-not (Test-Path -LiteralPath (Join-Path $payload $name) -PathType Leaf)) {
             throw "generated package omitted lifecycle asset: $name"
         }
@@ -246,7 +246,7 @@ try {
         }
     }
 
-    foreach ($name in @('Install-Release.ps1', 'Control-Release.ps1', 'Control-GpuOwner.ps1')) {
+    foreach ($name in @('Install-Release.ps1', 'Control-Release.ps1', 'Control-GpuOwner.ps1', 'Protect-StateRoot.ps1')) {
         Copy-Item -LiteralPath (Join-Path $payload $name) -Destination (Join-Path $packageOutput $name)
     }
 
@@ -300,6 +300,7 @@ try {
             installer_sha256 = Get-LowerSha256 (Join-Path $packageOutput 'Install-Release.ps1')
             controller_sha256 = Get-LowerSha256 (Join-Path $packageOutput 'Control-Release.ps1')
             gpu_owner_controller_sha256 = Get-LowerSha256 (Join-Path $packageOutput 'Control-GpuOwner.ps1')
+            state_protection_sha256 = Get-LowerSha256 (Join-Path $packageOutput 'Protect-StateRoot.ps1')
         }
         qualification_status = 'hardware-pending'
         secret_values_recorded = 0

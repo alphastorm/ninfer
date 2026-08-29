@@ -30,6 +30,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Protect-StateRoot.ps1')
 
 $script:InstallTestMode = $false
 if ($script:InstallTestMode) {
@@ -785,10 +786,12 @@ function Invoke-InstallTransactionRollback(
     throw "installer $Mode was incomplete: $([string]::Join('; ', $diagnosticArray))"
 }
 
-New-Item -ItemType Directory -Force -Path $StateRoot | Out-Null
-$StateRoot = (Resolve-Path -LiteralPath $StateRoot).Path
-& icacls.exe $StateRoot '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' ([string]::Concat($env:USERNAME, ':(OI)(CI)RX')) | Out-Null
-if ($LASTEXITCODE -ne 0) { throw 'failed to harden release state ACL before first write' }
+$StateRoot = Initialize-NInferProtectedStateRoot $StateRoot
+Assert-NInferProtectedStateTree $StateRoot
+if ($script:InstallTestMode) {
+    & icacls.exe $StateRoot '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'failed test-mode release state ACL ordering probe' }
+}
 $statePath = Join-Path $StateRoot 'state.json'
 $controllerPath = Join-Path $StateRoot 'Control-Release.ps1'
 $ownerControllerPath = Join-Path (Join-Path $StateRoot 'gpu-owner') 'Control-GpuOwner.ps1'
@@ -1115,7 +1118,7 @@ try {
         $lifecycleBin = Join-Path (Join-Path $releaseRoot 'bin') 'lifecycle'
         $qualificationBin = Join-Path (Join-Path $releaseRoot 'bin') 'qualification'
         New-Item -ItemType Directory -Path $lifecycleBin, $qualificationBin | Out-Null
-        foreach ($name in @('Control-Release.ps1', 'Install-Release.ps1')) {
+        foreach ($name in @('Control-Release.ps1', 'Protect-StateRoot.ps1', 'Install-Release.ps1')) {
             $source = Join-Path $payload $name
             if (Test-Path -LiteralPath $source -PathType Leaf) {
                 Move-Item -LiteralPath $source -Destination (Join-Path $lifecycleBin $name)
@@ -1235,6 +1238,11 @@ try {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ownerControllerPath) | Out-Null
             Set-TransactionFlag $transaction 'owner_controller_touched'
             Copy-Item -LiteralPath $ownerControllerSource -Destination $ownerControllerPath -Force
+            $ownerHelperSource = Join-Path (Split-Path -Parent $ownerControllerSource) 'Protect-StateRoot.ps1'
+            if (Test-Path -LiteralPath $ownerHelperSource -PathType Leaf) {
+                Copy-Item -LiteralPath $ownerHelperSource -Destination `
+                    (Join-Path (Split-Path -Parent $ownerControllerPath) 'Protect-StateRoot.ps1') -Force
+            }
             $installedOwnerSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $ownerControllerPath).Hash.ToLowerInvariant()
             if ($installedOwnerSha -cne [string]$ownerRecord.controller_sha256) {
                 throw 'managed GPU-owner controller SHA-256 mismatch'
@@ -1253,14 +1261,17 @@ try {
         }
         Invoke-InstallFault 'owner_controller_copy'
 
-        & icacls.exe $StateRoot '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' ([string]::Concat($env:USERNAME, ':(OI)(CI)RX')) | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'failed to restrict release state ACL' }
-        & icacls.exe (Join-Path $StateRoot '*') '/reset' '/T' | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw 'failed to propagate release state ACL' }
+        $stateHelperSource = Join-Path $lifecycleBin 'Protect-StateRoot.ps1'
+        Copy-Item -LiteralPath $stateHelperSource -Destination (Join-Path $StateRoot 'Protect-StateRoot.ps1') -Force
         & icacls.exe $secretDirectory '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' ([string]::Concat($env:USERNAME, ':(OI)(CI)R')) | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'failed to restrict release secret directory ACL' }
         & icacls.exe $installedKey '/inheritance:r' '/grant:r' 'SYSTEM:F' 'Administrators:F' ([string]::Concat($env:USERNAME, ':R')) | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'failed to restrict API-key file ACL' }
+        Assert-NInferProtectedStateTree $StateRoot
+        if ($script:InstallTestMode) {
+            & icacls.exe (Join-Path $StateRoot '*') '/reset' '/T' | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'failed test-mode recursive ACL ordering probe' }
+        }
         Invoke-InstallFault 'acl'
 
         Set-TransactionFlag $transaction 'controller_touched'
