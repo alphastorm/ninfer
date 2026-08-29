@@ -677,15 +677,16 @@ try {
         }
     }
     Assert-True ($stateRootAcl.Count -ge 1) 'installer did not apply the final state-root ACL'
-    $readOnlyRootAclFound = $false
+    $protectedRootAclFound = $false
     foreach ($call in $stateRootAcl) {
         $arguments = @($call)
-        if ($arguments -contains ([string]::Concat($env:USERNAME, ':(OI)(CI)RX')) -and
+        if ($arguments -contains 'SYSTEM:(OI)(CI)F' -and
+            $arguments -contains 'Administrators:(OI)(CI)F' -and
             $arguments -notcontains ([string]::Concat($env:USERNAME, ':(OI)(CI)M'))) {
-            $readOnlyRootAclFound = $true
+            $protectedRootAclFound = $true
         }
     }
-    Assert-True $readOnlyRootAclFound 'retained release state remained user-writable after upgrade'
+    Assert-True $protectedRootAclFound 'lifecycle fixture did not preserve the protected root ACL call'
 
     $global:NInferTestDeadReleaseId = $baseId
     $global:NInferTestDeadStartSleptMilliseconds = 0
