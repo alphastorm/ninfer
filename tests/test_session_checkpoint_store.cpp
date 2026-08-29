@@ -6,12 +6,16 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
+#include <future>
 #include <iostream>
 #include <iterator>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <string>
@@ -263,9 +267,9 @@ public:
             tenant = checkpoint_namespace.tenant_sha256();
             session = checkpoint_namespace.session_sha256();
             tag.assign(checkpoint_tag);
-            if (!write_chunked(writer, "engine/state.bin", payload) || fail_checkpoint) {
-                return std::nullopt;
-            }
+            if (!write_chunked(writer, "engine/state.bin", payload)) { return std::nullopt; }
+            if (checkpoint_hook) { checkpoint_hook(); }
+            if (fail_checkpoint) { return std::nullopt; }
             return ContinuationCheckpointStats{.frontier_tokens = 4096,
                                                .restored_tokens = 4096,
                                                .payload_bytes = payload.size()};
@@ -303,6 +307,7 @@ public:
     int restore_calls    = 0;
     bool fail_checkpoint = false;
     bool fail_restore    = false;
+    std::function<void()> checkpoint_hook;
 };
 
 int test_sha256_streaming() {
@@ -848,6 +853,151 @@ int test_delete_checkpoint_update_fails_closed() {
     return failures;
 }
 
+int test_delete_checkpoint_transaction_race_and_quota() {
+    int failures = 0;
+    {
+        TemporaryDirectory temporary;
+        const std::string tenant = session_checkpoint_tenant_sha256("checkpoint-delete-race-key");
+        const nlohmann::json runtime = fingerprint();
+        ResponseStoreSnapshot snapshot = sample_snapshot('b');
+        ResponseStore responses(2, 8ULL << 20);
+        for (const StoredResponse& response : snapshot.records) { responses.put(response); }
+        FakeCheckpointEngine engine;
+        SessionCheckpointManager manager(manager_options(temporary.path), runtime, tenant,
+                                         engine.access());
+        const SessionCheckpointSaveOutcome baseline = manager.save(
+            snapshot.client_session_sha256, snapshot.latest_response_id, responses);
+        failures += check(baseline.state == SessionCheckpointSaveState::Saved,
+                          "delete race fixture did not save its baseline");
+        if (baseline.state != SessionCheckpointSaveState::Saved) { return failures; }
+
+        std::mutex gate_mutex;
+        std::condition_variable gate_condition;
+        bool checkpoint_entered = false;
+        bool release_checkpoint = false;
+        engine.checkpoint_hook = [&] {
+            std::unique_lock lock(gate_mutex);
+            checkpoint_entered = true;
+            gate_condition.notify_all();
+            gate_condition.wait(lock, [&] { return release_checkpoint; });
+        };
+        auto erase = std::async(std::launch::async, [&] {
+            return manager.erase_response(snapshot.client_session_sha256,
+                                          snapshot.records.front().id, responses);
+        });
+        {
+            std::unique_lock lock(gate_mutex);
+            failures += check(gate_condition.wait_for(lock, std::chrono::seconds(5), [&] {
+                                  return checkpoint_entered;
+                              }),
+                              "delete race never reached durable publication");
+        }
+
+        StoredResponse foreign;
+        foreign.id                    = "resp_foreign_race";
+        foreign.session_key           = std::string(64, 'c');
+        foreign.client_session_sha256 = std::string(64, 'c');
+        foreign.response = {{"id", foreign.id}, {"object", "response"}, {"status", "completed"}};
+        foreign.context = snapshot.records.front().context;
+        std::promise<void> put_started;
+        std::future<void> put_started_future = put_started.get_future();
+        auto foreign_put = std::async(
+            std::launch::async,
+            [&responses, &put_started, foreign = std::move(foreign)]() mutable {
+                put_started.set_value();
+                responses.put(std::move(foreign));
+            });
+        put_started_future.wait();
+        const bool put_blocked =
+            foreign_put.wait_for(std::chrono::milliseconds(100)) == std::future_status::timeout;
+        {
+            std::lock_guard lock(gate_mutex);
+            release_checkpoint = true;
+        }
+        gate_condition.notify_all();
+        const SessionCheckpointEraseResult erased = erase.get();
+        foreign_put.get();
+        engine.checkpoint_hook = {};
+        failures += check(
+            put_blocked && erased == SessionCheckpointEraseResult::Erased &&
+                !responses.get_for_session(snapshot.records.front().id,
+                                           snapshot.client_session_sha256) &&
+                responses.get_for_session(snapshot.latest_response_id,
+                                          snapshot.client_session_sha256) &&
+                responses.get_for_session("resp_foreign_race", std::string(64, 'c')),
+            "foreign-session LRU insertion interleaved with a partial durable delete");
+
+        FakeCheckpointEngine restart_engine;
+        SessionCheckpointManager restarted(manager_options(temporary.path), runtime, tenant,
+                                           restart_engine.access());
+        ResponseStore restarted_responses(2, 8ULL << 20);
+        failures += check(
+            restarted.restore(snapshot.client_session_sha256, snapshot.latest_response_id,
+                              restarted_responses) == SessionCheckpointRestoreState::Restored &&
+                !restarted_responses.get_for_session(snapshot.records.front().id,
+                                                     snapshot.client_session_sha256) &&
+                restarted_responses.get_for_session(snapshot.latest_response_id,
+                                                    snapshot.client_session_sha256),
+            "restart after raced DELETE did not match the atomically published live result");
+    }
+
+    {
+        TemporaryDirectory temporary;
+        const std::string tenant = session_checkpoint_tenant_sha256("checkpoint-delete-quota-key");
+        const nlohmann::json runtime = fingerprint();
+        ResponseStoreSnapshot snapshot = sample_snapshot('d');
+        ResponseStore responses(8, 8ULL << 20);
+        for (const StoredResponse& response : snapshot.records) { responses.put(response); }
+        FakeCheckpointEngine baseline_engine;
+        const SessionCheckpointStoreOptions generous = manager_options(temporary.path);
+        SessionCheckpointManager baseline_manager(generous, runtime, tenant,
+                                                  baseline_engine.access());
+        const SessionCheckpointSaveOutcome baseline = baseline_manager.save(
+            snapshot.client_session_sha256, snapshot.latest_response_id, responses);
+        failures += check(baseline.state == SessionCheckpointSaveState::Saved &&
+                              baseline.checkpoint,
+                          "delete quota fixture did not save its baseline");
+        if (!baseline.checkpoint) { return failures; }
+        const std::filesystem::path session = stored_session_path(temporary.path, snapshot);
+        const std::string current_before = read_file_bytes(session / "current");
+
+        SessionCheckpointStoreOptions constrained = generous;
+        constrained.disk_quota_bytes = baseline_engine.payload.size();
+        FakeCheckpointEngine constrained_engine;
+        SessionCheckpointManager constrained_manager(constrained, runtime, tenant,
+                                                     constrained_engine.access());
+        const SessionCheckpointEraseResult quota_result = constrained_manager.erase_response(
+            snapshot.client_session_sha256, snapshot.records.front().id, responses);
+        SessionCheckpointStore inspection(generous);
+        const nlohmann::json status = inspection.status(
+            AuthenticatedCheckpointNamespace::authenticated(tenant,
+                                                            snapshot.client_session_sha256),
+            runtime);
+        failures += check(
+            quota_result == SessionCheckpointEraseResult::Conflict &&
+                responses.get_for_session(snapshot.records.front().id,
+                                          snapshot.client_session_sha256) &&
+                responses.get_for_session(snapshot.latest_response_id,
+                                          snapshot.client_session_sha256) &&
+                read_file_bytes(session / "current") == current_before &&
+                status.at("state") == "available",
+            "disk-quota rejection reported Erased or lost the durable pre-delete generation");
+
+        FakeCheckpointEngine restart_engine;
+        SessionCheckpointManager restarted(generous, runtime, tenant, restart_engine.access());
+        ResponseStore restarted_responses(8, 8ULL << 20);
+        failures += check(
+            restarted.restore(snapshot.client_session_sha256, snapshot.latest_response_id,
+                              restarted_responses) == SessionCheckpointRestoreState::Restored &&
+                restarted_responses.get_for_session(snapshot.records.front().id,
+                                                    snapshot.client_session_sha256) &&
+                restarted_responses.get_for_session(snapshot.latest_response_id,
+                                                    snapshot.client_session_sha256),
+            "restart after quota-rejected DELETE lost the durable baseline lineage");
+    }
+    return failures;
+}
+
 int test_active_reader_delete_and_gc() {
     TemporaryDirectory temporary;
     const ResponseStoreSnapshot responses = sample_snapshot();
@@ -1106,6 +1256,7 @@ int main() {
     failures += test_transaction_restart_compatibility_and_corruption();
     failures += test_production_manager_restart_and_identity_isolation();
     failures += test_delete_checkpoint_update_fails_closed();
+    failures += test_delete_checkpoint_transaction_race_and_quota();
     failures += test_active_reader_delete_and_gc();
     failures += test_store_wide_quota_across_sessions();
     if (failures == 0) { std::cout << "ok\n"; }

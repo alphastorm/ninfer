@@ -165,6 +165,63 @@ bool ResponseStore::erase_for_session(const std::string& id,
     return true;
 }
 
+ResponseStoreTransactionalEraseResult ResponseStore::erase_for_session_transactionally(
+    std::string_view id, std::string_view session_sha256,
+    const std::function<bool(const std::optional<ResponseStoreSnapshot>&)>& commit_external) {
+    if (id.empty() || session_sha256.empty() || !commit_external) {
+        return ResponseStoreTransactionalEraseResult::Conflict;
+    }
+    std::lock_guard lock(mutex_);
+    const auto target = records_.find(std::string(id));
+    if (target == records_.end() || !target->second.response->client_session_sha256 ||
+        std::string_view(*target->second.response->client_session_sha256) != session_sha256) {
+        return ResponseStoreTransactionalEraseResult::Missing;
+    }
+
+    try {
+        std::vector<std::pair<std::uint64_t, const StoredResponse*>> ordered;
+        for (const auto& [record_id, entry] : records_) {
+            if (std::string_view(record_id) != id && entry.response->client_session_sha256 &&
+                std::string_view(*entry.response->client_session_sha256) == session_sha256) {
+                ordered.emplace_back(entry.sequence, entry.response.get());
+            }
+        }
+        std::sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) {
+            return left.first < right.first;
+        });
+        std::optional<ResponseStoreSnapshot> snapshot;
+        if (!ordered.empty()) {
+            snapshot.emplace();
+            snapshot->client_session_sha256.assign(session_sha256);
+            snapshot->latest_response_id = ordered.back().second->id;
+            snapshot->records.reserve(ordered.size());
+            for (const auto& [sequence, record] : ordered) {
+                (void)sequence;
+                snapshot->records.push_back(*record);
+            }
+        }
+
+        ResponseStore replacement(max_records_, max_bytes_);
+        for (auto position = lru_.rbegin(); position != lru_.rend(); ++position) {
+            if (*position == id) { continue; }
+            const Entry& entry = records_.at(*position);
+            replacement.insert_locked(entry.response, entry.envelope_bytes, entry.sequence);
+        }
+        replacement.next_sequence_ = next_sequence_;
+        if (!commit_external(snapshot)) {
+            return ResponseStoreTransactionalEraseResult::Conflict;
+        }
+        records_.swap(replacement.records_);
+        lru_.swap(replacement.lru_);
+        live_context_references_.swap(replacement.live_context_references_);
+        std::swap(current_bytes_, replacement.current_bytes_);
+        std::swap(next_sequence_, replacement.next_sequence_);
+        return ResponseStoreTransactionalEraseResult::Erased;
+    } catch (...) {
+        return ResponseStoreTransactionalEraseResult::Conflict;
+    }
+}
+
 std::optional<ResponseStoreSnapshot>
 ResponseStore::snapshot_session(std::string_view client_session_sha256) const {
     std::lock_guard lock(mutex_);

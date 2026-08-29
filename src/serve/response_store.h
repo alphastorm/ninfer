@@ -52,6 +52,12 @@ struct ResponseStoreSnapshot {
     std::vector<StoredResponse> records;
 };
 
+enum class ResponseStoreTransactionalEraseResult : std::uint8_t {
+    Missing,
+    Conflict,
+    Erased,
+};
+
 class ResponseStore {
 public:
     ResponseStore(std::size_t max_records, std::size_t max_bytes);
@@ -65,6 +71,12 @@ public:
     void put(StoredResponse response);
     bool erase_for_session(const std::string& id,
                            const std::optional<std::string>& session_sha256);
+    // Builds both the post-delete durable snapshot and a complete replacement live store while
+    // holding the store lock. commit_external runs before no-throw swaps publish the live state,
+    // so foreign-session LRU activity can observe neither side of a partial delete.
+    [[nodiscard]] ResponseStoreTransactionalEraseResult erase_for_session_transactionally(
+        std::string_view id, std::string_view session_sha256,
+        const std::function<bool(const std::optional<ResponseStoreSnapshot>&)>& commit_external);
 
     // Snapshots are insertion ordered, parent-before-child for a normal Responses lineage. Restore
     // publishes the complete session while holding the store lock; malformed snapshots are rejected
