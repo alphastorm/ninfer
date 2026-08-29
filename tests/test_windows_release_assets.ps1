@@ -321,6 +321,15 @@ try {
         absolute_nvidia_shim_interceptions = 0
         receipt_sha256 = ('2' * 64)
     }
+    $stateSecurityFixture = [pscustomobject]@{
+        status = 'passed'
+        gpu_power_evidence_class = 'instrumented-function-shim-no-hardware-claim'
+        hardware_claimed = $false
+        gpu_power_fixture_calls = 1
+        null_dacl_rejections = 1
+        atomic_race_collision_rejections = 1
+        receipt_sha256 = ('7' * 64)
+    }
     $ompClient = [pscustomobject]@{
         status = 'passed'; omp_version = 'omp/18.0.9'; archive_sha256 = ('3' * 64)
         binary_sha256 = ('4' * 64); events = 1; typed_tool_name = 'read'; tool_results = 1
@@ -339,7 +348,8 @@ try {
         Protocol = $protocol; LongContext = $longContext; CheckpointRestart = $checkpointRestart
         Performance = $performance; InstrumentedLifecycle = $instrumentedLifecycle
         ShippedLifecycle = $shippedLifecycle; ReleaseAssetTests = $releaseAssetTests
-        StateSecurity = $stateSecurity; OmpClient = $ompClient; PublicDisclosure = $publicDisclosure
+        StateSecurityFixture = $stateSecurityFixture; StateSecurity = $stateSecurity
+        OmpClient = $ompClient; PublicDisclosure = $publicDisclosure
     }
 
     $originalProtocolStatus = $protocol.status

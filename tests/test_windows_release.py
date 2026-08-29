@@ -108,6 +108,13 @@ class WindowsReleaseContractTests(unittest.TestCase):
         security = receipt["qualification"]["windows_state_security"]
         self.assertEqual(security["status"], "not_run")
         self.assertTrue(security["fresh_package_gate_deferred"])
+        security_fixture = receipt["qualification"]["windows_state_security_fixture"]
+        self.assertEqual(security_fixture["status"], "passed")
+        self.assertEqual(
+            security_fixture["evidence_class"],
+            "instrumented-function-shim-no-hardware-claim",
+        )
+        self.assertFalse(security_fixture["hardware_claimed"])
 
         disclosure = receipt["public_disclosure"]
         self.assertEqual(disclosure["policy_version"], 1)

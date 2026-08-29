@@ -95,6 +95,7 @@ function New-NInferQualificationReceipt {
         [Parameter(Mandatory = $true)][object]$InstrumentedLifecycle,
         [Parameter(Mandatory = $true)][object]$ShippedLifecycle,
         [Parameter(Mandatory = $true)][object]$ReleaseAssetTests,
+        [Parameter(Mandatory = $true)][object]$StateSecurityFixture,
         [Parameter(Mandatory = $true)][object]$StateSecurity,
         [Parameter(Mandatory = $true)][object]$OmpClient,
         [Parameter(Mandatory = $true)][object]$PublicDisclosure
@@ -334,6 +335,24 @@ function New-NInferQualificationReceipt {
     }
 
     $securityStatus = Get-NInferQualificationStatus $StateSecurity 'windows_state_security'
+    $securityFixtureStatus = Get-NInferQualificationStatus $StateSecurityFixture 'windows_state_security_fixture'
+    $securityFixtureReceipt = [ordered]@{
+        status = $securityFixtureStatus
+        evidence_class = [string](Get-NInferQualificationProperty $StateSecurityFixture 'gpu_power_evidence_class' 'windows_state_security_fixture')
+        hardware_claimed = [bool](Get-NInferQualificationProperty $StateSecurityFixture 'hardware_claimed' 'windows_state_security_fixture')
+        gpu_power_fixture_calls = [int](Get-NInferQualificationProperty $StateSecurityFixture 'gpu_power_fixture_calls' 'windows_state_security_fixture')
+        null_dacl_rejections = [int](Get-NInferQualificationProperty $StateSecurityFixture 'null_dacl_rejections' 'windows_state_security_fixture')
+        atomic_race_collision_rejections = [int](Get-NInferQualificationProperty $StateSecurityFixture 'atomic_race_collision_rejections' 'windows_state_security_fixture')
+        receipt_sha256 = Get-NInferQualificationEvidenceSha256 $StateSecurityFixture 'windows_state_security_fixture'
+    }
+    if ($securityFixtureStatus -ceq 'passed' -and
+        ($securityFixtureReceipt.evidence_class -cne 'instrumented-function-shim-no-hardware-claim' -or
+         $securityFixtureReceipt.hardware_claimed -or
+         $securityFixtureReceipt.gpu_power_fixture_calls -lt 1 -or
+         $securityFixtureReceipt.null_dacl_rejections -lt 1 -or
+         $securityFixtureReceipt.atomic_race_collision_rejections -lt 1)) {
+        throw 'windows_state_security_fixture overclaims or omits instrumented controls'
+    }
     $securityReceipt = [ordered]@{
         status = $securityStatus
         evidence_scope = [string](Get-NInferQualificationProperty $StateSecurity 'evidence_scope' 'windows_state_security')
@@ -455,6 +474,7 @@ function New-NInferQualificationReceipt {
         $instrumentedStatus,
         $shippedStatus,
         $assetStatus,
+        $securityFixtureStatus,
         $securityStatus,
         $ompStatus
     )
@@ -486,6 +506,7 @@ function New-NInferQualificationReceipt {
             windows_lifecycle_instrumented = $instrumentedReceipt
             windows_lifecycle_shipped = $shippedReceipt
             windows_release_assets = $assetReceipt
+            windows_state_security_fixture = $securityFixtureReceipt
             windows_state_security = $securityReceipt
             omp_windows_client = $ompReceipt
         }
