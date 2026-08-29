@@ -63,9 +63,10 @@ incomplete and does not supersede `hardware-pending` until that one Windows gate
 | Preserved state security | Prior exact package proved atomic creation, NULL-DACL rejection, retained-secret effective denial, populated-root status in 874 ms, and fail-safe 370 W restoration |
 | Fresh rebuilt-package Windows gate | Deferred after the authorized local-host handoff; no beta qualification or supersession is claimed |
 
-This support claim is interactive OMP beta support, not authorization for an unattended evidence
-role. The separate frozen automatic-use corpus did not meet its quality floor, so that route remains
-disabled. JSON-schema `response_format` is also unsupported and rejected rather than ignored.
+This preserved runtime evidence is not current beta authorization and does not authorize an
+unattended evidence role. The separate frozen automatic-use corpus did not meet its quality floor,
+so that route remains disabled. JSON-schema `response_format` is also unsupported and rejected
+rather than ignored.
 
 Responses `DELETE` is logical object deletion, not a secure-erasure primitive. A deleted response is
 no longer addressable and is absent from the next durable transcript, including after process
