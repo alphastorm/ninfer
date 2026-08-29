@@ -10,7 +10,7 @@
 namespace ninfer {
 class Engine;
 class PreparedPrompt;
-}
+} // namespace ninfer
 
 namespace ninfer::runtime {
 
@@ -24,9 +24,9 @@ public:
                        std::size_t staging_bytes);
 
     [[nodiscard]] static std::optional<ContinuationCheckpointStats>
-    restore_session(Engine& engine, std::string_view session_sha256,
-                    std::string checkpoint_tag, const ContinuationCheckpointReader& reader,
-                    std::size_t staging_bytes);
+    restore_session(Engine& engine, std::string_view session_sha256, std::string checkpoint_tag,
+                    const ContinuationCheckpointReader& reader,
+                    ContinuationCheckpointStats expected, std::size_t staging_bytes);
 };
 
 } // namespace ninfer::runtime

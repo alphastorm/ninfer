@@ -168,13 +168,71 @@ std::string_view unstreamed_content(const GenerationOutcome& outcome) {
 }
 
 bool valid_session_digest(std::string_view digest) {
-    return digest.size() == 64 &&
-           std::all_of(digest.begin(), digest.end(), [](unsigned char byte) {
+    return digest.size() == 64 && std::all_of(digest.begin(), digest.end(), [](unsigned char byte) {
                return (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
            });
 }
 
+[[noreturn]] void throw_checkpoint_request_error(std::string message, std::string code = {}) {
+    ApiError error;
+    error.status  = 400;
+    error.code    = std::move(code);
+    error.message = std::move(message);
+    throw ApiException(std::move(error));
+}
+
 } // namespace
+
+std::string parse_checkpoint_save_request_body(std::string_view body) {
+    const nlohmann::json request = nlohmann::json::parse(body, nullptr, false);
+    if (request.is_discarded()) {
+        throw_checkpoint_request_error("request body is not valid JSON");
+    }
+    if (!request.is_object()) {
+        throw_checkpoint_request_error("request body must be a JSON object");
+    }
+    for (const auto& [field, value] : request.items()) {
+        (void)value;
+        if (field != "session_sha256") {
+            throw_checkpoint_request_error("unsupported checkpoint field '" + field + "'");
+        }
+    }
+    if (!request.contains("session_sha256")) {
+        throw_checkpoint_request_error("session_sha256 is required");
+    }
+    if (!request.at("session_sha256").is_string()) {
+        throw_checkpoint_request_error("session_sha256 must be a string", "invalid_session");
+    }
+    std::string digest = request.at("session_sha256").get<std::string>();
+    if (!valid_session_digest(digest)) {
+        throw_checkpoint_request_error("checkpoint session must be a lowercase SHA-256",
+                                       "invalid_session");
+    }
+    return digest;
+}
+
+void write_checkpoint_delete_response(httplib::Response& response,
+                                      SessionCheckpointEraseResult result) {
+    const char* state = nullptr;
+    switch (result) {
+    case SessionCheckpointEraseResult::Erased:
+        response.status = 200;
+        state           = "deleted";
+        break;
+    case SessionCheckpointEraseResult::Missing:
+        response.status = 404;
+        state           = "missing";
+        break;
+    case SessionCheckpointEraseResult::Conflict:
+        response.status = 409;
+        state           = "conflict";
+        break;
+    }
+    response.set_content(
+        nlohmann::json{{"artifact_type", "ninfer_session_checkpoint_status"}, {"state", state}}
+            .dump(),
+        "application/json");
+}
 
 httplib::Server::HandlerResponse handle_unrendered_http_error(const ServeOptions& options,
                                                               const httplib::Request& request,
@@ -343,15 +401,15 @@ void HttpServer::register_routes() {
         handle_status(req, res);
     });
     if (!options_.session_checkpoint_root.empty()) {
-        server_.Get(R"(/v1/ninfer/checkpoints/([0-9a-f]{64}))",
-                    [this](const httplib::Request& req, httplib::Response& res) {
-                        handle_checkpoint_get(req, res);
-                    });
-        server_.Post(R"(/v1/ninfer/checkpoints/([0-9a-f]{64}))",
+        server_.Post("/v1/ninfer/checkpoints",
                      [this](const httplib::Request& req, httplib::Response& res) {
                          handle_checkpoint_save(req, res);
                      });
-        server_.Delete(R"(/v1/ninfer/checkpoints/([0-9a-f]{64}))",
+        server_.Get(R"(/v1/ninfer/checkpoints/([^/]+)/status)",
+                    [this](const httplib::Request& req, httplib::Response& res) {
+                        handle_checkpoint_get(req, res);
+                    });
+        server_.Delete(R"(/v1/ninfer/checkpoints/([^/]+))",
                        [this](const httplib::Request& req, httplib::Response& res) {
                            handle_checkpoint_delete(req, res);
                        });
@@ -402,14 +460,8 @@ void HttpServer::register_routes() {
     });
 }
 
-void HttpServer::handle_checkpoint_get(const httplib::Request& req,
-                                       httplib::Response& res) const {
+void HttpServer::handle_checkpoint_get(const httplib::Request& req, httplib::Response& res) const {
     const std::string digest = req.matches.size() > 1 ? req.matches[1].str() : std::string();
-    if (service_ == nullptr) {
-        res.status = 503;
-        res.set_content(nlohmann::json{{"state", "loading"}}.dump(), "application/json");
-        return;
-    }
     if (!valid_session_digest(digest)) {
         ApiError error;
         error.status  = 400;
@@ -418,17 +470,27 @@ void HttpServer::handle_checkpoint_get(const httplib::Request& req,
         write_error(res, error);
         return;
     }
+    if (service_ == nullptr) {
+        res.status = 503;
+        res.set_content(nlohmann::json{{"state", "loading"}}.dump(), "application/json");
+        return;
+    }
     res.set_content(service_->checkpoint_status(digest).dump(), "application/json");
 }
 
 void HttpServer::handle_checkpoint_save(const httplib::Request& req, httplib::Response& res) {
-    const std::string digest = req.matches.size() > 1 ? req.matches[1].str() : std::string();
-    if (service_ == nullptr || !valid_session_digest(digest)) {
+    std::string digest;
+    try {
+        digest = parse_checkpoint_save_request_body(req.body);
+    } catch (const ApiException& error) {
+        write_error(res, error.error());
+        return;
+    }
+    if (service_ == nullptr) {
         ApiError error;
-        error.status = service_ == nullptr ? 503 : 400;
-        error.code = service_ == nullptr ? "service_unavailable" : "invalid_session";
-        error.message = service_ == nullptr ? "generation service is loading"
-                                            : "checkpoint session must be a lowercase SHA-256";
+        error.status  = 503;
+        error.code    = "service_unavailable";
+        error.message = "generation service is loading";
         write_error(res, error);
         return;
     }
@@ -443,7 +505,6 @@ void HttpServer::handle_checkpoint_save(const httplib::Request& req, httplib::Re
         return;
     }
     res.set_content(nlohmann::json{{"artifact_type", "ninfer_session_checkpoint_status"},
-                                   {"session_sha256", digest},
                                    {"state", "available"},
                                    {"generation", saved->generation},
                                    {"bytes", saved->bytes},
@@ -455,21 +516,23 @@ void HttpServer::handle_checkpoint_save(const httplib::Request& req, httplib::Re
 
 void HttpServer::handle_checkpoint_delete(const httplib::Request& req, httplib::Response& res) {
     const std::string digest = req.matches.size() > 1 ? req.matches[1].str() : std::string();
-    if (service_ == nullptr || !valid_session_digest(digest)) {
+    if (!valid_session_digest(digest)) {
         ApiError error;
-        error.status = service_ == nullptr ? 503 : 400;
-        error.code = service_ == nullptr ? "service_unavailable" : "invalid_session";
-        error.message = service_ == nullptr ? "generation service is loading"
-                                            : "checkpoint session must be a lowercase SHA-256";
+        error.status  = 400;
+        error.code    = "invalid_session";
+        error.message = "checkpoint session must be a lowercase SHA-256";
         write_error(res, error);
         return;
     }
-    const bool deleted = service_->erase_checkpoint(digest);
-    res.set_content(nlohmann::json{{"artifact_type", "ninfer_session_checkpoint_status"},
-                                   {"session_sha256", digest},
-                                   {"state", deleted ? "deleted" : "missing"}}
-                        .dump(),
-                    "application/json");
+    if (service_ == nullptr) {
+        ApiError error;
+        error.status  = 503;
+        error.code    = "service_unavailable";
+        error.message = "generation service is loading";
+        write_error(res, error);
+        return;
+    }
+    write_checkpoint_delete_response(res, service_->erase_checkpoint(digest));
 }
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {
@@ -933,12 +996,12 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
         [stream](bool) { stream->cancelled.store(true, std::memory_order_release); });
 }
 
-void HttpServer::maybe_checkpoint_completed_turn(
-    const std::optional<std::string>& session_sha256,
-    const GenerationOutcome& outcome) noexcept {
+void HttpServer::maybe_checkpoint_completed_turn(const std::optional<std::string>& session_sha256,
+                                                 const GenerationOutcome& outcome) noexcept {
     if (service_ == nullptr || !service_->checkpoint_enabled() || !session_sha256) { return; }
-    const std::uint64_t frontier = static_cast<std::uint64_t>(std::max(outcome.prompt_tokens, 0)) +
-                                   static_cast<std::uint64_t>(std::max(outcome.completion_tokens, 0));
+    const std::uint64_t frontier =
+        static_cast<std::uint64_t>(std::max(outcome.prompt_tokens, 0)) +
+        static_cast<std::uint64_t>(std::max(outcome.completion_tokens, 0));
     if (frontier < options_.session_checkpoint_min_tokens) { return; }
     try {
         (void)service_->save_checkpoint(*session_sha256, response_store_);

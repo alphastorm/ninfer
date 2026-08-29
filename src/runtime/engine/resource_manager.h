@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ninfer/types.h"
+#include "runtime/contract/continuation_checkpoint.h"
 #include "runtime/contract/types.h"
 #include "runtime/engine/context_cost.h"
 #include "runtime/engine/materialization_planner.h"
@@ -14,6 +15,8 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -118,10 +121,11 @@ public:
     private:
         Choice(LaneId destination, ResourcePlan&& plan, std::uint32_t catalog_capacity,
                std::optional<CacheSessionKey> session, RetentionClass retention,
-               bool update_session_index, std::uint64_t publication_order)
+               bool update_session_index, std::uint64_t publication_order,
+               std::string checkpoint_tag)
             : destination_(destination), plan_(std::move(plan)), session_(std::move(session)),
-              retention_(retention), update_session_index_(update_session_index),
-              publication_order_(publication_order) {
+              checkpoint_tag_(std::move(checkpoint_tag)), retention_(retention),
+              update_session_index_(update_session_index), publication_order_(publication_order) {
             private_claim_slots_.reserve(catalog_capacity);
             private_claim_ids_.reserve(catalog_capacity);
             private_claim_revisions_.reserve(catalog_capacity);
@@ -156,6 +160,7 @@ public:
         std::vector<std::uint32_t> shared_claim_dropped_checkpoints_;
         std::optional<PolicyObservationKey> selected_observation_;
         std::optional<CacheSessionKey> session_;
+        std::string checkpoint_tag_;
         RetentionClass retention_        = RetentionClass::RecentPrivate;
         bool update_session_index_       = true;
         std::uint64_t publication_order_ = 0;
@@ -242,7 +247,8 @@ public:
     }
 
     [[nodiscard]] Inspection inspect(Program& program, const PreparedPrompt& prompt,
-                                     const RequestBasePlan& base, std::uint64_t publication_order) {
+                                     const RequestBasePlan& base, std::uint64_t publication_order,
+                                     std::string checkpoint_tag = {}) {
         if (!std::holds_alternative<std::monostate>(transaction_) ||
             program.has_context_transaction()) {
             return {.readiness = Readiness::TemporarilyBlocked};
@@ -352,8 +358,9 @@ public:
             }
         }
 
-        std::optional<Choice> selected = plan_materialization(
-            program, prompt, base, *destination, candidates, publication_order, planning_started);
+        std::optional<Choice> selected =
+            plan_materialization(program, prompt, base, *destination, candidates, publication_order,
+                                 std::move(checkpoint_tag), planning_started);
         if (!selected) { return {.readiness = Readiness::TemporarilyBlocked}; }
         return {
             .readiness = selected->needs_transfer() ? Readiness::NeedsTransfer : Readiness::Ready,
@@ -621,20 +628,103 @@ public:
         assign_continuation_summary(publication.summary, result.summary);
         publication.handle.emplace(std::move(*result.continuation));
         result.continuation.reset();
-        publication.session   = active.session;
-        publication.retention = active.retention;
+        publication.session        = active.session;
+        publication.checkpoint_tag = std::move(active.checkpoint_tag);
+        publication.retention      = active.retention;
         migrate_observations(publication, result.summary, active.retention);
         advance_revision(publication.revision);
         if (publication.session && active.update_session_index) {
             if (!publish_session(*publication.session, active.publication_slot, publication.id,
                                  publication.revision, active.publication_order)) {
                 publication.session.reset();
+                publication.checkpoint_tag.clear();
                 publication.retention = RetentionClass::RecentPrivate;
             }
         }
         active             = {};
         lanes_[lane.value] = LogicalLaneState::Free;
         return result;
+    }
+
+    [[nodiscard]] std::optional<ContinuationCheckpointStats>
+    checkpoint_session(Program& program, const CacheSessionKey& session,
+                       std::string_view checkpoint_tag, ContinuationCheckpointWriter& writer,
+                       std::size_t staging_bytes) {
+        if (!cache_enabled_ || checkpoint_tag.empty() ||
+            !std::holds_alternative<std::monostate>(transaction_) ||
+            program.has_context_transaction()) {
+            return std::nullopt;
+        }
+        const std::optional<std::size_t> cell = find_session_cell(session);
+        if (!cell) { return std::nullopt; }
+        const SessionIndexEntry& binding = session_index_[*cell];
+        if (binding.state != SessionIndexState::Occupied || binding.slot >= catalog_count_) {
+            return std::nullopt;
+        }
+        const CatalogEntry& entry = catalog_[binding.slot];
+        if (entry.state != CatalogState::Catalogued || !entry.handle ||
+            entry.id != binding.owner_id || entry.revision != binding.revision ||
+            entry.session != std::optional<CacheSessionKey>(session) ||
+            entry.checkpoint_tag != checkpoint_tag) {
+            return std::nullopt;
+        }
+        return program.checkpoint_continuation(*entry.handle, writer, staging_bytes);
+    }
+
+    [[nodiscard]] std::optional<ContinuationCheckpointStats> restore_session_checkpoint(
+        Program& program, const CacheSessionKey& session, std::string checkpoint_tag,
+        const ContinuationCheckpointReader& reader, ContinuationCheckpointStats expected,
+        std::size_t staging_bytes, std::uint64_t publication_order) {
+        if (!cache_enabled_ || checkpoint_tag.empty() || publication_order == 0 ||
+            !std::holds_alternative<std::monostate>(transaction_) ||
+            program.has_context_transaction() || find_session_cell(session)) {
+            return std::nullopt;
+        }
+        std::uint32_t slot = kInvalidCatalogSlot;
+        for (std::uint32_t candidate = 0; candidate < catalog_count_; ++candidate) {
+            if (catalog_[candidate].state == CatalogState::Vacant) {
+                slot = candidate;
+                break;
+            }
+        }
+        if (slot == kInvalidCatalogSlot) { return std::nullopt; }
+
+        std::optional<typename Package::RestoredContinuation> restored =
+            program.restore_continuation(reader, staging_bytes);
+        if (!restored || restored->stats != expected || restored->summary.active_references != 0 ||
+            !valid_continuation_summary(restored->summary)) {
+            if (restored) { (void)program.release_continuation(std::move(restored->handle)); }
+            return std::nullopt;
+        }
+
+        CatalogEntry& entry = catalog_[slot];
+        try {
+            assign_continuation_summary(entry.summary, restored->summary);
+            migrate_observations(entry, restored->summary, RetentionClass::LiveSession);
+            entry.id = next_continuation_id_++;
+            if (entry.id == 0) { entry.id = next_continuation_id_++; }
+            if (entry.id == 0) { throw std::overflow_error("continuation identity exhausted"); }
+            entry.handle.emplace(std::move(restored->handle));
+            entry.session           = session;
+            entry.checkpoint_tag    = std::move(checkpoint_tag);
+            entry.retention         = RetentionClass::LiveSession;
+            entry.active_references = 0;
+            entry.state             = CatalogState::Catalogued;
+            advance_revision(entry.revision);
+            if (!publish_session(session, slot, entry.id, entry.revision, publication_order)) {
+                throw std::logic_error("checkpoint restore lost session publication order");
+            }
+            return restored->stats;
+        } catch (...) {
+            if (entry.handle) {
+                (void)program.release_continuation(std::move(*entry.handle));
+                entry.handle.reset();
+            } else {
+                (void)program.release_continuation(std::move(restored->handle));
+            }
+            clear_catalog_entry(entry);
+            return std::nullopt;
+        }
     }
 
     [[nodiscard]] AbortResult abort(Program& program, LaneId lane, SequenceHandle sequence) {
@@ -812,6 +902,7 @@ private:
         ContinuationSummary summary;
         std::optional<ContinuationHandle> handle;
         std::optional<CacheSessionKey> session;
+        std::string checkpoint_tag;
         std::vector<CheckpointObservation> observations;
         RetentionClass retention        = RetentionClass::RecentPrivate;
         std::uint32_t active_references = 0;
@@ -858,6 +949,7 @@ private:
         std::uint32_t publication_slot = kInvalidCatalogSlot;
         std::uint64_t continuation_id  = 0;
         std::optional<CacheSessionKey> session;
+        std::string checkpoint_tag;
         RetentionClass retention           = RetentionClass::RecentPrivate;
         bool update_session_index          = true;
         std::uint64_t publication_order    = 0;
@@ -889,6 +981,7 @@ private:
         std::vector<std::uint32_t> shared_claim_dropped_checkpoints;
         std::optional<PolicyObservationKey> selected_observation;
         std::optional<CacheSessionKey> session;
+        std::string checkpoint_tag;
         RetentionClass retention        = RetentionClass::RecentPrivate;
         bool update_session_index       = true;
         std::uint64_t publication_order = 0;
@@ -1072,6 +1165,7 @@ private:
         entry.summary.active_references = 0;
         entry.handle.reset();
         entry.session.reset();
+        entry.checkpoint_tag.clear();
         entry.observations.clear();
         entry.retention         = RetentionClass::RecentPrivate;
         entry.active_references = 0;
@@ -1093,18 +1187,18 @@ private:
         for (PrefixIndexEntry& entry : prefix_index_) { entry = {}; }
         std::size_t cursor = 0;
         const auto append  = [&](bool shared, std::uint32_t slot, std::uint64_t owner_id,
-                                std::uint64_t revision, const auto& checkpoint) {
+                                 std::uint64_t revision, const auto& checkpoint) {
             if (cursor >= prefix_index_.size()) {
                 throw std::logic_error("prefix index exceeded fixed capacity");
             }
             prefix_index_[cursor++] = PrefixIndexEntry{
-                 .occupied   = true,
-                 .shared     = shared,
-                 .key        = checkpoint.shortlist_key,
-                 .slot       = slot,
-                 .owner_id   = owner_id,
-                 .revision   = revision,
-                 .checkpoint = checkpoint.ref,
+                .occupied   = true,
+                .shared     = shared,
+                .key        = checkpoint.shortlist_key,
+                .slot       = slot,
+                .owner_id   = owner_id,
+                .revision   = revision,
+                .checkpoint = checkpoint.ref,
             };
         };
         for (std::uint32_t slot = 0; slot < catalog_count_; ++slot) {
@@ -1150,11 +1244,10 @@ private:
         return epoch;
     }
 
-    [[nodiscard]] std::optional<Choice>
-    plan_materialization(Program& program, const PreparedPrompt& prompt,
-                         const RequestBasePlan& base, LaneId destination,
-                         std::vector<Candidate>& candidates, std::uint64_t publication_order,
-                         typename Planner::Clock::time_point planning_started) {
+    [[nodiscard]] std::optional<Choice> plan_materialization(
+        Program& program, const PreparedPrompt& prompt, const RequestBasePlan& base,
+        LaneId destination, std::vector<Candidate>& candidates, std::uint64_t publication_order,
+        std::string checkpoint_tag, typename Planner::Clock::time_point planning_started) {
         std::vector<typename Planner::CandidateInput> candidate_inputs;
         std::vector<const ContinuationHandle*> private_owners;
         std::vector<std::uint32_t> private_owner_ordinals;
@@ -1336,7 +1429,8 @@ private:
         Candidate& candidate = candidates[planned->candidate_index];
         Choice choice(destination, std::move(*planned->plan), catalog_count_,
                       base.context_cache().session_key, base.context_cache().retention,
-                      base.context_cache().update_session_index, publication_order);
+                      base.context_cache().update_session_index, publication_order,
+                      std::move(checkpoint_tag));
         choice.source_slot_            = candidate.source_slot;
         choice.source_id_              = candidate.source_id;
         choice.source_revision_        = candidate.source_revision;
@@ -1436,7 +1530,7 @@ private:
             }
         }
         const CatalogEntry& publication = catalog_[choice.publication_slot_];
-        const bool source_cell          = choice.publication_slot_ == choice.source_slot_ &&
+        const bool source_cell = choice.publication_slot_ == choice.source_slot_ &&
                                  choice.source_disposition_ == ClaimDisposition::ConsumedToActive;
         const auto victim = std::find(choice.private_claim_slots_.begin(),
                                       choice.private_claim_slots_.end(), choice.publication_slot_);
@@ -1473,6 +1567,7 @@ private:
             .shared_claim_dropped_checkpoints = std::move(choice.shared_claim_dropped_checkpoints_),
             .selected_observation             = choice.selected_observation_,
             .session                          = std::move(choice.session_),
+            .checkpoint_tag                   = std::move(choice.checkpoint_tag_),
             .retention                        = choice.retention_,
             .update_session_index             = choice.update_session_index_,
             .publication_order                = choice.publication_order_,
@@ -1799,6 +1894,7 @@ private:
                 source.summary.long_anchors.clear();
                 source.observations.clear();
                 source.session.reset();
+                source.checkpoint_tag.clear();
                 source.active_references = 0;
             } else {
                 throw std::logic_error("materialization source returned an invalid disposition");
@@ -1867,9 +1963,10 @@ private:
         if (publication.handle) {
             throw std::logic_error("active publication cell retained an inactive capability");
         }
-        publication.state             = CatalogState::ReservedForActive;
-        publication.id                = next_continuation_id_++;
-        publication.session           = record->session;
+        publication.state   = CatalogState::ReservedForActive;
+        publication.id      = next_continuation_id_++;
+        publication.session = record->session;
+        publication.checkpoint_tag.clear();
         publication.retention         = record->retention;
         publication.active_references = 0;
         advance_revision(publication.revision);
@@ -1880,6 +1977,7 @@ private:
             .publication_slot     = record->publication_slot,
             .continuation_id      = publication.id,
             .session              = record->session,
+            .checkpoint_tag       = std::move(record->checkpoint_tag),
             .retention            = record->retention,
             .update_session_index = record->update_session_index,
             .publication_order    = record->publication_order,

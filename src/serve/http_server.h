@@ -25,6 +25,14 @@ httplib::Server::HandlerResponse handle_unrendered_http_error(const ServeOptions
                                                               const httplib::Request& request,
                                                               httplib::Response& response);
 
+// Parses the exact authenticated checkpoint-save body. Throws ApiException on malformed, missing,
+// extra, non-string, or non-digest input.
+[[nodiscard]] std::string parse_checkpoint_save_request_body(std::string_view body);
+
+// Renders the authenticated DELETE result without echoing the session identity or stored content.
+void write_checkpoint_delete_response(httplib::Response& response,
+                                      SessionCheckpointEraseResult result);
+
 class HttpServer {
 public:
     explicit HttpServer(ServeOptions options);

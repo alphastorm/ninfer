@@ -117,7 +117,7 @@ public:
     [[nodiscard]] PreparedRequest prepare(const GenerationRequest& req,
                                           std::function<bool()> is_cancelled = {},
                                           ContextCacheHints context_cache    = {},
-                                          std::string checkpoint_tag        = {}) const;
+                                          std::string checkpoint_tag         = {}) const;
     [[nodiscard]] int count_prompt_tokens(const GenerationRequest& req,
                                           std::function<bool()> is_cancelled = {}) const;
 
@@ -132,7 +132,7 @@ public:
                                           std::string_view required_response_id,
                                           ResponseStore& responses);
     [[nodiscard]] nlohmann::json checkpoint_status(std::string_view session_sha256) const;
-    bool erase_checkpoint(std::string_view session_sha256);
+    [[nodiscard]] SessionCheckpointEraseResult erase_checkpoint(std::string_view session_sha256);
 
     void warmup();
 
@@ -147,12 +147,10 @@ private:
         UnboundedStartup,
     };
 
-    [[nodiscard]] PreparedRequest prepare_impl(const GenerationRequest& req,
-                                               std::function<bool()> is_cancelled,
-                                               ContextCacheHints context_cache,
-                                               CacheParticipation cache_participation,
-                                               DeadlinePolicy deadline_policy,
-                                               std::string checkpoint_tag) const;
+    [[nodiscard]] PreparedRequest
+    prepare_impl(const GenerationRequest& req, std::function<bool()> is_cancelled,
+                 ContextCacheHints context_cache, CacheParticipation cache_participation,
+                 DeadlinePolicy deadline_policy, std::string checkpoint_tag) const;
     [[nodiscard]] std::shared_ptr<RequestLifetime>
     acquire_request_lifetime(DeadlinePolicy deadline_policy) const;
 

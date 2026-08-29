@@ -1,6 +1,6 @@
 #include "serve/session_checkpoint_store.h"
 
-#include "core/sha256.h"
+#include "runtime/contract/checkpoint_sha256.h"
 
 #include <algorithm>
 #include <array>
@@ -21,11 +21,11 @@
 #include <utility>
 
 #ifdef _WIN32
-#include <io.h>
-#include <windows.h>
+#    include <io.h>
+#    include <windows.h>
 #else
-#include <fcntl.h>
-#include <unistd.h>
+#    include <fcntl.h>
+#    include <unistd.h>
 #endif
 
 namespace ninfer::serve {
@@ -36,16 +36,33 @@ using runtime::ContinuationCheckpointReader;
 using runtime::ContinuationCheckpointStats;
 using runtime::ContinuationCheckpointWriter;
 
+class CheckpointCorruption final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
+class CheckpointUnavailable final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
 struct FileDescriptor {
     std::string path;
     std::uint64_t bytes = 0;
     std::string sha256;
 };
 
+[[nodiscard]] bool valid_checkpoint_stats(const ContinuationCheckpointStats& stats) noexcept {
+    return stats.frontier_tokens != 0 && stats.restored_tokens != 0 &&
+           stats.restored_tokens <= stats.frontier_tokens && stats.payload_bytes != 0 &&
+           static_cast<std::uint64_t>(stats.restored_tokens) * 100ULL >=
+               static_cast<std::uint64_t>(stats.frontier_tokens) * 95ULL;
+}
+
 [[nodiscard]] std::uint64_t unix_milliseconds() {
-    const auto value = std::chrono::duration_cast<std::chrono::milliseconds>(
-                           Clock::now().time_since_epoch())
-                           .count();
+    const auto value =
+        std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch())
+            .count();
     return value < 0 ? 0 : static_cast<std::uint64_t>(value);
 }
 
@@ -129,8 +146,7 @@ void write_synced(const std::filesystem::path& path, std::span<const std::byte> 
     std::FILE* file = open_binary_write(path);
     if (file == nullptr) { throw std::runtime_error("checkpoint file creation failed"); }
     try {
-        if (!bytes.empty() &&
-            std::fwrite(bytes.data(), 1, bytes.size(), file) != bytes.size()) {
+        if (!bytes.empty() && std::fwrite(bytes.data(), 1, bytes.size(), file) != bytes.size()) {
             throw std::runtime_error("checkpoint file write failed");
         }
         flush_file(file);
@@ -153,17 +169,17 @@ void write_synced(const std::filesystem::path& path, std::string_view bytes) {
                                                   std::size_t limit) {
     std::error_code error;
     const std::uintmax_t size = std::filesystem::file_size(path, error);
-    if (error || size > limit || size > std::numeric_limits<std::size_t>::max()) {
-        throw std::runtime_error("checkpoint file size is invalid");
+    if (error) { throw CheckpointUnavailable("checkpoint file size is unavailable"); }
+    if (size > limit || size > std::numeric_limits<std::size_t>::max()) {
+        throw CheckpointCorruption("checkpoint file size exceeds its bound");
     }
     std::vector<std::byte> bytes(static_cast<std::size_t>(size));
     std::FILE* file = open_binary_read(path);
-    if (file == nullptr) { throw std::runtime_error("checkpoint file open failed"); }
-    const std::size_t read =
-        bytes.empty() ? 0 : std::fread(bytes.data(), 1, bytes.size(), file);
-    const bool failed = read != bytes.size() || std::ferror(file) != 0;
-    std::fclose(file);
-    if (failed) { throw std::runtime_error("checkpoint file read failed"); }
+    if (file == nullptr) { throw CheckpointUnavailable("checkpoint file open failed"); }
+    const std::size_t read  = bytes.empty() ? 0 : std::fread(bytes.data(), 1, bytes.size(), file);
+    const bool failed       = read != bytes.size() || std::ferror(file) != 0;
+    const bool close_failed = std::fclose(file) != 0;
+    if (failed || close_failed) { throw CheckpointUnavailable("checkpoint file read failed"); }
     return bytes;
 }
 
@@ -173,17 +189,24 @@ void write_synced(const std::filesystem::path& path, std::string_view bytes) {
 }
 
 [[nodiscard]] FileDescriptor hash_file(const std::filesystem::path& root,
-                                       const std::string& relative,
-                                       std::uint64_t expected_bytes) {
+                                       const std::string& relative, std::uint64_t expected_bytes) {
     const std::filesystem::path path = root / relative;
     std::error_code error;
-    if (!std::filesystem::is_regular_file(path, error) || error ||
-        std::filesystem::file_size(path, error) != expected_bytes || error) {
-        throw std::runtime_error("checkpoint payload size mismatch");
+    const std::filesystem::file_status status = std::filesystem::status(path, error);
+    if (error || !std::filesystem::exists(status)) {
+        throw CheckpointUnavailable("checkpoint payload is unavailable");
+    }
+    if (!std::filesystem::is_regular_file(status)) {
+        throw CheckpointCorruption("checkpoint payload is not a regular file");
+    }
+    const std::uintmax_t actual_bytes = std::filesystem::file_size(path, error);
+    if (error) { throw CheckpointUnavailable("checkpoint payload size is unavailable"); }
+    if (actual_bytes != expected_bytes) {
+        throw CheckpointCorruption("checkpoint payload size mismatch");
     }
     std::FILE* file = open_binary_read(path);
-    if (file == nullptr) { throw std::runtime_error("checkpoint payload open failed"); }
-    crypto::Sha256 hasher;
+    if (file == nullptr) { throw CheckpointUnavailable("checkpoint payload open failed"); }
+    runtime::Sha256 hasher;
     std::array<std::byte, 64ULL << 10> buffer{};
     std::uint64_t consumed = 0;
     try {
@@ -191,27 +214,34 @@ void write_synced(const std::filesystem::path& path, std::string_view bytes) {
             const std::size_t requested = static_cast<std::size_t>(
                 std::min<std::uint64_t>(buffer.size(), expected_bytes - consumed));
             const std::size_t count = std::fread(buffer.data(), 1, requested, file);
-            if (count != requested) { throw std::runtime_error("checkpoint payload read failed"); }
+            if (count != requested) {
+                throw CheckpointUnavailable("checkpoint payload read failed");
+            }
             hasher.update(std::span<const std::byte>(buffer.data(), count));
             consumed += count;
         }
-        if (std::fgetc(file) != EOF) { throw std::runtime_error("checkpoint payload grew"); }
-        std::fclose(file);
+        if (std::fgetc(file) != EOF) { throw CheckpointCorruption("checkpoint payload grew"); }
+        if (std::ferror(file) != 0) {
+            throw CheckpointUnavailable("checkpoint payload read failed");
+        }
+        if (std::fclose(file) != 0) {
+            file = nullptr;
+            throw CheckpointUnavailable("checkpoint payload close failed");
+        }
         file = nullptr;
     } catch (...) {
         if (file != nullptr) { std::fclose(file); }
         throw;
     }
-    return {.path = relative,
-            .bytes = expected_bytes,
-            .sha256 = crypto::sha256_hex(hasher.finish())};
+    return {
+        .path = relative, .bytes = expected_bytes, .sha256 = runtime::sha256_hex(hasher.finish())};
 }
 
 [[nodiscard]] std::uint64_t directory_bytes(const std::filesystem::path& path) {
     std::error_code error;
     std::uint64_t total = 0;
-    for (std::filesystem::recursive_directory_iterator iterator(
-             path, std::filesystem::directory_options::skip_permission_denied, error),
+    for (std::filesystem::recursive_directory_iterator
+             iterator(path, std::filesystem::directory_options::skip_permission_denied, error),
          end;
          !error && iterator != end; iterator.increment(error)) {
         if (!iterator->is_regular_file(error) || error) { continue; }
@@ -260,9 +290,8 @@ nlohmann::json turn_to_json(const ChatTurn& turn) {
     }
     nlohmann::json calls = nlohmann::json::array();
     for (const ToolCall& call : turn.tool_calls) {
-        calls.push_back({{"id", call.id},
-                         {"name", call.name},
-                         {"arguments_json", call.arguments_json}});
+        calls.push_back(
+            {{"id", call.id}, {"name", call.name}, {"arguments_json", call.arguments_json}});
     }
     return {{"role", static_cast<std::uint8_t>(turn.role)},
             {"content", std::move(content)},
@@ -297,16 +326,16 @@ std::optional<ChatTurn> turn_from_json(const nlohmann::json& value) {
         std::optional<product::media_acquire::Source> source =
             source_from_json(encoded.at("source"));
         if (!source) { return std::nullopt; }
-        turn.content.push_back(ContentPart{.kind = static_cast<ContentKind>(kind),
-                                           .text = encoded.at("text").get<std::string>(),
+        turn.content.push_back(ContentPart{.kind     = static_cast<ContentKind>(kind),
+                                           .text     = encoded.at("text").get<std::string>(),
                                            .type_raw = encoded.at("type_raw").get<std::string>(),
-                                           .source = std::move(*source)});
+                                           .source   = std::move(*source)});
     }
     for (const nlohmann::json& encoded : value.at("tool_calls")) {
-        turn.tool_calls.push_back(ToolCall{.id = encoded.at("id").get<std::string>(),
-                                           .name = encoded.at("name").get<std::string>(),
-                                           .arguments_json =
-                                               encoded.at("arguments_json").get<std::string>()});
+        turn.tool_calls.push_back(
+            ToolCall{.id             = encoded.at("id").get<std::string>(),
+                     .name           = encoded.at("name").get<std::string>(),
+                     .arguments_json = encoded.at("arguments_json").get<std::string>()});
     }
     return turn;
 }
@@ -332,8 +361,8 @@ public:
         return write_impl(path, offset, total_bytes, bytes);
     }
 
-    bool write_store_file(std::string_view path, std::uint64_t offset,
-                          std::uint64_t total_bytes, std::span<const std::byte> bytes) {
+    bool write_store_file(std::string_view path, std::uint64_t offset, std::uint64_t total_bytes,
+                          std::span<const std::byte> bytes) {
         return write_impl(path, offset, total_bytes, bytes);
     }
 
@@ -367,7 +396,7 @@ private:
                     failed_ = true;
                     return false;
                 }
-                state.total = total_bytes;
+                state.total                             = total_bytes;
                 const std::filesystem::path destination = root_ / key;
                 std::filesystem::create_directories(destination.parent_path());
                 state.file = open_binary_write(destination);
@@ -397,7 +426,7 @@ private:
                 }
                 state.file     = nullptr;
                 state.complete = true;
-                state.digest   = crypto::sha256_hex(state.hasher.finish());
+                state.digest   = runtime::sha256_hex(state.hasher.finish());
             }
             return true;
         } catch (...) {
@@ -409,7 +438,7 @@ private:
 private:
     struct State {
         std::FILE* file = nullptr;
-        crypto::Sha256 hasher;
+        runtime::Sha256 hasher;
         std::uint64_t total   = 0;
         std::uint64_t written = 0;
         std::string digest;
@@ -427,12 +456,11 @@ private:
 }
 
 [[nodiscard]] std::optional<FileDescriptor> descriptor_from_json(const nlohmann::json& value) {
-    if (!value.is_object() || !value.at("path").is_string() ||
-        !value.at("sha256").is_string()) {
+    if (!value.is_object() || !value.at("path").is_string() || !value.at("sha256").is_string()) {
         return std::nullopt;
     }
-    FileDescriptor descriptor{.path = value.at("path").get<std::string>(),
-                              .bytes = value.at("bytes").get<std::uint64_t>(),
+    FileDescriptor descriptor{.path   = value.at("path").get<std::string>(),
+                              .bytes  = value.at("bytes").get<std::uint64_t>(),
                               .sha256 = value.at("sha256").get<std::string>()};
     if (!valid_relative_path(descriptor.path) || descriptor.sha256.size() != 64 ||
         !std::all_of(descriptor.sha256.begin(), descriptor.sha256.end(), [](unsigned char byte) {
@@ -445,13 +473,19 @@ private:
 
 [[nodiscard]] std::optional<std::string> current_generation(const std::filesystem::path& session) {
     std::error_code error;
-    const std::filesystem::path path = session / "current";
-    if (!std::filesystem::is_regular_file(path, error) || error) { return std::nullopt; }
+    const std::filesystem::path path          = session / "current";
+    const std::filesystem::file_status status = std::filesystem::status(path, error);
+    if (error == std::errc::no_such_file_or_directory) { return std::nullopt; }
+    if (error) { throw CheckpointUnavailable("checkpoint current pointer is unavailable"); }
+    if (!std::filesystem::exists(status)) { return std::nullopt; }
+    if (!std::filesystem::is_regular_file(status)) {
+        throw CheckpointCorruption("checkpoint current pointer is not a regular file");
+    }
     std::string value = read_text_bounded(path, 256);
     while (!value.empty() && (value.back() == '\n' || value.back() == '\r')) { value.pop_back(); }
     if (value.empty() || !valid_relative_path(value) || value.find('/') != std::string::npos ||
         value.starts_with('.')) {
-        throw std::runtime_error("checkpoint current pointer is invalid");
+        throw CheckpointCorruption("checkpoint current pointer is invalid");
     }
     return value;
 }
@@ -467,6 +501,198 @@ public:
 
 namespace {
 
+enum class CandidateKind : std::uint8_t {
+    Tombstone,
+    AbandonedStaging,
+    StaleGeneration,
+    CurrentSession,
+};
+
+struct GenerationCandidate {
+    CandidateKind kind = CandidateKind::StaleGeneration;
+    std::filesystem::path path;
+    std::string digest;
+    std::string name;
+    std::filesystem::file_time_type time;
+    std::uint64_t bytes = 0;
+};
+
+struct GenerationInventory {
+    std::uint64_t used = 0;
+    std::vector<GenerationCandidate> candidates;
+};
+
+void account_bytes(std::uint64_t& used, std::uint64_t bytes) {
+    if (bytes > std::numeric_limits<std::uint64_t>::max() - used) {
+        throw std::overflow_error("checkpoint quota accounting overflowed");
+    }
+    used += bytes;
+}
+
+[[nodiscard]] std::uint64_t session_generation_bytes(const std::filesystem::path& session) {
+    const std::filesystem::path generations = session / "generations";
+    std::error_code error;
+    if (!std::filesystem::is_directory(generations, error)) {
+        if (error && error != std::errc::no_such_file_or_directory) {
+            throw std::runtime_error("checkpoint generation scan failed");
+        }
+        return 0;
+    }
+    return directory_bytes(generations);
+}
+
+[[nodiscard]] std::uint64_t tombstone_generation_bytes(const std::filesystem::path& path) {
+    if (path.filename().string().find("--") == std::string::npos) {
+        return session_generation_bytes(path);
+    }
+    return directory_bytes(path);
+}
+
+[[nodiscard]] GenerationInventory inventory_generations(
+    const SessionCheckpointStoreOptions& options, const SessionCheckpointStore::Impl& impl,
+    const std::optional<std::filesystem::path>& protected_generation = std::nullopt,
+    const std::optional<std::filesystem::path>& protected_session    = std::nullopt) {
+    GenerationInventory inventory;
+    const std::filesystem::path tombstones = options.root / ".tombstones";
+    for (const auto& entry : std::filesystem::directory_iterator(tombstones)) {
+        const std::uint64_t bytes = entry.is_directory()
+                                        ? tombstone_generation_bytes(entry.path())
+                                        : static_cast<std::uint64_t>(entry.file_size());
+        account_bytes(inventory.used, bytes);
+        inventory.candidates.push_back({.kind  = CandidateKind::Tombstone,
+                                        .path  = entry.path(),
+                                        .time  = entry.last_write_time(),
+                                        .bytes = bytes});
+    }
+
+    const std::filesystem::path sessions_root = options.root / "sessions";
+    for (const auto& session_entry : std::filesystem::directory_iterator(sessions_root)) {
+        if (!session_entry.is_directory()) { continue; }
+        const std::string digest        = session_entry.path().filename().string();
+        const std::string active_prefix = digest + "/";
+        const bool session_active =
+            std::any_of(impl.active_generations.begin(), impl.active_generations.end(),
+                        [&](const auto& entry) { return entry.first.starts_with(active_prefix); });
+        bool current_readable = true;
+        std::optional<std::string> current;
+        try {
+            current = current_generation(session_entry.path());
+        } catch (...) { current_readable = false; }
+        const std::filesystem::path generations = session_entry.path() / "generations";
+        std::error_code error;
+        if (!std::filesystem::is_directory(generations, error)) {
+            if (error && error != std::errc::no_such_file_or_directory) {
+                throw std::runtime_error("checkpoint generation scan failed");
+            }
+            continue;
+        }
+        std::uint64_t session_bytes = 0;
+        std::optional<std::filesystem::file_time_type> current_time;
+        for (const auto& entry : std::filesystem::directory_iterator(generations)) {
+            if (!entry.is_directory()) { continue; }
+            const std::string name    = entry.path().filename().string();
+            const std::uint64_t bytes = directory_bytes(entry.path());
+            account_bytes(inventory.used, bytes);
+            account_bytes(session_bytes, bytes);
+            const bool is_current = current && name == *current;
+            if (is_current) { current_time = entry.last_write_time(); }
+            if (protected_generation && entry.path() == *protected_generation) { continue; }
+            const std::string active_key = digest + "/" + name;
+            if (impl.active_generations.contains(active_key)) { continue; }
+            if (name.starts_with(".staging-")) {
+                inventory.candidates.push_back({.kind   = CandidateKind::AbandonedStaging,
+                                                .path   = entry.path(),
+                                                .digest = digest,
+                                                .name   = name,
+                                                .time   = entry.last_write_time(),
+                                                .bytes  = bytes});
+            } else if (current_readable && !is_current) {
+                inventory.candidates.push_back({.kind   = CandidateKind::StaleGeneration,
+                                                .path   = entry.path(),
+                                                .digest = digest,
+                                                .name   = name,
+                                                .time   = entry.last_write_time(),
+                                                .bytes  = bytes});
+            }
+        }
+        if (current_readable && current && current_time && !session_active &&
+            (!protected_session || session_entry.path() != *protected_session)) {
+            inventory.candidates.push_back({.kind   = CandidateKind::CurrentSession,
+                                            .path   = session_entry.path(),
+                                            .digest = digest,
+                                            .name   = *current,
+                                            .time   = *current_time,
+                                            .bytes  = session_bytes});
+        }
+    }
+    std::sort(inventory.candidates.begin(), inventory.candidates.end(),
+              [](const GenerationCandidate& left, const GenerationCandidate& right) {
+                  if (left.kind != right.kind) { return left.kind < right.kind; }
+                  if (left.time != right.time) { return left.time < right.time; }
+                  return left.path.generic_string() < right.path.generic_string();
+              });
+    return inventory;
+}
+
+[[nodiscard]] std::filesystem::path
+candidate_tombstone(const SessionCheckpointStoreOptions& options,
+                    const GenerationCandidate& candidate) {
+    if (candidate.kind == CandidateKind::CurrentSession) {
+        return options.root / ".tombstones" / candidate.digest;
+    }
+    return options.root / ".tombstones" / (candidate.digest + "--" + candidate.name);
+}
+
+[[nodiscard]] bool cleanup_tombstone(const SessionCheckpointStoreOptions& options,
+                                     const std::filesystem::path& path) {
+    if (options.tombstone_cleanup) {
+        if (!options.tombstone_cleanup(path)) { return false; }
+    } else {
+        std::error_code error;
+        std::filesystem::remove_all(path, error);
+        if (error) { return false; }
+    }
+    std::error_code error;
+    return !std::filesystem::exists(path, error) && !error;
+}
+
+void sync_rename_parents(const std::filesystem::path& source,
+                         const std::filesystem::path& destination) noexcept {
+    try {
+        sync_directory(source.parent_path());
+        sync_directory(destination.parent_path());
+    } catch (...) {}
+}
+
+[[nodiscard]] bool enforce_disk_quota_locked(
+    const SessionCheckpointStoreOptions& options, const SessionCheckpointStore::Impl& impl,
+    const std::optional<std::filesystem::path>& protected_generation = std::nullopt,
+    const std::optional<std::filesystem::path>& protected_session    = std::nullopt) {
+    GenerationInventory inventory =
+        inventory_generations(options, impl, protected_generation, protected_session);
+    for (const GenerationCandidate& candidate : inventory.candidates) {
+        const bool unconditional = candidate.kind == CandidateKind::Tombstone ||
+                                   candidate.kind == CandidateKind::AbandonedStaging;
+        if (inventory.used <= options.disk_quota_bytes && !unconditional) { continue; }
+        if (candidate.kind == CandidateKind::Tombstone) {
+            if (cleanup_tombstone(options, candidate.path)) { inventory.used -= candidate.bytes; }
+            continue;
+        }
+
+        std::error_code error;
+        const std::uint64_t reclaimed         = candidate.kind == CandidateKind::CurrentSession
+                                                    ? session_generation_bytes(candidate.path)
+                                                    : directory_bytes(candidate.path);
+        const std::filesystem::path tombstone = candidate_tombstone(options, candidate);
+        std::filesystem::rename(candidate.path, tombstone, error);
+        if (error) { continue; }
+        sync_rename_parents(candidate.path, tombstone);
+        if (!cleanup_tombstone(options, tombstone)) { continue; }
+        inventory.used -= std::min(inventory.used, reclaimed);
+    }
+    return inventory.used <= options.disk_quota_bytes;
+}
+
 class DirectoryCheckpointReader final : public ContinuationCheckpointReader {
 public:
     DirectoryCheckpointReader(std::filesystem::path root,
@@ -478,6 +704,7 @@ public:
         // Constructed by SessionCheckpointStore::load while Impl::mutex is held.
         ++owner_->active_generations[active_key_];
     }
+
     ~DirectoryCheckpointReader() override {
         std::lock_guard lock(owner_->mutex);
         const auto found = owner_->active_generations.find(active_key_);
@@ -487,8 +714,7 @@ public:
 
     std::optional<std::uint64_t> file_size(std::string_view path) const override {
         const auto found = files_.find(std::string(path));
-        return found == files_.end() ? std::nullopt
-                                     : std::optional<std::uint64_t>(found->second);
+        return found == files_.end() ? std::nullopt : std::optional<std::uint64_t>(found->second);
     }
 
     bool read_file(std::string_view path, std::uint64_t offset,
@@ -508,8 +734,8 @@ public:
         const std::size_t count = sought && !destination.empty()
                                       ? std::fread(destination.data(), 1, destination.size(), file)
                                       : 0;
-        const bool ok = sought && (destination.empty() || count == destination.size()) &&
-                        std::ferror(file) == 0;
+        const bool ok           = sought && (destination.empty() || count == destination.size()) &&
+                                  std::ferror(file) == 0;
         std::fclose(file);
         return ok;
     }
@@ -525,8 +751,7 @@ void quarantine_generation(const std::filesystem::path& session, const std::stri
     std::error_code error;
     const std::filesystem::path source = session / "generations" / generation;
     const std::filesystem::path target =
-        session / "generations" /
-        (generation + ".corrupt-" + std::to_string(unix_milliseconds()));
+        session / "generations" / (generation + ".corrupt-" + std::to_string(unix_milliseconds()));
     std::filesystem::rename(source, target, error);
     error.clear();
     std::filesystem::remove(session / "current", error);
@@ -545,7 +770,8 @@ std::vector<std::byte> encode_response_store_snapshot(const ResponseStoreSnapsho
     }
     std::unordered_map<const ResponseContextNode*, std::uint64_t> context_ids;
     std::vector<ResponseContext> contexts;
-    const auto add_context = [&](const auto& self, const ResponseContext& context) -> std::uint64_t {
+    const auto add_context = [&](const auto& self,
+                                 const ResponseContext& context) -> std::uint64_t {
         if (!context) { return 0; }
         const auto found = context_ids.find(context.get());
         if (found != context_ids.end()) { return found->second; }
@@ -555,7 +781,9 @@ std::vector<std::byte> encode_response_store_snapshot(const ResponseStoreSnapsho
         contexts.push_back(context);
         return id;
     };
-    for (const StoredResponse& response : snapshot.records) { (void)add_context(add_context, response.context); }
+    for (const StoredResponse& response : snapshot.records) {
+        (void)add_context(add_context, response.context);
+    }
 
     nlohmann::json encoded_contexts = nlohmann::json::array();
     for (const ResponseContext& context : contexts) {
@@ -572,22 +800,22 @@ std::vector<std::byte> encode_response_store_snapshot(const ResponseStoreSnapsho
         records.push_back(
             {{"id", response.id},
              {"session_key", response.session_key},
-             {"client_session_sha256",
-              response.client_session_sha256 ? nlohmann::json(*response.client_session_sha256)
-                                             : nlohmann::json(nullptr)},
-             {"previous_response_id",
-              response.previous_response_id ? nlohmann::json(*response.previous_response_id)
-                                            : nlohmann::json(nullptr)},
+             {"client_session_sha256", response.client_session_sha256
+                                           ? nlohmann::json(*response.client_session_sha256)
+                                           : nlohmann::json(nullptr)},
+             {"previous_response_id", response.previous_response_id
+                                          ? nlohmann::json(*response.previous_response_id)
+                                          : nlohmann::json(nullptr)},
              {"response", response.response},
              {"input_items", response.input_items},
              {"context", response.context ? context_ids.at(response.context.get()) : 0},
              {"preserve_thinking", response.preserve_thinking}});
     }
-    const nlohmann::json root = {{"schema_version", kSessionCheckpointSchemaVersion},
-                                 {"client_session_sha256", snapshot.client_session_sha256},
-                                 {"latest_response_id", snapshot.latest_response_id},
-                                 {"contexts", std::move(encoded_contexts)},
-                                 {"records", std::move(records)}};
+    const nlohmann::json root      = {{"schema_version", kSessionCheckpointSchemaVersion},
+                                      {"client_session_sha256", snapshot.client_session_sha256},
+                                      {"latest_response_id", snapshot.latest_response_id},
+                                      {"contexts", std::move(encoded_contexts)},
+                                      {"records", std::move(records)}};
     std::vector<std::uint8_t> cbor = nlohmann::json::to_cbor(root);
     if (cbor.size() > byte_limit) {
         throw std::length_error("response checkpoint exceeds staging limit");
@@ -606,8 +834,8 @@ decode_response_store_snapshot(std::span<const std::byte> bytes, std::size_t byt
         std::transform(bytes.begin(), bytes.end(), cbor.begin(),
                        [](std::byte value) { return std::to_integer<std::uint8_t>(value); });
         const nlohmann::json root = nlohmann::json::from_cbor(cbor, true, true);
-        if (!root.is_object() || root.at("schema_version").get<std::uint32_t>() !=
-                                     kSessionCheckpointSchemaVersion ||
+        if (!root.is_object() ||
+            root.at("schema_version").get<std::uint32_t>() != kSessionCheckpointSchemaVersion ||
             !root.at("contexts").is_array() || !root.at("records").is_array()) {
             return std::nullopt;
         }
@@ -642,8 +870,8 @@ decode_response_store_snapshot(std::span<const std::byte> bytes, std::size_t byt
         snapshot.records.reserve(root.at("records").size());
         for (const nlohmann::json& encoded : root.at("records")) {
             StoredResponse response;
-            response.id                    = encoded.at("id").get<std::string>();
-            response.session_key           = encoded.at("session_key").get<std::string>();
+            response.id          = encoded.at("id").get<std::string>();
+            response.session_key = encoded.at("session_key").get<std::string>();
             if (!encoded.at("client_session_sha256").is_null()) {
                 response.client_session_sha256 =
                     encoded.at("client_session_sha256").get<std::string>();
@@ -652,13 +880,12 @@ decode_response_store_snapshot(std::span<const std::byte> bytes, std::size_t byt
                 response.previous_response_id =
                     encoded.at("previous_response_id").get<std::string>();
             }
-            response.response     = encoded.at("response");
-            response.input_items  = encoded.at("input_items").get<std::vector<nlohmann::json>>();
+            response.response    = encoded.at("response");
+            response.input_items = encoded.at("input_items").get<std::vector<nlohmann::json>>();
             response.preserve_thinking = encoded.at("preserve_thinking").get<bool>();
-            const std::size_t context = encoded.at("context").get<std::size_t>();
-            if (context >= contexts.size() || response.id.empty() ||
-                response.session_key.empty() || !response.response.is_object() ||
-                !response.client_session_sha256 ||
+            const std::size_t context  = encoded.at("context").get<std::size_t>();
+            if (context >= contexts.size() || response.id.empty() || response.session_key.empty() ||
+                !response.response.is_object() || !response.client_session_sha256 ||
                 *response.client_session_sha256 != snapshot.client_session_sha256 ||
                 !ids.insert(response.id).second) {
                 return std::nullopt;
@@ -669,9 +896,7 @@ decode_response_store_snapshot(std::span<const std::byte> bytes, std::size_t byt
         }
         return has_latest ? std::optional<ResponseStoreSnapshot>(std::move(snapshot))
                           : std::nullopt;
-    } catch (...) {
-        return std::nullopt;
-    }
+    } catch (...) { return std::nullopt; }
 }
 
 SessionCheckpointStore::SessionCheckpointStore(SessionCheckpointStoreOptions options)
@@ -680,17 +905,20 @@ SessionCheckpointStore::SessionCheckpointStore(SessionCheckpointStoreOptions opt
         throw std::invalid_argument("checkpoint store options must be positive");
     }
     std::filesystem::create_directories(options_.root / "sessions");
+    std::filesystem::create_directories(options_.root / ".tombstones");
+    collect_garbage();
 }
 
 bool SessionCheckpointStore::valid_digest(std::string_view digest) noexcept {
-    return digest.size() == 64 &&
-           std::all_of(digest.begin(), digest.end(), [](unsigned char byte) {
+    return digest.size() == 64 && std::all_of(digest.begin(), digest.end(), [](unsigned char byte) {
                return (byte >= '0' && byte <= '9') || (byte >= 'a' && byte <= 'f');
            });
 }
 
 std::filesystem::path SessionCheckpointStore::session_path(std::string_view digest) const {
-    if (!valid_digest(digest)) { throw std::invalid_argument("checkpoint session digest is invalid"); }
+    if (!valid_digest(digest)) {
+        throw std::invalid_argument("checkpoint session digest is invalid");
+    }
     return options_.root / "sessions" / std::string(digest);
 }
 
@@ -703,13 +931,13 @@ SessionCheckpointStore::save(const ResponseStoreSnapshot& responses,
         return std::nullopt;
     }
     std::lock_guard lock(impl_->mutex);
-    const std::filesystem::path session = session_path(responses.client_session_sha256);
+    const std::filesystem::path session     = session_path(responses.client_session_sha256);
     const std::filesystem::path generations = session / "generations";
     std::filesystem::create_directories(generations);
     const std::uint64_t ordinal = impl_->sequence.fetch_add(1, std::memory_order_relaxed);
-    const std::string generation = std::to_string(unix_milliseconds()) + "-" +
-                                   std::to_string(ordinal);
-    const std::filesystem::path staging = generations / (".staging-" + generation);
+    const std::string generation =
+        std::to_string(unix_milliseconds()) + "-" + std::to_string(ordinal);
+    const std::filesystem::path staging   = generations / (".staging-" + generation);
     const std::filesystem::path published = generations / generation;
     std::error_code cleanup_error;
     std::filesystem::remove_all(staging, cleanup_error);
@@ -723,8 +951,7 @@ SessionCheckpointStore::save(const ResponseStoreSnapshot& responses,
             throw std::runtime_error("response checkpoint write failed");
         }
         std::optional<ContinuationCheckpointStats> engine = exporter(writer);
-        if (!engine || engine->frontier_tokens == 0 || engine->restored_tokens == 0 ||
-            engine->restored_tokens > engine->frontier_tokens) {
+        if (!engine || !valid_checkpoint_stats(*engine)) {
             std::filesystem::remove_all(staging, cleanup_error);
             return std::nullopt;
         }
@@ -732,7 +959,9 @@ SessionCheckpointStore::save(const ResponseStoreSnapshot& responses,
         if (!payloads) { throw std::runtime_error("checkpoint payload set is incomplete"); }
 
         nlohmann::json checksum_body = nlohmann::json::array();
-        for (const FileDescriptor& file : *payloads) { checksum_body.push_back(descriptor_json(file)); }
+        for (const FileDescriptor& file : *payloads) {
+            checksum_body.push_back(descriptor_json(file));
+        }
         const std::string checksum_text = checksum_body.dump();
         if (!writer.write_store_file(
                 "checksums.json", 0, checksum_text.size(),
@@ -742,14 +971,24 @@ SessionCheckpointStore::save(const ResponseStoreSnapshot& responses,
         payloads = writer.files();
         if (!payloads) { throw std::runtime_error("checkpoint checksum set is incomplete"); }
 
-        std::uint64_t payload_bytes = 0;
-        nlohmann::json manifest_files = nlohmann::json::array();
+        std::uint64_t payload_bytes        = 0;
+        std::uint64_t engine_payload_bytes = 0;
+        nlohmann::json manifest_files      = nlohmann::json::array();
         for (const FileDescriptor& file : *payloads) {
             if (file.bytes > std::numeric_limits<std::uint64_t>::max() - payload_bytes) {
                 throw std::overflow_error("checkpoint payload byte count overflowed");
             }
             payload_bytes += file.bytes;
+            if (file.path.starts_with("engine/")) {
+                if (file.bytes > std::numeric_limits<std::uint64_t>::max() - engine_payload_bytes) {
+                    throw std::overflow_error("checkpoint engine byte count overflowed");
+                }
+                engine_payload_bytes += file.bytes;
+            }
             manifest_files.push_back(descriptor_json(file));
+        }
+        if (engine_payload_bytes != engine->payload_bytes) {
+            throw std::runtime_error("checkpoint engine payload summary is inconsistent");
         }
         const nlohmann::json manifest = {
             {"artifact_type", "ninfer_session_checkpoint"},
@@ -769,63 +1008,21 @@ SessionCheckpointStore::save(const ResponseStoreSnapshot& responses,
         const std::string manifest_text = manifest.dump();
         write_synced(staging / "manifest.json", manifest_text);
         sync_directory(staging);
+        // Reclaim before changing current. The staging generation and its session are protected,
+        // so quota or cleanup failure leaves the previously published generation untouched.
         const std::uint64_t total_bytes = directory_bytes(staging);
-        if (total_bytes > options_.disk_quota_bytes) {
+        if (total_bytes > options_.disk_quota_bytes ||
+            !enforce_disk_quota_locked(options_, *impl_, staging, session)) {
             std::filesystem::remove_all(staging, cleanup_error);
             return std::nullopt;
         }
 
         std::filesystem::rename(staging, published);
         sync_directory(generations);
-        const std::filesystem::path current_staging =
-            session / (".current-" + generation);
+        const std::filesystem::path current_staging = session / (".current-" + generation);
         write_synced(current_staging, generation + "\n");
         replace_path(current_staging, session / "current");
         sync_directory(session);
-
-        // Do not call the public locking wrapper while the transaction lock is held.
-        struct Candidate {
-            std::filesystem::path path;
-            std::filesystem::file_time_type time;
-            std::uint64_t bytes = 0;
-            bool abandoned_staging = false;
-        };
-        std::vector<Candidate> candidates;
-        std::uint64_t used = 0;
-        const std::filesystem::path sessions_root = options_.root / "sessions";
-        for (const auto& session_entry : std::filesystem::directory_iterator(sessions_root)) {
-            if (!session_entry.is_directory()) { continue; }
-            std::optional<std::string> current;
-            try { current = current_generation(session_entry.path()); } catch (...) {}
-            const std::filesystem::path dirs = session_entry.path() / "generations";
-            if (!std::filesystem::exists(dirs)) { continue; }
-            for (const auto& entry : std::filesystem::directory_iterator(dirs)) {
-                if (!entry.is_directory()) { continue; }
-                const std::string name = entry.path().filename().string();
-                const std::uint64_t size = directory_bytes(entry.path());
-                if (size > std::numeric_limits<std::uint64_t>::max() - used) {
-                    throw std::overflow_error("checkpoint quota accounting overflowed");
-                }
-                used += size;
-                const std::string active_key =
-                    session_entry.path().filename().string() + "/" + name;
-                if ((name.starts_with(".staging-") || !current || name != *current) &&
-                    !impl_->active_generations.contains(active_key)) {
-                    candidates.push_back({entry.path(), entry.last_write_time(), size,
-                                          name.starts_with(".staging-")});
-                }
-            }
-        }
-        std::sort(candidates.begin(), candidates.end(), [](const Candidate& left,
-                                                           const Candidate& right) {
-            return left.time < right.time;
-        });
-        for (const Candidate& candidate : candidates) {
-            if (used <= options_.disk_quota_bytes && !candidate.abandoned_staging) { continue; }
-            std::filesystem::remove_all(candidate.path, cleanup_error);
-            if (!cleanup_error) { used -= candidate.bytes; }
-            cleanup_error.clear();
-        }
 
         return SessionCheckpointSaveResult{
             .generation = generation, .engine = *engine, .bytes = total_bytes};
@@ -835,125 +1032,138 @@ SessionCheckpointStore::save(const ResponseStoreSnapshot& responses,
     }
 }
 
-std::optional<VerifiedSessionCheckpoint>
+SessionCheckpointLoadResult
 SessionCheckpointStore::load(std::string_view session_sha256,
                              const nlohmann::json& runtime_fingerprint,
                              std::optional<std::string_view> required_response_id) {
-    if (!valid_digest(session_sha256) || !runtime_fingerprint.is_object()) { return std::nullopt; }
+    if (!valid_digest(session_sha256) || !runtime_fingerprint.is_object()) {
+        return {.state = SessionCheckpointLoadState::Missing};
+    }
     std::lock_guard lock(impl_->mutex);
     const std::filesystem::path session = session_path(session_sha256);
     std::optional<std::string> generation;
     try {
         generation = current_generation(session);
-    } catch (...) {
-        return std::nullopt;
-    }
-    if (!generation) { return std::nullopt; }
+    } catch (const CheckpointCorruption&) {
+        return {.state = SessionCheckpointLoadState::Corrupt};
+    } catch (...) { return {.state = SessionCheckpointLoadState::Unavailable}; }
+    if (!generation) { return {.state = SessionCheckpointLoadState::Missing}; }
     const std::filesystem::path root = session / "generations" / *generation;
     try {
         const nlohmann::json manifest =
             nlohmann::json::parse(read_text_bounded(root / "manifest.json", 16ULL << 20));
         if (!manifest.is_object() ||
             manifest.at("artifact_type").get<std::string>() != "ninfer_session_checkpoint" ||
-            manifest.at("schema_version").get<std::uint32_t>() !=
-                kSessionCheckpointSchemaVersion ||
+            manifest.at("schema_version").get<std::uint32_t>() != kSessionCheckpointSchemaVersion ||
             manifest.at("session_sha256").get<std::string>() != session_sha256 ||
             manifest.at("generation").get<std::string>() != *generation) {
-            throw std::runtime_error("checkpoint manifest identity is corrupt");
+            throw CheckpointCorruption("checkpoint manifest identity is corrupt");
         }
         if (manifest.at("runtime_fingerprint") != runtime_fingerprint) {
-            return std::nullopt;
+            return {.state = SessionCheckpointLoadState::Incompatible};
         }
         if (!manifest.at("files").is_array() || manifest.at("files").empty() ||
             manifest.at("files").size() > 4096) {
-            throw std::runtime_error("checkpoint manifest file set is corrupt");
+            throw CheckpointCorruption("checkpoint manifest file set is corrupt");
         }
         std::map<std::string, std::uint64_t> allowed;
-        std::uint64_t verified_bytes = 0;
+        std::uint64_t verified_bytes        = 0;
+        std::uint64_t verified_engine_bytes = 0;
         for (const nlohmann::json& encoded : manifest.at("files")) {
             std::optional<FileDescriptor> expected = descriptor_from_json(encoded);
             if (!expected || !allowed.emplace(expected->path, expected->bytes).second) {
-                throw std::runtime_error("checkpoint manifest file descriptor is corrupt");
+                throw CheckpointCorruption("checkpoint manifest file descriptor is corrupt");
             }
             const FileDescriptor actual = hash_file(root, expected->path, expected->bytes);
             if (actual.sha256 != expected->sha256) {
-                throw std::runtime_error("checkpoint payload checksum mismatch");
+                throw CheckpointCorruption("checkpoint payload checksum mismatch");
             }
             if (expected->bytes > std::numeric_limits<std::uint64_t>::max() - verified_bytes) {
-                throw std::overflow_error("checkpoint verified byte count overflowed");
+                throw CheckpointCorruption("checkpoint verified byte count overflowed");
             }
             verified_bytes += expected->bytes;
+            if (expected->path.starts_with("engine/")) {
+                if (expected->bytes >
+                    std::numeric_limits<std::uint64_t>::max() - verified_engine_bytes) {
+                    throw CheckpointCorruption("checkpoint verified engine byte count overflowed");
+                }
+                verified_engine_bytes += expected->bytes;
+            }
+        }
+        if (manifest.at("payload_bytes").get<std::uint64_t>() != verified_bytes ||
+            manifest.at("engine_payload_bytes").get<std::uint64_t>() != verified_engine_bytes) {
+            throw CheckpointCorruption("checkpoint manifest payload summary is corrupt");
         }
         const auto response_file = allowed.find("responses.cbor");
         if (response_file == allowed.end() || response_file->second > options_.staging_bytes) {
-            throw std::runtime_error("checkpoint response payload is unavailable");
+            throw CheckpointCorruption("checkpoint response payload descriptor is corrupt");
         }
         const std::vector<std::byte> response_bytes =
             read_bounded(root / "responses.cbor", options_.staging_bytes);
         std::optional<ResponseStoreSnapshot> responses =
             decode_response_store_snapshot(response_bytes, options_.staging_bytes);
         if (!responses || responses->client_session_sha256 != session_sha256 ||
-            responses->latest_response_id !=
-                manifest.at("latest_response_id").get<std::string>() ||
+            responses->latest_response_id != manifest.at("latest_response_id").get<std::string>() ||
             responses->records.size() != manifest.at("response_records").get<std::size_t>()) {
-            throw std::runtime_error("checkpoint response state is corrupt");
+            throw CheckpointCorruption("checkpoint response state is corrupt");
         }
         if (required_response_id &&
             std::none_of(responses->records.begin(), responses->records.end(),
                          [&](const StoredResponse& response) {
                              return response.id == *required_response_id;
                          })) {
-            return std::nullopt;
+            return {.state = SessionCheckpointLoadState::Missing};
         }
         ContinuationCheckpointStats expected{
             .frontier_tokens = manifest.at("frontier_tokens").get<std::uint32_t>(),
             .restored_tokens = manifest.at("restored_tokens").get<std::uint32_t>(),
-            .payload_bytes = manifest.at("engine_payload_bytes").get<std::uint64_t>(),
+            .payload_bytes   = manifest.at("engine_payload_bytes").get<std::uint64_t>(),
         };
-        if (expected.frontier_tokens == 0 || expected.restored_tokens == 0 ||
-            expected.restored_tokens > expected.frontier_tokens) {
-            throw std::runtime_error("checkpoint engine summary is corrupt");
+        if (!valid_checkpoint_stats(expected)) {
+            throw CheckpointCorruption("checkpoint engine summary is corrupt");
         }
         const std::string active_key = std::string(session_sha256) + "/" + *generation;
-        auto reader = std::make_shared<DirectoryCheckpointReader>(
-            root, std::move(allowed), impl_, active_key);
-        return VerifiedSessionCheckpoint{.responses = std::move(*responses),
-                                         .engine = std::move(reader),
-                                         .expected_engine = expected,
-                                         .generation = *generation,
-                                         .bytes = directory_bytes(root)};
-    } catch (...) {
+        auto reader = std::make_shared<DirectoryCheckpointReader>(root, std::move(allowed), impl_,
+                                                                  active_key);
+        return {.state      = SessionCheckpointLoadState::Available,
+                .checkpoint = VerifiedSessionCheckpoint{.responses       = std::move(*responses),
+                                                        .engine          = std::move(reader),
+                                                        .expected_engine = expected,
+                                                        .generation      = *generation,
+                                                        .bytes           = directory_bytes(root)}};
+    } catch (const CheckpointCorruption&) {
         quarantine_generation(session, *generation);
-        return std::nullopt;
-    }
+        return {.state = SessionCheckpointLoadState::Corrupt};
+    } catch (const nlohmann::json::exception&) {
+        quarantine_generation(session, *generation);
+        return {.state = SessionCheckpointLoadState::Corrupt};
+    } catch (...) { return {.state = SessionCheckpointLoadState::Unavailable}; }
 }
 
-nlohmann::json SessionCheckpointStore::status(
-    std::string_view session_sha256, const nlohmann::json& runtime_fingerprint) const {
+nlohmann::json SessionCheckpointStore::status(std::string_view session_sha256,
+                                              const nlohmann::json& runtime_fingerprint) const {
     nlohmann::json result = {{"artifact_type", "ninfer_session_checkpoint_status"},
                              {"schema_version", kSessionCheckpointSchemaVersion},
-                             {"session_sha256", session_sha256},
                              {"state", "missing"}};
     if (!valid_digest(session_sha256) || !runtime_fingerprint.is_object()) { return result; }
     std::lock_guard lock(impl_->mutex);
     try {
-        const std::filesystem::path session = session_path(session_sha256);
+        const std::filesystem::path session         = session_path(session_sha256);
         const std::optional<std::string> generation = current_generation(session);
         if (!generation) { return result; }
         const std::filesystem::path root = session / "generations" / *generation;
         const nlohmann::json manifest =
             nlohmann::json::parse(read_text_bounded(root / "manifest.json", 16ULL << 20));
-        if (manifest.at("artifact_type").get<std::string>() != "ninfer_session_checkpoint" ||
-            manifest.at("schema_version").get<std::uint32_t>() !=
-                kSessionCheckpointSchemaVersion ||
+        if (!manifest.is_object() ||
+            manifest.at("artifact_type").get<std::string>() != "ninfer_session_checkpoint" ||
+            manifest.at("schema_version").get<std::uint32_t>() != kSessionCheckpointSchemaVersion ||
             manifest.at("session_sha256").get<std::string>() != session_sha256 ||
             manifest.at("generation").get<std::string>() != *generation) {
-            result["state"] = "corrupt";
-            return result;
+            throw CheckpointCorruption("checkpoint manifest identity is corrupt");
         }
-        result["state"] = manifest.at("runtime_fingerprint") == runtime_fingerprint
-                               ? "available"
-                               : "incompatible";
+        result["state"]              = manifest.at("runtime_fingerprint") == runtime_fingerprint
+                                           ? "available"
+                                           : "incompatible";
         result["generation"]         = *generation;
         result["created_at_unix_ms"] = manifest.at("created_at_unix_ms");
         result["bytes"]              = directory_bytes(root);
@@ -961,70 +1171,47 @@ nlohmann::json SessionCheckpointStore::status(
         result["restored_tokens"]    = manifest.at("restored_tokens");
         result["response_records"]   = manifest.at("response_records");
         return result;
-    } catch (...) {
+    } catch (const CheckpointCorruption&) {
         result["state"] = "corrupt";
+        return result;
+    } catch (const nlohmann::json::exception&) {
+        result["state"] = "corrupt";
+        return result;
+    } catch (...) {
+        result["state"] = "unavailable";
         return result;
     }
 }
 
-bool SessionCheckpointStore::erase(std::string_view session_sha256) {
-    if (!valid_digest(session_sha256)) { return false; }
+SessionCheckpointEraseResult SessionCheckpointStore::erase(std::string_view session_sha256) {
+    if (!valid_digest(session_sha256)) { return SessionCheckpointEraseResult::Missing; }
     std::lock_guard lock(impl_->mutex);
     const std::string prefix = std::string(session_sha256) + "/";
     if (std::any_of(impl_->active_generations.begin(), impl_->active_generations.end(),
                     [&](const auto& entry) { return entry.first.starts_with(prefix); })) {
-        return false;
+        return SessionCheckpointEraseResult::Conflict;
     }
+    const std::filesystem::path session = session_path(session_sha256);
+    const std::filesystem::path tombstone =
+        options_.root / ".tombstones" / std::string(session_sha256);
     std::error_code error;
-    const std::uintmax_t removed = std::filesystem::remove_all(session_path(session_sha256), error);
-    if (!error) { sync_directory(options_.root / "sessions"); }
-    return !error && removed != 0;
+    std::filesystem::rename(session, tombstone, error);
+    if (error) {
+        std::error_code status_error;
+        const bool source_exists = std::filesystem::exists(session, status_error);
+        if (error == std::errc::no_such_file_or_directory || (!status_error && !source_exists)) {
+            return SessionCheckpointEraseResult::Missing;
+        }
+        return SessionCheckpointEraseResult::Conflict;
+    }
+    sync_rename_parents(session, tombstone);
+    (void)cleanup_tombstone(options_, tombstone);
+    return SessionCheckpointEraseResult::Erased;
 }
 
 void SessionCheckpointStore::collect_garbage() {
     std::lock_guard lock(impl_->mutex);
-    struct Candidate {
-        std::filesystem::path path;
-        std::filesystem::file_time_type time;
-        std::uint64_t bytes = 0;
-        bool abandoned_staging = false;
-    };
-    std::vector<Candidate> candidates;
-    std::uint64_t used = 0;
-    const std::filesystem::path sessions_root = options_.root / "sessions";
-    for (const auto& session : std::filesystem::directory_iterator(sessions_root)) {
-        if (!session.is_directory()) { continue; }
-        std::optional<std::string> current;
-        try { current = current_generation(session.path()); } catch (...) {}
-        const std::filesystem::path generations = session.path() / "generations";
-        if (!std::filesystem::exists(generations)) { continue; }
-        for (const auto& entry : std::filesystem::directory_iterator(generations)) {
-            if (!entry.is_directory()) { continue; }
-            const std::string name = entry.path().filename().string();
-            const std::uint64_t bytes = directory_bytes(entry.path());
-            if (bytes > std::numeric_limits<std::uint64_t>::max() - used) {
-                throw std::overflow_error("checkpoint quota accounting overflowed");
-            }
-            used += bytes;
-            const std::string active_key = session.path().filename().string() + "/" + name;
-            if ((name.starts_with(".staging-") || !current || name != *current) &&
-                !impl_->active_generations.contains(active_key)) {
-                candidates.push_back({entry.path(), entry.last_write_time(), bytes,
-                                      name.starts_with(".staging-")});
-            }
-        }
-    }
-    std::sort(candidates.begin(), candidates.end(), [](const Candidate& left,
-                                                       const Candidate& right) {
-        return left.time < right.time;
-    });
-    std::error_code error;
-    for (const Candidate& candidate : candidates) {
-        if (used <= options_.disk_quota_bytes && !candidate.abandoned_staging) { continue; }
-        std::filesystem::remove_all(candidate.path, error);
-        if (!error) { used -= candidate.bytes; }
-        error.clear();
-    }
+    (void)enforce_disk_quota_locked(options_, *impl_);
 }
 
 } // namespace ninfer::serve

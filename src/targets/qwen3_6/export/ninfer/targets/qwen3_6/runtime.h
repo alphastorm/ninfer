@@ -637,9 +637,9 @@ template <class Variant>
 struct RestoredContinuation {
     ContinuationHandle<Variant> handle;
     ContinuationSummary summary;
-    runtime::ResourceVector resources;
     runtime::ContinuationCheckpointStats stats;
 };
+
 template <class Variant>
 class Program {
 public:
@@ -725,9 +725,6 @@ public:
     [[nodiscard]] std::optional<RestoredContinuation<Variant>>
     restore_continuation(const runtime::ContinuationCheckpointReader& reader,
                          std::size_t staging_bytes);
-    [[nodiscard]] std::array<runtime::DeviceResources, 1U << kMaximumConcurrency>
-    project_protected_resources(std::span<const ProtectedPrivateOwner<Variant>> private_owners,
-                                std::span<const ProtectedSharedOwner<Variant>> shared_owners) const;
     void fail_all_cleanup() noexcept;
 
     [[nodiscard]] bool

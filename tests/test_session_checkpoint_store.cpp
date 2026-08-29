@@ -1,4 +1,4 @@
-#include "core/sha256.h"
+#include "runtime/contract/checkpoint_sha256.h"
 #include "serve/session_checkpoint_store.h"
 
 #include <nlohmann/json.hpp>
@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <string>
@@ -32,10 +33,11 @@ class TemporaryDirectory {
 public:
     TemporaryDirectory() {
         const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-        path = std::filesystem::temp_directory_path() /
-               ("ninfer-checkpoint-test-" + std::to_string(stamp));
+        path             = std::filesystem::temp_directory_path() /
+                           ("ninfer-checkpoint-test-" + std::to_string(stamp));
         std::filesystem::create_directories(path);
     }
+
     ~TemporaryDirectory() {
         std::error_code error;
         std::filesystem::remove_all(path, error);
@@ -56,13 +58,13 @@ ChatTurn rich_turn() {
     turn.content.push_back(std::move(image));
     turn.tool_calls.push_back(serve::ToolCall{
         .id = "call_private", .name = "workspace_diff", .arguments_json = "{\"x\":1}"});
-    turn.reasoning_content = "preserved private reasoning";
+    turn.reasoning_content                        = "preserved private reasoning";
     turn.shared_cache_boundaries_after_text_bytes = {7, 29};
     return turn;
 }
 
-ResponseStoreSnapshot sample_snapshot() {
-    const std::string digest(64, 'a');
+ResponseStoreSnapshot sample_snapshot(char digest_byte = 'a') {
+    const std::string digest(64, digest_byte);
     ChatTurn user;
     user.role = ChatRole::User;
     ContentPart text;
@@ -70,7 +72,7 @@ ResponseStoreSnapshot sample_snapshot() {
     text.text     = "marker private text";
     text.type_raw = "input_text";
     user.content.push_back(std::move(text));
-    const ResponseContext root = append_response_context({}, {std::move(user)});
+    const ResponseContext root  = append_response_context({}, {std::move(user)});
     const ResponseContext child = append_response_context(root, {rich_turn()});
 
     StoredResponse first;
@@ -87,14 +89,15 @@ ResponseStoreSnapshot sample_snapshot() {
     second.client_session_sha256 = digest;
     second.previous_response_id  = first.id;
     second.response = {{"id", second.id}, {"object", "response"}, {"status", "completed"}};
-    second.input_items.push_back({{"type", "function_call_output"},
-                                  {"call_id", "call_private"},
-                                  {"output", "tool bytes private"}});
+    second.input_items.push_back(
+        {{"type", "function_call_output"},
+         {"call_id", "call_private"},
+         {"output", "diff --git a/workspace.txt b/workspace.txt\n+exact marker\n"}});
     second.context           = child;
     second.preserve_thinking = true;
     return {.client_session_sha256 = digest,
-            .latest_response_id = second.id,
-            .records = {std::move(first), std::move(second)}};
+            .latest_response_id    = second.id,
+            .records               = {std::move(first), std::move(second)}};
 }
 
 nlohmann::json fingerprint(std::string artifact = "artifact-sha-a") {
@@ -115,6 +118,45 @@ std::vector<std::byte> engine_payload() {
     return bytes;
 }
 
+std::uint64_t regular_file_bytes(const std::filesystem::path& root) {
+    if (!std::filesystem::exists(root)) { return 0; }
+    if (std::filesystem::is_regular_file(root)) {
+        return static_cast<std::uint64_t>(std::filesystem::file_size(root));
+    }
+    std::uint64_t total = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(root)) {
+        if (entry.is_regular_file()) { total += static_cast<std::uint64_t>(entry.file_size()); }
+    }
+    return total;
+}
+
+std::uint64_t retained_generation_bytes(const std::filesystem::path& root) {
+    std::uint64_t total                  = 0;
+    const std::filesystem::path sessions = root / "sessions";
+    if (std::filesystem::exists(sessions)) {
+        for (const auto& session : std::filesystem::directory_iterator(sessions)) {
+            if (session.is_directory()) {
+                total += regular_file_bytes(session.path() / "generations");
+            }
+        }
+    }
+    const std::filesystem::path tombstones = root / ".tombstones";
+    if (std::filesystem::exists(tombstones)) {
+        for (const auto& entry : std::filesystem::directory_iterator(tombstones)) {
+            const bool whole_session =
+                entry.path().filename().string().find("--") == std::string::npos;
+            total +=
+                regular_file_bytes(whole_session ? entry.path() / "generations" : entry.path());
+        }
+    }
+    return total;
+}
+
+std::string read_file_bytes(const std::filesystem::path& path) {
+    std::ifstream input(path, std::ios::binary);
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
 bool write_chunked(ContinuationCheckpointWriter& writer, std::string_view path,
                    std::span<const std::byte> bytes) {
     std::uint64_t offset = 0;
@@ -131,19 +173,17 @@ bool write_chunked(ContinuationCheckpointWriter& writer, std::string_view path,
 
 int test_sha256_streaming() {
     const std::string input = "abc";
-    crypto::Sha256 streaming;
+    runtime::Sha256 streaming;
     streaming.update(std::as_bytes(std::span(input.data(), 1)));
     streaming.update(std::as_bytes(std::span(input.data() + 1, input.size() - 1)));
     int failures = 0;
-    failures += check(
-        crypto::sha256_hex(streaming.finish()) ==
-            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-        "streaming SHA-256 matches the FIPS abc vector");
+    failures += check(runtime::sha256_hex(streaming.finish()) ==
+                          "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+                      "streaming SHA-256 matches the FIPS abc vector");
     const std::span<const std::byte> empty;
-    failures += check(
-        crypto::sha256_hex(crypto::sha256(empty)) ==
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        "SHA-256 matches the FIPS empty vector");
+    failures += check(runtime::sha256_hex(runtime::sha256(empty)) ==
+                          "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                      "SHA-256 matches the FIPS empty vector");
     return failures;
 }
 
@@ -159,57 +199,74 @@ int test_codec_round_trip() {
                           decoded->latest_response_id == original.latest_response_id,
                       "response ids and lineage survive codec");
     const StoredResponse& second = decoded->records.back();
-    failures += check(second.previous_response_id == "resp_private_first" &&
-                          second.preserve_thinking,
-                      "parent and preserve-thinking state survive codec");
+    failures +=
+        check(second.previous_response_id == "resp_private_first" && second.preserve_thinking,
+              "parent and preserve-thinking state survive codec");
     const std::vector<ChatTurn> turns = flatten_response_context(second.context);
-    failures += check(turns.size() == 2 && turns.back().tool_calls.size() == 1 &&
+    failures += check(turns.size() == 2 && turns.front().content.size() == 1 &&
+                          turns.front().content[0].text == "marker private text",
+                      "exact continuation marker survives codec");
+    failures += check(turns.back().tool_calls.size() == 1 &&
                           turns.back().tool_calls[0].arguments_json == "{\"x\":1}",
-                      "tool calls and context DAG survive codec");
+                      "typed tool call survives codec");
+    failures += check(second.input_items == original.records.back().input_items &&
+                          second.input_items.front().at("output") ==
+                              "diff --git a/workspace.txt b/workspace.txt\n+exact marker\n",
+                      "nonempty workspace diff and typed tool result survive byte-exactly");
     failures += check(turns.back().content.size() == 1 &&
                           turns.back().content[0].source.bytes ==
                               std::vector<std::uint8_t>({0, 1, 2, 255}) &&
                           turns.back().reasoning_content == "preserved private reasoning",
                       "media bytes and reasoning survive codec");
-    const std::vector<std::byte> reencoded =
-        encode_response_store_snapshot(*decoded, 1ULL << 20);
+    const std::vector<std::byte> reencoded = encode_response_store_snapshot(*decoded, 1ULL << 20);
     failures += check(encoded == reencoded, "response snapshot has a stable canonical encoding");
     ResponseStore live(4, 1ULL << 20);
     live.put(original.records.front());
     bool duplicate_external_commit = false;
-    failures += check(!live.restore_session(original, [&] {
-                          duplicate_external_commit = true;
-                          return true;
-                      }) &&
-                          !duplicate_external_commit && live.size() == 1 &&
-                          live.get("resp_private_first") != nullptr &&
-                          live.get("resp_private_second") == nullptr,
-                      "invalid ResponseStore restore leaves both transaction sides unchanged");
+    failures += check(
+        !live.restore_session(original,
+                              [&] {
+                                  duplicate_external_commit = true;
+                                  return true;
+                              }) &&
+            !duplicate_external_commit && live.size() == 1 &&
+            live.get_for_session("resp_private_first",
+                                 std::optional<std::string>{original.client_session_sha256}) !=
+                nullptr &&
+            live.get_for_session("resp_private_second",
+                                 std::optional<std::string>{original.client_session_sha256}) ==
+                nullptr,
+        "invalid ResponseStore restore leaves both transaction sides unchanged");
 
     ResponseStore gated(4, 1ULL << 20);
     bool failed_external_commit = false;
-    failures += check(!gated.restore_session(original, [&] {
-                          failed_external_commit = true;
-                          return false;
-                      }) &&
+    failures += check(!gated.restore_session(original,
+                                             [&] {
+                                                 failed_external_commit = true;
+                                                 return false;
+                                             }) &&
                           failed_external_commit && gated.size() == 0,
                       "failed external restore does not publish Responses state");
-    failures += check(gated.restore_session(original, [] { return true; }) && gated.size() == 2 &&
-                          gated.get("resp_private_first") != nullptr &&
-                          gated.get("resp_private_second") != nullptr,
-                      "successful external restore atomically publishes Responses state");
+    failures += check(
+        gated.restore_session(original, [] { return true; }) && gated.size() == 2 &&
+            gated.get_for_session("resp_private_first",
+                                  std::optional<std::string>{original.client_session_sha256}) !=
+                nullptr &&
+            gated.get_for_session("resp_private_second",
+                                  std::optional<std::string>{original.client_session_sha256}) !=
+                nullptr,
+        "successful external restore atomically publishes Responses state");
     return failures;
 }
 
 int test_transaction_restart_compatibility_and_corruption() {
     TemporaryDirectory temporary;
     const ResponseStoreSnapshot responses = sample_snapshot();
-    const std::vector<std::byte> payload = engine_payload();
-    SessionCheckpointStore store({.root = temporary.path,
-                                  .disk_quota_bytes = 8ULL << 20,
-                                  .staging_bytes = 1ULL << 20});
-    const auto exporter = [&](ContinuationCheckpointWriter& writer)
-        -> std::optional<ContinuationCheckpointStats> {
+    const std::vector<std::byte> payload  = engine_payload();
+    SessionCheckpointStore store(
+        {.root = temporary.path, .disk_quota_bytes = 8ULL << 20, .staging_bytes = 1ULL << 20});
+    const auto exporter =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
         const std::string metadata = "engine-metadata-v2";
         if (!write_chunked(writer, "engine/metadata.bin",
                            std::as_bytes(std::span(metadata.data(), metadata.size()))) ||
@@ -218,7 +275,7 @@ int test_transaction_restart_compatibility_and_corruption() {
         }
         return ContinuationCheckpointStats{.frontier_tokens = 100000,
                                            .restored_tokens = 97500,
-                                           .payload_bytes = payload.size() + metadata.size()};
+                                           .payload_bytes   = payload.size() + metadata.size()};
     };
 
     int failures = 0;
@@ -228,8 +285,8 @@ int test_transaction_restart_compatibility_and_corruption() {
     if (!saved) { return failures; }
     const std::filesystem::path session =
         temporary.path / "sessions" / responses.client_session_sha256;
-    failures += check(std::filesystem::is_regular_file(
-                          session / "generations" / saved->generation / "manifest.json") &&
+    failures += check(std::filesystem::is_regular_file(session / "generations" / saved->generation /
+                                                       "manifest.json") &&
                           std::filesystem::is_regular_file(session / "current"),
                       "payload, manifest, and current pointer are published");
 
@@ -237,43 +294,49 @@ int test_transaction_restart_compatibility_and_corruption() {
     const std::filesystem::path interrupted = session / "generations" / ".staging-interrupted";
     std::filesystem::create_directories(interrupted);
     std::ofstream(interrupted / "partial.bin", std::ios::binary) << "partial";
-    SessionCheckpointStore restarted({.root = temporary.path,
-                                      .disk_quota_bytes = 8ULL << 20,
-                                      .staging_bytes = 1ULL << 20});
-    std::optional<VerifiedSessionCheckpoint> loaded = restarted.load(
+    SessionCheckpointStore restarted(
+        {.root = temporary.path, .disk_quota_bytes = 8ULL << 20, .staging_bytes = 1ULL << 20});
+    SessionCheckpointLoadResult loaded = restarted.load(
         responses.client_session_sha256, fingerprint(), responses.latest_response_id);
-    failures += check(loaded.has_value() && loaded->generation == saved->generation,
+    failures += check(loaded.state == SessionCheckpointLoadState::Available && loaded.checkpoint &&
+                          loaded.checkpoint->generation == saved->generation,
                       "standalone restart ignores interrupted staging and restores prior current");
-    if (!loaded) { return failures; }
+    if (!loaded.checkpoint) { return failures; }
     std::vector<std::byte> restored(payload.size());
-    failures += check(loaded->engine->read_file("engine/state-0.bin", 0, restored) &&
+    failures += check(loaded.checkpoint->engine->read_file("engine/state-0.bin", 0, restored) &&
                           restored == payload &&
-                          loaded->expected_engine.restored_tokens == 97500,
+                          loaded.checkpoint->expected_engine.restored_tokens == 97500,
                       "verified engine reader restores exact payload and token summary");
     ResponseStore response_store(8, 1ULL << 20);
-    failures += check(response_store.restore_session(loaded->responses, [] { return true; }),
-                      "verified response snapshot installs atomically");
-    const auto restored_response =
-        response_store.get_for_session(responses.latest_response_id,
-                                       responses.client_session_sha256);
-    failures += check(restored_response && restored_response->previous_response_id ==
-                                               "resp_private_first",
-                      "restarted ResponseStore exposes exact continuation lineage");
+    failures +=
+        check(response_store.restore_session(loaded.checkpoint->responses, [] { return true; }),
+              "verified response snapshot installs atomically");
+    const auto restored_response = response_store.get_for_session(responses.latest_response_id,
+                                                                  responses.client_session_sha256);
+    failures +=
+        check(restored_response && restored_response->previous_response_id == "resp_private_first",
+              "restarted ResponseStore exposes exact continuation lineage");
 
-    loaded.reset();
+    loaded.checkpoint.reset();
     const nlohmann::json wrong = fingerprint("different-artifact");
-    failures += check(!restarted.load(responses.client_session_sha256, wrong),
+    const SessionCheckpointLoadResult wrong_fingerprint =
+        restarted.load(responses.client_session_sha256, wrong);
+    failures += check(wrong_fingerprint.state == SessionCheckpointLoadState::Incompatible &&
+                          !wrong_fingerprint.checkpoint,
                       "runtime/model fingerprint mismatch is a cache miss");
-    const nlohmann::json incompatible =
-        restarted.status(responses.client_session_sha256, wrong);
+    const nlohmann::json incompatible = restarted.status(responses.client_session_sha256, wrong);
     failures += check(incompatible.at("state") == "incompatible",
                       "status distinguishes incompatible from corrupt");
-    failures += check(restarted.load(responses.client_session_sha256, fingerprint()).has_value(),
+    SessionCheckpointLoadResult compatible =
+        restarted.load(responses.client_session_sha256, fingerprint());
+    failures += check(compatible.state == SessionCheckpointLoadState::Available &&
+                          compatible.checkpoint.has_value(),
                       "compatibility miss does not quarantine a valid generation");
+    compatible.checkpoint.reset();
 
     // An exporter cancellation may write staging bytes, but it cannot replace current.
-    const auto cancelled = [&](ContinuationCheckpointWriter& writer)
-        -> std::optional<ContinuationCheckpointStats> {
+    const auto cancelled =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
         (void)write_chunked(writer, "engine/partial.bin", payload);
         return std::nullopt;
     };
@@ -285,11 +348,26 @@ int test_transaction_restart_compatibility_and_corruption() {
                           after_cancel.at("generation") == saved->generation,
                       "cancelled export leaves prior current unchanged");
     const std::string public_status = after_cancel.dump();
-    failures += check(public_status.find("resp_private") == std::string::npos &&
+    failures += check(public_status.find(responses.client_session_sha256) == std::string::npos &&
+                          public_status.find("resp_private") == std::string::npos &&
                           public_status.find("marker private") == std::string::npos &&
                           public_status.find("call_private") == std::string::npos,
-                      "status exposes no response, prompt, tool, or reasoning content");
+                      "status does not expose raw session identity, response, prompt, tool, or "
+                      "reasoning content");
 
+    const auto insufficient_prefix =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        if (!write_chunked(writer, "engine/insufficient.bin", payload)) { return std::nullopt; }
+        return ContinuationCheckpointStats{
+            .frontier_tokens = 100000, .restored_tokens = 94999, .payload_bytes = payload.size()};
+    };
+    failures += check(!restarted.save(responses, fingerprint(), insufficient_prefix),
+                      "generation below the frozen 95 percent prefix floor is not published");
+    const nlohmann::json after_insufficient =
+        restarted.status(responses.client_session_sha256, fingerprint());
+    failures += check(after_insufficient.at("state") == "available" &&
+                          after_insufficient.at("generation") == saved->generation,
+                      "insufficient-prefix save leaves prior current unchanged");
     const std::optional<SessionCheckpointSaveResult> second =
         restarted.save(responses, fingerprint(), exporter);
     failures += check(second.has_value() && second->generation != saved->generation,
@@ -297,8 +375,29 @@ int test_transaction_restart_compatibility_and_corruption() {
     if (!second) { return failures; }
     failures += check(!std::filesystem::exists(interrupted),
                       "successful GC removes an abandoned staging generation");
-    const std::filesystem::path corrupt_file =
-        session / "generations" / second->generation / "engine/state-0.bin";
+    const std::filesystem::path generation_root = session / "generations" / second->generation;
+    const std::filesystem::path manifest        = generation_root / "manifest.json";
+    const std::filesystem::path hidden_manifest = generation_root / "manifest.temporarily-missing";
+    std::filesystem::rename(manifest, hidden_manifest);
+    const SessionCheckpointLoadResult unavailable =
+        restarted.load(responses.client_session_sha256, fingerprint());
+    const nlohmann::json unavailable_status =
+        restarted.status(responses.client_session_sha256, fingerprint());
+    failures +=
+        check(unavailable.state == SessionCheckpointLoadState::Unavailable &&
+                  !unavailable.checkpoint && unavailable_status.at("state") == "unavailable" &&
+                  std::filesystem::is_regular_file(session / "current") &&
+                  std::filesystem::is_directory(generation_root),
+              "transient manifest loss preserves current and returns unavailable");
+    std::filesystem::rename(hidden_manifest, manifest);
+    SessionCheckpointLoadResult retry =
+        restarted.load(responses.client_session_sha256, fingerprint());
+    failures += check(retry.state == SessionCheckpointLoadState::Available && retry.checkpoint &&
+                          retry.checkpoint->generation == second->generation,
+                      "checkpoint succeeds when the transient filesystem failure clears");
+    retry.checkpoint.reset();
+
+    const std::filesystem::path corrupt_file = generation_root / "engine/state-0.bin";
     std::fstream corrupt(corrupt_file, std::ios::in | std::ios::out | std::ios::binary);
     char byte = 0;
     corrupt.read(&byte, 1);
@@ -306,9 +405,13 @@ int test_transaction_restart_compatibility_and_corruption() {
     corrupt.seekp(0);
     corrupt.write(&byte, 1);
     corrupt.close();
-    failures += check(!restarted.load(responses.client_session_sha256, fingerprint()),
-                      "checksum corruption cannot enter ResponseStore or Engine");
+    const SessionCheckpointLoadResult corrupted =
+        restarted.load(responses.client_session_sha256, fingerprint());
+    failures +=
+        check(corrupted.state == SessionCheckpointLoadState::Corrupt && !corrupted.checkpoint,
+              "checksum corruption cannot enter ResponseStore or Engine");
     failures += check(!std::filesystem::exists(session / "current") &&
+                          !std::filesystem::exists(generation_root) &&
                           std::filesystem::exists(session / "generations" / saved->generation),
                       "corrupt current is quarantined while prior immutable generation survives");
     return failures;
@@ -317,28 +420,46 @@ int test_transaction_restart_compatibility_and_corruption() {
 int test_active_reader_delete_and_gc() {
     TemporaryDirectory temporary;
     const ResponseStoreSnapshot responses = sample_snapshot();
-    const std::vector<std::byte> payload = engine_payload();
-    SessionCheckpointStore store({.root = temporary.path,
-                                  .disk_quota_bytes = 64ULL << 10,
-                                  .staging_bytes = 1ULL << 20});
-    const auto exporter = [&](ContinuationCheckpointWriter& writer)
-        -> std::optional<ContinuationCheckpointStats> {
+    const std::vector<std::byte> payload  = engine_payload();
+    bool refuse_cleanup                   = false;
+    SessionCheckpointStore store({.root              = temporary.path,
+                                  .disk_quota_bytes  = 64ULL << 10,
+                                  .staging_bytes     = 1ULL << 20,
+                                  .tombstone_cleanup = [&](const std::filesystem::path& path) {
+                                      if (refuse_cleanup) { return false; }
+                                      std::error_code error;
+                                      std::filesystem::remove_all(path, error);
+                                      return !error;
+                                  }});
+    const auto exporter =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
         if (!write_chunked(writer, "engine/state.bin", payload)) { return std::nullopt; }
-        return ContinuationCheckpointStats{.frontier_tokens = 4096,
-                                           .restored_tokens = 4096,
-                                           .payload_bytes = payload.size()};
+        return ContinuationCheckpointStats{
+            .frontier_tokens = 4096, .restored_tokens = 4096, .payload_bytes = payload.size()};
     };
-    int failures = 0;
+    int failures     = 0;
     const auto saved = store.save(responses, fingerprint(), exporter);
     failures += check(saved.has_value(), "GC fixture generation saves");
     if (!saved) { return failures; }
-    auto loaded = store.load(responses.client_session_sha256, fingerprint());
-    failures += check(loaded.has_value() && !store.erase(responses.client_session_sha256),
-                      "explicit deletion cannot race an active restore reader");
-    loaded.reset();
-
     const std::filesystem::path session =
         temporary.path / "sessions" / responses.client_session_sha256;
+    SessionCheckpointLoadResult loaded = store.load(responses.client_session_sha256, fingerprint());
+    const SessionCheckpointEraseResult conflict = store.erase(responses.client_session_sha256);
+    failures += check(
+        loaded.state == SessionCheckpointLoadState::Available && loaded.checkpoint &&
+            conflict == SessionCheckpointEraseResult::Conflict &&
+            std::filesystem::is_regular_file(session / "generations" / saved->generation /
+                                             "responses.cbor") &&
+            std::filesystem::is_regular_file(session / "generations" / saved->generation /
+                                             "engine/state.bin") &&
+            store.status(responses.client_session_sha256, fingerprint()).at("state") == "available",
+        "refused deletion reports conflict and preserves transcript and Engine state");
+
+    const auto newer = store.save(responses, fingerprint(), exporter);
+    failures += check(newer.has_value() && newer->generation != saved->generation,
+                      "new current publishes while the prior generation has an active reader");
+    if (!newer) { return failures; }
+
     const std::filesystem::path stale = session / "generations" / "stale-generation";
     std::filesystem::create_directories(stale);
     std::ofstream filler(stale / "large.bin", std::ios::binary);
@@ -346,18 +467,179 @@ int test_active_reader_delete_and_gc() {
     filler.write(large.data(), large.size());
     filler.close();
     store.collect_garbage();
-    failures += check(!std::filesystem::exists(stale) &&
-                          std::filesystem::exists(session / "generations" /
-                                                  saved->generation) &&
-                          std::filesystem::exists(session / "current"),
-                      "quota GC removes stale LRU generation but protects current");
-    failures += check(store.erase(responses.client_session_sha256) &&
-                          store.status(responses.client_session_sha256, fingerprint()).at("state") ==
-                              "missing",
-                      "authenticated delete primitive removes inactive checkpoint state");
+    failures +=
+        check(!std::filesystem::exists(stale) &&
+                  std::filesystem::exists(session / "generations" / saved->generation) &&
+                  std::filesystem::exists(session / "generations" / newer->generation) &&
+                  std::filesystem::exists(session / "current"),
+              "quota GC removes stale LRU data but protects active and current generations");
+    loaded.checkpoint.reset();
+    const std::filesystem::path tombstone =
+        temporary.path / ".tombstones" / responses.client_session_sha256;
+    std::filesystem::create_directories(tombstone);
+    std::ofstream(tombstone / "occupied", std::ios::binary) << "occupied";
+    const std::string current_before = read_file_bytes(session / "current");
+    const std::string responses_before =
+        read_file_bytes(session / "generations" / newer->generation / "responses.cbor");
+    const std::string engine_before =
+        read_file_bytes(session / "generations" / newer->generation / "engine/state.bin");
+    const SessionCheckpointEraseResult rename_conflict =
+        store.erase(responses.client_session_sha256);
+    SessionCheckpointLoadResult after_conflict =
+        store.load(responses.client_session_sha256, fingerprint());
+    failures +=
+        check(rename_conflict == SessionCheckpointEraseResult::Conflict &&
+                  after_conflict.state == SessionCheckpointLoadState::Available &&
+                  after_conflict.checkpoint &&
+                  after_conflict.checkpoint->generation == newer->generation &&
+                  read_file_bytes(session / "current") == current_before &&
+                  read_file_bytes(session / "generations" / newer->generation / "responses.cbor") ==
+                      responses_before &&
+                  read_file_bytes(session / "generations" / newer->generation /
+                                  "engine/state.bin") == engine_before,
+              "failed session rename reports conflict without changing either checkpoint store");
+    after_conflict.checkpoint.reset();
+    std::filesystem::remove_all(tombstone);
+
+    refuse_cleanup = true;
+    failures += check(
+        store.erase(responses.client_session_sha256) == SessionCheckpointEraseResult::Erased &&
+            !std::filesystem::exists(session) && std::filesystem::is_directory(tombstone) &&
+            store.status(responses.client_session_sha256, fingerprint()).at("state") == "missing" &&
+            store.erase(responses.client_session_sha256) == SessionCheckpointEraseResult::Missing,
+        "successful rename is deleted even when physical cleanup is deferred");
+    refuse_cleanup = false;
+    store.collect_garbage();
+    failures += check(!std::filesystem::exists(tombstone),
+                      "garbage collection removes a deferred session tombstone");
     return failures;
 }
 
+int test_store_wide_quota_across_sessions() {
+    const ResponseStoreSnapshot first_session  = sample_snapshot('a');
+    const ResponseStoreSnapshot second_session = sample_snapshot('b');
+    const ResponseStoreSnapshot third_session  = sample_snapshot('c');
+    const std::vector<std::byte> payload       = engine_payload();
+    const auto exporter =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        if (!write_chunked(writer, "engine/state.bin", payload)) { return std::nullopt; }
+        return ContinuationCheckpointStats{
+            .frontier_tokens = 4096, .restored_tokens = 4096, .payload_bytes = payload.size()};
+    };
+
+    TemporaryDirectory measurement;
+    SessionCheckpointStore measuring_store(
+        {.root = measurement.path, .disk_quota_bytes = 1ULL << 20, .staging_bytes = 1ULL << 20});
+    const auto measured = measuring_store.save(first_session, fingerprint(), exporter);
+    int failures        = 0;
+    failures += check(measured.has_value(), "quota fixture generation size is measurable");
+    if (!measured) { return failures; }
+
+    const std::uint64_t quota = measured->bytes * 2;
+    TemporaryDirectory temporary;
+    SessionCheckpointStore store(
+        {.root = temporary.path, .disk_quota_bytes = quota, .staging_bytes = 1ULL << 20});
+    const auto first  = store.save(first_session, fingerprint(), exporter);
+    const auto second = store.save(second_session, fingerprint(), exporter);
+    const auto third  = store.save(third_session, fingerprint(), exporter);
+    failures +=
+        check(first && second && third, "three sessions publish under a two-generation cap");
+    if (!first || !second || !third) { return failures; }
+
+    const nlohmann::json first_status =
+        store.status(first_session.client_session_sha256, fingerprint());
+    const nlohmann::json second_status =
+        store.status(second_session.client_session_sha256, fingerprint());
+    const nlohmann::json third_status =
+        store.status(third_session.client_session_sha256, fingerprint());
+    failures +=
+        check(first_status.at("state") == "missing" && second_status.at("state") == "available" &&
+                  third_status.at("state") == "available",
+              "deterministic quota eviction removes the oldest inactive current session");
+    failures += check(retained_generation_bytes(temporary.path) <= quota,
+                      "resident generations stay within the store-wide disk quota");
+    failures += check(
+        !std::filesystem::exists(temporary.path / "sessions" / first_session.client_session_sha256 /
+                                 "current") &&
+            std::filesystem::is_regular_file(temporary.path / "sessions" /
+                                             second_session.client_session_sha256 / "current") &&
+            std::filesystem::is_regular_file(temporary.path / "sessions" /
+                                             third_session.client_session_sha256 / "current"),
+        "eviction removes its current pointer while retained sessions keep valid pointers");
+    TemporaryDirectory protected_temporary;
+    SessionCheckpointStore protected_store({.root             = protected_temporary.path,
+                                            .disk_quota_bytes = measured->bytes,
+                                            .staging_bytes    = 1ULL << 20});
+    const auto protected_saved = protected_store.save(first_session, fingerprint(), exporter);
+    SessionCheckpointLoadResult active =
+        protected_store.load(first_session.client_session_sha256, fingerprint());
+    const auto refused = protected_store.save(second_session, fingerprint(), exporter);
+    failures +=
+        check(protected_saved && active.checkpoint && !refused &&
+                  protected_store.status(first_session.client_session_sha256, fingerprint())
+                          .at("state") == "available" &&
+                  protected_store.status(second_session.client_session_sha256, fingerprint())
+                          .at("state") == "missing" &&
+                  retained_generation_bytes(protected_temporary.path) <= measured->bytes,
+              "active reader ownership rejects admission without exceeding the quota");
+
+    TemporaryDirectory failure_temporary;
+    bool refuse_cleanup = false;
+    SessionCheckpointStore failure_store(
+        {.root              = failure_temporary.path,
+         .disk_quota_bytes  = quota,
+         .staging_bytes     = 1ULL << 20,
+         .tombstone_cleanup = [&](const std::filesystem::path& path) {
+             if (refuse_cleanup) { return false; }
+             std::error_code error;
+             std::filesystem::remove_all(path, error);
+             return !error;
+         }});
+    const auto failure_first    = failure_store.save(first_session, fingerprint(), exporter);
+    const auto failure_previous = failure_store.save(second_session, fingerprint(), exporter);
+    failures += check(failure_first && failure_previous,
+                      "quota failure fixture publishes two current sessions");
+    if (!failure_first || !failure_previous) { return failures; }
+    const std::filesystem::path previous_session =
+        failure_temporary.path / "sessions" / second_session.client_session_sha256;
+    const std::filesystem::path previous_generation =
+        previous_session / "generations" / failure_previous->generation;
+    const std::string previous_current   = read_file_bytes(previous_session / "current");
+    const std::string previous_manifest  = read_file_bytes(previous_generation / "manifest.json");
+    const std::string previous_responses = read_file_bytes(previous_generation / "responses.cbor");
+    const std::string previous_engine = read_file_bytes(previous_generation / "engine/state.bin");
+
+    refuse_cleanup                = true;
+    const auto failed_replacement = failure_store.save(second_session, fingerprint(), exporter);
+    SessionCheckpointLoadResult previous_loaded =
+        failure_store.load(second_session.client_session_sha256, fingerprint());
+    const std::filesystem::path deferred_tombstone =
+        failure_temporary.path / ".tombstones" / first_session.client_session_sha256;
+    failures += check(
+        !failed_replacement && previous_loaded.state == SessionCheckpointLoadState::Available &&
+            previous_loaded.checkpoint &&
+            previous_loaded.checkpoint->generation == failure_previous->generation &&
+            read_file_bytes(previous_session / "current") == previous_current &&
+            read_file_bytes(previous_generation / "manifest.json") == previous_manifest &&
+            read_file_bytes(previous_generation / "responses.cbor") == previous_responses &&
+            read_file_bytes(previous_generation / "engine/state.bin") == previous_engine &&
+            std::filesystem::is_directory(previous_generation) &&
+            std::filesystem::is_directory(deferred_tombstone) &&
+            regular_file_bytes(deferred_tombstone / "generations") == failure_first->bytes &&
+            retained_generation_bytes(failure_temporary.path) ==
+                failure_first->bytes + failure_previous->bytes,
+        "cleanup failure rejects save before publication and preserves the prior current bytes");
+    previous_loaded.checkpoint.reset();
+    refuse_cleanup = false;
+    failure_store.collect_garbage();
+    failures += check(
+        !std::filesystem::exists(deferred_tombstone) &&
+            failure_store.status(second_session.client_session_sha256, fingerprint()).at("state") ==
+                "available" &&
+            retained_generation_bytes(failure_temporary.path) == failure_previous->bytes,
+        "deferred tombstones remain quota-accounted and are reclaimed by GC");
+    return failures;
+}
 } // namespace
 
 int main() {
@@ -366,6 +648,7 @@ int main() {
     failures += test_codec_round_trip();
     failures += test_transaction_restart_compatibility_and_corruption();
     failures += test_active_reader_delete_and_gc();
+    failures += test_store_wide_quota_across_sessions();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

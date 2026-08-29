@@ -50,8 +50,8 @@ cannot be combined with `--vision`. A later request cannot enable a capability o
 |---|---|
 | `GET /health` | process health |
 | `GET /v1/ninfer/status` | exact build/deployment identity, resolved runtime settings, activity, cache state, and MTP totals |
-| `GET /v1/ninfer/checkpoints/{session-sha256}` | authenticated durable-checkpoint compatibility and generation status |
-| `POST /v1/ninfer/checkpoints/{session-sha256}` | transactionally checkpoint one stored Responses session and its Engine continuation |
+| `POST /v1/ninfer/checkpoints` | transactionally checkpoint the stored Responses session named by the exact JSON body |
+| `GET /v1/ninfer/checkpoints/{session-sha256}/status` | authenticated durable-checkpoint compatibility and generation status |
 | `DELETE /v1/ninfer/checkpoints/{session-sha256}` | remove that session's durable generations |
 | `GET /v1/models` | configured OpenAI model alias |
 | `GET /v1/models/{id}` | lookup of the configured alias |
@@ -474,28 +474,49 @@ binds the loaded target/model/weights identity and relevant Engine/cache configu
 incompatible fingerprint is a cache miss; it is never imported under a different executable,
 artifact, or configuration.
 
-The three routes use the digest in the path and the server bearer API key:
+The routes require the server bearer API key. Save takes the digest only in one exact JSON body;
+malformed JSON, a missing or non-string digest, a non-lowercase/non-SHA-256 digest, or any extra
+field is HTTP 400:
+
+```json
+{"session_sha256":"<64 lowercase hex>"}
+```
 
 | Endpoint | Contract |
 |---|---|
-| `POST /v1/ninfer/checkpoints/{digest}` | save the complete stored lineage and the exact catalogued Engine endpoint whose checkpoint tag is that lineage's latest Response ID; return HTTP 409 when no complete checkpointable endpoint exists |
-| `GET /v1/ninfer/checkpoints/{digest}` | report `available`, `missing`, `incompatible`, or `corrupt` state without prompt or response content |
-| `DELETE /v1/ninfer/checkpoints/{digest}` | delete the current and retained generations for that digest; return `deleted` or `missing` |
+| `POST /v1/ninfer/checkpoints` | save the complete stored lineage and the exact catalogued Engine endpoint whose checkpoint tag is that lineage's latest Response ID; return HTTP 409 when no complete checkpointable endpoint exists |
+| `GET /v1/ninfer/checkpoints/{digest}/status` | report `available`, `missing`, `incompatible`, `corrupt`, or transient `unavailable` state |
+| `DELETE /v1/ninfer/checkpoints/{digest}` | atomically rename the complete session to an internal tombstone and retire it; return `deleted`/200, genuine `missing`/404, or `conflict`/409 when a live reader or filesystem refusal prevents the rename; physical cleanup is best-effort and retried by garbage collection |
+
+Success and status bodies never echo the session digest or include prompt, response, tool, or
+reasoning content.
 
 Each save writes a new generation, flushes payloads and checksums, writes the manifest last, then
-atomically replaces `current`. An interrupted save leaves the previous generation usable. Restore
-verifies every file and the runtime fingerprint before exposing state. On the first authenticated
-`previous_response_id` lookup missing from the in-memory store, NInfer lazily imports the matching
-Engine continuation and publishes the typed Responses snapshot in one transaction; any failure
-returns the ordinary missing-response behavior so the client can perform its explicit full replay.
-Corrupt current generations are quarantined and ignored.
+atomically replaces `current`. Publication requires an Engine export that can restore at least 95%
+of its compatible frontier, and its reported payload bytes must exactly match the generated Engine
+files. An interrupted save leaves the previous generation usable. Restore verifies every file and
+the runtime fingerprint before exposing state. On the first authenticated `previous_response_id`
+lookup missing from the in-memory store, NInfer lazily imports the matching Engine continuation.
+The imported frontier and payload summary must equal the manifest before Engine catalog ownership
+and the typed Responses snapshot publish in one transaction. Any failure returns the ordinary
+missing-response behavior so the client can perform its explicit full replay. Verified structural
+or checksum corruption is quarantined and ignored. A transient missing/open/read filesystem failure
+reports `unavailable` without changing the generation or `current` pointer, so a later request can
+retry the same checkpoint.
 
 A completed stored turn at or above `--session-checkpoint-min-tokens` is checkpointed
 automatically; the default threshold is `32768`. Graceful server shutdown attempts every live
 session. Explicit `POST` remains the crash-test boundary: do not kill the process until it returns.
-`--session-checkpoint-staging-mib` bounds transfer/codec staging and
-`--session-checkpoint-quota-mib` bounds retained generations; garbage collection never removes an
-active `current` generation.
+`--session-checkpoint-staging-mib` bounds transfer/codec staging.
+`--session-checkpoint-quota-mib` is a store-wide cap over all retained current and stale
+generations, including deferred tombstones. Before publishing a new `current`, admission cleans
+tombstones and abandoned staging, then reclaims the oldest inactive stale generations and inactive
+current sessions, with path order breaking equal timestamps. Reclaimed paths are atomically renamed
+to internal tombstones before physical cleanup, so no current pointer can dangle. The generation
+being published, its session, and every active restore reader are never eviction candidates. A
+cleanup failure or insufficient reclaimable space refuses the save before its prior `current`
+changes; retained tombstones remain quota-accounted and are retried at startup and by garbage
+collection.
 
 ### Responses input token count
 

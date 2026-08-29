@@ -260,9 +260,9 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
         checkpoint_runtime_fingerprint_ = session_checkpoint_runtime_fingerprint(
             options_, engine_->options(), engine_->load_summary());
         checkpoint_store_ = std::make_unique<SessionCheckpointStore>(SessionCheckpointStoreOptions{
-            .root = options_.session_checkpoint_root,
+            .root             = options_.session_checkpoint_root,
             .disk_quota_bytes = options_.session_checkpoint_quota_bytes,
-            .staging_bytes = options_.session_checkpoint_staging_bytes,
+            .staging_bytes    = options_.session_checkpoint_staging_bytes,
         });
     }
 }
@@ -478,13 +478,12 @@ GenerationService::save_checkpoint(std::string_view session_sha256, ResponseStor
     std::optional<ResponseStoreSnapshot> snapshot = responses.snapshot_session(session_sha256);
     if (!snapshot) { return std::nullopt; }
     const std::string checkpoint_tag = snapshot->latest_response_id;
-    return checkpoint_store_->save(
-        *snapshot, checkpoint_runtime_fingerprint_,
-        [&](runtime::ContinuationCheckpointWriter& writer) {
-            return runtime::CheckpointEngineAccess::checkpoint_session(
-                *engine_, session_sha256, checkpoint_tag, writer,
-                checkpoint_store_->options().staging_bytes);
-        });
+    return checkpoint_store_->save(*snapshot, checkpoint_runtime_fingerprint_,
+                                   [&](runtime::ContinuationCheckpointWriter& writer) {
+                                       return runtime::CheckpointEngineAccess::checkpoint_session(
+                                           *engine_, session_sha256, checkpoint_tag, writer,
+                                           checkpoint_store_->options().staging_bytes);
+                                   });
 }
 
 bool GenerationService::restore_checkpoint(std::string_view session_sha256,
@@ -493,32 +492,32 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
     if (!checkpoint_store_) { return false; }
     std::lock_guard lock(checkpoint_mutex_);
     try {
-        std::optional<VerifiedSessionCheckpoint> checkpoint = checkpoint_store_->load(
+        SessionCheckpointLoadResult loaded = checkpoint_store_->load(
             session_sha256, checkpoint_runtime_fingerprint_, required_response_id);
-        if (!checkpoint) { return false; }
-        const std::string checkpoint_tag = checkpoint->responses.latest_response_id;
-        return responses.restore_session(std::move(checkpoint->responses), [&] {
+        if (!loaded.checkpoint) { return false; }
+        VerifiedSessionCheckpoint checkpoint = std::move(*loaded.checkpoint);
+        const std::string checkpoint_tag     = checkpoint.responses.latest_response_id;
+        return responses.restore_session(std::move(checkpoint.responses), [&] {
             return runtime::CheckpointEngineAccess::restore_session(
-                       *engine_, session_sha256, checkpoint_tag,
-                       *checkpoint->engine, checkpoint_store_->options().staging_bytes)
+                       *engine_, session_sha256, checkpoint_tag, *checkpoint.engine,
+                       checkpoint.expected_engine, checkpoint_store_->options().staging_bytes)
                 .has_value();
         });
-    } catch (...) {
-        return false;
-    }
+    } catch (...) { return false; }
 }
 
 nlohmann::json GenerationService::checkpoint_status(std::string_view session_sha256) const {
     if (!checkpoint_store_) {
         return nlohmann::json{{"artifact_type", "ninfer_session_checkpoint_status"},
-                              {"session_sha256", session_sha256}, {"state", "disabled"}};
+                              {"session_sha256", session_sha256},
+                              {"state", "disabled"}};
     }
     std::lock_guard lock(checkpoint_mutex_);
     return checkpoint_store_->status(session_sha256, checkpoint_runtime_fingerprint_);
 }
 
-bool GenerationService::erase_checkpoint(std::string_view session_sha256) {
-    if (!checkpoint_store_) { return false; }
+SessionCheckpointEraseResult GenerationService::erase_checkpoint(std::string_view session_sha256) {
+    if (!checkpoint_store_) { return SessionCheckpointEraseResult::Missing; }
     std::lock_guard lock(checkpoint_mutex_);
     return checkpoint_store_->erase(session_sha256);
 }
@@ -536,7 +535,7 @@ void GenerationService::warmup() {
     request.max_tokens       = 4;
     request.max_tokens_set   = true;
     PreparedRequest prepared = prepare_impl(request, {}, {}, CacheParticipation::Disabled,
-                                              DeadlinePolicy::UnboundedStartup, {});
+                                            DeadlinePolicy::UnboundedStartup, {});
     run(prepared, nullptr);
 }
 

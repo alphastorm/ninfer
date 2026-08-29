@@ -23,6 +23,7 @@ struct SessionCheckpointStoreOptions {
     std::filesystem::path root;
     std::uint64_t disk_quota_bytes = 64ULL << 30;
     std::size_t staging_bytes      = 256ULL << 20;
+    std::function<bool(const std::filesystem::path&)> tombstone_cleanup;
 };
 
 struct SessionCheckpointSaveResult {
@@ -37,6 +38,25 @@ struct VerifiedSessionCheckpoint {
     runtime::ContinuationCheckpointStats expected_engine;
     std::string generation;
     std::uint64_t bytes = 0;
+};
+
+enum class SessionCheckpointLoadState : std::uint8_t {
+    Available,
+    Missing,
+    Incompatible,
+    Corrupt,
+    Unavailable,
+};
+
+struct SessionCheckpointLoadResult {
+    SessionCheckpointLoadState state = SessionCheckpointLoadState::Missing;
+    std::optional<VerifiedSessionCheckpoint> checkpoint;
+};
+
+enum class SessionCheckpointEraseResult : std::uint8_t {
+    Erased,
+    Missing,
+    Conflict,
 };
 
 // Exact, binary-preserving encoding for response bodies, typed tool items, media bytes, thinking,
@@ -64,15 +84,15 @@ public:
          const EngineExporter& exporter);
 
     // Verifies identity, manifest schema, every size/checksum, and the requested response id before
-    // exposing either ResponseStore state or an Engine reader. Incompatibility is a miss; corrupt
-    // current generations are quarantined and ignored.
-    [[nodiscard]] std::optional<VerifiedSessionCheckpoint>
+    // exposing either ResponseStore state or an Engine reader. Verified corruption is quarantined;
+    // transient filesystem failures preserve current for a later retry.
+    [[nodiscard]] SessionCheckpointLoadResult
     load(std::string_view session_sha256, const nlohmann::json& runtime_fingerprint,
          std::optional<std::string_view> required_response_id = std::nullopt);
 
     [[nodiscard]] nlohmann::json status(std::string_view session_sha256,
                                         const nlohmann::json& runtime_fingerprint) const;
-    bool erase(std::string_view session_sha256);
+    [[nodiscard]] SessionCheckpointEraseResult erase(std::string_view session_sha256);
     void collect_garbage();
 
 private:

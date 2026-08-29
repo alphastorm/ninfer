@@ -400,6 +400,12 @@ struct FakeReleaseResult {
     ConsumeStatus status = ConsumeStatus::InvariantMismatch;
 };
 
+struct FakeRestoredContinuation {
+    FakeContinuationHandle handle;
+    FakeContinuationSummary summary;
+    ninfer::runtime::ContinuationCheckpointStats stats;
+};
+
 struct FakeCommitRowResult {
     CommitDisposition disposition = CommitDisposition::Active;
 };
@@ -568,8 +574,8 @@ public:
                 : ninfer::runtime::MaterializationPhysicalStatus::Infeasible;
         plan.identity.source_disposition = plan.disposition;
         plan.identity.expandable         = plan.identity.physical_status !=
-                                   ninfer::runtime::MaterializationPhysicalStatus::Feasible;
-        plan.identity.projection_work = 1;
+                                           ninfer::runtime::MaterializationPhysicalStatus::Feasible;
+        plan.identity.projection_work    = 1;
         plan.identity.assessment_digest =
             (static_cast<std::uint64_t>(plan.value.reusable_prompt_tokens) << 32U) ^ revision_;
         return plan;
@@ -773,6 +779,29 @@ public:
         released_continuations.push_back(continuation.id);
         advance_revision();
         return FakeReleaseResult{.status = ConsumeStatus::Consumed};
+    }
+
+    [[nodiscard]] std::optional<ninfer::runtime::ContinuationCheckpointStats>
+    checkpoint_continuation(const FakeContinuationHandle& continuation,
+                            ninfer::runtime::ContinuationCheckpointWriter&,
+                            std::size_t staging_bytes) const {
+        if (continuation.id == 0 || staging_bytes == 0) { return std::nullopt; }
+        return ninfer::runtime::ContinuationCheckpointStats{
+            .frontier_tokens = 16, .restored_tokens = 16, .payload_bytes = 64};
+    }
+
+    [[nodiscard]] std::optional<FakeRestoredContinuation>
+    restore_continuation(const ninfer::runtime::ContinuationCheckpointReader&,
+                         std::size_t staging_bytes) {
+        if (staging_bytes == 0) { return std::nullopt; }
+        FakeContinuationSummary summary;
+        summary.endpoint = endpoint(88, 16);
+        advance_revision();
+        return FakeRestoredContinuation{
+            .handle  = FakeContinuationHandle{99, 88},
+            .summary = std::move(summary),
+            .stats   = {.frontier_tokens = 16, .restored_tokens = 16, .payload_bytes = 64},
+        };
     }
 
     [[nodiscard]] std::uint64_t resource_revision() const noexcept { return revision_; }
@@ -1126,8 +1155,8 @@ FakePressurePlanningSession::commit_expansion(FakePreparedPressureExpansion&& pr
     committed_children_.clear();
     std::uint32_t new_count = 0;
     for (Target& child : expansion_scratch_) {
-        auto found          = std::find_if(targets_.begin(), targets_.end(),
-                                           [&](const Target& prior) { return same_target(prior, child); });
+        auto found = std::find_if(targets_.begin(), targets_.end(),
+                                  [&](const Target& prior) { return same_target(prior, child); });
         std::uint32_t index = 0;
         if (found == targets_.end()) {
             child.stable_ordinal = static_cast<std::uint32_t>(targets_.size());
@@ -1217,6 +1246,7 @@ struct FakePackage {
     using StartResult                = FakeStartResult;
     using FinishResult               = FakeFinishResult;
     using AbortResult                = FakeAbortResult;
+    using RestoredContinuation       = FakeRestoredContinuation;
     using PressureTargetHandle       = FakePressureTargetHandle;
     using CommitResult               = FakeCommitResult;
     using DiscardResult              = FakeDiscardResult;
@@ -1237,9 +1267,10 @@ struct ActiveRequest {
 };
 
 ActiveRequest start_active(FakeManager& manager, FakeProgram& program, std::uint32_t content_key,
-                           const FakeRequestBasePlan& base, std::uint64_t publication_order) {
-    auto inspection =
-        manager.inspect(program, FakePreparedPrompt{content_key}, base, publication_order);
+                           const FakeRequestBasePlan& base, std::uint64_t publication_order,
+                           std::string checkpoint_tag = {}) {
+    auto inspection = manager.inspect(program, FakePreparedPrompt{content_key}, base,
+                                      publication_order, std::move(checkpoint_tag));
     require(inspection.choice.has_value(), "request did not produce an admission choice");
     const LaneId lane   = inspection.choice->destination();
     const auto reserved = manager.reserve_materialization(program, std::move(*inspection.choice),
@@ -1904,6 +1935,78 @@ void test_shortlist_collision_requires_program_exact_verification() {
             "shortlist collision bypassed Program exact identity verification");
 }
 
+void test_session_checkpoint_tag_and_restore_identity() {
+    class Writer final : public ninfer::runtime::ContinuationCheckpointWriter {
+    public:
+        bool write_file(std::string_view, std::uint64_t, std::uint64_t,
+                        std::span<const std::byte>) override {
+            return true;
+        }
+    } writer;
+
+    class Reader final : public ninfer::runtime::ContinuationCheckpointReader {
+    public:
+        std::optional<std::uint64_t> file_size(std::string_view) const override {
+            return std::nullopt;
+        }
+
+        bool read_file(std::string_view, std::uint64_t, std::span<std::byte>) const override {
+            return false;
+        }
+    } reader;
+
+    FakeProgram source_program;
+    FakeManager source         = make_manager(1, 2);
+    FakeRequestBasePlan seed   = make_base(77);
+    seed.cache.session_key     = FakeCacheSessionKey{77};
+    const ActiveRequest active = start_active(source, source_program, 77, seed, 1, "resp_1");
+    (void)finish_active(source, source_program, active);
+    require(!source.checkpoint_session(source_program, FakeCacheSessionKey{77}, "resp_wrong",
+                                       writer, 1024),
+            "checkpoint accepted a stale response tag");
+    const auto saved =
+        source.checkpoint_session(source_program, FakeCacheSessionKey{77}, "resp_1", writer, 1024);
+    require(saved && saved->restored_tokens == 16,
+            "checkpoint did not export the exact tagged session endpoint");
+
+    const ninfer::runtime::ContinuationCheckpointStats expected{
+        .frontier_tokens = 16, .restored_tokens = 16, .payload_bytes = 64};
+    FakeProgram rejected_program;
+    FakeManager rejected      = make_manager(1, 2);
+    const auto rejected_stats = rejected.restore_session_checkpoint(
+        rejected_program, FakeCacheSessionKey{88}, "resp_2", reader,
+        ninfer::runtime::ContinuationCheckpointStats{
+            .frontier_tokens = 16, .restored_tokens = 16, .payload_bytes = 63},
+        1024, 1);
+    require(!rejected_stats &&
+                rejected_program.released_continuations == std::vector<std::uint32_t>{99},
+            "restore retained Engine ownership that disagreed with the manifest summary");
+
+    FakeProgram restored_program;
+    FakeManager restored      = make_manager(1, 2);
+    const auto restored_stats = restored.restore_session_checkpoint(
+        restored_program, FakeCacheSessionKey{88}, "resp_2", reader, expected, 1024, 1);
+    require(restored_stats && restored_stats->frontier_tokens == 16,
+            "compatible checkpoint did not restore a catalogued continuation");
+    require(restored.checkpoint_session(restored_program, FakeCacheSessionKey{88}, "resp_2", writer,
+                                        1024)
+                    .has_value() &&
+                !restored.checkpoint_session(restored_program, FakeCacheSessionKey{88}, "resp_1",
+                                             writer, 1024),
+            "restored session did not retain its exact response checkpoint tag");
+
+    FakeRequestBasePlan successor = make_base(88);
+    successor.cache.session_key   = FakeCacheSessionKey{88};
+    const ActiveRequest resumed =
+        start_active(restored, restored_program, 88, successor, 2, "resp_3");
+    (void)finish_active(restored, restored_program, resumed);
+    require(!restored.checkpoint_session(restored_program, FakeCacheSessionKey{88}, "resp_2",
+                                         writer, 1024) &&
+                restored.checkpoint_session(restored_program, FakeCacheSessionKey{88}, "resp_3",
+                                            writer, 1024),
+            "newer session publication did not supersede the restored response tag");
+}
+
 } // namespace
 
 int main() {
@@ -1939,6 +2042,7 @@ int main() {
     run_test("backfill proof and stats", test_backfill_proof_and_stats_follow_program_revision);
     run_test("shortlist exact verification",
              test_shortlist_collision_requires_program_exact_verification);
+    run_test("session checkpoint identity", test_session_checkpoint_tag_and_restore_identity);
     if (failures != 0) { return 1; }
     std::cout << "ok\n";
     return 0;

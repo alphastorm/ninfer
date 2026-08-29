@@ -47,7 +47,7 @@ public:
     using PendingBatch       = typename Package::PendingBatch;
     using PreparedPrompt     = typename Package::PreparedPrompt;
     using OutputSession      = typename Package::OutputSession;
-    using CacheSessionKey     = typename Package::CacheSessionKey;
+    using CacheSessionKey    = typename Package::CacheSessionKey;
     using Request            = RequestRecord<Package>;
     using Scheduling         = Scheduler<Request>;
     using FifoSnapshot       = typename Scheduling::FifoSnapshot;
@@ -165,8 +165,7 @@ public:
 
     Submission submit(PreparedPrompt prompt, PromptSummary prompt_summary, double prepare_seconds,
                       ResolvedRequestOptions options, OutputConsumerMode consumer_mode,
-                      std::string checkpoint_tag,
-                      Clock::time_point pending_deadline = {}) {
+                      std::string checkpoint_tag, Clock::time_point pending_deadline = {}) {
         const Clock::time_point submitted = Clock::now();
         if (pending_deadline == Clock::time_point{}) {
             pending_deadline = submitted + pending_timeout_;
@@ -208,10 +207,10 @@ public:
                 throw RequestError(RequestErrorKind::ThinkingBudgetCapacityInsufficient,
                                    error.what());
             }
-            request = std::make_shared<Request>(
-                request_id, publication_order, std::move(prompt), std::move(output), prompt_summary,
-                prepare_seconds, std::move(options), consumer_mode, pending_deadline, submitted,
-                std::move(checkpoint_tag));
+            request = std::make_shared<Request>(request_id, publication_order, std::move(prompt),
+                                                std::move(output), prompt_summary, prepare_seconds,
+                                                std::move(options), consumer_mode, pending_deadline,
+                                                submitted, std::move(checkpoint_tag));
         } catch (...) {
             release_reserved_capacity();
             throw;
@@ -248,22 +247,33 @@ public:
         return out;
     }
 
-    [[nodiscard]] std::optional<ContinuationCheckpointStats> checkpoint_session(
-        const CacheSessionKey& session, std::string_view checkpoint_tag,
-        ContinuationCheckpointWriter& writer, std::size_t staging_bytes) {
+    [[nodiscard]] std::optional<ContinuationCheckpointStats>
+    checkpoint_session(const CacheSessionKey& session, std::string_view checkpoint_tag,
+                       ContinuationCheckpointWriter& writer, std::size_t staging_bytes) {
         std::scoped_lock lock(execution_mutex_);
         return resources_.checkpoint_session(*instance_.program, session, checkpoint_tag, writer,
                                              staging_bytes);
     }
 
-    [[nodiscard]] std::optional<ContinuationCheckpointStats> restore_session_checkpoint(
-        const CacheSessionKey& session, std::string checkpoint_tag,
-        const ContinuationCheckpointReader& reader, std::size_t staging_bytes) {
+    [[nodiscard]] std::optional<ContinuationCheckpointStats>
+    restore_session_checkpoint(const CacheSessionKey& session, std::string checkpoint_tag,
+                               const ContinuationCheckpointReader& reader,
+                               ContinuationCheckpointStats expected, std::size_t staging_bytes) {
+        std::uint64_t publication_order = 0;
+        {
+            std::lock_guard queue_lock(queue_mutex_);
+            if (stopping_ || failed_) { return std::nullopt; }
+            if (next_publication_order_ == 0) {
+                throw std::overflow_error("request publication identity space exhausted");
+            }
+            publication_order = next_publication_order_++;
+        }
         std::scoped_lock lock(execution_mutex_);
         return resources_.restore_session_checkpoint(*instance_.program, session,
-                                                     std::move(checkpoint_tag), reader,
-                                                     staging_bytes);
+                                                     std::move(checkpoint_tag), reader, expected,
+                                                     staging_bytes, publication_order);
     }
+
     [[nodiscard]] RuntimeStats runtime_stats() const {
         std::lock_guard lock(stats_mutex_);
         return published_stats_;
@@ -1003,9 +1013,9 @@ private:
                     throw std::logic_error("pending row has an invalid licensed extent");
                 }
                 const std::uint32_t count = static_cast<std::uint32_t>(raw_count);
-                const auto row_tokens     = pending.tokens().subspan(row * pending.row_stride(),
-                                                                     static_cast<std::size_t>(count));
-                generated_sizes[row]      = request->generated.size();
+                const auto row_tokens = pending.tokens().subspan(row * pending.row_stride(),
+                                                                 static_cast<std::size_t>(count));
+                generated_sizes[row]  = request->generated.size();
                 if (cancelled[row]) {
                     (void)request->output.preview_terminal(FinishReason::Cancelled);
                     decisions[row] = CommitDecision{
