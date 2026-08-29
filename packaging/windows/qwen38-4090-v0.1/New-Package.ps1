@@ -440,6 +440,7 @@ try {
     [ordered]@{
         artifact_type = 'ninfer_package_build_receipt'
         schema_version = 1
+        status = 'passed'
         release_id = $releaseId
         release_version = $releaseVersion
         patch_stack_sha = $PatchStackSha
