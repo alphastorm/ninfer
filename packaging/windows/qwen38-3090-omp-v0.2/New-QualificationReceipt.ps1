@@ -680,16 +680,23 @@ function New-NInferQualificationReceipt {
         public_disclosure = $disclosureReceipt
         scope = [ordered]@{
             target_clients = @('OMP 18.0.9 Windows x64')
-            supported_clients = $(if ($allPassed) { @('OMP 18.0.9 Windows x64') } else { @() })
+            supported_clients = @(
+                if ($allPassed) { 'OMP 18.0.9 Windows x64' }
+            )
             target_api_surfaces = @(
                 'OpenAI Responses API',
                 'Anthropic Messages API',
                 'typed tool calls',
                 'checkpoint continuation'
             )
-            supported_api_surfaces = $(if ($allPassed) {
-                @('OpenAI Responses API', 'Anthropic Messages API', 'typed tool calls', 'checkpoint continuation')
-            } else { @() })
+            supported_api_surfaces = @(
+                if ($allPassed) {
+                    'OpenAI Responses API'
+                    'Anthropic Messages API'
+                    'typed tool calls'
+                    'checkpoint continuation'
+                }
+            )
             limitations = @(
                 'Beta only; no stable or GA promotion.',
                 'Fresh exact-package Windows RTX 3090 lifecycle, state-security, and OMP acceptance remain deferred; remote Linux runtime evidence does not substitute for those gates.',

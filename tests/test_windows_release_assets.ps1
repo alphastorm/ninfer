@@ -418,6 +418,9 @@ try {
     Assert-Equal ([bool]$incomplete.qualification_authority.supersession_performed) $false 'incomplete receipt superseded pending build authority'
     Assert-Equal ([int]$incomplete.scope.supported_clients.Count) 0 'incomplete receipt advertised a supported client'
     Assert-Equal ([int]$incomplete.scope.supported_api_surfaces.Count) 0 'incomplete receipt advertised supported API surfaces'
+    $incompleteJson = $incomplete | ConvertTo-Json -Depth 24 -Compress
+    Assert-True $incompleteJson.Contains('"supported_clients":[]') 'incomplete receipt serialized supported_clients as null rather than an empty array'
+    Assert-True $incompleteJson.Contains('"supported_api_surfaces":[]') 'incomplete receipt serialized supported_api_surfaces as null rather than an empty array'
     Assert-Equal ([bool]$incomplete.platform.fresh_exact_package_windows_gates_passed) $false 'incomplete receipt marked the target Windows platform as proven'
 
     $ompClient.status = 'not_run'
