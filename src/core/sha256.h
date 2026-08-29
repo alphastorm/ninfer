@@ -6,7 +6,7 @@
 #include <span>
 #include <string>
 
-namespace ninfer::runtime {
+namespace ninfer::crypto {
 
 using Sha256Digest = std::array<std::uint8_t, 32>;
 
@@ -30,4 +30,4 @@ private:
 [[nodiscard]] Sha256Digest sha256(std::span<const std::byte> input);
 [[nodiscard]] std::string sha256_hex(const Sha256Digest& digest);
 
-} // namespace ninfer::runtime
+} // namespace ninfer::crypto

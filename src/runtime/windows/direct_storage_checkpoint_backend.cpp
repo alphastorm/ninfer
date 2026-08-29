@@ -25,6 +25,9 @@
 namespace ninfer::runtime::windows {
 namespace {
 
+using crypto::sha256;
+using crypto::sha256_hex;
+
 constexpr std::uint64_t kPayloadAlignment        = 4096;
 constexpr std::uint64_t kDirectStorageChunkBytes = 32ULL << 20;
 constexpr std::size_t kPayloadKindCount          = 4;

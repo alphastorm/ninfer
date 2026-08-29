@@ -1,6 +1,6 @@
 #include "serve/session_checkpoint_store.h"
 
-#include "runtime/contract/checkpoint_sha256.h"
+#include "core/sha256.h"
 
 #include <algorithm>
 #include <array>
@@ -214,7 +214,7 @@ hash_file(const std::filesystem::path& root, const std::string& relative,
     if (!read_queue || !read_queue->available()) {
         throw CheckpointUnavailable("checkpoint native read queue is unavailable");
     }
-    runtime::Sha256 hasher;
+    crypto::Sha256 hasher;
     std::vector<std::byte> buffer(
         static_cast<std::size_t>(std::min<std::uint64_t>(expected_bytes, 4ULL << 20)));
     std::uint64_t consumed = 0;
@@ -244,7 +244,7 @@ hash_file(const std::filesystem::path& root, const std::string& relative,
         throw;
     } catch (...) { throw CheckpointUnavailable("checkpoint native read failed"); }
     return {
-        .path = relative, .bytes = expected_bytes, .sha256 = runtime::sha256_hex(hasher.finish())};
+        .path = relative, .bytes = expected_bytes, .sha256 = crypto::sha256_hex(hasher.finish())};
 }
 
 [[nodiscard]] std::uint64_t directory_bytes(const std::filesystem::path& path) {
@@ -436,7 +436,7 @@ private:
                 }
                 state.file     = nullptr;
                 state.complete = true;
-                state.digest   = runtime::sha256_hex(state.hasher.finish());
+                state.digest   = crypto::sha256_hex(state.hasher.finish());
             }
             return true;
         } catch (...) {
@@ -448,7 +448,7 @@ private:
 private:
     struct State {
         std::FILE* file = nullptr;
-        runtime::Sha256 hasher;
+        crypto::Sha256 hasher;
         std::uint64_t total   = 0;
         std::uint64_t written = 0;
         std::string digest;

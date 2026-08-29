@@ -13,6 +13,10 @@ function(ninfer_cuda_archive target)
   target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
 endfunction()
 
+add_library(ninfer_sha256 STATIC
+  core/sha256.cpp)
+ninfer_internal_includes(ninfer_sha256)
+
 # Device/tensor/layout/graph primitives and the model-independent request runtime.
 add_library(ninfer_core STATIC
   core/arena.cu
@@ -37,7 +41,7 @@ ninfer_internal_includes(ninfer_core)
 target_include_directories(ninfer_core PRIVATE ${PROJECT_BINARY_DIR}/generated)
 add_dependencies(ninfer_core ninfer_verify_build_source)
 ninfer_cuda_archive(ninfer_core)
-target_link_libraries(ninfer_core PUBLIC CUDA::cudart CUDA::nvtx3 Threads::Threads)
+target_link_libraries(ninfer_core PUBLIC CUDA::cudart CUDA::nvtx3 Threads::Threads ninfer_sha256)
 
 # Generic .ninfer framing, binding, and direct final materialization.
 add_library(ninfer_artifact STATIC
@@ -308,10 +312,9 @@ endif()
 # One cold closed registry plus the opaque public product Engine. Family and exact-target
 # directories contribute their sources directly to this single compile owner below.
 add_library(ninfer_checkpoint_contract STATIC
-  runtime/contract/checkpoint_io.cpp
-  runtime/contract/checkpoint_sha256.cpp)
+  runtime/contract/checkpoint_io.cpp)
 ninfer_internal_includes(ninfer_checkpoint_contract)
-target_link_libraries(ninfer_checkpoint_contract PUBLIC Threads::Threads)
+target_link_libraries(ninfer_checkpoint_contract PUBLIC Threads::Threads ninfer_sha256)
 
 if(WIN32)
   add_library(ninfer_checkpoint_directstorage STATIC

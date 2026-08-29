@@ -1,4 +1,4 @@
-#include "runtime/contract/checkpoint_sha256.h"
+#include "core/sha256.h"
 #include "serve/session_checkpoint_store.h"
 
 #include <nlohmann/json.hpp>
@@ -217,15 +217,15 @@ bool write_chunked(ContinuationCheckpointWriter& writer, std::string_view path,
 
 int test_sha256_streaming() {
     const std::string input = "abc";
-    runtime::Sha256 streaming;
+    crypto::Sha256 streaming;
     streaming.update(std::as_bytes(std::span(input.data(), 1)));
     streaming.update(std::as_bytes(std::span(input.data() + 1, input.size() - 1)));
     int failures = 0;
-    failures += check(runtime::sha256_hex(streaming.finish()) ==
+    failures += check(crypto::sha256_hex(streaming.finish()) ==
                           "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
                       "streaming SHA-256 matches the FIPS abc vector");
     const std::span<const std::byte> empty;
-    failures += check(runtime::sha256_hex(runtime::sha256(empty)) ==
+    failures += check(crypto::sha256_hex(crypto::sha256(empty)) ==
                           "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
                       "SHA-256 matches the FIPS empty vector");
     return failures;

@@ -1,6 +1,6 @@
 #pragma once
 
-#include "runtime/contract/checkpoint_sha256.h"
+#include "core/sha256.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -19,7 +19,7 @@ inline constexpr std::uint64_t kCheckpointMagic          = 0x4e494e4643484b50ULL
 inline constexpr std::uint32_t kCheckpointSchemaVersion  = 1;
 inline constexpr std::uint32_t kCheckpointJournalVersion = 1;
 
-using CheckpointDigest = Sha256Digest;
+using CheckpointDigest = crypto::Sha256Digest;
 
 enum class CheckpointPayloadKind : std::uint8_t {
     StateImage,

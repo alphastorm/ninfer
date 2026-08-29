@@ -1,11 +1,11 @@
-#include "runtime/contract/checkpoint_sha256.h"
+#include "core/sha256.h"
 
 #include <algorithm>
 #include <bit>
 #include <limits>
 #include <stdexcept>
 
-namespace ninfer::runtime {
+namespace ninfer::crypto {
 namespace {
 
 constexpr std::array<std::uint32_t, 64> kRound{
@@ -67,14 +67,14 @@ void Sha256::process_block(const std::byte* block) noexcept {
         const std::uint32_t sum0     = std::rotr(a, 2) ^ std::rotr(a, 13) ^ std::rotr(a, 22);
         const std::uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
         const std::uint32_t t2       = sum0 + majority;
-        h                            = g;
-        g                            = f;
-        f                            = e;
-        e                            = d + t1;
-        d                            = c;
-        c                            = b;
-        b                            = a;
-        a                            = t1 + t2;
+        h = g;
+        g = f;
+        f = e;
+        e = d + t1;
+        d = c;
+        c = b;
+        b = a;
+        a = t1 + t2;
     }
     state_[0] += a;
     state_[1] += b;
@@ -118,10 +118,9 @@ Sha256Digest Sha256::finish() {
         throw std::overflow_error("SHA-256 bit length overflowed");
     }
     const std::uint64_t bits = total_bytes_ * 8ULL;
-    tail_[tail_bytes_++]     = std::byte{0x80};
+    tail_[tail_bytes_++] = std::byte{0x80};
     if (tail_bytes_ > 56) {
-        std::fill(tail_.begin() + static_cast<std::ptrdiff_t>(tail_bytes_), tail_.end(),
-                  std::byte{});
+        std::fill(tail_.begin() + static_cast<std::ptrdiff_t>(tail_bytes_), tail_.end(), std::byte{});
         process_block(tail_.data());
         tail_bytes_ = 0;
     }
@@ -156,4 +155,4 @@ std::string sha256_hex(const Sha256Digest& digest) {
     return result;
 }
 
-} // namespace ninfer::runtime
+} // namespace ninfer::crypto

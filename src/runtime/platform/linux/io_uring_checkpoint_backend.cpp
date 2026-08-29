@@ -59,6 +59,9 @@
 namespace ninfer::runtime {
 namespace {
 
+using crypto::sha256;
+using crypto::sha256_hex;
+
 constexpr std::size_t kPayloadKindCount  = 4;
 constexpr std::size_t kManifestBaseBytes = 164;
 constexpr std::size_t kDescriptorBytes   = 41;

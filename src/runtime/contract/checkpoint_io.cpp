@@ -11,6 +11,9 @@
 namespace ninfer::runtime {
 namespace {
 
+using crypto::Sha256;
+using crypto::sha256;
+
 CheckpointCompatibility mismatch(CheckpointCompatibilityError error, std::string_view field) {
     return CheckpointCompatibility{error, field};
 }

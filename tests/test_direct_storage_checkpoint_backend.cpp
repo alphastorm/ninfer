@@ -23,6 +23,7 @@ namespace {
 
 using namespace ninfer::runtime;
 using namespace ninfer::runtime::windows;
+using ninfer::crypto::sha256;
 
 int check(bool condition, const std::string& message) {
     if (condition) { return 0; }

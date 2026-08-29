@@ -24,6 +24,7 @@ namespace {
 
 using namespace ninfer::runtime;
 using namespace ninfer::runtime::windows;
+using ninfer::crypto::sha256;
 
 int check(bool condition, const char* message) {
     if (condition) { return 0; }
