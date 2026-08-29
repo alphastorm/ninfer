@@ -2,7 +2,7 @@
 
 ## Verdict
 
-**Beta-qualified for RTX 4090 support.** The final generic-profile Windows package passed the source-controlled Golden-equivalent through OMP: one typed tool invocation, exact string/integer/boolean arguments, tool-result continuation, and the exact visible final answer.
+**Beta-qualified for RTX 4090 support.** The final hardened generic-profile Windows package passed the source-controlled Golden-equivalent through standard OMP: one typed tool invocation, exact string/integer/boolean arguments, tool-result continuation, and the exact visible final answer.
 
 No stable or public release and no permanent route change was performed. The historical private corpus is unavailable and was not reused, read, copied, hashed, or transmitted; this qualification used only the committed synthetic fixture.
 
@@ -10,29 +10,35 @@ No stable or public release and no permanent route change was performed. The his
 
 | Item | Value |
 |---|---|
-| Runtime source | `aa1030e5d1d2b91e374ffc84d087c6fa3ec8371f` |
-| Runtime source archive | `9d43f5f83789dbce053aabddf3f6ff4e1e28eebd25601b2231d8dc1945b7cfbf` / `5227404` bytes |
-| Package source | `f5c6bb9d5c5b9b73ef1496ef97a7282fa3b8cbda` |
-| Package source archive | `63c5c3cb9a0b80b58e411c140e789fb27f1e00a44e3abf38020fd219c0c2ff7e` / `5227381` bytes |
-| Server | `43eff1c19fb788534466a51458e357f8f02bbee949ca4d6f3b605cfae177fa28` / `230208000` bytes |
+| Runtime source | `e5d51a44f1a3b5788be83b991c2761199e8e9a31` |
+| Runtime source archive | `e43847bf3da5ec152b3c9abf9a00cddca8f4bd79bf60f67d55c458a017f2eb3c` / `5232852` bytes |
+| Package source | `bdb3722518314ad9f7ea148897632201a77a329f` |
+| Package source archive | `285440d84bf97de20933723f8bea14ed1ead92b4a9697d85b0af10f96ec2618e` / `5232320` bytes |
+| Server | `e0769d5c64195325ba95891c1af99e71db2083271f379242134ac906f8ae9e5d` / `230245888` bytes |
 | Config | `ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db` |
 | Model | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
-| Package | `9967166bc3c45ffe546933e2531a90c26d5225b271359201d10ea3b7c34d2a6f` / `227349917` bytes |
-| SPDX 2.3 SBOM | `1826aadc5ef7edc0ce2900ec491d5c1e80331050985653dbcdf4a6c5dfc3b5d4` / `21597` bytes / `26` files |
+| Package | `5bef6ad506b82229f2c7cc6c0f9b53fd230a23bddd07bde3758e4bdc1b49d0cc` / `227389758` bytes |
+| SPDX 2.3 SBOM | `d24cd0ca18e68c498e64680ea942dfbcd4b050189b8a7e6490c5fde7e33028d6` / `22373` bytes / `27` files |
+| Qualification sidecar | `391b8cae18733ac774dfdc74713f3221baa845eff150d256ce7677bbab802544` / `6140` bytes |
+| SHA256SUMS | `90051cccc682fb8fd25f633d752f8c06f350edc08df9a80316a04fa0fd07749a` / `687` bytes |
 | Deployment profile | `qwen38-4090-v0.1` |
 | CUDA target/toolkit | `sm_89` / `13.3.73` |
 
-## Publication remediation
+## Publication and state-security remediation
 
-The public profile and committed receipts contain no private fleet projection. The first generic-profile package exposed absolute build/PDB paths inside the executable and vcpkg DLLs, so it was rejected before a live lease. The final binary and every dependency DLL were rebuilt with binary caches disabled under neutral `C:\NInferPublic` roots. A byte scan covered every staged file and all 26 ZIP members and found zero private identifiers.
+The final binary and every dependency DLL were built with caches disabled under neutral build roots. A byte scan covered all eight staged files and all 27 ZIP members; a separate scan covered all 1,082 tracked files. Both found zero private identifiers.
 
-A clean first install is self-contained at the release-control boundary: `Control-GpuOwner.ps1` is staged beside the installer and embedded in the ZIP, bound by `SHA256SUMS` and the package manifest. It supports `status`, `stop`, and `start` for an idle host and fails closed if an unmanaged compute owner is active; an operator-specific controller remains required when an existing workload must be stopped and restored.
+`Protect-StateRoot.ps1` now creates each missing managed parent from a trusted ProgramData ancestor, rejects precreated unowned paths and reparse points, restricts ownership and DACL access to SYSTEM and Administrators, and verifies the full state tree before lifecycle reads or writes. The elevated security regression proved effective low-privilege read and write denial, root and child junction rejection, three installer pre-write rejection paths, safe clean-root creation, and no shipped test-mode bypass.
+
+The generic GPU-owner controller stores its lease state below the protected state root. Its real-host regression observed an active compute owner, allowed non-destructive status, and rejected stop rather than taking ownership of an unmanaged workload. The live Golden request JSONL remained below the protected ProgramData state tree; seven valid records were observed without retaining raw requests.
+
+The installer, lifecycle controller, GPU-owner controller, and state-protection helper are each published standalone and in the ZIP. The committed member-binding receipt proves the standalone and ZIP-member SHA-256 values are byte-identical for all four scripts.
 
 The deterministic SPDX 2.3 document inventories every immutable ZIP member with SHA-1/SHA-256 and regenerated byte-identically. It is a complete file inventory; it does not claim dependency-package resolution beyond the shipped bytes.
 
 ## Build and regression evidence
 
-The final clean neutral build compiled source `9a22fbbb…` and all vcpkg dependencies from neutral roots; the classifier-only installer change was then source-verified and relinked as `aa1030e5…`. Runtime C++ and the CMake/include/apps/vcpkg manifest surface are unchanged from the qualified `4e67e6f9…` runtime, so the prior protocol, 102K process-restart, and uncontaminated performance receipts remain applicable.
+The clean neutral build compiled source `e5d51a44…` and all dependencies from neutral roots. `CMakeLists.txt`, `cmake`, `include`, `src`, `apps`, and `vcpkg.json` have no diff from the qualified `4e67e6f9…` runtime, so the prior protocol, 102K process-restart checkpoint, and uncontaminated performance receipts remain applicable.
 
 Focused checks passed:
 
@@ -40,13 +46,15 @@ Focused checks passed:
 - seven-case Golden-equivalent Python regression;
 - deterministic SPDX regression and Python compile;
 - MTP decision and release-asset PowerShell regressions;
-- generic GPU-owner controller regression.
+- deterministic generic GPU-owner regression;
+- real elevated Windows state-security and active-compute regression;
+- complete synthetic release-lifecycle regression.
 
-The complete synthetic release-lifecycle regression passes. Its dead-start mock now matches the production 30-second startup grace, observes the intended `managed scheduled task exited before release became ready: Ready` failure, and proves failed rollback restores the current release. The first-install fixture also reflects the published default GPU-owner controller contract.
+The synthetic lifecycle fixture explicitly treats its ACL instrumentation as ordering-only. Real ownership, DACL, effective-access, reparse, installer pre-write, and active-compute behavior is certified separately by the elevated state-security receipt. The lifecycle fixture also exercises ten injected failures, ten retries, helper rollback/repair, interrupted reentry, schema migration and identity rejection, and the production 30-second scheduled-task startup grace.
 
 ## Final Golden-equivalent
 
-Contract `qwen38-4090-omp-golden-equivalent-v1` passed through standard OMP `18.0.6` in `7.262045` seconds:
+Contract `qwen38-4090-omp-golden-equivalent-v1` passed through standard OMP `18.0.6` in `6.095594` seconds:
 
 | Gate | Result |
 |---|---|
@@ -57,19 +65,24 @@ Contract `qwen38-4090-omp-golden-equivalent-v1` passed through standard OMP `18.
 
 Exact visible answer: `NINFER_GOLDEN_EQUIVALENT_OK|Paris|3|metric=true|18C|clear`.
 
-Final Golden receipt SHA-256: `2146d764ae300e54486e85e970343d126b48efb74432d16d18851b56df5ccb6a`. Raw transcript content is not retained.
+Final Golden receipt SHA-256: `3f47356c7ff2ac8fa229d66d3a1969e44327bb954250b7cdc5993ca5152a9006`. Raw transcript content is not retained.
 
 ## Restoration
 
-Every live GPU-owner stop/start effect used the hash-pinned operator controller. The pre-lease incumbent is healthy again; candidate listener/state/task are absent and the pre-lease substrate state is restored. Final sanitized restore receipt SHA-256: `488cb5b6bfc0445b121c9bad8c419eb62cc0cf3da59e6efa59c9862818928aaa`.
+Every live GPU-owner stop/start effect used the hash-pinned tracked operator controller. The pre-lease incumbent is healthy again; candidate listener, protected state root, and scheduled task are absent, while the base controller and container substrate remain paused exactly as before the lease. No stable promotion, public release, or permanent route mutation occurred.
+
+Final restore receipt SHA-256: `d75cf019a9d725e3d44e3d58c47988c0e0e3794d1b1e6e46072557f0341f65c6`.
 
 ## Receipts
 
-- public asset receipt: `f8e6b594ec22ccb71da550f6e02b3853f6587679c35ed09aeaffe5faf437ceca`;
-- neutral clean build: `40fe2600f6e10d8aaa6a4b7e51ad4c1c8e2c3a6f5b675c884d3976132e255ed7`;
-- classifier build: `ceda47f030f58f4746f43abd23d1196a6bafe7c75ce183fe2e2efde8af921258`;
-- package: `422a8c637a0bac29b52af94842b74732c4c729bb05389c60805ae85cc03ceffd`;
-- private-identifier scan: `e04f8e098e56ede6889622eabee0c0e5247fac1bf0dfed044025e2331541f4e7`;
-- release lifecycle: `89cef9d271a8b1946aeebac3786cf1b6042c92f74f894c58a780016b9918807b`;
-- lease ready: `d6acd022842b97dbfb535fd0ec46cb807e176b07c1df9fe328455edb108eb22a`;
-- final restore: `488cb5b6bfc0445b121c9bad8c419eb62cc0cf3da59e6efa59c9862818928aaa`.
+- public asset receipt: `d63f4970616ffe561a7bb63a09b0438b97d893823a28d74d1b65126b7fd8cbb3`;
+- neutral clean build: `e9b53efc5fe7619408b84886a7fd68404584e9b2793565faf80b6b8d0af5c2e9`;
+- package: `3a3f77eee6c98f9117828b0935b477f9062bef4de36c7b3e4be1a6f2b46c1de7`;
+- private-identifier scan: `5ae9af1cb106d6fc359c5defd7f126f4808ee73d19e96a78387c6e18a99314cf`;
+- released-script byte binding: `1ccead7c905821ad4c299eed32276646db7e686b30c00dbbf761cf51d817e2b5`;
+- real Windows state security: `81e5d07d2ebff8c5e514d9405a33ea7e4626b3a39e4c88727a90621369d37aee`;
+- protected Golden request log: `08a270326d6b065e1c5b2cb51da867d3759b96037789750f6e3473eed6fb6329`;
+- release lifecycle: `51a0b816d9de7e58e15b4cb573b36e381e3700f0794b2c5fd5720c508e5fa0b6`;
+- lease ready: `b9678959bff959bc6ad2cbc68ae52c84b6aa5d2a45f0c70d143793213605da0e`;
+- final Golden: `3f47356c7ff2ac8fa229d66d3a1969e44327bb954250b7cdc5993ca5152a9006`;
+- final restore: `d75cf019a9d725e3d44e3d58c47988c0e0e3794d1b1e6e46072557f0341f65c6`.

@@ -1,0 +1,16 @@
+{
+  "artifact_type": "ninfer_omp_golden_protected_request_log",
+  "schema_version": 1,
+  "status": "passed",
+  "source_commit": "e5d51a44f1a3b5788be83b991c2761199e8e9a31",
+  "binary_sha256": "e0769d5c64195325ba95891c1af99e71db2083271f379242134ac906f8ae9e5d",
+  "state_root_under_program_data": true,
+  "state_tree_protection_verified": true,
+  "state_root_owner": "BUILTIN\\Administrators",
+  "state_root_dacl_protected": true,
+  "request_log_relative_path": "releases\\qwen38-4090-v0.1-e5d51a44f1a3\\logs\\requests.jsonl",
+  "request_log_bytes": 8458,
+  "json_record_count": 7,
+  "raw_requests_included": false,
+  "historical_private_corpus_reused": false
+}

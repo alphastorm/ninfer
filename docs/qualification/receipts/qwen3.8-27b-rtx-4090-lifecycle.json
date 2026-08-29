@@ -3,7 +3,7 @@
   "schema_version": 1,
   "status": "passed",
   "injected_failures": 10,
-  "missing_gpu_owner_rejections": 1,
+  "published_default_gpu_owner_controllers": 1,
   "retries": 10,
   "rollback_key_pairs": 10,
   "restart_model_rehash_calls": 0,
@@ -11,7 +11,7 @@
   "schema1_release_records_migrated": 1,
   "schema3_identity_mismatch_rejections": 1,
   "unmigratable_release_rejections": 1,
-  "acl_propagation_rejections": 1,
+  "stub_acl_propagation_rejections": 1,
   "interrupted_reentry_rejections": 2,
   "installer_repairs": 2,
   "scalar_cleanup_actions": 1,
@@ -19,7 +19,7 @@
   "candidate_model_copies": 0,
   "dead_start_rejections": 1,
   "captured_gpu_lease_reentries": 1,
-  "early_state_acl_hardening": 1,
+  "stub_acl_ordering_observations": 1,
   "selected_gpu_identity_bindings": 1,
-  "dead_start_sleep_milliseconds": 6000
+  "dead_start_sleep_milliseconds": 30000
 }

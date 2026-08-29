@@ -1,0 +1,21 @@
+{
+  "artifact_type": "ninfer_windows_state_security_regression",
+  "schema_version": 1,
+  "status": "passed",
+  "root_owner_sid": "S-1-5-32-544",
+  "root_dacl_protected": true,
+  "clean_default_managed_parent_creations": 2,
+  "low_privilege_effective_write_denials": 1,
+  "low_privilege_effective_read_denials": 1,
+  "precreated_root_rejections": 1,
+  "unowned_root_rejections": 1,
+  "root_junction_rejections": 1,
+  "child_junction_rejections": 1,
+  "preplanted_gpu_owner_rejections": 1,
+  "installer_prewrite_root_rejections": 3,
+  "active_compute_owner_observed": true,
+  "active_compute_owner_rejections": 1,
+  "gpu_owner_status_rejected_active_service": false,
+  "request_jsonl_under_protected_state": true,
+  "shipped_test_bypass": false
+}
