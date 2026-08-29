@@ -1,5 +1,6 @@
 #pragma once
 
+#include "serve/automatic_checkpoint_queue.h"
 #include "serve/generation_service.h"
 #include "serve/response_store.h"
 #include "serve/request_log.h"
@@ -12,9 +13,11 @@
 #include <condition_variable>
 #include <chrono>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace ninfer::serve {
@@ -29,6 +32,7 @@ public:
     void attach(GenerationService& service);
     bool listen();
     void stop();
+    void save_all_checkpoints() noexcept;
 
     [[nodiscard]] const std::string& public_model_id() const noexcept { return public_model_id_; }
 
@@ -44,12 +48,14 @@ private:
     void handle_response_input_items(const httplib::Request& req, httplib::Response& res);
     void handle_response_cancel(const httplib::Request& req, httplib::Response& res);
     void handle_response_compact(const httplib::Request& req, httplib::Response& res);
-    void checkpoint_stored_response(const std::optional<std::string>& session_sha256,
-                                    const std::string& response_id,
-                                    bool depends_on_previous_response);
+    void maybe_checkpoint_completed_turn(
+        const std::optional<std::string>& session_sha256) noexcept;
+    void save_automatic_checkpoint(std::string_view session_sha256) noexcept;
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
     void handle_status(const httplib::Request& req, httplib::Response& res) const;
+    void handle_checkpoint_get(const httplib::Request& req, httplib::Response& res);
+    void handle_checkpoint_delete(const httplib::Request& req, httplib::Response& res);
     // The process-wide console logger serializes lines from request and reporter threads.
     void log_line(const std::string& line);
     void log_request_start(const RequestLogContext& context);
@@ -73,6 +79,8 @@ private:
     std::condition_variable stats_cv_;
     std::thread stats_thread_;
     bool stats_stopping_ = false;
+    // Declared last so it drains and joins before the service pointer and ResponseStore disappear.
+    std::unique_ptr<AutomaticCheckpointQueue> automatic_checkpoints_;
 };
 
 } // namespace ninfer::serve

@@ -98,6 +98,21 @@ std::optional<std::string> response_session_identity(const httplib::Request& req
     return identity.client_session_sha256;
 }
 
+std::string require_checkpoint_session_header(const httplib::Request& request,
+                                              bool authentication_configured) {
+    std::optional<std::string> digest =
+        response_session_identity(request, authentication_configured);
+    if (!digest) {
+        ApiError error;
+        error.status  = 400;
+        error.message = "X-NInfer-Session is required";
+        error.param   = "ninfer_session";
+        error.code    = "invalid_ninfer_identity";
+        throw ApiException(std::move(error));
+    }
+    return std::move(*digest);
+}
+
 void apply_response_session_identity(const httplib::Request& request,
                                      bool authentication_configured,
                                      GenerationRequest& generation) {

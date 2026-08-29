@@ -329,6 +329,8 @@ add_library(ninfer::engine ALIAS ninfer_engine)
 if(NINFER_BUILD_SERVE)
   # HTTP protocol/product adapter. No serving header is part of the public API.
   add_library(ninfer_serve STATIC
+    runtime/windows/direct_storage_checkpoint_read_queue.cpp
+    serve/automatic_checkpoint_queue.cpp
     serve/client_identity.cpp
     serve/opaque_id.cpp
     serve/http_contract.cpp
@@ -357,6 +359,6 @@ if(NINFER_BUILD_SERVE)
     PUBLIC ninfer_engine Threads::Threads
     PRIVATE ninfer_media_acquire ${NINFER_CUDART_TARGET})
   if(WIN32)
-    target_link_libraries(ninfer_serve PRIVATE bcrypt)
+    target_link_libraries(ninfer_serve PRIVATE bcrypt ninfer_directstorage d3d12 dxgi)
   endif()
 endif()

@@ -24,12 +24,16 @@ struct SessionCheckpointStoreOptions {
     std::filesystem::path root;
     std::uint64_t disk_quota_bytes = 64ULL << 30;
     std::size_t staging_bytes      = 256ULL << 20;
+    std::uint32_t io_timeout_ms    = 30'000;
+    std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue;
     std::function<bool(const std::filesystem::path&)> tombstone_cleanup;
     // Empty callbacks use the platform implementation. Host tests inject deterministic filesystem
     // outcomes at these two durability boundaries without changing production behavior.
     std::function<void(const std::filesystem::path&)> before_directory_sync;
     std::function<void(const std::filesystem::path&, const std::filesystem::path&)>
         before_current_pointer_replace;
+    // Test-only fault seam for the final generation-size scan before reader ownership begins.
+    std::function<std::uint64_t(const std::filesystem::path&)> generation_size;
 };
 
 struct SessionCheckpointSaveResult {
@@ -167,6 +171,8 @@ public:
     [[nodiscard]] SessionCheckpointRestoreState
     restore(std::string_view session_sha256, std::string_view required_response_id,
             ResponseStore& responses);
+    [[nodiscard]] nlohmann::json status(std::string_view session_sha256);
+    [[nodiscard]] SessionCheckpointEraseResult erase(std::string_view session_sha256);
     [[nodiscard]] SessionCheckpointEraseResult
     erase_response(std::string_view session_sha256, std::string_view response_id,
                    ResponseStore& responses);

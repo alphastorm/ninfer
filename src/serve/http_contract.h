@@ -26,6 +26,9 @@ httplib::Server::HandlerResponse authorize_http_request(const ServeOptions& opti
 // Bodyless stored-response routes carry exactly one optional authenticated session digest.
 std::optional<std::string> response_session_identity(const httplib::Request& request,
                                                      bool authentication_configured);
+// Checkpoint status and namespace deletion require exactly one authenticated session header.
+std::string require_checkpoint_session_header(const httplib::Request& request,
+                                              bool authentication_configured);
 void apply_response_session_identity(const httplib::Request& request,
                                      bool authentication_configured,
                                      GenerationRequest& generation);

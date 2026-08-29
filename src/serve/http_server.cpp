@@ -229,6 +229,16 @@ void HttpServer::register_routes() {
     server_.Get("/v1/ninfer/status", [this](const httplib::Request& req, httplib::Response& res) {
         handle_status(req, res);
     });
+    if (!options_.session_checkpoint_root.empty()) {
+        server_.Get("/v1/ninfer/checkpoints/status",
+                    [this](const httplib::Request& req, httplib::Response& res) {
+                        handle_checkpoint_get(req, res);
+                    });
+        server_.Delete("/v1/ninfer/checkpoints",
+                       [this](const httplib::Request& req, httplib::Response& res) {
+                           handle_checkpoint_delete(req, res);
+                       });
+    }
     server_.Get("/metrics", [this](const httplib::Request&, httplib::Response& res) {
         res.set_content(metrics_.render(options_.max_concurrency), "text/plain; version=0.0.4");
     });
@@ -862,6 +872,64 @@ void HttpServer::handle_messages(const httplib::Request& req, httplib::Response&
         [stream](bool) { stream->cancelled.store(true, std::memory_order_release); });
 }
 
+void HttpServer::handle_checkpoint_get(const httplib::Request& req, httplib::Response& res) {
+    std::string digest;
+    try {
+        digest = require_checkpoint_session_header(req, !options_.api_key.empty());
+    } catch (const ApiException& error) {
+        write_error(res, error.error());
+        return;
+    }
+    if (service_ == nullptr) {
+        res.status = 503;
+        res.set_content(nlohmann::json{{"state", "loading"}}.dump(), "application/json");
+        return;
+    }
+    res.set_content(service_->checkpoint_status(digest).dump(), "application/json");
+}
+
+void HttpServer::handle_checkpoint_delete(const httplib::Request& req, httplib::Response& res) {
+    std::string digest;
+    try {
+        digest = require_checkpoint_session_header(req, !options_.api_key.empty());
+    } catch (const ApiException& error) {
+        write_error(res, error.error());
+        return;
+    }
+    if (service_ == nullptr) {
+        ApiError error;
+        error.status  = 503;
+        error.code    = "service_unavailable";
+        error.message = "generation service is loading";
+        write_error(res, error);
+        return;
+    }
+    switch (service_->erase_checkpoint(digest)) {
+    case SessionCheckpointEraseResult::Erased:
+        res.set_content(nlohmann::json{{"artifact_type", "ninfer_session_checkpoint_status"},
+                                       {"state", "erased"}}
+                            .dump(),
+                        "application/json");
+        return;
+    case SessionCheckpointEraseResult::Missing: {
+        ApiError error;
+        error.status  = 404;
+        error.code    = "checkpoint_not_found";
+        error.message = "session checkpoint does not exist";
+        write_error(res, error);
+        return;
+    }
+    case SessionCheckpointEraseResult::Conflict: {
+        ApiError error;
+        error.status  = 409;
+        error.code    = "checkpoint_unavailable";
+        error.message = "session checkpoint could not be erased";
+        write_error(res, error);
+        return;
+    }
+    }
+}
+
 void HttpServer::handle_status(const httplib::Request&, httplib::Response& res) const {
     if (service_ == nullptr) {
         res.status = 503;
@@ -889,6 +957,10 @@ void HttpServer::attach(GenerationService& service) {
     service_               = &service;
     request_jsonl_.write_server_start(options_, service.sampling_defaults(), public_model_id_,
                                       status_load_, status_memory_);
+    if (service.checkpoint_enabled()) {
+        automatic_checkpoints_ = std::make_unique<AutomaticCheckpointQueue>(
+            [this](std::string_view digest) { save_automatic_checkpoint(digest); });
+    }
 }
 
 bool HttpServer::listen() {

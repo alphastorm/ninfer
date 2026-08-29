@@ -208,6 +208,17 @@ ninfer_add_test(ninfer_response_store_test
 ninfer_add_test(ninfer_session_checkpoint_store_test
   SOURCES test_session_checkpoint_store.cpp
   LIBRARIES ninfer_serve)
+ninfer_add_test(ninfer_automatic_checkpoint_queue_test
+  SOURCES test_automatic_checkpoint_queue.cpp
+          ${PROJECT_SOURCE_DIR}/src/serve/automatic_checkpoint_queue.cpp)
+if(WIN32)
+  ninfer_add_test(ninfer_direct_storage_checkpoint_read_queue_windows_test
+    SOURCES test_direct_storage_checkpoint_read_queue_windows.cpp
+            ${PROJECT_SOURCE_DIR}/src/runtime/windows/direct_storage_checkpoint_read_queue.cpp
+    LIBRARIES ninfer_directstorage ${NINFER_CUDART_TARGET} d3d12 dxgi)
+  set_tests_properties(ninfer_direct_storage_checkpoint_read_queue_windows_test
+    PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 ninfer_add_test(ninfer_client_identity_test
   SOURCES test_client_identity.cpp
   LIBRARIES ninfer_serve)
