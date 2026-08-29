@@ -725,32 +725,16 @@ public:
             destination.size() > found->second - offset) {
             return false;
         }
-        if (read_queue_) {
-            if (!read_queue_->available()) { return false; }
-            try {
-                const runtime::ContinuationCheckpointReadRequest request{
-                    .file_offset = offset, .destination = destination};
-                std::unique_ptr<runtime::ContinuationCheckpointReadCompletion> completion =
-                    read_queue_->submit(root_ / found->first, std::span(&request, 1));
-                if (!completion) { return false; }
-                completion->wait();
-                return true;
-            } catch (...) { return false; }
-        }
-        std::FILE* file = open_binary_read(root_ / found->first);
-        if (file == nullptr) { return false; }
-#ifdef _WIN32
-        const bool sought = _fseeki64(file, static_cast<__int64>(offset), SEEK_SET) == 0;
-#else
-        const bool sought = ::fseeko(file, static_cast<off_t>(offset), SEEK_SET) == 0;
-#endif
-        const std::size_t count = sought && !destination.empty()
-                                      ? std::fread(destination.data(), 1, destination.size(), file)
-                                      : 0;
-        const bool ok           = sought && (destination.empty() || count == destination.size()) &&
-                                  std::ferror(file) == 0;
-        std::fclose(file);
-        return ok;
+        if (!read_queue_->available()) { return false; }
+        try {
+            const runtime::ContinuationCheckpointReadRequest request{.file_offset = offset,
+                                                                     .destination = destination};
+            std::unique_ptr<runtime::ContinuationCheckpointReadCompletion> completion =
+                read_queue_->submit(root_ / found->first, std::span(&request, 1));
+            if (!completion) { return false; }
+            completion->wait();
+            return true;
+        } catch (...) { return false; }
     }
 
 private:
@@ -917,6 +901,13 @@ SessionCheckpointStore::SessionCheckpointStore(SessionCheckpointStoreOptions opt
     : options_(std::move(options)), impl_(std::make_shared<Impl>()) {
     if (options_.root.empty() || options_.disk_quota_bytes == 0 || options_.staging_bytes == 0) {
         throw std::invalid_argument("checkpoint store options must be positive");
+    }
+    if (!options_.read_queue) {
+        throw std::invalid_argument("checkpoint store requires a native read queue");
+    }
+    if (!options_.read_queue->available()) {
+        throw std::invalid_argument("checkpoint read queue is unavailable: " +
+                                    std::string(options_.read_queue->unavailable_reason()));
     }
     std::filesystem::create_directories(options_.root / "sessions");
     std::filesystem::create_directories(options_.root / ".tombstones");
@@ -1158,9 +1149,7 @@ nlohmann::json SessionCheckpointStore::status(std::string_view session_sha256,
                                               const nlohmann::json& runtime_fingerprint) const {
     nlohmann::json result = {{"artifact_type", "ninfer_session_checkpoint_status"},
                              {"schema_version", kSessionCheckpointSchemaVersion},
-                             {"read_backend", options_.read_queue
-                                                  ? std::string(options_.read_queue->backend_name())
-                                                  : std::string("buffered")},
+                             {"read_backend", std::string(options_.read_queue->backend_name())},
                              {"state", "missing"}};
     if (!valid_digest(session_sha256) || !runtime_fingerprint.is_object()) { return result; }
     std::lock_guard lock(impl_->mutex);

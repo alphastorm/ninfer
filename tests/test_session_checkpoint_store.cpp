@@ -60,11 +60,11 @@ public:
         TestReadQueue& owner_;
     };
 
-    [[nodiscard]] bool available() const noexcept override { return true; }
+    [[nodiscard]] bool available() const noexcept override { return is_available; }
 
     [[nodiscard]] std::string_view backend_name() const noexcept override { return "test-queue"; }
 
-    [[nodiscard]] std::string_view unavailable_reason() const noexcept override { return {}; }
+    [[nodiscard]] std::string_view unavailable_reason() const noexcept override { return reason; }
 
     [[nodiscard]] std::unique_ptr<runtime::ContinuationCheckpointReadCompletion>
     submit(const std::filesystem::path& path,
@@ -84,6 +84,8 @@ public:
         return std::make_unique<Completion>(*this);
     }
 
+    bool is_available = true;
+    std::string reason;
     std::size_t submit_count = 0;
     std::size_t wait_count   = 0;
 };
@@ -305,8 +307,10 @@ int test_transaction_restart_compatibility_and_corruption() {
     TemporaryDirectory temporary;
     const ResponseStoreSnapshot responses = sample_snapshot();
     const std::vector<std::byte> payload  = engine_payload();
-    SessionCheckpointStore store(
-        {.root = temporary.path, .disk_quota_bytes = 8ULL << 20, .staging_bytes = 1ULL << 20});
+    SessionCheckpointStore store({.root             = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes    = 1ULL << 20,
+                                  .read_queue       = std::make_shared<TestReadQueue>()});
     const auto exporter =
         [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
         const std::string metadata = "engine-metadata-v2";
@@ -472,6 +476,7 @@ int test_active_reader_delete_and_gc() {
     SessionCheckpointStore store({.root              = temporary.path,
                                   .disk_quota_bytes  = 64ULL << 10,
                                   .staging_bytes     = 1ULL << 20,
+                                  .read_queue        = std::make_shared<TestReadQueue>(),
                                   .tombstone_cleanup = [&](const std::filesystem::path& path) {
                                       if (refuse_cleanup) { return false; }
                                       std::error_code error;
@@ -575,8 +580,12 @@ int test_store_wide_quota_across_sessions() {
     };
 
     TemporaryDirectory measurement;
-    SessionCheckpointStore measuring_store(
-        {.root = measurement.path, .disk_quota_bytes = 1ULL << 20, .staging_bytes = 1ULL << 20});
+    SessionCheckpointStore measuring_store({
+        .root             = measurement.path,
+        .disk_quota_bytes = 1ULL << 20,
+        .staging_bytes    = 1ULL << 20,
+        .read_queue       = std::make_shared<TestReadQueue>(),
+    });
     const auto measured = measuring_store.save(first_session, fingerprint(), exporter);
     int failures        = 0;
     failures += check(measured.has_value(), "quota fixture generation size is measurable");
@@ -584,8 +593,10 @@ int test_store_wide_quota_across_sessions() {
 
     const std::uint64_t quota = measured->bytes * 2;
     TemporaryDirectory temporary;
-    SessionCheckpointStore store(
-        {.root = temporary.path, .disk_quota_bytes = quota, .staging_bytes = 1ULL << 20});
+    SessionCheckpointStore store({.root             = temporary.path,
+                                  .disk_quota_bytes = quota,
+                                  .staging_bytes    = 1ULL << 20,
+                                  .read_queue       = std::make_shared<TestReadQueue>()});
     const auto first  = store.save(first_session, fingerprint(), exporter);
     const auto second = store.save(second_session, fingerprint(), exporter);
     const auto third  = store.save(third_session, fingerprint(), exporter);
@@ -614,9 +625,12 @@ int test_store_wide_quota_across_sessions() {
                                              third_session.client_session_sha256 / "current"),
         "eviction removes its current pointer while retained sessions keep valid pointers");
     TemporaryDirectory protected_temporary;
-    SessionCheckpointStore protected_store({.root             = protected_temporary.path,
-                                            .disk_quota_bytes = measured->bytes,
-                                            .staging_bytes    = 1ULL << 20});
+    SessionCheckpointStore protected_store({
+        .root             = protected_temporary.path,
+        .disk_quota_bytes = measured->bytes,
+        .staging_bytes    = 1ULL << 20,
+        .read_queue       = std::make_shared<TestReadQueue>(),
+    });
     const auto protected_saved = protected_store.save(first_session, fingerprint(), exporter);
     SessionCheckpointLoadResult active =
         protected_store.load(first_session.client_session_sha256, fingerprint());
@@ -636,6 +650,7 @@ int test_store_wide_quota_across_sessions() {
         {.root              = failure_temporary.path,
          .disk_quota_bytes  = quota,
          .staging_bytes     = 1ULL << 20,
+         .read_queue        = std::make_shared<TestReadQueue>(),
          .tombstone_cleanup = [&](const std::filesystem::path& path) {
              if (refuse_cleanup) { return false; }
              std::error_code error;
@@ -687,6 +702,31 @@ int test_store_wide_quota_across_sessions() {
         "deferred tombstones remain quota-accounted and are reclaimed by GC");
     return failures;
 }
+
+int test_native_read_queue_is_required() {
+    TemporaryDirectory temporary;
+    bool missing_rejected = false;
+    try {
+        SessionCheckpointStore missing(
+            {.root = temporary.path, .disk_quota_bytes = 1ULL << 20, .staging_bytes = 1ULL << 20});
+    } catch (const std::invalid_argument&) { missing_rejected = true; }
+
+    auto unavailable          = std::make_shared<TestReadQueue>();
+    unavailable->is_available = false;
+    unavailable->reason       = "injected unavailable queue";
+    bool unavailable_rejected = false;
+    try {
+        SessionCheckpointStore rejected({.root             = temporary.path,
+                                         .disk_quota_bytes = 1ULL << 20,
+                                         .staging_bytes    = 1ULL << 20,
+                                         .read_queue       = unavailable});
+    } catch (const std::invalid_argument& error) {
+        unavailable_rejected =
+            std::string_view(error.what()).find(unavailable->reason) != std::string_view::npos;
+    }
+    return check(missing_rejected && unavailable_rejected,
+                 "checkpoint store accepted a missing or unavailable native read queue");
+}
 } // namespace
 
 int main() {
@@ -696,6 +736,7 @@ int main() {
     failures += test_transaction_restart_compatibility_and_corruption();
     failures += test_active_reader_delete_and_gc();
     failures += test_store_wide_quota_across_sessions();
+    failures += test_native_read_queue_is_required();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }
