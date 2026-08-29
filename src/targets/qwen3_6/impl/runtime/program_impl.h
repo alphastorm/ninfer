@@ -8845,8 +8845,10 @@ ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReade
                     if (!logical) { throw std::bad_alloc(); }
                     restored_pages.push_back(*logical);
                 }
-                reservation = host_kv_extents->prepare_restore(pages, restored_pages);
-                if (!reservation) { throw std::bad_alloc(); }
+                std::optional<HostKVExtentReservation> prepared =
+                    host_kv_extents->prepare_restore(pages, restored_pages);
+                if (!prepared) { throw std::bad_alloc(); }
+                reservation.emplace(std::move(*prepared));
                 HostKVAllocationView destination = host_kv_extents->writable_view(*reservation);
                 std::uint64_t offset             = 0;
                 while (offset < total_bytes) {
