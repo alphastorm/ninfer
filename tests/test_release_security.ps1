@@ -16,7 +16,9 @@ param(
 
     [string]$ManagedStateRoot,
 
-    [switch]$ExerciseManagedRollback
+    [switch]$ExerciseManagedRollback,
+
+    [switch]$InstrumentGpuPowerFixture
 )
 
 Set-StrictMode -Version Latest
@@ -125,6 +127,7 @@ $testRoot = Join-Path $originalProgramData ('NInferSecurityRegression-' + [Guid]
 $user = 'NfAcl' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $password = 'Nf!9aA' + [Guid]::NewGuid().ToString('N').Substring(0, 14)
 $userCreated = $false
+$gpuRoot = $null
 try {
     $testRoot = Initialize-NInferProtectedStateRoot $testRoot
     $env:ProgramData = $testRoot
@@ -291,6 +294,10 @@ try {
             'managed state does not contain a completed upgrade with a retained previous release'
         $initialActive = [string]$initialManagedState.active_release
         $initialPrevious = [string]$initialManagedState.previous_release
+        $managedStateHelperPath = Join-Path $managedRoot 'Protect-StateRoot.ps1'
+        $managedOwnerHelperPath = Join-Path (Join-Path $managedRoot 'gpu-owner') 'Protect-StateRoot.ps1'
+        $initialStateHelperSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $managedStateHelperPath).Hash.ToLowerInvariant()
+        $initialOwnerHelperSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $managedOwnerHelperPath).Hash.ToLowerInvariant()
         $secretHashes = & $assertManagedSecrets $initialManagedState
         $statusTimer = [Diagnostics.Stopwatch]::StartNew()
         & $managedController -Action Status -StateRoot $managedRoot | Out-Null
@@ -306,6 +313,8 @@ try {
                 [string]$rolledState.previous_release -ceq $initialActive) `
                 'managed rollback did not atomically swap active and previous releases'
             $rolledHashes = & $assertManagedSecrets $rolledState
+            Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $managedStateHelperPath).Hash.ToLowerInvariant() -ceq $initialStateHelperSha) 'managed rollback changed root state-helper bytes'
+            Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $managedOwnerHelperPath).Hash.ToLowerInvariant() -ceq $initialOwnerHelperSha) 'managed rollback changed GPU-owner state-helper bytes'
             foreach ($releaseId in $secretHashes.Keys) {
                 Assert-True ([string]$rolledHashes[$releaseId] -ceq [string]$secretHashes[$releaseId]) `
                     "managed rollback changed a retained release secret: $releaseId"
@@ -318,6 +327,8 @@ try {
                 [string]$restoredManagedState.previous_release -ceq $initialPrevious) `
                 'reverse managed rollback did not restore the upgraded release'
             $restoredHashes = & $assertManagedSecrets $restoredManagedState
+            Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $managedStateHelperPath).Hash.ToLowerInvariant() -ceq $initialStateHelperSha) 'reverse rollback changed root state-helper bytes'
+            Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $managedOwnerHelperPath).Hash.ToLowerInvariant() -ceq $initialOwnerHelperSha) 'reverse rollback changed GPU-owner state-helper bytes'
             foreach ($releaseId in $secretHashes.Keys) {
                 Assert-True ([string]$restoredHashes[$releaseId] -ceq [string]$secretHashes[$releaseId]) `
                     "reverse rollback changed a retained release secret: $releaseId"
@@ -330,11 +341,36 @@ try {
         }
     }
 
+    if ($InstrumentGpuPowerFixture) {
+        $gpuOwnerSource = (Get-Content -LiteralPath $GpuOwnerControllerPath -Raw -Encoding UTF8).Replace(
+            [string]([char]13 + [char]10), [string][char]10
+        )
+        $trustedResolver = @'
+$nvidiaSmi = Join-Path ([Environment]::GetFolderPath('System')) 'nvidia-smi.exe'
+if (-not (Test-Path -LiteralPath $nvidiaSmi -PathType Leaf)) {
+    $nvidiaSmi = Join-Path $env:ProgramFiles 'NVIDIA Corporation\NVSMI\nvidia-smi.exe'
+}
+if (-not (Test-Path -LiteralPath $nvidiaSmi -PathType Leaf)) {
+    throw 'trusted nvidia-smi installation is missing'
+}
+'@
+        $fixtureResolver = '$nvidiaSmi = ''nvidia-smi.exe'''
+        if ([regex]::Matches($gpuOwnerSource, [regex]::Escape($trustedResolver)).Count -ne 1) {
+            throw 'GPU-owner trusted resolver fixture anchor changed'
+        }
+        $gpuOwnerSource = $gpuOwnerSource.Replace($trustedResolver, $fixtureResolver)
+        $instrumentedGpuOwner = Join-Path $testRoot 'Control-GpuOwner.instrumented.ps1'
+        [IO.File]::WriteAllText($instrumentedGpuOwner, $gpuOwnerSource, [Text.UTF8Encoding]::new($false))
+        $GpuOwnerControllerPath = $instrumentedGpuOwner
+    }
+
     $global:NInferTestPowerLimitW = 370
     $global:NInferTestInteractiveGpuActive = $false
+    $global:NInferNvidiaShimCalls = 0
     function global:nvidia-smi.exe {
         [CmdletBinding()]
         param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Remaining)
+        $global:NInferNvidiaShimCalls++
         $values = @($Remaining | ForEach-Object { [string]$_ })
         if ($values -contains '--query-gpu=power.limit') {
             ([double]$global:NInferTestPowerLimitW).ToString(
@@ -346,6 +382,14 @@ try {
         }
         Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1
     }
+    $absoluteNvidiaSmi = Join-Path ([Environment]::GetFolderPath('System')) 'nvidia-smi.exe'
+    if (-not (Test-Path -LiteralPath $absoluteNvidiaSmi -PathType Leaf)) {
+        $absoluteNvidiaSmi = Join-Path $env:ProgramFiles 'NVIDIA Corporation\NVSMI\nvidia-smi.exe'
+    }
+    $absolutePower = ((& $absoluteNvidiaSmi --query-gpu=power.limit --format=csv,noheader,nounits) | Out-String).Trim()
+    Assert-True ($LASTEXITCODE -eq 0 -and $absolutePower -match '^[0-9]+(?:[.][0-9]+)?$') 'trusted absolute nvidia-smi query failed'
+    Assert-True ($global:NInferNvidiaShimCalls -eq 0) 'path-qualified nvidia-smi unexpectedly invoked the function shim'
+    $absoluteNvidiaShimInterceptions = $global:NInferNvidiaShimCalls
     function global:Get-CimInstance {
         param([string]$ClassName, [object]$ErrorAction)
         if ($global:NInferTestInteractiveGpuActive) {
@@ -360,6 +404,9 @@ try {
     & $GpuOwnerControllerPath -Action stop -StateRoot $gpuRoot | Out-Null
     $pausedStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot) | Out-String).Trim() | ConvertFrom-Json)
     Assert-True ([bool]$pausedStatus.paused -and [int]$pausedStatus.power_limit_w -eq 300) 'GPU owner did not enter the qualified cap'
+    & $GpuOwnerControllerPath -Action stop -StateRoot $gpuRoot | Out-Null
+    $idempotentPausedStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot) | Out-String).Trim() | ConvertFrom-Json)
+    Assert-True ([bool]$idempotentPausedStatus.paused -and [int]$idempotentPausedStatus.power_limit_w -eq 300) 'non-default GPU-owner idempotent stop changed roots or power state'
     Assert-NInferProtectedStateTree $gpuRoot
 
     $global:NInferTestInteractiveGpuActive = $true
@@ -431,11 +478,15 @@ try {
         active_interactive_gpu_rejections = 1
         qualified_power_limit_w = 300
         restored_power_limit_w = 370
+        gpu_power_evidence_class = $(if ($InstrumentGpuPowerFixture) { 'instrumented-function-shim-no-hardware-claim' } else { 'real-trusted-absolute-nvidia-smi' })
+        absolute_nvidia_shim_interceptions = $absoluteNvidiaShimInterceptions
+        gpu_power_fixture_calls = $(if ($InstrumentGpuPowerFixture) { $global:NInferNvidiaShimCalls } else { 0 })
         request_jsonl_under_protected_state = $true
         request_jsonl_effective_access_denials = 2
         managed_release_acl_state_assertions = $managedReleasesVerified
         managed_request_log_acl_state_assertions = $managedRequestLogsVerified
         managed_rollback_directions = $managedRollbackDirections
+        retained_state_helper_hash_assertions = $(if ($managedRollbackDirections -eq 2) { 4 } else { 0 })
         populated_root_status_milliseconds = $managedStatusMilliseconds
         shipped_test_bypass = $false
         shipped_scripts_scanned = $releaseScripts.Count
@@ -445,6 +496,10 @@ try {
     $receipt | ConvertTo-Json -Compress
 }
 finally {
+    if ($null -ne $gpuRoot -and (Test-Path -LiteralPath (Join-Path $gpuRoot 'lease.json') -PathType Leaf)) {
+        try { & $GpuOwnerControllerPath -Action start -StateRoot $gpuRoot | Out-Null }
+        catch { Write-Error "failed to restore GPU power limit from retained lease evidence: $($_.Exception.Message)" }
+    }
     $env:ProgramData = $originalProgramData
     if ($userCreated) { & net.exe user $user '/delete' | Out-Null }
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue

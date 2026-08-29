@@ -244,6 +244,7 @@ class ReleaseOptions:
     upstream_base_sha: str
     release_head_sha: str
     build_profile: str
+    runtime_source_sha: str | None = None
     lineage_base_sha: str | None = None
     source_date_epoch: int | None = None
     runtime_dependencies: tuple[Path, ...] = ()
@@ -293,6 +294,9 @@ def validate_options(options: ReleaseOptions) -> tuple[dict[str, str], int]:
         options.lineage_base_sha
     ):
         fail("lineage base must be a full lowercase Git SHA")
+    runtime_source_sha = options.runtime_source_sha or options.release_head_sha
+    if not _GIT_SHA_RE.fullmatch(runtime_source_sha):
+        fail("runtime source must be a full lowercase Git SHA")
     dependency_names: set[str] = set()
     for dependency in options.runtime_dependencies:
         resolved = dependency.resolve()
@@ -331,6 +335,15 @@ def validate_options(options: ReleaseOptions) -> tuple[dict[str, str], int]:
             raise ReleaseError("required executable is unavailable: git") from error
         if lineage.returncode != 0:
             fail("lineage base is unavailable or is not an ancestor of the release head")
+    runtime_ancestor = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", runtime_source_sha, options.release_head_sha],
+        cwd=source,
+        text=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    if runtime_ancestor.returncode != 0:
+        fail("runtime source is unavailable or is not an ancestor of the package source")
     if options.windows_server_config is not None:
         config = options.windows_server_config
         resolved_config = config.resolve()
@@ -356,7 +369,7 @@ def validate_options(options: ReleaseOptions) -> tuple[dict[str, str], int]:
     identity = identities[0]
     expected = {
         "upstream_base_sha": options.upstream_base_sha,
-        "patch_stack_sha": options.release_head_sha,
+        "patch_stack_sha": runtime_source_sha,
         "build_profile": options.build_profile,
         "build_type": "Release",
         "source_dirty": "false",
@@ -736,7 +749,8 @@ def package_release(options: ReleaseOptions) -> dict[str, object]:
         "release_version": options.release_version,
         "platform": options.platform,
         "upstream_base_sha": options.upstream_base_sha,
-        "patch_stack_sha": options.release_head_sha,
+        "patch_stack_sha": options.runtime_source_sha or options.release_head_sha,
+        "package_source_sha": options.release_head_sha,
         "source_dirty": False,
         "build_profile": options.build_profile,
         "source_date_epoch": epoch,
@@ -763,6 +777,7 @@ def create_parser() -> argparse.ArgumentParser:
     parser.add_argument("--platform", default="linux-x86_64-cuda12.8")
     parser.add_argument("--upstream-base-sha", required=True)
     parser.add_argument("--release-head-sha", required=True)
+    parser.add_argument("--runtime-source-sha")
     parser.add_argument("--build-profile", required=True)
     parser.add_argument("--lineage-base-sha")
     parser.add_argument("--source-date-epoch", type=int)
@@ -788,6 +803,7 @@ def main() -> None:
                 upstream_base_sha=args.upstream_base_sha,
                 release_head_sha=args.release_head_sha,
                 build_profile=args.build_profile,
+                runtime_source_sha=args.runtime_source_sha,
                 lineage_base_sha=args.lineage_base_sha,
                 source_date_epoch=args.source_date_epoch,
                 runtime_dependencies=tuple(args.runtime_dependency),

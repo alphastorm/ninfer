@@ -20,6 +20,7 @@ $global:NInferTestStateRoot = $null
 $global:NInferTestDeadReleaseId = $null
 $global:NInferTestDeadStartSleptMilliseconds = 0
 $global:NInferInstrumentedAclApplications = 0
+$global:NInferTransientShimRecords = [Collections.Generic.List[object]]::new()
 
 function global:Get-ScheduledTask {
     param([string]$TaskName, [object]$ErrorAction)
@@ -181,6 +182,13 @@ function Get-Sha256([string]$Path) {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
 }
 
+function Get-Utf8Sha256([string]$Text) {
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Text)
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($hasher.ComputeHash($bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $hasher.Dispose() }
+}
+
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
@@ -247,11 +255,7 @@ function New-FixturePackage(
     Copy-Item -LiteralPath $script:OwnerControllerPath -Destination (Join-Path $payload 'Control-GpuOwner.ps1')
     Copy-Item -LiteralPath $InstallerPath -Destination (Join-Path $payload 'Install-Release.ps1')
     Copy-Item -LiteralPath $script:StateHelperPath -Destination (Join-Path $payload 'Protect-StateRoot.ps1')
-    [IO.File]::WriteAllText(
-        (Join-Path $payload 'New-QualificationReceipt.ps1'),
-        '# qualification receipt fixture',
-        [Text.UTF8Encoding]::new($false)
-    )
+    Copy-Item -LiteralPath $script:QualificationFixturePath -Destination (Join-Path $payload 'New-QualificationReceipt.ps1')
     $smoke = Join-Path $payload 'smoke'
     New-Item -ItemType Directory -Path $smoke | Out-Null
     foreach ($name in @('agent_protocol.py', 'serve_contract.py')) {
@@ -548,6 +552,25 @@ foreach ($requiredGate in @(
 $installerSource = $productionInstallerSource.Replace(
     [string]([char]13 + [char]10), [string][char]10
 )
+$trustedNvidiaResolver = @'
+function Get-TrustedNvidiaSmiPath {
+    $path = Join-Path ([Environment]::GetFolderPath('System')) 'nvidia-smi.exe'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        $path = Join-Path $env:ProgramFiles 'NVIDIA Corporation\NVSMI\nvidia-smi.exe'
+    }
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        throw 'trusted nvidia-smi installation is missing'
+    }
+    return $path
+}
+'@
+$instrumentedNvidiaResolver = @'
+function Get-TrustedNvidiaSmiPath {
+    return 'nvidia-smi.exe'
+}
+'@
+$installerSource = Replace-Exactly $installerSource $trustedNvidiaResolver `
+    $instrumentedNvidiaResolver 'installer nvidia query boundary'
 $administratorGate = @'
 $principal = [Security.Principal.WindowsPrincipal]::new(
     [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -672,10 +695,26 @@ $installerSource = Replace-Exactly $installerSource $catchAnchor $instrumentedCa
 $InstallerPath = Join-Path $testRoot 'Install-Release.instrumented.ps1'
 [IO.File]::WriteAllText($InstallerPath, $installerSource, [Text.UTF8Encoding]::new($false))
 $instrumentedInstallerSha256 = Get-Sha256 $InstallerPath
+$productionControllerPath = $ControllerPath
+$productionControllerSha256 = Get-Sha256 $productionControllerPath
+$controllerSource = (Get-Content -LiteralPath $productionControllerPath -Raw -Encoding UTF8).Replace(
+    [string]([char]13 + [char]10), [string][char]10
+)
+$controllerSource = Replace-Exactly $controllerSource $trustedNvidiaResolver `
+    $instrumentedNvidiaResolver 'controller nvidia query boundary'
+$ControllerPath = Join-Path $testRoot 'Control-Release.instrumented.ps1'
+[IO.File]::WriteAllText($ControllerPath, $controllerSource, [Text.UTF8Encoding]::new($false))
+$instrumentedControllerSha256 = Get-Sha256 $ControllerPath
 $script:StateRoot = Join-Path $testRoot 'state'
 $script:ModelPath = Join-Path $testRoot 'external-model.ninfer'
 $script:OwnerStatePath = Join-Path $testRoot 'owner-state.json'
 $script:OwnerControllerPath = Join-Path $testRoot 'Control-GpuOwner.ps1'
+$script:QualificationFixturePath = Join-Path $testRoot 'New-QualificationReceipt.ps1'
+[IO.File]::WriteAllText(
+    $script:QualificationFixturePath,
+    '# qualification receipt fixture',
+    [Text.UTF8Encoding]::new($false)
+)
 Write-Json $script:OwnerStatePath ([ordered]@{ paused = $false; stop_calls = 0 })
 $ownerScript = @'
 [CmdletBinding()]
@@ -740,6 +779,8 @@ try {
         Assert-True ([string]$baseRelease.$field -cmatch '^[0-9a-f]{64}$') "release identity field is invalid: $field"
     }
     $baseKeyPath = [string]$baseRelease.api_key_file
+    $managedStateHelperPath = Join-Path $script:StateRoot 'Protect-StateRoot.ps1'
+    $managedOwnerHelperPath = Join-Path (Join-Path $script:StateRoot 'gpu-owner') 'Protect-StateRoot.ps1'
     Assert-Equal (Get-Sha256 $baseKeyPath) ([string]$baseSecret.sha256) 'installed API key changed'
     Assert-True $global:NInferTestTaskRunning 'clean install did not start the managed task'
     Assert-True ([bool](Get-Content -LiteralPath $script:OwnerStatePath -Raw | ConvertFrom-Json).paused) 'clean install did not pause the prior GPU owner'
@@ -759,6 +800,12 @@ try {
         }
         return Microsoft.PowerShell.Utility\Get-FileHash -Algorithm $Algorithm -LiteralPath $LiteralPath
     }
+    $global:NInferTransientShimRecords.Add([ordered]@{
+            name = 'Get-FileHash:idempotent-model-rehash-guard'
+            kind = 'transient-process-local-function-shim'
+            sha256 = Get-Utf8Sha256 ([string](Get-Command Get-FileHash -CommandType Function).ScriptBlock)
+            security_claims_included = $false
+        })
     try { $alreadyReceipt = Invoke-FixtureInstall $basePackage $baseSecret -NoStart }
     finally { Remove-Item -LiteralPath Function:\Get-FileHash -Force }
     Assert-Equal ([string]$alreadyReceipt.status) 'already_installed' 'exact reinstall was not idempotent'
@@ -813,6 +860,8 @@ try {
         $faultSecret = New-SecretFile $testRoot "fault-$faultIndex"
         $stateSha = Get-Sha256 (Join-Path $script:StateRoot 'state.json')
         $controllerSha = Get-Sha256 (Join-Path $script:StateRoot 'Control-Release.ps1')
+        $stateHelperSha = Get-Sha256 $managedStateHelperPath
+        $ownerHelperSha = Get-Sha256 $managedOwnerHelperPath
         $taskXml = [string]$global:NInferTestTaskXml
         $failed = $false
         try { Invoke-FixtureInstall $faultPackage $faultSecret -Fault $fault | Out-Null }
@@ -820,6 +869,8 @@ try {
         Assert-True $failed "injected transaction failure did not surface: $fault"
         Assert-Equal (Get-Sha256 (Join-Path $script:StateRoot 'state.json')) $stateSha "failure changed state bytes: $fault"
         Assert-Equal (Get-Sha256 (Join-Path $script:StateRoot 'Control-Release.ps1')) $controllerSha "failure changed controller bytes: $fault"
+        Assert-Equal (Get-Sha256 $managedStateHelperPath) $stateHelperSha "failure changed state-helper bytes: $fault"
+        Assert-Equal (Get-Sha256 $managedOwnerHelperPath) $ownerHelperSha "failure changed GPU-owner helper bytes: $fault"
         Assert-Equal ([string]$global:NInferTestTaskXml) $taskXml "failure changed task definition: $fault"
         Assert-True $global:NInferTestTaskRunning "failure did not restore incumbent liveness: $fault"
         Assert-True (-not (Test-Path -LiteralPath (Join-Path (Join-Path $script:StateRoot 'releases') ([string]$faultPackage.instance_id)))) "failure left candidate files: $fault"
@@ -880,6 +931,12 @@ try {
         }
         return Microsoft.PowerShell.Utility\Get-FileHash -Algorithm $Algorithm -LiteralPath $LiteralPath
     }
+    $global:NInferTransientShimRecords.Add([ordered]@{
+            name = 'Get-FileHash:restart-identity-observer'
+            kind = 'transient-process-local-function-shim'
+            sha256 = Get-Utf8Sha256 ([string](Get-Command Get-FileHash -CommandType Function).ScriptBlock)
+            security_claims_included = $false
+        })
     $runFailure = $null
     try { & $managedController -Action Run -StateRoot $script:StateRoot | Out-Null }
     catch { $runFailure = $_ }
@@ -907,6 +964,44 @@ try {
     Assert-True (-not $global:NInferTestTaskExists) 'uninstall left the scheduled task registered'
     Assert-True (-not [bool](Get-Content -LiteralPath $script:OwnerStatePath -Raw | ConvertFrom-Json).paused) 'uninstall did not restore the GPU owner'
 
+    $substitutions = [Collections.Generic.List[object]]::new()
+    foreach ($component in @(
+            [ordered]@{ name = 'installer'; kind = 'generated-instrumented-file'; path = $InstallerPath },
+            [ordered]@{ name = 'release-controller'; kind = 'generated-nvidia-query-instrumentation'; path = $ControllerPath },
+            [ordered]@{ name = 'state-protection-helper'; kind = 'generated-stub-no-acl-semantics'; path = $script:StateHelperPath },
+            [ordered]@{ name = 'gpu-owner-controller'; kind = 'generated-state-machine-stub'; path = $script:OwnerControllerPath },
+            [ordered]@{ name = 'qualification-constructor'; kind = 'generated-presence-stub'; path = $script:QualificationFixturePath }
+        )) {
+        $substitutions.Add([ordered]@{
+                name = [string]$component.name
+                kind = [string]$component.kind
+                sha256 = Get-Sha256 ([string]$component.path)
+                security_claims_included = $false
+            })
+    }
+    foreach ($functionName in @(
+            'Get-ScheduledTask', 'Export-ScheduledTask', 'New-ScheduledTaskAction',
+            'New-ScheduledTaskTrigger', 'New-ScheduledTaskSettingsSet',
+            'New-ScheduledTaskPrincipal', 'Register-ScheduledTask',
+            'Unregister-ScheduledTask', 'Start-ScheduledTask', 'Stop-ScheduledTask',
+            'Get-NetTCPConnection', 'Invoke-RestMethod', 'Start-Sleep', 'nvidia-smi.exe'
+        )) {
+        $command = Get-Command $functionName -CommandType Function -ErrorAction Stop
+        $substitutions.Add([ordered]@{
+                name = $functionName
+                kind = 'process-local-function-shim'
+                sha256 = Get-Utf8Sha256 ([string]$command.ScriptBlock)
+                security_claims_included = $false
+            })
+    }
+    foreach ($transientShim in $global:NInferTransientShimRecords) {
+        $substitutions.Add($transientShim)
+    }
+    $substitutionArray = @($substitutions | ForEach-Object { $_ })
+    $substitutionManifestSha256 = Get-Utf8Sha256 (
+        $substitutionArray | ConvertTo-Json -Depth 8 -Compress
+    )
+
     [ordered]@{
         artifact_type = 'ninfer_windows_lifecycle_instrumented_regression'
         schema_version = 3
@@ -914,8 +1009,14 @@ try {
         evidence_class = 'generated-instrumented-transaction-harness'
         production_installer_sha256 = $productionInstallerSha256
         instrumented_installer_sha256 = $instrumentedInstallerSha256
+        production_controller_sha256 = $productionControllerSha256
+        instrumented_controller_sha256 = $instrumentedControllerSha256
         instrumented_state_protection_sha256 = $instrumentedStateProtectionSha256
         state_protection_evidence_class = 'generated-stub-no-acl-semantics'
+        substitution_manifest = $substitutionArray
+        substitution_manifest_sha256 = $substitutionManifestSha256
+        substitution_count = $substitutionArray.Count
+        security_claims_included = $false
         production_installer_executed = $false
         production_state_protection_executed = $false
         production_static_identity_gate_markers_verified = 8
@@ -927,6 +1028,7 @@ try {
         interrupted_repairs = 2
         dead_start_rejections = 1
         exact_rollbacks = 1
+        state_helper_rollback_hash_checks = ($faultPoints.Count * 2)
         restart_model_rehash_calls = $global:NInferBlockedModelHashCalls
         uninstalls = 1
         external_model_copies = 0

@@ -945,6 +945,87 @@ int test_delete_rejects_post_delete_generation_over_disk_quota() {
     return failures;
 }
 
+int test_delete_middle_latest_and_standalone_checkpoint_state() {
+    TemporaryDirectory temporary;
+    ResponseStoreSnapshot snapshot = sample_snapshot();
+    StoredResponse third = snapshot.records.back();
+    third.id = "resp_private_third";
+    third.session_key = std::string(64, 'c');
+    third.previous_response_id = snapshot.records.back().id;
+    third.response["id"] = third.id;
+    snapshot.latest_response_id = third.id;
+    snapshot.records.push_back(third);
+    ResponseStore responses(8, 8ULL << 20);
+    for (const StoredResponse& response : snapshot.records) { responses.put(response); }
+    const std::string tenant = session_checkpoint_tenant_sha256("delete-shapes-api-key");
+    FakeCheckpointEngine engine;
+    SessionCheckpointManager manager(manager_options(temporary.path), fingerprint(), tenant,
+                                     engine.access());
+    int failures = 0;
+    failures += check(manager.save(snapshot.client_session_sha256, third.id, responses).state ==
+                          SessionCheckpointSaveState::Saved,
+                      "delete-shapes baseline save failed");
+
+    const std::string middle_id = snapshot.records[1].id;
+    failures += check(
+        manager.erase_response(snapshot.client_session_sha256, middle_id, responses) ==
+                SessionCheckpointEraseResult::Erased &&
+            engine.tag == third.session_key &&
+            !responses.get_for_session(middle_id, snapshot.client_session_sha256) &&
+            responses.get_for_session(third.id, snapshot.client_session_sha256),
+        "middle DELETE did not checkpoint the surviving latest engine frontier");
+    FakeCheckpointEngine middle_restart_engine;
+    SessionCheckpointManager middle_restart(manager_options(temporary.path), fingerprint(), tenant,
+                                            middle_restart_engine.access());
+    ResponseStore middle_restart_responses(8, 8ULL << 20);
+    failures += check(
+        middle_restart.restore(snapshot.client_session_sha256, third.id,
+                               middle_restart_responses) ==
+                SessionCheckpointRestoreState::Restored &&
+            !middle_restart_responses.get_for_session(middle_id,
+                                                      snapshot.client_session_sha256) &&
+            middle_restart_responses.get_for_session(third.id,
+                                                     snapshot.client_session_sha256),
+        "middle DELETE transcript state reappeared after restart");
+
+    const std::string first_id = snapshot.records.front().id;
+    failures += check(
+        manager.erase_response(snapshot.client_session_sha256, third.id, responses) ==
+                SessionCheckpointEraseResult::Erased &&
+            engine.tag == snapshot.records.front().session_key &&
+            responses.get_for_session(first_id, snapshot.client_session_sha256) &&
+            !responses.get_for_session(third.id, snapshot.client_session_sha256),
+        "latest DELETE did not checkpoint the prior surviving response frontier");
+    FakeCheckpointEngine latest_restart_engine;
+    SessionCheckpointManager latest_restart(manager_options(temporary.path), fingerprint(), tenant,
+                                            latest_restart_engine.access());
+    ResponseStore latest_restart_responses(8, 8ULL << 20);
+    failures += check(
+        latest_restart.restore(snapshot.client_session_sha256, first_id,
+                               latest_restart_responses) ==
+                SessionCheckpointRestoreState::Restored &&
+            latest_restart.restore(snapshot.client_session_sha256, third.id,
+                                   latest_restart_responses) ==
+                SessionCheckpointRestoreState::Missing,
+        "deleted latest response remained durably restorable");
+
+    failures += check(
+        manager.erase_response(snapshot.client_session_sha256, first_id, responses) ==
+            SessionCheckpointEraseResult::Erased,
+        "standalone DELETE did not erase the session checkpoint");
+    FakeCheckpointEngine empty_restart_engine;
+    SessionCheckpointManager empty_restart(manager_options(temporary.path), fingerprint(), tenant,
+                                           empty_restart_engine.access());
+    ResponseStore empty_restart_responses(8, 8ULL << 20);
+    failures += check(
+        empty_restart.restore(snapshot.client_session_sha256, first_id,
+                              empty_restart_responses) ==
+                SessionCheckpointRestoreState::Missing &&
+            empty_restart_responses.size() == 0,
+        "erased standalone response remained durably restorable");
+    return failures;
+}
+
 int test_active_reader_delete_and_gc() {
     TemporaryDirectory temporary;
     const ResponseStoreSnapshot responses = sample_snapshot();
@@ -1205,6 +1286,7 @@ int main() {
     failures += test_delete_checkpoint_update_fails_closed();
     failures += test_delete_pins_session_across_cross_session_lru_eviction();
     failures += test_delete_rejects_post_delete_generation_over_disk_quota();
+    failures += test_delete_middle_latest_and_standalone_checkpoint_state();
     failures += test_active_reader_delete_and_gc();
     failures += test_store_wide_quota_across_sessions();
     if (failures == 0) { std::cout << "ok\n"; }

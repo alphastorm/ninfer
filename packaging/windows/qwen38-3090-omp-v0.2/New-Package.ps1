@@ -20,6 +20,9 @@ param(
     [ValidatePattern('^[0-9a-f]{40}$')]
     [string]$ReleaseHeadSha,
 
+    [ValidatePattern('^[0-9a-f]{40}$')]
+    [string]$RuntimeSourceSha = $ReleaseHeadSha,
+
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
     [string[]]$RuntimeFile,
@@ -168,6 +171,7 @@ try {
             '--platform', $platform,
             '--upstream-base-sha', $upstreamBaseSha,
             '--release-head-sha', $ReleaseHeadSha,
+            '--runtime-source-sha', $RuntimeSourceSha,
             '--build-profile', $buildProfile,
             '--lineage-base-sha', $lineageBaseSha,
             '--windows-server-config', $configPath
@@ -194,7 +198,8 @@ try {
         [string]$packageReceipt.platform -cne $platform -or
         [string]$packageReceipt.upstream_base_sha -cne $upstreamBaseSha -or
         [string]$packageReceipt.lineage_base_sha -cne $lineageBaseSha -or
-        [string]$packageReceipt.patch_stack_sha -cne $ReleaseHeadSha -or
+        [string]$packageReceipt.patch_stack_sha -cne $RuntimeSourceSha -or
+        [string]$packageReceipt.package_source_sha -cne $ReleaseHeadSha -or
         [string]$packageReceipt.build_profile -cne $buildProfile) {
         throw 'package.py receipt identity mismatch'
     }
@@ -215,7 +220,7 @@ try {
     $identity = Read-JsonFile (Join-Path $payload 'build-identity.json')
     $packagedSpec = Read-JsonFile (Join-Path $payload 'release-spec.json')
     $packagedConfig = Read-JsonFile (Join-Path $payload 'server-config.json')
-    if ([string]$identity.patch_stack_sha -cne $ReleaseHeadSha -or
+    if ([string]$identity.patch_stack_sha -cne $RuntimeSourceSha -or
         [string]$identity.lineage_base_sha -cne $lineageBaseSha -or
         [string]$identity.build_profile -cne $buildProfile -or
         [string]$identity.cuda_architecture -cne '86' -or
@@ -260,11 +265,10 @@ try {
         "$(Get-LowerSha256 (Join-Path $packageOutput $name))  $name"
     }
     $checksumsPath = Join-Path $packageOutput 'SHA256SUMS'
+    $lf = [string][char]10
     [IO.File]::WriteAllText(
         $checksumsPath,
-        ([string]::Join("
-", $checksumLines) + "
-"),
+        ([string]::Join($lf, $checksumLines) + $lf),
         [Text.Encoding]::ASCII
     )
     $checksumsSha = Get-LowerSha256 $checksumsPath
@@ -278,7 +282,9 @@ try {
         build_profile = $buildProfile
         upstream_base_sha = $upstreamBaseSha
         lineage_base_sha = $lineageBaseSha
-        patch_stack_sha = $ReleaseHeadSha
+        patch_stack_sha = $RuntimeSourceSha
+        runtime_source_sha = $RuntimeSourceSha
+        package_source_sha = $ReleaseHeadSha
         cuda_architecture = 'sm_86'
         binaries = [ordered]@{
             ninfer_sha256 = [string]$identity.binaries.ninfer
@@ -316,8 +322,7 @@ try {
     }
     [IO.File]::WriteAllText(
         (Join-Path $packageOutput 'package-build-receipt.json'),
-        (($buildReceipt | ConvertTo-Json -Depth 12) + "
-"),
+        (($buildReceipt | ConvertTo-Json -Depth 12) + $lf),
         [Text.UTF8Encoding]::new($false)
     )
 

@@ -134,7 +134,7 @@ switch ($Action) {
         $state = Read-State
         if ($null -ne $state) {
             Assert-InteractiveGpuWorkloadAbsent
-            & $PSCommandPath -Action status
+            & $PSCommandPath -Action status -StateRoot $StateRoot
             break
         }
         Assert-InteractiveGpuWorkloadAbsent

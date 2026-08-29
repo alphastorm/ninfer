@@ -23,9 +23,10 @@ profile **omp-v0.2.0-rtx3090**, CUDA architecture **sm_86**, and the pinned Qwen
 in the release specification. The three executables and every declared app-local DLL are covered by
 the inner and outer SHA-256 manifests. Package and checksum values are emitted in
 **package-build-receipt.json** at build time. That immutable build receipt deliberately remains
-`hardware-pending`. For the exact package SHA-256 it names, the later external
+`hardware-pending`. For the exact package SHA-256 it names, a later **passed** external
 [beta qualification receipt](qualification/receipts/qwen3.8-27b-rtx-3090-v0.2.0.json) is the sole
-post-hardware authority and explicitly supersedes that pre-hardware status. It does not rewrite the
+post-hardware authority and explicitly supersedes that pre-hardware status. An incomplete receipt
+does not supersede either pending authority. A final receipt does not rewrite the
 historical build receipt or the packaged release specification: consumers with only the archive
 must still treat it as hardware-pending until they verify the hash-bound external beta receipt.
 
@@ -40,11 +41,15 @@ context, process restart, performance, and lifecycle rollback while the existing
 policy remains authoritative. CPU-heavy, mixed-load, and overnight thermal claims are outside this
 release gate and require their own serviced-loop evidence.
 
-### Qualified beta result
+### Preserved runtime evidence and deferred fresh-package gate
 
-The immutable `7555db29d2e5` package is beta-qualified on one RTX 3090 with driver 616.56. The
-adjacent machine-readable receipt binds the exact package, source archive, SPDX SBOM, checksum
-manifest, package-build receipt, lifecycle scripts, and every gate receipt by SHA-256:
+The runtime source and binary evidence from `7555db29d2e5` remains valid because the subsequent
+changes are confined to packaging, lifecycle scripts, tests, and disclosure text; repository tests
+require an empty diff across `src`, `include`, `apps`, `cmake`, and top-level build configuration.
+The local Windows RTX 3090 was then released for user servicing. Therefore the rebuilt archive's
+fresh exact Windows install/security/bidirectional-rollback gate is explicitly deferred rather than
+being replaced with Linux or instrumented evidence. The adjacent machine-readable receipt remains
+incomplete and does not supersede `hardware-pending` until that one Windows gate is run:
 
 | Gate | Result |
 | --- | --- |
@@ -55,12 +60,20 @@ manifest, package-build receipt, lifecycle scripts, and every gate receipt by SH
 | Decode | 76.15 tok/s for 1,024 output tokens |
 | Prefill | 943.11 tok/s over 4,403 prompt tokens |
 | Peak GPU memory | 20,515 MiB |
-| State security | atomic protected-root creation, NULL-DACL rejection, retained-secret effective denial, and populated-root status in 874 ms |
-| Upgrade/rollback | exact shipped installer plus both active/previous directions passed at the 300 W cap |
+| Preserved state security | Prior exact package proved atomic creation, NULL-DACL rejection, retained-secret effective denial, populated-root status in 874 ms, and fail-safe 370 W restoration |
+| Fresh rebuilt-package Windows gate | Deferred after the authorized local-host handoff; no beta qualification or supersession is claimed |
 
 This support claim is interactive OMP beta support, not authorization for an unattended evidence
 role. The separate frozen automatic-use corpus did not meet its quality floor, so that route remains
 disabled. JSON-schema `response_format` is also unsupported and rejected rather than ignored.
+
+Responses `DELETE` is logical object deletion, not a secure-erasure primitive. A deleted response is
+no longer addressable and is absent from the next durable transcript, including after process
+restart. When a surviving descendant still depends on ancestor context, its Engine checkpoint may
+retain the ancestor token/KV state needed for that continuation. Delete descendants before their
+ancestors, then remove the appliance checkpoint/state root under the protected lifecycle, when
+secure erasure of the complete session context is required. Deleting a standalone or latest response
+leaves that response non-restorable; native tests cover middle, latest, and standalone shapes.
 
 Run the installer from an elevated PowerShell session with the package hash from the immutable OMP
 NInfer product manifest. A `SHA256SUMS` file delivered beside the archive is useful for local

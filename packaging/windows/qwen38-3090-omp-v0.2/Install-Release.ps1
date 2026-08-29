@@ -724,6 +724,12 @@ function Invoke-InstallTransactionRollback(
         try { Restore-PersistedFileSnapshot $OwnerControllerPath $Transaction.snapshots.owner_controller }
         catch { $failures.Add("GPU-owner controller restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
     }
+    if (Get-TransactionFlag $Transaction 'state_helpers_touched') {
+        try { Restore-PersistedFileSnapshot $stateHelperPath $Transaction.snapshots.state_helper }
+        catch { $failures.Add("state helper restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
+        try { Restore-PersistedFileSnapshot $ownerStateHelperPath $Transaction.snapshots.owner_state_helper }
+        catch { $failures.Add("GPU-owner state helper restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
+    }
 
     $cleanupTargets = @(Get-TransactionCleanupTargets $Transaction)
     Write-InstallEvent 'cleanup_inventory' 'Enumerated interrupted install cleanup targets' ([ordered]@{
@@ -777,6 +783,8 @@ $statePath = Join-Path $StateRoot 'state.json'
 $controllerPath = Join-Path $StateRoot 'Control-Release.ps1'
 $ownerControllerPath = Join-Path (Join-Path $StateRoot 'gpu-owner') 'Control-GpuOwner.ps1'
 $ownerStateRoot = Join-Path $StateRoot 'gpu-owner-state'
+$stateHelperPath = Join-Path $StateRoot 'Protect-StateRoot.ps1'
+$ownerStateHelperPath = Join-Path (Split-Path -Parent $ownerControllerPath) 'Protect-StateRoot.ps1'
 $receiptsStateRoot = Join-Path $StateRoot 'receipts'
 $transactionsRoot = Join-Path $receiptsStateRoot 'install-transactions'
 New-Item -ItemType Directory -Force -Path $transactionsRoot | Out-Null
@@ -919,10 +927,13 @@ try {
             state = Save-PersistedFileSnapshot $statePath $snapshotRoot 'state'
             controller = Save-PersistedFileSnapshot $controllerPath $snapshotRoot 'controller'
             owner_controller = Save-PersistedFileSnapshot $ownerControllerPath $snapshotRoot 'owner-controller'
+            state_helper = Save-PersistedFileSnapshot $stateHelperPath $snapshotRoot 'state-helper'
+            owner_state_helper = Save-PersistedFileSnapshot $ownerStateHelperPath $snapshotRoot 'owner-state-helper'
         }
         flags = [pscustomobject][ordered]@{
             incumbent_touched = $false
             owner_controller_touched = $false
+            state_helpers_touched = $false
             controller_touched = $false
             state_activated = $false
             task_touched = $false
@@ -1215,6 +1226,7 @@ try {
             releases = $releases
         }
 
+        Set-TransactionFlag $transaction 'state_helpers_touched'
         if ($null -ne $ownerControllerSource) {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ownerControllerPath) | Out-Null
             Set-TransactionFlag $transaction 'owner_controller_touched'
@@ -1241,7 +1253,7 @@ try {
             }
         }
         $stateHelperSource = Join-Path $lifecycleBin 'Protect-StateRoot.ps1'
-        Copy-Item -LiteralPath $stateHelperSource -Destination (Join-Path $StateRoot 'Protect-StateRoot.ps1') -Force
+        Copy-Item -LiteralPath $stateHelperSource -Destination $stateHelperPath -Force
         Set-NInferProtectedRootAcl $secretDirectory
         Set-NInferProtectedFileAcl $installedKey
         Assert-NInferProtectedStateTree $StateRoot

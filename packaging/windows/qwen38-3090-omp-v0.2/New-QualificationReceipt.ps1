@@ -112,7 +112,10 @@ function New-NInferQualificationReceipt {
     }
 
     $candidateReceipt = [ordered]@{
-        source_commit = Get-NInferQualificationGitSha $Candidate 'source_commit' 'candidate'
+        runtime_source_commit = Get-NInferQualificationGitSha $Candidate 'runtime_source_commit' 'candidate'
+        package_source_commit = Get-NInferQualificationGitSha $Candidate 'package_source_commit' 'candidate'
+        runtime_source_paths_changed = [bool](Get-NInferQualificationProperty $Candidate 'runtime_source_paths_changed' 'candidate')
+        runtime_source_diff_sha256 = Get-NInferQualificationSha256 $Candidate 'runtime_source_diff_sha256' 'candidate'
         upstream_base_commit = Get-NInferQualificationGitSha $Candidate 'upstream_base_commit' 'candidate'
         lineage_base_commit = Get-NInferQualificationGitSha $Candidate 'lineage_base_commit' 'candidate'
         server_binary_sha256 = Get-NInferQualificationSha256 $Candidate 'server_binary_sha256' 'candidate'
@@ -120,6 +123,10 @@ function New-NInferQualificationReceipt {
         benchmark_binary_sha256 = Get-NInferQualificationSha256 $Candidate 'benchmark_binary_sha256' 'candidate'
         config_sha256 = Get-NInferQualificationSha256 $Candidate 'config_sha256' 'candidate'
         model_artifact_sha256 = Get-NInferQualificationSha256 $Candidate 'model_artifact_sha256' 'candidate'
+    }
+    if ($candidateReceipt.runtime_source_paths_changed -or
+        $candidateReceipt.runtime_source_diff_sha256 -cne 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855') {
+        throw 'candidate package-only source advancement changed runtime source paths'
     }
 
     $platformReceipt = [ordered]@{
@@ -200,6 +207,11 @@ function New-NInferQualificationReceipt {
         exact_output = [string](Get-NInferQualificationProperty $CheckpointRestart 'exact_output' 'checkpoint_process_restart')
         failed_delete_commit_regression = [string](Get-NInferQualificationProperty $CheckpointRestart 'failed_delete_commit_regression' 'checkpoint_process_restart')
         cross_session_eviction_regression = [string](Get-NInferQualificationProperty $CheckpointRestart 'cross_session_eviction_regression' 'checkpoint_process_restart')
+        middle_delete_restart_regression = [string](Get-NInferQualificationProperty $CheckpointRestart 'middle_delete_restart_regression' 'checkpoint_process_restart')
+        latest_delete_nonrestorable_regression = [string](Get-NInferQualificationProperty $CheckpointRestart 'latest_delete_nonrestorable_regression' 'checkpoint_process_restart')
+        standalone_delete_nonrestorable_regression = [string](Get-NInferQualificationProperty $CheckpointRestart 'standalone_delete_nonrestorable_regression' 'checkpoint_process_restart')
+        deletion_semantics = [string](Get-NInferQualificationProperty $CheckpointRestart 'deletion_semantics' 'checkpoint_process_restart')
+        secure_erasure_claimed = [bool](Get-NInferQualificationProperty $CheckpointRestart 'secure_erasure_claimed' 'checkpoint_process_restart')
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $CheckpointRestart 'checkpoint_process_restart'
     }
     if ($checkpointStatus -ceq 'passed' -and
@@ -209,7 +221,12 @@ function New-NInferQualificationReceipt {
          $checkpointReceipt.continuation_elapsed_seconds -le 0 -or
          [string]::IsNullOrWhiteSpace($checkpointReceipt.exact_output) -or
          $checkpointReceipt.failed_delete_commit_regression -cne 'passed' -or
-         $checkpointReceipt.cross_session_eviction_regression -cne 'passed')) {
+         $checkpointReceipt.cross_session_eviction_regression -cne 'passed' -or
+         $checkpointReceipt.middle_delete_restart_regression -cne 'passed' -or
+         $checkpointReceipt.latest_delete_nonrestorable_regression -cne 'passed' -or
+         $checkpointReceipt.standalone_delete_nonrestorable_regression -cne 'passed' -or
+         $checkpointReceipt.deletion_semantics -cne 'logical-object-deletion' -or
+         $checkpointReceipt.secure_erasure_claimed)) {
         throw 'checkpoint_process_restart does not bind restart and atomic-delete regressions'
     }
 
@@ -241,8 +258,13 @@ function New-NInferQualificationReceipt {
         evidence_class = [string](Get-NInferQualificationProperty $InstrumentedLifecycle 'evidence_class' 'windows_lifecycle_instrumented')
         production_installer_sha256 = Get-NInferQualificationSha256 $InstrumentedLifecycle 'production_installer_sha256' 'windows_lifecycle_instrumented'
         instrumented_installer_sha256 = Get-NInferQualificationSha256 $InstrumentedLifecycle 'instrumented_installer_sha256' 'windows_lifecycle_instrumented'
+        production_controller_sha256 = Get-NInferQualificationSha256 $InstrumentedLifecycle 'production_controller_sha256' 'windows_lifecycle_instrumented'
+        instrumented_controller_sha256 = Get-NInferQualificationSha256 $InstrumentedLifecycle 'instrumented_controller_sha256' 'windows_lifecycle_instrumented'
         instrumented_state_protection_sha256 = Get-NInferQualificationSha256 $InstrumentedLifecycle 'instrumented_state_protection_sha256' 'windows_lifecycle_instrumented'
         state_protection_evidence_class = [string](Get-NInferQualificationProperty $InstrumentedLifecycle 'state_protection_evidence_class' 'windows_lifecycle_instrumented')
+        substitution_manifest_sha256 = Get-NInferQualificationSha256 $InstrumentedLifecycle 'substitution_manifest_sha256' 'windows_lifecycle_instrumented'
+        substitution_count = [int](Get-NInferQualificationProperty $InstrumentedLifecycle 'substitution_count' 'windows_lifecycle_instrumented')
+        security_claims_included = [bool](Get-NInferQualificationProperty $InstrumentedLifecycle 'security_claims_included' 'windows_lifecycle_instrumented')
         production_installer_executed = [bool](Get-NInferQualificationProperty $InstrumentedLifecycle 'production_installer_executed' 'windows_lifecycle_instrumented')
         production_state_protection_executed = [bool](Get-NInferQualificationProperty $InstrumentedLifecycle 'production_state_protection_executed' 'windows_lifecycle_instrumented')
         effective_acl_evidence = [bool](Get-NInferQualificationProperty $InstrumentedLifecycle 'effective_acl_evidence' 'windows_lifecycle_instrumented')
@@ -254,6 +276,9 @@ function New-NInferQualificationReceipt {
         ($instrumentedReceipt.evidence_class -cne 'generated-instrumented-transaction-harness' -or
          $instrumentedReceipt.production_installer_sha256 -ceq $instrumentedReceipt.instrumented_installer_sha256 -or
          $instrumentedReceipt.state_protection_evidence_class -cne 'generated-stub-no-acl-semantics' -or
+         $instrumentedReceipt.production_controller_sha256 -ceq $instrumentedReceipt.instrumented_controller_sha256 -or
+         $instrumentedReceipt.substitution_count -ne 21 -or
+         $instrumentedReceipt.security_claims_included -or
          $instrumentedReceipt.production_installer_executed -or
          $instrumentedReceipt.production_state_protection_executed -or
          $instrumentedReceipt.effective_acl_evidence -or
@@ -265,6 +290,9 @@ function New-NInferQualificationReceipt {
     $shippedStatus = Get-NInferQualificationStatus $ShippedLifecycle 'windows_lifecycle_shipped'
     $shippedReceipt = [ordered]@{
         status = $shippedStatus
+        evidence_scope = [string](Get-NInferQualificationProperty $ShippedLifecycle 'evidence_scope' 'windows_lifecycle_shipped')
+        fresh_package_gate_deferred = [bool](Get-NInferQualificationProperty $ShippedLifecycle 'fresh_package_gate_deferred' 'windows_lifecycle_shipped')
+        deferred_reason = [string](Get-NInferQualificationProperty $ShippedLifecycle 'deferred_reason' 'windows_lifecycle_shipped')
         installer_sha256 = Get-NInferQualificationSha256 $ShippedLifecycle 'installer_sha256' 'windows_lifecycle_shipped'
         production_installer_executed = [bool](Get-NInferQualificationProperty $ShippedLifecycle 'production_installer_executed' 'windows_lifecycle_shipped')
         instrumented_harness_used = [bool](Get-NInferQualificationProperty $ShippedLifecycle 'instrumented_harness_used' 'windows_lifecycle_shipped')
@@ -275,13 +303,19 @@ function New-NInferQualificationReceipt {
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $ShippedLifecycle 'windows_lifecycle_shipped'
     }
     if ($shippedStatus -ceq 'passed' -and
-        ($shippedReceipt.installer_sha256 -cne $releaseAssetsReceipt.installer_sha256 -or
+        ($shippedReceipt.fresh_package_gate_deferred -or
+         $shippedReceipt.installer_sha256 -cne $releaseAssetsReceipt.installer_sha256 -or
          -not $shippedReceipt.production_installer_executed -or
          $shippedReceipt.instrumented_harness_used -or
          $shippedReceipt.clean_installs -lt 1 -or $shippedReceipt.upgrades -lt 1 -or
          $shippedReceipt.rollback_directions -lt 2 -or
          $shippedReceipt.identity_gates_verified -ne 8)) {
         throw 'windows_lifecycle_shipped does not attest the exact shipped installer path'
+    }
+    if ($shippedStatus -ceq 'not_run' -and
+        (-not $shippedReceipt.fresh_package_gate_deferred -or
+         $shippedReceipt.deferred_reason -cne 'fresh-windows-rtx3090-unavailable-after-user-handoff')) {
+        throw 'deferred shipped Windows lifecycle gate lacks the authorized evidence boundary'
     }
 
     $assetStatus = Get-NInferQualificationStatus $ReleaseAssetTests 'windows_release_assets'
@@ -302,6 +336,9 @@ function New-NInferQualificationReceipt {
     $securityStatus = Get-NInferQualificationStatus $StateSecurity 'windows_state_security'
     $securityReceipt = [ordered]@{
         status = $securityStatus
+        evidence_scope = [string](Get-NInferQualificationProperty $StateSecurity 'evidence_scope' 'windows_state_security')
+        fresh_package_gate_deferred = [bool](Get-NInferQualificationProperty $StateSecurity 'fresh_package_gate_deferred' 'windows_state_security')
+        deferred_reason = [string](Get-NInferQualificationProperty $StateSecurity 'deferred_reason' 'windows_state_security')
         root_dacl_protected = [bool](Get-NInferQualificationProperty $StateSecurity 'root_dacl_protected' 'windows_state_security')
         atomic_race_collision_rejections = [int](Get-NInferQualificationProperty $StateSecurity 'atomic_race_collision_rejections' 'windows_state_security')
         raced_state_recursive_deletions = [int](Get-NInferQualificationProperty $StateSecurity 'raced_state_recursive_deletions' 'windows_state_security')
@@ -316,13 +353,17 @@ function New-NInferQualificationReceipt {
         managed_release_acl_state_assertions = [int](Get-NInferQualificationProperty $StateSecurity 'managed_release_acl_state_assertions' 'windows_state_security')
         managed_request_log_acl_state_assertions = [int](Get-NInferQualificationProperty $StateSecurity 'managed_request_log_acl_state_assertions' 'windows_state_security')
         managed_rollback_directions = [int](Get-NInferQualificationProperty $StateSecurity 'managed_rollback_directions' 'windows_state_security')
+        retained_state_helper_hash_assertions = [int](Get-NInferQualificationProperty $StateSecurity 'retained_state_helper_hash_assertions' 'windows_state_security')
         populated_root_status_milliseconds = [int](Get-NInferQualificationProperty $StateSecurity 'populated_root_status_milliseconds' 'windows_state_security')
+        gpu_power_evidence_class = [string](Get-NInferQualificationProperty $StateSecurity 'gpu_power_evidence_class' 'windows_state_security')
+        absolute_nvidia_shim_interceptions = [int](Get-NInferQualificationProperty $StateSecurity 'absolute_nvidia_shim_interceptions' 'windows_state_security')
         shipped_test_bypass = [bool](Get-NInferQualificationProperty $StateSecurity 'shipped_test_bypass' 'windows_state_security')
         restored_power_limit_w = [int](Get-NInferQualificationProperty $StateSecurity 'restored_power_limit_w' 'windows_state_security')
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $StateSecurity 'windows_state_security'
     }
     if ($securityStatus -ceq 'passed' -and
-        (-not $securityReceipt.root_dacl_protected -or
+        ($securityReceipt.fresh_package_gate_deferred -or
+         -not $securityReceipt.root_dacl_protected -or
          $securityReceipt.atomic_race_collision_rejections -lt 1 -or
          $securityReceipt.raced_state_recursive_deletions -ne 0 -or
          $securityReceipt.null_dacl_rejections -lt 1 -or
@@ -336,11 +377,19 @@ function New-NInferQualificationReceipt {
          $securityReceipt.managed_release_acl_state_assertions -lt 6 -or
          $securityReceipt.managed_request_log_acl_state_assertions -lt 1 -or
          $securityReceipt.managed_rollback_directions -lt 2 -or
+         $securityReceipt.retained_state_helper_hash_assertions -lt 4 -or
          $securityReceipt.populated_root_status_milliseconds -le 0 -or
          $securityReceipt.populated_root_status_milliseconds -gt 5000 -or
+         $securityReceipt.gpu_power_evidence_class -cne 'real-trusted-absolute-nvidia-smi' -or
+         $securityReceipt.absolute_nvidia_shim_interceptions -ne 0 -or
          $securityReceipt.shipped_test_bypass -or
          $securityReceipt.restored_power_limit_w -ne 370)) {
         throw 'windows_state_security does not prove the complete effective-access contract'
+    }
+    if ($securityStatus -ceq 'not_run' -and
+        (-not $securityReceipt.fresh_package_gate_deferred -or
+         $securityReceipt.deferred_reason -cne 'fresh-windows-rtx3090-unavailable-after-user-handoff')) {
+        throw 'deferred Windows state-security gate lacks the authorized evidence boundary'
     }
 
     $ompStatus = Get-NInferQualificationStatus $OmpClient 'omp_windows_client'
@@ -420,11 +469,12 @@ function New-NInferQualificationReceipt {
         platform = $platformReceipt
         release_assets = $releaseAssetsReceipt
         qualification_authority = [ordered]@{
-            authority = 'this-exact-beta-receipt'
+            authority = $(if ($allPassed) { 'this-exact-beta-receipt' } else { 'pending-deferred-windows-gate' })
             exact_package_sha256 = [string]$releaseAssetsReceipt.package.sha256
-            supersedes_package_build_receipt_qualification_status = $packageBuildStatus
-            supersedes_packaged_release_spec_qualification_status = $packagedSpecStatus
-            supersedes_source_archive_receipt_status = 'pending-requalification'
+            supersession_performed = $allPassed
+            supersedes_package_build_receipt_qualification_status = $(if ($allPassed) { $packageBuildStatus } else { $null })
+            supersedes_packaged_release_spec_qualification_status = $(if ($allPassed) { $packagedSpecStatus } else { $null })
+            supersedes_source_archive_receipt_status = $(if ($allPassed) { 'pending-requalification' } else { $null })
             historical_build_receipts_mutated = $false
             authority_scope = 'hash-bound-public-beta-only'
         }
@@ -452,7 +502,8 @@ function New-NInferQualificationReceipt {
                 'Beta only; no stable or GA promotion.',
                 'Single RTX 3090 at cohort 1 is qualified; multi-GPU and higher-concurrency claims are excluded.',
                 'CPU, mixed CPU/GPU, and overnight thermal qualification are excluded.',
-                'The 64K retrieval gate qualifies 64,512 prompt tokens; it is not a 128K claim.'
+                'The 64K retrieval gate qualifies 64,512 prompt tokens; it is not a 128K claim.',
+                'Responses DELETE is logical object deletion, not secure erasure; a surviving descendant checkpoint may retain ancestor token/KV context required for continuation.'
             )
         }
         automatic_route_activation_allowed = $false
@@ -461,7 +512,7 @@ function New-NInferQualificationReceipt {
     }
 
     $publicText = $receipt | ConvertTo-Json -Depth 24 -Compress
-    if ($publicText -match '(?i)(?:[A-Z]:\\Users\\|/Users/|/home/)' -or
+    if ($publicText -match '(?i)(?:[A-Z]:\\\\Users\\\\|/Users/|/home/)' -or
         $publicText -match '(?i)(?:api[_-]?key|bearer|password)["'']?\s*[:=]\s*["''][^"'']+') {
         throw 'qualification receipt contains a private path or credential value'
     }

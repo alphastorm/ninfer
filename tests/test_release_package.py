@@ -356,6 +356,25 @@ class BuildIdentityTests(unittest.TestCase):
 
 
 class ReleasePackageTests(unittest.TestCase):
+    def test_package_source_may_advance_without_rebinding_runtime_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source, binaries, runtime_head = create_release_fixture(root)
+            packaging_change = source / "packaging-only.txt"
+            packaging_change.write_text("hardened lifecycle\n", encoding="utf-8")
+            run_git(source, "add", packaging_change.name)
+            run_git(source, "commit", "--quiet", "-m", "package hardening")
+            package_head = run_git(source, "rev-parse", "HEAD")
+            options = dataclasses.replace(
+                release_options(source, binaries, runtime_head, root / "out"),
+                release_head_sha=package_head,
+                runtime_source_sha=runtime_head,
+            )
+            receipt = package_release(options)
+            self.assertEqual(receipt["patch_stack_sha"], runtime_head)
+            self.assertEqual(receipt["package_source_sha"], package_head)
+            self.assertNotEqual(receipt["patch_stack_sha"], receipt["package_source_sha"])
+
     def test_deterministic_source_binary_checksums_and_spdx(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

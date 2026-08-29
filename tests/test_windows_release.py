@@ -30,6 +30,25 @@ class WindowsReleaseContractTests(unittest.TestCase):
         self.assertFalse(receipt["automatic_route_activation_allowed"])
         self.assertFalse(receipt["stable_promotion_performed"])
         self.assertFalse(receipt["production_route_activation_performed"])
+        candidate = receipt["candidate"]
+        runtime_source = candidate["runtime_source_commit"]
+        package_source = candidate["package_source_commit"]
+        self.assertRegex(runtime_source, r"^[0-9a-f]{40}$")
+        self.assertRegex(package_source, r"^[0-9a-f]{40}$")
+        runtime_diff = subprocess.check_output(
+            [
+                "git", "diff", "--name-only", runtime_source, package_source, "--",
+                "src", "include", "apps", "cmake", "CMakeLists.txt", "CMakePresets.json",
+            ],
+            cwd=ROOT,
+            text=True,
+        ).strip()
+        self.assertEqual(runtime_diff, "")
+        self.assertFalse(candidate["runtime_source_paths_changed"])
+        self.assertEqual(
+            candidate["runtime_source_diff_sha256"],
+            hashlib.sha256(b"").hexdigest(),
+        )
 
         assets = receipt["release_assets"]
         expected_assets = {
@@ -108,7 +127,7 @@ class WindowsReleaseContractTests(unittest.TestCase):
 
         serialized = json.dumps(receipt, sort_keys=True)
         self.assertNotIn("gpu_uuid", serialized)
-        self.assertIsNone(re.search(r"(?i)(?:[A-Z]:\\Users\\|/Users/|/home/)", serialized))
+        self.assertIsNone(re.search(r"(?i)(?:[A-Z]:\\\\Users\\\\|/Users/|/home/)", serialized))
 
     def test_pinned_release_and_authenticated_c1_defaults(self) -> None:
         spec = json.loads((RELEASE / "release-spec.json").read_text(encoding="utf-8"))
@@ -366,6 +385,9 @@ class PowerShellWindowsReleaseTests(unittest.TestCase):
         self.assertEqual(
             value["state_protection_evidence_class"], "generated-stub-no-acl-semantics"
         )
+        self.assertEqual(value["substitution_count"], 21)
+        self.assertEqual(len(value["substitution_manifest"]), 21)
+        self.assertFalse(value["security_claims_included"])
         self.assertFalse(value["effective_acl_evidence"])
         self.assertRegex(value["production_installer_sha256"], r"^[0-9a-f]{64}$")
         self.assertRegex(value["instrumented_installer_sha256"], r"^[0-9a-f]{64}$")
