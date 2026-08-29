@@ -47,6 +47,7 @@ public:
     using PendingBatch       = typename Package::PendingBatch;
     using PreparedPrompt     = typename Package::PreparedPrompt;
     using OutputSession      = typename Package::OutputSession;
+    using PublishedOutput    = typename Package::PublishedOutput;
     using CacheSessionKey    = typename Package::CacheSessionKey;
     using Request            = RequestRecord<Package>;
     using Scheduling         = Scheduler<Request>;
