@@ -43,7 +43,9 @@ release gate and require their own serviced-loop evidence.
 
 ### Preserved runtime evidence and deferred fresh-package gate
 
-The runtime source and binary evidence from `7555db29d2e5` remains valid because the subsequent
+The definitive rebuilt archive is package source `a69652982f6f`, package SHA-256
+`09a9f24a4904360e7bc00ef946702c07e9e096aac638bb30776f511c5ab70afd` (813,776,623 bytes),
+and runtime source `7555db29d2e5`. The runtime binary evidence remains valid because the subsequent
 changes are confined to packaging, lifecycle scripts, tests, and disclosure text; repository tests
 require an empty diff across `src`, `include`, `apps`, `cmake`, and top-level build configuration.
 The local Windows RTX 3090 was then released for user servicing. Therefore the rebuilt archive's

@@ -1,12 +1,244 @@
 {
   "artifact_type": "ninfer_rtx3090_beta_qualification",
   "schema_version": 3,
-  "status": "pending-requalification",
+  "status": "incomplete",
   "beta_qualified": false,
-  "runtime_source_commit": "7555db29d2e5d517f74bd05d45020028d0f454c9",
-  "runtime_evidence_preserved": true,
-  "fresh_windows_rtx3090_package_lifecycle_gate": "deferred-after-user-handoff",
-  "reason": "Package-only security remediation requires a rebuilt archive; the user released the local Windows RTX 3090 before a fresh exact package/lifecycle run could be performed.",
+  "qualified_utc": "2026-08-29T06:06:23.7159648+00:00",
+  "candidate": {
+    "runtime_source_commit": "7555db29d2e5d517f74bd05d45020028d0f454c9",
+    "package_source_commit": "a69652982f6fa5cabd208ba41fae77d2dcedf78e",
+    "runtime_source_paths_changed": false,
+    "runtime_source_diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "upstream_base_commit": "ef6ecc3c139b43fc4d3e1b92df474305e8429544",
+    "lineage_base_commit": "c467349e375d6aa76afca63c0042bbc0869549aa",
+    "server_binary_sha256": "f15c05ac822901890e361f89e1789d4dd9ddec879e8cde8ff7457cfcfb48fb90",
+    "cli_binary_sha256": "bafca3886ca2c1598c049d88f0b9b3b446873a83eae8447860161d6d86ad88f1",
+    "benchmark_binary_sha256": "dad68e6b57417d639c118626ed92604e19ff8f11089ab26fe04183e6eca30851",
+    "config_sha256": "9a6ddc78992d6342913d991d26dfae26fc1a58f228746aa6d3b914067f4a1479",
+    "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e"
+  },
+  "platform": {
+    "gpu": "NVIDIA GeForce RTX 3090",
+    "vram_mib": 24576,
+    "cuda_architecture": "sm_86",
+    "driver_version": "616.56",
+    "operating_system": "Microsoft Windows 11 Pro 10.0.26200 build 26200",
+    "qualified_power_limit_w": 300,
+    "single_gpu": true
+  },
+  "release_assets": {
+    "package": {
+      "filename": "ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.tar.gz",
+      "sha256": "09a9f24a4904360e7bc00ef946702c07e9e096aac638bb30776f511c5ab70afd",
+      "bytes": 813776623
+    },
+    "source_archive": {
+      "filename": "ninfer-rtx3090-omp-v0.2.0-source.tar.gz",
+      "sha256": "4f6af1ef1b8db2763385fa8e8bb9e5a5980d2dc2bba0c34054d1a914e145b0f1",
+      "bytes": 4923706
+    },
+    "spdx_sbom": {
+      "filename": "ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.spdx.json",
+      "sha256": "4e944615a0686e871c391e818ccfd4ea13fb8f3335085ca30548352d767f4c90",
+      "bytes": 19950
+    },
+    "checksums": {
+      "filename": "SHA256SUMS",
+      "sha256": "0c22d4a3a0b9a965c8eb1061ecc46341c05d943e10b2572379f12dfb1c695322",
+      "bytes": 853
+    },
+    "package_build_receipt": {
+      "filename": "package-build-receipt.json",
+      "sha256": "d50a89a57da9b8faebf4862feadf1a960219ae9c79a665073e260e60f562d614",
+      "bytes": 3087
+    },
+    "inner_checksums_sha256": "7f14242fc4ce2d26bc3e3755a50d8964df132ecb06b10ea0de814295418775fe",
+    "installer_sha256": "72d9510933f0823e0d57aeb55fa1848c7efb381e18b4caef0c242f0353c30676",
+    "lifecycle_controller_sha256": "2980fcb733b0d20a19b5260a03d0c8a226e36a3e6ebcfbc51873c8fed2840119",
+    "gpu_owner_controller_sha256": "6d6e67baa037559b15035fe3308918ab92f7e8ad42b11d4b436bb1f904f40735",
+    "state_protection_helper_sha256": "e6e72f2f12787e7d849a4828e41f9e709e479eae40485aa062b4e2aeaaf91f4b",
+    "qualification_constructor_sha256": "5e5222a94585d37d9680acb12222cfc63f33197ec23176fbf09dba16b9d3af13"
+  },
+  "qualification_authority": {
+    "authority": "pending-deferred-windows-gate",
+    "exact_package_sha256": "09a9f24a4904360e7bc00ef946702c07e9e096aac638bb30776f511c5ab70afd",
+    "supersession_performed": false,
+    "supersedes_package_build_receipt_qualification_status": null,
+    "supersedes_packaged_release_spec_qualification_status": null,
+    "supersedes_source_archive_receipt_status": null,
+    "historical_build_receipts_mutated": false,
+    "authority_scope": "hash-bound-public-beta-only"
+  },
+  "qualification": {
+    "authenticated_agent_protocol": {
+      "status": "passed",
+      "checks_passed": 15,
+      "checks_total": 15,
+      "receipt_sha256": "132bd5cc3f0d70e4b27f87a1c7ab2704dc0d24b0cac3fe5e24247199aed1ff22"
+    },
+    "long_context_64k": {
+      "status": "passed",
+      "prompt_tokens": 64512,
+      "completion_tokens": 17,
+      "elapsed_seconds": 81.3876287000021,
+      "exact_output": "ORCHID=493817; COLOR=COBALT",
+      "receipt_sha256": "740e3b43eba3feab53ea93c1ccf0aa38c80e21c22741e9b7022e51cee1fa8b1a"
+    },
+    "checkpoint_process_restart": {
+      "status": "passed",
+      "checkpoint_files": 66,
+      "checkpoint_bytes": 2500115877,
+      "cached_input_tokens": 45,
+      "continuation_elapsed_seconds": 3.2853771999944,
+      "exact_output": "CHECKPOINT-3090-731942",
+      "failed_delete_commit_regression": "passed",
+      "cross_session_eviction_regression": "passed",
+      "middle_delete_restart_regression": "passed",
+      "latest_delete_nonrestorable_regression": "passed",
+      "standalone_delete_nonrestorable_regression": "passed",
+      "deletion_semantics": "logical-object-deletion",
+      "secure_erasure_claimed": false,
+      "receipt_sha256": "61a31d847f1a2a0bef7d33b5f67d868161480da28cbdf4e93560bd07d7240fb6"
+    },
+    "performance": {
+      "status": "passed",
+      "cohort": 1,
+      "generation_tokens": 1024,
+      "decode_tokens_per_second": 76.14569357100494,
+      "prefill_prompt_tokens": 4403,
+      "prefill_tokens_per_second": 943.105263292049,
+      "max_power_w": 299.92,
+      "max_temperature_c": 50,
+      "max_gpu_utilization_percent": 100,
+      "max_memory_used_mib": 20515,
+      "receipt_sha256": "68a04ded6494af453f4d3b74d73054e11bfce64f224f0798a5257552f4569f97"
+    },
+    "windows_lifecycle_instrumented": {
+      "status": "passed",
+      "evidence_class": "generated-instrumented-transaction-harness",
+      "production_installer_sha256": "154aaef2bcacf660ffc4b5b0718fa2d1fae78f43d52cefb7c3219bf28b46de0e",
+      "instrumented_installer_sha256": "141c20d7627aa687e98a22ea886b9a49ec313de2767822596c51a1a4172bd7a7",
+      "production_controller_sha256": "4add7ff071ef478729b2fb01ab6f9ffdc50c0e9bc3631d4e2579a9ec85d64d57",
+      "instrumented_controller_sha256": "e66a9f31ac3ae749cb0401a075bef12b9084c72e497e75cbe94ad8ff5269b821",
+      "instrumented_state_protection_sha256": "55a3a270d4074b9cd66202311ff8ad04b060779f21d9ffa93a0cd0f38b90ddea",
+      "state_protection_evidence_class": "generated-stub-no-acl-semantics",
+      "substitution_manifest_sha256": "f12e66bdfa150a8930590dd113ec89d29cc658831b7f0bb69139c0b65d0207e4",
+      "substitution_count": 22,
+      "security_claims_included": false,
+      "production_installer_executed": false,
+      "production_state_protection_executed": false,
+      "effective_acl_evidence": false,
+      "injected_failures": 10,
+      "interrupted_repairs": 2,
+      "receipt_sha256": "8a6203852268c91bce97b3436f09544a07b245bebc7fe9f711eb31656d85c492"
+    },
+    "windows_lifecycle_shipped": {
+      "status": "not_run",
+      "evidence_scope": "previous-exact-package-7555db29",
+      "fresh_package_gate_deferred": true,
+      "deferred_reason": "fresh-windows-rtx3090-unavailable-after-user-handoff",
+      "installer_sha256": "72d9510933f0823e0d57aeb55fa1848c7efb381e18b4caef0c242f0353c30676",
+      "production_installer_executed": false,
+      "instrumented_harness_used": false,
+      "clean_installs": 0,
+      "upgrades": 0,
+      "rollback_directions": 0,
+      "identity_gates_verified": 0,
+      "receipt_sha256": "6548de57311348f5cac3dd708f84752b9a66e3850f3eb0adc3294388e6861288"
+    },
+    "windows_release_assets": {
+      "status": "passed",
+      "deterministic_packages": 2,
+      "package_members_verified": 16,
+      "public_listen_rejections": 1,
+      "secret_free_receipts": 3,
+      "receipt_sha256": "e353b1381f6ce53489aa1b35e7586dda76f1c2bdb8a1058b2353f3feae511b5a"
+    },
+    "windows_state_security_fixture": {
+      "status": "passed",
+      "evidence_class": "instrumented-function-shim-no-hardware-claim",
+      "hardware_claimed": false,
+      "gpu_power_fixture_calls": 10,
+      "null_dacl_rejections": 1,
+      "atomic_race_collision_rejections": 1,
+      "receipt_sha256": "0134ff9902c899b221deebcf6772b7afe06d84dad633e35c7ccc2f0a1d3e2ccd"
+    },
+    "windows_state_security": {
+      "status": "not_run",
+      "evidence_scope": "previous-exact-package-7555db29",
+      "fresh_package_gate_deferred": true,
+      "deferred_reason": "fresh-windows-rtx3090-unavailable-after-user-handoff",
+      "root_dacl_protected": true,
+      "atomic_race_collision_rejections": 1,
+      "raced_state_recursive_deletions": 0,
+      "null_dacl_rejections": 1,
+      "low_privilege_effective_read_denials": 2,
+      "low_privilege_effective_write_denials": 2,
+      "precreated_or_unowned_root_rejections": 2,
+      "root_or_child_junction_rejections": 2,
+      "installer_prewrite_root_rejections": 3,
+      "active_interactive_gpu_rejections": 1,
+      "request_log_effective_access_denials": 2,
+      "managed_release_acl_state_assertions": 12,
+      "managed_request_log_acl_state_assertions": 12,
+      "managed_rollback_directions": 2,
+      "retained_state_helper_hash_assertions": 0,
+      "populated_root_status_milliseconds": 874,
+      "gpu_power_evidence_class": "previous-exact-package-pre-closure-control",
+      "absolute_nvidia_shim_interceptions": 0,
+      "shipped_test_bypass": false,
+      "restored_power_limit_w": 370,
+      "receipt_sha256": "5869755cce5d36c98094538f833e16760594897e5701c0786103aa2443485750"
+    },
+    "omp_windows_client": {
+      "status": "passed",
+      "omp_version": "omp/18.0.9",
+      "archive_sha256": "0256dc25174766c5cdaca23e4e4361e0b95295cd05a075089a6bbf10de170ef9",
+      "binary_sha256": "cd107c9b89d351d0a6c2243ba9f89a7db97a5e2cbb60213a6f984399bd135a81",
+      "events": 49,
+      "typed_tool_name": "read",
+      "tool_results": 1,
+      "exact_final_answer": true,
+      "receipt_sha256": "f10adb2cfa457d810938fd023ad2336895a300a15843df42d25543da836d2bb2"
+    }
+  },
+  "public_disclosure": {
+    "status": "passed_with_classified_generic_references",
+    "policy_version": 1,
+    "forbidden_marker_classes": [
+      "private-fleet-identifiers",
+      "private-home-paths",
+      "credential-material"
+    ],
+    "tracked_source_files_scanned": 1052,
+    "tracked_source_private_marker_or_unclassified_credential_findings": 0,
+    "release_bytes_scanned": 2081698162,
+    "release_files_scanned": 1088,
+    "binary_package_private_path_findings": 0,
+    "source_archive_generic_path_references": 15,
+    "classified_private_fleet_or_credential_findings": 0,
+    "raw_scan_sha256": "f53c43f65c3c921137ab57190dffdf48673a0679766a0828f2a94985f51bf228",
+    "private_fleet_projection_included": false,
+    "credential_values_recorded": 0
+  },
+  "scope": {
+    "supported_clients": [
+      "OMP 18.0.9 Windows x64"
+    ],
+    "supported_api_surfaces": [
+      "OpenAI Responses API",
+      "Anthropic Messages API",
+      "typed tool calls",
+      "checkpoint continuation"
+    ],
+    "limitations": [
+      "Beta only; no stable or GA promotion.",
+      "Single RTX 3090 at cohort 1 is qualified; multi-GPU and higher-concurrency claims are excluded.",
+      "CPU, mixed CPU/GPU, and overnight thermal qualification are excluded.",
+      "The 64K retrieval gate qualifies 64,512 prompt tokens; it is not a 128K claim.",
+      "Responses DELETE is logical object deletion, not secure erasure; a surviving descendant checkpoint may retain ancestor token/KV context required for continuation."
+    ]
+  },
   "automatic_route_activation_allowed": false,
   "stable_promotion_performed": false,
   "production_route_activation_performed": false
