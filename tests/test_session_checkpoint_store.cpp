@@ -1485,19 +1485,37 @@ int test_load_scan_failure_does_not_deadlock() {
 }
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc > 2) {
+        std::cerr << "usage: " << argv[0] << " [test-name]\n";
+        return 2;
+    }
+    const std::array tests{
+        std::pair{"sha256", &test_sha256_streaming},
+        std::pair{"namespace", &test_authenticated_namespace_validation},
+        std::pair{"codec", &test_codec_round_trip},
+        std::pair{"transaction", &test_transaction_restart_compatibility_and_corruption},
+        std::pair{"pointer-sync", &test_current_pointer_sync_failure_resolution},
+        std::pair{"manager-restart", &test_production_manager_restart_and_identity_isolation},
+        std::pair{"delete-failure", &test_delete_checkpoint_update_fails_closed},
+        std::pair{"delete-race", &test_delete_checkpoint_transaction_race_and_quota},
+        std::pair{"active-reader", &test_active_reader_delete_and_gc},
+        std::pair{"quota", &test_store_wide_quota_across_sessions},
+        std::pair{"load-unwind", &test_load_scan_failure_does_not_deadlock},
+    };
+    const std::string_view filter = argc == 2 ? argv[1] : "";
     int failures = 0;
-    failures += test_sha256_streaming();
-    failures += test_authenticated_namespace_validation();
-    failures += test_codec_round_trip();
-    failures += test_transaction_restart_compatibility_and_corruption();
-    failures += test_current_pointer_sync_failure_resolution();
-    failures += test_production_manager_restart_and_identity_isolation();
-    failures += test_delete_checkpoint_update_fails_closed();
-    failures += test_delete_checkpoint_transaction_race_and_quota();
-    failures += test_active_reader_delete_and_gc();
-    failures += test_store_wide_quota_across_sessions();
-    failures += test_load_scan_failure_does_not_deadlock();
+    bool matched = filter.empty();
+    for (const auto& [name, test] : tests) {
+        if (!filter.empty() && filter != name) { continue; }
+        matched = true;
+        std::cout << "RUN " << name << '\n' << std::flush;
+        failures += test();
+    }
+    if (!matched) {
+        std::cerr << "unknown test: " << filter << '\n';
+        return 2;
+    }
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }
