@@ -255,6 +255,13 @@ function Get-GpuOwnerLease {
     return $lease
 }
 
+function Remove-GpuOwnerLeaseFile([string]$Path) {
+    try { Remove-Item -LiteralPath $Path -Force -ErrorAction Stop }
+    catch {
+        if (Test-Path -LiteralPath $Path) { throw }
+    }
+}
+
 function Acquire-GpuOwnerLease {
     $state = Get-State
     $owner = Get-GpuOwner $state
@@ -309,7 +316,7 @@ function Acquire-GpuOwnerLease {
             else {
                 Invoke-GpuOwner $state 'start' | Out-Null
             }
-            Remove-Item -LiteralPath $leasePath -Force
+            Remove-GpuOwnerLeaseFile $leasePath
         }
         catch {
             throw [InvalidOperationException]::new(
@@ -341,7 +348,7 @@ function Restore-GpuOwnerLease {
     if ([bool]$after.paused -ne [bool]$lease.prior_paused) {
         throw 'GPU-owner prior state was not restored exactly'
     }
-    Remove-Item -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json') -Force
+    Remove-GpuOwnerLeaseFile (Join-Path $StateRoot 'gpu-owner-lease.json')
 }
 
 function Get-GpuOwnerStatus([object]$State) {
