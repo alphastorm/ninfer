@@ -21,10 +21,10 @@ int main() {
             std::lock_guard lock(saved_mutex);
             saved.emplace_back(digest);
         },
-        2);
+        1);
 
     const auto enqueue_started = std::chrono::steady_clock::now();
-    automatic_checkpoints.enqueue("session-a");
+    const auto first           = automatic_checkpoints.enqueue("session-a");
     const auto enqueue_elapsed = std::chrono::steady_clock::now() - enqueue_started;
     if (checkpoint_started.get_future().wait_for(std::chrono::seconds(1)) !=
             std::future_status::ready ||
@@ -33,11 +33,19 @@ int main() {
         return 1;
     }
 
-    automatic_checkpoints.enqueue("session-a");
-    automatic_checkpoints.enqueue("session-b");
+    const auto duplicate = automatic_checkpoints.enqueue("session-a");
+    const auto second    = automatic_checkpoints.enqueue("session-b");
+    const auto dropped   = automatic_checkpoints.enqueue("session-c");
     release_checkpoint.set_value();
     automatic_checkpoints.drain();
-    if (saved != std::vector<std::string>{"session-a", "session-b"}) {
+    const auto after_drain = automatic_checkpoints.enqueue("session-after-drain");
+    automatic_checkpoints.drain();
+    if (first != ninfer::serve::AutomaticCheckpointEnqueueResult::Enqueued ||
+        duplicate != ninfer::serve::AutomaticCheckpointEnqueueResult::Coalesced ||
+        second != ninfer::serve::AutomaticCheckpointEnqueueResult::Enqueued ||
+        dropped != ninfer::serve::AutomaticCheckpointEnqueueResult::Dropped ||
+        after_drain != ninfer::serve::AutomaticCheckpointEnqueueResult::Dropped ||
+        saved != std::vector<std::string>{"session-a", "session-b"}) {
         std::cerr << "automatic checkpoint queue did not coalesce and drain sessions\n";
         return 1;
     }

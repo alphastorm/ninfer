@@ -4,6 +4,7 @@
 
 #include "runtime/windows/direct_storage_checkpoint_backend.h"
 
+#include <cuda_runtime.h>
 #include <windows.h>
 
 #include <algorithm>
@@ -266,6 +267,12 @@ int test_native_read_queue_root_confinement() {
 
 int main() {
     try {
+        int cuda_devices              = 0;
+        const cudaError_t cuda_status = cudaGetDeviceCount(&cuda_devices);
+        if (cuda_status != cudaSuccess || cuda_devices == 0) {
+            std::cout << "SKIP: native CUDA device unavailable for DirectStorage test\n";
+            return 77;
+        }
         int failures = 0;
         failures += test_native_round_trip_and_corruption();
         failures += test_native_lock_timeout();

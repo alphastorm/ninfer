@@ -87,6 +87,8 @@ if(WIN32)
   ninfer_add_test(ninfer_direct_storage_checkpoint_windows_test
     SOURCES test_direct_storage_checkpoint_windows.cpp
     LIBRARIES ninfer_checkpoint_directstorage)
+  set_tests_properties(ninfer_direct_storage_checkpoint_windows_test
+    PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 if(TARGET ninfer_checkpoint_io_uring_linux)
   ninfer_add_test(ninfer_io_uring_checkpoint_backend_test

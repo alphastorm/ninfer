@@ -15,13 +15,16 @@ AutomaticCheckpointQueue::AutomaticCheckpointQueue(Save save, std::size_t max_pe
 
 AutomaticCheckpointQueue::~AutomaticCheckpointQueue() { drain(); }
 
-void AutomaticCheckpointQueue::enqueue(std::string session_digest) noexcept {
-    if (session_digest.empty()) { return; }
+AutomaticCheckpointEnqueueResult
+AutomaticCheckpointQueue::enqueue(std::string session_digest) noexcept {
+    if (session_digest.empty()) { return AutomaticCheckpointEnqueueResult::Dropped; }
     try {
         std::lock_guard lock(mutex_);
-        if (!accepting_ || queue_.size() >= max_pending_) { return; }
+        if (!accepting_ || queue_.size() >= max_pending_) {
+            return AutomaticCheckpointEnqueueResult::Dropped;
+        }
         const auto [pending, inserted] = pending_.insert(session_digest);
-        if (!inserted) { return; }
+        if (!inserted) { return AutomaticCheckpointEnqueueResult::Coalesced; }
         try {
             queue_.push_back(std::move(session_digest));
         } catch (...) {
@@ -29,7 +32,8 @@ void AutomaticCheckpointQueue::enqueue(std::string session_digest) noexcept {
             throw;
         }
         cv_.notify_one();
-    } catch (...) {}
+        return AutomaticCheckpointEnqueueResult::Enqueued;
+    } catch (...) { return AutomaticCheckpointEnqueueResult::Dropped; }
 }
 
 void AutomaticCheckpointQueue::drain() noexcept {

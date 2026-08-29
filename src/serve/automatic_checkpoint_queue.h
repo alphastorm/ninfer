@@ -13,6 +13,12 @@
 
 namespace ninfer::serve {
 
+enum class AutomaticCheckpointEnqueueResult {
+    Enqueued,
+    Coalesced,
+    Dropped,
+};
+
 // One bounded best-effort worker for automatic checkpoint saves. Explicit POST and shutdown saves
 // remain synchronous acceptance boundaries; request completion only enqueues here.
 class AutomaticCheckpointQueue {
@@ -27,7 +33,7 @@ public:
     AutomaticCheckpointQueue(AutomaticCheckpointQueue&&)                 = delete;
     AutomaticCheckpointQueue& operator=(AutomaticCheckpointQueue&&)      = delete;
 
-    void enqueue(std::string session_digest) noexcept;
+    [[nodiscard]] AutomaticCheckpointEnqueueResult enqueue(std::string session_digest) noexcept;
     void drain() noexcept;
 
 private:

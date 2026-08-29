@@ -16,6 +16,7 @@
 #include <set>
 #include <stdexcept>
 #include <system_error>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -37,6 +38,8 @@ using runtime::ContinuationCheckpointStats;
 using runtime::ContinuationCheckpointWriter;
 
 inline constexpr std::size_t kMaximumTombstoneAttempts = 4096;
+static_assert(std::is_nothrow_move_constructible_v<VerifiedSessionCheckpoint>);
+static_assert(std::is_nothrow_move_assignable_v<VerifiedSessionCheckpoint>);
 
 class CheckpointCorruption final : public std::runtime_error {
 public:
@@ -1153,14 +1156,15 @@ SessionCheckpointStore::load(std::string_view session_sha256,
         const std::uint64_t generation_bytes =
             options_.generation_size ? options_.generation_size(root) : directory_bytes(root);
         const std::string active_key = std::string(session_sha256) + "/" + *generation;
-        auto reader                  = std::make_shared<DirectoryCheckpointReader>(
+        VerifiedSessionCheckpoint verified;
+        verified.responses       = std::move(*responses);
+        verified.expected_engine = expected;
+        verified.generation      = *generation;
+        verified.bytes           = generation_bytes;
+        auto reader              = std::make_shared<DirectoryCheckpointReader>(
             root, std::move(allowed), options_.read_queue, impl_, active_key);
-        return {.state      = SessionCheckpointLoadState::Available,
-                .checkpoint = VerifiedSessionCheckpoint{.responses       = std::move(*responses),
-                                                        .engine          = std::move(reader),
-                                                        .expected_engine = expected,
-                                                        .generation      = *generation,
-                                                        .bytes           = generation_bytes}};
+        verified.engine = std::move(reader);
+        return {.state = SessionCheckpointLoadState::Available, .checkpoint = std::move(verified)};
     } catch (const CheckpointCorruption&) {
         quarantine_generation(session, *generation);
         return {.state = SessionCheckpointLoadState::Corrupt};

@@ -1035,13 +1035,23 @@ void HttpServer::maybe_checkpoint_completed_turn(const std::optional<std::string
         static_cast<std::uint64_t>(std::max(outcome.prompt_tokens, 0)) +
         static_cast<std::uint64_t>(std::max(outcome.completion_tokens, 0));
     if (frontier < options_.session_checkpoint_min_tokens) { return; }
-    automatic_checkpoints_->enqueue(*session_sha256);
+    if (automatic_checkpoints_->enqueue(*session_sha256) ==
+        AutomaticCheckpointEnqueueResult::Dropped) {
+        try {
+            write_console_log(ConsoleLogLevel::Warning,
+                              "automatic session checkpoint queue dropped an acceleration save");
+        } catch (...) {}
+    }
 }
 
 void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noexcept {
     try {
         if (service_ != nullptr) {
-            (void)service_->save_checkpoint(session_sha256, response_store_);
+            const bool saved =
+                service_->save_checkpoint(session_sha256, response_store_).has_value();
+            write_console_log(saved ? ConsoleLogLevel::Info : ConsoleLogLevel::Warning,
+                              saved ? "automatic session checkpoint saved"
+                                    : "automatic session checkpoint skipped: no complete endpoint");
         }
     } catch (const std::exception& exception) {
         try {
@@ -1054,10 +1064,7 @@ void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noex
 
 void HttpServer::save_all_checkpoints() noexcept {
     if (service_ == nullptr || !service_->checkpoint_enabled()) { return; }
-    if (automatic_checkpoints_) {
-        automatic_checkpoints_->drain();
-        automatic_checkpoints_.reset();
-    }
+    if (automatic_checkpoints_) { automatic_checkpoints_->drain(); }
     try {
         for (const std::string& digest : response_store_.session_digests()) {
             try {
