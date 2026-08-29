@@ -14,12 +14,9 @@
   },
   "source": {
     "upstream_base_sha": "9ec1b82c7afa021314682d7a95390f8935ead7c2",
-    "qualified_source_head": "aa1030e5d1d2b91e374ffc84d087c6fa3ec8371f",
-    "source_archive_sha256": "9d43f5f83789dbce053aabddf3f6ff4e1e28eebd25601b2231d8dc1945b7cfbf",
-    "source_archive_bytes": 5227404,
-    "package_source_head": "f5c6bb9d5c5b9b73ef1496ef97a7282fa3b8cbda",
-    "package_source_archive_sha256": "63c5c3cb9a0b80b58e411c140e789fb27f1e00a44e3abf38020fd219c0c2ff7e",
-    "package_source_archive_bytes": 5227381,
+    "qualified_source_head": "e5d51a44f1a3b5788be83b991c2761199e8e9a31",
+    "source_archive_sha256": "e43847bf3da5ec152b3c9abf9a00cddca8f4bd79bf60f67d55c458a017f2eb3c",
+    "source_archive_bytes": 5232852,
     "bounded_staging_commit": "e89e415d95921cecf4cf8a00df5540a4a036ff84",
     "directstorage_fallback_commit": "a9bb55b8e9b02ff34e4725dc8ca95d4fadeb3e0d",
     "qualified_patch_sha256": "ac8ba36da9bfc89ff97021eecba8c7ba8f88f9e7e9bfd1c9c3509b723d81d4e0",
@@ -34,15 +31,13 @@
   },
   "qualified_source_evidence": {
     "binding": "inherited-runtime-evidence-plus-final-source-bound-omp-gate",
-    "runtime_commit": "aa1030e5d1d2b91e374ffc84d087c6fa3ec8371f",
+    "runtime_commit": "e5d51a44f1a3b5788be83b991c2761199e8e9a31",
     "checkpoint_tokens": 102060,
     "checkpoint_reuse": "restore_disk_checkpoint",
     "protocol_receipt_sha256": "fd1778e2493f87017952bd2def6c240dbadba62d42a4e0ba72d9fd349ad188b8",
     "checkpoint_receipt_sha256": "cf87019c2a8258aa8e05aae5d8b0d2f4908fddcffa0344e902da2488c47b75b6",
     "performance_receipt_sha256": "c73b1d4dd9d1482c4c7d1ede6355b5edd7d3fbc15039007df3ead948f3a2309d",
-    "golden_equivalent_receipt_sha256": "2146d764ae300e54486e85e970343d126b48efb74432d16d18851b56df5ccb6a",
-    "release_lifecycle_receipt_sha256": "89cef9d271a8b1946aeebac3786cf1b6042c92f74f894c58a780016b9918807b",
-    "release_binding": "beta-qualified-no-stable-promotion"
+    "release_binding": "external-final-qualification-required"
   },
   "golden_equivalent": {
     "artifact_type": "ninfer_omp_golden_equivalent_contract",
@@ -60,16 +55,11 @@
   },
   "qualified_artifacts": {
     "deployment_profile": "qwen38-4090-v0.1",
-    "binary_sha256": "43eff1c19fb788534466a51458e357f8f02bbee949ca4d6f3b605cfae177fa28",
-    "binary_bytes": 230208000,
+    "binary_sha256": "e0769d5c64195325ba95891c1af99e71db2083271f379242134ac906f8ae9e5d",
+    "binary_bytes": 230245888,
     "config_sha256": "ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db",
-    "package_sha256": "9967166bc3c45ffe546933e2531a90c26d5225b271359201d10ea3b7c34d2a6f",
-    "package_bytes": 227349917,
-    "sbom_sha256": "1826aadc5ef7edc0ce2900ec491d5c1e80331050985653dbcdf4a6c5dfc3b5d4",
-    "sbom_files_analyzed": 26,
-    "sha256sums_sha256": "dad5e052a8243cb0bb8ea62412fcf96a345157282eb79d891bf45a6de75cb336",
-    "generic_gpu_owner_controller_sha256": "c51e287216743dd4becd56f44678c27d9c5de3c5950014695afdc40c39b1aa82",
-    "private_identifier_scan": "passed"
+    "generic_gpu_owner_controller_sha256": "b6a44ecdb177dae538d667937edb6a03bddf262d34815ae6153daf58351db9ab",
+    "state_protection_sha256": "c6622ad31753998ffc0281dc9699488153e911202a2aa8d03de07b17b16debcc"
   },
   "lifecycle": {
     "task_name": "NInfer-Qwen38-4090-v0.1",

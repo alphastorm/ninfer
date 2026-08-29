@@ -82,6 +82,14 @@ class ReleaseAuthorityTest(unittest.TestCase):
             package["generic_gpu_owner_controller_sha256"],
             assets["published_gpu_owner_controller"]["sha256"],
         )
+        self.assertEqual(
+            package["state_protection_sha256"],
+            artifacts["state_protection_sha256"],
+        )
+        self.assertEqual(
+            package["state_protection_sha256"],
+            assets["published_state_protection"]["sha256"],
+        )
 
         asset_map = {entry["filename"]: entry for entry in assets["assets"]}
         for filename in (
