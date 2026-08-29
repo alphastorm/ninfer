@@ -89,6 +89,12 @@ if(WIN32)
     LIBRARIES ninfer_checkpoint_directstorage)
   set_tests_properties(ninfer_direct_storage_checkpoint_windows_test
     PROPERTIES SKIP_RETURN_CODE 77)
+  if(NINFER_DIRECTSTORAGE_DLLS)
+    add_custom_command(TARGET ninfer_direct_storage_checkpoint_windows_test POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different
+              ${NINFER_DIRECTSTORAGE_DLLS}
+              $<TARGET_FILE_DIR:ninfer_direct_storage_checkpoint_windows_test>)
+  endif()
 endif()
 if(TARGET ninfer_checkpoint_io_uring_linux)
   ninfer_add_test(ninfer_io_uring_checkpoint_backend_test
