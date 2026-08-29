@@ -59,6 +59,7 @@
 namespace ninfer::runtime {
 namespace {
 
+using crypto::Sha256;
 using crypto::sha256;
 using crypto::sha256_hex;
 
