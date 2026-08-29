@@ -24,8 +24,7 @@ using namespace ninfer::runtime::windows;
 
 int check(bool condition, const char* message) {
     if (condition) { return 0; }
-    std::cerr << message << '
-';
+    std::cerr << message << '\n';
     return 1;
 }
 
@@ -70,12 +69,10 @@ int main() {
     } catch (const ContinuationCheckpointReadError& error) {
         std::filesystem::remove_all(base);
         if (capability_error(error.what())) {
-            std::cout << "SKIP: " << error.what() << '
-';
+            std::cout << "SKIP: " << error.what() << '\n';
             return 77;
         }
-        std::cerr << error.what() << '
-';
+        std::cerr << error.what() << '\n';
         return 1;
     }
 
@@ -90,8 +87,7 @@ int main() {
             queue->submit(payload, std::span(&request, 1));
         completion->wait();
     } catch (const std::exception& error) {
-        std::cerr << error.what() << '
-';
+        std::cerr << error.what() << '\n';
         ++failures;
     }
     failures += check(std::equal(restored.begin(), restored.end(),
@@ -108,7 +104,8 @@ int main() {
 
     queue.reset();
     std::filesystem::remove_all(base);
-    if (failures == 0) { std::cout << "DirectStorage checkpoint read queue tests passed
-"; }
+    if (failures == 0) {
+        std::cout << "DirectStorage checkpoint read queue tests passed\n";
+    }
     return failures == 0 ? 0 : 1;
 }
