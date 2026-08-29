@@ -283,7 +283,7 @@ try {
         packaged_release_spec_qualification_status = 'hardware-pending'
     }
     $protocol = [pscustomobject]@{
-        status = 'passed'; evidence_platform = 'remote-linux-rtx3090-runtime'
+        status = 'passed'; evidence_platform = 'remote-linux-rtx3090-runtime'; deferred_reason = ''
         checks_passed = 15; checks_total = 15; receipt_sha256 = ('9' * 64)
     }
     $remoteNative = [pscustomobject]@{
@@ -295,12 +295,12 @@ try {
         hourly_price_usd = 0.22; receipt_sha256 = ('6' * 64)
     }
     $longContext = [pscustomobject]@{
-        status = 'passed'; evidence_platform = 'remote-linux-rtx3090-runtime'; prompt_tokens = 64512; completion_tokens = 17
+        status = 'passed'; evidence_platform = 'remote-linux-rtx3090-runtime'; deferred_reason = ''; prompt_tokens = 64512; completion_tokens = 17
         elapsed_seconds = 1.0; exact_output = 'ORCHID=493817; COLOR=COBALT'
         receipt_sha256 = ('a' * 64)
     }
     $checkpointRestart = [pscustomobject]@{
-        status = 'passed'; evidence_platform = 'remote-linux-rtx3090-runtime'; checkpoint_files = 2; checkpoint_bytes = 1024
+        status = 'passed'; evidence_platform = 'remote-linux-rtx3090-runtime'; deferred_reason = ''; checkpoint_files = 2; checkpoint_bytes = 1024
         cached_input_tokens = 45; continuation_elapsed_seconds = 1.0
         exact_output = 'CHECKPOINT-3090-731942'; failed_delete_commit_regression = 'passed'
         cross_session_eviction_regression = 'passed'; receipt_sha256 = ('b' * 64)
@@ -313,7 +313,7 @@ try {
         deletion_semantics = 'logical-object-deletion'; secure_erasure_claimed = $false
     }
     $performance = [pscustomobject]@{
-        status = 'passed'; evidence_platform = 'remote-linux-rtx3090-runtime'; cohort = 1; generation_tokens = 1024
+        status = 'passed'; evidence_platform = 'remote-linux-rtx3090-runtime'; deferred_reason = ''; cohort = 1; generation_tokens = 1024
         decode_tokens_per_second = 1.0; prefill_prompt_tokens = 4403
         prefill_tokens_per_second = 1.0; max_power_w = 300.0; max_temperature_c = 50
         max_gpu_utilization_percent = 100; max_memory_used_mib = 20000
@@ -409,13 +409,16 @@ try {
     $originalProtocolStatus = $protocol.status
     $originalProtocolReceipt = $protocol.receipt_sha256
     $protocol.status = 'not_run'
+    $protocol.deferred_reason = 'community-rtx3090-cuda-runtime-unavailable'
     $protocol.receipt_sha256 = $null
     $incomplete = New-NInferQualificationReceipt @receiptArguments
     $protocol.status = $originalProtocolStatus
+    $protocol.deferred_reason = ''
     $protocol.receipt_sha256 = $originalProtocolReceipt
     Assert-Equal ([string]$incomplete.status) 'incomplete' 'receipt constructor passed an unrun gate'
     Assert-Equal ([bool]$incomplete.beta_qualified) $false 'incomplete receipt claimed beta qualification'
     Assert-Equal ([bool]$incomplete.qualification_authority.supersession_performed) $false 'incomplete receipt superseded pending build authority'
+    Assert-Equal ([int]$incomplete.qualification.authenticated_agent_protocol.checks_passed) 0 'deferred protocol retained passed counters'
     Assert-Equal ([int]$incomplete.scope.supported_clients.Count) 0 'incomplete receipt advertised a supported client'
     Assert-Equal ([int]$incomplete.scope.supported_api_surfaces.Count) 0 'incomplete receipt advertised supported API surfaces'
     $incompleteJson = $incomplete | ConvertTo-Json -Depth 24 -Compress

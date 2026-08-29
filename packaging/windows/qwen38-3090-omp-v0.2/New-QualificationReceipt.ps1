@@ -222,6 +222,7 @@ function New-NInferQualificationReceipt {
     $protocolReceipt = [ordered]@{
         status = $protocolStatus
         evidence_platform = [string](Get-NInferQualificationProperty $Protocol 'evidence_platform' 'authenticated_agent_protocol')
+        deferred_reason = [string](Get-NInferQualificationProperty $Protocol 'deferred_reason' 'authenticated_agent_protocol')
         checks_passed = [int](Get-NInferQualificationProperty $Protocol 'checks_passed' 'authenticated_agent_protocol')
         checks_total = [int](Get-NInferQualificationProperty $Protocol 'checks_total' 'authenticated_agent_protocol')
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $Protocol 'authenticated_agent_protocol'
@@ -230,6 +231,13 @@ function New-NInferQualificationReceipt {
         ($protocolReceipt.evidence_platform -cne 'remote-linux-rtx3090-runtime' -or
          $protocolReceipt.checks_passed -ne 15 -or $protocolReceipt.checks_total -ne 15)) {
         throw 'authenticated_agent_protocol must bind the complete 15/15 protocol'
+    }
+    if ($protocolStatus -ceq 'not_run') {
+        if ($protocolReceipt.deferred_reason -cne 'community-rtx3090-cuda-runtime-unavailable') {
+            throw 'deferred authenticated_agent_protocol lacks the bounded cloud failure reason'
+        }
+        $protocolReceipt.checks_passed = 0
+        $protocolReceipt.checks_total = 0
     }
 
     $remoteNativeStatus = Get-NInferQualificationStatus $RemoteNative 'remote_linux_sm86_native'
@@ -263,6 +271,7 @@ function New-NInferQualificationReceipt {
     $longContextReceipt = [ordered]@{
         status = $longContextStatus
         evidence_platform = [string](Get-NInferQualificationProperty $LongContext 'evidence_platform' 'long_context_64k')
+        deferred_reason = [string](Get-NInferQualificationProperty $LongContext 'deferred_reason' 'long_context_64k')
         prompt_tokens = [int](Get-NInferQualificationProperty $LongContext 'prompt_tokens' 'long_context_64k')
         completion_tokens = [int](Get-NInferQualificationProperty $LongContext 'completion_tokens' 'long_context_64k')
         elapsed_seconds = [double](Get-NInferQualificationProperty $LongContext 'elapsed_seconds' 'long_context_64k')
@@ -277,11 +286,21 @@ function New-NInferQualificationReceipt {
          [string]::IsNullOrWhiteSpace($longContextReceipt.exact_output))) {
         throw 'long_context_64k does not bind the exact 64K retrieval gate'
     }
+    if ($longContextStatus -ceq 'not_run') {
+        if ($longContextReceipt.deferred_reason -cne 'community-rtx3090-cuda-runtime-unavailable') {
+            throw 'deferred long_context_64k lacks the bounded cloud failure reason'
+        }
+        $longContextReceipt.prompt_tokens = 0
+        $longContextReceipt.completion_tokens = 0
+        $longContextReceipt.elapsed_seconds = 0
+        $longContextReceipt.exact_output = $null
+    }
 
     $checkpointStatus = Get-NInferQualificationStatus $CheckpointRestart 'checkpoint_process_restart'
     $checkpointReceipt = [ordered]@{
         status = $checkpointStatus
         evidence_platform = [string](Get-NInferQualificationProperty $CheckpointRestart 'evidence_platform' 'checkpoint_process_restart')
+        deferred_reason = [string](Get-NInferQualificationProperty $CheckpointRestart 'deferred_reason' 'checkpoint_process_restart')
         checkpoint_files = [int](Get-NInferQualificationProperty $CheckpointRestart 'checkpoint_files' 'checkpoint_process_restart')
         checkpoint_bytes = [Int64](Get-NInferQualificationProperty $CheckpointRestart 'checkpoint_bytes' 'checkpoint_process_restart')
         cached_input_tokens = [int](Get-NInferQualificationProperty $CheckpointRestart 'cached_input_tokens' 'checkpoint_process_restart')
@@ -318,11 +337,22 @@ function New-NInferQualificationReceipt {
          $checkpointReceipt.secure_erasure_claimed)) {
         throw 'checkpoint_process_restart does not bind restart and atomic-delete regressions'
     }
+    if ($checkpointStatus -ceq 'not_run') {
+        if ($checkpointReceipt.deferred_reason -cne 'community-rtx3090-cuda-runtime-unavailable') {
+            throw 'deferred checkpoint_process_restart lacks the bounded cloud failure reason'
+        }
+        $checkpointReceipt.checkpoint_files = 0
+        $checkpointReceipt.checkpoint_bytes = 0
+        $checkpointReceipt.cached_input_tokens = 0
+        $checkpointReceipt.continuation_elapsed_seconds = 0
+        $checkpointReceipt.exact_output = $null
+    }
 
     $performanceStatus = Get-NInferQualificationStatus $Performance 'performance'
     $performanceReceipt = [ordered]@{
         status = $performanceStatus
         evidence_platform = [string](Get-NInferQualificationProperty $Performance 'evidence_platform' 'performance')
+        deferred_reason = [string](Get-NInferQualificationProperty $Performance 'deferred_reason' 'performance')
         cohort = [int](Get-NInferQualificationProperty $Performance 'cohort' 'performance')
         generation_tokens = [int](Get-NInferQualificationProperty $Performance 'generation_tokens' 'performance')
         decode_tokens_per_second = [double](Get-NInferQualificationProperty $Performance 'decode_tokens_per_second' 'performance')
@@ -341,6 +371,16 @@ function New-NInferQualificationReceipt {
          $performanceReceipt.prefill_tokens_per_second -le 0 -or
          $performanceReceipt.max_power_w -gt 301.0)) {
         throw 'performance does not bind the bounded C1 300 W profile'
+    }
+    if ($performanceStatus -ceq 'not_run') {
+        if ($performanceReceipt.deferred_reason -cne 'community-rtx3090-cuda-runtime-unavailable') {
+            throw 'deferred performance lacks the bounded cloud failure reason'
+        }
+        foreach ($name in @(
+                'cohort', 'generation_tokens', 'decode_tokens_per_second',
+                'prefill_prompt_tokens', 'prefill_tokens_per_second', 'max_power_w',
+                'max_temperature_c', 'max_gpu_utilization_percent', 'max_memory_used_mib'
+            )) { $performanceReceipt[$name] = 0 }
     }
 
     $instrumentedStatus = Get-NInferQualificationStatus $InstrumentedLifecycle 'windows_lifecycle_instrumented'

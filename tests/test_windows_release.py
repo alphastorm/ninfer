@@ -127,10 +127,23 @@ class WindowsReleaseContractTests(unittest.TestCase):
             "checkpoint_process_restart",
             "performance",
         ):
+            self.assertEqual(receipt["qualification"][gate]["status"], "not_run")
             self.assertEqual(
                 receipt["qualification"][gate]["evidence_platform"],
                 "remote-linux-rtx3090-runtime",
             )
+            self.assertEqual(
+                receipt["qualification"][gate]["deferred_reason"],
+                "community-rtx3090-cuda-runtime-unavailable",
+            )
+        self.assertEqual(
+            receipt["qualification"]["authenticated_agent_protocol"]["checks_passed"], 0
+        )
+        self.assertEqual(receipt["qualification"]["long_context_64k"]["prompt_tokens"], 0)
+        self.assertEqual(
+            receipt["qualification"]["checkpoint_process_restart"]["checkpoint_files"], 0
+        )
+        self.assertEqual(receipt["qualification"]["performance"]["generation_tokens"], 0)
 
         instrumented = receipt["qualification"]["windows_lifecycle_instrumented"]
         shipped = receipt["qualification"]["windows_lifecycle_shipped"]
