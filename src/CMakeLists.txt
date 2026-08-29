@@ -361,6 +361,7 @@ add_library(ninfer::engine ALIAS ninfer_engine)
 if(NINFER_BUILD_SERVE)
   # HTTP protocol/product adapter. No serving header is part of the public API.
   add_library(ninfer_serve STATIC
+    serve/automatic_checkpoint_queue.cpp
     serve/client_identity.cpp
     serve/opaque_id.cpp
     serve/openai_schema.cpp

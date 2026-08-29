@@ -51,8 +51,8 @@ cannot be combined with `--vision`. A later request cannot enable a capability o
 | `GET /health` | process health |
 | `GET /v1/ninfer/status` | exact build/deployment identity, resolved runtime settings, activity, cache state, and MTP totals |
 | `POST /v1/ninfer/checkpoints` | transactionally checkpoint the stored Responses session named by the exact JSON body |
-| `GET /v1/ninfer/checkpoints/{session-sha256}/status` | authenticated durable-checkpoint compatibility and generation status |
-| `DELETE /v1/ninfer/checkpoints/{session-sha256}` | remove that session's durable generations |
+| `GET /v1/ninfer/checkpoints/status` | authenticated durable-checkpoint compatibility and generation status; session credential in `X-NInfer-Session` |
+| `DELETE /v1/ninfer/checkpoints` | remove the session named by `X-NInfer-Session` |
 | `GET /v1/models` | configured OpenAI model alias |
 | `GET /v1/models/{id}` | lookup of the configured alias |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |
@@ -493,8 +493,8 @@ field is HTTP 400:
 | Endpoint | Contract |
 |---|---|
 | `POST /v1/ninfer/checkpoints` | save the complete stored lineage and the exact catalogued Engine endpoint whose checkpoint tag is that lineage's latest Response ID; return HTTP 409 when no complete checkpointable endpoint exists |
-| `GET /v1/ninfer/checkpoints/{digest}/status` | report `available`, `missing`, `incompatible`, `corrupt`, or transient `unavailable` state |
-| `DELETE /v1/ninfer/checkpoints/{digest}` | atomically rename the complete session to an internal tombstone and retire it; return `deleted`/200, genuine `missing`/404, or `conflict`/409 when a live reader or filesystem refusal prevents the rename; physical cleanup is best-effort and retried by garbage collection |
+| `GET /v1/ninfer/checkpoints/status` | read the digest from the required `X-NInfer-Session` header and report `available`, `missing`, `incompatible`, `corrupt`, or transient `unavailable` state |
+| `DELETE /v1/ninfer/checkpoints` | read the digest from the required `X-NInfer-Session` header, atomically rename the complete session to an internal tombstone, and retire it; return `deleted`/200, genuine `missing`/404, or `conflict`/409 when a live reader or filesystem refusal prevents the rename; physical cleanup is best-effort and retried by garbage collection |
 
 Success and status bodies never echo the session digest or include prompt, response, tool, or
 reasoning content.
@@ -512,9 +512,12 @@ or checksum corruption is quarantined and ignored. A transient missing/open/read
 reports `unavailable` without changing the generation or `current` pointer, so a later request can
 retry the same checkpoint.
 
-A completed stored turn at or above `--session-checkpoint-min-tokens` is checkpointed
-automatically; the default threshold is `32768`. Graceful server shutdown attempts every live
-session. Explicit `POST` remains the crash-test boundary: do not kill the process until it returns.
+A completed stored turn at or above `--session-checkpoint-min-tokens` is enqueued to one
+bounded background checkpoint worker; the default threshold is `32768`. The request publishes its
+terminal HTTP/SSE response without waiting for checkpoint I/O, repeated saves for the same session
+coalesce, and a full queue drops only that automatic acceleration attempt. Graceful server shutdown
+drains the worker and then attempts every live session. Explicit `POST` remains the synchronous
+crash-test boundary: do not kill the process until it returns.
 `--session-checkpoint-staging-mib` bounds transfer/codec staging.
 `--session-checkpoint-quota-mib` is a store-wide cap over all retained current and stale
 generations, including deferred tombstones. Before publishing a new `current`, admission cleans

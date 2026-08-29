@@ -19,6 +19,7 @@
 #    include <cstddef>
 #    include <cstdint>
 #    include <cstring>
+#    include <cwchar>
 #    include <exception>
 #    include <filesystem>
 #    include <limits>
@@ -473,8 +474,9 @@ private:
 
 class WindowsDirectStorageReadQueue final : public ContinuationCheckpointReadQueue {
 public:
-    explicit WindowsDirectStorageReadQueue(std::uint32_t timeout_ms)
-        : state_(std::make_shared<DirectStorageState>()), timeout_ms_(timeout_ms) {
+    WindowsDirectStorageReadQueue(std::filesystem::path root, std::uint32_t timeout_ms)
+        : root_(std::filesystem::weakly_canonical(std::move(root))),
+          state_(std::make_shared<DirectStorageState>()), timeout_ms_(timeout_ms) {
         int cuda_device = 0;
         require_cuda(cudaGetDevice(&cuda_device), "failed to query the active CUDA device");
         cudaDeviceProp cuda_properties{};
@@ -555,9 +557,21 @@ public:
             throw CheckpointContractError("DirectStorage checkpoint request batch is invalid");
         }
 
+        const DWORD source_attributes = GetFileAttributesW(path.c_str());
+        if (source_attributes == INVALID_FILE_ATTRIBUTES ||
+            (source_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+            throw CheckpointContractError(
+                "DirectStorage checkpoint payload is not a regular non-reparse file");
+        }
+        const std::filesystem::path canonical = std::filesystem::weakly_canonical(path);
+        if (!contains(canonical)) {
+            throw CheckpointContractError(
+                "DirectStorage checkpoint read escaped its configured root");
+        }
+
         std::unique_lock queue_lock(state_->mutex);
         ComPtr<IDStorageFile> file;
-        require_hresult(state_->factory->OpenFile(path.c_str(), IID_PPV_ARGS(&file)),
+        require_hresult(state_->factory->OpenFile(canonical.c_str(), IID_PPV_ARGS(&file)),
                         "DirectStorage could not open the committed checkpoint payload");
         BY_HANDLE_FILE_INFORMATION information{};
         require_hresult(file->GetFileInformation(&information),
@@ -607,6 +621,21 @@ public:
     }
 
 private:
+    [[nodiscard]] static bool same_component(const std::filesystem::path& left,
+                                             const std::filesystem::path& right) noexcept {
+        return ::_wcsicmp(left.c_str(), right.c_str()) == 0;
+    }
+
+    [[nodiscard]] bool contains(const std::filesystem::path& path) const noexcept {
+        auto root      = root_.begin();
+        auto candidate = path.begin();
+        for (; root != root_.end(); ++root, ++candidate) {
+            if (candidate == path.end() || !same_component(*candidate, *root)) { return false; }
+        }
+        return candidate != path.end();
+    }
+
+    std::filesystem::path root_;
     std::shared_ptr<DirectStorageState> state_;
     std::uint32_t timeout_ms_ = 0;
 };
@@ -614,14 +643,21 @@ private:
 } // namespace
 
 std::shared_ptr<ContinuationCheckpointReadQueue>
-make_direct_storage_checkpoint_read_queue(std::uint32_t timeout_ms) {
-    return std::make_shared<WindowsDirectStorageReadQueue>(timeout_ms);
+make_direct_storage_checkpoint_read_queue(const std::filesystem::path& root,
+                                          std::uint32_t timeout_ms) {
+    std::error_code error;
+    std::filesystem::create_directories(root, error);
+    if (error) {
+        throw CheckpointContractError("create DirectStorage checkpoint root: " + error.message());
+    }
+    return std::make_shared<WindowsDirectStorageReadQueue>(root, timeout_ms);
 }
 
 std::unique_ptr<DirectStorageCheckpointBackend>
 make_direct_storage_checkpoint_backend(DirectStorageCheckpointConfig config) {
     auto file_system = std::make_shared<WindowsCheckpointFileSystem>();
-    auto read_queue  = make_direct_storage_checkpoint_read_queue(config.io_timeout_ms);
+    auto read_queue =
+        make_direct_storage_checkpoint_read_queue(config.directory, config.io_timeout_ms);
     return std::make_unique<DirectStorageCheckpointBackend>(
         std::move(config), std::move(file_system), std::move(read_queue));
 }

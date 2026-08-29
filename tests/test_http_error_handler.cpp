@@ -58,6 +58,33 @@ int main() {
     failures +=
         check(uppercase_checkpoint.status == 400 && uppercase_checkpoint.code == "invalid_session",
               "non-lowercase checkpoint session digest was accepted");
+
+    httplib::Request session_header;
+    session_header.headers.emplace("X-NInfer-Session", session_digest);
+    failures +=
+        check(ninfer::serve::parse_client_session_header(session_header, true) == session_digest &&
+                  ninfer::serve::require_checkpoint_session_header(session_header, true) ==
+                      session_digest,
+              "checkpoint session header did not yield its authenticated digest");
+    httplib::Request missing_session_header;
+    failures += check(!ninfer::serve::parse_client_session_header(missing_session_header, true),
+                      "optional session parser invented a missing credential");
+    try {
+        (void)ninfer::serve::require_checkpoint_session_header(missing_session_header, true);
+        failures += check(false, "checkpoint route accepted a missing session header");
+    } catch (const ninfer::serve::ApiException& error) {
+        failures += check(error.error().status == 400 && error.error().code == "invalid_session",
+                          "missing checkpoint session header returned the wrong error");
+    }
+    session_header.headers.emplace("X-NInfer-Session", session_digest);
+    try {
+        (void)ninfer::serve::parse_client_session_header(session_header, true);
+        failures += check(false, "duplicate checkpoint session headers were accepted");
+    } catch (const ninfer::serve::ApiException& error) {
+        failures +=
+            check(error.error().status == 400 && error.error().code == "invalid_ninfer_identity",
+                  "duplicate checkpoint session headers returned the wrong error");
+    }
     httplib::Response erased_checkpoint;
     ninfer::serve::write_checkpoint_delete_response(
         erased_checkpoint, ninfer::serve::SessionCheckpointEraseResult::Erased);

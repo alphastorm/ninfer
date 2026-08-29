@@ -281,7 +281,7 @@ runtime::CheckpointEngineAccess::make_read_queue(Engine& engine,
                                                  const std::filesystem::path& root) {
     if (engine.impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
 #if defined(_WIN32)
-    return runtime::windows::make_direct_storage_checkpoint_read_queue(30'000);
+    return runtime::windows::make_direct_storage_checkpoint_read_queue(root, 30'000);
 #elif defined(__linux__)
     return runtime::make_io_uring_checkpoint_read_queue(root);
 #else

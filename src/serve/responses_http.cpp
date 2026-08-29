@@ -131,25 +131,6 @@ std::string path_response_id(const httplib::Request& request) {
     return request.matches.size() > 1 ? request.matches[1].str() : std::string();
 }
 
-std::optional<std::string> path_response_session(const httplib::Request& request,
-                                                 bool authentication_configured) {
-    constexpr const char* header = "X-NInfer-Session";
-    const std::size_t count      = request.get_header_value_count(header);
-    if (count == 0) { return std::nullopt; }
-    if (count != 1) {
-        ApiError error;
-        error.message = "X-NInfer-Session must occur exactly once";
-        error.param   = "ninfer_session";
-        error.code    = "invalid_ninfer_identity";
-        throw ApiException(std::move(error));
-    }
-    GenerationRequest identity;
-    identity.client_session_sha256 =
-        parse_client_identity_sha256(request.get_header_value(header), "ninfer_session");
-    require_authenticated_client_identity(identity, authentication_configured);
-    return identity.client_session_sha256;
-}
-
 int parse_limit(const httplib::Request& request) {
     if (!request.has_param("limit")) { return 20; }
     const std::string value = request.get_param_value("limit");
@@ -231,9 +212,8 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         apply_client_identity_cache_hints(request.generation, !options_.api_key.empty(),
                                           cache_hints);
         if (request.previous_response_id) {
-            std::shared_ptr<const StoredResponse> previous =
-                response_store_.get_for_session(*request.previous_response_id,
-                                                request.generation.client_session_sha256);
+            std::shared_ptr<const StoredResponse> previous = response_store_.get_for_session(
+                *request.previous_response_id, request.generation.client_session_sha256);
             if (!previous && request.generation.client_session_sha256 &&
                 service_->checkpoint_enabled()) {
                 (void)service_->restore_checkpoint(*request.generation.client_session_sha256,
@@ -334,16 +314,16 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         return;
     }
 
-    auto stream                    = std::make_shared<StreamingResponse>();
-    stream->prepared               = std::move(prepared);
-    stream->input_turns            = std::move(request.input_turns);
-    stream->input_items            = std::move(request.input_items);
-    stream->previous_context       = std::move(previous_context);
-    stream->session_key            = std::move(session_key);
-    stream->client_session_sha256  = request.generation.client_session_sha256;
-    stream->previous_response_id   = request.previous_response_id;
-    stream->log_context            = log_context;
-    stream->store                  = request.store;
+    auto stream                   = std::make_shared<StreamingResponse>();
+    stream->prepared              = std::move(prepared);
+    stream->input_turns           = std::move(request.input_turns);
+    stream->input_items           = std::move(request.input_items);
+    stream->previous_context      = std::move(previous_context);
+    stream->session_key           = std::move(session_key);
+    stream->client_session_sha256 = request.generation.client_session_sha256;
+    stream->previous_response_id  = request.previous_response_id;
+    stream->log_context           = log_context;
+    stream->store                 = request.store;
     stream->encoder = std::make_unique<ResponsesEventStream>(id, created, std::move(request),
                                                              runtime_values(stream->prepared));
 
@@ -437,7 +417,7 @@ void HttpServer::handle_response_get(const httplib::Request& req, httplib::Respo
     try {
         const std::string id                               = path_response_id(req);
         const std::shared_ptr<const StoredResponse> stored = response_store_.get_for_session(
-            id, path_response_session(req, !options_.api_key.empty()));
+            id, parse_client_session_header(req, !options_.api_key.empty()));
         if (!stored) {
             write_error(res, make_response_not_found_error(id));
             return;
@@ -452,7 +432,7 @@ void HttpServer::handle_response_delete(const httplib::Request& req, httplib::Re
     try {
         const std::string id = path_response_id(req);
         if (!response_store_.erase_for_session(
-                id, path_response_session(req, !options_.api_key.empty()))) {
+                id, parse_client_session_header(req, !options_.api_key.empty()))) {
             write_error(res, make_response_not_found_error(id));
             return;
         }
@@ -467,7 +447,7 @@ void HttpServer::handle_response_input_items(const httplib::Request& req, httpli
     try {
         const std::string id                               = path_response_id(req);
         const std::shared_ptr<const StoredResponse> stored = response_store_.get_for_session(
-            id, path_response_session(req, !options_.api_key.empty()));
+            id, parse_client_session_header(req, !options_.api_key.empty()));
         if (!stored) {
             write_error(res, make_response_not_found_error(id));
             return;
@@ -482,7 +462,7 @@ void HttpServer::handle_response_cancel(const httplib::Request& req, httplib::Re
     try {
         const std::string id = path_response_id(req);
         if (!response_store_.get_for_session(
-                id, path_response_session(req, !options_.api_key.empty()))) {
+                id, parse_client_session_header(req, !options_.api_key.empty()))) {
             write_error(res, make_response_not_found_error(id));
             return;
         }

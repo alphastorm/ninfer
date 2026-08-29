@@ -222,6 +222,46 @@ int test_native_reparse_staging_rejection() {
                  "native reparse staging path escaped cleanup ownership");
 }
 
+int test_native_read_queue_root_confinement() {
+    TemporaryDirectory root(L"ninfer-directstorage-read-root");
+    TemporaryDirectory outside(L"ninfer-directstorage-read-outside");
+    std::vector<std::byte> expected(4097);
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        expected[index] = static_cast<std::byte>((index * 31U + 7U) & 0xffU);
+    }
+    const auto write = [&](const std::filesystem::path& path) {
+        std::ofstream output(path, std::ios::binary);
+        output.write(reinterpret_cast<const char*>(expected.data()),
+                     static_cast<std::streamsize>(expected.size()));
+        if (!output) { throw std::runtime_error("failed to write read-queue fixture"); }
+    };
+    const std::filesystem::path inside  = root.path() / "inside.bin";
+    const std::filesystem::path escaped = outside.path() / "escaped.bin";
+    write(inside);
+    write(escaped);
+
+    auto queue = make_direct_storage_checkpoint_read_queue(root.path(), 30'000);
+    std::vector<std::byte> restored(expected.size());
+    const ContinuationCheckpointReadRequest request{.file_offset = 0, .destination = restored};
+    std::unique_ptr<ContinuationCheckpointReadCompletion> completion =
+        queue->submit(inside, std::span(&request, 1));
+    if (!completion) { return check(false, "native read queue returned no completion"); }
+    completion->wait();
+    int failures = check(restored == expected, "native read queue changed in-root payload bytes");
+    failures +=
+        check(throws_contract([&] { (void)queue->submit(escaped, std::span(&request, 1)); }),
+              "native DirectStorage queue accepted an out-of-root payload");
+
+    const std::filesystem::path reparse = root.path() / "reparse.bin";
+    const DWORD flags                   = SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE;
+    if (CreateSymbolicLinkW(reparse.c_str(), escaped.c_str(), flags)) {
+        failures +=
+            check(throws_contract([&] { (void)queue->submit(reparse, std::span(&request, 1)); }),
+                  "native DirectStorage queue followed a payload reparse point");
+    }
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -230,6 +270,7 @@ int main() {
         failures += test_native_round_trip_and_corruption();
         failures += test_native_lock_timeout();
         failures += test_native_reparse_staging_rejection();
+        failures += test_native_read_queue_root_confinement();
         if (failures == 0) {
             std::cout << "Windows DirectStorage native checkpoint tests passed\n";
             return 0;

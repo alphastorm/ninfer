@@ -81,7 +81,8 @@ private:
 
 #if defined(_WIN32)
 [[nodiscard]] std::shared_ptr<ContinuationCheckpointReadQueue>
-make_direct_storage_checkpoint_read_queue(std::uint32_t timeout_ms);
+make_direct_storage_checkpoint_read_queue(const std::filesystem::path& root,
+                                          std::uint32_t timeout_ms);
 [[nodiscard]] std::unique_ptr<DirectStorageCheckpointBackend>
 make_direct_storage_checkpoint_backend(DirectStorageCheckpointConfig config);
 #endif

@@ -133,16 +133,15 @@ void ResponseStore::insert_locked(std::shared_ptr<const StoredResponse> response
                                   std::size_t envelope_bytes, std::uint64_t sequence) {
     lru_.push_front(response->id);
     try {
-        records_.emplace(response->id,
-                         Entry{response, lru_.begin(), envelope_bytes, sequence});
+        records_.emplace(response->id, Entry{response, lru_.begin(), envelope_bytes, sequence});
     } catch (...) {
         lru_.pop_front();
         throw;
     }
     bool envelope_accounted = false;
     try {
-        current_bytes_ = checked_add(current_bytes_, envelope_bytes,
-                                     "response store byte accounting overflowed");
+        current_bytes_     = checked_add(current_bytes_, envelope_bytes,
+                                         "response store byte accounting overflowed");
         envelope_accounted = true;
         retain_context_locked(response->context);
     } catch (...) {
@@ -177,9 +176,8 @@ ResponseStore::snapshot_session(std::string_view client_session_sha256) const {
         }
     }
     if (ordered.empty()) { return std::nullopt; }
-    std::sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) {
-        return left.first < right.first;
-    });
+    std::sort(ordered.begin(), ordered.end(),
+              [](const auto& left, const auto& right) { return left.first < right.first; });
     ResponseStoreSnapshot snapshot;
     snapshot.client_session_sha256.assign(client_session_sha256);
     snapshot.latest_response_id = ordered.back().second->id;
@@ -225,14 +223,9 @@ bool ResponseStore::restore_session(ResponseStoreSnapshot snapshot,
     }
     if (!has_latest) { return false; }
 
-    // Validate the imported lineage and preallocate every immutable record before taking the live
-    // store lock. No failure after this point is allowed to partially install the lineage.
-    ResponseStore staged(max_records_, max_bytes_);
-    try {
-        for (const StoredResponse& record : snapshot.records) { staged.put(record); }
-    } catch (...) {
-        return false;
-    }
+    // Preallocate every immutable record before taking the live store lock. The complete
+    // replacement below validates capacity before commit_external, and only no-throw swaps follow
+    // a successful external commit.
     std::vector<std::shared_ptr<const StoredResponse>> owned;
     std::vector<std::size_t> envelopes;
     try {
@@ -242,18 +235,15 @@ bool ResponseStore::restore_session(ResponseStoreSnapshot snapshot,
             envelopes.push_back(record_envelope_bytes(record));
             owned.push_back(std::make_shared<const StoredResponse>(std::move(record)));
         }
-    } catch (...) {
-        return false;
-    }
+    } catch (...) { return false; }
 
     std::lock_guard lock(mutex_);
     for (const auto& record : owned) {
         if (records_.contains(record->id)) { return false; }
     }
-    const std::size_t minimum_victims =
-        records_.size() + owned.size() > max_records_
-            ? records_.size() + owned.size() - max_records_
-            : 0;
+    const std::size_t minimum_victims = records_.size() + owned.size() > max_records_
+                                            ? records_.size() + owned.size() - max_records_
+                                            : 0;
     try {
         for (std::size_t victim_count = minimum_victims; victim_count <= records_.size();
              ++victim_count) {
@@ -283,11 +273,10 @@ bool ResponseStore::restore_session(ResponseStoreSnapshot snapshot,
             std::swap(next_sequence_, replacement.next_sequence_);
             return true;
         }
-    } catch (...) {
-        return false;
-    }
+    } catch (...) { return false; }
     return false;
 }
+
 std::size_t ResponseStore::size() const {
     std::lock_guard lock(mutex_);
     return records_.size();

@@ -632,8 +632,9 @@ int test_continuation_read_queue() {
     const Fixture checkpoint = fixture(1, {{CheckpointPayloadKind::StateImage, 7003}});
     save(backend, checkpoint);
 
+    const std::filesystem::path trailing_root = root.path().string() + "/";
     std::shared_ptr<ContinuationCheckpointReadQueue> queue =
-        make_io_uring_checkpoint_read_queue(root.path());
+        make_io_uring_checkpoint_read_queue(trailing_root);
     std::vector<std::byte> restored(4097);
     const ContinuationCheckpointReadRequest request{.file_offset = 37, .destination = restored};
     std::unique_ptr<ContinuationCheckpointReadCompletion> completion =
@@ -642,7 +643,8 @@ int test_continuation_read_queue() {
     completion->wait();
     const auto expected = std::span(checkpoint.payloads[0].bytes).subspan(37, restored.size());
     int failures        = check(std::equal(restored.begin(), restored.end(), expected.begin()),
-                                "io_uring continuation queue changed an unaligned payload range");
+                                "io_uring continuation queue changed an unaligned payload range or "
+                                "rejected a trailing-separator root");
     failures += check(throws_checkpoint([&] {
                           (void)queue->submit(root.path().parent_path() / "escaped-checkpoint",
                                               std::span(&request, 1));

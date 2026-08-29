@@ -72,7 +72,10 @@ ninfer_add_test(ninfer_tensor_test       SOURCES test_tensor.cpp)
 ninfer_add_test(ninfer_arena_test        SOURCES test_arena.cpp)
 ninfer_add_test(ninfer_admission_policy_test SOURCES test_admission_policy.cpp)
 ninfer_add_test(ninfer_context_cost_test SOURCES test_context_cost.cpp)
-ninfer_add_test(ninfer_resource_manager_test SOURCES test_resource_manager.cpp)
+  ninfer_add_test(ninfer_resource_manager_test SOURCES test_resource_manager.cpp)
+  ninfer_add_test(ninfer_automatic_checkpoint_queue_test
+    SOURCES test_automatic_checkpoint_queue.cpp
+            ${PROJECT_SOURCE_DIR}/src/serve/automatic_checkpoint_queue.cpp)
 ninfer_add_test(ninfer_checkpoint_io_contract_test
   SOURCES test_checkpoint_io_contract.cpp
   LIBRARIES ninfer_checkpoint_contract)
