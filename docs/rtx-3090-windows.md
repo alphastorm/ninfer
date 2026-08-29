@@ -43,36 +43,44 @@ session checkpoints with a 64 GiB total quota and 256 MiB staging bound. A packa
 configuration may instead bind to an IPv4 address in Tailscale's **100.64.0.0/10** range. Wildcard,
 LAN, and public listen addresses are rejected, and CORS remains disabled.
 
-Hardware qualification is GPU-only at the host's qualified 300 W cap. It covers correctness,
-context, process restart, performance, and lifecycle rollback while the existing FanControl/HWiNFO
-policy remains authoritative. CPU-heavy, mixed-load, and overnight thermal claims are outside this
-release gate and require their own serviced-loop evidence.
+Complete Windows beta qualification is GPU-only at the target 300 W cap and requires correctness,
+context, process restart, performance, shipped lifecycle rollback, state-security, and exact OMP
+acceptance on the same package. The current external receipt is incomplete and claims none of those
+Windows gates. CPU-heavy, mixed-load, and overnight thermal claims remain outside the release gate.
 
-### Preserved runtime evidence and deferred fresh-package gate
+### Current preview and deferred live-package gates
 
-Package `09a9f24a4904360e7bc00ef946702c07e9e096aac638bb30776f511c5ab70afd`
-from package source `a69652982f6f` is superseded and must not ship. Subsequent checkpoint durability
-changes affect runtime source, so a fresh sm_86 build and authorized remote Linux RTX 3090 runtime
-gates are required before a replacement preview can be frozen. Linux runtime evidence will not be
-used as a substitute for the separately deferred Windows package/lifecycle gate.
-The local Windows RTX 3090 was then released for user servicing. Therefore the rebuilt archive's
-fresh exact Windows install/security/bidirectional-rollback gate is explicitly deferred rather than
-being replaced with Linux or instrumented evidence. The adjacent machine-readable receipt remains
-incomplete and does not supersede `hardware-pending` until that one Windows gate is run:
+Package `b313904eb22a271d99d21d589075cc0102ab081e6835e9600f3c74c8d0cc48cc`
+is the current preview. It binds runtime source `c5db3495ce08a6756ffb8962a3ca5142343239ef`
+and package source `96b0101fde0483271ef002d8e6dfe3e431f8286f`. The earlier `09a9f24a...`
+archive is superseded and must not ship. A clean neutral Windows build, deterministic package tests,
+instrumented transaction tests, and focused native checkpoint contracts passed for the replacement.
+
+The authorized COMMUNITY RTX 3090 lane passed the current-source 3/3 native contract build. It did
+not yield usable live-model evidence: one exact-model attempt reached SHA verification before the
+remote command exited, later CUDA 13.1 startup returned `cudaErrorUnknown`, the CUDA 12.8 device
+probe also failed, and a subsequent provider allocation never published SSH. Every owned pod was
+deleted, no secure-cloud substitution was made, and the receipt records protocol, 64K retrieval,
+process-restart continuation, and C1 performance as `not_run` rather than reusing old counters.
+
+The Windows RTX 3090 was released for user servicing before the rebuilt archive existed. Therefore
+the exact current-package Windows install/security/bidirectional-rollback and OMP gates remain
+deferred. The adjacent machine-readable receipt is incomplete and does not supersede either
+immutable `hardware-pending` authority:
 
 | Gate | Result |
 | --- | --- |
-| Packaged serving protocol | 15/15 checks, including authenticated stateful continuation |
-| OMP client | OMP 18.0.9 emitted one typed `read` call, linked its result, and returned the exact visible marker |
-| Long context | 64,512 prompt tokens with exact retrieval in 81.39 s |
-| Process restart | 2,500,115,877 checkpoint bytes across 66 files; 45 cached tokens; 3.29 s continuation |
-| Decode | 76.15 tok/s for 1,024 output tokens |
-| Prefill | 943.11 tok/s over 4,403 prompt tokens |
-| Peak GPU memory | 20,515 MiB |
-| Preserved state security | Prior exact package proved atomic creation, NULL-DACL rejection, retained-secret effective denial, populated-root status in 874 ms, and fail-safe 370 W restoration |
-| Fresh rebuilt-package Windows gate | Deferred after the authorized local-host handoff; no beta qualification or supersession is claimed |
+| Exact replacement assets | Closed nine-entry outer checksum set; package/source/SBOM/build receipt are hash- and byte-bound |
+| Neutral Windows build | `sm_86`; response-store, checkpoint-store, and HTTP-contract tests passed |
+| Remote native contracts | Current runtime source; 3/3 focused tests passed; pod deleted |
+| Fresh live protocol / 64K / restart / C1 | `not_run` — COMMUNITY CUDA runtime unavailable; prior-package results are not projected |
+| Checkpoint deletion contracts | Failed-delete, cross-session LRU eviction, durable-only LRU delete, post-commit sync, and middle/latest/standalone restart shapes passed |
+| Instrumented lifecycle | Passed with 22 enumerated substitutions; no shipped-byte or ACL claim |
+| State-security fixture | Passed with instrumented GPU-power calls and prepared-lease restore; no hardware claim |
+| Historical Windows evidence | Package `e74c097f...` at source `7555db29...` only; it does not apply to the current package |
+| Fresh current-package Windows / OMP | Deferred after the authorized handoff; counters and evidence hashes are null/zero and no supersession is claimed |
 
-This preserved runtime evidence is not current beta authorization and does not authorize an
+This preview evidence is not beta authorization and does not authorize an
 unattended evidence role. The separate frozen automatic-use corpus did not meet its quality floor,
 so that route remains disabled. JSON-schema `response_format` is also unsupported and rejected
 rather than ignored.
