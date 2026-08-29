@@ -40,7 +40,7 @@ using Microsoft::WRL::ComPtr;
 [[noreturn]] void fail_windows(const std::string& operation, std::uint64_t code) {
     std::ostringstream message;
     message << operation << " (0x" << std::hex << code << ')';
-    throw CheckpointContractError(message.str());
+    throw ContinuationCheckpointReadError(message.str());
 }
 
 void require_hresult(HRESULT result, const std::string& operation) {
@@ -49,7 +49,7 @@ void require_hresult(HRESULT result, const std::string& operation) {
 
 void require_cuda(cudaError_t result, const std::string& operation) {
     if (result != cudaSuccess) {
-        throw CheckpointContractError(operation + ": " + cudaGetErrorString(result));
+        throw ContinuationCheckpointReadError(operation + ": " + cudaGetErrorString(result));
     }
 }
 
