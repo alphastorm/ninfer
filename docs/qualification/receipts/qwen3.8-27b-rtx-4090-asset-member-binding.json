@@ -1,34 +1,62 @@
 {
-    "artifact_type":  "ninfer_release_script_member_binding",
+    "artifact_type":  "ninfer_committed_source_asset_binding",
     "schema_version":  1,
     "status":  "passed",
-    "package_sha256":  "7548307420faab9f6cf82294c3aa0b6a6ea82168d89c8f5ac4900a683665b418",
+    "runtime_source_commit":  "e4654b5aed87e7385bdf33f8b4365a7a550d4ad9",
+    "package_source_commit":  "19ebcc09ebbcc79061badf78068e1ad70062485f",
+    "package_source_archive_sha256":  "c0d9c294f986834ea177842bf336e9c38d28200fcfeb325c9b218df70ddae39c",
+    "package_sha256":  "1cced9e1f16ad0d1b4a5f9c5a28d00cb2b4449137f1652696799be70a74baf7d",
     "zip_file_members":  27,
     "duplicate_member_names":  0,
-    "bindings":  [
-                     {
-                         "name":  "Install-Release.ps1",
-                         "standalone_sha256":  "f83612bd419998709dd366a06ee6c7ebf680094bf4e43977510ee64d3805c8ae",
-                         "zip_member":  "qwen38-4090-v0.1\\Install-Release.ps1",
-                         "zip_member_sha256":  "f83612bd419998709dd366a06ee6c7ebf680094bf4e43977510ee64d3805c8ae"
-                     },
-                     {
-                         "name":  "Control-Release.ps1",
-                         "standalone_sha256":  "da40b9f07f1c5a02af6587325346f26d0a90f94e674d09eceb5b49f93dc56ab8",
-                         "zip_member":  "qwen38-4090-v0.1\\Control-Release.ps1",
-                         "zip_member_sha256":  "da40b9f07f1c5a02af6587325346f26d0a90f94e674d09eceb5b49f93dc56ab8"
-                     },
-                     {
-                         "name":  "Control-GpuOwner.ps1",
-                         "standalone_sha256":  "3e3ae54c71c7534064ceff1dae59acfd2ea546a8c920fcc6c9fb1d46296ba5e0",
-                         "zip_member":  "qwen38-4090-v0.1\\Control-GpuOwner.ps1",
-                         "zip_member_sha256":  "3e3ae54c71c7534064ceff1dae59acfd2ea546a8c920fcc6c9fb1d46296ba5e0"
-                     },
-                     {
-                         "name":  "Protect-StateRoot.ps1",
-                         "standalone_sha256":  "c431cdd55a764526d6d9b720909b2a706e0df2b8f75d871900e4d74616af8463",
-                         "zip_member":  "qwen38-4090-v0.1\\Protect-StateRoot.ps1",
-                         "zip_member_sha256":  "c431cdd55a764526d6d9b720909b2a706e0df2b8f75d871900e4d74616af8463"
-                     }
-                 ]
+    "zip_script_bindings":  [
+                                {
+                                    "name":  "Compare-MtpQualification.ps1",
+                                    "package_source_sha256":  "ba6f49d5d5ef0db8f84f0361df3b65998c7277cbaabdf2ffb3c0f84294d49e3c",
+                                    "standalone_sha256":  "ba6f49d5d5ef0db8f84f0361df3b65998c7277cbaabdf2ffb3c0f84294d49e3c",
+                                    "zip_member_sha256":  "ba6f49d5d5ef0db8f84f0361df3b65998c7277cbaabdf2ffb3c0f84294d49e3c"
+                                },
+                                {
+                                    "name":  "Control-GpuOwner.ps1",
+                                    "package_source_sha256":  "3e3ae54c71c7534064ceff1dae59acfd2ea546a8c920fcc6c9fb1d46296ba5e0",
+                                    "standalone_sha256":  "3e3ae54c71c7534064ceff1dae59acfd2ea546a8c920fcc6c9fb1d46296ba5e0",
+                                    "zip_member_sha256":  "3e3ae54c71c7534064ceff1dae59acfd2ea546a8c920fcc6c9fb1d46296ba5e0"
+                                },
+                                {
+                                    "name":  "Control-Release.ps1",
+                                    "package_source_sha256":  "0d7d32dfeda190802433d8b92545bef66bee5dd617a18fd3e9d4c324bbb551d5",
+                                    "standalone_sha256":  "0d7d32dfeda190802433d8b92545bef66bee5dd617a18fd3e9d4c324bbb551d5",
+                                    "zip_member_sha256":  "0d7d32dfeda190802433d8b92545bef66bee5dd617a18fd3e9d4c324bbb551d5"
+                                },
+                                {
+                                    "name":  "Install-Release.ps1",
+                                    "package_source_sha256":  "767642c0a16d6dc3decb5543692fa50c1b0ccfaca2cf239a64c3a28b9a729fd2",
+                                    "standalone_sha256":  "767642c0a16d6dc3decb5543692fa50c1b0ccfaca2cf239a64c3a28b9a729fd2",
+                                    "zip_member_sha256":  "767642c0a16d6dc3decb5543692fa50c1b0ccfaca2cf239a64c3a28b9a729fd2"
+                                },
+                                {
+                                    "name":  "Invoke-Qualification.ps1",
+                                    "package_source_sha256":  "698db0aa389412cf35fb34ce2f2e59ce531b1316da2b1dd60b6ef33e9260a997",
+                                    "standalone_sha256":  "698db0aa389412cf35fb34ce2f2e59ce531b1316da2b1dd60b6ef33e9260a997",
+                                    "zip_member_sha256":  "698db0aa389412cf35fb34ce2f2e59ce531b1316da2b1dd60b6ef33e9260a997"
+                                },
+                                {
+                                    "name":  "New-QualificationReceipt.ps1",
+                                    "package_source_sha256":  "c0d7d640190dca4f5fe3d055a564fb0c3a0d4fbdfd0aa461faa763cf96c699a5",
+                                    "standalone_sha256":  "c0d7d640190dca4f5fe3d055a564fb0c3a0d4fbdfd0aa461faa763cf96c699a5",
+                                    "zip_member_sha256":  "c0d7d640190dca4f5fe3d055a564fb0c3a0d4fbdfd0aa461faa763cf96c699a5"
+                                },
+                                {
+                                    "name":  "Protect-StateRoot.ps1",
+                                    "package_source_sha256":  "c431cdd55a764526d6d9b720909b2a706e0df2b8f75d871900e4d74616af8463",
+                                    "standalone_sha256":  "c431cdd55a764526d6d9b720909b2a706e0df2b8f75d871900e4d74616af8463",
+                                    "zip_member_sha256":  "c431cdd55a764526d6d9b720909b2a706e0df2b8f75d871900e4d74616af8463"
+                                }
+                            ],
+    "new_package":  {
+                        "package_source_sha256":  "529a249e0a594e33a2683ba5a6bfe633fb7d85bbae4ff9cb745e062d0bf95b48",
+                        "standalone_sha256":  "529a249e0a594e33a2683ba5a6bfe633fb7d85bbae4ff9cb745e062d0bf95b48"
+                    },
+    "release_manifest_sha256":  "71caec4e55177e7ff45c53403d478dc7ede7f4ebb0f31099ec28282b847e493d",
+    "outer_checksum_entries":  14,
+    "outer_checksum_self_reference":  false
 }

@@ -2,7 +2,7 @@
 
 ## Verdict
 
-**Final closure review is red; this qualification and package must not ship.** The prior candidate is quarantined while the runtime, Windows trust boundary, disclosure scan, and outer asset manifest are rebuilt and all runtime-dependent gates rerun. No stable promotion, public release, or permanent route change was performed.
+**Qualified for beta support as a source-bound release candidate. All runtime, Windows trust, disclosure, and closed asset-manifest gates passed on the final clean package.** No stable promotion, public release, or permanent route change was performed.
 
 The unavailable historical private corpus was not reused, read, copied, hashed, or transmitted. Golden-equivalent coverage uses only the source-controlled synthetic typed-tool contract and deterministic final-answer oracle.
 
@@ -10,17 +10,17 @@ The unavailable historical private corpus was not reused, read, copied, hashed, 
 
 | Item | Value |
 |---|---|
-| Runtime source | `6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f` |
-| Runtime source archive | `83ed4cc9fff62929942186176ab7fcc360ac8e99926fb955a3e971b2c8b543f5` / `5254811` bytes |
-| Package source | `2fb84928e29da7b7c6be708cade723121457fa1f` |
-| Package source archive | `fdc08c36d8eecf70fff1cd2c6add2898c831b00d7c80167ab75a8e51ea6eb3de` / `5255750` bytes |
-| Server | `8e63c6a90b54913d8aa0c4d660f67ff1fab036e5435a144d450ff7dc1ce664a3` / `230262272` bytes |
+| Runtime source | `e4654b5aed87e7385bdf33f8b4365a7a550d4ad9` |
+| Runtime source archive | `0c8b7afd73ae1354d82f7f01b84e7b42b7fab203df5484fe4d954c6eaaf20d6d` / `5257807` bytes |
+| Package source | `19ebcc09ebbcc79061badf78068e1ad70062485f` |
+| Package source archive | `c0d9c294f986834ea177842bf336e9c38d28200fcfeb325c9b218df70ddae39c` / `5261801` bytes |
+| Server | `41fcc1803e4a057de24a485776e71737a31cb39fdd9358350b975f6b11b9c869` / `230305280` bytes |
 | Config | `ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db` |
 | Model | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
-| Package | `7548307420faab9f6cf82294c3aa0b6a6ea82168d89c8f5ac4900a683665b418` / `227402593` bytes |
-| SPDX 2.3 SBOM | `d37ab787f9f2ccc0212f56c1beb1cffb010a058ae15c2c89853b84a0824b3eaf` / `22373` bytes / `27` files |
-| Qualification sidecar | `30d8d741d1957ab13a6139f0d673b43ee0258b049cefa3b26d927f043a7b1656` / `8705` bytes |
-| SHA256SUMS | `dcd4bfbdc0c029fbd02c3345abdc4f5d4cc1212d845e6d22e76d1a474013ddce` / `680` bytes / LF only |
+| Package | `1cced9e1f16ad0d1b4a5f9c5a28d00cb2b4449137f1652696799be70a74baf7d` / `227438715` bytes |
+| SPDX 2.3 SBOM | `474f0c0e83903bec64744d9cd12b71a6b46b25647d218726d2ab7f61c9873e9a` / `22373` bytes / `27` files |
+| Qualification sidecar | `543e7ff9d174b6a7896acb1ccbd8332a3af3a9dc4c248794d3f073678c7a4497` / `8705` bytes |
+| SHA256SUMS | `e1d74d03094454c7c3f95452919e5f5e0b71164932e5d9256e54be03090a8c3a` / `680` bytes / LF only |
 | Deployment profile | `qwen38-4090-v0.1` |
 | CUDA target/toolkit | `sm_89` / `13.3.73` |
 
@@ -47,7 +47,7 @@ Real coverage is separate:
 - two exact shipped-installer full installs exercised upgrade, rollback, candidate return, retained-secret ACLs, and owner-state-root binding;
 - GPU power-limit mutations were exactly zero.
 
-The fixed status regression uses 2,048 sparse files and 2 GiB of logical lengths. It is a bounded synthetic file-walk measurement, not a realized quota-full generation topology and not a worst-case quota file-count claim. The prior run completed in `3.4954474` seconds below its 30-second gate; final eligibility requires a fresh run on the replacement package.
+The fixed status regression uses 2,048 sparse files and 2 GiB of logical lengths. It is a bounded synthetic file-walk measurement, not a realized quota-full generation topology and not a worst-case quota file-count claim. The prior run completed in `3.8825062` seconds below its 30-second gate; the final clean package run passed.
 
 ## Qualification authority and publication safety
 
@@ -69,7 +69,7 @@ Protocol receipt: `43360c9f78e6e48b75c3676344095d5a16c6015ab713059900f2a6113d2a7
 
 The first stored Responses turn contained exactly `102060` input tokens. A controller restart replaced the process; the next turn restored `102075` tokens and appended through `append_frontier`. The post-restart prompt contained `102097` tokens. No raw prompt or output is retained.
 
-Long-restart receipt: `6ca95941272e0d4eb2397bbb3dc41a14bb96ad89f52e2944fbb0ce085ca377d4`.
+Long-restart receipt: `8587c8617d3ee46a32861f8e919e25beda641f1c61154ea0d7a6a5c48aac6979`.
 
 ### Bounded performance
 
@@ -78,16 +78,16 @@ The exact public `long_decode_aime26_01` fixture ran once after one warmup:
 | Metric | Result |
 |---|---:|
 | Prompt tokens | 228 |
-| Completion tokens | 1485 |
-| Prefill | 1408.259 tokens/s |
-| Decode | 52.263 tokens/s |
-| Wall time | 28.612 s |
+| Completion tokens | 1168 |
+| Prefill | 1410.691 tokens/s |
+| Decode | 52.330 tokens/s |
+| Wall time | 22.512 s |
 | Prefix cache hits | 0 |
 | Reuse path | `full_reset` |
 
 No builder or compressor ran before or after measurement. The candidate was the sole measured NInfer compute owner. Fourteen unavoidable Windows display-model rows are disclosed separately; no other row reported measurable compute memory.
 
-Performance receipt: `9bf85003102f89a523812498bbe992827d2ee139c0367dce02e6191b615205ac`.
+Performance receipt: `35917c7df793c82db51f696addd0a5b21763e7b25d041c4ffd7b578682e23358`.
 
 ### Final Golden-equivalent
 
@@ -102,30 +102,30 @@ Contract `qwen38-4090-omp-golden-equivalent-v1` passed through standard OMP `18.
 
 Exact visible answer: `NINFER_GOLDEN_EQUIVALENT_OK|Paris|3|metric=true|18C|clear`.
 
-Golden receipt: `8331118c6f84e2c695d11f519e529cbec871e67d9951a62b822622c9d47f62f4`. Raw transcript content is not retained.
+Golden receipt: `bf4675664058418a2c64a4f4b8ed59b9abd0db57f927087256dafb0477ff13ba`. Raw transcript content is not retained.
 
 ## Restoration
 
 Every live GPU-owner stop/start effect used the hash-pinned tracked operator controller. The exact incumbent route is healthy again. Candidate listener, state root, scheduled task, processes, probe account, and credential material are absent. No production route was promoted or permanently mutated.
 
-Final restore receipt: `a0e6665a98e4a9bb734d2ea4dee23d2be7d31a94656c7e09cd6f36ca9ebfe1bb`.
+Final restore receipt: `45b64577cac78691f7077c586e99c8bc653381c18e15069f74b30ed27044e293`.
 
 ## Receipts
 
-- public asset receipt: `e05ad2e750e6856227910509d9d20aeb0949c751dff3a68d7f2c9bcecbf69c6b`;
-- neutral clean build: `56834a34871cdd6d8f8903ede947de543cb859ea97d076310a94aff595c0ab11`;
-- native transactional DELETE: `6a33ec4b68cd7bed6f49af50c821574b8a3397d65192cfc2055c4aa3cbf56ea2`;
-- package assembly: `bf22794202bb2da25cf4275861f4ec72f9d76537bc631d09bedbe2a93ac90d5b`;
-- immutable package finalization: `33f381fcce753c969cfe16ea52082a448ac71463846e5d93c8c697b99edd3420`;
+- public asset receipt: `e224ce431b3cc7e56a6c7c60f0578cb892de453d81175e8fa3bf2b531d940475`;
+- neutral clean build/package: `9d74814848b74830b1886a66b91e381df7c9ebdff31d53afd8ca64fc403281fb`;
+- native transactional DELETE: `fa6fc50dc311611a723e071dc2faa16efcecb662b305739bff106cf0fa83e447`;
+- package assembly: `9b3e9dfe8659cdca128884eaf14be54c5658100909ba2ed3a20870934a56e653`;
+- immutable package finalization: `0fed3f247db0624164c4b1bf3b62a16879694e29989af76da7172184b28477d3`;
 - final private-identifier scan: `b8cc1cd9de6cc9b775635cb7f7621f0664fc8e30d3c6324c10dd4914aa7841fc`;
-- released-script byte binding: `9fd4f24de65c3afea1abcce327525d3a7f5246eca150257c23ac2df425fa0d94`;
-- real state security: `e1c42dced5ba78eeeb1857362d38cbbc73851500b2927e8455e7e98f4884e5bf`;
-- instrumented lifecycle: `a1a7ea14d6032984faf811ac48e1f37af2352a6889897afd1efdbdc040d5e03d`;
-- real upgrade/rollback secret ACL: `4c8f6510cf5ad919a156749b58b1626bef428b0993dff2746bcc1d3d951f3105`;
-- protected request log: `a374ad04d7426cacfa074648130e5736d1e0066ddc2e1d7f944bbd285ccaf4f5`;
-- populated-root status timing: `5e63ca267ccebcefb204d6328d4afb5f91b07ed42f0e3feaa36b949b24f3f278`;
-- protocol: `43360c9f78e6e48b75c3676344095d5a16c6015ab713059900f2a6113d2a7918`;
-- 102K restart: `6ca95941272e0d4eb2397bbb3dc41a14bb96ad89f52e2944fbb0ce085ca377d4`;
-- performance: `9bf85003102f89a523812498bbe992827d2ee139c0367dce02e6191b615205ac`;
-- final Golden: `8331118c6f84e2c695d11f519e529cbec871e67d9951a62b822622c9d47f62f4`;
-- final restore: `a0e6665a98e4a9bb734d2ea4dee23d2be7d31a94656c7e09cd6f36ca9ebfe1bb`.
+- committed-script byte binding: `5aa4657f2809f39918ad12eeb3bddb350ec44f117756f3b6cdac2e581ebf1e6c`;
+- real state security: `02a2d1b531241189fd7754d477ddaa4abe21a33705d10e0898dc538a8badba81`;
+- instrumented lifecycle: `a9d2b71c0704be94b528e4cc59c87c40f7754dcdcbb2b69d429248f626dc7946`;
+- live GPU-owner/state ACL: `a8ed789ea1a7197de43bd74b7c4b76ca578431ba2a27ffddbb308722f46a7216`;
+- protected request log: `a6d2ce12c6149606e98831cef1d16fe24d2f7d1b945e9b9ff966aa3c9add2973`;
+- populated-root status timing: `f71d7f38488126372a9b6fe9c0659ca1b747aecac6e7bc7fbf64a91885732c2c`;
+- protocol: `bfc0ae064e1ff7e1c421df0dd51ebf17de416cd545676dd142e2c3bb378127ac`;
+- 102K restart: `8587c8617d3ee46a32861f8e919e25beda641f1c61154ea0d7a6a5c48aac6979`;
+- performance: `35917c7df793c82db51f696addd0a5b21763e7b25d041c4ffd7b578682e23358`;
+- final Golden: `bf4675664058418a2c64a4f4b8ed59b9abd0db57f927087256dafb0477ff13ba`;
+- final restore: `45b64577cac78691f7077c586e99c8bc653381c18e15069f74b30ed27044e293`.

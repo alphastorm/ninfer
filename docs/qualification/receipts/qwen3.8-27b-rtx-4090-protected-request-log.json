@@ -1,15 +1,17 @@
 {
-    "artifact_type":  "ninfer_crosslane_protected_request_log",
+    "artifact_type":  "ninfer_closure_protected_request_log",
     "schema_version":  1,
     "status":  "passed",
-    "source_commit":  "6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f",
-    "binary_sha256":  "8e63c6a90b54913d8aa0c4d660f67ff1fab036e5435a144d450ff7dc1ce664a3",
+    "runtime_source_commit":  "e4654b5aed87e7385bdf33f8b4365a7a550d4ad9",
+    "package_source_commit":  "19ebcc09ebbcc79061badf78068e1ad70062485f",
+    "binary_sha256":  "41fcc1803e4a057de24a485776e71737a31cb39fdd9358350b975f6b11b9c869",
+    "package_sha256":  "6a403c97ecbacab17f40bfe607b7ba268900e7479e0224aec68b98fd67345e48",
     "state_tree_protection_verified":  true,
     "state_root_dacl_protected":  true,
     "owner_state_root_under_release_state":  true,
-    "retained_release_logs":  2,
-    "valid_json_record_count":  67,
-    "request_log_bytes":  63897,
+    "retained_release_logs":  1,
+    "valid_json_record_count":  90,
+    "request_log_bytes":  74227,
     "raw_requests_included":  false,
     "historical_private_corpus_reused":  false
 }

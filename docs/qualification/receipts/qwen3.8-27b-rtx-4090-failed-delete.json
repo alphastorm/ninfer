@@ -1,20 +1,25 @@
 {
-  "artifact_type": "ninfer_atomic_delete_native_regression",
-  "schema_version": 1,
-  "status": "passed",
-  "runtime_source_commit": "6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f",
-  "package_source_commit": "2fb84928e29da7b7c6be708cade723121457fa1f",
-  "binary_sha256": "8e63c6a90b54913d8aa0c4d660f67ff1fab036e5435a144d450ff7dc1ce664a3",
-  "test_source_sha256": "94f35a426dacdd7f215cbdf3ce286efe54f60e6f9c911d6d112720c66be5dfac",
-  "test_log_sha256": "6c38bc5994f84cee729c4dd36c6eafa6f6514661d7e29e35414744606cef9815",
-  "test_output": "ok",
-  "contracts": [
-    "failed-publication preserves live and durable lineage",
-    "foreign-session LRU publication blocks across durable commit",
-    "disk-quota rejection preserves live and durable lineage",
-    "restart preserves the committed post-delete checkpoint",
-    "surviving descendant remains usable with engine-defined ancestry payload semantics"
-  ],
-  "engine_payload_semantics": "DELETE removes response addressability and the session-key checkpoint rooted at the latest surviving session key; it does not claim cryptographic erasure of ancestor tokens retained in a surviving descendant checkpoint.",
-  "historical_private_corpus_reused": false
+    "artifact_type":  "ninfer_transactional_delete_native_regression",
+    "schema_version":  2,
+    "status":  "passed",
+    "runtime_source_commit":  "e4654b5aed87e7385bdf33f8b4365a7a550d4ad9",
+    "package_source_commit":  "19ebcc09ebbcc79061badf78068e1ad70062485f",
+    "binary_sha256":  "41fcc1803e4a057de24a485776e71737a31cb39fdd9358350b975f6b11b9c869",
+    "test_source_sha256":  "cd61bd91d4c86fd7ba3b96510f19c287dd9a1c13072a1998d04f948986aa0568",
+    "test_log_sha256":  "7623a96dbdd619baa3ee90c945af9f7048fc791b92ae6a10831bcfb98ba5ce36",
+    "test_output":  "ok",
+    "contracts":  [
+                      "post-current-pointer directory-sync failure rolls back to the old pointer",
+                      "rollback replacement failure returns success when the new pointer is actually current",
+                      "ordinary saves retain prior fallback generations",
+                      "DELETE makes one bounded eager attempt to retire the pre-delete generation",
+                      "failed tombstone cleanup retains the complete old response body until collection reclaims it",
+                      "response missing from live LRU is deleted from verified durable state and cannot resurrect after restart",
+                      "foreign-session LRU publication blocks across durable DELETE commit",
+                      "checkpoint and quota rejection preserve live and durable lineage",
+                      "surviving descendant remains usable under engine-defined ancestry semantics"
+                  ],
+    "logical_delete_residual":  "An active reader or failed tombstone cleanup can retain complete old response bodies in protected stale or tombstone storage until release and successful GC; DELETE is not secure erasure.",
+    "windows_behavior":  "unchanged platform sync implementation; deterministic callbacks precede the production boundaries only in host tests",
+    "historical_private_corpus_reused":  false
 }

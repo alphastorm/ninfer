@@ -1,15 +1,15 @@
 {
-    "artifact_type":  "ninfer_rtx4090_focused_performance",
+    "artifact_type":  "ninfer_rtx4090_closure_performance",
     "schema_version":  1,
     "status":  "measured",
-    "completed_utc":  "2026-08-29T05:36:07.9628830Z",
-    "source_commit":  "6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f",
-    "binary_sha256":  "8e63c6a90b54913d8aa0c4d660f67ff1fab036e5435a144d450ff7dc1ce664a3",
-    "model_artifact_sha256":  "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
-    "config_sha256":  "ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db",
+    "completed_utc":  "2026-08-29T08:51:37.9052393Z",
+    "runtime_source_commit":  "e4654b5aed87e7385bdf33f8b4365a7a550d4ad9",
+    "package_source_commit":  "19ebcc09ebbcc79061badf78068e1ad70062485f",
+    "binary_sha256":  "41fcc1803e4a057de24a485776e71737a31cb39fdd9358350b975f6b11b9c869",
+    "package_sha256":  "6a403c97ecbacab17f40bfe607b7ba268900e7479e0224aec68b98fd67345e48",
     "workload":  {
                      "fixture":  "long_decode_aime26_01",
-                     "fixture_source":  "exact public source tree",
+                     "fixture_source":  "exact committed public package source",
                      "requested_output_tokens":  2048,
                      "seed":  12345,
                      "request_count":  1,
@@ -18,29 +18,22 @@
     "isolation":  {
                       "builders_before":  0,
                       "builders_after":  0,
-                      "available_memory_mib":  19821,
                       "ninfer_owners_before":  1,
                       "ninfer_owners_after":  1,
-                      "background_wddm_before":  14,
-                      "background_wddm_after":  14,
-                      "other_measured_before":  0,
-                      "other_measured_after":  0,
                       "prefix_cache_hit_tokens":  0,
                       "prefix_reuse_path":  "full_reset"
                   },
     "measurement":  {
-                        "wall_seconds":  28.611917199999997,
+                        "wall_seconds":  22.5123642,
                         "prompt_tokens":  228,
                         "computed_prefill_tokens":  228,
-                        "completion_tokens":  1485,
+                        "completion_tokens":  1168,
                         "finish_reason":  "stop_token",
-                        "prefill_seconds":  0.161902,
-                        "prefill_tokens_per_second":  1408.2593173648256,
-                        "decode_seconds":  28.413890499999962,
-                        "decode_tokens_per_second":  52.263170367324463
+                        "prefill_seconds":  0.1616229,
+                        "prefill_tokens_per_second":  1410.6911829944888,
+                        "decode_seconds":  22.320031900000011,
+                        "decode_tokens_per_second":  52.3296743137719
                     },
-    "gpu_before":  "NVIDIA GeForce RTX 4090, 24564, 19591, 4548, 0, 0, P2, 2835, 10701, 66.09",
-    "gpu_after":  "NVIDIA GeForce RTX 4090, 24564, 19593, 4546, 99, 100, P2, 2820, 10701, 386.90",
     "raw_prompt_or_output_included":  false,
     "private_golden_bytes_read":  false
 }

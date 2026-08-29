@@ -1,35 +1,29 @@
 {
-    "artifact_type":  "ninfer_windows_focused_upgrade_rollback_acl",
+    "artifact_type":  "ninfer_windows_closure_first_install_acl",
     "schema_version":  1,
     "status":  "passed",
-    "source_commit":  "6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f",
-    "binary_sha256":  "8e63c6a90b54913d8aa0c4d660f67ff1fab036e5435a144d450ff7dc1ce664a3",
-    "package_sha256":  "7548307420faab9f6cf82294c3aa0b6a6ea82168d89c8f5ac4900a683665b418",
-    "installer_sha256":  "f83612bd419998709dd366a06ee6c7ebf680094bf4e43977510ee64d3805c8ae",
-    "exact_shipped_installer_full_installs":  2,
-    "retained_release_count":  2,
+    "runtime_source_commit":  "e4654b5aed87e7385bdf33f8b4365a7a550d4ad9",
+    "package_source_commit":  "19ebcc09ebbcc79061badf78068e1ad70062485f",
+    "binary_sha256":  "41fcc1803e4a057de24a485776e71737a31cb39fdd9358350b975f6b11b9c869",
+    "package_sha256":  "6a403c97ecbacab17f40bfe607b7ba268900e7479e0224aec68b98fd67345e48",
+    "exact_shipped_installer_full_installs":  1,
+    "retained_release_count":  1,
     "owner_state_root_bound":  true,
     "owner_state_root_under_release_state":  true,
     "access_principals":  [
                               "SYSTEM",
                               "Administrators"
                           ],
-    "upgrade":  {
-                    "phase":  "after-real-upgrade",
-                    "retained_secrets":  2,
-                    "effective_read_denials":  2
-                },
-    "rollback":  {
-                     "phase":  "after-real-rollback",
-                     "retained_secrets":  2,
-                     "effective_read_denials":  2
-                 },
-    "candidate_return":  {
-                             "phase":  "after-candidate-return",
-                             "retained_secrets":  2,
-                             "effective_read_denials":  2
-                         },
-    "low_privilege_effective_read_denials":  6,
+    "installed":  {
+                      "phase":  "after-exact-first-install",
+                      "active_release":  "qwen38-4090-v0.1-e4654b5aed87",
+                      "previous_release":  "",
+                      "retained_secrets":  1,
+                      "effective_read_denials":  1,
+                      "patch_stack_sha":  "e4654b5aed87e7385bdf33f8b4365a7a550d4ad9",
+                      "binary_sha256":  "41fcc1803e4a057de24a485776e71737a31cb39fdd9358350b975f6b11b9c869"
+                  },
+    "low_privilege_effective_read_denials":  1,
     "null_dacl_secrets":  0,
     "raw_secrets_included":  false,
     "historical_private_corpus_reused":  false

@@ -27,9 +27,12 @@
     "active_compute_owner_rejections":  1,
     "gpu_owner_status_rejected_active_service":  false,
     "nvidia_smi_evidence_class":  "exact-trusted-absolute-query",
+    "trusted_absolute_nvidia_smi_scripts":  3,
+    "bare_nvidia_smi_command_invocations":  0,
     "gpu_power_limit_mutations":  0,
     "gpu_power_limit_restore_required":  false,
     "request_jsonl_under_protected_state":  true,
     "shipped_test_bypass":  false,
-    "published_release_scripts_scanned":  8
+    "published_release_scripts_scanned":  8,
+    "literal_predicate_hook_scan":  true
 }

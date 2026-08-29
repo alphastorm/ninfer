@@ -1,15 +1,13 @@
 {
-    "artifact_type":  "ninfer_rtx4090_focused_protocol",
+    "artifact_type":  "ninfer_rtx4090_closure_protocol",
     "schema_version":  1,
     "status":  "passed",
-    "completed_utc":  "2026-08-29T05:31:36.3064790Z",
-    "elapsed_seconds":  16.0117543,
-    "source_commit":  "6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f",
-    "binary_sha256":  "8e63c6a90b54913d8aa0c4d660f67ff1fab036e5435a144d450ff7dc1ce664a3",
-    "model_artifact_sha256":  "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
-    "config_sha256":  "ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db",
-    "deployment_profile":  "qwen38-4090-v0.1",
-    "protocol_script_sha256":  "a9cbaaff19eeae320973146bf05c760264b492885b1e3951479efa69648ee92b",
+    "completed_utc":  "2026-08-29T08:44:06.0704174Z",
+    "runtime_source_commit":  "e4654b5aed87e7385bdf33f8b4365a7a550d4ad9",
+    "package_source_commit":  "19ebcc09ebbcc79061badf78068e1ad70062485f",
+    "binary_sha256":  "41fcc1803e4a057de24a485776e71737a31cb39fdd9358350b975f6b11b9c869",
+    "package_sha256":  "6a403c97ecbacab17f40bfe607b7ba268900e7479e0224aec68b98fd67345e48",
+    "checks":  15,
     "protocol":  {
                      "artifact_type":  "ninfer_agent_protocol_smoke",
                      "checks":  {
@@ -30,7 +28,7 @@
                                     "unsupported_structured_output_rejected":  true
                                 },
                      "identity":  {
-                                      "binary_sha256":  "8e63c6a90b54913d8aa0c4d660f67ff1fab036e5435a144d450ff7dc1ce664a3",
+                                      "binary_sha256":  "41fcc1803e4a057de24a485776e71737a31cb39fdd9358350b975f6b11b9c869",
                                       "config_sha256":  "ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db",
                                       "deployment_profile":  "qwen38-4090-v0.1",
                                       "model_artifact_sha256":  "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e"
