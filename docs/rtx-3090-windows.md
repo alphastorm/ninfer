@@ -23,9 +23,11 @@ profile **omp-v0.2.0-rtx3090**, CUDA architecture **sm_86**, and the pinned Qwen
 in the release specification. The three executables and every declared app-local DLL are covered by
 the inner and outer SHA-256 manifests. Package and checksum values are emitted in
 **package-build-receipt.json** at build time. That immutable build receipt deliberately remains
-`hardware-pending`; the external
-[beta qualification receipt](qualification/receipts/qwen3.8-27b-rtx-3090-v0.2.0.json) closes the
-hardware gate without rebuilding or rebinding the package.
+`hardware-pending`. For the exact package SHA-256 it names, the later external
+[beta qualification receipt](qualification/receipts/qwen3.8-27b-rtx-3090-v0.2.0.json) is the sole
+post-hardware authority and explicitly supersedes that pre-hardware status. It does not rewrite the
+historical build receipt or the packaged release specification: consumers with only the archive
+must still treat it as hardware-pending until they verify the hash-bound external beta receipt.
 
 The default C1 profile binds to **127.0.0.1**, requires a one-line API-key file, uses 65,536 maximum
 context, automatic INT8 KV capacity, a 1,024-token prefill chunk, MTP3, and authenticated durable

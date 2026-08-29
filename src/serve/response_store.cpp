@@ -119,12 +119,22 @@ void ResponseStore::put(StoredResponse response) {
     }
     const std::uint64_t sequence = next_sequence_++;
     if (next_sequence_ == 0) { next_sequence_ = 1; }
-    insert_locked(std::move(owned), envelope_bytes, sequence);
+    insert_locked(owned, envelope_bytes, sequence);
 
     while (records_.size() > max_records_ || current_bytes_ > max_bytes_) {
         if (lru_.empty()) { throw std::logic_error("response store LRU is empty"); }
-        auto victim = std::prev(lru_.end());
-        if (victim == lru_.begin() && records_.size() == 1) { throw_store_capacity(); }
+        auto victim = lru_.end();
+        for (auto position = lru_.rbegin(); position != lru_.rend(); ++position) {
+            const Entry& candidate = records_.at(*position);
+            if (*position != owned->id && candidate.transaction_pins == 0) {
+                victim = std::prev(position.base());
+                break;
+            }
+        }
+        if (victim == lru_.end()) {
+            erase_locked(owned->id);
+            throw_store_capacity();
+        }
         erase_locked(*victim);
     }
 }
@@ -158,11 +168,90 @@ bool ResponseStore::erase_for_session(const std::string& id,
     std::lock_guard lock(mutex_);
     const auto found = records_.find(id);
     if (found == records_.end() ||
-        found->second.response->client_session_sha256 != session_sha256) {
+        found->second.response->client_session_sha256 != session_sha256 ||
+        found->second.transaction_pins != 0) {
         return false;
     }
     erase_locked(id);
     return true;
+}
+
+ResponseStoreTransactionState ResponseStore::erase_for_session_transactionally(
+    const std::string& id, std::string_view session_sha256,
+    const std::function<bool(const std::optional<ResponseStoreSnapshot>&)>& commit_external) {
+    std::optional<ResponseStoreSnapshot> post_delete;
+    std::vector<std::string> pinned_ids;
+    {
+        std::lock_guard lock(mutex_);
+        const auto target = records_.find(id);
+        if (target == records_.end() || !target->second.response->client_session_sha256 ||
+            *target->second.response->client_session_sha256 != session_sha256) {
+            return ResponseStoreTransactionState::Missing;
+        }
+
+        std::vector<std::pair<std::uint64_t, const StoredResponse*>> ordered;
+        for (const auto& [record_id, entry] : records_) {
+            (void)record_id;
+            if (entry.response->client_session_sha256 &&
+                *entry.response->client_session_sha256 == session_sha256) {
+                if (entry.transaction_pins != 0) {
+                    return ResponseStoreTransactionState::Conflict;
+                }
+                ordered.emplace_back(entry.sequence, entry.response.get());
+            }
+        }
+        std::sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) {
+            return left.first < right.first;
+        });
+
+        pinned_ids.reserve(ordered.size());
+        ResponseStoreSnapshot snapshot;
+        snapshot.client_session_sha256.assign(session_sha256);
+        snapshot.records.reserve(ordered.size() - 1);
+        for (const auto& [sequence, record] : ordered) {
+            (void)sequence;
+            pinned_ids.push_back(record->id);
+            if (record->id != id) { snapshot.records.push_back(*record); }
+        }
+        if (!snapshot.records.empty()) {
+            snapshot.latest_response_id = snapshot.records.back().id;
+            post_delete.emplace(std::move(snapshot));
+        }
+        for (const std::string& pinned_id : pinned_ids) {
+            ++records_.at(pinned_id).transaction_pins;
+        }
+    }
+
+    bool committed = false;
+    try {
+        committed = commit_external(post_delete);
+    } catch (...) { committed = false; }
+
+    std::lock_guard lock(mutex_);
+    const auto unpin = [&] {
+        for (const std::string& pinned_id : pinned_ids) {
+            const auto found = records_.find(pinned_id);
+            if (found != records_.end() && found->second.transaction_pins != 0) {
+                --found->second.transaction_pins;
+            }
+        }
+    };
+    if (!committed) {
+        unpin();
+        return ResponseStoreTransactionState::Conflict;
+    }
+    const auto target = records_.find(id);
+    if (target == records_.end() || target->second.transaction_pins != 1) {
+        unpin();
+        return ResponseStoreTransactionState::Conflict;
+    }
+    --target->second.transaction_pins;
+    erase_locked(id);
+    for (const std::string& pinned_id : pinned_ids) {
+        if (pinned_id == id) { continue; }
+        --records_.at(pinned_id).transaction_pins;
+    }
+    return ResponseStoreTransactionState::Committed;
 }
 
 std::optional<ResponseStoreSnapshot>
@@ -247,6 +336,10 @@ bool ResponseStore::restore_session(ResponseStoreSnapshot snapshot,
     }
 
     std::lock_guard lock(mutex_);
+    for (const auto& [id, entry] : records_) {
+        (void)id;
+        if (entry.transaction_pins != 0) { return false; }
+    }
     for (const auto& record : owned) {
         if (records_.contains(record->id)) { return false; }
     }

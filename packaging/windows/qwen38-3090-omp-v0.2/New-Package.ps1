@@ -301,8 +301,17 @@ try {
             controller_sha256 = Get-LowerSha256 (Join-Path $packageOutput 'Control-Release.ps1')
             gpu_owner_controller_sha256 = Get-LowerSha256 (Join-Path $packageOutput 'Control-GpuOwner.ps1')
             state_protection_sha256 = Get-LowerSha256 (Join-Path $packageOutput 'Protect-StateRoot.ps1')
+            qualification_constructor_sha256 = Get-LowerSha256 (Join-Path $payload 'New-QualificationReceipt.ps1')
         }
         qualification_status = 'hardware-pending'
+        qualification_status_authority = 'immutable-pre-hardware-package-build'
+        later_external_beta_authority = [ordered]@{
+            artifact_type = 'ninfer_rtx3090_beta_qualification'
+            schema_version = 3
+            public_receipt_path = 'docs/qualification/receipts/qwen3.8-27b-rtx-3090-v0.2.0.json'
+            supersedes_only_when_exact_package_sha256_matches = $true
+            mutates_this_build_receipt = $false
+        }
         secret_values_recorded = 0
     }
     [IO.File]::WriteAllText(

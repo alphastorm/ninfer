@@ -52,6 +52,12 @@ struct ResponseStoreSnapshot {
     std::vector<StoredResponse> records;
 };
 
+enum class ResponseStoreTransactionState : std::uint8_t {
+    Committed,
+    Missing,
+    Conflict,
+};
+
 class ResponseStore {
 public:
     ResponseStore(std::size_t max_records, std::size_t max_bytes);
@@ -64,6 +70,13 @@ public:
     void put(StoredResponse response);
     bool erase_for_session(const std::string& id,
                            const std::optional<std::string>& session_sha256);
+
+    // Pins the authenticated session snapshot against global-LRU eviction while commit_external
+    // publishes its post-delete durable state. A successful callback is followed only by the
+    // no-allocation live erase, so durable and live state cannot diverge between those operations.
+    [[nodiscard]] ResponseStoreTransactionState erase_for_session_transactionally(
+        const std::string& id, std::string_view session_sha256,
+        const std::function<bool(const std::optional<ResponseStoreSnapshot>&)>& commit_external);
 
     // Snapshots are insertion ordered, parent-before-child for a normal Responses lineage. Restore
     // publishes the complete session while holding the store lock; malformed snapshots are rejected
@@ -84,8 +97,9 @@ private:
     struct Entry {
         std::shared_ptr<const StoredResponse> response;
         std::list<std::string>::iterator lru;
-        std::size_t envelope_bytes = 0;
-        std::uint64_t sequence     = 0;
+        std::size_t envelope_bytes   = 0;
+        std::uint64_t sequence       = 0;
+        std::size_t transaction_pins = 0;
     };
 
     void retain_context_locked(const ResponseContext& context);

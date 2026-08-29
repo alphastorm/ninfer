@@ -128,6 +128,11 @@ try {
     Assert-Equal ([string]$receiptOne.support_assets.gpu_owner_controller_sha256) (Get-Sha256 (Join-Path $outOne 'Control-GpuOwner.ps1')) 'GPU-owner support asset hash mismatch'
     Assert-Equal ([string]$receiptOne.support_assets.state_protection_sha256) (Get-Sha256 (Join-Path $outOne 'Protect-StateRoot.ps1')) 'state-protection support asset hash mismatch'
     Assert-Equal ([string]$receiptOne.qualification_status) 'hardware-pending' 'package claimed unperformed hardware qualification'
+    Assert-Equal ([string]$receiptOne.qualification_status_authority) 'immutable-pre-hardware-package-build' 'package build status authority changed'
+    Assert-Equal ([string]$receiptOne.later_external_beta_authority.artifact_type) 'ninfer_rtx3090_beta_qualification' 'package omitted the later beta authority type'
+    Assert-Equal ([int]$receiptOne.later_external_beta_authority.schema_version) 3 'package omitted the later beta authority schema'
+    Assert-True ([bool]$receiptOne.later_external_beta_authority.supersedes_only_when_exact_package_sha256_matches) 'package beta authority is not exact-asset-bound'
+    Assert-Equal ([bool]$receiptOne.later_external_beta_authority.mutates_this_build_receipt) $false 'package beta authority mutates build history'
     Assert-Equal ([int]$receiptOne.secret_values_recorded) 0 'package receipt recorded a secret value'
 
     $packagePath = Join-Path $outOne ([string]$receiptOne.package.filename)
@@ -145,6 +150,14 @@ try {
         )) {
         Assert-True ($members -contains "$rootName/$name") "generated package omitted $name"
     }
+    $innerChecksumLines = @(& $tar '-xOf' $packagePath "$rootName/SHA256SUMS.txt")
+    if ($LASTEXITCODE -ne 0) { throw 'generated package checksum manifest extraction failed' }
+    $constructorChecksum = @($innerChecksumLines | Where-Object {
+            $_ -match '^([0-9a-f]{64})  New-QualificationReceipt[.]ps1$'
+        })
+    Assert-Equal $constructorChecksum.Count 1 'qualification constructor checksum is absent or duplicated'
+    [void]($constructorChecksum[0] -match '^([0-9a-f]{64})  ')
+    Assert-Equal ([string]$receiptOne.support_assets.qualification_constructor_sha256) $Matches[1] 'qualification-constructor support asset hash mismatch'
     Assert-True (@($members | Where-Object { $_ -match '4090|DirectStorage|directstorage' }).Count -eq 0) 'generated package contains a forbidden old identity'
 
     $outerSums = Join-Path $outOne 'SHA256SUMS'
@@ -175,59 +188,170 @@ try {
     Assert-True $badRejected "package builder accepted a public wildcard listen host; observed error: $badError"
     Assert-True (-not (Test-Path -LiteralPath $badOut)) 'rejected network config published output'
 
-    $identity = [pscustomobject]@{
-        release_head_sha = $releaseHead
-        upstream_base_sha = $upstream
-        lineage_base_sha = 'c467349e375d6aa76afca63c0042bbc0869549aa'
-        build_profile = 'omp-v0.2.0-rtx3090'
-        cuda_architecture = 'sm_86'
-        ninfer_sha256 = ('1' * 64)
-        server_sha256 = ('2' * 64)
-        benchmark_sha256 = ('3' * 64)
+    $candidate = [pscustomobject]@{
+        source_commit = $releaseHead
+        upstream_base_commit = $upstream
+        lineage_base_commit = 'c467349e375d6aa76afca63c0042bbc0869549aa'
+        server_binary_sha256 = ('1' * 64)
+        cli_binary_sha256 = ('2' * 64)
+        benchmark_binary_sha256 = ('3' * 64)
         config_sha256 = ('4' * 64)
-        model_sha256 = ('5' * 64)
-        package_sha256 = ('6' * 64)
-        checksums_sha256 = ('7' * 64)
+        model_artifact_sha256 = ('5' * 64)
         api_key = 'must-not-appear'
     }
-    $configuration = [pscustomobject]@{
-        deployment_profile = 'qwen38-3090-omp-v0.2.0-c1'
-        max_context = 65536
-        kv_capacity = 'auto'
-        kv_dtype = 'int8'
-        prefill_chunk = 1024
-        concurrency = 1
-        speculative_backend = 'mtp'
-        speculative_draft_tokens = 3
-        reasoning_effort = 'xhigh'
-        checkpoint_quota_mib = 65536
-        checkpoint_staging_mib = 256
-    }
-    $hardware = [pscustomobject]@{
-        status = 'passed'
-        evidence_sha256 = ('b' * 64)
-        gpu_name = 'NVIDIA GeForce RTX 3090'
-        gpu_uuid = 'GPU-fixture-3090'
+    $platform = [pscustomobject]@{
+        gpu = 'NVIDIA GeForce RTX 3090'
+        vram_mib = 24576
+        cuda_architecture = 'sm_86'
         driver_version = '570.00'
-        compute_capability = '8.6'
+        operating_system = 'Microsoft Windows 11 Pro fixture'
+        qualified_power_limit_w = 300
+        single_gpu = $true
     }
-    $notRun = [pscustomobject]@{ status = 'not_run'; evidence_sha256 = $null }
-    $incomplete = New-NInferQualificationReceipt -QualifiedUtc ([DateTimeOffset]::UtcNow.ToString('o')) -ReleaseId 'fixture' -Identity $identity -Configuration $configuration -Hardware $hardware -GpuThermal $notRun -Protocol $notRun -LongContext $notRun -CheckpointRestart $notRun -AutomaticRoleCorpus $notRun -Performance $notRun -Lifecycle $notRun
-    Assert-Equal ([string]$incomplete.status) 'incomplete' 'receipt constructor passed unrun hardware gates'
-    $incompleteText = $incomplete | ConvertTo-Json -Depth 16 -Compress
-    Assert-True (-not $incompleteText.Contains('must-not-appear')) 'qualification receipt copied an undeclared secret field'
-    $passedGate = [pscustomobject]@{ status = 'passed'; evidence_sha256 = ('a' * 64) }
-    $passed = New-NInferQualificationReceipt -QualifiedUtc ([DateTimeOffset]::UtcNow.ToString('o')) -ReleaseId 'fixture' -Identity $identity -Configuration $configuration -Hardware $hardware -GpuThermal $passedGate -Protocol $passedGate -LongContext $passedGate -CheckpointRestart $passedGate -AutomaticRoleCorpus $notRun -Performance $passedGate -Lifecycle $passedGate
+    $releaseAssets = [pscustomobject]@{
+        package = [pscustomobject]@{
+            filename = [string]$receiptOne.package.filename
+            sha256 = [string]$receiptOne.package.sha256
+            bytes = [Int64]$receiptOne.package.bytes
+        }
+        source_archive = [pscustomobject]@{
+            filename = 'ninfer-rtx3090-omp-v0.2.0-source.tar.gz'
+            sha256 = ('6' * 64)
+            bytes = 123
+        }
+        spdx_sbom = [pscustomobject]@{
+            filename = 'ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.spdx.json'
+            sha256 = ('7' * 64)
+            bytes = 456
+        }
+        checksums = [pscustomobject]@{
+            filename = 'SHA256SUMS'
+            sha256 = [string]$receiptOne.checksums.sha256
+            bytes = [Int64](Get-Item -LiteralPath $outerSums).Length
+        }
+        package_build_receipt = [pscustomobject]@{
+            filename = 'package-build-receipt.json'
+            sha256 = Get-Sha256 (Join-Path $outOne 'package-build-receipt.json')
+            bytes = [Int64](Get-Item -LiteralPath (Join-Path $outOne 'package-build-receipt.json')).Length
+        }
+        inner_checksums_sha256 = ('8' * 64)
+        installer_sha256 = Get-Sha256 (Join-Path $outOne 'Install-Release.ps1')
+        lifecycle_controller_sha256 = Get-Sha256 (Join-Path $outOne 'Control-Release.ps1')
+        gpu_owner_controller_sha256 = Get-Sha256 (Join-Path $outOne 'Control-GpuOwner.ps1')
+        state_protection_helper_sha256 = Get-Sha256 (Join-Path $outOne 'Protect-StateRoot.ps1')
+        qualification_constructor_sha256 = Get-Sha256 $ReceiptConstructorPath
+        package_build_qualification_status = 'hardware-pending'
+        packaged_release_spec_qualification_status = 'hardware-pending'
+    }
+    $protocol = [pscustomobject]@{
+        status = 'passed'; checks_passed = 15; checks_total = 15; receipt_sha256 = ('9' * 64)
+    }
+    $longContext = [pscustomobject]@{
+        status = 'passed'; prompt_tokens = 64512; completion_tokens = 17
+        elapsed_seconds = 1.0; exact_output = 'ORCHID=493817; COLOR=COBALT'
+        receipt_sha256 = ('a' * 64)
+    }
+    $checkpointRestart = [pscustomobject]@{
+        status = 'passed'; checkpoint_files = 2; checkpoint_bytes = 1024
+        cached_input_tokens = 45; continuation_elapsed_seconds = 1.0
+        exact_output = 'CHECKPOINT-3090-731942'; failed_delete_commit_regression = 'passed'
+        cross_session_eviction_regression = 'passed'; receipt_sha256 = ('b' * 64)
+    }
+    $performance = [pscustomobject]@{
+        status = 'passed'; cohort = 1; generation_tokens = 1024
+        decode_tokens_per_second = 1.0; prefill_prompt_tokens = 4403
+        prefill_tokens_per_second = 1.0; max_power_w = 300.0; max_temperature_c = 50
+        max_gpu_utilization_percent = 100; max_memory_used_mib = 20000
+        receipt_sha256 = ('c' * 64)
+    }
+    $instrumentedLifecycle = [pscustomobject]@{
+        status = 'passed'; evidence_class = 'generated-instrumented-transaction-harness'
+        production_installer_sha256 = [string]$releaseAssets.installer_sha256
+        instrumented_installer_sha256 = ('d' * 64); production_installer_executed = $false
+        effective_acl_evidence = $false; injected_failures = 10; interrupted_repairs = 2
+        receipt_sha256 = ('e' * 64)
+    }
+    $shippedLifecycle = [pscustomobject]@{
+        status = 'passed'; installer_sha256 = [string]$releaseAssets.installer_sha256
+        production_installer_executed = $true; instrumented_harness_used = $false
+        clean_installs = 1; upgrades = 1; rollback_directions = 2; identity_gates_verified = 8
+        receipt_sha256 = ('f' * 64)
+    }
+    $releaseAssetTests = [pscustomobject]@{
+        status = 'passed'; deterministic_packages = 2; package_members_verified = 16
+        public_listen_rejections = 1; secret_free_receipts = 3; receipt_sha256 = ('1' * 64)
+    }
+    $stateSecurity = [pscustomobject]@{
+        status = 'passed'; root_dacl_protected = $true; atomic_race_collision_rejections = 1
+        raced_state_recursive_deletions = 0; low_privilege_effective_read_denials = 2
+        low_privilege_effective_write_denials = 2; precreated_or_unowned_root_rejections = 2
+        root_or_child_junction_rejections = 2; installer_prewrite_root_rejections = 3
+        active_interactive_gpu_rejections = 1; request_log_effective_access_denials = 2
+        managed_release_acl_state_assertions = 6; managed_request_log_acl_state_assertions = 1
+        managed_rollback_directions = 2; shipped_test_bypass = $false; restored_power_limit_w = 370
+        receipt_sha256 = ('2' * 64)
+    }
+    $ompClient = [pscustomobject]@{
+        status = 'passed'; omp_version = 'omp/18.0.9'; archive_sha256 = ('3' * 64)
+        binary_sha256 = ('4' * 64); events = 1; typed_tool_name = 'read'; tool_results = 1
+        exact_final_answer = $true; receipt_sha256 = ('5' * 64)
+    }
+    $publicDisclosure = [pscustomobject]@{
+        status = 'passed_with_classified_generic_references'; tracked_source_files_scanned = 100
+        tracked_source_private_marker_or_unclassified_credential_findings = 0
+        release_bytes_scanned = 1000; release_files_scanned = 20
+        binary_package_private_path_findings = 0; source_archive_generic_path_references = 2
+        classified_private_fleet_or_credential_findings = 0; raw_scan_sha256 = ('6' * 64)
+    }
+    $receiptArguments = @{
+        QualifiedUtc = [DateTimeOffset]::UtcNow.ToString('o')
+        Candidate = $candidate; Platform = $platform; ReleaseAssets = $releaseAssets
+        Protocol = $protocol; LongContext = $longContext; CheckpointRestart = $checkpointRestart
+        Performance = $performance; InstrumentedLifecycle = $instrumentedLifecycle
+        ShippedLifecycle = $shippedLifecycle; ReleaseAssetTests = $releaseAssetTests
+        StateSecurity = $stateSecurity; OmpClient = $ompClient; PublicDisclosure = $publicDisclosure
+    }
+
+    $originalProtocolStatus = $protocol.status
+    $originalProtocolReceipt = $protocol.receipt_sha256
+    $protocol.status = 'not_run'
+    $protocol.receipt_sha256 = $null
+    $incomplete = New-NInferQualificationReceipt @receiptArguments
+    $protocol.status = $originalProtocolStatus
+    $protocol.receipt_sha256 = $originalProtocolReceipt
+    Assert-Equal ([string]$incomplete.status) 'incomplete' 'receipt constructor passed an unrun gate'
+    Assert-Equal ([bool]$incomplete.beta_qualified) $false 'incomplete receipt claimed beta qualification'
+
+    $passed = New-NInferQualificationReceipt @receiptArguments
+    Assert-Equal ([string]$passed.artifact_type) 'ninfer_rtx3090_beta_qualification' 'constructor emitted the wrong public receipt type'
+    Assert-Equal ([int]$passed.schema_version) 3 'constructor emitted the wrong public receipt schema'
     Assert-Equal ([string]$passed.status) 'passed' 'receipt constructor did not pass complete gates'
-    Assert-Equal ([bool]$passed.automatic_route_activation_allowed) $false 'receipt authorized an unqualified automatic role'
-    Assert-True (-not (($passed | ConvertTo-Json -Depth 16 -Compress).Contains('GPU-fixture-3090'))) 'receipt exposed the GPU UUID'
+    Assert-Equal ([bool]$passed.beta_qualified) $true 'passed receipt omitted beta authority'
+    Assert-Equal ([bool]$passed.automatic_route_activation_allowed) $false 'beta receipt authorized automatic routing'
+    Assert-Equal ([bool]$passed.stable_promotion_performed) $false 'beta receipt claimed stable promotion'
+    Assert-Equal ([bool]$passed.production_route_activation_performed) $false 'beta receipt claimed production activation'
+    Assert-Equal ([string]$passed.qualification_authority.supersedes_package_build_receipt_qualification_status) 'hardware-pending' 'beta authority did not supersede the build receipt status'
+    Assert-Equal ([string]$passed.qualification_authority.supersedes_source_archive_receipt_status) 'pending-requalification' 'beta authority did not supersede the source-archive pending receipt'
+    Assert-Equal ([bool]$passed.qualification_authority.historical_build_receipts_mutated) $false 'beta authority claimed to mutate build history'
+    Assert-Equal ([string]::Join(',', @($passed.public_disclosure.forbidden_marker_classes))) 'private-fleet-identifiers,private-home-paths,credential-material' 'public disclosure marker policy changed'
+    $passedText = $passed | ConvertTo-Json -Depth 24 -Compress
+    Assert-True (-not $passedText.Contains('must-not-appear')) 'qualification receipt copied an undeclared secret field'
+    Assert-True (-not $passedText.Contains('GPU-fixture-3090')) 'qualification receipt exposed a GPU UUID'
+
+    $originalPackageFilename = $releaseAssets.package.filename
+    $releaseAssets.package.filename = 'subdirectory\package.tar.gz'
+    $assetBindingRejected = $false
+    try { New-NInferQualificationReceipt @receiptArguments | Out-Null }
+    catch { $assetBindingRejected = $_.Exception.Message -like '*final public asset name*' }
+    $releaseAssets.package.filename = $originalPackageFilename
+    Assert-True $assetBindingRejected 'qualification constructor accepted an inexact package filename'
 
     [ordered]@{
         artifact_type = 'ninfer_windows_release_assets_regression'
         schema_version = 2
         status = 'passed'
         deterministic_packages = 2
-        package_members_verified = 14
+        package_members_verified = 16
         public_listen_rejections = 1
         secret_free_receipts = 3
     } | ConvertTo-Json -Compress

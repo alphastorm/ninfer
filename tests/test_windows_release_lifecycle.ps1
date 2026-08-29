@@ -19,10 +19,7 @@ $global:NInferTestTaskSerial = 0
 $global:NInferTestStateRoot = $null
 $global:NInferTestDeadReleaseId = $null
 $global:NInferTestDeadStartSleptMilliseconds = 0
-$global:NInferTestAclFailure = $false
-$global:NInferAclObservations = [Collections.Generic.List[object]]::new()
-$global:NInferTestAclResetArguments = @()
-$global:NInferAclCalls = [Collections.Generic.List[object]]::new()
+$global:NInferInstrumentedAclApplications = 0
 
 function global:Get-ScheduledTask {
     param([string]$TaskName, [object]$ErrorAction)
@@ -165,33 +162,9 @@ function global:Start-Sleep {
     }
 }
 
-function global:icacls.exe {
-    $arguments = @($args | ForEach-Object { [string]$_ })
-    $global:NInferAclCalls.Add(@($arguments))
-    if ($arguments -contains '/inheritance:r') {
-        $global:NInferAclObservations.Add([ordered]@{
-                transactions_exist = Test-Path -LiteralPath (Join-Path $global:NInferTestStateRoot 'receipts/install-transactions')
-                secrets_exist = Test-Path -LiteralPath (Join-Path $global:NInferTestStateRoot 'secrets')
-            })
-    }
-    if ($arguments -contains '/reset') {
-        $global:NInferTestAclResetArguments = $arguments
-        if ($global:NInferTestAclFailure) {
-            if ($arguments -contains '/C') {
-                Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1
-                'Successfully processed 1 files; Failed processing 1 files'
-                return
-            }
-            Set-Variable -Name LASTEXITCODE -Value 5 -Scope 1
-            'fixture protected child: Access is denied.'
-            return
-        }
-    }
-    Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1
-}
-
 function global:nvidia-smi.exe {
     param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Arguments)
+    '0, GPU-fixture-3090, NVIDIA GeForce RTX 3090, 8.6, 616.56'
     '0, GPU-fixture-3090, NVIDIA GeForce RTX 3090'
     Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1
 }
@@ -214,6 +187,24 @@ function Assert-True([bool]$Condition, [string]$Message) {
 
 function Assert-Equal([object]$Actual, [object]$Expected, [string]$Message) {
     if ([string]$Actual -cne [string]$Expected) { throw $Message }
+}
+
+function Replace-Exactly(
+    [string]$Text,
+    [string]$Needle,
+    [string]$Replacement,
+    [string]$Label
+) {
+    $normalizedNeedle = $Needle.Replace(
+        [string]([char]13 + [char]10), [string][char]10
+    )
+    $normalizedReplacement = $Replacement.Replace(
+        [string]([char]13 + [char]10), [string][char]10
+    )
+    if ([regex]::Matches($Text, [regex]::Escape($normalizedNeedle)).Count -ne 1) {
+        throw "generated lifecycle harness anchor changed: $Label"
+    }
+    return $Text.Replace($normalizedNeedle, $normalizedReplacement)
 }
 
 function New-SecretFile([string]$Directory, [string]$Name) {
@@ -261,6 +252,22 @@ function New-FixturePackage(
         '# qualification receipt fixture',
         [Text.UTF8Encoding]::new($false)
     )
+    $smoke = Join-Path $payload 'smoke'
+    New-Item -ItemType Directory -Path $smoke | Out-Null
+    foreach ($name in @('agent_protocol.py', 'serve_contract.py')) {
+        [IO.File]::WriteAllText(
+            (Join-Path $smoke $name),
+            "# lifecycle fixture $name",
+            [Text.UTF8Encoding]::new($false)
+        )
+    }
+    foreach ($name in @('README.md', 'RELEASE_NOTES.md', 'LICENSE', 'VERSION')) {
+        [IO.File]::WriteAllText(
+            (Join-Path $payload $name),
+            "lifecycle fixture $name",
+            [Text.UTF8Encoding]::new($false)
+        )
+    }
 
     $config = [ordered]@{
         artifact_type = 'ninfer_windows_server_config'
@@ -406,16 +413,16 @@ function Invoke-FixtureInstall(
     if (-not [string]::IsNullOrEmpty($Fault) -and -not [string]::IsNullOrEmpty($Interrupt)) {
         throw 'fixture cannot inject a failure and an interruption together'
     }
-    $previousFault = [Environment]::GetEnvironmentVariable('NINFER_TEST_INSTALL_FAILURE_AFTER', 'Process')
-    $previousInterrupt = [Environment]::GetEnvironmentVariable('NINFER_TEST_INSTALL_INTERRUPTION_AFTER', 'Process')
+    $previousFault = [Environment]::GetEnvironmentVariable('NINFER_HARNESS_INSTALL_FAILURE_AFTER', 'Process')
+    $previousInterrupt = [Environment]::GetEnvironmentVariable('NINFER_HARNESS_INSTALL_INTERRUPTION_AFTER', 'Process')
     try {
         [Environment]::SetEnvironmentVariable(
-            'NINFER_TEST_INSTALL_FAILURE_AFTER',
+            'NINFER_HARNESS_INSTALL_FAILURE_AFTER',
             $(if ([string]::IsNullOrEmpty($Fault)) { $null } else { $Fault }),
             'Process'
         )
         [Environment]::SetEnvironmentVariable(
-            'NINFER_TEST_INSTALL_INTERRUPTION_AFTER',
+            'NINFER_HARNESS_INSTALL_INTERRUPTION_AFTER',
             $(if ([string]::IsNullOrEmpty($Interrupt)) { $null } else { $Interrupt }),
             'Process'
         )
@@ -433,8 +440,8 @@ function Invoke-FixtureInstall(
         return ([string]$output[-1] | ConvertFrom-Json)
     }
     finally {
-        [Environment]::SetEnvironmentVariable('NINFER_TEST_INSTALL_FAILURE_AFTER', $previousFault, 'Process')
-        [Environment]::SetEnvironmentVariable('NINFER_TEST_INSTALL_INTERRUPTION_AFTER', $previousInterrupt, 'Process')
+        [Environment]::SetEnvironmentVariable('NINFER_HARNESS_INSTALL_FAILURE_AFTER', $previousFault, 'Process')
+        [Environment]::SetEnvironmentVariable('NINFER_HARNESS_INSTALL_INTERRUPTION_AFTER', $previousInterrupt, 'Process')
     }
 }
 
@@ -486,6 +493,17 @@ function Initialize-NInferProtectedStateRoot([string]$Path) {
     New-Item -ItemType Directory -Force -Path $Path | Out-Null
     return (Resolve-Path -LiteralPath $Path).Path
 }
+function Protect-NInferRetainedSecretAcls([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw 'instrumented protected state root is missing'
+    }
+}
+function Set-NInferProtectedRootAcl([string]$Path) {
+    $global:NInferInstrumentedAclApplications++
+}
+function Set-NInferProtectedFileAcl([string]$Path) {
+    $global:NInferInstrumentedAclApplications++
+}
 function Assert-NInferProtectedStateTree([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
         throw 'instrumented protected state root is missing'
@@ -497,14 +515,157 @@ function Assert-NInferProtectedStateTree([string]$Path) {
     $instrumentedProtection,
     [Text.UTF8Encoding]::new($false)
 )
-$installerSource = Get-Content -LiteralPath $InstallerPath -Raw -Encoding UTF8
-$testModeNeedle = '$script:InstallTestMode = $false'
-if ([regex]::Matches($installerSource, [regex]::Escape($testModeNeedle)).Count -ne 1) {
-    throw 'production installer test-mode invariant changed'
+$productionInstallerPath = $InstallerPath
+$productionInstallerSha256 = Get-Sha256 $productionInstallerPath
+$productionInstallerSource = Get-Content -LiteralPath $productionInstallerPath -Raw -Encoding UTF8
+foreach ($forbidden in @(
+        'InstallTestMode', 'Invoke-InstallFault', 'NINFER_TEST_INSTALL_',
+        'NInferSimulatedInterruption', 'NInferLifecycleHarness'
+    )) {
+    Assert-True (-not $productionInstallerSource.Contains($forbidden)) `
+        "production installer contains test instrumentation: $forbidden"
 }
-$installerSource = $installerSource.Replace($testModeNeedle, '$script:InstallTestMode = $true')
-$InstallerPath = Join-Path $testRoot 'Install-Release.test.ps1'
+foreach ($requiredGate in @(
+        'must run from an elevated PowerShell session',
+        'unexpected release package filename',
+        'release specification pinned model identity mismatch',
+        'release specification immutable build identity mismatch',
+        'release package is missing lifecycle binary',
+        'release package is missing its qualification receipt constructor',
+        'release package is missing its qualification smoke asset',
+        'release package is missing support file'
+    )) {
+    Assert-True $productionInstallerSource.Contains($requiredGate) `
+        "production installer omitted a shipped identity gate: $requiredGate"
+}
+
+$installerSource = $productionInstallerSource.Replace(
+    [string]([char]13 + [char]10), [string][char]10
+)
+$administratorGate = @'
+$principal = [Security.Principal.WindowsPrincipal]::new(
+    [Security.Principal.WindowsIdentity]::GetCurrent()
+)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'Install-Release.ps1 must run from an elevated PowerShell session'
+}
+'@
+$installerSource = Replace-Exactly $installerSource $administratorGate @'
+# Generated transaction harness only: host elevation is outside this fixture's contract.
+'@ 'administrator gate'
+
+$modelIdentityGate = @'
+    if ([Int64]$Spec.model.bytes -ne 18210531328 -or
+        [string]$Spec.model.sha256 -cne 'eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e') {
+        throw 'release specification pinned model identity mismatch'
+    }
+'@
+$installerSource = Replace-Exactly $installerSource $modelIdentityGate @'
+    if ([Int64]$Spec.model.bytes -le 0 -or
+        [string]$Spec.model.sha256 -cnotmatch '^[0-9a-f]{64}$') {
+        throw 'instrumented release specification model identity is invalid'
+    }
+'@ 'model identity gate'
+
+$immutableBuildGate = @'
+    if ([string]$Spec.build_profile -cne 'omp-v0.2.0-rtx3090' -or
+        [string]$Spec.gpu.cuda_architecture -cne 'sm_86' -or
+        [string]$Spec.source.lineage_base_sha -cne 'c467349e375d6aa76afca63c0042bbc0869549aa') {
+        throw 'release specification immutable build identity mismatch'
+    }
+'@
+$installerSource = Replace-Exactly $installerSource $immutableBuildGate @'
+    if ([string]$Spec.build_profile -cne 'omp-v0.2.0-rtx3090' -or
+        [string]$Spec.gpu.cuda_architecture -cne 'sm_86') {
+        throw 'instrumented release specification build identity mismatch'
+    }
+'@ 'immutable build gate'
+
+$packageFilenameGate = @'
+    if ([IO.Path]::GetFileName($package) -cne 'ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.tar.gz') {
+        throw 'unexpected release package filename'
+    }
+'@
+$installerSource = Replace-Exactly $installerSource $packageFilenameGate @'
+    # Generated transaction harness accepts uniquely named fixture archives.
+'@ 'package filename gate'
+
+$harnessFaultFunction = @'
+
+function Invoke-NInferHarnessFault([string]$Point) {
+    if ([string]$env:NINFER_HARNESS_INSTALL_INTERRUPTION_AFTER -ceq $Point) {
+        $exception = [InvalidOperationException]::new("simulated interrupted install after $Point")
+        $exception.Data['NInferHarnessInterruption'] = $true
+        throw $exception
+    }
+    if ([string]$env:NINFER_HARNESS_INSTALL_FAILURE_AFTER -ceq $Point) {
+        throw "injected install failure after $Point"
+    }
+}
+'@
+$installerSource = Replace-Exactly $installerSource '$ErrorActionPreference = ''Stop''' `
+    ('$ErrorActionPreference = ''Stop''' + $harnessFaultFunction) 'fault function insertion'
+
+$faultAnchors = [ordered]@{
+    model_reference = "        Set-TransactionPhase `$transaction 'model_reference_verified'"
+    candidate_layout = "        Set-TransactionPhase `$transaction 'candidate_layout_created'"
+    secret_copy = '        Assert-OneLineSecret $installedKey'
+    acl = "        Set-NInferProtectedFileAcl `$installedKey$([char]10)        Assert-NInferProtectedStateTree `$StateRoot"
+    controller_copy = '        Copy-Item -LiteralPath $controllerSource -Destination $controllerPath -Force'
+    prepared_pointer = "        Set-TransactionPhase `$transaction 'candidate_prepared'"
+    incumbent_stop = '            & $controllerPath -Action Stop -StateRoot $StateRoot | Out-Null'
+    state_activation = "        Set-TransactionPhase `$transaction 'candidate_activated'"
+    task_registration = '        Register-ReleaseTask $taskName $controllerPath'
+}
+foreach ($entry in $faultAnchors.GetEnumerator()) {
+    $anchor = [string]$entry.Value
+    $indent = [regex]::Match($anchor, '^ *').Value
+    $replacement = $anchor + [char]10 + $indent + "Invoke-NInferHarnessFault '$([string]$entry.Key)'"
+    $installerSource = Replace-Exactly $installerSource $anchor $replacement `
+        "fault point $([string]$entry.Key)"
+}
+
+$candidateStartAnchor = @'
+        if (-not $NoStart) {
+            & $controllerPath -Action Start -StateRoot $StateRoot | Out-Null
+        }
+        $statusOutput = @(& $controllerPath -Action Status -StateRoot $StateRoot)
+'@
+$instrumentedCandidateStart = @'
+        if (-not $NoStart) {
+            & $controllerPath -Action Start -StateRoot $StateRoot | Out-Null
+            Invoke-NInferHarnessFault 'candidate_start'
+        }
+        $statusOutput = @(& $controllerPath -Action Status -StateRoot $StateRoot)
+'@
+$installerSource = Replace-Exactly $installerSource $candidateStartAnchor `
+    $instrumentedCandidateStart 'fault point candidate_start'
+
+$catchAnchor = @'
+    catch {
+        $installFailure = $_
+        try {
+'@
+$instrumentedCatch = @'
+    catch {
+        $installFailure = $_
+        if ([bool]$installFailure.Exception.Data['NInferHarnessInterruption']) {
+            Set-ObjectProperty $transaction 'status' 'repair_required'
+            Set-ObjectProperty $transaction 'phase' 'interrupted'
+            Set-ObjectProperty $transaction 'diagnostics' @(
+                Get-BoundedDiagnostic $installFailure.Exception.Message
+            )
+            Write-InstallTransaction $transaction
+            throw $installFailure
+        }
+        try {
+'@
+$installerSource = Replace-Exactly $installerSource $catchAnchor $instrumentedCatch `
+    'interruption catch'
+
+$InstallerPath = Join-Path $testRoot 'Install-Release.instrumented.ps1'
 [IO.File]::WriteAllText($InstallerPath, $installerSource, [Text.UTF8Encoding]::new($false))
+$instrumentedInstallerSha256 = Get-Sha256 $InstallerPath
 $script:StateRoot = Join-Path $testRoot 'state'
 $script:ModelPath = Join-Path $testRoot 'external-model.ninfer'
 $script:OwnerStatePath = Join-Path $testRoot 'owner-state.json'
@@ -528,8 +689,8 @@ $state | ConvertTo-Json -Compress
 $ownerScript = $ownerScript.Replace('__OWNER_STATE__', $script:OwnerStatePath.Replace("'", "''"))
 [IO.File]::WriteAllText($script:OwnerControllerPath, $ownerScript, [Text.UTF8Encoding]::new($false))
 $global:NInferTestStateRoot = $script:StateRoot
-$originalFault = [Environment]::GetEnvironmentVariable('NINFER_TEST_INSTALL_FAILURE_AFTER', 'Process')
-$originalInterrupt = [Environment]::GetEnvironmentVariable('NINFER_TEST_INSTALL_INTERRUPTION_AFTER', 'Process')
+$originalFault = [Environment]::GetEnvironmentVariable('NINFER_HARNESS_INSTALL_FAILURE_AFTER', 'Process')
+$originalInterrupt = [Environment]::GetEnvironmentVariable('NINFER_HARNESS_INSTALL_INTERRUPTION_AFTER', 'Process')
 
 try {
     $modelBytes = New-Object byte[] 1024
@@ -575,9 +736,8 @@ try {
     Assert-Equal (Get-Sha256 $baseKeyPath) ([string]$baseSecret.sha256) 'installed API key changed'
     Assert-True $global:NInferTestTaskRunning 'clean install did not start the managed task'
     Assert-True ([bool](Get-Content -LiteralPath $script:OwnerStatePath -Raw | ConvertFrom-Json).paused) 'clean install did not pause the prior GPU owner'
-    $keyAcl = @($global:NInferAclCalls | Where-Object { $_ -contains $baseKeyPath })
-    Assert-True ($keyAcl.Count -ge 1) 'installer did not apply an explicit API-key ACL'
-    Assert-True (@($keyAcl | Where-Object { $_ -contains 'SYSTEM:F' -and $_ -contains 'Administrators:F' }).Count -eq 1) 'API-key ACL does not grant only explicit system/admin rights plus operator read'
+    Assert-True ($global:NInferInstrumentedAclApplications -ge 2) `
+        'instrumented installer did not reach the secret ACL application boundary'
 
     $stateShaBeforeIdempotent = Get-Sha256 (Join-Path $script:StateRoot 'state.json')
     $global:NInferBlockedModelPath = (Resolve-Path -LiteralPath $script:ModelPath).Path
@@ -670,24 +830,8 @@ try {
     $upgradeKeyPath = [string]$state.releases.PSObject.Properties[$upgradeId].Value.api_key_file
     Assert-Equal (Get-Sha256 $upgradeKeyPath) ([string]$upgradeSecret.sha256) 'upgrade secret identity mismatch'
     Assert-Equal ([string]$upgradeReceipt.identity.package_sha256) ([string]$upgradePackage.sha256) 'upgrade receipt lost package identity'
-    $stateRootAcl = [Collections.Generic.List[object]]::new()
-    foreach ($call in $global:NInferAclCalls) {
-        $arguments = @($call)
-        if ($arguments -contains $script:StateRoot -and $arguments -contains '/inheritance:r') {
-            $stateRootAcl.Add($arguments)
-        }
-    }
-    Assert-True ($stateRootAcl.Count -ge 1) 'installer did not apply the final state-root ACL'
-    $protectedRootAclFound = $false
-    foreach ($call in $stateRootAcl) {
-        $arguments = @($call)
-        if ($arguments -contains 'SYSTEM:(OI)(CI)F' -and
-            $arguments -contains 'Administrators:(OI)(CI)F' -and
-            $arguments -notcontains ([string]::Concat($env:USERNAME, ':(OI)(CI)M'))) {
-            $protectedRootAclFound = $true
-        }
-    }
-    Assert-True $protectedRootAclFound 'lifecycle fixture did not preserve the protected root ACL call'
+    Assert-True ($global:NInferInstrumentedAclApplications -ge 4) `
+        'instrumented upgrade did not reach both secret ACL application boundaries'
 
     $global:NInferTestDeadReleaseId = $baseId
     $global:NInferTestDeadStartSleptMilliseconds = 0
@@ -735,7 +879,8 @@ try {
     finally { Remove-Item -LiteralPath Function:\Get-FileHash -Force }
     Assert-True ($null -ne $runFailure) 'invalid fixture executable unexpectedly ran'
     Assert-Equal $global:NInferBlockedModelHashCalls 0 'restart path rehashed the external model'
-    Assert-True ($global:NInferExecutableHashCalls -ge 4) 'restart did not verify three binaries and config'
+    Assert-True ($global:NInferExecutableHashCalls -ge 4) `
+        "restart did not verify three binaries and config; observed $global:NInferExecutableHashCalls; failure: $($runFailure.Exception.Message)"
     Assert-True (-not [bool](Get-Content -LiteralPath $script:OwnerStatePath -Raw | ConvertFrom-Json).paused) 'failed run did not restore GPU owner'
 
     & $managedController -Action Start -StateRoot $script:StateRoot | Out-Null
@@ -756,9 +901,15 @@ try {
     Assert-True (-not [bool](Get-Content -LiteralPath $script:OwnerStatePath -Raw | ConvertFrom-Json).paused) 'uninstall did not restore the GPU owner'
 
     [ordered]@{
-        artifact_type = 'ninfer_windows_lifecycle_regression'
-        schema_version = 2
+        artifact_type = 'ninfer_windows_lifecycle_instrumented_regression'
+        schema_version = 3
         status = 'passed'
+        evidence_class = 'generated-instrumented-transaction-harness'
+        production_installer_sha256 = $productionInstallerSha256
+        instrumented_installer_sha256 = $instrumentedInstallerSha256
+        production_installer_executed = $false
+        production_static_identity_gate_markers_verified = 8
+        effective_acl_evidence = $false
         clean_installs = 1
         idempotent_installs = 1
         upgrades = 1
@@ -773,15 +924,15 @@ try {
     } | ConvertTo-Json -Compress
 }
 finally {
-    [Environment]::SetEnvironmentVariable('NINFER_TEST_INSTALL_FAILURE_AFTER', $originalFault, 'Process')
-    [Environment]::SetEnvironmentVariable('NINFER_TEST_INSTALL_INTERRUPTION_AFTER', $originalInterrupt, 'Process')
+    [Environment]::SetEnvironmentVariable('NINFER_HARNESS_INSTALL_FAILURE_AFTER', $originalFault, 'Process')
+    [Environment]::SetEnvironmentVariable('NINFER_HARNESS_INSTALL_INTERRUPTION_AFTER', $originalInterrupt, 'Process')
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
     foreach ($name in @(
             'Get-ScheduledTask', 'Export-ScheduledTask', 'New-ScheduledTaskAction',
             'New-ScheduledTaskTrigger', 'New-ScheduledTaskSettingsSet',
             'New-ScheduledTaskPrincipal', 'Register-ScheduledTask',
             'Unregister-ScheduledTask', 'Start-ScheduledTask', 'Stop-ScheduledTask',
-            'Get-NetTCPConnection', 'Invoke-RestMethod', 'Start-Sleep', 'icacls.exe', 'nvidia-smi.exe'
+            'Get-NetTCPConnection', 'Invoke-RestMethod', 'Start-Sleep', 'nvidia-smi.exe'
         )) {
         Remove-Item -LiteralPath "Function:\$name" -ErrorAction SilentlyContinue
     }

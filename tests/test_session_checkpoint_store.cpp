@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <optional>
@@ -263,6 +264,7 @@ public:
             tenant = checkpoint_namespace.tenant_sha256();
             session = checkpoint_namespace.session_sha256();
             tag.assign(checkpoint_tag);
+            if (checkpoint_hook) { checkpoint_hook(); }
             if (!write_chunked(writer, "engine/state.bin", payload) || fail_checkpoint) {
                 return std::nullopt;
             }
@@ -303,6 +305,7 @@ public:
     int restore_calls    = 0;
     bool fail_checkpoint = false;
     bool fail_restore    = false;
+    std::function<void()> checkpoint_hook;
 };
 
 int test_sha256_streaming() {
@@ -848,6 +851,66 @@ int test_delete_checkpoint_update_fails_closed() {
     return failures;
 }
 
+int test_delete_pins_session_across_cross_session_lru_eviction() {
+    TemporaryDirectory temporary;
+    const std::string tenant = session_checkpoint_tenant_sha256("checkpoint-delete-lru-api-key");
+    const nlohmann::json runtime = fingerprint();
+    ResponseStoreSnapshot snapshot = sample_snapshot();
+    ResponseStore responses(3, 8ULL << 20);
+    for (const StoredResponse& response : snapshot.records) { responses.put(response); }
+
+    ResponseStoreSnapshot unrelated_snapshot = sample_snapshot('b');
+    StoredResponse unrelated = unrelated_snapshot.records.front();
+    unrelated.id = "resp_unrelated_lru_victim";
+    unrelated.response["id"] = unrelated.id;
+    responses.put(unrelated);
+
+    FakeCheckpointEngine engine;
+    SessionCheckpointManager manager(manager_options(temporary.path), runtime, tenant,
+                                     engine.access());
+    const SessionCheckpointSaveOutcome baseline = manager.save(
+        snapshot.client_session_sha256, snapshot.latest_response_id, responses);
+    int failures = 0;
+    failures += check(baseline.state == SessionCheckpointSaveState::Saved && baseline.checkpoint,
+                      "cross-session eviction fixture did not publish its restart baseline");
+    if (!baseline.checkpoint) { return failures; }
+
+    ResponseStoreSnapshot incoming_snapshot = sample_snapshot('c');
+    StoredResponse incoming = incoming_snapshot.records.front();
+    incoming.id = "resp_cross_session_insert";
+    incoming.response["id"] = incoming.id;
+    engine.checkpoint_hook = [&] { responses.put(incoming); };
+
+    const SessionCheckpointEraseResult erased = manager.erase_response(
+        snapshot.client_session_sha256, snapshot.records.front().id, responses);
+    engine.checkpoint_hook = {};
+    failures += check(
+        erased == SessionCheckpointEraseResult::Erased &&
+            !responses.get_for_session(snapshot.records.front().id,
+                                       snapshot.client_session_sha256) &&
+            responses.get_for_session(snapshot.latest_response_id,
+                                      snapshot.client_session_sha256) &&
+            !responses.get_for_session(unrelated.id,
+                                       *unrelated.client_session_sha256) &&
+            responses.get_for_session(incoming.id, *incoming.client_session_sha256),
+        "cross-session LRU insertion evicted or conflicted with the checkpointed DELETE session");
+
+    FakeCheckpointEngine restart_engine;
+    SessionCheckpointManager restarted(manager_options(temporary.path), runtime, tenant,
+                                       restart_engine.access());
+    ResponseStore restarted_responses(3, 8ULL << 20);
+    const SessionCheckpointRestoreState restored = restarted.restore(
+        snapshot.client_session_sha256, snapshot.latest_response_id, restarted_responses);
+    failures += check(
+        restored == SessionCheckpointRestoreState::Restored &&
+            !restarted_responses.get_for_session(snapshot.records.front().id,
+                                                 snapshot.client_session_sha256) &&
+            restarted_responses.get_for_session(snapshot.latest_response_id,
+                                                snapshot.client_session_sha256),
+        "restart disagreed with the successful DELETE after cross-session LRU pressure");
+    return failures;
+}
+
 int test_active_reader_delete_and_gc() {
     TemporaryDirectory temporary;
     const ResponseStoreSnapshot responses = sample_snapshot();
@@ -1106,6 +1169,7 @@ int main() {
     failures += test_transaction_restart_compatibility_and_corruption();
     failures += test_production_manager_restart_and_identity_isolation();
     failures += test_delete_checkpoint_update_fails_closed();
+    failures += test_delete_pins_session_across_cross_session_lru_eviction();
     failures += test_active_reader_delete_and_gc();
     failures += test_store_wide_quota_across_sessions();
     if (failures == 0) { std::cout << "ok\n"; }

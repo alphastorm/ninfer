@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -16,6 +17,99 @@ PWSH = shutil.which("powershell.exe" if sys.platform == "win32" else "pwsh")
 
 
 class WindowsReleaseContractTests(unittest.TestCase):
+    def test_public_beta_receipt_schema_and_asset_binding(self) -> None:
+        receipt_path = (
+            ROOT
+            / "docs/qualification/receipts/qwen3.8-27b-rtx-3090-v0.2.0.json"
+        )
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        self.assertEqual(receipt["artifact_type"], "ninfer_rtx3090_beta_qualification")
+        self.assertEqual(receipt["schema_version"], 3)
+        self.assertEqual(receipt["status"], "passed")
+        self.assertTrue(receipt["beta_qualified"])
+        self.assertFalse(receipt["automatic_route_activation_allowed"])
+        self.assertFalse(receipt["stable_promotion_performed"])
+        self.assertFalse(receipt["production_route_activation_performed"])
+
+        assets = receipt["release_assets"]
+        expected_assets = {
+            "package": "ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.tar.gz",
+            "source_archive": "ninfer-rtx3090-omp-v0.2.0-source.tar.gz",
+            "spdx_sbom": "ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.spdx.json",
+            "checksums": "SHA256SUMS",
+            "package_build_receipt": "package-build-receipt.json",
+        }
+        for name, filename in expected_assets.items():
+            self.assertEqual(assets[name]["filename"], filename)
+            self.assertRegex(assets[name]["sha256"], r"^[0-9a-f]{64}$")
+            self.assertGreater(assets[name]["bytes"], 0)
+
+        def sha256(path: Path) -> str:
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            return digest.hexdigest()
+
+        source_assets = {
+            "installer_sha256": RELEASE / "Install-Release.ps1",
+            "lifecycle_controller_sha256": RELEASE / "Control-Release.ps1",
+            "gpu_owner_controller_sha256": RELEASE / "Control-GpuOwner.ps1",
+            "state_protection_helper_sha256": RELEASE / "Protect-StateRoot.ps1",
+            "qualification_constructor_sha256": RELEASE / "New-QualificationReceipt.ps1",
+        }
+        for field, path in source_assets.items():
+            self.assertEqual(assets[field], sha256(path), field)
+        self.assertEqual(receipt["candidate"]["config_sha256"], sha256(RELEASE / "server-config.json"))
+
+        authority = receipt["qualification_authority"]
+        self.assertEqual(authority["authority"], "this-exact-beta-receipt")
+        self.assertEqual(authority["exact_package_sha256"], assets["package"]["sha256"])
+        self.assertEqual(
+            authority["supersedes_package_build_receipt_qualification_status"],
+            "hardware-pending",
+        )
+        self.assertEqual(
+            authority["supersedes_packaged_release_spec_qualification_status"],
+            "hardware-pending",
+        )
+        self.assertEqual(
+            authority["supersedes_source_archive_receipt_status"],
+            "pending-requalification",
+        )
+        self.assertFalse(authority["historical_build_receipts_mutated"])
+
+        instrumented = receipt["qualification"]["windows_lifecycle_instrumented"]
+        shipped = receipt["qualification"]["windows_lifecycle_shipped"]
+        self.assertEqual(
+            instrumented["evidence_class"], "generated-instrumented-transaction-harness"
+        )
+        self.assertFalse(instrumented["production_installer_executed"])
+        self.assertFalse(instrumented["effective_acl_evidence"])
+        self.assertTrue(shipped["production_installer_executed"])
+        self.assertFalse(shipped["instrumented_harness_used"])
+        self.assertEqual(shipped["installer_sha256"], assets["installer_sha256"])
+
+        disclosure = receipt["public_disclosure"]
+        self.assertEqual(disclosure["policy_version"], 1)
+        self.assertEqual(
+            disclosure["forbidden_marker_classes"],
+            ["private-fleet-identifiers", "private-home-paths", "credential-material"],
+        )
+        self.assertEqual(
+            disclosure["tracked_source_private_marker_or_unclassified_credential_findings"],
+            0,
+        )
+        self.assertEqual(disclosure["binary_package_private_path_findings"], 0)
+        self.assertEqual(disclosure["classified_private_fleet_or_credential_findings"], 0)
+        self.assertFalse(disclosure["private_fleet_projection_included"])
+        self.assertEqual(disclosure["credential_values_recorded"], 0)
+        self.assertRegex(disclosure["raw_scan_sha256"], r"^[0-9a-f]{64}$")
+
+        serialized = json.dumps(receipt, sort_keys=True)
+        self.assertNotIn("gpu_uuid", serialized)
+        self.assertIsNone(re.search(r"(?i)(?:[A-Z]:\\Users\\|/Users/|/home/)", serialized))
+
     def test_pinned_release_and_authenticated_c1_defaults(self) -> None:
         spec = json.loads((RELEASE / "release-spec.json").read_text(encoding="utf-8"))
         config = json.loads((RELEASE / "server-config.json").read_text(encoding="utf-8"))
@@ -76,6 +170,16 @@ class WindowsReleaseContractTests(unittest.TestCase):
             spec["lifecycle"]["gpu_owner_controller_protocol"]["qualified_power_limit_w"],
             300,
         )
+        self.assertEqual(spec["qualification"]["status"], "hardware-pending")
+        self.assertEqual(
+            spec["qualification"]["status_authority"],
+            "immutable-pre-hardware-package-build",
+        )
+        later = spec["qualification"]["later_external_beta_authority"]
+        self.assertEqual(later["artifact_type"], "ninfer_rtx3090_beta_qualification")
+        self.assertEqual(later["schema_version"], 3)
+        self.assertTrue(later["supersedes_only_when_exact_package_sha256_matches"])
+        self.assertFalse(later["mutates_packaged_history"])
 
     def test_controller_server_options_match_runtime(self) -> None:
         controller = (RELEASE / "Control-Release.ps1").read_text(encoding="utf-8")
@@ -148,11 +252,19 @@ class WindowsReleaseContractTests(unittest.TestCase):
         state_protection = (RELEASE / "Protect-StateRoot.ps1").read_text(encoding="utf-8")
         guide = (ROOT / "docs/rtx-3090-windows.md").read_text(encoding="utf-8")
 
-        self.assertNotIn("NINFER_INSTALL_TEST_MODE", installer)
-        self.assertIn("$script:InstallTestMode = $false", installer)
-        self.assertNotIn("[switch]$InternalSourceTestMode", installer)
+        for marker in (
+            "InstallTestMode",
+            "Invoke-InstallFault",
+            "NINFER_TEST_INSTALL_",
+            "NInferSimulatedInterruption",
+            "InternalSourceTestMode",
+        ):
+            self.assertNotIn(marker, installer)
         self.assertIn("Control-GpuOwner.ps1", installer)
         self.assertIn("Initialize-NInferProtectedStateRoot", installer)
+        self.assertIn("Protect-NInferRetainedSecretAcls", installer)
+        self.assertIn("Set-NInferProtectedFileAcl $installedKey", installer)
+        self.assertNotIn("$env:USERNAME", installer)
         self.assertNotIn("':(OI)(CI)M'", installer)
         self.assertNotIn("':(OI)(CI)RX'", installer)
         self.assertGreaterEqual(controller.count("server executable"), 2)
@@ -161,6 +273,9 @@ class WindowsReleaseContractTests(unittest.TestCase):
         self.assertIn("qualifiedPowerLimitW = 300", gpu_owner)
         self.assertIn("Assert-NInferNoReparseTree", state_protection)
         self.assertIn("SetOwner($administrators)", state_protection)
+        self.assertIn("CreateDirectoryW", state_protection)
+        self.assertNotIn("-Recurse -Force -ErrorAction SilentlyContinue", state_protection)
+        self.assertIn("grants access outside SYSTEM or Administrators", state_protection)
         self.assertNotIn("Get-Content .\\SHA256SUMS", guide)
         self.assertIn("components.ninfer_variants", guide)
 
@@ -223,6 +338,18 @@ class PowerShellWindowsReleaseTests(unittest.TestCase):
         self.assertEqual(value["interrupted_repairs"], 2)
         self.assertEqual(value["restart_model_rehash_calls"], 0)
         self.assertEqual(value["uninstalls"], 1)
+        self.assertEqual(
+            value["artifact_type"],
+            "ninfer_windows_lifecycle_instrumented_regression",
+        )
+        self.assertEqual(value["evidence_class"], "generated-instrumented-transaction-harness")
+        self.assertFalse(value["production_installer_executed"])
+        self.assertFalse(value["effective_acl_evidence"])
+        self.assertRegex(value["production_installer_sha256"], r"^[0-9a-f]{64}$")
+        self.assertRegex(value["instrumented_installer_sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotEqual(
+            value["production_installer_sha256"], value["instrumented_installer_sha256"]
+        )
 
     def test_deterministic_assets_and_receipts(self) -> None:
         value = self.run_script(

@@ -12,7 +12,11 @@ param(
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
     [string]$InstallerPath,
 
-    [string]$ReceiptPath
+    [string]$ReceiptPath,
+
+    [string]$ManagedStateRoot,
+
+    [switch]$ExerciseManagedRollback
 )
 
 Set-StrictMode -Version Latest
@@ -27,6 +31,9 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
         status = 'skipped_requires_elevation'
     } | ConvertTo-Json -Compress
     exit 77
+}
+if ($ExerciseManagedRollback -and [string]::IsNullOrWhiteSpace($ManagedStateRoot)) {
+    throw '-ExerciseManagedRollback requires -ManagedStateRoot'
 }
 
 $StateProtectionPath = (Resolve-Path -LiteralPath $StateProtectionPath).Path
@@ -67,6 +74,52 @@ public static class NInferSecurityNative {
 '@
 }
 
+function Get-LowPrivilegeFileDenials(
+    [string]$Path,
+    [string]$User,
+    [string]$Password
+) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "effective-access target is missing: $Path"
+    }
+    $token = [IntPtr]::Zero
+    if (-not [NInferSecurityNative]::LogonUser(
+            $User, $env:COMPUTERNAME, $Password, 2, 0, [ref]$token
+        )) {
+        throw "failed to log on the low-privilege effective-access principal: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
+    $readDenied = $false
+    $writeDenied = $false
+    $impersonation = $null
+    try {
+        $impersonation = [Security.Principal.WindowsIdentity]::Impersonate($token)
+        $stream = $null
+        try {
+            $stream = [IO.File]::Open(
+                $Path, [IO.FileMode]::Open, [IO.FileAccess]::Read,
+                [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+            )
+        }
+        catch [UnauthorizedAccessException] { $readDenied = $true }
+        finally { if ($null -ne $stream) { $stream.Dispose() } }
+
+        $stream = $null
+        try {
+            $stream = [IO.File]::Open(
+                $Path, [IO.FileMode]::Open, [IO.FileAccess]::Write,
+                [IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+            )
+        }
+        catch [UnauthorizedAccessException] { $writeDenied = $true }
+        finally { if ($null -ne $stream) { $stream.Dispose() } }
+    }
+    finally {
+        if ($null -ne $impersonation) { $impersonation.Undo(); $impersonation.Dispose() }
+        [NInferSecurityNative]::CloseHandle($token) | Out-Null
+    }
+    return [pscustomobject]@{ read_denied = $readDenied; write_denied = $writeDenied }
+}
+
 $originalProgramData = $env:ProgramData
 $testRoot = Join-Path $originalProgramData ('NInferSecurityRegression-' + [Guid]::NewGuid().ToString('N'))
 $user = 'NfAcl' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
@@ -81,6 +134,15 @@ try {
     $cleanDefaultRoot = Initialize-NInferProtectedStateRoot $cleanDefaultRoot
     Assert-NInferProtectedAcl $cleanDefaultParent $true
     Assert-NInferProtectedStateTree $cleanDefaultRoot
+
+    $racedRoot = Join-Path $env:ProgramData 'atomic-race-winner'
+    New-Item -ItemType Directory -Path $racedRoot | Out-Null
+    $racedMarker = Join-Path $racedRoot 'attacker-marker.txt'
+    [IO.File]::WriteAllText($racedMarker, 'preserve', [Text.UTF8Encoding]::new($false))
+    Assert-Rejected { New-NInferProtectedDirectoryAtomic $racedRoot } `
+        '*already exists*' 'atomic creation accepted a raced precreated directory'
+    Assert-True (Test-Path -LiteralPath $racedMarker -PathType Leaf) `
+        'atomic creation failure deleted raced precreated state'
     $env:ProgramData = $originalProgramData
 
     & net.exe user $user $password '/add' '/y' | Out-Null
@@ -96,28 +158,9 @@ try {
 
     $adminProbe = Join-Path $protected 'admin-write.txt'
     [IO.File]::WriteAllText($adminProbe, 'admin', [Text.UTF8Encoding]::new($false))
-    $token = [IntPtr]::Zero
-    if (-not [NInferSecurityNative]::LogonUser($user, $env:COMPUTERNAME, $password, 2, 0, [ref]$token)) {
-        throw "failed to log on the low-privilege effective-access principal: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
-    }
-    $lowPrivilegeDenied = $false
-    $impersonation = $null
-    try {
-        $impersonation = [Security.Principal.WindowsIdentity]::Impersonate($token)
-        try {
-            [IO.File]::WriteAllText(
-                (Join-Path $protected 'low-privilege-write.txt'),
-                'forbidden',
-                [Text.UTF8Encoding]::new($false)
-            )
-        }
-        catch [UnauthorizedAccessException] { $lowPrivilegeDenied = $true }
-    }
-    finally {
-        if ($null -ne $impersonation) { $impersonation.Undo(); $impersonation.Dispose() }
-        [NInferSecurityNative]::CloseHandle($token) | Out-Null
-    }
-    Assert-True $lowPrivilegeDenied 'protected root allowed a real low-privilege write'
+    $protectedDenials = Get-LowPrivilegeFileDenials $adminProbe $user $password
+    Assert-True ([bool]$protectedDenials.read_denied -and [bool]$protectedDenials.write_denied) `
+        'protected root allowed real low-privilege read or write access'
 
     $precreated = Join-Path $testRoot 'precreated'
     New-Item -ItemType Directory -Path $precreated | Out-Null
@@ -177,6 +220,95 @@ try {
             [IO.Path]::GetFullPath($requestLogRoot) + [IO.Path]::DirectorySeparatorChar,
             [StringComparison]::OrdinalIgnoreCase
         )) 'request JSONL did not resolve below protected state'
+    $requestLogDenials = Get-LowPrivilegeFileDenials $requestLog $user $password
+    Assert-True ([bool]$requestLogDenials.read_denied -and [bool]$requestLogDenials.write_denied) `
+        'protected request JSONL allowed low-privilege read or write access'
+
+    $managedReleasesVerified = 0
+    $managedRequestLogsVerified = 0
+    $managedRollbackDirections = 0
+    if (-not [string]::IsNullOrWhiteSpace($ManagedStateRoot)) {
+        if (-not (Test-Path -LiteralPath $ManagedStateRoot -PathType Container)) {
+            throw 'managed upgrade state root is missing'
+        }
+        $managedRoot = (Resolve-Path -LiteralPath $ManagedStateRoot).Path
+        Assert-NInferProtectedStateTree $managedRoot
+        $managedController = Join-Path $managedRoot 'Control-Release.ps1'
+        if (-not (Test-Path -LiteralPath $managedController -PathType Leaf)) {
+            throw 'managed release controller is missing'
+        }
+
+        $getManagedState = {
+            Get-Content -LiteralPath (Join-Path $managedRoot 'state.json') -Raw | ConvertFrom-Json
+        }
+        $assertManagedSecrets = {
+            param([object]$State)
+            $hashes = [ordered]@{}
+            foreach ($releaseProperty in @($State.releases.PSObject.Properties)) {
+                $releaseId = [string]$releaseProperty.Name
+                $release = $releaseProperty.Value
+                $expectedDirectory = Join-Path (Join-Path $managedRoot 'secrets') $releaseId
+                $expectedKey = Join-Path $expectedDirectory 'api-key.txt'
+                Assert-True ([string]::Equals(
+                        [IO.Path]::GetFullPath([string]$release.api_key_file),
+                        [IO.Path]::GetFullPath($expectedKey),
+                        [StringComparison]::OrdinalIgnoreCase
+                    )) "retained release secret path mismatch: $releaseId"
+                Assert-NInferProtectedAcl $expectedDirectory $true
+                Assert-NInferProtectedAcl $expectedKey $true
+                $denials = Get-LowPrivilegeFileDenials $expectedKey $user $password
+                Assert-True ([bool]$denials.read_denied -and [bool]$denials.write_denied) `
+                    "retained release secret allowed low-privilege access: $releaseId"
+                $hashes[$releaseId] = (Get-FileHash -Algorithm SHA256 -LiteralPath $expectedKey).Hash.ToLowerInvariant()
+
+                $requestPath = Join-Path ([string]$release.release_root) 'logs\requests.jsonl'
+                if (Test-Path -LiteralPath $requestPath -PathType Leaf) {
+                    Assert-NInferProtectedAcl $requestPath
+                    $requestDenials = Get-LowPrivilegeFileDenials $requestPath $user $password
+                    Assert-True ([bool]$requestDenials.read_denied -and [bool]$requestDenials.write_denied) `
+                        "managed request log allowed low-privilege access: $releaseId"
+                    $script:managedRequestLogsVerified++
+                }
+                $script:managedReleasesVerified++
+            }
+            return $hashes
+        }
+
+        $initialManagedState = & $getManagedState
+        Assert-True (-not [string]::IsNullOrWhiteSpace([string]$initialManagedState.active_release) -and
+            -not [string]::IsNullOrWhiteSpace([string]$initialManagedState.previous_release) -and
+            [string]$initialManagedState.active_release -cne [string]$initialManagedState.previous_release) `
+            'managed state does not contain a completed upgrade with a retained previous release'
+        $initialActive = [string]$initialManagedState.active_release
+        $initialPrevious = [string]$initialManagedState.previous_release
+        $secretHashes = & $assertManagedSecrets $initialManagedState
+
+        if ($ExerciseManagedRollback) {
+            & $managedController -Action Rollback -StateRoot $managedRoot | Out-Null
+            $rolledState = & $getManagedState
+            Assert-True ([string]$rolledState.active_release -ceq $initialPrevious -and
+                [string]$rolledState.previous_release -ceq $initialActive) `
+                'managed rollback did not atomically swap active and previous releases'
+            $rolledHashes = & $assertManagedSecrets $rolledState
+            foreach ($releaseId in $secretHashes.Keys) {
+                Assert-True ([string]$rolledHashes[$releaseId] -ceq [string]$secretHashes[$releaseId]) `
+                    "managed rollback changed a retained release secret: $releaseId"
+            }
+            $managedRollbackDirections++
+
+            & $managedController -Action Rollback -StateRoot $managedRoot | Out-Null
+            $restoredManagedState = & $getManagedState
+            Assert-True ([string]$restoredManagedState.active_release -ceq $initialActive -and
+                [string]$restoredManagedState.previous_release -ceq $initialPrevious) `
+                'reverse managed rollback did not restore the upgraded release'
+            $restoredHashes = & $assertManagedSecrets $restoredManagedState
+            foreach ($releaseId in $secretHashes.Keys) {
+                Assert-True ([string]$restoredHashes[$releaseId] -ceq [string]$secretHashes[$releaseId]) `
+                    "reverse rollback changed a retained release secret: $releaseId"
+            }
+            $managedRollbackDirections++
+        }
+    }
 
     $global:NInferTestPowerLimitW = 370
     $global:NInferTestInteractiveGpuActive = $false
@@ -231,14 +363,26 @@ try {
         & $GpuOwnerControllerPath -Action status -StateRoot $preplantedGpu | Out-Null
     } '*protected state inherits an external DACL*' 'preplanted generic GPU-owner state was accepted'
 
+    $installerSource = Get-Content -LiteralPath $InstallerPath -Raw -Encoding UTF8
+    foreach ($forbidden in @(
+            'InstallTestMode', 'Invoke-InstallFault', 'NINFER_TEST_INSTALL_',
+            'NInferSimulatedInterruption', 'NInferLifecycleHarness'
+        )) {
+        Assert-True (-not $installerSource.Contains($forbidden)) `
+            "shipped installer contains a test bypass or fault hook: $forbidden"
+    }
+
     $receipt = [ordered]@{
         artifact_type = 'ninfer_windows_state_security_regression'
-        schema_version = 1
+        schema_version = 2
         status = 'passed'
         root_owner_sid = $rootOwner
         root_dacl_protected = $true
         clean_default_managed_parent_creations = 2
-        low_privilege_effective_write_denials = 1
+        atomic_race_collision_rejections = 1
+        raced_state_recursive_deletions = 0
+        low_privilege_effective_read_denials = 2
+        low_privilege_effective_write_denials = 2
         precreated_root_rejections = 1
         unowned_root_rejections = 1
         root_junction_rejections = 1
@@ -249,6 +393,10 @@ try {
         qualified_power_limit_w = 300
         restored_power_limit_w = 370
         request_jsonl_under_protected_state = $true
+        request_jsonl_effective_access_denials = 2
+        managed_release_acl_state_assertions = $managedReleasesVerified
+        managed_request_log_acl_state_assertions = $managedRequestLogsVerified
+        managed_rollback_directions = $managedRollbackDirections
         shipped_test_bypass = $false
     }
     if (-not [string]::IsNullOrWhiteSpace($ReceiptPath)) { Write-JsonAtomic $ReceiptPath $receipt }

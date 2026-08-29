@@ -69,6 +69,14 @@
   },
   "qualification": {
     "status": "hardware-pending",
+    "status_authority": "immutable-pre-hardware-package-build",
+    "later_external_beta_authority": {
+      "artifact_type": "ninfer_rtx3090_beta_qualification",
+      "schema_version": 3,
+      "public_receipt_path": "docs/qualification/receipts/qwen3.8-27b-rtx-3090-v0.2.0.json",
+      "supersedes_only_when_exact_package_sha256_matches": true,
+      "mutates_packaged_history": false
+    },
     "required_gates": [
       "gpu-only-thermal-envelope",
       "sm86-driver-hardware-identity",
