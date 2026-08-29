@@ -1,26 +1,166 @@
 {
   "artifact_type": "ninfer_rtx3090_beta_qualification",
-  "schema_version": 1,
-  "status": "candidate_pending_requalification",
-  "beta_qualified": false,
-  "invalidated_utc": "2026-08-28T22:37:25Z",
-  "reason": "Post-review source remediation changed checkpoint deletion semantics and the public Windows package/lifecycle contract; prior package evidence cannot qualify the new candidate.",
-  "previous_qualified_candidate": {
-    "source_commit": "a796e21d057f4c57910d5d6af79eb682bd99cf5c",
-    "server_binary_sha256": "381c65d142f9c9ab8c5c9f17c6e80d87658ebb667ff60f55f25c960f986df8f3",
-    "package_sha256": "96c09f6b6f813328ecf38e0e5dcb2e7ea59e887dec7dd319b64d03d34e4b7325"
+  "schema_version": 2,
+  "status": "passed",
+  "beta_qualified": true,
+  "qualified_utc": "2026-08-29T01:17:44Z",
+  "candidate": {
+    "source_commit": "43ee45e7599f70e9c76b4a57274e5075704afdb8",
+    "upstream_base_commit": "ef6ecc3c139b43fc4d3e1b92df474305e8429544",
+    "lineage_base_commit": "c467349e375d6aa76afca63c0042bbc0869549aa",
+    "server_binary_sha256": "63302aa2b3761ec6fff0783f4128544e9d8c36a675c9f7cef91c1277fefda12c",
+    "cli_binary_sha256": "614a8bfa7b80be0d3492f2721733a69baa759a5cfdadaca8029832f788ed05f8",
+    "benchmark_binary_sha256": "730c6299f6c5c0a158f4cce41ad13d723983ded181e46f4e9b2b15ec87efdd01",
+    "config_sha256": "9a6ddc78992d6342913d991d26dfae26fc1a58f228746aa6d3b914067f4a1479",
+    "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e"
   },
-  "required_requalification": [
-    "clean sm_86 build and Windows release tests",
-    "immutable package and public support-asset hashes",
-    "packaged authenticated agent protocol",
-    "exact 64K context retrieval",
-    "process-restart checkpoint continuation including failed-delete durability",
-    "bounded performance at the qualified GPU cap",
-    "bidirectional managed rollback",
-    "OMP client typed-tool continuation",
-    "public-byte disclosure and credential scan"
-  ],
+  "platform": {
+    "gpu": "NVIDIA GeForce RTX 3090",
+    "vram_mib": 24576,
+    "cuda_architecture": "sm_86",
+    "driver_version": "616.56",
+    "operating_system": "Microsoft Windows 11 Pro 10.0.26200 build 26200",
+    "qualified_power_limit_w": 300,
+    "single_gpu": true
+  },
+  "release_assets": {
+    "package": {
+      "filename": "ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.tar.gz",
+      "sha256": "dddf0da2d287a85fe1235158aac65c804d421ffb0d4ac8b537d8e552426803d5",
+      "bytes": 813763405
+    },
+    "source_archive": {
+      "filename": "ninfer-rtx3090-omp-v0.2.0-source.tar.gz",
+      "sha256": "27a3d3448cba79e824e00cbb97eda37d3cedf03b7dbf632aa5311b447e9ca50a"
+    },
+    "spdx_sbom": {
+      "filename": "ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.spdx.json",
+      "sha256": "316cf52f58a20f74db2857df9317f69d81f3e60fce3962939f3d222d28bcbb2c"
+    },
+    "checksums_sha256": "f691e4257fa3bfb72abc75fe7034a24ee6b84b58ee5aaa71238c57de3945db5c",
+    "inner_checksums_sha256": "1ceef16923093a81136603f69d467315483f2de2da7b1c58ffb80b85446ab83d",
+    "package_build_receipt_sha256": "f6b18d52823afff71a16f4aac1916a6ae775883db49d52ae445fbe82e89f0bc2",
+    "installer_sha256": "8f79b4a022a93cc324a5780e0b8c9d86ea99b130013238443bf4ccca4017b415",
+    "lifecycle_controller_sha256": "274b1e689c02f28d1d8ed1466e9903a5c5af54bde9fa877c10003c399f942977",
+    "gpu_owner_controller_sha256": "8961573490df7d838e3a2f8b37be1c7a5c39fde57ba4bd48747dce7d3dd72486",
+    "state_protection_helper_sha256": "4151166b62ad90ce9ff897b3fc3e6dd21d1396f6806585aa3555b88cb760b8d1"
+  },
+  "qualification": {
+    "authenticated_agent_protocol": {
+      "status": "passed",
+      "checks_passed": 15,
+      "checks_total": 15,
+      "receipt_sha256": "6634e70ed0842639e306b9de25be499cdbf4b3bdd036ff943010b8c605c88cf2"
+    },
+    "long_context_64k": {
+      "status": "passed",
+      "prompt_tokens": 64512,
+      "completion_tokens": 17,
+      "elapsed_seconds": 81.51650320000772,
+      "exact_output": "ORCHID=493817; COLOR=COBALT",
+      "receipt_sha256": "c156cd588b1b13284964eae16a23dfee04e157231553794e171224d91dfa6a14"
+    },
+    "checkpoint_process_restart": {
+      "status": "passed",
+      "old_pid": 13600,
+      "new_pid": 2180,
+      "checkpoint_files": 58,
+      "checkpoint_bytes": 2187602719,
+      "cached_input_tokens": 45,
+      "continuation_elapsed_seconds": 3.199422300007427,
+      "exact_output": "CHECKPOINT-3090-731942",
+      "failed_delete_commit_regression": "passed",
+      "receipt_sha256": "790888e39bcdd00cdf6bfea8083e534267808ff5910d479f8491584685ac9926"
+    },
+    "performance": {
+      "status": "passed",
+      "cohort": 1,
+      "generation_tokens": 1024,
+      "decode_tokens_per_second": 76.13985281913642,
+      "prefill_prompt_tokens": 4403,
+      "prefill_tokens_per_second": 942.2529887428052,
+      "max_power_w": 300.08,
+      "max_temperature_c": 49,
+      "max_gpu_utilization_percent": 100,
+      "max_memory_used_mib": 20515,
+      "receipt_sha256": "00102d137c03f1b7ac7fc567363abcd42dffe58119e0f2c6872f17dfb1895e15"
+    },
+    "windows_lifecycle": {
+      "status": "passed",
+      "clean_installs": 1,
+      "idempotent_installs": 1,
+      "upgrades": 1,
+      "injected_failures": 10,
+      "interrupted_repairs": 2,
+      "dead_start_rejections": 1,
+      "exact_rollbacks": 1,
+      "restart_model_rehash_calls": 0,
+      "uninstalls": 1,
+      "external_model_copies": 0,
+      "secret_values_recorded": 0,
+      "receipt_sha256": "3616f0e437187d760dbc5655545909f84248db9719f78754bb92eab180570086"
+    },
+    "windows_release_assets": {
+      "status": "passed",
+      "deterministic_packages": 2,
+      "package_members_verified": 14,
+      "public_listen_rejections": 1,
+      "secret_free_receipts": 3,
+      "receipt_sha256": "d208a5d6385cb9dfc5e2546662cea335c372a1c180d4d1713a93bbc07f13b86f"
+    },
+    "windows_state_security": {
+      "status": "passed",
+      "root_dacl_protected": true,
+      "low_privilege_effective_write_denials": 1,
+      "precreated_or_unowned_root_rejections": 2,
+      "root_or_child_junction_rejections": 2,
+      "preplanted_gpu_owner_rejections": 1,
+      "installer_prewrite_root_rejections": 3,
+      "active_interactive_gpu_rejections": 1,
+      "request_log_under_protected_state": true,
+      "shipped_test_bypass": false,
+      "restored_power_limit_w": 370,
+      "receipt_sha256": "2c44884e9c003f0a67c4d0db1cebe0d2801056b43f9f9dabbaf7f212387daba0"
+    },
+    "omp_windows_client": {
+      "status": "passed",
+      "omp_version": "omp/18.0.9",
+      "archive_sha256": "0256dc25174766c5cdaca23e4e4361e0b95295cd05a075089a6bbf10de170ef9",
+      "binary_sha256": "cd107c9b89d351d0a6c2243ba9f89a7db97a5e2cbb60213a6f984399bd135a81",
+      "events": 55,
+      "typed_tool_name": "read",
+      "tool_results": 1,
+      "exact_final_answer": true
+    },
+    "public_disclosure": {
+      "status": "passed_with_classified_generic_references",
+      "tracked_source_files_scanned": 1052,
+      "tracked_source_private_marker_or_unclassified_credential_findings": 0,
+      "release_bytes_scanned": 2081507556,
+      "release_files_scanned": 1088,
+      "binary_package_private_path_findings": 0,
+      "source_archive_generic_path_references": 11,
+      "classified_private_fleet_or_credential_findings": 0,
+      "raw_scan_sha256": "b5fafe7e71f1831c85450160125ad6151f1efc15c5304cb44fe30067a655ddf1"
+    }
+  },
+  "scope": {
+    "supported_clients": [
+      "OMP 18.0.9 Windows x64"
+    ],
+    "supported_api_surfaces": [
+      "OpenAI Responses API",
+      "Anthropic Messages API",
+      "typed tool calls",
+      "checkpoint continuation"
+    ],
+    "limitations": [
+      "Beta only; no stable or GA promotion.",
+      "Single RTX 3090 at cohort 1 is qualified; multi-GPU and higher-concurrency claims are excluded.",
+      "CPU, mixed CPU/GPU, and overnight thermal qualification are excluded pending sf-old coolant maintenance.",
+      "The 64K retrieval gate qualifies 64,512 prompt tokens; it is not a 128K claim."
+    ]
+  },
   "automatic_route_activation_allowed": false,
   "stable_promotion_performed": false,
   "production_route_activation_performed": false,
