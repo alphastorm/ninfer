@@ -253,6 +253,7 @@ function New-FixturePackage(
         [Text.UTF8Encoding]::new($false)
     )
     Copy-Item -LiteralPath $ControllerPath -Destination (Join-Path $payload 'Control-Release.ps1')
+    Copy-Item -LiteralPath $script:OwnerControllerPath -Destination (Join-Path $payload 'Control-GpuOwner.ps1')
     Copy-Item -LiteralPath $InstallerPath -Destination (Join-Path $payload 'Install-Release.ps1')
     Copy-Item -LiteralPath $script:StateHelperPath -Destination (Join-Path $payload 'Protect-StateRoot.ps1')
     [IO.File]::WriteAllText(
