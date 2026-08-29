@@ -181,12 +181,13 @@ try {
     $global:NInferTestPowerLimitW = 370
     $global:NInferTestInteractiveGpuActive = $false
     function global:nvidia-smi.exe {
-        param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Arguments)
-        $values = @($Arguments | ForEach-Object { [string]$_ })
+        [CmdletBinding()]
+        param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Remaining)
+        $values = @($Remaining | ForEach-Object { [string]$_ })
         if ($values -contains '--query-gpu=power.limit') {
-            [Console]::Out.WriteLine(([double]$global:NInferTestPowerLimitW).ToString(
-                    '0.00', [Globalization.CultureInfo]::InvariantCulture
-                ))
+            ([double]$global:NInferTestPowerLimitW).ToString(
+                '0.00', [Globalization.CultureInfo]::InvariantCulture
+            )
         }
         elseif ($values.Count -ge 2 -and $values[0] -ceq '-pl') {
             $global:NInferTestPowerLimitW = [int]$values[1]
