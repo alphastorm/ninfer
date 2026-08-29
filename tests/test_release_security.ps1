@@ -345,20 +345,18 @@ try {
         $gpuOwnerSource = (Get-Content -LiteralPath $GpuOwnerControllerPath -Raw -Encoding UTF8).Replace(
             [string]([char]13 + [char]10), [string][char]10
         )
-        $trustedResolver = @'
-$nvidiaSmi = Join-Path ([Environment]::GetFolderPath('System')) 'nvidia-smi.exe'
-if (-not (Test-Path -LiteralPath $nvidiaSmi -PathType Leaf)) {
-    $nvidiaSmi = Join-Path $env:ProgramFiles 'NVIDIA Corporation\NVSMI\nvidia-smi.exe'
-}
-if (-not (Test-Path -LiteralPath $nvidiaSmi -PathType Leaf)) {
-    throw 'trusted nvidia-smi installation is missing'
-}
-'@
         $fixtureResolver = '$nvidiaSmi = ''nvidia-smi.exe'''
-        if ([regex]::Matches($gpuOwnerSource, [regex]::Escape($trustedResolver)).Count -ne 1) {
+        $resolverStartMarker = '$nvidiaSmi = Join-Path ([Environment]::GetFolderPath(''System'')) ''nvidia-smi.exe'''
+        $resolverEndMarker = "    throw 'trusted nvidia-smi installation is missing'`n}"
+        $resolverStart = $gpuOwnerSource.IndexOf($resolverStartMarker, [StringComparison]::Ordinal)
+        $resolverEnd = $gpuOwnerSource.IndexOf($resolverEndMarker, [StringComparison]::Ordinal)
+        if ($resolverStart -lt 0 -or $resolverEnd -lt $resolverStart -or
+            $gpuOwnerSource.LastIndexOf($resolverStartMarker, [StringComparison]::Ordinal) -ne $resolverStart) {
             throw 'GPU-owner trusted resolver fixture anchor changed'
         }
-        $gpuOwnerSource = $gpuOwnerSource.Replace($trustedResolver, $fixtureResolver)
+        $resolverEnd += $resolverEndMarker.Length
+        $gpuOwnerSource = $gpuOwnerSource.Substring(0, $resolverStart) + $fixtureResolver +
+            $gpuOwnerSource.Substring($resolverEnd)
         $instrumentedGpuOwner = Join-Path $testRoot 'Control-GpuOwner.instrumented.ps1'
         [IO.File]::WriteAllText($instrumentedGpuOwner, $gpuOwnerSource, [Text.UTF8Encoding]::new($false))
         Copy-Item -LiteralPath $StateProtectionPath -Destination (Join-Path $testRoot 'Protect-StateRoot.ps1')
