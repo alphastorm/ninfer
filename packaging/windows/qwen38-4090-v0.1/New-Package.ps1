@@ -16,6 +16,9 @@ param(
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
     [string]$QualificationRecord = (Join-Path $PSScriptRoot '../../../docs/qualification/qwen3.8-27b-rtx-4090-v0.1.json'),
 
+    [Parameter(Mandatory = $true)]
+    [string]$SbomCreatedUtc,
+
     [string]$OutputDirectory = (Join-Path $PSScriptRoot 'out')
 )
 
@@ -181,13 +184,14 @@ $bin = Join-Path $payload 'bin'
 New-Item -ItemType Directory -Force -Path $bin | Out-Null
 
 $zipPath = Join-Path $outputRoot "$assetStem.zip"
+$sbomPath = Join-Path $outputRoot "$assetStem.spdx.json"
 $qualificationPath = Join-Path $outputRoot "$assetStem-qualification.json"
 $installerAsset = Join-Path $outputRoot 'Install-Release.ps1'
 $controllerAsset = Join-Path $outputRoot 'Control-Release.ps1'
 $gpuOwnerAsset = Join-Path $outputRoot 'Control-GpuOwner.ps1'
 $stateProtectionAsset = Join-Path $outputRoot 'Protect-StateRoot.ps1'
 $shaSumsPath = Join-Path $outputRoot 'SHA256SUMS'
-foreach ($path in @($zipPath, $qualificationPath, $installerAsset, $controllerAsset, $gpuOwnerAsset, $stateProtectionAsset, $shaSumsPath)) {
+foreach ($path in @($zipPath, $sbomPath, $qualificationPath, $installerAsset, $controllerAsset, $gpuOwnerAsset, $stateProtectionAsset, $shaSumsPath)) {
     Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
 }
 
@@ -295,6 +299,17 @@ try {
     Compress-Archive -LiteralPath $payload -DestinationPath $zipPath -CompressionLevel Optimal
     $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $zipPath).Hash.ToLowerInvariant()
     $runtimeDllCount = @(Get-ChildItem -LiteralPath $bin -File -Filter '*.dll').Count
+    $python = (Get-Command python.exe -ErrorAction Stop).Source
+    & $python (Join-Path $PSScriptRoot 'new_sbom.py') --archive $zipPath --output $sbomPath --release-tag 'v0.1.0-qwen38-4090-beta.1' --source-commit $PatchStackSha --created $SbomCreatedUtc | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $sbomPath -PathType Leaf)) {
+        throw 'package-owned SPDX generation failed'
+    }
+    $sbom = Read-JsonFile $sbomPath
+    if ([string]$sbom.spdxVersion -cne 'SPDX-2.3' -or
+        @($sbom.files).Count -ne ($checksumEntries.Count + 1)) {
+        throw 'package-owned SPDX inventory does not match ZIP members'
+    }
+    $sbomSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $sbomPath).Hash.ToLowerInvariant()
 
     Set-JsonProperty $qualification 'release_id' ([string]$manifest.release_instance_id)
     Set-JsonProperty $qualification 'release_version' $releaseVersion
@@ -309,6 +324,12 @@ try {
             release_manifest_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant()
             installer_sha256 = [string]$manifest.installer_sha256
             controller_sha256 = [string]$manifest.controller_sha256
+            sbom = [ordered]@{
+                filename = [IO.Path]::GetFileName($sbomPath)
+                sha256 = $sbomSha256
+                size_bytes = (Get-Item -LiteralPath $sbomPath).Length
+                files_analyzed = @($sbom.files).Count
+            }
         })
     [IO.File]::WriteAllText(
         $qualificationPath,
@@ -320,7 +341,7 @@ try {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Control-Release.ps1') -Destination $controllerAsset
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Control-GpuOwner.ps1') -Destination $gpuOwnerAsset
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Protect-StateRoot.ps1') -Destination $stateProtectionAsset
-    $assets = @($zipPath, $qualificationPath, $installerAsset, $controllerAsset, $gpuOwnerAsset, $stateProtectionAsset) |
+    $assets = @($zipPath, $sbomPath, $qualificationPath, $installerAsset, $controllerAsset, $gpuOwnerAsset, $stateProtectionAsset) |
         Sort-Object { [IO.Path]::GetFileName($_) }
     $sumLines = foreach ($asset in $assets) {
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant()
@@ -341,12 +362,18 @@ try {
         package_sha256 = $zipHash
         package_bytes = (Get-Item -LiteralPath $zipPath).Length
         package_file = [IO.Path]::GetFileName($zipPath)
+        sbom_file = [IO.Path]::GetFileName($sbomPath)
+        sbom_sha256 = $sbomSha256
+        sbom_bytes = (Get-Item -LiteralPath $sbomPath).Length
+        sbom_files_analyzed = @($sbom.files).Count
         qualification_file = [IO.Path]::GetFileName($qualificationPath)
         qualification_status = [string]$qualification.status
         release_eligible_at_assembly = [bool]$qualification.release_eligible
         external_final_qualification_required = $true
         candidate_status_superseded = [bool]$qualification.authority.supersedes_package_candidate_status
         checksum_file = [IO.Path]::GetFileName($shaSumsPath)
+        checksum_entries = $sumLines.Count
+        checksum_line_ending = 'LF'
         installer_file = [IO.Path]::GetFileName($installerAsset)
         controller_file = [IO.Path]::GetFileName($controllerAsset)
         gpu_owner_controller_file = [IO.Path]::GetFileName($gpuOwnerAsset)

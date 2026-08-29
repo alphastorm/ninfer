@@ -28,6 +28,7 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ('ninfer-release-assets-' + [Guid]:
 New-Item -ItemType Directory -Path $root | Out-Null
 $patchSha = '028030476c96c71f783b6d8b1abb90684e0b8066'
 $assetStem = 'ninfer-4090-qwen38-v0.1.0-win-x64'
+$sbomCreatedUtc = '2026-08-29T00:00:00Z'
 
 try {
     $windowsFixture = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
@@ -126,7 +127,7 @@ try {
     $passedRedOut = Join-Path $root 'out-passed-red'
     $passedRedRejected = $false
     try {
-        & $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $passedRedPath -OutputDirectory $passedRedOut | Out-Null
+        & $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $passedRedPath -SbomCreatedUtc $sbomCreatedUtc -OutputDirectory $passedRedOut | Out-Null
     }
     catch { $passedRedRejected = $_.Exception.Message -ceq 'qualification record claims passed while required release gates remain incomplete' }
     Assert-True $passedRedRejected 'passed qualification with red gate was accepted'
@@ -141,7 +142,7 @@ try {
     try {
         & $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha `
             -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath `
-            -QualificationRecord $wrongQualificationPath -OutputDirectory $wrongOut | Out-Null
+            -QualificationRecord $wrongQualificationPath -SbomCreatedUtc $sbomCreatedUtc -OutputDirectory $wrongOut | Out-Null
     }
     catch {
         if ($_.Exception.Message -cne 'qualification record artifact hashes do not match the release inputs') {
@@ -161,7 +162,7 @@ try {
     try {
         & $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha `
             -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $wrongSemanticConfigPath `
-            -QualificationRecord $qualificationPath -OutputDirectory $wrongSemanticOut | Out-Null
+            -QualificationRecord $qualificationPath -SbomCreatedUtc $sbomCreatedUtc -OutputDirectory $wrongSemanticOut | Out-Null
     }
     catch {
         if ($_.Exception.Message -cne 'qualification record artifact hashes do not match the release inputs') {
@@ -175,13 +176,15 @@ try {
     $out = Join-Path $root 'out'
     $receipt = ((& $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha `
             -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath `
-            -QualificationRecord $qualificationPath -OutputDirectory $out) | Out-String) | ConvertFrom-Json
+            -QualificationRecord $qualificationPath -SbomCreatedUtc $sbomCreatedUtc `
+            -OutputDirectory $out) | Out-String) | ConvertFrom-Json
     Assert-True ([string]$receipt.package_file -ceq "$assetStem.zip") 'package filename mismatch'
 
     $crlfOut = Join-Path $root 'out-crlf'
     $crlfReceipt = ((& $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha `
             -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $crlfConfigPath `
-            -QualificationRecord $qualificationPath -OutputDirectory $crlfOut) | Out-String) | ConvertFrom-Json
+            -QualificationRecord $qualificationPath -SbomCreatedUtc $sbomCreatedUtc `
+            -OutputDirectory $crlfOut) | Out-String) | ConvertFrom-Json
     Assert-True ([string]$crlfReceipt.package_file -ceq "$assetStem.zip") 'CRLF package filename mismatch'
 
     $expectedAssets = @(
@@ -190,6 +193,7 @@ try {
         'Install-Release.ps1',
         'Protect-StateRoot.ps1',
         'SHA256SUMS',
+        "$assetStem.spdx.json",
         "$assetStem-qualification.json",
         "$assetStem.zip"
     ) | Sort-Object
@@ -200,13 +204,24 @@ try {
     }
 
     $sumLines = @(Get-Content -LiteralPath (Join-Path $out 'SHA256SUMS') -Encoding UTF8)
-    Assert-True ($sumLines.Count -eq 6) 'SHA256SUMS must cover six non-self assets'
+    Assert-True ($sumLines.Count -eq 7) 'SHA256SUMS must cover seven non-self assets including SPDX'
+    $sumBytes = [IO.File]::ReadAllBytes((Join-Path $out 'SHA256SUMS'))
+    Assert-True ($sumBytes.Length -ne 0 -and $sumBytes[-1] -eq 10 -and
+        $sumBytes -notcontains 13) 'SHA256SUMS must use one terminal LF and no CR bytes'
+    $sumNames = [Collections.Generic.List[string]]::new()
     foreach ($line in $sumLines) {
         if ($line -notmatch '^([0-9a-f]{64})  (.+)$') { throw 'invalid SHA256SUMS line' }
         $asset = Join-Path $out $Matches[2]
         Assert-True (Test-Path -LiteralPath $asset -PathType Leaf) 'SHA256SUMS names a missing asset'
         $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant()
         Assert-True ($actual -ceq $Matches[1]) 'SHA256SUMS hash mismatch'
+        $sumNames.Add([string]$Matches[2])
+    }
+    $expectedSumNames = @($expectedAssets | Where-Object { $_ -cne 'SHA256SUMS' } | Sort-Object)
+    $actualSumNames = @($sumNames | Sort-Object)
+    Assert-True ($actualSumNames.Count -eq $expectedSumNames.Count) 'SHA256SUMS filename set size mismatch'
+    for ($index = 0; $index -lt $expectedSumNames.Count; $index++) {
+        Assert-True ($actualSumNames[$index] -ceq $expectedSumNames[$index]) 'SHA256SUMS filename set mismatch'
     }
 
     $expanded = Join-Path $root 'expanded'
@@ -261,7 +276,16 @@ try {
     $qualification = Get-Content -LiteralPath (Join-Path $out "$assetStem-qualification.json") -Raw |
         ConvertFrom-Json
     $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out "$assetStem.zip")).Hash.ToLowerInvariant()
+    $sbomPath = Join-Path $out "$assetStem.spdx.json"
+    $sbom = Get-Content -LiteralPath $sbomPath -Raw | ConvertFrom-Json
     Assert-True ([string]$qualification.package.sha256 -ceq $zipHash) 'qualification is not bound to archive hash'
+    Assert-True ([string]$qualification.package.sbom.sha256 -ceq
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $sbomPath).Hash.ToLowerInvariant()) 'qualification is not bound to package-owned SPDX'
+    Assert-True ([string]$receipt.sbom_file -ceq "$assetStem.spdx.json" -and
+        [string]$receipt.sbom_sha256 -ceq [string]$qualification.package.sbom.sha256 -and
+        [int]$receipt.sbom_files_analyzed -eq @($sbom.files).Count) 'package receipt omitted SPDX authority'
+    Assert-True ([int]$receipt.checksum_entries -eq 7 -and
+        [string]$receipt.checksum_line_ending -ceq 'LF') 'package receipt checksum contract mismatch'
     Assert-True ([int]$qualification.package.runtime_dlls -eq 2) 'qualification runtime DLL count mismatch'
     Assert-True ([string]$qualification.status -ceq 'candidate_ready') 'package builder changed candidate qualification status'
     Assert-True ($qualification.release_eligible -eq $false) 'assembled package sidecar claims release eligibility'

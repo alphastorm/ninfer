@@ -2,9 +2,9 @@
 
 ## Verdict
 
-**Beta-qualified for RTX 4090 support at corrected runtime `02803047…`.** The prior qualification at `683f8817…` and package `5bef6ad5…` are superseded and must not ship: that runtime could durably lose surviving stored-response descendants when DELETE checkpoint publication failed.
+**Superseded after focused review; this qualification and package must not ship.** A replacement is being rebuilt and every runtime-dependent gate must pass again before beta eligibility can be restored.
 
-The corrected package passed every runtime-dependent gate again. No prior protocol, long-context, performance, or Golden result was inherited. No stable or public release and no permanent route change was performed. The historical private corpus is unavailable and was not reused, read, copied, hashed, or transmitted.
+The evidence below is retained only as the superseded candidate record and does not confer current eligibility. No stable or public release and no permanent route change was performed. The historical private corpus is unavailable and was not reused, read, copied, hashed, or transmitted.
 
 ## Exact identities
 

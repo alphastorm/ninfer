@@ -177,13 +177,19 @@ function Get-GpuOwner([object]$State) {
     $owner = $property.Value
     Assert-FileHash ([string]$owner.controller_path) ([string]$owner.controller_sha256) `
         'GPU-owner controller'
+    $ownerStateProperty = $owner.PSObject.Properties['state_root']
+    $expectedOwnerState = Join-Path $StateRoot 'gpu-owner-state'
+    if ($null -eq $ownerStateProperty -or
+        -not (Test-SamePath ([string]$ownerStateProperty.Value) $expectedOwnerState)) {
+        throw 'GPU-owner protected state root identity mismatch'
+    }
     return $owner
 }
 
 function Invoke-GpuOwner([object]$State, [ValidateSet('status', 'stop', 'start')][string]$OwnerAction) {
     $owner = Get-GpuOwner $State
     if ($null -eq $owner) { return $null }
-    $output = ((& ([string]$owner.controller_path) -Action $OwnerAction) | Out-String).Trim()
+    $output = ((& ([string]$owner.controller_path) -Action $OwnerAction -StateRoot ([string]$owner.state_root)) | Out-String).Trim()
     if ($OwnerAction -cne 'status') { return $null }
     if ([string]::IsNullOrWhiteSpace($output)) { throw 'GPU-owner status returned no JSON' }
     $status = $output | ConvertFrom-Json
@@ -214,6 +220,9 @@ function Acquire-GpuOwnerLease {
         if ([string]$lease.controller_sha256 -cne [string]$owner.controller_sha256) {
             throw 'GPU-owner lease controller identity mismatch'
         }
+        if (-not (Test-SamePath ([string]$lease.owner_state_root) ([string]$owner.state_root))) {
+            throw 'GPU-owner lease state-root identity mismatch'
+        }
         $current = Invoke-GpuOwner $state 'status'
         if ([string]$lease.phase -cne 'released' -or -not [bool]$current.paused) {
             Invoke-GpuOwner $state 'stop' | Out-Null
@@ -233,6 +242,7 @@ function Acquire-GpuOwnerLease {
         schema_version = 1
         release_id = [string]$state.active_release
         controller_sha256 = [string]$owner.controller_sha256
+        owner_state_root = [string]$owner.state_root
         prior_paused = [bool]$before.paused
         phase = 'captured'
         acquired_utc = [DateTime]::UtcNow.ToString('o')
@@ -272,7 +282,8 @@ function Restore-GpuOwnerLease {
     $state = Get-State
     $owner = Get-GpuOwner $state
     if ($null -eq $owner -or
-        [string]$lease.controller_sha256 -cne [string]$owner.controller_sha256) {
+        [string]$lease.controller_sha256 -cne [string]$owner.controller_sha256 -or
+        -not (Test-SamePath ([string]$lease.owner_state_root) ([string]$owner.state_root))) {
         throw 'cannot restore GPU owner with a different controller identity'
     }
     if ([bool]$lease.prior_paused) {

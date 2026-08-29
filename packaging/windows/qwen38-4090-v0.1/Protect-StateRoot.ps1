@@ -40,6 +40,15 @@ function Assert-NInferNoReparseTree([string]$Path) {
 function Assert-NInferProtectedAcl([string]$Path, [bool]$RequireProtectedDacl = $false) {
     $allowed = Get-NInferAllowedOwnerSidValues
     $acl = Get-Acl -LiteralPath $Path
+    $descriptor = [Security.AccessControl.RawSecurityDescriptor]::new(
+        $acl.GetSecurityDescriptorBinaryForm(),
+        0
+    )
+    if (($descriptor.ControlFlags -band
+            [Security.AccessControl.ControlFlags]::DiscretionaryAclPresent) -eq 0 -or
+        $null -eq $descriptor.DiscretionaryAcl) {
+        throw "protected state has a NULL DACL: $Path"
+    }
     $ownerSid = ConvertFrom-NInferOwnerString ([string]$acl.Owner)
     if ($allowed -cnotcontains $ownerSid) {
         throw "protected state owner is not SYSTEM or Administrators: $Path"

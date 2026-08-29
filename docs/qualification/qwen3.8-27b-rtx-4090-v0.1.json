@@ -1,10 +1,10 @@
 {
   "artifact_type": "ninfer_public_windows_release_qualification",
   "schema_version": 1,
-  "status": "passed",
+  "status": "superseded_focused_review_red",
   "qualification_level": "beta",
-  "beta_support_qualified": true,
-  "release_eligible": true,
+  "beta_support_qualified": false,
+  "release_eligible": false,
   "release_id": "qwen38-4090-v0.1",
   "release_version": "0.1.0",
   "qualification_target": {
@@ -140,9 +140,9 @@
     "real_upgrade_rollback_retained_secret_acl": "passed"
   },
   "authority": {
-    "role": "external-final-qualification-authority",
-    "supersedes_package_candidate_status": true,
-    "superseded_status": "candidate_ready",
+    "role": "superseded-qualification-record",
+    "supersedes_package_candidate_status": false,
+    "superseded_status": "focused_review_red",
     "binding": "SHA256SUMS-bound-sidecar",
     "sidecar_filename": "ninfer-4090-qwen38-v0.1.0-win-x64-qualification.json",
     "supersedes_qualification_commit": "683f8817badc2e30942fe8c1213e78cdea6571ba",
@@ -167,5 +167,5 @@
   "stable_release_performed": false,
   "stable_promotion_performed": false,
   "permanent_route_mutation": false,
-  "decision": "Corrected RTX 4090 support is beta-qualified at the exact hardened generic-profile identities above; the prior qualification and package are superseded, and no stable or public release was performed."
+  "decision": "Superseded after focused review; this qualification and package must not ship."
 }

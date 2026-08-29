@@ -66,6 +66,14 @@ def iter_strings(value: object):
             yield from iter_strings(child)
 
 
+def powershell_code_without_literals(text: str) -> str:
+    text = re.sub(r'(?ms)^@".*?^"@', "", text)
+    text = re.sub(r"(?ms)^@'.*?^'@", "", text)
+    text = re.sub(r"'(?:''|[^'])*'", "", text)
+    text = re.sub(r'"[^"\n]*"', "", text)
+    return re.sub(r"(?m)#.*$", "", text)
+
+
 class ReleaseAuthorityTest(unittest.TestCase):
     def test_public_authorities_have_one_eligible_identity_lineage(self) -> None:
         self.assertFalse(STALE_REVIEW_CLOSURE.exists())
@@ -162,7 +170,11 @@ class ReleaseAuthorityTest(unittest.TestCase):
         self.assertEqual(lifecycle["evidence_class"], "instrumented-unshipped-installer-lifecycle")
         self.assertIs(lifecycle["exact_shipped_installer_executed"], False)
         self.assertEqual(lifecycle["published_installer_callable_test_hooks"], 0)
-        self.assertIs(lifecycle["real_acl_evidence_included"], False)
+        self.assertEqual(
+            lifecycle["state_protection_evidence_class"], "exact-shipped-helper-real-acl"
+        )
+        self.assertIs(lifecycle["state_protection_stubbed"], False)
+        self.assertIs(lifecycle["real_acl_evidence_included"], True)
         self.assertEqual(
             state_security["evidence_class"],
             "exact-shipped-state-helper-and-installer-prewrite-real-acl",
@@ -253,6 +265,31 @@ class ReleaseAuthorityTest(unittest.TestCase):
             "NInferSimulatedInterruption",
         ):
             self.assertNotIn(forbidden, text)
+
+    def test_every_published_powershell_script_has_no_hook_vocabulary(self) -> None:
+        scripts = sorted(RELEASE_ROOT.glob("*.ps1"))
+        self.assertEqual(
+            {path.name for path in scripts},
+            {
+                "Compare-MtpQualification.ps1",
+                "Control-GpuOwner.ps1",
+                "Control-Release.ps1",
+                "Install-Release.ps1",
+                "Invoke-Qualification.ps1",
+                "New-Package.ps1",
+                "New-QualificationReceipt.ps1",
+                "Protect-StateRoot.ps1",
+            },
+        )
+        hook = re.compile(
+            r"(?:TestMode|Mock|Fixture|Fault|Inject(?:ed|ion)?|Bypass|"
+            r"Simulat(?:e|ed|ion)|Harness|test[_-]?mode|mock[_-]|fixture[_-]|"
+            r"fault[_-]|inject[_-]|bypass[_-]|simulat[_-]|harness[_-]|"
+            r"NINFER_[A-Z0-9_]*(?:TEST|MOCK|FAULT|INJECT|BYPASS|SIMULAT|HARNESS))"
+        )
+        for path in scripts:
+            source = powershell_code_without_literals(path.read_text(encoding="utf-8"))
+            self.assertIsNone(hook.search(source), str(path))
 
 
 if __name__ == "__main__":

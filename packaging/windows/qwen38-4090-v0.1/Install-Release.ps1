@@ -231,6 +231,11 @@ function Get-TransactionCleanupTargets([object]$Transaction) {
         [ordered]@{ field = 'cache_root'; kind = 'candidate_cache'; root = (Join-Path $StateRoot 'cache') },
         [ordered]@{ field = 'stage_path'; kind = 'package_stage'; root = $StateRoot }
     )
+    if (Get-TransactionFlag $Transaction 'owner_state_created') {
+        $descriptors += [ordered]@{
+            field = 'owner_state_root'; kind = 'gpu_owner_state'; root = $StateRoot
+        }
+    }
     foreach ($descriptor in $descriptors) {
         $property = $Transaction.PSObject.Properties[[string]$descriptor.field]
         if ($null -eq $property -or [string]::IsNullOrWhiteSpace([string]$property.Value)) { continue }
@@ -687,6 +692,7 @@ Assert-NInferProtectedStateTree $StateRoot
 $statePath = Join-Path $StateRoot 'state.json'
 $controllerPath = Join-Path $StateRoot 'Control-Release.ps1'
 $ownerControllerPath = Join-Path (Join-Path $StateRoot 'gpu-owner') 'Control-GpuOwner.ps1'
+$ownerStateRoot = Join-Path $StateRoot 'gpu-owner-state'
 $stateProtectionPath = Join-Path $StateRoot 'Protect-StateRoot.ps1'
 $ownerProtectionPath = Join-Path (Split-Path -Parent $ownerControllerPath) 'Protect-StateRoot.ps1'
 $receiptsStateRoot = Join-Path $StateRoot 'receipts'
@@ -767,12 +773,28 @@ try {
     $migratedReleases = if ($null -eq $oldState) { [ordered]@{} } else { ConvertTo-Schema3Releases $oldState }
     $ownerControllerSource = $null
     $ownerRecord = $null
+    $ownerStateCreated = $false
     if (-not [string]::IsNullOrWhiteSpace($GpuOwnerControllerPath)) {
         if (-not (Test-Path -LiteralPath $GpuOwnerControllerPath -PathType Leaf)) {
             throw 'GPU-owner controller does not exist'
         }
         $ownerControllerSource = (Resolve-Path -LiteralPath $GpuOwnerControllerPath).Path
-        $ownerStatusOutput = @(& $ownerControllerSource -Action status)
+        $ownerCommand = Get-Command -Name $ownerControllerSource -CommandType ExternalScript -ErrorAction Stop
+        if ($null -eq $ownerCommand.Parameters['StateRoot']) {
+            throw 'GPU-owner controller must accept the protected StateRoot parameter'
+        }
+        $ownerStateExisted = Test-Path -LiteralPath $ownerStateRoot
+        try {
+            $ownerStatusOutput = @(& $ownerControllerSource -Action status -StateRoot $ownerStateRoot)
+        }
+        catch {
+            if (-not $ownerStateExisted -and (Test-Path -LiteralPath $ownerStateRoot)) {
+                Assert-NInferProtectedStateTree $ownerStateRoot
+                Remove-Item -LiteralPath $ownerStateRoot -Recurse -Force
+            }
+            throw
+        }
+        $ownerStateCreated = -not $ownerStateExisted
         $ownerStatus = Convert-CommandOutputToJson $ownerStatusOutput 'GPU-owner controller status'
         if ($null -eq $ownerStatus.PSObject.Properties['paused'] -or
             $ownerStatus.paused -isnot [bool]) {
@@ -781,10 +803,15 @@ try {
         $ownerRecord = [ordered]@{
             controller_path = $ownerControllerPath
             controller_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $ownerControllerSource).Hash.ToLowerInvariant()
+            state_root = $ownerStateRoot
         }
     }
     elseif ($null -ne $oldState -and $null -ne $oldState.PSObject.Properties['gpu_owner']) {
-        $ownerRecord = $oldState.gpu_owner
+        $ownerRecord = [ordered]@{
+            controller_path = [string]$oldState.gpu_owner.controller_path
+            controller_sha256 = [string]$oldState.gpu_owner.controller_sha256
+            state_root = $ownerStateRoot
+        }
     }
     if ($null -eq $ownerRecord) {
         throw 'a GPU-owner controller is required for the first install; upgrades inherit the managed adapter'
@@ -811,6 +838,7 @@ try {
         release_root = $null
         secret_directory = $null
         cache_root = $null
+        owner_state_root = $ownerStateRoot
         task_name = $null
         task_existed = $false
         task_was_running = $false
@@ -826,6 +854,7 @@ try {
         flags = [pscustomobject][ordered]@{
             incumbent_touched = $false
             owner_controller_touched = $false
+            owner_state_created = $ownerStateCreated
             controller_touched = $false
             state_activated = $false
             task_touched = $false

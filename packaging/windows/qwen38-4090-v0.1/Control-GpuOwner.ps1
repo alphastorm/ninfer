@@ -30,15 +30,62 @@ function Write-State([object]$Value) {
 
 function Get-ComputeOwnerStatus([bool]$ThrowOnFailure) {
     try {
-        $nvidiaSmi = (Get-Command nvidia-smi.exe -ErrorAction Stop).Source
-        $rows = @(& $nvidiaSmi --query-compute-apps=pid --format=csv,noheader,nounits 2>$null)
-        if ($LASTEXITCODE -ne 0) { throw 'nvidia-smi compute-owner query failed' }
-        $pids = @($rows | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -match '^\d+$' })
-        return [pscustomobject]@{ available = $true; pids = $pids }
+        $systemDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::System)
+        $nvidiaSmi = [IO.Path]::GetFullPath((Join-Path $systemDirectory 'nvidia-smi.exe'))
+        if (-not (Test-Path -LiteralPath $nvidiaSmi -PathType Leaf)) {
+            throw 'trusted System32 nvidia-smi application is missing'
+        }
+        $start = [Diagnostics.ProcessStartInfo]::new()
+        $start.FileName = $nvidiaSmi
+        $start.Arguments = '--query-compute-apps=pid --format=csv,noheader,nounits'
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $process = [Diagnostics.Process]::new()
+        $process.StartInfo = $start
+        try {
+            if (-not $process.Start()) { throw 'trusted nvidia-smi process did not start' }
+            $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+            $stderrTask = $process.StandardError.ReadToEndAsync()
+            $process.WaitForExit()
+            $stdout = [string]$stdoutTask.GetAwaiter().GetResult()
+            $stderr = [string]$stderrTask.GetAwaiter().GetResult()
+            if ($process.ExitCode -ne 0) {
+                throw "trusted nvidia-smi compute-owner query exited $($process.ExitCode): $($stderr.Substring(0, [Math]::Min(256, $stderr.Length)))"
+            }
+            if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+                throw "trusted nvidia-smi compute-owner query wrote stderr: $($stderr.Substring(0, [Math]::Min(256, $stderr.Length)))"
+            }
+        }
+        finally { $process.Dispose() }
+
+        $trimmed = $stdout.TrimEnd([char[]]@(13, 10))
+        if ([string]::IsNullOrWhiteSpace($trimmed)) {
+            return [pscustomobject]@{ available = $true; pids = @() }
+        }
+        $pids = [Collections.Generic.List[uint32]]::new()
+        foreach ($row in @($trimmed -split '[\r\n]+')) {
+            $value = ([string]$row).Trim()
+            [uint32]$parsedPid = 0
+            if ([string]::IsNullOrWhiteSpace($value) -or
+                -not [uint32]::TryParse(
+                    $value,
+                    [Globalization.NumberStyles]::None,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [ref]$parsedPid
+                ) -or $parsedPid -eq 0) {
+                throw "trusted nvidia-smi returned a malformed compute-owner row: $value"
+            }
+            $pids.Add($parsedPid)
+        }
+        return [pscustomobject]@{ available = $true; pids = @($pids) }
     }
     catch {
         if ($ThrowOnFailure) { throw 'failed to inspect GPU compute owners' }
-        return [pscustomobject]@{ available = $false; pids = @() }
+        $message = [string]$_.Exception.Message
+        if ($message.Length -gt 512) { $message = $message.Substring(0, 512) }
+        return [pscustomobject]@{ available = $false; pids = @(); error = $message }
     }
 }
 
@@ -72,6 +119,8 @@ switch ($Action) {
             mode = [string]$state.mode
             paused = [bool]$state.paused -and [bool]$compute.available -and @($compute.pids).Count -eq 0
             compute_owner_query_available = [bool]$compute.available
+            compute_owner_query_application = 'trusted-system32-nvidia-smi'
+            compute_owner_query_error = if ([bool]$compute.available) { $null } else { [string]$compute.error }
             active_compute_owner_count = @($compute.pids).Count
         } | ConvertTo-Json -Compress
     }

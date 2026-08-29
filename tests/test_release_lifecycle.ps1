@@ -227,12 +227,7 @@ function New-FixturePackage(
             'Install-Release.ps1', 'New-QualificationReceipt.ps1',
             'Invoke-Qualification.ps1', 'Compare-MtpQualification.ps1'
         )) {
-        $source = if ($name -ceq 'Protect-StateRoot.ps1') {
-            Join-Path $instrumentedRoot $name
-        }
-        else {
-            Join-Path $publishedAssetRoot $name
-        }
+        $source = Join-Path $publishedAssetRoot $name
         Copy-Item -LiteralPath $source -Destination (Join-Path $payload $name)
     }
     $smoke = Join-Path $payload 'smoke'
@@ -499,8 +494,9 @@ function Assert-OwnerPaused([bool]$Expected, [string]$Message) {
     Assert-Equal ([bool](Read-OwnerState).paused) $Expected $Message
 }
 
-$testRoot = Join-Path ([IO.Path]::GetTempPath()) ('ninfer-release-lifecycle-' + [Guid]::NewGuid().ToString('N'))
-New-Item -ItemType Directory -Path $testRoot | Out-Null
+. (Join-Path $publishedAssetRoot 'Protect-StateRoot.ps1')
+$testRoot = Join-Path $env:ProgramData ('NInferLifecycleRegression-' + [Guid]::NewGuid().ToString('N'))
+$testRoot = Initialize-NInferProtectedStateRoot $testRoot
 $instrumentedRoot = Join-Path $testRoot 'instrumented-installer'
 New-Item -ItemType Directory -Path $instrumentedRoot | Out-Null
 $publishedInstallerText = [IO.File]::ReadAllText($publishedInstallerPath, [Text.Encoding]::UTF8)
@@ -516,42 +512,44 @@ Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $publishedInstallerPath) '
     -Destination (Join-Path $instrumentedRoot 'Control-GpuOwner.ps1')
 $ControllerPath = Join-Path $instrumentedRoot 'Control-Release.ps1'
 Copy-Item -LiteralPath $publishedControllerPath -Destination $ControllerPath
-$instrumentedProtection = @'
-function Initialize-NInferProtectedStateRoot([string]$Path) {
-    New-Item -ItemType Directory -Force -Path $Path | Out-Null
-    return (Resolve-Path -LiteralPath $Path).Path
-}
-function Assert-NInferProtectedStateTree([string]$Path) {
-    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
-        throw 'instrumented protected state root is missing'
-    }
-}
-'@
-[IO.File]::WriteAllText(
-    (Join-Path $instrumentedRoot 'Protect-StateRoot.ps1'),
-    $instrumentedProtection,
-    [Text.UTF8Encoding]::new($false)
-)
+Copy-Item -LiteralPath (Join-Path $publishedAssetRoot 'Protect-StateRoot.ps1') -Destination (Join-Path $instrumentedRoot 'Protect-StateRoot.ps1')
 $script:StateRoot = Join-Path $testRoot 'state'
 $script:ModelPath = Join-Path $testRoot 'model.ninfer'
 $script:OwnerStatePath = Join-Path $testRoot 'gpu-owner-state.json'
 $script:OwnerControllerPath = Join-Path $testRoot 'Control-GpuOwner.ps1'
+$script:ExpectedOwnerStateRoot = Join-Path $script:StateRoot 'gpu-owner-state'
 Write-Json $script:OwnerStatePath ([ordered]@{ paused = $false; stop_calls = 0 })
 $ownerScript = @'
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('status', 'stop', 'start')]
-    [string]$Action
+    [string]$Action,
+    [Parameter(Mandatory = $true)]
+    [string]$StateRoot
 )
 $ErrorActionPreference = 'Stop'
 $statePath = '__OWNER_STATE__'
+$expectedStateRoot = '__OWNER_STATE_ROOT__'
+if (-not [string]::Equals(
+        [IO.Path]::GetFullPath($StateRoot),
+        [IO.Path]::GetFullPath($expectedStateRoot),
+        [StringComparison]::OrdinalIgnoreCase)) {
+    throw 'fixture GPU-owner StateRoot was not propagated'
+}
+New-Item -ItemType Directory -Path $StateRoot -Force | Out-Null
+[IO.File]::WriteAllText(
+    (Join-Path $StateRoot 'adapter-state.json'),
+    '{"managed":true}',
+    [Text.UTF8Encoding]::new($false)
+)
 $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
 if ($Action -ceq 'stop') { $state.paused = $true; $state.stop_calls = [int]$state.stop_calls + 1 }
 if ($Action -ceq 'start') { $state.paused = $false }
 [IO.File]::WriteAllText($statePath, ($state | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
 $state | ConvertTo-Json -Compress
 '@
+$ownerScript = $ownerScript.Replace('__OWNER_STATE_ROOT__', $script:ExpectedOwnerStateRoot.Replace("'", "''"))
 $ownerScript = $ownerScript.Replace('__OWNER_STATE__', $script:OwnerStatePath.Replace("'", "''"))
 [IO.File]::WriteAllText($script:OwnerControllerPath, $ownerScript, [Text.UTF8Encoding]::new($false))
 Copy-Item -LiteralPath (Join-Path $instrumentedRoot 'Protect-StateRoot.ps1') `
@@ -922,7 +920,7 @@ try {
     Assert-OwnerPaused $false 'stop did not restore a previously running GPU owner'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $script:StateRoot 'gpu-owner-lease.json'))) 'stop left a GPU-owner lease behind'
 
-    & $script:OwnerControllerPath -Action stop | Out-Null
+    & $script:OwnerControllerPath -Action stop -StateRoot $script:ExpectedOwnerStateRoot | Out-Null
     Assert-OwnerPaused $true 'gaming-mode fixture did not enter paused state'
     & $managedController -Action Start -StateRoot $script:StateRoot | Out-Null
     Assert-OwnerPaused $true 'start changed a previously paused GPU owner'
@@ -932,7 +930,7 @@ try {
     Assert-OwnerPaused $true 'restart changed prior gaming state'
     & $managedController -Action Stop -StateRoot $script:StateRoot | Out-Null
     Assert-OwnerPaused $true 'stop did not restore prior gaming state'
-    & $script:OwnerControllerPath -Action start | Out-Null
+    & $script:OwnerControllerPath -Action start -StateRoot $script:ExpectedOwnerStateRoot | Out-Null
     Assert-OwnerPaused $false 'normal-host state was not restored for cleanup'
     $activeState = Read-State
     $activeRelease = $activeState.releases.PSObject.Properties[[string]$activeState.active_release].Value
@@ -1005,9 +1003,10 @@ try {
             artifact_type = 'ninfer_gpu_owner_lease'; schema_version = 1
             release_id = [string]$active.active_release
             controller_sha256 = [string]$active.gpu_owner.controller_sha256
+            owner_state_root = [string]$active.gpu_owner.state_root
             prior_paused = $false; phase = 'captured'; acquired_utc = [DateTime]::UtcNow.ToString('o')
         })
-    & $script:OwnerControllerPath -Action start | Out-Null
+    & $script:OwnerControllerPath -Action start -StateRoot $script:ExpectedOwnerStateRoot | Out-Null
     $stopCallsBefore = [int](Read-OwnerState).stop_calls
     & $managedController -Action Start -StateRoot $script:StateRoot | Out-Null
     Assert-True ([int](Read-OwnerState).stop_calls -gt $stopCallsBefore) 'captured GPU-owner lease did not re-drive owner stop'
@@ -1023,8 +1022,11 @@ try {
         published_installer_sha256 = $publishedInstallerSha256
         instrumented_installer_sha256 = $instrumentedInstallerSha256
         instrumentation_generator_sha256 = $harnessGeneratorSha256
+        published_state_protection_sha256 = Get-Sha256 (Join-Path $publishedAssetRoot 'Protect-StateRoot.ps1')
+        state_protection_evidence_class = 'exact-shipped-helper-real-acl'
+        state_protection_stubbed = $false
         published_installer_callable_test_hooks = 0
-        real_acl_evidence_included = $false
+        real_acl_evidence_included = $true
         injected_failures = $faultPoints.Count
         published_default_gpu_owner_controllers = 1
         retries = $faultPoints.Count
@@ -1042,6 +1044,8 @@ try {
         candidate_model_copies = 0
         dead_start_rejections = 1
         captured_gpu_lease_reentries = 1
+        nondefault_owner_state_root_bindings = 1
+        owner_state_cleanup_with_release_root = $true
         selected_gpu_identity_bindings = 1
         dead_start_sleep_milliseconds = $global:NInferTestDeadStartSleptMilliseconds
     } | ConvertTo-Json -Compress
@@ -1049,7 +1053,10 @@ try {
 finally {
     [Environment]::SetEnvironmentVariable('NINFER_HARNESS_FAILURE_AFTER', $originalFault, 'Process')
     [Environment]::SetEnvironmentVariable('NINFER_HARNESS_INTERRUPTION_AFTER', $originalInterrupt, 'Process')
-    Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $testRoot) {
+        Assert-NInferProtectedStateTree $testRoot
+        Remove-Item -LiteralPath $testRoot -Recurse -Force
+    }
     foreach ($name in @(
             'Get-ScheduledTask', 'Export-ScheduledTask', 'New-ScheduledTaskAction',
             'New-ScheduledTaskTrigger', 'New-ScheduledTaskSettingsSet',
