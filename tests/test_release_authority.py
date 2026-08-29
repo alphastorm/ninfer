@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import re
 import unittest
 
 
@@ -14,6 +15,12 @@ RELEASE_SPEC_PATH = RELEASE_ROOT / "release-spec.json"
 ASSET_RECEIPT_PATH = QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-assets.json"
 GOLDEN_RECEIPT_PATH = (
     QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-golden-equivalent.json"
+)
+LIFECYCLE_RECEIPT_PATH = (
+    QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-lifecycle.json"
+)
+STATE_SECURITY_RECEIPT_PATH = (
+    QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-state-security.json"
 )
 STALE_REVIEW_CLOSURE = (
     QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-review-closure.json"
@@ -32,6 +39,18 @@ def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def iter_strings(value: object):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for key, child in value.items():
+            yield str(key)
+            yield from iter_strings(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from iter_strings(child)
+
+
 class ReleaseAuthorityTest(unittest.TestCase):
     def test_public_authorities_have_one_eligible_identity_lineage(self) -> None:
         self.assertFalse(STALE_REVIEW_CLOSURE.exists())
@@ -39,6 +58,35 @@ class ReleaseAuthorityTest(unittest.TestCase):
         spec = load(RELEASE_SPEC_PATH)
         assets = load(ASSET_RECEIPT_PATH)
         golden = load(GOLDEN_RECEIPT_PATH)
+        lifecycle = load(LIFECYCLE_RECEIPT_PATH)
+        state_security = load(STATE_SECURITY_RECEIPT_PATH)
+
+        expected_qualification_fields = {
+            "artifact_type",
+            "schema_version",
+            "status",
+            "qualification_level",
+            "beta_support_qualified",
+            "release_eligible",
+            "release_id",
+            "release_version",
+            "qualification_target",
+            "source",
+            "identity",
+            "package",
+            "golden_equivalent",
+            "live_evidence",
+            "release_gates",
+            "state_security",
+            "authority",
+            "restoration",
+            "publication",
+            "stable_release_performed",
+            "stable_promotion_performed",
+            "permanent_route_mutation",
+            "decision",
+        }
+        self.assertEqual(set(qualification), expected_qualification_fields)
 
         self.assertEqual(qualification["release_id"], RELEASE_ID)
         self.assertEqual(qualification["status"], "passed")
@@ -46,6 +94,24 @@ class ReleaseAuthorityTest(unittest.TestCase):
         self.assertIs(qualification["beta_support_qualified"], True)
         self.assertEqual(spec["release_id"], RELEASE_ID)
         self.assertEqual(spec["deployment_profile"], "qwen38-4090-v0.1")
+        authority = qualification["authority"]
+        spec_authority = spec["qualification_authority"]
+        self.assertEqual(authority["role"], "external-final-qualification-authority")
+        self.assertIs(authority["supersedes_package_candidate_status"], True)
+        self.assertEqual(authority["superseded_status"], "candidate_ready")
+        self.assertEqual(authority["binding"], "SHA256SUMS-bound-sidecar")
+        self.assertEqual(
+            authority["sidecar_filename"], spec_authority["external_sidecar_filename"]
+        )
+        self.assertEqual(
+            spec_authority["in_archive_status"], "candidate-only-not-release-eligible"
+        )
+        self.assertEqual(
+            spec_authority["external_artifact_type"],
+            "ninfer_public_windows_release_qualification",
+        )
+        self.assertEqual(spec_authority["external_required_status"], "passed")
+        self.assertIs(spec_authority["external_required_release_eligible"], True)
 
         source = qualification["source"]
         spec_source = spec["source"]
@@ -70,6 +136,24 @@ class ReleaseAuthorityTest(unittest.TestCase):
             sha256(GOLDEN_RECEIPT_PATH),
             qualification["golden_equivalent"]["receipt_sha256"],
         )
+        self.assertEqual(
+            sha256(LIFECYCLE_RECEIPT_PATH),
+            qualification["release_gates"]["L"]["release_lifecycle_receipt_sha256"],
+        )
+        self.assertEqual(
+            sha256(STATE_SECURITY_RECEIPT_PATH),
+            qualification["release_gates"]["L"]["state_security_receipt_sha256"],
+        )
+        self.assertEqual(lifecycle["evidence_class"], "instrumented-unshipped-installer-lifecycle")
+        self.assertIs(lifecycle["exact_shipped_installer_executed"], False)
+        self.assertEqual(lifecycle["published_installer_callable_test_hooks"], 0)
+        self.assertIs(lifecycle["real_acl_evidence_included"], False)
+        self.assertEqual(
+            state_security["evidence_class"],
+            "exact-shipped-state-helper-and-installer-prewrite-real-acl",
+        )
+        self.assertIs(state_security["exact_shipped_installer_executed"], True)
+        self.assertIs(state_security["exact_shipped_installer_full_install"], False)
 
         package = qualification["package"]
         self.assertEqual(package["sha256"], assets["package"]["sha256"])
@@ -113,10 +197,29 @@ class ReleaseAuthorityTest(unittest.TestCase):
                 self.assertIs(value["release_eligible"], True, str(path))
         self.assertEqual(public_authorities, [QUALIFICATION_PATH.resolve()])
 
-    def test_published_installer_has_no_ambient_test_mode_input(self) -> None:
+        publication = qualification["publication"]
+        self.assertEqual(publication["private_identifier_scan"], "passed")
+        self.assertEqual(publication["staged_asset_findings"], 0)
+        self.assertEqual(publication["tracked_source_findings"], 0)
+        self.assertIs(publication["public_release_performed"], False)
+        disclosure_patterns = (
+            re.compile(r"(?:[A-Za-z]:\\Users\\|/Users/|/home/)", re.IGNORECASE),
+            re.compile(r"\b(?:nyc|sf)-[a-z0-9-]+\b", re.IGNORECASE),
+            re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
+        )
+        for value in iter_strings(qualification):
+            for pattern in disclosure_patterns:
+                self.assertIsNone(pattern.search(value), value)
+
+    def test_published_installer_has_no_callable_test_or_fault_hook(self) -> None:
         text = (RELEASE_ROOT / "Install-Release.ps1").read_text(encoding="utf-8")
-        self.assertNotIn("NINFER_INSTALL_TEST_MODE", text)
-        self.assertEqual(text.count("$script:InstallTestMode = $false"), 1)
+        for forbidden in (
+            "InstallTestMode",
+            "NINFER_TEST_INSTALL",
+            "Invoke-InstallFault",
+            "NInferSimulatedInterruption",
+        ):
+            self.assertNotIn(forbidden, text)
 
 
 if __name__ == "__main__":

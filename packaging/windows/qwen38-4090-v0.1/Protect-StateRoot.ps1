@@ -56,7 +56,7 @@ function Assert-NInferProtectedAcl([string]$Path, [bool]$RequireProtectedDacl = 
     }
 }
 
-function Set-NInferProtectedRootAcl([string]$Path) {
+function New-NInferProtectedDirectorySecurity {
     $administrators = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
     $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
     $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
@@ -73,7 +73,65 @@ function Set-NInferProtectedRootAcl([string]$Path) {
                 [Security.AccessControl.AccessControlType]::Allow
             ))
     }
-    Set-Acl -LiteralPath $Path -AclObject $security
+    return $security
+}
+
+function New-NInferProtectedDirectoryAtomic([string]$Path) {
+    if (-not ('NInferProtectedDirectoryNative' -as [type])) {
+        Add-Type @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+public static class NInferProtectedDirectoryNative {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct SecurityAttributes {
+        internal int Length;
+        internal IntPtr SecurityDescriptor;
+        [MarshalAs(UnmanagedType.Bool)] internal bool InheritHandle;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool CreateDirectoryW(string path, ref SecurityAttributes attributes);
+
+    public static void Create(string path, byte[] securityDescriptor) {
+        if (securityDescriptor == null || securityDescriptor.Length == 0) {
+            throw new ArgumentException("A security descriptor is required.", "securityDescriptor");
+        }
+        IntPtr descriptor = Marshal.AllocHGlobal(securityDescriptor.Length);
+        try {
+            Marshal.Copy(securityDescriptor, 0, descriptor, securityDescriptor.Length);
+            SecurityAttributes attributes = new SecurityAttributes {
+                Length = Marshal.SizeOf(typeof(SecurityAttributes)),
+                SecurityDescriptor = descriptor,
+                InheritHandle = false
+            };
+            if (!CreateDirectoryW(path, ref attributes)) {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+        }
+        finally {
+            Marshal.FreeHGlobal(descriptor);
+        }
+    }
+}
+'@
+    }
+
+    $security = New-NInferProtectedDirectorySecurity
+    try {
+        [NInferProtectedDirectoryNative]::Create(
+            $Path,
+            $security.GetSecurityDescriptorBinaryForm()
+        )
+    }
+    catch [ComponentModel.Win32Exception] {
+        if ($_.Exception.NativeErrorCode -eq 183) {
+            throw "protected state directory appeared during atomic creation: $Path"
+        }
+        throw
+    }
 }
 
 function Assert-NInferTrustedCreationAncestor([string]$Path) {
@@ -126,9 +184,8 @@ function Initialize-NInferProtectedStateRoot([string]$Path) {
     try {
         while ($missing.Count -ne 0) {
             $next = $missing.Pop()
-            New-Item -ItemType Directory -Path $next -ErrorAction Stop | Out-Null
+            New-NInferProtectedDirectoryAtomic $next
             $created.Add($next)
-            Set-NInferProtectedRootAcl $next
             Assert-NInferNoReparseAncestors $next
             Assert-NInferProtectedAcl $next $true
         }

@@ -92,7 +92,8 @@ try {
     Write-Json $qualificationPath ([ordered]@{
             artifact_type = 'ninfer_public_windows_release_qualification'
             schema_version = 1
-            status = 'incomplete'
+            status = 'candidate_ready'
+            release_eligible = $false
             source = [ordered]@{ qualified_commit = $patchSha }
             identity = [ordered]@{
                 binary_sha256 = $serverSha256
@@ -102,14 +103,25 @@ try {
             release_gates = [ordered]@{
                 G = [ordered]@{ status = 'not_run' }
                 L = [ordered]@{ status = 'not_run' }
+                R = [ordered]@{ status = 'not_run' }
+            }
+            authority = [ordered]@{
+                role = 'external-final-qualification-authority'
+                supersedes_package_candidate_status = $false
+                superseded_status = 'candidate_ready'
+                binding = 'SHA256SUMS-bound-sidecar'
+                sidecar_filename = 'ninfer-4090-qwen38-v0.1.0-win-x64-qualification.json'
             }
         })
 
     $passedRedPath = Join-Path $root 'qualification-passed-red.json'
     $passedRed = Get-Content -LiteralPath $qualificationPath -Raw | ConvertFrom-Json
     $passedRed.status = 'passed'
+    $passedRed.release_eligible = $true
+    $passedRed.authority.supersedes_package_candidate_status = $true
     $passedRed.release_gates.G.status = 'passed'
     $passedRed.release_gates.L.status = 'not_run'
+    $passedRed.release_gates.R.status = 'passed'
     Write-Json $passedRedPath $passedRed
     $passedRedOut = Join-Path $root 'out-passed-red'
     $passedRedRejected = $false
@@ -251,7 +263,13 @@ try {
     $zipHash = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out "$assetStem.zip")).Hash.ToLowerInvariant()
     Assert-True ([string]$qualification.package.sha256 -ceq $zipHash) 'qualification is not bound to archive hash'
     Assert-True ([int]$qualification.package.runtime_dlls -eq 2) 'qualification runtime DLL count mismatch'
-    Assert-True ([string]$qualification.status -ceq 'incomplete') 'package builder changed qualification verdict'
+    Assert-True ([string]$qualification.status -ceq 'candidate_ready') 'package builder changed candidate qualification status'
+    Assert-True ($qualification.release_eligible -eq $false) 'assembled package sidecar claims release eligibility'
+    Assert-True ($qualification.authority.supersedes_package_candidate_status -eq $false) 'assembled package sidecar claims final authority supersession'
+    Assert-True ([string]$receipt.qualification_status -ceq 'candidate_ready') 'package receipt omitted candidate status'
+    Assert-True ($receipt.release_eligible_at_assembly -eq $false) 'package receipt claims assembly-time eligibility'
+    Assert-True ($receipt.external_final_qualification_required -eq $true) 'package receipt omitted external final authority requirement'
+    Assert-True ($receipt.candidate_status_superseded -eq $false) 'package receipt claims candidate status was already superseded'
 
     [ordered]@{
         artifact_type = 'ninfer_release_asset_regression'

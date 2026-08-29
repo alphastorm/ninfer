@@ -123,6 +123,26 @@ if ($qualification.artifact_type -cne 'ninfer_public_windows_release_qualificati
     [string]$qualification.source.qualified_commit -cne $PatchStackSha) {
     throw 'qualification record is not bound to the executable source identity'
 }
+if ([string]$spec.qualification_authority.in_archive_status -cne
+        'candidate-only-not-release-eligible' -or
+    [string]$spec.qualification_authority.external_sidecar_filename -cne
+        'ninfer-4090-qwen38-v0.1.0-win-x64-qualification.json' -or
+    [string]$spec.qualification_authority.external_artifact_type -cne
+        'ninfer_public_windows_release_qualification' -or
+    [string]$spec.qualification_authority.external_required_status -cne 'passed' -or
+    $spec.qualification_authority.external_required_release_eligible -ne $true) {
+    throw 'release specification qualification authority contract mismatch'
+}
+if ([string]$qualification.authority.role -cne
+        'external-final-qualification-authority' -or
+    [string]$qualification.authority.binding -cne 'SHA256SUMS-bound-sidecar' -or
+    [string]$qualification.authority.sidecar_filename -cne
+        [string]$spec.qualification_authority.external_sidecar_filename) {
+    throw 'qualification record supersession authority mismatch'
+}
+if ([string]$qualification.status -cnotin @('candidate_ready', 'passed')) {
+    throw 'qualification record has an unsupported authority status'
+}
 if ([string]$spec.source.qualified_source_head -cne $PatchStackSha) {
     throw 'release specification is not bound to the executable source identity'
 }
@@ -135,13 +155,22 @@ if ([string]$qualification.identity.binary_sha256 -cne $serverSha256 -or
     throw 'qualification record artifact hashes do not match the release inputs'
 }
 if ([string]$qualification.status -ceq 'passed') {
-    foreach ($gate in @('G', 'L')) {
+    if ($qualification.release_eligible -ne $true -or
+        $qualification.authority.supersedes_package_candidate_status -ne $true -or
+        [string]$qualification.authority.superseded_status -cne 'candidate_ready') {
+        throw 'passed qualification does not supersede candidate status unambiguously'
+    }
+    foreach ($gate in @('G', 'L', 'R')) {
         $property = $qualification.release_gates.PSObject.Properties[$gate]
         if ($null -eq $property -or $null -eq $property.Value.PSObject.Properties['status'] -or
             [string]$property.Value.status -cne 'passed') {
             throw 'qualification record claims passed while required release gates remain incomplete'
         }
     }
+}
+elseif ($qualification.release_eligible -ne $false -or
+    $qualification.authority.supersedes_package_candidate_status -ne $false) {
+    throw 'candidate qualification claims release eligibility or supersession'
 }
 
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
@@ -313,6 +342,10 @@ try {
         package_bytes = (Get-Item -LiteralPath $zipPath).Length
         package_file = [IO.Path]::GetFileName($zipPath)
         qualification_file = [IO.Path]::GetFileName($qualificationPath)
+        qualification_status = [string]$qualification.status
+        release_eligible_at_assembly = [bool]$qualification.release_eligible
+        external_final_qualification_required = $true
+        candidate_status_superseded = [bool]$qualification.authority.supersedes_package_candidate_status
         checksum_file = [IO.Path]::GetFileName($shaSumsPath)
         installer_file = [IO.Path]::GetFileName($installerAsset)
         controller_file = [IO.Path]::GetFileName($controllerAsset)

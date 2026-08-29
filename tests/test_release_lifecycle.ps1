@@ -14,6 +14,7 @@ $InstallerPath = (Resolve-Path -LiteralPath $InstallerPath).Path
 $ControllerPath = (Resolve-Path -LiteralPath $ControllerPath).Path
 $publishedInstallerPath = $InstallerPath
 $publishedControllerPath = $ControllerPath
+$publishedAssetRoot = Split-Path -Parent $publishedInstallerPath
 $global:NInferTestTaskExists = $false
 $global:NInferTestTaskRunning = $false
 $global:NInferTestTaskXml = $null
@@ -21,9 +22,6 @@ $global:NInferTestTaskSerial = 0
 $global:NInferTestStateRoot = $null
 $global:NInferTestDeadReleaseId = $null
 $global:NInferTestDeadStartSleptMilliseconds = 0
-$global:NInferTestAclFailure = $false
-$global:NInferAclObservations = [Collections.Generic.List[object]]::new()
-$global:NInferTestAclResetArguments = @()
 
 function global:Get-ScheduledTask {
     param([string]$TaskName, [object]$ErrorAction)
@@ -166,33 +164,14 @@ function global:Start-Sleep {
     }
 }
 
-function global:icacls.exe {
-    $arguments = @($args | ForEach-Object { [string]$_ })
-    if ($arguments -contains '/inheritance:r') {
-        $global:NInferAclObservations.Add([ordered]@{
-                transactions_exist = Test-Path -LiteralPath (Join-Path $global:NInferTestStateRoot 'receipts/install-transactions')
-                secrets_exist = Test-Path -LiteralPath (Join-Path $global:NInferTestStateRoot 'secrets')
-            })
-    }
-    if ($arguments -contains '/reset') {
-        $global:NInferTestAclResetArguments = $arguments
-        if ($global:NInferTestAclFailure) {
-            if ($arguments -contains '/C') {
-                Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1
-                'Successfully processed 1 files; Failed processing 1 files'
-                return
-            }
-            Set-Variable -Name LASTEXITCODE -Value 5 -Scope 1
-            'fixture protected child: Access is denied.'
-            return
-        }
-    }
-    Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1
-}
-
 function global:nvidia-smi.exe {
     param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Arguments)
-    '0, GPU-fixture-4090, NVIDIA GeForce RTX 4090'
+    if (@($Arguments | Where-Object { [string]$_ -like '*driver_version*' }).Count -ne 0) {
+        '0, GPU-fixture-4090, NVIDIA GeForce RTX 4090, 8.9, 581.15'
+    }
+    else {
+        '0, GPU-fixture-4090, NVIDIA GeForce RTX 4090'
+    }
     Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1
 }
 
@@ -243,9 +222,27 @@ function New-FixturePackage(
         "fixture-binary-$InstanceId",
         [Text.UTF8Encoding]::new($false)
     )
-    Copy-Item -LiteralPath $ControllerPath -Destination (Join-Path $payload 'Control-Release.ps1')
-    Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $ControllerPath) 'Protect-StateRoot.ps1') `
-        -Destination (Join-Path $payload 'Protect-StateRoot.ps1')
+    foreach ($name in @(
+            'Control-Release.ps1', 'Control-GpuOwner.ps1', 'Protect-StateRoot.ps1',
+            'Install-Release.ps1', 'New-QualificationReceipt.ps1',
+            'Invoke-Qualification.ps1', 'Compare-MtpQualification.ps1'
+        )) {
+        $source = if ($name -ceq 'Protect-StateRoot.ps1') {
+            Join-Path $instrumentedRoot $name
+        }
+        else {
+            Join-Path $publishedAssetRoot $name
+        }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $payload $name)
+    }
+    $smoke = Join-Path $payload 'smoke'
+    New-Item -ItemType Directory -Path $smoke | Out-Null
+    foreach ($name in @(
+            'agent_protocol.py', 'golden_equivalent.py',
+            'golden_equivalent_extension.ts', 'golden_equivalent_contract.json'
+        )) {
+        Copy-Item -LiteralPath (Join-Path $publishedAssetRoot $name) -Destination (Join-Path $smoke $name)
+    }
 
     $config = [ordered]@{
         release_id = "fixture-$InstanceId"
@@ -277,6 +274,8 @@ function New-FixturePackage(
         schema_version = 1
         release_id = "fixture-$InstanceId"
         release_instance_id = $InstanceId
+        release_version = '0.1.0'
+        asset_filename = 'ninfer-4090-qwen38-v0.1.0-win-x64.zip'
         deployment_profile = "fixture-$InstanceId"
         source_dirty = $false
         upstream_base_sha = ('1' * 40)
@@ -290,6 +289,11 @@ function New-FixturePackage(
     $spec = [ordered]@{
         release_id = "fixture-$InstanceId"
         source = [ordered]@{ upstream_base_sha = ('1' * 40) }
+        gpu = [ordered]@{
+            name = 'NVIDIA GeForce RTX 4090'
+            compute_capability = '8.9'
+            minimum_driver_major = 580
+        }
         model = [ordered]@{ bytes = [Int64]$model.Length; sha256 = Get-Sha256 $ModelPath }
         lifecycle = [ordered]@{
             task_name = 'NInfer-Qwen38-4090-v0.1'
@@ -316,7 +320,7 @@ function New-FixturePackage(
             files = $files
         })
 
-    $zip = Join-Path $Directory "$InstanceId.zip"
+    $zip = Join-Path $workspace 'ninfer-4090-qwen38-v0.1.0-win-x64.zip'
     Compress-Archive -Path $payload -DestinationPath $zip -CompressionLevel NoCompression
     return [pscustomobject]@{
         instance_id = $InstanceId
@@ -336,16 +340,16 @@ function Invoke-FixtureInstall(
         -not [string]::IsNullOrEmpty($Interrupt)) {
         throw 'fixture cannot inject a failure and an interruption together'
     }
-    $previousFault = [Environment]::GetEnvironmentVariable('NINFER_TEST_INSTALL_FAILURE_AFTER', 'Process')
-    $previousInterrupt = [Environment]::GetEnvironmentVariable('NINFER_TEST_INSTALL_INTERRUPTION_AFTER', 'Process')
+    $previousFault = [Environment]::GetEnvironmentVariable('NINFER_HARNESS_FAILURE_AFTER', 'Process')
+    $previousInterrupt = [Environment]::GetEnvironmentVariable('NINFER_HARNESS_INTERRUPTION_AFTER', 'Process')
     try {
         [Environment]::SetEnvironmentVariable(
-            'NINFER_TEST_INSTALL_FAILURE_AFTER',
+            'NINFER_HARNESS_FAILURE_AFTER',
             $(if ([string]::IsNullOrEmpty($Fault)) { $null } else { $Fault }),
             'Process'
         )
         [Environment]::SetEnvironmentVariable(
-            'NINFER_TEST_INSTALL_INTERRUPTION_AFTER',
+            'NINFER_HARNESS_INTERRUPTION_AFTER',
             $(if ([string]::IsNullOrEmpty($Interrupt)) { $null } else { $Interrupt }),
             'Process'
         )
@@ -361,8 +365,8 @@ function Invoke-FixtureInstall(
         & $InstallerPath @parameters | Out-Null
     }
     finally {
-        [Environment]::SetEnvironmentVariable('NINFER_TEST_INSTALL_FAILURE_AFTER', $previousFault, 'Process')
-        [Environment]::SetEnvironmentVariable('NINFER_TEST_INSTALL_INTERRUPTION_AFTER', $previousInterrupt, 'Process')
+        [Environment]::SetEnvironmentVariable('NINFER_HARNESS_FAILURE_AFTER', $previousFault, 'Process')
+        [Environment]::SetEnvironmentVariable('NINFER_HARNESS_INTERRUPTION_AFTER', $previousInterrupt, 'Process')
     }
 }
 
@@ -500,23 +504,14 @@ New-Item -ItemType Directory -Path $testRoot | Out-Null
 $instrumentedRoot = Join-Path $testRoot 'instrumented-installer'
 New-Item -ItemType Directory -Path $instrumentedRoot | Out-Null
 $publishedInstallerText = [IO.File]::ReadAllText($publishedInstallerPath, [Text.Encoding]::UTF8)
-Assert-True (-not $publishedInstallerText.Contains('NINFER_INSTALL_TEST_MODE')) `
-    'published installer exposes ambient test-mode activation'
-$productionTestMode = '$script:InstallTestMode = $false'
-$productionTestModeIndex = $publishedInstallerText.IndexOf($productionTestMode, [StringComparison]::Ordinal)
-Assert-True ($productionTestModeIndex -ge 0 -and
-    $publishedInstallerText.IndexOf(
-        $productionTestMode,
-        $productionTestModeIndex + $productionTestMode.Length,
-        [StringComparison]::Ordinal
-    ) -lt 0) `
-    'published installer test mode is not one hardcoded false assignment'
-$instrumentedInstallerText = $publishedInstallerText.Replace(
-    $productionTestMode,
-    '$script:InstallTestMode = $true'
-)
+$harnessGeneratorPath = Join-Path $PSScriptRoot 'New-InstrumentedInstallerHarness.ps1'
+. $harnessGeneratorPath
+$instrumentedInstallerText = New-NInferInstrumentedInstallerText $publishedInstallerText
 $InstallerPath = Join-Path $instrumentedRoot 'Install-Release.ps1'
 [IO.File]::WriteAllText($InstallerPath, $instrumentedInstallerText, [Text.UTF8Encoding]::new($false))
+$publishedInstallerSha256 = Get-Sha256 $publishedInstallerPath
+$instrumentedInstallerSha256 = Get-Sha256 $InstallerPath
+$harnessGeneratorSha256 = Get-Sha256 $harnessGeneratorPath
 Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $publishedInstallerPath) 'Control-GpuOwner.ps1') `
     -Destination (Join-Path $instrumentedRoot 'Control-GpuOwner.ps1')
 $ControllerPath = Join-Path $instrumentedRoot 'Control-Release.ps1'
@@ -562,8 +557,8 @@ $ownerScript = $ownerScript.Replace('__OWNER_STATE__', $script:OwnerStatePath.Re
 Copy-Item -LiteralPath (Join-Path $instrumentedRoot 'Protect-StateRoot.ps1') `
     -Destination (Join-Path $testRoot 'Protect-StateRoot.ps1')
 $global:NInferTestStateRoot = $script:StateRoot
-$originalFault = [Environment]::GetEnvironmentVariable('NINFER_TEST_INSTALL_FAILURE_AFTER', 'Process')
-$originalInterrupt = [Environment]::GetEnvironmentVariable('NINFER_TEST_INSTALL_INTERRUPTION_AFTER', 'Process')
+$originalFault = [Environment]::GetEnvironmentVariable('NINFER_HARNESS_FAILURE_AFTER', 'Process')
+$originalInterrupt = [Environment]::GetEnvironmentVariable('NINFER_HARNESS_INTERRUPTION_AFTER', 'Process')
 
 try {
     $modelBytes = New-Object byte[] 256
@@ -578,9 +573,6 @@ try {
     Assert-True (Test-Path -LiteralPath $publishedOwnerController -PathType Leaf) `
         'first-install default GPU-owner controller is missing beside the installer'
     Invoke-FixtureInstall $basePackage $baseSecret
-    $earlyAclObservations = @($global:NInferAclObservations | Where-Object { -not $_.transactions_exist -and -not $_.secrets_exist })
-    Assert-Equal $earlyAclObservations.Count 1 'first-install ACL hardening did not precede transaction and secret children'
-    Assert-True (-not [bool]$global:NInferAclObservations[0].transactions_exist -and -not [bool]$global:NInferAclObservations[0].secrets_exist) 'first ACL hardening invocation was late'
     $state = Read-State
     Assert-Equal $state.active_release 'base-release' 'base release did not activate'
     Assert-Equal ([int]$state.schema_version) 3 'base release did not publish schema 3 state'
@@ -632,10 +624,11 @@ try {
     Assert-Equal $global:NInferTestTaskRunning $schema3TaskRunningBefore 'schema-3 identity rejection changed task liveness'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path (Join-Path $script:StateRoot 'releases') 'schema3-mismatch'))) 'schema-3 identity rejection left a candidate release'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path (Join-Path $script:StateRoot 'secrets') 'schema3-mismatch'))) 'schema-3 identity rejection left a candidate secret'
-    $unmigratableState = ConvertTo-Schema1State $schema3BaseState
+    $unmigratableState = $schema3BaseState | ConvertTo-Json -Depth 20 | ConvertFrom-Json
     $unmigratableRelease = ConvertTo-Schema1Release $baseReleaseBeforeMigration
+    $unmigratableRelease['model_artifact_sha256'] = $baseVerifiedModelDigest
     $unmigratableRelease['model_artifact'] = Join-Path $script:StateRoot 'missing-model.ninfer'
-    $unmigratableState.releases['unmigratable-release'] = $unmigratableRelease
+    Add-Member -InputObject $unmigratableState.releases -MemberType NoteProperty -Name 'unmigratable-release' -Value ([pscustomobject]$unmigratableRelease)
     Write-Json (Join-Path $script:StateRoot 'state.json') $unmigratableState
 
     $migrationFailurePackage = New-FixturePackage $testRoot 'migration-failure' $script:ModelPath 48149
@@ -649,72 +642,53 @@ try {
         $migrationFailure = $_
     }
     Assert-True ($null -ne $migrationFailure) 'install accepted an unmigratable prior release record'
-    Assert-True ($migrationFailure.Exception.Message -like "*cannot migrate installed release 'unmigratable-release': model artifact is missing*") 'unmigratable release returned the wrong failure'
+    Assert-True ($migrationFailure.Exception.Message -like "*cannot migrate installed release 'unmigratable-release': model artifact is missing*") "unmigratable release returned the wrong failure: $($migrationFailure.Exception.Message)"
     Assert-Equal (Get-Sha256 (Join-Path $script:StateRoot 'state.json')) $legacyStateSha 'failed schema migration published lifecycle state'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path (Join-Path $script:StateRoot 'releases') 'migration-failure'))) 'failed schema migration left a candidate release'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path (Join-Path $script:StateRoot 'secrets') 'migration-failure'))) 'failed schema migration left a candidate secret'
 
     $legacyState = ConvertTo-Schema1State $schema3BaseState
     Write-Json (Join-Path $script:StateRoot 'state.json') $legacyState
-    $migrationPackage = New-FixturePackage $testRoot 'migration-release' $script:ModelPath 48150
-    $migrationSecret = New-SecretFile $testRoot 'migration-release'
-    Invoke-FixtureInstall $migrationPackage $migrationSecret
-    $migratedState = Read-State
-    Assert-Equal ([int]$migratedState.schema_version) 3 'schema-1 lifecycle state was not migrated to schema 3'
-    Assert-Equal $migratedState.active_release 'migration-release' 'migration candidate did not activate'
-    foreach ($property in $migratedState.releases.PSObject.Properties) {
+    $legacyStateSha = Get-Sha256 (Join-Path $script:StateRoot 'state.json')
+    $legacyPackage = New-FixturePackage $testRoot 'legacy-rejected' $script:ModelPath 48150
+    $legacySecret = New-SecretFile $testRoot 'legacy-rejected'
+    $legacyFailure = $null
+    try { Invoke-FixtureInstall $legacyPackage $legacySecret -NoStart }
+    catch { $legacyFailure = $_ }
+    Assert-True ($null -ne $legacyFailure) 'production installer accepted a legacy release without bound GPU identity'
+    Assert-True ($legacyFailure.Exception.Message -like "*cannot migrate installed release 'base-release': selected GPU identity is missing*") 'legacy release returned the wrong fail-closed error'
+    Assert-Equal (Get-Sha256 (Join-Path $script:StateRoot 'state.json')) $legacyStateSha 'legacy rejection mutated lifecycle state'
+    Write-Json (Join-Path $script:StateRoot 'state.json') $schema3BaseState
+
+    $upgradePackage = New-FixturePackage $testRoot 'upgrade-release' $script:ModelPath 48150
+    $upgradeSecret = New-SecretFile $testRoot 'upgrade-release'
+    Invoke-FixtureInstall $upgradePackage $upgradeSecret
+    $upgradedState = Read-State
+    Assert-Equal ([int]$upgradedState.schema_version) 3 'upgrade did not preserve schema-3 state'
+    Assert-Equal $upgradedState.active_release 'upgrade-release' 'upgrade candidate did not activate'
+    foreach ($property in $upgradedState.releases.PSObject.Properties) {
         Assert-CleanSchema3Release $property.Value $property.Name
         Assert-CandidateLayout $property.Value $property.Name
     }
-    $migratedBase = $migratedState.releases.PSObject.Properties['base-release'].Value
-    Assert-Equal ([string]$migratedBase.model_artifact_sha256) $baseVerifiedModelDigest 'schema migration did not preserve the verified model digest'
-    $migrationKeyPath = [string]$migratedState.releases.PSObject.Properties['migration-release'].Value.api_key_file
-    $ledger['migration-release'] = [pscustomobject]@{ path = $migrationKeyPath; sha256 = $migrationSecret.sha256 }
+    $upgradedBase = $upgradedState.releases.PSObject.Properties['base-release'].Value
+    Assert-Equal ([string]$upgradedBase.model_artifact_sha256) $baseVerifiedModelDigest 'upgrade did not preserve the verified model digest'
+    $upgradeKeyPath = [string]$upgradedState.releases.PSObject.Properties['upgrade-release'].Value.api_key_file
+    $ledger['upgrade-release'] = [pscustomobject]@{ path = $upgradeKeyPath; sha256 = $upgradeSecret.sha256 }
     Assert-KeyLedger $ledger
-    Assert-OwnerPaused $true 'migrated release start did not release the GPU owner'
+    Assert-OwnerPaused $true 'upgraded release start did not release the GPU owner'
 
     & $managedController -Action Rollback -StateRoot $script:StateRoot | Out-Null
-    Assert-Equal (Read-State).active_release 'base-release' 'rollback could not start the migrated schema-1 release'
+    Assert-Equal (Read-State).active_release 'base-release' 'rollback could not start the retained base release'
     & $managedController -Action Restart -StateRoot $script:StateRoot | Out-Null
-    Assert-Equal (Read-State).active_release 'base-release' 'restart changed the migrated active release'
-    Assert-True $global:NInferTestTaskRunning 'migrated release restart did not remain live'
+    Assert-Equal (Read-State).active_release 'base-release' 'restart changed the rolled-back active release'
+    Assert-True $global:NInferTestTaskRunning 'rolled-back release restart did not remain live'
 
-    $aclPackage = New-FixturePackage $testRoot 'acl-incomplete' $script:ModelPath 48151
-    $aclSecret = New-SecretFile $testRoot 'acl-incomplete'
-    $aclStateShaBefore = Get-Sha256 (Join-Path $script:StateRoot 'state.json')
-    $aclControllerShaBefore = Get-Sha256 $managedController
-    $aclTaskXmlBefore = [string]$global:NInferTestTaskXml
-    $global:NInferTestAclResetArguments = @()
-    $global:NInferTestAclFailure = $true
-    $aclFailure = $null
-    try {
-        Invoke-FixtureInstall $aclPackage $aclSecret -NoStart
-    }
-    catch {
-        $aclFailure = $_
-    }
-    finally {
-        $global:NInferTestAclFailure = $false
-    }
-    Assert-True ($null -ne $aclFailure) 'install accepted a failed recursive ACL ordering probe'
-    Assert-True ($aclFailure.Exception.Message -like '*failed test-mode recursive ACL ordering probe*') "ACL ordering probe returned the wrong failure: $($aclFailure.Exception.Message)"
-    Assert-True ($global:NInferTestAclResetArguments -contains '/reset') 'ACL ordering fixture was not executed'
-    Assert-True ($global:NInferTestAclResetArguments -notcontains '/C') 'ACL ordering fixture retained continue-on-error'
-    Assert-Equal (Get-Sha256 (Join-Path $script:StateRoot 'state.json')) $aclStateShaBefore 'ACL failure published lifecycle state'
-    Assert-Equal (Get-Sha256 $managedController) $aclControllerShaBefore 'ACL failure changed the managed controller'
-    Assert-Equal ([string]$global:NInferTestTaskXml) $aclTaskXmlBefore 'ACL failure changed the scheduled task'
-    Assert-True $global:NInferTestTaskRunning 'ACL failure did not restart the incumbent release'
-    Assert-Equal (Read-State).active_release 'base-release' 'ACL failure left the candidate active'
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path (Join-Path $script:StateRoot 'releases') 'acl-incomplete'))) 'ACL failure left a candidate release'
-    Assert-True (-not (Test-Path -LiteralPath (Join-Path (Join-Path $script:StateRoot 'secrets') 'acl-incomplete'))) 'ACL failure left a candidate secret'
-    Assert-OwnerPaused $true 'ACL failure changed GPU-owner state'
     $faultPoints = @(
         'model_reference',
         'candidate_layout',
         'secret_copy',
         'incumbent_stop',
         'owner_controller_copy',
-        'acl',
         'controller_copy',
         'state_activation',
         'task_registration',
@@ -1044,16 +1018,23 @@ try {
         artifact_type = 'ninfer_release_lifecycle_regression'
         schema_version = 1
         status = 'passed'
+        evidence_class = 'instrumented-unshipped-installer-lifecycle'
+        exact_shipped_installer_executed = $false
+        published_installer_sha256 = $publishedInstallerSha256
+        instrumented_installer_sha256 = $instrumentedInstallerSha256
+        instrumentation_generator_sha256 = $harnessGeneratorSha256
+        published_installer_callable_test_hooks = 0
+        real_acl_evidence_included = $false
         injected_failures = $faultPoints.Count
         published_default_gpu_owner_controllers = 1
         retries = $faultPoints.Count
         rollback_key_pairs = $faultPoints.Count
         restart_model_rehash_calls = $global:NInferBlockedModelHashCalls
         model_metadata_tamper_rejections = 1
-        schema1_release_records_migrated = 1
+        schema1_release_records_migrated = 0
         schema3_identity_mismatch_rejections = 1
         unmigratable_release_rejections = 1
-        stub_acl_propagation_rejections = 1
+        legacy_release_rejections = 1
         interrupted_reentry_rejections = 2
         installer_repairs = 2
         scalar_cleanup_actions = 1
@@ -1061,21 +1042,20 @@ try {
         candidate_model_copies = 0
         dead_start_rejections = 1
         captured_gpu_lease_reentries = 1
-        stub_acl_ordering_observations = $earlyAclObservations.Count
         selected_gpu_identity_bindings = 1
         dead_start_sleep_milliseconds = $global:NInferTestDeadStartSleptMilliseconds
     } | ConvertTo-Json -Compress
 }
 finally {
-    [Environment]::SetEnvironmentVariable('NINFER_TEST_INSTALL_FAILURE_AFTER', $originalFault, 'Process')
-    [Environment]::SetEnvironmentVariable('NINFER_TEST_INSTALL_INTERRUPTION_AFTER', $originalInterrupt, 'Process')
+    [Environment]::SetEnvironmentVariable('NINFER_HARNESS_FAILURE_AFTER', $originalFault, 'Process')
+    [Environment]::SetEnvironmentVariable('NINFER_HARNESS_INTERRUPTION_AFTER', $originalInterrupt, 'Process')
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
     foreach ($name in @(
             'Get-ScheduledTask', 'Export-ScheduledTask', 'New-ScheduledTaskAction',
             'New-ScheduledTaskTrigger', 'New-ScheduledTaskSettingsSet',
             'New-ScheduledTaskPrincipal', 'Register-ScheduledTask',
             'Unregister-ScheduledTask', 'Start-ScheduledTask', 'Stop-ScheduledTask',
-            'Get-NetTCPConnection', 'Invoke-RestMethod', 'Start-Sleep', 'icacls.exe', 'nvidia-smi.exe'
+            'Get-NetTCPConnection', 'Invoke-RestMethod', 'Start-Sleep', 'nvidia-smi.exe'
         )) {
         Remove-Item -LiteralPath "Function:\global:$name" -ErrorAction SilentlyContinue
     }

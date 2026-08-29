@@ -34,6 +34,8 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 $StateProtectionPath = (Resolve-Path -LiteralPath $StateProtectionPath).Path
 $GpuOwnerControllerPath = (Resolve-Path -LiteralPath $GpuOwnerControllerPath).Path
 $InstallerPath = (Resolve-Path -LiteralPath $InstallerPath).Path
+$stateProtectionText = [IO.File]::ReadAllText($StateProtectionPath, [Text.Encoding]::UTF8)
+$installerText = [IO.File]::ReadAllText($InstallerPath, [Text.Encoding]::UTF8)
 . $StateProtectionPath
 
 function Assert-True([bool]$Condition, [string]$Message) {
@@ -75,6 +77,12 @@ $user = 'NfAcl' + [Guid]::NewGuid().ToString('N').Substring(0, 8)
 $password = 'Nf!9aA' + [Guid]::NewGuid().ToString('N').Substring(0, 14)
 $userCreated = $false
 try {
+    Assert-True $stateProtectionText.Contains('[NInferProtectedDirectoryNative]::Create') 'state helper does not use atomic ACL-bearing directory creation'
+    Assert-True (-not $stateProtectionText.Contains('New-Item -ItemType Directory -Path $next')) 'state helper still creates a directory before applying its ACL'
+    foreach ($forbidden in @('InstallTestMode', 'NINFER_TEST_INSTALL', 'Invoke-InstallFault', 'NInferSimulatedInterruption')) {
+        Assert-True (-not $installerText.Contains($forbidden)) "shipped installer contains a callable test or fault hook: $forbidden"
+    }
+
     $testRoot = Initialize-NInferProtectedStateRoot $testRoot
     $env:ProgramData = $testRoot
     $cleanDefaultParent = Join-Path $env:ProgramData 'NInfer'
@@ -96,8 +104,11 @@ try {
     Assert-True ($rootOwner -cin @('S-1-5-18', 'S-1-5-32-544')) 'protected root owner is not SYSTEM or Administrators'
     Assert-True $rootAcl.AreAccessRulesProtected 'protected root DACL still inherits'
 
-    $adminProbe = Join-Path $protected 'admin-write.txt'
-    [IO.File]::WriteAllText($adminProbe, 'admin', [Text.UTF8Encoding]::new($false))
+    $secretDirectory = Join-Path $protected 'secrets\retained-release'
+    New-Item -ItemType Directory -Path $secretDirectory -Force | Out-Null
+    $adminProbe = Join-Path $secretDirectory 'api-key.txt'
+    [IO.File]::WriteAllText($adminProbe, 'admin-only-secret', [Text.UTF8Encoding]::new($false))
+    Assert-NInferProtectedStateTree $protected
     $token = [IntPtr]::Zero
     if (-not [NInferSecurityNative]::LogonUser($user, $env:COMPUTERNAME, $password, 2, 0, [ref]$token)) {
         throw "failed to log on the low-privilege effective-access principal: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
@@ -127,8 +138,11 @@ try {
 
     $precreated = Join-Path $testRoot 'precreated'
     New-Item -ItemType Directory -Path $precreated | Out-Null
+    $precreatedMarker = Join-Path $precreated 'attacker-marker.txt'
+    [IO.File]::WriteAllText($precreatedMarker, 'must-survive', [Text.UTF8Encoding]::new($false))
     Assert-Rejected { Initialize-NInferProtectedStateRoot $precreated | Out-Null } `
         '*protected state inherits an external DACL*' 'attacker-precreated root was accepted'
+    Assert-True (Test-Path -LiteralPath $precreatedMarker -PathType Leaf) 'state initialization recursively deleted an untrusted precreated tree'
 
     $unowned = Join-Path $testRoot 'unowned'
     New-Item -ItemType Directory -Path $unowned | Out-Null
@@ -213,11 +227,17 @@ try {
         artifact_type = 'ninfer_windows_state_security_regression'
         schema_version = 1
         status = 'passed'
+        evidence_class = 'exact-shipped-state-helper-and-installer-prewrite-real-acl'
+        exact_shipped_installer_executed = $true
+        exact_shipped_installer_full_install = $false
         root_owner_sid = $rootOwner
         root_dacl_protected = $true
+        atomic_acl_directory_creation = $true
+        untrusted_precreated_tree_preserved = $true
         clean_default_managed_parent_creations = 2
         low_privilege_effective_write_denials = 1
         low_privilege_effective_read_denials = 1
+        bearer_secret_effective_read_denials = 1
         precreated_root_rejections = 1
         unowned_root_rejections = 1
         root_junction_rejections = 1

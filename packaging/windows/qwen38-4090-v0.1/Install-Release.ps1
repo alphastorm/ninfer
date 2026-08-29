@@ -32,25 +32,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Protect-StateRoot.ps1')
 
-$script:InstallTestMode = $false
-if ($script:InstallTestMode) {
-    $temporaryRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd(
-        [IO.Path]::DirectorySeparatorChar
-    ) + [IO.Path]::DirectorySeparatorChar
-    $testStateRoot = [IO.Path]::GetFullPath($StateRoot).TrimEnd(
-        [IO.Path]::DirectorySeparatorChar
-    ) + [IO.Path]::DirectorySeparatorChar
-    if (-not $testStateRoot.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'transaction test state must remain under the operating-system temporary directory'
-    }
-}
-else {
-    $principal = [Security.Principal.WindowsPrincipal]::new(
-        [Security.Principal.WindowsIdentity]::GetCurrent()
-    )
-    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        throw 'Install-Release.ps1 must run from an elevated PowerShell session'
-    }
+$principal = [Security.Principal.WindowsPrincipal]::new(
+    [Security.Principal.WindowsIdentity]::GetCurrent()
+)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw 'Install-Release.ps1 must run from an elevated PowerShell session'
 }
 
 function Read-JsonFile([string]$Path) {
@@ -72,18 +58,6 @@ function Write-JsonAtomic([string]$Path, [object]$Value) {
     }
 }
 
-
-function Invoke-InstallFault([string]$Point) {
-    if (-not $script:InstallTestMode) { return }
-    if ([string]$env:NINFER_TEST_INSTALL_INTERRUPTION_AFTER -ceq $Point) {
-        $exception = [InvalidOperationException]::new("simulated interrupted install after $Point")
-        $exception.Data['NInferSimulatedInterruption'] = $true
-        throw $exception
-    }
-    if ([string]$env:NINFER_TEST_INSTALL_FAILURE_AFTER -ceq $Point) {
-        throw "injected install failure after $Point"
-    }
-}
 
 function Restore-ReleaseTask([string]$TaskName, [bool]$Existed, [string]$Xml) {
     if ($Existed) {
@@ -428,9 +402,6 @@ function ConvertTo-Schema3Release(
         $gpuUuid = [string](Get-RequiredReleaseField $Release $ReleaseId 'gpu_uuid')
         $gpuName = [string](Get-RequiredReleaseField $Release $ReleaseId 'gpu_name')
     }
-    elseif ($script:InstallTestMode) {
-        $gpuIndex = 0; $gpuUuid = 'GPU-fixture-4090'; $gpuName = 'NVIDIA GeForce RTX 4090'
-    }
     else { throw "cannot migrate installed release '$ReleaseId': selected GPU identity is missing" }
 
     return [ordered]@{
@@ -488,9 +459,6 @@ function Assert-HostPrerequisites([object]$Spec, [object]$Config) {
     $deviceText = [string]$Config.engine.device
     if ($deviceText -notmatch '^(?:cuda:)?([0-9]+)$') { throw 'configured GPU device is invalid' }
     $deviceIndex = [int]$Matches[1]
-    if ($script:InstallTestMode) {
-        return [ordered]@{ index = $deviceIndex; uuid = 'GPU-fixture-4090'; name = 'NVIDIA GeForce RTX 4090' }
-    }
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or -not [Environment]::Is64BitOperatingSystem -or [IntPtr]::Size -ne 8) {
         throw 'this release requires 64-bit Windows on x86-64'
     }
@@ -578,7 +546,7 @@ function Assert-InstallerArchitectureContract([object]$Spec) {
         [string]$Spec.lifecycle.interrupted_install_reentry -cne 'repair-required') {
         throw 'release specification installer ownership contract mismatch'
     }
-    if (-not $script:InstallTestMode -and [Int64]$Spec.model.bytes -ne 18210531328) {
+    if ([Int64]$Spec.model.bytes -ne 18210531328) {
         throw 'release specification pinned model byte length mismatch'
     }
 }
@@ -716,10 +684,6 @@ function Invoke-InstallTransactionRollback(
 
 $StateRoot = Initialize-NInferProtectedStateRoot $StateRoot
 Assert-NInferProtectedStateTree $StateRoot
-if ($script:InstallTestMode) {
-    & icacls.exe $StateRoot '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'Administrators:(OI)(CI)F' | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw 'failed test-mode release state ACL ordering probe' }
-}
 $statePath = Join-Path $StateRoot 'state.json'
 $controllerPath = Join-Path $StateRoot 'Control-Release.ps1'
 $ownerControllerPath = Join-Path (Join-Path $StateRoot 'gpu-owner') 'Control-GpuOwner.ps1'
@@ -789,8 +753,7 @@ try {
     }
 
     $package = (Resolve-Path -LiteralPath $PackagePath).Path
-    if (-not $script:InstallTestMode -and
-        [IO.Path]::GetFileName($package) -cne 'ninfer-4090-qwen38-v0.1.0-win-x64.zip') {
+    if ([IO.Path]::GetFileName($package) -cne 'ninfer-4090-qwen38-v0.1.0-win-x64.zip') {
         throw 'unexpected release package filename'
     }
     Write-InstallEvent 'package_identity_started' 'Verifying release package identity' ([ordered]@{ path = $package })
@@ -874,8 +837,6 @@ try {
             operation_id = $operationId
             journal_path = $journalPath
         })
-    Invoke-InstallFault 'stage_create'
-
     try {
         Write-InstallEvent 'package_expand_started' 'Expanding verified release package' ([ordered]@{ stage_path = $stage })
         Expand-Archive -LiteralPath $package -DestinationPath $stage
@@ -898,9 +859,8 @@ try {
             $manifest.source_dirty -ne $false) {
             throw 'release package identity mismatch'
         }
-        if (-not $script:InstallTestMode -and
-            ([string]$manifest.release_version -cne '0.1.0' -or
-             [string]$manifest.asset_filename -cne 'ninfer-4090-qwen38-v0.1.0-win-x64.zip')) {
+        if ([string]$manifest.release_version -cne '0.1.0' -or
+            [string]$manifest.asset_filename -cne 'ninfer-4090-qwen38-v0.1.0-win-x64.zip') {
             throw 'release package semantic version mismatch'
         }
         if ([string]$manifest.upstream_base_sha -cne [string]$spec.source.upstream_base_sha) {
@@ -945,7 +905,6 @@ try {
             throw 'model artifact SHA-256 mismatch'
         }
         Set-TransactionPhase $transaction 'model_reference_verified'
-        Invoke-InstallFault 'model_reference'
 
         $instanceId = [string]$manifest.release_instance_id
         if ([string]::IsNullOrWhiteSpace($instanceId) -or $instanceId -notmatch '^[A-Za-z0-9._-]+$') {
@@ -979,7 +938,7 @@ try {
             if (Test-Path -LiteralPath $source -PathType Leaf) {
                 Move-Item -LiteralPath $source -Destination (Join-Path $lifecycleBin $name)
             }
-            elseif (-not $script:InstallTestMode) {
+            else {
                 throw "release package is missing lifecycle binary: $name"
             }
         }
@@ -988,7 +947,7 @@ try {
             if (Test-Path -LiteralPath $source -PathType Leaf) {
                 Move-Item -LiteralPath $source -Destination (Join-Path $qualificationBin $name)
             }
-            elseif (-not $script:InstallTestMode) {
+            else {
                 throw "release package is missing qualification binary: $name"
             }
         }
@@ -996,7 +955,7 @@ try {
         if (Test-Path -LiteralPath $smokeSource -PathType Container) {
             Move-Item -LiteralPath $smokeSource -Destination (Join-Path $qualificationBin 'smoke')
         }
-        elseif (-not $script:InstallTestMode) {
+        else {
             throw 'release package is missing qualification smoke binaries'
         }
         Move-Item -LiteralPath (Join-Path $payload 'server-config.json') -Destination (Join-Path $configRoot 'server-config.json')
@@ -1007,13 +966,11 @@ try {
         if ($payloadResidue.Count -ne 0) { throw 'release package contains an unclassified candidate-root entry' }
         New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
         Set-TransactionPhase $transaction 'candidate_layout_created'
-        Invoke-InstallFault 'candidate_layout'
 
         New-Item -ItemType Directory -Path $secretDirectory | Out-Null
         $installedKey = Join-Path $secretDirectory 'api-key.txt'
         Copy-Item -LiteralPath $apiKeySource -Destination $installedKey
         Assert-OneLineSecret $installedKey
-        Invoke-InstallFault 'secret_copy'
 
         $serverExecutable = Join-Path (Join-Path $releaseRoot 'bin') 'ninfer-serve.exe'
         $configFile = Join-Path $configRoot 'server-config.json'
@@ -1066,7 +1023,6 @@ try {
             Set-TransactionFlag $transaction 'incumbent_touched'
             & $controllerPath -Action Stop -StateRoot $StateRoot | Out-Null
         }
-        Invoke-InstallFault 'incumbent_stop'
         if ($null -ne $ownerControllerSource) {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ownerControllerPath) | Out-Null
             Set-TransactionFlag $transaction 'owner_controller_touched'
@@ -1091,32 +1047,21 @@ try {
                 throw 'installed GPU-owner controller identity mismatch'
             }
         }
-        Invoke-InstallFault 'owner_controller_copy'
-
         Set-TransactionFlag $transaction 'controller_touched'
         $stateHelperSource = Join-Path $lifecycleBin 'Protect-StateRoot.ps1'
         Copy-Item -LiteralPath $stateHelperSource -Destination $stateProtectionPath -Force
         Assert-NInferProtectedStateTree $StateRoot
-        if ($script:InstallTestMode) {
-            & icacls.exe (Join-Path $StateRoot '*') '/reset' '/T' | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw 'failed test-mode recursive ACL ordering probe' }
-        }
-        Invoke-InstallFault 'acl'
 
         Copy-Item -LiteralPath $controllerSource -Destination $controllerPath -Force
-        Invoke-InstallFault 'controller_copy'
 
         Set-TransactionFlag $transaction 'state_activated'
         Write-JsonAtomic $statePath $state
-        Invoke-InstallFault 'state_activation'
 
         Set-TransactionFlag $transaction 'task_touched'
         Register-ReleaseTask $taskName $controllerPath
-        Invoke-InstallFault 'task_registration'
 
         if (-not $NoStart) {
             & $controllerPath -Action Start -StateRoot $StateRoot | Out-Null
-            Invoke-InstallFault 'candidate_start'
         }
         $statusOutput = @(& $controllerPath -Action Status -StateRoot $StateRoot)
         $lifecycleStatus = Convert-CommandOutputToJson $statusOutput 'release lifecycle status'
@@ -1164,21 +1109,6 @@ try {
     }
     catch {
         $installFailure = $_
-        if ($script:InstallTestMode -and
-            [bool]$installFailure.Exception.Data['NInferSimulatedInterruption']) {
-            Set-ObjectProperty $transaction 'status' 'repair_required'
-            Set-ObjectProperty $transaction 'phase' 'interrupted'
-            Set-ObjectProperty $transaction 'diagnostics' @(
-                Get-BoundedDiagnostic $installFailure.Exception.Message
-            )
-            Write-InstallTransaction $transaction
-            Write-InstallEvent 'install_interrupted' 'Installer transaction requires repair; re-entry is blocked' ([ordered]@{
-                    operation_id = $operationId
-                    journal_path = $journalPath
-                })
-            throw $installFailure
-        }
-
         try {
             $rollbackActions = @(Invoke-InstallTransactionRollback $transaction $statePath $controllerPath $ownerControllerPath 'rollback')
             $failureReceipt = [ordered]@{

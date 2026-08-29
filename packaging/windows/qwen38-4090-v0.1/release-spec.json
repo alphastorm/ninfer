@@ -53,6 +53,14 @@
     "fixture_provenance": "source-controlled synthetic fixture; the unavailable historical private corpus was not reused",
     "historical_private_corpus_reused": false
   },
+  "qualification_authority": {
+    "in_archive_status": "candidate-only-not-release-eligible",
+    "external_sidecar_filename": "ninfer-4090-qwen38-v0.1.0-win-x64-qualification.json",
+    "external_artifact_type": "ninfer_public_windows_release_qualification",
+    "external_required_status": "passed",
+    "external_required_release_eligible": true,
+    "supersession_binding": "SHA256SUMS-bound external sidecar supersedes candidate status only after G, L, and R pass"
+  },
   "qualified_artifacts": {
     "deployment_profile": "qwen38-4090-v0.1",
     "binary_sha256": "e0769d5c64195325ba95891c1af99e71db2083271f379242134ac906f8ae9e5d",
@@ -83,7 +91,9 @@
       "helper": "Protect-StateRoot.ps1",
       "owner_sids": ["S-1-5-18", "S-1-5-32-544"],
       "dacl_inheritance": "disabled-at-managed-roots",
-      "write_capable_principals": ["SYSTEM", "Administrators"],
+      "access_principals": ["SYSTEM", "Administrators"],
+      "directory_creation": "atomic-with-final-security-descriptor",
+      "untrusted_tree_cleanup": "never",
       "reparse_policy": "reject-root-ancestors-and-descendants",
       "upgrade_verification": "before-state-read-or-write",
       "request_jsonl": "under-protected-release-state"
