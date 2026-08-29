@@ -164,17 +164,6 @@ function global:Start-Sleep {
     }
 }
 
-function global:nvidia-smi.exe {
-    param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Arguments)
-    if (@($Arguments | Where-Object { [string]$_ -like '*driver_version*' }).Count -ne 0) {
-        '0, GPU-fixture-4090, NVIDIA GeForce RTX 4090, 8.9, 581.15'
-    }
-    else {
-        '0, GPU-fixture-4090, NVIDIA GeForce RTX 4090'
-    }
-    Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1
-}
-
 function Write-Json([string]$Path, [object]$Value) {
     [IO.File]::WriteAllText(
         $Path,
@@ -1039,7 +1028,7 @@ try {
             'New-ScheduledTaskPrincipal', 'Register-ScheduledTask',
             'Unregister-ScheduledTask', 'Start-ScheduledTask', 'Stop-ScheduledTask',
             'Get-NetTCPConnection', 'Invoke-RestMethod', 'Start-Sleep',
-            'nvidia-smi.exe', 'Get-FileHash'
+            'Invoke-TrustedNvidiaSmi result in generated installer', 'Get-FileHash'
         )
         exact_unsubstituted_components = @(
             'Control-Release.ps1', 'Protect-StateRoot.ps1',
@@ -1083,7 +1072,7 @@ finally {
             'New-ScheduledTaskTrigger', 'New-ScheduledTaskSettingsSet',
             'New-ScheduledTaskPrincipal', 'Register-ScheduledTask',
             'Unregister-ScheduledTask', 'Start-ScheduledTask', 'Stop-ScheduledTask',
-            'Get-NetTCPConnection', 'Invoke-RestMethod', 'Start-Sleep', 'nvidia-smi.exe'
+            'Get-NetTCPConnection', 'Invoke-RestMethod', 'Start-Sleep'
         )) {
         Remove-Item -LiteralPath "Function:\global:$name" -ErrorAction SilentlyContinue
     }

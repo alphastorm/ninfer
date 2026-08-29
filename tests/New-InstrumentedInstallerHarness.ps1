@@ -63,6 +63,15 @@ function Invoke-NInferHarnessFault([string]$Point) {
     $instrumented = Replace-NInferHarnessTextOnce $instrumented `
         $productionModelPin $instrumentedModelPin 'fixture model pin'
 
+    $productionGpuQuery = @'
+    $rows = @(Invoke-TrustedNvidiaSmi '--query-gpu=index,uuid,name,compute_cap,driver_version --format=csv,noheader,nounits')
+'@
+    $instrumentedGpuQuery = @'
+    $rows = @('0, GPU-fixture-4090, NVIDIA GeForce RTX 4090, 8.9, 581.15')
+'@
+    $instrumented = Replace-NInferHarnessTextOnce $instrumented `
+        $productionGpuQuery $instrumentedGpuQuery 'fixture trusted GPU query result'
+
     $stageAnchor = @'
     Write-InstallEvent 'install_started' 'Started durable installer transaction' ([ordered]@{
             operation_id = $operationId

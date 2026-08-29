@@ -21,6 +21,45 @@ function Read-JsonFile([string]$Path) {
     return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
+function Invoke-TrustedNvidiaSmi([string]$Arguments) {
+    $systemDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::System)
+    $application = [IO.Path]::GetFullPath((Join-Path $systemDirectory 'nvidia-smi.exe'))
+    if (-not (Test-Path -LiteralPath $application -PathType Leaf)) {
+        throw 'trusted System32 nvidia-smi application is missing'
+    }
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $application
+    $start.Arguments = $Arguments
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    try {
+        if (-not $process.Start()) { throw 'trusted nvidia-smi process did not start' }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $stdout = [string]$stdoutTask.GetAwaiter().GetResult()
+        $stderr = [string]$stderrTask.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) {
+            throw "trusted nvidia-smi query exited $($process.ExitCode): $($stderr.Substring(0, [Math]::Min(256, $stderr.Length)))"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($stderr)) {
+            throw "trusted nvidia-smi query wrote stderr: $($stderr.Substring(0, [Math]::Min(256, $stderr.Length)))"
+        }
+    }
+    finally { $process.Dispose() }
+    $trimmed = $stdout.TrimEnd([char[]]@(13, 10))
+    if ([string]::IsNullOrWhiteSpace($trimmed)) { return @() }
+    $rows = @($trimmed -split '[\r\n]+')
+    if (@($rows | Where-Object { [string]::IsNullOrWhiteSpace([string]$_) }).Count -ne 0) {
+        throw 'trusted nvidia-smi query returned an empty row'
+    }
+    return $rows
+}
+
 function Write-JsonAtomic([string]$Path, [object]$Value) {
     $temporary = "$Path.$([Guid]::NewGuid().ToString('N')).tmp"
     try {
@@ -157,12 +196,18 @@ function Assert-SelectedGpuIdentity([object]$Release) {
     if (Test-Path Env:CUDA_VISIBLE_DEVICES) {
         throw 'CUDA_VISIBLE_DEVICES must be absent for bound GPU ordinal identity'
     }
-    $rows = @(& nvidia-smi.exe --query-gpu=index,uuid,name --format=csv,noheader,nounits 2>$null)
-    if ($LASTEXITCODE -ne 0) { throw 'selected GPU identity query failed' }
+    $rows = @(Invoke-TrustedNvidiaSmi '--query-gpu=index,uuid,name --format=csv,noheader,nounits')
+    if ($rows.Count -eq 0) { throw 'selected GPU identity query returned no rows' }
     $matched = $false
     foreach ($row in $rows) {
         $parts = @(([string]$row -split ',') | ForEach-Object { $_.Trim() })
-        if ($parts.Count -ne 3 -or [int]$parts[0] -ne [int]$Release.gpu_index) { continue }
+        [uint32]$rowIndex = 0
+        if ($parts.Count -ne 3 -or @($parts | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -ne 0 -or
+            -not [uint32]::TryParse($parts[0], [Globalization.NumberStyles]::None,
+                [Globalization.CultureInfo]::InvariantCulture, [ref]$rowIndex)) {
+            throw 'trusted nvidia-smi selected-GPU query returned a malformed row'
+        }
+        if ($rowIndex -ne [uint32]$Release.gpu_index) { continue }
         if ($parts[1] -cne [string]$Release.gpu_uuid -or $parts[2] -cne [string]$Release.gpu_name) {
             throw 'selected GPU identity changed after install'
         }

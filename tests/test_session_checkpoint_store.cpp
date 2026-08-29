@@ -1132,9 +1132,15 @@ int test_delete_checkpoint_transaction_race_and_quota() {
         ResponseStore responses(8, 8ULL << 20);
         for (const StoredResponse& response : snapshot.records) { responses.put(response); }
         bool refuse_cleanup = false;
+        int cleanup_calls = 0;
+        std::optional<std::filesystem::path> retained_tombstone;
         SessionCheckpointStoreOptions options = manager_options(temporary.path);
         options.tombstone_cleanup = [&](const std::filesystem::path& path) {
-            if (refuse_cleanup) { return false; }
+            ++cleanup_calls;
+            if (refuse_cleanup) {
+                retained_tombstone = path;
+                return false;
+            }
             std::error_code error;
             std::filesystem::remove_all(path, error);
             return !error;
@@ -1151,17 +1157,32 @@ int test_delete_checkpoint_transaction_race_and_quota() {
         refuse_cleanup = true;
         const SessionCheckpointEraseResult erased = manager.erase_response(
             snapshot.client_session_sha256, snapshot.records.front().id, responses);
-        const std::filesystem::path tombstone =
-            temporary.path / ".tombstones" /
-            (namespace_storage_digest(checkpoint_namespace(snapshot)) + "--" +
-             baseline.checkpoint->generation);
+        const std::filesystem::path tombstone = retained_tombstone.value_or(
+            temporary.path / ".tombstones" / "missing-retained-generation");
         const std::filesystem::path retained_responses = tombstone / "responses.cbor";
+        std::optional<ResponseStoreSnapshot> retained_snapshot;
+        if (std::filesystem::is_regular_file(retained_responses)) {
+            const std::string bytes = read_file_bytes(retained_responses);
+            retained_snapshot = decode_response_store_snapshot(
+                std::as_bytes(std::span(bytes.data(), bytes.size())), 1ULL << 20);
+        }
+        failures += check(erased == SessionCheckpointEraseResult::Erased,
+                          "deferred-cleanup DELETE did not commit");
+        failures += check(cleanup_calls == 1,
+                          "committed DELETE did not attempt bounded eager generation cleanup");
+        failures += check(retained_tombstone.has_value(),
+                          "bounded eager cleanup did not expose its deferred tombstone");
+        failures += check(std::filesystem::is_regular_file(retained_responses),
+                          "failed eager cleanup did not retain responses.cbor in a tombstone");
+        failures += check(retained_snapshot.has_value(),
+                          "retained pre-delete responses.cbor did not decode");
         failures += check(
-            erased == SessionCheckpointEraseResult::Erased &&
-                std::filesystem::is_regular_file(retained_responses) &&
-                read_file_bytes(retained_responses).find(snapshot.records.front().id) !=
-                    std::string::npos,
-            "failed eager cleanup did not disclose retention of the complete old response body");
+            retained_snapshot &&
+                std::any_of(retained_snapshot->records.begin(), retained_snapshot->records.end(),
+                            [&](const StoredResponse& response) {
+                                return response.id == snapshot.records.front().id;
+                            }),
+            "retained pre-delete snapshot omitted the logically deleted response body");
 
         refuse_cleanup = false;
         SessionCheckpointStore collector(options);

@@ -94,6 +94,10 @@ try {
         populated_file_count = $files.Count
         populated_logical_bytes = $observedLogicalBytes
         configured_checkpoint_quota_mib = 8192
+        measurement_scope = 'fixed synthetic 2048-file sparse-root status regression'
+        fixture_storage = 'sparse files with logical byte lengths; not realized checkpoint generations'
+        worst_case_quota_file_count_claim = $false
+        quota_full_generation_topology_measured = $false
         status_elapsed_seconds = $elapsed
         maximum_status_seconds = $MaximumStatusSeconds
         endpoint_state = [string]$status.endpoint_state

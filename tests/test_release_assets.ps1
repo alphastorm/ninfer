@@ -19,14 +19,14 @@ function Assert-True([bool]$Condition, [string]$Message) {
 function Write-Json([string]$Path, [object]$Value) {
     [IO.File]::WriteAllText(
         $Path,
-        ($Value | ConvertTo-Json -Depth 16),
+        ($Value | ConvertTo-Json -Depth 64),
         [Text.UTF8Encoding]::new($false)
     )
 }
 
 $root = Join-Path ([IO.Path]::GetTempPath()) ('ninfer-release-assets-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root | Out-Null
-$patchSha = '6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f'
+$patchSha = 'e4654b5aed87e7385bdf33f8b4365a7a550d4ad9'
 $assetStem = 'ninfer-4090-qwen38-v0.1.0-win-x64'
 $sbomCreatedUtc = '2026-08-29T00:00:00Z'
 
@@ -61,6 +61,10 @@ try {
     $runtimeB = Join-Path $root 'runtime-b.dll'
     [IO.File]::WriteAllText($runtimeA, 'runtime-a', [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText($runtimeB, 'runtime-b', [Text.UTF8Encoding]::new($false))
+    $sourceArchive = Join-Path $root 'package-source.tar.gz'
+    [IO.File]::WriteAllText($sourceArchive, 'committed-package-source', [Text.UTF8Encoding]::new($false))
+    $sourceArchiveSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceArchive).Hash.ToLowerInvariant()
+    $sourceArchiveBytes = (Get-Item -LiteralPath $sourceArchive).Length
     if ($windowsFixture) { (Get-Item -LiteralPath $runtimeB).Attributes = [IO.FileAttributes]::Hidden }
     $serverSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $server).Hash.ToLowerInvariant()
     $canonicalConfigSha256 = 'ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db'
@@ -95,7 +99,11 @@ try {
             schema_version = 1
             status = 'candidate_ready'
             release_eligible = $false
-            source = [ordered]@{ qualified_commit = $patchSha }
+            source = [ordered]@{
+                qualified_commit = $patchSha
+                package_source_archive_sha256 = $sourceArchiveSha256
+                package_source_archive_bytes = $sourceArchiveBytes
+            }
             identity = [ordered]@{
                 binary_sha256 = $serverSha256
                 config_sha256 = $configSha256
@@ -127,9 +135,12 @@ try {
     $passedRedOut = Join-Path $root 'out-passed-red'
     $passedRedRejected = $false
     try {
-        & $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $passedRedPath -SbomCreatedUtc $sbomCreatedUtc -OutputDirectory $passedRedOut | Out-Null
+        & $PackageBuilderPath -ServerExecutable $server -SourceArchive $sourceArchive -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $passedRedPath -SbomCreatedUtc $sbomCreatedUtc -OutputDirectory $passedRedOut | Out-Null
     }
-    catch { $passedRedRejected = $_.Exception.Message -ceq 'qualification record claims passed while required release gates remain incomplete' }
+    catch {
+        if ($_.Exception.Message -cne 'qualification record claims passed while required release gates remain incomplete') { throw }
+        $passedRedRejected = $true
+    }
     Assert-True $passedRedRejected 'passed qualification with red gate was accepted'
     Assert-True (-not (Test-Path -LiteralPath $passedRedOut)) 'red passed gate created output assets'
 
@@ -140,7 +151,7 @@ try {
     $wrongOut = Join-Path $root 'out-wrong-model'
     $wrongModelRejected = $false
     try {
-        & $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha `
+        & $PackageBuilderPath -ServerExecutable $server -SourceArchive $sourceArchive -PatchStackSha $patchSha `
             -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath `
             -QualificationRecord $wrongQualificationPath -SbomCreatedUtc $sbomCreatedUtc -OutputDirectory $wrongOut | Out-Null
     }
@@ -159,7 +170,7 @@ try {
     Write-Json $gpuUuidQualificationPath $gpuUuidQualification
     $gpuUuidRejected = $false
     try {
-        & $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $gpuUuidQualificationPath -SbomCreatedUtc $sbomCreatedUtc -OutputDirectory (Join-Path $root 'out-gpu-uuid') | Out-Null
+        & $PackageBuilderPath -ServerExecutable $server -SourceArchive $sourceArchive -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $gpuUuidQualificationPath -SbomCreatedUtc $sbomCreatedUtc -OutputDirectory (Join-Path $root 'out-gpu-uuid') | Out-Null
     }
     catch { $gpuUuidRejected = $_.Exception.Message -ceq 'public qualification disclosure violation' }
     Assert-True $gpuUuidRejected 'qualification containing a real gpu_uuid input field was accepted'
@@ -170,10 +181,60 @@ try {
     Write-Json $windowsPathQualificationPath $windowsPathQualification
     $windowsPathRejected = $false
     try {
-        & $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $windowsPathQualificationPath -SbomCreatedUtc $sbomCreatedUtc -OutputDirectory (Join-Path $root 'out-windows-path') | Out-Null
+        & $PackageBuilderPath -ServerExecutable $server -SourceArchive $sourceArchive -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $windowsPathQualificationPath -SbomCreatedUtc $sbomCreatedUtc -OutputDirectory (Join-Path $root 'out-windows-path') | Out-Null
     }
     catch { $windowsPathRejected = $_.Exception.Message -ceq 'public qualification disclosure violation' }
     Assert-True $windowsPathRejected 'JSON-escaped Windows private path was accepted'
+
+    $deepPropertyPath = Join-Path $root 'qualification-deep-property.json'
+    $deepPropertyQualification = Get-Content -LiteralPath $qualificationPath -Raw | ConvertFrom-Json
+    [object]$deepProperty = [ordered]@{ gpu_uuid = 'GPU-deep-fixture-4090' }
+    foreach ($depth in 1..40) { $deepProperty = [ordered]@{ child = $deepProperty } }
+    Add-Member -InputObject $deepPropertyQualification.source -MemberType NoteProperty `
+        -Name 'deep_metadata' -Value $deepProperty
+    Write-Json $deepPropertyPath $deepPropertyQualification
+    $deepPropertyRejected = $false
+    try {
+        & $PackageBuilderPath -ServerExecutable $server -SourceArchive $sourceArchive -PatchStackSha $patchSha `
+            -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath `
+            -QualificationRecord $deepPropertyPath -SbomCreatedUtc $sbomCreatedUtc `
+            -OutputDirectory (Join-Path $root 'out-deep-property') | Out-Null
+    }
+    catch { $deepPropertyRejected = $_.Exception.Message -ceq 'public qualification disclosure violation' }
+    Assert-True $deepPropertyRejected 'forbidden property below serialization depth 35 was accepted'
+
+    $deepPathPath = Join-Path $root 'qualification-deep-path.json'
+    $deepPathQualification = Get-Content -LiteralPath $qualificationPath -Raw | ConvertFrom-Json
+    [object]$deepPath = [ordered]@{ value = 'C:\Users\Public\deep-candidate.json' }
+    foreach ($depth in 1..40) { $deepPath = [ordered]@{ child = $deepPath } }
+    Add-Member -InputObject $deepPathQualification.source -MemberType NoteProperty `
+        -Name 'deep_path_metadata' -Value $deepPath
+    Write-Json $deepPathPath $deepPathQualification
+    $deepPathRejected = $false
+    try {
+        & $PackageBuilderPath -ServerExecutable $server -SourceArchive $sourceArchive -PatchStackSha $patchSha `
+            -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath `
+            -QualificationRecord $deepPathPath -SbomCreatedUtc $sbomCreatedUtc `
+            -OutputDirectory (Join-Path $root 'out-deep-path') | Out-Null
+    }
+    catch { $deepPathRejected = $_.Exception.Message -ceq 'public qualification disclosure violation' }
+    Assert-True $deepPathRejected 'private path below serialization depth 35 was accepted'
+
+    $hookBuilderRoot = Join-Path $root 'hook-builder'
+    New-Item -ItemType Directory -Path $hookBuilderRoot | Out-Null
+    Copy-Item -Path (Join-Path (Split-Path -Parent $PackageBuilderPath) '*') `
+        -Destination $hookBuilderRoot -Recurse
+    [IO.File]::AppendAllText(
+        (Join-Path $hookBuilderRoot 'Invoke-Qualification.ps1'),
+        ([Environment]::NewLine + 'if ($env:MODE -eq ''fixture'') { throw ''forbidden'' }' + [Environment]::NewLine),
+        [Text.UTF8Encoding]::new($false)
+    )
+    $literalHookRejected = $false
+    try {
+        & (Join-Path $hookBuilderRoot 'New-Package.ps1') -ServerExecutable $server -SourceArchive $sourceArchive -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $qualificationPath -SbomCreatedUtc $sbomCreatedUtc -OutputDirectory (Join-Path $root 'out-literal-hook') | Out-Null
+    }
+    catch { $literalHookRejected = $_.Exception.Message -like 'published PowerShell predicate exposes hook vocabulary:*' }
+    Assert-True $literalHookRejected 'packager accepted a literal-gated hook predicate'
 
     $wrongSemanticConfig = Get-Content -LiteralPath $lfConfigPath -Raw | ConvertFrom-Json
     $wrongSemanticConfig.engine.prefill_chunk = 256
@@ -182,7 +243,7 @@ try {
     $wrongSemanticOut = Join-Path $root 'out-wrong-semantics'
     $wrongSemanticRejected = $false
     try {
-        & $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha `
+        & $PackageBuilderPath -ServerExecutable $server -SourceArchive $sourceArchive -PatchStackSha $patchSha `
             -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $wrongSemanticConfigPath `
             -QualificationRecord $qualificationPath -SbomCreatedUtc $sbomCreatedUtc -OutputDirectory $wrongSemanticOut | Out-Null
     }
@@ -196,25 +257,32 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $wrongSemanticOut)) 'rejected configuration semantics created output assets'
 
     $out = Join-Path $root 'out'
-    $receipt = ((& $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha `
+    $receipt = ((& $PackageBuilderPath -ServerExecutable $server -SourceArchive $sourceArchive -PatchStackSha $patchSha `
             -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath `
             -QualificationRecord $qualificationPath -SbomCreatedUtc $sbomCreatedUtc `
             -OutputDirectory $out) | Out-String) | ConvertFrom-Json
     Assert-True ([string]$receipt.package_file -ceq "$assetStem.zip") 'package filename mismatch'
 
     $crlfOut = Join-Path $root 'out-crlf'
-    $crlfReceipt = ((& $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha `
+    $crlfReceipt = ((& $PackageBuilderPath -ServerExecutable $server -SourceArchive $sourceArchive -PatchStackSha $patchSha `
             -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $crlfConfigPath `
             -QualificationRecord $qualificationPath -SbomCreatedUtc $sbomCreatedUtc `
             -OutputDirectory $crlfOut) | Out-String) | ConvertFrom-Json
     Assert-True ([string]$crlfReceipt.package_file -ceq "$assetStem.zip") 'CRLF package filename mismatch'
 
     $expectedAssets = @(
+        'Compare-MtpQualification.ps1',
         'Control-GpuOwner.ps1',
         'Control-Release.ps1',
         'Install-Release.ps1',
+        'Invoke-Qualification.ps1',
+        'New-Package.ps1',
+        'New-QualificationReceipt.ps1',
         'Protect-StateRoot.ps1',
         'SHA256SUMS',
+        'package-build-receipt.json',
+        "$assetStem-release-manifest.json",
+        "$assetStem-source.tar.gz",
         "$assetStem.spdx.json",
         "$assetStem-qualification.json",
         "$assetStem.zip"
@@ -226,7 +294,7 @@ try {
     }
 
     $sumLines = @(Get-Content -LiteralPath (Join-Path $out 'SHA256SUMS') -Encoding UTF8)
-    Assert-True ($sumLines.Count -eq 7) 'SHA256SUMS must cover seven non-self assets including SPDX'
+    Assert-True ($sumLines.Count -eq 14) 'SHA256SUMS must cover the closed non-self asset set exactly once'
     $sumBytes = [IO.File]::ReadAllBytes((Join-Path $out 'SHA256SUMS'))
     Assert-True ($sumBytes.Length -ne 0 -and $sumBytes[-1] -eq 10 -and
         $sumBytes -notcontains 13) 'SHA256SUMS must use one terminal LF and no CR bytes'
@@ -262,12 +330,59 @@ try {
     Assert-True ([string]$manifest.asset_filename -ceq "$assetStem.zip") 'manifest asset filename mismatch'
     Assert-True ([string]$manifest.gpu_owner_controller_sha256 -cmatch '^[0-9a-f]{64}$') 'manifest omitted the generic GPU-owner controller identity'
     Assert-True ([string]$manifest.state_protection_sha256 -cmatch '^[0-9a-f]{64}$') 'manifest omitted the protected-state helper identity'
-    foreach ($name in @('Control-Release.ps1', 'Control-GpuOwner.ps1', 'Protect-StateRoot.ps1', 'Install-Release.ps1')) {
+    $publishedZipScripts = @(
+        'Compare-MtpQualification.ps1', 'Control-GpuOwner.ps1', 'Control-Release.ps1',
+        'Install-Release.ps1', 'Invoke-Qualification.ps1',
+        'New-QualificationReceipt.ps1', 'Protect-StateRoot.ps1'
+    )
+    $hookPattern = '(?i)(?:\b(?:TestMode|Mock|Fixture|Fault|Bypass|Harness)\b|\bInject(?:ed|ion)?\b|\bSimulat(?:e|ed|ion)\b|test[_-]?mode|mock[_-]|fixture[_-]|fault[_-]|inject[_-]|bypass[_-]|simulat[_-]|harness[_-]|NINFER_[A-Z0-9_]*(?:TEST|MOCK|FAULT|INJECT|BYPASS|SIMULAT|HARNESS))'
+    foreach ($name in $publishedZipScripts) {
         $standalone = Join-Path $out $name
         $member = Join-Path $payload $name
         Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $standalone).Hash.ToLowerInvariant() -ceq
             (Get-FileHash -Algorithm SHA256 -LiteralPath $member).Hash.ToLowerInvariant()) "standalone and ZIP member differ: $name"
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile(
+            $member,
+            [ref]$tokens,
+            [ref]$errors
+        )
+        Assert-True (@($errors).Count -eq 0) "ZIP PowerShell member does not parse: $name"
+        Assert-True (@($tokens | Where-Object {
+                    $_.Kind -cin @('Variable', 'SplattedVariable', 'Identifier', 'Generic') -and
+                    [string]$_.Text -cmatch $hookPattern
+                }).Count -eq 0) "ZIP PowerShell member exposes hook vocabulary: $name"
+        $predicates = [Collections.Generic.List[string]]::new()
+        foreach ($node in $ast.FindAll({
+                    param($candidate)
+                    $candidate -is [Management.Automation.Language.IfStatementAst] -or
+                    $candidate -is [Management.Automation.Language.WhileStatementAst] -or
+                    $candidate -is [Management.Automation.Language.DoWhileStatementAst] -or
+                    $candidate -is [Management.Automation.Language.DoUntilStatementAst] -or
+                    $candidate -is [Management.Automation.Language.ForStatementAst] -or
+                    $candidate -is [Management.Automation.Language.SwitchStatementAst] -or
+                    $candidate -is [Management.Automation.Language.ParameterAst]
+                }, $true)) {
+            if ($node -is [Management.Automation.Language.IfStatementAst]) {
+                foreach ($clause in $node.Clauses) { $predicates.Add($clause.Item1.Extent.Text) }
+            }
+            elseif ($node -is [Management.Automation.Language.SwitchStatementAst]) {
+                $predicates.Add($node.Condition.Extent.Text)
+                foreach ($clause in $node.Clauses) { $predicates.Add($clause.Item1.Extent.Text) }
+            }
+            elseif ($node -is [Management.Automation.Language.ParameterAst]) {
+                $predicates.Add($node.Extent.Text)
+            }
+            elseif ($null -ne $node.Condition) { $predicates.Add($node.Condition.Extent.Text) }
+        }
+        Assert-True (@($predicates | Where-Object { $_ -cmatch $hookPattern }).Count -eq 0) `
+            "ZIP PowerShell member exposes a literal-gated hook predicate: $name"
     }
+    Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out "$assetStem-release-manifest.json")).Hash.ToLowerInvariant() -ceq
+        (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $payload 'release-manifest.json')).Hash.ToLowerInvariant()) 'outer release manifest differs from ZIP member'
+    Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out "$assetStem-source.tar.gz")).Hash.ToLowerInvariant() -ceq
+        $sourceArchiveSha256) 'outer source archive differs from committed source input'
 
     $packagedConfigPath = Join-Path $payload 'server-config.json'
     Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath $packagedConfigPath).Hash.ToLowerInvariant() -ceq $canonicalConfigSha256) 'LF input did not produce the qualified config bytes'
@@ -306,7 +421,13 @@ try {
     Assert-True ([string]$receipt.sbom_file -ceq "$assetStem.spdx.json" -and
         [string]$receipt.sbom_sha256 -ceq [string]$qualification.package.sbom.sha256 -and
         [int]$receipt.sbom_files_analyzed -eq @($sbom.files).Count) 'package receipt omitted SPDX authority'
-    Assert-True ([int]$receipt.checksum_entries -eq 7 -and
+    $persistedReceipt = Get-Content -LiteralPath (Join-Path $out 'package-build-receipt.json') -Raw | ConvertFrom-Json
+    Assert-True ([string]$persistedReceipt.package_sha256 -ceq $zipHash -and
+        [string]$persistedReceipt.source_archive_sha256 -ceq $sourceArchiveSha256 -and
+        [string]$persistedReceipt.release_manifest_sha256 -ceq
+            (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out "$assetStem-release-manifest.json")).Hash.ToLowerInvariant() -and
+        @($persistedReceipt.published_scripts.PSObject.Properties).Count -eq 8) 'persisted package receipt does not bind the closed asset set'
+    Assert-True ([int]$receipt.checksum_entries -eq 14 -and
         [string]$receipt.checksum_line_ending -ceq 'LF') 'package receipt checksum contract mismatch'
     Assert-True ([int]$qualification.package.runtime_dlls -eq 2) 'qualification runtime DLL count mismatch'
     Assert-True ([string]$qualification.status -ceq 'candidate_ready') 'package builder changed candidate qualification status'
@@ -334,26 +455,48 @@ try {
     [IO.File]::AppendAllText((Join-Path $tamperOut 'Control-Release.ps1'), 'tamper')
     $tamperRejected = $false
     try {
-        & $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $finalQualificationPath -SbomCreatedUtc $sbomCreatedUtc -FinalizeExistingAssets -OutputDirectory $tamperOut | Out-Null
+        & $PackageBuilderPath -ServerExecutable $server -SourceArchive $sourceArchive -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $finalQualificationPath -SbomCreatedUtc $sbomCreatedUtc -FinalizeExistingAssets -OutputDirectory $tamperOut | Out-Null
     }
     catch { $tamperRejected = $_.Exception.Message -like '*immutable release asset changed after candidate assembly*' }
     Assert-True $tamperRejected 'finalizer accepted a mutated immutable release script'
-    $finalization = ((& $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $finalQualificationPath -SbomCreatedUtc $sbomCreatedUtc -FinalizeExistingAssets -OutputDirectory $out) | Out-String) | ConvertFrom-Json
+    $selfListedOut = Join-Path $root 'out-finalizer-self-listed'
+    New-Item -ItemType Directory -Path $selfListedOut | Out-Null
+    Copy-Item -Path (Join-Path $out '*') -Destination $selfListedOut -Recurse
+    [IO.File]::AppendAllText(
+        (Join-Path $selfListedOut 'SHA256SUMS'),
+        "$('0' * 64)  SHA256SUMS$([char]10)",
+        [Text.UTF8Encoding]::new($false)
+    )
+    $selfListedRejected = $false
+    try {
+        & $PackageBuilderPath -ServerExecutable $server -SourceArchive $sourceArchive -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $finalQualificationPath -SbomCreatedUtc $sbomCreatedUtc -FinalizeExistingAssets -OutputDirectory $selfListedOut | Out-Null
+    }
+    catch { $selfListedRejected = $_.Exception.Message -ceq 'candidate SHA256SUMS does not contain the exact non-self asset set' }
+    Assert-True $selfListedRejected 'finalizer accepted a self-listed outer SHA256SUMS'
+    $finalization = ((& $PackageBuilderPath -ServerExecutable $server -SourceArchive $sourceArchive -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $finalQualificationPath -SbomCreatedUtc $sbomCreatedUtc -FinalizeExistingAssets -OutputDirectory $out) | Out-String) | ConvertFrom-Json
     Assert-True ([string]$finalization.mode -ceq 'finalized-existing-assets' -and $finalization.release_eligible -eq $true -and $finalization.candidate_status_superseded -eq $true) 'packager finalization did not supersede candidate authority'
     Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out "$assetStem.zip")).Hash.ToLowerInvariant() -ceq $zipBeforeFinalization) 'final authority mutated the live-qualified ZIP'
     Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out "$assetStem.spdx.json")).Hash.ToLowerInvariant() -ceq $sbomBeforeFinalization) 'final authority mutated the package-owned SPDX'
     Assert-True ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $out "$assetStem-qualification.json")).Hash.ToLowerInvariant() -ceq (Get-FileHash -Algorithm SHA256 -LiteralPath $finalQualificationPath).Hash.ToLowerInvariant()) 'packager did not publish the exact final authority bytes'
-    Assert-True ([int]$finalization.checksum_entries -eq 7 -and [string]$finalization.checksum_line_ending -ceq 'LF') 'final authority manifest contract mismatch'
+    Assert-True ([int]$finalization.checksum_entries -eq 14 -and [string]$finalization.checksum_line_ending -ceq 'LF') 'final authority manifest contract mismatch'
 
     [ordered]@{
         artifact_type = 'ninfer_release_asset_regression'
         schema_version = 1
         status = 'passed'
         assets = $expectedAssets.Count
+        outer_checksum_entries = $sumLines.Count
+        published_source_scripts_scanned = 8
+        published_zip_scripts_scanned = $publishedZipScripts.Count
+        package_build_receipt_persisted_before_checksums = $true
+        outer_manifest_self_reference = $false
         payload_entries = $listed.Count
         wrong_model_artifact_identity_rejections = 1
         gpu_uuid_disclosure_rejections = 1
         escaped_windows_path_rejections = 1
+        deep_forbidden_property_rejections = 1
+        deep_private_path_rejections = 1
+        literal_gated_hook_rejections = 1
         passed_red_gate_rejections = 1
         hidden_payload_coverage = $true
         pinned_model_bytes = [Int64]$releaseSpec.model.bytes
@@ -369,6 +512,7 @@ try {
         packager_owned_sbom = $true
         packager_finalization_modes = 1
         immutable_asset_tamper_rejections = 1
+        self_referential_manifest_rejections = 1
     } | ConvertTo-Json -Compress
 }
 finally {

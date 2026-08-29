@@ -75,12 +75,43 @@ def iter_strings(value: object):
             yield from iter_strings(child)
 
 
-def powershell_code_without_literals(text: str) -> str:
+def powershell_identifiers_without_literals(text: str) -> str:
     text = re.sub(r'(?ms)^@".*?^"@', "", text)
     text = re.sub(r"(?ms)^@'.*?^'@", "", text)
     text = re.sub(r"'(?:''|[^'])*'", "", text)
     text = re.sub(r'"[^"\n]*"', "", text)
     return re.sub(r"(?m)#.*$", "", text)
+
+
+def powershell_predicates(text: str) -> str:
+    text = re.sub(r"(?m)#.*$", "", text)
+    predicates: list[str] = []
+    for match in re.finditer(r"(?i)\b(?:if|elseif|while|until|switch|for|param)\s*\(", text):
+        start = match.start()
+        position = match.end() - 1
+        depth = 0
+        quote: str | None = None
+        escaped = False
+        while position < len(text):
+            character = text[position]
+            if escaped:
+                escaped = False
+            elif ord(character) == 96:
+                escaped = True
+            elif quote is not None:
+                if character == quote:
+                    quote = None
+            elif character in ("'", '"'):
+                quote = character
+            elif character == "(":
+                depth += 1
+            elif character == ")":
+                depth -= 1
+                if depth == 0:
+                    predicates.append(text[start : position + 1])
+                    break
+            position += 1
+    return "\n".join(predicates)
 
 
 class ReleaseAuthorityTest(unittest.TestCase):
@@ -231,6 +262,8 @@ class ReleaseAuthorityTest(unittest.TestCase):
         self.assertEqual(status_timing["binary_sha256"], identity["binary_sha256"])
         self.assertEqual(status_timing["populated_file_count"], 2048)
         self.assertEqual(status_timing["populated_logical_bytes"], 2 * 1024**3)
+        self.assertIs(status_timing["worst_case_quota_file_count_claim"], False)
+        self.assertIs(status_timing["quota_full_generation_topology_measured"], False)
         self.assertLessEqual(
             status_timing["status_elapsed_seconds"], status_timing["maximum_status_seconds"]
         )
@@ -275,10 +308,17 @@ class ReleaseAuthorityTest(unittest.TestCase):
 
         asset_map = {entry["filename"]: entry for entry in assets["assets"]}
         for filename in (
+            "Compare-MtpQualification.ps1",
             "Control-GpuOwner.ps1",
             "Control-Release.ps1",
             "Install-Release.ps1",
+            "Invoke-Qualification.ps1",
+            "New-Package.ps1",
+            "New-QualificationReceipt.ps1",
             "Protect-StateRoot.ps1",
+            "package-build-receipt.json",
+            "ninfer-4090-qwen38-v0.1.0-win-x64-release-manifest.json",
+            "ninfer-4090-qwen38-v0.1.0-win-x64-source.tar.gz",
             "ninfer-4090-qwen38-v0.1.0-win-x64.spdx.json",
             "ninfer-4090-qwen38-v0.1.0-win-x64.zip",
             "ninfer-4090-qwen38-v0.1.0-win-x64-qualification.json",
@@ -340,14 +380,24 @@ class ReleaseAuthorityTest(unittest.TestCase):
             },
         )
         hook = re.compile(
-            r"(?:TestMode|Mock|Fixture|Fault|Inject(?:ed|ion)?|Bypass|"
-            r"Simulat(?:e|ed|ion)|Harness|test[_-]?mode|mock[_-]|fixture[_-]|"
+            r"(?:\b(?:TestMode|Mock|Fixture|Fault|Bypass|Harness)\b|"
+            r"\bInject(?:ed|ion)?\b|\bSimulat(?:e|ed|ion)\b|"
+            r"test[_-]?mode|mock[_-]|fixture[_-]|"
             r"fault[_-]|inject[_-]|bypass[_-]|simulat[_-]|harness[_-]|"
-            r"NINFER_[A-Z0-9_]*(?:TEST|MOCK|FAULT|INJECT|BYPASS|SIMULAT|HARNESS))"
+            r"NINFER_[A-Z0-9_]*(?:TEST|MOCK|FAULT|INJECT|BYPASS|SIMULAT|HARNESS))",
+            re.IGNORECASE,
         )
         for path in scripts:
-            source = powershell_code_without_literals(path.read_text(encoding="utf-8"))
-            self.assertIsNone(hook.search(source), str(path))
+            source = path.read_text(encoding="utf-8")
+            self.assertIsNone(
+                hook.search(powershell_identifiers_without_literals(source)), str(path)
+            )
+            self.assertIsNone(hook.search(powershell_predicates(source)), str(path))
+
+    def test_hook_scan_keeps_string_literals_in_executable_predicates(self) -> None:
+        source = "if ($env:NINFER_TEST_MODE -eq 'fixture') { Write-Output forbidden }"
+        self.assertIn("NINFER_TEST_MODE", powershell_predicates(source))
+        self.assertIn("'fixture'", powershell_predicates(source))
 
 
 if __name__ == "__main__":

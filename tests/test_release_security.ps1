@@ -96,12 +96,18 @@ try {
     Assert-True $stateProtectionText.Contains('[NInferProtectedDirectoryNative]::Create') 'state helper does not use atomic ACL-bearing directory creation'
     Assert-True (-not $stateProtectionText.Contains('New-Item -ItemType Directory -Path $next')) 'state helper still creates a directory before applying its ACL'
     $publishedScripts = @(Get-ChildItem -LiteralPath $PublishedScriptRoot -File -Filter '*.ps1' | Sort-Object Name)
-    Assert-True ($publishedScripts.Count -eq 8) 'published PowerShell release class changed without hook review'
-    $hookPattern = '(?:TestMode|Mock|Fixture|Fault|Inject(?:ed|ion)?|Bypass|Simulat(?:e|ed|ion)|Harness|test[_-]?mode|mock[_-]|fixture[_-]|fault[_-]|inject[_-]|bypass[_-]|simulat[_-]|harness[_-]|NINFER_[A-Z0-9_]*(?:TEST|MOCK|FAULT|INJECT|BYPASS|SIMULAT|HARNESS))'
+    $expectedPublishedScripts = @(
+        'Compare-MtpQualification.ps1', 'Control-GpuOwner.ps1', 'Control-Release.ps1',
+        'Install-Release.ps1', 'Invoke-Qualification.ps1', 'New-Package.ps1',
+        'New-QualificationReceipt.ps1', 'Protect-StateRoot.ps1'
+    ) | Sort-Object
+    Assert-True (@(Compare-Object $expectedPublishedScripts @($publishedScripts.Name)).Count -eq 0) `
+        'published PowerShell release class changed without hook review'
+    $hookPattern = '(?i)(?:\b(?:TestMode|Mock|Fixture|Fault|Bypass|Harness)\b|\bInject(?:ed|ion)?\b|\bSimulat(?:e|ed|ion)\b|test[_-]?mode|mock[_-]|fixture[_-]|fault[_-]|inject[_-]|bypass[_-]|simulat[_-]|harness[_-]|NINFER_[A-Z0-9_]*(?:TEST|MOCK|FAULT|INJECT|BYPASS|SIMULAT|HARNESS))'
     foreach ($scriptPath in $publishedScripts) {
         $tokens = $null
         $errors = $null
-        $null = [Management.Automation.Language.Parser]::ParseFile(
+        $ast = [Management.Automation.Language.Parser]::ParseFile(
             $scriptPath.FullName,
             [ref]$tokens,
             [ref]$errors
@@ -112,6 +118,58 @@ try {
                 [string]$_.Text -cmatch $hookPattern
             })
         Assert-True ($hookTokens.Count -eq 0) "published script contains reachable hook vocabulary: $($scriptPath.Name)"
+        $predicateText = [Collections.Generic.List[string]]::new()
+        foreach ($node in $ast.FindAll({
+                    param($candidate)
+                    $candidate -is [Management.Automation.Language.IfStatementAst] -or
+                    $candidate -is [Management.Automation.Language.WhileStatementAst] -or
+                    $candidate -is [Management.Automation.Language.DoWhileStatementAst] -or
+                    $candidate -is [Management.Automation.Language.DoUntilStatementAst] -or
+                    $candidate -is [Management.Automation.Language.ForStatementAst] -or
+                    $candidate -is [Management.Automation.Language.SwitchStatementAst] -or
+                    $candidate -is [Management.Automation.Language.ParameterAst]
+                }, $true)) {
+            if ($node -is [Management.Automation.Language.IfStatementAst]) {
+                foreach ($clause in $node.Clauses) { $predicateText.Add($clause.Item1.Extent.Text) }
+            }
+            elseif ($node -is [Management.Automation.Language.SwitchStatementAst]) {
+                $predicateText.Add($node.Condition.Extent.Text)
+                foreach ($clause in $node.Clauses) { $predicateText.Add($clause.Item1.Extent.Text) }
+            }
+            elseif ($node -is [Management.Automation.Language.ParameterAst]) {
+                $predicateText.Add($node.Extent.Text)
+            }
+            elseif ($null -ne $node.Condition) { $predicateText.Add($node.Condition.Extent.Text) }
+        }
+        Assert-True (@($predicateText | Where-Object { $_ -cmatch $hookPattern }).Count -eq 0) `
+            "published script contains literal-gated hook predicate: $($scriptPath.Name)"
+        $bareNvidiaCommands = @($ast.FindAll({
+                    param($candidate)
+                    $candidate -is [Management.Automation.Language.CommandAst] -and
+                    [string]$candidate.GetCommandName() -ieq 'nvidia-smi.exe'
+                }, $true))
+        Assert-True ($bareNvidiaCommands.Count -eq 0) `
+            "published script invokes nvidia-smi through command lookup: $($scriptPath.Name)"
+    }
+    $syntheticTokens = $null
+    $syntheticErrors = $null
+    $syntheticAst = [Management.Automation.Language.Parser]::ParseInput(
+        'if ($env:NINFER_TEST_MODE -eq ''fixture'') { Write-Output forbidden }',
+        [ref]$syntheticTokens,
+        [ref]$syntheticErrors
+    )
+    $syntheticIf = @($syntheticAst.FindAll({
+                param($candidate)
+                $candidate -is [Management.Automation.Language.IfStatementAst]
+            }, $true))
+    Assert-True ($syntheticErrors.Count -eq 0 -and $syntheticIf.Count -eq 1 -and
+        $syntheticIf[0].Clauses[0].Item1.Extent.Text -cmatch $hookPattern) `
+        'hook scan does not inspect string literals in executable predicates'
+    foreach ($trustedName in @('Control-GpuOwner.ps1', 'Control-Release.ps1', 'Install-Release.ps1')) {
+        $trustedText = [IO.File]::ReadAllText((Join-Path $PublishedScriptRoot $trustedName), [Text.Encoding]::UTF8)
+        Assert-True ($trustedText.Contains('[Environment+SpecialFolder]::System') -and
+            $trustedText.Contains('[Diagnostics.ProcessStartInfo]::new()')) `
+            "published GPU query is not trusted-absolute and process-captured: $trustedName"
     }
 
     $testRoot = Initialize-NInferProtectedStateRoot $testRoot
@@ -308,11 +366,14 @@ try {
         active_compute_owner_rejections = if ($activeComputeRejected) { 1 } else { 0 }
         gpu_owner_status_rejected_active_service = $false
         nvidia_smi_evidence_class = 'exact-trusted-absolute-query'
+        trusted_absolute_nvidia_smi_scripts = 3
+        bare_nvidia_smi_command_invocations = 0
         gpu_power_limit_mutations = 0
         gpu_power_limit_restore_required = $false
         request_jsonl_under_protected_state = $true
         shipped_test_bypass = $false
         published_release_scripts_scanned = $publishedScripts.Count
+        literal_predicate_hook_scan = $true
     }
     if (-not [string]::IsNullOrWhiteSpace($ReceiptPath)) { Write-JsonAtomic $ReceiptPath $receipt }
     $receipt | ConvertTo-Json -Compress

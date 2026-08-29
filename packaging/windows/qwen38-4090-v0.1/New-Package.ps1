@@ -5,6 +5,10 @@ param(
     [string]$ServerExecutable,
 
     [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$SourceArchive,
+
+    [Parameter(Mandatory = $true)]
     [ValidatePattern('^[0-9a-f]{40}$')]
     [string]$PatchStackSha,
 
@@ -42,11 +46,87 @@ function Set-JsonProperty([object]$Object, [string]$Name, [object]$Value) {
 }
 
 function Assert-PublicQualificationDisclosure([object]$Qualification) {
-    $serialized = $Qualification | ConvertTo-Json -Depth 32 -Compress
-    $escapedPrivatePath = '(?i)(?:[A-Z]:\\\\Users\\\\|/Users/|/home/|(?:nyc|sf)-[a-z0-9-]+|(?:[0-9]{1,3}\.){3}[0-9]{1,3})'
-    $forbiddenProperty = '(?i)"(?:gpu_uuid|api_key|api_key_file|controller_path|health_url|private_host)"\s*:'
-    if ($serialized -match $escapedPrivatePath -or $serialized -match $forbiddenProperty) {
-        throw 'public qualification disclosure violation'
+    $privateValue = '(?i)(?:[A-Z]:\\Users\\|/Users/|/home/|(?:nyc|sf)-[a-z0-9-]+|(?:[0-9]{1,3}\.){3}[0-9]{1,3})'
+    $forbiddenProperty = '^(?i:gpu_uuid|api_key|api_key_file|controller_path|health_url|private_host)$'
+    $pending = [Collections.Generic.Stack[object]]::new()
+    $pending.Push($Qualification)
+    while ($pending.Count -ne 0) {
+        $value = $pending.Pop()
+        if ($null -eq $value) { continue }
+        if ($value -is [string]) {
+            if ([string]$value -match $privateValue) {
+                throw 'public qualification disclosure violation'
+            }
+            continue
+        }
+        if ($value -is [Collections.IDictionary]) {
+            foreach ($key in $value.Keys) {
+                if ([string]$key -match $forbiddenProperty) {
+                    throw 'public qualification disclosure violation'
+                }
+                $pending.Push($value[$key])
+            }
+            continue
+        }
+        if ($value -is [Collections.IEnumerable]) {
+            foreach ($item in $value) { $pending.Push($item) }
+            continue
+        }
+        if ($value -is [ValueType]) { continue }
+        foreach ($property in $value.PSObject.Properties) {
+            if ([string]$property.Name -match $forbiddenProperty) {
+                throw 'public qualification disclosure violation'
+            }
+            $pending.Push($property.Value)
+        }
+    }
+}
+
+function Assert-NoPublishedPowerShellHooks([string[]]$Paths) {
+    $hookPattern = '(?i)(?:\b(?:TestMode|Mock|Fixture|Fault|Bypass|Harness)\b|\bInject(?:ed|ion)?\b|\bSimulat(?:e|ed|ion)\b|test[_-]?mode|mock[_-]|fixture[_-]|fault[_-]|inject[_-]|bypass[_-]|simulat[_-]|harness[_-]|NINFER_[A-Z0-9_]*(?:TEST|MOCK|FAULT|INJECT|BYPASS|SIMULAT|HARNESS))'
+    foreach ($path in $Paths) {
+        $tokens = $null
+        $errors = $null
+        $ast = [Management.Automation.Language.Parser]::ParseFile(
+            $path,
+            [ref]$tokens,
+            [ref]$errors
+        )
+        if (@($errors).Count -ne 0) { throw "published PowerShell script does not parse: $path" }
+        $namedHooks = @($tokens | Where-Object {
+                $_.Kind -cin @('Variable', 'SplattedVariable', 'Identifier', 'Generic') -and
+                [string]$_.Text -cmatch $hookPattern
+            })
+        if ($namedHooks.Count -ne 0) {
+            throw "published PowerShell script exposes hook vocabulary: $([IO.Path]::GetFileName($path)): $([string]::Join(',', @($namedHooks.Text)))"
+        }
+
+        $predicateText = [Collections.Generic.List[string]]::new()
+        foreach ($node in $ast.FindAll({
+                    param($candidate)
+                    $candidate -is [Management.Automation.Language.IfStatementAst] -or
+                    $candidate -is [Management.Automation.Language.WhileStatementAst] -or
+                    $candidate -is [Management.Automation.Language.DoWhileStatementAst] -or
+                    $candidate -is [Management.Automation.Language.DoUntilStatementAst] -or
+                    $candidate -is [Management.Automation.Language.ForStatementAst] -or
+                    $candidate -is [Management.Automation.Language.SwitchStatementAst] -or
+                    $candidate -is [Management.Automation.Language.ParameterAst]
+                }, $true)) {
+            if ($node -is [Management.Automation.Language.IfStatementAst]) {
+                foreach ($clause in $node.Clauses) { $predicateText.Add($clause.Item1.Extent.Text) }
+            }
+            elseif ($node -is [Management.Automation.Language.SwitchStatementAst]) {
+                $predicateText.Add($node.Condition.Extent.Text)
+                foreach ($clause in $node.Clauses) { $predicateText.Add($clause.Item1.Extent.Text) }
+            }
+            elseif ($node -is [Management.Automation.Language.ParameterAst]) {
+                $predicateText.Add($node.Extent.Text)
+            }
+            elseif ($null -ne $node.Condition) { $predicateText.Add($node.Condition.Extent.Text) }
+        }
+        if (@($predicateText | Where-Object { $_ -cmatch $hookPattern }).Count -ne 0) {
+            throw "published PowerShell predicate exposes hook vocabulary: $([IO.Path]::GetFileName($path))"
+        }
     }
 }
 
@@ -76,6 +156,9 @@ $assetStem = 'ninfer-4090-qwen38-v0.1.0-win-x64'
 $profile = 'qwen38-4090-v0.1'
 $upstreamBaseSha = '9ec1b82c7afa021314682d7a95390f8935ead7c2'
 $server = (Resolve-Path -LiteralPath $ServerExecutable).Path
+$sourceArchiveInput = (Resolve-Path -LiteralPath $SourceArchive).Path
+$sourceArchiveSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $sourceArchiveInput).Hash.ToLowerInvariant()
+$sourceArchiveBytes = (Get-Item -LiteralPath $sourceArchiveInput).Length
 $configSource = (Resolve-Path -LiteralPath $ServerConfig).Path
 $qualificationSource = (Resolve-Path -LiteralPath $QualificationRecord).Path
 $versionOutput = (& $server --version 2>&1 | Out-String).Trim()
@@ -94,6 +177,18 @@ foreach ($required in @(
 }
 
 $specSource = Join-Path $PSScriptRoot 'release-spec.json'
+$publishedScriptNames = @(
+    'Compare-MtpQualification.ps1',
+    'Control-GpuOwner.ps1',
+    'Control-Release.ps1',
+    'Install-Release.ps1',
+    'Invoke-Qualification.ps1',
+    'New-Package.ps1',
+    'New-QualificationReceipt.ps1',
+    'Protect-StateRoot.ps1'
+)
+$publishedScriptPaths = @($publishedScriptNames | ForEach-Object { Join-Path $PSScriptRoot $_ })
+Assert-NoPublishedPowerShellHooks $publishedScriptPaths
 $spec = Read-JsonFile $specSource
 $config = Read-JsonFile $configSource
 $qualification = Read-JsonFile $qualificationSource
@@ -136,6 +231,10 @@ if ($qualification.artifact_type -cne 'ninfer_public_windows_release_qualificati
     [int]$qualification.schema_version -ne 1 -or
     [string]$qualification.source.qualified_commit -cne $PatchStackSha) {
     throw 'qualification record is not bound to the executable source identity'
+}
+if ([string]$qualification.source.package_source_archive_sha256 -cne $sourceArchiveSha256 -or
+    [Int64]$qualification.source.package_source_archive_bytes -ne $sourceArchiveBytes) {
+    throw 'qualification record is not bound to the package source archive'
 }
 Assert-PublicQualificationDisclosure $qualification
 if ([string]$spec.qualification_authority.in_archive_status -cne
@@ -193,11 +292,21 @@ $outputRoot = (Resolve-Path -LiteralPath $OutputDirectory).Path
 
 $zipPath = Join-Path $outputRoot "$assetStem.zip"
 $sbomPath = Join-Path $outputRoot "$assetStem.spdx.json"
+$sourceArchiveAsset = Join-Path $outputRoot "$assetStem-source.tar.gz"
+$releaseManifestAsset = Join-Path $outputRoot "$assetStem-release-manifest.json"
+$packageReceiptAsset = Join-Path $outputRoot 'package-build-receipt.json'
 $qualificationPath = Join-Path $outputRoot "$assetStem-qualification.json"
 $installerAsset = Join-Path $outputRoot 'Install-Release.ps1'
 $controllerAsset = Join-Path $outputRoot 'Control-Release.ps1'
 $gpuOwnerAsset = Join-Path $outputRoot 'Control-GpuOwner.ps1'
 $stateProtectionAsset = Join-Path $outputRoot 'Protect-StateRoot.ps1'
+$standaloneScriptAssets = [ordered]@{}
+foreach ($name in $publishedScriptNames) {
+    $standaloneScriptAssets[$name] = Join-Path $outputRoot $name
+}
+$immutableAssets = @(
+    $zipPath, $sbomPath, $sourceArchiveAsset, $releaseManifestAsset, $packageReceiptAsset
+) + @($standaloneScriptAssets.Values)
 $shaSumsPath = Join-Path $outputRoot 'SHA256SUMS'
 if ($FinalizeExistingAssets) {
     if ([string]$qualification.status -cne 'passed' -or
@@ -205,10 +314,7 @@ if ($FinalizeExistingAssets) {
         $qualification.authority.supersedes_package_candidate_status -ne $true) {
         throw 'only a passed final authority may finalize existing package assets'
     }
-    foreach ($path in @(
-            $zipPath, $sbomPath, $installerAsset, $controllerAsset,
-            $gpuOwnerAsset, $stateProtectionAsset
-        )) {
+    foreach ($path in $immutableAssets) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
             throw "existing immutable release asset is missing: $path"
         }
@@ -223,10 +329,19 @@ if ($FinalizeExistingAssets) {
         }
         $candidateSums[$Matches[2]] = $Matches[1]
     }
-    foreach ($path in @(
-            $zipPath, $sbomPath, $installerAsset, $controllerAsset,
-            $gpuOwnerAsset, $stateProtectionAsset
-        )) {
+    $expectedCandidateNames = @($immutableAssets + $qualificationPath | ForEach-Object {
+            [IO.Path]::GetFileName($_)
+        })
+    if ($candidateSums.Count -ne $expectedCandidateNames.Count -or
+        $candidateSums.ContainsKey('SHA256SUMS')) {
+        throw 'candidate SHA256SUMS does not contain the exact non-self asset set'
+    }
+    foreach ($name in $expectedCandidateNames) {
+        if (-not $candidateSums.ContainsKey($name)) {
+            throw 'candidate SHA256SUMS does not contain the exact non-self asset set'
+        }
+    }
+    foreach ($path in $immutableAssets) {
         $name = [IO.Path]::GetFileName($path)
         if (-not $candidateSums.ContainsKey($name) -or
             [string]$candidateSums[$name] -cne
@@ -250,11 +365,14 @@ if ($FinalizeExistingAssets) {
         (Get-Item -LiteralPath $sbomPath).Length -ne $expectedSbomBytes) {
         throw 'final authority does not match existing immutable ZIP or SPDX assets'
     }
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $sourceArchiveAsset).Hash.ToLowerInvariant() -cne
+            $sourceArchiveSha256 -or
+        (Get-Item -LiteralPath $sourceArchiveAsset).Length -ne $sourceArchiveBytes) {
+        throw 'final authority source archive does not match candidate assembly'
+    }
     [IO.File]::WriteAllBytes($qualificationPath, [IO.File]::ReadAllBytes($qualificationSource))
-    $assets = @(
-        $zipPath, $sbomPath, $qualificationPath, $installerAsset,
-        $controllerAsset, $gpuOwnerAsset, $stateProtectionAsset
-    ) | Sort-Object { [IO.Path]::GetFileName($_) }
+    $assets = @($immutableAssets + $qualificationPath) |
+        Sort-Object { [IO.Path]::GetFileName($_) }
     $sumLines = foreach ($asset in $assets) {
         "$((Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant())  $([IO.Path]::GetFileName($asset))"
     }
@@ -285,7 +403,7 @@ $stage = Join-Path $outputRoot ('.stage-' + [Guid]::NewGuid().ToString('N'))
 $payload = Join-Path $stage $releaseId
 $bin = Join-Path $payload 'bin'
 New-Item -ItemType Directory -Force -Path $bin | Out-Null
-foreach ($path in @($zipPath, $sbomPath, $qualificationPath, $installerAsset, $controllerAsset, $gpuOwnerAsset, $stateProtectionAsset, $shaSumsPath)) {
+foreach ($path in @($immutableAssets + $qualificationPath + $shaSumsPath)) {
     Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
 }
 
@@ -431,12 +549,59 @@ try {
         [Text.UTF8Encoding]::new($false)
     )
 
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Install-Release.ps1') -Destination $installerAsset
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Control-Release.ps1') -Destination $controllerAsset
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Control-GpuOwner.ps1') -Destination $gpuOwnerAsset
-    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Protect-StateRoot.ps1') -Destination $stateProtectionAsset
-    $assets = @($zipPath, $sbomPath, $qualificationPath, $installerAsset, $controllerAsset, $gpuOwnerAsset, $stateProtectionAsset) |
+    Copy-Item -LiteralPath $sourceArchiveInput -Destination $sourceArchiveAsset
+    Copy-Item -LiteralPath $manifestPath -Destination $releaseManifestAsset
+    foreach ($name in $publishedScriptNames) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) `
+            -Destination ([string]$standaloneScriptAssets[$name])
+    }
+    $scriptHashes = [ordered]@{}
+    foreach ($name in $publishedScriptNames) {
+        $scriptPath = [string]$standaloneScriptAssets[$name]
+        $scriptHashes[$name] = [ordered]@{
+            sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $scriptPath).Hash.ToLowerInvariant()
+            bytes = (Get-Item -LiteralPath $scriptPath).Length
+        }
+    }
+    $packageReceipt = [ordered]@{
+        artifact_type = 'ninfer_package_build_receipt'
+        schema_version = 1
+        status = 'passed'
+        release_id = $releaseId
+        release_version = $releaseVersion
+        patch_stack_sha = $PatchStackSha
+        package_sha256 = $zipHash
+        package_bytes = (Get-Item -LiteralPath $zipPath).Length
+        package_file = [IO.Path]::GetFileName($zipPath)
+        source_archive_file = [IO.Path]::GetFileName($sourceArchiveAsset)
+        source_archive_sha256 = $sourceArchiveSha256
+        source_archive_bytes = $sourceArchiveBytes
+        release_manifest_file = [IO.Path]::GetFileName($releaseManifestAsset)
+        release_manifest_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $releaseManifestAsset).Hash.ToLowerInvariant()
+        sbom_file = [IO.Path]::GetFileName($sbomPath)
+        sbom_sha256 = $sbomSha256
+        sbom_bytes = (Get-Item -LiteralPath $sbomPath).Length
+        sbom_files_analyzed = @($sbom.files).Count
+        qualification_file = [IO.Path]::GetFileName($qualificationPath)
+        qualification_status = [string]$qualification.status
+        release_eligible_at_assembly = [bool]$qualification.release_eligible
+        external_final_qualification_required = $true
+        candidate_status_superseded = [bool]$qualification.authority.supersedes_package_candidate_status
+        published_scripts = $scriptHashes
+        checksum_file = [IO.Path]::GetFileName($shaSumsPath)
+        checksum_entries = $immutableAssets.Count + 1
+        checksum_line_ending = 'LF'
+    }
+    [IO.File]::WriteAllText(
+        $packageReceiptAsset,
+        ($packageReceipt | ConvertTo-Json -Depth 8),
+        [Text.UTF8Encoding]::new($false)
+    )
+    $assets = @($immutableAssets + $qualificationPath) |
         Sort-Object { [IO.Path]::GetFileName($_) }
+    if ($assets.Count -ne $packageReceipt.checksum_entries) {
+        throw 'outer release asset inventory is incomplete'
+    }
     $sumLines = foreach ($asset in $assets) {
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant()
         "$hash  $([IO.Path]::GetFileName($asset))"
@@ -448,33 +613,7 @@ try {
         [Text.UTF8Encoding]::new($false)
     )
 
-    [ordered]@{
-        artifact_type = 'ninfer_package_build_receipt'
-        schema_version = 1
-        status = 'passed'
-        release_id = $releaseId
-        release_version = $releaseVersion
-        patch_stack_sha = $PatchStackSha
-        package_sha256 = $zipHash
-        package_bytes = (Get-Item -LiteralPath $zipPath).Length
-        package_file = [IO.Path]::GetFileName($zipPath)
-        sbom_file = [IO.Path]::GetFileName($sbomPath)
-        sbom_sha256 = $sbomSha256
-        sbom_bytes = (Get-Item -LiteralPath $sbomPath).Length
-        sbom_files_analyzed = @($sbom.files).Count
-        qualification_file = [IO.Path]::GetFileName($qualificationPath)
-        qualification_status = [string]$qualification.status
-        release_eligible_at_assembly = [bool]$qualification.release_eligible
-        external_final_qualification_required = $true
-        candidate_status_superseded = [bool]$qualification.authority.supersedes_package_candidate_status
-        checksum_file = [IO.Path]::GetFileName($shaSumsPath)
-        checksum_entries = $sumLines.Count
-        checksum_line_ending = 'LF'
-        installer_file = [IO.Path]::GetFileName($installerAsset)
-        controller_file = [IO.Path]::GetFileName($controllerAsset)
-        gpu_owner_controller_file = [IO.Path]::GetFileName($gpuOwnerAsset)
-        state_protection_file = [IO.Path]::GetFileName($stateProtectionAsset)
-    } | ConvertTo-Json -Depth 6
+    $packageReceipt | ConvertTo-Json -Depth 8
 }
 finally {
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }

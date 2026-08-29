@@ -47,7 +47,7 @@ Real coverage is separate:
 - two exact shipped-installer full installs exercised upgrade, rollback, candidate return, retained-secret ACLs, and owner-state-root binding;
 - GPU power-limit mutations were exactly zero.
 
-Status on a protected root populated with 2,048 sparse files and 2 GiB of logical checkpoint data completed in `3.4954474` seconds, below the 30-second gate.
+The fixed status regression uses 2,048 sparse files and 2 GiB of logical lengths. It is a bounded synthetic file-walk measurement, not a realized quota-full generation topology and not a worst-case quota file-count claim. The prior run completed in `3.4954474` seconds below its 30-second gate; final eligibility requires a fresh run on the replacement package.
 
 ## Qualification authority and publication safety
 
