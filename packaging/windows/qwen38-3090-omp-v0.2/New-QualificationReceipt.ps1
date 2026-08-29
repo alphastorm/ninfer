@@ -739,9 +739,9 @@ function New-NInferQualificationReceipt {
             limitations = @(
                 'Beta only; no stable or GA promotion.',
                 'Fresh exact-package Windows RTX 3090 lifecycle, state-security, and OMP acceptance remain deferred; remote Linux runtime evidence does not substitute for those gates.',
-                'Remote Linux sm_86 runtime evidence covers one RTX 3090 at cohort 1; multi-GPU and higher-concurrency claims are excluded.',
+                'Remote Linux sm_86 native contract evidence covers one RTX 3090; live-model and cohort-performance claims are excluded from this incomplete receipt.',
                 'CPU, mixed CPU/GPU, and overnight thermal qualification are excluded.',
-                'The 64K retrieval gate qualifies 64,512 prompt tokens; it is not a 128K claim.',
+                'The deferred 64K target is 64,512 prompt tokens; no 128K claim is made.',
                 'Responses DELETE is logical object deletion, not secure erasure; a surviving descendant checkpoint may retain ancestor token/KV context required for continuation, and an active reader or cleanup failure may defer physical stale-generation reclamation.'
             )
         }
