@@ -647,6 +647,8 @@ function Invoke-InstallTransactionRollback(
     if (Get-TransactionFlag $Transaction 'controller_touched') {
         try { Restore-PersistedFileSnapshot $ControllerPath $Transaction.snapshots.controller }
         catch { $failures.Add("controller restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
+        try { Restore-PersistedFileSnapshot $StateProtectionPath $Transaction.snapshots.state_protection }
+        catch { $failures.Add("state-protection helper restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
     }
     if (Get-TransactionFlag $Transaction 'task_touched') {
         try {
@@ -663,6 +665,8 @@ function Invoke-InstallTransactionRollback(
     if (Get-TransactionFlag $Transaction 'owner_controller_touched') {
         try { Restore-PersistedFileSnapshot $OwnerControllerPath $Transaction.snapshots.owner_controller }
         catch { $failures.Add("GPU-owner controller restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
+        try { Restore-PersistedFileSnapshot $OwnerProtectionPath $Transaction.snapshots.owner_protection }
+        catch { $failures.Add("GPU-owner protection helper restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
     }
 
     $cleanupTargets = @(Get-TransactionCleanupTargets $Transaction)
@@ -719,6 +723,8 @@ if ($script:InstallTestMode) {
 $statePath = Join-Path $StateRoot 'state.json'
 $controllerPath = Join-Path $StateRoot 'Control-Release.ps1'
 $ownerControllerPath = Join-Path (Join-Path $StateRoot 'gpu-owner') 'Control-GpuOwner.ps1'
+$stateProtectionPath = Join-Path $StateRoot 'Protect-StateRoot.ps1'
+$ownerProtectionPath = Join-Path (Split-Path -Parent $ownerControllerPath) 'Protect-StateRoot.ps1'
 $receiptsStateRoot = Join-Path $StateRoot 'receipts'
 $transactionsRoot = Join-Path $receiptsStateRoot 'install-transactions'
 New-Item -ItemType Directory -Force -Path $transactionsRoot | Out-Null
@@ -850,7 +856,9 @@ try {
         snapshots = [pscustomobject][ordered]@{
             state = Save-PersistedFileSnapshot $statePath $snapshotRoot 'state'
             controller = Save-PersistedFileSnapshot $controllerPath $snapshotRoot 'controller'
+            state_protection = Save-PersistedFileSnapshot $stateProtectionPath $snapshotRoot 'state-protection'
             owner_controller = Save-PersistedFileSnapshot $ownerControllerPath $snapshotRoot 'owner-controller'
+            owner_protection = Save-PersistedFileSnapshot $ownerProtectionPath $snapshotRoot 'owner-protection'
         }
         flags = [pscustomobject][ordered]@{
             incumbent_touched = $false
@@ -1065,8 +1073,7 @@ try {
             Copy-Item -LiteralPath $ownerControllerSource -Destination $ownerControllerPath -Force
             $ownerHelperSource = Join-Path (Split-Path -Parent $ownerControllerSource) 'Protect-StateRoot.ps1'
             if (Test-Path -LiteralPath $ownerHelperSource -PathType Leaf) {
-                Copy-Item -LiteralPath $ownerHelperSource -Destination `
-                    (Join-Path (Split-Path -Parent $ownerControllerPath) 'Protect-StateRoot.ps1') -Force
+                Copy-Item -LiteralPath $ownerHelperSource -Destination $ownerProtectionPath -Force
             }
             $installedOwnerSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $ownerControllerPath).Hash.ToLowerInvariant()
             if ($installedOwnerSha -cne [string]$ownerRecord.controller_sha256) {
@@ -1086,8 +1093,9 @@ try {
         }
         Invoke-InstallFault 'owner_controller_copy'
 
+        Set-TransactionFlag $transaction 'controller_touched'
         $stateHelperSource = Join-Path $lifecycleBin 'Protect-StateRoot.ps1'
-        Copy-Item -LiteralPath $stateHelperSource -Destination (Join-Path $StateRoot 'Protect-StateRoot.ps1') -Force
+        Copy-Item -LiteralPath $stateHelperSource -Destination $stateProtectionPath -Force
         Assert-NInferProtectedStateTree $StateRoot
         if ($script:InstallTestMode) {
             & icacls.exe (Join-Path $StateRoot '*') '/reset' '/T' | Out-Null
@@ -1095,7 +1103,6 @@ try {
         }
         Invoke-InstallFault 'acl'
 
-        Set-TransactionFlag $transaction 'controller_touched'
         Copy-Item -LiteralPath $controllerSource -Destination $controllerPath -Force
         Invoke-InstallFault 'controller_copy'
 

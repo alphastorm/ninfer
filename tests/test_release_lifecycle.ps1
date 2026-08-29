@@ -559,6 +559,8 @@ $state | ConvertTo-Json -Compress
 '@
 $ownerScript = $ownerScript.Replace('__OWNER_STATE__', $script:OwnerStatePath.Replace("'", "''"))
 [IO.File]::WriteAllText($script:OwnerControllerPath, $ownerScript, [Text.UTF8Encoding]::new($false))
+Copy-Item -LiteralPath (Join-Path $instrumentedRoot 'Protect-StateRoot.ps1') `
+    -Destination (Join-Path $testRoot 'Protect-StateRoot.ps1')
 $global:NInferTestStateRoot = $script:StateRoot
 $originalFault = [Environment]::GetEnvironmentVariable('NINFER_TEST_INSTALL_FAILURE_AFTER', 'Process')
 $originalInterrupt = [Environment]::GetEnvironmentVariable('NINFER_TEST_INSTALL_INTERRUPTION_AFTER', 'Process')
@@ -726,6 +728,8 @@ try {
         $secret = New-SecretFile $testRoot $instance
         $stateShaBefore = Get-Sha256 (Join-Path $script:StateRoot 'state.json')
         $controllerShaBefore = Get-Sha256 (Join-Path $script:StateRoot 'Control-Release.ps1')
+        $stateProtectionShaBefore = Get-Sha256 (Join-Path $script:StateRoot 'Protect-StateRoot.ps1')
+        $ownerProtectionShaBefore = Get-Sha256 (Join-Path $script:StateRoot 'gpu-owner\Protect-StateRoot.ps1')
         $taskXmlBefore = [string]$global:NInferTestTaskXml
         $taskRunningBefore = $global:NInferTestTaskRunning
 
@@ -741,6 +745,10 @@ try {
             'state bytes changed after failed install'
         Assert-Equal (Get-Sha256 (Join-Path $script:StateRoot 'Control-Release.ps1')) `
             $controllerShaBefore 'controller bytes changed after failed install'
+        Assert-Equal (Get-Sha256 (Join-Path $script:StateRoot 'Protect-StateRoot.ps1')) `
+            $stateProtectionShaBefore 'state-protection helper changed after failed install'
+        Assert-Equal (Get-Sha256 (Join-Path $script:StateRoot 'gpu-owner\Protect-StateRoot.ps1')) `
+            $ownerProtectionShaBefore 'GPU-owner protection helper changed after failed install'
         Assert-Equal $global:NInferTestTaskXml $taskXmlBefore 'task definition changed after failed install'
         Assert-Equal $global:NInferTestTaskRunning $taskRunningBefore 'incumbent running state changed after failed install'
         Assert-Equal (Read-State).active_release 'base-release' 'failed candidate remained active'
