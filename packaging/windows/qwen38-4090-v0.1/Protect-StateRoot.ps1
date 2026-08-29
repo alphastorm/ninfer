@@ -37,20 +37,6 @@ function Assert-NInferNoReparseTree([string]$Path) {
     }
 }
 
-function Test-NInferWriteCapableRights([Security.AccessControl.FileSystemRights]$Rights) {
-    $writeMask = [Security.AccessControl.FileSystemRights]::WriteData -bor
-        [Security.AccessControl.FileSystemRights]::AppendData -bor
-        [Security.AccessControl.FileSystemRights]::CreateFiles -bor
-        [Security.AccessControl.FileSystemRights]::CreateDirectories -bor
-        [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
-        [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
-        [Security.AccessControl.FileSystemRights]::Delete -bor
-        [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
-        [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-        [Security.AccessControl.FileSystemRights]::TakeOwnership
-    return ($Rights -band $writeMask) -ne 0
-}
-
 function Assert-NInferProtectedAcl([string]$Path, [bool]$RequireProtectedDacl = $false) {
     $allowed = Get-NInferAllowedOwnerSidValues
     $acl = Get-Acl -LiteralPath $Path
@@ -63,12 +49,9 @@ function Assert-NInferProtectedAcl([string]$Path, [bool]$RequireProtectedDacl = 
     }
     $rules = $acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
     foreach ($rule in $rules) {
-        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
-            -not (Test-NInferWriteCapableRights $rule.FileSystemRights)) {
-            continue
-        }
-        if ($allowed -cnotcontains [string]$rule.IdentityReference.Value) {
-            throw "protected state grants write-capable access outside SYSTEM or Administrators: $Path"
+        if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            $allowed -cnotcontains [string]$rule.IdentityReference.Value) {
+            throw "protected state grants access outside SYSTEM or Administrators: $Path"
         }
     }
 }
@@ -139,10 +122,12 @@ function Initialize-NInferProtectedStateRoot([string]$Path) {
         throw 'protected state ancestor exists but is not a directory'
     }
     Assert-NInferTrustedCreationAncestor $ancestor
+    $created = [Collections.Generic.List[string]]::new()
     try {
         while ($missing.Count -ne 0) {
             $next = $missing.Pop()
             New-Item -ItemType Directory -Path $next -ErrorAction Stop | Out-Null
+            $created.Add($next)
             Set-NInferProtectedRootAcl $next
             Assert-NInferNoReparseAncestors $next
             Assert-NInferProtectedAcl $next $true
@@ -151,8 +136,8 @@ function Initialize-NInferProtectedStateRoot([string]$Path) {
         Assert-NInferProtectedAcl $fullPath $true
     }
     catch {
-        if (Test-Path -LiteralPath $fullPath -PathType Container) {
-            Remove-Item -LiteralPath $fullPath -Recurse -Force -ErrorAction SilentlyContinue
+        for ($index = $created.Count - 1; $index -ge 0; $index--) {
+            Remove-Item -LiteralPath $created[$index] -Recurse -Force -ErrorAction SilentlyContinue
         }
         throw
     }

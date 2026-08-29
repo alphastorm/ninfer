@@ -103,6 +103,7 @@ try {
         throw "failed to log on the low-privilege effective-access principal: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
     }
     $lowPrivilegeDenied = $false
+    $lowPrivilegeReadDenied = $false
     $impersonation = $null
     try {
         $impersonation = [Security.Principal.WindowsIdentity]::Impersonate($token)
@@ -114,12 +115,15 @@ try {
             )
         }
         catch [UnauthorizedAccessException] { $lowPrivilegeDenied = $true }
+        try { [IO.File]::ReadAllText($adminProbe) | Out-Null }
+        catch [UnauthorizedAccessException] { $lowPrivilegeReadDenied = $true }
     }
     finally {
         if ($null -ne $impersonation) { $impersonation.Undo(); $impersonation.Dispose() }
         [NInferSecurityNative]::CloseHandle($token) | Out-Null
     }
     Assert-True $lowPrivilegeDenied 'protected root allowed a real low-privilege write'
+    Assert-True $lowPrivilegeReadDenied 'protected root allowed a real low-privilege read'
 
     $precreated = Join-Path $testRoot 'precreated'
     New-Item -ItemType Directory -Path $precreated | Out-Null
@@ -213,6 +217,7 @@ try {
         root_dacl_protected = $true
         clean_default_managed_parent_creations = 2
         low_privilege_effective_write_denials = 1
+        low_privilege_effective_read_denials = 1
         precreated_root_rejections = 1
         unowned_root_rejections = 1
         root_junction_rejections = 1

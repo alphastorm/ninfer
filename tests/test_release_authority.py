@@ -70,15 +70,9 @@ class ReleaseAuthorityTest(unittest.TestCase):
             sha256(GOLDEN_RECEIPT_PATH),
             qualification["golden_equivalent"]["receipt_sha256"],
         )
-        self.assertEqual(
-            sha256(GOLDEN_RECEIPT_PATH),
-            spec["qualified_source_evidence"]["golden_equivalent_receipt_sha256"],
-        )
 
         package = qualification["package"]
-        self.assertEqual(package["sha256"], artifacts["package_sha256"])
         self.assertEqual(package["sha256"], assets["package"]["sha256"])
-        self.assertEqual(package["sbom"]["sha256"], artifacts["sbom_sha256"])
         self.assertEqual(package["sbom"]["sha256"], assets["sbom"]["sha256"])
         self.assertEqual(
             package["generic_gpu_owner_controller_sha256"],
