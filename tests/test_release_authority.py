@@ -22,6 +22,21 @@ LIFECYCLE_RECEIPT_PATH = (
 STATE_SECURITY_RECEIPT_PATH = (
     QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-state-security.json"
 )
+FAILED_DELETE_RECEIPT_PATH = (
+    QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-failed-delete.json"
+)
+UPGRADE_ACL_RECEIPT_PATH = (
+    QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-upgrade-rollback-acl.json"
+)
+PROTOCOL_RECEIPT_PATH = (
+    QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-protocol.json"
+)
+LONG_RESTART_RECEIPT_PATH = (
+    QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-long-restart.json"
+)
+PERFORMANCE_RECEIPT_PATH = (
+    QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-performance.json"
+)
 STALE_REVIEW_CLOSURE = (
     QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-review-closure.json"
 )
@@ -154,6 +169,24 @@ class ReleaseAuthorityTest(unittest.TestCase):
         )
         self.assertIs(state_security["exact_shipped_installer_executed"], True)
         self.assertIs(state_security["exact_shipped_installer_full_install"], False)
+        l_gate = qualification["release_gates"]["L"]
+        self.assertEqual(
+            sha256(FAILED_DELETE_RECEIPT_PATH), l_gate["native_failed_delete_receipt_sha256"]
+        )
+        self.assertEqual(
+            sha256(UPGRADE_ACL_RECEIPT_PATH),
+            l_gate["real_upgrade_rollback_acl_receipt_sha256"],
+        )
+        live = qualification["live_evidence"]
+        self.assertIs(live["prior_runtime_evidence_reused"], False)
+        self.assertEqual(sha256(PROTOCOL_RECEIPT_PATH), live["protocol"]["receipt_sha256"])
+        self.assertEqual(
+            sha256(LONG_RESTART_RECEIPT_PATH),
+            live["checkpoint_restart"]["receipt_sha256"],
+        )
+        self.assertEqual(
+            sha256(PERFORMANCE_RECEIPT_PATH), live["performance"]["receipt_sha256"]
+        )
 
         package = qualification["package"]
         self.assertEqual(package["sha256"], assets["package"]["sha256"])

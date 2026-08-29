@@ -1,32 +1,34 @@
 {
-  "artifact_type": "ninfer_release_script_member_binding",
-  "schema_version": 1,
-  "status": "passed",
-  "package_sha256": "5bef6ad506b82229f2c7cc6c0f9b53fd230a23bddd07bde3758e4bdc1b49d0cc",
-  "bindings": [
-    {
-      "name": "Install-Release.ps1",
-      "standalone_sha256": "2086de0dea282b9d4d4baa1e9694ea6ad385f640069170161787cba25819a5f3",
-      "zip_member": "qwen38-4090-v0.1\\Install-Release.ps1",
-      "zip_member_sha256": "2086de0dea282b9d4d4baa1e9694ea6ad385f640069170161787cba25819a5f3"
-    },
-    {
-      "name": "Control-Release.ps1",
-      "standalone_sha256": "b0afd1419729265fd8658fafe9a70a69e1d9571d78323a7feeb91d7796de16a9",
-      "zip_member": "qwen38-4090-v0.1\\Control-Release.ps1",
-      "zip_member_sha256": "b0afd1419729265fd8658fafe9a70a69e1d9571d78323a7feeb91d7796de16a9"
-    },
-    {
-      "name": "Control-GpuOwner.ps1",
-      "standalone_sha256": "b6a44ecdb177dae538d667937edb6a03bddf262d34815ae6153daf58351db9ab",
-      "zip_member": "qwen38-4090-v0.1\\Control-GpuOwner.ps1",
-      "zip_member_sha256": "b6a44ecdb177dae538d667937edb6a03bddf262d34815ae6153daf58351db9ab"
-    },
-    {
-      "name": "Protect-StateRoot.ps1",
-      "standalone_sha256": "c6622ad31753998ffc0281dc9699488153e911202a2aa8d03de07b17b16debcc",
-      "zip_member": "qwen38-4090-v0.1\\Protect-StateRoot.ps1",
-      "zip_member_sha256": "c6622ad31753998ffc0281dc9699488153e911202a2aa8d03de07b17b16debcc"
-    }
-  ]
+    "artifact_type":  "ninfer_release_script_member_binding",
+    "schema_version":  1,
+    "status":  "passed",
+    "package_sha256":  "3c5ea14499de4bb9330c82f4cee35c830971698880a09fe80d5d3d333df31e0f",
+    "zip_file_members":  27,
+    "duplicate_member_names":  0,
+    "bindings":  [
+                     {
+                         "name":  "Install-Release.ps1",
+                         "standalone_sha256":  "3038e6d0bb5df3ab5eb990271473de5abbb8fb3d009f04fb9c269691d8e9c8a2",
+                         "zip_member":  "qwen38-4090-v0.1\\Install-Release.ps1",
+                         "zip_member_sha256":  "3038e6d0bb5df3ab5eb990271473de5abbb8fb3d009f04fb9c269691d8e9c8a2"
+                     },
+                     {
+                         "name":  "Control-Release.ps1",
+                         "standalone_sha256":  "b0afd1419729265fd8658fafe9a70a69e1d9571d78323a7feeb91d7796de16a9",
+                         "zip_member":  "qwen38-4090-v0.1\\Control-Release.ps1",
+                         "zip_member_sha256":  "b0afd1419729265fd8658fafe9a70a69e1d9571d78323a7feeb91d7796de16a9"
+                     },
+                     {
+                         "name":  "Control-GpuOwner.ps1",
+                         "standalone_sha256":  "b6a44ecdb177dae538d667937edb6a03bddf262d34815ae6153daf58351db9ab",
+                         "zip_member":  "qwen38-4090-v0.1\\Control-GpuOwner.ps1",
+                         "zip_member_sha256":  "b6a44ecdb177dae538d667937edb6a03bddf262d34815ae6153daf58351db9ab"
+                     },
+                     {
+                         "name":  "Protect-StateRoot.ps1",
+                         "standalone_sha256":  "40af12d55f5bce58384728c6649a507e04aca8b66824da60c070e76b26a429f6",
+                         "zip_member":  "qwen38-4090-v0.1\\Protect-StateRoot.ps1",
+                         "zip_member_sha256":  "40af12d55f5bce58384728c6649a507e04aca8b66824da60c070e76b26a429f6"
+                     }
+                 ]
 }

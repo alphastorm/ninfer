@@ -1,0 +1,17 @@
+{
+    "artifact_type":  "ninfer_native_failed_checkpoint_delete_regression",
+    "schema_version":  1,
+    "status":  "passed",
+    "source_commit":  "028030476c96c71f783b6d8b1abb90684e0b8066",
+    "binary_sha256":  "e5fce224529d7eeb3da4b685a842824a376856817c03f161dc23e780797bca6c",
+    "test_source_sha256":  "0455d606b48f49d011f6d152c74478e168761f0e112e115eba118ae7c02a4d33",
+    "manager_source_sha256":  "4533346192fc584acfa10e663e4e36d48ec52f14f07b559d469280192ab528a2",
+    "http_source_sha256":  "95792f567e18e977661400232b5aa7c2cd559d81b7d67bf3dd24631dadd51bbc",
+    "native_test_log_sha256":  "9f2a59a60e65fbcd5a3e1b7248adf92890ce3a32b19e43fb4751c2657196de13",
+    "failed_checkpoint_publication_returned_conflict":  true,
+    "failed_delete_preserved_live_parent_and_descendant":  true,
+    "failed_delete_preserved_durable_current_generation":  true,
+    "restart_after_failed_delete_restored_descendant":  true,
+    "successful_parent_delete_retained_descendant_in_memory":  true,
+    "successful_parent_delete_retained_descendant_after_restart":  true
+}

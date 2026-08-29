@@ -1,0 +1,34 @@
+{
+    "artifact_type":  "ninfer_windows_real_upgrade_rollback_secret_acl",
+    "schema_version":  1,
+    "status":  "passed",
+    "evidence_class":  "exact-shipped-installer-real-upgrade-rollback-acl",
+    "source_commit":  "028030476c96c71f783b6d8b1abb90684e0b8066",
+    "binary_sha256":  "e5fce224529d7eeb3da4b685a842824a376856817c03f161dc23e780797bca6c",
+    "package_sha256":  "3c5ea14499de4bb9330c82f4cee35c830971698880a09fe80d5d3d333df31e0f",
+    "installer_sha256":  "3038e6d0bb5df3ab5eb990271473de5abbb8fb3d009f04fb9c269691d8e9c8a2",
+    "exact_shipped_installer_full_installs":  2,
+    "retained_release_count":  2,
+    "access_principals":  [
+                              "SYSTEM",
+                              "Administrators"
+                          ],
+    "upgrade":  {
+                    "phase":  "after-real-upgrade",
+                    "retained_secrets":  2,
+                    "effective_read_denials":  2
+                },
+    "rollback":  {
+                     "phase":  "after-real-rollback",
+                     "retained_secrets":  2,
+                     "effective_read_denials":  2
+                 },
+    "candidate_return":  {
+                             "phase":  "after-candidate-return",
+                             "retained_secrets":  2,
+                             "effective_read_denials":  2
+                         },
+    "low_privilege_effective_read_denials":  6,
+    "raw_secrets_included":  false,
+    "historical_private_corpus_reused":  false
+}

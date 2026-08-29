@@ -2,59 +2,102 @@
 
 ## Verdict
 
-**Beta-qualified for RTX 4090 support.** The final hardened generic-profile Windows package passed the source-controlled Golden-equivalent through standard OMP: one typed tool invocation, exact string/integer/boolean arguments, tool-result continuation, and the exact visible final answer.
+**Beta-qualified for RTX 4090 support at corrected runtime `02803047…`.** The prior qualification at `683f8817…` and package `5bef6ad5…` are superseded and must not ship: that runtime could durably lose surviving stored-response descendants when DELETE checkpoint publication failed.
 
-No stable or public release and no permanent route change was performed. The historical private corpus is unavailable and was not reused, read, copied, hashed, or transmitted; this qualification used only the committed synthetic fixture.
+The corrected package passed every runtime-dependent gate again. No prior protocol, long-context, performance, or Golden result was inherited. No stable or public release and no permanent route change was performed. The historical private corpus is unavailable and was not reused, read, copied, hashed, or transmitted.
 
 ## Exact identities
 
 | Item | Value |
 |---|---|
-| Runtime source | `e5d51a44f1a3b5788be83b991c2761199e8e9a31` |
-| Runtime source archive | `e43847bf3da5ec152b3c9abf9a00cddca8f4bd79bf60f67d55c458a017f2eb3c` / `5232852` bytes |
-| Package source | `bdb3722518314ad9f7ea148897632201a77a329f` |
-| Package source archive | `285440d84bf97de20933723f8bea14ed1ead92b4a9697d85b0af10f96ec2618e` / `5232320` bytes |
-| Server | `e0769d5c64195325ba95891c1af99e71db2083271f379242134ac906f8ae9e5d` / `230245888` bytes |
+| Runtime source | `028030476c96c71f783b6d8b1abb90684e0b8066` |
+| Runtime source archive | `77eb4ccb48dc022ea027e526ee1c28a23a745bb0364c77e3978edcde11d1044f` / `5239266` bytes |
+| Package source | `b24a807eeb61b11896cbd8a9f3c8fd73e77dd2c8` |
+| Package source archive | `7ee03ec6e6783b0e5ea32a68ee22b2a717a124547e4779a735726fc0bf2faeb3` / `5239221` bytes |
+| Server | `e5fce224529d7eeb3da4b685a842824a376856817c03f161dc23e780797bca6c` / `230245888` bytes |
 | Config | `ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db` |
 | Model | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
-| Package | `5bef6ad506b82229f2c7cc6c0f9b53fd230a23bddd07bde3758e4bdc1b49d0cc` / `227389758` bytes |
-| SPDX 2.3 SBOM | `d24cd0ca18e68c498e64680ea942dfbcd4b050189b8a7e6490c5fde7e33028d6` / `22373` bytes / `27` files |
-| Qualification sidecar | `391b8cae18733ac774dfdc74713f3221baa845eff150d256ce7677bbab802544` / `6140` bytes |
-| SHA256SUMS | `90051cccc682fb8fd25f633d752f8c06f350edc08df9a80316a04fa0fd07749a` / `687` bytes |
+| Package | `3c5ea14499de4bb9330c82f4cee35c830971698880a09fe80d5d3d333df31e0f` / `227387438` bytes |
+| SPDX 2.3 SBOM | `8b832bfdcc14a09fc33d80ad860f0312724e4ddc4267c31114d30729e642d607` / `22373` bytes / `27` files |
+| Qualification sidecar | `32d8b2266cd6f2cbb572445b3349442e62655f0405a2c87a64afc6fdaf8442ef` / `8195` bytes |
+| SHA256SUMS | `f7e14e6441647856fbbbf75e4df57233c8175b95559a4b6c35a6e84d7be47966` / `687` bytes |
 | Deployment profile | `qwen38-4090-v0.1` |
 | CUDA target/toolkit | `sm_89` / `13.3.73` |
 
-## Publication and state-security remediation
+## Durable DELETE correction
 
-The final binary and every dependency DLL were built with caches disabled under neutral build roots. A byte scan covered all eight staged files and all 27 ZIP members; a separate scan covered all 1,082 tracked files. Both found zero private identifiers.
+The response DELETE path now snapshots one authenticated session, publishes the durable post-delete generation before mutating the live response store, and returns a fail-closed conflict when checkpoint publication fails. A successful parent deletion retains descendants in memory and after process restart.
 
-`Protect-StateRoot.ps1` now creates each missing managed parent from a trusted ProgramData ancestor, rejects precreated unowned paths and reparse points, restricts ownership and DACL access to SYSTEM and Administrators, and verifies the full state tree before lifecycle reads or writes. The elevated security regression proved effective low-privilege read and write denial, root and child junction rejection, three installer pre-write rejection paths, safe clean-root creation, and no shipped test-mode bypass.
+The native regression proved all six observable outcomes:
 
-The generic GPU-owner controller stores its lease state below the protected state root. Its real-host regression observed an active compute owner, allowed non-destructive status, and rejected stop rather than taking ownership of an unmanaged workload. The live Golden request JSONL remained below the protected ProgramData state tree; seven valid records were observed without retaining raw requests.
+- failed checkpoint publication returns conflict;
+- the live parent and descendant remain present;
+- the durable `current` generation is unchanged;
+- restart after failure restores the descendant and its parent link;
+- successful parent deletion retains the descendant in memory;
+- restart after success restores only the surviving descendant lineage.
 
-The installer, lifecycle controller, GPU-owner controller, and state-protection helper are each published standalone and in the ZIP. The committed member-binding receipt proves the standalone and ZIP-member SHA-256 values are byte-identical for all four scripts.
+The corrected runtime diff is deliberately confined to seven serving files: generation service, response store, Responses HTTP, and session-checkpoint manager declarations/definitions. Because runtime inputs changed, all hardware-dependent gates were rerun instead of inherited.
 
-The deterministic SPDX 2.3 document inventories every immutable ZIP member with SHA-1/SHA-256 and regenerated byte-identically. It is a complete file inventory; it does not claim dependency-package resolution beyond the shipped bytes.
+## Windows release-boundary hardening
 
-## Build and regression evidence
+The shipped installer contains no callable test mode, ambient test activation, or fault-injection hook. Synthetic failure and interruption instrumentation is generated only in the unshipped lifecycle harness. Its receipt is explicitly classified `instrumented-unshipped-installer-lifecycle` and does not claim exact shipped-byte or real-ACL coverage.
 
-The clean neutral build compiled source `e5d51a44…` and all dependencies from neutral roots. `CMakeLists.txt`, `cmake`, `include`, `src`, `apps`, and `vcpkg.json` have no diff from the qualified `4e67e6f9…` runtime, so the prior protocol, 102K process-restart checkpoint, and uncontaminated performance receipts remain applicable.
+Real coverage is separate:
 
-Focused checks passed:
+- the shipped state helper creates each missing ProgramData directory atomically with its final SYSTEM/Administrators-only security descriptor;
+- raced, precreated, unowned, and reparse state fails closed;
+- failure cleanup never recursively removes an untrusted precreated tree;
+- effective low-privilege reads and writes are denied;
+- installed bearer secrets grant access only to SYSTEM and Administrators;
+- two exact shipped-installer full installs performed a real retained-release upgrade;
+- both retained secrets denied low-privilege reads after upgrade, after rollback, and after returning to the corrected candidate.
 
-- native Responses schema, request log, serve options, and session-checkpoint store;
-- seven-case Golden-equivalent Python regression;
-- deterministic SPDX regression and Python compile;
-- MTP decision and release-asset PowerShell regressions;
-- deterministic generic GPU-owner regression;
-- real elevated Windows state-security and active-compute regression;
-- complete synthetic release-lifecycle regression.
+The generic GPU-owner controller again observed an active compute owner, allowed non-destructive status, and rejected stop rather than taking an unmanaged workload.
 
-The synthetic lifecycle fixture explicitly treats its ACL instrumentation as ordering-only. Real ownership, DACL, effective-access, reparse, installer pre-write, and active-compute behavior is certified separately by the elevated state-security receipt. The lifecycle fixture also exercises ten injected failures, ten retries, helper rollback/repair, interrupted reentry, schema migration and identity rejection, and the production 30-second scheduled-task startup grace.
+## Qualification authority and publication safety
 
-## Final Golden-equivalent
+The in-package status is explicitly `candidate-only-not-release-eligible`. The final external sidecar is the sole release-eligibility authority; it supersedes `candidate_ready` only after G, L, and R pass and is bound by `SHA256SUMS`. Repository tests enforce the final schema, disclosure rules, exact authority lineage, receipt hashes, and supersession semantics.
 
-Contract `qwen38-4090-omp-golden-equivalent-v1` passed through standard OMP `18.0.6` in `6.095594` seconds:
+All four published PowerShell scripts are byte-identical to their corresponding ZIP members. The ZIP contains 27 unique file members and no duplicate member names. The deterministic SPDX document regenerated byte-identically.
+
+A final byte scan covered all eight staged assets and all 27 ZIP members. A separate scan covered all 1,091 intended tracked files. Both found zero private identifiers.
+
+## Rerun results
+
+### Protocol
+
+The authenticated 15-check pack passed in full, including typed tool arguments, tool-result arrays, stream parity, private-session cache isolation, stored Responses isolation, continuation, streaming checkpointing, parent deletion, descendant survival, and Anthropic token counting.
+
+Protocol receipt: `7018042400580ab54bb91da71502f1fdd0251cef9231c3abaef01699f89c7561`.
+
+### Exact 102K process checkpoint restart
+
+The first stored Responses turn contained exactly `102060` input tokens. A controller restart replaced the process; the next turn restored `102075` tokens and appended the suffix through `append_frontier`. The post-restart prompt contained `102097` tokens. No raw prompt or output is retained.
+
+Long-restart receipt: `1f693885a38a4d7196954b47f3f677dcf27ab12e0cd8a939c4f5fc7e3782b09a`.
+
+### Bounded performance
+
+The exact public `long_decode_aime26_01` fixture ran once after one warmup:
+
+| Metric | Result |
+|---|---:|
+| Prompt tokens | 228 |
+| Completion tokens | 2041 |
+| Prefill | 1395.703 tokens/s |
+| Decode | 52.156 tokens/s |
+| Wall time | 39.351 s |
+| Prefix cache hits | 0 |
+| Reuse path | `full_reset` |
+
+No builder or compressor ran before or after measurement. The candidate was the sole measured NInfer compute owner. Fourteen unavoidable Windows display-model rows reported unavailable memory accounting and are disclosed rather than misclassified as absent; no other row reported measurable compute memory.
+
+Performance receipt: `4f87baf4db0c61c2e2f8b7a809988880dc665075b01d8b644e00e58ee7c9d1ad`.
+
+### Final Golden-equivalent
+
+Contract `qwen38-4090-omp-golden-equivalent-v1` passed through standard OMP `18.0.6` in `7.561452` seconds:
 
 | Gate | Result |
 |---|---|
@@ -65,24 +108,28 @@ Contract `qwen38-4090-omp-golden-equivalent-v1` passed through standard OMP `18.
 
 Exact visible answer: `NINFER_GOLDEN_EQUIVALENT_OK|Paris|3|metric=true|18C|clear`.
 
-Final Golden receipt SHA-256: `3f47356c7ff2ac8fa229d66d3a1969e44327bb954250b7cdc5993ca5152a9006`. Raw transcript content is not retained.
+Golden receipt: `17e980b1038c2743d5811cc6ca79d148da017d329714a98f7ae4f330680e6ba2`. Raw transcript content is not retained.
 
 ## Restoration
 
-Every live GPU-owner stop/start effect used the hash-pinned tracked operator controller. The pre-lease incumbent is healthy again; candidate listener, protected state root, and scheduled task are absent, while the base controller and container substrate remain paused exactly as before the lease. No stable promotion, public release, or permanent route mutation occurred.
+Every live GPU-owner stop/start effect used the hash-pinned tracked operator controller. The exact incumbent is healthy again; candidate listener, protected state, scheduled task, processes, probe account, credential, and lease tools are absent. The base controller and container substrate remain paused exactly as before the lease.
 
-Final restore receipt SHA-256: `d75cf019a9d725e3d44e3d58c47988c0e0e3794d1b1e6e46072557f0341f65c6`.
+Final restore receipt: `4b4fb020f73fae0b81021cc8f22d64220e4dfa669da6f35ecce668a0ec3efa1c`.
 
 ## Receipts
 
-- public asset receipt: `d63f4970616ffe561a7bb63a09b0438b97d893823a28d74d1b65126b7fd8cbb3`;
-- neutral clean build: `e9b53efc5fe7619408b84886a7fd68404584e9b2793565faf80b6b8d0af5c2e9`;
-- package: `3a3f77eee6c98f9117828b0935b477f9062bef4de36c7b3e4be1a6f2b46c1de7`;
+- public asset receipt: `3ebe0ef7691076b41929d340f78d925d184ed7853bbf45d2d3a89d21ff726104`;
+- neutral clean build: `5818d8e84746270d24d5693a0690f21a6e3f7624079ab5e31a60ca355e2de775`;
+- native failed DELETE: `b97de5511fc17bc18e302145059242dac5eeba6b9909b3a1f810361b4d604a43`;
+- package: `642f0d6854f4893aab8859cd179c6fc47e435bfbd9c1c3ef87e3666cd1d8a812`;
 - private-identifier scan: `5ae9af1cb106d6fc359c5defd7f126f4808ee73d19e96a78387c6e18a99314cf`;
-- released-script byte binding: `1ccead7c905821ad4c299eed32276646db7e686b30c00dbbf761cf51d817e2b5`;
-- real Windows state security: `81e5d07d2ebff8c5e514d9405a33ea7e4626b3a39e4c88727a90621369d37aee`;
-- protected Golden request log: `08a270326d6b065e1c5b2cb51da867d3759b96037789750f6e3473eed6fb6329`;
-- release lifecycle: `51a0b816d9de7e58e15b4cb573b36e381e3700f0794b2c5fd5720c508e5fa0b6`;
-- lease ready: `b9678959bff959bc6ad2cbc68ae52c84b6aa5d2a45f0c70d143793213605da0e`;
-- final Golden: `3f47356c7ff2ac8fa229d66d3a1969e44327bb954250b7cdc5993ca5152a9006`;
-- final restore: `d75cf019a9d725e3d44e3d58c47988c0e0e3794d1b1e6e46072557f0341f65c6`.
+- released-script byte binding: `35c76b52fd6afc726decc9216de1ba45b69d149f951122023ed886d3bcdd9bac`;
+- real state security: `1b8c651c3a09caad36ac5cd718ce418241b2eff8794698bce264bb4d44d42339`;
+- instrumented lifecycle: `358e95a9ca51d3b7cd0d0c497e6ff972bdb12d92ae91103c616a21bc2b4da889`;
+- real upgrade/rollback secret ACL: `6fa85ecd07d0dfa07ae25756ec77e33de4a207312677a4c9da44f2aee678334a`;
+- protected request log: `5f379ef154e6d9a0b2585b4b10df67cd066a3e37cdf3344ac7da8d3d296b558c`;
+- protocol: `7018042400580ab54bb91da71502f1fdd0251cef9231c3abaef01699f89c7561`;
+- 102K restart: `1f693885a38a4d7196954b47f3f677dcf27ab12e0cd8a939c4f5fc7e3782b09a`;
+- performance: `4f87baf4db0c61c2e2f8b7a809988880dc665075b01d8b644e00e58ee7c9d1ad`;
+- final Golden: `17e980b1038c2743d5811cc6ca79d148da017d329714a98f7ae4f330680e6ba2`;
+- final restore: `4b4fb020f73fae0b81021cc8f22d64220e4dfa669da6f35ecce668a0ec3efa1c`.
