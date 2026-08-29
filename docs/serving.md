@@ -352,6 +352,18 @@ explicit deletion also make an ID unavailable. A single Response larger than the
 capacity fails with `response_store_capacity_exceeded` rather than silently pretending it was
 stored.
 
+With session checkpoints enabled, DELETE constructs the post-delete durable snapshot and complete
+replacement live store while holding the response-store lock. The durable callback must succeed
+before no-throw swaps publish the live deletion. A foreign-session LRU insertion therefore waits
+for the whole transaction; checkpoint, quota, or filesystem failure returns
+`checkpoint_unavailable` without changing either live state or the durable `current` generation.
+
+DELETE is record and addressability deletion, not cryptographic erasure of content still reachable
+through a surviving descendant. The replacement Engine checkpoint is rooted at the latest
+surviving response's session key and can intentionally retain ancestor token/KV state required by
+that descendant. The deleted response record is absent from `responses.cbor`, direct retrieval and
+new continuation from its ID fail, and surviving descendants remain restart-durable.
+
 ### Durable process-restart continuation
 
 `--session-checkpoint-dir DIR` enables optional persistence for stored Responses carrying an

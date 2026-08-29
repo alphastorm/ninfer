@@ -41,6 +41,15 @@ function Set-JsonProperty([object]$Object, [string]$Name, [object]$Value) {
     }
 }
 
+function Assert-PublicQualificationDisclosure([object]$Qualification) {
+    $serialized = $Qualification | ConvertTo-Json -Depth 32 -Compress
+    $escapedPrivatePath = '(?i)(?:[A-Z]:\\\\Users\\\\|/Users/|/home/|(?:nyc|sf)-[a-z0-9-]+|(?:[0-9]{1,3}\.){3}[0-9]{1,3})'
+    $forbiddenProperty = '(?i)"(?:gpu_uuid|api_key|api_key_file|controller_path|health_url|private_host)"\s*:'
+    if ($serialized -match $escapedPrivatePath -or $serialized -match $forbiddenProperty) {
+        throw 'public qualification disclosure violation'
+    }
+}
+
 function ConvertTo-ReleaseTextBytes([string]$Path) {
     $encoding = [Text.UTF8Encoding]::new($false, $true)
     $text = $encoding.GetString([IO.File]::ReadAllBytes($Path))
@@ -128,6 +137,7 @@ if ($qualification.artifact_type -cne 'ninfer_public_windows_release_qualificati
     [string]$qualification.source.qualified_commit -cne $PatchStackSha) {
     throw 'qualification record is not bound to the executable source identity'
 }
+Assert-PublicQualificationDisclosure $qualification
 if ([string]$spec.qualification_authority.in_archive_status -cne
         'candidate-only-not-release-eligible' -or
     [string]$spec.qualification_authority.external_sidecar_filename -cne
@@ -431,9 +441,10 @@ try {
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant()
         "$hash  $([IO.Path]::GetFileName($asset))"
     }
+    $lineFeed = [string][char]10
     [IO.File]::WriteAllText(
         $shaSumsPath,
-        ([string]::Join("`n", $sumLines) + "`n"),
+        ([string]::Join($lineFeed, $sumLines) + $lineFeed),
         [Text.UTF8Encoding]::new($false)
     )
 

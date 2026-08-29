@@ -307,6 +307,9 @@ try {
         active_compute_owner_observed = [int]$gpuStatus.active_compute_owner_count -gt 0
         active_compute_owner_rejections = if ($activeComputeRejected) { 1 } else { 0 }
         gpu_owner_status_rejected_active_service = $false
+        nvidia_smi_evidence_class = 'exact-trusted-absolute-query'
+        gpu_power_limit_mutations = 0
+        gpu_power_limit_restore_required = $false
         request_jsonl_under_protected_state = $true
         shipped_test_bypass = $false
         published_release_scripts_scanned = $publishedScripts.Count

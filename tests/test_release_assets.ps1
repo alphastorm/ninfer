@@ -153,6 +153,28 @@ try {
     Assert-True $wrongModelRejected 'wrong current model artifact identity was accepted'
     Assert-True (-not (Test-Path -LiteralPath $wrongOut)) 'rejected model identity created output assets'
 
+    $gpuUuidQualificationPath = Join-Path $root 'qualification-gpu-uuid.json'
+    $gpuUuidQualification = Get-Content -LiteralPath $qualificationPath -Raw | ConvertFrom-Json
+    Add-Member -InputObject $gpuUuidQualification -MemberType NoteProperty -Name 'gpu_uuid' -Value 'GPU-fixture-4090'
+    Write-Json $gpuUuidQualificationPath $gpuUuidQualification
+    $gpuUuidRejected = $false
+    try {
+        & $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $gpuUuidQualificationPath -SbomCreatedUtc $sbomCreatedUtc -OutputDirectory (Join-Path $root 'out-gpu-uuid') | Out-Null
+    }
+    catch { $gpuUuidRejected = $_.Exception.Message -ceq 'public qualification disclosure violation' }
+    Assert-True $gpuUuidRejected 'qualification containing a real gpu_uuid input field was accepted'
+
+    $windowsPathQualificationPath = Join-Path $root 'qualification-windows-path.json'
+    $windowsPathQualification = Get-Content -LiteralPath $qualificationPath -Raw | ConvertFrom-Json
+    Add-Member -InputObject $windowsPathQualification.source -MemberType NoteProperty -Name 'local_path' -Value 'C:\Users\Public\candidate.json'
+    Write-Json $windowsPathQualificationPath $windowsPathQualification
+    $windowsPathRejected = $false
+    try {
+        & $PackageBuilderPath -ServerExecutable $server -PatchStackSha $patchSha -RuntimeFile @($runtimeA, $runtimeB) -ServerConfig $lfConfigPath -QualificationRecord $windowsPathQualificationPath -SbomCreatedUtc $sbomCreatedUtc -OutputDirectory (Join-Path $root 'out-windows-path') | Out-Null
+    }
+    catch { $windowsPathRejected = $_.Exception.Message -ceq 'public qualification disclosure violation' }
+    Assert-True $windowsPathRejected 'JSON-escaped Windows private path was accepted'
+
     $wrongSemanticConfig = Get-Content -LiteralPath $lfConfigPath -Raw | ConvertFrom-Json
     $wrongSemanticConfig.engine.prefill_chunk = 256
     $wrongSemanticConfigPath = Join-Path $root 'server-config-wrong-semantics.json'
@@ -330,6 +352,8 @@ try {
         assets = $expectedAssets.Count
         payload_entries = $listed.Count
         wrong_model_artifact_identity_rejections = 1
+        gpu_uuid_disclosure_rejections = 1
+        escaped_windows_path_rejections = 1
         passed_red_gate_rejections = 1
         hidden_payload_coverage = $true
         pinned_model_bytes = [Int64]$releaseSpec.model.bytes

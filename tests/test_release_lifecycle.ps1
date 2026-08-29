@@ -1025,6 +1025,27 @@ try {
         published_state_protection_sha256 = Get-Sha256 (Join-Path $publishedAssetRoot 'Protect-StateRoot.ps1')
         state_protection_evidence_class = 'exact-shipped-helper-real-acl'
         state_protection_stubbed = $false
+        substituted_components = @(
+            'Install-Release.ps1 generated instrumentation copy',
+            'Control-GpuOwner.ps1 generated owner-state adapter',
+            'ninfer-serve.exe non-executable fixture bytes',
+            'model.ninfer synthetic 256-byte artifact',
+            'release package generated production-shaped fixture',
+            'API key generated synthetic fixture'
+        )
+        substituted_functions = @(
+            'Get-ScheduledTask', 'Export-ScheduledTask', 'New-ScheduledTaskAction',
+            'New-ScheduledTaskTrigger', 'New-ScheduledTaskSettingsSet',
+            'New-ScheduledTaskPrincipal', 'Register-ScheduledTask',
+            'Unregister-ScheduledTask', 'Start-ScheduledTask', 'Stop-ScheduledTask',
+            'Get-NetTCPConnection', 'Invoke-RestMethod', 'Start-Sleep',
+            'nvidia-smi.exe', 'Get-FileHash'
+        )
+        exact_unsubstituted_components = @(
+            'Control-Release.ps1', 'Protect-StateRoot.ps1',
+            'New-QualificationReceipt.ps1', 'Invoke-Qualification.ps1',
+            'Compare-MtpQualification.ps1', 'Golden-equivalent smoke assets'
+        )
         published_installer_callable_test_hooks = 0
         real_acl_evidence_included = $true
         injected_failures = $faultPoints.Count

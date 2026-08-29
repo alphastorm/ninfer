@@ -831,6 +831,7 @@ int test_delete_checkpoint_update_fails_closed() {
         snapshot.client_session_sha256, snapshot.records.front().id, responses);
     failures += check(
         erased == SessionCheckpointEraseResult::Erased && engine.checkpoint_calls == 3 &&
+            engine.tag == snapshot.records.back().session_key &&
             !responses.get_for_session(snapshot.records.front().id,
                                        snapshot.client_session_sha256) &&
             responses.get_for_session(snapshot.latest_response_id,
@@ -845,6 +846,7 @@ int test_delete_checkpoint_update_fails_closed() {
         snapshot.client_session_sha256, snapshot.latest_response_id, committed_responses);
     failures += check(
         committed_restored == SessionCheckpointRestoreState::Restored &&
+            committed_restart_engine.tag == snapshot.records.back().session_key &&
             !committed_responses.get_for_session(snapshot.records.front().id,
                                                  snapshot.client_session_sha256) &&
             committed_responses.get_for_session(snapshot.latest_response_id,

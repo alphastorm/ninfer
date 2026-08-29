@@ -266,6 +266,11 @@ class ReleaseAuthorityTest(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, text)
 
+    def test_private_windows_path_survives_json_roundtrip_for_disclosure_scan(self) -> None:
+        value = json.loads(json.dumps({"path": r"C:\Users\Example\receipt.json"}))
+        pattern = re.compile(r"[A-Za-z]:\\Users\\", re.IGNORECASE)
+        self.assertTrue(any(pattern.search(text) for text in iter_strings(value)))
+
     def test_every_published_powershell_script_has_no_hook_vocabulary(self) -> None:
         scripts = sorted(RELEASE_ROOT.glob("*.ps1"))
         self.assertEqual(

@@ -1440,6 +1440,10 @@ SessionCheckpointEraseResult SessionCheckpointManager::erase_response(
                         latest.session_key.size() > kMaximumContextCacheSessionKeyBytes) {
                         return false;
                     }
+                    // DELETE removes the addressed Responses record, not content still reachable
+                    // through a surviving descendant. Re-export the Engine continuation rooted at
+                    // the latest surviving session key; this is continuation durability, not a
+                    // cryptographic-erasure guarantee for ancestor tokens in that lineage.
                     const std::string checkpoint_tag = latest.session_key;
                     return store_
                         ->save(checkpoint_namespace, *snapshot, runtime_fingerprint_,
