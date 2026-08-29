@@ -682,8 +682,7 @@ function New-NInferQualificationReceipt {
         $ompStatus
     )
     $allPassed = @($statuses | Where-Object { $_ -cne 'passed' }).Count -eq 0
-    $platformReceipt['fresh_exact_package_windows_gates_passed'] =
-        ($shippedStatus -ceq 'passed' -and $securityStatus -ceq 'passed' -and $ompStatus -ceq 'passed')
+    $platformReceipt['fresh_exact_package_windows_gates_passed'] = $allPassed
     $receipt = [ordered]@{
         artifact_type = 'ninfer_rtx3090_beta_qualification'
         schema_version = 3
