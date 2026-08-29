@@ -640,6 +640,20 @@ GenerationService::restore_checkpoint(std::string_view session_sha256,
     return checkpoint_manager_->restore(session_sha256, required_response_id, responses);
 }
 
+nlohmann::json GenerationService::checkpoint_status(std::string_view session_sha256) {
+    if (!checkpoint_manager_) {
+        return nlohmann::json{{"artifact_type", "ninfer_session_checkpoint_status"},
+                              {"state", "disabled"}};
+    }
+    return checkpoint_manager_->status(session_sha256);
+}
+
+SessionCheckpointEraseResult GenerationService::erase_checkpoint(
+    std::string_view session_sha256) {
+    if (!checkpoint_manager_) { return SessionCheckpointEraseResult::Missing; }
+    return checkpoint_manager_->erase(session_sha256);
+}
+
 SessionCheckpointEraseResult GenerationService::erase_checkpoint_response(
     std::string_view session_sha256, std::string_view response_id, ResponseStore& responses) {
     if (!checkpoint_manager_) { return SessionCheckpointEraseResult::Missing; }

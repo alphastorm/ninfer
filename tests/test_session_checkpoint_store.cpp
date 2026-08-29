@@ -172,7 +172,7 @@ std::uint64_t retained_generation_bytes(const std::filesystem::path& root) {
     if (std::filesystem::exists(tombstones)) {
         for (const auto& entry : std::filesystem::directory_iterator(tombstones)) {
             const bool whole_session =
-                entry.path().filename().string().find("--") == std::string::npos;
+                entry.path().filename().string().find("--session--") != std::string::npos;
             total += regular_file_bytes(whole_session ? entry.path() / "generations"
                                                        : entry.path());
         }
@@ -650,6 +650,10 @@ int test_production_manager_restart_and_identity_isolation() {
                           disabled.restore(snapshot.client_session_sha256,
                                            snapshot.latest_response_id, source) ==
                               SessionCheckpointRestoreState::Disabled &&
+                          disabled.status(snapshot.client_session_sha256).at("state") ==
+                              "disabled" &&
+                          disabled.erase(snapshot.client_session_sha256) ==
+                              SessionCheckpointEraseResult::Missing &&
                           source.size() == source_size,
                       "disabled checkpoint manager changed ordinary Responses state");
 
@@ -667,6 +671,9 @@ int test_production_manager_restart_and_identity_isolation() {
                           exporter.session == snapshot.client_session_sha256 &&
                           exporter.tag == "stable-checkpoint-session-tag",
                       "production manager did not export the complete stable-tagged session");
+    failures += check(manager.status(snapshot.client_session_sha256).at("state") ==
+                          "available",
+                      "manager status did not expose the published checkpoint");
     if (!saved.checkpoint) { return failures; }
 
     bool api_key_persisted = false;
@@ -774,6 +781,13 @@ int test_production_manager_restart_and_identity_isolation() {
                               SessionCheckpointRestoreState::Corrupt &&
                           corrupt_engine.restore_calls == 0 && corrupt_responses.size() == 0,
                       "corruption reached Engine or Responses publication");
+    failures += check(manager.erase(snapshot.client_session_sha256) ==
+                              SessionCheckpointEraseResult::Erased &&
+                          manager.status(snapshot.client_session_sha256).at("state") ==
+                              "missing" &&
+                          manager.erase(snapshot.client_session_sha256) ==
+                              SessionCheckpointEraseResult::Missing,
+                      "manager namespace deletion did not remove the checkpoint atomically");
     return failures;
 }
 
@@ -1186,38 +1200,30 @@ int test_active_reader_delete_and_gc() {
                           std::filesystem::exists(session / "current"),
                       "quota GC removes stale LRU data but protects active and current generations");
     loaded.checkpoint.reset();
-    const std::filesystem::path tombstone =
+    const std::filesystem::path occupied_tombstone =
         temporary.path / ".tombstones" /
         namespace_storage_digest(checkpoint_namespace(responses));
-    std::filesystem::create_directories(tombstone);
-    std::ofstream(tombstone / "occupied", std::ios::binary) << "occupied";
-    const std::string current_before = read_file_bytes(session / "current");
-    const std::string responses_before =
-        read_file_bytes(session / "generations" / newer->generation / "responses.cbor");
-    const std::string engine_before =
-        read_file_bytes(session / "generations" / newer->generation / "engine/state.bin");
-    const SessionCheckpointEraseResult rename_conflict =
+    std::filesystem::create_directories(occupied_tombstone);
+    std::ofstream(occupied_tombstone / "occupied", std::ios::binary) << "occupied";
+    const SessionCheckpointEraseResult collision_safe_erase =
         store.erase(checkpoint_namespace(responses));
-    SessionCheckpointLoadResult after_conflict =
-        store.load(checkpoint_namespace(responses), fingerprint());
     failures += check(
-        rename_conflict == SessionCheckpointEraseResult::Conflict &&
-            after_conflict.state == SessionCheckpointLoadState::Available &&
-            after_conflict.checkpoint && after_conflict.checkpoint->generation == newer->generation &&
-            read_file_bytes(session / "current") == current_before &&
-            read_file_bytes(session / "generations" / newer->generation / "responses.cbor") ==
-                responses_before &&
-            read_file_bytes(session / "generations" / newer->generation / "engine/state.bin") ==
-                engine_before,
-        "failed session rename reports conflict without changing either checkpoint store");
-    after_conflict.checkpoint.reset();
-    std::filesystem::remove_all(tombstone);
+        collision_safe_erase == SessionCheckpointEraseResult::Erased &&
+            !std::filesystem::exists(session) &&
+            std::filesystem::is_directory(occupied_tombstone),
+        "an occupied prior tombstone blocked collision-free session deletion");
+
+    const auto resaved =
+        store.save(checkpoint_namespace(responses), responses, fingerprint(), exporter);
+    failures += check(resaved.has_value() && std::filesystem::is_directory(session),
+                      "a retained tombstone blocked reuse of the live session namespace");
+    if (!resaved) { return failures; }
 
     refuse_cleanup = true;
     failures += check(store.erase(checkpoint_namespace(responses)) ==
                               SessionCheckpointEraseResult::Erased &&
                           !std::filesystem::exists(session) &&
-                          std::filesystem::is_directory(tombstone) &&
+                          !std::filesystem::is_empty(temporary.path / ".tombstones") &&
                           store.status(checkpoint_namespace(responses), fingerprint()).at("state") ==
                               "missing" &&
                           store.erase(checkpoint_namespace(responses)) ==
@@ -1225,8 +1231,8 @@ int test_active_reader_delete_and_gc() {
                       "successful rename is deleted even when physical cleanup is deferred");
     refuse_cleanup = false;
     store.collect_garbage();
-    failures += check(!std::filesystem::exists(tombstone),
-                      "garbage collection removes a deferred session tombstone");
+    failures += check(std::filesystem::is_empty(temporary.path / ".tombstones"),
+                      "garbage collection removes occupied and deferred session tombstones");
     return failures;
 }
 
@@ -1343,9 +1349,16 @@ int test_store_wide_quota_across_sessions() {
         checkpoint_namespace(second_session), second_session, fingerprint(), exporter);
     SessionCheckpointLoadResult previous_loaded =
         failure_store.load(checkpoint_namespace(second_session), fingerprint());
-    const std::filesystem::path deferred_tombstone =
-        failure_temporary.path / ".tombstones" /
-        namespace_storage_digest(checkpoint_namespace(first_session));
+    std::optional<std::filesystem::path> deferred_tombstone;
+    const std::string deferred_prefix =
+        namespace_storage_digest(checkpoint_namespace(first_session)) + "--session--";
+    for (const auto& entry :
+         std::filesystem::directory_iterator(failure_temporary.path / ".tombstones")) {
+        if (entry.path().filename().string().starts_with(deferred_prefix)) {
+            deferred_tombstone = entry.path();
+            break;
+        }
+    }
     failures += check(
         !failed_replacement && previous_loaded.state == SessionCheckpointLoadState::Available &&
             previous_loaded.checkpoint &&
@@ -1355,15 +1368,16 @@ int test_store_wide_quota_across_sessions() {
             read_file_bytes(previous_generation / "responses.cbor") == previous_responses &&
             read_file_bytes(previous_generation / "engine/state.bin") == previous_engine &&
             std::filesystem::is_directory(previous_generation) &&
-            std::filesystem::is_directory(deferred_tombstone) &&
-            regular_file_bytes(deferred_tombstone / "generations") == failure_first->bytes &&
+            deferred_tombstone && std::filesystem::is_directory(*deferred_tombstone) &&
+            regular_file_bytes(*deferred_tombstone / "generations") ==
+                failure_first->bytes &&
             retained_generation_bytes(failure_temporary.path) ==
                 failure_first->bytes + failure_previous->bytes,
         "cleanup failure rejects save before publication and preserves the prior current bytes");
     previous_loaded.checkpoint.reset();
     refuse_cleanup = false;
     failure_store.collect_garbage();
-    failures += check(!std::filesystem::exists(deferred_tombstone) &&
+    failures += check(deferred_tombstone && !std::filesystem::exists(*deferred_tombstone) &&
                           failure_store
                                   .status(checkpoint_namespace(second_session), fingerprint())
                                   .at("state") == "available" &&
@@ -1371,6 +1385,35 @@ int test_store_wide_quota_across_sessions() {
                               failure_previous->bytes,
                       "deferred tombstones remain quota-accounted and are reclaimed by GC");
     return failures;
+}
+
+int test_load_scan_failure_does_not_deadlock() {
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot();
+    const std::vector<std::byte> payload  = engine_payload();
+    SessionCheckpointStore store({
+        .root             = temporary.path,
+        .disk_quota_bytes = 8ULL << 20,
+        .staging_bytes    = 1ULL << 20,
+        .generation_size  = [](const std::filesystem::path&) -> std::uint64_t {
+            throw std::runtime_error("injected directory scan failure");
+        },
+    });
+    const auto saved = store.save(
+        checkpoint_namespace(responses), responses, fingerprint(),
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+            if (!write_chunked(writer, "engine/state.bin", payload)) { return std::nullopt; }
+            return ContinuationCheckpointStats{
+                .frontier_tokens = 4096,
+                .restored_tokens = 4096,
+                .payload_bytes   = payload.size(),
+            };
+        });
+    if (!saved) { return check(false, "directory-scan fixture did not save"); }
+    const SessionCheckpointLoadResult loaded =
+        store.load(checkpoint_namespace(responses), fingerprint());
+    return check(loaded.state == SessionCheckpointLoadState::Unavailable && !loaded.checkpoint,
+                 "generation scan failure did not unwind before reader ownership");
 }
 } // namespace
 
@@ -1389,6 +1432,7 @@ int main() {
     failures += test_delete_middle_latest_and_standalone_checkpoint_state();
     failures += test_active_reader_delete_and_gc();
     failures += test_store_wide_quota_across_sessions();
+    failures += test_load_scan_failure_does_not_deadlock();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

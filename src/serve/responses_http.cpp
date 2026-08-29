@@ -273,25 +273,52 @@ Json paginated_input_items(const httplib::Request& request, const std::vector<Js
 
 } // namespace
 
-void HttpServer::checkpoint_stored_response(
-    const std::optional<std::string>& session_sha256, const std::string& response_id,
-    bool depends_on_previous_response) {
-    if (service_ == nullptr || !service_->checkpoint_enabled() || !session_sha256) { return; }
-    const SessionCheckpointSaveOutcome saved =
-        service_->save_checkpoint(*session_sha256, response_id, response_store_);
-    if (saved.state == SessionCheckpointSaveState::Saved) { return; }
-    write_console_log(ConsoleLogLevel::Warning,
-                      "checkpoint save response=" + response_id + " state=" +
-                          checkpoint_save_state_name(saved.state));
-    if (!depends_on_previous_response) { return; }
-    (void)response_store_.erase_for_session(response_id, session_sha256);
-    ApiError error;
-    error.status  = saved.state == SessionCheckpointSaveState::Unavailable ? 503 : 500;
-    error.type    = "server_error";
-    error.param   = "previous_response_id";
-    error.code    = "checkpoint_save_failed";
-    error.message = "completed continuation could not be saved atomically";
-    throw ApiException(std::move(error));
+void HttpServer::maybe_checkpoint_completed_turn(
+    const std::optional<std::string>& session_sha256) noexcept {
+    if (!automatic_checkpoints_ || !session_sha256) { return; }
+    if (automatic_checkpoints_->enqueue(*session_sha256) ==
+        AutomaticCheckpointEnqueueResult::Dropped) {
+        try {
+            write_console_log(ConsoleLogLevel::Warning,
+                              "automatic session checkpoint queue dropped an acceleration save");
+        } catch (...) {}
+    }
+}
+
+void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noexcept {
+    try {
+        if (service_ == nullptr) { return; }
+        const std::optional<ResponseStoreSnapshot> snapshot =
+            response_store_.snapshot_session(session_sha256);
+        if (!snapshot) {
+            write_console_log(ConsoleLogLevel::Warning,
+                              "automatic session checkpoint skipped: no complete endpoint");
+            return;
+        }
+        const SessionCheckpointSaveOutcome saved = service_->save_checkpoint(
+            session_sha256, snapshot->latest_response_id, response_store_);
+        write_console_log(saved.state == SessionCheckpointSaveState::Saved
+                              ? ConsoleLogLevel::Info
+                              : ConsoleLogLevel::Warning,
+                          std::string("automatic session checkpoint state=") +
+                              checkpoint_save_state_name(saved.state));
+    } catch (const std::exception& exception) {
+        try {
+            write_console_log(ConsoleLogLevel::Warning,
+                              std::string("session checkpoint save failed (continuing): ") +
+                                  exception.what());
+        } catch (...) {}
+    }
+}
+
+void HttpServer::save_all_checkpoints() noexcept {
+    if (service_ == nullptr || !service_->checkpoint_enabled()) { return; }
+    if (automatic_checkpoints_) { automatic_checkpoints_->drain(); }
+    try {
+        for (const std::string& digest : response_store_.session_digests()) {
+            save_automatic_checkpoint(digest);
+        }
+    } catch (...) {}
 }
 
 void HttpServer::handle_responses(const httplib::Request& req, httplib::Response& res) {
@@ -407,8 +434,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                                      std::move(response.output_history));
                 stored.preserve_thinking = prepared.preserve_thinking;
                 response_store_.put(std::move(stored));
-                checkpoint_stored_response(request.generation.client_session_sha256, id,
-                                           request.previous_response_id.has_value());
+                maybe_checkpoint_completed_turn(request.generation.client_session_sha256);
             }
             log_request_done(log_context, outcome);
             set_owned_content(res, response.body.dump(), prepared.lifetime);
@@ -475,9 +501,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                                                       std::move(finished.response.output_history));
                     stored.preserve_thinking = stream->prepared.preserve_thinking;
                     response_store_.put(std::move(stored));
-                    checkpoint_stored_response(stream->client_session_sha256,
-                                               finished.response.body.at("id").get<std::string>(),
-                                               stream->previous_response_id.has_value());
+                    maybe_checkpoint_completed_turn(stream->client_session_sha256);
                 }
                 write_stream_items(sink, *stream, std::move(finished.events_before_terminal));
                 log_request_done(stream->log_context, outcome);

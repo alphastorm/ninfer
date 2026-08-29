@@ -1,6 +1,9 @@
 #include "serve/session_checkpoint_store.h"
 
 #include "core/sha256.h"
+#if defined(_WIN32)
+#    include "runtime/windows/direct_storage_checkpoint_read_queue.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -34,9 +37,15 @@ namespace {
 
 using Clock = std::chrono::system_clock;
 using runtime::ContinuationCheckpointReader;
+using runtime::ContinuationCheckpointReadCompletion;
+using runtime::ContinuationCheckpointReadQueue;
+using runtime::ContinuationCheckpointReadRequest;
 using runtime::ContinuationCheckpointStats;
 using runtime::ContinuationCheckpointWriter;
 using runtime::AuthenticatedCheckpointNamespace;
+inline constexpr std::size_t kMaximumTombstoneAttempts = 4096;
+static_assert(std::is_nothrow_move_constructible_v<ResponseStoreSnapshot>);
+static_assert(std::is_nothrow_move_constructible_v<VerifiedSessionCheckpoint>);
 
 [[nodiscard]] std::string namespace_storage_digest(
     const AuthenticatedCheckpointNamespace& checkpoint_namespace) {
@@ -611,7 +620,7 @@ void account_bytes(std::uint64_t& used, std::uint64_t bytes) {
 }
 
 [[nodiscard]] std::uint64_t tombstone_generation_bytes(const std::filesystem::path& path) {
-    if (path.filename().string().find("--") == std::string::npos) {
+    if (path.filename().string().find("--session--") != std::string::npos) {
         return session_generation_bytes(path);
     }
     return directory_bytes(path);
@@ -707,12 +716,26 @@ void account_bytes(std::uint64_t& used, std::uint64_t bytes) {
     return inventory;
 }
 
+[[nodiscard]] std::filesystem::path unique_tombstone(
+    const SessionCheckpointStoreOptions& options, std::string stem) {
+    const std::filesystem::path root = options.root / ".tombstones";
+    const std::string stamp          = std::to_string(unix_milliseconds());
+    for (std::size_t attempt = 0; attempt < kMaximumTombstoneAttempts; ++attempt) {
+        const std::filesystem::path candidate =
+            root / (stem + "--" + stamp + "-" + std::to_string(attempt));
+        std::error_code error;
+        const bool exists = std::filesystem::exists(candidate, error);
+        if (error) { throw std::runtime_error("checkpoint tombstone lookup failed"); }
+        if (!exists) { return candidate; }
+    }
+    throw std::runtime_error("checkpoint tombstone namespace is exhausted");
+}
+
 [[nodiscard]] std::filesystem::path candidate_tombstone(
     const SessionCheckpointStoreOptions& options, const GenerationCandidate& candidate) {
-    if (candidate.kind == CandidateKind::CurrentSession) {
-        return options.root / ".tombstones" / candidate.digest;
-    }
-    return options.root / ".tombstones" / (candidate.digest + "--" + candidate.name);
+    const char* kind =
+        candidate.kind == CandidateKind::CurrentSession ? "--session--" : "--generation--";
+    return unique_tombstone(options, candidate.digest + kind + candidate.name);
 }
 
 [[nodiscard]] bool cleanup_tombstone(const SessionCheckpointStoreOptions& options,
@@ -776,9 +799,10 @@ public:
     DirectoryCheckpointReader(std::filesystem::path root,
                               std::map<std::string, std::uint64_t> files,
                               std::shared_ptr<SessionCheckpointStore::Impl> owner,
-                              std::string active_key)
+                              std::string active_key,
+                              std::shared_ptr<ContinuationCheckpointReadQueue> read_queue)
         : root_(std::move(root)), files_(std::move(files)), owner_(std::move(owner)),
-          active_key_(std::move(active_key)) {
+          active_key_(std::move(active_key)), read_queue_(std::move(read_queue)) {
         // Constructed by SessionCheckpointStore::load while Impl::mutex is held.
         ++owner_->active_generations[active_key_];
     }
@@ -802,6 +826,20 @@ public:
             destination.size() > found->second - offset) {
             return false;
         }
+        if (destination.empty()) { return true; }
+#ifdef _WIN32
+        if (!read_queue_ || !read_queue_->available()) { return false; }
+        try {
+            const ContinuationCheckpointReadRequest request{
+                .file_offset = offset, .destination = destination};
+            std::unique_ptr<ContinuationCheckpointReadCompletion> completion =
+                read_queue_->submit(root_ / found->first, std::span(&request, 1));
+            completion->wait();
+            return true;
+        } catch (...) {
+            return false;
+        }
+#else
         std::FILE* file = open_binary_read(root_ / found->first);
         if (file == nullptr) { return false; }
 #ifdef _WIN32
@@ -816,6 +854,7 @@ public:
                         std::ferror(file) == 0;
         std::fclose(file);
         return ok;
+#endif
     }
 
 private:
@@ -823,6 +862,7 @@ private:
     std::map<std::string, std::uint64_t> files_;
     std::shared_ptr<SessionCheckpointStore::Impl> owner_;
     std::string active_key_;
+    std::shared_ptr<ContinuationCheckpointReadQueue> read_queue_;
 };
 
 void quarantine_generation(const std::filesystem::path& session, const std::string& generation) {
@@ -980,9 +1020,19 @@ decode_response_store_snapshot(std::span<const std::byte> bytes, std::size_t byt
 
 SessionCheckpointStore::SessionCheckpointStore(SessionCheckpointStoreOptions options)
     : options_(std::move(options)), impl_(std::make_shared<Impl>()) {
-    if (options_.root.empty() || options_.disk_quota_bytes == 0 || options_.staging_bytes == 0) {
+    if (options_.root.empty() || options_.disk_quota_bytes == 0 || options_.staging_bytes == 0 ||
+        options_.io_timeout_ms == 0) {
         throw std::invalid_argument("checkpoint store options must be positive");
     }
+#if defined(_WIN32)
+    if (!options_.read_queue) {
+        options_.read_queue = runtime::windows::make_direct_storage_checkpoint_read_queue(
+            options_.root, options_.io_timeout_ms);
+    }
+    if (!options_.read_queue->available()) {
+        throw std::runtime_error("DirectStorage checkpoint read queue is unavailable");
+    }
+#endif
     std::filesystem::create_directories(options_.root / "sessions");
     std::filesystem::create_directories(options_.root / ".tombstones");
     collect_garbage();
@@ -1225,15 +1275,23 @@ SessionCheckpointStore::load(const AuthenticatedCheckpointNamespace& checkpoint_
         if (!valid_checkpoint_stats(expected)) {
             throw CheckpointCorruption("checkpoint engine summary is corrupt");
         }
-        const std::string active_key = session.filename().string() + "/" + *generation;
+        const std::uint64_t generation_bytes = options_.generation_size
+                                                   ? options_.generation_size(root)
+                                                   : directory_bytes(root);
+        ResponseStoreSnapshot published_responses = std::move(*responses);
+        std::string published_generation           = *generation;
+        const std::string active_key =
+            session.filename().string() + "/" + published_generation;
         auto reader = std::make_shared<DirectoryCheckpointReader>(
-            root, std::move(allowed), impl_, active_key);
+            root, std::move(allowed), impl_, active_key, options_.read_queue);
         return {.state = SessionCheckpointLoadState::Available,
-                .checkpoint = VerifiedSessionCheckpoint{.responses = std::move(*responses),
+                .checkpoint = VerifiedSessionCheckpoint{.responses =
+                                                            std::move(published_responses),
                                                         .engine = std::move(reader),
                                                         .expected_engine = expected,
-                                                        .generation = *generation,
-                                                        .bytes = directory_bytes(root)}};
+                                                        .generation =
+                                                            std::move(published_generation),
+                                                        .bytes = generation_bytes}};
     } catch (const CheckpointCorruption&) {
         quarantine_generation(session, *generation);
         return load_state(SessionCheckpointLoadState::Corrupt);
@@ -1303,8 +1361,10 @@ SessionCheckpointEraseResult SessionCheckpointStore::erase(
                     [&](const auto& entry) { return entry.first.starts_with(prefix); })) {
         return SessionCheckpointEraseResult::Conflict;
     }
-    const std::filesystem::path tombstone = options_.root / ".tombstones" /
-                                            storage_digest;
+    std::filesystem::path tombstone;
+    try {
+        tombstone = unique_tombstone(options_, storage_digest + "--session");
+    } catch (...) { return SessionCheckpointEraseResult::Conflict; }
     std::error_code error;
     std::filesystem::rename(session, tombstone, error);
     if (error) {
@@ -1443,6 +1503,44 @@ SessionCheckpointManager::restore_locked(std::string_view session_sha256,
                          : SessionCheckpointRestoreState::Failed;
     } catch (...) {
         return SessionCheckpointRestoreState::Unavailable;
+    }
+}
+
+nlohmann::json SessionCheckpointManager::status(std::string_view session_sha256) {
+    if (!store_) {
+        return nlohmann::json{{"artifact_type", "ninfer_session_checkpoint_status"},
+                              {"state", "disabled"}};
+    }
+    if (!AuthenticatedCheckpointNamespace::valid_sha256(session_sha256)) {
+        return nlohmann::json{{"artifact_type", "ninfer_session_checkpoint_status"},
+                              {"state", "missing"}};
+    }
+    std::lock_guard lock(mutex_);
+    try {
+        const AuthenticatedCheckpointNamespace checkpoint_namespace =
+            AuthenticatedCheckpointNamespace::authenticated(tenant_sha256_,
+                                                            std::string(session_sha256));
+        return store_->status(checkpoint_namespace, runtime_fingerprint_);
+    } catch (...) {
+        return nlohmann::json{{"artifact_type", "ninfer_session_checkpoint_status"},
+                              {"state", "unavailable"}};
+    }
+}
+
+SessionCheckpointEraseResult SessionCheckpointManager::erase(
+    std::string_view session_sha256) {
+    if (!store_) { return SessionCheckpointEraseResult::Missing; }
+    if (!AuthenticatedCheckpointNamespace::valid_sha256(session_sha256)) {
+        return SessionCheckpointEraseResult::Conflict;
+    }
+    std::lock_guard lock(mutex_);
+    try {
+        const AuthenticatedCheckpointNamespace checkpoint_namespace =
+            AuthenticatedCheckpointNamespace::authenticated(tenant_sha256_,
+                                                            std::string(session_sha256));
+        return store_->erase(checkpoint_namespace);
+    } catch (...) {
+        return SessionCheckpointEraseResult::Conflict;
     }
 }
 

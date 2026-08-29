@@ -133,6 +133,17 @@ int main() {
     httplib::Request ordinary_stored_route;
     failures += check(!ninfer::serve::response_session_identity(ordinary_stored_route, false),
                       "missing stored-response session header did not stay absent");
+    failures += check(ninfer::serve::require_checkpoint_session_header(session_request, true) ==
+                          session_digest,
+                      "checkpoint session header was not accepted");
+    std::string missing_checkpoint_code;
+    try {
+        (void)ninfer::serve::require_checkpoint_session_header(ordinary_stored_route, true);
+    } catch (const ninfer::serve::ApiException& exception) {
+        missing_checkpoint_code = exception.error().code;
+    }
+    failures += check(missing_checkpoint_code == "invalid_ninfer_identity",
+                      "checkpoint route accepted a missing session header");
 
     httplib::Request duplicate_session = session_request;
     duplicate_session.headers.emplace("x-ninfer-session", std::string(64, 'b'));
