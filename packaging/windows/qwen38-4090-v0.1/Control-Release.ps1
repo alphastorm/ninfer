@@ -9,6 +9,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Protect-StateRoot.ps1')
+if (-not (Test-Path -LiteralPath $StateRoot -PathType Container)) {
+    throw 'protected release state root is missing'
+}
+$StateRoot = Initialize-NInferProtectedStateRoot $StateRoot
+Assert-NInferProtectedStateTree $StateRoot
 
 function Read-JsonFile([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "missing state file" }
@@ -552,6 +558,10 @@ function Invoke-Run {
         $sessionCheckpoints = Join-Path $cache 'responses'
         $logs = Join-Path ([string]$release.release_root) 'logs'
         New-Item -ItemType Directory -Force -Path $cache, $sessionCheckpoints, $logs | Out-Null
+        $requestLogPath = Join-Path $logs 'requests.jsonl'
+        if (-not (Test-PathWithinRoot $requestLogPath $StateRoot)) {
+            throw 'request JSONL path escaped protected release state'
+        }
         $serverArguments = [Collections.Generic.List[string]]::new()
         foreach ($argument in @(
                 [string]$release.model_artifact,
@@ -574,7 +584,7 @@ function Invoke-Run {
                 '--reasoning-effort', [string]$config.reasoning.effort,
                 '--response-store-max-records', [string]$config.response_store.max_records,
                 '--response-store-max-mib', [string]$config.response_store.max_mib,
-                '--request-log-jsonl', (Join-Path $logs 'requests.jsonl'),
+                '--request-log-jsonl', $requestLogPath,
                 '--log-stats-interval-ms', [string]$config.telemetry.stats_interval_ms,
                 '--no-ui'
             )) {

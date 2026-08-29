@@ -12,6 +12,8 @@ $ErrorActionPreference = 'Stop'
 
 $InstallerPath = (Resolve-Path -LiteralPath $InstallerPath).Path
 $ControllerPath = (Resolve-Path -LiteralPath $ControllerPath).Path
+$publishedInstallerPath = $InstallerPath
+$publishedControllerPath = $ControllerPath
 $global:NInferTestTaskExists = $false
 $global:NInferTestTaskRunning = $false
 $global:NInferTestTaskXml = $null
@@ -242,6 +244,8 @@ function New-FixturePackage(
         [Text.UTF8Encoding]::new($false)
     )
     Copy-Item -LiteralPath $ControllerPath -Destination (Join-Path $payload 'Control-Release.ps1')
+    Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $ControllerPath) 'Protect-StateRoot.ps1') `
+        -Destination (Join-Path $payload 'Protect-StateRoot.ps1')
 
     $config = [ordered]@{
         release_id = "fixture-$InstanceId"
@@ -493,6 +497,46 @@ function Assert-OwnerPaused([bool]$Expected, [string]$Message) {
 
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('ninfer-release-lifecycle-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $testRoot | Out-Null
+$instrumentedRoot = Join-Path $testRoot 'instrumented-installer'
+New-Item -ItemType Directory -Path $instrumentedRoot | Out-Null
+$publishedInstallerText = [IO.File]::ReadAllText($publishedInstallerPath, [Text.Encoding]::UTF8)
+Assert-True (-not $publishedInstallerText.Contains('NINFER_INSTALL_TEST_MODE')) `
+    'published installer exposes ambient test-mode activation'
+$productionTestMode = '$script:InstallTestMode = $false'
+$productionTestModeIndex = $publishedInstallerText.IndexOf($productionTestMode, [StringComparison]::Ordinal)
+Assert-True ($productionTestModeIndex -ge 0 -and
+    $publishedInstallerText.IndexOf(
+        $productionTestMode,
+        $productionTestModeIndex + $productionTestMode.Length,
+        [StringComparison]::Ordinal
+    ) -lt 0) `
+    'published installer test mode is not one hardcoded false assignment'
+$instrumentedInstallerText = $publishedInstallerText.Replace(
+    $productionTestMode,
+    '$script:InstallTestMode = $true'
+)
+$InstallerPath = Join-Path $instrumentedRoot 'Install-Release.ps1'
+[IO.File]::WriteAllText($InstallerPath, $instrumentedInstallerText, [Text.UTF8Encoding]::new($false))
+Copy-Item -LiteralPath (Join-Path (Split-Path -Parent $publishedInstallerPath) 'Control-GpuOwner.ps1') `
+    -Destination (Join-Path $instrumentedRoot 'Control-GpuOwner.ps1')
+$ControllerPath = Join-Path $instrumentedRoot 'Control-Release.ps1'
+Copy-Item -LiteralPath $publishedControllerPath -Destination $ControllerPath
+$instrumentedProtection = @'
+function Initialize-NInferProtectedStateRoot([string]$Path) {
+    New-Item -ItemType Directory -Force -Path $Path | Out-Null
+    return (Resolve-Path -LiteralPath $Path).Path
+}
+function Assert-NInferProtectedStateTree([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
+        throw 'instrumented protected state root is missing'
+    }
+}
+'@
+[IO.File]::WriteAllText(
+    (Join-Path $instrumentedRoot 'Protect-StateRoot.ps1'),
+    $instrumentedProtection,
+    [Text.UTF8Encoding]::new($false)
+)
 $script:StateRoot = Join-Path $testRoot 'state'
 $script:ModelPath = Join-Path $testRoot 'model.ninfer'
 $script:OwnerStatePath = Join-Path $testRoot 'gpu-owner-state.json'
@@ -518,8 +562,6 @@ $ownerScript = $ownerScript.Replace('__OWNER_STATE__', $script:OwnerStatePath.Re
 $global:NInferTestStateRoot = $script:StateRoot
 $originalFault = [Environment]::GetEnvironmentVariable('NINFER_TEST_INSTALL_FAILURE_AFTER', 'Process')
 $originalInterrupt = [Environment]::GetEnvironmentVariable('NINFER_TEST_INSTALL_INTERRUPTION_AFTER', 'Process')
-$originalTestMode = [Environment]::GetEnvironmentVariable('NINFER_INSTALL_TEST_MODE', 'Process')
-[Environment]::SetEnvironmentVariable('NINFER_INSTALL_TEST_MODE', 'transaction', 'Process')
 
 try {
     $modelBytes = New-Object byte[] 256
@@ -652,10 +694,10 @@ try {
     finally {
         $global:NInferTestAclFailure = $false
     }
-    Assert-True ($null -ne $aclFailure) 'install accepted incomplete recursive ACL propagation'
-    Assert-True ($aclFailure.Exception.Message -like '*failed to propagate release state ACL*') "ACL propagation returned the wrong failure: $($aclFailure.Exception.Message)"
-    Assert-True ($global:NInferTestAclResetArguments -contains '/reset') 'ACL propagation fixture was not executed'
-    Assert-True ($global:NInferTestAclResetArguments -notcontains '/C') 'ACL propagation retained continue-on-error'
+    Assert-True ($null -ne $aclFailure) 'install accepted a failed recursive ACL ordering probe'
+    Assert-True ($aclFailure.Exception.Message -like '*failed test-mode recursive ACL ordering probe*') "ACL ordering probe returned the wrong failure: $($aclFailure.Exception.Message)"
+    Assert-True ($global:NInferTestAclResetArguments -contains '/reset') 'ACL ordering fixture was not executed'
+    Assert-True ($global:NInferTestAclResetArguments -notcontains '/C') 'ACL ordering fixture retained continue-on-error'
     Assert-Equal (Get-Sha256 (Join-Path $script:StateRoot 'state.json')) $aclStateShaBefore 'ACL failure published lifecycle state'
     Assert-Equal (Get-Sha256 $managedController) $aclControllerShaBefore 'ACL failure changed the managed controller'
     Assert-Equal ([string]$global:NInferTestTaskXml) $aclTaskXmlBefore 'ACL failure changed the scheduled task'
@@ -1003,7 +1045,7 @@ try {
         schema1_release_records_migrated = 1
         schema3_identity_mismatch_rejections = 1
         unmigratable_release_rejections = 1
-        acl_propagation_rejections = 1
+        stub_acl_propagation_rejections = 1
         interrupted_reentry_rejections = 2
         installer_repairs = 2
         scalar_cleanup_actions = 1
@@ -1011,7 +1053,7 @@ try {
         candidate_model_copies = 0
         dead_start_rejections = 1
         captured_gpu_lease_reentries = 1
-        early_state_acl_hardening = $earlyAclObservations.Count
+        stub_acl_ordering_observations = $earlyAclObservations.Count
         selected_gpu_identity_bindings = 1
         dead_start_sleep_milliseconds = $global:NInferTestDeadStartSleptMilliseconds
     } | ConvertTo-Json -Compress
@@ -1019,7 +1061,6 @@ try {
 finally {
     [Environment]::SetEnvironmentVariable('NINFER_TEST_INSTALL_FAILURE_AFTER', $originalFault, 'Process')
     [Environment]::SetEnvironmentVariable('NINFER_TEST_INSTALL_INTERRUPTION_AFTER', $originalInterrupt, 'Process')
-    [Environment]::SetEnvironmentVariable('NINFER_INSTALL_TEST_MODE', $originalTestMode, 'Process')
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
     foreach ($name in @(
             'Get-ScheduledTask', 'Export-ScheduledTask', 'New-ScheduledTaskAction',

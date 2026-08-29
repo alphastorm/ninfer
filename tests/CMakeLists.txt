@@ -8,6 +8,9 @@ add_test(NAME ninfer_public_api_test COMMAND ninfer_public_api_test)
 add_test(
   NAME ninfer_golden_equivalent_test
   COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_golden_equivalent.py")
+add_test(
+  NAME ninfer_release_authority_test
+  COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tests/test_release_authority.py")
 
 if(WIN32)
   add_test(
@@ -33,6 +36,14 @@ if(WIN32)
     COMMAND powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
       -File "${PROJECT_SOURCE_DIR}/tests/test_generic_gpu_owner.ps1"
       -ControllerPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/Control-GpuOwner.ps1")
+  set_tests_properties(ninfer_generic_gpu_owner_test PROPERTIES SKIP_RETURN_CODE 77)
+  add_test(
+    NAME ninfer_windows_state_security_test
+    COMMAND powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass
+      -File "${PROJECT_SOURCE_DIR}/tests/test_release_security.ps1"
+      -StateProtectionPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/Protect-StateRoot.ps1"
+      -GpuOwnerControllerPath "${PROJECT_SOURCE_DIR}/packaging/windows/qwen38-4090-v0.1/Control-GpuOwner.ps1")
+  set_tests_properties(ninfer_windows_state_security_test PROPERTIES SKIP_RETURN_CODE 77)
 endif()
 
 function(ninfer_add_test name)

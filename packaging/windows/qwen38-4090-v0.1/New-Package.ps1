@@ -156,8 +156,9 @@ $qualificationPath = Join-Path $outputRoot "$assetStem-qualification.json"
 $installerAsset = Join-Path $outputRoot 'Install-Release.ps1'
 $controllerAsset = Join-Path $outputRoot 'Control-Release.ps1'
 $gpuOwnerAsset = Join-Path $outputRoot 'Control-GpuOwner.ps1'
+$stateProtectionAsset = Join-Path $outputRoot 'Protect-StateRoot.ps1'
 $shaSumsPath = Join-Path $outputRoot 'SHA256SUMS'
-foreach ($path in @($zipPath, $qualificationPath, $installerAsset, $controllerAsset, $gpuOwnerAsset, $shaSumsPath)) {
+foreach ($path in @($zipPath, $qualificationPath, $installerAsset, $controllerAsset, $gpuOwnerAsset, $stateProtectionAsset, $shaSumsPath)) {
     Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
 }
 
@@ -178,6 +179,7 @@ try {
             'release-spec.json',
             'Control-Release.ps1',
             'Control-GpuOwner.ps1',
+            'Protect-StateRoot.ps1',
             'Install-Release.ps1',
             'New-QualificationReceipt.ps1',
             'Invoke-Qualification.ps1',
@@ -207,6 +209,7 @@ try {
     $specPath = Join-Path $payload 'release-spec.json'
     $controllerPath = Join-Path $payload 'Control-Release.ps1'
     $gpuOwnerPath = Join-Path $payload 'Control-GpuOwner.ps1'
+    $stateProtectionPath = Join-Path $payload 'Protect-StateRoot.ps1'
     $installerPath = Join-Path $payload 'Install-Release.ps1'
     $manifest = [ordered]@{
         artifact_type = 'ninfer_windows_release_manifest'
@@ -225,6 +228,7 @@ try {
         installer_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $installerPath).Hash.ToLowerInvariant()
         controller_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $controllerPath).Hash.ToLowerInvariant()
         gpu_owner_controller_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $gpuOwnerPath).Hash.ToLowerInvariant()
+        state_protection_sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $stateProtectionPath).Hash.ToLowerInvariant()
         created_utc = [DateTime]::UtcNow.ToString('o')
     }
     $manifestPath = Join-Path $payload 'release-manifest.json'
@@ -286,7 +290,8 @@ try {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Install-Release.ps1') -Destination $installerAsset
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Control-Release.ps1') -Destination $controllerAsset
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Control-GpuOwner.ps1') -Destination $gpuOwnerAsset
-    $assets = @($zipPath, $qualificationPath, $installerAsset, $controllerAsset, $gpuOwnerAsset) |
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'Protect-StateRoot.ps1') -Destination $stateProtectionAsset
+    $assets = @($zipPath, $qualificationPath, $installerAsset, $controllerAsset, $gpuOwnerAsset, $stateProtectionAsset) |
         Sort-Object { [IO.Path]::GetFileName($_) }
     $sumLines = foreach ($asset in $assets) {
         $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $asset).Hash.ToLowerInvariant()
@@ -312,6 +317,7 @@ try {
         installer_file = [IO.Path]::GetFileName($installerAsset)
         controller_file = [IO.Path]::GetFileName($controllerAsset)
         gpu_owner_controller_file = [IO.Path]::GetFileName($gpuOwnerAsset)
+        state_protection_file = [IO.Path]::GetFileName($stateProtectionAsset)
     } | ConvertTo-Json -Depth 6
 }
 finally {

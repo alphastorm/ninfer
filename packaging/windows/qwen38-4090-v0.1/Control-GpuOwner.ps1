@@ -9,10 +9,12 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'Protect-StateRoot.ps1')
+$StateRoot = Initialize-NInferProtectedStateRoot $StateRoot
+Assert-NInferProtectedStateTree $StateRoot
 $statePath = Join-Path $StateRoot 'state.json'
 
 function Write-State([object]$Value) {
-    New-Item -ItemType Directory -Force -Path $StateRoot | Out-Null
     $temporary = "$statePath.$([Guid]::NewGuid().ToString('N')).tmp"
     try {
         [IO.File]::WriteAllText(
@@ -21,23 +23,27 @@ function Write-State([object]$Value) {
             [Text.UTF8Encoding]::new($false)
         )
         Move-Item -LiteralPath $temporary -Destination $statePath -Force
+        Assert-NInferProtectedStateTree $StateRoot
     }
     finally { Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue }
 }
 
+function Get-ComputeOwnerStatus([bool]$ThrowOnFailure) {
+    try {
+        $nvidiaSmi = (Get-Command nvidia-smi.exe -ErrorAction Stop).Source
+        $rows = @(& $nvidiaSmi --query-compute-apps=pid --format=csv,noheader,nounits 2>$null)
+        if ($LASTEXITCODE -ne 0) { throw 'nvidia-smi compute-owner query failed' }
+        $pids = @($rows | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -match '^\d+$' })
+        return [pscustomobject]@{ available = $true; pids = $pids }
+    }
+    catch {
+        if ($ThrowOnFailure) { throw 'failed to inspect GPU compute owners' }
+        return [pscustomobject]@{ available = $false; pids = @() }
+    }
+}
+
 function Read-State {
     if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) {
-        $testMode = [string]$env:NINFER_GPU_OWNER_TEST_MODE -ceq 'idle'
-        $pids = @()
-        if (-not $testMode) {
-            $nvidiaSmi = (Get-Command nvidia-smi.exe -ErrorAction Stop).Source
-            $rows = @(& $nvidiaSmi --query-compute-apps=pid --format=csv,noheader,nounits 2>$null)
-            if ($LASTEXITCODE -ne 0) { throw 'failed to inspect GPU compute owners' }
-            $pids = @($rows | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ -match '^\d+$' })
-        }
-        if ($pids.Count -ne 0) {
-            throw 'unmanaged GPU compute owner is active; provide an operator-specific GPU-owner controller'
-        }
         $initial = [ordered]@{
             artifact_type = 'ninfer_generic_gpu_owner_state'
             schema_version = 1
@@ -59,14 +65,21 @@ function Read-State {
 $state = Read-State
 switch ($Action) {
     'status' {
+        $compute = Get-ComputeOwnerStatus $false
         [ordered]@{
             artifact_type = 'ninfer_generic_gpu_owner_status'
             schema_version = 1
             mode = [string]$state.mode
-            paused = [bool]$state.paused
+            paused = [bool]$state.paused -and [bool]$compute.available -and @($compute.pids).Count -eq 0
+            compute_owner_query_available = [bool]$compute.available
+            active_compute_owner_count = @($compute.pids).Count
         } | ConvertTo-Json -Compress
     }
     'stop' {
+        $compute = Get-ComputeOwnerStatus $true
+        if (@($compute.pids).Count -ne 0) {
+            throw 'unmanaged GPU compute owner is active; provide an operator-specific GPU-owner controller'
+        }
         $state.paused = $true
         Write-State $state
         [ordered]@{ status = 'stopped'; paused = $true } | ConvertTo-Json -Compress

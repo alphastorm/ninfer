@@ -89,6 +89,15 @@
       "published_default": "Control-GpuOwner.ps1",
       "published_default_mode": "idle-host-fail-closed-on-active-compute-owner"
     },
+    "state_root_security": {
+      "helper": "Protect-StateRoot.ps1",
+      "owner_sids": ["S-1-5-18", "S-1-5-32-544"],
+      "dacl_inheritance": "disabled-at-managed-roots",
+      "write_capable_principals": ["SYSTEM", "Administrators"],
+      "reparse_policy": "reject-root-ancestors-and-descendants",
+      "upgrade_verification": "before-state-read-or-write",
+      "request_jsonl": "under-protected-release-state"
+    },
     "production_route_mutation": false,
     "docker_mutation": false,
     "gaming_process_mutation": false
