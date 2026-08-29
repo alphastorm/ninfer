@@ -288,7 +288,10 @@ try {
     }
     $remoteNative = [pscustomobject]@{
         status = 'passed'; source_commit = $releaseHead; gpu = 'NVIDIA GeForce RTX 3090'
-        cuda_architecture = 'sm_86'; focused_tests = 3; pod_deleted = $true
+        vram_mib = 24576; driver_version = 'test-driver'; operating_system = 'remote Linux test fixture'
+        cuda_architecture = 'sm_86'
+        focused_tests = @('ninfer_response_store_test', 'ninfer_session_checkpoint_store_test', 'ninfer_http_contract_test')
+        pod_deleted = $true
         hourly_price_usd = 0.22; receipt_sha256 = ('6' * 64)
     }
     $longContext = [pscustomobject]@{
@@ -413,8 +416,12 @@ try {
     Assert-Equal ([string]$incomplete.status) 'incomplete' 'receipt constructor passed an unrun gate'
     Assert-Equal ([bool]$incomplete.beta_qualified) $false 'incomplete receipt claimed beta qualification'
     Assert-Equal ([bool]$incomplete.qualification_authority.supersession_performed) $false 'incomplete receipt superseded pending build authority'
+    Assert-Equal ([int]$incomplete.scope.supported_clients.Count) 0 'incomplete receipt advertised a supported client'
+    Assert-Equal ([int]$incomplete.scope.supported_api_surfaces.Count) 0 'incomplete receipt advertised supported API surfaces'
+    Assert-Equal ([bool]$incomplete.platform.fresh_exact_package_windows_gates_passed) $false 'incomplete receipt marked the target Windows platform as proven'
 
     $ompClient.status = 'not_run'
+    $ompClient.evidence_scope = 'exact-current-package-deferred'
     $ompClient.fresh_package_gate_deferred = $true
     $ompClient.deferred_reason = 'fresh-windows-rtx3090-unavailable-after-user-handoff'
     $ompClient.receipt_sha256 = $null
@@ -423,7 +430,28 @@ try {
     Assert-Equal $deferredOmp.qualification.omp_windows_client.archive_sha256 $null 'deferred OMP gate retained a pass-shaped archive hash'
     Assert-Equal ([int]$deferredOmp.qualification.omp_windows_client.events) 0 'deferred OMP gate retained passed event counters'
     Assert-Equal ([bool]$deferredOmp.qualification.omp_windows_client.exact_final_answer) $false 'deferred OMP gate retained passed acceptance'
+    foreach ($gate in @($shippedLifecycle, $stateSecurity)) {
+        $gate.status = 'not_run'
+        $gate.evidence_scope = 'exact-current-package-deferred'
+        $gate.fresh_package_gate_deferred = $true
+        $gate.deferred_reason = 'fresh-windows-rtx3090-unavailable-after-user-handoff'
+        $gate.receipt_sha256 = $null
+    }
+    $deferredWindows = New-NInferQualificationReceipt @receiptArguments
+    Assert-Equal ([int]$deferredWindows.qualification.windows_lifecycle_shipped.upgrades) 0 'deferred shipped lifecycle retained passed counters'
+    Assert-Equal $deferredWindows.qualification.windows_lifecycle_shipped.receipt_sha256 $null 'deferred shipped lifecycle retained a historical evidence hash'
+    Assert-Equal ([int]$deferredWindows.qualification.windows_state_security.low_privilege_effective_read_denials) 0 'deferred state security retained passed counters'
+    Assert-Equal $deferredWindows.qualification.windows_state_security.receipt_sha256 $null 'deferred state security retained a historical evidence hash'
+    foreach ($gate in @($shippedLifecycle, $stateSecurity)) {
+        $gate.status = 'passed'
+        $gate.evidence_scope = 'exact-current-package'
+        $gate.fresh_package_gate_deferred = $false
+        $gate.deferred_reason = ''
+    }
+    $shippedLifecycle.receipt_sha256 = ('f' * 64)
+    $stateSecurity.receipt_sha256 = ('2' * 64)
     $ompClient.status = 'passed'
+    $ompClient.evidence_scope = 'exact-current-package'
     $ompClient.fresh_package_gate_deferred = $false
     $ompClient.deferred_reason = ''
     $ompClient.receipt_sha256 = ('5' * 64)

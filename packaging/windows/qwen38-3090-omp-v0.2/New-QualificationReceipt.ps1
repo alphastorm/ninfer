@@ -179,6 +179,7 @@ function New-NInferQualificationReceipt {
     }
 
     $platformReceipt = [ordered]@{
+        role = 'target-deployment-profile'
         gpu = [string](Get-NInferQualificationProperty $Platform 'gpu' 'platform')
         vram_mib = [int](Get-NInferQualificationProperty $Platform 'vram_mib' 'platform')
         cuda_architecture = [string](Get-NInferQualificationProperty $Platform 'cuda_architecture' 'platform')
@@ -236,8 +237,11 @@ function New-NInferQualificationReceipt {
         status = $remoteNativeStatus
         source_commit = Get-NInferQualificationGitSha $RemoteNative 'source_commit' 'remote_linux_sm86_native'
         gpu = [string](Get-NInferQualificationProperty $RemoteNative 'gpu' 'remote_linux_sm86_native')
+        vram_mib = [int](Get-NInferQualificationProperty $RemoteNative 'vram_mib' 'remote_linux_sm86_native')
+        driver_version = [string](Get-NInferQualificationProperty $RemoteNative 'driver_version' 'remote_linux_sm86_native')
+        operating_system = [string](Get-NInferQualificationProperty $RemoteNative 'operating_system' 'remote_linux_sm86_native')
         cuda_architecture = [string](Get-NInferQualificationProperty $RemoteNative 'cuda_architecture' 'remote_linux_sm86_native')
-        focused_tests = [int](Get-NInferQualificationProperty $RemoteNative 'focused_tests' 'remote_linux_sm86_native')
+        focused_tests = @((Get-NInferQualificationProperty $RemoteNative 'focused_tests' 'remote_linux_sm86_native') | ForEach-Object { [string]$_ })
         pod_deleted = [bool](Get-NInferQualificationProperty $RemoteNative 'pod_deleted' 'remote_linux_sm86_native')
         hourly_price_usd = [double](Get-NInferQualificationProperty $RemoteNative 'hourly_price_usd' 'remote_linux_sm86_native')
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $RemoteNative 'remote_linux_sm86_native'
@@ -245,8 +249,11 @@ function New-NInferQualificationReceipt {
     if ($remoteNativeStatus -ceq 'passed' -and
         ($remoteNativeReceipt.source_commit -cne $candidateReceipt.runtime_source_commit -or
          $remoteNativeReceipt.gpu -cne 'NVIDIA GeForce RTX 3090' -or
+         $remoteNativeReceipt.vram_mib -ne 24576 -or
+         [string]::IsNullOrWhiteSpace($remoteNativeReceipt.driver_version) -or
+         [string]::IsNullOrWhiteSpace($remoteNativeReceipt.operating_system) -or
          $remoteNativeReceipt.cuda_architecture -cne 'sm_86' -or
-         $remoteNativeReceipt.focused_tests -lt 3 -or
+         [string]::Join(',', @($remoteNativeReceipt.focused_tests | Sort-Object)) -cne 'ninfer_http_contract_test,ninfer_response_store_test,ninfer_session_checkpoint_store_test' -or
          -not $remoteNativeReceipt.pod_deleted -or
          $remoteNativeReceipt.hourly_price_usd -gt 0.70)) {
         throw 'remote_linux_sm86_native does not bind the authorized ephemeral RTX 3090 lane'
@@ -397,9 +404,19 @@ function New-NInferQualificationReceipt {
         throw 'windows_lifecycle_shipped does not attest the exact shipped installer path'
     }
     if ($shippedStatus -ceq 'not_run' -and
-        (-not $shippedReceipt.fresh_package_gate_deferred -or
+        ($shippedReceipt.evidence_scope -cne 'exact-current-package-deferred' -or
+         -not $shippedReceipt.fresh_package_gate_deferred -or
          $shippedReceipt.deferred_reason -cne 'fresh-windows-rtx3090-unavailable-after-user-handoff')) {
         throw 'deferred shipped Windows lifecycle gate lacks the authorized evidence boundary'
+    }
+    if ($shippedStatus -ceq 'not_run') {
+        $shippedReceipt.production_installer_executed = $false
+        $shippedReceipt.instrumented_harness_used = $false
+        $shippedReceipt.clean_installs = 0
+        $shippedReceipt.upgrades = 0
+        $shippedReceipt.rollback_directions = 0
+        $shippedReceipt.identity_gates_verified = 0
+        $shippedReceipt.receipt_sha256 = $null
     }
 
     $assetStatus = Get-NInferQualificationStatus $ReleaseAssetTests 'windows_release_assets'
@@ -494,7 +511,8 @@ function New-NInferQualificationReceipt {
         throw 'windows_state_security does not prove the complete effective-access contract'
     }
     if ($securityStatus -ceq 'not_run' -and
-        (-not $securityReceipt.fresh_package_gate_deferred -or
+        ($securityReceipt.evidence_scope -cne 'exact-current-package-deferred' -or
+         -not $securityReceipt.fresh_package_gate_deferred -or
          $securityReceipt.deferred_reason -cne 'fresh-windows-rtx3090-unavailable-after-user-handoff')) {
         throw 'deferred Windows state-security gate lacks the authorized evidence boundary'
     }
@@ -560,7 +578,8 @@ function New-NInferQualificationReceipt {
         throw 'omp_windows_client does not bind exact typed-tool/final-answer acceptance'
     }
     if ($ompStatus -ceq 'not_run') {
-        if (-not $ompReceipt.fresh_package_gate_deferred -or
+        if ($ompReceipt.evidence_scope -cne 'exact-current-package-deferred' -or
+            -not $ompReceipt.fresh_package_gate_deferred -or
             $ompReceipt.deferred_reason -cne 'fresh-windows-rtx3090-unavailable-after-user-handoff') {
             throw 'deferred OMP Windows gate lacks the authorized evidence boundary'
         }
@@ -623,6 +642,8 @@ function New-NInferQualificationReceipt {
         $ompStatus
     )
     $allPassed = @($statuses | Where-Object { $_ -cne 'passed' }).Count -eq 0
+    $platformReceipt['fresh_exact_package_windows_gates_passed'] =
+        ($shippedStatus -ceq 'passed' -and $securityStatus -ceq 'passed' -and $ompStatus -ceq 'passed')
     $receipt = [ordered]@{
         artifact_type = 'ninfer_rtx3090_beta_qualification'
         schema_version = 3
@@ -658,16 +679,21 @@ function New-NInferQualificationReceipt {
         }
         public_disclosure = $disclosureReceipt
         scope = [ordered]@{
-            supported_clients = @('OMP 18.0.9 Windows x64')
-            supported_api_surfaces = @(
+            target_clients = @('OMP 18.0.9 Windows x64')
+            supported_clients = $(if ($allPassed) { @('OMP 18.0.9 Windows x64') } else { @() })
+            target_api_surfaces = @(
                 'OpenAI Responses API',
                 'Anthropic Messages API',
                 'typed tool calls',
                 'checkpoint continuation'
             )
+            supported_api_surfaces = $(if ($allPassed) {
+                @('OpenAI Responses API', 'Anthropic Messages API', 'typed tool calls', 'checkpoint continuation')
+            } else { @() })
             limitations = @(
                 'Beta only; no stable or GA promotion.',
-                'Single RTX 3090 at cohort 1 is qualified; multi-GPU and higher-concurrency claims are excluded.',
+                'Fresh exact-package Windows RTX 3090 lifecycle, state-security, and OMP acceptance remain deferred; remote Linux runtime evidence does not substitute for those gates.',
+                'Remote Linux sm_86 runtime evidence covers one RTX 3090 at cohort 1; multi-GPU and higher-concurrency claims are excluded.',
                 'CPU, mixed CPU/GPU, and overnight thermal qualification are excluded.',
                 'The 64K retrieval gate qualifies 64,512 prompt tokens; it is not a 128K claim.',
                 'Responses DELETE is logical object deletion, not secure erasure; a surviving descendant checkpoint may retain ancestor token/KV context required for continuation, and an active reader or cleanup failure may defer physical stale-generation reclamation.'
