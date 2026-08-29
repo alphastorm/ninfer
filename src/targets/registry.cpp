@@ -55,6 +55,11 @@ artifact::LoadProgress artifact_progress(const LoadProgress& progress) {
     return artifact::LoadProgress{.callback = progress.callback};
 }
 
+// Runtime budget computed by the pre-flight gate, before weights were resident. The device
+// arena is sized from this value and then owns the memory, so cudaMemGetInfo reports ~0 free
+// afterwards; KV capacity resolution must be told the same budget rather than re-measuring.
+std::size_t g_planned_runtime_bytes = 0;
+
 std::size_t runtime_bytes_after_planned_weights(std::uint64_t weight_bytes,
                                                 bool wddm_evictable_budget = false) {
     std::size_t free_bytes  = 0;
@@ -71,7 +76,8 @@ std::size_t runtime_bytes_after_planned_weights(std::uint64_t weight_bytes,
             total_bytes - static_cast<std::size_t>(weight_bytes) - kMinDwmHeadroom;
         const std::size_t free_after_weights =
             free_bytes > weight_bytes ? free_bytes - static_cast<std::size_t>(weight_bytes) : 0;
-        return std::max(free_after_weights, evictable_capacity);
+        g_planned_runtime_bytes = std::max(free_after_weights, evictable_capacity);
+        return g_planned_runtime_bytes;
     }
 #endif
     if (weight_bytes > free_bytes) {
@@ -80,7 +86,8 @@ std::size_t runtime_bytes_after_planned_weights(std::uint64_t weight_bytes,
                                     std::to_string(free_bytes) +
                                     " bytes are free before loading weights");
     }
-    return free_bytes - static_cast<std::size_t>(weight_bytes);
+    g_planned_runtime_bytes = free_bytes - static_cast<std::size_t>(weight_bytes);
+    return g_planned_runtime_bytes;
 }
 
 std::size_t current_free_device_bytes(std::size_t weights_bytes = 0,
