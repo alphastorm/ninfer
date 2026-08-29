@@ -14,9 +14,9 @@
   },
   "source": {
     "upstream_base_sha": "9ec1b82c7afa021314682d7a95390f8935ead7c2",
-    "qualified_source_head": "e5d51a44f1a3b5788be83b991c2761199e8e9a31",
-    "source_archive_sha256": "e43847bf3da5ec152b3c9abf9a00cddca8f4bd79bf60f67d55c458a017f2eb3c",
-    "source_archive_bytes": 5232852,
+    "qualified_source_head": "028030476c96c71f783b6d8b1abb90684e0b8066",
+    "source_archive_sha256": "77eb4ccb48dc022ea027e526ee1c28a23a745bb0364c77e3978edcde11d1044f",
+    "source_archive_bytes": 5239266,
     "bounded_staging_commit": "e89e415d95921cecf4cf8a00df5540a4a036ff84",
     "directstorage_fallback_commit": "a9bb55b8e9b02ff34e4725dc8ca95d4fadeb3e0d",
     "qualified_patch_sha256": "ac8ba36da9bfc89ff97021eecba8c7ba8f88f9e7e9bfd1c9c3509b723d81d4e0",
@@ -30,13 +30,13 @@
     "bytes": 18210531328
   },
   "qualified_source_evidence": {
-    "binding": "inherited-runtime-evidence-plus-final-source-bound-omp-gate",
-    "runtime_commit": "e5d51a44f1a3b5788be83b991c2761199e8e9a31",
-    "checkpoint_tokens": 102060,
-    "checkpoint_reuse": "restore_disk_checkpoint",
-    "protocol_receipt_sha256": "fd1778e2493f87017952bd2def6c240dbadba62d42a4e0ba72d9fd349ad188b8",
-    "checkpoint_receipt_sha256": "cf87019c2a8258aa8e05aae5d8b0d2f4908fddcffa0344e902da2488c47b75b6",
-    "performance_receipt_sha256": "c73b1d4dd9d1482c4c7d1ede6355b5edd7d3fbc15039007df3ead948f3a2309d",
+    "binding": "all-runtime-dependent-live-evidence-rerun-required",
+    "runtime_commit": "028030476c96c71f783b6d8b1abb90684e0b8066",
+    "prior_runtime_evidence_reused": false,
+    "protocol": "rerun-required",
+    "checkpoint_102k_restart": "rerun-required",
+    "bounded_performance": "rerun-required",
+    "golden_equivalent": "rerun-required",
     "release_binding": "external-final-qualification-required"
   },
   "golden_equivalent": {
@@ -63,11 +63,12 @@
   },
   "qualified_artifacts": {
     "deployment_profile": "qwen38-4090-v0.1",
-    "binary_sha256": "e0769d5c64195325ba95891c1af99e71db2083271f379242134ac906f8ae9e5d",
+    "binary_sha256": "e5fce224529d7eeb3da4b685a842824a376856817c03f161dc23e780797bca6c",
     "binary_bytes": 230245888,
     "config_sha256": "ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db",
     "generic_gpu_owner_controller_sha256": "b6a44ecdb177dae538d667937edb6a03bddf262d34815ae6153daf58351db9ab",
-    "state_protection_sha256": "c6622ad31753998ffc0281dc9699488153e911202a2aa8d03de07b17b16debcc"
+    "state_protection_sha256": "40af12d55f5bce58384728c6649a507e04aca8b66824da60c070e76b26a429f6",
+    "installer_sha256": "3038e6d0bb5df3ab5eb990271473de5abbb8fb3d009f04fb9c269691d8e9c8a2"
   },
   "lifecycle": {
     "task_name": "NInfer-Qwen38-4090-v0.1",
