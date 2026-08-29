@@ -1,20 +1,12 @@
 {
-    "artifact_type":  "ninfer_rtx4090_long_restart_gate",
+    "artifact_type":  "ninfer_rtx4090_focused_long_restart",
     "schema_version":  1,
     "status":  "passed",
-    "completed_utc":  "2026-08-29T02:59:17.4459805Z",
-    "source_commit":  "028030476c96c71f783b6d8b1abb90684e0b8066",
-    "binary_sha256":  "e5fce224529d7eeb3da4b685a842824a376856817c03f161dc23e780797bca6c",
+    "completed_utc":  "2026-08-29T05:35:22.4397526Z",
+    "source_commit":  "6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f",
+    "binary_sha256":  "8e63c6a90b54913d8aa0c4d660f67ff1fab036e5435a144d450ff7dc1ce664a3",
     "model_artifact_sha256":  "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
     "config_sha256":  "ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db",
-    "configuration":  {
-                          "max_context":  131072,
-                          "kv_capacity":  131072,
-                          "kv_dtype":  "rk2v4-e8",
-                          "prefill_chunk":  512,
-                          "speculative_backend":  "none",
-                          "draft_tokens":  0
-                      },
     "input":  {
                   "source":  "authorized-on-host-synthetic-long-context-fixture",
                   "bytes":  612037,
@@ -22,43 +14,23 @@
                   "raw_bytes_included":  false,
                   "historical_private_corpus_reused":  false
               },
-    "initial_clean_restart":  {
-                                  "before_pid":  28028,
-                                  "after_pid":  27784
-                              },
     "first_turn":  {
                        "prompt_tokens":  102060,
                        "completion_tokens":  16,
-                       "elapsed_seconds":  93.0582312
+                       "elapsed_seconds":  93.5555523
                    },
-    "checkpoint_before_restart":  {
-                                      "new_file_count":  8,
-                                      "total_bytes":  3530062221
-                                  },
     "process_restart":  {
-                            "before_pid":  27784,
-                            "after_pid":  21552,
-                            "started_utc":  "2026-08-29T02:58:04.3445317Z",
-                            "completed_utc":  "2026-08-29T02:58:50.5133731Z",
-                            "elapsed_seconds":  46.1688414
+                            "before_pid":  20944,
+                            "after_pid":  14724,
+                            "elapsed_seconds":  46.3650862
                         },
     "post_restart_turn":  {
                               "prompt_tokens":  102097,
                               "completion_tokens":  16,
-                              "elapsed_seconds":  25.890753399999998,
-                              "prefix_reuse_path":  "append_frontier",
                               "restored_tokens":  102075,
-                              "prepare_seconds":  0.2533155
+                              "prefix_reuse_path":  "append_frontier",
+                              "elapsed_seconds":  28.209462199999997
                           },
-    "candidate":  {
-                      "pid":  21552,
-                      "listener_port":  18082,
-                      "endpoint_state":  "ready"
-                  },
-    "owner_lease":  {
-                        "active":  true,
-                        "predecessor_paused":  true
-                    },
-    "private_golden_bytes_read":  false,
-    "raw_prompt_or_output_included":  false
+    "raw_prompt_or_output_included":  false,
+    "private_golden_bytes_read":  false
 }

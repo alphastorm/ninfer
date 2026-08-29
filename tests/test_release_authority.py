@@ -37,6 +37,15 @@ LONG_RESTART_RECEIPT_PATH = (
 PERFORMANCE_RECEIPT_PATH = (
     QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-performance.json"
 )
+MEMBER_BINDING_RECEIPT_PATH = (
+    QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-asset-member-binding.json"
+)
+PROTECTED_LOG_RECEIPT_PATH = (
+    QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-protected-request-log.json"
+)
+STATUS_TIMING_RECEIPT_PATH = (
+    QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-status-timing.json"
+)
 STALE_REVIEW_CLOSURE = (
     QUALIFICATION_ROOT / "receipts" / "qwen3.8-27b-rtx-4090-review-closure.json"
 )
@@ -83,6 +92,10 @@ class ReleaseAuthorityTest(unittest.TestCase):
         golden = load(GOLDEN_RECEIPT_PATH)
         lifecycle = load(LIFECYCLE_RECEIPT_PATH)
         state_security = load(STATE_SECURITY_RECEIPT_PATH)
+        failed_delete = load(FAILED_DELETE_RECEIPT_PATH)
+        member_binding = load(MEMBER_BINDING_RECEIPT_PATH)
+        protected_log = load(PROTECTED_LOG_RECEIPT_PATH)
+        status_timing = load(STATUS_TIMING_RECEIPT_PATH)
 
         expected_qualification_fields = {
             "artifact_type",
@@ -189,6 +202,46 @@ class ReleaseAuthorityTest(unittest.TestCase):
             sha256(UPGRADE_ACL_RECEIPT_PATH),
             l_gate["real_upgrade_rollback_acl_receipt_sha256"],
         )
+        self.assertEqual(
+            sha256(MEMBER_BINDING_RECEIPT_PATH),
+            l_gate["asset_member_binding_receipt_sha256"],
+        )
+        self.assertEqual(
+            sha256(PROTECTED_LOG_RECEIPT_PATH),
+            l_gate["protected_request_log_receipt_sha256"],
+        )
+        self.assertEqual(
+            sha256(STATUS_TIMING_RECEIPT_PATH),
+            l_gate["populated_state_status_timing_receipt_sha256"],
+        )
+        self.assertEqual(failed_delete["status"], "passed")
+        self.assertEqual(failed_delete["runtime_source_commit"], source["qualified_commit"])
+        self.assertEqual(failed_delete["binary_sha256"], identity["binary_sha256"])
+        self.assertIn("foreign-session LRU publication", " ".join(failed_delete["contracts"]))
+        self.assertIn("quota rejection", " ".join(failed_delete["contracts"]))
+        self.assertIn("does not claim cryptographic erasure", failed_delete["engine_payload_semantics"])
+        self.assertEqual(member_binding["status"], "passed")
+        self.assertEqual(member_binding["package_sha256"], qualification["package"]["sha256"])
+        self.assertEqual(len(member_binding["bindings"]), 4)
+        self.assertEqual(protected_log["status"], "passed")
+        self.assertIs(protected_log["state_tree_protection_verified"], True)
+        self.assertIs(protected_log["owner_state_root_under_release_state"], True)
+        self.assertEqual(status_timing["status"], "passed")
+        self.assertEqual(status_timing["source_commit"], source["qualified_commit"])
+        self.assertEqual(status_timing["binary_sha256"], identity["binary_sha256"])
+        self.assertEqual(status_timing["populated_file_count"], 2048)
+        self.assertEqual(status_timing["populated_logical_bytes"], 2 * 1024**3)
+        self.assertLessEqual(
+            status_timing["status_elapsed_seconds"], status_timing["maximum_status_seconds"]
+        )
+        self.assertEqual(state_security["null_dacl_rejections"], 1)
+        self.assertEqual(state_security["null_dacl_effective_read_observations"], 1)
+        self.assertEqual(state_security["nvidia_smi_evidence_class"], "exact-trusted-absolute-query")
+        self.assertEqual(state_security["default_gpu_owner_state_mutations"], 0)
+        self.assertEqual(state_security["gpu_power_limit_mutations"], 0)
+        self.assertGreaterEqual(len(lifecycle["substituted_components"]), 6)
+        self.assertIn("Get-FileHash", lifecycle["substituted_functions"])
+        self.assertIn("Protect-StateRoot.ps1", lifecycle["exact_unsubstituted_components"])
         live = qualification["live_evidence"]
         self.assertIs(live["prior_runtime_evidence_reused"], False)
         self.assertEqual(sha256(PROTOCOL_RECEIPT_PATH), live["protocol"]["receipt_sha256"])

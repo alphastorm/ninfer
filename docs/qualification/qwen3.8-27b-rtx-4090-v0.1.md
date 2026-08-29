@@ -2,80 +2,74 @@
 
 ## Verdict
 
-**Superseded after focused review; this qualification and package must not ship.** A replacement is being rebuilt and every runtime-dependent gate must pass again before beta eligibility can be restored.
+**Qualified for beta support as a source-bound release candidate.** Gates G, L, and R passed on the final binary and finalized asset set. No stable promotion, public release, or permanent route change was performed.
 
-The evidence below is retained only as the superseded candidate record and does not confer current eligibility. No stable or public release and no permanent route change was performed. The historical private corpus is unavailable and was not reused, read, copied, hashed, or transmitted.
+The unavailable historical private corpus was not reused, read, copied, hashed, or transmitted. Golden-equivalent coverage uses only the source-controlled synthetic typed-tool contract and deterministic final-answer oracle.
 
 ## Exact identities
 
 | Item | Value |
 |---|---|
-| Runtime source | `028030476c96c71f783b6d8b1abb90684e0b8066` |
-| Runtime source archive | `77eb4ccb48dc022ea027e526ee1c28a23a745bb0364c77e3978edcde11d1044f` / `5239266` bytes |
-| Package source | `b24a807eeb61b11896cbd8a9f3c8fd73e77dd2c8` |
-| Package source archive | `7ee03ec6e6783b0e5ea32a68ee22b2a717a124547e4779a735726fc0bf2faeb3` / `5239221` bytes |
-| Server | `e5fce224529d7eeb3da4b685a842824a376856817c03f161dc23e780797bca6c` / `230245888` bytes |
+| Runtime source | `6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f` |
+| Runtime source archive | `83ed4cc9fff62929942186176ab7fcc360ac8e99926fb955a3e971b2c8b543f5` / `5254811` bytes |
+| Package source | `2fb84928e29da7b7c6be708cade723121457fa1f` |
+| Package source archive | `fdc08c36d8eecf70fff1cd2c6add2898c831b00d7c80167ab75a8e51ea6eb3de` / `5255750` bytes |
+| Server | `8e63c6a90b54913d8aa0c4d660f67ff1fab036e5435a144d450ff7dc1ce664a3` / `230262272` bytes |
 | Config | `ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db` |
 | Model | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
-| Package | `3c5ea14499de4bb9330c82f4cee35c830971698880a09fe80d5d3d333df31e0f` / `227387438` bytes |
-| SPDX 2.3 SBOM | `8b832bfdcc14a09fc33d80ad860f0312724e4ddc4267c31114d30729e642d607` / `22373` bytes / `27` files |
-| Qualification sidecar | `32d8b2266cd6f2cbb572445b3349442e62655f0405a2c87a64afc6fdaf8442ef` / `8195` bytes |
-| SHA256SUMS | `f7e14e6441647856fbbbf75e4df57233c8175b95559a4b6c35a6e84d7be47966` / `687` bytes |
+| Package | `7548307420faab9f6cf82294c3aa0b6a6ea82168d89c8f5ac4900a683665b418` / `227402593` bytes |
+| SPDX 2.3 SBOM | `d37ab787f9f2ccc0212f56c1beb1cffb010a058ae15c2c89853b84a0824b3eaf` / `22373` bytes / `27` files |
+| Qualification sidecar | `30d8d741d1957ab13a6139f0d673b43ee0258b049cefa3b26d927f043a7b1656` / `8705` bytes |
+| SHA256SUMS | `dcd4bfbdc0c029fbd02c3345abdc4f5d4cc1212d845e6d22e76d1a474013ddce` / `680` bytes / LF only |
 | Deployment profile | `qwen38-4090-v0.1` |
 | CUDA target/toolkit | `sm_89` / `13.3.73` |
 
-## Durable DELETE correction
+## Transactional DELETE correction
 
-The response DELETE path now snapshots one authenticated session, publishes the durable post-delete generation before mutating the live response store, and returns a fail-closed conflict when checkpoint publication fails. A successful parent deletion retains descendants in memory and after process restart.
+The response DELETE path now holds the response-store transaction boundary while it builds a replacement live store and post-delete session checkpoint, commits the checkpoint generation, and performs no-throw live swaps. Foreign-session LRU publication cannot interleave with the durable commit. Publication failure or quota rejection returns conflict while preserving both the live records and the durable `current` generation.
 
-The native regression proved all six observable outcomes:
+The deterministic native regression covers failed publication, a foreign-session LRU race, quota rejection, restart durability, and surviving-descendant engine-tag semantics. DELETE removes response addressability and the session-key checkpoint rooted at the latest surviving session key; it does not claim cryptographic erasure of ancestor tokens still reachable through a surviving descendant checkpoint.
 
-- failed checkpoint publication returns conflict;
-- the live parent and descendant remain present;
-- the durable `current` generation is unchanged;
-- restart after failure restores the descendant and its parent link;
-- successful parent deletion retains the descendant in memory;
-- restart after success restores only the surviving descendant lineage.
-
-The corrected runtime diff is deliberately confined to seven serving files: generation service, response store, Responses HTTP, and session-checkpoint manager declarations/definitions. Because runtime inputs changed, all hardware-dependent gates were rerun instead of inherited.
+Because runtime inputs changed, every hardware-dependent gate was rerun instead of inherited.
 
 ## Windows release-boundary hardening
 
-The shipped installer contains no callable test mode, ambient test activation, or fault-injection hook. Synthetic failure and interruption instrumentation is generated only in the unshipped lifecycle harness. Its receipt is explicitly classified `instrumented-unshipped-installer-lifecycle` and does not claim exact shipped-byte or real-ACL coverage.
+The shipped installer contains no callable test mode, ambient test activation, or fault-injection hook. Synthetic failure instrumentation is generated only in the unshipped lifecycle harness. Its receipt enumerates every substituted component and function and separately identifies the exact unmodified shipped components.
 
 Real coverage is separate:
 
-- the shipped state helper creates each missing ProgramData directory atomically with its final SYSTEM/Administrators-only security descriptor;
-- raced, precreated, unowned, and reparse state fails closed;
-- failure cleanup never recursively removes an untrusted precreated tree;
-- effective low-privilege reads and writes are denied;
-- installed bearer secrets grant access only to SYSTEM and Administrators;
-- two exact shipped-installer full installs performed a real retained-release upgrade;
-- both retained secrets denied low-privilege reads after upgrade, after rollback, and after returning to the corrected candidate.
+- each missing managed directory is created atomically with its final SYSTEM/Administrators-only descriptor;
+- NULL DACLs, raced or precreated roots, unowned roots, and reparse points fail closed without deleting an untrusted tree;
+- a real low-privilege principal was denied protected reads and writes, while the deliberately created NULL-DACL probe was observed readable before rejection;
+- the generic GPU-owner controller invokes only the trusted absolute system query, rejects malformed or ambiguous output, and uses the release-bound owner state root on every action;
+- the default owner-state root remained unchanged during nondefault-root tests;
+- the installer snapshots and restores both lifecycle helpers during rollback;
+- two exact shipped-installer full installs exercised upgrade, rollback, candidate return, retained-secret ACLs, and owner-state-root binding;
+- GPU power-limit mutations were exactly zero.
 
-The generic GPU-owner controller again observed an active compute owner, allowed non-destructive status, and rejected stop rather than taking an unmanaged workload.
+Status on a protected root populated with 2,048 sparse files and 2 GiB of logical checkpoint data completed in `3.4954474` seconds, below the 30-second gate.
 
 ## Qualification authority and publication safety
 
-The in-package status is explicitly `candidate-only-not-release-eligible`. The final external sidecar is the sole release-eligibility authority; it supersedes `candidate_ready` only after G, L, and R pass and is bound by `SHA256SUMS`. Repository tests enforce the final schema, disclosure rules, exact authority lineage, receipt hashes, and supersession semantics.
+The in-package status is `candidate-only-not-release-eligible`. The passed external sidecar is the sole release-eligibility authority; it supersedes `candidate_ready` only after G, L, and R pass and is bound by package-owned `SHA256SUMS`.
 
-All four published PowerShell scripts are byte-identical to their corresponding ZIP members. The ZIP contains 27 unique file members and no duplicate member names. The deterministic SPDX document regenerated byte-identically.
+The finalizer first reverified the candidate checksums for every immutable asset, then replaced only the external qualification sidecar and LF checksum manifest. The ZIP and SPDX hashes are unchanged from candidate assembly. All four standalone lifecycle scripts are byte-identical to their ZIP members. The ZIP has 27 unique file members and no duplicate names.
 
-A final byte scan covered all eight staged assets and all 27 ZIP members. A separate scan covered all 1,091 intended tracked files. Both found zero private identifiers.
+A final scan covered all eight finalized assets and all 27 ZIP members. A separate scan covered all 1,093 intended tracked files. Both found zero private identifiers.
 
-## Rerun results
+## Live rerun results
 
 ### Protocol
 
 The authenticated 15-check pack passed in full, including typed tool arguments, tool-result arrays, stream parity, private-session cache isolation, stored Responses isolation, continuation, streaming checkpointing, parent deletion, descendant survival, and Anthropic token counting.
 
-Protocol receipt: `7018042400580ab54bb91da71502f1fdd0251cef9231c3abaef01699f89c7561`.
+Protocol receipt: `43360c9f78e6e48b75c3676344095d5a16c6015ab713059900f2a6113d2a7918`.
 
 ### Exact 102K process checkpoint restart
 
-The first stored Responses turn contained exactly `102060` input tokens. A controller restart replaced the process; the next turn restored `102075` tokens and appended the suffix through `append_frontier`. The post-restart prompt contained `102097` tokens. No raw prompt or output is retained.
+The first stored Responses turn contained exactly `102060` input tokens. A controller restart replaced the process; the next turn restored `102075` tokens and appended through `append_frontier`. The post-restart prompt contained `102097` tokens. No raw prompt or output is retained.
 
-Long-restart receipt: `1f693885a38a4d7196954b47f3f677dcf27ab12e0cd8a939c4f5fc7e3782b09a`.
+Long-restart receipt: `6ca95941272e0d4eb2397bbb3dc41a14bb96ad89f52e2944fbb0ce085ca377d4`.
 
 ### Bounded performance
 
@@ -84,20 +78,20 @@ The exact public `long_decode_aime26_01` fixture ran once after one warmup:
 | Metric | Result |
 |---|---:|
 | Prompt tokens | 228 |
-| Completion tokens | 2041 |
-| Prefill | 1395.703 tokens/s |
-| Decode | 52.156 tokens/s |
-| Wall time | 39.351 s |
+| Completion tokens | 1485 |
+| Prefill | 1408.259 tokens/s |
+| Decode | 52.263 tokens/s |
+| Wall time | 28.612 s |
 | Prefix cache hits | 0 |
 | Reuse path | `full_reset` |
 
-No builder or compressor ran before or after measurement. The candidate was the sole measured NInfer compute owner. Fourteen unavoidable Windows display-model rows reported unavailable memory accounting and are disclosed rather than misclassified as absent; no other row reported measurable compute memory.
+No builder or compressor ran before or after measurement. The candidate was the sole measured NInfer compute owner. Fourteen unavoidable Windows display-model rows are disclosed separately; no other row reported measurable compute memory.
 
-Performance receipt: `4f87baf4db0c61c2e2f8b7a809988880dc665075b01d8b644e00e58ee7c9d1ad`.
+Performance receipt: `9bf85003102f89a523812498bbe992827d2ee139c0367dce02e6191b615205ac`.
 
 ### Final Golden-equivalent
 
-Contract `qwen38-4090-omp-golden-equivalent-v1` passed through standard OMP `18.0.6` in `7.561452` seconds:
+Contract `qwen38-4090-omp-golden-equivalent-v1` passed through standard OMP `18.0.6` in `6.786655` seconds:
 
 | Gate | Result |
 |---|---|
@@ -108,28 +102,30 @@ Contract `qwen38-4090-omp-golden-equivalent-v1` passed through standard OMP `18.
 
 Exact visible answer: `NINFER_GOLDEN_EQUIVALENT_OK|Paris|3|metric=true|18C|clear`.
 
-Golden receipt: `17e980b1038c2743d5811cc6ca79d148da017d329714a98f7ae4f330680e6ba2`. Raw transcript content is not retained.
+Golden receipt: `8331118c6f84e2c695d11f519e529cbec871e67d9951a62b822622c9d47f62f4`. Raw transcript content is not retained.
 
 ## Restoration
 
-Every live GPU-owner stop/start effect used the hash-pinned tracked operator controller. The exact incumbent is healthy again; candidate listener, protected state, scheduled task, processes, probe account, credential, and lease tools are absent. The base controller and container substrate remain paused exactly as before the lease.
+Every live GPU-owner stop/start effect used the hash-pinned tracked operator controller. The exact incumbent route is healthy again. Candidate listener, state root, scheduled task, processes, probe account, and credential material are absent. No production route was promoted or permanently mutated.
 
-Final restore receipt: `4b4fb020f73fae0b81021cc8f22d64220e4dfa669da6f35ecce668a0ec3efa1c`.
+Final restore receipt: `a0e6665a98e4a9bb734d2ea4dee23d2be7d31a94656c7e09cd6f36ca9ebfe1bb`.
 
 ## Receipts
 
-- public asset receipt: `3ebe0ef7691076b41929d340f78d925d184ed7853bbf45d2d3a89d21ff726104`;
-- neutral clean build: `5818d8e84746270d24d5693a0690f21a6e3f7624079ab5e31a60ca355e2de775`;
-- native failed DELETE: `b97de5511fc17bc18e302145059242dac5eeba6b9909b3a1f810361b4d604a43`;
-- package: `642f0d6854f4893aab8859cd179c6fc47e435bfbd9c1c3ef87e3666cd1d8a812`;
-- private-identifier scan: `5ae9af1cb106d6fc359c5defd7f126f4808ee73d19e96a78387c6e18a99314cf`;
-- released-script byte binding: `35c76b52fd6afc726decc9216de1ba45b69d149f951122023ed886d3bcdd9bac`;
-- real state security: `1b8c651c3a09caad36ac5cd718ce418241b2eff8794698bce264bb4d44d42339`;
-- instrumented lifecycle: `358e95a9ca51d3b7cd0d0c497e6ff972bdb12d92ae91103c616a21bc2b4da889`;
-- real upgrade/rollback secret ACL: `6fa85ecd07d0dfa07ae25756ec77e33de4a207312677a4c9da44f2aee678334a`;
-- protected request log: `5f379ef154e6d9a0b2585b4b10df67cd066a3e37cdf3344ac7da8d3d296b558c`;
-- protocol: `7018042400580ab54bb91da71502f1fdd0251cef9231c3abaef01699f89c7561`;
-- 102K restart: `1f693885a38a4d7196954b47f3f677dcf27ab12e0cd8a939c4f5fc7e3782b09a`;
-- performance: `4f87baf4db0c61c2e2f8b7a809988880dc665075b01d8b644e00e58ee7c9d1ad`;
-- final Golden: `17e980b1038c2743d5811cc6ca79d148da017d329714a98f7ae4f330680e6ba2`;
-- final restore: `4b4fb020f73fae0b81021cc8f22d64220e4dfa669da6f35ecce668a0ec3efa1c`.
+- public asset receipt: `e05ad2e750e6856227910509d9d20aeb0949c751dff3a68d7f2c9bcecbf69c6b`;
+- neutral clean build: `56834a34871cdd6d8f8903ede947de543cb859ea97d076310a94aff595c0ab11`;
+- native transactional DELETE: `6a33ec4b68cd7bed6f49af50c821574b8a3397d65192cfc2055c4aa3cbf56ea2`;
+- package assembly: `bf22794202bb2da25cf4275861f4ec72f9d76537bc631d09bedbe2a93ac90d5b`;
+- immutable package finalization: `33f381fcce753c969cfe16ea52082a448ac71463846e5d93c8c697b99edd3420`;
+- final private-identifier scan: `b8cc1cd9de6cc9b775635cb7f7621f0664fc8e30d3c6324c10dd4914aa7841fc`;
+- released-script byte binding: `9fd4f24de65c3afea1abcce327525d3a7f5246eca150257c23ac2df425fa0d94`;
+- real state security: `e1c42dced5ba78eeeb1857362d38cbbc73851500b2927e8455e7e98f4884e5bf`;
+- instrumented lifecycle: `a1a7ea14d6032984faf811ac48e1f37af2352a6889897afd1efdbdc040d5e03d`;
+- real upgrade/rollback secret ACL: `4c8f6510cf5ad919a156749b58b1626bef428b0993dff2746bcc1d3d951f3105`;
+- protected request log: `a374ad04d7426cacfa074648130e5736d1e0066ddc2e1d7f944bbd285ccaf4f5`;
+- populated-root status timing: `5e63ca267ccebcefb204d6328d4afb5f91b07ed42f0e3feaa36b949b24f3f278`;
+- protocol: `43360c9f78e6e48b75c3676344095d5a16c6015ab713059900f2a6113d2a7918`;
+- 102K restart: `6ca95941272e0d4eb2397bbb3dc41a14bb96ad89f52e2944fbb0ce085ca377d4`;
+- performance: `9bf85003102f89a523812498bbe992827d2ee139c0367dce02e6191b615205ac`;
+- final Golden: `8331118c6f84e2c695d11f519e529cbec871e67d9951a62b822622c9d47f62f4`;
+- final restore: `a0e6665a98e4a9bb734d2ea4dee23d2be7d31a94656c7e09cd6f36ca9ebfe1bb`.

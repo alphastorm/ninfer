@@ -1,17 +1,20 @@
 {
-    "artifact_type":  "ninfer_native_failed_checkpoint_delete_regression",
-    "schema_version":  1,
-    "status":  "passed",
-    "source_commit":  "028030476c96c71f783b6d8b1abb90684e0b8066",
-    "binary_sha256":  "e5fce224529d7eeb3da4b685a842824a376856817c03f161dc23e780797bca6c",
-    "test_source_sha256":  "0455d606b48f49d011f6d152c74478e168761f0e112e115eba118ae7c02a4d33",
-    "manager_source_sha256":  "4533346192fc584acfa10e663e4e36d48ec52f14f07b559d469280192ab528a2",
-    "http_source_sha256":  "95792f567e18e977661400232b5aa7c2cd559d81b7d67bf3dd24631dadd51bbc",
-    "native_test_log_sha256":  "9f2a59a60e65fbcd5a3e1b7248adf92890ce3a32b19e43fb4751c2657196de13",
-    "failed_checkpoint_publication_returned_conflict":  true,
-    "failed_delete_preserved_live_parent_and_descendant":  true,
-    "failed_delete_preserved_durable_current_generation":  true,
-    "restart_after_failed_delete_restored_descendant":  true,
-    "successful_parent_delete_retained_descendant_in_memory":  true,
-    "successful_parent_delete_retained_descendant_after_restart":  true
+  "artifact_type": "ninfer_atomic_delete_native_regression",
+  "schema_version": 1,
+  "status": "passed",
+  "runtime_source_commit": "6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f",
+  "package_source_commit": "2fb84928e29da7b7c6be708cade723121457fa1f",
+  "binary_sha256": "8e63c6a90b54913d8aa0c4d660f67ff1fab036e5435a144d450ff7dc1ce664a3",
+  "test_source_sha256": "94f35a426dacdd7f215cbdf3ce286efe54f60e6f9c911d6d112720c66be5dfac",
+  "test_log_sha256": "6c38bc5994f84cee729c4dd36c6eafa6f6514661d7e29e35414744606cef9815",
+  "test_output": "ok",
+  "contracts": [
+    "failed-publication preserves live and durable lineage",
+    "foreign-session LRU publication blocks across durable commit",
+    "disk-quota rejection preserves live and durable lineage",
+    "restart preserves the committed post-delete checkpoint",
+    "surviving descendant remains usable with engine-defined ancestry payload semantics"
+  ],
+  "engine_payload_semantics": "DELETE removes response addressability and the session-key checkpoint rooted at the latest surviving session key; it does not claim cryptographic erasure of ancestor tokens retained in a surviving descendant checkpoint.",
+  "historical_private_corpus_reused": false
 }

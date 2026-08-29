@@ -1,0 +1,14 @@
+{
+    "artifact_type":  "ninfer_populated_state_status_timing",
+    "schema_version":  1,
+    "status":  "passed",
+    "source_commit":  "6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f",
+    "binary_sha256":  "8e63c6a90b54913d8aa0c4d660f67ff1fab036e5435a144d450ff7dc1ce664a3",
+    "populated_file_count":  2048,
+    "populated_logical_bytes":  2147483648,
+    "configured_checkpoint_quota_mib":  8192,
+    "status_elapsed_seconds":  3.4954473999999998,
+    "maximum_status_seconds":  30,
+    "endpoint_state":  "ready",
+    "raw_state_or_requests_included":  false
+}

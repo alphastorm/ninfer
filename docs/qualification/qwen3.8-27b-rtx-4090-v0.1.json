@@ -1,10 +1,10 @@
 {
   "artifact_type": "ninfer_public_windows_release_qualification",
   "schema_version": 1,
-  "status": "superseded_focused_review_red",
+  "status": "passed",
   "qualification_level": "beta",
-  "beta_support_qualified": false,
-  "release_eligible": false,
+  "beta_support_qualified": true,
+  "release_eligible": true,
   "release_id": "qwen38-4090-v0.1",
   "release_version": "0.1.0",
   "qualification_target": {
@@ -13,19 +13,19 @@
     "cuda_architecture": "sm_89"
   },
   "source": {
-    "qualified_commit": "028030476c96c71f783b6d8b1abb90684e0b8066",
-    "package_source_commit": "b24a807eeb61b11896cbd8a9f3c8fd73e77dd2c8",
+    "qualified_commit": "6fd9e4507d00331a29c20fe4bed8ace11c0b3a0f",
+    "package_source_commit": "2fb84928e29da7b7c6be708cade723121457fa1f",
     "source_dirty": false,
-    "source_archive_sha256": "77eb4ccb48dc022ea027e526ee1c28a23a745bb0364c77e3978edcde11d1044f",
-    "source_archive_bytes": 5239266,
-    "package_source_archive_sha256": "7ee03ec6e6783b0e5ea32a68ee22b2a717a124547e4779a735726fc0bf2faeb3",
-    "package_source_archive_bytes": 5239221,
-    "runtime_change_from_e5d51a44": "atomic fail-closed per-response checkpoint deletion",
+    "source_archive_sha256": "83ed4cc9fff62929942186176ab7fcc360ac8e99926fb955a3e971b2c8b543f5",
+    "source_archive_bytes": 5254811,
+    "package_source_archive_sha256": "fdc08c36d8eecf70fff1cd2c6add2898c831b00d7c80167ab75a8e51ea6eb3de",
+    "package_source_archive_bytes": 5255750,
+    "runtime_change_from_e5d51a44": "fully transactional fail-closed per-response checkpoint deletion",
     "prior_runtime_evidence_reused": false
   },
   "identity": {
-    "binary_sha256": "e5fce224529d7eeb3da4b685a842824a376856817c03f161dc23e780797bca6c",
-    "binary_bytes": 230245888,
+    "binary_sha256": "8e63c6a90b54913d8aa0c4d660f67ff1fab036e5435a144d450ff7dc1ce664a3",
+    "binary_bytes": 230262272,
     "config_sha256": "ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db",
     "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
     "deployment_profile": "qwen38-4090-v0.1",
@@ -33,23 +33,23 @@
     "cuda_toolkit": "13.3.73"
   },
   "package": {
-    "source_commit": "b24a807eeb61b11896cbd8a9f3c8fd73e77dd2c8",
+    "source_commit": "2fb84928e29da7b7c6be708cade723121457fa1f",
     "filename": "ninfer-4090-qwen38-v0.1.0-win-x64.zip",
-    "sha256": "3c5ea14499de4bb9330c82f4cee35c830971698880a09fe80d5d3d333df31e0f",
-    "bytes": 227387438,
+    "sha256": "7548307420faab9f6cf82294c3aa0b6a6ea82168d89c8f5ac4900a683665b418",
+    "bytes": 227402593,
     "runtime_dlls": 9,
     "files": 27,
     "sbom": {
       "filename": "ninfer-4090-qwen38-v0.1.0-win-x64.spdx.json",
       "spdx_version": "SPDX-2.3",
-      "sha256": "8b832bfdcc14a09fc33d80ad860f0312724e4ddc4267c31114d30729e642d607",
+      "sha256": "d37ab787f9f2ccc0212f56c1beb1cffb010a058ae15c2c89853b84a0824b3eaf",
       "bytes": 22373,
       "files_analyzed": 27,
       "deterministic_regeneration": "passed"
     },
-    "generic_gpu_owner_controller_sha256": "b6a44ecdb177dae538d667937edb6a03bddf262d34815ae6153daf58351db9ab",
-    "state_protection_sha256": "40af12d55f5bce58384728c6649a507e04aca8b66824da60c070e76b26a429f6",
-    "installer_sha256": "3038e6d0bb5df3ab5eb990271473de5abbb8fb3d009f04fb9c269691d8e9c8a2",
+    "generic_gpu_owner_controller_sha256": "3e3ae54c71c7534064ceff1dae59acfd2ea546a8c920fcc6c9fb1d46296ba5e0",
+    "state_protection_sha256": "c431cdd55a764526d6d9b720909b2a706e0df2b8f75d871900e4d74616af8463",
+    "installer_sha256": "f83612bd419998709dd366a06ee6c7ebf680094bf4e43977510ee64d3805c8ae",
     "asset_receipt": "receipts/qwen3.8-27b-rtx-4090-assets.json"
   },
   "golden_equivalent": {
@@ -63,7 +63,7 @@
     "fixture_provenance": "source-controlled synthetic fixture; the unavailable historical private corpus was not reused",
     "historical_private_corpus_reused": false,
     "omp_version": "omp/18.0.6",
-    "wall_seconds": 7.561452,
+    "wall_seconds": 6.786655,
     "raw_transcript_included": false,
     "gates": {
       "typed_tool_invocation": "passed",
@@ -74,7 +74,7 @@
     "final_visible_answer": "NINFER_GOLDEN_EQUIVALENT_OK|Paris|3|metric=true|18C|clear",
     "transcript_projection_sha256": "77f581081492b5a0b15a9667c557c20532e5461f998d854347e3019a19552a5a",
     "receipt": "receipts/qwen3.8-27b-rtx-4090-golden-equivalent.json",
-    "receipt_sha256": "17e980b1038c2743d5811cc6ca79d148da017d329714a98f7ae4f330680e6ba2"
+    "receipt_sha256": "8331118c6f84e2c695d11f519e529cbec871e67d9951a62b822622c9d47f62f4"
   },
   "live_evidence": {
     "prior_runtime_evidence_reused": false,
@@ -82,7 +82,7 @@
       "status": "passed",
       "checks": 15,
       "receipt": "receipts/qwen3.8-27b-rtx-4090-protocol.json",
-      "receipt_sha256": "7018042400580ab54bb91da71502f1fdd0251cef9231c3abaef01699f89c7561"
+      "receipt_sha256": "43360c9f78e6e48b75c3676344095d5a16c6015ab713059900f2a6113d2a7918"
     },
     "checkpoint_restart": {
       "status": "passed",
@@ -90,66 +90,77 @@
       "restored_tokens": 102075,
       "reuse_path": "append_frontier",
       "receipt": "receipts/qwen3.8-27b-rtx-4090-long-restart.json",
-      "receipt_sha256": "1f693885a38a4d7196954b47f3f677dcf27ab12e0cd8a939c4f5fc7e3782b09a"
+      "receipt_sha256": "6ca95941272e0d4eb2397bbb3dc41a14bb96ad89f52e2944fbb0ce085ca377d4"
     },
     "performance": {
       "status": "measured",
       "prompt_tokens": 228,
-      "completion_tokens": 2041,
-      "prefill_tokens_per_second": 1395.7033151014484,
-      "decode_tokens_per_second": 52.15573796372569,
+      "completion_tokens": 1485,
+      "prefill_tokens_per_second": 1408.2593173648256,
+      "decode_tokens_per_second": 52.26317036732446,
       "receipt": "receipts/qwen3.8-27b-rtx-4090-performance.json",
-      "receipt_sha256": "4f87baf4db0c61c2e2f8b7a809988880dc665075b01d8b644e00e58ee7c9d1ad"
+      "receipt_sha256": "9bf85003102f89a523812498bbe992827d2ee139c0367dce02e6191b615205ac"
     }
   },
   "release_gates": {
     "G": {
       "status": "passed",
-      "receipt_sha256": "17e980b1038c2743d5811cc6ca79d148da017d329714a98f7ae4f330680e6ba2"
+      "receipt_sha256": "8331118c6f84e2c695d11f519e529cbec871e67d9951a62b822622c9d47f62f4"
     },
     "L": {
       "status": "passed",
-      "neutral_clean_build_receipt_sha256": "5818d8e84746270d24d5693a0690f21a6e3f7624079ab5e31a60ca355e2de775",
-      "native_failed_delete_receipt_sha256": "b97de5511fc17bc18e302145059242dac5eeba6b9909b3a1f810361b4d604a43",
-      "package_receipt_sha256": "642f0d6854f4893aab8859cd179c6fc47e435bfbd9c1c3ef87e3666cd1d8a812",
-      "private_identifier_scan_receipt_sha256": "5ae9af1cb106d6fc359c5defd7f126f4808ee73d19e96a78387c6e18a99314cf",
-      "release_lifecycle_receipt_sha256": "358e95a9ca51d3b7cd0d0c497e6ff972bdb12d92ae91103c616a21bc2b4da889",
-      "state_security_receipt_sha256": "1b8c651c3a09caad36ac5cd718ce418241b2eff8794698bce264bb4d44d42339",
-      "asset_member_binding_receipt_sha256": "35c76b52fd6afc726decc9216de1ba45b69d149f951122023ed886d3bcdd9bac",
-      "real_upgrade_rollback_acl_receipt_sha256": "6fa85ecd07d0dfa07ae25756ec77e33de4a207312677a4c9da44f2aee678334a",
-      "protected_request_log_receipt_sha256": "5f379ef154e6d9a0b2585b4b10df67cd066a3e37cdf3344ac7da8d3d296b558c"
+      "neutral_clean_build_receipt_sha256": "56834a34871cdd6d8f8903ede947de543cb859ea97d076310a94aff595c0ab11",
+      "native_failed_delete_receipt_sha256": "6a33ec4b68cd7bed6f49af50c821574b8a3397d65192cfc2055c4aa3cbf56ea2",
+      "package_receipt_sha256": "bf22794202bb2da25cf4275861f4ec72f9d76537bc631d09bedbe2a93ac90d5b",
+      "private_identifier_scan_receipt_sha256": "b8cc1cd9de6cc9b775635cb7f7621f0664fc8e30d3c6324c10dd4914aa7841fc",
+      "release_lifecycle_receipt_sha256": "a1a7ea14d6032984faf811ac48e1f37af2352a6889897afd1efdbdc040d5e03d",
+      "state_security_receipt_sha256": "e1c42dced5ba78eeeb1857362d38cbbc73851500b2927e8455e7e98f4884e5bf",
+      "asset_member_binding_receipt_sha256": "9fd4f24de65c3afea1abcce327525d3a7f5246eca150257c23ac2df425fa0d94",
+      "real_upgrade_rollback_acl_receipt_sha256": "4c8f6510cf5ad919a156749b58b1626bef428b0993dff2746bcc1d3d951f3105",
+      "protected_request_log_receipt_sha256": "a374ad04d7426cacfa074648130e5736d1e0066ddc2e1d7f944bbd285ccaf4f5",
+      "populated_state_status_timing_receipt_sha256": "5e63ca267ccebcefb204d6328d4afb5f91b07ed42f0e3feaa36b949b24f3f278"
     },
     "R": {
       "status": "passed",
-      "restore_receipt_sha256": "4b4fb020f73fae0b81021cc8f22d64220e4dfa669da6f35ecce668a0ec3efa1c"
+      "restore_receipt_sha256": "a0e6665a98e4a9bb734d2ea4dee23d2be7d31a94656c7e09cd6f36ca9ebfe1bb"
     }
   },
   "state_security": {
     "atomic_acl_directory_creation": true,
     "protected_program_data_root": true,
-    "access_principals": ["SYSTEM", "Administrators"],
+    "access_principals": [
+      "SYSTEM",
+      "Administrators"
+    ],
     "effective_low_privilege_read_denied": true,
     "effective_low_privilege_write_denied": true,
     "bearer_secret_effective_read_denied": true,
+    "null_dacl_rejected_after_effective_read_observation": true,
     "untrusted_precreated_tree_preserved": true,
     "precreated_and_reparse_root_rejections": "passed",
     "active_compute_owner_rejection": "passed",
     "status_with_active_compute_owner": "passed",
+    "trusted_absolute_nvidia_smi_query": "passed",
+    "nondefault_gpu_owner_state_root": "passed",
+    "default_gpu_owner_state_mutations": 0,
     "request_jsonl_under_protected_state": true,
     "shipped_test_bypass": false,
-    "real_upgrade_rollback_retained_secret_acl": "passed"
+    "published_release_scripts_scanned": 8,
+    "real_upgrade_rollback_retained_secret_acl": "passed",
+    "populated_state_status_elapsed_seconds": 3.4954474,
+    "populated_state_status_maximum_seconds": 30
   },
   "authority": {
-    "role": "superseded-qualification-record",
-    "supersedes_package_candidate_status": false,
-    "superseded_status": "focused_review_red",
+    "role": "external-final-qualification-authority",
+    "supersedes_package_candidate_status": true,
+    "superseded_status": "candidate_ready",
     "binding": "SHA256SUMS-bound-sidecar",
     "sidecar_filename": "ninfer-4090-qwen38-v0.1.0-win-x64-qualification.json",
-    "supersedes_qualification_commit": "683f8817badc2e30942fe8c1213e78cdea6571ba",
-    "superseded_runtime_commit": "e5d51a44f1a3b5788be83b991c2761199e8e9a31",
-    "superseded_package_sha256": "5bef6ad506b82229f2c7cc6c0f9b53fd230a23bddd07bde3758e4bdc1b49d0cc",
-    "superseding_package_sha256": "3c5ea14499de4bb9330c82f4cee35c830971698880a09fe80d5d3d333df31e0f",
-    "reason": "corrected durable per-response checkpoint deletion and requalified every runtime-dependent gate"
+    "candidate_package_source_commit": "2fb84928e29da7b7c6be708cade723121457fa1f",
+    "superseded_focused_package_sha256": "5a8d6664344cfe6cae5fc5dddb7e4db7dc52909b1937b1e8218aaf985f6b2a35",
+    "superseded_predecessor_package_sha256": "3c5ea14499de4bb9330c82f4cee35c830971698880a09fe80d5d3d333df31e0f",
+    "superseding_package_sha256": "7548307420faab9f6cf82294c3aa0b6a6ea82168d89c8f5ac4900a683665b418",
+    "reason": "closed focused and cross-lane review findings and reran every runtime-dependent gate on the final binary"
   },
   "restoration": {
     "status": "passed",
@@ -167,5 +178,5 @@
   "stable_release_performed": false,
   "stable_promotion_performed": false,
   "permanent_route_mutation": false,
-  "decision": "Superseded after focused review; this qualification and package must not ship."
+  "decision": "Qualified for beta support as a source-bound release candidate; no public release, stable promotion, or permanent route mutation was performed."
 }
