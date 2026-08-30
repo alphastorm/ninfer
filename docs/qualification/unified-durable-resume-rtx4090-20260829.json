@@ -1,0 +1,33 @@
+{
+  "artifact_type": "ninfer_unified_durable_resume_qualification",
+  "behavior_marker_preserved": true,
+  "binary_sha256": "2d920324078250feb65ec282c61455cef9b8f65b382e9fd4a312f745fce13f29",
+  "checkpoint_after_restart": {
+    "artifact_type": "ninfer_session_checkpoint_status",
+    "bytes": 469340842,
+    "frontier_tokens": 12033,
+    "generation": "1788049289653-0",
+    "restored_tokens": 12033,
+    "schema_version": 3,
+    "state": "available"
+  },
+  "checkpoint_before_restart": {
+    "artifact_type": "ninfer_session_checkpoint_status",
+    "bytes": 469340842,
+    "frontier_tokens": 12033,
+    "generation": "1788049289653-0",
+    "restored_tokens": 12033,
+    "schema_version": 3,
+    "state": "available"
+  },
+  "config_sha256": "ff5aa00deb0ef7bbbfa8b327e4e6a8ab8a72230d471daf246af145318184f772",
+  "first_output_sha256": "a49f46272a5e19931f6174cc55485f5c6bd507f246b8bd0d8fb970d3029d245b",
+  "hardware": "NVIDIA GeForce RTX 4090",
+  "initial_latency_seconds": 7.042604,
+  "model_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
+  "restored_latency_seconds": 27.007292,
+  "restored_output_sha256": "39b096a70bf9bff44fd043096ee7958b0ec402038c75959e3d37575135315c42",
+  "restored_previous_response": true,
+  "runtime_source_commit": "3504543920dac59ca33a56363d277e21e0609af2",
+  "schema_version": 1
+}
