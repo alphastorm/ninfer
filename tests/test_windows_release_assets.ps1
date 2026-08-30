@@ -287,7 +287,8 @@ try {
         checks_passed = 15; checks_total = 15; receipt_sha256 = ('9' * 64)
     }
     $remoteNative = [pscustomobject]@{
-        status = 'passed'; source_commit = $releaseHead; gpu = 'NVIDIA GeForce RTX 3090'
+        status = 'passed'; evidence_platform = 'remote-linux-rtx3090-runtime'
+        source_commit = $releaseHead; gpu = 'NVIDIA GeForce RTX 3090'
         vram_mib = 24576; driver_version = 'test-driver'; operating_system = 'remote Linux test fixture'
         cuda_architecture = 'sm_86'
         focused_tests = @('ninfer_response_store_test', 'ninfer_session_checkpoint_store_test', 'ninfer_http_contract_test')
@@ -481,9 +482,14 @@ try {
     foreach ($gate in @($protocol, $longContext, $checkpointRestart, $performance)) {
         $gate.evidence_platform = 'native-windows-rtx3090-package'
     }
+    $remoteNative.evidence_platform = 'native-windows-rtx3090-build'
+    $remoteNative.operating_system = 'Windows test fixture'
+    $remoteNative.pod_deleted = $false
+    $remoteNative.hourly_price_usd = 0
     $nativeWindowsPassed = New-NInferQualificationReceipt @receiptArguments
     Assert-Equal ([string]$nativeWindowsPassed.status) 'passed' 'constructor rejected exact native-Windows package evidence'
     Assert-Equal ([string]$nativeWindowsPassed.qualification.checkpoint_process_restart.evidence_platform) 'native-windows-rtx3090-package' 'constructor lost native-Windows restart evidence scope'
+    Assert-Equal ([string]$nativeWindowsPassed.qualification.remote_linux_sm86_native.evidence_platform) 'native-windows-rtx3090-build' 'constructor lost native-Windows contract evidence scope'
 
     $candidate | Add-Member -NotePropertyName api_key -NotePropertyValue 'must-not-appear'
     $credentialPropertyRejected = $false

@@ -243,6 +243,7 @@ function New-NInferQualificationReceipt {
     $remoteNativeStatus = Get-NInferQualificationStatus $RemoteNative 'remote_linux_sm86_native'
     $remoteNativeReceipt = [ordered]@{
         status = $remoteNativeStatus
+        evidence_platform = [string](Get-NInferQualificationProperty $RemoteNative 'evidence_platform' 'remote_linux_sm86_native')
         source_commit = Get-NInferQualificationGitSha $RemoteNative 'source_commit' 'remote_linux_sm86_native'
         gpu = [string](Get-NInferQualificationProperty $RemoteNative 'gpu' 'remote_linux_sm86_native')
         vram_mib = [int](Get-NInferQualificationProperty $RemoteNative 'vram_mib' 'remote_linux_sm86_native')
@@ -262,9 +263,15 @@ function New-NInferQualificationReceipt {
          [string]::IsNullOrWhiteSpace($remoteNativeReceipt.operating_system) -or
          $remoteNativeReceipt.cuda_architecture -cne 'sm_86' -or
          [string]::Join(',', @($remoteNativeReceipt.focused_tests | Sort-Object)) -cne 'ninfer_http_contract_test,ninfer_response_store_test,ninfer_session_checkpoint_store_test' -or
-         -not $remoteNativeReceipt.pod_deleted -or
-         $remoteNativeReceipt.hourly_price_usd -gt 0.70)) {
-        throw 'remote_linux_sm86_native does not bind the authorized ephemeral RTX 3090 lane'
+         $remoteNativeReceipt.evidence_platform -cnotin @('remote-linux-rtx3090-runtime', 'native-windows-rtx3090-build'))) {
+        throw 'remote_linux_sm86_native does not bind an accepted exact RTX 3090 contract lane'
+    }
+    if ($remoteNativeStatus -ceq 'passed' -and
+        (($remoteNativeReceipt.evidence_platform -ceq 'remote-linux-rtx3090-runtime' -and
+          (-not $remoteNativeReceipt.pod_deleted -or $remoteNativeReceipt.hourly_price_usd -gt 0.70)) -or
+         ($remoteNativeReceipt.evidence_platform -ceq 'native-windows-rtx3090-build' -and
+          ($remoteNativeReceipt.pod_deleted -or $remoteNativeReceipt.hourly_price_usd -ne 0)))) {
+        throw 'remote_linux_sm86_native lifecycle fields do not match its evidence platform'
     }
 
     $longContextStatus = Get-NInferQualificationStatus $LongContext 'long_context_64k'
