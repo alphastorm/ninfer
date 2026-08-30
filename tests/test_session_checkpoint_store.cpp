@@ -6,8 +6,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <condition_variable>
+#include <cstdio>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -1418,6 +1422,23 @@ int test_load_scan_failure_does_not_deadlock() {
 } // namespace
 
 int main(int argc, char** argv) {
+    std::set_terminate([] {
+        std::fputs("std::terminate invoked by checkpoint store test\n", stderr);
+        std::fflush(stderr);
+        std::abort();
+    });
+#if defined(_WIN32)
+    _set_invalid_parameter_handler(
+        [](const wchar_t* expression, const wchar_t* function, const wchar_t* file,
+           unsigned int line, uintptr_t) {
+            std::fwprintf(stderr, L"invalid CRT parameter: %ls function=%ls file=%ls line=%u\n",
+                          expression != nullptr ? expression : L"",
+                          function != nullptr ? function : L"", file != nullptr ? file : L"",
+                          line);
+            std::fflush(stderr);
+            std::abort();
+        });
+#endif
     if (argc > 2) {
         std::cerr << "usage: " << argv[0] << " [test-name]\n";
         return 2;
