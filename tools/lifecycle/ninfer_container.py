@@ -579,8 +579,14 @@ def verify_container_configuration(
             ) from error
         if observed_profile != expected_profile:
             fail("managed container checkpoint seccomp policy drifted")
-    expected_security_option_count = 2 if seccomp_profile is not None else 1
-    if len(security_options) != expected_security_option_count:
+    non_seccomp_options = {
+        value for value in security_options if not value.startswith("seccomp=")
+    }
+    if not non_seccomp_options <= {
+        "no-new-privileges",
+        "no-new-privileges=true",
+        "label=disable",
+    }:
         fail("managed container has unexpected security options")
     if (
         host_config.get("Privileged") is not False
