@@ -1,4 +1,7 @@
 #include "serve/generation_service.h"
+#if defined(_WIN32)
+#    include "runtime/windows/direct_storage_checkpoint_read_queue.h"
+#endif
 
 #include "product/media_acquire/acquire.h"
 #include "runtime/engine/checkpoint_engine_access.h"
@@ -319,6 +322,11 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
         client_session_locks_  = std::make_shared<ClientSessionLocks>();
     }
     if (!options_.session_checkpoint_root.empty()) {
+        std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue;
+#if defined(_WIN32)
+        read_queue = runtime::windows::make_direct_storage_checkpoint_read_queue(
+            options_.session_checkpoint_root, 30'000);
+#endif
         nlohmann::json fingerprint = session_checkpoint_runtime_fingerprint(
             options_, engine_->options(), engine_->load_summary(), engine_->memory_summary(),
             ninfer::build_info());
@@ -344,6 +352,7 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
                 .root = options_.session_checkpoint_root,
                 .disk_quota_bytes = options_.session_checkpoint_quota_bytes,
                 .staging_bytes = options_.session_checkpoint_staging_bytes,
+                .read_queue = std::move(read_queue),
                 .tombstone_cleanup = {},
             },
             std::move(fingerprint), session_tenant_sha256_, std::move(checkpoint_engine));
