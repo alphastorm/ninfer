@@ -215,7 +215,7 @@ if(WIN32)
   ninfer_add_test(ninfer_direct_storage_checkpoint_read_queue_windows_test
     SOURCES test_direct_storage_checkpoint_read_queue_windows.cpp
             ${PROJECT_SOURCE_DIR}/src/runtime/windows/direct_storage_checkpoint_read_queue.cpp
-    LIBRARIES ninfer_directstorage ${NINFER_CUDART_TARGET} d3d12 dxgi)
+    LIBRARIES ninfer_core ninfer_directstorage ${NINFER_CUDART_TARGET} d3d12 dxgi)
   set_tests_properties(ninfer_direct_storage_checkpoint_read_queue_windows_test
     PROPERTIES SKIP_RETURN_CODE 77)
 endif()

@@ -2,6 +2,7 @@
 #    error "This test requires native Windows"
 #endif
 
+#include "core/direct_storage_engine.h"
 #include "runtime/windows/direct_storage_checkpoint_read_queue.h"
 
 #include <windows.h>
@@ -63,6 +64,11 @@ int main() {
         .write(reinterpret_cast<const char*>(expected.data()), expected.size());
 
     std::shared_ptr<ContinuationCheckpointReadQueue> queue;
+    if (!ninfer::core::DirectStorageEngine::instance().available()) {
+        std::filesystem::remove_all(base);
+        std::cout << "SKIP: legacy DirectStorage engine is unavailable\n";
+        return 77;
+    }
     try {
         queue = make_direct_storage_checkpoint_read_queue(
             std::filesystem::path(root.native() + L"\\"), 30'000);

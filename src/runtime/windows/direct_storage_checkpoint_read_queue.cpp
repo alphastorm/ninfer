@@ -9,6 +9,7 @@
 #    include <d3d12.h>
 #    include <dxgi1_6.h>
 #    include <dstorage.h>
+#    include <dstorageerr.h>
 #    include <windows.h>
 #    include <wrl/client.h>
 
@@ -285,8 +286,12 @@ public:
         require_hresult(DStorageGetFactory(IID_PPV_ARGS(&state_->factory)),
                         "Windows DirectStorage 1.3 factory is unavailable");
         state_->factory->SetDebugFlags(DSTORAGE_DEBUG_SHOW_ERRORS);
-        require_hresult(state_->factory->SetStagingBufferSize(DSTORAGE_STAGING_BUFFER_SIZE_32MB),
-                        "failed to configure the DirectStorage staging buffer");
+        const HRESULT staging_result =
+            state_->factory->SetStagingBufferSize(DSTORAGE_STAGING_BUFFER_SIZE_32MB);
+        if (FAILED(staging_result) && staging_result != E_DSTORAGE_STAGING_BUFFER_LOCKED) {
+            require_hresult(staging_result,
+                            "failed to configure the DirectStorage staging buffer");
+        }
 
         DSTORAGE_QUEUE_DESC queue_desc{};
         queue_desc.SourceType = DSTORAGE_REQUEST_SOURCE_FILE;
