@@ -780,21 +780,6 @@ void HttpServer::handle_checkpoint_delete(const httplib::Request& req, httplib::
     }
 }
 
-void HttpServer::handle_status(const httplib::Request&, httplib::Response& res) const {
-    if (service_ == nullptr) {
-        res.status = 503;
-        res.set_content(nlohmann::json{{"artifact_type", "ninfer_server_status"},
-                                       {"schema_version", 1},
-                                       {"status", "starting"}}
-                            .dump(),
-                        "application/json");
-        return;
-    }
-    res.set_content(format_status_json(options_, public_model_id_, status_load_, status_memory_,
-                                       service_->runtime_stats()),
-                    "application/json");
-}
-
 bool HttpServer::bind() { return server_.bind_to_port(options_.host, options_.port); }
 
 void HttpServer::attach(GenerationService& service) {
