@@ -255,16 +255,28 @@ std::optional<runtime::ContinuationCheckpointStats>
 runtime::CheckpointEngineAccess::checkpoint_session(
     Engine& engine, const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
     std::string_view checkpoint_tag, runtime::ContinuationCheckpointWriter& writer,
-    std::size_t staging_bytes) {
-    if (engine.impl_ == nullptr || checkpoint_tag.empty() || staging_bytes == 0) {
+    std::size_t staging_bytes, runtime::SessionCheckpointSkipDetail* skip) {
+    if (checkpoint_tag.empty()) {
+        if (skip != nullptr) { skip->reason = runtime::SessionCheckpointSkipReason::EmptyTag; }
+        return std::nullopt;
+    }
+    if (engine.impl_ == nullptr || staging_bytes == 0) {
+        if (skip != nullptr) {
+            skip->reason = runtime::SessionCheckpointSkipReason::CacheDisabled;
+        }
         return std::nullopt;
     }
     return std::visit(
         [&](auto& executor) -> std::optional<runtime::ContinuationCheckpointStats> {
             using Executor = std::remove_cvref_t<decltype(executor)>;
             if constexpr (std::is_same_v<Executor, std::monostate>) {
+                if (skip != nullptr) {
+                    skip->reason = runtime::SessionCheckpointSkipReason::CacheDisabled;
+                }
                 return std::nullopt;
             } else {
+                // Deeper executor gates on this engine do not name their refusal yet; the
+                // reason remains whatever the caller preset (None renders as "unknown").
                 return executor->checkpoint_session(checkpoint_namespace, checkpoint_tag, writer,
                                                     staging_bytes);
             }

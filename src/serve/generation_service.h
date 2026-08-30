@@ -117,7 +117,8 @@ public:
     [[nodiscard]] bool checkpoint_enabled() const noexcept;
     [[nodiscard]] SessionCheckpointSaveOutcome
     save_checkpoint(std::string_view session_sha256, std::string_view required_response_id,
-                    ResponseStore& responses);
+                    ResponseStore& responses,
+                    runtime::SessionCheckpointSkipDetail* skip = nullptr);
     [[nodiscard]] SessionCheckpointRestoreState
     restore_checkpoint(std::string_view session_sha256, std::string_view required_response_id,
                        ResponseStore& responses);

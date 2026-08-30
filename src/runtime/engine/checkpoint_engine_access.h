@@ -26,7 +26,7 @@ public:
     checkpoint_session(Engine& engine,
                        const AuthenticatedCheckpointNamespace& checkpoint_namespace,
                        std::string_view checkpoint_tag, ContinuationCheckpointWriter& writer,
-                       std::size_t staging_bytes);
+                       std::size_t staging_bytes, SessionCheckpointSkipDetail* skip = nullptr);
 
     [[nodiscard]] static std::optional<ContinuationCheckpointStats>
     restore_session(Engine& engine,
