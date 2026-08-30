@@ -20,7 +20,15 @@ AutomaticCheckpointQueue::enqueue(std::string session_digest) noexcept {
     if (session_digest.empty()) { return AutomaticCheckpointEnqueueResult::Dropped; }
     try {
         std::lock_guard lock(mutex_);
-        if (!accepting_ || queue_.size() >= max_pending_) {
+        if (!accepting_) { return AutomaticCheckpointEnqueueResult::Dropped; }
+        // Dedup before the capacity gate: a session already queued (its save not
+        // yet started) coalesces truthfully even when the queue is full, because
+        // that queued save snapshots state at execution time and will include
+        // this turn (review CR-20260830 GrokR2).
+        if (pending_.contains(session_digest)) {
+            return AutomaticCheckpointEnqueueResult::Coalesced;
+        }
+        if (queue_.size() >= max_pending_) {
             return AutomaticCheckpointEnqueueResult::Dropped;
         }
         const auto [pending, inserted] = pending_.insert(session_digest);
