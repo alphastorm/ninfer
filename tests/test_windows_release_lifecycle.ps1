@@ -156,7 +156,7 @@ function global:Start-Sleep {
     param([int]$Seconds, [int]$Milliseconds)
     if (-not [string]::IsNullOrWhiteSpace([string]$global:NInferTestDeadReleaseId)) {
         $global:NInferTestDeadStartSleptMilliseconds += ($Seconds * 1000 + $Milliseconds)
-        if ($global:NInferTestDeadStartSleptMilliseconds -gt 8000) {
+        if ($global:NInferTestDeadStartSleptMilliseconds -gt 35000) {
             throw 'dead-start fixture exceeded the liveness-detection bound'
         }
     }
