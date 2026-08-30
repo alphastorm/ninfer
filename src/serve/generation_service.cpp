@@ -249,7 +249,7 @@ void verify_declared_artifact_digest(const std::string& artifact_path,
         throw std::invalid_argument("model artifact is unreadable for identity verification: " +
                                     artifact_path);
     }
-    core::Sha256 hasher;
+    ninfer::crypto::Sha256 hasher;
     std::vector<std::byte> buffer(1 << 20);
     while (input) {
         input.read(reinterpret_cast<char*>(buffer.data()),
@@ -264,7 +264,7 @@ void verify_declared_artifact_digest(const std::string& artifact_path,
         throw std::invalid_argument("model artifact read failed during identity verification: " +
                                     artifact_path);
     }
-    const std::string actual = core::sha256_hex(hasher.finish());
+    const std::string actual = ninfer::crypto::sha256_hex(hasher.finish());
     if (actual != declared_sha256) {
         throw std::invalid_argument(
             "model artifact bytes do not match the declared model_artifact_sha256 identity");
