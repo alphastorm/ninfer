@@ -4,6 +4,7 @@ import hashlib
 import contextlib
 import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import subprocess
@@ -206,6 +207,10 @@ class LifecycleConfigTests(unittest.TestCase):
                 mock.patch(
                     "tools.lifecycle.ninfer_container.verify_container_configuration"
                 ),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.identity_from_labels",
+                    return_value=identity,
+                ),
                 mock.patch("tools.lifecycle.ninfer_container.wait_for_health"),
                 mock.patch(
                     "tools.lifecycle.ninfer_container.fetch_status", return_value={}
@@ -218,6 +223,11 @@ class LifecycleConfigTests(unittest.TestCase):
             command = docker_mock.call_args.args[0]
             self.assertIn(f"{root / 'checkpoints'}:/checkpoints", command)
             self.assertIn("no-new-privileges=true", command)
+            self.assertEqual(command[command.index("--cap-drop") + 1], "ALL")
+            self.assertEqual(
+                command[command.index("--user") + 1],
+                f"{os.geteuid()}:{os.getegid()}",
+            )
             self.assertNotIn("/bin/sh", command)
             self.assertNotIn("mounted-secret", command)
             api_key_option = command.index("--api-key-file")
@@ -265,7 +275,9 @@ class LifecycleConfigTests(unittest.TestCase):
                     LifecycleError, "exited or restarted before becoming healthy"
                 ):
                     wait_for_health(config, 10)
-            diagnostic = logs_dir / "startup-failure.log"
+            diagnostics = list(logs_dir.glob("startup-failure-*.log"))
+            self.assertEqual(len(diagnostics), 1)
+            diagnostic = diagnostics[0]
             self.assertEqual(
                 diagnostic.read_text(encoding="utf-8"),
                 "[error] io_uring_setup: Operation not permitted\n",
@@ -317,16 +329,43 @@ class LifecycleConfigTests(unittest.TestCase):
             root = Path(directory).resolve()
             target = root / "target"
             target.mkdir()
+            original_mode = target.stat().st_mode & 0o777
             link = root / "link"
             link.symlink_to(target, target_is_directory=True)
             with self.assertRaisesRegex(LifecycleError, "symlink"):
                 prepare_private_bind_directory(link, "checkpoint_dir")
+            self.assertEqual(target.stat().st_mode & 0o777, original_mode)
 
             writable = root / "writable"
             writable.mkdir(mode=0o777)
             writable.chmod(0o777)
             with self.assertRaisesRegex(LifecycleError, "externally writable"):
                 prepare_private_bind_directory(writable / "child", "request_log_dir")
+
+    def test_binary_measurement_rejects_image_symlink(self) -> None:
+        container_id = "b" * 64
+        created = subprocess.CompletedProcess(
+            args=["docker", "create"],
+            returncode=0,
+            stdout=container_id + "\n",
+            stderr="",
+        )
+
+        def host_command(
+            arguments: list[str], **_: object
+        ) -> subprocess.CompletedProcess[str]:
+            if arguments[:2] == ["docker", "cp"]:
+                Path(arguments[-1]).symlink_to("/etc/hosts")
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+
+        with (
+            mock.patch("tools.lifecycle.ninfer_container.docker", return_value=created),
+            mock.patch(
+                "tools.lifecycle.ninfer_container.run", side_effect=host_command
+            ),
+        ):
+            with self.assertRaisesRegex(LifecycleError, "regular file"):
+                image_binary_sha256("ninfer:symlink")
 
     def test_start_cleans_container_created_before_run_failure(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -413,20 +452,31 @@ class LifecycleConfigTests(unittest.TestCase):
                 )
             )
             seccomp = checkpoint_seccomp_profile(config)
+            seccomp_json = json.dumps(
+                json.loads(seccomp.read_text(encoding="utf-8")),
+                separators=(",", ":"),
+            )
             inspected = {
                 "HostConfig": {
                     "RestartPolicy": {"Name": "no"},
+                    "Privileged": False,
+                    "CapAdd": None,
+                    "CapDrop": ["ALL"],
+                    "IpcMode": "host",
+                    "PidMode": "",
                     "SecurityOpt": [
                         "no-new-privileges=true",
-                        f"seccomp={seccomp}",
+                        f"seccomp={seccomp_json}",
                     ],
                 },
                 "Config": {
+                    "User": f"{os.geteuid()}:{os.getegid()}",
+                    "Cmd": ["/usr/local/bin/ninfer-serve", "/models/model.ninfer"],
                     "Labels": {
                         "org.ninfer.checkpoint-seccomp-sha256": (
                             "3b7bf1e9fa71bfd8ed536c8aaaa2d40e4f133a0c853d226efd9b9e4966dd1506"
                         )
-                    }
+                    },
                 },
                 "Mounts": [
                     {

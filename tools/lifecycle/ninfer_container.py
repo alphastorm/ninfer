@@ -11,7 +11,9 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -390,6 +392,9 @@ def image_binary_sha256(image: str) -> str:
                     os.fspath(destination),
                 ]
             )
+            metadata = destination.lstat()
+            if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+                fail("image binary measurement did not produce a regular file")
             return sha256_file(destination)
     finally:
         run(["docker", "rm", "--force", container_id], check=False)
@@ -415,6 +420,8 @@ def validate_bind_path(path: Path, field: str, *, directory: bool) -> None:
                     fail(f"{field} must name a regular file")
             elif not stat.S_ISDIR(metadata.st_mode):
                 fail(f"{field} ancestor must be a directory")
+            if metadata.st_uid not in {0, os.geteuid()}:
+                fail(f"{field} must have only root- or lifecycle-owned path components")
             if metadata.st_mode & 0o022:
                 fail(f"{field} must not have externally writable path components")
     except OSError as error:
@@ -422,13 +429,30 @@ def validate_bind_path(path: Path, field: str, *, directory: bool) -> None:
 
 
 def prepare_private_bind_directory(path: Path, field: str) -> None:
+    if path.exists() or path.is_symlink():
+        validate_bind_path(path, field, directory=True)
+    else:
+        ancestor = path.parent
+        while not ancestor.exists() and not ancestor.is_symlink():
+            ancestor = ancestor.parent
+        validate_bind_path(ancestor, f"{field} ancestor", directory=True)
+        try:
+            path.mkdir(mode=0o700, parents=True)
+        except OSError as error:
+            raise LifecycleError(f"failed to create {field}") from error
+        validate_bind_path(path, field, directory=True)
     try:
-        path.mkdir(parents=True, exist_ok=True)
-        path.chmod(0o700)
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
+        try:
+            os.fchmod(descriptor, 0o700)
+        finally:
+            os.close(descriptor)
     except OSError as error:
         raise LifecycleError(f"failed to prepare {field}") from error
     validate_bind_path(path, field, directory=True)
-    if path.stat().st_uid != os.geteuid():
+    if path.lstat().st_uid != os.geteuid():
         fail(f"{field} must be owned by the lifecycle user")
 
 
@@ -538,11 +562,36 @@ def verify_container_configuration(
     if "seccomp=unconfined" in security_options:
         fail("managed container disabled seccomp")
     seccomp_profile = checkpoint_seccomp_profile(config)
+    seccomp_options = [
+        value for value in security_options if value.startswith("seccomp=")
+    ]
+    if seccomp_profile is not None:
+        try:
+            expected_profile = json.loads(seccomp_profile.read_text(encoding="utf-8"))
+            observed_profile = (
+                json.loads(seccomp_options[0].removeprefix("seccomp="))
+                if len(seccomp_options) == 1
+                else None
+            )
+        except (OSError, json.JSONDecodeError) as error:
+            raise LifecycleError(
+                "failed to verify managed container seccomp policy"
+            ) from error
+        if observed_profile != expected_profile:
+            fail("managed container checkpoint seccomp policy drifted")
+    expected_security_option_count = 2 if seccomp_profile is not None else 1
+    if len(security_options) != expected_security_option_count:
+        fail("managed container has unexpected security options")
     if (
-        seccomp_profile is not None
-        and f"seccomp={seccomp_profile}" not in security_options
+        host_config.get("Privileged") is not False
+        or host_config.get("CapAdd")
+        or "ALL" not in (host_config.get("CapDrop") or [])
+        or host_config.get("IpcMode") != "host"
+        or host_config.get("PidMode") not in {"", None}
     ):
-        fail("managed container checkpoint seccomp policy drifted")
+        fail("managed container privilege configuration drifted")
+    if inspected.get("Config", {}).get("User") != f"{os.geteuid()}:{os.getegid()}":
+        fail("managed container user identity drifted")
 
     labels = inspected.get("Config", {}).get("Labels") or {}
     expected_seccomp = (
@@ -577,6 +626,15 @@ def verify_container_configuration(
                 fail("managed container mount source drifted")
         except OSError as error:
             raise LifecycleError("failed to verify managed container mount") from error
+    if set(mounts) != {destination for destination, _, _ in expected_mounts}:
+        fail("managed container has unexpected mounts")
+    command = inspected.get("Config", {}).get("Cmd") or []
+    if (
+        not command
+        or command[0] != "/usr/local/bin/ninfer-serve"
+        or "/bin/sh" in command
+    ):
+        fail("managed container command drifted")
 
 
 def require_gpu_idle() -> None:
@@ -683,10 +741,23 @@ def capture_startup_failure_logs(config: RuntimeConfig) -> None:
     secret = read_api_key(config.api_key_file)
     if secret:
         content = content.replace(secret, "<redacted>")
+    name = f"startup-failure-{time.time_ns()}-{secrets.token_hex(8)}.log"
     try:
-        path = config.request_log_dir / "startup-failure.log"
-        path.write_text(content, encoding="utf-8")
-        path.chmod(0o600)
+        directory = os.open(
+            config.request_log_dir,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+        )
+        try:
+            descriptor = os.open(
+                name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=directory,
+            )
+        finally:
+            os.close(directory)
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(content)
     except OSError as error:
         raise LifecycleError("failed to preserve startup diagnostics") from error
 
@@ -889,6 +960,10 @@ def command_start(args: argparse.Namespace) -> None:
         config.container,
         "--gpus",
         "all",
+        "--user",
+        f"{os.geteuid()}:{os.getegid()}",
+        "--cap-drop",
+        "ALL",
         "--ipc",
         "host",
         "--security-opt",
@@ -951,6 +1026,8 @@ def command_start(args: argparse.Namespace) -> None:
         container_id = docker(command).stdout.strip()
         inspected = require_managed_container(config)
         verify_container_configuration(config, inspected)
+        if identity_from_labels(inspected) != identity:
+            fail("created container identity differs from the measured candidate")
         wait_for_health(config, args.timeout)
         status = fetch_status(config)
         verify_status(config, identity, status)
@@ -991,7 +1068,10 @@ def command_status(args: argparse.Namespace) -> None:
     inspected = require_managed_container(config)
     verify_container_configuration(config, inspected)
     identity = identity_from_labels(inspected)
-    verify_expected(identity, parse_expected(args))
+    measured = measure_runtime(config)
+    verify_expected(measured, parse_expected(args))
+    if identity != measured:
+        fail("managed container identity differs from current trusted measurements")
     value = fetch_status(config)
     verify_status(config, identity, value)
     print(json.dumps(value, sort_keys=True))
@@ -1088,11 +1168,20 @@ def create_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def raise_keyboard_interrupt(_signal: int, _frame: object) -> None:
+    raise KeyboardInterrupt
+
+
 def main() -> int:
     parser = create_parser()
     args = parser.parse_args()
+    signal.signal(signal.SIGTERM, raise_keyboard_interrupt)
+    if hasattr(signal, "SIGHUP"):
+        signal.signal(signal.SIGHUP, raise_keyboard_interrupt)
     try:
         args.handler(args)
+    except KeyboardInterrupt:
+        return 130
     except (LifecycleError, UnicodeDecodeError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

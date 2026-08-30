@@ -776,14 +776,19 @@ creates it with mode `0700`, mounts it at `/checkpoints`, and owns the correspon
 a repository-owned seccomp profile based on Moby `moby/profiles` commit
 `b7711bef4ad769a13fd40fe1ba710ad0f796fcfd`: Docker's default allowlist plus only
 `io_uring_setup`, `io_uring_enter`, and `io_uring_register` on `amd64`. The lifecycle verifies the
-profile SHA-256 before start and never disables seccomp. The API-key value is read from a
+profile SHA-256 before start and never disables seccomp. Bind-source paths must contain no
+symlinks, externally writable components, or owners other than root and the lifecycle user. The
+container runs as that user with all Linux capabilities dropped and `no-new-privileges` enabled.
+The API-key value is read from a
 read-only secret mount and supplied to NInfer by the mounted file path; the value is not placed in
 Docker or process argv, labels, receipts, or the canonical configuration identity.
 `restart_policy` defaults to `no`; use `unless-stopped` only for a promoted appliance that Docker
-must restart with its daemon. `start` applies the declared policy, and `status` rejects restart,
-mount, and security-option drift. The canonical configuration SHA-256 covers model ID, deployment
-profile, bind address and port, API-auth presence, request-log presence, checkpoint mount target and
-seccomp SHA-256, restart policy, and ordered server args. Binary and model bytes have separate
+must restart with its daemon. `start` applies the declared policy, and `status` independently
+remeasures image, binary, model, and configuration identity while rejecting restart, mount,
+command, user, capability, and security-option drift. The canonical configuration SHA-256 covers
+model ID, deployment profile, bind address and port, API-auth presence, request-log presence,
+checkpoint mount target and seccomp SHA-256, restart policy, and ordered server args. Binary and
+model bytes have separate
 SHA-256 identities.
 
 ```bash
