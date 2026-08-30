@@ -1,9 +1,6 @@
 #include "serve/session_checkpoint_store.h"
 
 #include "core/sha256.h"
-#if defined(_WIN32)
-#    include "runtime/windows/direct_storage_checkpoint_read_queue.h"
-#endif
 
 #include <algorithm>
 #include <array>
@@ -1029,11 +1026,7 @@ SessionCheckpointStore::SessionCheckpointStore(SessionCheckpointStoreOptions opt
         throw std::invalid_argument("checkpoint store options must be positive");
     }
 #if defined(_WIN32)
-    if (!options_.read_queue) {
-        options_.read_queue = runtime::windows::make_direct_storage_checkpoint_read_queue(
-            options_.root, options_.io_timeout_ms);
-    }
-    if (!options_.read_queue->available()) {
+    if (!options_.read_queue || !options_.read_queue->available()) {
         throw std::runtime_error("DirectStorage checkpoint read queue is unavailable");
     }
 #endif

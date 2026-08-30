@@ -52,6 +52,35 @@ public:
     std::filesystem::path path;
 };
 
+class TestReadQueue final : public runtime::ContinuationCheckpointReadQueue {
+public:
+    class Completion final : public runtime::ContinuationCheckpointReadCompletion {
+    public:
+        void wait() override {}
+    };
+
+    [[nodiscard]] bool available() const noexcept override { return true; }
+    [[nodiscard]] std::string_view backend_name() const noexcept override { return "test-queue"; }
+    [[nodiscard]] std::string_view unavailable_reason() const noexcept override { return {}; }
+
+    [[nodiscard]] std::unique_ptr<runtime::ContinuationCheckpointReadCompletion>
+    submit(const std::filesystem::path& path,
+           std::span<const runtime::ContinuationCheckpointReadRequest> requests) override {
+        for (const runtime::ContinuationCheckpointReadRequest& request : requests) {
+            std::ifstream input(path, std::ios::binary);
+            input.seekg(static_cast<std::streamoff>(request.file_offset));
+            input.read(reinterpret_cast<char*>(request.destination.data()),
+                       static_cast<std::streamsize>(request.destination.size()));
+            if (!input ||
+                input.gcount() != static_cast<std::streamsize>(request.destination.size())) {
+                throw std::runtime_error(
+                    "test checkpoint queue could not read the requested range");
+            }
+        }
+        return std::make_unique<Completion>();
+    }
+};
+
 ChatTurn rich_turn() {
     ChatTurn turn;
     turn.role = "assistant";
@@ -253,6 +282,7 @@ SessionCheckpointStoreOptions manager_options(const std::filesystem::path& root)
     return {.root = root,
             .disk_quota_bytes = 8ULL << 20,
             .staging_bytes = 1ULL << 20,
+            .read_queue = std::make_shared<TestReadQueue>(),
             .tombstone_cleanup = {}};
 }
 
@@ -431,6 +461,7 @@ int test_transaction_restart_compatibility_and_corruption() {
     SessionCheckpointStore store({.root = temporary.path,
                                   .disk_quota_bytes = 8ULL << 20,
                                   .staging_bytes = 4ULL << 10,
+                                  .read_queue = std::make_shared<TestReadQueue>(),
                                   .tombstone_cleanup = {}});
     const auto exporter = [&](ContinuationCheckpointWriter& writer)
         -> std::optional<ContinuationCheckpointStats> {
@@ -469,6 +500,7 @@ int test_transaction_restart_compatibility_and_corruption() {
     SessionCheckpointStore restarted({.root = temporary.path,
                                       .disk_quota_bytes = 8ULL << 20,
                                       .staging_bytes = 4ULL << 10,
+                                      .read_queue = std::make_shared<TestReadQueue>(),
                                       .tombstone_cleanup = {}});
     SessionCheckpointLoadResult loaded = restarted.load(
         checkpoint_namespace(responses), fingerprint(), responses.latest_response_id);
@@ -1151,6 +1183,7 @@ int test_active_reader_delete_and_gc() {
         {.root = temporary.path,
          .disk_quota_bytes = 64ULL << 10,
          .staging_bytes = 1ULL << 20,
+         .read_queue = std::make_shared<TestReadQueue>(),
          .tombstone_cleanup = [&](const std::filesystem::path& path) {
              if (refuse_cleanup) { return false; }
              std::error_code error;
@@ -1257,6 +1290,7 @@ int test_store_wide_quota_across_sessions() {
     SessionCheckpointStore measuring_store({.root = measurement.path,
                                             .disk_quota_bytes = 1ULL << 20,
                                             .staging_bytes = 1ULL << 20,
+                                            .read_queue = std::make_shared<TestReadQueue>(),
                                             .tombstone_cleanup = {}});
     const auto measured = measuring_store.save(checkpoint_namespace(first_session), first_session,
                                                fingerprint(), exporter);
@@ -1269,6 +1303,7 @@ int test_store_wide_quota_across_sessions() {
     SessionCheckpointStore store({.root = temporary.path,
                                   .disk_quota_bytes = quota,
                                   .staging_bytes = 1ULL << 20,
+                                  .read_queue = std::make_shared<TestReadQueue>(),
                                   .tombstone_cleanup = {}});
     const auto first =
         store.save(checkpoint_namespace(first_session), first_session, fingerprint(), exporter);
@@ -1302,6 +1337,7 @@ int test_store_wide_quota_across_sessions() {
     SessionCheckpointStore protected_store({.root = protected_temporary.path,
                                              .disk_quota_bytes = measured->bytes,
                                              .staging_bytes = 1ULL << 20,
+                                             .read_queue = std::make_shared<TestReadQueue>(),
                                              .tombstone_cleanup = {}});
     const auto protected_saved =
         protected_store.save(checkpoint_namespace(first_session), first_session, fingerprint(),
@@ -1326,6 +1362,7 @@ int test_store_wide_quota_across_sessions() {
         {.root = failure_temporary.path,
          .disk_quota_bytes = quota,
          .staging_bytes = 1ULL << 20,
+         .read_queue = std::make_shared<TestReadQueue>(),
          .tombstone_cleanup = [&](const std::filesystem::path& path) {
              if (refuse_cleanup) { return false; }
              std::error_code error;
@@ -1399,6 +1436,7 @@ int test_load_scan_failure_does_not_deadlock() {
         .root             = temporary.path,
         .disk_quota_bytes = 8ULL << 20,
         .staging_bytes    = 1ULL << 20,
+        .read_queue = std::make_shared<TestReadQueue>(),
         .generation_size  = [](const std::filesystem::path&) -> std::uint64_t {
             throw std::runtime_error("injected directory scan failure");
         },
