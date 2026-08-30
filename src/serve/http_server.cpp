@@ -1083,11 +1083,21 @@ void HttpServer::maybe_checkpoint_completed_turn(const std::optional<std::string
 void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noexcept {
     try {
         if (service_ != nullptr) {
+            runtime::SessionCheckpointSkipDetail skip;
             const bool saved =
-                service_->save_checkpoint(session_sha256, response_store_).has_value();
-            write_console_log(saved ? ConsoleLogLevel::Info : ConsoleLogLevel::Warning,
-                              saved ? "automatic session checkpoint saved"
-                                    : "automatic session checkpoint skipped: no complete endpoint");
+                service_->save_checkpoint(session_sha256, response_store_, &skip).has_value();
+            if (saved) {
+                write_console_log(ConsoleLogLevel::Info, "automatic session checkpoint saved");
+            } else {
+                std::string message = "automatic session checkpoint skipped: ";
+                message += runtime::session_checkpoint_skip_reason_name(skip.reason);
+                if (skip.reason == runtime::SessionCheckpointSkipReason::TagMismatch) {
+                    message += " (catalogued ";
+                    message += skip.catalogued_tag.empty() ? "<empty>" : skip.catalogued_tag;
+                    message += ")";
+                }
+                write_console_log(ConsoleLogLevel::Warning, message);
+            }
         }
     } catch (const std::exception& exception) {
         try {

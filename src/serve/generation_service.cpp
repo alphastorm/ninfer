@@ -527,17 +527,28 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
 bool GenerationService::checkpoint_enabled() const noexcept { return checkpoint_store_ != nullptr; }
 
 std::optional<SessionCheckpointSaveResult>
-GenerationService::save_checkpoint(std::string_view session_sha256, ResponseStore& responses) {
-    if (!checkpoint_store_) { return std::nullopt; }
+GenerationService::save_checkpoint(std::string_view session_sha256, ResponseStore& responses,
+                                   runtime::SessionCheckpointSkipDetail* skip) {
+    if (!checkpoint_store_) {
+        if (skip != nullptr) {
+            skip->reason = runtime::SessionCheckpointSkipReason::StoreDisabled;
+        }
+        return std::nullopt;
+    }
     std::lock_guard lock(checkpoint_mutex_);
     std::optional<ResponseStoreSnapshot> snapshot = responses.snapshot_session(session_sha256);
-    if (!snapshot) { return std::nullopt; }
+    if (!snapshot) {
+        if (skip != nullptr) {
+            skip->reason = runtime::SessionCheckpointSkipReason::NoSessionRecords;
+        }
+        return std::nullopt;
+    }
     const std::string checkpoint_tag = snapshot->latest_response_id;
     return checkpoint_store_->save(*snapshot, checkpoint_runtime_fingerprint_,
                                    [&](runtime::ContinuationCheckpointWriter& writer) {
                                        return runtime::CheckpointEngineAccess::checkpoint_session(
                                            *engine_, session_sha256, checkpoint_tag, writer,
-                                           checkpoint_store_->options().staging_bytes);
+                                           checkpoint_store_->options().staging_bytes, skip);
                                    });
 }
 

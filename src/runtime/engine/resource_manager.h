@@ -649,26 +649,38 @@ public:
     [[nodiscard]] std::optional<ContinuationCheckpointStats>
     checkpoint_session(Program& program, const CacheSessionKey& session,
                        std::string_view checkpoint_tag, ContinuationCheckpointWriter& writer,
-                       std::size_t staging_bytes) {
-        if (!cache_enabled_ || checkpoint_tag.empty() ||
-            !std::holds_alternative<std::monostate>(transaction_) ||
-            program.has_context_transaction()) {
+                       std::size_t staging_bytes, SessionCheckpointSkipDetail* skip = nullptr) {
+        const auto refuse = [&](SessionCheckpointSkipReason reason)
+            -> std::optional<ContinuationCheckpointStats> {
+            if (skip != nullptr) { skip->reason = reason; }
             return std::nullopt;
+        };
+        if (!cache_enabled_) { return refuse(SessionCheckpointSkipReason::CacheDisabled); }
+        if (checkpoint_tag.empty()) { return refuse(SessionCheckpointSkipReason::EmptyTag); }
+        if (!std::holds_alternative<std::monostate>(transaction_) ||
+            program.has_context_transaction()) {
+            return refuse(SessionCheckpointSkipReason::TransactionBusy);
         }
         const std::optional<std::size_t> cell = find_session_cell(session);
-        if (!cell) { return std::nullopt; }
+        if (!cell) { return refuse(SessionCheckpointSkipReason::SessionNotIndexed); }
         const SessionIndexEntry& binding = session_index_[*cell];
         if (binding.state != SessionIndexState::Occupied || binding.slot >= catalog_count_) {
-            return std::nullopt;
+            return refuse(SessionCheckpointSkipReason::IndexEntryInvalid);
         }
         const CatalogEntry& entry = catalog_[binding.slot];
         if (entry.state != CatalogState::Catalogued || !entry.handle ||
             entry.id != binding.owner_id || entry.revision != binding.revision ||
-            entry.session != std::optional<CacheSessionKey>(session) ||
-            entry.checkpoint_tag != checkpoint_tag) {
-            return std::nullopt;
+            entry.session != std::optional<CacheSessionKey>(session)) {
+            return refuse(SessionCheckpointSkipReason::CatalogIdentityDrift);
         }
-        return program.checkpoint_continuation(*entry.handle, writer, staging_bytes);
+        if (entry.checkpoint_tag != checkpoint_tag) {
+            if (skip != nullptr) { skip->catalogued_tag = entry.checkpoint_tag; }
+            return refuse(SessionCheckpointSkipReason::TagMismatch);
+        }
+        std::optional<ContinuationCheckpointStats> stats =
+            program.checkpoint_continuation(*entry.handle, writer, staging_bytes);
+        if (!stats) { return refuse(SessionCheckpointSkipReason::ProgramRejected); }
+        return stats;
     }
 
     [[nodiscard]] std::optional<ContinuationCheckpointStats> restore_session_checkpoint(

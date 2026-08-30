@@ -137,6 +137,18 @@ FakeCheckpointSummary long_anchor(std::uint32_t digest, std::uint32_t frontier,
     };
 }
 
+FakeCheckpointSummary replay_checkpoint(std::uint32_t digest, std::uint32_t frontier) {
+    return FakeCheckpointSummary{
+        .ref           = CheckpointRef{.kind     = CheckpointKind::ResponseReplay,
+                                       .frontier = frontier,
+                                       .ordinal  = 0},
+        .scope         = CheckpointScope::Private,
+        .shortlist_key = FakeShortlistKey{.digest = digest, .frontier = frontier},
+        .required_kv   = FakeRequiredKV{.main_pages = 1, .backend_pages = 0},
+        .rebuild_work  = PrefillWork{.tokens = frontier},
+    };
+}
+
 struct FakeContextCache {
     std::optional<FakeCacheSessionKey> session_key;
     RetentionClass retention  = RetentionClass::RecentPrivate;
@@ -761,7 +773,8 @@ public:
         }
         result.disposition      = FinishDisposition::Catalogued;
         const std::uint32_t key = sequence_content_keys_[sequence.id];
-        result.summary.endpoint = endpoint(key, finish_frontier);
+        if (!finish_omit_endpoint) { result.summary.endpoint = endpoint(key, finish_frontier); }
+        result.summary.rewrite = finish_rewrite;
         result.continuation.emplace(sequence.id, key);
         return result;
     }
@@ -824,6 +837,8 @@ public:
     bool progress_in_progress_once          = false;
     bool finish_fail_next                   = false;
     bool finish_release                     = false;
+    bool finish_omit_endpoint               = false;
+    std::optional<FakeCheckpointSummary> finish_rewrite;
     bool abort_capture_start                = false;
     ContextTransactionStatus capture_status = ContextTransactionStatus::Published;
     FakeCaptureAssessment capture_assessment;
@@ -1961,9 +1976,20 @@ void test_session_checkpoint_tag_and_restore_identity() {
     seed.cache.session_key     = FakeCacheSessionKey{77};
     const ActiveRequest active = start_active(source, source_program, 77, seed, 1, "resp_1");
     (void)finish_active(source, source_program, active);
+    ninfer::runtime::SessionCheckpointSkipDetail stale_skip;
     require(!source.checkpoint_session(source_program, FakeCacheSessionKey{77}, "resp_wrong",
-                                       writer, 1024),
+                                       writer, 1024, &stale_skip),
             "checkpoint accepted a stale response tag");
+    require(stale_skip.reason == ninfer::runtime::SessionCheckpointSkipReason::TagMismatch &&
+                stale_skip.catalogued_tag == "resp_1",
+            "stale tag refusal did not name the catalogued tag");
+    ninfer::runtime::SessionCheckpointSkipDetail unknown_skip;
+    require(!source.checkpoint_session(source_program, FakeCacheSessionKey{12345}, "resp_1",
+                                       writer, 1024, &unknown_skip),
+            "checkpoint accepted an unknown session");
+    require(unknown_skip.reason ==
+                ninfer::runtime::SessionCheckpointSkipReason::SessionNotIndexed,
+            "unknown session refusal did not name the missing index");
     const auto saved =
         source.checkpoint_session(source_program, FakeCacheSessionKey{77}, "resp_1", writer, 1024);
     require(saved && saved->restored_tokens == 16,
@@ -2007,6 +2033,82 @@ void test_session_checkpoint_tag_and_restore_identity() {
             "newer session publication did not supersede the restored response tag");
 }
 
+void test_replay_selected_successor_retags_session() {
+    class Writer final : public ninfer::runtime::ContinuationCheckpointWriter {
+    public:
+        bool write_file(std::string_view, std::uint64_t, std::uint64_t,
+                        std::span<const std::byte>) override {
+            return true;
+        }
+    } writer;
+
+    FakeProgram program;
+    FakeManager manager = make_manager(1, 2);
+
+    // Seed turn: catalogued continuation carries ONLY an interior response-replay checkpoint,
+    // so the successor can only reuse the session through the replay path.
+    program.finish_omit_endpoint = true;
+    program.finish_rewrite       = replay_checkpoint(77, 8);
+    FakeRequestBasePlan seed     = make_base(77);
+    seed.cache.session_key       = FakeCacheSessionKey{77};
+    const ActiveRequest first    = start_active(manager, program, 77, seed, 1, "resp_1");
+    (void)finish_active(manager, program, first);
+    require(manager
+                .checkpoint_session(program, FakeCacheSessionKey{77}, "resp_1", writer, 1024)
+                .has_value(),
+            "seed turn was not checkpointable under its own tag");
+
+    // Successor turn: same session, selected through the replay checkpoint.
+    program.finish_omit_endpoint  = false;
+    program.finish_rewrite        = replay_checkpoint(77, 8);
+    FakeRequestBasePlan successor = make_base(77);
+    successor.cache.session_key   = FakeCacheSessionKey{77};
+    auto inspection = manager.inspect(program, FakePreparedPrompt{77}, successor, 2, "resp_2");
+    require(inspection.choice.has_value(), "replay successor produced no admission choice");
+    require(inspection.choice->summary().prefix_reuse_path ==
+                ninfer::PrefixReusePath::PrivateResponseReplay,
+            "successor did not select the response-replay checkpoint");
+    const LaneId lane   = inspection.choice->destination();
+    const auto reserved = manager.reserve_materialization(program, std::move(*inspection.choice),
+                                                          FakePreparedPrompt{77}, {});
+    require(reserved == FakeManager::MaterializationReserveResult::Reserved,
+            "replay successor was not reserved");
+    auto outcome = [&]() -> FakeManager::MaterializationOutcome {
+        auto progress = manager.progress_context_transaction(program, {});
+        if (!std::holds_alternative<ContextTransactionInProgress>(progress)) {
+            return std::get<FakeManager::MaterializationOutcome>(std::move(progress));
+        }
+        auto completed = manager.progress_context_transaction(program, {});
+        return std::get<FakeManager::MaterializationOutcome>(std::move(completed));
+    }();
+    require(outcome.status == ContextTransactionStatus::Published && outcome.activation,
+            "replay successor did not publish");
+    auto activation = std::move(*outcome.activation);
+    const FakeSequenceHandle sequence = activation.sequence();
+    manager.adopt(program, std::move(activation));
+    program.finish_frontier = 32;
+    const FakeFinishResult finish = manager.finish(program, lane, sequence);
+    require(finish.status == ConsumeStatus::Consumed &&
+                finish.disposition == FinishDisposition::Catalogued,
+            "replay successor terminal continuation was not catalogued");
+
+    // The completed replay turn is the session's newest endpoint: the automatic checkpoint
+    // must be able to export it under the successor's tag.
+    ninfer::runtime::SessionCheckpointSkipDetail skip;
+    const auto saved = manager.checkpoint_session(program, FakeCacheSessionKey{77}, "resp_2",
+                                                  writer, 1024, &skip);
+    const std::string skip_message =
+        std::string("replay successor was not checkpointable under its tag (") +
+        std::string(ninfer::runtime::session_checkpoint_skip_reason_name(skip.reason)) + ")";
+    require(saved.has_value(), skip_message.c_str());
+    ninfer::runtime::SessionCheckpointSkipDetail stale;
+    require(!manager.checkpoint_session(program, FakeCacheSessionKey{77}, "resp_1", writer, 1024,
+                                        &stale) &&
+                stale.reason == ninfer::runtime::SessionCheckpointSkipReason::TagMismatch &&
+                stale.catalogued_tag == "resp_2",
+            "replay successor did not supersede the prior session tag");
+}
+
 } // namespace
 
 int main() {
@@ -2043,6 +2145,7 @@ int main() {
     run_test("shortlist exact verification",
              test_shortlist_collision_requires_program_exact_verification);
     run_test("session checkpoint identity", test_session_checkpoint_tag_and_restore_identity);
+    run_test("replay successor retags session", test_replay_selected_successor_retags_session);
     if (failures != 0) { return 1; }
     std::cout << "ok\n";
     return 0;
