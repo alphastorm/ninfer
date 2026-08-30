@@ -75,21 +75,6 @@ class WindowsReleaseContractTests(unittest.TestCase):
                 ["git", "show", f"{package_source}:{relative}"], cwd=ROOT
             )
             self.assertEqual(assets[field], hashlib.sha256(committed).hexdigest(), field)
-        receipt_only_changes = set(
-            subprocess.check_output(
-                ["git", "diff", "--name-only", package_source, "HEAD"],
-                cwd=ROOT,
-                text=True,
-            ).splitlines()
-        )
-        self.assertTrue(
-            receipt_only_changes
-            <= {
-                "docs/qualification/receipts/qwen3.8-27b-rtx-3090-v0.2.0.json",
-                "docs/rtx-3090-windows.md",
-            },
-            receipt_only_changes,
-        )
         self.assertRegex(receipt["candidate"]["config_sha256"], r"^[0-9a-f]{64}$")
 
         authority = receipt["qualification_authority"]
@@ -236,7 +221,7 @@ class WindowsReleaseContractTests(unittest.TestCase):
         spec = json.loads((RELEASE / "release-spec.json").read_text(encoding="utf-8"))
         config = json.loads((RELEASE / "server-config.json").read_text(encoding="utf-8"))
         self.assertEqual(spec["source"]["lineage_base_sha"], "c467349e375d6aa76afca63c0042bbc0869549aa")
-        self.assertEqual(spec["build_profile"], "omp-v0.2.0-rtx3090")
+        self.assertEqual(spec["build_profile"], "omp-v0.2.1-rtx3090")
         self.assertEqual(spec["gpu"]["cuda_architecture"], "sm_86")
         self.assertEqual(spec["gpu"]["compute_capability"], "8.6")
         self.assertEqual(

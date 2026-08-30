@@ -281,7 +281,7 @@ function New-FixturePackage(
         artifact_type = 'ninfer_windows_server_config'
         schema_version = 2
         release_id = $ReleaseName
-        deployment_profile = 'qwen38-3090-omp-v0.2.0-c1'
+        deployment_profile = 'qwen38-3090-omp-v0.2.1-beta.1-c1'
         listen = [ordered]@{
             host = '127.0.0.1'
             port = $Port
@@ -316,10 +316,10 @@ function New-FixturePackage(
         artifact_type = 'ninfer_windows_release_spec'
         schema_version = 2
         release_id = $ReleaseName
-        release_version = '0.2.0'
-        deployment_profile = 'qwen38-3090-omp-v0.2.0-c1'
-        build_profile = 'omp-v0.2.0-rtx3090'
-        platform = 'windows-x86_64-cuda12.8-rtx3090'
+        release_version = '0.2.1-beta.1'
+        deployment_profile = 'qwen38-3090-omp-v0.2.1-beta.1-c1'
+        build_profile = 'omp-v0.2.1-rtx3090'
+        platform = 'windows-x86_64-cuda13.3-rtx3090'
         source = [ordered]@{
             upstream_base_sha = ('1' * 40)
             lineage_base_sha = ('2' * 40)
@@ -356,16 +356,16 @@ function New-FixturePackage(
     $identity = [ordered]@{
         artifact_type = 'ninfer_release_build_identity'
         schema_version = 2
-        release_version = 'v0.2.0'
-        platform = 'windows-x86_64-cuda12.8-rtx3090'
+        release_version = 'v0.2.1-beta.1'
+        platform = 'windows-x86_64-cuda13.3-rtx3090'
         upstream_base_sha = ('1' * 40)
         lineage_base_sha = ('2' * 40)
         patch_stack_sha = $patchSha
-        build_profile = 'omp-v0.2.0-rtx3090'
+        build_profile = 'omp-v0.2.1-rtx3090'
         build_type = 'Release'
         cxx_compiler = 'fixture'
         cuda_compiler = 'fixture'
-        cuda_toolkit = '12.8'
+        cuda_toolkit = '13.3'
         cuda_architecture = '86'
         source_dirty = $false
         source_archive_sha256 = ('3' * 64)
@@ -606,21 +606,21 @@ $installerSource = Replace-Exactly $installerSource $modelIdentityGate @'
 '@ 'model identity gate'
 
 $immutableBuildGate = @'
-    if ([string]$Spec.build_profile -cne 'omp-v0.2.0-rtx3090' -or
+    if ([string]$Spec.build_profile -cne 'omp-v0.2.1-rtx3090' -or
         [string]$Spec.gpu.cuda_architecture -cne 'sm_86' -or
         [string]$Spec.source.lineage_base_sha -cne 'c467349e375d6aa76afca63c0042bbc0869549aa') {
         throw 'release specification immutable build identity mismatch'
     }
 '@
 $installerSource = Replace-Exactly $installerSource $immutableBuildGate @'
-    if ([string]$Spec.build_profile -cne 'omp-v0.2.0-rtx3090' -or
+    if ([string]$Spec.build_profile -cne 'omp-v0.2.1-rtx3090' -or
         [string]$Spec.gpu.cuda_architecture -cne 'sm_86') {
         throw 'instrumented release specification build identity mismatch'
     }
 '@ 'immutable build gate'
 
 $packageFilenameGate = @'
-    if ([IO.Path]::GetFileName($package) -cne 'ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.tar.gz') {
+    if ([IO.Path]::GetFileName($package) -cne 'ninfer-rtx3090-omp-v0.2.1-beta.1-windows-x86_64-cuda13.3-rtx3090.tar.gz') {
         throw 'unexpected release package filename'
     }
 '@
@@ -773,7 +773,7 @@ try {
     $baseReceiptText = $baseReceipt | ConvertTo-Json -Depth 20 -Compress
     $baseSecretValue = [IO.File]::ReadAllText($baseSecret.path)
     Assert-True (-not $baseReceiptText.Contains($baseSecretValue)) 'install receipt contains the API key'
-    Assert-Equal ([string]$baseReceipt.identity.build_profile) 'omp-v0.2.0-rtx3090' 'install receipt lost build profile'
+    Assert-Equal ([string]$baseReceipt.identity.build_profile) 'omp-v0.2.1-rtx3090' 'install receipt lost build profile'
     Assert-Equal ([string]$baseReceipt.identity.cuda_architecture) 'sm_86' 'install receipt lost CUDA architecture'
 
     $baseId = [string]$basePackage.instance_id

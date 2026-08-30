@@ -33,7 +33,7 @@ function Write-FakeBinary(
     [string]$UpstreamSha,
     [string]$ReleaseSha
 ) {
-    $identity = "$Program upstream_base_sha=$UpstreamSha patch_stack_sha=$ReleaseSha build_profile=omp-v0.2.0-rtx3090 build_type=Release cxx_compiler=fixture cuda_compiler=fixture cuda_toolkit=12.8 cuda_architecture=86 source_dirty=false"
+    $identity = "$Program upstream_base_sha=$UpstreamSha patch_stack_sha=$ReleaseSha build_profile=omp-v0.2.1-rtx3090 build_type=Release cxx_compiler=fixture cuda_compiler=fixture cuda_toolkit=13.3 cuda_architecture=86 source_dirty=false"
     if ([Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT) {
         $compiler = (Get-Command cl.exe -ErrorAction Stop).Source
         $sourcePath = [IO.Path]::ChangeExtension($Path, '.cpp')
@@ -67,7 +67,7 @@ try {
     $spec = Get-Content -LiteralPath $specPath -Raw | ConvertFrom-Json
     $config = Get-Content -LiteralPath $ServerConfigPath -Raw | ConvertFrom-Json
     Assert-Equal ([string]$spec.source.lineage_base_sha) 'c467349e375d6aa76afca63c0042bbc0869549aa' 'release spec lineage changed'
-    Assert-Equal ([string]$spec.build_profile) 'omp-v0.2.0-rtx3090' 'release build profile changed'
+    Assert-Equal ([string]$spec.build_profile) 'omp-v0.2.1-rtx3090' 'release build profile changed'
     Assert-Equal ([string]$spec.gpu.cuda_architecture) 'sm_86' 'release CUDA architecture changed'
     Assert-Equal ([string]$spec.model.revision) '18dfc887423fa5aabf3cb56fac41490e462b3fab' 'model revision changed'
     Assert-Equal ([Int64]$spec.model.bytes) 18210531328 'model byte identity changed'
@@ -196,7 +196,7 @@ try {
     Assert-True ($outerSumBytes.Length -gt 0 -and $outerSumBytes[-1] -eq 10) 'outer checksum manifest lacks a terminal LF'
     Assert-True (-not ($outerSumBytes -contains 13)) 'outer checksum manifest contains checkout-dependent CR bytes'
     $outerLines = [IO.File]::ReadAllLines($outerSums, [Text.Encoding]::ASCII)
-    $spdxName = 'ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.spdx.json'
+    $spdxName = 'ninfer-rtx3090-omp-v0.2.1-beta.1-windows-x86_64-cuda13.3-rtx3090.spdx.json'
     Assert-Equal @($outerLines | Where-Object { $_.EndsWith("  $spdxName") }).Count 1 'outer checksum manifest omitted or duplicated the SPDX SBOM'
     foreach ($line in $outerLines) {
         if ($line -cnotmatch '^([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._-]*)$') {
@@ -259,7 +259,7 @@ try {
             bytes = 123
         }
         spdx_sbom = [pscustomobject]@{
-            filename = 'ninfer-rtx3090-omp-v0.2.0-windows-x86_64-cuda12.8-rtx3090.spdx.json'
+            filename = 'ninfer-rtx3090-omp-v0.2.1-beta.1-windows-x86_64-cuda13.3-rtx3090.spdx.json'
             sha256 = ('7' * 64)
             bytes = 456
         }
