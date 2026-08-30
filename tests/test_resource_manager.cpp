@@ -1762,6 +1762,39 @@ void test_pressure_tries_every_preserving_alternative_before_eviction() {
             "pressure escalated before trying the feasible preserving alternative");
 }
 
+void test_cross_session_eviction_clears_foreign_binding_before_reuse() {
+    FakeManager manager = make_manager(1, 2);
+    FakeProgram program;
+    const FakeCacheSessionKey victim{81};
+    const FakeCacheSessionKey evictor{82};
+
+    const ActiveRequest first = start_active(
+        manager, program, 71, make_base(71, victim, RetentionClass::LiveSession), 10);
+    (void)finish_active(manager, program, first);
+    const ActiveRequest second = start_active(
+        manager, program, 72, make_base(72, victim, RetentionClass::LiveSession), 20);
+    (void)finish_active(manager, program, second);
+    require(manager.session_publication_order(victim) == 20,
+            "victim session did not own the current publication before pressure");
+
+    program.required_pressure_actions = 2;
+    program.require_evictions         = true;
+    const ActiveRequest intruder = start_active(
+        manager, program, 73, make_base(73, evictor, RetentionClass::LiveSession), 30);
+    require(!manager.session_publication_order(victim),
+            "cross-session eviction retained the victim's session binding");
+    (void)finish_active(manager, program, intruder);
+
+    require(manager.session_publication_order(evictor) == 30,
+            "evictor publication did not become current after slot reuse");
+    require(!manager.session_publication_order(victim),
+            "victim binding resurfaced after the evictor published");
+    const bool slot0 = manager.catalog_state(0) == FakeManager::CatalogState::Catalogued;
+    const bool slot1 = manager.catalog_state(1) == FakeManager::CatalogState::Catalogued;
+    require(slot0 != slot1,
+            "eviction left a stale foreign continuation beside the new publication");
+}
+
 void test_cumulative_owner_target_closes_pressure_without_eviction() {
     FakeManager manager = make_manager(1, 2);
     FakeProgram program;
@@ -1996,6 +2029,8 @@ int main() {
     run_test("canonical pressure", test_canonical_pressure_starts_with_disposable_owner);
     run_test("all preserving pressure alternatives",
              test_pressure_tries_every_preserving_alternative_before_eviction);
+    run_test("cross-session eviction hygiene",
+             test_cross_session_eviction_clears_foreign_binding_before_reuse);
     run_test("cumulative owner target",
              test_cumulative_owner_target_closes_pressure_without_eviction);
     run_test("joint two-owner pressure", test_two_owners_jointly_close_pressure);
