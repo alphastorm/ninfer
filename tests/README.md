@@ -197,3 +197,16 @@ A permanent test should protect one current risk, such as:
 Performance-only assertions belong in benchmarks and profiler review. Source scans,
 implementation-shape assertions, trivial getters/configuration, retired command surfaces, and
 broad additions without a concrete regression risk do not belong in the permanent suite.
+
+## Host-only iteration without CUDA
+
+The resource-manager suite is pure host C++. On a CUDA-less workstation:
+
+```sh
+clang++ -std=c++23 -Isrc -Iinclude -Itests/support/nvtx-stub \
+  -Ithird_party -Ithird_party/nlohmann/include -include exception \
+  -o /tmp/rm_test tests/test_resource_manager.cpp \
+  src/runtime/engine/context_cost.cpp src/runtime/engine/context_cost_defaults.cpp && /tmp/rm_test
+```
+
+`tests/support/nvtx-stub` supplies a no-op NVTX header; everything else is real product code.

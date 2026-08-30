@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 
 namespace ninfer::runtime {
@@ -55,6 +56,58 @@ struct ContinuationCheckpointStats {
 
     [[nodiscard]] friend constexpr bool operator==(ContinuationCheckpointStats,
                                                    ContinuationCheckpointStats) noexcept = default;
+};
+
+// Names the first failed gate when a session checkpoint export is refused. The engine and the
+// serve layer surface this so a skipped save is diagnosable from one log line instead of a
+// precondition audit across layers.
+enum class SessionCheckpointSkipReason : std::uint8_t {
+    None = 0,
+    StoreDisabled,
+    NoSessionRecords,
+    CacheDisabled,
+    EmptyTag,
+    TransactionBusy,
+    SessionNotIndexed,
+    IndexEntryInvalid,
+    CatalogIdentityDrift,
+    TagMismatch,
+    ProgramRejected,
+};
+
+[[nodiscard]] constexpr std::string_view
+session_checkpoint_skip_reason_name(SessionCheckpointSkipReason reason) noexcept {
+    switch (reason) {
+    case SessionCheckpointSkipReason::None:
+        return "none";
+    case SessionCheckpointSkipReason::StoreDisabled:
+        return "checkpoint store disabled";
+    case SessionCheckpointSkipReason::NoSessionRecords:
+        return "session has no stored responses";
+    case SessionCheckpointSkipReason::CacheDisabled:
+        return "engine context cache disabled";
+    case SessionCheckpointSkipReason::EmptyTag:
+        return "empty checkpoint tag";
+    case SessionCheckpointSkipReason::TransactionBusy:
+        return "resource transaction in progress";
+    case SessionCheckpointSkipReason::SessionNotIndexed:
+        return "session is not indexed in the engine";
+    case SessionCheckpointSkipReason::IndexEntryInvalid:
+        return "session index entry is invalid";
+    case SessionCheckpointSkipReason::CatalogIdentityDrift:
+        return "catalogued continuation identity drifted";
+    case SessionCheckpointSkipReason::TagMismatch:
+        return "catalogued checkpoint tag mismatch";
+    case SessionCheckpointSkipReason::ProgramRejected:
+        return "program refused continuation export";
+    }
+    return "unknown";
+}
+
+struct SessionCheckpointSkipDetail {
+    SessionCheckpointSkipReason reason = SessionCheckpointSkipReason::None;
+    // TagMismatch only: the tag the catalogued continuation actually carries.
+    std::string catalogued_tag;
 };
 
 } // namespace ninfer::runtime

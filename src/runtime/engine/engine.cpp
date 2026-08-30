@@ -294,17 +294,30 @@ std::optional<runtime::ContinuationCheckpointStats>
 runtime::CheckpointEngineAccess::checkpoint_session(Engine& engine, std::string_view session_sha256,
                                                     std::string_view checkpoint_tag,
                                                     runtime::ContinuationCheckpointWriter& writer,
-                                                    std::size_t staging_bytes) {
-    if (engine.impl_ == nullptr || checkpoint_tag.empty()) { return std::nullopt; }
+                                                    std::size_t staging_bytes,
+                                                    runtime::SessionCheckpointSkipDetail* skip) {
+    if (checkpoint_tag.empty()) {
+        if (skip != nullptr) { skip->reason = runtime::SessionCheckpointSkipReason::EmptyTag; }
+        return std::nullopt;
+    }
+    if (engine.impl_ == nullptr) {
+        if (skip != nullptr) {
+            skip->reason = runtime::SessionCheckpointSkipReason::CacheDisabled;
+        }
+        return std::nullopt;
+    }
     return std::visit(
         [&](auto& core) -> std::optional<runtime::ContinuationCheckpointStats> {
             using CorePointer = std::remove_cvref_t<decltype(core)>;
             if constexpr (std::is_same_v<CorePointer, std::monostate>) {
+                if (skip != nullptr) {
+                    skip->reason = runtime::SessionCheckpointSkipReason::CacheDisabled;
+                }
                 return std::nullopt;
             } else {
                 using Core = typename CorePointer::element_type;
                 return core->checkpoint_session(checkpoint_session_key<Core>(session_sha256),
-                                                checkpoint_tag, writer, staging_bytes);
+                                                checkpoint_tag, writer, staging_bytes, skip);
             }
         },
         engine.impl_->core);

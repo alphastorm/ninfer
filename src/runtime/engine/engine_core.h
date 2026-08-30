@@ -250,10 +250,11 @@ public:
 
     [[nodiscard]] std::optional<ContinuationCheckpointStats>
     checkpoint_session(const CacheSessionKey& session, std::string_view checkpoint_tag,
-                       ContinuationCheckpointWriter& writer, std::size_t staging_bytes) {
+                       ContinuationCheckpointWriter& writer, std::size_t staging_bytes,
+                       SessionCheckpointSkipDetail* skip = nullptr) {
         std::scoped_lock lock(execution_mutex_);
         return resources_.checkpoint_session(*instance_.program, session, checkpoint_tag, writer,
-                                             staging_bytes);
+                                             staging_bytes, skip);
     }
 
     [[nodiscard]] std::optional<ContinuationCheckpointStats>
