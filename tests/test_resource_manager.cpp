@@ -2087,6 +2087,7 @@ void test_replay_selected_successor_retags_session() {
     const FakeSequenceHandle sequence = activation.sequence();
     manager.adopt(program, std::move(activation));
     program.finish_frontier = 32;
+    manager.mark_terminal_pending(lane);
     const FakeFinishResult finish = manager.finish(program, lane, sequence);
     require(finish.status == ConsumeStatus::Consumed &&
                 finish.disposition == FinishDisposition::Catalogued,
