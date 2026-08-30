@@ -707,6 +707,7 @@ $after=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
         return self.remote_json(self.config.target, install_script, timeout=900)
 
     def target_internal(self, phase: str, *arguments: str, timeout: int = 1800) -> dict[str, Any]:
+        self.stage_script(self.config.target, f"{self.target_root}/qualify_rtx3090.py")
         command = [
             "ssh",
             "-T",
