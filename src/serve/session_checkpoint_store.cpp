@@ -680,12 +680,13 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
     return !std::filesystem::exists(path, error) && !error;
 }
 
-void sync_rename_parents(const std::filesystem::path& source,
-                         const std::filesystem::path& destination) noexcept {
+[[nodiscard]] bool sync_rename_parents(const std::filesystem::path& source,
+                                       const std::filesystem::path& destination) noexcept {
     try {
         sync_directory(source.parent_path());
         sync_directory(destination.parent_path());
-    } catch (...) {}
+        return true;
+    } catch (...) { return false; }
 }
 
 [[nodiscard]] bool enforce_disk_quota_locked(
@@ -710,7 +711,7 @@ void sync_rename_parents(const std::filesystem::path& source,
         const std::filesystem::path tombstone = candidate_tombstone(options, candidate);
         std::filesystem::rename(candidate.path, tombstone, error);
         if (error) { continue; }
-        sync_rename_parents(candidate.path, tombstone);
+        (void)sync_rename_parents(candidate.path, tombstone);
         if (!cleanup_tombstone(options, tombstone)) { continue; }
         inventory.used -= std::min(inventory.used, reclaimed);
     }
@@ -792,19 +793,24 @@ std::vector<std::byte> encode_response_store_snapshot(const ResponseStoreSnapsho
     }
     std::unordered_map<const ResponseContextNode*, std::uint64_t> context_ids;
     std::vector<ResponseContext> contexts;
-    const auto add_context = [&](const auto& self,
-                                 const ResponseContext& context) -> std::uint64_t {
-        if (!context) { return 0; }
-        const auto found = context_ids.find(context.get());
-        if (found != context_ids.end()) { return found->second; }
-        (void)self(self, context->parent);
-        const std::uint64_t id = static_cast<std::uint64_t>(contexts.size()) + 1;
-        context_ids.emplace(context.get(), id);
-        contexts.push_back(context);
-        return id;
+    // Iterative ancestor walk: one stack frame regardless of session depth, so a
+    // many-thousand-turn lineage cannot exhaust the serving thread's stack during
+    // save (review CR-20260830 R7).
+    const auto add_context = [&](const ResponseContext& context) {
+        std::vector<const ResponseContext*> lineage;
+        for (const ResponseContext* cursor = &context; *cursor != nullptr;
+             cursor = &(*cursor)->parent) {
+            if (context_ids.contains(cursor->get())) { break; }
+            lineage.push_back(cursor);
+        }
+        for (auto it = lineage.rbegin(); it != lineage.rend(); ++it) {
+            const std::uint64_t id = static_cast<std::uint64_t>(contexts.size()) + 1;
+            context_ids.emplace((*it)->get(), id);
+            contexts.push_back(**it);
+        }
     };
     for (const StoredResponse& response : snapshot.records) {
-        (void)add_context(add_context, response.context);
+        add_context(response.context);
     }
 
     nlohmann::json encoded_contexts = nlohmann::json::array();
@@ -936,6 +942,9 @@ SessionCheckpointStore::SessionCheckpointStore(SessionCheckpointStoreOptions opt
     }
     std::filesystem::create_directories(options_.root / "sessions");
     std::filesystem::create_directories(options_.root / ".tombstones");
+    sync_directory(options_.root / "sessions");
+    sync_directory(options_.root / ".tombstones");
+    sync_directory(options_.root);
     collect_garbage();
 }
 
@@ -1053,6 +1062,9 @@ SessionCheckpointStore::save(const ResponseStoreSnapshot& responses,
         write_synced(current_staging, generation + "\n");
         replace_path(current_staging, session / "current");
         sync_directory(session);
+        // First save for a session creates sessions/<digest>; sync the parent so the
+        // acknowledged generation's dirent survives power loss (review CR-20260830 R2).
+        sync_directory(options_.root / "sessions");
 
         return SessionCheckpointSaveResult{
             .generation = generation, .engine = *engine, .bytes = total_bytes};
@@ -1245,7 +1257,11 @@ SessionCheckpointEraseResult SessionCheckpointStore::erase(std::string_view sess
         }
         return SessionCheckpointEraseResult::Conflict;
     }
-    sync_rename_parents(session, tombstone);
+    if (!sync_rename_parents(session, tombstone)) {
+        // The rename may not be durable; report a retryable failure instead of
+        // acknowledging a deletion that a crash could resurrect (review CR-20260830 R2).
+        return SessionCheckpointEraseResult::Conflict;
+    }
     (void)cleanup_tombstone(options_, tombstone);
     return SessionCheckpointEraseResult::Erased;
 }

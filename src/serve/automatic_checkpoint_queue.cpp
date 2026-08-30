@@ -62,13 +62,16 @@ void AutomaticCheckpointQueue::run(std::stop_token stop) noexcept {
             }
             session = std::move(queue_.front());
             queue_.pop_front();
+            // Release the coalescing key before running the save: a turn that
+            // completes while this save executes must re-enqueue rather than be
+            // coalesced into a snapshot that predates it (review CR-20260830 GrokR2).
+            pending_.erase(session);
         }
         try {
             save_(session);
         } catch (...) {}
         {
             std::lock_guard lock(mutex_);
-            pending_.erase(session);
             if (stop.stop_requested() && queue_.empty()) {
                 cv_.notify_all();
                 return;

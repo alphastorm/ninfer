@@ -68,5 +68,7 @@
     "upstream_base_sha": "699c9a638bbf2f2bf6964ce1ac3b418133860086",
     "weights_id": "groupwise-int"
   },
-  "transcript_replay_latency_seconds": 20.054089
+  "transcript_replay_latency_seconds": 20.054089,
+  "status": "superseded-development-record",
+  "supersession_note": "Development-lineage record from the 2026-08-29 bring-up (runtime_source_commit 340f3cf9, worktree build with source_dirty=true, 36,023-token restore probe). It is not an attestation for any release candidate; the v0.4.0 campaign qualification on a clean digest-pinned image replaces it, including the >=100,000-token docker-restart continuation gate (review CR-20260830 GemR2/GrokR3)."
 }

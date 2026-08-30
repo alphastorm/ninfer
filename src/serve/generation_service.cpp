@@ -1,5 +1,9 @@
 #include "serve/generation_service.h"
 
+#include "core/sha256.h"
+
+#include <fstream>
+
 #include "product/media_acquire/acquire.h"
 #include "runtime/engine/checkpoint_engine_access.h"
 #include "serve/client_identity.h"
@@ -231,8 +235,47 @@ private:
 
 } // namespace
 
+namespace {
+
+// The lifecycle passes the artifact digest it hashed at deployment time. The serve
+// re-hashes the bytes it will actually load and refuses a mismatch, so a mutated
+// bind-mount source cannot restart under a stale identity and accept checkpoints
+// fingerprinted for a different model (review CR-20260830 R3).
+void verify_declared_artifact_digest(const std::string& artifact_path,
+                                     const std::string& declared_sha256) {
+    if (declared_sha256.empty()) { return; }
+    std::ifstream input(artifact_path, std::ios::binary);
+    if (!input) {
+        throw std::invalid_argument("model artifact is unreadable for identity verification: " +
+                                    artifact_path);
+    }
+    core::Sha256 hasher;
+    std::vector<std::byte> buffer(1 << 20);
+    while (input) {
+        input.read(reinterpret_cast<char*>(buffer.data()),
+                   static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize got = input.gcount();
+        if (got > 0) {
+            hasher.update(std::span<const std::byte>(buffer.data(),
+                                                     static_cast<std::size_t>(got)));
+        }
+    }
+    if (input.bad()) {
+        throw std::invalid_argument("model artifact read failed during identity verification: " +
+                                    artifact_path);
+    }
+    const std::string actual = core::sha256_hex(hasher.finish());
+    if (actual != declared_sha256) {
+        throw std::invalid_argument(
+            "model artifact bytes do not match the declared model_artifact_sha256 identity");
+    }
+}
+
+} // namespace
+
 GenerationService::GenerationService(ServeOptions options, LoadProgress load_progress)
     : options_(std::move(options)) {
+    verify_declared_artifact_digest(options_.artifact_path, options_.artifact_sha256);
     ninfer::EngineOptions engine_options;
     engine_options.artifact_path            = options_.artifact_path;
     engine_options.device                   = options_.device;

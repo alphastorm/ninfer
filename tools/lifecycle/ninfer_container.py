@@ -176,8 +176,11 @@ def load_config(path: Path) -> RuntimeConfig:
         fail("port must be an integer in 1..65535")
 
     bind_host = raw.get("bind_host", "127.0.0.1")
-    if bind_host not in {"127.0.0.1", "0.0.0.0"}:
-        fail('bind_host must be either "127.0.0.1" or "0.0.0.0"')
+    if bind_host != "127.0.0.1":
+        fail(
+            'bind_host must be "127.0.0.1": the product trust boundary is loopback-only, '
+            "and non-loopback publication is not a supported deployment"
+        )
 
     raw_args = raw.get("args", [])
     if not isinstance(raw_args, list):
@@ -204,8 +207,6 @@ def load_config(path: Path) -> RuntimeConfig:
     )
     if api_key_file is None:
         fail("api_key_file is required for authenticated lifecycle status verification")
-    if bind_host == "0.0.0.0" and api_key_file is None:
-        fail("a non-loopback bind_host requires api_key_file")
     restart_policy = raw.get("restart_policy", "no")
     if restart_policy not in _RESTART_POLICIES:
         fail('restart_policy must be either "no" or "unless-stopped"')

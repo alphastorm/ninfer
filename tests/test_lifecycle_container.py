@@ -39,6 +39,7 @@ def write_config(
     model_path: str = "/srv/ninfer/model.ninfer",
     api_key_file: str = "/run/secrets/ninfer-test-api-key",
     args: list[str] | None = None,
+    bind_host: str | None = None,
 ) -> Path:
     config = {
         "image": "ninfer:test",
@@ -56,6 +57,8 @@ def write_config(
         config["checkpoint_dir"] = checkpoint_dir
     if args is not None:
         config["args"] = args
+    if bind_host is not None:
+        config["bind_host"] = bind_host
     path.write_text(json.dumps(config), encoding="utf-8")
     return path
 
@@ -92,6 +95,17 @@ class LifecycleConfigTests(unittest.TestCase):
         run_mock.assert_called_once_with(
             ["docker", "container", "inspect", "ninfer:test"], check=False
         )
+
+    def test_bind_host_is_loopback_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            accepted = load_config(
+                write_config(root / "loopback.json", bind_host="127.0.0.1"))
+            self.assertEqual(accepted.bind_host, "127.0.0.1")
+            with self.assertRaises(LifecycleError):
+                load_config(write_config(root / "external.json", bind_host="0.0.0.0"))
+            with self.assertRaises(LifecycleError):
+                load_config(write_config(root / "other.json", bind_host="192.168.1.10"))
 
     def test_restart_policy_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

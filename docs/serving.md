@@ -720,9 +720,10 @@ Run `./build/apps/ninfer-serve --help` for the exact option contract.
 
 `tools/lifecycle/ninfer_container.py` builds and operates one isolated Docker candidate from a
 Linux or WSL host. It never changes a shared route or stops another container. Candidate ports bind
-to loopback by default. Every lifecycle configuration requires `api_key_file` because startup and
-status verification use the authenticated status contract. An explicit `bind_host` of `0.0.0.0`
-accepts that same secret-backed configuration; any other bind address is rejected. `start` refuses
+to loopback only: `bind_host` accepts exactly `127.0.0.1`, and any other bind address is rejected
+because the product trust boundary is loopback-only. Every lifecycle configuration requires
+`api_key_file` because startup and status verification use the authenticated status contract.
+`start` refuses
 an existing container name or listening port, and `stop` refuses a container without the lifecycle
 ownership label.
 
