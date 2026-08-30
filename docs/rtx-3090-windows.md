@@ -46,44 +46,41 @@ LAN, and public listen addresses are rejected, and CORS remains disabled.
 Complete Windows beta qualification is GPU-only at the target 300 W cap and requires correctness,
 context, process restart, performance, shipped lifecycle rollback, state-security, and exact OMP
 acceptance on the same package. The current external receipt is incomplete and claims none of those
-Windows gates. CPU-heavy, mixed-load, and overnight thermal claims remain outside the release gate.
+released-package Windows gates. The post-release candidate receipt below is separate. CPU-heavy,
+mixed-load, and overnight thermal claims remain outside the release gate.
 
-### Current preview and deferred live-package gates
+### Released preview and qualified parity candidate
 
 Package `b313904eb22a271d99d21d589075cc0102ab081e6835e9600f3c74c8d0cc48cc`
-is the current preview. It binds runtime source `c5db3495ce08a6756ffb8962a3ca5142343239ef`
+is the released preview. It binds runtime source `c5db3495ce08a6756ffb8962a3ca5142343239ef`
 and package source `96b0101fde0483271ef002d8e6dfe3e431f8286f`. The earlier `09a9f24a...`
-archive is superseded and must not ship. A clean neutral Windows build, deterministic package tests,
-instrumented transaction tests, and focused native checkpoint contracts passed for the replacement.
+archive is superseded and must not ship. That immutable history remains unchanged.
 
-The authorized COMMUNITY RTX 3090 lane passed the current-source 3/3 native contract build. It did
-not yield usable live-model evidence: one exact-model attempt reached SHA verification before the
-remote command exited, later CUDA 13.1 startup returned `cudaErrorUnknown`, the CUDA 12.8 device
-probe also failed, and a subsequent provider allocation never published SSH. Every owned pod was
-deleted, no secure-cloud substitution was made, and the receipt records protocol, 64K retrieval,
-process-restart continuation, and C1 performance as `not_run` rather than reusing old counters.
-
-The Windows RTX 3090 was released for user servicing before the rebuilt archive existed. Therefore
-the exact current-package Windows install/security/bidirectional-rollback and OMP gates remain
-deferred. The adjacent machine-readable receipt is incomplete and does not supersede either
-immutable `hardware-pending` authority:
+The fresh `v0.2.1-beta.1` candidate binds source
+`872ee508c1f9c46fa38f4170c7e21f254a79e21f` and package
+`e7642d7069e85de497731735bde92a0c9b23f5b486848ab8cbe5c4da222baf97`.
+One idempotent command checkpointed and restored the entire sequence:
 
 | Gate | Result |
 | --- | --- |
-| Exact replacement assets | Closed nine-entry outer checksum set; package/source/SBOM/build receipt are hash- and byte-bound |
-| Neutral Windows build | `sm_86`; response-store, checkpoint-store, and HTTP-contract tests passed |
-| Remote native contracts | Current runtime source; 3/3 focused tests passed; pod deleted |
-| Fresh live protocol / 64K / restart / C1 | `not_run` — COMMUNITY CUDA runtime unavailable; prior-package results are not projected |
+| Exact candidate assets | Deterministic closed package; public-byte scan found zero private paths or credential-shaped values |
+| Neutral Windows build | `sm_86`; response-store, checkpoint-store, HTTP, DirectStorage, and automatic-queue tests passed |
+| Authenticated protocol | 15/15 checks passed |
+| Long context | Exact 64,512-token retrieval in 88.89 s |
+| Process restart | PID replacement; 45 cached input tokens and 310,216,517 checkpoint bytes restored |
 | Checkpoint deletion contracts | Failed-delete, cross-session LRU eviction, durable-only LRU delete, post-commit sync, and middle/latest/standalone restart shapes passed |
-| Instrumented lifecycle | Passed with 22 enumerated substitutions; no shipped-byte or ACL claim |
-| State-security fixture | Passed with instrumented GPU-power calls and prepared-lease restore; no hardware claim |
-| Historical Windows evidence | Package `e74c097f...` at source `7555db29...` only; it does not apply to the current package |
-| Fresh current-package Windows / OMP | Deferred after the authorized handoff; counters and evidence hashes are null/zero and no supersession is claimed |
+| Lifecycle and security | Clean install, upgrade, two rollback directions, protected state, and exact OMP read-tool acceptance passed |
+| Managed C1 | 90.17 decode tok/s; 893.41 prefill tok/s; 93.43% MTP3; 21,159 MiB; 299.8 W; 47 °C |
+| Restoration | Scheduled task Ready, runtime stopped, lease inactive, power limit restored to 370 W |
 
-This preview evidence is not beta authorization and does not authorize an
-unattended evidence role. The separate frozen automatic-use corpus did not meet its quality floor,
-so that route remains disabled. JSON-schema `response_format` is also unsupported and rejected
-rather than ignored.
+The orchestrator is `tools/qualification/qualify_rtx3090.py`. It accepts explicit builder,
+target, vcpkg, predecessor-runtime, model, synthetic 64K fixture, and OMP acceptance roots; `--resume`
+verifies each saved receipt before skipping it. Use `--dry-run` to inspect all phases without remote
+effects. Candidate qualification does not make the released manifest select this package.
+
+This candidate evidence does not authorize an unattended evidence role. The separate frozen
+automatic-use corpus did not meet its quality floor, so that route remains disabled. JSON-schema
+`response_format` is also unsupported and rejected rather than ignored.
 
 Responses `DELETE` is logical object deletion, not a secure-erasure primitive. A deleted response is
 no longer addressable and is absent from the next durable transcript, including after process
