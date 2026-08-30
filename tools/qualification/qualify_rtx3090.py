@@ -312,12 +312,16 @@ class Config:
     resume: bool
     dry_run: bool
     through_phase: str | None
+    candidate_source: str | None
+    upgrade_orchestrator_state: bool
 
 
 class Orchestrator:
     def __init__(self, config: Config) -> None:
         self.config = config
-        self.head = run(["git", "rev-parse", "HEAD"], cwd=config.source_root).stdout.strip()
+        self.tool_head = run(["git", "rev-parse", "HEAD"], cwd=config.source_root).stdout.strip()
+        self.head = config.candidate_source or self.tool_head
+        run(["git", "cat-file", "-e", f"{self.head}^{{commit}}"], cwd=config.source_root)
         self.head8 = self.head[:8]
         self.script = Path(__file__).resolve()
         self.script_sha = sha256_file(self.script)
@@ -338,16 +342,32 @@ class Orchestrator:
     def _load_state(self) -> dict[str, Any]:
         if self.state_path.exists():
             state = json.loads(self.state_path.read_text(encoding="utf-8"))
-            expected = (self.head, self.script_sha)
-            observed = (state.get("source_commit"), state.get("orchestrator_sha256"))
-            if observed != expected:
+            if state.get("source_commit") != self.head:
                 raise LaneError("checkpoint belongs to another source or orchestrator revision")
+            if state.get("orchestrator_sha256") != self.script_sha:
+                if not self.config.upgrade_orchestrator_state:
+                    raise LaneError("checkpoint belongs to another source or orchestrator revision")
+                runtime_diff = run(
+                    [
+                        "git", "diff", "--name-only", self.head, self.tool_head, "--",
+                        "src", "include", "apps", "cmake", "CMakeLists.txt", "CMakePresets.json",
+                    ],
+                    cwd=self.config.source_root,
+                ).stdout.strip()
+                if runtime_diff:
+                    raise LaneError("qualification-tool advancement changed runtime source paths")
+                revisions = state.setdefault("orchestrator_revisions", [])
+                revisions.append(state.get("orchestrator_sha256"))
+                state["orchestrator_sha256"] = self.script_sha
+                state["qualification_tool_commit"] = self.tool_head
+                atomic_json(self.state_path, state)
             return state
         state = {
             "artifact_type": "ninfer_rtx3090_qualification_orchestration",
             "schema_version": 1,
             "source_commit": self.head,
             "orchestrator_sha256": self.script_sha,
+            "qualification_tool_commit": self.tool_head,
             "status": "not_started",
             "current_phase": None,
             "phases": {},
@@ -458,6 +478,15 @@ $limit=[int][double](nvidia-smi.exe --query-gpu=power.limit --format=csv,noheade
     def preflight(self) -> dict[str, Any]:
         if run(["git", "status", "--porcelain"], cwd=self.config.source_root).stdout.strip():
             raise LaneError("source worktree must be clean before qualification")
+        runtime_diff = run(
+            [
+                "git", "diff", "--name-only", self.head, self.tool_head, "--",
+                "src", "include", "apps", "cmake", "CMakeLists.txt", "CMakePresets.json",
+            ],
+            cwd=self.config.source_root,
+        ).stdout.strip()
+        if runtime_diff:
+            raise LaneError("qualification-tool advancement changed runtime source paths")
         if self.config.long_fixture.stat().st_size <= 0:
             raise LaneError("64K fixture is empty")
         run(["ssh", "-T", self.config.builder, "exit"], timeout=30)
@@ -625,7 +654,7 @@ if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw'package is n
         target_root = self.target_root
         remote_ps(
             self.config.target,
-            f"$p={ps_quote(target_root)};New-Item -ItemType Directory -Path $p -Force|Out-Null",
+            f"$p={ps_quote(target_root)};New-Item -ItemType Directory -Path $p,(Join-Path $p 'evidence') -Force|Out-Null",
         )
         for name in (
             PACKAGE_NAME,
@@ -805,6 +834,7 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
             "status": "passed",
             "qualified_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "source_commit": self.head,
+            "qualification_tool_commit": self.tool_head,
             "package": self.state["phases"]["package"]["receipt"]["package"],
             "evidence": evidence,
             "observed": {
@@ -1024,6 +1054,8 @@ def main() -> int:
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--through-phase", choices=PHASES)
+    parser.add_argument("--candidate-source")
+    parser.add_argument("--upgrade-orchestrator-state", action="store_true")
     args = parser.parse_args()
     config = Config(
         source_root=args.source_root.resolve(), state_dir=args.state_dir.resolve(), builder=args.builder,
@@ -1032,6 +1064,8 @@ def main() -> int:
         long_fixture=args.long_fixture.resolve(), omp_root=args.omp_root, state_root=args.state_root,
         task_name=args.task_name, resume=args.resume, dry_run=args.dry_run,
         through_phase=args.through_phase,
+        candidate_source=args.candidate_source,
+        upgrade_orchestrator_state=args.upgrade_orchestrator_state,
     )
     result = Orchestrator(config).execute()
     print(json.dumps(result, indent=2, sort_keys=True))
