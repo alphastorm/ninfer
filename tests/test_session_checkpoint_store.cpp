@@ -1424,6 +1424,15 @@ int test_load_scan_failure_does_not_deadlock() {
 int main(int argc, char** argv) {
     std::set_terminate([] {
         std::fputs("std::terminate invoked by checkpoint store test\n", stderr);
+        if (const std::exception_ptr exception = std::current_exception()) {
+            try {
+                std::rethrow_exception(exception);
+            } catch (const std::exception& error) {
+                std::fprintf(stderr, "active exception: %s\n", error.what());
+            } catch (...) {
+                std::fputs("active exception: non-standard exception\n", stderr);
+            }
+        }
         std::fflush(stderr);
         std::abort();
     });
