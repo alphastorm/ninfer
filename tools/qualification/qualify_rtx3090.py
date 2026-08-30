@@ -955,12 +955,26 @@ def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
     state_root = Path(args.state_root)
     state = json.loads((state_root / "state.json").read_text(encoding="utf-8"))
     release = state["releases"][state["active_release"]]
+    controller = state_root / "Control-Release.ps1"
+    run(
+        [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(controller), "-Action", "Start", "-StateRoot", str(state_root),
+        ],
+        timeout=900,
+    )
     key = read_key(Path(release["api_key_file"]))
     base = f"http://{release['host']}:{release['port']}"
     session = digest("checkpoint-session")
     seed = request_json(base, key, "POST", "/v1/responses", {"model": "q38-ninfer", "input": f"Memorize this exact marker for the next turn: {CHECKPOINT_MARKER}. Reply only SAVED.", "max_output_tokens": 32, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "ninfer_request_id": digest("seed")})
-    old_pid = compact_json_from_output(run(["powershell", "-NoProfile", "-Command", "(Get-NetTCPConnection -State Listen -LocalPort 18082).OwningProcess|ConvertTo-Json -Compress"]).stdout) if False else int(run(["powershell", "-NoProfile", "-Command", "(Get-NetTCPConnection -State Listen -LocalPort 18082).OwningProcess"]).stdout.strip())
-    controller = state_root / "Control-Release.ps1"
+    old_pid = int(
+        run(
+            [
+                "powershell", "-NoProfile", "-Command",
+                "(Get-NetTCPConnection -State Listen -LocalPort 18082).OwningProcess",
+            ]
+        ).stdout.strip()
+    )
     run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(controller), "-Action", "Restart", "-StateRoot", str(state_root)], timeout=900)
     new_pid = int(run(["powershell", "-NoProfile", "-Command", "(Get-NetTCPConnection -State Listen -LocalPort 18082).OwningProcess"]).stdout.strip())
     continued = request_json(base, key, "POST", "/v1/responses", {"model": "q38-ninfer", "input": "Return only the exact marker from the previous turn.", "previous_response_id": seed["id"], "max_output_tokens": 64, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "ninfer_request_id": digest("continue")})
