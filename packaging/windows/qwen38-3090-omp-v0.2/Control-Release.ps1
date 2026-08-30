@@ -491,7 +491,9 @@ function Assert-ManagedStartLiveness([object]$State, [object]$Release) {
 
 function Wait-Ready([int]$TimeoutSeconds) {
     $started = [DateTime]::UtcNow
-    $startupGraceDeadline = $started.AddSeconds(5)
+    # Task Scheduler may not dispatch the wrapper immediately on an attended workstation. Give it
+    # time to publish the owned-process record; the full readiness deadline still bounds model load.
+    $startupGraceDeadline = $started.AddSeconds(30)
     $deadline = $started.AddSeconds($TimeoutSeconds)
     $lastError = $null
     while ([DateTime]::UtcNow -lt $deadline) {

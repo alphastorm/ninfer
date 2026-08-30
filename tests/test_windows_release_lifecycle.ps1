@@ -19,6 +19,7 @@ $global:NInferTestTaskSerial = 0
 $global:NInferTestStateRoot = $null
 $global:NInferTestDeadReleaseId = $null
 $global:NInferTestDeadStartSleptMilliseconds = 0
+$global:NInferTestDelayedStatusFailures = 0
 $global:NInferInstrumentedAclApplications = 0
 $global:NInferTransientShimRecords = [Collections.Generic.List[object]]::new()
 
@@ -122,6 +123,10 @@ function global:Invoke-RestMethod {
         [int]$TimeoutSec,
         [switch]$UseBasicParsing
     )
+    if ($global:NInferTestDelayedStatusFailures -gt 0) {
+        $global:NInferTestDelayedStatusFailures--
+        throw 'fixture endpoint is not ready yet'
+    }
     $state = Get-Content -LiteralPath (Join-Path $global:NInferTestStateRoot 'state.json') -Raw |
         ConvertFrom-Json
     if ([string]$state.active_release -ceq [string]$global:NInferTestDeadReleaseId) {
@@ -766,7 +771,11 @@ try {
     catch { $multilineRejected = $_.Exception.Message -like '*exactly one non-empty line*' }
     Assert-True $multilineRejected 'installer accepted a multiline secret file'
 
+    # Four failed probes span more than the former five-second ownership grace. A healthy task may
+    # be queued that long before its wrapper publishes runtime ownership on an attended host.
+    $global:NInferTestDelayedStatusFailures = 4
     $baseReceipt = Invoke-FixtureInstall $basePackage $baseSecret
+    Assert-Equal $global:NInferTestDelayedStatusFailures 0 'delayed managed start did not reach readiness'
     Assert-Equal ([string]$baseReceipt.status) 'passed' 'clean install did not pass'
     Assert-Equal ([int]$baseReceipt.schema_version) 2 'install receipt schema changed'
     Assert-Equal ([int]$baseReceipt.secret_values_recorded) 0 'install receipt recorded a secret value'
