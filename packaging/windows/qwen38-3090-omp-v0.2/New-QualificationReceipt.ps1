@@ -228,7 +228,7 @@ function New-NInferQualificationReceipt {
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $Protocol 'authenticated_agent_protocol'
     }
     if ($protocolStatus -ceq 'passed' -and
-        ($protocolReceipt.evidence_platform -cne 'remote-linux-rtx3090-runtime' -or
+        ($protocolReceipt.evidence_platform -cnotin @('remote-linux-rtx3090-runtime', 'native-windows-rtx3090-package') -or
          $protocolReceipt.checks_passed -ne 15 -or $protocolReceipt.checks_total -ne 15)) {
         throw 'authenticated_agent_protocol must bind the complete 15/15 protocol'
     }
@@ -279,7 +279,7 @@ function New-NInferQualificationReceipt {
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $LongContext 'long_context_64k'
     }
     if ($longContextStatus -ceq 'passed' -and
-        ($longContextReceipt.evidence_platform -cne 'remote-linux-rtx3090-runtime' -or
+        ($longContextReceipt.evidence_platform -cnotin @('remote-linux-rtx3090-runtime', 'native-windows-rtx3090-package') -or
          $longContextReceipt.prompt_tokens -ne 64512 -or
          $longContextReceipt.completion_tokens -le 0 -or
          $longContextReceipt.elapsed_seconds -le 0 -or
@@ -319,7 +319,7 @@ function New-NInferQualificationReceipt {
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $CheckpointRestart 'checkpoint_process_restart'
     }
     if ($checkpointStatus -ceq 'passed' -and
-        ($checkpointReceipt.evidence_platform -cne 'remote-linux-rtx3090-runtime' -or
+        ($checkpointReceipt.evidence_platform -cnotin @('remote-linux-rtx3090-runtime', 'native-windows-rtx3090-package') -or
          $checkpointReceipt.checkpoint_files -le 0 -or
          $checkpointReceipt.checkpoint_bytes -le 0 -or
          $checkpointReceipt.cached_input_tokens -le 0 -or
@@ -365,7 +365,7 @@ function New-NInferQualificationReceipt {
         receipt_sha256 = Get-NInferQualificationEvidenceSha256 $Performance 'performance'
     }
     if ($performanceStatus -ceq 'passed' -and
-        ($performanceReceipt.evidence_platform -cne 'remote-linux-rtx3090-runtime' -or
+        ($performanceReceipt.evidence_platform -cnotin @('remote-linux-rtx3090-runtime', 'native-windows-rtx3090-package') -or
          $performanceReceipt.cohort -ne 1 -or $performanceReceipt.generation_tokens -ne 1024 -or
          $performanceReceipt.decode_tokens_per_second -le 0 -or
          $performanceReceipt.prefill_tokens_per_second -le 0 -or

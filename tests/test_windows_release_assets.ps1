@@ -478,6 +478,13 @@ try {
     $passedText = $passed | ConvertTo-Json -Depth 24 -Compress
     Assert-True (-not $passedText.Contains('GPU-fixture-3090')) 'qualification receipt exposed a GPU UUID'
 
+    foreach ($gate in @($protocol, $longContext, $checkpointRestart, $performance)) {
+        $gate.evidence_platform = 'native-windows-rtx3090-package'
+    }
+    $nativeWindowsPassed = New-NInferQualificationReceipt @receiptArguments
+    Assert-Equal ([string]$nativeWindowsPassed.status) 'passed' 'constructor rejected exact native-Windows package evidence'
+    Assert-Equal ([string]$nativeWindowsPassed.qualification.checkpoint_process_restart.evidence_platform) 'native-windows-rtx3090-package' 'constructor lost native-Windows restart evidence scope'
+
     $candidate | Add-Member -NotePropertyName api_key -NotePropertyValue 'must-not-appear'
     $credentialPropertyRejected = $false
     try { New-NInferQualificationReceipt @receiptArguments | Out-Null }
