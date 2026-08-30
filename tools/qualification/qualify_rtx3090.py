@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import tempfile
 import threading
 import time
 from typing import Any, Callable
@@ -108,6 +109,37 @@ def ps_encoded(script: str) -> str:
 
 
 def remote_ps(host: str, script: str, *, timeout: int = 600) -> str:
+    encoded = ps_encoded(script)
+    if len(encoded) > 7000:
+        digest = hashlib.sha256(script.encode("utf-8")).hexdigest()[:16]
+        remote_path = f"C:/Windows/Temp/ninfer-qualification-{digest}.ps1"
+        local_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", suffix=".ps1", delete=False
+            ) as stream:
+                stream.write(script)
+                local_path = Path(stream.name)
+            scp(str(local_path), remote_spec(host, remote_path))
+            result = run(
+                [
+                    "ssh", "-T", host, "powershell", "-NoProfile", "-NonInteractive",
+                    "-ExecutionPolicy", "Bypass", "-OutputFormat", "Text", "-File", remote_path,
+                ],
+                timeout=timeout,
+            )
+            return result.stdout
+        finally:
+            if local_path is not None:
+                local_path.unlink(missing_ok=True)
+            run(
+                [
+                    "ssh", "-T", host, "powershell", "-NoProfile", "-NonInteractive",
+                    "-Command", f"Remove-Item -LiteralPath '{remote_path}' -Force -ErrorAction SilentlyContinue",
+                ],
+                timeout=60,
+                check=False,
+            )
     result = run(
         [
             "ssh",
@@ -121,7 +153,7 @@ def remote_ps(host: str, script: str, *, timeout: int = 600) -> str:
             "-OutputFormat",
             "Text",
             "-EncodedCommand",
-            ps_encoded(script),
+            encoded,
         ],
         timeout=timeout,
     )
