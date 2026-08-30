@@ -727,6 +727,7 @@ $after=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
 $ErrorActionPreference='Stop'
 $root={ps_quote(self.config.state_root)}
 $stage={ps_quote(self.target_root)}
+New-Item -ItemType Directory -Path (Join-Path $stage 'evidence') -Force|Out-Null
 $controller=Join-Path $root 'Control-Release.ps1'
 &$controller -Action Start -StateRoot $root|Out-Null
 $s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
