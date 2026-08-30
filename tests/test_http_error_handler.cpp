@@ -74,10 +74,12 @@ int main() {
                           session_digest, session_header, true) == session_digest,
                       "agreeing checkpoint path and header were rejected");
     try {
-        (void)ninfer::serve::require_checkpoint_session_identity(std::string(63, 'a') + "b",
+        (void)ninfer::serve::require_checkpoint_session_identity(std::string(63, 'a'),
                                                                  path_only_request, true);
-        failures += check(false, "checkpoint route accepted a mismatched path digest agreement");
-    } catch (const ninfer::serve::ApiException&) {
+        failures += check(false, "checkpoint route accepted a short path digest");
+    } catch (const ninfer::serve::ApiException& error) {
+        failures += check(error.error().status == 400,
+                          "invalid checkpoint path digest returned the wrong status");
     }
     try {
         (void)ninfer::serve::require_checkpoint_session_identity(std::string(64, 'b'),
