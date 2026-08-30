@@ -941,10 +941,33 @@ try {
             throw 'release package upstream identity mismatch'
         }
 
-        $taskName = [string]$spec.lifecycle.task_name
-        if ($taskName -cne 'NInfer-Qwen38-4090-v0.1') { throw 'unexpected lifecycle task identity' }
-        if ($null -ne $oldState -and [string]$oldState.task_name -cne $taskName) {
-            throw 'installed lifecycle task identity mismatch'
+        $taskBase = [string]$spec.lifecycle.task_name
+        if ($taskBase -cne 'NInfer-Qwen38-4090-v0.1') { throw 'unexpected lifecycle task identity' }
+        # Per-StateRoot task identity: the default state root keeps the canonical task name;
+        # every other root derives a distinct name so side-by-side installs (for example the
+        # two-arm MTP qualification) never collide on one scheduled task. Installs that already
+        # recorded a task name keep it for their whole lifecycle.
+        $defaultStateRoot =
+            [IO.Path]::GetFullPath((Join-Path $env:ProgramData 'NInfer\qwen38-4090')).TrimEnd('\')
+        $resolvedStateRoot = [IO.Path]::GetFullPath($StateRoot).TrimEnd('\')
+        $taskName = $taskBase
+        if ($resolvedStateRoot -ine $defaultStateRoot) {
+            $rootHasher = [Security.Cryptography.SHA256]::Create()
+            try {
+                $rootDigest = [BitConverter]::ToString(
+                    $rootHasher.ComputeHash(
+                        [Text.Encoding]::UTF8.GetBytes($resolvedStateRoot.ToLowerInvariant())
+                    )
+                ).Replace('-', '').ToLowerInvariant()
+            } finally { $rootHasher.Dispose() }
+            $taskName = '{0}-{1}' -f $taskBase, $rootDigest.Substring(0, 8)
+        }
+        if ($null -ne $oldState) {
+            $recordedTaskName = [string]$oldState.task_name
+            if ($recordedTaskName -cne $taskName -and $recordedTaskName -cne $taskBase) {
+                throw 'installed lifecycle task identity mismatch'
+            }
+            $taskName = $recordedTaskName
         }
         $oldTask = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
         if ($null -eq $oldState -and $null -ne $oldTask) {

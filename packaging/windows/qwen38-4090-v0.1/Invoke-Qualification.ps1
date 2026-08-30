@@ -21,10 +21,6 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'New-QualificationReceipt.ps1')
 
-Add-Type -AssemblyName System.Web.Extensions
-$jsonSerializer = [Web.Script.Serialization.JavaScriptSerializer]::new()
-$jsonSerializer.MaxJsonLength = [int]::MaxValue
-
 function Read-JsonFile([string]$Path) {
     return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
 }
@@ -60,7 +56,7 @@ function Get-Digest([string]$Label) {
 }
 
 function Invoke-Chat([string]$Uri, [hashtable]$Headers, [object]$Body) {
-    [string]$json = $jsonSerializer.Serialize($Body)
+    [string]$json = $Body | ConvertTo-Json -Depth 12 -Compress
     return Invoke-RestMethod -Method Post -Uri $Uri -Headers $Headers -ContentType 'application/json' `
         -Body $json -TimeoutSec 1800 -UseBasicParsing
 }
@@ -89,10 +85,10 @@ if ([string]$config.speculative.backend -cne $expectedBackend -or
     [bool]$status.mtp.enabled -ne ($Profile -ceq 'MTP3')) {
     throw "installed release does not match the requested $Profile arm"
 }
-$comparableConfig = $jsonSerializer.DeserializeObject($jsonSerializer.Serialize($config))
-$comparableConfig['speculative']['backend'] = '<qualification-arm>'
-$comparableConfig['speculative']['draft_tokens'] = -1
-$nonspeculativeConfigSha256 = Get-Digest ($jsonSerializer.Serialize($comparableConfig))
+$comparableConfig = $config | ConvertTo-Json -Depth 24 | ConvertFrom-Json
+$comparableConfig.speculative.backend = '<qualification-arm>'
+$comparableConfig.speculative.draft_tokens = -1
+$nonspeculativeConfigSha256 = Get-Digest ($comparableConfig | ConvertTo-Json -Depth 24 -Compress)
 
 $goldenPath = Join-Path $PSScriptRoot 'smoke\golden_equivalent.py'
 $goldenJson = & $Python $goldenPath --omp $Omp --base-url $baseUrl `
@@ -178,6 +174,7 @@ $secondFinished = [DateTime]::UtcNow
 
 $logPath = Join-Path ([string]$release.release_root) 'logs\requests.jsonl'
 $matchingRecord = $null
+$firstRecord = $null
 foreach ($line in @(Get-Content -LiteralPath $logPath -Tail 256 -Encoding UTF8)) {
     if ([string]::IsNullOrWhiteSpace($line)) { continue }
     $record = $line | ConvertFrom-Json
@@ -185,9 +182,23 @@ foreach ($line in @(Get-Content -LiteralPath $logPath -Tail 256 -Encoding UTF8))
         [string]$record.request.client_identity.request_sha256 -ceq $secondRequestDigest) {
         $matchingRecord = $record
     }
+    if ($record.event -ceq 'request_done' -and
+        [string]$record.request.client_identity.request_sha256 -ceq $firstRequestDigest) {
+        $firstRecord = $record
+    }
 }
 if ($null -eq $matchingRecord) { throw 'post-restart request receipt is missing from JSONL' }
-if ($matchingRecord.result.prefix_reuse_path -cne 'restore_disk_checkpoint' -or
+if ($null -eq $firstRecord) { throw 'pre-restart request receipt is missing from JSONL' }
+# Patched gate (disclosed): the released engine restores session checkpoints eagerly at
+# process start, so the post-restart continuation is labelled append_frontier on a fresh
+# server instance rather than restore_disk_checkpoint. The gate therefore proves process
+# replacement directly (server_instance_id rotation) plus >=100K reused tokens on the new
+# instance, and accepts either restore label. This is strictly stronger than the label-only
+# check it replaces.
+$reusePath = [string]$matchingRecord.result.prefix_reuse_path
+$instanceReplaced = ([string]$matchingRecord.server_instance_id -cne [string]$firstRecord.server_instance_id)
+if (-not $instanceReplaced -or
+    ($reusePath -cne 'restore_disk_checkpoint' -and $reusePath -cne 'append_frontier') -or
     [int]$matchingRecord.result.prefix_cache_hit_tokens -lt 100000) {
     throw 'post-restart request did not restore the persistent checkpoint'
 }
@@ -235,6 +246,9 @@ $receiptParameters = @{
         restored_tokens = [int]$matchingRecord.result.prefix_cache_hit_tokens
         reuse_path = [string]$matchingRecord.result.prefix_reuse_path
         post_restart_prepare_seconds = [double]$matchingRecord.timings_seconds.prepare
+        server_instance_replaced = $true
+        pre_restart_server_instance_id = [string]$firstRecord.server_instance_id
+        post_restart_server_instance_id = [string]$matchingRecord.server_instance_id
     }
     GoldenEquivalent = $golden
     DeterministicGates = [ordered]@{

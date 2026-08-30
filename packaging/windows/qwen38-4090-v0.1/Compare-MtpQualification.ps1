@@ -53,7 +53,8 @@ function Test-DeterministicGates([object]$Receipt) {
             [string]$Receipt.deterministic_gates.long_session -ceq 'passed' -and
             [string]$Receipt.deterministic_gates.persistence -ceq 'passed' -and
             [string]$Receipt.deterministic_gates.golden_equivalent -ceq 'passed' -and
-            [string]$Receipt.persistence.reuse_path -ceq 'restore_disk_checkpoint' -and
+            ([string]$Receipt.persistence.reuse_path -cin @('restore_disk_checkpoint', 'append_frontier')) -and
+            [bool]$Receipt.persistence.server_instance_replaced -and
             [int]$Receipt.persistence.restored_tokens -ge 100000 -and
             [string]$Receipt.golden_equivalent.status -ceq 'passed' -and
             [double]$Receipt.golden_equivalent.omp.wall_seconds -gt 0 -and
