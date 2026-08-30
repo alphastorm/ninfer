@@ -254,7 +254,7 @@ try {
             bytes = [Int64]$receiptOne.package.bytes
         }
         source_archive = [pscustomobject]@{
-            filename = 'ninfer-rtx3090-omp-v0.2.0-source.tar.gz'
+            filename = 'ninfer-rtx3090-omp-v0.2.1-beta.1-source.tar.gz'
             sha256 = ('6' * 64)
             bytes = 123
         }
