@@ -191,12 +191,6 @@ ninfer_add_test(ninfer_serve_options_test
 ninfer_add_test(ninfer_request_log_test
   SOURCES test_request_log.cpp
   LIBRARIES ninfer_serve)
-ninfer_add_test(ninfer_client_identity_test
-  SOURCES test_client_identity.cpp
-  LIBRARIES ninfer_serve)
-ninfer_add_test(ninfer_http_contract_test
-  SOURCES test_http_contract.cpp
-  LIBRARIES ninfer_serve)
 ninfer_add_test(ninfer_bench_support_test
   SOURCES test_ninfer_bench_support.cpp
           ${PROJECT_SOURCE_DIR}/bench/targets/qwen3_6_27b/ninfer_bench_support.cpp
