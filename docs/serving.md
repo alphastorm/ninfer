@@ -467,9 +467,10 @@ stored.
 ### Durable session checkpoints
 
 `--session-checkpoint-dir DIR` enables authenticated, local persistence for stored Responses that
-carry a lowercase SHA-256 `ninfer_session`. Startup then also requires `--api-key`, exact
-`--binary-sha256`, `--artifact-sha256`, and `--config-sha256` declarations, prefix reuse, at least
-one Host StateImage slot, and nonzero Host KV capacity. The checkpoint fingerprint additionally
+carry a lowercase SHA-256 `ninfer_session`. Startup then also requires exactly one of `--api-key`
+or `--api-key-file`, plus exact `--binary-sha256`, `--artifact-sha256`, and
+`--config-sha256` declarations, prefix reuse, at least one Host StateImage slot, and nonzero Host KV
+capacity. The checkpoint fingerprint additionally
 binds the loaded target/model/weights identity and relevant Engine/cache configuration. An
 incompatible fingerprint is a cache miss; it is never imported under a different executable,
 artifact, or configuration.
@@ -775,19 +776,27 @@ creates it with mode `0700`, mounts it at `/checkpoints`, and owns the correspon
 a repository-owned seccomp profile based on Moby `moby/profiles` commit
 `b7711bef4ad769a13fd40fe1ba710ad0f796fcfd`: Docker's default allowlist plus only
 `io_uring_setup`, `io_uring_enter`, and `io_uring_register` on `amd64`. The lifecycle verifies the
-profile SHA-256 before start and never disables seccomp. The API-key value is
-read from a read-only secret mount inside the container; it is not placed in Docker argv, labels,
-receipts, or the canonical configuration identity. `restart_policy` defaults to `no`; use
-`unless-stopped` only for a promoted appliance that Docker must restart with its daemon. `start`
-applies the declared policy, and `status` rejects policy drift. The canonical configuration SHA-256 covers model ID, deployment
-profile, bind address and port, API-auth presence, request-log presence, checkpoint-mount presence,
-restart policy, and ordered server args. Binary and model bytes have separate SHA-256 identities.
+profile SHA-256 before start and never disables seccomp. The API-key value is read from a
+read-only secret mount and supplied to NInfer by the mounted file path; the value is not placed in
+Docker or process argv, labels, receipts, or the canonical configuration identity.
+`restart_policy` defaults to `no`; use `unless-stopped` only for a promoted appliance that Docker
+must restart with its daemon. `start` applies the declared policy, and `status` rejects restart,
+mount, and security-option drift. The canonical configuration SHA-256 covers model ID, deployment
+profile, bind address and port, API-auth presence, request-log presence, checkpoint mount target and
+seccomp SHA-256, restart policy, and ordered server args. Binary and model bytes have separate
+SHA-256 identities.
 
 ```bash
-python3 tools/lifecycle/ninfer_container.py preflight --config candidate.json
-python3 tools/lifecycle/ninfer_container.py start --config candidate.json
+identity=(
+  --expect-image-id "$IMAGE_ID"
+  --expect-binary-sha256 "$BINARY_SHA256"
+  --expect-model-artifact-sha256 "$MODEL_SHA256"
+  --expect-config-sha256 "$CONFIG_SHA256"
+)
+python3 tools/lifecycle/ninfer_container.py preflight --config candidate.json "${identity[@]}"
+python3 tools/lifecycle/ninfer_container.py start --config candidate.json "${identity[@]}"
 python3 tools/lifecycle/ninfer_container.py health --config candidate.json
-python3 tools/lifecycle/ninfer_container.py status --config candidate.json
+python3 tools/lifecycle/ninfer_container.py status --config candidate.json "${identity[@]}"
 
 python3 tools/smoke/serve_contract.py \
   --base-url http://127.0.0.1:18088 --model registered-model \
@@ -800,9 +809,10 @@ python3 tools/smoke/agent_protocol.py \
 python3 tools/lifecycle/ninfer_container.py stop --config candidate.json
 ```
 
-`preflight`, `start`, and `status` accept optional `--expect-image-id`,
-`--expect-binary-sha256`, `--expect-model-artifact-sha256`, and
-`--expect-config-sha256` pins. Receipts and status output contain identities and counters but omit
+`preflight`, `start`, and `status` require `--expect-image-id`, `--expect-binary-sha256`,
+`--expect-model-artifact-sha256`, and `--expect-config-sha256`. Obtain them from the separately
+verified build/configuration receipt; the lifecycle never executes the candidate image to hash its
+binary. Receipts and status output contain identities and counters but omit
 model/log paths, process argv, API-key values, prompts, and generated text.
 
 ## Structured request log

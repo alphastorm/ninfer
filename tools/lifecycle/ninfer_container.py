@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import time
@@ -24,9 +25,7 @@ import urllib.request
 
 _LIFECYCLE_LABEL = "org.ninfer.lifecycle"
 _LIFECYCLE_VALUE = "tools.lifecycle.ninfer_container"
-_CHECKPOINT_SECCOMP_PROFILE = Path(__file__).with_name(
-    "ninfer_io_uring_seccomp.json"
-)
+_CHECKPOINT_SECCOMP_PROFILE = Path(__file__).with_name("ninfer_io_uring_seccomp.json")
 _CHECKPOINT_SECCOMP_PROFILE_SHA256 = (
     "3b7bf1e9fa71bfd8ed536c8aaaa2d40e4f133a0c853d226efd9b9e4966dd1506"
 )
@@ -39,6 +38,7 @@ _RESERVED_SERVER_ARGS = {
     "--host",
     "--port",
     "--api-key",
+    "--api-key-file",
     "--model-id",
     "--binary-sha256",
     "--artifact-sha256",
@@ -99,6 +99,14 @@ class RuntimeConfig:
             "port": self.port,
             "request_log_configured": True,
             "checkpoint_configured": self.checkpoint_dir is not None,
+            "checkpoint_mount_target": (
+                "/checkpoints" if self.checkpoint_dir is not None else None
+            ),
+            "checkpoint_seccomp_sha256": (
+                _CHECKPOINT_SECCOMP_PROFILE_SHA256
+                if self.checkpoint_dir is not None
+                else None
+            ),
             "restart_policy": self.restart_policy,
         }
 
@@ -256,6 +264,7 @@ def sha256_file(path: Path) -> str:
         raise LifecycleError("failed to hash required deployment file") from error
     return digest.hexdigest()
 
+
 def verify_clean_source(
     source: Path, upstream_base_sha: str, expected_patch_stack_sha: str
 ) -> str:
@@ -265,10 +274,19 @@ def verify_clean_source(
     if head != expected_patch_stack_sha:
         fail("source HEAD differs from --expect-patch-stack-sha")
     status = run(
-        ["git", "-C", os.fspath(source), "status", "--porcelain", "--untracked-files=all"]
+        [
+            "git",
+            "-C",
+            os.fspath(source),
+            "status",
+            "--porcelain",
+            "--untracked-files=all",
+        ]
     ).stdout
     if status:
-        fail("source tree must be clean before a release identity can report source_dirty=false")
+        fail(
+            "source tree must be clean before a release identity can report source_dirty=false"
+        )
     ancestor = run(
         [
             "git",
@@ -343,7 +361,6 @@ def materialize_source_archive(source: Path, head: str, destination: Path) -> st
     return archive_sha256
 
 
-
 def canonical_config_sha256(config: RuntimeConfig) -> str:
     encoded = json.dumps(
         config.canonical_identity(), sort_keys=True, separators=(",", ":")
@@ -359,25 +376,69 @@ def image_id(image: str) -> str:
 
 
 def image_binary_sha256(image: str) -> str:
-    output = docker(
-        [
-            "run",
-            "--rm",
-            "--entrypoint",
-            "/usr/bin/sha256sum",
-            image,
-            "/usr/local/bin/ninfer-serve",
-        ]
-    ).stdout
-    value = output.split(maxsplit=1)[0] if output.split() else ""
-    if not _SHA256_RE.fullmatch(value):
-        fail("failed to measure /usr/local/bin/ninfer-serve in the image")
-    return value
+    container_id = docker(["create", "--entrypoint", "/bin/true", image]).stdout.strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", container_id):
+        fail("Docker returned an invalid measurement container identity")
+    try:
+        with tempfile.TemporaryDirectory(prefix="ninfer-binary-measure-") as directory:
+            destination = Path(directory) / "ninfer-serve"
+            run(
+                [
+                    "docker",
+                    "cp",
+                    f"{container_id}:/usr/local/bin/ninfer-serve",
+                    os.fspath(destination),
+                ]
+            )
+            return sha256_file(destination)
+    finally:
+        run(["docker", "rm", "--force", container_id], check=False)
+
+
+def validate_bind_path(path: Path, field: str, *, directory: bool) -> None:
+    try:
+        candidates = [Path(path.anchor)]
+        current = Path(path.anchor)
+        for component in path.parts[1:]:
+            current /= component
+            candidates.append(current)
+        for index, candidate in enumerate(candidates):
+            metadata = candidate.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                fail(f"{field} must not contain symlink components")
+            is_target = index == len(candidates) - 1
+            if is_target and directory:
+                if not stat.S_ISDIR(metadata.st_mode):
+                    fail(f"{field} must name a directory")
+            elif is_target:
+                if not stat.S_ISREG(metadata.st_mode):
+                    fail(f"{field} must name a regular file")
+            elif not stat.S_ISDIR(metadata.st_mode):
+                fail(f"{field} ancestor must be a directory")
+            if metadata.st_mode & 0o022:
+                fail(f"{field} must not have externally writable path components")
+    except OSError as error:
+        raise LifecycleError(f"failed to validate {field}") from error
+
+
+def prepare_private_bind_directory(path: Path, field: str) -> None:
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        path.chmod(0o700)
+    except OSError as error:
+        raise LifecycleError(f"failed to prepare {field}") from error
+    validate_bind_path(path, field, directory=True)
+    if path.stat().st_uid != os.geteuid():
+        fail(f"{field} must be owned by the lifecycle user")
 
 
 def validate_secret_file(path: Path | None) -> None:
     if path is None:
         return
+    validate_bind_path(path, "api_key_file", directory=False)
+    metadata = path.stat()
+    if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+        fail("api_key_file must be lifecycle-owned with mode 0600")
     try:
         value = path.read_bytes().rstrip(b"\r\n")
     except OSError as error:
@@ -387,8 +448,7 @@ def validate_secret_file(path: Path | None) -> None:
 
 
 def measure_runtime(config: RuntimeConfig) -> RuntimeIdentity:
-    if not config.model_path.is_file():
-        fail("model_path must name an existing regular file")
+    validate_bind_path(config.model_path, "model_path", directory=False)
     validate_secret_file(config.api_key_file)
     return RuntimeIdentity(
         image_id=image_id(config.image),
@@ -399,6 +459,16 @@ def measure_runtime(config: RuntimeConfig) -> RuntimeIdentity:
 
 
 def parse_expected(args: argparse.Namespace) -> ExpectedIdentity:
+    if any(
+        getattr(args, field) is None
+        for field in (
+            "expect_image_id",
+            "expect_binary_sha256",
+            "expect_model_artifact_sha256",
+            "expect_config_sha256",
+        )
+    ):
+        fail("all expected runtime identity pins are required")
     for field in ("binary_sha256", "model_artifact_sha256", "config_sha256"):
         value = getattr(args, f"expect_{field}")
         if value is not None and not _SHA256_RE.fullmatch(value):
@@ -452,6 +522,61 @@ def require_managed_container(config: RuntimeConfig) -> dict[str, Any]:
     if labels.get(_LIFECYCLE_LABEL) != _LIFECYCLE_VALUE:
         fail("refusing to operate on a container not created by this lifecycle tool")
     return inspected
+
+
+def verify_container_configuration(
+    config: RuntimeConfig, inspected: dict[str, Any]
+) -> None:
+    host_config = inspected.get("HostConfig", {})
+    restart_policy = host_config.get("RestartPolicy", {}).get("Name")
+    if restart_policy != config.restart_policy:
+        fail("managed container restart policy differs from lifecycle configuration")
+
+    security_options = set(host_config.get("SecurityOpt") or [])
+    if not ({"no-new-privileges", "no-new-privileges=true"} & security_options):
+        fail("managed container omitted no-new-privileges")
+    if "seccomp=unconfined" in security_options:
+        fail("managed container disabled seccomp")
+    seccomp_profile = checkpoint_seccomp_profile(config)
+    if (
+        seccomp_profile is not None
+        and f"seccomp={seccomp_profile}" not in security_options
+    ):
+        fail("managed container checkpoint seccomp policy drifted")
+
+    labels = inspected.get("Config", {}).get("Labels") or {}
+    expected_seccomp = (
+        _CHECKPOINT_SECCOMP_PROFILE_SHA256
+        if config.checkpoint_dir is not None
+        else None
+    )
+    if labels.get("org.ninfer.checkpoint-seccomp-sha256") != expected_seccomp:
+        fail("managed container checkpoint seccomp identity label drifted")
+
+    mounts = {
+        value.get("Destination"): value
+        for value in inspected.get("Mounts", [])
+        if isinstance(value, dict) and isinstance(value.get("Destination"), str)
+    }
+    expected_mounts: list[tuple[str, Path, bool]] = [
+        ("/models/model.ninfer", config.model_path, False),
+        ("/logs", config.request_log_dir, True),
+    ]
+    if config.checkpoint_dir is not None:
+        expected_mounts.append(("/checkpoints", config.checkpoint_dir, True))
+    if config.api_key_file is not None:
+        expected_mounts.append(
+            ("/run/secrets/ninfer_api_key", config.api_key_file, False)
+        )
+    for destination, source, writable in expected_mounts:
+        mount = mounts.get(destination)
+        if mount is None or bool(mount.get("RW")) != writable:
+            fail("managed container mount configuration drifted")
+        try:
+            if not os.path.samefile(mount.get("Source", ""), source):
+                fail("managed container mount source drifted")
+        except OSError as error:
+            raise LifecycleError("failed to verify managed container mount") from error
 
 
 def require_gpu_idle() -> None:
@@ -552,6 +677,20 @@ def request_json(url: str, api_key: str | None, *, timeout: float) -> dict[str, 
     return value
 
 
+def capture_startup_failure_logs(config: RuntimeConfig) -> None:
+    logs = run(["docker", "logs", "--tail", "80", config.container], check=False)
+    content = (logs.stdout or "") + (logs.stderr or "")
+    secret = read_api_key(config.api_key_file)
+    if secret:
+        content = content.replace(secret, "<redacted>")
+    try:
+        path = config.request_log_dir / "startup-failure.log"
+        path.write_text(content, encoding="utf-8")
+        path.chmod(0o600)
+    except OSError as error:
+        raise LifecycleError("failed to preserve startup diagnostics") from error
+
+
 def wait_for_health(config: RuntimeConfig, timeout: float) -> None:
     deadline = time.monotonic() + timeout
     url = f"http://127.0.0.1:{config.port}/health"
@@ -560,20 +699,22 @@ def wait_for_health(config: RuntimeConfig, timeout: float) -> None:
         if inspected is None:
             fail("managed container disappeared before becoming healthy")
         state = inspected.get("State", {})
-        if not state.get("Running", False):
-            logs = run(
-                ["docker", "logs", "--tail", "80", config.container],
-                check=False,
-            )
-            lines = (logs.stderr or logs.stdout or "").strip().splitlines()
-            detail = f": {lines[-1]}" if lines else ""
-            fail("managed container exited before becoming healthy" + detail)
+        restart_count = inspected.get("RestartCount", 0)
+        if (
+            not state.get("Running", False)
+            or state.get("Restarting", False)
+            or not isinstance(restart_count, int)
+            or restart_count != 0
+        ):
+            capture_startup_failure_logs(config)
+            fail("managed container exited or restarted before becoming healthy")
         try:
             if request_json(url, None, timeout=2.0) == {"status": "ok"}:
                 return
         except LifecycleError:
             pass
         time.sleep(1.0)
+    capture_startup_failure_logs(config)
     fail(f"server did not become healthy within {timeout:g} seconds")
 
 
@@ -650,6 +791,12 @@ def receipt(
         "binary_sha256": identity.binary_sha256,
         "model_artifact_sha256": identity.model_artifact_sha256,
         "config_sha256": identity.config_sha256,
+        "checkpoint_configured": config.checkpoint_dir is not None,
+        "checkpoint_seccomp_sha256": (
+            _CHECKPOINT_SECCOMP_PROFILE_SHA256
+            if config.checkpoint_dir is not None
+            else None
+        ),
     }
     value.update(extra)
     return value
@@ -715,18 +862,9 @@ def command_start(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     require_gpu_idle()
     identity = preflight(config, parse_expected(args))
-    try:
-        config.request_log_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as error:
-        raise LifecycleError("failed to create request_log_dir") from error
+    prepare_private_bind_directory(config.request_log_dir, "request_log_dir")
     if config.checkpoint_dir is not None:
-        try:
-            config.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            if config.checkpoint_dir.is_symlink() or not config.checkpoint_dir.is_dir():
-                fail("checkpoint_dir must be a non-symlink directory")
-            config.checkpoint_dir.chmod(0o700)
-        except OSError as error:
-            raise LifecycleError("failed to prepare checkpoint_dir") from error
+        prepare_private_bind_directory(config.checkpoint_dir, "checkpoint_dir")
     timestamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%S.%fZ")
     request_log_name = f"requests-{timestamp}.jsonl"
     labels = [
@@ -737,6 +875,13 @@ def command_start(args: argparse.Namespace) -> None:
         ("org.ninfer.deployment-profile", config.deployment_profile),
         ("org.ninfer.model-id", config.model_id),
     ]
+    if config.checkpoint_dir is not None:
+        labels.append(
+            (
+                "org.ninfer.checkpoint-seccomp-sha256",
+                _CHECKPOINT_SECCOMP_PROFILE_SHA256,
+            )
+        )
     command = [
         "run",
         "--detach",
@@ -746,6 +891,8 @@ def command_start(args: argparse.Namespace) -> None:
         "all",
         "--ipc",
         "host",
+        "--security-opt",
+        "no-new-privileges=true",
         "--restart",
         config.restart_policy,
         "--publish",
@@ -788,25 +935,22 @@ def command_start(args: argparse.Namespace) -> None:
     ]
     if config.checkpoint_dir is not None:
         server_args.extend(("--session-checkpoint-dir", "/checkpoints"))
-    server_args.extend(config.args)
-    if config.api_key_file is None:
-        command.extend((config.image, "/usr/local/bin/ninfer-serve", *server_args))
-    else:
+    if config.api_key_file is not None:
         command.extend(
             (
                 "--volume",
                 f"{config.api_key_file}:/run/secrets/ninfer_api_key:ro",
-                config.image,
-                "/bin/sh",
-                "-c",
-                'exec /usr/local/bin/ninfer-serve "$@" --api-key "$(cat /run/secrets/ninfer_api_key)"',
-                "sh",
-                *server_args,
             )
         )
+        server_args.extend(("--api-key-file", "/run/secrets/ninfer_api_key"))
+    server_args.extend(config.args)
+    command.extend((config.image, "/usr/local/bin/ninfer-serve", *server_args))
 
-    container_id = docker(command).stdout.strip()
+    container_id = ""
     try:
+        container_id = docker(command).stdout.strip()
+        inspected = require_managed_container(config)
+        verify_container_configuration(config, inspected)
         wait_for_health(config, args.timeout)
         status = fetch_status(config)
         verify_status(config, identity, status)
@@ -845,11 +989,7 @@ def command_health(args: argparse.Namespace) -> None:
 def command_status(args: argparse.Namespace) -> None:
     config = load_config(args.config)
     inspected = require_managed_container(config)
-    restart_policy = (
-        inspected.get("HostConfig", {}).get("RestartPolicy", {}).get("Name")
-    )
-    if restart_policy != config.restart_policy:
-        fail("managed container restart policy differs from lifecycle configuration")
+    verify_container_configuration(config, inspected)
     identity = identity_from_labels(inspected)
     verify_expected(identity, parse_expected(args))
     value = fetch_status(config)
@@ -892,10 +1032,10 @@ def command_stop(args: argparse.Namespace) -> None:
 
 
 def add_expected_arguments(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--expect-image-id")
-    parser.add_argument("--expect-binary-sha256")
-    parser.add_argument("--expect-model-artifact-sha256")
-    parser.add_argument("--expect-config-sha256")
+    parser.add_argument("--expect-image-id", required=True)
+    parser.add_argument("--expect-binary-sha256", required=True)
+    parser.add_argument("--expect-model-artifact-sha256", required=True)
+    parser.add_argument("--expect-config-sha256", required=True)
 
 
 def create_parser() -> argparse.ArgumentParser:

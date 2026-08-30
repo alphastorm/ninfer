@@ -6,6 +6,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -13,6 +14,26 @@
 
 namespace ninfer::serve {
 namespace {
+
+std::string read_api_key_file(const char* path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) { throw std::invalid_argument("--api-key-file is not readable"); }
+    input.seekg(0, std::ios::end);
+    const std::streamoff size = input.tellg();
+    if (size < 0 || size > 4096) {
+        throw std::invalid_argument("--api-key-file exceeds 4096 bytes");
+    }
+    input.seekg(0, std::ios::beg);
+    std::string value(static_cast<std::size_t>(size), '\0');
+    input.read(value.data(), static_cast<std::streamsize>(size));
+    if (!input) { throw std::invalid_argument("--api-key-file could not be read completely"); }
+    if (!value.empty() && value.back() == '\n') { value.pop_back(); }
+    if (!value.empty() && value.back() == '\r') { value.pop_back(); }
+    if (value.empty() || value.find_first_of("\r\n") != std::string::npos) {
+        throw std::invalid_argument("--api-key-file must contain exactly one non-empty line");
+    }
+    return value;
+}
 
 int parse_nonnegative_int(const char* text, const char* label) {
     char* end        = nullptr;
@@ -91,7 +112,7 @@ std::string parse_profile_name(const char* text) {
 
 std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 + " --version\n" + "       " + argv0 +
-           " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
+           " <model.ninfer> [--host H] [--port N] [--api-key KEY|--api-key-file FILE] "
            "[--model-id ID] [--binary-sha256 SHA] [--artifact-sha256 SHA] "
            "[--config-sha256 SHA] [--deployment-profile NAME] "
            "[--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
@@ -148,6 +169,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     bool default_max_tokens_explicit = false;
     bool kv_capacity_explicit        = false;
     bool context_capacity_explicit   = false;
+    bool api_key_source_explicit     = false;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         options.help_requested = true;
         return options;
@@ -169,7 +191,17 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--port") {
             options.port = parse_nonnegative_int(require_value("--port"), "port");
         } else if (arg == "--api-key") {
-            options.api_key = require_value("--api-key");
+            if (api_key_source_explicit) {
+                throw std::invalid_argument("API key source must be specified exactly once");
+            }
+            options.api_key         = require_value("--api-key");
+            api_key_source_explicit = true;
+        } else if (arg == "--api-key-file") {
+            if (api_key_source_explicit) {
+                throw std::invalid_argument("API key source must be specified exactly once");
+            }
+            options.api_key         = read_api_key_file(require_value("--api-key-file"));
+            api_key_source_explicit = true;
         } else if (arg == "--model-id") {
             options.model_id_override = require_value("--model-id");
             if (options.model_id_override->empty()) {
@@ -427,7 +459,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     if (!options.session_checkpoint_root.empty()) {
         if (options.api_key.empty()) {
-            throw std::invalid_argument("--session-checkpoint-dir requires --api-key");
+            throw std::invalid_argument(
+                "--session-checkpoint-dir requires --api-key or --api-key-file");
         }
         if (options.binary_sha256.empty() || options.artifact_sha256.empty() ||
             options.config_sha256.empty()) {

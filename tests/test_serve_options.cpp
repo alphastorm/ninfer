@@ -1,6 +1,9 @@
 #include "serve/serve_options.h"
 #include "serve/translate.h"
 
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <string>
@@ -42,6 +45,26 @@ int main() {
     const std::string binary_sha(64, '1');
     const std::string artifact_sha(64, '2');
     const std::string config_sha(64, '3');
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path api_key_path =
+        std::filesystem::temp_directory_path() / ("ninfer-api-key-" + std::to_string(stamp));
+    const std::filesystem::path invalid_api_key_path = api_key_path.string() + "-invalid";
+    std::ofstream(api_key_path, std::ios::binary) << "file-secret\r\n";
+    std::ofstream(invalid_api_key_path, std::ios::binary) << "first\nsecond\n";
+    const ServeOptions file_key =
+        parse({"ninfer-serve", "model.ninfer", "--api-key-file", api_key_path.string()});
+    failures += check(file_key.api_key == "file-secret",
+                      "API key file was not read without trailing newlines");
+    failures += check(rejects([&] {
+                          (void)parse({"ninfer-serve", "model.ninfer", "--api-key", "inline",
+                                       "--api-key-file", api_key_path.string()});
+                      }),
+                      "multiple API key sources were accepted");
+    failures += check(rejects([&] {
+                          (void)parse({"ninfer-serve", "model.ninfer", "--api-key-file",
+                                       invalid_api_key_path.string()});
+                      }),
+                      "multi-line API key file was accepted");
     const ServeOptions identity = parse(
         {"ninfer-serve", "model.ninfer", "--binary-sha256", binary_sha, "--artifact-sha256",
          artifact_sha, "--config-sha256", config_sha, "--deployment-profile", "rtx-5090-release"});
@@ -373,6 +396,8 @@ int main() {
         check(serve_usage_text("ninfer-serve").find("--request-log-jsonl") != std::string::npos,
               "serve help omits --request-log-jsonl");
 
+    std::filesystem::remove(api_key_path);
+    std::filesystem::remove(invalid_api_key_path);
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

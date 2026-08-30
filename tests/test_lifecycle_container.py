@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import contextlib
+import io
 import json
 from pathlib import Path
 import tempfile
@@ -14,10 +17,14 @@ from tools.lifecycle.ninfer_container import (
     canonical_config_sha256,
     checkpoint_seccomp_profile,
     command_start,
+    create_parser,
+    image_binary_sha256,
     inspect_container,
     load_config,
     materialize_source_archive,
+    prepare_private_bind_directory,
     verify_clean_source,
+    verify_container_configuration,
     wait_for_health,
 )
 
@@ -28,17 +35,19 @@ def write_config(
     restart_policy: str | None = None,
     checkpoint_dir: str | None = None,
     request_log_dir: str = "/srv/ninfer/logs",
+    model_path: str = "/srv/ninfer/model.ninfer",
+    api_key_file: str = "/run/secrets/ninfer-test-api-key",
     args: list[str] | None = None,
 ) -> Path:
     config = {
         "image": "ninfer:test",
         "container": "ninfer-test",
-        "model_path": "/srv/ninfer/model.ninfer",
+        "model_path": model_path,
         "model_id": "test-model",
         "deployment_profile": "test-profile",
         "port": 18088,
         "request_log_dir": request_log_dir,
-        "api_key_file": "/run/secrets/ninfer-test-api-key",
+        "api_key_file": api_key_file,
     }
     if restart_policy is not None:
         config["restart_policy"] = restart_policy
@@ -51,6 +60,11 @@ def write_config(
 
 
 class LifecycleConfigTests(unittest.TestCase):
+    def test_authorizing_commands_require_all_identity_pins(self) -> None:
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit):
+                create_parser().parse_args(["preflight", "--config", "candidate.json"])
+
     def test_container_release_cannot_self_declare_clean_without_git(self) -> None:
         root = Path(__file__).resolve().parents[1]
         self.assertNotIn(
@@ -80,12 +94,10 @@ class LifecycleConfigTests(unittest.TestCase):
 
     def test_restart_policy_contract(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             default = load_config(write_config(root / "default.json"))
             persistent = load_config(
-                write_config(
-                    root / "persistent.json", restart_policy="unless-stopped"
-                )
+                write_config(root / "persistent.json", restart_policy="unless-stopped")
             )
 
             self.assertEqual(default.restart_policy, "no")
@@ -101,7 +113,7 @@ class LifecycleConfigTests(unittest.TestCase):
 
     def test_checkpoint_directory_is_mounted_by_lifecycle_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             ordinary = load_config(write_config(root / "ordinary.json"))
             durable = load_config(
                 write_config(
@@ -148,11 +160,19 @@ class LifecycleConfigTests(unittest.TestCase):
 
     def test_start_mounts_checkpoint_directory_at_owned_server_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
+            model = root / "model.ninfer"
+            secret = root / "api-key"
+            model.write_bytes(b"model")
+            secret.write_text("mounted-secret\n", encoding="utf-8")
+            secret.chmod(0o600)
             config_path = write_config(
                 root / "durable.json",
                 checkpoint_dir=str(root / "checkpoints"),
                 request_log_dir=str(root / "logs"),
+                model_path=str(model),
+                api_key_file=str(secret),
+                args=["--max-context", "1024"],
             )
             identity = RuntimeIdentity(
                 image_id="sha256:" + "1" * 64,
@@ -163,18 +183,16 @@ class LifecycleConfigTests(unittest.TestCase):
             args = SimpleNamespace(
                 config=config_path,
                 timeout=1.0,
-                expect_image_id=None,
-                expect_binary_sha256=None,
-                expect_model_artifact_sha256=None,
-                expect_config_sha256=None,
+                expect_image_id=identity.image_id,
+                expect_binary_sha256=identity.binary_sha256,
+                expect_model_artifact_sha256=identity.model_artifact_sha256,
+                expect_config_sha256=identity.config_sha256,
             )
             started = subprocess.CompletedProcess(
                 args=["docker", "run"], returncode=0, stdout="container-id\n", stderr=""
             )
             with (
-                mock.patch(
-                    "tools.lifecycle.ninfer_container.require_gpu_idle"
-                ),
+                mock.patch("tools.lifecycle.ninfer_container.require_gpu_idle"),
                 mock.patch(
                     "tools.lifecycle.ninfer_container.preflight", return_value=identity
                 ),
@@ -182,24 +200,32 @@ class LifecycleConfigTests(unittest.TestCase):
                     "tools.lifecycle.ninfer_container.docker", return_value=started
                 ) as docker_mock,
                 mock.patch(
-                    "tools.lifecycle.ninfer_container.wait_for_health"
+                    "tools.lifecycle.ninfer_container.require_managed_container",
+                    return_value={},
                 ),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.verify_container_configuration"
+                ),
+                mock.patch("tools.lifecycle.ninfer_container.wait_for_health"),
                 mock.patch(
                     "tools.lifecycle.ninfer_container.fetch_status", return_value={}
                 ),
-                mock.patch(
-                    "tools.lifecycle.ninfer_container.verify_status"
-                ),
+                mock.patch("tools.lifecycle.ninfer_container.verify_status"),
                 mock.patch("builtins.print"),
             ):
                 command_start(args)
 
             command = docker_mock.call_args.args[0]
             self.assertIn(f"{root / 'checkpoints'}:/checkpoints", command)
-            security_option = command.index("--security-opt")
-            self.assertEqual(
-                command[security_option + 1],
+            self.assertIn("no-new-privileges=true", command)
+            self.assertNotIn("/bin/sh", command)
+            self.assertNotIn("mounted-secret", command)
+            api_key_option = command.index("--api-key-file")
+            self.assertEqual(command[api_key_option + 1], "/run/secrets/ninfer_api_key")
+            self.assertLess(api_key_option, command.index("--max-context"))
+            self.assertIn(
                 f"seccomp={checkpoint_seccomp_profile(load_config(config_path))}",
+                command,
             )
             option = command.index("--session-checkpoint-dir")
             self.assertEqual(command[option + 1], "/checkpoints")
@@ -208,10 +234,18 @@ class LifecycleConfigTests(unittest.TestCase):
 
     def test_health_wait_reports_the_first_container_exit(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            secret = root / "api-key"
+            secret.write_text("secret-value\n", encoding="utf-8")
+            secret.chmod(0o600)
+            logs_dir = root / "logs"
+            logs_dir.mkdir(mode=0o700)
             config = load_config(
                 write_config(
-                    Path(directory) / "candidate.json",
-                    request_log_dir=str(Path(directory) / "logs"),
+                    root / "candidate.json",
+                    request_log_dir=str(logs_dir),
+                    model_path=str(secret),
+                    api_key_file=str(secret),
                 )
             )
             logs = subprocess.CompletedProcess(
@@ -225,19 +259,202 @@ class LifecycleConfigTests(unittest.TestCase):
                     "tools.lifecycle.ninfer_container.inspect_container",
                     return_value={"State": {"Running": False}},
                 ),
-                mock.patch(
-                    "tools.lifecycle.ninfer_container.run", return_value=logs
-                ),
+                mock.patch("tools.lifecycle.ninfer_container.run", return_value=logs),
             ):
                 with self.assertRaisesRegex(
-                    LifecycleError, "io_uring_setup: Operation not permitted"
+                    LifecycleError, "exited or restarted before becoming healthy"
                 ):
                     wait_for_health(config, 10)
+            diagnostic = logs_dir / "startup-failure.log"
+            self.assertEqual(
+                diagnostic.read_text(encoding="utf-8"),
+                "[error] io_uring_setup: Operation not permitted\n",
+            )
+            self.assertEqual(diagnostic.stat().st_mode & 0o777, 0o600)
 
+    def test_binary_measurement_uses_host_hashing(self) -> None:
+        container_id = "a" * 64
+        created = subprocess.CompletedProcess(
+            args=["docker", "create"],
+            returncode=0,
+            stdout=container_id + "\n",
+            stderr="",
+        )
+
+        def host_command(
+            arguments: list[str], **_: object
+        ) -> subprocess.CompletedProcess[str]:
+            if arguments[:2] == ["docker", "cp"]:
+                Path(arguments[-1]).write_bytes(b"trusted-binary-bytes")
+            return subprocess.CompletedProcess(arguments, 0, "", "")
+
+        with (
+            mock.patch(
+                "tools.lifecycle.ninfer_container.docker", return_value=created
+            ) as docker_mock,
+            mock.patch(
+                "tools.lifecycle.ninfer_container.run", side_effect=host_command
+            ) as run_mock,
+        ):
+            measured = image_binary_sha256("ninfer:test")
+
+        self.assertEqual(measured, hashlib.sha256(b"trusted-binary-bytes").hexdigest())
+        self.assertEqual(docker_mock.call_args.args[0][0], "create")
+        self.assertTrue(
+            any(
+                call.args[0][:2] == ["docker", "cp"] for call in run_mock.call_args_list
+            )
+        )
+        self.assertFalse(
+            any(
+                call.args[0][:2] == ["docker", "run"]
+                for call in run_mock.call_args_list
+            )
+        )
+
+    def test_private_bind_directory_rejects_symlink_and_writable_ancestor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            target = root / "target"
+            target.mkdir()
+            link = root / "link"
+            link.symlink_to(target, target_is_directory=True)
+            with self.assertRaisesRegex(LifecycleError, "symlink"):
+                prepare_private_bind_directory(link, "checkpoint_dir")
+
+            writable = root / "writable"
+            writable.mkdir(mode=0o777)
+            writable.chmod(0o777)
+            with self.assertRaisesRegex(LifecycleError, "externally writable"):
+                prepare_private_bind_directory(writable / "child", "request_log_dir")
+
+    def test_start_cleans_container_created_before_run_failure(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            model = root / "model.ninfer"
+            secret = root / "api-key"
+            model.write_bytes(b"model")
+            secret.write_text("secret\n", encoding="utf-8")
+            secret.chmod(0o600)
+            config_path = write_config(
+                root / "candidate.json",
+                checkpoint_dir=str(root / "checkpoints"),
+                request_log_dir=str(root / "logs"),
+                model_path=str(model),
+                api_key_file=str(secret),
+            )
+            identity = RuntimeIdentity(
+                image_id="sha256:" + "1" * 64,
+                binary_sha256="2" * 64,
+                model_artifact_sha256="3" * 64,
+                config_sha256="4" * 64,
+            )
+            args = SimpleNamespace(
+                config=config_path,
+                timeout=1.0,
+                expect_image_id=identity.image_id,
+                expect_binary_sha256=identity.binary_sha256,
+                expect_model_artifact_sha256=identity.model_artifact_sha256,
+                expect_config_sha256=identity.config_sha256,
+            )
+            owned = {
+                "Config": {
+                    "Labels": {
+                        "org.ninfer.lifecycle": "tools.lifecycle.ninfer_container"
+                    }
+                }
+            }
+            removed = subprocess.CompletedProcess(
+                args=["docker", "rm"], returncode=0, stdout="", stderr=""
+            )
+            with (
+                mock.patch("tools.lifecycle.ninfer_container.require_gpu_idle"),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.preflight", return_value=identity
+                ),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.docker",
+                    side_effect=LifecycleError("docker run failed"),
+                ),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.inspect_container",
+                    return_value=owned,
+                ),
+                mock.patch(
+                    "tools.lifecycle.ninfer_container.run", return_value=removed
+                ) as run_mock,
+            ):
+                with self.assertRaisesRegex(LifecycleError, "docker run failed"):
+                    command_start(args)
+
+            run_mock.assert_called_with(
+                ["docker", "rm", "--force", "ninfer-test"], check=False
+            )
+
+    def test_container_configuration_binds_mounts_and_security(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            model = root / "model.ninfer"
+            secret = root / "api-key"
+            logs = root / "logs"
+            checkpoints = root / "checkpoints"
+            model.write_bytes(b"model")
+            secret.write_text("secret\n", encoding="utf-8")
+            secret.chmod(0o600)
+            logs.mkdir()
+            checkpoints.mkdir()
+            config = load_config(
+                write_config(
+                    root / "candidate.json",
+                    checkpoint_dir=str(checkpoints),
+                    request_log_dir=str(logs),
+                    model_path=str(model),
+                    api_key_file=str(secret),
+                )
+            )
+            seccomp = checkpoint_seccomp_profile(config)
+            inspected = {
+                "HostConfig": {
+                    "RestartPolicy": {"Name": "no"},
+                    "SecurityOpt": [
+                        "no-new-privileges=true",
+                        f"seccomp={seccomp}",
+                    ],
+                },
+                "Config": {
+                    "Labels": {
+                        "org.ninfer.checkpoint-seccomp-sha256": (
+                            "3b7bf1e9fa71bfd8ed536c8aaaa2d40e4f133a0c853d226efd9b9e4966dd1506"
+                        )
+                    }
+                },
+                "Mounts": [
+                    {
+                        "Destination": "/models/model.ninfer",
+                        "Source": str(model),
+                        "RW": False,
+                    },
+                    {"Destination": "/logs", "Source": str(logs), "RW": True},
+                    {
+                        "Destination": "/checkpoints",
+                        "Source": str(checkpoints),
+                        "RW": True,
+                    },
+                    {
+                        "Destination": "/run/secrets/ninfer_api_key",
+                        "Source": str(secret),
+                        "RW": False,
+                    },
+                ],
+            }
+            verify_container_configuration(config, inspected)
+            inspected["HostConfig"]["SecurityOpt"] = ["seccomp=unconfined"]
+            with self.assertRaisesRegex(LifecycleError, "no-new-privileges"):
+                verify_container_configuration(config, inspected)
 
     def test_clean_source_attestation_and_archive(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
+            root = Path(directory).resolve()
             source = root / "source"
             source.mkdir()
 
@@ -295,6 +512,7 @@ class LifecycleConfigTests(unittest.TestCase):
             (source / "tracked.txt").write_text("dirty bytes\n", encoding="utf-8")
             with self.assertRaisesRegex(LifecycleError, "source tree must be clean"):
                 verify_clean_source(source, head, head)
+
 
 if __name__ == "__main__":
     unittest.main()
