@@ -36,6 +36,11 @@ function(ninfer_add_test name)
       NINFER_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
       NINFER_PYTHON_EXECUTABLE="${Python3_EXECUTABLE}")
   endif()
+  if(WIN32 AND DSTORAGE_DLLS)
+    add_custom_command(TARGET ${name} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different ${DSTORAGE_DLLS} $<TARGET_FILE_DIR:${name}>
+    )
+  endif()
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
