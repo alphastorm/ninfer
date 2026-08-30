@@ -51,8 +51,8 @@ cannot be combined with `--vision`. A later request cannot enable a capability o
 | `GET /health` | process health |
 | `GET /v1/ninfer/status` | exact build/deployment identity, resolved runtime settings, activity, cache state, and MTP totals |
 | `POST /v1/ninfer/checkpoints` | transactionally checkpoint the stored Responses session named by the exact JSON body |
-| `GET /v1/ninfer/checkpoints/status` | authenticated durable-checkpoint compatibility and generation status; session credential in `X-NInfer-Session` |
-| `DELETE /v1/ninfer/checkpoints` | remove the session named by `X-NInfer-Session` |
+| `GET /v1/ninfer/checkpoints/<session_sha256>/status` | authenticated durable-checkpoint compatibility and generation status; the released OMP client's addressing. `GET /v1/ninfer/checkpoints/status` with `X-NInfer-Session` remains for operator tooling |
+| `DELETE /v1/ninfer/checkpoints/<session_sha256>` | remove the named session; the collection route with `X-NInfer-Session` remains for operator tooling |
 | `GET /v1/models` | configured OpenAI model alias |
 | `GET /v1/models/{id}` | lookup of the configured alias |
 | `POST /v1/chat/completions` | OpenAI-style chat generation |

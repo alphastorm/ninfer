@@ -439,7 +439,7 @@ int test_transaction_restart_compatibility_and_corruption() {
         restarted.status(responses.client_session_sha256, fingerprint());
     failures +=
         check(unavailable.state == SessionCheckpointLoadState::Unavailable &&
-                  !unavailable.checkpoint && unavailable_status.at("state") == "unavailable" &&
+                  !unavailable.checkpoint && unavailable_status.at("state") == "disabled" &&
                   std::filesystem::is_regular_file(session / "current") &&
                   std::filesystem::is_directory(generation_root),
               "transient manifest loss preserves current and returns unavailable");

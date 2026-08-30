@@ -36,9 +36,15 @@ httplib::Server::HandlerResponse handle_unrendered_http_error(const ServeOptions
 [[nodiscard]] std::optional<std::string>
 parse_client_session_header(const httplib::Request& request, bool authentication_configured);
 
-// Checkpoint status/delete always require the session credential in X-NInfer-Session.
-[[nodiscard]] std::string require_checkpoint_session_header(const httplib::Request& request,
-                                                            bool authentication_configured);
+// Checkpoint status/delete resolve the session credential from the URL path parameter
+// (the released OMP client's addressing: /v1/ninfer/checkpoints/<sha256>...) or from
+// X-NInfer-Session on the collection routes; disagreement between the two is rejected.
+[[nodiscard]] std::optional<std::string>
+checkpoint_session_path_argument(const httplib::Request& request);
+[[nodiscard]] std::string
+require_checkpoint_session_identity(const std::optional<std::string>& path_value,
+                                    const httplib::Request& request,
+                                    bool authentication_configured);
 
 // Renders the authenticated DELETE result without echoing the session identity or stored content.
 void write_checkpoint_delete_response(httplib::Response& response,

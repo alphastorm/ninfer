@@ -1213,7 +1213,11 @@ nlohmann::json SessionCheckpointStore::status(std::string_view session_sha256,
         result["state"] = "corrupt";
         return result;
     } catch (...) {
-        result["state"] = "unavailable";
+        // The released OMP client's checkpoint-state vocabulary is closed
+        // (available/missing/incompatible/corrupt/disabled/deleted); a transient
+        // store failure reports "disabled" so the pinned client falls back to
+        // transcript replay instead of failing the status parse.
+        result["state"] = "disabled";
         return result;
     }
 }

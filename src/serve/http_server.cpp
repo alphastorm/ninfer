@@ -204,19 +204,45 @@ std::optional<std::string> parse_client_session_header(const httplib::Request& r
     return identity.client_session_sha256;
 }
 
-std::string require_checkpoint_session_header(const httplib::Request& request,
-                                              bool authentication_configured) {
-    std::optional<std::string> digest =
+std::optional<std::string> checkpoint_session_path_argument(const httplib::Request& request) {
+    if (request.matches.size() > 1) { return request.matches[1].str(); }
+    return std::nullopt;
+}
+
+// Resolves the checkpoint session digest from either surface the product ships:
+// the released OMP client addresses checkpoints by URL path parameter
+// (GET /v1/ninfer/checkpoints/<sha256>/status, DELETE /v1/ninfer/checkpoints/<sha256>),
+// while the header form (X-NInfer-Session on the collection routes) remains for
+// operator tooling. A path parameter and a header that disagree are rejected.
+std::string require_checkpoint_session_identity(const std::optional<std::string>& path_value,
+                                                const httplib::Request& request,
+                                                bool authentication_configured) {
+    std::optional<std::string> path_digest;
+    if (path_value) {
+        GenerationRequest identity;
+        identity.client_session_sha256 =
+            parse_client_identity_sha256(*path_value, "ninfer_session");
+        require_authenticated_client_identity(identity, authentication_configured);
+        path_digest = identity.client_session_sha256;
+    }
+    std::optional<std::string> header_digest =
         parse_client_session_header(request, authentication_configured);
-    if (!digest) {
+    if (path_digest && header_digest && *path_digest != *header_digest) {
         ApiError error;
         error.status  = 400;
-        error.message = "X-NInfer-Session is required";
+        error.message = "checkpoint session path and X-NInfer-Session disagree";
         error.param   = "ninfer_session";
         error.code    = "invalid_session";
         throw ApiException(std::move(error));
     }
-    return std::move(*digest);
+    if (path_digest) { return std::move(*path_digest); }
+    if (header_digest) { return std::move(*header_digest); }
+    ApiError error;
+    error.status  = 400;
+    error.message = "checkpoint session identity is required in the URL path or X-NInfer-Session";
+    error.param   = "ninfer_session";
+    error.code    = "invalid_session";
+    throw ApiException(std::move(error));
 }
 
 std::string parse_checkpoint_save_request_body(std::string_view body) {
@@ -445,7 +471,15 @@ void HttpServer::register_routes() {
                     [this](const httplib::Request& req, httplib::Response& res) {
                         handle_checkpoint_get(req, res);
                     });
+        server_.Get(R"(/v1/ninfer/checkpoints/([0-9a-f]{64})/status)",
+                    [this](const httplib::Request& req, httplib::Response& res) {
+                        handle_checkpoint_get(req, res);
+                    });
         server_.Delete("/v1/ninfer/checkpoints",
+                       [this](const httplib::Request& req, httplib::Response& res) {
+                           handle_checkpoint_delete(req, res);
+                       });
+        server_.Delete(R"(/v1/ninfer/checkpoints/([0-9a-f]{64}))",
                        [this](const httplib::Request& req, httplib::Response& res) {
                            handle_checkpoint_delete(req, res);
                        });
@@ -499,7 +533,8 @@ void HttpServer::register_routes() {
 void HttpServer::handle_checkpoint_get(const httplib::Request& req, httplib::Response& res) const {
     std::string digest;
     try {
-        digest = require_checkpoint_session_header(req, !options_.api_key.empty());
+        digest = require_checkpoint_session_identity(checkpoint_session_path_argument(req), req,
+                                                     !options_.api_key.empty());
     } catch (const ApiException& error) {
         write_error(res, error.error());
         return;
@@ -551,7 +586,8 @@ void HttpServer::handle_checkpoint_save(const httplib::Request& req, httplib::Re
 void HttpServer::handle_checkpoint_delete(const httplib::Request& req, httplib::Response& res) {
     std::string digest;
     try {
-        digest = require_checkpoint_session_header(req, !options_.api_key.empty());
+        digest = require_checkpoint_session_identity(checkpoint_session_path_argument(req), req,
+                                                     !options_.api_key.empty());
     } catch (const ApiException& error) {
         write_error(res, error.error());
         return;

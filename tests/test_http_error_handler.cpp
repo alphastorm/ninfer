@@ -63,18 +63,40 @@ int main() {
     session_header.headers.emplace("X-NInfer-Session", session_digest);
     failures +=
         check(ninfer::serve::parse_client_session_header(session_header, true) == session_digest &&
-                  ninfer::serve::require_checkpoint_session_header(session_header, true) ==
-                      session_digest,
+                  ninfer::serve::require_checkpoint_session_identity(std::nullopt, session_header,
+                                                                     true) == session_digest,
               "checkpoint session header did not yield its authenticated digest");
+    httplib::Request path_only_request;
+    failures += check(ninfer::serve::require_checkpoint_session_identity(
+                          session_digest, path_only_request, true) == session_digest,
+                      "checkpoint session path parameter did not yield its authenticated digest");
+    failures += check(ninfer::serve::require_checkpoint_session_identity(
+                          session_digest, session_header, true) == session_digest,
+                      "agreeing checkpoint path and header were rejected");
+    try {
+        (void)ninfer::serve::require_checkpoint_session_identity(std::string(63, 'a') + "b",
+                                                                 path_only_request, true);
+        failures += check(false, "checkpoint route accepted a mismatched path digest agreement");
+    } catch (const ninfer::serve::ApiException&) {
+    }
+    try {
+        (void)ninfer::serve::require_checkpoint_session_identity(std::string(64, 'b'),
+                                                                 session_header, true);
+        failures += check(false, "disagreeing checkpoint path and header were accepted");
+    } catch (const ninfer::serve::ApiException& error) {
+        failures += check(error.error().status == 400 && error.error().code == "invalid_session",
+                          "disagreeing checkpoint identities returned the wrong error");
+    }
     httplib::Request missing_session_header;
     failures += check(!ninfer::serve::parse_client_session_header(missing_session_header, true),
                       "optional session parser invented a missing credential");
     try {
-        (void)ninfer::serve::require_checkpoint_session_header(missing_session_header, true);
-        failures += check(false, "checkpoint route accepted a missing session header");
+        (void)ninfer::serve::require_checkpoint_session_identity(std::nullopt,
+                                                                 missing_session_header, true);
+        failures += check(false, "checkpoint route accepted a missing session identity");
     } catch (const ninfer::serve::ApiException& error) {
         failures += check(error.error().status == 400 && error.error().code == "invalid_session",
-                          "missing checkpoint session header returned the wrong error");
+                          "missing checkpoint session identity returned the wrong error");
     }
     session_header.headers.emplace("X-NInfer-Session", session_digest);
     try {
