@@ -77,7 +77,7 @@
     "sha256sums_member_set": "package receipt, ZIP release manifest, ZIP, package source archive, SPDX, external qualification sidecar, and all eight published PowerShell scripts exactly once; SHA256SUMS is not self-listed"
   },
   "lifecycle": {
-    "task_name": "NInfer-Qwen38-4090-v0.1",
+    "task_name": "NInfer-Qwen38-4090-v0.2",
     "listen_port": 18082,
     "installation_scope": "isolated-version-root",
     "candidate_root_directories": [

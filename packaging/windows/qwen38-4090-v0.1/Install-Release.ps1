@@ -933,7 +933,7 @@ try {
             $manifest.source_dirty -ne $false) {
             throw 'release package identity mismatch'
         }
-        if ([string]$manifest.release_version -cne '0.1.0' -or
+        if ([string]$manifest.release_version -cne '0.2.0' -or
             [string]$manifest.asset_filename -cne 'ninfer-4090-qwen38-v0.2.0-win-x64.zip') {
             throw 'release package semantic version mismatch'
         }
@@ -942,7 +942,7 @@ try {
         }
 
         $taskName = [string]$spec.lifecycle.task_name
-        if ($taskName -cne 'NInfer-Qwen38-4090-v0.1') { throw 'unexpected lifecycle task identity' }
+        if ($taskName -cne 'NInfer-Qwen38-4090-v0.2') { throw 'unexpected lifecycle task identity' }
         if ($null -ne $oldState -and [string]$oldState.task_name -cne $taskName) {
             throw 'installed lifecycle task identity mismatch'
         }
