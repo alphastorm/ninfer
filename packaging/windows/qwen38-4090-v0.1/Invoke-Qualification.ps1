@@ -89,7 +89,9 @@ if ([string]$config.speculative.backend -cne $expectedBackend -or
     [bool]$status.mtp.enabled -ne ($Profile -ceq 'MTP3')) {
     throw "installed release does not match the requested $Profile arm"
 }
-$comparableConfig = $jsonSerializer.DeserializeObject($jsonSerializer.Serialize($config))
+# JavaScriptSerializer cannot walk PSCustomObject graphs on Windows PowerShell 5.1
+# (circular PSMethod reference); deserialize the raw JSON text instead.
+$comparableConfig = $jsonSerializer.DeserializeObject((Get-Content -LiteralPath ([string]$release.config_file) -Raw -Encoding UTF8))
 $comparableConfig['speculative']['backend'] = '<qualification-arm>'
 $comparableConfig['speculative']['draft_tokens'] = -1
 $nonspeculativeConfigSha256 = Get-Digest ($jsonSerializer.Serialize($comparableConfig))
