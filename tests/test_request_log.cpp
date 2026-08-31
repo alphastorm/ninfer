@@ -208,8 +208,33 @@ int main() {
                           status.at("scheduler").at("waiting") == 3 &&
                           status.at("cache").at("persistent").at("enabled") == false &&
                           status.at("cache").at("telemetry_available") == false &&
-                          status.at("mtp").at("rounds").is_null(),
+                          status.at("mtp").at("rounds") == 0,
                       "status identity, scheduler, cache, or MTP group missing");
+    // Pinned OMP 18.0.9 client contract (ninfer#28): these exact fields must be concrete
+    // non-negative numbers - a null or missing value makes the client reject the session
+    // at provider init. Mirrors the client validator field-for-field.
+    const auto unsigned_field = [](const Json& node, const char* key) {
+        return node.contains(key) && node.at(key).is_number() && !node.at(key).is_number_float()
+                   ? node.at(key).template get<std::int64_t>() >= 0
+                   : false;
+    };
+    const Json& scheduler = status.at("scheduler");
+    for (const char* key : {"max_concurrency", "max_pending_requests", "running", "prefilling",
+                            "decode_ready", "waiting", "materializing", "capture_pending"}) {
+        failures += check(unsigned_field(scheduler, key),
+                          (std::string("pinned-client scheduler field is not a concrete number: ") +
+                           key).c_str());
+    }
+    const Json& catalog = status.at("cache").at("private_catalog");
+    failures += check(unsigned_field(catalog, "occupied") && unsigned_field(catalog, "capacity"),
+                      "pinned-client private_catalog occupancy must be concrete numbers");
+    failures += check(unsigned_field(status.at("cache"), "reused_prompt_tokens"),
+                      "pinned-client reused_prompt_tokens must be a concrete number");
+    for (const char* key : {"rounds", "drafted_tokens", "accepted_tokens", "fallback_steps"}) {
+        failures += check(unsigned_field(status.at("mtp"), key),
+                          (std::string("pinned-client mtp counter is not a concrete number: ") + key)
+                              .c_str());
+    }
     failures += check(status.dump().find("must-not-appear") == std::string::npos &&
                           status.dump().find("/models/") == std::string::npos,
                       "status JSON leaked a secret or private path");
