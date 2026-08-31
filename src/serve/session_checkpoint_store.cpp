@@ -546,20 +546,34 @@ public:
     bool write_file(std::string_view path, std::uint64_t offset, std::uint64_t total_bytes,
                     std::span<const std::byte> bytes) override {
         try {
+            const std::size_t size = bytes.size();
+            {
+                std::unique_lock lock(mutex_);
+                if (failed_ || closed_) { return false; }
+                // Reserve before copying so accounted bytes cover every copy this writer
+                // holds, including the chunk the drain thread is currently writing
+                // (review CR-20260831-ckptdecouple R2). A chunk larger than the whole
+                // capacity is admitted only once the writer holds nothing at all.
+                space_.wait(lock, [&] {
+                    return failed_ || queued_bytes_ == 0 || queued_bytes_ + size <= capacity_;
+                });
+                if (failed_) { return false; }
+                queued_bytes_ += size;
+            }
+            // Copy outside the lock so the drain thread keeps writing during the memcpy.
             Chunk chunk;
             chunk.path.assign(path);
             chunk.offset = offset;
             chunk.total  = total_bytes;
             chunk.bytes.assign(bytes.begin(), bytes.end());
-            std::unique_lock lock(mutex_);
-            if (failed_ || closed_) { return false; }
-            space_.wait(lock, [&] {
-                return failed_ || queue_.empty() ||
-                       queued_bytes_ + chunk.bytes.size() <= capacity_;
-            });
-            if (failed_) { return false; }
-            queued_bytes_ += chunk.bytes.size();
-            queue_.push_back(std::move(chunk));
+            {
+                std::lock_guard lock(mutex_);
+                if (failed_) {
+                    queued_bytes_ -= size;
+                    return false;
+                }
+                queue_.push_back(std::move(chunk));
+            }
             ready_.notify_one();
             return true;
         } catch (...) {
@@ -604,19 +618,23 @@ private:
                 if (queue_.empty()) { return; }
                 chunk = std::move(queue_.front());
                 queue_.pop_front();
-                queued_bytes_ -= chunk.bytes.size();
+                // queued_bytes_ keeps covering this in-flight chunk until its disk write
+                // completes, so the configured bound is a real RAM bound (review R2).
             }
-            space_.notify_all();
             const bool wrote =
                 inner_.write_file(chunk.path, chunk.offset, chunk.total, chunk.bytes);
-            if (!wrote) {
+            {
                 std::lock_guard lock(mutex_);
-                failed_ = true;
-                queue_.clear();
-                queued_bytes_ = 0;
-                space_.notify_all();
-                return;
+                queued_bytes_ -= chunk.bytes.size();
+                if (!wrote) {
+                    failed_ = true;
+                    queue_.clear();
+                    queued_bytes_ = 0;
+                    space_.notify_all();
+                    return;
+                }
             }
+            space_.notify_all();
         }
     }
 

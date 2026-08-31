@@ -399,10 +399,19 @@ missing/open/read filesystem failure reports `unavailable` without changing the 
 A completed stored turn at or above `--session-checkpoint-min-tokens` is enqueued to one
 bounded background checkpoint worker; the default threshold is `32768`. The request publishes its
 terminal HTTP/SSE response without waiting for checkpoint I/O, repeated saves for the same session
-coalesce, and a full queue drops only that automatic acceleration attempt. Graceful server shutdown
+coalesce, and a full queue drops only that automatic acceleration attempt. An automatic save
+additionally yields to live traffic: it waits for an idle engine (bounded at 60 s) before
+starting, so a busy server still checkpoints eventually but foreground requests never queue
+behind an elective save. Graceful server shutdown
 drains the worker and then attempts every live session. Explicit `POST` remains the synchronous
-crash-test boundary: do not kill the process until it returns.
+crash-test boundary: it never waits and starts immediately; do not kill the process until it
+returns.
 `--session-checkpoint-staging-mib` bounds transfer/codec staging.
+`--session-checkpoint-write-buffer-mib` (default `6144`) bounds the in-memory queue that
+decouples checkpoint disk writes from the engine: the exporter copies chunks into this buffer
+and returns, one drain thread performs the real writes, and a deferred write failure fails the
+save before anything publishes. The bound covers queued plus in-flight bytes; beyond it the
+exporter blocks (engine-held) until the drain catches up, so lower it on small-RAM hosts.
 `--session-checkpoint-quota-mib` is a store-wide cap over all retained current and stale
 generations, including deferred tombstones. Before publishing a new `current`, admission cleans
 tombstones and abandoned staging, then reclaims the oldest inactive stale generations and inactive
@@ -514,6 +523,8 @@ curl http://127.0.0.1:8080/v1/models \
 | `--session-checkpoint-dir DIR` | enable authenticated process-restart continuation at this root | disabled |
 | `--session-checkpoint-quota-mib N` | total retained checkpoint budget | `65536` |
 | `--session-checkpoint-staging-mib N` | bounded response codec and host transfer staging | `256` |
+| `--session-checkpoint-write-buffer-mib N` | in-memory queue decoupling checkpoint disk writes from the engine (queued + in-flight) | `6144` |
+| `--session-checkpoint-min-tokens N` | completed-turn frontier that triggers an automatic save | `32768` |
 | `--kv-dtype bf16\|int8\|rk8v4` | KV-cache storage; `rk8v4` is experimental and lossy | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |
