@@ -3,8 +3,8 @@
   "schema_version": 1,
   "status": "candidate_ready",
   "qualification_level": "beta",
-  "beta_support_qualified": true,
-  "release_eligible": true,
+  "beta_support_qualified": false,
+  "release_eligible": false,
   "release_id": "qwen38-4090-v0.1",
   "release_version": "0.1.0",
   "qualification_target": {
@@ -154,7 +154,7 @@
   },
   "authority": {
     "role": "external-final-qualification-authority",
-    "supersedes_package_candidate_status": true,
+    "supersedes_package_candidate_status": false,
     "superseded_status": "candidate_ready",
     "binding": "SHA256SUMS-bound-sidecar",
     "sidecar_filename": "ninfer-4090-qwen38-v0.2.0-win-x64-qualification.json",
@@ -179,7 +179,7 @@
   "stable_release_performed": false,
   "stable_promotion_performed": false,
   "permanent_route_mutation": false,
-  "decision": "Qualified for beta support as a source-bound release candidate; no public release, stable promotion, or permanent route mutation was performed.",
+  "decision": "Candidate record for the qwen38-4090-v0.2 durable train cut from qualified head 32aa5899; release eligibility is granted only by the external SHA256SUMS-bound sidecar produced by on-rig qualification. No public release or route mutation performed.",
   "campaign": {
     "council": "CR-20260831-durable4090 (remediated; ledger in campaign dir)"
   }
