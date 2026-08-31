@@ -670,7 +670,10 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
 [[nodiscard]] bool cleanup_tombstone(const SessionCheckpointStoreOptions& options,
                                      const std::filesystem::path& path) {
     if (options.tombstone_cleanup) {
-        if (!options.tombstone_cleanup(path)) { return false; }
+        // A cleanup hook outage is an unhealthy reclamation, never a failed save.
+        try {
+            if (!options.tombstone_cleanup(path)) { return false; }
+        } catch (...) { return false; }
     } else {
         std::error_code error;
         std::filesystem::remove_all(path, error);
@@ -1010,6 +1013,9 @@ SessionCheckpointStore::save(const ResponseStoreSnapshot& responses,
         std::optional<ContinuationCheckpointStats> engine = exporter(writer);
         if (!engine || !valid_checkpoint_stats(*engine)) {
             std::filesystem::remove_all(staging, cleanup_error);
+            if (skip != nullptr) {
+                skip->reason = runtime::SessionCheckpointSkipReason::ProgramRejected;
+            }
             return std::nullopt;
         }
         std::optional<std::vector<FileDescriptor>> payloads = writer.files();
@@ -1100,7 +1106,13 @@ SessionCheckpointStore::save(const ResponseStoreSnapshot& responses,
         // The superseded generation is now a stale candidate. Enforcement reclaims it only
         // under quota pressure, so it keeps serving as the corruption-recovery fallback
         // whenever the quota allows both generations. The fresh current stays protected.
-        (void)enforce_disk_quota_locked(options_, *impl_, std::nullopt, session);
+        // Reclamation is strictly best effort after the durable publish: the acknowledged
+        // generation must never be reported failed for cleanup trouble (council R1). While
+        // eviction keeps failing, the next save's own enforcement pass observes the failure
+        // and withdraws the transient tolerance, so usage still cannot creep past the cap.
+        try {
+            (void)enforce_disk_quota_locked(options_, *impl_, std::nullopt, session);
+        } catch (...) {}
 
         return SessionCheckpointSaveResult{
             .generation = generation, .engine = *engine, .bytes = total_bytes};
