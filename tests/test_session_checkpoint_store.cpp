@@ -945,6 +945,21 @@ int test_post_verification_replacement_fails_closed() {
     failures += check(loaded.checkpoint->engine->read_file("engine/metadata.bin", 0, intact),
                       "untouched payloads keep reading through the same reader");
     loaded.checkpoint.reset();
+
+    // Council CR-20260831-fanout43 R3: the streamed mismatch is corruption evidence, not a
+    // transient read error. Status must stop advertising the generation, and the next load
+    // must quarantine it instead of re-verifying the tampered bytes as current.
+    const nlohmann::json seen = store.status(responses.client_session_sha256, fingerprint());
+    failures += check(seen.at("state") == "corrupt",
+                      "status reports the streamed mismatch before any new load");
+    const SessionCheckpointLoadResult after_tamper = store.load(
+        responses.client_session_sha256, fingerprint(), responses.latest_response_id);
+    failures += check(after_tamper.state == SessionCheckpointLoadState::Corrupt &&
+                          !after_tamper.checkpoint.has_value(),
+                      "the corrupted generation is quarantined on the next load");
+    const nlohmann::json gone = store.status(responses.client_session_sha256, fingerprint());
+    failures += check(gone.at("state") == "missing",
+                      "quarantine removes the corrupt generation from the current pointer");
     return failures;
 }
 } // namespace

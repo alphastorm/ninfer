@@ -1124,6 +1124,10 @@ void compose_responses_generation_messages(ResponsesRequest& request,
     // Same-lane fanout anchors: every continuation of one previous_response_id presents the
     // identical inherited frontier, and a stored base marks its pre-generation frontier, so
     // sibling branches reuse the base prefill instead of replaying it from root (omp-ninfer#34).
+    // Compose is the single owner of these bits: clear whatever the inputs carried so a stored
+    // lineage can never accumulate markers past the engine's per-request capacity.
+    for (ChatTurn& turn : previous_context) { turn.private_cache_boundary_after = false; }
+    for (ChatTurn& turn : current_input) { turn.private_cache_boundary_after = false; }
     if (!previous_context.empty()) {
         previous_context.back().private_cache_boundary_after = true;
     }

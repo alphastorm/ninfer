@@ -153,6 +153,31 @@ int test_basic_request() {
                           !rooted.generation.messages[0].private_cache_boundary_after &&
                           rooted.generation.messages[1].private_cache_boundary_after,
                       "stored base request anchors its pre-generation frontier");
+    ResponsesRequest deep_hop = request;
+    ChatTurn flagged_parent;
+    flagged_parent.role = ninfer::ChatRole::User;
+    ContentPart flagged_parent_text;
+    flagged_parent_text.kind = ContentKind::Text;
+    flagged_parent_text.text = "hop one input";
+    flagged_parent.content.push_back(std::move(flagged_parent_text));
+    flagged_parent.private_cache_boundary_after = true;
+    ChatTurn flagged_reply;
+    flagged_reply.role = ninfer::ChatRole::Assistant;
+    ContentPart flagged_reply_text;
+    flagged_reply_text.kind = ContentKind::Text;
+    flagged_reply_text.text = "hop one answer";
+    flagged_reply.content.push_back(std::move(flagged_reply_text));
+    flagged_reply.private_cache_boundary_after = true;
+    compose_responses_generation_messages(deep_hop, {flagged_parent, flagged_reply});
+    std::size_t anchor_count = 0;
+    for (const ChatTurn& turn : deep_hop.generation.messages) {
+        anchor_count += turn.private_cache_boundary_after ? 1U : 0U;
+    }
+    failures += check(anchor_count == 2 &&
+                          !deep_hop.generation.messages[1].private_cache_boundary_after &&
+                          deep_hop.generation.messages[2].private_cache_boundary_after &&
+                          deep_hop.generation.messages[3].private_cache_boundary_after,
+                      "compose owns the anchor bits: inherited flags never accumulate");
     return failures;
 }
 

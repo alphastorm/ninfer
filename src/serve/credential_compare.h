@@ -12,7 +12,10 @@ namespace ninfer::serve {
 // Constant-time credential equality (alphastorm/ninfer#22). Both sides are reduced to
 // fixed-length SHA-256 digests first, so neither the byte position of the first mismatch nor
 // the length relationship between the presented and stored credential shapes the comparison
-// time. Use for every bearer-key and session-ownership equality; never for plain data.
+// time. The digest indirection is also the compiler-hardening argument: even if the reduction
+// loop below were optimized into an early-exit compare, the timing would reveal only how many
+// leading DIGEST bytes match, which cannot be steered byte-by-byte without a preimage.
+// Use for every bearer-key and session-ownership equality; never for plain data.
 [[nodiscard]] inline bool credential_equal(std::string_view presented,
                                            std::string_view expected) noexcept {
     const crypto::Sha256Digest lhs =
