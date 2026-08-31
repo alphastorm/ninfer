@@ -68,6 +68,10 @@ public:
     [[nodiscard]] std::optional<ResponseStoreSnapshot>
     snapshot_session(std::string_view client_session_sha256) const;
     [[nodiscard]] std::vector<std::string> session_digests() const;
+    // Replaces the complete lineage of snapshot.client_session_sha256: existing records owned by
+    // that session are replacement input (same-session ID overlap is the partial-lineage repair
+    // case; stale target records absent from the snapshot are removed), an incoming ID owned by
+    // any other record fails closed, and unrelated sessions survive unless capacity evicts them.
     // Builds the complete replacement first, then invokes commit_external while holding the store
     // lock. A false result publishes neither side; a true result is followed only by no-throw
     // swaps, making the external Engine restore and Responses publication one transaction.

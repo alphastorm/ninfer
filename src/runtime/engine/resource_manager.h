@@ -698,8 +698,36 @@ public:
         std::size_t staging_bytes, std::uint64_t publication_order) {
         if (!cache_enabled_ || checkpoint_tag.empty() || publication_order == 0 ||
             !std::holds_alternative<std::monostate>(transaction_) ||
-            program.has_context_transaction() || find_session_cell(session)) {
+            program.has_context_transaction()) {
             return std::nullopt;
+        }
+        if (const std::optional<std::size_t> cell = find_session_cell(session)) {
+            // Lazy restore may race the session's own liveness: when the exact catalogued
+            // endpoint (same tag, same frontier) is already live, importing a duplicate
+            // continuation is unnecessary and refusing strands the Responses half of the
+            // transaction. Succeed idempotently without reading payloads or touching the
+            // catalog; any other live state - newer tag, different frontier, drifted
+            // binding - stays a refusal that mutates nothing.
+            const SessionIndexEntry& binding = session_index_[*cell];
+            if (binding.state != SessionIndexState::Occupied || binding.slot >= catalog_count_) {
+                return std::nullopt;
+            }
+            const CatalogEntry& entry = catalog_[binding.slot];
+            if (entry.state != CatalogState::Catalogued || !entry.handle ||
+                entry.id != binding.owner_id || entry.revision != binding.revision ||
+                entry.session != std::optional<CacheSessionKey>(session)) {
+                return std::nullopt;
+            }
+            if (entry.checkpoint_tag.empty() || entry.checkpoint_tag != checkpoint_tag) {
+                return std::nullopt;
+            }
+            if (expected.frontier_tokens == 0 || expected.restored_tokens == 0 ||
+                expected.restored_tokens > expected.frontier_tokens ||
+                expected.payload_bytes == 0 || !entry.summary.endpoint ||
+                entry.summary.endpoint->ref.frontier != expected.frontier_tokens) {
+                return std::nullopt;
+            }
+            return expected;
         }
         std::uint32_t slot = kInvalidCatalogSlot;
         for (std::uint32_t candidate = 0; candidate < catalog_count_; ++candidate) {

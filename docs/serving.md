@@ -507,11 +507,17 @@ files. An interrupted save leaves the previous generation usable. Restore verifi
 the runtime fingerprint before exposing state. On the first authenticated `previous_response_id`
 lookup missing from the in-memory store, NInfer lazily imports the matching Engine continuation.
 The imported frontier and payload summary must equal the manifest before Engine catalog ownership
-and the typed Responses snapshot publish in one transaction. Any failure returns the ordinary
-missing-response behavior so the client can perform its explicit full replay. Verified structural
-or checksum corruption is quarantined and ignored. A transient missing/open/read filesystem failure
-reports `unavailable` without changing the generation or `current` pointer, so a later request can
-retry the same checkpoint.
+and the typed Responses snapshot publish in one transaction. The restore replaces the target
+session's complete stored lineage: records the session still holds are replacement input (a
+partially evicted lineage is repaired, and stale same-session records absent from the verified
+snapshot are removed), an incoming Response ID owned by any other record fails closed, and when
+the exact catalogued Engine endpoint (same checkpoint tag and frontier) is already live the
+Engine side succeeds idempotently without importing a duplicate continuation. A newer or
+differently tagged live endpoint refuses the restore and mutates nothing. Any failure returns
+the ordinary missing-response behavior so the client can perform its explicit full replay.
+Verified structural or checksum corruption is quarantined and ignored. A transient
+missing/open/read filesystem failure reports `unavailable` without changing the generation or
+`current` pointer, so a later request can retry the same checkpoint.
 
 A completed stored turn at or above `--session-checkpoint-min-tokens` is enqueued to one
 bounded background checkpoint worker; the default threshold is `32768`. The request publishes its

@@ -807,6 +807,7 @@ public:
     restore_continuation(const ninfer::runtime::ContinuationCheckpointReader&,
                          std::size_t staging_bytes) {
         if (staging_bytes == 0) { return std::nullopt; }
+        ++restore_calls;
         FakeContinuationSummary summary;
         summary.endpoint = endpoint(88, 16);
         advance_revision();
@@ -852,6 +853,7 @@ public:
     std::uint64_t abort_calls                   = 0;
     std::uint64_t skipped_captures              = 0;
     std::uint32_t finish_frontier               = 16;
+    std::size_t restore_calls                   = 0;
     std::uint32_t started_source_id             = 0;
     ClaimDisposition started_source_disposition = ClaimDisposition::ConsumedToActive;
     std::vector<std::uint32_t> inspected_private_sources;
@@ -2099,6 +2101,41 @@ void test_session_checkpoint_tag_and_restore_identity() {
                 restored.checkpoint_session(restored_program, FakeCacheSessionKey{88}, "resp_3",
                                             writer, 1024),
             "newer session publication did not supersede the restored response tag");
+
+    // Lazy restore racing the session's own liveness: the exact catalogued endpoint (same tag,
+    // same frontier) is an idempotent success that imports nothing and touches nothing, while a
+    // stale tag or a different frontier stays a refusal that leaves the live endpoint intact.
+    FakeProgram live_program;
+    FakeManager live              = make_manager(1, 2);
+    FakeRequestBasePlan live_seed = make_base(66);
+    live_seed.cache.session_key   = FakeCacheSessionKey{66};
+    const ActiveRequest live_turn =
+        start_active(live, live_program, 66, live_seed, 1, "resp_live");
+    (void)finish_active(live, live_program, live_turn);
+    const std::size_t restores_before = live_program.restore_calls;
+    const auto idempotent             = live.restore_session_checkpoint(
+        live_program, FakeCacheSessionKey{66}, "resp_live", reader, expected, 1024, 7);
+    require(idempotent && idempotent->frontier_tokens == 16 &&
+                live_program.restore_calls == restores_before &&
+                live_program.released_continuations.empty(),
+            "exact live endpoint was not an idempotent restore success");
+    require(live.checkpoint_session(live_program, FakeCacheSessionKey{66}, "resp_live", writer,
+                                    1024)
+                .has_value(),
+            "idempotent restore disturbed the live catalogued endpoint");
+    require(!live.restore_session_checkpoint(live_program, FakeCacheSessionKey{66}, "resp_other",
+                                             reader, expected, 1024, 8),
+            "stale tag restore over a live session was not refused");
+    const ninfer::runtime::ContinuationCheckpointStats wrong_frontier{
+        .frontier_tokens = 17, .restored_tokens = 17, .payload_bytes = 64};
+    require(!live.restore_session_checkpoint(live_program, FakeCacheSessionKey{66}, "resp_live",
+                                             reader, wrong_frontier, 1024, 9),
+            "frontier mismatch restore over a live session was not refused");
+    require(live_program.restore_calls == restores_before &&
+                live.checkpoint_session(live_program, FakeCacheSessionKey{66}, "resp_live",
+                                        writer, 1024)
+                    .has_value(),
+            "refused restores disturbed the live endpoint");
 }
 
 void test_replay_selected_successor_retags_session() {
