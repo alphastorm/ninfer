@@ -11,6 +11,7 @@
 #include <atomic>
 #include <charconv>
 #include <chrono>
+#include <thread>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -273,9 +274,13 @@ Json paginated_input_items(const httplib::Request& request, const std::vector<Js
 
 } // namespace
 
-void HttpServer::maybe_checkpoint_completed_turn(
-    const std::optional<std::string>& session_sha256) noexcept {
+void HttpServer::maybe_checkpoint_completed_turn(const std::optional<std::string>& session_sha256,
+                                                 const GenerationOutcome& outcome) noexcept {
     if (!automatic_checkpoints_ || !session_sha256) { return; }
+    const std::uint64_t frontier =
+        static_cast<std::uint64_t>(std::max(outcome.prompt_tokens, 0)) +
+        static_cast<std::uint64_t>(std::max(outcome.completion_tokens, 0));
+    if (frontier < options_.session_checkpoint_min_tokens) { return; }
     if (automatic_checkpoints_->enqueue(*session_sha256) ==
         AutomaticCheckpointEnqueueResult::Dropped) {
         try {
@@ -288,6 +293,31 @@ void HttpServer::maybe_checkpoint_completed_turn(
 void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noexcept {
     try {
         if (service_ == nullptr) { return; }
+        // Staging briefly holds the engine even with buffered export writes. An automatic
+        // save is pure acceleration, so yield to live traffic: start only after the engine
+        // stays quiet for several consecutive samples - a momentary gap between client
+        // turns is not idle intent - bounded so a busy server still checkpoints eventually
+        // (ninfer#34). Explicit POST saves keep their synchronous contract and never wait.
+        int quiet_samples = 0;
+        for (int waited = 0; waited < 120 && quiet_samples < 3; ++waited) {
+            const ninfer::RuntimeStats stats = service_->runtime_stats();
+            const std::uint32_t busy = stats.running_requests + stats.prefilling_requests +
+                                       stats.decode_ready_requests + stats.waiting_requests;
+            quiet_samples = busy == 0 ? quiet_samples + 1 : 0;
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+        // Redundant-save skip: the catalogued checkpoint may already cover the session's
+        // newest stored response (e.g. an explicit POST checkpointed the same turn while
+        // this one sat queued). Re-exporting an identical frontier holds the engine for
+        // nothing. A turn completing after this check re-enqueues by design, so nothing
+        // newer can be lost.
+        const std::optional<std::string> live =
+            response_store_.latest_response_id(session_sha256);
+        if (live && !live->empty() && service_->checkpoint_covers(session_sha256, *live)) {
+            write_console_log(ConsoleLogLevel::Info,
+                              "automatic session checkpoint skipped: already current");
+            return;
+        }
         const std::optional<ResponseStoreSnapshot> snapshot =
             response_store_.snapshot_session(session_sha256);
         if (!snapshot) {
@@ -434,7 +464,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                                      std::move(response.output_history));
                 stored.preserve_thinking = prepared.preserve_thinking;
                 response_store_.put(std::move(stored));
-                maybe_checkpoint_completed_turn(request.generation.client_session_sha256);
+                maybe_checkpoint_completed_turn(request.generation.client_session_sha256, outcome);
             }
             log_request_done(log_context, outcome);
             set_owned_content(res, response.body.dump(), prepared.lifetime);
@@ -501,7 +531,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                                                       std::move(finished.response.output_history));
                     stored.preserve_thinking = stream->prepared.preserve_thinking;
                     response_store_.put(std::move(stored));
-                    maybe_checkpoint_completed_turn(stream->client_session_sha256);
+                    maybe_checkpoint_completed_turn(stream->client_session_sha256, outcome);
                 }
                 write_stream_items(sink, *stream, std::move(finished.events_before_terminal));
                 log_request_done(stream->log_context, outcome);

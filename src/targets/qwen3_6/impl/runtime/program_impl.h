@@ -1444,8 +1444,30 @@ std::optional<runtime::ContinuationCheckpointStats> ProgramImplCore::restore_ses
     runtime::ContinuationCheckpointStats expected, std::size_t staging_bytes) {
     if (lane >= max_concurrency || checkpoint_tag.empty() ||
         checkpoint_tag.size() > kMaximumCheckpointTagBytes || staging_bytes == 0 ||
-        has_checkpoint_session(checkpoint_namespace) || sequences[lane].retained ||
-        sequences[lane].kv || requests[lane].lifecycle != Lifecycle::Empty) {
+        sequences[lane].retained || sequences[lane].kv ||
+        requests[lane].lifecycle != Lifecycle::Empty) {
+        return std::nullopt;
+    }
+    for (std::uint32_t existing = 0; existing < max_concurrency; ++existing) {
+        const SequenceState& candidate = sequences[existing];
+        if (!candidate.retained || !candidate.session_published ||
+            !candidate.checkpoint_namespace ||
+            *candidate.checkpoint_namespace != checkpoint_namespace) {
+            continue;
+        }
+        // Lazy restore may race the session's own liveness: when the exact catalogued
+        // endpoint (same tag, same frontier) is already live, importing a duplicate
+        // continuation is unnecessary and refusing strands the Responses half of the
+        // repair transaction (port of mainline 4e465fb5). Succeed idempotently without
+        // reading payloads or touching any lane; any other live state - newer tag,
+        // different frontier - stays a refusal that mutates nothing.
+        if (candidate.checkpoint_tag == checkpoint_tag && expected.frontier_tokens != 0 &&
+            expected.restored_tokens != 0 &&
+            expected.restored_tokens <= expected.frontier_tokens &&
+            expected.payload_bytes != 0 &&
+            candidate.execution_frontier == expected.frontier_tokens) {
+            return expected;
+        }
         return std::nullopt;
     }
     try {

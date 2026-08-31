@@ -48,8 +48,8 @@ private:
     void handle_response_input_items(const httplib::Request& req, httplib::Response& res);
     void handle_response_cancel(const httplib::Request& req, httplib::Response& res);
     void handle_response_compact(const httplib::Request& req, httplib::Response& res);
-    void maybe_checkpoint_completed_turn(
-        const std::optional<std::string>& session_sha256) noexcept;
+    void maybe_checkpoint_completed_turn(const std::optional<std::string>& session_sha256,
+                                         const GenerationOutcome& outcome) noexcept;
     void save_automatic_checkpoint(std::string_view session_sha256) noexcept;
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
