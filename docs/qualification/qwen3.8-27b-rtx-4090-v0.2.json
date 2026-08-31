@@ -24,11 +24,11 @@
     "prior_runtime_evidence_reused": false
   },
   "identity": {
-    "binary_sha256": "41fcc1803e4a057de24a485776e71737a31cb39fdd9358350b975f6b11b9c869",
-    "binary_bytes": 230305280,
-    "config_sha256": "ec5e4cdb167ac26fc7cc762f9e3d188b965c4e2a20ecfe3cbb1968f084e872db",
+    "binary_sha256": "a5b501ecdcf00031945bddac0732ba302aa2250d529076a41f592e7038aff4a2",
+    "binary_bytes": 247915008,
+    "config_sha256": "6c429bc379fcee33bf8a6bdf8d96631f7a1f51adb23eae3fa805689cad31a297",
     "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
-    "deployment_profile": "qwen38-4090-v0.1",
+    "deployment_profile": "qwen38-4090-v0.2",
     "build_type": "Release",
     "cuda_toolkit": "13.3.73",
     "patch_stack_sha": "32aa589982c49d540a68a831d2c89aa83247f5c7"
