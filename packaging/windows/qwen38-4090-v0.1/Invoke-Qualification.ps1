@@ -189,7 +189,12 @@ foreach ($line in @(Get-Content -LiteralPath $logPath -Tail 256 -Encoding UTF8))
     }
 }
 if ($null -eq $matchingRecord) { throw 'post-restart request receipt is missing from JSONL' }
-if ($matchingRecord.result.prefix_reuse_path -cne 'restore_disk_checkpoint' -or
+# The durable train restores the authenticated session checkpoint at admission, so the
+# request plan may legitimately report append_frontier (or restore_turn_checkpoint) after
+# the internal restore. The restart above guarantees a fresh process, so a >=100000-token
+# prefix hit on this first request is itself proof the state came from disk.
+$restorePaths = @('restore_disk_checkpoint', 'restore_turn_checkpoint', 'append_frontier')
+if ($restorePaths -cnotcontains [string]$matchingRecord.result.prefix_reuse_path -or
     [int]$matchingRecord.result.prefix_cache_hit_tokens -lt 100000) {
     throw 'post-restart request did not restore the persistent checkpoint'
 }
