@@ -334,9 +334,10 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
         checkpoint_engine.checkpoint =
             [this](const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
                    std::string_view checkpoint_tag,
-                   runtime::ContinuationCheckpointWriter& writer, std::size_t staging_bytes) {
+                   runtime::ContinuationCheckpointWriter& writer, std::size_t staging_bytes,
+                   runtime::SessionCheckpointSkipDetail* skip) {
                 return runtime::CheckpointEngineAccess::checkpoint_session(
-                    *engine_, checkpoint_namespace, checkpoint_tag, writer, staging_bytes);
+                    *engine_, checkpoint_namespace, checkpoint_tag, writer, staging_bytes, skip);
             };
         checkpoint_engine.restore =
             [this](const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
@@ -642,11 +643,16 @@ bool GenerationService::checkpoint_enabled() const noexcept {
 SessionCheckpointSaveOutcome
 GenerationService::save_checkpoint(std::string_view session_sha256,
                                    std::string_view required_response_id,
-                                   ResponseStore& responses) {
+                                   ResponseStore& responses,
+                                   runtime::SessionCheckpointSkipDetail* skip) {
     if (!checkpoint_manager_) {
+        if (skip != nullptr &&
+            skip->reason == runtime::SessionCheckpointSkipReason::None) {
+            skip->reason = runtime::SessionCheckpointSkipReason::StoreDisabled;
+        }
         return {.state = SessionCheckpointSaveState::Disabled, .checkpoint = std::nullopt};
     }
-    return checkpoint_manager_->save(session_sha256, required_response_id, responses);
+    return checkpoint_manager_->save(session_sha256, required_response_id, responses, skip);
 }
 
 SessionCheckpointRestoreState

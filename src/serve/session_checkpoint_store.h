@@ -92,7 +92,8 @@ public:
     [[nodiscard]] std::optional<SessionCheckpointSaveResult>
     save(const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace,
          const ResponseStoreSnapshot& responses, const nlohmann::json& runtime_fingerprint,
-         const EngineExporter& exporter, bool retire_previous = false);
+         const EngineExporter& exporter, bool retire_previous = false,
+         runtime::SessionCheckpointSkipDetail* skip = nullptr);
 
     // Verifies identity, manifest schema, every size/checksum, and the requested response id before
     // exposing either ResponseStore state or an Engine reader. Verified corruption is quarantined;
@@ -124,7 +125,8 @@ private:
 struct SessionCheckpointEngine {
     using Checkpoint = std::function<std::optional<runtime::ContinuationCheckpointStats>(
         const runtime::AuthenticatedCheckpointNamespace&, std::string_view,
-        runtime::ContinuationCheckpointWriter&, std::size_t)>;
+        runtime::ContinuationCheckpointWriter&, std::size_t,
+        runtime::SessionCheckpointSkipDetail*)>;
     using Restore = std::function<std::optional<runtime::ContinuationCheckpointStats>(
         const runtime::AuthenticatedCheckpointNamespace&, std::string_view,
         const runtime::ContinuationCheckpointReader&, runtime::ContinuationCheckpointStats,
@@ -167,7 +169,7 @@ public:
     [[nodiscard]] bool enabled() const noexcept { return store_ != nullptr; }
     [[nodiscard]] SessionCheckpointSaveOutcome
     save(std::string_view session_sha256, std::string_view required_response_id,
-         ResponseStore& responses);
+         ResponseStore& responses, runtime::SessionCheckpointSkipDetail* skip = nullptr);
     [[nodiscard]] SessionCheckpointRestoreState
     restore(std::string_view session_sha256, std::string_view required_response_id,
             ResponseStore& responses);

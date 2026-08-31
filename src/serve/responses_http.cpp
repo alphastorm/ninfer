@@ -297,13 +297,23 @@ void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noex
                               "automatic session checkpoint skipped: no complete endpoint");
             return;
         }
+        runtime::SessionCheckpointSkipDetail skip;
         const SessionCheckpointSaveOutcome saved = service_->save_checkpoint(
-            session_sha256, snapshot->latest_response_id, response_store_);
-        write_console_log(saved.state == SessionCheckpointSaveState::Saved
-                              ? ConsoleLogLevel::Info
-                              : ConsoleLogLevel::Warning,
-                          std::string("automatic session checkpoint state=") +
-                              checkpoint_save_state_name(saved.state));
+            session_sha256, snapshot->latest_response_id, response_store_, &skip);
+        if (saved.state == SessionCheckpointSaveState::Saved) {
+            write_console_log(ConsoleLogLevel::Info, "automatic session checkpoint saved");
+        } else {
+            std::string message = "automatic session checkpoint skipped: state=";
+            message += checkpoint_save_state_name(saved.state);
+            message += " reason=";
+            message += runtime::session_checkpoint_skip_reason_name(skip.reason);
+            if (skip.reason == runtime::SessionCheckpointSkipReason::TagMismatch) {
+                message += " (catalogued ";
+                message += skip.catalogued_tag.empty() ? "<empty>" : skip.catalogued_tag;
+                message += ")";
+            }
+            write_console_log(ConsoleLogLevel::Warning, message);
+        }
     } catch (const std::exception& exception) {
         try {
             write_console_log(ConsoleLogLevel::Warning,

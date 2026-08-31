@@ -295,7 +295,8 @@ public:
         out.checkpoint =
             [this](const AuthenticatedCheckpointNamespace& checkpoint_namespace,
                    std::string_view checkpoint_tag, ContinuationCheckpointWriter& writer,
-                   std::size_t) -> std::optional<ContinuationCheckpointStats> {
+                   std::size_t, runtime::SessionCheckpointSkipDetail*)
+            -> std::optional<ContinuationCheckpointStats> {
             ++checkpoint_calls;
             tenant = checkpoint_namespace.tenant_sha256();
             session = checkpoint_namespace.session_sha256();

@@ -1075,10 +1075,14 @@ std::optional<SessionCheckpointSaveResult>
 SessionCheckpointStore::save(const AuthenticatedCheckpointNamespace& checkpoint_namespace,
                              const ResponseStoreSnapshot& responses,
                              const nlohmann::json& runtime_fingerprint,
-                             const EngineExporter& exporter, bool retire_previous) {
+                             const EngineExporter& exporter, bool retire_previous,
+                             runtime::SessionCheckpointSkipDetail* skip) {
     if (responses.client_session_sha256 != checkpoint_namespace.session_sha256() ||
         !runtime_fingerprint.is_object() ||
         !exporter) {
+        if (skip != nullptr) {
+            skip->reason = runtime::SessionCheckpointSkipReason::IndexEntryInvalid;
+        }
         return std::nullopt;
     }
     std::lock_guard lock(impl_->mutex);
@@ -1111,6 +1115,12 @@ SessionCheckpointStore::save(const AuthenticatedCheckpointNamespace& checkpoint_
         std::optional<ContinuationCheckpointStats> engine = exporter(writer);
         if (!engine || !valid_checkpoint_stats(*engine)) {
             std::filesystem::remove_all(staging, cleanup_error);
+            if (skip != nullptr &&
+                skip->reason == runtime::SessionCheckpointSkipReason::None) {
+                // The exporter names deeper engine gates itself; an unnamed invalid or missing
+                // stats export is the program refusing continuation export (ninfer#30 R4).
+                skip->reason = runtime::SessionCheckpointSkipReason::ProgramRejected;
+            }
             return std::nullopt;
         }
         std::optional<std::vector<FileDescriptor>> payloads = writer.files();
@@ -1464,21 +1474,32 @@ SessionCheckpointManager::SessionCheckpointManager(SessionCheckpointStoreOptions
 
 SessionCheckpointSaveOutcome SessionCheckpointManager::save(
     std::string_view session_sha256, std::string_view required_response_id,
-    ResponseStore& responses) {
+    ResponseStore& responses, runtime::SessionCheckpointSkipDetail* skip) {
+    const auto name = [&](runtime::SessionCheckpointSkipReason reason) {
+        if (skip != nullptr &&
+            skip->reason == runtime::SessionCheckpointSkipReason::None) {
+            skip->reason = reason;
+        }
+    };
     if (!store_) {
+        name(runtime::SessionCheckpointSkipReason::StoreDisabled);
         return {.state = SessionCheckpointSaveState::Disabled, .checkpoint = std::nullopt};
     }
     if (!AuthenticatedCheckpointNamespace::valid_sha256(session_sha256) ||
         required_response_id.empty()) {
+        name(runtime::SessionCheckpointSkipReason::SessionNotIndexed);
         return {.state = SessionCheckpointSaveState::Failed, .checkpoint = std::nullopt};
     }
     std::lock_guard lock(mutex_);
     try {
         std::optional<ResponseStoreSnapshot> snapshot = responses.snapshot_session(session_sha256);
         if (!snapshot) {
+            name(runtime::SessionCheckpointSkipReason::NoSessionRecords);
             return {.state = SessionCheckpointSaveState::Missing, .checkpoint = std::nullopt};
         }
         if (snapshot->latest_response_id != required_response_id) {
+            if (skip != nullptr) { skip->catalogued_tag = snapshot->latest_response_id; }
+            name(runtime::SessionCheckpointSkipReason::TagMismatch);
             return {.state = SessionCheckpointSaveState::Missing, .checkpoint = std::nullopt};
         }
         const auto latest = std::find_if(
@@ -1487,6 +1508,7 @@ SessionCheckpointSaveOutcome SessionCheckpointManager::save(
             });
         if (latest == snapshot->records.end() || latest->session_key.empty() ||
             latest->session_key.size() > kMaximumContextCacheSessionKeyBytes) {
+            name(runtime::SessionCheckpointSkipReason::IndexEntryInvalid);
             return {.state = SessionCheckpointSaveState::Failed, .checkpoint = std::nullopt};
         }
         const AuthenticatedCheckpointNamespace checkpoint_namespace =
@@ -1497,8 +1519,9 @@ SessionCheckpointSaveOutcome SessionCheckpointManager::save(
             checkpoint_namespace, *snapshot, runtime_fingerprint_,
             [&](ContinuationCheckpointWriter& writer) {
                 return engine_.checkpoint(checkpoint_namespace, checkpoint_tag, writer,
-                                          store_->options().staging_bytes);
-            });
+                                          store_->options().staging_bytes, skip);
+            },
+            false, skip);
         if (!saved) {
             return {.state = SessionCheckpointSaveState::Failed, .checkpoint = std::nullopt};
         }
@@ -1633,7 +1656,7 @@ SessionCheckpointEraseResult SessionCheckpointManager::erase_response(
                                [&](ContinuationCheckpointWriter& writer) {
                                    return engine_.checkpoint(
                                        checkpoint_namespace, checkpoint_tag, writer,
-                                       store_->options().staging_bytes);
+                                       store_->options().staging_bytes, nullptr);
                                }, true)
                         .has_value();
                 });
@@ -1679,7 +1702,7 @@ SessionCheckpointEraseResult SessionCheckpointManager::erase_response(
                               [&](ContinuationCheckpointWriter& writer) {
                                   return engine_.checkpoint(
                                       checkpoint_namespace, checkpoint_tag, writer,
-                                      store_->options().staging_bytes);
+                                      store_->options().staging_bytes, nullptr);
                               }, true)
                        .has_value()
                    ? SessionCheckpointEraseResult::Erased
