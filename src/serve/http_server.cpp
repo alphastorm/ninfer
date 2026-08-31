@@ -2,6 +2,7 @@
 
 #include "serve/anthropic_schema.h"
 #include "serve/client_identity.h"
+#include "serve/credential_compare.h"
 #include "serve/console_log.h"
 #include "serve/openai_schema.h"
 #include "serve/request_log.h"
@@ -421,9 +422,16 @@ void HttpServer::register_routes() {
         // Accept both the OpenAI-style bearer token and the Anthropic-style
         // x-api-key header so OpenAI clients and Claude Code (ANTHROPIC_API_KEY
         // -> x-api-key, ANTHROPIC_AUTH_TOKEN -> Authorization: Bearer) both work.
+        // Credential equality is digest-based constant time (alphastorm/ninfer#22).
+        const std::string& authorization = req.get_header_value("Authorization");
+        constexpr std::string_view kBearerPrefix{"Bearer "};
         const bool bearer_ok =
-            req.get_header_value("Authorization") == ("Bearer " + options_.api_key);
-        const bool x_api_key_ok = req.get_header_value("x-api-key") == options_.api_key;
+            authorization.size() > kBearerPrefix.size() &&
+            std::string_view(authorization).substr(0, kBearerPrefix.size()) == kBearerPrefix &&
+            credential_equal(std::string_view(authorization).substr(kBearerPrefix.size()),
+                             options_.api_key);
+        const bool x_api_key_ok =
+            credential_equal(req.get_header_value("x-api-key"), options_.api_key);
         if (!bearer_ok && !x_api_key_ok) {
             ApiError error;
             error.status  = 401;
@@ -567,13 +575,17 @@ void HttpServer::handle_checkpoint_save(const httplib::Request& req, httplib::Re
     const std::optional<SessionCheckpointSaveResult> saved =
         service_->save_checkpoint(digest, response_store_, &skip);
     if (!saved) {
-        // The HTTP body keeps its released closed vocabulary; the named gate goes to the
-        // server log only.
+        // The HTTP body keeps its released closed vocabulary; the named gate and the
+        // attempted response id go to the server log only (alphastorm/ninfer#31).
         try {
-            write_console_log(ConsoleLogLevel::Warning,
-                              std::string("checkpoint save refused: ") +
-                                  std::string(runtime::session_checkpoint_skip_reason_name(
-                                      skip.reason)));
+            std::string refusal = "checkpoint save refused: ";
+            refusal += runtime::session_checkpoint_skip_reason_name(skip.reason);
+            if (!skip.attempted_tag.empty()) {
+                refusal += " (attempted ";
+                refusal += skip.attempted_tag;
+                refusal += ")";
+            }
+            write_console_log(ConsoleLogLevel::Warning, refusal);
         } catch (...) {}
         ApiError error;
         error.status  = 409;
@@ -1100,6 +1112,11 @@ void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noex
             } else {
                 std::string message = "automatic session checkpoint skipped: ";
                 message += runtime::session_checkpoint_skip_reason_name(skip.reason);
+                if (!skip.attempted_tag.empty()) {
+                    message += " (attempted ";
+                    message += skip.attempted_tag;
+                    message += ")";
+                }
                 if (skip.reason == runtime::SessionCheckpointSkipReason::TagMismatch) {
                     message += " (catalogued ";
                     message += skip.catalogued_tag.empty() ? "<empty>" : skip.catalogued_tag;

@@ -738,10 +738,16 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
            inventory.used <= options.disk_quota_bytes + tolerated_transient_bytes;
 }
 
+// A checkpoint payload entry whose content hash was verified at load time.
+struct VerifiedFile {
+    std::uint64_t bytes;
+    std::string sha256;
+};
+
 class DirectoryCheckpointReader final : public ContinuationCheckpointReader {
 public:
     DirectoryCheckpointReader(std::filesystem::path root,
-                              std::map<std::string, std::uint64_t> files,
+                              std::map<std::string, VerifiedFile> files,
                               std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue,
                               std::shared_ptr<SessionCheckpointStore::Impl> owner,
                               std::string active_key)
@@ -760,17 +766,26 @@ public:
 
     std::optional<std::uint64_t> file_size(std::string_view path) const override {
         const auto found = files_.find(std::string(path));
-        return found == files_.end() ? std::nullopt : std::optional<std::uint64_t>(found->second);
+        return found == files_.end() ? std::nullopt
+                                     : std::optional<std::uint64_t>(found->second.bytes);
     }
 
     bool read_file(std::string_view path, std::uint64_t offset,
                    std::span<std::byte> destination) const override {
         const auto found = files_.find(std::string(path));
-        if (found == files_.end() || offset > found->second ||
-            destination.size() > found->second - offset) {
+        if (found == files_.end() || offset > found->second.bytes ||
+            destination.size() > found->second.bytes - offset) {
             return false;
         }
         if (!read_queue_->available()) { return false; }
+        // Load-time hashing verified the then-current bytes, but the backend reopens the
+        // pathname on every submit, so a post-verification replacement could otherwise feed
+        // unchecked bytes into the engine import (alphastorm/ninfer#21). Engine restores
+        // consume each payload exactly once, front to back; enforce that coverage and
+        // re-hash the streamed chunks, failing the import closed on any divergence.
+        std::lock_guard verify_lock(verify_mutex_);
+        ReadVerifyState& state = verify_[found->first];
+        if (state.failed || state.verified || offset != state.next_offset) { return false; }
         try {
             const runtime::ContinuationCheckpointReadRequest request{.file_offset = offset,
                                                                      .destination = destination};
@@ -778,16 +793,37 @@ public:
                 read_queue_->submit(root_ / found->first, std::span(&request, 1));
             if (!completion) { return false; }
             completion->wait();
+            state.hasher.update(destination);
+            state.next_offset += destination.size();
+            if (state.next_offset == found->second.bytes) {
+                if (crypto::sha256_hex(state.hasher.finish()) != found->second.sha256) {
+                    state.failed = true;
+                    return false;
+                }
+                state.verified = true;
+            }
             return true;
-        } catch (...) { return false; }
+        } catch (...) {
+            state.failed = true;
+            return false;
+        }
     }
 
 private:
+    struct ReadVerifyState {
+        crypto::Sha256 hasher;
+        std::uint64_t next_offset = 0;
+        bool failed               = false;
+        bool verified             = false;
+    };
+
     std::filesystem::path root_;
-    std::map<std::string, std::uint64_t> files_;
+    std::map<std::string, VerifiedFile> files_;
     std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue_;
     std::shared_ptr<SessionCheckpointStore::Impl> owner_;
     std::string active_key_;
+    mutable std::mutex verify_mutex_;
+    mutable std::map<std::string, ReadVerifyState> verify_;
 };
 
 void quarantine_generation(const std::filesystem::path& session, const std::string& generation) {
@@ -1156,12 +1192,14 @@ SessionCheckpointStore::load(std::string_view session_sha256,
             manifest.at("files").size() > 4096) {
             throw CheckpointCorruption("checkpoint manifest file set is corrupt");
         }
-        std::map<std::string, std::uint64_t> allowed;
+        std::map<std::string, VerifiedFile> allowed;
         std::uint64_t verified_bytes        = 0;
         std::uint64_t verified_engine_bytes = 0;
         for (const nlohmann::json& encoded : manifest.at("files")) {
             std::optional<FileDescriptor> expected = descriptor_from_json(encoded);
-            if (!expected || !allowed.emplace(expected->path, expected->bytes).second) {
+            if (!expected ||
+                !allowed.emplace(expected->path, VerifiedFile{expected->bytes, expected->sha256})
+                     .second) {
                 throw CheckpointCorruption("checkpoint manifest file descriptor is corrupt");
             }
             const FileDescriptor actual =
@@ -1186,11 +1224,18 @@ SessionCheckpointStore::load(std::string_view session_sha256,
             throw CheckpointCorruption("checkpoint manifest payload summary is corrupt");
         }
         const auto response_file = allowed.find("responses.cbor");
-        if (response_file == allowed.end() || response_file->second > options_.staging_bytes) {
+        if (response_file == allowed.end() || response_file->second.bytes > options_.staging_bytes) {
             throw CheckpointCorruption("checkpoint response payload descriptor is corrupt");
         }
         const std::vector<std::byte> response_bytes =
             read_bounded(root / "responses.cbor", options_.staging_bytes);
+        // The verification pass above hashed the then-current file; this reopen must match the
+        // verified digest or the import is fed different bytes (alphastorm/ninfer#21).
+        if (response_bytes.size() != response_file->second.bytes ||
+            crypto::sha256_hex(crypto::sha256(std::span<const std::byte>(response_bytes))) !=
+                response_file->second.sha256) {
+            throw CheckpointCorruption("checkpoint response payload changed after verification");
+        }
         std::optional<ResponseStoreSnapshot> responses =
             decode_response_store_snapshot(response_bytes, options_.staging_bytes);
         if (!responses || responses->client_session_sha256 != session_sha256 ||
