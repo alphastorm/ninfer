@@ -150,10 +150,10 @@ function Get-BytesSha256([byte[]]$Bytes) {
     }
 }
 
-$releaseId = 'qwen38-4090-v0.1'
-$releaseVersion = '0.1.0'
-$assetStem = 'ninfer-4090-qwen38-v0.1.0-win-x64'
-$profile = 'qwen38-4090-v0.1'
+$releaseId = 'qwen38-4090-v0.2'
+$releaseVersion = '0.2.0'
+$assetStem = 'ninfer-4090-qwen38-v0.2.0-win-x64'
+$profile = 'qwen38-4090-v0.2'
 $upstreamBaseSha = '9ec1b82c7afa021314682d7a95390f8935ead7c2'
 $server = (Resolve-Path -LiteralPath $ServerExecutable).Path
 $sourceArchiveInput = (Resolve-Path -LiteralPath $SourceArchive).Path

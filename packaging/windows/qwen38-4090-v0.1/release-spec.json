@@ -1,9 +1,9 @@
 {
   "artifact_type": "ninfer_windows_release_spec",
   "schema_version": 1,
-  "release_id": "qwen38-4090-v0.1",
-  "release_version": "0.1.0",
-  "deployment_profile": "qwen38-4090-v0.1",
+  "release_id": "qwen38-4090-v0.2",
+  "release_version": "0.2.0",
+  "deployment_profile": "qwen38-4090-v0.2",
   "platform": "windows-x86_64",
   "gpu": {
     "name": "NVIDIA GeForce RTX 4090",
@@ -14,9 +14,9 @@
   },
   "source": {
     "upstream_base_sha": "9ec1b82c7afa021314682d7a95390f8935ead7c2",
-    "qualified_source_head": "e4654b5aed87e7385bdf33f8b4365a7a550d4ad9",
-    "source_archive_sha256": "0c8b7afd73ae1354d82f7f01b84e7b42b7fab203df5484fe4d954c6eaaf20d6d",
-    "source_archive_bytes": 5257807,
+    "qualified_source_head": "32aa589982c49d540a68a831d2c89aa83247f5c7",
+    "source_archive_sha256": "b302caa122dd2ddcee7b3a63fd9ddd67265d817fbeb9f179a419641ffce4f27c",
+    "source_archive_bytes": 5288683,
     "bounded_staging_commit": "e89e415d95921cecf4cf8a00df5540a4a036ff84",
     "directstorage_fallback_commit": "a9bb55b8e9b02ff34e4725dc8ca95d4fadeb3e0d",
     "qualified_patch_sha256": "ac8ba36da9bfc89ff97021eecba8c7ba8f88f9e7e9bfd1c9c3509b723d81d4e0",
@@ -55,7 +55,7 @@
   },
   "qualification_authority": {
     "in_archive_status": "candidate-only-not-release-eligible",
-    "external_sidecar_filename": "ninfer-4090-qwen38-v0.1.0-win-x64-qualification.json",
+    "external_sidecar_filename": "ninfer-4090-qwen38-v0.2.0-win-x64-qualification.json",
     "external_artifact_type": "ninfer_public_windows_release_qualification",
     "external_required_status": "passed",
     "external_required_release_eligible": true,
@@ -80,7 +80,12 @@
     "task_name": "NInfer-Qwen38-4090-v0.1",
     "listen_port": 18082,
     "installation_scope": "isolated-version-root",
-    "candidate_root_directories": ["bin", "config", "logs", "receipts"],
+    "candidate_root_directories": [
+      "bin",
+      "config",
+      "logs",
+      "receipts"
+    ],
     "model_artifact_ownership": "external-pinned-read-only",
     "cache_ownership": "state-root-per-release",
     "interrupted_install_reentry": "repair-required",
@@ -88,7 +93,11 @@
     "gpu_owner_controller_protocol": {
       "required_on_first_install": true,
       "inherited_on_upgrade": true,
-      "actions": ["status", "stop", "start"],
+      "actions": [
+        "status",
+        "stop",
+        "start"
+      ],
       "status_paused_field": "paused",
       "state_root_parameter": "required-on-every-invocation",
       "state_root_location": "under-release-StateRoot/gpu-owner-state",
@@ -98,9 +107,15 @@
     },
     "state_root_security": {
       "helper": "Protect-StateRoot.ps1",
-      "owner_sids": ["S-1-5-18", "S-1-5-32-544"],
+      "owner_sids": [
+        "S-1-5-18",
+        "S-1-5-32-544"
+      ],
       "dacl_inheritance": "disabled-at-managed-roots",
-      "access_principals": ["SYSTEM", "Administrators"],
+      "access_principals": [
+        "SYSTEM",
+        "Administrators"
+      ],
       "directory_creation": "atomic-with-final-security-descriptor",
       "untrusted_tree_cleanup": "never",
       "reparse_policy": "reject-root-ancestors-and-descendants",
