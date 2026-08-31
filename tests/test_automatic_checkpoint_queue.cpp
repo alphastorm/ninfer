@@ -1,5 +1,6 @@
 #include "serve/automatic_checkpoint_queue.h"
 
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <iostream>
@@ -14,9 +15,12 @@ int main() {
     std::shared_future<void> release_future = release_checkpoint.get_future().share();
     std::mutex saved_mutex;
     std::vector<std::string> saved;
+    std::atomic<bool> started_signalled{false};
     ninfer::serve::AutomaticCheckpointQueue automatic_checkpoints(
         [&](std::string_view digest) {
-            if (digest == "session-a") { checkpoint_started.set_value(); }
+            if (digest == "session-a" && !started_signalled.exchange(true)) {
+                checkpoint_started.set_value();
+            }
             release_future.wait();
             std::lock_guard lock(saved_mutex);
             saved.emplace_back(digest);
@@ -33,20 +37,23 @@ int main() {
         return 1;
     }
 
-    const auto duplicate = automatic_checkpoints.enqueue("session-a");
-    const auto second    = automatic_checkpoints.enqueue("session-b");
-    const auto dropped   = automatic_checkpoints.enqueue("session-c");
+    // A turn that completes while its session's save is executing must re-enqueue
+    // (the pre-fix behavior coalesced it away and lost the newest state); a session
+    // that is queued but not yet executing still coalesces (review CR-20260830 GrokR2).
+    const auto requeued  = automatic_checkpoints.enqueue("session-a");
+    const auto coalesced = automatic_checkpoints.enqueue("session-a");
+    const auto dropped   = automatic_checkpoints.enqueue("session-b");
     release_checkpoint.set_value();
     automatic_checkpoints.drain();
     const auto after_drain = automatic_checkpoints.enqueue("session-after-drain");
     automatic_checkpoints.drain();
     if (first != ninfer::serve::AutomaticCheckpointEnqueueResult::Enqueued ||
-        duplicate != ninfer::serve::AutomaticCheckpointEnqueueResult::Coalesced ||
-        second != ninfer::serve::AutomaticCheckpointEnqueueResult::Enqueued ||
+        requeued != ninfer::serve::AutomaticCheckpointEnqueueResult::Enqueued ||
+        coalesced != ninfer::serve::AutomaticCheckpointEnqueueResult::Coalesced ||
         dropped != ninfer::serve::AutomaticCheckpointEnqueueResult::Dropped ||
         after_drain != ninfer::serve::AutomaticCheckpointEnqueueResult::Dropped ||
-        saved != std::vector<std::string>{"session-a", "session-b"}) {
-        std::cerr << "automatic checkpoint queue did not coalesce and drain sessions\n";
+        saved != std::vector<std::string>{"session-a", "session-a"}) {
+        std::cerr << "automatic checkpoint queue did not requeue racing saves\n";
         return 1;
     }
     std::cout << "ok\n";

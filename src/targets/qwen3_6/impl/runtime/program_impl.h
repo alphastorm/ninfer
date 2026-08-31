@@ -1443,11 +1443,18 @@ std::optional<runtime::ContinuationCheckpointStats> ProgramImplCore::restore_ses
     std::string checkpoint_tag, const runtime::ContinuationCheckpointReader& reader,
     runtime::ContinuationCheckpointStats expected, std::size_t staging_bytes) {
     if (lane >= max_concurrency || checkpoint_tag.empty() ||
-        checkpoint_tag.size() > kMaximumCheckpointTagBytes || staging_bytes == 0 ||
-        sequences[lane].retained || sequences[lane].kv ||
-        requests[lane].lifecycle != Lifecycle::Empty) {
+        checkpoint_tag.size() > kMaximumCheckpointTagBytes || staging_bytes == 0) {
         return std::nullopt;
     }
+    // Lazy restore may race the session's own liveness: when the exact catalogued
+    // endpoint (same tag, same frontier) is already live, importing a duplicate
+    // continuation is unnecessary and refusing strands the Responses half of the
+    // repair transaction (port of mainline 4e465fb5). This check runs before the
+    // destination-lane occupancy guard because on a single-lane profile the live
+    // endpoint occupies the only lane a caller can name (council CR-20260831-
+    // durable3090 grok R1). Succeed idempotently without reading payloads or
+    // touching any lane; any other live state for the namespace - newer tag,
+    // different frontier - stays a refusal that mutates nothing.
     for (std::uint32_t existing = 0; existing < max_concurrency; ++existing) {
         const SequenceState& candidate = sequences[existing];
         if (!candidate.retained || !candidate.session_published ||
@@ -1455,12 +1462,6 @@ std::optional<runtime::ContinuationCheckpointStats> ProgramImplCore::restore_ses
             *candidate.checkpoint_namespace != checkpoint_namespace) {
             continue;
         }
-        // Lazy restore may race the session's own liveness: when the exact catalogued
-        // endpoint (same tag, same frontier) is already live, importing a duplicate
-        // continuation is unnecessary and refusing strands the Responses half of the
-        // repair transaction (port of mainline 4e465fb5). Succeed idempotently without
-        // reading payloads or touching any lane; any other live state - newer tag,
-        // different frontier - stays a refusal that mutates nothing.
         if (candidate.checkpoint_tag == checkpoint_tag && expected.frontier_tokens != 0 &&
             expected.restored_tokens != 0 &&
             expected.restored_tokens <= expected.frontier_tokens &&
@@ -1468,6 +1469,10 @@ std::optional<runtime::ContinuationCheckpointStats> ProgramImplCore::restore_ses
             candidate.execution_frontier == expected.frontier_tokens) {
             return expected;
         }
+        return std::nullopt;
+    }
+    if (sequences[lane].retained || sequences[lane].kv ||
+        requests[lane].lifecycle != Lifecycle::Empty) {
         return std::nullopt;
     }
     try {

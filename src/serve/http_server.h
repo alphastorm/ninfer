@@ -50,11 +50,17 @@ private:
     void handle_response_compact(const httplib::Request& req, httplib::Response& res);
     void maybe_checkpoint_completed_turn(const std::optional<std::string>& session_sha256,
                                          const GenerationOutcome& outcome) noexcept;
+    // Automatic saves yield to live traffic; shutdown flushes and the explicit POST
+    // route save immediately so the drain fits the packaged stop deadline.
+    enum class CheckpointSaveUrgency : std::uint8_t { YieldToLiveTraffic, Immediate };
     void save_automatic_checkpoint(std::string_view session_sha256) noexcept;
+    void save_checkpoint_now(std::string_view session_sha256,
+                             CheckpointSaveUrgency urgency) noexcept;
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
     void handle_status(const httplib::Request& req, httplib::Response& res) const;
     void handle_checkpoint_get(const httplib::Request& req, httplib::Response& res);
+    void handle_checkpoint_save(const httplib::Request& req, httplib::Response& res);
     void handle_checkpoint_delete(const httplib::Request& req, httplib::Response& res);
     // The process-wide console logger serializes lines from request and reporter threads.
     void log_line(const std::string& line);

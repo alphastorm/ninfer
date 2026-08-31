@@ -291,20 +291,29 @@ void HttpServer::maybe_checkpoint_completed_turn(const std::optional<std::string
 }
 
 void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noexcept {
+    save_checkpoint_now(session_sha256, CheckpointSaveUrgency::YieldToLiveTraffic);
+}
+
+void HttpServer::save_checkpoint_now(std::string_view session_sha256,
+                                     CheckpointSaveUrgency urgency) noexcept {
     try {
         if (service_ == nullptr) { return; }
-        // Staging briefly holds the engine even with buffered export writes. An automatic
-        // save is pure acceleration, so yield to live traffic: start only after the engine
-        // stays quiet for several consecutive samples - a momentary gap between client
-        // turns is not idle intent - bounded so a busy server still checkpoints eventually
-        // (ninfer#34). Explicit POST saves keep their synchronous contract and never wait.
-        int quiet_samples = 0;
-        for (int waited = 0; waited < 120 && quiet_samples < 3; ++waited) {
-            const ninfer::RuntimeStats stats = service_->runtime_stats();
-            const std::uint32_t busy = stats.running_requests + stats.prefilling_requests +
-                                       stats.decode_ready_requests + stats.waiting_requests;
-            quiet_samples = busy == 0 ? quiet_samples + 1 : 0;
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        if (urgency == CheckpointSaveUrgency::YieldToLiveTraffic) {
+            // Staging briefly holds the engine even with buffered export writes. An
+            // automatic save is pure acceleration, so yield to live traffic: start only
+            // after the engine stays quiet for several consecutive samples - a momentary
+            // gap between client turns is not idle intent - bounded so a busy server
+            // still checkpoints eventually (ninfer#34). Shutdown flushes and explicit
+            // POST saves never wait: the drain must fit the packaged stop deadline
+            // (council CR-20260831-durable3090 daybreak R4 / grok R3).
+            int quiet_samples = 0;
+            for (int waited = 0; waited < 120 && quiet_samples < 3; ++waited) {
+                const ninfer::RuntimeStats stats = service_->runtime_stats();
+                const std::uint32_t busy = stats.running_requests + stats.prefilling_requests +
+                                           stats.decode_ready_requests + stats.waiting_requests;
+                quiet_samples = busy == 0 ? quiet_samples + 1 : 0;
+                std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            }
         }
         // Redundant-save skip: the catalogued checkpoint may already cover the session's
         // newest stored response (e.g. an explicit POST checkpointed the same turn while
@@ -346,7 +355,7 @@ void HttpServer::save_all_checkpoints() noexcept {
     if (automatic_checkpoints_) { automatic_checkpoints_->drain(); }
     try {
         for (const std::string& digest : response_store_.session_digests()) {
-            save_automatic_checkpoint(digest);
+            save_checkpoint_now(digest, CheckpointSaveUrgency::Immediate);
         }
     } catch (...) {}
 }

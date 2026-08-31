@@ -348,12 +348,11 @@ default. Enabling it requires `--api-key` plus nonempty `--binary-sha256`, `--ar
 `--config-sha256`, and `--deployment-profile` identities. The API key is reduced to a
 domain-separated tenant SHA-256 in memory; the key itself is never written to the checkpoint.
 
-After each eligible stored Response completes, the server snapshots that session's complete local
-Responses lineage and the matching Engine continuation into one checksummed generation. Streaming
-sends its terminal event only after this save attempt, so it never reports completion before the
-durability decision. A save failure is logged. If the request itself used `previous_response_id`,
-the new Response is removed and the request fails rather than returning a continuation that could
-not be committed.
+After each eligible stored Response completes, the server enqueues that session for one bounded
+background checkpoint worker; the terminal HTTP/SSE event does not wait for checkpoint I/O. The
+explicit `POST /v1/ninfer/checkpoints` route is the synchronous durability boundary: it saves the
+complete stored lineage at its newest response id before returning. A background save failure is
+logged and retried on the next completed turn.
 
 After a process restart, an in-memory miss for `previous_response_id` loads only the namespace for
 the authenticated tenant and supplied session. The manifest, response ID, all payload checksums,
@@ -397,7 +396,8 @@ missing/open/read filesystem failure reports `unavailable` without changing the 
 `current` pointer, so a later request can retry the same checkpoint.
 
 A completed stored turn at or above `--session-checkpoint-min-tokens` is enqueued to one
-bounded background checkpoint worker; the default threshold is `32768`. The request publishes its
+bounded background checkpoint worker; the default threshold on this lane is `0`, so every
+completed stored turn is checkpointed. The request publishes its
 terminal HTTP/SSE response without waiting for checkpoint I/O, repeated saves for the same session
 coalesce, and a full queue drops only that automatic acceleration attempt. An automatic save
 additionally yields to live traffic: it starts only after the engine stays quiet for consecutive samples (bounded at 60 s),

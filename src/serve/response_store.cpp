@@ -87,13 +87,23 @@ ResponseStore::ResponseStore(std::size_t max_records, std::size_t max_bytes)
     }
 }
 
+namespace {
+// Session-ownership checks are authorization decisions: compare the stored and
+// presented capabilities in constant time (council CR-20260831-durable3090 R1).
+[[nodiscard]] bool session_matches(const std::optional<std::string>& stored,
+                                   const std::optional<std::string>& presented) {
+    if (!stored || !presented) { return stored.has_value() == presented.has_value(); }
+    return ninfer::serve::credential_equal(*stored, *presented);
+}
+} // namespace
+
 std::shared_ptr<const StoredResponse>
 ResponseStore::get_for_session(const std::string& id,
                                const std::optional<std::string>& session_sha256) {
     std::lock_guard lock(mutex_);
     const auto found = records_.find(id);
     if (found == records_.end() ||
-        found->second.response->client_session_sha256 != session_sha256) {
+        !session_matches(found->second.response->client_session_sha256, session_sha256)) {
         return {};
     }
     lru_.splice(lru_.begin(), lru_, found->second.lru);
@@ -169,7 +179,7 @@ bool ResponseStore::erase_for_session(const std::string& id,
     std::lock_guard lock(mutex_);
     const auto found = records_.find(id);
     if (found == records_.end() ||
-        found->second.response->client_session_sha256 != session_sha256 ||
+        !session_matches(found->second.response->client_session_sha256, session_sha256) ||
         found->second.transaction_pins != 0) {
         return false;
     }
@@ -186,7 +196,7 @@ ResponseStoreTransactionState ResponseStore::erase_for_session_transactionally(
         std::lock_guard lock(mutex_);
         const auto target = records_.find(id);
         if (target == records_.end() || !target->second.response->client_session_sha256 ||
-            *target->second.response->client_session_sha256 != session_sha256) {
+            !credential_equal(*target->second.response->client_session_sha256, session_sha256)) {
             return ResponseStoreTransactionState::Missing;
         }
 
@@ -194,7 +204,7 @@ ResponseStoreTransactionState ResponseStore::erase_for_session_transactionally(
         for (const auto& [record_id, entry] : records_) {
             (void)record_id;
             if (entry.response->client_session_sha256 &&
-                *entry.response->client_session_sha256 == session_sha256) {
+                credential_equal(*entry.response->client_session_sha256, session_sha256)) {
                 if (entry.transaction_pins != 0) {
                     return ResponseStoreTransactionState::Conflict;
                 }
@@ -262,7 +272,7 @@ ResponseStore::snapshot_session(std::string_view client_session_sha256) const {
     for (const auto& [id, entry] : records_) {
         (void)id;
         if (entry.response->client_session_sha256 &&
-            *entry.response->client_session_sha256 == client_session_sha256) {
+            credential_equal(*entry.response->client_session_sha256, client_session_sha256)) {
             ordered.emplace_back(entry.sequence, entry.response.get());
         }
     }
@@ -368,6 +378,22 @@ bool ResponseStore::restore_session(ResponseStoreSnapshot snapshot,
         return stored->client_session_sha256 &&
                credential_equal(*stored->client_session_sha256, snapshot.client_session_sha256);
     };
+    // Freshness guard: repair must never roll the session backward past completed state
+    // the checkpoint does not cover. A live target-session record that is absent from the
+    // verified snapshot but CHAINS ONTO covered lineage (its previous_response_id names a
+    // snapshot record) is a newer completed frontier; refuse and fall back to the ordinary
+    // missing-response path instead of deleting it (council CR-20260831-durable3090
+    // daybreak R3). Unlinked same-session leftovers stay the removable repair case.
+    {
+        std::unordered_set<std::string_view> snapshot_ids;
+        snapshot_ids.reserve(owned.size());
+        for (const auto& record : owned) { snapshot_ids.insert(record->id); }
+        for (const auto& [id, entry] : records_) {
+            if (!target_session(entry.response) || snapshot_ids.contains(id)) { continue; }
+            const auto& parent = entry.response->previous_response_id;
+            if (parent && snapshot_ids.contains(*parent)) { return false; }
+        }
+    }
     std::size_t unrelated_count = 0;
     for (const auto& [id, entry] : records_) {
         (void)id;

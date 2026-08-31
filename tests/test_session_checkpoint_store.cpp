@@ -491,6 +491,28 @@ int test_codec_round_trip() {
                                   std::optional<std::string>{std::string(64, 'e')}) != nullptr,
         "unrelated sessions survive a target-session restore");
 
+    ResponseStore fresher(4, 1ULL << 20);
+    fresher.put(original.records.front());
+    StoredResponse newer;
+    newer.id                    = "resp_private_newer";
+    newer.session_key           = original.records.front().session_key;
+    newer.client_session_sha256 = original.client_session_sha256;
+    newer.previous_response_id  = original.latest_response_id;
+    newer.response              = nlohmann::json::object();
+    fresher.put(newer);
+    bool fresher_commit = false;
+    failures += check(!fresher.restore_session(original,
+                                               [&] {
+                                                   fresher_commit = true;
+                                                   return true;
+                                               }) &&
+                          !fresher_commit && fresher.size() == 2 &&
+                          fresher.get_for_session(
+                              "resp_private_newer",
+                              std::optional<std::string>{original.client_session_sha256}) !=
+                              nullptr,
+                      "a newer record chained onto covered lineage refuses the rollback repair");
+
     ResponseStore gated(4, 1ULL << 20);
     bool failed_external_commit = false;
     failures += check(!gated.restore_session(original, [&] {

@@ -235,6 +235,10 @@ void HttpServer::register_routes() {
         handle_status(req, res);
     });
     if (!options_.session_checkpoint_root.empty()) {
+        server_.Post("/v1/ninfer/checkpoints",
+                     [this](const httplib::Request& req, httplib::Response& res) {
+                         handle_checkpoint_save(req, res);
+                     });
         server_.Get("/v1/ninfer/checkpoints/status",
                     [this](const httplib::Request& req, httplib::Response& res) {
                         handle_checkpoint_get(req, res);
@@ -737,6 +741,65 @@ void HttpServer::handle_checkpoint_get(const httplib::Request& req, httplib::Res
         return;
     }
     res.set_content(service_->checkpoint_status(digest).dump(), "application/json");
+}
+
+void HttpServer::handle_checkpoint_save(const httplib::Request& req, httplib::Response& res) {
+    // The synchronous crash-test boundary the serving guide promises: save the complete
+    // stored lineage at its newest response id before returning, never waiting on the
+    // elective idle debounce (council CR-20260831-durable3090 daybreak R2).
+    std::string digest;
+    try {
+        digest = require_checkpoint_session_header(req, !options_.api_key.empty());
+    } catch (const ApiException& error) {
+        write_error(res, error.error());
+        return;
+    }
+    if (service_ == nullptr) {
+        ApiError error;
+        error.status  = 503;
+        error.code    = "service_unavailable";
+        error.message = "generation service is loading";
+        write_error(res, error);
+        return;
+    }
+    const std::optional<ResponseStoreSnapshot> snapshot =
+        response_store_.snapshot_session(digest);
+    if (!snapshot) {
+        ApiError error;
+        error.status  = 409;
+        error.code    = "checkpoint_unavailable";
+        error.message = "session has no complete checkpointable response";
+        write_error(res, error);
+        return;
+    }
+    const SessionCheckpointSaveOutcome saved =
+        service_->save_checkpoint(digest, snapshot->latest_response_id, response_store_);
+    if (saved.state != SessionCheckpointSaveState::Saved) {
+        // The HTTP body keeps the released closed vocabulary; the named state goes to
+        // the server log only.
+        try {
+            const char* state_name = "failed";
+            switch (saved.state) {
+            case SessionCheckpointSaveState::Disabled: state_name = "disabled"; break;
+            case SessionCheckpointSaveState::Missing: state_name = "missing"; break;
+            case SessionCheckpointSaveState::Unavailable: state_name = "unavailable"; break;
+            case SessionCheckpointSaveState::Failed:
+            case SessionCheckpointSaveState::Saved: break;
+            }
+            write_console_log(ConsoleLogLevel::Warning,
+                              std::string("checkpoint save refused: ") + state_name);
+        } catch (...) {}
+        ApiError error;
+        error.status  = 409;
+        error.code    = "checkpoint_unavailable";
+        error.message = "session has no complete checkpointable response";
+        write_error(res, error);
+        return;
+    }
+    res.set_content(nlohmann::json{{"artifact_type", "ninfer_session_checkpoint_status"},
+                                   {"state", "saved"}}
+                        .dump(),
+                    "application/json");
 }
 
 void HttpServer::handle_checkpoint_delete(const httplib::Request& req, httplib::Response& res) {
