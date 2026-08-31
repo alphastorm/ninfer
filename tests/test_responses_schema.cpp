@@ -131,6 +131,28 @@ int test_basic_request() {
                           composed.generation.messages[1].content[0].text == "old answer" &&
                           composed.generation.messages[2].content[0].text == "hello",
                       "instructions, previous context, and current input composed in order");
+    failures += check(!composed.generation.messages[0].private_cache_boundary_after &&
+                          composed.generation.messages[1].private_cache_boundary_after &&
+                          composed.generation.messages[2].private_cache_boundary_after,
+                      "stored continuation anchors the inherited frontier and the input tail");
+    ResponsesRequest unstored = request;
+    unstored.store            = false;
+    ChatTurn unstored_previous;
+    unstored_previous.role = ninfer::ChatRole::Assistant;
+    ContentPart unstored_text;
+    unstored_text.kind = ContentKind::Text;
+    unstored_text.text = "old answer";
+    unstored_previous.content.push_back(std::move(unstored_text));
+    compose_responses_generation_messages(unstored, {unstored_previous});
+    failures += check(unstored.generation.messages[1].private_cache_boundary_after &&
+                          !unstored.generation.messages[2].private_cache_boundary_after,
+                      "unstored continuation anchors only the inherited frontier");
+    ResponsesRequest rooted = request;
+    compose_responses_generation_messages(rooted, {});
+    failures += check(rooted.generation.messages.size() == 2 &&
+                          !rooted.generation.messages[0].private_cache_boundary_after &&
+                          rooted.generation.messages[1].private_cache_boundary_after,
+                      "stored base request anchors its pre-generation frontier");
     return failures;
 }
 
