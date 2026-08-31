@@ -340,22 +340,38 @@ bool ResponseStore::restore_session(ResponseStoreSnapshot snapshot,
         (void)id;
         if (entry.transaction_pins != 0) { return false; }
     }
-    for (const auto& record : owned) {
-        if (records_.contains(record->id)) { return false; }
+    // Restore replaces the target session's complete lineage: an existing record OWNED BY THE
+    // TARGET SESSION is replacement input (same-session ID overlap is the partial-lineage repair
+    // case, and stale target records absent from the verified snapshot are removed), while an
+    // incoming ID owned by any other record - another session or an unscoped one - stays a
+    // fail-closed collision so an authenticated snapshot can never overwrite foreign state.
+    const auto target_session = [&](const std::shared_ptr<const StoredResponse>& stored) {
+        return stored->client_session_sha256 &&
+               credential_equal(*stored->client_session_sha256, snapshot.client_session_sha256);
+    };
+    std::size_t unrelated_count = 0;
+    for (const auto& [id, entry] : records_) {
+        (void)id;
+        if (!target_session(entry.response)) { ++unrelated_count; }
     }
-    const std::size_t minimum_victims =
-        records_.size() + owned.size() > max_records_
-            ? records_.size() + owned.size() - max_records_
-            : 0;
+    for (const auto& record : owned) {
+        const auto found = records_.find(record->id);
+        if (found != records_.end() && !target_session(found->second.response)) { return false; }
+    }
+    const std::size_t minimum_victims = unrelated_count + owned.size() > max_records_
+                                            ? unrelated_count + owned.size() - max_records_
+                                            : 0;
     try {
-        for (std::size_t victim_count = minimum_victims; victim_count <= records_.size();
+        for (std::size_t victim_count = minimum_victims; victim_count <= unrelated_count;
              ++victim_count) {
             ResponseStore replacement(max_records_, max_bytes_);
             std::size_t oldest_rank = 0;
             // insert_locked pushes to the MRU end, so replay survivors from oldest to newest.
+            // Target-session records are replacement input, never capacity victims.
             for (auto position = lru_.rbegin(); position != lru_.rend(); ++position) {
-                if (oldest_rank++ < victim_count) { continue; }
                 const Entry& entry = records_.at(*position);
+                if (target_session(entry.response)) { continue; }
+                if (oldest_rank++ < victim_count) { continue; }
                 replacement.insert_locked(entry.response, entry.envelope_bytes, entry.sequence);
             }
             replacement.next_sequence_ = next_sequence_;

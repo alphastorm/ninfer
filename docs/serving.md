@@ -364,9 +364,54 @@ filesystem unavailability, and failed atomic restore return explicit checkpoint 
 fingerprint binds model/artifact/config/binary/deployment identity, source and build profile,
 `cuda_architecture`, context/KV/speculation settings, and resolved target memory layout.
 
-`--session-checkpoint-quota-mib` bounds all retained generations under the root. The staging limit
-bounds response encoding and each host transfer and must not exceed the quota. Existing ordinary
-Responses behavior is unchanged when `--session-checkpoint-dir` is omitted.
+```json
+{"session_sha256":"<64 lowercase hex>"}
+```
+
+| Endpoint | Contract |
+|---|---|
+| `POST /v1/ninfer/checkpoints` | save the complete stored lineage and the exact catalogued Engine endpoint whose checkpoint tag is that lineage's latest Response ID; return HTTP 409 when no complete checkpointable endpoint exists |
+| `GET /v1/ninfer/checkpoints/status` | read the digest from the required `X-NInfer-Session` header and report `available`, `missing`, `incompatible`, `corrupt`, or transient `unavailable` state |
+| `DELETE /v1/ninfer/checkpoints` | read the digest from the required `X-NInfer-Session` header, atomically rename the complete session to an internal tombstone, and retire it; return `deleted`/200, genuine `missing`/404, or `conflict`/409 when a live reader or filesystem refusal prevents the rename; physical cleanup is best-effort and retried by garbage collection |
+
+Success and status bodies never echo the session digest or include prompt, response, tool, or
+reasoning content.
+
+Each save writes a new generation, flushes payloads and checksums, writes the manifest last, then
+atomically replaces `current`. Publication requires an Engine export that can restore at least 95%
+of its compatible frontier, and its reported payload bytes must exactly match the generated Engine
+files. An interrupted save leaves the previous generation usable. Restore verifies every file and
+the runtime fingerprint before exposing state. On the first authenticated `previous_response_id`
+lookup missing from the in-memory store, NInfer lazily imports the matching Engine continuation.
+The imported frontier and payload summary must equal the manifest before Engine catalog ownership
+and the typed Responses snapshot publish in one transaction. The restore replaces the target
+session's complete stored lineage: records the session still holds are replacement input (a
+partially evicted lineage is repaired, and stale same-session records absent from the verified
+snapshot are removed), an incoming Response ID owned by any other record fails closed, and when
+the exact catalogued Engine endpoint (same checkpoint tag and frontier) is already live the
+Engine side succeeds idempotently without importing a duplicate continuation. A newer or
+differently tagged live endpoint refuses the restore and mutates nothing. Any failure returns
+the ordinary missing-response behavior so the client can perform its explicit full replay.
+Verified structural or checksum corruption is quarantined and ignored. A transient
+missing/open/read filesystem failure reports `unavailable` without changing the generation or
+`current` pointer, so a later request can retry the same checkpoint.
+
+A completed stored turn at or above `--session-checkpoint-min-tokens` is enqueued to one
+bounded background checkpoint worker; the default threshold is `32768`. The request publishes its
+terminal HTTP/SSE response without waiting for checkpoint I/O, repeated saves for the same session
+coalesce, and a full queue drops only that automatic acceleration attempt. Graceful server shutdown
+drains the worker and then attempts every live session. Explicit `POST` remains the synchronous
+crash-test boundary: do not kill the process until it returns.
+`--session-checkpoint-staging-mib` bounds transfer/codec staging.
+`--session-checkpoint-quota-mib` is a store-wide cap over all retained current and stale
+generations, including deferred tombstones. Before publishing a new `current`, admission cleans
+tombstones and abandoned staging, then reclaims the oldest inactive stale generations and inactive
+current sessions, with path order breaking equal timestamps. Reclaimed paths are atomically renamed
+to internal tombstones before physical cleanup, so no current pointer can dangle. The generation
+being published, its session, and every active restore reader are never eviction candidates. A
+cleanup failure or insufficient reclaimable space refuses the save before its prior `current`
+changes; retained tombstones remain quota-accounted and are retried at startup and by garbage
+collection.
 
 ### Responses input token count
 

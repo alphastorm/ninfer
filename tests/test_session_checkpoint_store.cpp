@@ -425,17 +425,71 @@ int test_codec_round_trip() {
     failures += check(encoded == reencoded, "response snapshot has a stable canonical encoding");
     ResponseStore live(4, 1ULL << 20);
     live.put(original.records.front());
-    bool duplicate_external_commit = false;
-    failures += check(!live.restore_session(original, [&] {
-                          duplicate_external_commit = true;
-                          return true;
-                      }) &&
-                          !duplicate_external_commit && live.size() == 1 &&
-                          live.get_for_session("resp_private_first",
-                                               original.client_session_sha256) != nullptr &&
-                          live.get_for_session("resp_private_second",
-                                               original.client_session_sha256) == nullptr,
-                      "invalid ResponseStore restore leaves both transaction sides unchanged");
+    StoredResponse stale;
+    stale.id                    = "resp_private_stale";
+    stale.session_key           = original.records.front().session_key;
+    stale.client_session_sha256 = original.client_session_sha256;
+    stale.response              = nlohmann::json::object();
+    live.put(stale);
+    bool repaired_external_commit = false;
+    failures += check(
+        live.restore_session(original,
+                             [&] {
+                                 repaired_external_commit = true;
+                                 return true;
+                             }) &&
+            repaired_external_commit && live.size() == 2 &&
+            live.get_for_session("resp_private_first",
+                                 std::optional<std::string>{original.client_session_sha256}) !=
+                nullptr &&
+            live.get_for_session("resp_private_second",
+                                 std::optional<std::string>{original.client_session_sha256}) !=
+                nullptr &&
+            live.get_for_session("resp_private_stale",
+                                 std::optional<std::string>{original.client_session_sha256}) ==
+                nullptr,
+        "partial same-session store repairs to the complete verified lineage");
+
+    ResponseStore foreign(4, 1ULL << 20);
+    StoredResponse foreign_owner        = original.records.front();
+    foreign_owner.client_session_sha256 = std::string(64, 'e');
+    foreign.put(foreign_owner);
+    bool foreign_commit = false;
+    failures += check(!foreign.restore_session(original,
+                                               [&] {
+                                                   foreign_commit = true;
+                                                   return true;
+                                               }) &&
+                          !foreign_commit && foreign.size() == 1,
+                      "incoming id owned by another session stays a fail-closed collision");
+
+    ResponseStore partial(4, 1ULL << 20);
+    partial.put(original.records.front());
+    bool partial_commit = false;
+    failures += check(!partial.restore_session(original,
+                                               [&] {
+                                                   partial_commit = true;
+                                                   return false;
+                                               }) &&
+                          partial_commit && partial.size() == 1 &&
+                          partial.get_for_session(
+                              "resp_private_first",
+                              std::optional<std::string>{original.client_session_sha256}) !=
+                              nullptr,
+                      "failed external commit preserves the partial session exactly");
+
+    ResponseStore mixed(4, 1ULL << 20);
+    StoredResponse unrelated;
+    unrelated.id                    = "resp_unrelated";
+    unrelated.session_key           = "other-session";
+    unrelated.client_session_sha256 = std::string(64, 'e');
+    unrelated.response              = nlohmann::json::object();
+    mixed.put(unrelated);
+    failures += check(
+        mixed.restore_session(original, [] { return true; }) && mixed.size() == 3 &&
+            mixed.get_for_session("resp_unrelated",
+                                  std::optional<std::string>{std::string(64, 'e')}) != nullptr,
+        "unrelated sessions survive a target-session restore");
 
     ResponseStore gated(4, 1ULL << 20);
     bool failed_external_commit = false;
