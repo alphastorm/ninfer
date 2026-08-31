@@ -133,6 +133,10 @@ public:
                                           std::string_view required_response_id,
                                           ResponseStore& responses);
     [[nodiscard]] nlohmann::json checkpoint_status(std::string_view session_sha256) const;
+    // True when the catalogued checkpoint already records response_id as the session's
+    // newest stored response under the current runtime fingerprint (redundant-save skip).
+    [[nodiscard]] bool checkpoint_covers(std::string_view session_sha256,
+                                         std::string_view response_id) const;
     [[nodiscard]] SessionCheckpointEraseResult erase_checkpoint(std::string_view session_sha256);
 
     void warmup();

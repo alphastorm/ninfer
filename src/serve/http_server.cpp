@@ -1118,6 +1118,18 @@ void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noex
                 if (busy == 0) { break; }
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
+            // A checkpoint that already covers the session's newest stored response makes
+            // this save redundant (e.g. an explicit POST checkpointed the same turn while
+            // it sat queued). Re-exporting an identical frontier holds the engine for
+            // nothing, so skip before touching it. A turn completing after this check
+            // re-enqueues by design, so nothing newer can be lost.
+            const std::optional<std::string> live =
+                response_store_.latest_response_id(session_sha256);
+            if (live && !live->empty() && service_->checkpoint_covers(session_sha256, *live)) {
+                write_console_log(ConsoleLogLevel::Info,
+                                  "automatic session checkpoint skipped: already current");
+                return;
+            }
             runtime::SessionCheckpointSkipDetail skip;
             const bool saved =
                 service_->save_checkpoint(session_sha256, response_store_, &skip).has_value();

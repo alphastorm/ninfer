@@ -587,6 +587,14 @@ nlohmann::json GenerationService::checkpoint_status(std::string_view session_sha
     return checkpoint_store_->status(session_sha256, checkpoint_runtime_fingerprint_);
 }
 
+bool GenerationService::checkpoint_covers(std::string_view session_sha256,
+                                          std::string_view response_id) const {
+    if (!checkpoint_store_) { return false; }
+    std::lock_guard lock(checkpoint_mutex_);
+    return checkpoint_store_->covers(session_sha256, checkpoint_runtime_fingerprint_,
+                                     response_id);
+}
+
 SessionCheckpointEraseResult GenerationService::erase_checkpoint(std::string_view session_sha256) {
     if (!checkpoint_store_) { return SessionCheckpointEraseResult::Missing; }
     std::lock_guard lock(checkpoint_mutex_);

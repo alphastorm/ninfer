@@ -1477,6 +1477,33 @@ SessionCheckpointStore::load(std::string_view session_sha256,
     } catch (...) { return {.state = SessionCheckpointLoadState::Unavailable}; }
 }
 
+bool SessionCheckpointStore::covers(std::string_view session_sha256,
+                                    const nlohmann::json& runtime_fingerprint,
+                                    std::string_view response_id) const {
+    if (!valid_digest(session_sha256) || !runtime_fingerprint.is_object() ||
+        response_id.empty()) {
+        return false;
+    }
+    std::lock_guard lock(impl_->mutex);
+    try {
+        const std::filesystem::path session         = session_path(session_sha256);
+        const std::optional<std::string> generation = current_generation(session);
+        if (!generation) { return false; }
+        if (impl_->is_corrupt(std::string(session_sha256) + "/" + *generation)) { return false; }
+        const std::filesystem::path root = session / "generations" / *generation;
+        const nlohmann::json manifest =
+            nlohmann::json::parse(read_text_bounded(root / "manifest.json", 16ULL << 20));
+        return manifest.is_object() &&
+               manifest.at("artifact_type").get<std::string>() == "ninfer_session_checkpoint" &&
+               manifest.at("schema_version").get<std::uint32_t>() ==
+                   kSessionCheckpointSchemaVersion &&
+               manifest.at("session_sha256").get<std::string>() == session_sha256 &&
+               manifest.at("generation").get<std::string>() == *generation &&
+               manifest.at("runtime_fingerprint") == runtime_fingerprint &&
+               manifest.at("latest_response_id").get<std::string>() == response_id;
+    } catch (...) { return false; }
+}
+
 nlohmann::json SessionCheckpointStore::status(std::string_view session_sha256,
                                               const nlohmann::json& runtime_fingerprint) const {
     nlohmann::json result = {{"artifact_type", "ninfer_session_checkpoint_status"},

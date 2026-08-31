@@ -67,6 +67,10 @@ public:
     // without exposing a partial lineage.
     [[nodiscard]] std::optional<ResponseStoreSnapshot>
     snapshot_session(std::string_view client_session_sha256) const;
+    // Newest stored response id for the session without copying the lineage; used to
+    // detect a checkpoint that already covers the session (redundant-save skip).
+    [[nodiscard]] std::optional<std::string>
+    latest_response_id(std::string_view client_session_sha256) const;
     [[nodiscard]] std::vector<std::string> session_digests() const;
     // Replaces the complete lineage of snapshot.client_session_sha256: existing records owned by
     // that session are replacement input (same-session ID overlap is the partial-lineage repair

@@ -98,6 +98,13 @@ public:
 
     [[nodiscard]] nlohmann::json status(std::string_view session_sha256,
                                         const nlohmann::json& runtime_fingerprint) const;
+    // True when the current catalogued generation is fingerprint-compatible and already
+    // records response_id as the session's newest stored response. Lets the automatic
+    // save path skip a redundant re-export without status ever exposing response
+    // identity (that non-disclosure is a tested boundary).
+    [[nodiscard]] bool covers(std::string_view session_sha256,
+                              const nlohmann::json& runtime_fingerprint,
+                              std::string_view response_id) const;
     [[nodiscard]] SessionCheckpointEraseResult erase(std::string_view session_sha256);
     void collect_garbage();
 
