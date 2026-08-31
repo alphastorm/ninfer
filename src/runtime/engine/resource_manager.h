@@ -674,7 +674,10 @@ public:
             return refuse(SessionCheckpointSkipReason::CatalogIdentityDrift);
         }
         if (entry.checkpoint_tag != checkpoint_tag) {
-            if (skip != nullptr) { skip->catalogued_tag = entry.checkpoint_tag; }
+            if (skip != nullptr) {
+                SessionCheckpointSkipDetail::assign_tag(skip->catalogued_tag,
+                                                        entry.checkpoint_tag);
+            }
             return refuse(SessionCheckpointSkipReason::TagMismatch);
         }
         std::optional<ContinuationCheckpointStats> stats =

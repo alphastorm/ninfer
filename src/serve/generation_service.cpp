@@ -544,6 +544,9 @@ GenerationService::save_checkpoint(std::string_view session_sha256, ResponseStor
         return std::nullopt;
     }
     const std::string checkpoint_tag = snapshot->latest_response_id;
+    if (skip != nullptr) {
+        runtime::SessionCheckpointSkipDetail::assign_tag(skip->attempted_tag, checkpoint_tag);
+    }
     return checkpoint_store_->save(*snapshot, checkpoint_runtime_fingerprint_,
                                    [&](runtime::ContinuationCheckpointWriter& writer) {
                                        return runtime::CheckpointEngineAccess::checkpoint_session(
