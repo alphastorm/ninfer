@@ -138,7 +138,7 @@ if ($protocol.artifact_type -cne 'ninfer_agent_protocol_smoke' -or
 $longPromptPath = (Resolve-Path -LiteralPath $LongPromptFile).Path
 $longPrompt = [IO.File]::ReadAllText($longPromptPath, [Text.UTF8Encoding]::new($false, $true))
 if ([string]::IsNullOrWhiteSpace($longPrompt)) { throw 'long prompt corpus is empty' }
-$digestPrefix = "ninfer-qwen38-4090-v0.1/$($Profile.ToLowerInvariant())"
+$digestPrefix = "ninfer-qwen38-4090-v0.2/$($Profile.ToLowerInvariant())"
 $sessionDigest = Get-Digest "$digestPrefix/qualification-session"
 $firstRequestDigest = Get-Digest "$digestPrefix/qualification-first"
 $secondRequestDigest = Get-Digest "$digestPrefix/qualification-post-restart"
