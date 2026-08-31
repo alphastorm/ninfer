@@ -525,7 +525,7 @@ curl http://127.0.0.1:8080/v1/models \
 | `--session-checkpoint-quota-mib N` | total retained checkpoint budget | `65536` |
 | `--session-checkpoint-staging-mib N` | bounded response codec and host transfer staging | `256` |
 | `--session-checkpoint-write-buffer-mib N` | in-memory queue decoupling checkpoint disk writes from the engine (queued + in-flight) | `6144` |
-| `--session-checkpoint-min-tokens N` | completed-turn frontier that triggers an automatic save | `32768` |
+| `--session-checkpoint-min-tokens N` | completed-turn frontier floor for automatic saves; `0` checkpoints every completed stored turn | `0` |
 | `--kv-dtype bf16\|int8\|rk8v4` | KV-cache storage; `rk8v4` is experimental and lossy | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |

@@ -22,7 +22,7 @@ inline constexpr std::size_t kDefaultResponseStoreBytes   = 256ULL << 20;
 inline constexpr std::uint64_t kDefaultSessionCheckpointQuotaBytes = 64ULL << 30;
 inline constexpr std::size_t kDefaultSessionCheckpointStagingBytes = 256ULL << 20;
 inline constexpr std::size_t kDefaultSessionCheckpointWriteBufferBytes = 6ULL << 30;
-inline constexpr std::uint32_t kDefaultSessionCheckpointMinTokens  = 32768;
+inline constexpr std::uint32_t kDefaultSessionCheckpointMinTokens  = 0;
 
 struct ServeOptions {
     bool help_requested = false;
