@@ -114,6 +114,7 @@ enum class SessionCheckpointSkipReason : std::uint8_t {
     CatalogIdentityDrift,
     TagMismatch,
     ProgramRejected,
+    QuotaExceeded,
 };
 
 [[nodiscard]] constexpr std::string_view
@@ -141,6 +142,8 @@ session_checkpoint_skip_reason_name(SessionCheckpointSkipReason reason) noexcept
         return "catalogued checkpoint tag mismatch";
     case SessionCheckpointSkipReason::ProgramRejected:
         return "program refused continuation export";
+    case SessionCheckpointSkipReason::QuotaExceeded:
+        return "checkpoint disk quota exceeded";
     }
     return "unknown";
 }

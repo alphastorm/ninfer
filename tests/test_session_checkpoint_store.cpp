@@ -1219,7 +1219,10 @@ int test_delete_checkpoint_transaction_race_and_quota() {
         }
         failures += check(erased == SessionCheckpointEraseResult::Erased,
                           "deferred-cleanup DELETE did not commit");
-        failures += check(cleanup_calls == 1,
+        // Deferred reclamation may legitimately re-attempt the failed tombstone in the same
+        // save's post-publish enforcement pass (ab3d07f8); the invariant is that cleanup was
+        // attempted, not an exact attempt count.
+        failures += check(cleanup_calls >= 1,
                           "committed DELETE did not attempt bounded eager generation cleanup");
         failures += check(retained_tombstone.has_value(),
                           "bounded eager cleanup did not expose its deferred tombstone");
@@ -1526,6 +1529,71 @@ int test_load_scan_failure_does_not_deadlock() {
     return check(loaded.state == SessionCheckpointLoadState::Unavailable && !loaded.checkpoint,
                  "generation scan failure did not unwind before reader ownership");
 }
+
+// A session whose checkpoint exceeds half the quota must still be able to save a successor:
+// the superseded current generation is tolerated as a publish transient and reclaimed after
+// the current pointer swaps (alphastorm/ninfer#25). Adapted to this lineage's authenticated
+// namespace API from main ab3d07f8.
+int test_large_session_resaves_within_quota() {
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot();
+    const AuthenticatedCheckpointNamespace ns = checkpoint_namespace(responses);
+    std::vector<std::byte> payload(48ULL << 10);
+    for (std::size_t index = 0; index < payload.size(); ++index) {
+        payload[index] = static_cast<std::byte>((index * 41U) & 0xffU);
+    }
+    SessionCheckpointStore store({.root             = temporary.path,
+                                  .disk_quota_bytes = 64ULL << 10,
+                                  .staging_bytes    = 1ULL << 20,
+                                  .read_queue       = std::make_shared<TestReadQueue>()});
+    const auto exporter =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        if (!write_chunked(writer, "engine/state.bin", payload)) { return std::nullopt; }
+        return ContinuationCheckpointStats{
+            .frontier_tokens = 4096, .restored_tokens = 4096, .payload_bytes = payload.size()};
+    };
+    int failures = 0;
+    const std::filesystem::path session = stored_session_path(temporary.path, responses);
+
+    const auto first = store.save(ns, responses, fingerprint(), exporter);
+    failures += check(first.has_value(), "first oversized-session generation saves");
+    if (!first) { return failures; }
+    failures += check(first->bytes * 2 > (64ULL << 10),
+                      "fixture generation must exceed half the quota for this regression");
+
+    ninfer::runtime::SessionCheckpointSkipDetail skip;
+    const auto second = store.save(ns, responses, fingerprint(), exporter, false, &skip);
+    failures += check(second.has_value() && second->generation != first->generation,
+                      "successor save must tolerate the superseded generation as a transient");
+    if (!second) { return failures; }
+    failures += check(!std::filesystem::exists(session / "generations" / first->generation),
+                      "superseded generation is reclaimed after publish");
+    SessionCheckpointLoadResult loaded = store.load(ns, fingerprint());
+    failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+                          loaded.checkpoint.has_value(),
+                      "reclaimed store still loads the successor generation");
+    loaded.checkpoint.reset();
+
+    // A single generation larger than the whole quota is still refused, with the named reason.
+    std::vector<std::byte> oversized(96ULL << 10);
+    const auto refuse_exporter =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        if (!write_chunked(writer, "engine/state.bin", oversized)) { return std::nullopt; }
+        return ContinuationCheckpointStats{.frontier_tokens = 4096,
+                                           .restored_tokens = 4096,
+                                           .payload_bytes   = oversized.size()};
+    };
+    ninfer::runtime::SessionCheckpointSkipDetail oversize_skip;
+    const auto refused =
+        store.save(ns, responses, fingerprint(), refuse_exporter, false, &oversize_skip);
+    failures += check(!refused.has_value() &&
+                          oversize_skip.reason ==
+                              ninfer::runtime::SessionCheckpointSkipReason::QuotaExceeded,
+                      "generation larger than the quota is refused with the named reason");
+    failures += check(store.status(ns, fingerprint()).at("state") == "available",
+                      "refused oversized save leaves the published successor untouched");
+    return failures;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1571,6 +1639,7 @@ int main(int argc, char** argv) {
         std::pair{"active-reader", &test_active_reader_delete_and_gc},
         std::pair{"quota", &test_store_wide_quota_across_sessions},
         std::pair{"load-unwind", &test_load_scan_failure_does_not_deadlock},
+        std::pair{"resave-quota", &test_large_session_resaves_within_quota},
     };
     const std::string_view filter = argc == 2 ? argv[1] : "";
     int failures = 0;

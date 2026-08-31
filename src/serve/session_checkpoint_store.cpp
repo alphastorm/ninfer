@@ -793,9 +793,14 @@ void retire_generation_locked(const SessionCheckpointStoreOptions& options,
 [[nodiscard]] bool enforce_disk_quota_locked(
     const SessionCheckpointStoreOptions& options, const SessionCheckpointStore::Impl& impl,
     const std::optional<std::filesystem::path>& protected_generation = std::nullopt,
-    const std::optional<std::filesystem::path>& protected_session = std::nullopt) {
+    const std::optional<std::filesystem::path>& protected_session    = std::nullopt,
+    std::uint64_t tolerated_transient_bytes                          = 0) {
     GenerationInventory inventory =
         inventory_generations(options, impl, protected_generation, protected_session);
+    // The transient tolerance below only applies while reclamation is fully healthy: if any
+    // eviction this pass fails, the store falls back to the hard cap so a broken cleanup path
+    // can never let disk usage creep past the quota one tolerated save at a time.
+    bool reclamation_healthy = true;
     for (const GenerationCandidate& candidate : inventory.candidates) {
         const bool unconditional = candidate.kind == CandidateKind::Tombstone ||
                                    candidate.kind == CandidateKind::AbandonedStaging;
@@ -803,6 +808,8 @@ void retire_generation_locked(const SessionCheckpointStoreOptions& options,
         if (candidate.kind == CandidateKind::Tombstone) {
             if (cleanup_tombstone(options, candidate.path)) {
                 inventory.used -= candidate.bytes;
+            } else {
+                reclamation_healthy = false;
             }
             continue;
         }
@@ -814,12 +821,20 @@ void retire_generation_locked(const SessionCheckpointStoreOptions& options,
                 : directory_bytes(candidate.path);
         const std::filesystem::path tombstone = candidate_tombstone(options, candidate);
         std::filesystem::rename(candidate.path, tombstone, error);
-        if (error) { continue; }
-        sync_rename_parents(candidate.path, tombstone);
-        if (!cleanup_tombstone(options, tombstone)) { continue; }
+        if (error) {
+            reclamation_healthy = false;
+            continue;
+        }
+        (void)sync_rename_parents(candidate.path, tombstone);
+        if (!cleanup_tombstone(options, tombstone)) {
+            reclamation_healthy = false;
+            continue;
+        }
         inventory.used -= std::min(inventory.used, reclaimed);
     }
-    return inventory.used <= options.disk_quota_bytes;
+    if (inventory.used <= options.disk_quota_bytes) { return true; }
+    return reclamation_healthy &&
+           inventory.used <= options.disk_quota_bytes + tolerated_transient_bytes;
 }
 
 class DirectoryCheckpointReader final : public ContinuationCheckpointReader {
@@ -1176,12 +1191,25 @@ SessionCheckpointStore::save(const AuthenticatedCheckpointNamespace& checkpoint_
         const std::string manifest_text = manifest.dump();
         write_synced(staging / "manifest.json", manifest_text);
         sync_checkpoint_directory(options_, staging);
-        // Reclaim before changing current. The staging generation and its session are protected,
-        // so quota or cleanup failure leaves the previously published generation untouched.
+        // A session's previously published generation is deliberately never evicted while its
+        // successor stages (readers may hold it; a failed save must leave it untouched). Its
+        // bytes are tolerated as a publish transient while reclamation is healthy; after
+        // publish it becomes an ordinary stale candidate for quota enforcement. Without the
+        // tolerance a session whose checkpoint exceeds half the quota could never save twice
+        // (alphastorm/ninfer#25).
+        std::uint64_t previous_bytes = 0;
+        try {
+            if (const std::optional<std::string> previous_current = current_generation(session)) {
+                previous_bytes = directory_bytes(generations / *previous_current);
+            }
+        } catch (...) { previous_bytes = 0; }
         const std::uint64_t total_bytes = directory_bytes(staging);
         if (total_bytes > options_.disk_quota_bytes ||
-            !enforce_disk_quota_locked(options_, *impl_, staging, session)) {
+            !enforce_disk_quota_locked(options_, *impl_, staging, session, previous_bytes)) {
             std::filesystem::remove_all(staging, cleanup_error);
+            if (skip != nullptr) {
+                skip->reason = runtime::SessionCheckpointSkipReason::QuotaExceeded;
+            }
             return std::nullopt;
         }
 
@@ -1239,6 +1267,11 @@ SessionCheckpointStore::save(const AuthenticatedCheckpointNamespace& checkpoint_
         if (retire_previous && previous_generation && *previous_generation != generation) {
             retire_generation_locked(options_, *impl_, session, *previous_generation);
         }
+
+        // The superseded generation is now a stale candidate. Enforcement reclaims it only
+        // under quota pressure, so it keeps serving as the corruption-recovery fallback
+        // whenever the quota allows both generations. The fresh current stays protected.
+        (void)enforce_disk_quota_locked(options_, *impl_, std::nullopt, session);
 
         return SessionCheckpointSaveResult{
             .generation = generation, .engine = *engine, .bytes = total_bytes};

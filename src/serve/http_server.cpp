@@ -406,6 +406,7 @@ void HttpServer::register_routes() {
             }
         });
     }
+
 }
 
 void HttpServer::handle_models(const httplib::Request&, httplib::Response& res) const {
