@@ -151,10 +151,24 @@ bool try_allocate_d3d12_residency_locked(std::size_t capacity_bytes, void*& out_
     // behaviour: under desktop VRAM contention the pages are not yet backed, so weights
     // written into the mapping are silently lost and the model emits noise.
     if (res.fence->GetCompletedValue() < 1) {
+        // After EnqueueMakeResident is accepted, the fence WILL be signalled eventually;
+        // releasing the heap or fence while the operation is pending is a lifetime hazard
+        // (council CR-20260831-durable4090 U4). Every failure below therefore waits for the
+        // fence with a bounded spin before returning, instead of returning immediately.
+        const auto bounded_fence_spin = [&] {
+            const ULONGLONG deadline = GetTickCount64() + kResidencyWaitTimeoutMs;
+            while (res.fence->GetCompletedValue() < 1 && GetTickCount64() < deadline) {
+                Sleep(10);
+            }
+        };
         HANDLE residency_event = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-        if (residency_event == nullptr) { return false; }
+        if (residency_event == nullptr) {
+            bounded_fence_spin();
+            return false;
+        }
         if (FAILED(res.fence->SetEventOnCompletion(1, residency_event))) {
             CloseHandle(residency_event);
+            bounded_fence_spin();
             return false;
         }
         const DWORD wait_result = WaitForSingleObject(residency_event, kResidencyWaitTimeoutMs);
@@ -213,17 +227,23 @@ bool try_allocate_d3d12_residency_locked(std::size_t capacity_bytes, void*& out_
         const std::size_t probe = capacity_bytes < kProbeBytes ? capacity_bytes : kProbeBytes;
         std::vector<unsigned char> pattern(probe);
         for (std::size_t i = 0; i < probe; ++i) { pattern[i] = static_cast<unsigned char>((i * 31 + 7) & 0xFF); }
-        std::vector<unsigned char> readback(probe, 0);
+        std::vector<unsigned char> readback_head(probe, 0);
+        std::vector<unsigned char> readback_tail(probe, 0);
 
+        // Both ends of the mapping must round-trip (council: tail-only readback accepted
+        // mappings whose head pages were incoherent).
         bool coherent = false;
         const std::size_t tail_offset = capacity_bytes > probe ? capacity_bytes - probe : 0;
         if (cudaMemcpy(dev_ptr, pattern.data(), probe, cudaMemcpyHostToDevice) == cudaSuccess &&
             cudaMemcpy(static_cast<unsigned char*>(dev_ptr) + tail_offset, pattern.data(), probe,
                        cudaMemcpyHostToDevice) == cudaSuccess &&
             cudaDeviceSynchronize() == cudaSuccess &&
-            cudaMemcpy(readback.data(), static_cast<unsigned char*>(dev_ptr) + tail_offset, probe,
-                       cudaMemcpyDeviceToHost) == cudaSuccess) {
-            coherent = std::memcmp(pattern.data(), readback.data(), probe) == 0;
+            cudaMemcpy(readback_head.data(), dev_ptr, probe, cudaMemcpyDeviceToHost) ==
+                cudaSuccess &&
+            cudaMemcpy(readback_tail.data(), static_cast<unsigned char*>(dev_ptr) + tail_offset,
+                       probe, cudaMemcpyDeviceToHost) == cudaSuccess) {
+            coherent = std::memcmp(pattern.data(), readback_head.data(), probe) == 0 &&
+                       std::memcmp(pattern.data(), readback_tail.data(), probe) == 0;
         }
 
         if (!coherent) {
@@ -231,10 +251,22 @@ bool try_allocate_d3d12_residency_locked(std::size_t capacity_bytes, void*& out_
                          "[ninfer] D3D12 residency arena failed read-back verification "
                          "(%zu bytes); falling back to cudaMalloc\n",
                          capacity_bytes);
+            // Release the mapped buffer BEFORE destroying its external memory, exactly like
+            // the memset-failure path: destroying the import while the mapping is live can
+            // retain a weight-sized allocation and starve the cudaMalloc fallback
+            // (council CR-20260831-durable4090 convergent P1).
+            cudaFree(dev_ptr);
             cudaDestroyExternalMemory(ext_mem);
             return false;
         }
-        cudaMemset(dev_ptr, 0, capacity_bytes);
+        // The probe patterns must not leak into the weight arena: a failed clearing memset is
+        // a failed probe, not an accepted mapping.
+        if (cudaMemset(dev_ptr, 0, capacity_bytes) != cudaSuccess ||
+            cudaDeviceSynchronize() != cudaSuccess) {
+            cudaFree(dev_ptr);
+            cudaDestroyExternalMemory(ext_mem);
+            return false;
+        }
     }
 
     out_ptr = dev_ptr;

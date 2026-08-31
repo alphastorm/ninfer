@@ -1261,6 +1261,14 @@ SessionCheckpointStore::save(const AuthenticatedCheckpointNamespace& checkpoint_
                     *previous_generation != generation) {
                     retire_generation_locked(options_, *impl_, session, *previous_generation);
                 }
+                // This branch acknowledges the save even though the session sync raced: the
+                // publish is durable, so it must run the same best-effort post-publish
+                // reclamation as the happy path. Without it a greater-than-half-quota session
+                // could leave both generations resident above the cap until the next
+                // lifecycle event (council CR-20260831-durable4090 R2).
+                try {
+                    (void)enforce_disk_quota_locked(options_, *impl_, std::nullopt, session);
+                } catch (...) {}
                 return SessionCheckpointSaveResult{
                     .generation = generation, .engine = *engine, .bytes = total_bytes};
             }

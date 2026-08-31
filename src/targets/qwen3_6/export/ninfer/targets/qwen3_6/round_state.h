@@ -12,6 +12,12 @@
 
 namespace ninfer::targets::qwen3_6 {
 
+// Rollback compatibility (council CR-20260831-durable4090 R1): checkpoints serialize the
+// runtime draft_window, and restore refuses a mismatched window. The shipped v0.3.1 package
+// supported at most 5 drafts, so a checkpoint saved with draft_window > 5 cannot be restored
+// after a package rollback - the session degrades to the documented transcript-replay path.
+// The packaged default stays MTP3; widths above 5 are experimental/ablation territory until
+// a release train raises the shipped floor.
 inline constexpr std::uint32_t kMtpDecodeMaximumDrafts    = 15;
 inline constexpr std::uint32_t kMtpDecodeMaximumWidth     = kMtpDecodeMaximumDrafts + 1;
 inline constexpr std::uint32_t kDFlashDecodeMaximumDrafts = 15;

@@ -109,9 +109,11 @@ if(MSVC)
     # NVVM & PTXAS Device Optimizations
     $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-O3>
     $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-v>           # Print exact register usage and .local stack spills
-    $<$<COMPILE_LANGUAGE:CUDA>:-ftz=true>            # Flush subnormals to zero (hardware fast path on sm_89)
-    $<$<COMPILE_LANGUAGE:CUDA>:-prec-div=false>      # Fast single-precision hardware division (__fdividef)
-    $<$<COMPILE_LANGUAGE:CUDA>:-prec-sqrt=false>     # Fuse 1.0f/sqrtf(x) into single-cycle rsqrtf(x)
+    # NOTE: upstream 4b66c882 also enabled -ftz=true, -prec-div=false, and -prec-sqrt=false
+    # here. Those change IEEE semantics for EVERY device TU and break golden-token
+    # comparability against the shipped v0.3.1 lane, so they are deliberately not adopted
+    # for this train (council CR-20260831-durable4090 R4). Revisit per-kernel with measured
+    # goldens if the ablation shows a win worth the numeric contract change.
   )
 
   # LINKER: prefix ensures CMake passes this strictly to link.exe via -Xlinker for CUDA targets

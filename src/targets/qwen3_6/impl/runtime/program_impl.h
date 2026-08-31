@@ -1087,6 +1087,19 @@ runtime::PrefillStepResult ProgramImplCore::start_prefill_lane(std::uint32_t lan
                     }
                     if (!valid_page_ids.empty()) {
                         auto& pool = decoder->text_kv.pool();
+                        // Fail closed on cross-layout snapshots: the staged bytes are strided by
+                        // the SNAPSHOT's page size, and the scatter kernel writes pool-stride
+                        // pages. A snapshot written under a different KV page layout would
+                        // otherwise shear every page silently
+                        // (council CR-20260831-durable4090 U3/R4 class).
+                        if (header.text_page_bytes != pool.total_page_bytes() ||
+                            loaded_text_kv.size() <
+                                static_cast<std::size_t>(header.text_page_bytes) *
+                                    valid_page_ids.size()) {
+                            throw std::runtime_error(
+                                "text KV snapshot layout does not match the live pool; "
+                                "refusing cross-layout restore");
+                        }
                         // Chunked staging: bounded page batches instead of one giant allocation, so a
                         // large snapshot restore never needs a whole-snapshot staging buffer (which OOMs
                         // on 24 GB cards at 280k context). Staging is page-major and the scatter kernel
