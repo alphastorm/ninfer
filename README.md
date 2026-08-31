@@ -251,6 +251,13 @@ capacities remain fixed for the process lifetime.
 Run `./build/apps/ninfer --help` or `./build/apps/ninfer-serve --help` for the exact current option
 contract.
 
+## Product integrations
+
+- **[OMP NInfer](https://github.com/alphastorm/omp-ninfer)** — the qualified
+  [Oh My Pi](https://github.com/can1357/oh-my-pi) integration and release layer: GPU-bound
+  profiles, pinned artifacts, compatibility qualification, durable session workflows, and
+  operator documentation for running this engine as a coding-agent appliance.
+
 ## License
 
 NInfer is licensed under the [Apache License 2.0](LICENSE).
