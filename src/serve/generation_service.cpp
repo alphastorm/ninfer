@@ -549,7 +549,8 @@ GenerationService::save_checkpoint(std::string_view session_sha256, ResponseStor
                                        return runtime::CheckpointEngineAccess::checkpoint_session(
                                            *engine_, session_sha256, checkpoint_tag, writer,
                                            checkpoint_store_->options().staging_bytes, skip);
-                                   });
+                                   },
+                                   skip);
 }
 
 bool GenerationService::restore_checkpoint(std::string_view session_sha256,

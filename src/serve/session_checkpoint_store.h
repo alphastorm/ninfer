@@ -83,7 +83,7 @@ public:
     // replaced. A failed or cancelled save never changes the previously published generation.
     [[nodiscard]] std::optional<SessionCheckpointSaveResult>
     save(const ResponseStoreSnapshot& responses, const nlohmann::json& runtime_fingerprint,
-         const EngineExporter& exporter);
+         const EngineExporter& exporter, runtime::SessionCheckpointSkipDetail* skip = nullptr);
 
     // Verifies identity, manifest schema, every size/checksum, and the requested response id before
     // exposing either ResponseStore state or an Engine reader. Verified corruption is quarantined;

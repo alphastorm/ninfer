@@ -563,9 +563,18 @@ void HttpServer::handle_checkpoint_save(const httplib::Request& req, httplib::Re
         write_error(res, error);
         return;
     }
+    runtime::SessionCheckpointSkipDetail skip;
     const std::optional<SessionCheckpointSaveResult> saved =
-        service_->save_checkpoint(digest, response_store_);
+        service_->save_checkpoint(digest, response_store_, &skip);
     if (!saved) {
+        // The HTTP body keeps its released closed vocabulary; the named gate goes to the
+        // server log only.
+        try {
+            write_console_log(ConsoleLogLevel::Warning,
+                              std::string("checkpoint save refused: ") +
+                                  std::string(runtime::session_checkpoint_skip_reason_name(
+                                      skip.reason)));
+        } catch (...) {}
         ApiError error;
         error.status  = 409;
         error.code    = "checkpoint_unavailable";
