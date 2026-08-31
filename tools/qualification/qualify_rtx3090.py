@@ -40,14 +40,14 @@ PHASES = (
 MODEL_SHA256 = "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e"
 UPSTREAM_SHA = "ef6ecc3c139b43fc4d3e1b92df474305e8429544"
 LINEAGE_SHA = "c467349e375d6aa76afca63c0042bbc0869549aa"
-RELEASE_ID = "qwen38-3090-omp-v0.2.1-beta.1"
+RELEASE_ID = "qwen38-3090-omp-v0.2.2-beta.1"
 PACKAGE_NAME = (
-    "ninfer-rtx3090-omp-v0.2.1-beta.1-"
+    "ninfer-rtx3090-omp-v0.2.2-beta.1-"
     "windows-x86_64-cuda13.3-rtx3090.tar.gz"
 )
-SOURCE_NAME = "ninfer-rtx3090-omp-v0.2.1-beta.1-source.tar.gz"
+SOURCE_NAME = "ninfer-rtx3090-omp-v0.2.2-beta.1-source.tar.gz"
 SPDX_NAME = (
-    "ninfer-rtx3090-omp-v0.2.1-beta.1-"
+    "ninfer-rtx3090-omp-v0.2.2-beta.1-"
     "windows-x86_64-cuda13.3-rtx3090.spdx.json"
 )
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
@@ -557,7 +557,7 @@ $pf=[Environment]::GetFolderPath('ProgramFilesX86')
 $vsdev=Join-Path $pf 'Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat'
 $lines=&cmd.exe /d /s /c ('"'+$vsdev+'" -arch=x64 -host_arch=x64 >nul && set')
 foreach($line in $lines){{$i=$line.IndexOf('=');if($i -gt 0){{[Environment]::SetEnvironmentVariable($line.Substring(0,$i),$line.Substring($i+1),'Process')}}}}
-&cmake -S $source -B $build -G Ninja '-DCMAKE_BUILD_TYPE=Release' '-DCMAKE_CUDA_ARCHITECTURES=86' '-DNINFER_BUILD_APPS=ON' '-DBUILD_TESTING=ON' '-DNINFER_BUILD_BENCHMARKS=ON' '-DNINFER_BUILD_PROFILE=omp-v0.2.1-rtx3090' '-DNINFER_UPSTREAM_BASE_SHA={UPSTREAM_SHA}' '-DNINFER_PATCH_STACK_SHA={self.head}' ('-DCMAKE_TOOLCHAIN_FILE='+{ps_quote(self.config.builder_vcpkg)}) ('-DVCPKG_INSTALLED_DIR='+{ps_quote(self.config.builder_vcpkg_installed)})
+&cmake -S $source -B $build -G Ninja '-DCMAKE_BUILD_TYPE=Release' '-DCMAKE_CUDA_ARCHITECTURES=86' '-DNINFER_BUILD_APPS=ON' '-DBUILD_TESTING=ON' '-DNINFER_BUILD_BENCHMARKS=ON' '-DNINFER_BUILD_PROFILE=omp-v0.2.2-rtx3090' '-DNINFER_UPSTREAM_BASE_SHA={UPSTREAM_SHA}' '-DNINFER_PATCH_STACK_SHA={self.head}' ('-DCMAKE_TOOLCHAIN_FILE='+{ps_quote(self.config.builder_vcpkg)}) ('-DVCPKG_INSTALLED_DIR='+{ps_quote(self.config.builder_vcpkg_installed)})
 if($LASTEXITCODE -ne 0){{throw'configure failed'}}
 &cmake --build $build --target ninfer_direct_storage_checkpoint_read_queue_windows_test ninfer_session_checkpoint_store_test ninfer_response_store_test ninfer_http_contract_test ninfer_automatic_checkpoint_queue_test ninfer-serve ninfer ninfer_bench --parallel 16
 if($LASTEXITCODE -ne 0){{throw'build failed'}}
