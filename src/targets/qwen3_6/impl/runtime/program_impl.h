@@ -7106,8 +7106,12 @@ void ProgramImplCore::populate_continuation_summary(const SequenceState& sequenc
                                                     qwen3_6::ContinuationSummary& summary) const {
     validate_long_anchor_ordinals(sequence.long_anchors,
                                   context_cache.max_long_anchors_per_continuation.value_or(0));
+    // Long anchors were structurally impossible on the serve path until fanout markers landed,
+    // so several callers hand in summaries sized for zero anchors. Reserving here (bounded by
+    // the per-continuation anchor cap) keeps every seal, publish, terminal, and restore path
+    // correct instead of throwing on the first anchored continuation (CR-20260831-fanout43 r2).
     if (summary.long_anchors.capacity() < sequence.long_anchors.size()) {
-        throw std::logic_error("continuation summary backing was not reserved");
+        summary.long_anchors.reserve(sequence.long_anchors.size());
     }
     summary.endpoint.reset();
     summary.rewrite.reset();
