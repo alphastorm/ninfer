@@ -942,7 +942,7 @@ try {
         }
 
         $taskName = [string]$spec.lifecycle.task_name
-        if ($taskName -cne 'NInfer-Qwen38-4090-v0.2') { throw 'unexpected lifecycle task identity' }
+        if ($taskName -cne 'NInfer-Qwen38-4090-v0.1') { throw 'unexpected lifecycle task identity' }
         if ($null -ne $oldState -and [string]$oldState.task_name -cne $taskName) {
             throw 'installed lifecycle task identity mismatch'
         }
