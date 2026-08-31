@@ -107,6 +107,14 @@ public:
                                         const runtime::AuthenticatedCheckpointNamespace&
                                             checkpoint_namespace,
                                         const nlohmann::json& runtime_fingerprint) const;
+    // True when the current catalogued generation is fingerprint-compatible and already
+    // records response_id as the session's newest stored response. Lets the automatic
+    // save path skip a redundant re-export without status ever exposing response
+    // identity (that non-disclosure is a tested boundary).
+    [[nodiscard]] bool covers(const runtime::AuthenticatedCheckpointNamespace&
+                                  checkpoint_namespace,
+                              const nlohmann::json& runtime_fingerprint,
+                              std::string_view response_id) const;
     [[nodiscard]] SessionCheckpointEraseResult
     erase(const runtime::AuthenticatedCheckpointNamespace& checkpoint_namespace);
     void collect_garbage();
@@ -173,6 +181,9 @@ public:
     restore(std::string_view session_sha256, std::string_view required_response_id,
             ResponseStore& responses);
     [[nodiscard]] nlohmann::json status(std::string_view session_sha256);
+    // True when the catalogued checkpoint already records response_id as the session's
+    // newest stored response under the manager's runtime fingerprint (redundant-save skip).
+    [[nodiscard]] bool covers(std::string_view session_sha256, std::string_view response_id);
     [[nodiscard]] SessionCheckpointEraseResult erase(std::string_view session_sha256);
     [[nodiscard]] SessionCheckpointEraseResult
     erase_response(std::string_view session_sha256, std::string_view response_id,

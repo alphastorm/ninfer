@@ -658,6 +658,12 @@ nlohmann::json GenerationService::checkpoint_status(std::string_view session_sha
     return checkpoint_manager_->status(session_sha256);
 }
 
+bool GenerationService::checkpoint_covers(std::string_view session_sha256,
+                                          std::string_view response_id) const {
+    if (!checkpoint_manager_) { return false; }
+    return checkpoint_manager_->covers(session_sha256, response_id);
+}
+
 SessionCheckpointEraseResult GenerationService::erase_checkpoint(
     std::string_view session_sha256) {
     if (!checkpoint_manager_) { return SessionCheckpointEraseResult::Missing; }

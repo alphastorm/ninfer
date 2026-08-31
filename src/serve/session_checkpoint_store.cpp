@@ -1432,6 +1432,32 @@ SessionCheckpointStore::load(const AuthenticatedCheckpointNamespace& checkpoint_
     }
 }
 
+bool SessionCheckpointStore::covers(
+    const AuthenticatedCheckpointNamespace& checkpoint_namespace,
+    const nlohmann::json& runtime_fingerprint, std::string_view response_id) const {
+    if (!runtime_fingerprint.is_object() || response_id.empty()) { return false; }
+    std::lock_guard lock(impl_->mutex);
+    try {
+        const std::filesystem::path session         = session_path(checkpoint_namespace);
+        const std::optional<std::string> generation = current_generation(session);
+        if (!generation) { return false; }
+        const std::filesystem::path root = session / "generations" / *generation;
+        const nlohmann::json manifest =
+            nlohmann::json::parse(read_text_bounded(root / "manifest.json", 16ULL << 20));
+        return manifest.is_object() &&
+               manifest.at("artifact_type").get<std::string>() == "ninfer_session_checkpoint" &&
+               manifest.at("schema_version").get<std::uint32_t>() ==
+                   kSessionCheckpointSchemaVersion &&
+               manifest.at("tenant_sha256").get<std::string>() ==
+                   checkpoint_namespace.tenant_sha256() &&
+               manifest.at("session_sha256").get<std::string>() ==
+                   checkpoint_namespace.session_sha256() &&
+               manifest.at("generation").get<std::string>() == *generation &&
+               manifest.at("runtime_fingerprint") == runtime_fingerprint &&
+               manifest.at("latest_response_id").get<std::string>() == response_id;
+    } catch (...) { return false; }
+}
+
 nlohmann::json SessionCheckpointStore::status(
     const AuthenticatedCheckpointNamespace& checkpoint_namespace,
     const nlohmann::json& runtime_fingerprint) const {
@@ -1654,6 +1680,19 @@ nlohmann::json SessionCheckpointManager::status(std::string_view session_sha256)
         return nlohmann::json{{"artifact_type", "ninfer_session_checkpoint_status"},
                               {"state", "unavailable"}};
     }
+}
+
+bool SessionCheckpointManager::covers(std::string_view session_sha256,
+                                      std::string_view response_id) {
+    if (!store_) { return false; }
+    if (!AuthenticatedCheckpointNamespace::valid_sha256(session_sha256)) { return false; }
+    std::lock_guard lock(mutex_);
+    try {
+        const AuthenticatedCheckpointNamespace checkpoint_namespace =
+            AuthenticatedCheckpointNamespace::authenticated(tenant_sha256_,
+                                                            std::string(session_sha256));
+        return store_->covers(checkpoint_namespace, runtime_fingerprint_, response_id);
+    } catch (...) { return false; }
 }
 
 SessionCheckpointEraseResult SessionCheckpointManager::erase(

@@ -401,8 +401,9 @@ bounded background checkpoint worker; the default threshold is `32768`. The requ
 terminal HTTP/SSE response without waiting for checkpoint I/O, repeated saves for the same session
 coalesce, and a full queue drops only that automatic acceleration attempt. An automatic save
 additionally yields to live traffic: it waits for an idle engine (bounded at 60 s) before
-starting, so a busy server still checkpoints eventually but foreground requests never queue
-behind an elective save. Graceful server shutdown
+starting, skips entirely when the catalogued checkpoint already covers the session's newest
+stored response, and never queues foreground requests behind an elective save. Graceful server
+shutdown
 drains the worker and then attempts every live session. Explicit `POST` remains the synchronous
 crash-test boundary: it never waits and starts immediately; do not kill the process until it
 returns.

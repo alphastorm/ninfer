@@ -1550,6 +1550,12 @@ int test_buffered_write_backpressure_round_trips() {
     failures += check(loaded.checkpoint->engine->read_file("engine/state-0.bin", 0, restored) &&
                           restored == payload,
                       "buffered writes preserve exact payload bytes");
+    failures += check(store.covers(responses.client_session_sha256, fingerprint(),
+                                   responses.latest_response_id),
+                      "catalogued generation covers its own newest response");
+    failures += check(!store.covers(responses.client_session_sha256, fingerprint(),
+                                    "resp_not_yet_checkpointed"),
+                      "an uncheckpointed response id is not covered");
     loaded.checkpoint.reset();
     return failures;
 }

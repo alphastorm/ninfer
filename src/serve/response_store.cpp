@@ -280,6 +280,24 @@ ResponseStore::snapshot_session(std::string_view client_session_sha256) const {
     return snapshot;
 }
 
+std::optional<std::string>
+ResponseStore::latest_response_id(std::string_view client_session_sha256) const {
+    std::lock_guard lock(mutex_);
+    const StoredResponse* newest = nullptr;
+    std::uint64_t newest_sequence = 0;
+    for (const auto& [id, entry] : records_) {
+        (void)id;
+        if (entry.response->client_session_sha256 &&
+            credential_equal(*entry.response->client_session_sha256, client_session_sha256) &&
+            (newest == nullptr || entry.sequence > newest_sequence)) {
+            newest          = entry.response.get();
+            newest_sequence = entry.sequence;
+        }
+    }
+    if (newest == nullptr) { return std::nullopt; }
+    return newest->id;
+}
+
 std::vector<std::string> ResponseStore::session_digests() const {
     std::lock_guard lock(mutex_);
     std::unordered_set<std::string> unique;
