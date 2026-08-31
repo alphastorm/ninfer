@@ -1511,6 +1511,48 @@ int test_load_scan_failure_does_not_deadlock() {
     return check(loaded.state == SessionCheckpointLoadState::Unavailable && !loaded.checkpoint,
                  "generation scan failure did not unwind before reader ownership");
 }
+
+int test_buffered_write_backpressure_round_trips() {
+    // ninfer#34: exporter writes flow through a bounded in-memory queue drained off the
+    // engine lock. A capacity of one byte forces every chunk through the oversized-chunk
+    // escape and the backpressure wait; the published bytes must stay identical.
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot();
+    const std::vector<std::byte> payload  = engine_payload();
+    SessionCheckpointStore store({.root               = temporary.path,
+                                  .disk_quota_bytes   = 8ULL << 20,
+                                  .staging_bytes      = 1ULL << 20,
+                                  .write_buffer_bytes = 1,
+                                  .read_queue         = std::make_shared<TestReadQueue>()});
+    const auto exporter =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        const std::string metadata = "engine-metadata-v2";
+        if (!write_chunked(writer, "engine/metadata.bin",
+                           std::as_bytes(std::span(metadata.data(), metadata.size()))) ||
+            !write_chunked(writer, "engine/state-0.bin", payload)) {
+            return std::nullopt;
+        }
+        return ContinuationCheckpointStats{.frontier_tokens = 100000,
+                                           .restored_tokens = 97500,
+                                           .payload_bytes   = payload.size() + metadata.size()};
+    };
+    int failures     = 0;
+    const auto saved = store.save(responses, fingerprint(), exporter);
+    failures += check(saved.has_value(), "buffered save publishes under byte-level backpressure");
+    if (!saved) { return failures; }
+    SessionCheckpointLoadResult loaded = store.load(
+        responses.client_session_sha256, fingerprint(), responses.latest_response_id);
+    failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+                          loaded.checkpoint.has_value(),
+                      "buffered save round-trips through verification");
+    if (!loaded.checkpoint) { return failures; }
+    std::vector<std::byte> restored(payload.size());
+    failures += check(loaded.checkpoint->engine->read_file("engine/state-0.bin", 0, restored) &&
+                          restored == payload,
+                      "buffered writes preserve exact payload bytes");
+    loaded.checkpoint.reset();
+    return failures;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1559,6 +1601,7 @@ int main(int argc, char** argv) {
         std::pair{"active-reader", &test_active_reader_delete_and_gc},
         std::pair{"quota", &test_store_wide_quota_across_sessions},
         std::pair{"load-unwind", &test_load_scan_failure_does_not_deadlock},
+        std::pair{"buffered-backpressure", &test_buffered_write_backpressure_round_trips},
     };
     const std::string_view filter = argc == 2 ? argv[1] : "";
     int failures = 0;

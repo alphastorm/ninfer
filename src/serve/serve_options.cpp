@@ -286,6 +286,22 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 throw std::invalid_argument("--session-checkpoint-staging-mib is out of range");
             }
             options.session_checkpoint_staging_bytes = static_cast<std::size_t>(mib << 20);
+        } else if (arg == "--session-checkpoint-write-buffer-mib") {
+            const std::uint64_t mib =
+                parse_u64(require_value("--session-checkpoint-write-buffer-mib"),
+                          "session-checkpoint-write-buffer-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument(
+                    "--session-checkpoint-write-buffer-mib is out of range");
+            }
+            options.session_checkpoint_write_buffer_bytes = static_cast<std::size_t>(mib << 20);
+        } else if (arg == "--session-checkpoint-min-tokens") {
+            const std::uint64_t tokens = parse_u64(require_value("--session-checkpoint-min-tokens"),
+                                                   "session-checkpoint-min-tokens");
+            if (tokens > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::invalid_argument("--session-checkpoint-min-tokens is out of range");
+            }
+            options.session_checkpoint_min_tokens = static_cast<std::uint32_t>(tokens);
         } else if (arg == "--device") {
             options.device = parse_nonnegative_int(require_value("--device"), "device");
         } else if (arg == "--kv-dtype") {

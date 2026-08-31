@@ -345,6 +345,7 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
                 .root = options_.session_checkpoint_root,
                 .disk_quota_bytes = options_.session_checkpoint_quota_bytes,
                 .staging_bytes = options_.session_checkpoint_staging_bytes,
+                .write_buffer_bytes = options_.session_checkpoint_write_buffer_bytes,
                 .read_queue = std::move(read_queue),
                 .tombstone_cleanup = {},
             },
