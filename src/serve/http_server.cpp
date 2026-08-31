@@ -1111,9 +1111,10 @@ void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noex
             // (ninfer#34). Explicit POST saves keep their synchronous contract and never wait.
             for (int waited = 0; waited < 120; ++waited) {
                 const ninfer::RuntimeStats stats = service_->runtime_stats();
-                const std::uint32_t busy = stats.running_requests + stats.waiting_requests +
-                                           stats.prefilling_requests +
-                                           stats.materializing_requests;
+                const std::uint32_t busy =
+                    stats.running_requests + stats.waiting_requests + stats.prefilling_requests +
+                    stats.materializing_requests + stats.capture_pending_requests +
+                    stats.terminal_pending_requests;
                 if (busy == 0) { break; }
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }

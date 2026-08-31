@@ -1054,6 +1054,64 @@ int test_buffered_write_backpressure_round_trips() {
     loaded.checkpoint.reset();
     return failures;
 }
+
+int test_buffered_deferred_failure_fails_before_publication() {
+    // Review CR-20260831-ckptdecouple R4/U2: a deferred disk write that fails in the drain
+    // thread - after the buffered writer already acknowledged the chunk to the exporter -
+    // must fail the save at finish() and leave the prior published generation untouched.
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot();
+    const std::vector<std::byte> payload  = engine_payload();
+    SessionCheckpointStore store({.root             = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes    = 1ULL << 20,
+                                  .read_queue       = std::make_shared<TestReadQueue>()});
+    int failures = 0;
+    const auto good =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        if (!write_chunked(writer, "engine/state-0.bin", payload)) { return std::nullopt; }
+        return ContinuationCheckpointStats{.frontier_tokens = 100000,
+                                           .restored_tokens = 97500,
+                                           .payload_bytes   = payload.size()};
+    };
+    failures += check(store.save(responses, fingerprint(), good).has_value(),
+                      "baseline generation publishes");
+    const auto poisoned =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        (void)write_chunked(writer, "engine/state-0.bin", payload);
+        // Acknowledged at enqueue time, rejected later by the drain-side writer
+        // (offset beyond total). The exporter deliberately ignores every return value
+        // and reports success, so only finish() can stop publication.
+        const std::string tail = "poison";
+        (void)writer.write_file("engine/state-1.bin", 8, 4,
+                                std::as_bytes(std::span(tail.data(), tail.size())));
+        return ContinuationCheckpointStats{.frontier_tokens = 100001,
+                                           .restored_tokens = 97501,
+                                           .payload_bytes   = payload.size()};
+    };
+    bool poisoned_save_failed = false;
+    try {
+        poisoned_save_failed = !store.save(responses, fingerprint(), poisoned).has_value();
+    } catch (const std::exception&) {
+        // save() rethrows I/O failures after cleaning its staging; either signal is the
+        // required "failed before publication" outcome.
+        poisoned_save_failed = true;
+    }
+    failures += check(poisoned_save_failed,
+                      "deferred drain failure fails the save despite exporter-reported success");
+    SessionCheckpointLoadResult loaded = store.load(
+        responses.client_session_sha256, fingerprint(), responses.latest_response_id);
+    failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+                          loaded.checkpoint.has_value(),
+                      "prior published generation survives the failed save");
+    if (!loaded.checkpoint) { return failures; }
+    std::vector<std::byte> restored(payload.size());
+    failures += check(loaded.checkpoint->engine->read_file("engine/state-0.bin", 0, restored) &&
+                          restored == payload,
+                      "surviving generation still serves the baseline bytes");
+    loaded.checkpoint.reset();
+    return failures;
+}
 } // namespace
 
 int main() {
@@ -1069,6 +1127,7 @@ int main() {
     failures += test_post_publish_reclaim_failure_keeps_save_acknowledged();
     failures += test_post_verification_replacement_fails_closed();
     failures += test_buffered_write_backpressure_round_trips();
+    failures += test_buffered_deferred_failure_fails_before_publication();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }
