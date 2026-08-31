@@ -19,7 +19,7 @@
     "source_archive_sha256": "b302caa122dd2ddcee7b3a63fd9ddd67265d817fbeb9f179a419641ffce4f27c",
     "source_archive_bytes": 5288683,
     "package_source_archive_sha256": "b302caa122dd2ddcee7b3a63fd9ddd67265d817fbeb9f179a419641ffce4f27c",
-    "package_source_archive_bytes": 5261801,
+    "package_source_archive_bytes": 5288683,
     "runtime_change_from_e5d51a44": "fully transactional fail-closed per-response checkpoint deletion with durable LRU-evicted DELETE and POSIX pointer-sync recovery",
     "prior_runtime_evidence_reused": false
   },

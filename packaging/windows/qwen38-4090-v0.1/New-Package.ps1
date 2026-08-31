@@ -240,7 +240,7 @@ Assert-PublicQualificationDisclosure $qualification
 if ([string]$spec.qualification_authority.in_archive_status -cne
         'candidate-only-not-release-eligible' -or
     [string]$spec.qualification_authority.external_sidecar_filename -cne
-        'ninfer-4090-qwen38-v0.1.0-win-x64-qualification.json' -or
+        "$assetStem-qualification.json" -or
     [string]$spec.qualification_authority.external_artifact_type -cne
         'ninfer_public_windows_release_qualification' -or
     [string]$spec.qualification_authority.external_required_status -cne 'passed' -or
