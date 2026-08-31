@@ -1594,6 +1594,75 @@ int test_large_session_resaves_within_quota() {
                       "refused oversized save leaves the published successor untouched");
     return failures;
 }
+
+// Reclamation failure after the current pointer swaps must never fail the acknowledged save:
+// publication is durable, eviction is best effort, and the next save's own enforcement pass
+// withdraws the transient tolerance while cleanup keeps failing (council CR-20260831 R1).
+// Adapted to this lineage's authenticated namespace API from main bb290513.
+int test_post_publish_reclaim_failure_keeps_save_acknowledged() {
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot();
+    const AuthenticatedCheckpointNamespace ns = checkpoint_namespace(responses);
+    std::vector<std::byte> payload(48ULL << 10);
+    for (std::size_t index = 0; index < payload.size(); ++index) {
+        payload[index] = static_cast<std::byte>((index * 59U) & 0xffU);
+    }
+    bool cleanup_throws = false;
+    SessionCheckpointStore store({.root              = temporary.path,
+                                  .disk_quota_bytes  = 64ULL << 10,
+                                  .staging_bytes     = 1ULL << 20,
+                                  .read_queue        = std::make_shared<TestReadQueue>(),
+                                  .tombstone_cleanup = [&](const std::filesystem::path& path) {
+                                      if (cleanup_throws) {
+                                          throw std::runtime_error("injected cleanup outage");
+                                      }
+                                      std::error_code error;
+                                      std::filesystem::remove_all(path, error);
+                                      return !error;
+                                  }});
+    const auto exporter =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        if (!write_chunked(writer, "engine/state.bin", payload)) { return std::nullopt; }
+        return ContinuationCheckpointStats{
+            .frontier_tokens = 4096, .restored_tokens = 4096, .payload_bytes = payload.size()};
+    };
+    int failures = 0;
+    const std::filesystem::path session = stored_session_path(temporary.path, responses);
+
+    const auto first = store.save(ns, responses, fingerprint(), exporter);
+    failures += check(first.has_value(), "baseline generation saves");
+    if (!first) { return failures; }
+
+    cleanup_throws  = true;
+    const auto second = store.save(ns, responses, fingerprint(), exporter);
+    failures += check(second.has_value() && second->generation != first->generation,
+                      "save is acknowledged even though post-publish reclamation throws");
+    if (!second) { return failures; }
+    failures += check(std::filesystem::exists(session / "generations" / second->generation),
+                      "published successor generation is durable");
+    SessionCheckpointLoadResult loaded = store.load(ns, fingerprint());
+    failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+                          loaded.checkpoint.has_value() &&
+                          loaded.checkpoint->generation == second->generation,
+                      "store serves the acknowledged successor after the cleanup outage");
+    loaded.checkpoint.reset();
+
+    // While cleanup keeps failing, the tolerance is withdrawn: the next save must refuse
+    // instead of letting usage creep past the cap one tolerated save at a time.
+    ninfer::runtime::SessionCheckpointSkipDetail skip;
+    const auto third = store.save(ns, responses, fingerprint(), exporter, false, &skip);
+    failures += check(!third.has_value() &&
+                          skip.reason ==
+                              ninfer::runtime::SessionCheckpointSkipReason::QuotaExceeded,
+                      "unhealthy reclamation withdraws the transient tolerance fail-closed");
+
+    // Once the outage clears, the same save succeeds again and the store converges.
+    cleanup_throws   = false;
+    const auto fourth = store.save(ns, responses, fingerprint(), exporter);
+    failures += check(fourth.has_value(),
+                      "save recovers once reclamation is healthy again");
+    return failures;
+}
 } // namespace
 
 int main(int argc, char** argv) {
@@ -1640,6 +1709,7 @@ int main(int argc, char** argv) {
         std::pair{"quota", &test_store_wide_quota_across_sessions},
         std::pair{"load-unwind", &test_load_scan_failure_does_not_deadlock},
         std::pair{"resave-quota", &test_large_session_resaves_within_quota},
+        std::pair{"post-publish-ack", &test_post_publish_reclaim_failure_keeps_save_acknowledged},
     };
     const std::string_view filter = argc == 2 ? argv[1] : "";
     int failures = 0;
