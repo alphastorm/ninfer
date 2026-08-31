@@ -1,7 +1,7 @@
 {
   "artifact_type": "ninfer_public_windows_release_qualification",
   "schema_version": 1,
-  "status": "passed",
+  "status": "candidate_ready",
   "qualification_level": "beta",
   "beta_support_qualified": true,
   "release_eligible": true,
@@ -157,8 +157,8 @@
     "supersedes_package_candidate_status": true,
     "superseded_status": "candidate_ready",
     "binding": "SHA256SUMS-bound-sidecar",
-    "sidecar_filename": "ninfer-4090-qwen38-v0.1.0-win-x64-qualification.json",
-    "candidate_package_source_commit": "19ebcc09ebbcc79061badf78068e1ad70062485f",
+    "sidecar_filename": "ninfer-4090-qwen38-v0.2.0-win-x64-qualification.json",
+    "candidate_package_source_commit": "pending-package-cut",
     "superseded_review_red_package_sha256": "7548307420faab9f6cf82294c3aa0b6a6ea82168d89c8f5ac4900a683665b418",
     "superseding_package_sha256": "1cced9e1f16ad0d1b4a5f9c5a28d00cb2b4449137f1652696799be70a74baf7d",
     "reason": "closed final review defects and reran runtime, Windows, disclosure, and package-manifest gates"
