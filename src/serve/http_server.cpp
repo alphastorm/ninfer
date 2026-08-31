@@ -1106,16 +1106,19 @@ void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noex
     try {
         if (service_ != nullptr) {
             // Even with buffered export writes, staging briefly holds the engine. An automatic
-            // save is pure acceleration, so yield to live traffic: wait for an idle engine
-            // before starting, bounded so a busy server still checkpoints eventually
-            // (ninfer#34). Explicit POST saves keep their synchronous contract and never wait.
-            for (int waited = 0; waited < 120; ++waited) {
+            // save is pure acceleration, so yield to live traffic: start only after the engine
+            // has been quiet for several consecutive samples - a momentary gap between fanout
+            // branches is not idle intent - bounded so a busy server still checkpoints
+            // eventually (ninfer#34). Explicit POST saves keep their synchronous contract and
+            // never wait.
+            int quiet_samples = 0;
+            for (int waited = 0; waited < 120 && quiet_samples < 3; ++waited) {
                 const ninfer::RuntimeStats stats = service_->runtime_stats();
                 const std::uint32_t busy =
                     stats.running_requests + stats.waiting_requests + stats.prefilling_requests +
                     stats.materializing_requests + stats.capture_pending_requests +
                     stats.terminal_pending_requests;
-                if (busy == 0) { break; }
+                quiet_samples = busy == 0 ? quiet_samples + 1 : 0;
                 std::this_thread::sleep_for(std::chrono::milliseconds(500));
             }
             // A checkpoint that already covers the session's newest stored response makes
