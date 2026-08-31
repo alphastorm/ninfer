@@ -23,6 +23,10 @@ struct SessionCheckpointStoreOptions {
     std::filesystem::path root;
     std::uint64_t disk_quota_bytes = 64ULL << 30;
     std::size_t staging_bytes      = 256ULL << 20;
+    // Bounds the in-memory chunk queue between the engine-held export and the drain thread
+    // that performs the disk writes (ninfer#34). The engine blocks only when the queue is
+    // full; sizing it at or above the typical payload keeps engine-held time at staging cost.
+    std::size_t write_buffer_bytes = 6ULL << 30;
     std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue;
     std::function<std::uint64_t(const std::filesystem::path&)> generation_size;
     std::function<bool(const std::filesystem::path&)> tombstone_cleanup;

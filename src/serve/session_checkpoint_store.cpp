@@ -9,6 +9,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <condition_variable>
+#include <deque>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -16,6 +18,7 @@
 #include <set>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -495,6 +498,110 @@ private:
     std::size_t staging_limit_ = 0;
     std::map<std::string, State> states_;
     bool failed_ = false;
+};
+
+// Decouples the engine-held export from disk latency (ninfer#34): the engine's exporter runs
+// under the Engine execution lock, so every microsecond it spends inside write_file serializes
+// queued requests behind the save. This writer copies each chunk into a bounded in-memory queue
+// and returns, while one drain thread performs the real DirectoryCheckpointWriter writes.
+// finish() joins the drain and reports whether every deferred write succeeded; a deferred
+// failure fails the save exactly like an inline write failure, before anything publishes.
+class BufferedCheckpointWriter final : public ContinuationCheckpointWriter {
+public:
+    BufferedCheckpointWriter(DirectoryCheckpointWriter& inner, std::size_t capacity_bytes)
+        : inner_(inner), capacity_(capacity_bytes == 0 ? 1 : capacity_bytes) {
+        drain_ = std::thread([this] { drain(); });
+    }
+
+    ~BufferedCheckpointWriter() override { (void)finish(); }
+
+    bool write_file(std::string_view path, std::uint64_t offset, std::uint64_t total_bytes,
+                    std::span<const std::byte> bytes) override {
+        try {
+            Chunk chunk;
+            chunk.path.assign(path);
+            chunk.offset = offset;
+            chunk.total  = total_bytes;
+            chunk.bytes.assign(bytes.begin(), bytes.end());
+            std::unique_lock lock(mutex_);
+            if (failed_ || closed_) { return false; }
+            space_.wait(lock, [&] {
+                return failed_ || queue_.empty() ||
+                       queued_bytes_ + chunk.bytes.size() <= capacity_;
+            });
+            if (failed_) { return false; }
+            queued_bytes_ += chunk.bytes.size();
+            queue_.push_back(std::move(chunk));
+            ready_.notify_one();
+            return true;
+        } catch (...) {
+            std::lock_guard lock(mutex_);
+            failed_ = true;
+            return false;
+        }
+    }
+
+    // Idempotent: closes the queue, joins the drain thread, and reports whether every
+    // deferred write reached the inner writer successfully.
+    [[nodiscard]] bool finish() noexcept {
+        {
+            std::lock_guard lock(mutex_);
+            closed_ = true;
+        }
+        ready_.notify_all();
+        space_.notify_all();
+        if (drain_.joinable()) {
+            try {
+                drain_.join();
+            } catch (...) { return false; }
+        }
+        std::lock_guard lock(mutex_);
+        return !failed_;
+    }
+
+private:
+    struct Chunk {
+        std::string path;
+        std::uint64_t offset = 0;
+        std::uint64_t total  = 0;
+        std::vector<std::byte> bytes;
+    };
+
+    void drain() {
+        for (;;) {
+            Chunk chunk;
+            {
+                std::unique_lock lock(mutex_);
+                ready_.wait(lock, [&] { return failed_ || closed_ || !queue_.empty(); });
+                if (queue_.empty()) { return; }
+                chunk = std::move(queue_.front());
+                queue_.pop_front();
+                queued_bytes_ -= chunk.bytes.size();
+            }
+            space_.notify_all();
+            const bool wrote =
+                inner_.write_file(chunk.path, chunk.offset, chunk.total, chunk.bytes);
+            if (!wrote) {
+                std::lock_guard lock(mutex_);
+                failed_ = true;
+                queue_.clear();
+                queued_bytes_ = 0;
+                space_.notify_all();
+                return;
+            }
+        }
+    }
+
+    DirectoryCheckpointWriter& inner_;
+    std::size_t capacity_ = 0;
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::condition_variable space_;
+    std::deque<Chunk> queue_;
+    std::size_t queued_bytes_ = 0;
+    bool failed_              = false;
+    bool closed_              = false;
+    std::thread drain_;
 };
 
 [[nodiscard]] nlohmann::json descriptor_json(const FileDescriptor& file) {
@@ -1108,7 +1215,14 @@ SessionCheckpointStore::save(const ResponseStoreSnapshot& responses,
         if (!writer.write_store_file("responses.cbor", 0, response_bytes.size(), response_bytes)) {
             throw std::runtime_error("response checkpoint write failed");
         }
-        std::optional<ContinuationCheckpointStats> engine = exporter(writer);
+        // The exporter holds the Engine execution lock: buffer its writes so the engine pays
+        // staging cost only, and fail the save if any deferred disk write failed (ninfer#34).
+        BufferedCheckpointWriter buffered(writer, options_.write_buffer_bytes);
+        std::optional<ContinuationCheckpointStats> engine = exporter(buffered);
+        if (!buffered.finish()) {
+            engine.reset();
+            throw std::runtime_error("checkpoint payload write failed");
+        }
         if (!engine || !valid_checkpoint_stats(*engine)) {
             std::filesystem::remove_all(staging, cleanup_error);
             if (skip != nullptr) {

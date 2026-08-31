@@ -18,6 +18,7 @@ inline constexpr std::size_t kDefaultResponseStoreRecords = 1024;
 inline constexpr std::size_t kDefaultResponseStoreBytes   = 256ULL << 20;
 inline constexpr std::uint64_t kDefaultSessionCheckpointQuotaBytes = 64ULL << 30;
 inline constexpr std::size_t kDefaultSessionCheckpointStagingBytes = 256ULL << 20;
+inline constexpr std::size_t kDefaultSessionCheckpointWriteBufferBytes = 6ULL << 30;
 inline constexpr std::uint32_t kDefaultSessionCheckpointMinTokens  = 32768;
 
 struct ServeOptions {
@@ -50,6 +51,8 @@ struct ServeOptions {
     std::filesystem::path session_checkpoint_root;
     std::uint64_t session_checkpoint_quota_bytes = kDefaultSessionCheckpointQuotaBytes;
     std::size_t session_checkpoint_staging_bytes = kDefaultSessionCheckpointStagingBytes;
+    std::size_t session_checkpoint_write_buffer_bytes =
+        kDefaultSessionCheckpointWriteBufferBytes;
     std::uint32_t session_checkpoint_min_tokens  = kDefaultSessionCheckpointMinTokens;
     int device                             = 0;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
