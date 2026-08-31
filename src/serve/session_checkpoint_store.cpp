@@ -227,6 +227,50 @@ void write_synced(const std::filesystem::path& path, std::string_view bytes) {
     return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
 }
 
+// Origin authentication for checkpoint manifests (alphastorm/ninfer#32). The digest chain in
+// manifest.json authenticates consistency only: a writer inside the checkpoint root can rewrite
+// manifest and payloads coherently. The MAC key lives outside the root, so a valid manifest.mac
+// proves the manifest was produced by this server's configured identity.
+enum class ManifestOriginState : std::uint8_t { Authentic, Unauthenticated, Forged };
+
+[[nodiscard]] std::string manifest_origin_mac_hex(std::string_view key,
+                                                  std::string_view manifest_text) {
+    return crypto::sha256_hex(crypto::hmac_sha256(
+        std::as_bytes(std::span(key.data(), key.size())),
+        std::as_bytes(std::span(manifest_text.data(), manifest_text.size()))));
+}
+
+[[nodiscard]] bool constant_time_hex_equal(std::string_view left, std::string_view right) {
+    if (left.size() != right.size()) { return false; }
+    unsigned char difference = 0;
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        difference = static_cast<unsigned char>(
+            difference | (static_cast<unsigned char>(left[i]) ^
+                          static_cast<unsigned char>(right[i])));
+    }
+    return difference == 0;
+}
+
+[[nodiscard]] ManifestOriginState manifest_origin_state(const std::filesystem::path& root,
+                                                        std::string_view manifest_text,
+                                                        std::string_view key) {
+    if (key.empty()) { return ManifestOriginState::Unauthenticated; }
+    std::error_code probe_error;
+    if (!std::filesystem::exists(root / "manifest.mac", probe_error) || probe_error) {
+        return ManifestOriginState::Unauthenticated;
+    }
+    try {
+        std::string recorded = read_text_bounded(root / "manifest.mac", 128);
+        while (!recorded.empty() && (recorded.back() == '\n' || recorded.back() == '\r')) {
+            recorded.pop_back();
+        }
+        if (recorded.size() != 64) { return ManifestOriginState::Forged; }
+        const std::string expected = manifest_origin_mac_hex(key, manifest_text);
+        return constant_time_hex_equal(recorded, expected) ? ManifestOriginState::Authentic
+                                                           : ManifestOriginState::Forged;
+    } catch (...) { return ManifestOriginState::Forged; }
+}
+
 [[nodiscard]] FileDescriptor
 hash_file(const std::filesystem::path& root, const std::string& relative,
           std::uint64_t expected_bytes,
@@ -1300,6 +1344,10 @@ SessionCheckpointStore::save(const ResponseStoreSnapshot& responses,
         };
         const std::string manifest_text = manifest.dump();
         write_synced(staging / "manifest.json", manifest_text);
+        if (!options_.origin_mac_key.empty()) {
+            write_synced(staging / "manifest.mac",
+                         manifest_origin_mac_hex(options_.origin_mac_key, manifest_text));
+        }
         sync_directory(staging);
         // A session's previously published generation is deliberately never evicted while its
         // successor stages (readers may hold it; a failed save must leave it untouched). Its
@@ -1374,8 +1422,22 @@ SessionCheckpointStore::load(std::string_view session_sha256,
         return {.state = SessionCheckpointLoadState::Corrupt};
     }
     try {
-        const nlohmann::json manifest =
-            nlohmann::json::parse(read_text_bounded(root / "manifest.json", 16ULL << 20));
+        const std::string manifest_text = read_text_bounded(root / "manifest.json", 16ULL << 20);
+        // Verify origin before trusting any manifest content (alphastorm/ninfer#32). A
+        // present-but-wrong MAC is tamper evidence and quarantines like corruption; an absent
+        // MAC is refused only under the strict import posture so locally-produced legacy
+        // generations keep loading through the compatibility window.
+        switch (manifest_origin_state(root, manifest_text, options_.origin_mac_key)) {
+        case ManifestOriginState::Authentic: break;
+        case ManifestOriginState::Forged:
+            throw CheckpointCorruption("checkpoint manifest origin authentication failed");
+        case ManifestOriginState::Unauthenticated:
+            if (options_.require_origin_auth) {
+                throw CheckpointCorruption("checkpoint manifest origin is unauthenticated");
+            }
+            break;
+        }
+        const nlohmann::json manifest = nlohmann::json::parse(manifest_text);
         if (!manifest.is_object() ||
             manifest.at("artifact_type").get<std::string>() != "ninfer_session_checkpoint" ||
             manifest.at("schema_version").get<std::uint32_t>() != kSessionCheckpointSchemaVersion ||
@@ -1491,8 +1553,16 @@ bool SessionCheckpointStore::covers(std::string_view session_sha256,
         if (!generation) { return false; }
         if (impl_->is_corrupt(std::string(session_sha256) + "/" + *generation)) { return false; }
         const std::filesystem::path root = session / "generations" / *generation;
-        const nlohmann::json manifest =
-            nlohmann::json::parse(read_text_bounded(root / "manifest.json", 16ULL << 20));
+        const std::string manifest_text = read_text_bounded(root / "manifest.json", 16ULL << 20);
+        const ManifestOriginState origin =
+            manifest_origin_state(root, manifest_text, options_.origin_mac_key);
+        if (origin == ManifestOriginState::Forged ||
+            (origin == ManifestOriginState::Unauthenticated && options_.require_origin_auth)) {
+            // A skip decision must never trust an unauthenticated catalogue entry: fall
+            // through to a real save instead of skipping against forged state.
+            return false;
+        }
+        const nlohmann::json manifest = nlohmann::json::parse(manifest_text);
         return manifest.is_object() &&
                manifest.at("artifact_type").get<std::string>() == "ninfer_session_checkpoint" &&
                manifest.at("schema_version").get<std::uint32_t>() ==
@@ -1521,8 +1591,18 @@ nlohmann::json SessionCheckpointStore::status(std::string_view session_sha256,
             return result;
         }
         const std::filesystem::path root = session / "generations" / *generation;
-        const nlohmann::json manifest =
-            nlohmann::json::parse(read_text_bounded(root / "manifest.json", 16ULL << 20));
+        const std::string manifest_text = read_text_bounded(root / "manifest.json", 16ULL << 20);
+        switch (manifest_origin_state(root, manifest_text, options_.origin_mac_key)) {
+        case ManifestOriginState::Authentic: break;
+        case ManifestOriginState::Forged:
+            throw CheckpointCorruption("checkpoint manifest origin authentication failed");
+        case ManifestOriginState::Unauthenticated:
+            if (options_.require_origin_auth) {
+                throw CheckpointCorruption("checkpoint manifest origin is unauthenticated");
+            }
+            break;
+        }
+        const nlohmann::json manifest = nlohmann::json::parse(manifest_text);
         if (!manifest.is_object() ||
             manifest.at("artifact_type").get<std::string>() != "ninfer_session_checkpoint" ||
             manifest.at("schema_version").get<std::uint32_t>() != kSessionCheckpointSchemaVersion ||

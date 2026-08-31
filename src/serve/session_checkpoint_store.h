@@ -27,6 +27,16 @@ struct SessionCheckpointStoreOptions {
     // that performs the disk writes (ninfer#34). The engine blocks only when the queue is
     // full; sizing it at or above the typical payload keeps engine-held time at staging cost.
     std::size_t write_buffer_bytes = 6ULL << 30;
+    // Authenticates checkpoint manifest ORIGIN, not just consistency (alphastorm/ninfer#32):
+    // 32 raw bytes of HMAC-SHA256 key material held outside the checkpoint root (derived from
+    // the bearer key, never the bearer key itself). Saves write a manifest.mac sibling; loads
+    // verify it. Empty disables production and verification - without a configured bearer key
+    // no authenticated origin exists.
+    std::string origin_mac_key;
+    // Refuse generations without a valid origin MAC (the NAS/S3 import posture). Off keeps
+    // the compatibility window: unMAC'd locally-produced generations still load, and only a
+    // present-but-wrong MAC is treated as tampering.
+    bool require_origin_auth = false;
     std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue;
     std::function<std::uint64_t(const std::filesystem::path&)> generation_size;
     std::function<bool(const std::filesystem::path&)> tombstone_cleanup;

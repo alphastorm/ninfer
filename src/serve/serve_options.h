@@ -54,6 +54,10 @@ struct ServeOptions {
     std::size_t session_checkpoint_write_buffer_bytes =
         kDefaultSessionCheckpointWriteBufferBytes;
     std::uint32_t session_checkpoint_min_tokens  = kDefaultSessionCheckpointMinTokens;
+    // Refuse checkpoint generations without a valid origin MAC (alphastorm/ninfer#32).
+    // Requires an API key: the MAC key derives from it. The default keeps the
+    // compatibility window for locally-produced unMAC'd generations.
+    bool session_checkpoint_require_origin_auth = false;
     int device                             = 0;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;

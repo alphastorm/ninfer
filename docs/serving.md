@@ -501,7 +501,16 @@ Success and status bodies never echo the session digest or include prompt, respo
 reasoning content.
 
 Each save writes a new generation, flushes payloads and checksums, writes the manifest last, then
-atomically replaces `current`. Publication requires an Engine export that can restore at least 95%
+atomically replaces `current`. Alongside the manifest the save writes `manifest.mac`: an
+HMAC-SHA256 over the exact manifest bytes, keyed by material derived from the bearer key through
+a fixed domain separator and held outside the checkpoint root. The digest chain inside the
+manifest authenticates consistency; the MAC authenticates origin - a writer who can rewrite the
+checkpoint root coherently still cannot forge it. Loads verify the MAC before trusting any
+manifest content: a present-but-wrong MAC quarantines the generation like corruption, while an
+absent MAC is tolerated only for locally-produced legacy generations.
+`--session-checkpoint-require-origin-auth` ends that compatibility window and refuses
+unauthenticated generations outright - the required posture before checkpoints are ever imported
+from remote storage (NAS/S3 sync). Publication requires an Engine export that can restore at least 95%
 of its compatible frontier, and its reported payload bytes must exactly match the generated Engine
 files. An interrupted save leaves the previous generation usable. Restore verifies every file and
 the runtime fingerprint before exposing state. On the first authenticated `previous_response_id`
@@ -685,6 +694,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--session-checkpoint-staging-mib N` | bounded checkpoint codec and transfer staging | `256` |
 | `--session-checkpoint-write-buffer-mib N` | in-memory queue decoupling checkpoint disk writes from the engine (queued + in-flight) | `6144` |
 | `--session-checkpoint-min-tokens N` | completed-turn frontier that triggers an automatic save | `32768` |
+| `--session-checkpoint-require-origin-auth` | refuse checkpoint generations without a valid `manifest.mac` (remote-import posture) | off |
 | `--kv-dtype bf16\|int8\|fp8` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash `1..15` | unset |

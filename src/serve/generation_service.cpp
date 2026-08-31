@@ -313,11 +313,23 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
         }
         checkpoint_runtime_fingerprint_ = session_checkpoint_runtime_fingerprint(
             options_, engine_->options(), engine_->load_summary());
+        // The manifest origin MAC key derives from the bearer key through a fixed domain
+        // separator - the bearer key itself never touches the checkpoint machinery, and a
+        // writer inside the checkpoint root cannot recreate the key (alphastorm/ninfer#32).
+        // parse_serve_options guarantees an API key whenever checkpoints are enabled.
+        static constexpr std::string_view kOriginDomain =
+            "ninfer-checkpoint-manifest-origin-v1";
+        const crypto::Sha256Digest origin_key = crypto::hmac_sha256(
+            std::as_bytes(std::span(options_.api_key.data(), options_.api_key.size())),
+            std::as_bytes(std::span(kOriginDomain.data(), kOriginDomain.size())));
         checkpoint_store_ = std::make_unique<SessionCheckpointStore>(SessionCheckpointStoreOptions{
             .root             = options_.session_checkpoint_root,
             .disk_quota_bytes = options_.session_checkpoint_quota_bytes,
             .staging_bytes      = options_.session_checkpoint_staging_bytes,
             .write_buffer_bytes = options_.session_checkpoint_write_buffer_bytes,
+            .origin_mac_key = std::string(reinterpret_cast<const char*>(origin_key.data()),
+                                          origin_key.size()),
+            .require_origin_auth = options_.session_checkpoint_require_origin_auth,
             .read_queue       = std::move(read_queue),
         });
     }

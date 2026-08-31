@@ -155,4 +155,35 @@ std::string sha256_hex(const Sha256Digest& digest) {
     return result;
 }
 
+
+Sha256Digest hmac_sha256(std::span<const std::byte> key, std::span<const std::byte> message) {
+    constexpr std::size_t kBlockBytes = 64;
+    std::array<std::byte, kBlockBytes> block{};
+    if (key.size() > kBlockBytes) {
+        const Sha256Digest hashed = sha256(key);
+        for (std::size_t i = 0; i < hashed.size(); ++i) {
+            block[i] = static_cast<std::byte>(hashed[i]);
+        }
+    } else {
+        for (std::size_t i = 0; i < key.size(); ++i) { block[i] = key[i]; }
+    }
+    std::array<std::byte, kBlockBytes> inner_pad{};
+    std::array<std::byte, kBlockBytes> outer_pad{};
+    for (std::size_t i = 0; i < kBlockBytes; ++i) {
+        inner_pad[i] = block[i] ^ static_cast<std::byte>(0x36);
+        outer_pad[i] = block[i] ^ static_cast<std::byte>(0x5c);
+    }
+    Sha256 inner;
+    inner.update(inner_pad);
+    inner.update(message);
+    const Sha256Digest inner_digest = inner.finish();
+    std::array<std::byte, 32> inner_bytes{};
+    for (std::size_t i = 0; i < inner_digest.size(); ++i) {
+        inner_bytes[i] = static_cast<std::byte>(inner_digest[i]);
+    }
+    Sha256 outer;
+    outer.update(outer_pad);
+    outer.update(inner_bytes);
+    return outer.finish();
+}
 } // namespace ninfer::crypto

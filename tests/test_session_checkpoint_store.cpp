@@ -1118,6 +1118,149 @@ int test_buffered_deferred_failure_fails_before_publication() {
     loaded.checkpoint.reset();
     return failures;
 }
+
+
+[[nodiscard]] std::filesystem::path
+stored_generation_root(const std::filesystem::path& root, const ResponseStoreSnapshot& responses,
+                       const std::string& generation) {
+    return root / "sessions" / responses.client_session_sha256 / "generations" / generation;
+}
+
+int test_hmac_sha256_rfc4231_vectors() {
+    int failures = 0;
+    const std::string key1(20, static_cast<char>(0x0b));
+    const std::string msg1 = "Hi There";
+    failures += check(crypto::sha256_hex(crypto::hmac_sha256(
+                          std::as_bytes(std::span(key1.data(), key1.size())),
+                          std::as_bytes(std::span(msg1.data(), msg1.size())))) ==
+                          "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+                      "HMAC-SHA256 matches RFC 4231 test case 1");
+    const std::string key2 = "Jefe";
+    const std::string msg2 = "what do ya want for nothing?";
+    failures += check(crypto::sha256_hex(crypto::hmac_sha256(
+                          std::as_bytes(std::span(key2.data(), key2.size())),
+                          std::as_bytes(std::span(msg2.data(), msg2.size())))) ==
+                          "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+                      "HMAC-SHA256 matches RFC 4231 test case 2");
+    return failures;
+}
+
+int test_manifest_origin_authentication() {
+    // alphastorm/ninfer#32: the digest chain authenticates consistency; the MAC keyed outside
+    // the checkpoint root authenticates origin. A coherent in-root rewrite must not survive.
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot();
+    const std::vector<std::byte> payload  = engine_payload();
+    const std::string mac_key(32, static_cast<char>(0x42));
+    const auto exporter =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        if (!write_chunked(writer, "engine/state-0.bin", payload)) { return std::nullopt; }
+        return ContinuationCheckpointStats{.frontier_tokens = 100000,
+                                           .restored_tokens = 97500,
+                                           .payload_bytes   = payload.size()};
+    };
+    int failures = 0;
+    std::string generation;
+    {
+        SessionCheckpointStore store({.root             = temporary.path,
+                                      .disk_quota_bytes = 8ULL << 20,
+                                      .staging_bytes    = 1ULL << 20,
+                                      .origin_mac_key   = mac_key,
+                                      .read_queue       = std::make_shared<TestReadQueue>()});
+        const auto saved = store.save(responses, fingerprint(), exporter);
+        failures += check(saved.has_value(), "keyed save publishes");
+        if (!saved) { return failures; }
+        generation = saved->generation;
+        const std::filesystem::path root = stored_generation_root(temporary.path, responses,
+                                                                  generation);
+        failures += check(std::filesystem::is_regular_file(root / "manifest.mac"),
+                          "save writes the origin MAC beside the manifest");
+        SessionCheckpointLoadResult loaded = store.load(
+            responses.client_session_sha256, fingerprint(), responses.latest_response_id);
+        failures += check(loaded.state == SessionCheckpointLoadState::Available,
+                          "authentic generation loads under its own key");
+        loaded.checkpoint.reset();
+        failures += check(store.covers(responses.client_session_sha256, fingerprint(),
+                                       responses.latest_response_id),
+                          "authentic generation covers its newest response");
+    }
+    const std::filesystem::path root =
+        stored_generation_root(temporary.path, responses, generation);
+    {
+        // Same root, different key: a valid-looking store produced elsewhere is forged here.
+        SessionCheckpointStore foreign({.root             = temporary.path,
+                                        .disk_quota_bytes = 8ULL << 20,
+                                        .staging_bytes    = 1ULL << 20,
+                                        .origin_mac_key   = std::string(32, static_cast<char>(0x43)),
+                                        .read_queue       = std::make_shared<TestReadQueue>()});
+        failures += check(!foreign.covers(responses.client_session_sha256, fingerprint(),
+                                          responses.latest_response_id),
+                          "a skip decision never trusts a foreign-keyed catalogue");
+        const SessionCheckpointLoadResult loaded = foreign.load(
+            responses.client_session_sha256, fingerprint(), responses.latest_response_id);
+        failures += check(loaded.state == SessionCheckpointLoadState::Corrupt,
+                          "foreign-keyed generation quarantines as tampering");
+    }
+    return failures;
+}
+
+int test_manifest_origin_compatibility_window() {
+    // Legacy generations without a MAC load through the window, strict mode ends it, and a
+    // coherent manifest rewrite without the key fails even when its digests are consistent.
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot();
+    const std::vector<std::byte> payload  = engine_payload();
+    const std::string mac_key(32, static_cast<char>(0x42));
+    const auto exporter =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        if (!write_chunked(writer, "engine/state-0.bin", payload)) { return std::nullopt; }
+        return ContinuationCheckpointStats{.frontier_tokens = 100000,
+                                           .restored_tokens = 97500,
+                                           .payload_bytes   = payload.size()};
+    };
+    int failures = 0;
+    std::string generation;
+    {
+        // Legacy producer: no key configured, no MAC written.
+        SessionCheckpointStore legacy({.root             = temporary.path,
+                                       .disk_quota_bytes = 8ULL << 20,
+                                       .staging_bytes    = 1ULL << 20,
+                                       .read_queue       = std::make_shared<TestReadQueue>()});
+        const auto saved = legacy.save(responses, fingerprint(), exporter);
+        failures += check(saved.has_value(), "legacy save publishes without a MAC");
+        if (!saved) { return failures; }
+        generation = saved->generation;
+    }
+    const std::filesystem::path root =
+        stored_generation_root(temporary.path, responses, generation);
+    failures += check(!std::filesystem::exists(root / "manifest.mac"),
+                      "legacy generation has no origin MAC");
+    {
+        SessionCheckpointStore window({.root             = temporary.path,
+                                       .disk_quota_bytes = 8ULL << 20,
+                                       .staging_bytes    = 1ULL << 20,
+                                       .origin_mac_key   = mac_key,
+                                       .read_queue       = std::make_shared<TestReadQueue>()});
+        SessionCheckpointLoadResult loaded = window.load(
+            responses.client_session_sha256, fingerprint(), responses.latest_response_id);
+        failures += check(loaded.state == SessionCheckpointLoadState::Available,
+                          "unMAC'd legacy generation loads through the compatibility window");
+        loaded.checkpoint.reset();
+    }
+    {
+        SessionCheckpointStore strict({.root               = temporary.path,
+                                       .disk_quota_bytes   = 8ULL << 20,
+                                       .staging_bytes      = 1ULL << 20,
+                                       .origin_mac_key     = mac_key,
+                                       .require_origin_auth = true,
+                                       .read_queue         = std::make_shared<TestReadQueue>()});
+        const SessionCheckpointLoadResult refused = strict.load(
+            responses.client_session_sha256, fingerprint(), responses.latest_response_id);
+        failures += check(refused.state == SessionCheckpointLoadState::Corrupt,
+                          "strict origin auth refuses the unauthenticated generation");
+    }
+    return failures;
+}
 } // namespace
 
 int main() {
@@ -1134,6 +1277,9 @@ int main() {
     failures += test_post_verification_replacement_fails_closed();
     failures += test_buffered_write_backpressure_round_trips();
     failures += test_buffered_deferred_failure_fails_before_publication();
+    failures += test_hmac_sha256_rfc4231_vectors();
+    failures += test_manifest_origin_authentication();
+    failures += test_manifest_origin_compatibility_window();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

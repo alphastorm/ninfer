@@ -128,7 +128,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--session-checkpoint-dir DIR] [--session-checkpoint-quota-mib N] "
            "[--session-checkpoint-staging-mib N] [--session-checkpoint-write-buffer-mib N] "
-           "[--session-checkpoint-min-tokens N] "
+           "[--session-checkpoint-min-tokens N] [--session-checkpoint-require-origin-auth] "
            "[--kv-dtype bf16|int8|fp8] [--spec mtp|dflash --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
@@ -362,6 +362,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 throw std::invalid_argument("--session-checkpoint-min-tokens is out of range");
             }
             options.session_checkpoint_min_tokens = static_cast<std::uint32_t>(tokens);
+        } else if (arg == "--session-checkpoint-require-origin-auth") {
+            options.session_checkpoint_require_origin_auth = true;
         } else if (arg == "--device") {
             options.device = parse_nonnegative_int(require_value("--device"), "device");
         } else if (arg == "--kv-dtype") {
@@ -482,6 +484,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             throw std::invalid_argument(
                 "--session-checkpoint-dir requires enabled Host StateImage and Host KV capacity");
         }
+    }
+    if (options.session_checkpoint_require_origin_auth &&
+        options.session_checkpoint_root.empty()) {
+        throw std::invalid_argument(
+            "--session-checkpoint-require-origin-auth requires --session-checkpoint-dir");
     }
     return options;
 }
