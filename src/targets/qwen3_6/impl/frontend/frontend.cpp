@@ -35,8 +35,9 @@ using Json   = nlohmann::json;
 using Clock  = std::chrono::steady_clock;
 namespace fi = frontend_internal;
 
-constexpr std::size_t kPatchFeatures   = 1536;
-constexpr std::string_view kThinkClose = "</think>";
+constexpr std::size_t kPatchFeatures        = 1536;
+constexpr std::string_view kThinkClose      = "</think>";
+constexpr std::string_view kUtf8Replacement = "\xef\xbf\xbd";
 constexpr std::string_view kThinkingControl =
     "\n\n Considering the limited time by the user, I have to give the solution based on the "
     "thinking directly now.\n</think>\n\n";
@@ -281,20 +282,33 @@ std::vector<fi::ChatMessage> convert_messages(std::vector<ChatMessage> messages)
         }
         target.parts.reserve(source.parts.size());
         for (MessagePart& part : source.parts) {
-            if (part.kind == MessagePartKind::Text) {
+            switch (part.kind) {
+            case MessagePartKind::Text:
                 target.parts.push_back(fi::ChatPart::text_part(std::move(part.text)));
-                continue;
+                break;
+            case MessagePartKind::Media: {
+                if (part.media.bytes.empty()) {
+                    throw std::invalid_argument("frontend media input contains no owning bytes");
+                }
+                fi::MediaData media;
+                media.source_name = std::move(part.media.source_name);
+                media.media_type  = std::move(part.media.media_type);
+                media.bytes       = std::move(part.media.bytes);
+                switch (part.media.kind) {
+                case MediaKind::Image:
+                    target.parts.push_back(fi::ChatPart::image(std::move(media)));
+                    break;
+                case MediaKind::Video:
+                    target.parts.push_back(fi::ChatPart::video(std::move(media)));
+                    break;
+                default:
+                    throw std::invalid_argument("frontend media kind is invalid");
+                }
+                break;
             }
-            if (part.media.bytes.empty()) {
-                throw std::invalid_argument("frontend media input contains no owning bytes");
+            default:
+                throw std::invalid_argument("frontend message-part kind is invalid");
             }
-            fi::MediaData media;
-            media.source_name = std::move(part.media.source_name);
-            media.media_type  = std::move(part.media.media_type);
-            media.bytes       = std::move(part.media.bytes);
-            target.parts.push_back(part.media.kind == MediaKind::Image
-                                       ? fi::ChatPart::image(std::move(media))
-                                       : fi::ChatPart::video(std::move(media)));
         }
         result.push_back(std::move(target));
     }
@@ -399,47 +413,65 @@ void append_delta(PublishedOutput& output, OutputChannel channel, std::string te
     }
 }
 
-std::size_t valid_utf8_prefix_size(std::string_view bytes) {
+std::string consume_generated_utf8(std::string& pending) {
+    std::string decoded;
+    decoded.reserve(pending.size());
     std::size_t offset = 0;
-    while (offset < bytes.size()) {
-        const auto lead         = static_cast<unsigned char>(bytes[offset]);
-        std::size_t length      = 0;
-        std::uint32_t codepoint = 0;
-        std::uint32_t minimum   = 0;
+    while (offset < pending.size()) {
+        const auto lead    = static_cast<unsigned char>(pending[offset]);
+        std::size_t length = 0;
         if (lead <= 0x7fU) {
-            length    = 1;
-            codepoint = lead;
+            decoded.push_back(pending[offset]);
+            ++offset;
+            continue;
         } else if (lead >= 0xc2U && lead <= 0xdfU) {
-            length    = 2;
-            codepoint = lead & 0x1fU;
-            minimum   = 0x80U;
+            length = 2;
         } else if (lead >= 0xe0U && lead <= 0xefU) {
-            length    = 3;
-            codepoint = lead & 0x0fU;
-            minimum   = 0x800U;
+            length = 3;
         } else if (lead >= 0xf0U && lead <= 0xf4U) {
-            length    = 4;
-            codepoint = lead & 0x07U;
-            minimum   = 0x10000U;
+            length = 4;
         } else {
-            throw std::invalid_argument("invalid UTF-8 leading byte in generated token stream");
+            decoded.append(kUtf8Replacement);
+            ++offset;
+            continue;
         }
-        if (offset + length > bytes.size()) { return offset; }
+
+        bool malformed = false;
         for (std::size_t index = 1; index < length; ++index) {
-            const auto byte = static_cast<unsigned char>(bytes[offset + index]);
-            if ((byte & 0xc0U) != 0x80U) {
-                throw std::invalid_argument(
-                    "invalid UTF-8 continuation byte in generated token stream");
+            if (offset + index >= pending.size()) {
+                pending.erase(0, offset);
+                return decoded;
             }
-            codepoint = (codepoint << 6U) | (byte & 0x3fU);
+            const auto byte      = static_cast<unsigned char>(pending[offset + index]);
+            unsigned int minimum = 0x80U;
+            unsigned int maximum = 0xbfU;
+            if (index == 1) {
+                if (lead == 0xe0U) {
+                    minimum = 0xa0U;
+                } else if (lead == 0xedU) {
+                    maximum = 0x9fU;
+                } else if (lead == 0xf0U) {
+                    minimum = 0x90U;
+                } else if (lead == 0xf4U) {
+                    maximum = 0x8fU;
+                }
+            }
+            if (byte < minimum || byte > maximum) {
+                // Replace one maximal subpart. The first byte that cannot continue this sequence
+                // is deliberately left for the next iteration, so valid following text is kept.
+                decoded.append(kUtf8Replacement);
+                offset += index;
+                malformed = true;
+                break;
+            }
         }
-        if (codepoint < minimum || (codepoint >= 0xd800U && codepoint <= 0xdfffU) ||
-            codepoint > 0x10ffffU) {
-            throw std::invalid_argument("invalid UTF-8 codepoint in generated token stream");
-        }
+        if (malformed) { continue; }
+
+        decoded.append(pending, offset, length);
         offset += length;
     }
-    return offset;
+    pending.clear();
+    return decoded;
 }
 
 std::size_t longest_suffix_prefix(std::string_view text, std::string_view marker,
@@ -604,10 +636,7 @@ void feed_token_bytes(DecoderState& state, std::string_view bytes, const StopPol
                       PublishedOutput& emitted, std::uint32_t committed_tokens,
                       StopMatch* best_match) {
     state.utf8_pending.append(bytes);
-    const std::size_t valid = valid_utf8_prefix_size(state.utf8_pending);
-    if (valid == 0) { return; }
-    const std::string text = state.utf8_pending.substr(0, valid);
-    state.utf8_pending.erase(0, valid);
+    const std::string text = consume_generated_utf8(state.utf8_pending);
     feed_decoded_text(state, text, policy, emitted, committed_tokens, best_match);
 }
 
@@ -618,7 +647,7 @@ void terminalize(DecoderState& state, const StopPolicy& policy, PublishedOutput&
         // Publish the standard replacement character rather than an invalid
         // UTF-8 suffix; the logical token prefix remains exact.
         state.utf8_pending.clear();
-        feed_decoded_text(state, "\xef\xbf\xbd", policy, emitted, committed_tokens, nullptr);
+        feed_decoded_text(state, kUtf8Replacement, policy, emitted, committed_tokens, nullptr);
     }
     if (state.in_reasoning) {
         feed_channel(state, OutputChannel::Reasoning, state.think_marker_pending, policy, emitted,

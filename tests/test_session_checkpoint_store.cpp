@@ -888,6 +888,80 @@ int test_native_read_queue_is_required() {
     return check(missing_rejected && unavailable_rejected,
                  "checkpoint store accepted a missing or unavailable native read queue");
 }
+
+int test_post_verification_replacement_fails_closed() {
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot();
+    const std::vector<std::byte> payload  = engine_payload();
+    SessionCheckpointStore store({.root             = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes    = 1ULL << 20,
+                                  .read_queue       = std::make_shared<TestReadQueue>()});
+    const auto exporter =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        const std::string metadata = "engine-metadata-v2";
+        if (!write_chunked(writer, "engine/metadata.bin",
+                           std::as_bytes(std::span(metadata.data(), metadata.size()))) ||
+            !write_chunked(writer, "engine/state-0.bin", payload)) {
+            return std::nullopt;
+        }
+        return ContinuationCheckpointStats{.frontier_tokens = 100000,
+                                           .restored_tokens = 97500,
+                                           .payload_bytes   = payload.size() + metadata.size()};
+    };
+    int failures     = 0;
+    const auto saved = store.save(responses, fingerprint(), exporter);
+    failures += check(saved.has_value(), "tamper fixture publishes");
+    if (!saved) { return failures; }
+
+    // alphastorm/ninfer#21: load() hashes the then-current bytes, but every backend read
+    // reopens the pathname. A same-size replacement inside the checkpoint root after
+    // verification must fail the streamed re-hash instead of feeding the engine.
+    SessionCheckpointLoadResult loaded = store.load(
+        responses.client_session_sha256, fingerprint(), responses.latest_response_id);
+    failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+                          loaded.checkpoint.has_value(),
+                      "tamper fixture loads before replacement");
+    if (!loaded.checkpoint) { return failures; }
+    std::vector<std::byte> tampered = payload;
+    tampered.front() ^= std::byte{0x5a};
+    const std::filesystem::path state_path = temporary.path / "sessions" /
+                                             responses.client_session_sha256 / "generations" /
+                                             saved->generation / "engine" / "state-0.bin";
+    {
+        std::ofstream swap(state_path, std::ios::binary | std::ios::trunc);
+        swap.write(reinterpret_cast<const char*>(tampered.data()),
+                   static_cast<std::streamsize>(tampered.size()));
+    }
+    std::vector<std::byte> victim(payload.size());
+    failures += check(!loaded.checkpoint->engine->read_file("engine/state-0.bin", 0, victim),
+                      "post-verification replacement fails the streamed re-hash closed");
+    failures += check(!loaded.checkpoint->engine->read_file("engine/state-0.bin", 0, victim),
+                      "a failed payload stays refused for the reader's lifetime");
+    std::vector<std::byte> skewed(1);
+    failures += check(!loaded.checkpoint->engine->read_file("engine/metadata.bin", 1, skewed),
+                      "out-of-sequence coverage is refused");
+    std::vector<std::byte> intact(18);
+    failures += check(loaded.checkpoint->engine->read_file("engine/metadata.bin", 0, intact),
+                      "untouched payloads keep reading through the same reader");
+    loaded.checkpoint.reset();
+
+    // Council CR-20260831-fanout43 R3: the streamed mismatch is corruption evidence, not a
+    // transient read error. Status must stop advertising the generation, and the next load
+    // must quarantine it instead of re-verifying the tampered bytes as current.
+    const nlohmann::json seen = store.status(responses.client_session_sha256, fingerprint());
+    failures += check(seen.at("state") == "corrupt",
+                      "status reports the streamed mismatch before any new load");
+    const SessionCheckpointLoadResult after_tamper = store.load(
+        responses.client_session_sha256, fingerprint(), responses.latest_response_id);
+    failures += check(after_tamper.state == SessionCheckpointLoadState::Corrupt &&
+                          !after_tamper.checkpoint.has_value(),
+                      "the corrupted generation is quarantined on the next load");
+    const nlohmann::json gone = store.status(responses.client_session_sha256, fingerprint());
+    failures += check(gone.at("state") == "missing",
+                      "quarantine removes the corrupt generation from the current pointer");
+    return failures;
+}
 } // namespace
 
 int main() {
@@ -901,6 +975,7 @@ int main() {
     failures += test_native_read_queue_is_required();
     failures += test_large_session_resaves_within_quota();
     failures += test_post_publish_reclaim_failure_keeps_save_acknowledged();
+    failures += test_post_verification_replacement_fails_closed();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

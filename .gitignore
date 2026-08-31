@@ -46,3 +46,6 @@ profiles/
 
 # Claude Code personal/local settings (may contain API tokens)
 .claude/settings.local.json
+
+# Planning-tool exports are developer tooling output, never repository content (omp-ninfer#16 class).
+prompt-exports/

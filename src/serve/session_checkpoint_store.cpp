@@ -93,12 +93,43 @@ struct FileDescriptor {
     return component_has_byte;
 }
 
+// Checkpoint writes must never follow a filesystem entry an adjacent writer could have
+// replaced: a symlink swapped under the staging tree would redirect server-authority
+// writes outside the checkpoint root (council CR-20260831-fanout43 R2).
 [[nodiscard]] std::FILE* open_binary_write(const std::filesystem::path& path) {
 #ifdef _WIN32
+    // MSVC's symlink_status reports directory junctions as symlinks, so one check
+    // rejects both reparse forms.
+    std::error_code status_error;
+    const std::filesystem::file_status existing =
+        std::filesystem::symlink_status(path, status_error);
+    if (!status_error && existing.type() == std::filesystem::file_type::symlink) {
+        return nullptr;
+    }
     return _wfopen(path.c_str(), L"wb");
 #else
-    return std::fopen(path.c_str(), "wb");
+    const int descriptor =
+        ::open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (descriptor < 0) { return nullptr; }
+    std::FILE* file = ::fdopen(descriptor, "wb");
+    if (file == nullptr) { ::close(descriptor); }
+    return file;
 #endif
+}
+
+// Every directory component below the writer root must be a real directory, not a
+// symlink or reparse point, when the destination file is created.
+[[nodiscard]] bool directory_chain_is_real(const std::filesystem::path& root,
+                                           const std::filesystem::path& relative_parent) {
+    std::filesystem::path current = root;
+    for (const std::filesystem::path& component : relative_parent) {
+        current /= component;
+        std::error_code error;
+        const std::filesystem::file_status status =
+            std::filesystem::symlink_status(current, error);
+        if (error || status.type() != std::filesystem::file_type::directory) { return false; }
+    }
+    return true;
 }
 
 [[nodiscard]] std::FILE* open_binary_read(const std::filesystem::path& path) {
@@ -409,6 +440,11 @@ private:
                 state.total                             = total_bytes;
                 const std::filesystem::path destination = root_ / key;
                 std::filesystem::create_directories(destination.parent_path());
+                if (!directory_chain_is_real(root_,
+                                             std::filesystem::path(key).parent_path())) {
+                    failed_ = true;
+                    return false;
+                }
                 state.file = open_binary_write(destination);
                 if (state.file == nullptr) {
                     failed_ = true;
@@ -506,7 +542,29 @@ class SessionCheckpointStore::Impl : public std::enable_shared_from_this<Impl> {
 public:
     mutable std::mutex mutex;
     std::unordered_map<std::string, std::uint32_t> active_generations;
+    // Generations whose streamed import re-hash observed bytes diverging from the
+    // load-time digests. load() and status() consult this and quarantine instead of
+    // advertising the generation as available (council CR-20260831-fanout43 R3).
+    std::set<std::string> corrupt_generations;
     std::atomic<std::uint64_t> sequence{0};
+
+    void mark_corrupt(const std::string& active_key) {
+        std::lock_guard lock(mutex);
+        try {
+            corrupt_generations.insert(active_key);
+        } catch (...) {}
+    }
+
+
+    [[nodiscard]] bool is_corrupt(const std::string& active_key) const {
+        return corrupt_generations.contains(active_key);
+    }
+    [[nodiscard]] bool consume_corrupt(const std::string& active_key) {
+        const auto found = corrupt_generations.find(active_key);
+        if (found == corrupt_generations.end()) { return false; }
+        corrupt_generations.erase(found);
+        return true;
+    }
 };
 
 namespace {
@@ -738,10 +796,16 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
            inventory.used <= options.disk_quota_bytes + tolerated_transient_bytes;
 }
 
+// A checkpoint payload entry whose content hash was verified at load time.
+struct VerifiedFile {
+    std::uint64_t bytes;
+    std::string sha256;
+};
+
 class DirectoryCheckpointReader final : public ContinuationCheckpointReader {
 public:
     DirectoryCheckpointReader(std::filesystem::path root,
-                              std::map<std::string, std::uint64_t> files,
+                              std::map<std::string, VerifiedFile> files,
                               std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue,
                               std::shared_ptr<SessionCheckpointStore::Impl> owner,
                               std::string active_key)
@@ -760,17 +824,26 @@ public:
 
     std::optional<std::uint64_t> file_size(std::string_view path) const override {
         const auto found = files_.find(std::string(path));
-        return found == files_.end() ? std::nullopt : std::optional<std::uint64_t>(found->second);
+        return found == files_.end() ? std::nullopt
+                                     : std::optional<std::uint64_t>(found->second.bytes);
     }
 
     bool read_file(std::string_view path, std::uint64_t offset,
                    std::span<std::byte> destination) const override {
         const auto found = files_.find(std::string(path));
-        if (found == files_.end() || offset > found->second ||
-            destination.size() > found->second - offset) {
+        if (found == files_.end() || offset > found->second.bytes ||
+            destination.size() > found->second.bytes - offset) {
             return false;
         }
         if (!read_queue_->available()) { return false; }
+        // Load-time hashing verified the then-current bytes, but the backend reopens the
+        // pathname on every submit, so a post-verification replacement could otherwise feed
+        // unchecked bytes into the engine import (alphastorm/ninfer#21). Engine restores
+        // consume each payload exactly once, front to back; enforce that coverage and
+        // re-hash the streamed chunks, failing the import closed on any divergence.
+        std::lock_guard verify_lock(verify_mutex_);
+        ReadVerifyState& state = verify_[found->first];
+        if (state.failed || state.verified || offset != state.next_offset) { return false; }
         try {
             const runtime::ContinuationCheckpointReadRequest request{.file_offset = offset,
                                                                      .destination = destination};
@@ -778,16 +851,41 @@ public:
                 read_queue_->submit(root_ / found->first, std::span(&request, 1));
             if (!completion) { return false; }
             completion->wait();
+            state.hasher.update(destination);
+            state.next_offset += destination.size();
+            if (state.next_offset == found->second.bytes) {
+                if (crypto::sha256_hex(state.hasher.finish()) != found->second.sha256) {
+                    state.failed = true;
+                    // Divergence from the load-time digest is corruption evidence, not a
+                    // transient read error: surface it so the next load or status call
+                    // quarantines this generation instead of advertising it available.
+                    owner_->mark_corrupt(active_key_);
+                    return false;
+                }
+                state.verified = true;
+            }
             return true;
-        } catch (...) { return false; }
+        } catch (...) {
+            state.failed = true;
+            return false;
+        }
     }
 
 private:
+    struct ReadVerifyState {
+        crypto::Sha256 hasher;
+        std::uint64_t next_offset = 0;
+        bool failed               = false;
+        bool verified             = false;
+    };
+
     std::filesystem::path root_;
-    std::map<std::string, std::uint64_t> files_;
+    std::map<std::string, VerifiedFile> files_;
     std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue_;
     std::shared_ptr<SessionCheckpointStore::Impl> owner_;
     std::string active_key_;
+    mutable std::mutex verify_mutex_;
+    mutable std::map<std::string, ReadVerifyState> verify_;
 };
 
 void quarantine_generation(const std::filesystem::path& session, const std::string& generation) {
@@ -1139,6 +1237,10 @@ SessionCheckpointStore::load(std::string_view session_sha256,
     } catch (...) { return {.state = SessionCheckpointLoadState::Unavailable}; }
     if (!generation) { return {.state = SessionCheckpointLoadState::Missing}; }
     const std::filesystem::path root = session / "generations" / *generation;
+    if (impl_->consume_corrupt(std::string(session_sha256) + "/" + *generation)) {
+        quarantine_generation(session, *generation);
+        return {.state = SessionCheckpointLoadState::Corrupt};
+    }
     try {
         const nlohmann::json manifest =
             nlohmann::json::parse(read_text_bounded(root / "manifest.json", 16ULL << 20));
@@ -1156,12 +1258,14 @@ SessionCheckpointStore::load(std::string_view session_sha256,
             manifest.at("files").size() > 4096) {
             throw CheckpointCorruption("checkpoint manifest file set is corrupt");
         }
-        std::map<std::string, std::uint64_t> allowed;
+        std::map<std::string, VerifiedFile> allowed;
         std::uint64_t verified_bytes        = 0;
         std::uint64_t verified_engine_bytes = 0;
         for (const nlohmann::json& encoded : manifest.at("files")) {
             std::optional<FileDescriptor> expected = descriptor_from_json(encoded);
-            if (!expected || !allowed.emplace(expected->path, expected->bytes).second) {
+            if (!expected ||
+                !allowed.emplace(expected->path, VerifiedFile{expected->bytes, expected->sha256})
+                     .second) {
                 throw CheckpointCorruption("checkpoint manifest file descriptor is corrupt");
             }
             const FileDescriptor actual =
@@ -1186,11 +1290,18 @@ SessionCheckpointStore::load(std::string_view session_sha256,
             throw CheckpointCorruption("checkpoint manifest payload summary is corrupt");
         }
         const auto response_file = allowed.find("responses.cbor");
-        if (response_file == allowed.end() || response_file->second > options_.staging_bytes) {
+        if (response_file == allowed.end() || response_file->second.bytes > options_.staging_bytes) {
             throw CheckpointCorruption("checkpoint response payload descriptor is corrupt");
         }
         const std::vector<std::byte> response_bytes =
             read_bounded(root / "responses.cbor", options_.staging_bytes);
+        // The verification pass above hashed the then-current file; this reopen must match the
+        // verified digest or the import is fed different bytes (alphastorm/ninfer#21).
+        if (response_bytes.size() != response_file->second.bytes ||
+            crypto::sha256_hex(crypto::sha256(std::span<const std::byte>(response_bytes))) !=
+                response_file->second.sha256) {
+            throw CheckpointCorruption("checkpoint response payload changed after verification");
+        }
         std::optional<ResponseStoreSnapshot> responses =
             decode_response_store_snapshot(response_bytes, options_.staging_bytes);
         if (!responses || responses->client_session_sha256 != session_sha256 ||
@@ -1246,6 +1357,10 @@ nlohmann::json SessionCheckpointStore::status(std::string_view session_sha256,
         const std::filesystem::path session         = session_path(session_sha256);
         const std::optional<std::string> generation = current_generation(session);
         if (!generation) { return result; }
+        if (impl_->is_corrupt(std::string(session_sha256) + "/" + *generation)) {
+            result["state"] = "corrupt";
+            return result;
+        }
         const std::filesystem::path root = session / "generations" / *generation;
         const nlohmann::json manifest =
             nlohmann::json::parse(read_text_bounded(root / "manifest.json", 16ULL << 20));

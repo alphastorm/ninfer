@@ -109,8 +109,18 @@ session_checkpoint_skip_reason_name(SessionCheckpointSkipReason reason) noexcept
 
 struct SessionCheckpointSkipDetail {
     SessionCheckpointSkipReason reason = SessionCheckpointSkipReason::None;
+    // The checkpoint tag the refused save attempted (response-id correlation for logs).
+    std::string attempted_tag;
     // TagMismatch only: the tag the catalogued continuation actually carries.
     std::string catalogued_tag;
+
+    // Diagnostics must never turn a clean refusal into an exception: on allocation
+    // failure the detail stays empty and the refusal path proceeds (alphastorm/ninfer#31).
+    static void assign_tag(std::string& field, std::string_view tag) noexcept {
+        try {
+            field.assign(tag);
+        } catch (...) { field.clear(); }
+    }
 };
 
 } // namespace ninfer::runtime

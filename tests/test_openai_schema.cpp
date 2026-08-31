@@ -509,6 +509,15 @@ int test_parse_tool_history_messages() {
                           parts_req.messages[2].content[1].text == "sunny",
                       "tool text-part array preserves order and text");
 
+    Json named_tool = body;
+    named_tool["messages"][2]["name"] = "get_weather";
+    const GenerationRequest named_req =
+        parse_chat_completion_request(named_tool, default_limits());
+    failures += check(named_req.messages[2].role == ninfer::ChatRole::Tool &&
+                          named_req.messages[2].tool_call_id == "call_1" &&
+                          named_req.messages[2].content.at(0).text == R"({"temp":20})",
+                      "a mirrored tool message name stays an ignored compatibility field");
+
     Json missing_content = body;
     missing_content["messages"][2].erase("content");
     failures += check(

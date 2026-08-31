@@ -1,5 +1,7 @@
 #include "serve/response_store.h"
 
+#include "serve/credential_compare.h"
+
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
@@ -8,6 +10,14 @@
 
 namespace ninfer::serve {
 namespace {
+
+// Session ownership is a credential check: an attacker probing stored response ids with
+// candidate session digests must not learn prefix proximity (alphastorm/ninfer#22).
+bool session_matches(const std::optional<std::string>& stored,
+                     const std::optional<std::string>& presented) {
+    if (stored.has_value() != presented.has_value()) { return false; }
+    return !stored || credential_equal(*stored, *presented);
+}
 
 std::size_t estimate_turn_bytes(const ChatTurn& turn) {
     std::size_t bytes = sizeof(ChatTurn) + turn.tool_call_id.size() + turn.reasoning_content.size();
@@ -92,7 +102,7 @@ ResponseStore::get_for_session(const std::string& id,
     std::lock_guard lock(mutex_);
     const auto found = records_.find(id);
     if (found == records_.end() ||
-        found->second.response->client_session_sha256 != session_sha256) {
+        !session_matches(found->second.response->client_session_sha256, session_sha256)) {
         return {};
     }
     lru_.splice(lru_.begin(), lru_, found->second.lru);
@@ -157,7 +167,7 @@ bool ResponseStore::erase_for_session(const std::string& id,
     std::lock_guard lock(mutex_);
     const auto found = records_.find(id);
     if (found == records_.end() ||
-        found->second.response->client_session_sha256 != session_sha256) {
+        !session_matches(found->second.response->client_session_sha256, session_sha256)) {
         return false;
     }
     erase_locked(id);
@@ -171,7 +181,7 @@ ResponseStore::snapshot_session(std::string_view client_session_sha256) const {
     for (const auto& [id, entry] : records_) {
         (void)id;
         if (entry.response->client_session_sha256 &&
-            *entry.response->client_session_sha256 == client_session_sha256) {
+            credential_equal(*entry.response->client_session_sha256, client_session_sha256)) {
             ordered.emplace_back(entry.sequence, entry.response.get());
         }
     }

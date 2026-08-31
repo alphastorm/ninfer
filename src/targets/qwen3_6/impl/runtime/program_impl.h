@@ -8665,6 +8665,13 @@ ProgramImplCore::checkpoint_continuation(const ContinuationHandle& continuation,
             payload_bytes += bytes;
         };
 
+        // Export copies ride transfer_stream while the caller only holds execution_mutex_.
+        // Order them explicitly behind every already-enqueued compute-stream KV/state write
+        // instead of relying on unit-boundary synchronization (alphastorm/ninfer#24).
+        CudaCompletionEvent compute_fence(device);
+        compute_fence.record(device.stream);
+        compute_fence.wait(device.transfer_stream);
+
         const qwen3_6::StateImageHostLayout& state_layout = state_store->host_layout();
         if (state_layout.image_bytes == 0 || state_layout.image_bytes > staging_bytes) {
             return std::nullopt;
