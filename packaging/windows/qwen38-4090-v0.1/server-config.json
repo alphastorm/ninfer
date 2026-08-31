@@ -22,8 +22,8 @@
     "vision": false
   },
   "speculative": {
-    "backend": "none",
-    "draft_tokens": 0
+    "backend": "mtp",
+    "draft_tokens": 3
   },
   "reasoning": {
     "thinking": true,

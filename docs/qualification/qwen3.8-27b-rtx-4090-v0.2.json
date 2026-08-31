@@ -26,7 +26,7 @@
   "identity": {
     "binary_sha256": "a5b501ecdcf00031945bddac0732ba302aa2250d529076a41f592e7038aff4a2",
     "binary_bytes": 247915008,
-    "config_sha256": "6c429bc379fcee33bf8a6bdf8d96631f7a1f51adb23eae3fa805689cad31a297",
+    "config_sha256": "cb4ba6db0732193b99d83838013cc5fad9dc5042e3c0709b0e6a611eec91efae",
     "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
     "deployment_profile": "qwen38-4090-v0.2",
     "build_type": "Release",
