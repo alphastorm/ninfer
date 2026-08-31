@@ -200,9 +200,9 @@ function New-NInferQualificationReceipt {
     }
 
     $releaseAssetsReceipt = [ordered]@{
-        package = Get-NInferQualificationAsset $ReleaseAssets 'package' 'ninfer-rtx3090-omp-v0.2.1-beta.1-windows-x86_64-cuda13.3-rtx3090.tar.gz'
-        source_archive = Get-NInferQualificationAsset $ReleaseAssets 'source_archive' 'ninfer-rtx3090-omp-v0.2.1-beta.1-source.tar.gz'
-        spdx_sbom = Get-NInferQualificationAsset $ReleaseAssets 'spdx_sbom' 'ninfer-rtx3090-omp-v0.2.1-beta.1-windows-x86_64-cuda13.3-rtx3090.spdx.json'
+        package = Get-NInferQualificationAsset $ReleaseAssets 'package' 'ninfer-rtx3090-omp-v0.2.2-beta.1-windows-x86_64-cuda13.3-rtx3090.tar.gz'
+        source_archive = Get-NInferQualificationAsset $ReleaseAssets 'source_archive' 'ninfer-rtx3090-omp-v0.2.2-beta.1-source.tar.gz'
+        spdx_sbom = Get-NInferQualificationAsset $ReleaseAssets 'spdx_sbom' 'ninfer-rtx3090-omp-v0.2.2-beta.1-windows-x86_64-cuda13.3-rtx3090.spdx.json'
         checksums = Get-NInferQualificationAsset $ReleaseAssets 'checksums' 'SHA256SUMS'
         package_build_receipt = Get-NInferQualificationAsset $ReleaseAssets 'package_build_receipt' 'package-build-receipt.json'
         inner_checksums_sha256 = Get-NInferQualificationSha256 $ReleaseAssets 'inner_checksums_sha256' 'release_assets'

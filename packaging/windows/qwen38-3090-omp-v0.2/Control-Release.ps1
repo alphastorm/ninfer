@@ -95,7 +95,7 @@ function Get-Release([object]$State, [string]$ReleaseId) {
             throw "installed release source identity is invalid: $field"
         }
     }
-    if ([string]$release.build_profile -cnotin @('omp-v0.2.0-rtx3090', 'omp-v0.2.1-rtx3090') -or
+    if ([string]$release.build_profile -cnotin @('omp-v0.2.0-rtx3090', 'omp-v0.2.2-rtx3090') -or
         [string]$release.cuda_architecture -cne 'sm_86') {
         throw 'installed release immutable build profile is invalid'
     }
