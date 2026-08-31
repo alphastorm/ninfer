@@ -1537,11 +1537,11 @@ int test_buffered_write_backpressure_round_trips() {
                                            .payload_bytes   = payload.size() + metadata.size()};
     };
     int failures     = 0;
-    const auto saved = store.save(responses, fingerprint(), exporter);
+    const auto saved = store.save(checkpoint_namespace(responses), responses, fingerprint(), exporter);
     failures += check(saved.has_value(), "buffered save publishes under byte-level backpressure");
     if (!saved) { return failures; }
     SessionCheckpointLoadResult loaded = store.load(
-        responses.client_session_sha256, fingerprint(), responses.latest_response_id);
+        checkpoint_namespace(responses), fingerprint(), responses.latest_response_id);
     failures += check(loaded.state == SessionCheckpointLoadState::Available &&
                           loaded.checkpoint.has_value(),
                       "buffered save round-trips through verification");
@@ -1550,10 +1550,10 @@ int test_buffered_write_backpressure_round_trips() {
     failures += check(loaded.checkpoint->engine->read_file("engine/state-0.bin", 0, restored) &&
                           restored == payload,
                       "buffered writes preserve exact payload bytes");
-    failures += check(store.covers(responses.client_session_sha256, fingerprint(),
+    failures += check(store.covers(checkpoint_namespace(responses), fingerprint(),
                                    responses.latest_response_id),
                       "catalogued generation covers its own newest response");
-    failures += check(!store.covers(responses.client_session_sha256, fingerprint(),
+    failures += check(!store.covers(checkpoint_namespace(responses), fingerprint(),
                                     "resp_not_yet_checkpointed"),
                       "an uncheckpointed response id is not covered");
     loaded.checkpoint.reset();
@@ -1579,7 +1579,7 @@ int test_buffered_deferred_failure_fails_before_publication() {
                                            .restored_tokens = 97500,
                                            .payload_bytes   = payload.size()};
     };
-    failures += check(store.save(responses, fingerprint(), good).has_value(),
+    failures += check(store.save(checkpoint_namespace(responses), responses, fingerprint(), good).has_value(),
                       "baseline generation publishes");
     const auto poisoned =
         [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
@@ -1596,7 +1596,7 @@ int test_buffered_deferred_failure_fails_before_publication() {
     };
     bool poisoned_save_failed = false;
     try {
-        poisoned_save_failed = !store.save(responses, fingerprint(), poisoned).has_value();
+        poisoned_save_failed = !store.save(checkpoint_namespace(responses), responses, fingerprint(), poisoned).has_value();
     } catch (const std::exception&) {
         // save() rethrows I/O failures after cleaning its staging; either signal is the
         // required "failed before publication" outcome.
@@ -1605,7 +1605,7 @@ int test_buffered_deferred_failure_fails_before_publication() {
     failures += check(poisoned_save_failed,
                       "deferred drain failure fails the save despite exporter-reported success");
     SessionCheckpointLoadResult loaded = store.load(
-        responses.client_session_sha256, fingerprint(), responses.latest_response_id);
+        checkpoint_namespace(responses), fingerprint(), responses.latest_response_id);
     failures += check(loaded.state == SessionCheckpointLoadState::Available &&
                           loaded.checkpoint.has_value(),
                       "prior published generation survives the failed save");

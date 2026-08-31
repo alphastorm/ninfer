@@ -1,4 +1,5 @@
 #include "serve/response_store.h"
+#include "serve/credential_compare.h"
 
 #include <algorithm>
 #include <limits>
