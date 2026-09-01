@@ -313,6 +313,12 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
         }
         checkpoint_runtime_fingerprint_ = session_checkpoint_runtime_fingerprint(
             options_, engine_->options(), engine_->load_summary());
+        if (options_.api_key.empty()) {
+            // parse_serve_options enforces this for the CLI; direct construction must not
+            // reach a publicly computable HMAC(empty, domain) origin key (council
+            // CR-20260831-originauth U2).
+            throw std::invalid_argument("session checkpoints require a configured API key");
+        }
         // The manifest origin MAC key derives from the bearer key through a fixed domain
         // separator - the bearer key itself never touches the checkpoint machinery, and a
         // writer inside the checkpoint root cannot recreate the key (alphastorm/ninfer#32).

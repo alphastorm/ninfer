@@ -256,19 +256,24 @@ enum class ManifestOriginState : std::uint8_t { Authentic, Unauthenticated, Forg
                                                         std::string_view key) {
     if (key.empty()) { return ManifestOriginState::Unauthenticated; }
     std::error_code probe_error;
-    if (!std::filesystem::exists(root / "manifest.mac", probe_error) || probe_error) {
-        return ManifestOriginState::Unauthenticated;
+    const bool tag_exists = std::filesystem::exists(root / "manifest.mac", probe_error);
+    if (probe_error) {
+        // A transient inability to even probe the tag is a filesystem fault, never origin
+        // evidence: preserve current for retry (council CR-20260831-originauth R2).
+        throw CheckpointUnavailable("checkpoint origin tag probe failed");
     }
-    try {
-        std::string recorded = read_text_bounded(root / "manifest.mac", 128);
-        while (!recorded.empty() && (recorded.back() == '\n' || recorded.back() == '\r')) {
-            recorded.pop_back();
-        }
-        if (recorded.size() != 64) { return ManifestOriginState::Forged; }
-        const std::string expected = manifest_origin_mac_hex(key, manifest_text);
-        return constant_time_hex_equal(recorded, expected) ? ManifestOriginState::Authentic
-                                                           : ManifestOriginState::Forged;
-    } catch (...) { return ManifestOriginState::Forged; }
+    if (!tag_exists) { return ManifestOriginState::Unauthenticated; }
+    // read_text_bounded throws CheckpointUnavailable on open/size/read faults; let it
+    // propagate so a transient tag read reports Unavailable instead of quarantining a
+    // valid generation. Only structural badness or a mismatch is forgery evidence.
+    std::string recorded = read_text_bounded(root / "manifest.mac", 128);
+    while (!recorded.empty() && (recorded.back() == '\n' || recorded.back() == '\r')) {
+        recorded.pop_back();
+    }
+    if (recorded.size() != 64) { return ManifestOriginState::Forged; }
+    const std::string expected = manifest_origin_mac_hex(key, manifest_text);
+    return constant_time_hex_equal(recorded, expected) ? ManifestOriginState::Authentic
+                                                       : ManifestOriginState::Forged;
 }
 
 [[nodiscard]] FileDescriptor
@@ -1424,16 +1429,18 @@ SessionCheckpointStore::load(std::string_view session_sha256,
     try {
         const std::string manifest_text = read_text_bounded(root / "manifest.json", 16ULL << 20);
         // Verify origin before trusting any manifest content (alphastorm/ninfer#32). A
-        // present-but-wrong MAC is tamper evidence and quarantines like corruption; an absent
-        // MAC is refused only under the strict import posture so locally-produced legacy
-        // generations keep loading through the compatibility window.
+        // present-but-wrong MAC is tamper evidence and quarantines like corruption. An
+        // absent MAC under the strict import posture is a REVERSIBLE policy refusal, not
+        // evidence: report Incompatible (clean-replay path) and mutate nothing, so
+        // clearing the flag restores the generation (council CR-20260831-originauth
+        // grok R2). Off-strict, locally-produced legacy generations keep loading.
         switch (manifest_origin_state(root, manifest_text, options_.origin_mac_key)) {
         case ManifestOriginState::Authentic: break;
         case ManifestOriginState::Forged:
             throw CheckpointCorruption("checkpoint manifest origin authentication failed");
         case ManifestOriginState::Unauthenticated:
             if (options_.require_origin_auth) {
-                throw CheckpointCorruption("checkpoint manifest origin is unauthenticated");
+                return {.state = SessionCheckpointLoadState::Incompatible};
             }
             break;
         }
@@ -1598,7 +1605,8 @@ nlohmann::json SessionCheckpointStore::status(std::string_view session_sha256,
             throw CheckpointCorruption("checkpoint manifest origin authentication failed");
         case ManifestOriginState::Unauthenticated:
             if (options_.require_origin_auth) {
-                throw CheckpointCorruption("checkpoint manifest origin is unauthenticated");
+                result["state"] = "incompatible";
+                return result;
             }
             break;
         }

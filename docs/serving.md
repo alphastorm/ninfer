@@ -506,10 +506,14 @@ HMAC-SHA256 over the exact manifest bytes, keyed by material derived from the be
 a fixed domain separator and held outside the checkpoint root. The digest chain inside the
 manifest authenticates consistency; the MAC authenticates origin - a writer who can rewrite the
 checkpoint root coherently still cannot forge it. Loads verify the MAC before trusting any
-manifest content: a present-but-wrong MAC quarantines the generation like corruption, while an
-absent MAC is tolerated only for locally-produced legacy generations.
-`--session-checkpoint-require-origin-auth` ends that compatibility window and refuses
-unauthenticated generations outright - the required posture before checkpoints are ever imported
+manifest content: a present-but-wrong MAC quarantines the generation like corruption; a transient
+failure reading the tag reports `unavailable` and preserves `current` for retry; an absent MAC is
+tolerated only for locally-produced legacy generations.
+`--session-checkpoint-require-origin-auth` ends that compatibility window: unauthenticated
+generations report `incompatible` (a reversible policy refusal - clearing the flag restores
+them) rather than quarantining. The flag requires an API key of at least 32 characters, because
+the persisted tag is an offline verifier for the bearer credential. It is
+the required posture before checkpoints are ever imported
 from remote storage (NAS/S3 sync). Publication requires an Engine export that can restore at least 95%
 of its compatible frontier, and its reported payload bytes must exactly match the generated Engine
 files. An interrupted save leaves the previous generation usable. Restore verifies every file and

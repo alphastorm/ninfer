@@ -485,10 +485,20 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 "--session-checkpoint-dir requires enabled Host StateImage and Host KV capacity");
         }
     }
-    if (options.session_checkpoint_require_origin_auth &&
-        options.session_checkpoint_root.empty()) {
-        throw std::invalid_argument(
-            "--session-checkpoint-require-origin-auth requires --session-checkpoint-dir");
+    if (options.session_checkpoint_require_origin_auth) {
+        if (options.session_checkpoint_root.empty()) {
+            throw std::invalid_argument(
+                "--session-checkpoint-require-origin-auth requires --session-checkpoint-dir");
+        }
+        // The persisted origin tag is an offline verifier for the bearer credential: a
+        // checkpoint-root reader can test key guesses against manifest.mac without touching
+        // the server (council CR-20260831-originauth R1). The strict import posture
+        // therefore demands a credential outside dictionary reach.
+        if (options.api_key.size() < 32) {
+            throw std::invalid_argument(
+                "--session-checkpoint-require-origin-auth requires an API key of at least "
+                "32 characters");
+        }
     }
     return options;
 }
