@@ -22,7 +22,6 @@ namespace {
 constexpr int kD       = 128;
 constexpr int kQHeads  = 32;
 constexpr int kKVHeads = 8;
-constexpr int kWindow  = 4096;
 constexpr float kScale = 0.08838834764831844055f;
 constexpr ops::AttentionHeadGeometry kGeometry{kD, kQHeads, kKVHeads};
 
@@ -46,11 +45,11 @@ std::size_t query_kv_index(int d, int kv_head, int token) {
                 static_cast<std::size_t>(kKVHeads) * static_cast<std::size_t>(token));
 }
 
-std::size_t context_index(int d, int kv_head, int slot) {
+std::size_t context_index(int window, int d, int kv_head, int slot) {
     return static_cast<std::size_t>(d) +
            static_cast<std::size_t>(kD) *
                (static_cast<std::size_t>(slot) +
-                static_cast<std::size_t>(kWindow) * static_cast<std::size_t>(kv_head));
+                static_cast<std::size_t>(window) * static_cast<std::size_t>(kv_head));
 }
 
 std::vector<std::uint16_t> bf16_bits(const std::vector<float>& values) {
@@ -64,13 +63,13 @@ void sliding_window_attention_oracle(const std::vector<float>& q, const std::vec
                                      const std::vector<float>& context_k,
                                      const std::vector<float>& context_v,
                                      const std::vector<int>& positions, int context_length,
-                                     int valid_columns, std::vector<double>& out) {
+                                     int valid_columns, int window, std::vector<double>& out) {
     const int tokens = static_cast<int>(positions.size());
     out.assign(static_cast<std::size_t>(kD) * kQHeads * tokens, 0.0);
 
     for (int token = 0; token < valid_columns; ++token) {
         const int query_position = positions[static_cast<std::size_t>(token)];
-        const int context_begin  = std::max(0, query_position - (kWindow - 1));
+        const int context_begin  = std::max(0, query_position - (window - 1));
         const int context_keys   = context_length - context_begin;
         const int key_count      = context_keys + valid_columns;
         naive_dense_softmax_attention(
@@ -79,14 +78,14 @@ void sliding_window_attention_oracle(const std::vector<float>& q, const std::vec
             [&](int d, int head, int key) {
                 return key < context_keys
                            ? static_cast<double>(context_k[context_index(
-                                 d, head, (context_begin + key) & (kWindow - 1))])
+                                 window, d, head, (context_begin + key) & (window - 1))])
                            : static_cast<double>(
                                  query_k[query_kv_index(d, head, key - context_keys)]);
             },
             [&](int d, int head, int key) {
                 return key < context_keys
                            ? static_cast<double>(context_v[context_index(
-                                 d, head, (context_begin + key) & (kWindow - 1))])
+                                 window, d, head, (context_begin + key) & (window - 1))])
                            : static_cast<double>(
                                  query_v[query_kv_index(d, head, key - context_keys)]);
             },
@@ -95,12 +94,13 @@ void sliding_window_attention_oracle(const std::vector<float>& q, const std::vec
     }
 }
 
-CyclicKVCacheLayerView make_context_view(DeviceBuffer& k, DeviceBuffer& v, int lane_capacity = 1) {
+CyclicKVCacheLayerView make_context_view(DeviceBuffer& k, DeviceBuffer& v, int window,
+                                         int lane_capacity = 1) {
     return {
-        .k               = Tensor(k.p, DType::BF16, {kD, kWindow, kKVHeads, lane_capacity}),
-        .v               = Tensor(v.p, DType::BF16, {kD, kWindow, kKVHeads, lane_capacity}),
-        .capacity        = kWindow,
-        .padded_capacity = kWindow,
+        .k               = Tensor(k.p, DType::BF16, {kD, window, kKVHeads, lane_capacity}),
+        .v               = Tensor(v.p, DType::FP16, {kD, window, kKVHeads, lane_capacity}),
+        .capacity        = static_cast<std::uint32_t>(window),
+        .padded_capacity = static_cast<std::uint32_t>(window),
         .num_kv_heads    = kKVHeads,
         .head_dim        = kD,
         .lane_capacity   = lane_capacity,
@@ -112,13 +112,14 @@ enum class InputProfile {
     WindowBoundary,
 };
 
-int run_case(int tokens, int context_length, InputProfile profile = InputProfile::Random,
-             int envelope_max = -1, int valid_columns = -1) {
+int run_case(int window, int tokens, int context_length,
+             InputProfile profile = InputProfile::Random, int envelope_max = -1,
+             int valid_columns = -1) {
     if (envelope_max < 0) envelope_max = context_length;
     if (valid_columns < 0) valid_columns = tokens;
     const std::size_t q_count        = static_cast<std::size_t>(kD) * kQHeads * tokens;
     const std::size_t query_kv_count = static_cast<std::size_t>(kD) * kKVHeads * tokens;
-    const std::size_t context_count  = static_cast<std::size_t>(kD) * kWindow * kKVHeads;
+    const std::size_t context_count  = static_cast<std::size_t>(kD) * window * kKVHeads;
 
     std::vector<float> q(q_count);
     std::vector<float> query_k(query_kv_count);
@@ -140,8 +141,8 @@ int run_case(int tokens, int context_length, InputProfile profile = InputProfile
         std::fill(context_v.begin(), context_v.end(), 0.0f);
         for (int kv_head = 0; kv_head < kKVHeads; ++kv_head) {
             for (int d = 0; d < kD; ++d) {
-                context_v[context_index(d, kv_head, 0)]         = 512.0f;
-                context_v[context_index(d, kv_head, 1)]         = 256.0f;
+                context_v[context_index(window, d, kv_head, 0)] = 512.0f;
+                context_v[context_index(window, d, kv_head, 1)] = 256.0f;
                 query_v[query_kv_index(d, kv_head, tokens - 1)] = 1.0f;
             }
         }
@@ -159,7 +160,7 @@ int run_case(int tokens, int context_length, InputProfile profile = InputProfile
     }
     std::vector<double> reference;
     sliding_window_attention_oracle(q, query_k, query_v, context_k, context_v, positions,
-                                    context_length, valid_columns, reference);
+                                    context_length, valid_columns, window, reference);
 
     const auto q_expected         = bf16_bits(q);
     const auto query_k_expected   = bf16_bits(query_k);
@@ -187,20 +188,21 @@ int run_case(int tokens, int context_length, InputProfile profile = InputProfile
     Tensor valid_tensor(d_valid.p, DType::I32, {1});
     Tensor lane_tensor(d_lane.p, DType::I32, {1});
     Tensor out_tensor(d_out.data(), DType::BF16, {kD, kQHeads, tokens, 1});
-    CyclicKVCacheLayerView context = make_context_view(d_context_k, d_context_v);
+    CyclicKVCacheLayerView context = make_context_view(d_context_k, d_context_v, window);
     const ops::SlidingWindowAttentionExecutionEnvelope envelope{
         0, static_cast<std::uint32_t>(envelope_max)};
     const std::size_t workspace_bytes = ops::sliding_window_attention_workspace_capacity_bytes(
-        kGeometry, kWindow, envelope, tokens, tokens, 1);
-    DeviceArena workspace(workspace_bytes);
+        kGeometry, static_cast<std::uint32_t>(window), envelope, tokens, tokens, 1);
+    DeviceArena workspace(std::max<std::size_t>(workspace_bytes, 1));
 
     ops::sliding_window_attention(q_tensor, query_k_tensor, query_v_tensor, positions_tensor,
-                                  valid_tensor, lane_tensor, kGeometry, kWindow, kScale, context,
-                                  envelope, workspace, out_tensor, nullptr);
+                                  valid_tensor, lane_tensor, kGeometry,
+                                  static_cast<std::uint32_t>(window), kScale, context, envelope,
+                                  workspace, out_tensor, nullptr);
     cuda_synchronize();
 
-    std::string label = "sliding_window_attention T=" + std::to_string(tokens) +
-                        " V=" + std::to_string(valid_columns) +
+    std::string label = "sliding_window_attention W=" + std::to_string(window) +
+                        " T=" + std::to_string(tokens) + " V=" + std::to_string(valid_columns) +
                         " L=" + std::to_string(context_length);
     if (envelope_max != context_length) {
         label += " envelope=[0," + std::to_string(envelope_max) + "]";
@@ -241,12 +243,12 @@ int run_case(int tokens, int context_length, InputProfile profile = InputProfile
     return failures;
 }
 
-int run_batch_case() {
+int run_batch_case(int window) {
     constexpr int tokens                 = 2;
     constexpr int batch                  = 2;
     const std::size_t row_q_count        = static_cast<std::size_t>(kD) * kQHeads * tokens;
     const std::size_t row_kv_count       = static_cast<std::size_t>(kD) * kKVHeads * tokens;
-    const std::size_t lane_context_count = static_cast<std::size_t>(kD) * kWindow * kKVHeads;
+    const std::size_t lane_context_count = static_cast<std::size_t>(kD) * window * kKVHeads;
     std::vector<float> q(row_q_count * batch);
     std::vector<float> query_k(row_kv_count * batch);
     std::vector<float> query_v(row_kv_count * batch);
@@ -265,7 +267,7 @@ int run_batch_case() {
     round_to_bf16(context_k);
     round_to_bf16(context_v);
 
-    const std::vector<int> positions{4096, 4097, 65, 65};
+    const std::vector<int> positions{window, window + 1, 65, 65};
     const std::vector<std::int32_t> valid{2, 1};
     const std::vector<std::int32_t> lanes{1, 0};
 
@@ -287,10 +289,11 @@ int run_batch_case() {
     Tensor valid_tensor(d_valid.p, DType::I32, {batch});
     Tensor lanes_tensor(d_lanes.p, DType::I32, {batch});
     Tensor out_tensor(d_out.data(), DType::BF16, {kD, kQHeads, tokens, batch});
-    constexpr ops::SlidingWindowAttentionExecutionEnvelope envelope{0, 4096};
+    const ops::SlidingWindowAttentionExecutionEnvelope envelope{0,
+                                                                static_cast<std::uint32_t>(window)};
     DeviceArena workspace(ops::sliding_window_attention_workspace_capacity_bytes(
-        kGeometry, kWindow, envelope, tokens, tokens, batch));
-    auto context = make_context_view(d_context_k, d_context_v, batch);
+        kGeometry, static_cast<std::uint32_t>(window), envelope, tokens, tokens, batch));
+    auto context = make_context_view(d_context_k, d_context_v, window, batch);
 
     std::vector<double> expected(row_q_count * batch);
     for (int b = 0; b < batch; ++b) {
@@ -314,19 +317,20 @@ int run_batch_case() {
         std::vector<double> row_expected;
         sliding_window_attention_oracle(row_q, row_query_k, row_query_v, row_context_k,
                                         row_context_v, row_positions, row_positions.front(),
-                                        valid[static_cast<std::size_t>(b)], row_expected);
+                                        valid[static_cast<std::size_t>(b)], window, row_expected);
         std::copy(row_expected.begin(), row_expected.end(),
                   expected.begin() + static_cast<std::ptrdiff_t>(b * row_q_count));
     }
 
     ops::sliding_window_attention(q_tensor, query_k_tensor, query_v_tensor, positions_tensor,
-                                  valid_tensor, lanes_tensor, kGeometry, kWindow, kScale, context,
-                                  envelope, workspace, out_tensor, nullptr);
+                                  valid_tensor, lanes_tensor, kGeometry,
+                                  static_cast<std::uint32_t>(window), kScale, context, envelope,
+                                  workspace, out_tensor, nullptr);
     cuda_synchronize();
 
-    int failures = verify_reduction("sliding_window_attention B=2 mixed lengths and lanes",
-                                    from_device_bf16(d_out.data(), row_q_count * batch), expected,
-                                    kSlidingWindowBf16Criterion);
+    int failures = verify_reduction(
+        "sliding_window_attention W=" + std::to_string(window) + " B=2 mixed lengths and lanes",
+        from_device_bf16(d_out.data(), row_q_count * batch), expected, kSlidingWindowBf16Criterion);
     failures += d_out.verify_guards("sliding_window_attention B=2 output guards");
     return failures;
 }
@@ -341,31 +345,39 @@ int main() {
 
     int failures = 0;
     constexpr ops::SlidingWindowAttentionExecutionEnvelope capacity_envelope{0, 8194};
-    const std::size_t interval = ops::sliding_window_attention_workspace_capacity_bytes(
-        kGeometry, kWindow, capacity_envelope, 1, 16, 1);
-    const std::size_t endpoint = ops::sliding_window_attention_workspace_capacity_bytes(
-        kGeometry, kWindow, capacity_envelope, 16, 16, 1);
-    if (interval != endpoint) {
-        std::cerr << "sliding_window_attention interval capacity did not resolve to its monotonic "
-                     "endpoint\n";
-        ++failures;
+    for (const std::uint32_t window : {2048U, 4096U}) {
+        const std::size_t interval = ops::sliding_window_attention_workspace_capacity_bytes(
+            kGeometry, window, capacity_envelope, 1, 16, 1);
+        const std::size_t endpoint = ops::sliding_window_attention_workspace_capacity_bytes(
+            kGeometry, window, capacity_envelope, 16, 16, 1);
+        if (interval != endpoint) {
+            std::cerr << "sliding_window_attention W=" << window
+                      << " interval capacity did not resolve to its monotonic endpoint\n";
+            ++failures;
+        }
     }
     try {
-        (void)ops::sliding_window_attention_workspace_capacity_bytes(kGeometry, kWindow,
+        (void)ops::sliding_window_attention_workspace_capacity_bytes(kGeometry, 2048,
                                                                      capacity_envelope, 0, 16, 1);
         std::cerr << "sliding_window_attention accepted an invalid token interval\n";
         ++failures;
     } catch (const std::invalid_argument&) {}
-    failures += run_case(1, 0);
-    failures += run_case(16, 1);
-    failures += run_case(8, 96, InputProfile::Random, 4096);
-    failures += run_case(16, 4096);
-    failures += run_case(2, 4096, InputProfile::WindowBoundary);
-    failures += run_case(2, 8194);
-    failures += run_case(8, 65, InputProfile::Random, 96);
-    failures += run_case(8, 65, InputProfile::Random, 96, 0);
-    failures += run_case(8, 4096, InputProfile::Random, 4096, 0);
-    failures += run_batch_case();
+    failures += run_case(4096, 1, 0);
+    failures += run_case(4096, 16, 1);
+    failures += run_case(4096, 8, 96, InputProfile::Random, 4096);
+    failures += run_case(4096, 16, 4096);
+    failures += run_case(4096, 2, 4096, InputProfile::WindowBoundary);
+    failures += run_case(4096, 2, 8194);
+    failures += run_case(4096, 8, 65, InputProfile::Random, 96);
+    failures += run_case(4096, 8, 65, InputProfile::Random, 96, 0);
+    failures += run_case(4096, 8, 4096, InputProfile::Random, 4096, 0);
+    failures += run_batch_case(4096);
+
+    failures += run_case(2048, 8, 96);
+    failures += run_case(2048, 8, 97);
+    failures += run_case(2048, 8, 2048);
+    failures += run_case(2048, 2, 2048, InputProfile::WindowBoundary);
+    failures += run_batch_case(2048);
 
     if (failures != 0) {
         std::cerr << "sliding_window_attention failures=" << failures << '\n';

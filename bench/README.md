@@ -479,12 +479,19 @@ cmake --build build --parallel --target ninfer_context_softmax_attention_bench
 ```
 
 `ninfer_sliding_window_attention_bench` measures the public Q32/KV8/D128 symmetric sliding-window
-contract over the 4096-slot cyclic BF16 cache and a complete non-causal query block.
+contract over a 2048- or 4096-slot cyclic BF16-K/FP16-V cache and a complete non-causal query
+block. It reports the production route, split capacity, Graph node count, and exact batch shape.
 
 ```bash
 cmake --build build --parallel --target ninfer_sliding_window_attention_bench
 ./build/bench/ninfer_sliding_window_attention_bench \
+  --window 2048 --tokens 8 --batches 1,2,3,4,5,6,7,8 \
+  --context 64,96,97,128,2047,2048,262144 \
+  --execution graph --cache cold --warmup 10 --repeat 61
+./build/bench/ninfer_sliding_window_attention_bench \
+  --window 4096 \
   --tokens 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 \
+  --batches 1 \
   --context 0,32,64,96,128,4095,4096,8192,262144 \
   --execution graph --cache cold --warmup 10 --repeat 61
 ```

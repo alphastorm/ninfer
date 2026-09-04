@@ -4,7 +4,7 @@
 
 namespace ninfer::ops::detail {
 
-inline constexpr std::int32_t kSlidingWindowMaxCandidateSplit = 32;
+inline constexpr std::int32_t kSlidingWindowMaxSplits = 32;
 
 enum class SlidingWindowAttentionRoute {
     Direct,
@@ -17,10 +17,11 @@ struct SlidingWindowAttentionPlan {
     std::int32_t warps;
     std::int32_t split_capacity;
     std::int32_t max_context;
+    std::int32_t window;
 };
 
 [[nodiscard]] SlidingWindowAttentionPlan
-sliding_window_attention_resolve_plan(std::int32_t tokens,
+sliding_window_attention_resolve_plan(std::uint32_t window, std::int32_t tokens,
                                       SlidingWindowAttentionExecutionEnvelope envelope);
 [[nodiscard]] const char* sliding_window_attention_route_name(SlidingWindowAttentionRoute route);
 

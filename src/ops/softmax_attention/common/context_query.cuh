@@ -130,9 +130,11 @@ __device__ __forceinline__ void context_query_split_partial_body(
     query_k += QueryKvElements * batch;
     query_v += QueryKvElements * batch;
     out += QueryElements * batch;
-    partial_acc += PartialElements * split_capacity * batch;
-    partial_m += StatElements * split_capacity * batch;
-    partial_l += StatElements * split_capacity * batch;
+    if constexpr (!DirectOutput) {
+        partial_acc += PartialElements * split_capacity * batch;
+        partial_m += StatElements * split_capacity * batch;
+        partial_l += StatElements * split_capacity * batch;
+    }
     const int valid = valid_columns[batch];
     if (kv_head >= kContextQueryKVHeads || split >= split_capacity || length < 0 ||
         length > max_context || valid < 0 || valid > Tokens) {

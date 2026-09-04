@@ -4,22 +4,21 @@
 
 namespace ninfer::ops {
 
-inline constexpr int kSlidingWindowAttentionWindow = 4096;
-
+template <int Window>
 struct SlidingWindowAttentionPolicy {
+    static_assert(Window == 2048 || Window == 4096);
+    static_assert((Window & (Window - 1)) == 0);
     static constexpr bool PageMapped = false;
 
     const std::int32_t* positions;
     int padded_context;
 
-    __device__ __forceinline__ int context_count(int value) const {
-        return min(value, kSlidingWindowAttentionWindow - 1);
-    }
+    __device__ __forceinline__ int context_count(int value) const { return min(value, Window - 1); }
 
     __device__ __forceinline__ int query_position(int token) const { return positions[token]; }
 
     __device__ __forceinline__ bool allow_context(int query, int key) const {
-        return key >= query - (kSlidingWindowAttentionWindow - 1);
+        return key >= query - (Window - 1);
     }
 
     __device__ __forceinline__ std::int64_t context_tile(int kv_head, int, int) const {
@@ -28,7 +27,7 @@ struct SlidingWindowAttentionPolicy {
 
     __device__ __forceinline__ std::int64_t context_index(std::int64_t tile, int d, int position,
                                                           int) const {
-        const int slot = position & (kSlidingWindowAttentionWindow - 1);
+        const int slot = position & (Window - 1);
         return tile + d + static_cast<std::int64_t>(kContextQueryHeadDim) * slot;
     }
 
@@ -36,7 +35,7 @@ struct SlidingWindowAttentionPolicy {
     __device__ __forceinline__ void prime(int, int, int, int) {}
 };
 
-template <int Tokens, int WarpsPerCta, int KeyBlock, bool DirectOutput>
+template <int Window, int Tokens, int WarpsPerCta, int KeyBlock, bool DirectOutput>
 __launch_bounds__(WarpsPerCta * 32, 2) __global__
     void sliding_window_attention_split_partial_kernel(
         const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ query_k,
@@ -52,17 +51,17 @@ __launch_bounds__(WarpsPerCta * 32, 2) __global__
     context_k += lane_elements * lanes[batch];
     context_v += lane_elements * lanes[batch];
     const std::int32_t* batch_positions = positions + static_cast<std::int64_t>(Tokens) * batch;
-    SlidingWindowAttentionPolicy policy{
+    SlidingWindowAttentionPolicy<Window> policy{
         .positions      = batch_positions,
         .padded_context = padded_context,
     };
-    context_query_split_partial_body<SlidingWindowAttentionPolicy, Tokens, WarpsPerCta, KeyBlock,
-                                     DirectOutput>(
+    context_query_split_partial_body<SlidingWindowAttentionPolicy<Window>, Tokens, WarpsPerCta,
+                                     KeyBlock, DirectOutput>(
         q, query_k, query_v, valid_columns, context_k, context_v, policy, batch_positions[0],
         max_context, split_capacity, scale, partial_acc, partial_m, partial_l, out);
 }
 
-template <int Tokens, int KeyBlock, int WarpsPerBlock>
+template <int Window, int Tokens, int KeyBlock, int WarpsPerBlock>
 __launch_bounds__(WarpsPerBlock * 32, 2) __global__
     void sliding_window_attention_reduce_kernel(const __nv_bfloat16* __restrict__ partial_acc,
                                                 const float* __restrict__ partial_m,
@@ -102,7 +101,7 @@ __launch_bounds__(WarpsPerBlock * 32, 2) __global__
         }
         return;
     }
-    const int context_count = min(length, kSlidingWindowAttentionWindow - 1);
+    const int context_count = min(length, Window - 1);
     const int context_tiles = (context_count + KeyBlock - 1) / KeyBlock;
     const int active_splits = context_tiles > 0 ? min(context_tiles, split_capacity) : 1;
 
