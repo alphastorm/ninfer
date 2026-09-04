@@ -101,6 +101,8 @@ add_library(ninfer_ops STATIC
   ops/launcher/vision_pos_embed.cu
   ops/rmsnorm_rope/rmsnorm_rope.cpp
   ops/rmsnorm_rope/launch.cu
+  ops/context_kv_materialize/context_kv_materialize.cpp
+  ops/context_kv_materialize/decode.cu
   # Softmax Attention and KV-cache state transitions.
   ops/softmax_attention/dense/causal_cache/causal_softmax_attention.cpp
   ops/softmax_attention/dense/causal_cache/small_t.cu
