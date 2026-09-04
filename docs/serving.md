@@ -29,9 +29,9 @@ With `C=2` and two extra Device checkpoint slots, the process owns two active St
 plus a global pool of two Device-resident checkpoints. Eight pinned Host State slots and 8 GiB of
 pinned Host KV retain inactive continuations under Device pressure. Active request capacity is two.
 
-Other artifacts use the same command shape with their own path. For 35B-A3B text-only DFlash,
-replace the MTP selection with `--spec dflash --draft-tokens 7 --lm-head-draft`; DFlash cannot be
-combined with `--vision`.
+Other artifacts use the same command shape with their own path. For 35B-A3B DFlash, replace the MTP
+selection with `--spec dflash --draft-tokens 7 --lm-head-draft`. It may remain combined with
+`--vision`.
 
 When `--model-id` is omitted, the server advertises and accepts the loaded container's exact
 `identity.model_id`. An explicit `--model-id` remains a public HTTP alias override and does not
@@ -41,8 +41,10 @@ Vision is disabled by default: its weights and Vision-specific unified-workspace
 allocated, and media requests and token-count requests fail with HTTP 400 `vision_disabled`. Add
 `--vision` when the server must accept image or video input. Speculative residency is likewise
 frozen by `--spec mtp|dflash` and `--draft-tokens`; omitting `--spec` loads neither backend.
-`--lm-head-draft` additionally loads the optimized proposal head. DFlash is 35B-A3B text-only and
-cannot be combined with `--vision`. A later request cannot enable a capability omitted at startup.
+`--lm-head-draft` additionally loads the optimized proposal head. On 35B-A3B, DFlash can be combined
+with `--vision`; it accelerates generated-text decode after multimodal prefill, while Vision encode
+and prefill remain outside speculative acceleration. A later request cannot enable a capability
+omitted at startup.
 
 ## Endpoints
 

@@ -173,7 +173,8 @@ Use the same command with the exact older Qwen3.6 NVFP4 or 35B-A3B file. Migrati
 metadata without rewriting the weight payload.
 
 GPU residency is fixed at process startup. `--spec` selects speculative decoding residency, and
-`--vision` selects Vision residency. DFlash is available for text-only Qwen3.6-35B-A3B execution.
+`--vision` independently selects Vision residency. Qwen3.6-35B-A3B DFlash can be combined with
+Vision; it accelerates generated-text decode after multimodal prefill, not Vision encode itself.
 
 ## Docker
 
@@ -219,7 +220,8 @@ All registered model IDs support:
 - OpenAI Responses Core, OpenAI Chat Completions, and Anthropic Messages, including streaming,
   tools, local response state, token counting, and usage accounting.
 
-The 35B-A3B target additionally supports text-only DFlash with draft windows from one to fifteen.
+The 35B-A3B target additionally supports DFlash with draft windows from one to fifteen for Text and
+image/video Vision prompts.
 
 The product boundary remains intentionally small:
 

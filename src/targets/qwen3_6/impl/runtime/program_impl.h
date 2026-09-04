@@ -1201,9 +1201,6 @@ ProgramImplCore::ProgramImplCore(const LoadedModelData& model_in, const Sequence
     if (model.mtp.has_value() && model.dflash.has_value()) {
         throw std::invalid_argument("MTP and DFlash model views are mutually exclusive");
     }
-    if (model.dflash.has_value() && model.vision.has_value()) {
-        throw std::invalid_argument("DFlash and Vision model views are mutually exclusive");
-    }
     if (workspace_plan.general_capacity == 0 ||
         workspace_plan.vision.has_value() != vision_enabled ||
         (workspace_plan.vision &&
@@ -10675,6 +10672,7 @@ void ProgramImplCore::prepare_graphs() {
             *dflash_host_ingress       = {};
             *dflash_host_egress        = {};
             const std::uint32_t extent = std::min(draft_window, capacity - frontier - 1U);
+            const std::uint32_t width  = draft_window + 1U;
             for (std::uint32_t row = 0; row < batch_size; ++row) {
                 dflash_host_ingress->anchors[row] = 0;
                 dflash_host_ingress->execution_frontiers[row] =
@@ -10684,6 +10682,11 @@ void ProgramImplCore::prepare_graphs() {
                 dflash_host_ingress->proposal_extents[row] = static_cast<std::int32_t>(extent);
                 dflash_host_ingress->target_valid_columns[row] =
                     static_cast<std::int32_t>(extent + 1U);
+                for (std::uint32_t column = 0; column < width; ++column) {
+                    dflash_host_ingress->target_rope_positions[row * width + column] =
+                        checked_i32(frontier + std::min(column, extent),
+                                    "graph representative DFlash target RoPE position");
+                }
                 dflash_host_ingress->text_kv_table_rows[row]      = static_cast<std::int32_t>(row);
                 dflash_host_ingress->dflash_kv_table_rows[row]    = static_cast<std::int32_t>(row);
                 dflash_host_ingress->active_lanes[row]            = static_cast<std::int32_t>(row);
@@ -11690,6 +11693,11 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
                 checked_i32(sequence.dflash_context_frontier, "DFlash context frontier");
             dflash_host_ingress->proposal_extents[row]     = static_cast<std::int32_t>(extent);
             dflash_host_ingress->target_valid_columns[row] = static_cast<std::int32_t>(extent + 1U);
+            for (std::uint32_t column = 0; column < width; ++column) {
+                const std::uint32_t position = frontier + std::min(column, extent);
+                dflash_host_ingress->target_rope_positions[row * width + column] =
+                    checked_i32(position, "DFlash target RoPE position") + sequence.rope_delta;
+            }
             dflash_host_ingress->text_kv_table_rows[row] =
                 text_kv_addresses->bound_row(sequence.kv->text);
             dflash_host_ingress->dflash_kv_table_rows[row] =
