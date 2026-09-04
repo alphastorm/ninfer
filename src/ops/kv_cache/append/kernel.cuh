@@ -335,7 +335,6 @@ __launch_bounds__(256) __global__
 
 inline constexpr int kKVCacheAppendPrefixHeadDim = 128;
 inline constexpr int kKVCacheAppendPrefixHeads   = 8;
-inline constexpr int kKVCacheAppendPrefixWindow  = 4096;
 inline constexpr int kKVCacheAppendPrefixPage    = 64;
 
 __device__ __forceinline__ void kv_cache_append_prefix_copy_cyclic_unit(
@@ -389,6 +388,7 @@ __device__ __forceinline__ void kv_cache_append_prefix_copy_paged_unit(
     *reinterpret_cast<int4*>(&cache_v[dst + 8]) = v1;
 }
 
+template <int Capacity>
 __global__ void kv_cache_append_prefix_cyclic_kernel(
     const __nv_bfloat16* __restrict__ k, const __nv_bfloat16* __restrict__ v,
     const std::int32_t* __restrict__ positions, const std::int32_t* __restrict__ counts,
@@ -419,7 +419,7 @@ __global__ void kv_cache_append_prefix_cyclic_kernel(
     const int token         = static_cast<int>(blockIdx.x) * TokensPerBlock + local_token;
     if (token >= count) return;
     const int position = positions[token];
-    const int slot     = position & (kKVCacheAppendPrefixWindow - 1);
+    const int slot     = position & (Capacity - 1);
     kv_cache_append_prefix_copy_cyclic_unit(k, v, cache_k, cache_v, token, unit_in_token, slot,
                                             padded_capacity);
 }

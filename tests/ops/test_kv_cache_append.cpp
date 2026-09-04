@@ -25,7 +25,8 @@ constexpr int kKVHeads       = 8;
 constexpr int kPage          = 64;
 constexpr int kLogicalPages  = 3;
 constexpr int kPhysicalPages = 6;
-constexpr int kWindow        = 4096;
+constexpr int kDFlash2Window = 2048;
+constexpr int kDFlashWindow  = 4096;
 constexpr int kFullHeadDim   = 256;
 constexpr int kFullGroup     = 64;
 constexpr int kFullGroups    = kFullHeadDim / kFullGroup;
@@ -447,11 +448,11 @@ std::size_t input_index(int d, int head, int token) {
                 static_cast<std::size_t>(kKVHeads) * static_cast<std::size_t>(token));
 }
 
-std::size_t cyclic_cache_index(int d, int head, int slot) {
+std::size_t cyclic_cache_index(int d, int head, int slot, int capacity) {
     return static_cast<std::size_t>(d) +
            static_cast<std::size_t>(kHeadDim) *
                (static_cast<std::size_t>(slot) +
-                static_cast<std::size_t>(kWindow) * static_cast<std::size_t>(head));
+                static_cast<std::size_t>(capacity) * static_cast<std::size_t>(head));
 }
 
 std::size_t paged_cache_index(int d, int head, int position,
@@ -480,14 +481,14 @@ void append_oracle(std::vector<std::uint16_t>& cache_k, std::vector<std::uint16_
                    const std::vector<std::uint16_t>& input_k,
                    const std::vector<std::uint16_t>& input_v,
                    const std::vector<std::int32_t>& positions, int commit_count, bool cyclic,
-                   const std::vector<std::int32_t>& mapping) {
+                   const std::vector<std::int32_t>& mapping, int cyclic_capacity = 0) {
     for (int token = 0; token < commit_count; ++token) {
         const int position = positions[static_cast<std::size_t>(token)];
-        const int slot     = cyclic ? position % kWindow : 0;
+        const int slot     = cyclic ? position % cyclic_capacity : 0;
         for (int head = 0; head < kKVHeads; ++head) {
             for (int d = 0; d < kHeadDim; ++d) {
                 const auto src = input_index(d, head, token);
-                const auto dst = cyclic ? cyclic_cache_index(d, head, slot)
+                const auto dst = cyclic ? cyclic_cache_index(d, head, slot, cyclic_capacity)
                                         : paged_cache_index(d, head, position, mapping);
                 cache_k[dst]   = input_k[src];
                 cache_v[dst]   = input_v[src];
@@ -509,13 +510,13 @@ PagedKVBatchLayerView paged_view(GuardedDeviceBuffer& k, GuardedDeviceBuffer& v,
     };
 }
 
-CyclicKVCacheLayerView cyclic_view(GuardedDeviceBuffer& k, GuardedDeviceBuffer& v,
+CyclicKVCacheLayerView cyclic_view(GuardedDeviceBuffer& k, GuardedDeviceBuffer& v, int capacity,
                                    int lane_capacity = 1) {
     return {
-        .k        = Tensor(k.data(), DType::BF16, {kHeadDim, kWindow, kKVHeads, lane_capacity}),
-        .v        = Tensor(v.data(), DType::BF16, {kHeadDim, kWindow, kKVHeads, lane_capacity}),
-        .capacity = kWindow,
-        .padded_capacity = kWindow,
+        .k        = Tensor(k.data(), DType::BF16, {kHeadDim, capacity, kKVHeads, lane_capacity}),
+        .v        = Tensor(v.data(), DType::BF16, {kHeadDim, capacity, kKVHeads, lane_capacity}),
+        .capacity = static_cast<std::uint32_t>(capacity),
+        .padded_capacity = static_cast<std::uint32_t>(capacity),
         .num_kv_heads    = kKVHeads,
         .head_dim        = kHeadDim,
         .lane_capacity   = lane_capacity,
@@ -523,13 +524,14 @@ CyclicKVCacheLayerView cyclic_view(GuardedDeviceBuffer& k, GuardedDeviceBuffer& 
 }
 
 int run_case(int tokens, int commit_count, int first_position, bool cyclic,
-             std::vector<std::int32_t> mapping = {}, int min_count = 0) {
+             std::vector<std::int32_t> mapping = {}, int min_count = 0,
+             int cyclic_capacity = kDFlashWindow) {
     if (!cyclic && mapping.size() != kLogicalPages) {
         throw std::invalid_argument("paged prefix case requires a complete mapping");
     }
     const std::size_t input_count = static_cast<std::size_t>(kHeadDim) * kKVHeads * tokens;
-    const std::size_t cache_count =
-        static_cast<std::size_t>(kHeadDim) * kKVHeads * (cyclic ? kWindow : kPage * kPhysicalPages);
+    const std::size_t cache_count = static_cast<std::size_t>(kHeadDim) * kKVHeads *
+                                    (cyclic ? cyclic_capacity : kPage * kPhysicalPages);
     const auto host_k = patterned_bits(input_count, 0x10203040u + static_cast<unsigned>(tokens));
     const auto host_v =
         patterned_bits(input_count, 0x50607080u + static_cast<unsigned>(commit_count));
@@ -541,7 +543,8 @@ int run_case(int tokens, int commit_count, int first_position, bool cyclic,
     }
     auto expected_k = initial_k;
     auto expected_v = initial_v;
-    append_oracle(expected_k, expected_v, host_k, host_v, positions, commit_count, cyclic, mapping);
+    append_oracle(expected_k, expected_v, host_k, host_v, positions, commit_count, cyclic, mapping,
+                  cyclic_capacity);
 
     DeviceBuffer d_k         = to_device(host_k);
     DeviceBuffer d_v         = to_device(host_v);
@@ -565,7 +568,7 @@ int run_case(int tokens, int commit_count, int first_position, bool cyclic,
     };
     if (cyclic) {
         ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, selector_tensor, envelope,
-                                    cyclic_view(cache_k, cache_v), nullptr);
+                                    cyclic_view(cache_k, cache_v, cyclic_capacity), nullptr);
     } else {
         ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, selector_tensor, envelope,
                                     paged_view(cache_k, cache_v, d_table), nullptr);
@@ -575,7 +578,8 @@ int run_case(int tokens, int commit_count, int first_position, bool cyclic,
     const std::string label = std::string("kv_cache_append_prefix ") +
                               (cyclic ? "cyclic" : "paged") + " T=" + std::to_string(tokens) +
                               " C=" + std::to_string(commit_count) +
-                              " min=" + std::to_string(min_count);
+                              " min=" + std::to_string(min_count) +
+                              (cyclic ? " capacity=" + std::to_string(cyclic_capacity) : "");
     int failures =
         verify_exact((label + " cache k").c_str(),
                      from_device<std::uint16_t>(cache_k.data(), cache_count), expected_k);
@@ -594,11 +598,10 @@ int run_case(int tokens, int commit_count, int first_position, bool cyclic,
     return failures;
 }
 
-int cyclic_graph_replay_case() {
-    constexpr int tokens          = 16;
-    constexpr int first_position  = 2 * kWindow - 4;
+int cyclic_graph_replay_case(int capacity, int tokens) {
+    const int first_position      = 2 * capacity - 4;
     const std::size_t input_count = static_cast<std::size_t>(kHeadDim) * kKVHeads * tokens;
-    const std::size_t cache_count = static_cast<std::size_t>(kHeadDim) * kWindow * kKVHeads;
+    const std::size_t cache_count = static_cast<std::size_t>(kHeadDim) * capacity * kKVHeads;
     const auto host_k             = patterned_bits(input_count, 0x11223344u);
     const auto host_v             = patterned_bits(input_count, 0x55667788u);
     const auto initial_k          = patterned_bits(cache_count, 0x99aabbccu);
@@ -618,7 +621,7 @@ int cyclic_graph_replay_case() {
     Tensor position_tensor(d_positions.p, DType::I32, {tokens, 1});
     Tensor count_tensor(d_count.p, DType::I32, {1});
     Tensor lane_tensor(d_lane.p, DType::I32, {1});
-    auto cache = cyclic_view(cache_k, cache_v);
+    auto cache = cyclic_view(cache_k, cache_v, capacity);
 
     cudaStream_t stream        = nullptr;
     cudaGraph_t graph          = nullptr;
@@ -626,8 +629,9 @@ int cyclic_graph_replay_case() {
     cuda_check(cudaStreamCreate(&stream), "create kv append stream");
     cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
                "begin kv append capture");
-    ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, lane_tensor, {0, tokens},
-                                cache, stream);
+    const ops::KVCacheAppendPrefixExecutionEnvelope envelope{0, static_cast<std::uint32_t>(tokens)};
+    ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, lane_tensor, envelope, cache,
+                                stream);
     cuda_check(cudaStreamEndCapture(stream, &graph), "end kv append capture");
     cuda_check(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0),
                "instantiate kv append graph");
@@ -642,9 +646,11 @@ int cyclic_graph_replay_case() {
 
         auto expected_k = initial_k;
         auto expected_v = initial_v;
-        append_oracle(expected_k, expected_v, host_k, host_v, positions, commit_count, true, {});
+        append_oracle(expected_k, expected_v, host_k, host_v, positions, commit_count, true, {},
+                      capacity);
         const std::string label =
-            "kv_cache_append_prefix cyclic graph C=" + std::to_string(commit_count);
+            "kv_cache_append_prefix cyclic graph capacity=" + std::to_string(capacity) +
+            " C=" + std::to_string(commit_count);
         failures +=
             verify_exact((label + " cache k").c_str(),
                          from_device<std::uint16_t>(cache_k.data(), cache_count), expected_k);
@@ -750,17 +756,22 @@ int paged_graph_replay_case() {
     return failures;
 }
 
-int batch_selector_case(bool cyclic) {
+int batch_selector_case(bool cyclic, int cyclic_capacity = kDFlashWindow) {
     constexpr int tokens = 3;
     constexpr int batch  = 2;
     const std::vector<std::int32_t> counts{1, 3};
     const std::vector<std::int32_t> selectors{1, 0};
     const std::vector<std::int32_t> positions =
-        cyclic ? std::vector<std::int32_t>{kWindow - 1, kWindow, kWindow + 1, 5, 6, 7}
+        cyclic ? std::vector<std::int32_t>{cyclic_capacity - 1,
+                                           cyclic_capacity,
+                                           cyclic_capacity + 1,
+                                           5,
+                                           6,
+                                           7}
                : std::vector<std::int32_t>{63, 64, 65, 5, 6, 7};
-    const std::size_t row_input_count = static_cast<std::size_t>(kHeadDim) * kKVHeads * tokens;
-    const std::size_t lane_cache_count =
-        static_cast<std::size_t>(kHeadDim) * kKVHeads * (cyclic ? kWindow : kPage * kPhysicalPages);
+    const std::size_t row_input_count  = static_cast<std::size_t>(kHeadDim) * kKVHeads * tokens;
+    const std::size_t lane_cache_count = static_cast<std::size_t>(kHeadDim) * kKVHeads *
+                                         (cyclic ? cyclic_capacity : kPage * kPhysicalPages);
     const auto host_k    = patterned_bits(row_input_count * batch, 0x31415926u);
     const auto host_v    = patterned_bits(row_input_count * batch, 0x27182818u);
     const auto initial_k = patterned_bits(lane_cache_count * (cyclic ? batch : 1), 0x16180339u);
@@ -784,7 +795,8 @@ int batch_selector_case(bool cyclic) {
                     const std::size_t dst =
                         cyclic ? static_cast<std::size_t>(selectors[static_cast<std::size_t>(b)]) *
                                          lane_cache_count +
-                                     cyclic_cache_index(d, head, position % kWindow)
+                                     cyclic_cache_index(d, head, position % cyclic_capacity,
+                                                        cyclic_capacity)
                                : paged_cache_index(d, head, position, mapping);
                     expected_k[dst] = host_k[src];
                     expected_v[dst] = host_v[src];
@@ -812,7 +824,7 @@ int batch_selector_case(bool cyclic) {
     constexpr ops::KVCacheAppendPrefixExecutionEnvelope envelope{0, tokens};
     if (cyclic) {
         ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, selector_tensor, envelope,
-                                    cyclic_view(cache_k, cache_v, batch), nullptr);
+                                    cyclic_view(cache_k, cache_v, cyclic_capacity, batch), nullptr);
     } else {
         ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, selector_tensor, envelope,
                                     paged_view(cache_k, cache_v, d_tables, batch), nullptr);
@@ -820,7 +832,81 @@ int batch_selector_case(bool cyclic) {
     cuda_synchronize();
 
     const std::string label =
-        std::string("kv_cache_append_prefix B=2 ") + (cyclic ? "cyclic lanes" : "paged rows");
+        std::string("kv_cache_append_prefix B=2 ") +
+        (cyclic ? "cyclic lanes capacity=" + std::to_string(cyclic_capacity) : "paged rows");
+    int failures =
+        verify_exact((label + " k").c_str(),
+                     from_device<std::uint16_t>(cache_k.data(), expected_k.size()), expected_k);
+    failures +=
+        verify_exact((label + " v").c_str(),
+                     from_device<std::uint16_t>(cache_v.data(), expected_v.size()), expected_v);
+    failures += cache_k.verify_guards((label + " k guards").c_str());
+    failures += cache_v.verify_guards((label + " v guards").c_str());
+    return failures;
+}
+
+int cyclic_decode_batch_case(int capacity) {
+    constexpr int tokens = 8;
+    constexpr int batch  = 8;
+    const std::array<std::int32_t, batch> counts{0, 1, 2, 3, 4, 5, 7, 8};
+    const std::array<std::int32_t, batch> lanes{7, 0, 6, 1, 5, 2, 4, 3};
+    std::vector<std::int32_t> positions(static_cast<std::size_t>(tokens) * batch);
+    for (int b = 0; b < batch; ++b) {
+        const int first = 2 * capacity - 3 + 11 * b;
+        for (int token = 0; token < tokens; ++token) {
+            positions[static_cast<std::size_t>(b * tokens + token)] = first + token;
+        }
+    }
+
+    const std::size_t row_input_count  = static_cast<std::size_t>(kHeadDim) * kKVHeads * tokens;
+    const std::size_t lane_cache_count = static_cast<std::size_t>(kHeadDim) * kKVHeads * capacity;
+    const auto host_k                  = patterned_bits(row_input_count * batch, 0x2468ace0u);
+    const auto host_v    = finite_patterned_bf16_bits(row_input_count * batch, 0x13579bdfu);
+    const auto initial_k = patterned_bits(lane_cache_count * batch, 0x10293847u);
+    const auto initial_v = patterned_bits(lane_cache_count * batch, 0x56473829u);
+    auto expected_k      = initial_k;
+    auto expected_v      = initial_v;
+    for (int b = 0; b < batch; ++b) {
+        for (int token = 0; token < counts[static_cast<std::size_t>(b)]; ++token) {
+            const int position = positions[static_cast<std::size_t>(b * tokens + token)];
+            for (int head = 0; head < kKVHeads; ++head) {
+                for (int d = 0; d < kHeadDim; ++d) {
+                    const std::size_t src =
+                        static_cast<std::size_t>(b) * row_input_count + input_index(d, head, token);
+                    const std::size_t dst =
+                        static_cast<std::size_t>(lanes[static_cast<std::size_t>(b)]) *
+                            lane_cache_count +
+                        cyclic_cache_index(d, head, position % capacity, capacity);
+                    expected_k[dst] = host_k[src];
+                    expected_v[dst] = bf16_bits_to_f16_bits(host_v[src]);
+                }
+            }
+        }
+    }
+
+    const std::vector<std::int32_t> host_counts(counts.begin(), counts.end());
+    const std::vector<std::int32_t> host_lanes(lanes.begin(), lanes.end());
+    DeviceBuffer d_k         = to_device(host_k);
+    DeviceBuffer d_v         = to_device(host_v);
+    DeviceBuffer d_positions = to_device(positions);
+    DeviceBuffer d_counts    = to_device(host_counts);
+    DeviceBuffer d_lanes     = to_device(host_lanes);
+    GuardedDeviceBuffer cache_k(initial_k.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer cache_v(initial_v.size() * sizeof(std::uint16_t));
+    cache_k.copy_from_host(initial_k.data(), cache_k.bytes());
+    cache_v.copy_from_host(initial_v.data(), cache_v.bytes());
+
+    Tensor k(d_k.p, DType::BF16, {kHeadDim, kKVHeads, tokens, batch});
+    Tensor v(d_v.p, DType::BF16, {kHeadDim, kKVHeads, tokens, batch});
+    Tensor position_tensor(d_positions.p, DType::I32, {tokens, batch});
+    Tensor count_tensor(d_counts.p, DType::I32, {batch});
+    Tensor lane_tensor(d_lanes.p, DType::I32, {batch});
+    ops::kv_cache_append_prefix(k, v, position_tensor, count_tensor, lane_tensor, {0, tokens},
+                                cyclic_view(cache_k, cache_v, capacity, batch), nullptr);
+    cuda_synchronize();
+
+    const std::string label =
+        "kv_cache_append_prefix cyclic decode B=8 capacity=" + std::to_string(capacity);
     int failures =
         verify_exact((label + " k").c_str(),
                      from_device<std::uint16_t>(cache_k.data(), expected_k.size()), expected_k);
@@ -852,14 +938,23 @@ int main() {
     failures += run_case(1, 1, 63, false, {2, 3, 4});
     failures += run_case(16, 7, 60, false, {5, 1, 4}, 5);
     failures += run_case(16, 16, 120, false, {2, 5, 0});
-    failures += run_case(1, 0, kWindow - 1, true);
-    failures += run_case(1, 1, 2 * kWindow - 1, true);
-    failures += run_case(16, 7, 2 * kWindow - 2, true);
-    failures += run_case(16, 16, 3 * kWindow - 8, true, {}, 16);
-    failures += cyclic_graph_replay_case();
+    failures += run_case(1, 0, kDFlashWindow - 1, true);
+    failures += run_case(1, 1, 2 * kDFlashWindow - 1, true);
+    failures += run_case(16, 7, 2 * kDFlashWindow - 2, true);
+    failures += run_case(16, 16, 3 * kDFlashWindow - 8, true, {}, 16);
+    failures += run_case(1, 0, kDFlash2Window - 1, true, {}, 0, kDFlash2Window);
+    failures += run_case(1, 1, 2 * kDFlash2Window - 1, true, {}, 0, kDFlash2Window);
+    failures += run_case(8, 7, 2 * kDFlash2Window - 2, true, {}, 0, kDFlash2Window);
+    failures += run_case(8, 8, 3 * kDFlash2Window - 4, true, {}, 8, kDFlash2Window);
+    failures += run_case(kDFlash2Window, kDFlash2Window, 3 * kDFlash2Window - kDFlash2Window / 2,
+                         true, {}, kDFlash2Window, kDFlash2Window);
+    failures += cyclic_graph_replay_case(kDFlashWindow, 16);
+    failures += cyclic_graph_replay_case(kDFlash2Window, 8);
     failures += paged_graph_replay_case();
-    failures += batch_selector_case(true);
+    failures += batch_selector_case(true, kDFlashWindow);
     failures += batch_selector_case(false);
+    failures += cyclic_decode_batch_case(kDFlashWindow);
+    failures += cyclic_decode_batch_case(kDFlash2Window);
 
     if (failures != 0) {
         std::cerr << "kv_cache_append failures=" << failures << '\n';
