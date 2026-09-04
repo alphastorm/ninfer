@@ -315,6 +315,9 @@ ninfer_add_op_test(ninfer_sliding_window_attention_test
 ninfer_add_op_test(ninfer_kv_cache_append_test
   SOURCES ops/test_kv_cache_append.cpp
   LIBRARIES ninfer_ops)
+ninfer_add_op_test(ninfer_rmsnorm_rope_test
+  SOURCES ops/test_rmsnorm_rope.cpp
+  LIBRARIES ninfer_ops)
 ninfer_add_op_test(ninfer_prepare_masked_block_test
   SOURCES ops/test_prepare_masked_block.cpp
   LIBRARIES ninfer_ops)
