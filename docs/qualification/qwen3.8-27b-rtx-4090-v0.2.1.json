@@ -1,0 +1,187 @@
+{
+  "artifact_type": "ninfer_public_windows_release_qualification",
+  "schema_version": 1,
+  "status": "candidate_ready",
+  "qualification_level": "beta",
+  "beta_support_qualified": false,
+  "release_eligible": false,
+  "release_id": "qwen38-4090-v0.1",
+  "release_version": "0.1.0",
+  "qualification_target": {
+    "platform": "windows-x86_64",
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "cuda_architecture": "sm_89"
+  },
+  "source": {
+    "qualified_commit": "b9c4636b0b887b16153fe796daaad33c1d563752",
+    "package_source_commit": "b9c4636b0b887b16153fe796daaad33c1d563752",
+    "source_dirty": false,
+    "source_archive_sha256": "ee303df613aeb2c40d5209edba5a0abdbc3b88716822a2378c52f8a72a28b543",
+    "source_archive_bytes": 5039925,
+    "package_source_archive_sha256": "ee303df613aeb2c40d5209edba5a0abdbc3b88716822a2378c52f8a72a28b543",
+    "package_source_archive_bytes": 5039925,
+    "runtime_change_from_e5d51a44": "fully transactional fail-closed per-response checkpoint deletion with durable LRU-evicted DELETE and POSIX pointer-sync recovery",
+    "prior_runtime_evidence_reused": false,
+    "runtime_change_from_32aa5899": "configuration only: prefill chunk 512 -> 2,048 on the unchanged rk2v4-e8 KV, MTP3, 131,072-context stack; binary rebuilt from the same C++ sources with the new patch stack identity"
+  },
+  "identity": {
+    "binary_sha256": "647f328ea5f391a14ec1fb938892c9592b7c73166c895d0ca244d347b405ff17",
+    "binary_bytes": 247915008,
+    "config_sha256": "d61ec15f38e292b10127c65e920b751a7294d4d1ae9bbcab7dd6ea9568c6947d",
+    "model_artifact_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
+    "deployment_profile": "qwen38-4090-v0.2",
+    "build_type": "Release",
+    "cuda_toolkit": "13.3.73",
+    "patch_stack_sha": "b9c4636b0b887b16153fe796daaad33c1d563752"
+  },
+  "package": {
+    "source_commit": "19ebcc09ebbcc79061badf78068e1ad70062485f",
+    "filename": "ninfer-4090-qwen38-v0.1.0-win-x64.zip",
+    "sha256": "1cced9e1f16ad0d1b4a5f9c5a28d00cb2b4449137f1652696799be70a74baf7d",
+    "bytes": 227438715,
+    "runtime_dlls": 9,
+    "files": 27,
+    "sbom": {
+      "filename": "ninfer-4090-qwen38-v0.1.0-win-x64.spdx.json",
+      "spdx_version": "SPDX-2.3",
+      "sha256": "474f0c0e83903bec64744d9cd12b71a6b46b25647d218726d2ab7f61c9873e9a",
+      "bytes": 22373,
+      "files_analyzed": 27,
+      "deterministic_regeneration": "passed"
+    },
+    "generic_gpu_owner_controller_sha256": "3e3ae54c71c7534064ceff1dae59acfd2ea546a8c920fcc6c9fb1d46296ba5e0",
+    "state_protection_sha256": "c431cdd55a764526d6d9b720909b2a706e0df2b8f75d871900e4d74616af8463",
+    "installer_sha256": "767642c0a16d6dc3decb5543692fa50c1b0ccfaca2cf239a64c3a28b9a729fd2",
+    "asset_receipt": "receipts/qwen3.8-27b-rtx-4090-assets.json"
+  },
+  "golden_equivalent": {
+    "artifact_type": "ninfer_omp_golden_equivalent_receipt",
+    "schema_version": 1,
+    "status": "passed",
+    "contract_id": "qwen38-4090-omp-golden-equivalent-v1",
+    "runner_sha256": "da13ef87ab4294795d7ddc89d0b054dee1af2b9c08d48c870a999ed3bb975d5d",
+    "contract_file_sha256": "7cffbd6ccf8edd010be505687dc77683240d9c92e9262cd0a3f207be5a8863cb",
+    "extension_sha256": "2902db7da21b6fb28c9320594a3eda2a306f2a57c627cc97a3ce5f842ef05a33",
+    "fixture_provenance": "source-controlled synthetic fixture; the unavailable historical private corpus was not reused",
+    "historical_private_corpus_reused": false,
+    "omp_version": "omp/18.0.6",
+    "wall_seconds": 7.961149,
+    "raw_transcript_included": false,
+    "gates": {
+      "typed_tool_invocation": "passed",
+      "typed_argument_oracle": "passed",
+      "tool_result_continuation": "passed",
+      "exact_visible_final_answer": "passed"
+    },
+    "final_visible_answer": "NINFER_GOLDEN_EQUIVALENT_OK|Paris|3|metric=true|18C|clear",
+    "transcript_projection_sha256": "77f581081492b5a0b15a9667c557c20532e5461f998d854347e3019a19552a5a",
+    "receipt": "receipts/qwen3.8-27b-rtx-4090-golden-equivalent.json",
+    "receipt_sha256": "bf4675664058418a2c64a4f4b8ed59b9abd0db57f927087256dafb0477ff13ba"
+  },
+  "live_evidence": {
+    "prior_runtime_evidence_reused": false,
+    "protocol": {
+      "status": "passed",
+      "checks": 15,
+      "receipt": "receipts/qwen3.8-27b-rtx-4090-protocol.json",
+      "receipt_sha256": "bfc0ae064e1ff7e1c421df0dd51ebf17de416cd545676dd142e2c3bb378127ac"
+    },
+    "checkpoint_restart": {
+      "status": "passed",
+      "first_prompt_tokens": 102060,
+      "restored_tokens": 102075,
+      "reuse_path": "append_frontier",
+      "receipt": "receipts/qwen3.8-27b-rtx-4090-long-restart.json",
+      "receipt_sha256": "8587c8617d3ee46a32861f8e919e25beda641f1c61154ea0d7a6a5c48aac6979"
+    },
+    "performance": {
+      "status": "measured",
+      "prompt_tokens": 228,
+      "completion_tokens": 1168,
+      "prefill_tokens_per_second": 1410.6911829944888,
+      "decode_tokens_per_second": 52.3296743137719,
+      "receipt": "receipts/qwen3.8-27b-rtx-4090-performance.json",
+      "receipt_sha256": "35917c7df793c82db51f696addd0a5b21763e7b25d041c4ffd7b578682e23358"
+    }
+  },
+  "release_gates": {
+    "G": {
+      "status": "passed",
+      "receipt_sha256": "bf4675664058418a2c64a4f4b8ed59b9abd0db57f927087256dafb0477ff13ba"
+    },
+    "L": {
+      "status": "passed",
+      "neutral_clean_build_receipt_sha256": "9d74814848b74830b1886a66b91e381df7c9ebdff31d53afd8ca64fc403281fb",
+      "native_failed_delete_receipt_sha256": "fa6fc50dc311611a723e071dc2faa16efcecb662b305739bff106cf0fa83e447",
+      "package_receipt_sha256": "11bc043842b8e7be5e80359ca2f59cc0980e1ef64c3d0217e50d3327fbc4f74b",
+      "private_identifier_scan_receipt_sha256": "b8cc1cd9de6cc9b775635cb7f7621f0664fc8e30d3c6324c10dd4914aa7841fc",
+      "release_lifecycle_receipt_sha256": "a9d2b71c0704be94b528e4cc59c87c40f7754dcdcbb2b69d429248f626dc7946",
+      "state_security_receipt_sha256": "02a2d1b531241189fd7754d477ddaa4abe21a33705d10e0898dc538a8badba81",
+      "asset_member_binding_receipt_sha256": "9829a4b43f0e13e837a996ec36585bcdb23a628042887e6cb9fc39223c93d831",
+      "real_upgrade_rollback_acl_receipt_sha256": "a8ed789ea1a7197de43bd74b7c4b76ca578431ba2a27ffddbb308722f46a7216",
+      "protected_request_log_receipt_sha256": "a6d2ce12c6149606e98831cef1d16fe24d2f7d1b945e9b9ff966aa3c9add2973",
+      "populated_state_status_timing_receipt_sha256": "f71d7f38488126372a9b6fe9c0659ca1b747aecac6e7bc7fbf64a91885732c2c",
+      "source_member_binding_receipt_sha256": "9829a4b43f0e13e837a996ec36585bcdb23a628042887e6cb9fc39223c93d831"
+    },
+    "R": {
+      "status": "passed",
+      "restore_receipt_sha256": "45b64577cac78691f7077c586e99c8bc653381c18e15069f74b30ed27044e293"
+    }
+  },
+  "state_security": {
+    "atomic_acl_directory_creation": true,
+    "protected_program_data_root": true,
+    "access_principals": [
+      "SYSTEM",
+      "Administrators"
+    ],
+    "effective_low_privilege_read_denied": true,
+    "effective_low_privilege_write_denied": true,
+    "bearer_secret_effective_read_denied": true,
+    "null_dacl_rejected_after_effective_read_observation": true,
+    "untrusted_precreated_tree_preserved": true,
+    "precreated_and_reparse_root_rejections": "passed",
+    "active_compute_owner_rejection": "passed",
+    "status_with_active_compute_owner": "passed",
+    "trusted_absolute_nvidia_smi_query": "passed",
+    "nondefault_gpu_owner_state_root": "passed",
+    "default_gpu_owner_state_mutations": 0,
+    "request_jsonl_under_protected_state": true,
+    "shipped_test_bypass": false,
+    "published_release_scripts_scanned": 8,
+    "real_upgrade_rollback_retained_secret_acl": "passed",
+    "populated_state_status_elapsed_seconds": 3.8825062,
+    "populated_state_status_maximum_seconds": 30
+  },
+  "authority": {
+    "role": "external-final-qualification-authority",
+    "supersedes_package_candidate_status": false,
+    "superseded_status": "candidate_ready",
+    "binding": "SHA256SUMS-bound-sidecar",
+    "sidecar_filename": "ninfer-4090-qwen38-v0.2.1-win-x64-qualification.json",
+    "candidate_package_source_commit": "pending-package-cut",
+    "superseded_review_red_package_sha256": "7548307420faab9f6cf82294c3aa0b6a6ea82168d89c8f5ac4900a683665b418",
+    "superseding_package_sha256": "1cced9e1f16ad0d1b4a5f9c5a28d00cb2b4449137f1652696799be70a74baf7d",
+    "reason": "closed final review defects and reran runtime, Windows, disclosure, and package-manifest gates"
+  },
+  "restoration": {
+    "status": "passed",
+    "incumbent_route_restored": true,
+    "candidate_effects_absent": true,
+    "credential_and_lease_tools_absent": true,
+    "private_fleet_projection_included": false
+  },
+  "publication": {
+    "private_identifier_scan": "passed",
+    "staged_asset_findings": 0,
+    "tracked_source_findings": 0,
+    "public_release_performed": false
+  },
+  "stable_release_performed": false,
+  "stable_promotion_performed": false,
+  "permanent_route_mutation": false,
+  "decision": "Candidate record for the qwen38-4090-v0.2 durable train at prefill chunk 2,048, cut from qualified head b9c4636b; release eligibility requires the external Invoke-Qualification MTP3 receipt bound by the OMP NInfer product manifest. Live evidence blocks below are the inherited v0.2 candidate context and are superseded by that receipt.",
+  "campaign": {
+    "council": "CR-20260831-durable4090 (remediated; ledger in campaign dir)"
+  }
+}
