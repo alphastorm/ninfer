@@ -14,9 +14,9 @@
   },
   "source": {
     "upstream_base_sha": "9ec1b82c7afa021314682d7a95390f8935ead7c2",
-    "qualified_source_head": "9834bf58e6c9a8a71c1ec924de8addb793c093a1",
-    "source_archive_sha256": "c13342914e5026b93dd912c4c59113192f325ee1b7e5820155e3663a3703623f",
-    "source_archive_bytes": 5047573,
+    "qualified_source_head": "e186e04e1dee5acf9e1cae25dc279acb64c96274",
+    "source_archive_sha256": "45f9432cc016dfd2aa34c00ce600bad9136db4772eaab90e75d45c0ad5ac92d2",
+    "source_archive_bytes": 5054239,
     "bounded_staging_commit": "e89e415d95921cecf4cf8a00df5540a4a036ff84",
     "directstorage_fallback_commit": "a9bb55b8e9b02ff34e4725dc8ca95d4fadeb3e0d",
     "qualified_patch_sha256": "ac8ba36da9bfc89ff97021eecba8c7ba8f88f9e7e9bfd1c9c3509b723d81d4e0",
@@ -63,8 +63,8 @@
   },
   "qualified_artifacts": {
     "deployment_profile": "qwen38-4090-v0.2",
-    "binary_sha256": "f731af9e0ab92c5983c706fecf786e00f154838b7b22aab81073e8a02860ec0c",
-    "binary_bytes": 247919104,
+    "binary_sha256": "b1ebd400d7a783f79bfcd7543a084725c647603fd43aa39648d8147a6c377939",
+    "binary_bytes": 247925760,
     "config_sha256": "d61ec15f38e292b10127c65e920b751a7294d4d1ae9bbcab7dd6ea9568c6947d",
     "generic_gpu_owner_controller_sha256": "3e3ae54c71c7534064ceff1dae59acfd2ea546a8c920fcc6c9fb1d46296ba5e0",
     "state_protection_sha256": "c431cdd55a764526d6d9b720909b2a706e0df2b8f75d871900e4d74616af8463",
