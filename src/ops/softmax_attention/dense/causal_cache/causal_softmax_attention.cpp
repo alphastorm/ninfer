@@ -20,6 +20,7 @@ constexpr float kExpectedScale                       = 0.0625f;
 constexpr std::int32_t kSmallTChunkTokens            = 6;
 constexpr std::int32_t kMaximumVerifyTokens          = 16;
 constexpr std::int32_t kMaximumBatchSize             = 8;
+constexpr std::uint32_t kH24VerifyChunkedVisibleKeys = 320;
 constexpr std::uint32_t kTwoChunkPromptVisibleKeys   = 512;
 constexpr std::uint32_t kThreeChunkPromptVisibleKeys = 1024;
 
@@ -326,6 +327,9 @@ CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::i
                                                     CausalAttentionExecutionEnvelope envelope) {
     if (width >= 1 && width <= kSmallTChunkTokens) { return CausalAttentionRoute::SmallT; }
     if (batch_size > 1) { return CausalAttentionRoute::ChunkedSmallT; }
+    if (q_heads == 24 && width <= 8 && envelope.max_visible_keys > kH24VerifyChunkedVisibleKeys) {
+        return CausalAttentionRoute::ChunkedSmallT;
+    }
     const std::uint32_t prompt_visible_keys =
         width <= 2 * kSmallTChunkTokens ? kTwoChunkPromptVisibleKeys : kThreeChunkPromptVisibleKeys;
     if (q_heads == 16 && width <= kMaximumVerifyTokens &&

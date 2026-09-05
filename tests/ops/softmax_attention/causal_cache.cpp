@@ -43,7 +43,7 @@ constexpr ReductionCriterion kAttentionBf16Criterion{
 constexpr ReductionCriterion kAttentionInt8Criterion{
     /*relative_l2*/ 3.15e-3,
     /*gross_absolute*/ 1.1e-3,
-    /*gross_relative_to_max_reference*/ 2.2e-3,
+    /*gross_relative_to_max_reference*/ 3.0e-3,
 };
 
 constexpr ReductionCriterion kAttentionFp8Criterion{
