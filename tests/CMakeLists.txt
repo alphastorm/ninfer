@@ -300,6 +300,9 @@ endforeach()
 ninfer_add_op_test(ninfer_linear_topk_test
   SOURCES ops/test_linear_topk.cu
   LIBRARIES ninfer_ops)
+ninfer_add_op_test(ninfer_candidate_selector_test
+  SOURCES ops/test_candidate_selector.cpp
+  LIBRARIES ninfer_ops)
 
 # Stateful, fused, and exact-shape Ops remain central even when the current implementation domain
 # is one checkpoint/device.

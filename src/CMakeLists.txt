@@ -103,6 +103,8 @@ add_library(ninfer_ops STATIC
   ops/rmsnorm_rope/launch.cu
   ops/context_kv_materialize/context_kv_materialize.cpp
   ops/context_kv_materialize/decode.cu
+  ops/candidate_selector/bf16/candidate_selector_path.cu
+  ops/candidate_selector/bf16/candidate_selector_path_plan.cpp
   # Softmax Attention and KV-cache state transitions.
   ops/softmax_attention/dense/causal_cache/causal_softmax_attention.cpp
   ops/softmax_attention/dense/causal_cache/small_t.cu
@@ -273,6 +275,7 @@ add_library(ninfer_ops STATIC
   ops/wrapper/argmax.cpp
   ops/wrapper/cast.cpp
   ops/wrapper/causal_conv1d_silu.cpp
+  ops/wrapper/candidate_selector.cpp
   ops/wrapper/dynamic_grouped_conv.cpp
   ops/wrapper/embedding.cpp
   ops/wrapper/gdn_gating.cpp

@@ -253,6 +253,19 @@ cmake --build build -j --target ninfer_linear_topk_bench
 ./build/bench/ninfer_linear_topk_bench q4-optimized 4
 ```
 
+## CandidateSelectorPath Op benchmark
+
+`ninfer_candidate_selector_bench` measures one public DFlash2 conditional-walk call with the exact
+seven-step, 16-candidate, rank-256 geometry and full `[248320,256]` BF16 codebooks. It covers
+`B=1..8` in greedy, stochastic, and mixed-request modes. Every sample is a one-node CUDA Graph
+replay after a 256 MiB L2 eviction; the eviction is excluded from timing.
+
+```bash
+cmake --build build -j --target ninfer_candidate_selector_bench
+./build/bench/ninfer_candidate_selector_bench --warmup 12 --repeat 160
+./build/bench/ninfer_candidate_selector_bench --batch 8 --warmup 12 --repeat 160
+```
+
 ## Embedding Op benchmark
 
 `ninfer_embedding_bench` measures the four registered quantized public `embedding()` profiles:
