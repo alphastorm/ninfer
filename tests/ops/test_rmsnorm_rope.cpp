@@ -1,4 +1,5 @@
 #include "ninfer/ops/rmsnorm_rope.h"
+#include "core/decode_graph.h"
 #include "ops/op_tester.h"
 
 #include <algorithm>
@@ -19,7 +20,6 @@ namespace {
 constexpr int kHeadDim         = 128;
 constexpr int kQueryHeads      = 32;
 constexpr int kKeyHeads        = 8;
-constexpr int kProposalWidth   = 8;
 constexpr double kEpsilon      = 1.0e-6;
 constexpr double kTheta        = 1.0e7;
 constexpr double kRelativeL2   = 1.85e-3;
@@ -153,8 +153,32 @@ int verify_profile(const std::string& label, const std::vector<double>& got,
     return 0;
 }
 
-int run_pair_case(int batch, int first_position, std::uint32_t seed) {
-    const int tokens              = kProposalWidth * batch;
+template <class Launch, class Reset>
+void execute(Launch launch, Reset reset, bool graph) {
+    if (!graph) {
+        launch(nullptr);
+        cuda_synchronize();
+        return;
+    }
+    cudaStream_t stream = nullptr;
+    cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "create stream");
+    {
+        DecodeGraphDefinition definition;
+        DecodeGraphExecutable executable;
+        definition.capture(stream, [&] { launch(stream); });
+        executable.instantiate(definition);
+        for (int i = 0; i < 2; ++i) {
+            reset(stream);
+            executable.launch(stream);
+            cuda_check(cudaStreamSynchronize(stream), "graph replay synchronize");
+        }
+    }
+    cuda_check(cudaStreamDestroy(stream), "destroy stream");
+}
+
+int run_pair_case(int width, int batch, int first_position, std::uint32_t seed,
+                  bool graph = false) {
+    const int tokens              = width * batch;
     const std::size_t q_count     = static_cast<std::size_t>(kHeadDim) * kQueryHeads * tokens;
     const std::size_t k_count     = static_cast<std::size_t>(kHeadDim) * kKeyHeads * tokens;
     const auto q                  = make_bf16_values(q_count, seed, -4.0F, 4.0F);
@@ -176,17 +200,29 @@ int run_pair_case(int batch, int first_position, std::uint32_t seed) {
     DeviceBuffer q_weight_device = to_device(q_weight_bits);
     DeviceBuffer k_weight_device = to_device(k_weight_bits);
     DeviceBuffer position_device = to_device(positions);
-    Tensor q_tensor(q_device.data(), DType::BF16, {kHeadDim, kQueryHeads, kProposalWidth, batch});
-    Tensor k_tensor(k_device.data(), DType::BF16, {kHeadDim, kKeyHeads, kProposalWidth, batch});
+    Tensor q_tensor(q_device.data(), DType::BF16, {kHeadDim, kQueryHeads, width, batch});
+    Tensor k_tensor(k_device.data(), DType::BF16, {kHeadDim, kKeyHeads, width, batch});
     Tensor q_weight_tensor(q_weight_device.p, DType::BF16, {kHeadDim});
     Tensor k_weight_tensor(k_weight_device.p, DType::BF16, {kHeadDim});
-    Tensor position_tensor(position_device.p, DType::I32, {kProposalWidth, batch});
-    ops::rmsnorm_rope(position_tensor, q_weight_tensor, k_weight_tensor, q_tensor, k_tensor,
-                      nullptr);
-    cuda_synchronize();
+    Tensor position_tensor(position_device.p, DType::I32, {width, batch});
+    execute(
+        [&](cudaStream_t stream) {
+            ops::rmsnorm_rope(position_tensor, q_weight_tensor, k_weight_tensor, q_tensor, k_tensor,
+                              stream);
+        },
+        [&](cudaStream_t stream) {
+            cuda_check(cudaMemcpyAsync(q_device.data(), q_bits.data(), q_device.bytes(),
+                                       cudaMemcpyHostToDevice, stream),
+                       "reset q");
+            cuda_check(cudaMemcpyAsync(k_device.data(), k_bits.data(), k_device.bytes(),
+                                       cudaMemcpyHostToDevice, stream),
+                       "reset k");
+        },
+        graph);
 
-    const std::string label =
-        "rmsnorm_rope pair B=" + std::to_string(batch) + " P=" + std::to_string(first_position);
+    const std::string label = "rmsnorm_rope pair W=" + std::to_string(width) +
+                              " graph=" + std::to_string(graph) + " B=" + std::to_string(batch) +
+                              " P=" + std::to_string(first_position);
     int failures =
         verify_profile(label + " q", from_device_bf16(q_device.data(), q_count), q_expected);
     failures +=
@@ -205,7 +241,7 @@ int run_pair_case(int batch, int first_position, std::uint32_t seed) {
     return failures;
 }
 
-int run_single_case(int tokens, int first_position, std::uint32_t seed) {
+int run_single_case(int tokens, int first_position, std::uint32_t seed, bool graph = false) {
     const std::size_t count     = static_cast<std::size_t>(kHeadDim) * kKeyHeads * tokens;
     const auto input            = make_bf16_values(count, seed, -4.0F, 4.0F);
     const auto weight           = make_bf16_values(kHeadDim, seed + 1U, 0.25F, 1.75F);
@@ -221,11 +257,20 @@ int run_single_case(int tokens, int first_position, std::uint32_t seed) {
     Tensor input_tensor(input_device.data(), DType::BF16, {kHeadDim, kKeyHeads, tokens});
     Tensor weight_tensor(weight_device.p, DType::BF16, {kHeadDim});
     Tensor position_tensor(position_device.p, DType::I32, {tokens});
-    ops::rmsnorm_rope(position_tensor, weight_tensor, input_tensor, nullptr);
-    cuda_synchronize();
+    execute(
+        [&](cudaStream_t stream) {
+            ops::rmsnorm_rope(position_tensor, weight_tensor, input_tensor, stream);
+        },
+        [&](cudaStream_t stream) {
+            cuda_check(cudaMemcpyAsync(input_device.data(), input_bits.data(), input_device.bytes(),
+                                       cudaMemcpyHostToDevice, stream),
+                       "reset K");
+        },
+        graph);
 
-    const std::string label =
-        "rmsnorm_rope single T=" + std::to_string(tokens) + " P=" + std::to_string(first_position);
+    const std::string label = "rmsnorm_rope single graph=" + std::to_string(graph) +
+                              " T=" + std::to_string(tokens) +
+                              " P=" + std::to_string(first_position);
     int failures = verify_profile(label, from_device_bf16(input_device.data(), count), expected);
     failures += input_device.verify_guards(label + " guards");
     failures +=
@@ -246,8 +291,14 @@ int main() {
     }
 
     int failures = 0;
-    failures += run_pair_case(1, 0, 0x1001U);
-    failures += run_pair_case(8, 262'080, 0x1002U);
+    for (int width = 2; width <= 16; ++width)
+        for (int batch = 1; batch <= 8; ++batch)
+            failures += run_pair_case(width, batch, width == 2 && batch == 1 ? 0 : 262000,
+                                      0x1000U + width * 8 + batch);
+    failures += run_pair_case(3, 3, 0, 0x1001U, true);
+    failures += run_pair_case(16, 8, 262000, 0x1002U, true);
+    failures += run_single_case(1, 0, 0x2001U, true);
+    failures += run_single_case(2048, 260000, 0x2002U, true);
     failures += run_single_case(1, 0, 0x2001U);
     failures += run_single_case(8, 131'069, 0x2002U);
     failures += run_single_case(64, 262'080, 0x2003U);

@@ -14,7 +14,6 @@ namespace {
 constexpr std::int32_t kHeadDim       = 128;
 constexpr std::int32_t kQueryHeads    = 32;
 constexpr std::int32_t kKeyHeads      = 8;
-constexpr std::int32_t kProposalWidth = 8;
 constexpr std::int32_t kMaximumBatch  = 8;
 constexpr std::int32_t kMaximumSingle = 2048;
 
@@ -63,17 +62,19 @@ void require_single_nonoverlap(const Tensor& positions, const Tensor& norm_weigh
 void rmsnorm_rope(const Tensor& positions, const Tensor& q_norm_weight, const Tensor& k_norm_weight,
                   Tensor& q, Tensor& k, cudaStream_t stream) {
     const std::int32_t batch = q.ne[3];
+    const std::int32_t width = q.ne[2];
+    if (width < 2 || width > 16) throw std::invalid_argument("rmsnorm_rope: pair W must be 2..16");
     if (batch < 1 || batch > kMaximumBatch) {
         throw std::invalid_argument("rmsnorm_rope: pair B must be 1..8");
     }
-    require_tensor(q, DType::BF16, {kHeadDim, kQueryHeads, kProposalWidth, batch}, "q");
-    require_tensor(k, DType::BF16, {kHeadDim, kKeyHeads, kProposalWidth, batch}, "k");
+    require_tensor(q, DType::BF16, {kHeadDim, kQueryHeads, width, batch}, "q");
+    require_tensor(k, DType::BF16, {kHeadDim, kKeyHeads, width, batch}, "k");
     require_tensor(q_norm_weight, DType::BF16, {kHeadDim, 1, 1, 1}, "q norm weight");
     require_tensor(k_norm_weight, DType::BF16, {kHeadDim, 1, 1, 1}, "k norm weight");
-    require_tensor(positions, DType::I32, {kProposalWidth, batch, 1, 1}, "positions");
+    require_tensor(positions, DType::I32, {width, batch, 1, 1}, "positions");
     require_pair_nonoverlap(positions, q_norm_weight, k_norm_weight, q, k);
-    detail::rmsnorm_rope_pair_launch(positions, q_norm_weight, k_norm_weight, q, k,
-                                     kProposalWidth * batch, stream);
+    detail::rmsnorm_rope_pair_launch(positions, q_norm_weight, k_norm_weight, q, k, width * batch,
+                                     stream);
 }
 
 void rmsnorm_rope(const Tensor& positions, const Tensor& norm_weight, Tensor& x,

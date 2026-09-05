@@ -9,9 +9,9 @@ namespace ninfer::ops {
 /**
  * Apply plain per-head RMSNorm followed by full-head split-half 1-D RoPE in place.
  *
- * The pair profile is fixed to q BF16 [128,32,8,B], k BF16 [128,8,8,B], q_norm_weight and
- * k_norm_weight BF16 [128], and positions I32 [8,B], with B=1..8. For each head and physical
- * token, the complete mathematical operation is
+ * The pair profile is q BF16 [128,32,W,B], k BF16 [128,8,W,B], q_norm_weight and
+ * k_norm_weight BF16 [128], and positions I32 [W,B], with W=2..16 and B=1..8. For each head and
+ * physical token, the complete mathematical operation is
  *
  *   inv       = 1 / sqrt(sum_d x[d]^2 / 128 + 1e-6)
  *   n[d]      = x[d] * inv * norm_weight[d]

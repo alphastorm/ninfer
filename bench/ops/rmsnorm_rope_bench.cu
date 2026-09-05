@@ -1,4 +1,4 @@
-// Public-Op benchmark for the fixed DFlash2 pair and context-K RMSNorm+RoPE profiles.
+// Public-Op benchmark for variable-width DFlash2 pair and context-K RMSNorm+RoPE profiles.
 #include "ninfer/ops/rmsnorm_rope.h"
 
 #include "ninfer_bench_common.h"
@@ -18,15 +18,15 @@ using namespace ninfer;
 
 namespace {
 
-constexpr int kHeadDim       = 128;
-constexpr int kQueryHeads    = 32;
-constexpr int kKeyHeads      = 8;
-constexpr int kProposalWidth = 8;
+constexpr int kHeadDim    = 128;
+constexpr int kQueryHeads = 32;
+constexpr int kKeyHeads   = 8;
 
 enum class Form : std::uint8_t { Pair, Single };
 enum class Execution : std::uint8_t { Eager, Graph };
 
 struct Options {
+    std::vector<int> widths{2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
     Form form           = Form::Pair;
     Execution execution = Execution::Graph;
     std::vector<int> batches{1, 2, 3, 4, 5, 6, 7, 8};
@@ -40,7 +40,7 @@ struct Options {
     std::fprintf(stderr,
                  "error: %s\n"
                  "usage: ninfer_rmsnorm_rope_bench --form pair|single "
-                 "[--batches B,...] [--tokens T,...] [--execution eager|graph] "
+                 "[--widths W,...] [--batches B,...] [--tokens T,...] [--execution eager|graph] "
                  "[--warmup N] [--repeat N] [--profile]\n",
                  message);
     std::exit(2);
@@ -87,6 +87,8 @@ Options parse_options(int argc, char** argv) {
                 options.form = Form::Single;
             else
                 usage("--form expects pair or single");
+        } else if (argument == "--widths") {
+            options.widths = parse_list(next("--widths requires a value"), 2, 16, "--widths");
         } else if (argument == "--batches") {
             options.batches = parse_list(next("--batches requires a value"), 1, 8, "--batches");
         } else if (argument == "--tokens") {
@@ -109,7 +111,8 @@ Options parse_options(int argc, char** argv) {
             usage("unknown argument");
         }
     }
-    if (options.profile && ((options.form == Form::Pair && options.batches.size() != 1) ||
+    if (options.profile && ((options.form == Form::Pair &&
+                             (options.batches.size() != 1 || options.widths.size() != 1)) ||
                             (options.form == Form::Single && options.tokens.size() != 1))) {
         usage("--profile requires one selected extent");
     }
@@ -128,17 +131,24 @@ bench::Result measure(const Options& options, const bench::launch_fn& launch, do
     if (options.execution == Execution::Eager) {
         return bench::bench_loop(launch, bytes, options.warmup, options.repeat, 100);
     }
+    constexpr int repetitions = 32;
     bench::TimedGraph graph;
-    graph.capture(stream, launch);
-    CUDA_CHECK(cudaStreamSynchronize(stream));
-    const bench::launch_fn graph_launch = [&](cudaStream_t launch_stream) {
-        graph.launch(launch_stream);
-    };
-    return bench::bench_loop(graph_launch, bytes, options.warmup, options.repeat, 100);
+    graph.capture(stream, [&](cudaStream_t) {
+        for (int i = 0; i < repetitions; ++i) launch(stream);
+    });
+    const auto timing = bench::measure_graph(graph, stream, options.warmup, options.repeat);
+    bench::Result result;
+    result.n_runs      = options.repeat;
+    result.inner_iters = repetitions;
+    result.median_us   = timing.median_us / repetitions;
+    result.min_us      = timing.min_us / repetitions;
+    result.p95_us      = timing.p95_us / repetitions;
+    result.gbs         = bytes / result.median_us / 1.0e3;
+    return result;
 }
 
-void run_pair(const Options& options, int batch, cudaStream_t stream) {
-    const int tokens          = kProposalWidth * batch;
+void run_pair(const Options& options, int width, int batch, cudaStream_t stream) {
+    const int tokens          = width * batch;
     const auto positions_host = host_positions(tokens);
     DeviceBuffer positions(positions_host.size() * sizeof(std::int32_t));
     positions.copy_from_host(positions_host.data(), positions.bytes);
@@ -146,9 +156,9 @@ void run_pair(const Options& options, int batch, cudaStream_t stream) {
     DeviceBuffer k = bench::make_bf16(static_cast<std::size_t>(kHeadDim) * kKeyHeads * tokens);
     DeviceBuffer q_weight = bench::make_bf16(kHeadDim);
     DeviceBuffer k_weight = bench::make_bf16(kHeadDim);
-    Tensor t_positions(positions.p, DType::I32, {kProposalWidth, batch});
-    Tensor t_q(q.p, DType::BF16, {kHeadDim, kQueryHeads, kProposalWidth, batch});
-    Tensor t_k(k.p, DType::BF16, {kHeadDim, kKeyHeads, kProposalWidth, batch});
+    Tensor t_positions(positions.p, DType::I32, {width, batch});
+    Tensor t_q(q.p, DType::BF16, {kHeadDim, kQueryHeads, width, batch});
+    Tensor t_k(k.p, DType::BF16, {kHeadDim, kKeyHeads, width, batch});
     Tensor t_q_weight(q_weight.p, DType::BF16, {kHeadDim});
     Tensor t_k_weight(k_weight.p, DType::BF16, {kHeadDim});
     const auto launch = [&](cudaStream_t launch_stream) {
@@ -166,10 +176,11 @@ void run_pair(const Options& options, int batch, cudaStream_t stream) {
     const double bytes =
         2.0 * static_cast<double>(kHeadDim) * (kQueryHeads + kKeyHeads) * tokens * 2.0;
     const bench::Result timing = measure(options, launch, bytes, stream);
-    std::printf("form=pair B=%d T=%d route=fixed-b256 execution=%s median=%.3f us min=%.3f us "
-                "p95=%.3f us useful=%.1f GB/s\n",
-                batch, tokens, options.execution == Execution::Graph ? "graph" : "eager",
-                timing.median_us, timing.min_us, timing.p95_us, timing.gbs);
+    std::printf("form=pair W=%d B=%d T=%d heads_per_cta=8 execution=%s median=%.3f us min=%.3f us "
+                "p95=%.3f us useful=%.1f GB/s graph_repetitions=%d cache=warm\n",
+                width, batch, tokens, options.execution == Execution::Graph ? "graph" : "eager",
+                timing.median_us, timing.min_us, timing.p95_us, timing.gbs,
+                options.execution == Execution::Graph ? 32 : 1);
 }
 
 void run_single(const Options& options, int tokens, cudaStream_t stream) {
@@ -195,10 +206,11 @@ void run_single(const Options& options, int tokens, cudaStream_t stream) {
     }
     const double bytes         = 2.0 * static_cast<double>(kHeadDim) * kKeyHeads * tokens * 2.0;
     const bench::Result timing = measure(options, launch, bytes, stream);
-    std::printf("form=single T=%d route=fixed-b256 execution=%s median=%.3f us min=%.3f us "
-                "p95=%.3f us useful=%.1f GB/s\n",
+    std::printf("form=single T=%d heads_per_cta=8 execution=%s median=%.3f us min=%.3f us "
+                "p95=%.3f us useful=%.1f GB/s graph_repetitions=%d cache=warm\n",
                 tokens, options.execution == Execution::Graph ? "graph" : "eager", timing.median_us,
-                timing.min_us, timing.p95_us, timing.gbs);
+                timing.min_us, timing.p95_us, timing.gbs,
+                options.execution == Execution::Graph ? 32 : 1);
 }
 
 } // namespace
@@ -210,13 +222,14 @@ int main(int argc, char** argv) {
             std::printf("SKIP: no usable CUDA device\n");
             return 0;
         }
-        const Options options = parse_options(argc, argv);
-        cudaStream_t stream   = nullptr;
+        Options options     = parse_options(argc, argv);
+        cudaStream_t stream = nullptr;
         CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
         if (options.form == Form::Pair) {
-            for (const int batch : options.batches) run_pair(options, batch, stream);
+            for (int width : options.widths)
+                for (int batch : options.batches) run_pair(options, width, batch, stream);
         } else {
-            for (const int tokens : options.tokens) run_single(options, tokens, stream);
+            for (int tokens : options.tokens) run_single(options, tokens, stream);
         }
         CUDA_CHECK(cudaStreamDestroy(stream));
         return 0;
