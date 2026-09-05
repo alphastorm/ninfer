@@ -9,18 +9,10 @@ namespace ninfer::ops::detail {
 
 void linear_topk_w8_launch(const Tensor& hidden, const Weight& head, std::int32_t valid_rows,
                            const LinearTopKWorkspace& workspace, cudaStream_t stream);
-void linear_topk_w8_grouped_ksplit_launch(const Tensor& hidden, const Weight& head,
-                                          std::int32_t valid_rows,
-                                          const LinearTopKWorkspace& workspace,
-                                          cudaStream_t stream);
 void linear_topk_w8_m64_launch(const Tensor& hidden, const Weight& head, std::int32_t valid_rows,
                                const LinearTopKWorkspace& workspace, cudaStream_t stream);
 void linear_topk_fp8_launch(const Tensor& hidden, const Weight& head, std::int32_t valid_rows,
                             const LinearTopKWorkspace& workspace, cudaStream_t stream);
-void linear_topk_fp8_grouped_ksplit_launch(const Tensor& hidden, const Weight& head,
-                                           std::int32_t valid_rows,
-                                           const LinearTopKWorkspace& workspace,
-                                           cudaStream_t stream);
 void linear_topk_fp8_m64_launch(const Tensor& hidden, const Weight& head, std::int32_t valid_rows,
                                 const LinearTopKWorkspace& workspace, cudaStream_t stream);
 void linear_topk_q4_launch(const Tensor& hidden, const Weight& head,

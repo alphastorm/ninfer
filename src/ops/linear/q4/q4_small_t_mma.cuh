@@ -78,7 +78,7 @@ __launch_bounds__(256, 6) __global__
     constexpr int kTileCols     = TileCols;
     constexpr int kNt           = kTileCols / 8;
     static_assert(kTileCols >= 8 && kTileCols <= 32 && (kTileCols % 8) == 0);
-    static_assert(ActiveCols >= 2 && ActiveCols <= kTileCols && ActiveCols > kTileCols - 8);
+    static_assert(ActiveCols >= 1 && ActiveCols <= kTileCols && ActiveCols > kTileCols - 8);
     static_assert((kHidden % kGroupK) == 0);
     static_assert(RowPolicy::kOutputRowsPerCta <= kRowsPerCta);
     static_assert(((kGroupK / 2 + Schedule::kCodeRowPad) % 16) == 0,

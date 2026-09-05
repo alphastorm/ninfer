@@ -11,33 +11,34 @@
 namespace ninfer::ops {
 
 /**
- * Returns the caller-owned transient capacity required by linear_topk for every batch size in the
- * inclusive `[min_batch_size,max_batch_size]` interval. The registered profile is identified by
- * its weight format and exact `[head_rows,input_rows]` geometry. Batch sizes are in `[1,8]`.
+ * Returns the caller-owned transient capacity required by linear_topk for every column count in the
+ * inclusive `[min_columns,max_columns]` interval. The registered profile is identified by
+ * its weight format and exact `[head_rows,input_rows]` geometry. Column counts are positive.
  */
 [[nodiscard]] std::size_t linear_topk_workspace_capacity_bytes(QType qtype, std::int32_t head_rows,
                                                                std::int32_t input_rows,
-                                                               std::int32_t min_batch_size,
-                                                               std::int32_t max_batch_size);
+                                                               std::int32_t min_columns,
+                                                               std::int32_t max_columns);
 
 /**
- * @brief Projects seven proposal columns per batch row through a full vocabulary head and returns
+ * @brief Projects independent matrix columns through a full vocabulary head and returns
  * the stable top sixteen scores and global token ids per column.
  *
- * @details For `B in [1,8]`, `hidden` is contiguous BF16 `[5120,7B]`, `head` is either
- * W8G32_F16S or FP8_E4M3FN_ROW_BF16S `[248320,5120]`, and `valid_rows` is 248077. For every
- * `t in [0,7B)` and valid vocabulary row `v`, the ideal score is
+ * @details For any positive column count `U`, `hidden` is contiguous BF16 `[5120,U]`, `head` is
+ * either W8G32_F16S or FP8_E4M3FN_ROW_BF16S `[248320,5120]`, and `valid_rows` is 248077. For every
+ * `t in [0,U)` and valid vocabulary row `v`, the ideal score is
  *
  * @f[
  *   s_{v,t}=\sum_{k=0}^{5119}\mathrm{FP32Dequant}(head)_{v,k}
  *                              \mathrm{FP32}(hidden_{k,t}).
  * @f]
  *
- * `candidate_scores` is contiguous FP32 `[16,7,B]` and `candidate_ids` is contiguous I32
- * `[16,7,B]`. Rank is stored fastest. Candidates are ordered by descending computed score, with
- * exact score ties resolved by lower global token id. Physical rows `[valid_rows,248320)` never
- * participate. Projection uses the registered A16 arithmetic profile; candidate scores are
- * returned directly in FP32 and no dense vocabulary-logit tensor is an observable intermediate.
+ * `candidate_scores` is contiguous FP32 `[16,U]` and `candidate_ids` is contiguous I32
+ * `[16,U]`. Rank is stored fastest; a caller may view the output as `[16,K,B]` when `U=K*B`.
+ * Candidates are ordered by descending computed score, with exact score ties resolved by lower
+ * global token id. Physical rows `[valid_rows,248320)` never participate. Projection uses the
+ * registered A16 arithmetic profile; candidate scores are returned directly in FP32 and no dense
+ * vocabulary-logit tensor is an observable intermediate.
  *
  * All tensors and every weight plane are preserved except that both output tensors are completely
  * overwritten. Inputs, outputs, weight planes, and workspace must not overlap. The Op has no

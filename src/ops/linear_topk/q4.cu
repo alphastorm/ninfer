@@ -5,6 +5,8 @@
 #include "ops/linear/q4/q4_small_t_mma.cuh"
 
 #include <cstdint>
+#include <array>
+#include <utility>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -51,20 +53,25 @@ void launch_ksplit(const Tensor& hidden, const Weight& head, const Tensor& row_t
     CUDA_CHECK(cudaGetLastError());
 }
 
+using Launch = void (*)(const Tensor&, const Weight&, const Tensor&, const LinearTopKWorkspace&,
+                        cudaStream_t);
+
+template <std::size_t... I>
+constexpr auto make_launchers(std::index_sequence<I...>) {
+    return std::array<Launch, sizeof...(I)>{&launch_ksplit<1 + I>...};
+}
+
+constexpr auto launchers = make_launchers(std::make_index_sequence<16>{});
+
 } // namespace
 
 void linear_topk_q4_launch(const Tensor& hidden, const Weight& head,
                            const Tensor& row_to_global_ids, const LinearTopKWorkspace& workspace,
                            cudaStream_t stream) {
-    if (workspace.rows_per_producer == kLinearTopKKSplitRowsPerGroup) {
-        if (hidden.ne[1] == 7) {
-            launch_ksplit<7>(hidden, head, row_to_global_ids, workspace, stream);
-        } else {
-            launch_ksplit<14>(hidden, head, row_to_global_ids, workspace, stream);
-        }
-        return;
+    if (workspace.rows_per_producer == kLinearTopKDirectRows) {
+        launchers[hidden.ne[1] - 1](hidden, head, row_to_global_ids, workspace, stream);
+    } else {
+        linear_topk_q4_m64_launch(hidden, head, row_to_global_ids, workspace, stream);
     }
-    linear_topk_q4_m64_launch(hidden, head, row_to_global_ids, workspace, stream);
 }
-
 } // namespace ninfer::ops::detail

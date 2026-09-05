@@ -256,10 +256,8 @@ add_library(ninfer_ops STATIC
   ops/linear_pair/w8/w8_pair_plan.cpp
   ops/linear_topk/linear_topk.cpp
   ops/linear_topk/w8.cu
-  ops/linear_topk/w8_grouped_ksplit.cu
   ops/linear_topk/w8_m64.cu
   ops/linear_topk/fp8.cu
-  ops/linear_topk/fp8_grouped_ksplit.cu
   ops/linear_topk/fp8_m64.cu
   ops/linear_topk/q4.cu
   ops/linear_topk/q4_m64.cu

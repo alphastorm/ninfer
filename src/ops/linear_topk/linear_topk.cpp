@@ -5,6 +5,7 @@
 #include "ops/linear_topk/linear_topk_workspace.h"
 
 #include <cstddef>
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -49,14 +50,29 @@ HeadProfile resolve_profile(QType qtype, std::int32_t head_rows, std::int32_t in
     throw std::invalid_argument("linear_topk: unsupported head profile");
 }
 
-std::int32_t producer_rows_for(HeadProfile profile, std::int32_t columns) {
-    // The Q4 T=14 small-T producer is materially faster than the 64-row family and therefore owns
-    // the same 16-row partial-candidate geometry as T=7.
-    if (columns == detail::kLinearTopKWidth ||
-        (profile == HeadProfile::Q4Optimized && columns == 2 * detail::kLinearTopKWidth)) {
-        return detail::kLinearTopKKSplitRowsPerGroup;
+struct Plan {
+    int rows; // Vocabulary rows reduced by each producer CTA.
+    int tile; // Zero selects K-split; otherwise this is the MMA column tile.
+    int block_k = 128;
+};
+
+Plan plan_for(HeadProfile profile, int columns) {
+    if (profile == HeadProfile::Q4Optimized) {
+        if (columns <= 16) return {16, 0};
+        if (columns <= 32) return {64, 32};
+        if (columns <= 48) return {64, 48};
+    } else {
+        if (columns <= 24) return {128, 0};
+        if (columns <= 32) return {profile == HeadProfile::W8Full ? 128 : 64, 32};
+        if (columns <= 40) return {64, 40};
+        if (columns <= 48) return {64, 48};
     }
-    return detail::kLinearTopKMRowsPerGroup;
+    if (columns <= 64) return {64, 64};
+    if (columns <= 80) return {64, 80};
+    if (columns <= 96) return {64, 96, profile == HeadProfile::Fp8Full && columns > 88 ? 64 : 128};
+    if (columns <= 112) return {64, 112, 64};
+    if (columns <= 120) return {64, 120, 64};
+    return {64, 128, 64};
 }
 
 void require_matrix(const Tensor& tensor, DType dtype, std::int32_t rows, std::int32_t columns,
@@ -68,21 +84,18 @@ void require_matrix(const Tensor& tensor, DType dtype, std::int32_t rows, std::i
     }
 }
 
-std::int32_t validate_io(const Tensor& hidden, const Tensor& candidate_ids,
-                         const Tensor& candidate_scores) {
+void validate_io(const Tensor& hidden, const Tensor& candidate_ids,
+                 const Tensor& candidate_scores) {
     if (hidden.dtype != DType::BF16 || hidden.ne[0] != detail::kLinearTopKHidden ||
-        hidden.ne[1] <= 0 || (hidden.ne[1] % detail::kLinearTopKWidth) != 0 || hidden.ne[2] != 1 ||
-        hidden.ne[3] != 1 || !hidden.is_contiguous() || !aligned_to(hidden.data, 16)) {
+        hidden.ne[1] <= 0 || hidden.ne[2] != 1 || hidden.ne[3] != 1 || !hidden.is_contiguous() ||
+        !aligned_to(hidden.data, 16)) {
         throw std::invalid_argument("linear_topk: invalid hidden");
     }
-    const std::int32_t batch = hidden.ne[1] / detail::kLinearTopKWidth;
-    if (batch < 1 || batch > detail::kLinearTopKMaxBatch) {
-        throw std::invalid_argument("linear_topk: B must be in [1,8]");
-    }
-    const auto require_output = [&](const Tensor& tensor, DType dtype, const char* label) {
+    const std::int32_t columns = hidden.ne[1];
+    const auto require_output  = [&](const Tensor& tensor, DType dtype, const char* label) {
         if (tensor.dtype != dtype || tensor.ne[0] != detail::kLinearTopK ||
-            tensor.ne[1] != detail::kLinearTopKWidth || tensor.ne[2] != batch ||
-            tensor.ne[3] != 1 || !tensor.is_contiguous() || !aligned_to(tensor.data, 16)) {
+            tensor.ne[1] != columns || tensor.ne[2] != 1 || tensor.ne[3] != 1 ||
+            !tensor.is_contiguous() || !aligned_to(tensor.data, 16)) {
             throw std::invalid_argument(std::string("linear_topk: invalid ") + label);
         }
     };
@@ -92,7 +105,6 @@ std::int32_t validate_io(const Tensor& hidden, const Tensor& candidate_ids,
         overlaps(candidate_ids, candidate_scores)) {
         throw std::invalid_argument("linear_topk: input and outputs must not overlap");
     }
-    return batch;
 }
 
 void require_w8(const Weight& head) {
@@ -162,23 +174,65 @@ void require_scratch_nonoverlap(const Tensor& hidden, const Tensor& candidate_id
     }
 }
 
+Tensor column_slice(const Tensor& tensor, int first, int columns) {
+    return Tensor(static_cast<std::uint8_t*>(tensor.data) +
+                      static_cast<std::int64_t>(first) * tensor.nb[1],
+                  tensor.dtype, {tensor.ne[0], columns});
+}
+
+void execute(const Tensor& hidden, const Weight& head, const Tensor* id_map, Tensor& ids,
+             Tensor& scores, WorkspaceArena& workspace, cudaStream_t stream) {
+    const auto profile = resolve_profile(head.qtype, head.n, head.k);
+    for (int first = 0; first < hidden.ne[1];) {
+        const int columns  = std::min(detail::kLinearTopKMaxChunkColumns, hidden.ne[1] - first);
+        auto x             = column_slice(hidden, first, columns);
+        auto out_ids       = column_slice(ids, first, columns);
+        auto out_scores    = column_slice(scores, first, columns);
+        const auto plan    = plan_for(profile, columns);
+        auto scope         = workspace.scope();
+        const auto scratch = detail::allocate_linear_topk_workspace(
+            workspace, head.n, columns, plan.rows, plan.tile, plan.block_k);
+        require_scratch_nonoverlap(hidden, ids, scores, id_map, scratch);
+        require_no_weight_overlap(head, hidden, ids, scores, id_map, scratch);
+        if (profile == HeadProfile::W8Full)
+            detail::linear_topk_w8_launch(x, head, detail::kLinearTopKFullValidRows, scratch,
+                                          stream);
+        else if (profile == HeadProfile::Fp8Full)
+            detail::linear_topk_fp8_launch(x, head, detail::kLinearTopKFullValidRows, scratch,
+                                           stream);
+        else
+            detail::linear_topk_q4_launch(x, head, *id_map, scratch, stream);
+        detail::linear_topk_merge_launch(scratch, out_ids, out_scores, stream);
+        first += columns;
+    }
+}
 } // namespace
 
 std::size_t linear_topk_workspace_capacity_bytes(QType qtype, std::int32_t head_rows,
-                                                 std::int32_t input_rows,
-                                                 std::int32_t min_batch_size,
-                                                 std::int32_t max_batch_size) {
-    const HeadProfile profile = resolve_profile(qtype, head_rows, input_rows);
-    if (min_batch_size < 1 || max_batch_size < min_batch_size ||
-        max_batch_size > detail::kLinearTopKMaxBatch) {
-        throw std::invalid_argument("linear_topk workspace: invalid batch interval");
-    }
+                                                 std::int32_t input_rows, std::int32_t min_columns,
+                                                 std::int32_t max_columns) {
+    const auto profile = resolve_profile(qtype, head_rows, input_rows);
+    if (min_columns < 1 || max_columns < min_columns)
+        throw std::invalid_argument("linear_topk workspace: invalid column interval");
     WorkspaceLayoutBuilder layout;
-    for (std::int32_t batch = min_batch_size; batch <= max_batch_size; ++batch) {
-        auto scope                 = layout.scope();
-        const std::int32_t columns = detail::kLinearTopKWidth * batch;
-        (void)detail::allocate_linear_topk_workspace(layout, head_rows, columns,
-                                                     producer_rows_for(profile, columns));
+    for (int columns = 1; columns <= detail::kLinearTopKMaxChunkColumns; ++columns) {
+        bool reachable = columns >= min_columns && columns <= max_columns;
+        if (max_columns > detail::kLinearTopKMaxChunkColumns) {
+            if (columns == detail::kLinearTopKMaxChunkColumns)
+                reachable = true;
+            else {
+                const auto first = static_cast<std::int64_t>(min_columns) +
+                                   (columns - min_columns % detail::kLinearTopKMaxChunkColumns +
+                                    detail::kLinearTopKMaxChunkColumns) %
+                                       detail::kLinearTopKMaxChunkColumns;
+                reachable |= first <= max_columns;
+            }
+        }
+        if (!reachable) continue;
+        const auto plan = plan_for(profile, columns);
+        auto scope      = layout.scope();
+        (void)detail::allocate_linear_topk_workspace(layout, head_rows, columns, plan.rows,
+                                                     plan.tile, plan.block_k);
     }
     return layout.peak_bytes();
 }
@@ -186,7 +240,7 @@ std::size_t linear_topk_workspace_capacity_bytes(QType qtype, std::int32_t head_
 void linear_topk(const Tensor& hidden, const Weight& head, std::int32_t valid_rows,
                  Tensor& candidate_ids, Tensor& candidate_scores, WorkspaceArena& workspace,
                  cudaStream_t stream) {
-    const std::int32_t batch  = validate_io(hidden, candidate_ids, candidate_scores);
+    validate_io(hidden, candidate_ids, candidate_scores);
     const HeadProfile profile = resolve_profile(head.qtype, head.n, head.k);
     if (profile == HeadProfile::Q4Optimized || valid_rows != detail::kLinearTopKFullValidRows) {
         throw std::invalid_argument("linear_topk: invalid full-head profile or valid_rows");
@@ -197,24 +251,13 @@ void linear_topk(const Tensor& hidden, const Weight& head, std::int32_t valid_ro
         (void)detail::validate_fp8_weight(head, "linear_topk FP8 full head");
     }
 
-    auto scope                                = workspace.scope();
-    const detail::LinearTopKWorkspace scratch = detail::allocate_linear_topk_workspace(
-        workspace, head.n, detail::kLinearTopKWidth * batch,
-        producer_rows_for(profile, detail::kLinearTopKWidth * batch));
-    require_scratch_nonoverlap(hidden, candidate_ids, candidate_scores, nullptr, scratch);
-    require_no_weight_overlap(head, hidden, candidate_ids, candidate_scores, nullptr, scratch);
-    if (profile == HeadProfile::W8Full) {
-        detail::linear_topk_w8_launch(hidden, head, valid_rows, scratch, stream);
-    } else {
-        detail::linear_topk_fp8_launch(hidden, head, valid_rows, scratch, stream);
-    }
-    detail::linear_topk_merge_launch(scratch, candidate_ids, candidate_scores, stream);
+    execute(hidden, head, nullptr, candidate_ids, candidate_scores, workspace, stream);
 }
 
 void linear_topk(const Tensor& hidden, const Weight& head, const Tensor& row_to_global_ids,
                  Tensor& candidate_ids, Tensor& candidate_scores, WorkspaceArena& workspace,
                  cudaStream_t stream) {
-    const std::int32_t batch = validate_io(hidden, candidate_ids, candidate_scores);
+    validate_io(hidden, candidate_ids, candidate_scores);
     if (resolve_profile(head.qtype, head.n, head.k) != HeadProfile::Q4Optimized) {
         throw std::invalid_argument("linear_topk: invalid optimized-head profile");
     }
@@ -226,16 +269,7 @@ void linear_topk(const Tensor& hidden, const Weight& head, const Tensor& row_to_
         throw std::invalid_argument("linear_topk: id map overlaps input or output");
     }
 
-    auto scope                                = workspace.scope();
-    const detail::LinearTopKWorkspace scratch = detail::allocate_linear_topk_workspace(
-        workspace, head.n, detail::kLinearTopKWidth * batch,
-        producer_rows_for(HeadProfile::Q4Optimized, detail::kLinearTopKWidth * batch));
-    require_scratch_nonoverlap(hidden, candidate_ids, candidate_scores, &row_to_global_ids,
-                               scratch);
-    require_no_weight_overlap(head, hidden, candidate_ids, candidate_scores, &row_to_global_ids,
-                              scratch);
-    detail::linear_topk_q4_launch(hidden, head, row_to_global_ids, scratch, stream);
-    detail::linear_topk_merge_launch(scratch, candidate_ids, candidate_scores, stream);
+    execute(hidden, head, &row_to_global_ids, candidate_ids, candidate_scores, workspace, stream);
 }
 
 } // namespace ninfer::ops
