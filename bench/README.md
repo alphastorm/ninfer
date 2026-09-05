@@ -230,6 +230,13 @@ ncu --profile-from-start off --set full \
 Op emits. CSV records `execution` and, for Graph measurements, `graph_nodes`; the terminal header
 also records execution mode and CUDA runtime. `--profile` follows the selected execution mode.
 
+For short Ops, `--execution graph --graph-calls N` captures N serial calls (1..64, default 1).
+Latency and calculated work rates are normalized per call; CSV `graph_nodes` counts all nodes in
+the bundle and `graph_calls` records N. The cache flush occurs only before the bundle, so later
+calls reuse cached inputs. These rows are labeled `cold-before-graph-bundle` and omit DRAM/read
+percentages and the DRAM memory floor. Multiple calls are for timing and cannot be combined with
+`--profile`, which always captures one complete public call.
+
 Every ordinary sample is cold-cache: a 256 MiB L2 eviction write completes before the timed
 interval. Reported effective bandwidth uses the encoded weight planes once, one BF16 activation
 read, and one BF16 output write. Reported FLOPs are the mathematical `2*N*K*T`; neither metric

@@ -1,8 +1,8 @@
 #pragma once
 
 // Small-output BF16 x BF16 MMA for the exact [256,5120] selector projection. A CTA computes one
-// 16-row by 8-token tile. Sixteen warps split K, double-buffer global-to-shared staging, and reduce
-// their FP32 fragments in shared memory.
+// 16-row by 8/16-token tile. Sixteen/eight warps split K, double-buffer global-to-shared staging,
+// and reduce FP32 fragments in shared memory before the final BF16 store.
 
 #include "ops/common/math.h"
 #include "ops/common/memory.cuh"
@@ -15,10 +15,11 @@
 
 namespace ninfer::ops::detail {
 
+template <int KWarps, int TileTokens>
 struct Bf16N256K5120MmaSchedule {
     static constexpr int kOutputRowsPerCta  = 16;
-    static constexpr int kKWarps            = 16;
-    static constexpr int kTileTokens        = 8;
+    static constexpr int kKWarps            = KWarps;
+    static constexpr int kTileTokens        = TileTokens;
     static constexpr int kPipelineStages    = 2;
     static constexpr Cache kWeightCache     = Cache::cg;
     static constexpr Cache kActivationCache = Cache::cg;
@@ -42,10 +43,10 @@ __device__ __forceinline__ int bf16_n256_k5120_swizzle(int row, int col) {
     return (col & ~63) + ((((col & 63) >> 3) ^ (row & 7)) << 3) + (col & 7);
 }
 
-__global__ __launch_bounds__(512, 1) void bf16_n256_k5120_mma_kernel(
+template <class Schedule>
+__global__ __launch_bounds__(Schedule::kThreads, 1) void bf16_n256_k5120_mma_kernel(
     const __nv_bfloat16* __restrict__ x, const __nv_bfloat16* __restrict__ weight,
     __nv_bfloat16* __restrict__ out, std::int32_t tokens) {
-    using Schedule            = Bf16N256K5120MmaSchedule;
     constexpr int kRows       = 256;
     constexpr int kHidden     = 5120;
     constexpr int kMmaRows    = 16;
@@ -140,14 +141,10 @@ __global__ __launch_bounds__(512, 1) void bf16_n256_k5120_mma_kernel(
 
 #pragma unroll 1
     for (int group = 0; group < kGroups; ++group) {
-        if constexpr (Schedule::kPipelineStages == 1) {
-            cp_wait<0>();
+        if (group + Schedule::kPipelineStages <= kGroups) {
+            cp_wait<Schedule::kPipelineStages - 1>();
         } else {
-            if (group + Schedule::kPipelineStages <= kGroups) {
-                cp_wait<Schedule::kPipelineStages - 1>();
-            } else {
-                cp_wait<0>();
-            }
+            cp_wait<0>();
         }
         __syncthreads();
         const int stage = group % Schedule::kPipelineStages;
