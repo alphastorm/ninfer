@@ -99,31 +99,34 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
                                       std::int32_t token_domain, const SamplingConfig* configs,
                                       WorkspaceArena& workspace, cudaStream_t stream);
 
-// Caller-owned transient capacity for the exact sparse-proposal profile over every batch size in
-// the inclusive interval. The raw-greedy execution envelope requires no workspace.
+// Caller-owned transient capacity over the inclusive draft-count and batch intervals.
+// The raw-greedy execution envelope requires no workspace.
 [[nodiscard]] std::size_t speculative_accept_sparse_drafts_workspace_capacity_bytes(
-    std::int32_t token_domain, SpeculativeAcceptExecutionEnvelope envelope, std::int32_t min_batch,
-    std::int32_t max_batch);
+    std::int32_t token_domain, SpeculativeAcceptExecutionEnvelope envelope, std::int32_t min_drafts,
+    std::int32_t max_drafts, std::int32_t min_batch, std::int32_t max_batch);
 
 /**
  * Op: speculative_accept_sparse_drafts
  *
  * Algorithm:
- *   This is the seven-draft, 16-candidate sparse-proposal form of speculative rejection sampling.
- *   For row b, only target columns 0..P are live, where P=current_extents[b]. Greedy rows accept
- *   the longest draft prefix matching the penalty-adjusted target argmax and then emit that argmax
- *   as correction/bonus. Positive-temperature rows build the target distribution p with the
- *   sampling.h penalty/filter semantics, accept draft d at each live draft column with probability
- *   min(1,p(d)/q(d)), and on first rejection sample from normalized max(p-q,0). If all P drafts are
- *   accepted, the final token is sampled from target column P.
+ *   This is the variable-K, 16-candidate form of speculative rejection sampling.
+ *   For row b, let P=clamp(current_extents[b],0,K). Only target columns 0..P are live.
+ *   Greedy rows accept the longest prefix matching the penalty-adjusted target argmax,
+ *   then emit that argmax as correction/bonus. Positive-temperature rows construct p
+ *   using sampling.h penalties and filters. A live draft d is accepted with probability
+ *   min(1,p(d)/q(d)); first rejection samples normalized max(p-q,0). After accepting all
+ *   P drafts, the terminal token is sampled from target column P.
  *
  * Logical shapes and registered profile:
- *   All Tensor storage is contiguous. target_tokens/licensed_tokens are I32 [8,B], logits is BF16
- *   [248320,8,B], drafts is I32 [7,B], candidate_ids is I32 [16,7,B], proposal_q is FP32
- *   [16,7,B], and current_extents/round_lengths/round_anchors/licensed_counts/accepted_drafts are
- *   I32 [B]. The registered domain is token_domain=248077 and B=1..8. For each live draft row,
- *   candidate ids are distinct global ids in [0,token_domain), proposal_q is the normalized FP32
- *   distribution used to draw that draft, and the draft occurs in that row with positive q.
+ *   All Tensor storage is contiguous. target_tokens/licensed_tokens are I32 [K+1,B].
+ *   logits is BF16 [248320,K+1,B]; drafts is I32 [K,B]; candidate_ids is I32 [16,K,B];
+ *   proposal_q is FP32 [16,K,B]. current_extents, round_lengths, round_anchors,
+ *   licensed_counts, and accepted_drafts are I32 [B].
+ *   The registered domain is token_domain=248077, K=1..15, B=1..8. Each live draft
+ *   position has distinct global candidate ids in [0,token_domain). proposal_q is the
+ *   normalized FP32 distribution used to draw that draft; the draft occurs with positive q.
+ *   For greedy rows without penalties, live target_tokens are the unpenalized target argmax
+ *   over the valid token domain, with lower ids breaking ties.
  *
  * Numeric:
  *   proposal_q is consumed directly; it is not reconstructed from selector scores or expanded to
@@ -143,7 +146,7 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  *
  * Execution:
  *   all_rows_greedy_without_penalties=true promises the matching device configs and enables the
- *   raw target_tokens route. A false promise selects the general route and supports mixed rows.
+ *   raw target_tokens route. A false flag selects the general route and supports mixed rows.
  *
  * Workspace:
  *   Caller-owned transient storage reported by

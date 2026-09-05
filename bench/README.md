@@ -890,19 +890,31 @@ cmake --build build --parallel --target ninfer_argmax_bench ninfer_sampling_sele
 ```
 
 The G2/G3/G4 benchmark uses physical rows 248320 and valid token domain 248077. G2 covers optional
-occurrence counts and batched sampling at `B=1,2,4,8`; G3 covers every one-hot MTP window
-`K=1..5`. With no arguments it runs the existing G2/G3 greedy/stochastic matrix. G4 is the exact
-DFlash2 sparse-q profile with seven drafts, 16 candidates per position, `P=0..7`, and `B=1..8`.
-It reports the raw-greedy/general route, CUDA Graph node count, workspace, and cold-cache latency:
+occurrence counts and batched sampling at `B=1,2,4,8`; G3 covers one-hot MTP windows `K=1..5`.
+With no arguments it runs the G2/G3 greedy/stochastic matrix. G4 covers DFlash2 sparse-q acceptance
+with `K=1..15`, 16 proposal candidates, `P=0..K`, and `B=1..8`. `--drafts` defaults to the
+checkpoint recommendation of seven; the default extent is the selected K.
+
+G4 reports the raw-greedy/general route, Graph node count, caller workspace, and whole-Op timings.
+A 256 MiB flush precedes each timed Graph; setup and input transfers are outside the measurement.
+`--graph-calls N` bundles N calls and reports time divided by N, so later calls reuse cache.
+`--mixed` cycles raw greedy, penalty-bearing greedy, and stochastic requests; `--general` selects
+the conservative general envelope even for greedy inputs. `--reject-at J` changes one proposal to
+exercise rejection; `--extent 0` checks the bonus-only case. These DFlash2 measurements do not
+measure Engine inference.
 
 ```bash
 ./build/bench/ninfer_sampling_select_bench --matrix
 ./build/bench/ninfer_sampling_select_bench --sample --batch 8 --mode stochastic --top-k 20
 ./build/bench/ninfer_sampling_select_bench --mtp --mode stochastic --mtp-k 5 --top-k 20
 ./build/bench/ninfer_sampling_select_bench \
-  --dflash2 --batch 8 --extent 7 --mode greedy
+  --dflash2 --drafts 15 --batch 8 --mode greedy --graph-calls 32 --warmup 8 --repeat 60
 ./build/bench/ninfer_sampling_select_bench \
-  --dflash2 --batch 8 --extent 7 --mode stochastic --top-k 20
+  --dflash2 --drafts 15 --batch 8 --mode stochastic --top-k 20 --warmup 8 --repeat 60
+./build/bench/ninfer_sampling_select_bench \
+  --dflash2 --drafts 7 --batch 8 --mode stochastic --mixed --extent 3
+./build/bench/ninfer_sampling_select_bench \
+  --dflash2 --drafts 15 --batch 8 --mode stochastic --no-counts --reject-at 7
 ```
 
 ## 35B dFlash causal Attention qualification

@@ -9,8 +9,7 @@
 namespace ninfer::ops {
 namespace {
 
-constexpr std::int32_t kSparseDrafts       = 7;
-constexpr std::int32_t kSparseColumns      = kSparseDrafts + 1;
+constexpr std::int32_t kSparseMaxDrafts    = 15;
 constexpr std::int32_t kSparseCandidates   = 16;
 constexpr std::int32_t kSparsePhysicalRows = 248320;
 constexpr std::int32_t kSparseTokenDomain  = 248077;
@@ -86,15 +85,16 @@ std::size_t speculative_accept_greedy_drafts_workspace_capacity_bytes(std::int32
 }
 
 std::size_t speculative_accept_sparse_drafts_workspace_capacity_bytes(
-    std::int32_t token_domain, SpeculativeAcceptExecutionEnvelope envelope, std::int32_t min_batch,
-    std::int32_t max_batch) {
-    if (token_domain != kSparseTokenDomain || min_batch < 1 || max_batch < min_batch ||
+    std::int32_t token_domain, SpeculativeAcceptExecutionEnvelope envelope, std::int32_t min_drafts,
+    std::int32_t max_drafts, std::int32_t min_batch, std::int32_t max_batch) {
+    if (token_domain != kSparseTokenDomain || min_drafts < 1 || max_drafts < min_drafts ||
+        max_drafts > kSparseMaxDrafts || min_batch < 1 || max_batch < min_batch ||
         max_batch > kSparseMaxBatch) {
         throw std::invalid_argument("sparse speculative accept workspace: unsupported profile");
     }
     if (envelope.all_rows_greedy_without_penalties) { return 0; }
     const std::size_t row_bytes =
-        sampling_workspace_capacity_bytes(token_domain, kSparseColumns, kSparseColumns);
+        sampling_workspace_capacity_bytes(token_domain, min_drafts + 1, max_drafts + 1);
     return row_bytes * static_cast<std::size_t>(max_batch);
 }
 
@@ -188,21 +188,23 @@ void speculative_accept_sparse_drafts(
         throw std::invalid_argument(
             "speculative_accept_sparse_drafts: token_domain must be 248077");
     }
-    const std::int32_t batch = drafts.ne[1];
+    const std::int32_t k = drafts.ne[0];
+    if (k < 1 || k > kSparseMaxDrafts)
+        throw std::invalid_argument("speculative_accept_sparse_drafts: K must be 1..15");
+    const std::int32_t columns = k + 1;
+    const std::int32_t batch   = drafts.ne[1];
     if (batch < 1 || batch > kSparseMaxBatch) {
         throw std::invalid_argument("speculative_accept_sparse_drafts: B must be 1..8");
     }
-    require_matrix(target_tokens, DType::I32, kSparseColumns, batch, op, "target_tokens");
-    require_tensor3(logits, DType::BF16, kSparsePhysicalRows, kSparseColumns, batch, op, "logits");
-    require_matrix(drafts, DType::I32, kSparseDrafts, batch, op, "drafts");
-    require_tensor3(candidate_ids, DType::I32, kSparseCandidates, kSparseDrafts, batch, op,
-                    "candidate_ids");
-    require_tensor3(proposal_q, DType::FP32, kSparseCandidates, kSparseDrafts, batch, op,
-                    "proposal_q");
+    require_matrix(target_tokens, DType::I32, columns, batch, op, "target_tokens");
+    require_tensor3(logits, DType::BF16, kSparsePhysicalRows, columns, batch, op, "logits");
+    require_matrix(drafts, DType::I32, k, batch, op, "drafts");
+    require_tensor3(candidate_ids, DType::I32, kSparseCandidates, k, batch, op, "candidate_ids");
+    require_tensor3(proposal_q, DType::FP32, kSparseCandidates, k, batch, op, "proposal_q");
     require_vector(current_extents, DType::I32, batch, op, "current_extents");
     require_vector(round_lengths, DType::I32, batch, op, "round_lengths");
     require_vector(round_anchors, DType::I32, batch, op, "round_anchors");
-    require_matrix(licensed_tokens, DType::I32, kSparseColumns, batch, op, "licensed_tokens");
+    require_matrix(licensed_tokens, DType::I32, columns, batch, op, "licensed_tokens");
     require_vector(licensed_counts, DType::I32, batch, op, "licensed_counts");
     require_vector(accepted_drafts, DType::I32, batch, op, "accepted_drafts");
     if (configs == nullptr) {
@@ -211,7 +213,7 @@ void speculative_accept_sparse_drafts(
 
     auto scratch_scope      = workspace.scope();
     const std::size_t bytes = speculative_accept_sparse_drafts_workspace_capacity_bytes(
-        token_domain, envelope, batch, batch);
+        token_domain, envelope, k, k, batch, batch);
     const DeviceSpan scratch = bytes == 0 ? DeviceSpan{} : workspace.alloc_bytes(bytes);
     detail::speculative_accept_sparse_drafts_launch(
         target_tokens, logits, drafts, candidate_ids, proposal_q, current_extents, round_lengths,

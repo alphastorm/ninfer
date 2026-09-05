@@ -2,7 +2,7 @@
 //
 //   ./ninfer_sampling_select_bench --sample --batch 8 --mode stochastic
 //   ./ninfer_sampling_select_bench --mtp --mode stochastic --mtp-k 5
-//   ./ninfer_sampling_select_bench --dflash2 --batch 8 --mode stochastic --extent 7
+//   ./ninfer_sampling_select_bench --dflash2 --drafts 15 --batch 8 --mode stochastic --extent 15
 //   ./ninfer_sampling_select_bench --matrix
 #include "core/device.h"
 #include "core/tensor.h"
@@ -28,8 +28,6 @@ namespace {
 
 constexpr std::int32_t kPhysicalRows      = 248320;
 constexpr std::int32_t kTokenDomain       = 248077;
-constexpr std::int32_t kDFlash2Drafts     = 7;
-constexpr std::int32_t kDFlash2Columns    = 8;
 constexpr std::int32_t kDFlash2Candidates = 16;
 constexpr std::size_t kFlushBytes         = std::size_t{256} << 20;
 
@@ -47,14 +45,23 @@ struct Options {
     Mode mode          = Mode::Stochastic;
     int batch          = 1;
     int mtp_k          = 3;
-    int extent         = kDFlash2Drafts;
+    int drafts         = 7;
+    int extent         = 0;
+    bool extent_set    = false;
+    bool force_general = false;
+    bool mixed         = false;
+    int reject_at      = -1;
+    int warmup         = 8;
+    int repeat         = 60;
+    int graph_calls    = 1;
     int top_k          = 20;
 };
 
 void usage(const char* argv0) {
     std::printf("usage: %s [--sample|--mtp|--dflash2|--matrix] [--mode greedy|stochastic] "
-                "[--batch 1..8] [--mtp-k 1..5] [--extent 0..7] [--top-k 1..20] "
-                "[--no-counts]\n",
+                "[--batch 1..8] [--mtp-k 1..5] [--drafts 1..15] [--extent 0..K] [--top-k 1..20] "
+                "[--no-counts] [--general] [--mixed] [--reject-at J] [--warmup N] [--repeat N] "
+                "[--graph-calls N]\n",
                 argv0);
 }
 
@@ -101,7 +108,22 @@ Options parse_args(int argc, char** argv) {
         } else if (arg == "--mtp-k") {
             options.mtp_k = parse_int(need_value("--mtp-k"), "--mtp-k");
         } else if (arg == "--extent") {
-            options.extent = parse_int(need_value("--extent"), "--extent");
+            options.extent     = parse_int(need_value("--extent"), "--extent");
+            options.extent_set = true;
+        } else if (arg == "--drafts") {
+            options.drafts = parse_int(need_value("--drafts"), "--drafts");
+        } else if (arg == "--general") {
+            options.force_general = true;
+        } else if (arg == "--mixed") {
+            options.mixed = true;
+        } else if (arg == "--reject-at") {
+            options.reject_at = parse_int(need_value("--reject-at"), "--reject-at");
+        } else if (arg == "--warmup") {
+            options.warmup = parse_int(need_value("--warmup"), "--warmup");
+        } else if (arg == "--repeat") {
+            options.repeat = parse_int(need_value("--repeat"), "--repeat");
+        } else if (arg == "--graph-calls") {
+            options.graph_calls = parse_int(need_value("--graph-calls"), "--graph-calls");
         } else if (arg == "--top-k") {
             options.top_k = parse_int(need_value("--top-k"), "--top-k");
         } else if (arg == "--no-counts") {
@@ -129,9 +151,16 @@ Options parse_args(int argc, char** argv) {
     if (options.batch < 1 || options.batch > 8) {
         throw std::invalid_argument("--batch must be in [1,8]");
     }
-    if (options.extent < 0 || options.extent > kDFlash2Drafts) {
-        throw std::invalid_argument("--extent must be in [0,7]");
-    }
+    if (options.drafts < 1 || options.drafts > 15)
+        throw std::invalid_argument("--drafts must be in [1,15]");
+    if (!options.extent_set) options.extent = options.drafts;
+    if (options.extent < 0 || options.extent > options.drafts)
+        throw std::invalid_argument("--extent must be in [0,K]");
+    if (options.reject_at < -1 || options.reject_at >= options.drafts)
+        throw std::invalid_argument("--reject-at must be in [-1,K)");
+    if (options.warmup < 0 || options.repeat < 1 || options.graph_calls < 1 ||
+        options.graph_calls > 64)
+        throw std::invalid_argument("invalid timing counts");
     if (options.top_k < 1 || options.top_k > 20) {
         throw std::invalid_argument("--top-k must be in [1,20]");
     }
@@ -176,7 +205,7 @@ DeviceBuffer make_config(DeviceBuffer& counts, Mode mode, bool counts_active, in
 }
 
 DeviceBuffer make_batch_configs(DeviceBuffer& counts, int batch, Mode mode, bool counts_active,
-                                int top_k) {
+                                int top_k, bool mixed = false) {
     std::vector<ops::SamplingConfig> configs(static_cast<std::size_t>(batch));
     for (int row = 0; row < batch; ++row) {
         ops::SamplingConfig& config = configs[static_cast<std::size_t>(row)];
@@ -189,6 +218,13 @@ DeviceBuffer make_batch_configs(DeviceBuffer& counts, int batch, Mode mode, bool
                                           ? static_cast<std::int32_t*>(counts.p) +
                                         static_cast<std::size_t>(row) * kTokenDomain
                                           : nullptr;
+        if (mixed) {
+            config.temperature       = row % 3 == 2 ? 0.6f : 0.0f;
+            config.presence_penalty  = row % 3 == 0 ? 0.0f : 1.0f;
+            config.frequency_penalty = row % 3 == 1 ? 0.125f : 0.0f;
+            config.token_counts =
+                counts_active ? static_cast<int*>(counts.p) + row * kTokenDomain : nullptr;
+        }
     }
     DeviceBuffer device(configs.size() * sizeof(ops::SamplingConfig));
     CUDA_CHECK(cudaMemcpy(device.p, configs.data(), device.bytes, cudaMemcpyHostToDevice));
@@ -280,10 +316,15 @@ void run_mtp(DeviceBuffer& logits, DeviceBuffer& counts, int k, Mode mode, bool 
     print_result(label.c_str(), result);
 }
 
-void run_dflash2(DeviceBuffer& logits, DeviceBuffer& counts, int batch, int extent, Mode mode,
-                 bool counts_active, int top_k) {
+void run_dflash2(DeviceBuffer& logits, DeviceBuffer& counts, const Options& options) {
+    const int batch = options.batch, extent = options.extent;
+    const int kDFlash2Drafts = options.drafts, kDFlash2Columns = options.drafts + 1;
+    const Mode mode          = options.mode;
+    const bool counts_active = options.counts_active;
+    const int top_k          = options.top_k;
     CUDA_CHECK(cudaMemset(counts.p, 0, counts.bytes));
-    DeviceBuffer configs = make_batch_configs(counts, batch, mode, counts_active, top_k);
+    DeviceBuffer configs =
+        make_batch_configs(counts, batch, mode, counts_active, top_k, options.mixed);
 
     std::vector<std::int32_t> target_host(static_cast<std::size_t>(kDFlash2Columns) * batch);
     std::vector<std::int32_t> draft_host(static_cast<std::size_t>(kDFlash2Drafts) * batch);
@@ -306,6 +347,14 @@ void run_dflash2(DeviceBuffer& logits, DeviceBuffer& counts, int batch, int exte
             }
             q_host[base] = mode == Mode::Greedy ? 1.0f : 0.5f;
             if (mode == Mode::Stochastic) q_host[base + 1] = 0.5f;
+            if (draft == options.reject_at) {
+                draft_host[static_cast<std::size_t>(row) * kDFlash2Drafts + draft] =
+                    candidate_host[base + 1];
+                if (mode == Mode::Greedy) {
+                    q_host[base]     = 0.0f;
+                    q_host[base + 1] = 1.0f;
+                }
+            }
         }
     }
 
@@ -335,11 +384,12 @@ void run_dflash2(DeviceBuffer& logits, DeviceBuffer& counts, int batch, int exte
     Tensor tlicensed_counts(licensed_counts.p, DType::I32, {batch});
     Tensor taccepted(accepted.p, DType::I32, {batch});
     const ops::SpeculativeAcceptExecutionEnvelope envelope{
-        .all_rows_greedy_without_penalties = mode == Mode::Greedy,
+        .all_rows_greedy_without_penalties =
+            mode == Mode::Greedy && !options.force_general && !options.mixed,
     };
     const std::size_t workspace_bytes =
-        ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(kTokenDomain, envelope,
-                                                                       batch, batch);
+        ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
+            kTokenDomain, envelope, kDFlash2Drafts, kDFlash2Drafts, batch, batch);
     WorkspaceArena workspace(std::max<std::size_t>(workspace_bytes, 256));
     const auto* config_ptr = static_cast<const ops::SamplingConfig*>(configs.p);
     const auto launch      = [&](cudaStream_t stream) {
@@ -353,22 +403,24 @@ void run_dflash2(DeviceBuffer& logits, DeviceBuffer& counts, int batch, int exte
     launch(stream);
     CUDA_CHECK(cudaStreamSynchronize(stream));
     TimedGraph graph;
-    graph.capture(stream, launch);
+    graph.capture(stream, [&](cudaStream_t s) {
+        for (int i = 0; i < options.graph_calls; ++i) launch(s);
+    });
     DeviceBuffer flush(kFlushBytes);
-    const ColdTiming timing = measure_cold_graph(graph, flush, stream, 10, 61);
+    const ColdTiming timing =
+        measure_cold_graph(graph, flush, stream, options.warmup, options.repeat);
     CUDA_CHECK(cudaStreamDestroy(stream));
 
     const bool general = !envelope.all_rows_greedy_without_penalties;
-    const double bytes =
-        general ? static_cast<double>(extent + 1) * batch * kTokenDomain *
-                      (2.0 + (counts_active ? 4.0 : 0.0))
-                : static_cast<double>(batch) * (kDFlash2Columns + kDFlash2Drafts) * 4.0;
-    const double gbps = bytes / (timing.median_us * 1.0e-6) / 1.0e9;
-    std::printf("G4 sparse B=%d P=%d %-10s route=%-10s nodes=%zu workspace=%zu "
-                "median=%8.3f us min=%8.3f us p95=%8.3f us useful=%7.1f GB/s\n",
-                batch, extent, mode == Mode::Greedy ? "greedy" : "stochastic",
-                general ? "general" : "raw_greedy", graph.nodes(), workspace_bytes,
-                timing.median_us, timing.min_us, timing.p95_us, gbps);
+    std::printf("G4 sparse K=%d B=%d P=%d mode=%s route=%s counts=%d reject_at=%d nodes=%zu "
+                "calls=%d workspace=%zu median=%.3f us min=%.3f us p95=%.3f us\n",
+                kDFlash2Drafts, batch, extent,
+                options.mixed          ? "mixed"
+                : mode == Mode::Greedy ? "greedy"
+                                       : "stochastic",
+                general ? "general" : "raw_greedy", counts_active, options.reject_at, graph.nodes(),
+                options.graph_calls, workspace_bytes, timing.median_us / options.graph_calls,
+                timing.min_us / options.graph_calls, timing.p95_us / options.graph_calls);
 }
 
 } // namespace
@@ -382,11 +434,19 @@ int main(int argc, char** argv) {
 
     try {
         const Options options = parse_args(argc, argv);
+        if (options.dflash2) {
+            int device = 0;
+            cudaDeviceProp properties{};
+            CUDA_CHECK(cudaGetDevice(&device));
+            CUDA_CHECK(cudaGetDeviceProperties(&properties, device));
+            std::printf("# gpu=%s cuda_runtime=%d cache_flush_mib=256 warmup=%d repeat=%d\n",
+                        properties.name, CUDART_VERSION, options.warmup, options.repeat);
+        }
         const int max_cols =
             options.matrix
                 ? 8
                 : std::max({options.sample ? options.batch : 1, options.mtp ? options.mtp_k + 1 : 1,
-                            options.dflash2 ? options.batch * kDFlash2Columns : 1});
+                            options.dflash2 ? options.batch * (options.drafts + 1) : 1});
         DeviceBuffer logits = make_logits(max_cols);
         const int count_rows =
             options.matrix ? 8 : (options.dflash2 || options.sample ? options.batch : 1);
@@ -423,10 +483,7 @@ int main(int argc, char** argv) {
                 run_mtp(logits, counts, options.mtp_k, options.mode, options.counts_active,
                         options.top_k);
             }
-            if (options.dflash2) {
-                run_dflash2(logits, counts, options.batch, options.extent, options.mode,
-                            options.counts_active, options.top_k);
-            }
+            if (options.dflash2) { run_dflash2(logits, counts, options); }
         }
     } catch (const std::exception& e) {
         std::fprintf(stderr, "ninfer_sampling_select_bench: %s\n", e.what());
