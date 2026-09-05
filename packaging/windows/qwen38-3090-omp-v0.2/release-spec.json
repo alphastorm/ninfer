@@ -1,10 +1,10 @@
 {
   "artifact_type": "ninfer_windows_release_spec",
   "schema_version": 2,
-  "release_id": "qwen38-3090-omp-v0.2.4-beta.1",
-  "release_version": "0.2.4-beta.1",
-  "deployment_profile": "qwen38-3090-omp-v0.2.4-beta.1-c1",
-  "build_profile": "omp-v0.2.4-rtx3090",
+  "release_id": "qwen38-3090-omp-v0.2.5-beta.1",
+  "release_version": "0.2.5-beta.1",
+  "deployment_profile": "qwen38-3090-omp-v0.2.5-beta.1-c1",
+  "build_profile": "omp-v0.2.5-rtx3090",
   "platform": "windows-x86_64-cuda13.3-rtx3090",
   "gpu": {
     "name": "NVIDIA GeForce RTX 3090",
@@ -73,7 +73,7 @@
     "later_external_beta_authority": {
       "artifact_type": "ninfer_rtx3090_beta_qualification",
       "schema_version": 3,
-      "public_receipt_path": "docs/qualification/receipts/qwen3.8-27b-rtx-3090-v0.2.4-beta.1.json",
+      "public_receipt_path": "docs/qualification/receipts/qwen3.8-27b-rtx-3090-v0.2.5-beta.1.json",
       "supersedes_only_when_exact_package_sha256_matches": true,
       "mutates_packaged_history": false
     },
