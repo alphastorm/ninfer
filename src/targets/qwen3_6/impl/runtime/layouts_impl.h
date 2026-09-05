@@ -627,6 +627,11 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
             throw std::invalid_argument("DFlash draft window must be in [1,15]");
         }
         break;
+    case SpeculativeBackend::DFlash2:
+        if (options.speculative.draft_tokens != 7) {
+            throw std::invalid_argument("DFlash2 requires draft_tokens=7");
+        }
+        throw std::invalid_argument("DFlash2 execution is not implemented");
     }
     // The FP8-KV causal Attention kernels issue e4m3 MMA and are excluded from Ampere builds,
     // which serve the same sequences from the BF16 and INT8 caches.
