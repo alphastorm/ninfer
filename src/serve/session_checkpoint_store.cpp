@@ -220,6 +220,55 @@ void write_synced(const std::filesystem::path& path, std::string_view bytes) {
     return {reinterpret_cast<const char*>(bytes.data()), bytes.size()};
 }
 
+// Origin authentication for checkpoint manifests (alphastorm/ninfer#32). The digest chain in
+// manifest.json authenticates consistency only: a writer inside the checkpoint root can rewrite
+// manifest and payloads coherently. The MAC key lives outside the root, so a valid manifest.mac
+// proves the manifest was produced by this server's configured identity.
+enum class ManifestOriginState : std::uint8_t { Authentic, Unauthenticated, Forged };
+
+[[nodiscard]] std::string manifest_origin_mac_hex(std::string_view key,
+                                                  std::string_view manifest_text) {
+    return crypto::sha256_hex(crypto::hmac_sha256(
+        std::as_bytes(std::span(key.data(), key.size())),
+        std::as_bytes(std::span(manifest_text.data(), manifest_text.size()))));
+}
+
+[[nodiscard]] bool constant_time_hex_equal(std::string_view left, std::string_view right) {
+    if (left.size() != right.size()) { return false; }
+    unsigned char difference = 0;
+    for (std::size_t i = 0; i < left.size(); ++i) {
+        difference = static_cast<unsigned char>(
+            difference | (static_cast<unsigned char>(left[i]) ^
+                          static_cast<unsigned char>(right[i])));
+    }
+    return difference == 0;
+}
+
+[[nodiscard]] ManifestOriginState manifest_origin_state(const std::filesystem::path& root,
+                                                        std::string_view manifest_text,
+                                                        std::string_view key) {
+    if (key.empty()) { return ManifestOriginState::Unauthenticated; }
+    std::error_code probe_error;
+    const bool tag_exists = std::filesystem::exists(root / "manifest.mac", probe_error);
+    if (probe_error) {
+        // A transient inability to even probe the tag is a filesystem fault, never origin
+        // evidence: preserve current for retry.
+        throw CheckpointUnavailable("checkpoint origin tag probe failed");
+    }
+    if (!tag_exists) { return ManifestOriginState::Unauthenticated; }
+    // read_text_bounded throws CheckpointUnavailable on open/size/read faults; let it
+    // propagate so a transient tag read reports Unavailable instead of quarantining a
+    // valid generation. Only structural badness or a mismatch is forgery evidence.
+    std::string recorded = read_text_bounded(root / "manifest.mac", 128);
+    while (!recorded.empty() && (recorded.back() == '\n' || recorded.back() == '\r')) {
+        recorded.pop_back();
+    }
+    if (recorded.size() != 64) { return ManifestOriginState::Forged; }
+    const std::string expected = manifest_origin_mac_hex(key, manifest_text);
+    return constant_time_hex_equal(recorded, expected) ? ManifestOriginState::Authentic
+                                                       : ManifestOriginState::Forged;
+}
+
 [[nodiscard]] FileDescriptor hash_file(const std::filesystem::path& root,
                                        const std::string& relative,
                                        std::uint64_t expected_bytes) {
@@ -1267,6 +1316,10 @@ SessionCheckpointStore::save(const AuthenticatedCheckpointNamespace& checkpoint_
         };
         const std::string manifest_text = manifest.dump();
         write_synced(staging / "manifest.json", manifest_text);
+        if (!options_.origin_mac_key.empty()) {
+            write_synced(staging / "manifest.mac",
+                         manifest_origin_mac_hex(options_.origin_mac_key, manifest_text));
+        }
         sync_directory(staging);
         // Reclaim before changing current. The staging generation and its session are protected,
         // so quota or cleanup failure leaves the previously published generation untouched.
@@ -1332,8 +1385,24 @@ SessionCheckpointStore::load(const AuthenticatedCheckpointNamespace& checkpoint_
     if (!generation) { return load_state(SessionCheckpointLoadState::Missing); }
     const std::filesystem::path root = session / "generations" / *generation;
     try {
-        const nlohmann::json manifest =
-            nlohmann::json::parse(read_text_bounded(root / "manifest.json", 16ULL << 20));
+        const std::string manifest_text = read_text_bounded(root / "manifest.json", 16ULL << 20);
+        // Verify origin before trusting any manifest content (alphastorm/ninfer#32). A
+        // present-but-wrong MAC is tamper evidence and quarantines like corruption. An
+        // absent MAC under the strict import posture is a REVERSIBLE policy refusal, not
+        // evidence: report Incompatible (clean-replay path) and mutate nothing, so
+        // clearing the flag restores the generation. Off-strict, locally-produced legacy
+        // generations keep loading.
+        switch (manifest_origin_state(root, manifest_text, options_.origin_mac_key)) {
+        case ManifestOriginState::Authentic: break;
+        case ManifestOriginState::Forged:
+            throw CheckpointCorruption("checkpoint manifest origin authentication failed");
+        case ManifestOriginState::Unauthenticated:
+            if (options_.require_origin_auth) {
+                return load_state(SessionCheckpointLoadState::Incompatible);
+            }
+            break;
+        }
+        const nlohmann::json manifest = nlohmann::json::parse(manifest_text);
         if (!manifest.is_object() ||
             manifest.at("artifact_type").get<std::string>() != "ninfer_session_checkpoint" ||
             manifest.at("schema_version").get<std::uint32_t>() !=
@@ -1449,8 +1518,16 @@ bool SessionCheckpointStore::covers(
         const std::optional<std::string> generation = current_generation(session);
         if (!generation) { return false; }
         const std::filesystem::path root = session / "generations" / *generation;
-        const nlohmann::json manifest =
-            nlohmann::json::parse(read_text_bounded(root / "manifest.json", 16ULL << 20));
+        const std::string manifest_text = read_text_bounded(root / "manifest.json", 16ULL << 20);
+        const ManifestOriginState origin =
+            manifest_origin_state(root, manifest_text, options_.origin_mac_key);
+        if (origin == ManifestOriginState::Forged ||
+            (origin == ManifestOriginState::Unauthenticated && options_.require_origin_auth)) {
+            // A skip decision must never trust an unauthenticated catalogue entry: fall
+            // through to a real save instead of skipping against forged state.
+            return false;
+        }
+        const nlohmann::json manifest = nlohmann::json::parse(manifest_text);
         return manifest.is_object() &&
                manifest.at("artifact_type").get<std::string>() == "ninfer_session_checkpoint" &&
                manifest.at("schema_version").get<std::uint32_t>() ==
@@ -1478,8 +1555,19 @@ nlohmann::json SessionCheckpointStore::status(
         const std::optional<std::string> generation = current_generation(session);
         if (!generation) { return result; }
         const std::filesystem::path root = session / "generations" / *generation;
-        const nlohmann::json manifest =
-            nlohmann::json::parse(read_text_bounded(root / "manifest.json", 16ULL << 20));
+        const std::string manifest_text = read_text_bounded(root / "manifest.json", 16ULL << 20);
+        switch (manifest_origin_state(root, manifest_text, options_.origin_mac_key)) {
+        case ManifestOriginState::Authentic: break;
+        case ManifestOriginState::Forged:
+            throw CheckpointCorruption("checkpoint manifest origin authentication failed");
+        case ManifestOriginState::Unauthenticated:
+            if (options_.require_origin_auth) {
+                result["state"] = "incompatible";
+                return result;
+            }
+            break;
+        }
+        const nlohmann::json manifest = nlohmann::json::parse(manifest_text);
         if (!manifest.is_object() ||
             manifest.at("artifact_type").get<std::string>() != "ninfer_session_checkpoint" ||
             manifest.at("schema_version").get<std::uint32_t>() !=

@@ -87,6 +87,31 @@ int main() {
                          "/tmp/checkpoints"});
         }),
         "session checkpoints were accepted without API authentication");
+    const ServeOptions strict = parse(
+        {"ninfer-serve", "model.ninfer", "--api-key", "checkpoint-secret-of-thirty-two-chars!!",
+         "--binary-sha256", binary_sha, "--artifact-sha256", artifact_sha, "--config-sha256",
+         config_sha, "--deployment-profile", "qwen38-4090-v0.1", "--session-checkpoint-dir",
+         "/tmp/ninfer-checkpoints", "--session-checkpoint-require-origin-auth"});
+    failures += check(strict.session_checkpoint_require_origin_auth,
+                      "strict origin authentication was not preserved");
+    failures += check(!checkpoints.session_checkpoint_require_origin_auth,
+                      "origin authentication defaults to the compatibility window");
+    failures += check(
+        rejects([&] {
+            (void)parse({"ninfer-serve", "model.ninfer", "--api-key", "short-secret",
+                         "--binary-sha256", binary_sha, "--artifact-sha256", artifact_sha,
+                         "--config-sha256", config_sha, "--deployment-profile",
+                         "qwen38-4090-v0.1", "--session-checkpoint-dir", "/tmp/checkpoints",
+                         "--session-checkpoint-require-origin-auth"});
+        }),
+        "strict origin authentication accepted a bearer key under 32 characters");
+    failures += check(
+        rejects([&] {
+            (void)parse({"ninfer-serve", "model.ninfer", "--api-key",
+                         "checkpoint-secret-of-thirty-two-chars!!",
+                         "--session-checkpoint-require-origin-auth"});
+        }),
+        "strict origin authentication accepted without a checkpoint directory");
     failures += check(
         rejects([&] {
             (void)parse({"ninfer-serve", "model.ninfer", "--api-key", "secret",

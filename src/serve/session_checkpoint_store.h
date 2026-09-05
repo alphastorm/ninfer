@@ -35,6 +35,16 @@ struct SessionCheckpointStoreOptions {
     std::function<void(const std::filesystem::path&)> current_pointer_sync;
     // Test-only fault seam for the final generation-size scan before reader ownership begins.
     std::function<std::uint64_t(const std::filesystem::path&)> generation_size;
+    // Authenticates checkpoint manifest ORIGIN, not just consistency (alphastorm/ninfer#32):
+    // 32 raw bytes of HMAC-SHA256 key material held outside the checkpoint root (derived from
+    // the bearer key, never the bearer key itself). Saves write a manifest.mac sibling; loads
+    // verify it. Empty disables production and verification - without a configured bearer key
+    // no authenticated origin exists.
+    std::string origin_mac_key;
+    // Refuse generations without a valid origin MAC (the NAS/S3 import posture). Off keeps
+    // the compatibility window: unMAC'd locally-produced generations still load, and only a
+    // present-but-wrong MAC is treated as tampering.
+    bool require_origin_auth = false;
 };
 
 struct SessionCheckpointSaveResult {
