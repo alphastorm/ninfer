@@ -570,6 +570,26 @@ Prefix useful traffic is 8192 bytes per committed token, multiplied by the batch
 with a positive envelope still exercises device count handling and reports zero useful bytes.
 `--max-count 0 --counts 0` produces no kernels and reports zero GPU time.
 
+## Ragged-prefix preparation Op benchmark
+
+`ninfer_prepare_ragged_prefix_bench` measures the complete public gather/zero-fill operation,
+including positions and counts. D=25600 is the DFlash2 feature vector; D=16384 covers existing
+DFlash. `--counts full|one|ragged|zero` controls actual per-request prefixes. Zero prefixes still
+write the full output tail and metadata. Each ordinary call has one kernel and zero scratch.
+
+```bash
+cmake --build build -j --target ninfer_prepare_ragged_prefix_bench
+./build/bench/ninfer_prepare_ragged_prefix_bench \
+  --rows 25600 --widths 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16 \
+  --batches 1,2,3,4,5,6,7,8 --counts ragged --execution graph --cache cold
+./build/bench/ninfer_prepare_ragged_prefix_bench \
+  --widths 1,8,16 --batches 1,8 --counts full --cache warm --graph-calls 32
+```
+
+CSV includes actual live columns, total Graph nodes, call count, scratch, logical useful bytes,
+and per-call median/min/p95. Cold mode flushes 256 MiB before the timed interval; a bundle flushes
+only before its first call. `--profile` captures one selected public call and requires one shape.
+
 ## Masked-block preparation Op benchmark
 
 `ninfer_prepare_masked_block_bench` measures the public exact I32 anchor/mask transform for every

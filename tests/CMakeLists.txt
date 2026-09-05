@@ -289,6 +289,7 @@ set(ninfer_op_tests
   sampling
   scalar
   cast
+  prepare_ragged_prefix
   scatter
   position)
 foreach(op IN LISTS ninfer_op_tests)

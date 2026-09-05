@@ -1,4 +1,3 @@
-#include "ninfer/ops/prepare_ragged_prefix.h"
 #include "ninfer/ops/scatter.h"
 #include "ops/op_tester.h"
 
@@ -113,8 +112,6 @@ int batch_prefix_case() {
     constexpr std::int32_t capacity = 3;
     const std::vector<std::int32_t> lanes{2, 0};
     const std::vector<std::int32_t> valid{2, 3};
-    const std::vector<std::int32_t> starts{10, 20};
-    const std::vector<std::int32_t> ends{12, 23};
     const auto source = bit_pattern(static_cast<std::size_t>(rows * width * batch), 0x2468'ace0u);
     const auto initial =
         bit_pattern(static_cast<std::size_t>(rows * width * capacity), 0x3141'5926u);
@@ -134,17 +131,8 @@ int batch_prefix_case() {
     DeviceBuffer device_source = to_device(source);
     DeviceBuffer device_lanes  = to_device(lanes);
     DeviceBuffer device_valid  = to_device(valid);
-    DeviceBuffer device_starts = to_device(starts);
-    DeviceBuffer device_ends   = to_device(ends);
     GuardedDeviceBuffer device_pool(initial.size() * sizeof(std::uint16_t));
-    GuardedDeviceBuffer device_gathered(source.size() * sizeof(std::uint16_t));
-    GuardedDeviceBuffer device_positions(static_cast<std::size_t>(width * batch) *
-                                         sizeof(std::int32_t));
-    GuardedDeviceBuffer device_counts(static_cast<std::size_t>(batch) * sizeof(std::int32_t));
     device_pool.copy_from_host(initial.data(), initial.size() * sizeof(std::uint16_t));
-    device_gathered.fill(0xcd);
-    device_positions.fill(0xef);
-    device_counts.fill(0xab);
 
     Tensor source_tensor(device_source.p, DType::BF16, {rows, width, batch});
     Tensor lanes_tensor(device_lanes.p, DType::I32, {batch});
@@ -152,37 +140,12 @@ int batch_prefix_case() {
     Tensor pool_tensor(device_pool.data(), DType::BF16, {rows, width, capacity});
     ops::scatter_bf16_batch(source_tensor, lanes_tensor, valid_tensor, pool_tensor, nullptr);
 
-    Tensor starts_tensor(device_starts.p, DType::I32, {batch});
-    Tensor ends_tensor(device_ends.p, DType::I32, {batch});
-    Tensor gathered_tensor(device_gathered.data(), DType::BF16, {rows, width, batch});
-    Tensor positions_tensor(device_positions.data(), DType::I32, {width, batch});
-    Tensor counts_tensor(device_counts.data(), DType::I32, {batch});
-    ops::prepare_ragged_prefix(pool_tensor, lanes_tensor, starts_tensor, ends_tensor,
-                               gathered_tensor, positions_tensor, counts_tensor, nullptr);
     cuda_synchronize();
-
-    auto expected_gathered = source;
-    std::fill(expected_gathered.begin() + static_cast<std::ptrdiff_t>(2 * rows),
-              expected_gathered.begin() + static_cast<std::ptrdiff_t>(3 * rows), 0);
-    const std::vector<std::int32_t> expected_positions{10, 11, 11, 20, 21, 22};
 
     int failures = verify_exact(
         "scatter_bf16_batch B=2 pool",
         from_device<std::uint16_t>(device_pool.data(), expected_pool.size()), expected_pool);
-    failures +=
-        verify_exact("prepare_ragged_prefix B=2 values",
-                     from_device<std::uint16_t>(device_gathered.data(), expected_gathered.size()),
-                     expected_gathered);
-    failures +=
-        verify_exact("prepare_ragged_prefix B=2 positions",
-                     from_device<std::int32_t>(device_positions.data(), expected_positions.size()),
-                     expected_positions);
-    failures += verify_exact("prepare_ragged_prefix B=2 counts",
-                             from_device<std::int32_t>(device_counts.data(), valid.size()), valid);
     failures += device_pool.verify_guards("scatter_bf16_batch B=2 pool guards");
-    failures += device_gathered.verify_guards("prepare_ragged_prefix B=2 values guards");
-    failures += device_positions.verify_guards("prepare_ragged_prefix B=2 positions guards");
-    failures += device_counts.verify_guards("prepare_ragged_prefix B=2 counts guards");
     return failures;
 }
 
