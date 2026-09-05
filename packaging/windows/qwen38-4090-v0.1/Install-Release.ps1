@@ -804,7 +804,7 @@ try {
     }
 
     $package = (Resolve-Path -LiteralPath $PackagePath).Path
-    if ([IO.Path]::GetFileName($package) -cne 'ninfer-4090-qwen38-v0.2.1-win-x64.zip') {
+    if ([IO.Path]::GetFileName($package) -cne 'ninfer-4090-qwen38-v0.2.2-win-x64.zip') {
         throw 'unexpected release package filename'
     }
     Write-InstallEvent 'package_identity_started' 'Verifying release package identity' ([ordered]@{ path = $package })
@@ -933,8 +933,8 @@ try {
             $manifest.source_dirty -ne $false) {
             throw 'release package identity mismatch'
         }
-        if ([string]$manifest.release_version -cne '0.2.1' -or
-            [string]$manifest.asset_filename -cne 'ninfer-4090-qwen38-v0.2.1-win-x64.zip') {
+        if ([string]$manifest.release_version -cne '0.2.2' -or
+            [string]$manifest.asset_filename -cne 'ninfer-4090-qwen38-v0.2.2-win-x64.zip') {
             throw 'release package semantic version mismatch'
         }
         if ([string]$manifest.upstream_base_sha -cne [string]$spec.source.upstream_base_sha) {
