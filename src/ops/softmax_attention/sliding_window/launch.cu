@@ -48,31 +48,48 @@ void dispatch_tokens(std::int32_t tokens, Launch&& launch) {
 } // namespace
 
 SlidingWindowAttentionPlan
-sliding_window_attention_resolve_plan(std::uint32_t window, std::int32_t tokens,
+sliding_window_attention_resolve_plan(std::uint32_t window, std::int32_t tokens, std::int32_t batch,
                                       SlidingWindowAttentionExecutionEnvelope envelope) {
     if (window != 2048 && window != 4096) {
         throw std::invalid_argument("sliding_window_attention plan: unsupported window");
     }
-    if (tokens < 1 || tokens > 16) {
-        throw std::invalid_argument("sliding_window_attention plan: T must be 1..16");
+    if (tokens < 1 || tokens > 16 || batch < 1 || batch > 8) {
+        throw std::invalid_argument(
+            "sliding_window_attention plan: T must be 1..16 and B must be 1..8");
     }
     if (envelope.min_context > envelope.max_context) {
         throw std::invalid_argument("sliding_window_attention plan: invalid envelope");
     }
-    // Graph envelopes whose longest context fits three key tiles avoid the second kernel and
-    // workspace round trip. At four tiles, split-KV is already faster for every qualified T.
-    constexpr std::uint32_t direct_context_limit = 96;
-    const bool direct                            = envelope.max_context <= direct_context_limit;
-    constexpr std::int32_t key_block             = 32;
-    const std::uint32_t context_rows             = std::min(envelope.max_context, window - 1u);
-    const std::int32_t context_tiles =
-        static_cast<std::int32_t>((context_rows + key_block - 1u) / key_block);
-    constexpr std::int32_t split_limit = 32;
+    // Keep enough independent KV-head CTAs for small batches, but limit repeated Q loads,
+    // FP32 partial writes and merge traffic as the batch/query block grows.
+    const int direct_context_limit = window == 2048 && tokens > 8 && batch >= 6 ? 128 : 96;
+    const bool direct = envelope.max_context <= static_cast<std::uint32_t>(direct_context_limit);
+    constexpr int key_block          = 32;
+    const int reduce_warps           = window == 2048 ? 4 : 1;
+    const std::uint32_t context_rows = std::min(envelope.max_context, window - 1u);
+    const std::int32_t context_tiles = (context_rows + key_block - 1u) / key_block;
+    int split_limit                  = 32;
+    if (window == 2048) {
+        if (tokens <= 4) {
+            split_limit = batch <= 2 ? 32 : batch <= 6 ? 16 : 8;
+        } else if (tokens <= 8) {
+            split_limit = batch == 1 ? 32 : batch == 2 ? 16 : 8;
+            if (batch >= 6) split_limit = std::min(split_limit, std::max(4, context_tiles / 4));
+        } else {
+            split_limit = batch <= 2 ? 16 : batch <= 5 ? 8 : 4;
+            if (batch >= 2) {
+                const int tiles_per_split = batch == 2 ? 2 : 4;
+                split_limit = std::min(split_limit, std::max(4, context_tiles / tiles_per_split));
+            }
+        }
+    }
     return {
         .route =
             direct ? SlidingWindowAttentionRoute::Direct : SlidingWindowAttentionRoute::SplitKv,
         .tokens         = tokens,
         .warps          = (tokens + 3) / 4,
+        .key_block      = key_block,
+        .reduce_warps   = reduce_warps,
         .split_capacity = direct ? 1 : std::min(split_limit, std::max(1, context_tiles)),
         .max_context    = static_cast<std::int32_t>(envelope.max_context),
         .window         = static_cast<std::int32_t>(window),
@@ -98,14 +115,16 @@ void sliding_window_attention_launch(const Tensor& q, const Tensor& query_k, con
                                      cudaStream_t stream) {
     dispatch_tokens(q.ne[2], [&]<int Tokens, int Warps>() {
         const auto launch_window = [&]<int Window>() {
-            const bool direct = plan.route == SlidingWindowAttentionRoute::Direct;
+            constexpr int KeyBlock    = 32;
+            constexpr int ReduceWarps = Window == 2048 ? 4 : 1;
+            const bool direct         = plan.route == SlidingWindowAttentionRoute::Direct;
             if (plan.window != Window || context.capacity != static_cast<std::uint32_t>(Window) ||
-                plan.warps != Warps || plan.split_capacity < 1 ||
+                plan.warps != Warps || plan.key_block != KeyBlock ||
+                plan.reduce_warps != ReduceWarps || plan.split_capacity < 1 ||
                 plan.split_capacity > kSlidingWindowMaxSplits ||
                 (direct && plan.split_capacity != 1)) {
                 throw std::invalid_argument("sliding_window_attention: inconsistent plan");
             }
-            constexpr int KeyBlock = 32;
             constexpr std::size_t SmemBytes =
                 2u * KeyBlock * kContextQueryHeadDim * sizeof(__nv_bfloat16);
             if (direct) {
@@ -121,9 +140,8 @@ void sliding_window_attention_launch(const Tensor& q, const Tensor& query_k, con
                         static_cast<const __nv_bfloat16*>(context.k.data),
                         static_cast<const __half*>(context.v.data),
                         static_cast<int>(context.padded_capacity), plan.max_context, 1, scale,
-                        static_cast<__nv_bfloat16*>(partial_acc.data),
-                        static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data),
-                        static_cast<__nv_bfloat16*>(out.data));
+                        static_cast<float*>(partial_acc.data), static_cast<float*>(partial_m.data),
+                        static_cast<float*>(partial_l.data), static_cast<__nv_bfloat16*>(out.data));
                 CUDA_CHECK(cudaGetLastError());
                 return;
             }
@@ -140,17 +158,16 @@ void sliding_window_attention_launch(const Tensor& q, const Tensor& query_k, con
                     static_cast<const __nv_bfloat16*>(context.k.data),
                     static_cast<const __half*>(context.v.data),
                     static_cast<int>(context.padded_capacity), plan.max_context,
-                    plan.split_capacity, scale, static_cast<__nv_bfloat16*>(partial_acc.data),
+                    plan.split_capacity, scale, static_cast<float*>(partial_acc.data),
                     static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data),
                     static_cast<__nv_bfloat16*>(out.data));
             CUDA_CHECK(cudaGetLastError());
 
-            constexpr int ReduceWarps = 1;
-            constexpr int ReduceRows  = kContextQueryQHeads * Tokens;
+            constexpr int ReduceRows = kContextQueryQHeads * Tokens;
             const dim3 reduce_grid((ReduceRows + ReduceWarps - 1) / ReduceWarps, 1, q.ne[3]);
             sliding_window_attention_reduce_kernel<Window, Tokens, KeyBlock, ReduceWarps>
                 <<<reduce_grid, ReduceWarps * 32, 0, stream>>>(
-                    static_cast<const __nv_bfloat16*>(partial_acc.data),
+                    static_cast<const float*>(partial_acc.data),
                     static_cast<const float*>(partial_m.data),
                     static_cast<const float*>(partial_l.data),
                     static_cast<const std::int32_t*>(positions.data),

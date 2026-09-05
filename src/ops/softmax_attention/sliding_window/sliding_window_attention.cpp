@@ -76,7 +76,7 @@ template <class Allocator>
 PartialWorkspace allocate_workspace(Allocator& workspace, std::int32_t tokens, std::int32_t splits,
                                     std::int32_t batch_size) {
     return {
-        workspace.alloc(DType::BF16, {kHeadDim, kQHeads, tokens, splits * batch_size}),
+        workspace.alloc(DType::FP32, {kHeadDim, kQHeads, tokens, splits * batch_size}),
         workspace.alloc(DType::FP32, {kQHeads, tokens, splits * batch_size}),
         workspace.alloc(DType::FP32, {kQHeads, tokens, splits * batch_size}),
     };
@@ -96,11 +96,18 @@ std::size_t sliding_window_attention_workspace_capacity_bytes(
         throw std::invalid_argument(
             "sliding_window_attention workspace: invalid envelope or token interval");
     }
-    const auto plan = detail::sliding_window_attention_resolve_plan(window, max_tokens, envelope);
-    if (plan.route == detail::SlidingWindowAttentionRoute::Direct) return 0;
-    WorkspaceLayoutBuilder layout;
-    (void)allocate_workspace(layout, max_tokens, plan.split_capacity, batch_size);
-    return layout.peak_bytes(1);
+    // Split capacity depends on the query width. The largest width need not have the
+    // largest allocation (for example, a wider block can use fewer splits).
+    std::size_t capacity = 0;
+    for (int tokens = min_tokens; tokens <= max_tokens; ++tokens) {
+        const auto plan =
+            detail::sliding_window_attention_resolve_plan(window, tokens, batch_size, envelope);
+        if (plan.route == detail::SlidingWindowAttentionRoute::Direct) continue;
+        WorkspaceLayoutBuilder layout;
+        (void)allocate_workspace(layout, tokens, plan.split_capacity, batch_size);
+        capacity = std::max(capacity, layout.peak_bytes(1));
+    }
+    return capacity;
 }
 
 void sliding_window_attention(const Tensor& q, const Tensor& query_k, const Tensor& query_v,
@@ -153,8 +160,9 @@ void sliding_window_attention(const Tensor& q, const Tensor& query_k, const Tens
         throw std::invalid_argument("sliding_window_attention: scale must be 1/sqrt(128)");
     }
 
-    auto scope      = workspace.scope();
-    const auto plan = detail::sliding_window_attention_resolve_plan(window, tokens, envelope);
+    auto scope = workspace.scope();
+    const auto plan =
+        detail::sliding_window_attention_resolve_plan(window, tokens, batch, envelope);
     PartialWorkspace partial{};
     if (plan.route == detail::SlidingWindowAttentionRoute::SplitKv) {
         partial = allocate_workspace(workspace, tokens, plan.split_capacity, batch);

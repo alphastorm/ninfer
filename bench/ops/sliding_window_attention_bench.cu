@@ -10,6 +10,8 @@
 #include "ops/softmax_attention/sliding_window/launch.h"
 
 #include <cuda_profiler_api.h>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
@@ -46,12 +48,14 @@ struct Options {
     std::vector<std::int32_t> tokens{1, 2, 4, 8, 12, 16};
     std::vector<std::int32_t> contexts{0, 128, 2048, 4095, 4096, 8192, 262144};
     std::vector<std::int32_t> batches{1};
-    std::int32_t window = 4096;
-    Execution execution = Execution::Graph;
-    CacheMode cache     = CacheMode::Cold;
-    int warmup          = 5;
-    int repeat          = 50;
-    bool profile        = false;
+    std::int32_t window       = 4096;
+    std::int32_t envelope_max = -1;
+    Execution execution       = Execution::Graph;
+    CacheMode cache           = CacheMode::Cold;
+    int warmup                = 5;
+    int repeat                = 50;
+    int graph_calls           = 1;
+    bool profile              = false;
     std::string csv_out;
 };
 
@@ -60,9 +64,13 @@ struct Result {
     std::int32_t tokens;
     std::int32_t batch;
     std::int32_t context;
+    std::int32_t envelope_max;
+    std::int32_t key_block;
+    std::int32_t reduce_warps;
     ops::detail::SlidingWindowAttentionRoute route;
     std::int32_t split_capacity;
     std::size_t graph_nodes;
+    int graph_calls;
     Execution execution;
     CacheState cache;
     std::size_t workspace_bytes;
@@ -76,9 +84,9 @@ struct Result {
                  "error: %s\n"
                  "usage: ninfer_sliding_window_attention_bench "
                  "[--window 2048|4096] [--tokens 1,...,16] [--batches 1,...,8] "
-                 "[--context 0,...,262144] "
+                 "[--context 0,...,262144] [--envelope-max N] "
                  "[--execution eager|graph|both] [--cache cold|warm|both] "
-                 "[--warmup N] [--repeat N] [--profile] [--csv-out PATH]\n",
+                 "[--warmup N] [--repeat N] [--graph-calls N] [--profile] [--csv-out PATH]\n",
                  message);
     std::exit(2);
 }
@@ -132,6 +140,9 @@ Options parse_options(int argc, char** argv) {
         } else if (argument == "--context") {
             options.contexts =
                 parse_list(next("--context requires a value"), 0, 262144, "--context");
+        } else if (argument == "--envelope-max") {
+            options.envelope_max =
+                parse_i32(next("--envelope-max requires a value"), 0, 262144, "--envelope-max");
         } else if (argument == "--execution") {
             const std::string_view value(next("--execution requires a value"));
             if (value == "eager")
@@ -156,6 +167,9 @@ Options parse_options(int argc, char** argv) {
             options.warmup = parse_i32(next("--warmup requires a value"), 0, 10000, "--warmup");
         } else if (argument == "--repeat") {
             options.repeat = parse_i32(next("--repeat requires a value"), 1, 10000, "--repeat");
+        } else if (argument == "--graph-calls") {
+            options.graph_calls =
+                parse_i32(next("--graph-calls requires a value"), 1, 64, "--graph-calls");
         } else if (argument == "--profile") {
             options.profile = true;
         } else if (argument == "--csv-out") {
@@ -170,6 +184,12 @@ Options parse_options(int argc, char** argv) {
                             options.batches.size() != 1 || options.execution == Execution::Both ||
                             options.cache == CacheMode::Both)) {
         usage("--profile requires one T, one B, one context, one execution, and one cache state");
+    }
+    if (options.graph_calls > 1 && (options.execution != Execution::Graph || options.profile))
+        usage("graph bundles require --execution graph and no --profile");
+    for (const int context : options.contexts) {
+        if (options.envelope_max >= 0 && options.envelope_max < context)
+            usage("envelope max must cover every context");
     }
     return options;
 }
@@ -188,16 +208,33 @@ CyclicKVCacheLayerView make_context_view(DeviceBuffer& k, DeviceBuffer& v, std::
 }
 
 std::size_t workspace_capacity(std::int32_t window, std::int32_t tokens, std::int32_t batch,
-                               std::int32_t context) {
+                               std::int32_t maximum) {
     const ops::SlidingWindowAttentionExecutionEnvelope envelope{
-        static_cast<std::uint32_t>(context), static_cast<std::uint32_t>(context)};
+        0, static_cast<std::uint32_t>(maximum)};
     return ops::sliding_window_attention_workspace_capacity_bytes(
         kGeometry, static_cast<std::uint32_t>(window), envelope, tokens, tokens, batch);
 }
 
+__global__ void fill_context_values(__half* values, std::size_t elements) {
+    const std::size_t index = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index < elements) {
+        const float value = 0.5f - static_cast<float>(index % 251) / 250.0f;
+        values[index]     = __float2half_rn(__bfloat162float(__float2bfloat16_rn(value)));
+    }
+}
+
+DeviceBuffer make_context_values(std::size_t elements) {
+    DeviceBuffer result(elements * sizeof(__half));
+    fill_context_values<<<(elements + 255) / 256, 256>>>(static_cast<__half*>(result.p), elements);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+    return result;
+}
+
 class Case {
 public:
-    Case(std::int32_t window, std::int32_t tokens, std::int32_t batch, std::int32_t context)
+    Case(std::int32_t window, std::int32_t tokens, std::int32_t batch, std::int32_t context,
+         std::int32_t maximum)
         : window_(window), tokens_(tokens), batch_(batch), context_(context),
           q_(bench::make_bf16(static_cast<std::size_t>(kHeadDim) * kQueryHeads * tokens * batch)),
           query_k_(
@@ -207,13 +244,13 @@ public:
           positions_(static_cast<std::size_t>(tokens) * batch * sizeof(std::int32_t)),
           valid_(static_cast<std::size_t>(batch) * sizeof(std::int32_t)),
           lane_(static_cast<std::size_t>(batch) * sizeof(std::int32_t)),
-          context_k_(bench::make_zeros(static_cast<std::size_t>(kHeadDim) * window * kKvHeads *
-                                       batch * 2)),
-          context_v_(bench::make_zeros(static_cast<std::size_t>(kHeadDim) * window * kKvHeads *
-                                       batch * 2)),
+          context_k_(
+              bench::make_bf16(static_cast<std::size_t>(kHeadDim) * window * kKvHeads * batch)),
+          context_v_(
+              make_context_values(static_cast<std::size_t>(kHeadDim) * window * kKvHeads * batch)),
           output_(bench::make_zeros(static_cast<std::size_t>(kHeadDim) * kQueryHeads * tokens *
                                     batch * 2)),
-          workspace_bytes_(workspace_capacity(window, tokens, batch, context)),
+          workspace_bytes_(workspace_capacity(window, tokens, batch, maximum)),
           workspace_(std::max<std::size_t>(workspace_bytes_, 1)),
           q_tensor_(q_.p, DType::BF16, {kHeadDim, kQueryHeads, tokens, batch}),
           query_k_tensor_(query_k_.p, DType::BF16, {kHeadDim, kKvHeads, tokens, batch}),
@@ -222,7 +259,7 @@ public:
           valid_tensor_(valid_.p, DType::I32, {batch}), lane_tensor_(lane_.p, DType::I32, {batch}),
           output_tensor_(output_.p, DType::BF16, {kHeadDim, kQueryHeads, tokens, batch}),
           context_view_(make_context_view(context_k_, context_v_, window, batch)),
-          envelope_{static_cast<std::uint32_t>(context), static_cast<std::uint32_t>(context)} {
+          envelope_{0, static_cast<std::uint32_t>(maximum)} {
         std::vector<std::int32_t> host_positions(static_cast<std::size_t>(tokens) * batch);
         std::vector<std::int32_t> host_valid(static_cast<std::size_t>(batch), tokens);
         std::vector<std::int32_t> host_lanes(static_cast<std::size_t>(batch));
@@ -316,15 +353,16 @@ void report(const Result& result) {
     const double gbps    = result.useful_bytes / seconds / 1.0e9;
     const double tflops  = result.useful_flops / seconds / 1.0e12;
     std::printf("entry=sliding_window execution=%-5s cache=%-4s W=%d T=%2d B=%d L=%6d "
-                "route=%s splits=%d graph_nodes=%zu workspace=%8zu "
+                "max_L=%d key_block=%d reduce_warps=%d route=%s splits=%d graph_nodes=%zu "
+                "graph_calls=%d workspace=%8zu "
                 "median=%9.3f us min=%9.3f us p95=%9.3f us "
                 "useful=%8.1f GB/s (%5.1f%% of %.0f) math=%7.2f TFLOP/s (%5.1f%% of %.1f)\n",
                 execution_name(result.execution), cache_name(result.cache), result.window,
-                result.tokens, result.batch, result.context,
-                ops::detail::sliding_window_attention_route_name(result.route),
-                result.split_capacity, result.graph_nodes, result.workspace_bytes,
-                result.timing.median_us, result.timing.min_us, result.timing.p95_us, gbps,
-                gbps / kRtx5090DramGBs * 100.0, kRtx5090DramGBs, tflops,
+                result.tokens, result.batch, result.context, result.envelope_max, result.key_block,
+                result.reduce_warps, ops::detail::sliding_window_attention_route_name(result.route),
+                result.split_capacity, result.graph_nodes, result.graph_calls,
+                result.workspace_bytes, result.timing.median_us, result.timing.min_us,
+                result.timing.p95_us, gbps, gbps / kRtx5090DramGBs * 100.0, kRtx5090DramGBs, tflops,
                 tflops / kDenseBf16TcTflops * 100.0, kDenseBf16TcTflops);
 }
 
@@ -334,17 +372,19 @@ void write_csv(const Options& options, const std::vector<Result>& results) {
     if (!path.parent_path().empty()) { std::filesystem::create_directories(path.parent_path()); }
     std::ofstream output(path);
     if (!output) { throw std::runtime_error("failed to open CSV output"); }
-    output << "entry,execution,cache,window,T,B,context,route,split_capacity,graph_nodes,"
+    output << "entry,execution,cache,window,T,B,context,envelope_max,key_block,reduce_warps,route,"
+              "split_capacity,graph_nodes,graph_calls,"
               "workspace_bytes,useful_bytes,useful_flops,median_us,min_us,p95_us\n";
     for (const Result& result : results) {
         output << "sliding_window," << execution_name(result.execution) << ','
                << cache_name(result.cache) << ',' << result.window << ',' << result.tokens << ','
-               << result.batch << ',' << result.context << ','
+               << result.batch << ',' << result.context << ',' << result.envelope_max << ','
+               << result.key_block << ',' << result.reduce_warps << ','
                << ops::detail::sliding_window_attention_route_name(result.route) << ','
-               << result.split_capacity << ',' << result.graph_nodes << ','
-               << result.workspace_bytes << ',' << result.useful_bytes << ',' << result.useful_flops
-               << ',' << result.timing.median_us << ',' << result.timing.min_us << ','
-               << result.timing.p95_us << '\n';
+               << result.split_capacity << ',' << result.graph_nodes << ',' << result.graph_calls
+               << ',' << result.workspace_bytes << ',' << result.useful_bytes << ','
+               << result.useful_flops << ',' << result.timing.median_us << ','
+               << result.timing.min_us << ',' << result.timing.p95_us << '\n';
     }
 }
 
@@ -394,7 +434,8 @@ int main(int argc, char** argv) {
 
         if (options.profile) {
             Case data(options.window, options.tokens.front(), options.batches.front(),
-                      options.contexts.front());
+                      options.contexts.front(),
+                      options.envelope_max < 0 ? options.contexts.front() : options.envelope_max);
             profile(data, options, flush, stream);
             CUDA_CHECK(cudaStreamDestroy(stream));
             return 0;
@@ -404,17 +445,19 @@ int main(int argc, char** argv) {
         for (const std::int32_t context : options.contexts) {
             for (const std::int32_t tokens : options.tokens) {
                 for (const std::int32_t batch : options.batches) {
-                    Case data(options.window, tokens, batch, context);
+                    const int maximum = options.envelope_max < 0 ? context : options.envelope_max;
+                    Case data(options.window, tokens, batch, context, maximum);
                     const ops::SlidingWindowAttentionExecutionEnvelope envelope{
-                        static_cast<std::uint32_t>(context), static_cast<std::uint32_t>(context)};
+                        0, static_cast<std::uint32_t>(maximum)};
                     const auto plan = ops::detail::sliding_window_attention_resolve_plan(
-                        static_cast<std::uint32_t>(options.window), tokens, envelope);
+                        static_cast<std::uint32_t>(options.window), tokens, batch, envelope);
                     bench::TimedGraph graph;
                     if (options.execution != Execution::Eager) {
                         data.launch(stream);
                         CUDA_CHECK(cudaStreamSynchronize(stream));
                         graph.capture(stream, [&](cudaStream_t launch_stream) {
-                            data.launch(launch_stream);
+                            for (int call = 0; call < options.graph_calls; ++call)
+                                data.launch(launch_stream);
                         });
                     }
                     for (const Execution execution : {Execution::Eager, Execution::Graph}) {
@@ -434,9 +477,13 @@ int main(int argc, char** argv) {
                                 tokens,
                                 batch,
                                 context,
+                                maximum,
+                                plan.key_block,
+                                plan.reduce_warps,
                                 plan.route,
                                 plan.split_capacity,
                                 execution == Execution::Graph ? graph.nodes() : 0,
+                                options.graph_calls,
                                 execution,
                                 cache,
                                 data.workspace_bytes(),
@@ -445,6 +492,9 @@ int main(int argc, char** argv) {
                                 measure(data, execution, cache, &graph, flush, stream,
                                         options.warmup, options.repeat),
                             };
+                            result.timing.median_us /= options.graph_calls;
+                            result.timing.min_us /= options.graph_calls;
+                            result.timing.p95_us /= options.graph_calls;
                             report(result);
                             results.push_back(result);
                         }

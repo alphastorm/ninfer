@@ -41,9 +41,9 @@ __launch_bounds__(WarpsPerCta * 32, 2) __global__
         const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ query_k,
         const __nv_bfloat16* __restrict__ query_v, const std::int32_t* __restrict__ positions,
         const std::int32_t* __restrict__ valid_columns, const std::int32_t* __restrict__ lanes,
-        const __nv_bfloat16* __restrict__ context_k, const __nv_bfloat16* __restrict__ context_v,
+        const __nv_bfloat16* __restrict__ context_k, const __half* __restrict__ context_v,
         int padded_context, int max_context, int split_capacity, float scale,
-        __nv_bfloat16* __restrict__ partial_acc, float* __restrict__ partial_m,
+        float* __restrict__ partial_acc, float* __restrict__ partial_m,
         float* __restrict__ partial_l, __nv_bfloat16* __restrict__ out) {
     const int batch = static_cast<int>(blockIdx.z);
     const std::int64_t lane_elements =
@@ -57,13 +57,14 @@ __launch_bounds__(WarpsPerCta * 32, 2) __global__
     };
     context_query_split_partial_body<SlidingWindowAttentionPolicy<Window>, Tokens, WarpsPerCta,
                                      KeyBlock, DirectOutput>(
-        q, query_k, query_v, valid_columns, context_k, context_v, policy, batch_positions[0],
-        max_context, split_capacity, scale, partial_acc, partial_m, partial_l, out);
+        q, query_k, query_v, valid_columns, context_k, context_v, policy,
+        DirectOutput && valid_columns[batch] == 0 ? 0 : batch_positions[0], max_context,
+        split_capacity, scale, partial_acc, partial_m, partial_l, out);
 }
 
 template <int Window, int Tokens, int KeyBlock, int WarpsPerBlock>
 __launch_bounds__(WarpsPerBlock * 32, 2) __global__
-    void sliding_window_attention_reduce_kernel(const __nv_bfloat16* __restrict__ partial_acc,
+    void sliding_window_attention_reduce_kernel(const float* __restrict__ partial_acc,
                                                 const float* __restrict__ partial_m,
                                                 const float* __restrict__ partial_l,
                                                 const std::int32_t* __restrict__ positions,
@@ -71,7 +72,7 @@ __launch_bounds__(WarpsPerBlock * 32, 2) __global__
                                                 int max_context, int split_capacity,
                                                 __nv_bfloat16* __restrict__ out) {
     static_assert(WarpsPerBlock >= 1 && WarpsPerBlock <= 8);
-    constexpr int MaxSplits = 128;
+    constexpr int MaxSplits = 32;
     constexpr unsigned Mask = 0xffffffffu;
     __shared__ float weights[WarpsPerBlock][MaxSplits];
 
@@ -126,10 +127,8 @@ __launch_bounds__(WarpsPerBlock * 32, 2) __global__
         const int d     = lane + item * 32;
         float numerator = 0.0f;
         for (int split = 0; split < active_splits; ++split) {
-            numerator +=
-                __bfloat162float(
-                    partial_acc[context_query_partial_index<Tokens>(q_head, d, token, split)]) *
-                weights[warp][split];
+            numerator += partial_acc[context_query_partial_index<Tokens>(q_head, d, token, split)] *
+                         weights[warp][split];
         }
         const float value = global_l > 0.0f ? numerator / global_l : 0.0f;
         out[context_query_q_index(q_head, d, token)] = __float2bfloat16(value);
