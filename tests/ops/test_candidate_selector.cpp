@@ -1,6 +1,7 @@
 #include "ninfer/ops/candidate_selector.h"
 
 #include "ops/op_tester.h"
+#include "core/decode_graph.h"
 
 #include <algorithm>
 #include <array>
@@ -21,7 +22,7 @@ using namespace ninfer::test;
 namespace {
 
 constexpr std::int32_t kCandidates   = 16;
-constexpr std::int32_t kSteps        = 7;
+int kSteps                           = 7;
 constexpr std::int32_t kRank         = 256;
 constexpr std::int32_t kCodebookRows = 248320;
 constexpr std::int32_t kTokenDomain  = 248077;
@@ -81,13 +82,13 @@ std::vector<std::int32_t> make_candidate_ids() {
     return result;
 }
 
-std::vector<float> make_unary_scores() {
+std::vector<float> make_unary_scores(std::uint32_t salt = 0) {
     std::vector<float> result(static_cast<std::size_t>(kMaxBatch) * kSteps * kCandidates);
     for (std::int32_t batch = 0; batch < kMaxBatch; ++batch) {
         for (std::int32_t step = 0; step < kSteps; ++step) {
             for (std::int32_t candidate = 0; candidate < kCandidates; ++candidate) {
                 const std::uint32_t mixed = mix32(static_cast<std::uint32_t>(
-                    (batch * kSteps + step) * kCandidates + candidate + 307));
+                    (batch * kSteps + step) * kCandidates + candidate + 307 + salt * 7919));
                 const float variation =
                     static_cast<float>(static_cast<int>((mixed >> 10) & 0xffU) - 128) / 512.0F;
                 result[candidate_offset(batch, step, candidate)] =
@@ -307,16 +308,118 @@ std::vector<ops::SamplingConfig> choose_configs(const std::vector<std::int32_t>&
     return configs;
 }
 
-int run() {
-    const std::vector<std::int32_t> candidate_ids     = make_candidate_ids();
-    const std::vector<float> unary_scores             = make_unary_scores();
-    const std::vector<std::uint16_t> projected_hidden = make_projected_hidden();
-    const std::vector<std::int32_t> anchors           = make_anchors();
-    const std::vector<std::int32_t> base_positions    = make_base_positions();
-    const std::vector<double> lattice =
-        build_lattice(candidate_ids, unary_scores, projected_hidden, anchors);
-    const std::vector<ops::SamplingConfig> configs =
-        choose_configs(candidate_ids, lattice, base_positions);
+int verify_draws(const std::string& label, int batch, const std::vector<int>& ids,
+                 const std::vector<ops::SamplingConfig>& configs, const std::vector<int>& positions,
+                 const std::vector<int>& drafts, const std::vector<float>& q) {
+    int failures = 0;
+    for (int b = 0; b < batch; ++b)
+        for (int i = 0; i < kSteps; ++i) {
+            const auto base = candidate_offset(b, i, 0);
+            double mass     = 0;
+            for (int c = 0; c < kCandidates; ++c) {
+                const float value = q[base + c];
+                if (!std::isfinite(value) || value < 0) ++failures;
+                mass += value;
+                if (configs[b].temperature <= 0 && value != 0 && value != 1) ++failures;
+            }
+            if (std::abs(mass - 1.0) > 2.0e-6) ++failures;
+            const float uniform = configs[b].temperature > 0
+                                      ? oracle_uniform(configs[b].seed, positions[b] + i)
+                                      : 0.0F;
+            float cumulative    = 0;
+            int selected        = kCandidates - 1;
+            for (int c = 0; c < kCandidates; ++c) {
+                cumulative += q[base + c];
+                if (uniform < cumulative) {
+                    selected = c;
+                    break;
+                }
+            }
+            if (drafts[b * kSteps + i] != ids[base + selected]) ++failures;
+        }
+    if (failures) std::cerr << label << " output q does not describe the actual draw\n";
+    return failures;
+}
+
+int run(bool ties = false, bool dependent = false) {
+
+    std::vector<std::int32_t> candidate_ids = make_candidate_ids();
+    std::vector<float> unary_scores;
+    std::vector<std::uint16_t> projected_hidden    = make_projected_hidden();
+    const std::vector<std::int32_t> anchors        = make_anchors();
+    const std::vector<std::int32_t> base_positions = make_base_positions();
+    std::vector<double> lattice;
+    bool stable = false;
+    const std::vector<ops::SamplingConfig> greedy_probe(kMaxBatch);
+    for (std::uint32_t salt = 0; salt < 64; ++salt) {
+        unary_scores     = make_unary_scores(salt);
+        lattice          = build_lattice(candidate_ids, unary_scores, projected_hidden, anchors);
+        const auto probe = walk_oracle(candidate_ids, lattice, greedy_probe, base_positions);
+        stable           = true;
+        for (int b = 1; b < kMaxBatch; b += 2) stable &= probe.minimum_decision_margin[b] > 5.0e-4;
+        if (stable) break;
+    }
+    if (!stable) throw std::runtime_error("could not construct stable selector fixture");
+    if (ties) {
+        std::fill(unary_scores.begin(), unary_scores.end(), 0.0F);
+        std::fill(projected_hidden.begin(), projected_hidden.end(), 0);
+        for (std::size_t first = 0; first < candidate_ids.size(); first += kCandidates)
+            std::reverse(candidate_ids.begin() + first,
+                         candidate_ids.begin() + first + kCandidates);
+        lattice = build_lattice(candidate_ids, unary_scores, projected_hidden, anchors);
+    }
+    if (dependent) {
+        std::fill(unary_scores.begin(), unary_scores.end(), 0.0F);
+        lattice = build_lattice(candidate_ids, unary_scores, projected_hidden, anchors);
+        for (int b = 0; b < kMaxBatch; ++b) {
+            for (int c = 0; c < kCandidates; ++c)
+                unary_scores[candidate_offset(b, 0, c)] = c == 5 ? 1000.0F : -1000.0F;
+            int left = 0, right = 1;
+            double largest = 0, midpoint = 0;
+            for (int c = 0; c < kCandidates; ++c)
+                for (int d = 0; d < kCandidates; ++d) {
+                    const double actual =
+                        lattice[lattice_offset(b, 1, 5, c)] - lattice[lattice_offset(b, 1, 5, d)];
+                    const double other =
+                        lattice[lattice_offset(b, 1, 0, c)] - lattice[lattice_offset(b, 1, 0, d)];
+                    if (actual - other > largest) {
+                        largest  = actual - other;
+                        left     = c;
+                        right    = d;
+                        midpoint = (actual + other) / 2;
+                    }
+                }
+            if (largest < 0.05) throw std::runtime_error("weak predecessor-sensitive fixture");
+            for (int c = 0; c < kCandidates; ++c)
+                unary_scores[candidate_offset(b, 1, c)] = -1000.0F;
+            unary_scores[candidate_offset(b, 1, left)]  = static_cast<float>(-midpoint);
+            unary_scores[candidate_offset(b, 1, right)] = 0;
+        }
+        for (int b = 0; b < kMaxBatch; ++b)
+            for (int i = 2; i < kSteps; ++i)
+                for (int c = 0; c < kCandidates; ++c)
+                    unary_scores[candidate_offset(b, i, c)] = c == 0 ? 1000.0F : -1000.0F;
+        lattice = build_lattice(candidate_ids, unary_scores, projected_hidden, anchors);
+    }
+    std::vector<ops::SamplingConfig> configs;
+    if (ties || dependent) {
+        configs.resize(kMaxBatch);
+        for (int b = 0; b < kMaxBatch; ++b) {
+            configs[b].temperature = !dependent && (b % 2 == 0) ? 0.75F : 0.0F;
+            configs[b].seed        = 1234 + b;
+        }
+    } else
+        configs = choose_configs(candidate_ids, lattice, base_positions);
+    std::vector<int> host_counts(kTokenDomain, 7);
+    DeviceBuffer counts = to_device(host_counts);
+    for (auto& config : configs) {
+        config.top_k             = 1;
+        config.top_p             = 0.01F;
+        config.min_p             = 0.9F;
+        config.presence_penalty  = 2.0F;
+        config.frequency_penalty = 3.0F;
+        config.token_counts      = static_cast<int*>(counts.p);
+    }
     const WalkResult expected = walk_oracle(candidate_ids, lattice, configs, base_positions);
 
     DeviceBuffer candidate_device = to_device(candidate_ids);
@@ -339,7 +442,7 @@ int run() {
     Tensor successor(successor_device.p, DType::BF16, {kRank, kCodebookRows});
 
     int failures = 0;
-    for (const std::int32_t batch_size : std::array<std::int32_t, 2>{1, kMaxBatch}) {
+    for (int batch_size = 1; batch_size <= kMaxBatch; ++batch_size) {
         const std::size_t draft_count = static_cast<std::size_t>(batch_size) * kSteps;
         const std::size_t q_count     = draft_count * kCandidates;
         GuardedDeviceBuffer draft_device(draft_count * sizeof(std::int32_t));
@@ -353,12 +456,21 @@ int run() {
         Tensor positions(position_device.p, DType::I32, {batch_size});
         Tensor drafts(draft_device.data(), DType::I32, {kSteps, batch_size});
         Tensor q(q_device.data(), DType::FP32, {kCandidates, kSteps, batch_size});
-        ops::candidate_selector_path(ids, unary, hidden, anchor, predecessor, successor, positions,
-                                     static_cast<const ops::SamplingConfig*>(config_device.p),
-                                     drafts, q, nullptr);
+        const auto capacity = ops::candidate_selector_path_workspace_capacity_bytes(
+            kSteps, kSteps, batch_size, batch_size);
+        GuardedDeviceBuffer scratch(std::max<std::size_t>(capacity, 1));
+        WorkspaceArena workspace(DeviceSpan{scratch.data(), scratch.bytes()});
+        const auto launch = [&](cudaStream_t stream) {
+            ops::candidate_selector_path(ids, unary, hidden, anchor, predecessor, successor,
+                                         positions,
+                                         static_cast<const ops::SamplingConfig*>(config_device.p),
+                                         drafts, q, workspace, stream);
+        };
+        launch(nullptr);
         cuda_synchronize();
 
-        const std::string label = "candidate_selector_path B=" + std::to_string(batch_size);
+        const std::string label = "candidate_selector_path K=" + std::to_string(kSteps) +
+                                  " B=" + std::to_string(batch_size);
         failures += verify_exact((label + " drafts").c_str(),
                                  from_device<std::int32_t>(draft_device.data(), draft_count),
                                  std::vector<std::int32_t>(expected.drafts.begin(),
@@ -368,9 +480,130 @@ int run() {
         failures += verify_pointwise(
             label + " proposal_q", actual_q_double,
             std::span<const double>(expected.probabilities.data(), q_count), kProbabilityCriterion);
+        failures += verify_draws(label, batch_size, candidate_ids, configs, base_positions,
+                                 from_device<int>(draft_device.data(), draft_count), actual_q);
         failures += draft_device.verify_guards(label + " drafts");
         failures += q_device.verify_guards(label + " proposal_q");
+        failures += scratch.verify_guards(label + " workspace");
+        if (workspace.used() != 0 || workspace.peak_used() != capacity) {
+            std::cerr << label << " workspace scope/peak\n";
+            ++failures;
+        }
+        if (batch_size == 1 || batch_size == 8) {
+            cudaStream_t stream = nullptr;
+            cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking),
+                       "selector graph stream");
+            {
+                DecodeGraphDefinition definition;
+                DecodeGraphExecutable executable;
+                definition.capture(stream, [&] { launch(stream); });
+                executable.instantiate(definition);
+                executable.launch(stream);
+                executable.launch(stream);
+                cuda_synchronize(stream);
+                if (!ties && !dependent && batch_size == 8 &&
+                    (kSteps == 1 || kSteps == 7 || kSteps == 15)) {
+                    auto next_positions = base_positions;
+                    for (auto& position : next_positions) position += 4096;
+                    const auto next_configs =
+                        choose_configs(candidate_ids, lattice, next_positions);
+                    const auto next_expected =
+                        walk_oracle(candidate_ids, lattice, next_configs, next_positions);
+                    cuda_check(cudaMemcpyAsync(position_device.p, next_positions.data(),
+                                               next_positions.size() * sizeof(int),
+                                               cudaMemcpyHostToDevice, stream),
+                               "update graph positions");
+                    cuda_check(cudaMemcpyAsync(config_device.p, next_configs.data(),
+                                               next_configs.size() * sizeof(ops::SamplingConfig),
+                                               cudaMemcpyHostToDevice, stream),
+                               "update graph configs");
+                    executable.launch(stream);
+                    cuda_synchronize(stream);
+                    const auto next_drafts = from_device<int>(draft_device.data(), draft_count);
+                    const auto next_q      = from_device<float>(q_device.data(), q_count);
+                    failures += verify_exact("selector graph updated RNG", next_drafts,
+                                             next_expected.drafts);
+                    failures +=
+                        verify_pointwise("selector graph updated conditional q",
+                                         std::vector<double>(next_q.begin(), next_q.end()),
+                                         next_expected.probabilities, kProbabilityCriterion);
+                    failures += verify_draws("selector graph updated q", batch_size, candidate_ids,
+                                             next_configs, next_positions, next_drafts, next_q);
+                    cuda_check(cudaMemcpyAsync(position_device.p, base_positions.data(),
+                                               base_positions.size() * sizeof(int),
+                                               cudaMemcpyHostToDevice, stream),
+                               "restore graph positions");
+                    cuda_check(cudaMemcpyAsync(config_device.p, configs.data(),
+                                               configs.size() * sizeof(ops::SamplingConfig),
+                                               cudaMemcpyHostToDevice, stream),
+                               "restore graph configs");
+                    executable.launch(stream);
+                    cuda_synchronize(stream);
+                }
+            }
+            cuda_check(cudaStreamDestroy(stream), "destroy selector stream");
+            failures += verify_exact(
+                (label + " graph drafts").c_str(),
+                from_device<int>(draft_device.data(), draft_count),
+                std::vector<int>(expected.drafts.begin(), expected.drafts.begin() + draft_count));
+            failures += verify_exact((label + " graph q").c_str(),
+                                     from_device<float>(q_device.data(), q_count), actual_q);
+            failures += scratch.verify_guards(label + " graph workspace");
+        }
     }
+    if (!ties && !dependent && (kSteps == 1 || kSteps == 7 || kSteps == 15)) {
+        constexpr std::array<int, 3> order{7, 0, 4};
+        const auto pack = [&]<class T>(const std::vector<T>& values, int stride) {
+            std::vector<T> out;
+            for (int b : order)
+                out.insert(out.end(), values.begin() + b * stride,
+                           values.begin() + (b + 1) * stride);
+            return out;
+        };
+        const auto pi = pack(candidate_ids, kSteps * kCandidates);
+        const auto pu = pack(unary_scores, kSteps * kCandidates);
+        const auto ph = pack(projected_hidden, kSteps * kRank);
+        const auto pa = pack(anchors, 1), pp = pack(base_positions, 1);
+        const auto pc = pack(configs, 1);
+        const auto ed = pack(expected.drafts, kSteps);
+        const auto eq = pack(expected.probabilities, kSteps * kCandidates);
+        auto di = to_device(pi), du = to_device(pu), dh = to_device(ph), da = to_device(pa),
+             dp = to_device(pp), dc = to_device(pc);
+        GuardedDeviceBuffer dd(3 * kSteps * 4), dq(3 * kSteps * kCandidates * 4);
+        const auto capacity =
+            ops::candidate_selector_path_workspace_capacity_bytes(kSteps, kSteps, 3, 3);
+        GuardedDeviceBuffer sw(std::max<std::size_t>(capacity, 1));
+        WorkspaceArena workspace(DeviceSpan{sw.data(), sw.bytes()});
+        Tensor ti(di.p, DType::I32, {kCandidates, kSteps, 3}),
+            tu(du.p, DType::FP32, {kCandidates, kSteps, 3});
+        Tensor th(dh.p, DType::BF16, {kRank, kSteps, 3}), ta(da.p, DType::I32, {3}),
+            tp(dp.p, DType::I32, {3});
+        Tensor td(dd.data(), DType::I32, {kSteps, 3}),
+            tq(dq.data(), DType::FP32, {kCandidates, kSteps, 3});
+        ops::candidate_selector_path(ti, tu, th, ta, predecessor, successor, tp,
+                                     static_cast<const ops::SamplingConfig*>(dc.p), td, tq,
+                                     workspace, nullptr);
+        cuda_synchronize();
+        const auto actual_d = from_device<int>(dd.data(), 3 * kSteps);
+        const auto actual_q = from_device<float>(dq.data(), 3 * kSteps * kCandidates);
+        failures += verify_exact("selector compact row RNG", actual_d, ed);
+        failures += verify_pointwise("selector compact conditional q",
+                                     std::vector<double>(actual_q.begin(), actual_q.end()), eq,
+                                     kProbabilityCriterion);
+        failures += verify_draws("selector compact", 3, pi, pc, pp, actual_d, actual_q);
+        failures += dd.verify_guards("compact drafts") + dq.verify_guards("compact q") +
+                    sw.verify_guards("compact workspace");
+    }
+    failures +=
+        verify_exact("selector preserves candidate ids",
+                     from_device<int>(candidate_device.p, candidate_ids.size()), candidate_ids);
+    failures += verify_exact("selector preserves unary",
+                             from_device<float>(unary_device.p, unary_scores.size()), unary_scores);
+    failures += verify_exact("selector preserves hidden",
+                             from_device<std::uint16_t>(hidden_device.p, projected_hidden.size()),
+                             projected_hidden);
+    failures += verify_exact("selector ignores token counts",
+                             from_device<int>(counts.p, host_counts.size()), host_counts);
     return failures;
 }
 
@@ -382,7 +615,18 @@ int main() {
             std::cout << "SKIP: no usable CUDA device\n";
             return 77;
         }
-        const int failures = run();
+        int failures = 0;
+        for (kSteps = 1; kSteps <= 15; ++kSteps) failures += run();
+        {
+            kSteps = 1;
+            failures += run(true);
+            kSteps = 15;
+            failures += run(true);
+            kSteps = 2;
+            failures += run(false, true);
+            kSteps = 15;
+            failures += run(false, true);
+        }
         std::cout << (failures == 0 ? "OK" : "FAIL") << " candidate_selector_path\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {
