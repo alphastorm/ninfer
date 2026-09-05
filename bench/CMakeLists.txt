@@ -32,6 +32,7 @@ ninfer_add_op_bench(ninfer_gelu_bench SOURCES ops/gelu_bench.cu)
 ninfer_add_op_bench(ninfer_layer_norm_bench SOURCES ops/layer_norm_bench.cu)
 ninfer_add_op_bench(ninfer_vision_pos_embed_bench SOURCES ops/vision_pos_embed_bench.cu)
 ninfer_add_op_bench(ninfer_scatter_bench SOURCES ops/scatter_bench.cu)
+ninfer_add_op_bench(ninfer_scatter_bf16_batch_bench SOURCES ops/scatter_bf16_batch_bench.cu)
 ninfer_add_op_bench(ninfer_packed_softmax_attention_bench
   SOURCES ops/packed_softmax_attention_bench.cu)
 ninfer_add_op_bench(ninfer_prepare_ragged_prefix_bench

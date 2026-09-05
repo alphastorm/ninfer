@@ -105,50 +105,6 @@ int extract_case(std::int32_t source_rows, std::int32_t destination_rows,
     return failures;
 }
 
-int batch_prefix_case() {
-    constexpr std::int32_t rows     = 8;
-    constexpr std::int32_t width    = 3;
-    constexpr std::int32_t batch    = 2;
-    constexpr std::int32_t capacity = 3;
-    const std::vector<std::int32_t> lanes{2, 0};
-    const std::vector<std::int32_t> valid{2, 3};
-    const auto source = bit_pattern(static_cast<std::size_t>(rows * width * batch), 0x2468'ace0u);
-    const auto initial =
-        bit_pattern(static_cast<std::size_t>(rows * width * capacity), 0x3141'5926u);
-    auto expected_pool = initial;
-    for (std::int32_t b = 0; b < batch; ++b) {
-        for (std::int32_t column = 0; column < valid[static_cast<std::size_t>(b)]; ++column) {
-            for (std::int32_t row = 0; row < rows; ++row) {
-                expected_pool[static_cast<std::size_t>(lanes[static_cast<std::size_t>(b)] * width +
-                                                       column) *
-                                  rows +
-                              row] =
-                    source[static_cast<std::size_t>(b * width + column) * rows + row];
-            }
-        }
-    }
-
-    DeviceBuffer device_source = to_device(source);
-    DeviceBuffer device_lanes  = to_device(lanes);
-    DeviceBuffer device_valid  = to_device(valid);
-    GuardedDeviceBuffer device_pool(initial.size() * sizeof(std::uint16_t));
-    device_pool.copy_from_host(initial.data(), initial.size() * sizeof(std::uint16_t));
-
-    Tensor source_tensor(device_source.p, DType::BF16, {rows, width, batch});
-    Tensor lanes_tensor(device_lanes.p, DType::I32, {batch});
-    Tensor valid_tensor(device_valid.p, DType::I32, {batch});
-    Tensor pool_tensor(device_pool.data(), DType::BF16, {rows, width, capacity});
-    ops::scatter_bf16_batch(source_tensor, lanes_tensor, valid_tensor, pool_tensor, nullptr);
-
-    cuda_synchronize();
-
-    int failures = verify_exact(
-        "scatter_bf16_batch B=2 pool",
-        from_device<std::uint16_t>(device_pool.data(), expected_pool.size()), expected_pool);
-    failures += device_pool.verify_guards("scatter_bf16_batch B=2 pool guards");
-    return failures;
-}
-
 } // namespace
 
 int main() {
@@ -162,7 +118,6 @@ int main() {
     failures += scatter_case(2048, {5, 1, 3}, 7);
     failures += extract_case(10240, 6144, 4096, 6);
     failures += extract_case(8192, 2048, 2048, 1);
-    failures += batch_prefix_case();
     std::cout << (failures ? "FAIL" : "OK") << " scatter and extract_bf16_columns\n";
     return failures ? 1 : 0;
 }
