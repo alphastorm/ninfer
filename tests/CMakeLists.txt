@@ -167,6 +167,8 @@ ninfer_add_test(ninfer_response_store_test
 ninfer_add_test(ninfer_session_checkpoint_store_test
   SOURCES test_session_checkpoint_store.cpp
   LIBRARIES ninfer_serve)
+ninfer_add_test(ninfer_continuation_checkpoint_read_plan_test
+  SOURCES test_continuation_checkpoint_read_plan.cpp)
 ninfer_add_test(ninfer_automatic_checkpoint_queue_test
   SOURCES test_automatic_checkpoint_queue.cpp
           ${PROJECT_SOURCE_DIR}/src/serve/automatic_checkpoint_queue.cpp)

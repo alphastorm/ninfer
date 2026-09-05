@@ -11,6 +11,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace ninfer::runtime {
 
@@ -36,6 +37,93 @@ public:
     submit(const std::filesystem::path& path,
            std::span<const ContinuationCheckpointReadRequest> requests) = 0;
 };
+
+// Restore payload files are written contiguously in device-segment enumeration order, so a
+// reader can cover a run of whole (or partial) segments with one staging-sized read instead of
+// one read per KV page segment. A fixed-cost read request (DirectStorage submit and fence wait,
+// or an open/seek/read/close) per page segment is what held native-lane restores near 10 MB/s.
+struct ContinuationCheckpointReadPiece {
+    std::size_t segment = 0; // index into the enumerated device segments
+    std::size_t offset  = 0; // byte offset inside that segment
+    std::size_t bytes   = 0;
+
+    friend bool operator==(const ContinuationCheckpointReadPiece&,
+                           const ContinuationCheckpointReadPiece&) = default;
+};
+
+struct ContinuationCheckpointReadWindow {
+    std::uint64_t file_offset = 0;
+    std::size_t bytes         = 0;
+    std::size_t first_piece   = 0;
+    std::size_t piece_count   = 0;
+
+    friend bool operator==(const ContinuationCheckpointReadWindow&,
+                           const ContinuationCheckpointReadWindow&) = default;
+};
+
+struct ContinuationCheckpointReadPlan {
+    std::vector<ContinuationCheckpointReadPiece> pieces;
+    std::vector<ContinuationCheckpointReadWindow> windows;
+    std::uint64_t total_bytes = 0;
+};
+
+// Every window holds at most window_bytes and, except for the last, exactly window_bytes; pieces
+// appear in segment order and partition every segment exactly once.
+[[nodiscard]] inline ContinuationCheckpointReadPlan
+plan_continuation_checkpoint_reads(std::span<const std::size_t> segment_bytes,
+                                   std::size_t window_bytes) {
+    if (window_bytes == 0) {
+        throw std::invalid_argument("continuation checkpoint read window must be non-empty");
+    }
+    ContinuationCheckpointReadPlan plan;
+    ContinuationCheckpointReadWindow window{};
+    const auto close = [&]() {
+        if (window.bytes == 0) { return; }
+        plan.windows.push_back(window);
+        window = ContinuationCheckpointReadWindow{
+            .file_offset = window.file_offset + window.bytes,
+            .first_piece = plan.pieces.size(),
+        };
+    };
+    for (std::size_t index = 0; index < segment_bytes.size(); ++index) {
+        const std::size_t bytes = segment_bytes[index];
+        if (bytes == 0) {
+            throw std::invalid_argument("continuation checkpoint device segment is empty");
+        }
+        std::size_t offset = 0;
+        while (offset < bytes) {
+            if (window.bytes == window_bytes) { close(); }
+            const std::size_t amount = std::min(window_bytes - window.bytes, bytes - offset);
+            plan.pieces.push_back({.segment = index, .offset = offset, .bytes = amount});
+            ++window.piece_count;
+            window.bytes += amount;
+            offset += amount;
+        }
+        plan.total_bytes += bytes;
+    }
+    close();
+    return plan;
+}
+
+// One reader call may span more bytes than a single queue request accepts; split it into
+// contiguous requests of at most max_request_bytes so the queue still receives one batch.
+[[nodiscard]] inline std::vector<ContinuationCheckpointReadRequest>
+split_continuation_checkpoint_read(std::uint64_t file_offset, std::span<std::byte> destination,
+                                   std::size_t max_request_bytes) {
+    if (max_request_bytes == 0) {
+        throw std::invalid_argument("continuation checkpoint request bound must be non-empty");
+    }
+    std::vector<ContinuationCheckpointReadRequest> requests;
+    requests.reserve(destination.size() / max_request_bytes + 1);
+    std::size_t offset = 0;
+    while (offset < destination.size()) {
+        const std::size_t amount = std::min(max_request_bytes, destination.size() - offset);
+        requests.push_back({.file_offset = file_offset + offset,
+                            .destination = destination.subspan(offset, amount)});
+        offset += amount;
+    }
+    return requests;
+}
 
 // A checkpoint namespace may only be constructed at an authenticated caller boundary. Both
 // components are fixed-size digests so the runtime never accepts raw tenant or session names and

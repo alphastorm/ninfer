@@ -63,9 +63,14 @@ public:
     [[nodiscard]] std::string_view backend_name() const noexcept override { return "test-queue"; }
     [[nodiscard]] std::string_view unavailable_reason() const noexcept override { return {}; }
 
+    std::size_t submits  = 0;
+    std::size_t requests = 0;
+
     [[nodiscard]] std::unique_ptr<runtime::ContinuationCheckpointReadCompletion>
     submit(const std::filesystem::path& path,
            std::span<const runtime::ContinuationCheckpointReadRequest> requests) override {
+        ++submits;
+        this->requests += requests.size();
         for (const runtime::ContinuationCheckpointReadRequest& request : requests) {
             std::ifstream input(path, std::ios::binary);
             input.seekg(static_cast<std::streamoff>(request.file_offset));
@@ -1641,6 +1646,59 @@ int test_buffered_deferred_failure_fails_before_publication() {
 }
 } // namespace
 
+int test_large_reader_call_is_one_batched_submit() {
+#ifdef _WIN32
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot();
+    // 70 MiB of payload: larger than the 32 MiB DirectStorage request bound, so one reader
+    // call must become one submit carrying three requests rather than three submits.
+    std::vector<std::byte> payload(70ULL << 20);
+    for (std::size_t index = 0; index < payload.size(); index += 4093) {
+        payload[index] = static_cast<std::byte>(index * 31 % 251);
+    }
+    auto queue = std::make_shared<TestReadQueue>();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 256ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .read_queue = queue,
+                                  .tombstone_cleanup = {}});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer)
+        -> std::optional<ContinuationCheckpointStats> {
+        const std::string metadata = "engine-metadata-v2";
+        if (!write_chunked(writer, "engine/metadata.bin",
+                           std::as_bytes(std::span(metadata.data(), metadata.size()))) ||
+            !write_chunked(writer, "engine/state-0.bin", payload)) {
+            return std::nullopt;
+        }
+        return ContinuationCheckpointStats{.frontier_tokens = 1000,
+                                           .restored_tokens = 1000,
+                                           .payload_bytes = payload.size() + metadata.size()};
+    };
+    int failures = 0;
+    const std::optional<SessionCheckpointSaveResult> saved =
+        store.save(checkpoint_namespace(responses), responses, fingerprint(), exporter);
+    failures += check(saved.has_value(), "large generation publishes");
+    if (!saved) { return failures; }
+    SessionCheckpointLoadResult loaded =
+        store.load(checkpoint_namespace(responses), fingerprint(), responses.latest_response_id);
+    failures += check(loaded.state == SessionCheckpointLoadState::Available && loaded.checkpoint,
+                      "large generation loads");
+    if (!loaded.checkpoint) { return failures; }
+    const std::size_t submits_before  = queue->submits;
+    const std::size_t requests_before = queue->requests;
+    std::vector<std::byte> restored(payload.size());
+    failures += check(loaded.checkpoint->engine->read_file("engine/state-0.bin", 0, restored) &&
+                          restored == payload,
+                      "one reader call restores the exact 70 MiB payload");
+    failures += check(queue->submits - submits_before == 1 &&
+                          queue->requests - requests_before == 3,
+                      "one reader call is one submit of three bounded requests");
+    return failures;
+#else
+    return 0;
+#endif
+}
+
 int main(int argc, char** argv) {
     std::set_terminate([] {
         std::fputs("std::terminate invoked by checkpoint store test\n", stderr);
@@ -1677,6 +1735,7 @@ int main(int argc, char** argv) {
         std::pair{"namespace", &test_authenticated_namespace_validation},
         std::pair{"codec", &test_codec_round_trip},
         std::pair{"transaction", &test_transaction_restart_compatibility_and_corruption},
+        std::pair{"batched-read", &test_large_reader_call_is_one_batched_submit},
         std::pair{"manager-restart", &test_production_manager_restart_and_identity_isolation},
         std::pair{"delete-failure", &test_delete_checkpoint_update_fails_closed},
         std::pair{"delete-lru-pin", &test_delete_pins_session_across_cross_session_lru_eviction},

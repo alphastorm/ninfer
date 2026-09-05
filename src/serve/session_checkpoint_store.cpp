@@ -44,6 +44,9 @@ using runtime::ContinuationCheckpointStats;
 using runtime::ContinuationCheckpointWriter;
 using runtime::AuthenticatedCheckpointNamespace;
 inline constexpr std::size_t kMaximumTombstoneAttempts = 4096;
+// Matches DSTORAGE_STAGING_BUFFER_SIZE_32MB configured by the DirectStorage read queue; a
+// larger reader call becomes several requests in one batch.
+inline constexpr std::size_t kDirectStorageRequestBytes = 32ULL << 20;
 static_assert(std::is_nothrow_move_constructible_v<ResponseStoreSnapshot>);
 static_assert(std::is_nothrow_move_constructible_v<VerifiedSessionCheckpoint>);
 
@@ -956,10 +959,14 @@ public:
 #ifdef _WIN32
         if (!read_queue_ || !read_queue_->available()) { return false; }
         try {
-            const ContinuationCheckpointReadRequest request{
-                .file_offset = offset, .destination = destination};
+            // One batch per reader call: the engine already coalesces page segments into
+            // staging-sized windows, and the queue takes many requests per submit. Bound each
+            // request to the DirectStorage staging buffer configured for the queue.
+            const std::vector<ContinuationCheckpointReadRequest> requests =
+                runtime::split_continuation_checkpoint_read(offset, destination,
+                                                            kDirectStorageRequestBytes);
             std::unique_ptr<ContinuationCheckpointReadCompletion> completion =
-                read_queue_->submit(root_ / found->first, std::span(&request, 1));
+                read_queue_->submit(root_ / found->first, requests);
             completion->wait();
             return true;
         } catch (...) {

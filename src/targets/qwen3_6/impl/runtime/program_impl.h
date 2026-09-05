@@ -570,27 +570,35 @@ bool read_device_payload(std::string_view path, Enumerate&& enumerate,
                          PinnedHostBuffer& staging, cudaStream_t stream) {
     const std::uint64_t total = checkpoint_payload_bytes(enumerate);
     if (reader.file_size(path) != std::optional<std::uint64_t>(total)) { return false; }
-    std::uint64_t file_offset = 0;
-    bool ok = true;
+    // One read per staging window, not one per page segment: the payload was written in this
+    // enumeration order, so a window of the file is a contiguous run of (partial) segments that
+    // scatter to the device with asynchronous copies and one stream synchronization.
+    std::vector<DeviceCheckpointSegment> segments;
+    std::vector<std::size_t> segment_bytes;
     enumerate([&](DeviceCheckpointSegment segment) {
-        if (!ok) { return; }
-        std::size_t segment_offset = 0;
-        while (segment_offset < segment.bytes) {
-            const std::size_t amount =
-                std::min(staging.size(), segment.bytes - segment_offset);
-            auto destination = std::span<std::byte>(static_cast<std::byte*>(staging.data()), amount);
-            if (!reader.read_file(path, file_offset, destination)) {
-                ok = false;
-                return;
-            }
-            CUDA_CHECK(cudaMemcpyAsync(segment.data + segment_offset, staging.data(), amount,
-                                       cudaMemcpyHostToDevice, stream));
-            CUDA_CHECK(cudaStreamSynchronize(stream));
-            segment_offset += amount;
-            file_offset += amount;
-        }
+        segments.push_back(segment);
+        segment_bytes.push_back(segment.bytes);
     });
-    return ok && file_offset == total;
+    const runtime::ContinuationCheckpointReadPlan plan =
+        runtime::plan_continuation_checkpoint_reads(segment_bytes, staging.size());
+    std::byte* const host = static_cast<std::byte*>(staging.data());
+    for (const runtime::ContinuationCheckpointReadWindow& window : plan.windows) {
+        if (!reader.read_file(path, window.file_offset,
+                              std::span<std::byte>(host, window.bytes))) {
+            return false;
+        }
+        std::size_t host_offset = 0;
+        for (std::size_t index = window.first_piece;
+             index < window.first_piece + window.piece_count; ++index) {
+            const runtime::ContinuationCheckpointReadPiece& piece = plan.pieces[index];
+            CUDA_CHECK(cudaMemcpyAsync(segments[piece.segment].data + piece.offset,
+                                       host + host_offset, piece.bytes, cudaMemcpyHostToDevice,
+                                       stream));
+            host_offset += piece.bytes;
+        }
+        CUDA_CHECK(cudaStreamSynchronize(stream));
+    }
+    return plan.total_bytes == total;
 }
 
 template <class Sink>
