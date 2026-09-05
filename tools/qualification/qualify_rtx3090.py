@@ -28,7 +28,7 @@ PHASES = (
     "package",
     "transfer_install",
     "protocol",
-    "context_64k",
+    "context_128k",
     "restart",
     "rollback",
     "security",
@@ -40,18 +40,19 @@ PHASES = (
 MODEL_SHA256 = "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e"
 UPSTREAM_SHA = "ef6ecc3c139b43fc4d3e1b92df474305e8429544"
 LINEAGE_SHA = "c467349e375d6aa76afca63c0042bbc0869549aa"
-RELEASE_ID = "qwen38-3090-omp-v0.2.2-beta.1"
+RELEASE_ID = "qwen38-3090-omp-v0.2.3-beta.1"
 PACKAGE_NAME = (
-    "ninfer-rtx3090-omp-v0.2.2-beta.1-"
+    "ninfer-rtx3090-omp-v0.2.3-beta.1-"
     "windows-x86_64-cuda13.3-rtx3090.tar.gz"
 )
-SOURCE_NAME = "ninfer-rtx3090-omp-v0.2.2-beta.1-source.tar.gz"
+SOURCE_NAME = "ninfer-rtx3090-omp-v0.2.3-beta.1-source.tar.gz"
 SPDX_NAME = (
-    "ninfer-rtx3090-omp-v0.2.2-beta.1-"
+    "ninfer-rtx3090-omp-v0.2.3-beta.1-"
     "windows-x86_64-cuda13.3-rtx3090.spdx.json"
 )
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 EXPECTED_LONG = "ORCHID=493817; COLOR=COBALT"
+LONG_PROMPT_TOKENS = 130048
 CHECKPOINT_MARKER = "CHECKPOINT-3090-731942"
 CREDENTIAL_PATTERNS = (
     re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
@@ -409,7 +410,7 @@ $r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
                 return bool(self.remote_json(self.config.target, script)["ok"])
             evidence_names = {
                 "protocol": "agent-protocol.json",
-                "context_64k": "long-context-64k.json",
+                "context_128k": "long-context-128k.json",
                 "restart": "checkpoint-restart-proof.json",
                 "security": "state-security.json",
                 "benchmark_c1": "managed-c1.json",
@@ -488,7 +489,7 @@ $limit=[int][double](nvidia-smi.exe --query-gpu=power.limit --format=csv,noheade
         if runtime_diff:
             raise LaneError("qualification-tool advancement changed runtime source paths")
         if self.config.long_fixture.stat().st_size <= 0:
-            raise LaneError("64K fixture is empty")
+            raise LaneError("128K fixture is empty")
         run(["ssh", "-T", self.config.builder, "exit"], timeout=30)
         run(["ssh", "-T", self.config.target, "exit"], timeout=30)
         status = self.remote_json(
@@ -557,7 +558,7 @@ $pf=[Environment]::GetFolderPath('ProgramFilesX86')
 $vsdev=Join-Path $pf 'Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat'
 $lines=&cmd.exe /d /s /c ('"'+$vsdev+'" -arch=x64 -host_arch=x64 >nul && set')
 foreach($line in $lines){{$i=$line.IndexOf('=');if($i -gt 0){{[Environment]::SetEnvironmentVariable($line.Substring(0,$i),$line.Substring($i+1),'Process')}}}}
-&cmake -S $source -B $build -G Ninja '-DCMAKE_BUILD_TYPE=Release' '-DCMAKE_CUDA_ARCHITECTURES=86' '-DNINFER_BUILD_APPS=ON' '-DBUILD_TESTING=ON' '-DNINFER_BUILD_BENCHMARKS=ON' '-DNINFER_BUILD_PROFILE=omp-v0.2.2-rtx3090' '-DNINFER_UPSTREAM_BASE_SHA={UPSTREAM_SHA}' '-DNINFER_PATCH_STACK_SHA={self.head}' ('-DCMAKE_TOOLCHAIN_FILE='+{ps_quote(self.config.builder_vcpkg)}) ('-DVCPKG_INSTALLED_DIR='+{ps_quote(self.config.builder_vcpkg_installed)})
+&cmake -S $source -B $build -G Ninja '-DCMAKE_BUILD_TYPE=Release' '-DCMAKE_CUDA_ARCHITECTURES=86' '-DNINFER_BUILD_APPS=ON' '-DBUILD_TESTING=ON' '-DNINFER_BUILD_BENCHMARKS=ON' '-DNINFER_BUILD_PROFILE=omp-v0.2.3-rtx3090' '-DNINFER_UPSTREAM_BASE_SHA={UPSTREAM_SHA}' '-DNINFER_PATCH_STACK_SHA={self.head}' ('-DCMAKE_TOOLCHAIN_FILE='+{ps_quote(self.config.builder_vcpkg)}) ('-DVCPKG_INSTALLED_DIR='+{ps_quote(self.config.builder_vcpkg_installed)})
 if($LASTEXITCODE -ne 0){{throw'configure failed'}}
 &cmake --build $build --target ninfer_direct_storage_checkpoint_read_queue_windows_test ninfer_session_checkpoint_store_test ninfer_response_store_test ninfer_http_contract_test ninfer_automatic_checkpoint_queue_test ninfer-serve ninfer ninfer_bench --parallel 16
 if($LASTEXITCODE -ne 0){{throw'build failed'}}
@@ -669,7 +670,7 @@ if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw'package is n
                 through_local=True,
             )
         self.stage_script(self.config.target, f"{target_root}/qualify_rtx3090.py")
-        scp(str(self.config.long_fixture), remote_spec(self.config.target, f"{target_root}/long_niah_64k.json"))
+        scp(str(self.config.long_fixture), remote_spec(self.config.target, f"{target_root}/long_niah_128k.json"))
         scp(
             str(self.config.source_root / "tests" / "test_release_security.ps1"),
             remote_spec(self.config.target, f"{target_root}/test_release_security.ps1"),
@@ -743,7 +744,7 @@ $v=Get-Content $out -Raw | ConvertFrom-Json
         return self.remote_json(self.config.target, script, timeout=1200)
 
     def context(self) -> dict[str, Any]:
-        return self.target_internal("_long", "--fixture", f"{self.target_root}/long_niah_64k.json", timeout=1800)
+        return self.target_internal("_long", "--fixture", f"{self.target_root}/long_niah_128k.json", timeout=1800)
 
     def restart(self) -> dict[str, Any]:
         return self.target_internal("_restart", timeout=1800)
@@ -827,7 +828,7 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
             if name in self.state["phases"]
             and name not in {"preflight", "receipt", "restore"}
         }
-        context = self.state["phases"]["context_64k"]["receipt"]
+        context = self.state["phases"]["context_128k"]["receipt"]
         restart = self.state["phases"]["restart"]["receipt"]
         benchmark = self.state["phases"]["benchmark_c1"]["receipt"]
         summary = {
@@ -902,7 +903,7 @@ if([bool]$status.gpu_owner.lease_active -or [bool]$status.gpu_owner.current_paus
             ("package", self.package),
             ("transfer_install", self.transfer_install),
             ("protocol", self.protocol),
-            ("context_64k", self.context),
+            ("context_128k", self.context),
             ("restart", self.restart),
             ("rollback", self.rollback),
             ("security", self.security),
@@ -944,10 +945,10 @@ def internal_long(args: argparse.Namespace) -> dict[str, Any]:
     )
     usage = result["usage"]
     content = result["choices"][0]["message"]["content"].strip()
-    if usage["prompt_tokens"] != 64512 or content != EXPECTED_LONG:
-        raise LaneError("64K retrieval was not exact")
-    receipt = {"status": "passed", "prompt_tokens": 64512, "completion_tokens": usage["completion_tokens"], "exact_output": content, "elapsed_seconds": time.perf_counter() - started, "fixture_sha256": sha256_file(Path(args.fixture))}
-    atomic_json(evidence / "long-context-64k.json", receipt)
+    if usage["prompt_tokens"] != LONG_PROMPT_TOKENS or content != EXPECTED_LONG:
+        raise LaneError("128K retrieval was not exact")
+    receipt = {"status": "passed", "prompt_tokens": LONG_PROMPT_TOKENS, "completion_tokens": usage["completion_tokens"], "exact_output": content, "elapsed_seconds": time.perf_counter() - started, "fixture_sha256": sha256_file(Path(args.fixture))}
+    atomic_json(evidence / "long-context-128k.json", receipt)
     return receipt
 
 

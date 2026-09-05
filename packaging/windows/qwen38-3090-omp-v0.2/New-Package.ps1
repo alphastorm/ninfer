@@ -40,10 +40,10 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$releaseId = 'qwen38-3090-omp-v0.2.2-beta.1'
-$releaseVersion = 'v0.2.2-beta.1'
-$deploymentProfile = 'qwen38-3090-omp-v0.2.2-beta.1-c1'
-$buildProfile = 'omp-v0.2.2-rtx3090'
+$releaseId = 'qwen38-3090-omp-v0.2.3-beta.1'
+$releaseVersion = 'v0.2.3-beta.1'
+$deploymentProfile = 'qwen38-3090-omp-v0.2.3-beta.1-c1'
+$buildProfile = 'omp-v0.2.3-rtx3090'
 $platform = 'windows-x86_64-cuda13.3-rtx3090'
 $upstreamBaseSha = 'ef6ecc3c139b43fc4d3e1b92df474305e8429544'
 $lineageBaseSha = 'c467349e375d6aa76afca63c0042bbc0869549aa'
@@ -120,7 +120,7 @@ if ($config.artifact_type -cne 'ninfer_windows_server_config' -or
     [int]$config.schema_version -ne 2 -or
     [string]$config.release_id -cne $releaseId -or
     [string]$config.deployment_profile -cne $deploymentProfile -or
-    [int]$config.engine.max_context -ne 65536 -or
+    [int]$config.engine.max_context -ne 131072 -or
     [string]$config.engine.kv_capacity -cne 'auto' -or
     [int]$config.engine.prefill_chunk -ne 1024 -or
     [string]$config.engine.kv_dtype -cne 'int8' -or
@@ -300,7 +300,7 @@ try {
         later_external_beta_authority = [ordered]@{
             artifact_type = 'ninfer_rtx3090_beta_qualification'
             schema_version = 3
-            public_receipt_path = 'docs/qualification/receipts/qwen3.8-27b-rtx-3090-v0.2.2-beta.1.json'
+            public_receipt_path = 'docs/qualification/receipts/qwen3.8-27b-rtx-3090-v0.2.3-beta.1.json'
             supersedes_only_when_exact_package_sha256_matches = $true
             mutates_this_build_receipt = $false
         }
