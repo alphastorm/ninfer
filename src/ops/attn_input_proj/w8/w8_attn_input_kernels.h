@@ -49,4 +49,13 @@ void w8_dflash2_attn_input_mma_r32_c64_launch(const Tensor& x, const Weight& wei
 void w8_dflash2_attn_input_mma_r64_c128_launch(const Tensor& x, const Weight& weight, Tensor& q,
                                                Tensor& k, Tensor& v, cudaStream_t stream);
 
+void w8_dflash2_attn_input_mma_r16_c64_k128_launch(const Tensor&, const Weight&, Tensor&, Tensor&,
+                                                   Tensor&, cudaStream_t);
+
+void w8_dflash2_attn_input_mma_r32_c32_k128_launch(const Tensor&, const Weight&, Tensor&, Tensor&,
+                                                   Tensor&, cudaStream_t);
+
+void w8_dflash2_attn_input_mma_r32_c64_k128_launch(const Tensor&, const Weight&, Tensor&, Tensor&,
+                                                   Tensor&, cudaStream_t);
+
 } // namespace ninfer::ops::detail

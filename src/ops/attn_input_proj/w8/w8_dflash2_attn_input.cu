@@ -17,10 +17,11 @@
 namespace ninfer::ops::detail {
 namespace {
 
-using Geometry                    = W8DFlash2AttentionProjectionGeometry;
-constexpr std::int32_t kQueryRows = 4096;
-constexpr std::int32_t kKvRows    = 1024;
-using Output                      = W8SplitOutput3<kQueryRows, kKvRows, kKvRows>;
+using Geometry                          = W8DFlash2AttentionProjectionGeometry;
+constexpr std::int32_t kQueryRows       = 4096;
+constexpr std::int32_t kKvRows          = 1024;
+constexpr std::int32_t kLastSmallTokens = 48;
+using Output                            = W8SplitOutput3<kQueryRows, kKvRows, kKvRows>;
 using Launch = void (*)(const Tensor&, const Weight&, Tensor&, Tensor&, Tensor&, cudaStream_t);
 
 template <int ActiveTokens>
@@ -49,7 +50,7 @@ constexpr auto make_small_launchers(std::index_sequence<Offsets...>) {
 }
 
 constexpr auto kSmallLaunchers = make_small_launchers(
-    std::make_index_sequence<kW8DFlash2AttentionLastSmallT - kW8DFlash2AttentionFirstSmallT + 1>{});
+    std::make_index_sequence<kLastSmallTokens - kW8DFlash2AttentionFirstSmallT + 1>{});
 
 template <class Schedule, bool Full>
 void launch_mma_slice(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k, Tensor& v,
@@ -69,7 +70,7 @@ void launch_mma_slice(const Tensor& x, const Weight& weight, Tensor& q, Tensor& 
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <class Schedule>
+template <class Schedule, bool AllowFull = true>
 void launch_mma(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k, Tensor& v,
                 cudaStream_t stream) {
     for_each_token_slice(x.ne[1], Schedule::BN, [&](std::int32_t offset, std::int32_t count) {
@@ -77,11 +78,14 @@ void launch_mma(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k, Ten
         Tensor q_slice       = q.slice(1, offset, count);
         Tensor k_slice       = k.slice(1, offset, count);
         Tensor v_slice       = v.slice(1, offset, count);
-        if ((count % Schedule::BN) == 0) {
-            launch_mma_slice<Schedule, true>(x_slice, weight, q_slice, k_slice, v_slice, stream);
-        } else {
-            launch_mma_slice<Schedule, false>(x_slice, weight, q_slice, k_slice, v_slice, stream);
+        if constexpr (AllowFull) {
+            if ((count % Schedule::BN) == 0) {
+                launch_mma_slice<Schedule, true>(x_slice, weight, q_slice, k_slice, v_slice,
+                                                 stream);
+                return;
+            }
         }
+        launch_mma_slice<Schedule, false>(x_slice, weight, q_slice, k_slice, v_slice, stream);
     });
 }
 
@@ -89,7 +93,7 @@ void launch_mma(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k, Ten
 
 void w8_dflash2_attn_input_small_t_launch(const Tensor& x, const Weight& weight, Tensor& q,
                                           Tensor& k, Tensor& v, cudaStream_t stream) {
-    if (x.ne[1] < kW8DFlash2AttentionFirstSmallT || x.ne[1] > kW8DFlash2AttentionLastSmallT) {
+    if (x.ne[1] < kW8DFlash2AttentionFirstSmallT || x.ne[1] > kLastSmallTokens) {
         throw std::invalid_argument("W8 DFlash2 attention input small-T: unsupported T");
     }
     const std::size_t index = static_cast<std::size_t>(x.ne[1] - kW8DFlash2AttentionFirstSmallT);
@@ -106,6 +110,26 @@ void w8_dflash2_attn_input_mma_r64_c128_launch(const Tensor& x, const Weight& we
                                                Tensor& k, Tensor& v, cudaStream_t stream) {
     using Schedule = W8RowSplitMmaGemmSchedule<64, 128, 64, 16, 2, 2>;
     launch_mma<Schedule>(x, weight, q, k, v, stream);
+}
+
+void w8_dflash2_attn_input_mma_r16_c64_k128_launch(const Tensor& x, const Weight& w, Tensor& q,
+                                                   Tensor& k, Tensor& v, cudaStream_t stream) {
+    using Schedule = W8RowSplitMmaGemmSchedule<16, 64, 16, 16, 1, 2, 128, 1>;
+    // This route owns only the partial 49..63-column tile.
+    launch_mma<Schedule, false>(x, w, q, k, v, stream);
+}
+
+void w8_dflash2_attn_input_mma_r32_c32_k128_launch(const Tensor& x, const Weight& w, Tensor& q,
+                                                   Tensor& k, Tensor& v, cudaStream_t stream) {
+    using Schedule = W8RowSplitMmaGemmSchedule<32, 32, 16, 16, 1, 2, 128, 1>;
+    launch_mma<Schedule>(x, w, q, k, v, stream);
+}
+
+void w8_dflash2_attn_input_mma_r32_c64_k128_launch(const Tensor& x, const Weight& w, Tensor& q,
+                                                   Tensor& k, Tensor& v, cudaStream_t stream) {
+    // Three-block launch bounds reduce register usage and keep all 384 decode CTAs in one wave.
+    using Schedule = W8RowSplitMmaGemmSchedule<32, 64, 16, 16, 3, 2, 128, 1>;
+    launch_mma<Schedule>(x, w, q, k, v, stream);
 }
 
 } // namespace ninfer::ops::detail

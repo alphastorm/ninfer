@@ -243,7 +243,7 @@ struct W8LinearSmallTProductionSchedule<W8N5120K25600Geometry, ActiveTokens> {
                                        : ActiveTokens <= 48 ? 48
                                        : ActiveTokens <= 56 ? 56
                                                             : 64;
-    // RTX 5090 cold-cache winner over the complete T=1..64 interval: eight K-split warps through
+    // RTX 5090 cold-cache profile retained over T=1..56: eight K-split warps through
     // T=32, then four. Both regions retain two-block launch bounds; shared scale staging wins from
     // T=5 onward while direct loads avoid its fixed cost at T=1..4.
     static constexpr int kKWarps    = ActiveTokens <= 32 ? 8 : 4;

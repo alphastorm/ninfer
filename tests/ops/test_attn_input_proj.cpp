@@ -1,5 +1,7 @@
 #include "ninfer/ops/attn_input_proj.h"
 
+#include "core/device.h"
+#include "core/decode_graph.h"
 #include "ops/direct_bf16_weight.h"
 #include "ops/excluded_paths.h"
 #include "ops/input_projection_test_common.h"
@@ -8,6 +10,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <iostream>
 #include <span>
 #include <string>
@@ -447,33 +450,59 @@ int run_w8_target() {
 }
 
 int run_w8_qkv_case(DevicePackedWeight& parent, std::int32_t hidden, const char* profile,
-                    std::int32_t tokens) {
-    constexpr std::int32_t kQRows       = 4096;
-    constexpr std::int32_t kKvRows      = 1024;
-    const std::vector<float> activation = make_bf16_activation(hidden, tokens, 301U + tokens);
-    const std::vector<std::uint16_t> activation_bits = bf16_bits(activation);
-    DeviceBuffer device_activation                   = to_device(activation_bits);
-
-    GuardedBf16Tensor query(kQRows, tokens);
-    GuardedBf16Tensor key(kKvRows, tokens);
-    GuardedBf16Tensor value(kKvRows, tokens);
+                    std::int32_t tokens, bool graph_replay = false, int sample_rows = 7) {
+    constexpr int kQRows = 4096, kKvRows = 1024;
+    std::vector<float> activation  = make_bf16_activation(hidden, tokens, 301U + tokens);
+    auto activation_bits           = bf16_bits(activation);
+    DeviceBuffer device_activation = to_device(activation_bits);
+    GuardedBf16Tensor query(kQRows, tokens), key(kKvRows, tokens), value(kKvRows, tokens);
     Tensor x(device_activation.p, DType::BF16, {hidden, tokens});
-    Tensor q = query.tensor();
-    Tensor k = key.tensor();
-    Tensor v = value.tensor();
-    ops::attn_input_proj(x, parent.view(), q, k, v, nullptr);
+    Tensor q = query.tensor(), k = key.tensor(), v = value.tensor();
+    std::optional<DeviceContext> context;
+    if (graph_replay) context.emplace();
+    const cudaStream_t stream = context ? context->stream : nullptr;
+    const auto launch         = [&] { ops::attn_input_proj(x, parent.view(), q, k, v, stream); };
+    DecodeGraphDefinition definition;
+    DecodeGraphExecutable graph;
     cuda_synchronize();
-
-    const std::string suffix = " W8 " + std::string(profile) + " A16 T=" + std::to_string(tokens);
-    int failures             = 0;
-    failures +=
-        verify_output("attn q" + suffix, query, parent.host, 0, kQRows, activation, hidden, tokens);
-    failures += verify_output("attn k" + suffix, key, parent.host, kQRows, kKvRows, activation,
-                              hidden, tokens);
-    failures += verify_output("attn value" + suffix, value, parent.host, kQRows + kKvRows, kKvRows,
-                              activation, hidden, tokens);
-    failures += verify_preserved("attn x" + suffix, device_activation, activation_bits);
-    failures += parent.verify_preserved("attn parent weight" + suffix);
+    if (graph_replay) {
+        definition.capture(stream, launch);
+        graph.instantiate(definition);
+    }
+    int failures = 0;
+    for (int phase = 0; phase < (graph_replay ? 2 : 1); ++phase) {
+        if (phase) {
+            for (auto& element : activation) element = -element;
+            activation_bits = bf16_bits(activation);
+            device_activation.copy_from_host(activation_bits.data(), device_activation.bytes);
+        }
+        cuda_check(
+            cudaMemsetAsync(q.data, 0xff, static_cast<std::size_t>(kQRows) * tokens * 2, stream),
+            "poison Q");
+        cuda_check(
+            cudaMemsetAsync(k.data, 0xff, static_cast<std::size_t>(kKvRows) * tokens * 2, stream),
+            "poison K");
+        cuda_check(
+            cudaMemsetAsync(v.data, 0xff, static_cast<std::size_t>(kKvRows) * tokens * 2, stream),
+            "poison V");
+        if (graph_replay)
+            graph.launch(stream);
+        else
+            launch();
+        cuda_synchronize(stream);
+        const std::string suffix = " W8 " + std::string(profile) +
+                                   " A16 T=" + std::to_string(tokens) +
+                                   (graph_replay ? " graph phase=" + std::to_string(phase) : "");
+        failures += verify_output("attn q" + suffix, query, parent.host, 0, kQRows, activation,
+                                  hidden, tokens, kAttnInputProjA16Tolerance, sample_rows);
+        failures += verify_output("attn k" + suffix, key, parent.host, kQRows, kKvRows, activation,
+                                  hidden, tokens, kAttnInputProjA16Tolerance, sample_rows);
+        failures +=
+            verify_output("attn value" + suffix, value, parent.host, kQRows + kKvRows, kKvRows,
+                          activation, hidden, tokens, kAttnInputProjA16Tolerance, sample_rows);
+        failures += verify_preserved("attn x" + suffix, device_activation, activation_bits);
+    }
+    failures += parent.verify_preserved("attn parent weight");
     return failures;
 }
 
@@ -490,13 +519,16 @@ int run_w8_companion() {
 }
 
 int run_w8_dflash2() {
-    constexpr std::int32_t kHidden = 5120;
+    constexpr int kHidden = 5120;
     DevicePackedWeight parent(
         quantized_weight::make_patterned_weight(QType::W8G32_F16S, 6144, kHidden, 313U));
     int failures = 0;
-    for (const std::int32_t tokens : {1, 8, 53, 54, 192, 193, 1024}) {
+    for (int tokens = 1; tokens <= 128; ++tokens)
         failures += run_w8_qkv_case(parent, kHidden, "DFlash2", tokens);
-    }
+    for (int tokens : {129, 192, 193, 1024})
+        failures += run_w8_qkv_case(parent, kHidden, "DFlash2", tokens);
+    for (int tokens : {1, 8, 16, 48, 49, 53, 54, 63, 64, 65, 96, 97, 112, 127, 128, 129})
+        failures += run_w8_qkv_case(parent, kHidden, "DFlash2", tokens, true, 31);
     return failures;
 }
 

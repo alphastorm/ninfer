@@ -21,6 +21,9 @@ enum class W8AttnInputScheduleId {
     MmaR128C64,
     MmaR128C80,
     DFlash2SmallT,
+    DFlash2MmaR16C64K128,
+    DFlash2MmaR32C32K128,
+    DFlash2MmaR32C64K128,
     DFlash2MmaR32C64,
     DFlash2MmaR64C128,
 };

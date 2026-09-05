@@ -7,6 +7,7 @@
 #include <stdexcept>
 
 namespace ninfer::ops::detail {
+
 namespace {
 
 constexpr std::int32_t kAnyCols = std::numeric_limits<std::int32_t>::max();
@@ -36,9 +37,12 @@ constexpr std::array<RouteSpec, 9> kCompanionRoutes{{
     {561, kAnyCols, W8AttnInputScheduleId::MmaR64C128},
 }};
 
-constexpr std::array<RouteSpec, 3> kDFlash2Routes{{
-    {1, 53, W8AttnInputScheduleId::DFlash2SmallT},
-    {54, 192, W8AttnInputScheduleId::DFlash2MmaR32C64},
+constexpr std::array<RouteSpec, 6> kDFlash2Routes{{
+    {1, 48, W8AttnInputScheduleId::DFlash2SmallT},
+    {49, 63, W8AttnInputScheduleId::DFlash2MmaR16C64K128},
+    {64, 96, W8AttnInputScheduleId::DFlash2MmaR32C32K128},
+    {97, 128, W8AttnInputScheduleId::DFlash2MmaR32C64K128},
+    {129, 192, W8AttnInputScheduleId::DFlash2MmaR32C64},
     {193, kAnyCols, W8AttnInputScheduleId::DFlash2MmaR64C128},
 }};
 
@@ -102,6 +106,12 @@ const char* w8_attn_input_schedule_name(W8AttnInputScheduleId schedule) noexcept
         return "attn_input_proj.w8.mma.r128.c80";
     case W8AttnInputScheduleId::DFlash2SmallT:
         return "attn_input_proj.w8.dflash2.small_t";
+    case W8AttnInputScheduleId::DFlash2MmaR16C64K128:
+        return "attn_input_proj.w8.dflash2.mma.r16.c64.k128";
+    case W8AttnInputScheduleId::DFlash2MmaR32C32K128:
+        return "attn_input_proj.w8.dflash2.mma.r32.c32.k128";
+    case W8AttnInputScheduleId::DFlash2MmaR32C64K128:
+        return "attn_input_proj.w8.dflash2.mma.r32.c64.k128";
     case W8AttnInputScheduleId::DFlash2MmaR32C64:
         return "attn_input_proj.w8.dflash2.mma.r32.c64";
     case W8AttnInputScheduleId::DFlash2MmaR64C128:
@@ -167,6 +177,9 @@ void w8_attn_input_execute_plan(const W8AttnInputPlan& plan, const Tensor& x, co
     case W8AttnInputScheduleId::DFlash2SmallT:
     case W8AttnInputScheduleId::DFlash2MmaR32C64:
     case W8AttnInputScheduleId::DFlash2MmaR64C128:
+    case W8AttnInputScheduleId::DFlash2MmaR16C64K128:
+    case W8AttnInputScheduleId::DFlash2MmaR32C32K128:
+    case W8AttnInputScheduleId::DFlash2MmaR32C64K128:
         throw std::logic_error("W8 attention input: three-output schedule in four-output plan");
     }
     throw std::logic_error("W8 attention input: unknown schedule");
@@ -195,6 +208,15 @@ void w8_attn_input_execute_plan(const W8AttnInputPlan& plan, const Tensor& x, co
         switch (plan.schedule) {
         case W8AttnInputScheduleId::DFlash2SmallT:
             w8_dflash2_attn_input_small_t_launch(x, weight, q, k, v, stream);
+            return;
+        case W8AttnInputScheduleId::DFlash2MmaR16C64K128:
+            w8_dflash2_attn_input_mma_r16_c64_k128_launch(x, weight, q, k, v, stream);
+            return;
+        case W8AttnInputScheduleId::DFlash2MmaR32C32K128:
+            w8_dflash2_attn_input_mma_r32_c32_k128_launch(x, weight, q, k, v, stream);
+            return;
+        case W8AttnInputScheduleId::DFlash2MmaR32C64K128:
+            w8_dflash2_attn_input_mma_r32_c64_k128_launch(x, weight, q, k, v, stream);
             return;
         case W8AttnInputScheduleId::DFlash2MmaR32C64:
             w8_dflash2_attn_input_mma_r32_c64_launch(x, weight, q, k, v, stream);
@@ -240,6 +262,9 @@ void w8_attn_input_execute_plan(const W8AttnInputPlan& plan, const Tensor& x, co
     case W8AttnInputScheduleId::DFlash2SmallT:
     case W8AttnInputScheduleId::DFlash2MmaR32C64:
     case W8AttnInputScheduleId::DFlash2MmaR64C128:
+    case W8AttnInputScheduleId::DFlash2MmaR16C64K128:
+    case W8AttnInputScheduleId::DFlash2MmaR32C32K128:
+    case W8AttnInputScheduleId::DFlash2MmaR32C64K128:
         throw std::logic_error("W8 attention input: DFlash2 schedule in companion plan");
     }
     throw std::logic_error("W8 attention input: unknown schedule");
