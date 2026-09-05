@@ -1,5 +1,7 @@
 #include "ninfer/ops/kv_cache_append.h"
 #include "ops/op_tester.h"
+#include "core/decode_graph.h"
+#include "core/device.h"
 
 #include <cuda_runtime.h>
 
@@ -918,6 +920,172 @@ int cyclic_decode_batch_case(int capacity) {
     return failures;
 }
 
+// Cyclic prefix qualification: the independent exact oracle above owns the codec. The
+// destination remains live across calls, so every comparison also checks untouched slots,
+// padding and unselected lanes.
+class CyclicPrefixFixture {
+    static constexpr int Lanes = 8;
+    static constexpr std::array<int, Lanes> LaneOrder{7, 0, 4, 2, 6, 1, 5, 3};
+    int capacity_, padded_;
+    std::vector<std::uint16_t> expected_k_, expected_v_;
+    GuardedDeviceBuffer cache_k_, cache_v_;
+    std::array<int, Lanes> frontier_{};
+
+public:
+    explicit CyclicPrefixFixture(int capacity)
+        : capacity_(capacity), padded_(capacity + 8),
+          expected_k_(
+              patterned_bits(static_cast<std::size_t>(kHeadDim) * padded_ * kKVHeads * Lanes, 91)),
+          expected_v_(patterned_bits(expected_k_.size(), 137)), cache_k_(expected_k_.size() * 2),
+          cache_v_(expected_v_.size() * 2) {
+        cache_k_.copy_from_host(expected_k_.data(), expected_k_.size() * 2);
+        cache_v_.copy_from_host(expected_v_.data(), expected_v_.size() * 2);
+        for (int lane = 0; lane < Lanes; ++lane) frontier_[lane] = (lane + 2) * capacity - 3;
+    }
+
+    // kind=0 empty, kind=1 mixed zero/one/short/full, kind=2 full.
+    int run(int width, int batch, int kind, bool replay, int upper = -1) {
+        if (upper < 0) upper = width;
+        const auto elements = static_cast<std::size_t>(kHeadDim) * kKVHeads * width * batch;
+        std::vector<std::uint16_t> input_k(elements), input_v(elements);
+        std::vector<int> positions(width * batch), counts(batch), lanes(batch);
+        GuardedDeviceBuffer dk(elements * 2), dv(elements * 2), dp(positions.size() * 4),
+            dc(batch * 4), dl(batch * 4);
+        Tensor k(dk.data(), DType::BF16, {kHeadDim, kKVHeads, width, batch}),
+            v(dv.data(), DType::BF16, {kHeadDim, kKVHeads, width, batch}),
+            p(dp.data(), DType::I32, {width, batch}), c(dc.data(), DType::I32, {batch}),
+            l(dl.data(), DType::I32, {batch});
+        CyclicKVCacheLayerView cache{
+            .k        = Tensor(cache_k_.data(), DType::BF16, {kHeadDim, padded_, kKVHeads, Lanes}),
+            .v        = Tensor(cache_v_.data(), DType::FP16, {kHeadDim, padded_, kKVHeads, Lanes}),
+            .capacity = static_cast<std::uint32_t>(capacity_),
+            .padded_capacity = static_cast<std::uint32_t>(padded_),
+            .num_kv_heads    = kKVHeads,
+            .head_dim        = kHeadDim,
+            .lane_capacity   = Lanes};
+        const ops::KVCacheAppendPrefixExecutionEnvelope envelope{0,
+                                                                 static_cast<std::uint32_t>(upper)};
+        DeviceContext device;
+        DecodeGraphDefinition definition;
+        DecodeGraphExecutable graph;
+        const auto launch = [&] {
+            ops::kv_cache_append_prefix(k, v, p, c, l, envelope, cache, device.stream);
+        };
+        int failures = 0;
+        for (int phase = 0; phase < (replay ? 2 : 1); ++phase) {
+            for (std::size_t i = 0; i < elements; ++i) {
+                auto kb = static_cast<std::uint16_t>(i * 40503 + width * 17 + phase * 103);
+                auto vb = static_cast<std::uint16_t>(i * 17351 + width * 31 + phase * 211);
+                if ((kb & 0x7f80u) == 0x7f80u) kb ^= 0x0080u;
+                if ((vb & 0x7f80u) == 0x7f80u) vb ^= 0x0080u;
+                input_k[i] = kb;
+                input_v[i] = vb;
+            }
+            for (int b = 0; b < batch; ++b) {
+                lanes[b]       = LaneOrder[(b + 3 * phase) % Lanes];
+                const int mode = (b + phase) % 4;
+                counts[b]      = kind == 0   ? 0
+                                 : kind == 2 ? upper
+                                 : mode == 0 ? upper
+                                 : mode == 1 ? std::max(0, upper - 1)
+                                 : mode == 2 ? std::min(1, upper)
+                                             : 0;
+                for (int t = 0; t < width; ++t) {
+                    const auto src =
+                        (static_cast<std::size_t>(b) * width + t) * kKVHeads * kHeadDim;
+                    positions[b * width + t] = t < counts[b] ? frontier_[lanes[b]] + t : -1234567;
+                    if (t >= counts[b]) {
+                        std::fill_n(input_k.begin() + src, kKVHeads * kHeadDim, 0x7fc1);
+                        std::fill_n(input_v.begin() + src, kKVHeads * kHeadDim, 0x7fff);
+                        continue;
+                    }
+                    const int slot = positions[b * width + t] % capacity_;
+                    for (int h = 0; h < kKVHeads; ++h)
+                        for (int d = 0; d < kHeadDim; ++d) {
+                            const auto source = src + h * kHeadDim + d;
+                            const auto dst =
+                                (((static_cast<std::size_t>(lanes[b]) * kKVHeads + h) * padded_ +
+                                  slot) *
+                                 kHeadDim) +
+                                d;
+                            expected_k_[dst] = input_k[source];
+                            expected_v_[dst] = bf16_bits_to_f16_bits(input_v[source]);
+                        }
+                }
+                frontier_[lanes[b]] += counts[b];
+            }
+            dk.copy_from_host(input_k.data(), input_k.size() * 2);
+            dv.copy_from_host(input_v.data(), input_v.size() * 2);
+            dp.copy_from_host(positions.data(), positions.size() * 4);
+            dc.copy_from_host(counts.data(), batch * 4);
+            dl.copy_from_host(lanes.data(), batch * 4);
+            cuda_synchronize();
+            if (replay && phase == 0) {
+                definition.capture(device.stream, launch);
+                graph.instantiate(definition);
+            }
+            if (replay)
+                graph.launch(device.stream);
+            else
+                launch();
+            cuda_synchronize(device.stream);
+            const std::string label =
+                "cyclic prefix capacity=" + std::to_string(capacity_) +
+                " Wc=" + std::to_string(width) + " B=" + std::to_string(batch) +
+                " upper=" + std::to_string(upper) + " kind=" + std::to_string(kind) +
+                (replay ? " graph " : " eager ") + std::to_string(phase);
+            failures += verify_exact(
+                (label + " cache K").c_str(),
+                from_device<std::uint16_t>(cache_k_.data(), expected_k_.size()), expected_k_);
+            failures += verify_exact(
+                (label + " cache V").c_str(),
+                from_device<std::uint16_t>(cache_v_.data(), expected_v_.size()), expected_v_);
+            failures += verify_exact((label + " input K unchanged").c_str(),
+                                     from_device<std::uint16_t>(dk.data(), elements), input_k);
+            failures += verify_exact((label + " input V unchanged").c_str(),
+                                     from_device<std::uint16_t>(dv.data(), elements), input_v);
+            failures += verify_exact((label + " positions unchanged").c_str(),
+                                     from_device<int>(dp.data(), positions.size()), positions);
+            failures += verify_exact((label + " counts unchanged").c_str(),
+                                     from_device<int>(dc.data(), batch), counts);
+            failures += verify_exact((label + " lanes unchanged").c_str(),
+                                     from_device<int>(dl.data(), batch), lanes);
+            failures += cache_k_.verify_guards(label) + cache_v_.verify_guards(label) +
+                        dk.verify_guards(label) + dv.verify_guards(label) +
+                        dp.verify_guards(label) + dc.verify_guards(label) + dl.verify_guards(label);
+        }
+        return failures;
+    }
+};
+
+int cyclic_variable_prefix_tests() {
+    int failures = 0;
+    CyclicPrefixFixture dflash2(2048);
+    for (int batch = 1; batch <= 8; ++batch)
+        for (int width = 1; width <= 16; ++width)
+            failures += dflash2.run(width, batch, 1, batch == 1 || batch == 8);
+    for (int width : {1, 3, 8, 9, 16})
+        for (int batch : {1, 8}) {
+            failures += dflash2.run(width, batch, 0, true);
+            failures += dflash2.run(width, batch, 0, true, 0);
+            failures += dflash2.run(width, batch, 2, true);
+        }
+    // Context extent is independent of K; only the copied prefix must fit the ring.
+    failures += dflash2.run(16, 8, 1, true, 7);
+    failures += dflash2.run(17, 1, 2, true);
+    failures += dflash2.run(65, 1, 1, true);
+    for (int width : {127, 128, 129}) failures += dflash2.run(width, 1, 2, true);
+    failures += dflash2.run(17, 8, 1, true);
+    failures += dflash2.run(4097, 1, 1, true, 16);
+    failures += dflash2.run(2048, 1, 2, true);
+    CyclicPrefixFixture dflash(4096);
+    for (int width : {1, 3, 8, 9, 16, 17})
+        for (int batch : {1, 8}) failures += dflash.run(width, batch, 1, true);
+    failures += dflash.run(4096, 1, 2, true);
+    return failures;
+}
+
+
 } // namespace
 
 int main() {
@@ -955,6 +1123,7 @@ int main() {
     failures += batch_selector_case(false);
     failures += cyclic_decode_batch_case(kDFlashWindow);
     failures += cyclic_decode_batch_case(kDFlash2Window);
+    failures += cyclic_variable_prefix_tests();
 
     if (failures != 0) {
         std::cerr << "kv_cache_append failures=" << failures << '\n';

@@ -566,8 +566,9 @@ cmake --build build --parallel --target ninfer_kv_cache_append_bench
   --layout all --execution graph --cache cold --warmup 10 --repeat 61
 ```
 
-Prefix useful traffic is 8192 bytes per committed token; `C=0` still exercises the public
-device-count contract and reports zero useful bytes.
+Prefix useful traffic is 8192 bytes per committed token, multiplied by the batch size. `C=0`
+with a positive envelope still exercises device count handling and reports zero useful bytes.
+`--max-count 0 --counts 0` produces no kernels and reports zero GPU time.
 
 ## Masked-block preparation Op benchmark
 
