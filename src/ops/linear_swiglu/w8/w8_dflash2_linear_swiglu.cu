@@ -18,7 +18,7 @@ namespace {
 using Geometry                       = W8MtpGateUpProjectionGeometry;
 constexpr std::int32_t kIntermediate = Geometry::kOutputRows / 2;
 constexpr std::int32_t kFirstExactT  = 1;
-constexpr std::int32_t kLastExactT   = 51;
+constexpr std::int32_t kLastExactT   = 40;
 using Launch = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
 
 template <int ActiveTokens>
@@ -29,9 +29,7 @@ struct DFlash2SmallTSchedule {
                                        : ActiveTokens <= 16 ? 16
                                        : ActiveTokens <= 24 ? 24
                                        : ActiveTokens <= 32 ? 32
-                                       : ActiveTokens <= 40 ? 40
-                                       : ActiveTokens <= 48 ? 48
-                                                            : 56;
+                                                            : 40;
     static constexpr int kKWarps     = ActiveTokens >= 22 && ActiveTokens <= 24 ? 8 : 4;
     static constexpr auto kActivationStage =
         ActiveTokens <= 4 || (ActiveTokens >= 9 && ActiveTokens <= 15)

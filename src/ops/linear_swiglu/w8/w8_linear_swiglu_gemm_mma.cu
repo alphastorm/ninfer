@@ -67,27 +67,9 @@ void w8_linear_swiglu_mma_r32_c128_launch(const Tensor& x, const Weight& w, Tens
     launch_route<Schedule>(x, w, out, stream);
 }
 
-void w8_linear_swiglu_mma_r64_c32_launch(const Tensor& x, const Weight& w, Tensor& out,
-                                         cudaStream_t stream) {
-    using Schedule = W8RowSplitMmaGemmSchedule<64, 32, 64, 16, 3>;
-    launch_route<Schedule>(x, w, out, stream);
-}
-
-void w8_linear_swiglu_mma_r64_c48_launch(const Tensor& x, const Weight& w, Tensor& out,
-                                         cudaStream_t stream) {
-    using Schedule = W8RowSplitMmaGemmSchedule<64, 48, 64, 16, 3>;
-    launch_route<Schedule>(x, w, out, stream);
-}
-
 void w8_linear_swiglu_mma_r64_c64_launch(const Tensor& x, const Weight& w, Tensor& out,
                                          cudaStream_t stream) {
     using Schedule = W8RowSplitMmaGemmSchedule<64, 64, 64, 16, 2>;
-    launch_route<Schedule>(x, w, out, stream);
-}
-
-void w8_linear_swiglu_mma_r64_c80_launch(const Tensor& x, const Weight& w, Tensor& out,
-                                         cudaStream_t stream) {
-    using Schedule = W8RowSplitMmaGemmSchedule<64, 80, 64, 16, 2>;
     launch_route<Schedule>(x, w, out, stream);
 }
 
@@ -112,6 +94,36 @@ void w8_linear_swiglu_mma_r128_c64_launch(const Tensor& x, const Weight& w, Tens
 void w8_linear_swiglu_mma_r128_c80_launch(const Tensor& x, const Weight& w, Tensor& out,
                                           cudaStream_t stream) {
     using Schedule = W8RowSplitMmaGemmSchedule<128, 80, 64, 16, 2>;
+    launch_route<Schedule>(x, w, out, stream);
+}
+
+void w8_dflash2_linear_swiglu_mma_r32_c64_k128_launch(const Tensor& x, const Weight& w, Tensor& out,
+                                                      cudaStream_t stream) {
+    using Schedule = W8RowSplitMmaGemmSchedule<32, 64, 16, 16, 3, 2, 128, 1>;
+    launch_route<Schedule>(x, w, out, stream);
+}
+
+void w8_dflash2_linear_swiglu_mma_r64_c64_k128_launch(const Tensor& x, const Weight& w, Tensor& out,
+                                                      cudaStream_t stream) {
+    using Schedule = W8RowSplitMmaGemmSchedule<64, 64, 32, 16, 2, 2, 128, 1>;
+    launch_route<Schedule>(x, w, out, stream);
+}
+
+void w8_dflash2_linear_swiglu_mma_r64_c80_k128_launch(const Tensor& x, const Weight& w, Tensor& out,
+                                                      cudaStream_t stream) {
+    using Schedule = W8RowSplitMmaGemmSchedule<64, 80, 64, 8, 2, 2, 128, 1>;
+    launch_route<Schedule>(x, w, out, stream);
+}
+
+void w8_dflash2_linear_swiglu_mma_r64_c88_k128_launch(const Tensor& x, const Weight& w, Tensor& out,
+                                                      cudaStream_t stream) {
+    using Schedule = W8RowSplitMmaGemmSchedule<64, 88, 64, 8, 2, 2, 128, 1>;
+    launch_route<Schedule>(x, w, out, stream);
+}
+
+void w8_dflash2_linear_swiglu_mma_r64_c96_k128_launch(const Tensor& x, const Weight& w, Tensor& out,
+                                                      cudaStream_t stream) {
+    using Schedule = W8RowSplitMmaGemmSchedule<64, 96, 64, 8, 2, 2, 128, 1>;
     launch_route<Schedule>(x, w, out, stream);
 }
 

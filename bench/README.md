@@ -583,19 +583,26 @@ Useful traffic is `(2+2B)*4` bytes: two device scalar reads and two complete I32
 
 ## W8 LinearSwiGLU Op benchmark
 
-`ninfer_w8_linear_swiglu_bench` measures the registered W8 `[12288,2048] -> [6144,T]`
-LinearSwiGLU profile. Production writes only the fused output and uses no workspace. The explicit
-control runs the registered parent `linear` followed by `silu_mul`. Candidate mode retains the
-decode, exact-T split-K Tensor Core, and tiled Tensor Core schedules used to tune every dispatch
-seam. Every cold-cache sample follows a 256 MiB L2 flush.
+`ninfer_w8_linear_swiglu_bench` measures the public W8 LinearSwiGLU profiles:
+`--problem companion` is `[12288,2048] -> [6144,T]`; `--problem dflash2` is
+`[34816,5120] -> [17408,T]`. Every timed call uses production dispatch and writes only the fused
+output. Workspace is queried for the requested interval before timing. Private candidate forcing
+and the former composed control are removed from this retained tool.
+
+`--execution eager` (default) times the complete public call; `--execution graph` captures that
+call and times one replay. Every sample follows a 256 MiB L2 flush. CSV records execution mode,
+workspace, and Graph node count; the header records GPU and CUDA runtime. Reported work rates use
+the logical weight/input/output bytes and the two projections' mathematical FLOPs. `--profile`
+warms up and flushes before enabling CUDA profiling for exactly one complete Op call.
 
 ```bash
-cmake --build build --parallel --target ninfer_w8_linear_swiglu_bench
+cmake --build build -j --target ninfer_w8_linear_swiglu_bench
 ./build/bench/ninfer_w8_linear_swiglu_bench \
-  --t-sweep 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,32,64,96,128,256,512,896,1024 \
-  --warmup 10 --repeat 50 --csv-out profiles/bench/w8_linear_swiglu.csv
+  --problem dflash2 --t-sweep 1,8,16,32,40,41,51,52,63,64,65,80,81,88,89,96,97,128,1024 \
+  --execution graph --warmup 8 --repeat 60 \
+  --csv-out profiles/bench/w8_linear_swiglu.csv
 ./build/bench/ninfer_w8_linear_swiglu_bench \
-  --profile --t-sweep 1024
+  --problem dflash2 --profile --t-sweep 128
 ```
 
 ## Q4 LinearSwiGLU Op benchmark

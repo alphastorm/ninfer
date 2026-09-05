@@ -7,6 +7,7 @@
 #include <stdexcept>
 
 namespace ninfer::ops::detail {
+
 namespace {
 
 constexpr std::int32_t kAnyCols = std::numeric_limits<std::int32_t>::max();
@@ -38,14 +39,15 @@ constexpr std::array<RouteSpec, 18> kCompanionRoutes{{
     {561, kAnyCols, W8LinearSwiGluScheduleId::MmaR64C128},
 }};
 
-// RTX 5090 cold-cache routes: exact small-T owns the product points through T=48, R32/C64 owns
-// T=56, and a full R128/C64 tile owns T=64. R64/C96 is the single bridge into the
-// T=1024-centered R64/C128 prefill route.
-constexpr std::array<RouteSpec, 5> kDFlash2Routes{{
-    {1, 51, W8LinearSwiGluScheduleId::DFlash2SmallT},
-    {52, 63, W8LinearSwiGluScheduleId::DFlash2MmaR32C64},
-    {64, 64, W8LinearSwiGluScheduleId::DFlash2MmaR128C64},
-    {65, 96, W8LinearSwiGluScheduleId::DFlash2MmaR64C96},
+// Qualified whole-Op cold-cache routes on RTX 5090. The exact T=64 tile retains a distinct
+// winner; larger extents use the selected column tiles without narrowing the positive-T domain.
+constexpr std::array<RouteSpec, 7> kDFlash2Routes{{
+    {1, 40, W8LinearSwiGluScheduleId::DFlash2SmallT},
+    {41, 63, W8LinearSwiGluScheduleId::DFlash2MmaR32C64K128},
+    {64, 64, W8LinearSwiGluScheduleId::DFlash2MmaR64C64K128},
+    {65, 80, W8LinearSwiGluScheduleId::DFlash2MmaR64C80K128},
+    {81, 88, W8LinearSwiGluScheduleId::DFlash2MmaR64C88K128},
+    {89, 96, W8LinearSwiGluScheduleId::DFlash2MmaR64C96K128},
     {97, kAnyCols, W8LinearSwiGluScheduleId::DFlash2MmaR64C128},
 }};
 
@@ -106,12 +108,16 @@ const char* w8_linear_swiglu_schedule_name(W8LinearSwiGluScheduleId schedule) no
         return "linear_swiglu.w8.mma.pair.r64.c80";
     case W8LinearSwiGluScheduleId::DFlash2SmallT:
         return "linear_swiglu.w8.dflash2.small_t";
-    case W8LinearSwiGluScheduleId::DFlash2MmaR32C64:
-        return "linear_swiglu.w8.dflash2.mma.pair.r16.c64";
-    case W8LinearSwiGluScheduleId::DFlash2MmaR128C64:
-        return "linear_swiglu.w8.dflash2.mma.pair.r64.c64";
-    case W8LinearSwiGluScheduleId::DFlash2MmaR64C96:
-        return "linear_swiglu.w8.dflash2.mma.pair.r32.c96";
+    case W8LinearSwiGluScheduleId::DFlash2MmaR32C64K128:
+        return "linear_swiglu.w8.dflash2.mma.r32.c64.k128";
+    case W8LinearSwiGluScheduleId::DFlash2MmaR64C64K128:
+        return "linear_swiglu.w8.dflash2.mma.r64.c64.k128";
+    case W8LinearSwiGluScheduleId::DFlash2MmaR64C80K128:
+        return "linear_swiglu.w8.dflash2.mma.r64.c80.k128";
+    case W8LinearSwiGluScheduleId::DFlash2MmaR64C88K128:
+        return "linear_swiglu.w8.dflash2.mma.r64.c88.k128";
+    case W8LinearSwiGluScheduleId::DFlash2MmaR64C96K128:
+        return "linear_swiglu.w8.dflash2.mma.r64.c96.k128";
     case W8LinearSwiGluScheduleId::DFlash2MmaR64C128:
         return "linear_swiglu.w8.dflash2.mma.pair.r32.c128";
     }
@@ -187,14 +193,20 @@ void w8_linear_swiglu_execute_plan(const W8LinearSwiGluPlan& plan, const Tensor&
     case W8LinearSwiGluScheduleId::DFlash2SmallT:
         w8_dflash2_linear_swiglu_small_t_launch(x, w, out, stream);
         return;
-    case W8LinearSwiGluScheduleId::DFlash2MmaR32C64:
-        w8_linear_swiglu_mma_r32_c64_launch(x, w, out, stream);
+    case W8LinearSwiGluScheduleId::DFlash2MmaR32C64K128:
+        w8_dflash2_linear_swiglu_mma_r32_c64_k128_launch(x, w, out, stream);
         return;
-    case W8LinearSwiGluScheduleId::DFlash2MmaR128C64:
-        w8_linear_swiglu_mma_r128_c64_launch(x, w, out, stream);
+    case W8LinearSwiGluScheduleId::DFlash2MmaR64C64K128:
+        w8_dflash2_linear_swiglu_mma_r64_c64_k128_launch(x, w, out, stream);
         return;
-    case W8LinearSwiGluScheduleId::DFlash2MmaR64C96:
-        w8_linear_swiglu_mma_r64_c96_launch(x, w, out, stream);
+    case W8LinearSwiGluScheduleId::DFlash2MmaR64C80K128:
+        w8_dflash2_linear_swiglu_mma_r64_c80_k128_launch(x, w, out, stream);
+        return;
+    case W8LinearSwiGluScheduleId::DFlash2MmaR64C88K128:
+        w8_dflash2_linear_swiglu_mma_r64_c88_k128_launch(x, w, out, stream);
+        return;
+    case W8LinearSwiGluScheduleId::DFlash2MmaR64C96K128:
+        w8_dflash2_linear_swiglu_mma_r64_c96_k128_launch(x, w, out, stream);
         return;
     case W8LinearSwiGluScheduleId::DFlash2MmaR64C128:
         w8_linear_swiglu_mma_r64_c128_launch(x, w, out, stream);
