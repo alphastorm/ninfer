@@ -3,6 +3,7 @@
 #    include "runtime/windows/direct_storage_checkpoint_read_queue.h"
 #endif
 
+#include "core/sha256.h"
 #include "product/media_acquire/acquire.h"
 #include "runtime/engine/checkpoint_engine_access.h"
 #include "serve/client_identity.h"
@@ -16,8 +17,10 @@
 #include <cstddef>
 #include <condition_variable>
 #include <mutex>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 
@@ -349,6 +352,19 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
                     *engine_, checkpoint_namespace, std::string(checkpoint_tag), reader, expected,
                     staging_bytes);
             };
+        if (options_.api_key.empty()) {
+            // parse_serve_options enforces this for the CLI; direct construction must not
+            // reach a publicly computable HMAC(empty, domain) origin key.
+            throw std::invalid_argument("session checkpoints require a configured API key");
+        }
+        // The manifest origin MAC key derives from the bearer key through a fixed domain
+        // separator - the bearer key itself never touches the checkpoint machinery, and a
+        // writer inside the checkpoint root cannot recreate the key (alphastorm/ninfer#32).
+        static constexpr std::string_view kOriginDomain =
+            "ninfer-checkpoint-manifest-origin-v1";
+        const crypto::Sha256Digest origin_key = crypto::hmac_sha256(
+            std::as_bytes(std::span(options_.api_key.data(), options_.api_key.size())),
+            std::as_bytes(std::span(kOriginDomain.data(), kOriginDomain.size())));
         checkpoint_manager_ = std::make_unique<SessionCheckpointManager>(
             SessionCheckpointStoreOptions{
                 .root = options_.session_checkpoint_root,
@@ -356,6 +372,9 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
                 .staging_bytes = options_.session_checkpoint_staging_bytes,
                 .read_queue = std::move(read_queue),
                 .tombstone_cleanup = {},
+                .origin_mac_key = std::string(reinterpret_cast<const char*>(origin_key.data()),
+                                              origin_key.size()),
+                .require_origin_auth = options_.session_checkpoint_require_origin_auth,
             },
             std::move(fingerprint), session_tenant_sha256_, std::move(checkpoint_engine));
     }

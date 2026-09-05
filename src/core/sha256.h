@@ -28,6 +28,9 @@ private:
 };
 
 [[nodiscard]] Sha256Digest sha256(std::span<const std::byte> input);
+// RFC 2104 HMAC-SHA256. Keys longer than the 64-byte block are pre-hashed per the RFC.
+[[nodiscard]] Sha256Digest hmac_sha256(std::span<const std::byte> key,
+                                       std::span<const std::byte> message);
 [[nodiscard]] std::string sha256_hex(const Sha256Digest& digest);
 
 } // namespace ninfer::crypto

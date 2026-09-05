@@ -142,7 +142,8 @@ std::string serve_usage_text(const char* argv0) {
            "  --response-store-max-mib <N>      Memory budget in MiB for response store records (default: 256)\n"
            "  --session-checkpoint-dir <DIR>    Persist authenticated Responses sessions across restarts\n"
            "  --session-checkpoint-quota-mib <N>  Total durable session checkpoint budget (default: 65536)\n"
-           "  --session-checkpoint-staging-mib <N> Bounded host transfer staging (default: 256)\n\n"
+           "  --session-checkpoint-staging-mib <N> Bounded host transfer staging (default: 256)\n"
+           "  --session-checkpoint-require-origin-auth  Refuse generations without a valid origin MAC\n\n"
            "Model & Hardware Configuration:\n"
            "  --device <N>                CUDA device ordinal (default: 0)\n"
            "  --max-context <N>           Maximum sequence context length in tokens (prompt + completion, default: 8192)\n"
@@ -297,6 +298,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 throw std::invalid_argument("--session-checkpoint-quota-mib is out of range");
             }
             options.session_checkpoint_quota_bytes = mib << 20;
+        } else if (arg == "--session-checkpoint-require-origin-auth") {
+            options.session_checkpoint_require_origin_auth = true;
         } else if (arg == "--session-checkpoint-staging-mib") {
             const std::uint64_t mib = parse_u64(require_value("--session-checkpoint-staging-mib"),
                                                 "session-checkpoint-staging-mib");
@@ -430,9 +433,22 @@ ServeOptions parse_serve_options(int argc, char** argv) {
 }
 
 void validate_session_checkpoint_options(const ServeOptions& options) {
+    if (options.session_checkpoint_require_origin_auth && options.session_checkpoint_root.empty()) {
+        throw std::invalid_argument(
+            "--session-checkpoint-require-origin-auth requires --session-checkpoint-dir");
+    }
     if (options.session_checkpoint_root.empty()) { return; }
     if (options.api_key.empty()) {
         throw std::invalid_argument("--session-checkpoint-dir requires --api-key");
+    }
+    // The persisted origin tag is an offline verifier for the bearer credential: a
+    // checkpoint-root reader can test key guesses against manifest.mac without touching the
+    // server. The strict import posture therefore demands a credential outside dictionary
+    // reach.
+    if (options.session_checkpoint_require_origin_auth && options.api_key.size() < 32) {
+        throw std::invalid_argument(
+            "--session-checkpoint-require-origin-auth requires an API key of at least "
+            "32 characters");
     }
     if (!runtime::AuthenticatedCheckpointNamespace::valid_sha256(options.binary_sha256) ||
         !runtime::AuthenticatedCheckpointNamespace::valid_sha256(options.artifact_sha256) ||

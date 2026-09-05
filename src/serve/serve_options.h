@@ -48,6 +48,10 @@ struct ServeOptions {
     std::filesystem::path session_checkpoint_root; // empty => durable continuation disabled
     std::uint64_t session_checkpoint_quota_bytes = kDefaultSessionCheckpointQuotaBytes;
     std::size_t session_checkpoint_staging_bytes = kDefaultSessionCheckpointStagingBytes;
+    // Refuse checkpoint generations without a valid origin MAC (alphastorm/ninfer#32).
+    // Requires an API key: the MAC key derives from it. The default keeps the
+    // compatibility window for locally-produced unMAC'd generations.
+    bool session_checkpoint_require_origin_auth = false;
     int device                             = 0;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;

@@ -1723,6 +1723,249 @@ int test_large_reader_call_is_one_batched_submit() {
 #endif
 }
 
+int test_hmac_sha256_rfc4231_vectors() {
+    int failures = 0;
+    const std::string key1(20, static_cast<char>(0x0b));
+    const std::string msg1 = "Hi There";
+    failures += check(crypto::sha256_hex(crypto::hmac_sha256(
+                          std::as_bytes(std::span(key1.data(), key1.size())),
+                          std::as_bytes(std::span(msg1.data(), msg1.size())))) ==
+                          "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+                      "HMAC-SHA256 matches RFC 4231 test case 1");
+    const std::string key2 = "Jefe";
+    const std::string msg2 = "what do ya want for nothing?";
+    failures += check(crypto::sha256_hex(crypto::hmac_sha256(
+                          std::as_bytes(std::span(key2.data(), key2.size())),
+                          std::as_bytes(std::span(msg2.data(), msg2.size())))) ==
+                          "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+                      "HMAC-SHA256 matches RFC 4231 test case 2");
+    return failures;
+}
+
+std::function<std::optional<ContinuationCheckpointStats>(ContinuationCheckpointWriter&)>
+origin_exporter(const std::vector<std::byte>& payload) {
+    return [&payload](ContinuationCheckpointWriter& writer)
+               -> std::optional<ContinuationCheckpointStats> {
+        if (!write_chunked(writer, "engine/state-0.bin", payload)) { return std::nullopt; }
+        return ContinuationCheckpointStats{.frontier_tokens = 100000,
+                                           .restored_tokens = 97500,
+                                           .payload_bytes = payload.size()};
+    };
+}
+
+int test_manifest_origin_authentication() {
+    // alphastorm/ninfer#32: the digest chain authenticates consistency; the MAC keyed outside
+    // the checkpoint root authenticates origin. A coherent in-root rewrite must not survive.
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot();
+    const std::vector<std::byte> payload = engine_payload();
+    const std::string mac_key(32, static_cast<char>(0x42));
+    const auto exporter = origin_exporter(payload);
+    int failures = 0;
+    std::string generation;
+    {
+        SessionCheckpointStore store({.root = temporary.path,
+                                      .disk_quota_bytes = 8ULL << 20,
+                                      .staging_bytes = 1ULL << 20,
+                                      .read_queue = std::make_shared<TestReadQueue>(),
+                                      .tombstone_cleanup = {},
+                                      .origin_mac_key = mac_key});
+        const auto saved =
+            store.save(checkpoint_namespace(responses), responses, fingerprint(), exporter);
+        failures += check(saved.has_value(), "keyed save publishes");
+        if (!saved) { return failures; }
+        generation = saved->generation;
+        const std::filesystem::path root =
+            stored_session_path(temporary.path, responses) / "generations" / generation;
+        failures += check(std::filesystem::is_regular_file(root / "manifest.mac"),
+                          "save writes the origin MAC beside the manifest");
+        SessionCheckpointLoadResult loaded = store.load(
+            checkpoint_namespace(responses), fingerprint(), responses.latest_response_id);
+        failures += check(loaded.state == SessionCheckpointLoadState::Available,
+                          "authentic generation loads under its own key");
+        loaded.checkpoint.reset();
+        failures += check(store.status(checkpoint_namespace(responses), fingerprint())
+                                  .value("state", "") == "available",
+                          "authentic generation reports available");
+    }
+    {
+        // Same root, different key: a valid-looking store produced elsewhere is forged here.
+        SessionCheckpointStore foreign({.root = temporary.path,
+                                        .disk_quota_bytes = 8ULL << 20,
+                                        .staging_bytes = 1ULL << 20,
+                                        .read_queue = std::make_shared<TestReadQueue>(),
+                                        .tombstone_cleanup = {},
+                                        .origin_mac_key =
+                                            std::string(32, static_cast<char>(0x43))});
+        const SessionCheckpointLoadResult loaded = foreign.load(
+            checkpoint_namespace(responses), fingerprint(), responses.latest_response_id);
+        failures += check(loaded.state == SessionCheckpointLoadState::Corrupt,
+                          "foreign-keyed generation quarantines as tampering");
+    }
+    return failures;
+}
+
+int test_manifest_origin_compatibility_window() {
+    // Legacy generations without a MAC load through the window, strict mode ends it
+    // reversibly, and a coherent manifest rewrite without the key fails even when its
+    // digests are consistent.
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot();
+    const std::vector<std::byte> payload = engine_payload();
+    const std::string mac_key(32, static_cast<char>(0x42));
+    const auto exporter = origin_exporter(payload);
+    int failures = 0;
+    std::string generation;
+    {
+        // Legacy producer: no key configured, no MAC written.
+        SessionCheckpointStore legacy({.root = temporary.path,
+                                       .disk_quota_bytes = 8ULL << 20,
+                                       .staging_bytes = 1ULL << 20,
+                                       .read_queue = std::make_shared<TestReadQueue>(),
+                                       .tombstone_cleanup = {}});
+        const auto saved =
+            legacy.save(checkpoint_namespace(responses), responses, fingerprint(), exporter);
+        failures += check(saved.has_value(), "legacy save publishes without a MAC");
+        if (!saved) { return failures; }
+        generation = saved->generation;
+    }
+    const std::filesystem::path root =
+        stored_session_path(temporary.path, responses) / "generations" / generation;
+    failures += check(!std::filesystem::exists(root / "manifest.mac"),
+                      "legacy generation has no origin MAC");
+    {
+        SessionCheckpointStore window({.root = temporary.path,
+                                       .disk_quota_bytes = 8ULL << 20,
+                                       .staging_bytes = 1ULL << 20,
+                                       .read_queue = std::make_shared<TestReadQueue>(),
+                                       .tombstone_cleanup = {},
+                                       .origin_mac_key = mac_key});
+        SessionCheckpointLoadResult loaded = window.load(
+            checkpoint_namespace(responses), fingerprint(), responses.latest_response_id);
+        failures += check(loaded.state == SessionCheckpointLoadState::Available,
+                          "unMAC'd legacy generation loads through the compatibility window");
+        loaded.checkpoint.reset();
+    }
+    {
+        SessionCheckpointStore strict({.root = temporary.path,
+                                       .disk_quota_bytes = 8ULL << 20,
+                                       .staging_bytes = 1ULL << 20,
+                                       .read_queue = std::make_shared<TestReadQueue>(),
+                                       .tombstone_cleanup = {},
+                                       .origin_mac_key = mac_key,
+                                       .require_origin_auth = true});
+        // Strict refusal is a reversible policy denial: Incompatible (clean-replay path),
+        // never quarantine.
+        const SessionCheckpointLoadResult refused = strict.load(
+            checkpoint_namespace(responses), fingerprint(), responses.latest_response_id);
+        failures += check(refused.state == SessionCheckpointLoadState::Incompatible,
+                          "strict origin auth refuses reversibly without quarantining");
+        failures += check(std::filesystem::is_regular_file(root / "manifest.json"),
+                          "strict refusal leaves the generation untouched");
+        failures += check(strict.status(checkpoint_namespace(responses), fingerprint())
+                                  .value("state", "") == "incompatible",
+                          "strict status reports the refusal");
+    }
+    {
+        // Clearing the flag restores the generation - the refusal was policy, not evidence.
+        SessionCheckpointStore window_again({.root = temporary.path,
+                                             .disk_quota_bytes = 8ULL << 20,
+                                             .staging_bytes = 1ULL << 20,
+                                             .read_queue = std::make_shared<TestReadQueue>(),
+                                             .tombstone_cleanup = {},
+                                             .origin_mac_key = mac_key});
+        SessionCheckpointLoadResult restored = window_again.load(
+            checkpoint_namespace(responses), fingerprint(), responses.latest_response_id);
+        failures += check(restored.state == SessionCheckpointLoadState::Available,
+                          "clearing strict mode restores the window-era generation");
+        restored.checkpoint.reset();
+    }
+    {
+        // A coherent rewrite: consistent digests, no key. The MAC no longer matches.
+        std::string text = read_file_bytes(root / "manifest.json");
+        const std::string marker = "\"restored_tokens\":97500";
+        const std::size_t at = text.find(marker);
+        failures += check(at != std::string::npos, "manifest carries the expected token count");
+        if (at != std::string::npos) {
+            text.replace(at, marker.size(), "\"restored_tokens\":97501");
+            std::ofstream out(root / "manifest.json", std::ios::binary | std::ios::trunc);
+            out << text;
+        }
+        SessionCheckpointStore keyed({.root = temporary.path,
+                                      .disk_quota_bytes = 8ULL << 20,
+                                      .staging_bytes = 1ULL << 20,
+                                      .read_queue = std::make_shared<TestReadQueue>(),
+                                      .tombstone_cleanup = {},
+                                      .origin_mac_key = mac_key});
+        // The legacy generation carries no MAC, so this rewrite is only refused under the
+        // strict posture; write a fresh keyed generation and rewrite that instead.
+        const auto saved =
+            keyed.save(checkpoint_namespace(responses), responses, fingerprint(), exporter);
+        failures += check(saved.has_value(), "keyed save publishes over the legacy generation");
+        if (saved) {
+            const std::filesystem::path keyed_root =
+                stored_session_path(temporary.path, responses) / "generations" / saved->generation;
+            std::string keyed_text = read_file_bytes(keyed_root / "manifest.json");
+            const std::size_t keyed_at = keyed_text.find(marker);
+            failures += check(keyed_at != std::string::npos, "keyed manifest carries the count");
+            if (keyed_at != std::string::npos) {
+                keyed_text.replace(keyed_at, marker.size(), "\"restored_tokens\":97501");
+                std::ofstream out(keyed_root / "manifest.json", std::ios::binary | std::ios::trunc);
+                out << keyed_text;
+            }
+            const SessionCheckpointLoadResult forged = keyed.load(
+                checkpoint_namespace(responses), fingerprint(), responses.latest_response_id);
+            failures += check(forged.state == SessionCheckpointLoadState::Corrupt,
+                              "a keyless manifest rewrite fails origin authentication");
+        }
+    }
+    return failures;
+}
+
+int test_manifest_origin_transient_tag_failure_preserves_current() {
+    // A transient inability to read manifest.mac is a filesystem fault, never forgery - load
+    // must report Unavailable, keep current, and succeed on retry once readable again.
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot();
+    const std::vector<std::byte> payload = engine_payload();
+    const std::string mac_key(32, static_cast<char>(0x42));
+    const auto exporter = origin_exporter(payload);
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .read_queue = std::make_shared<TestReadQueue>(),
+                                  .tombstone_cleanup = {},
+                                  .origin_mac_key = mac_key});
+    int failures = 0;
+    const auto saved =
+        store.save(checkpoint_namespace(responses), responses, fingerprint(), exporter);
+    failures += check(saved.has_value(), "keyed save publishes");
+    if (!saved) { return failures; }
+    const std::filesystem::path session = stored_session_path(temporary.path, responses);
+    const std::filesystem::path root = session / "generations" / saved->generation;
+    const std::filesystem::path tag = root / "manifest.mac";
+    const std::filesystem::path away = root / "manifest.mac.away";
+    // Simulate a transient fault: replace the tag with a directory so the open fails
+    // (unreadable), without changing any authenticated bytes.
+    std::filesystem::rename(tag, away);
+    std::filesystem::create_directory(tag);
+    SessionCheckpointLoadResult faulted = store.load(
+        checkpoint_namespace(responses), fingerprint(), responses.latest_response_id);
+    failures += check(faulted.state == SessionCheckpointLoadState::Unavailable,
+                      "transient tag fault reports unavailable, not forgery");
+    failures += check(std::filesystem::is_regular_file(root / "manifest.json") &&
+                          std::filesystem::exists(session / "current"),
+                      "transient tag fault preserves the generation and current pointer");
+    std::filesystem::remove(tag);
+    std::filesystem::rename(away, tag);
+    SessionCheckpointLoadResult retried = store.load(
+        checkpoint_namespace(responses), fingerprint(), responses.latest_response_id);
+    failures += check(retried.state == SessionCheckpointLoadState::Available,
+                      "retry succeeds after the tag becomes readable again");
+    retried.checkpoint.reset();
+    return failures;
+}
+
 int main(int argc, char** argv) {
     std::set_terminate([] {
         std::fputs("std::terminate invoked by checkpoint store test\n", stderr);
@@ -1760,6 +2003,10 @@ int main(int argc, char** argv) {
         std::pair{"codec", &test_codec_round_trip},
         std::pair{"transaction", &test_transaction_restart_compatibility_and_corruption},
         std::pair{"batched-read", &test_large_reader_call_is_one_batched_submit},
+        std::pair{"hmac", &test_hmac_sha256_rfc4231_vectors},
+        std::pair{"origin-auth", &test_manifest_origin_authentication},
+        std::pair{"origin-window", &test_manifest_origin_compatibility_window},
+        std::pair{"origin-transient", &test_manifest_origin_transient_tag_failure_preserves_current},
         std::pair{"pointer-sync", &test_current_pointer_sync_failure_resolution},
         std::pair{"manager-restart", &test_production_manager_restart_and_identity_isolation},
         std::pair{"delete-failure", &test_delete_checkpoint_update_fails_closed},
