@@ -622,12 +622,12 @@ function Assert-InstallerArchitectureContract([object]$Spec, [object]$Config) {
         [string]$Spec.model.sha256 -cne 'eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e') {
         throw 'release specification pinned model identity mismatch'
     }
-    if ([string]$Spec.build_profile -cne 'omp-v0.2.3-rtx3090' -or
+    if ([string]$Spec.build_profile -cne 'omp-v0.2.4-rtx3090' -or
         [string]$Spec.gpu.cuda_architecture -cne 'sm_86' -or
         [string]$Spec.source.lineage_base_sha -cne 'c467349e375d6aa76afca63c0042bbc0869549aa') {
         throw 'release specification immutable build identity mismatch'
     }
-    if ([string]$Config.deployment_profile -cne 'qwen38-3090-omp-v0.2.3-beta.1-c1' -or
+    if ([string]$Config.deployment_profile -cne 'qwen38-3090-omp-v0.2.4-beta.1-c1' -or
         [int]$Config.engine.max_context -ne 131072 -or
         [string]$Config.engine.kv_capacity -cne 'auto' -or
         [string]$Config.engine.kv_dtype -cne 'int8' -or
@@ -849,7 +849,7 @@ try {
     }
 
     $package = (Resolve-Path -LiteralPath $PackagePath).Path
-    if ([IO.Path]::GetFileName($package) -cne 'ninfer-rtx3090-omp-v0.2.3-beta.1-windows-x86_64-cuda13.3-rtx3090.tar.gz') {
+    if ([IO.Path]::GetFileName($package) -cne 'ninfer-rtx3090-omp-v0.2.4-beta.1-windows-x86_64-cuda13.3-rtx3090.tar.gz') {
         throw 'unexpected release package filename'
     }
     Write-InstallEvent 'package_identity_started' 'Verifying release package identity' ([ordered]@{ path = $package })
