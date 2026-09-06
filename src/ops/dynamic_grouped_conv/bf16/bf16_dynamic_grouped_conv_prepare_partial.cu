@@ -122,9 +122,7 @@ void bf16_dynamic_grouped_conv_prepare_partial_launch(DynamicConvPrepareRoute ro
         return launch<16, C, 8>(input, weight, partial, stream)
             COL(8);
             COL(16);
-            COL(24);
             COL(32);
-            COL(40);
             COL(48);
 #undef COL
         }

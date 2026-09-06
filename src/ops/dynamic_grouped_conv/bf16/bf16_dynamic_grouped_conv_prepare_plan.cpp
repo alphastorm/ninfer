@@ -9,7 +9,7 @@ namespace {
 DynamicConvPrepareRoute resolve_route(int tokens) {
     // Complete cold-cache Graph timings favor split-8 R16 through 48 columns.
     // R32 halves split scratch and avoids the repeated wide tile above that range.
-    if (tokens <= 48) return {16, (tokens + 7) / 8 * 8, 8};
+    if (tokens <= 48) return {16, tokens <= 8 ? 8 : tokens <= 16 ? 16 : tokens <= 32 ? 32 : 48, 8};
     return {32, tokens <= 96 ? 32 : 64, 4};
 }
 
