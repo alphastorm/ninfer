@@ -1087,6 +1087,42 @@ int select_hidden_case(int rows, int columns, int accepted_value) {
     return failures;
 }
 
+int batched_select_hidden_case(int width, int batch) {
+    constexpr int rows = 5120;
+    std::vector<std::uint16_t> hidden(static_cast<std::size_t>(rows) * width * batch);
+    for (std::size_t i = 0; i < hidden.size(); ++i) hidden[i] = static_cast<std::uint16_t>(i * 257 + i / rows * 6113);
+    std::vector<std::int32_t> selectors(batch);
+    std::vector<std::uint16_t> expected(static_cast<std::size_t>(rows) * batch);
+    DeviceBuffer input = to_device(hidden), indices = to_device(selectors);
+    GuardedDeviceBuffer output(expected.size() * sizeof(std::uint16_t));
+    output.fill(0xcd);
+    Tensor h(input.p, DType::BF16, {rows, width, batch}), i(indices.p, DType::I32, {batch});
+    Tensor o(output.data(), DType::BF16, {rows, batch});
+    DeviceContext context;
+    cuda_synchronize();
+    const auto launch = [&] { ops::speculative_select_accepted_hidden(h, i, o, context.stream); };
+    DecodeGraphDefinition definition;
+    DecodeGraphExecutable graph;
+    if (width == 16 && batch == 8) { definition.capture(context.stream, launch); graph.instantiate(definition); }
+    int failures = 0;
+    // Final commit N is positive here; a zero commit never issues this gather with selector -1.
+    for (int phase = 0; phase < width; ++phase) {
+        for (int b = 0; b < batch; ++b) {
+            selectors[b] = (phase + 3 * b) % width;
+            std::copy_n(hidden.begin() + static_cast<std::size_t>(b * width + selectors[b]) * rows,
+                         rows, expected.begin() + b * rows);
+        }
+        CUDA_CHECK(cudaMemcpyAsync(indices.p, selectors.data(), indices.bytes, cudaMemcpyHostToDevice, context.stream));
+        if (graph.ready()) graph.launch(context.stream); else launch();
+        context.synchronize();
+        failures += verify_exact("committed hidden N-1", read<std::uint16_t>(output, expected.size()), expected);
+        failures += verify_exact("selectors unchanged", from_device<std::int32_t>(indices, batch), selectors);
+    }
+    failures += verify_exact("hidden unchanged", from_device<std::uint16_t>(input, hidden.size()), hidden);
+    failures += output.verify_guards("committed hidden");
+    return failures;
+}
+
 int remap_case(int token_count) {
     constexpr int map_size = 131072;
     std::vector<std::int32_t> id_map(map_size);
@@ -1125,6 +1161,8 @@ int transforms_conformance() {
     int failures = 0;
     for (int k = 1; k <= 15; ++k)
         for (int batch : {1, 8}) failures += prepare_verify_case(k, batch);
+    for (int width = 2; width <= 16; ++width)
+        for (int batch : {1, 8}) failures += batched_select_hidden_case(width, batch);
     failures += select_hidden_case(5120, 6, 0);
     failures += select_hidden_case(5120, 6, 5);
     failures += select_hidden_case(2048, 16, 7);
