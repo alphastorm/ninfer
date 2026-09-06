@@ -534,19 +534,26 @@ int run_w8_dflash2() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    const bool dflash2_only = argc == 2 && std::string(argv[1]) == "--dflash2-only";
+    if (argc != 1 && !dflash2_only) {
+        std::cerr << "usage: ninfer_attn_input_proj_test [--dflash2-only]\n";
+        return 2;
+    }
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
 
     int failures = 0;
-    failures += run_q4_q5();
-    failures += run_bf16_target();
-    failures += test::arm("attn NVFP4", run_nvfp4_target);
-    failures += test::arm("attn FP8", run_fp8_target);
-    failures += run_w8_target();
-    failures += run_w8_companion();
+    if (!dflash2_only) {
+        failures += run_q4_q5();
+        failures += run_bf16_target();
+        failures += test::arm("attn NVFP4", run_nvfp4_target);
+        failures += test::arm("attn FP8", run_fp8_target);
+        failures += run_w8_target();
+        failures += run_w8_companion();
+    }
     failures += run_w8_dflash2();
     std::cout << (failures == 0 ? "OK" : "FAIL") << " attn_input_proj\n";
     return failures == 0 ? 0 : 1;

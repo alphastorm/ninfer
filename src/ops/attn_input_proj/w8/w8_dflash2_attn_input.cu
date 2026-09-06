@@ -24,10 +24,17 @@ constexpr std::int32_t kLastSmallTokens = 48;
 using Output                            = W8SplitOutput3<kQueryRows, kKvRows, kKvRows>;
 using Launch = void (*)(const Tensor&, const Weight&, Tensor&, Tensor&, Tensor&, cudaStream_t);
 
-template <int ActiveTokens>
-void launch_small_exact(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k, Tensor& v,
-                        cudaStream_t stream) {
-    using Schedule = typename W8LinearSmallTProductionSchedule<Geometry, ActiveTokens>::Type;
+// Exact input-load unrolling matters in the first two MMA column tiles. Wider blocks use
+// runtime live columns with one specialization per accumulator capacity.
+template <int Columns, bool Exact>
+void launch_small(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k, Tensor& v,
+                  cudaStream_t stream) {
+    constexpr int Capacity = (Columns + 7) / 8 * 8;
+    constexpr int Warps = Columns <= 4 ? 16 : Columns <= 16 ? 8 : 4;
+    constexpr auto Scales = Columns <= 4 || (Columns > 8 && Columns <= 16)
+                                ? W8SmallTMmaScaleAccess::Direct
+                                : W8SmallTMmaScaleAccess::Shared;
+    using Schedule = W8SmallTMmaSchedule<Warps, Capacity, 2, Scales>;
     static_assert((kQueryRows % Schedule::kRowsPerCta) == 0);
     static_assert((kKvRows % Schedule::kRowsPerCta) == 0);
     static_assert((Geometry::kInputRows % Schedule::kGroupK) == 0);
@@ -35,22 +42,23 @@ void launch_small_exact(const Tensor& x, const Weight& weight, Tensor& q, Tensor
     const Output output{static_cast<__nv_bfloat16*>(q.data), static_cast<__nv_bfloat16*>(k.data),
                         static_cast<__nv_bfloat16*>(v.data)};
     constexpr int kBlocks = Geometry::kOutputRows / Schedule::kRowsPerCta;
-    w8_small_t_mma_kernel<Geometry, ActiveTokens, Schedule>
+    w8_small_t_mma_kernel<Geometry, Columns, Schedule, Output, W8SmallTMmaStoreEpilogue,
+                          W8SmallTMmaIdentityRows, false, !Exact>
         <<<kBlocks, Schedule::kThreads, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const std::uint8_t*>(weight.scales), output);
+            static_cast<const std::uint8_t*>(weight.scales), output, W8SmallTMmaStoreEpilogue{},
+            W8SmallTMmaIdentityRows{}, x.ne[1]);
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <std::size_t... Offsets>
-constexpr auto make_small_launchers(std::index_sequence<Offsets...>) {
-    return std::array<Launch, sizeof...(Offsets)>{
-        &launch_small_exact<kW8DFlash2AttentionFirstSmallT + static_cast<int>(Offsets)>...};
+template <bool Exact, std::size_t... I>
+constexpr auto make_small_launchers(std::index_sequence<I...>) {
+    return std::array<Launch, sizeof...(I)>{
+        &launch_small<Exact ? 1 + static_cast<int>(I) : 24 + 8 * static_cast<int>(I), Exact>...};
 }
-
-constexpr auto kSmallLaunchers = make_small_launchers(
-    std::make_index_sequence<kLastSmallTokens - kW8DFlash2AttentionFirstSmallT + 1>{});
+constexpr auto kExactLaunchers = make_small_launchers<true>(std::make_index_sequence<16>{});
+constexpr auto kTileLaunchers = make_small_launchers<false>(std::make_index_sequence<4>{});
 
 template <class Schedule, bool Full>
 void launch_mma_slice(const Tensor& x, const Weight& weight, Tensor& q, Tensor& k, Tensor& v,
@@ -96,8 +104,10 @@ void w8_dflash2_attn_input_small_t_launch(const Tensor& x, const Weight& weight,
     if (x.ne[1] < kW8DFlash2AttentionFirstSmallT || x.ne[1] > kLastSmallTokens) {
         throw std::invalid_argument("W8 DFlash2 attention input small-T: unsupported T");
     }
-    const std::size_t index = static_cast<std::size_t>(x.ne[1] - kW8DFlash2AttentionFirstSmallT);
-    kSmallLaunchers[index](x, weight, q, k, v, stream);
+    if (x.ne[1] <= 16)
+        kExactLaunchers[x.ne[1] - 1](x, weight, q, k, v, stream);
+    else
+        kTileLaunchers[(x.ne[1] - 17) / 8](x, weight, q, k, v, stream);
 }
 
 void w8_dflash2_attn_input_mma_r32_c64_launch(const Tensor& x, const Weight& weight, Tensor& q,
