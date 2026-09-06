@@ -49,7 +49,7 @@ ninfer_bench --weights <artifact.ninfer>
           [-r, --repetitions <n>] [--warmup <n>]
           [--max-ctx <tokens>] [--prefill-chunk <tokens>]
           [--kv-dtype <bf16|int8|fp8>]
-          [--mtp-draft-tokens <0..5>] [--lm-head-draft]
+          [--spec <mtp|dflash|dflash2> --draft-tokens <n>] [--lm-head-draft]
           [--device <id>] [--no-cuda-graph] [--profile-measured]
           [-o, --output <table|json|csv>] [--output-file <path>]
 ```
@@ -65,14 +65,26 @@ Example:
 ```
 
 `bf16` selects BF16 KV storage, `int8` selects INT8 group-64 KV storage, and `fp8` selects
-row-scaled E4M3 D256 KV storage. MTP is enabled with
-`--mtp-draft-tokens`; `--lm-head-draft` selects the optimized proposal head. CUDA Graph decode is
+row-scaled E4M3 D256 KV storage. Select a backend with `--spec mtp|dflash|dflash2 --draft-tokens K` (MTP K=1..5, DFlash/DFlash2
+K=1..15); `--lm-head-draft` selects the optimized proposal head. CUDA Graph decode is
 enabled by default.
 
 `--profile-measured` is a benchmark-only profiler boundary. It requires exactly one selected test
 and `-r 1`, synchronizes after warmup, and brackets only the measured repetition with
 `cudaProfilerStart/Stop`. Use it with an Nsight Systems `cudaProfilerApi` capture range so artifact
 load, graph construction, and warmup do not enter topology counts.
+
+For a DFlash2 companion artifact:
+
+```bash
+./build/bench/ninfer_bench --weights out/qwen3_8_27b_nvfp4_dflash2.ninfer \
+  -pg '2048,128' --spec dflash2 --draft-tokens 7 --lm-head-draft \
+  --max-ctx 4096 --kv-dtype bf16 --warmup 1 -r 3
+```
+
+The benchmark disables context retention because every repetition is an independent root request.
+Schema v14 records `speculative_backend`, `draft_tokens`, and the proposal head independently;
+JSON and CSV identify DFlash2 explicitly. MTP alone reserves its extra lookahead KV margin.
 
 ## Context-cost calibration
 

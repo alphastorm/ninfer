@@ -31,8 +31,8 @@ benchmark-report, and external protocol behavior. Repository verification princi
   Responses Item/state/SSE behavior, and incremental tool-call behavior;
 - `test_request_log.cpp` and `test_http_error_handler.cpp` — generation lifecycle records,
   preparation rejections, protocol-shaped payload-limit errors, and application-error preservation;
-- `test_ninfer_bench_support.cpp` — product benchmark CLI, timing boundary, and schema-v13 reports;
-- `test_bench_matrix.py` — schema-v13 report consumption by the Python matrix summarizer;
+- `test_ninfer_bench_support.cpp` — product benchmark CLI, timing boundary, and schema-v14 reports;
+- `test_bench_matrix.py` — schema-v14 report consumption by the Python matrix summarizer;
 - `test_serve_corpus.py` — current serving request-log identity at the measurement consumer;
 - `test_profile_harness.py` — pinned Docker Desktop Linux/GPU-container admission, pre-outage restoration
   preflight, fixed-payload boundary, verified candidate teardown, production restoration,
@@ -210,3 +210,27 @@ clang++ -std=c++23 -Isrc -Iinclude -Itests/support/nvtx-stub \
 ```
 
 `tests/support/nvtx-stub` supplies a no-op NVTX header; everything else is real product code.
+
+## DFlash2 Engine integration
+
+The real test uses one explicit companion artifact and compares a fixed greedy fixture and its
+penalty-count variant with ordinary decoding. It also checks compact batches with unequal output
+budgets, same-seed stochastic replay, retained/fresh prefix behavior, and absence of a full backend
+KV pool. K>=7 exercises a stop inside a licensed block; K=15 additionally checks oversized prefill,
+local ring wrap, and the logical context-capacity tail. Optional Vision runs image/video capture
+and prefix restore. Zero extra Device StateImage slots exercise Host snapshot/restore.
+
+```bash
+cmake --build build -j --target ninfer_qwen3_8_27b_dflash2_real_test
+NINFER_QWEN3_8_27B_DFLASH2_WEIGHTS=out/qwen3_8_27b_dflash2.ninfer \
+  build/tests/ninfer_qwen3_8_27b_dflash2_real_test 15 1 1 8
+NINFER_QWEN3_8_27B_DFLASH2_WEIGHTS=out/qwen3_8_27b_dflash2.ninfer \
+  build/tests/ninfer_qwen3_8_27b_dflash2_real_test 7 1 0 2 bf16 1 0
+NINFER_QWEN3_8_27B_DFLASH2_WEIGHTS=out/qwen3_8_27b_nvfp4_dflash2.ninfer \
+  build/tests/ninfer_qwen3_8_27b_dflash2_real_test 2 0 0 2 int8
+```
+
+Arguments are K, Graph enabled, optimized head enabled, maximum B, target KV (`bf16` or `int8`),
+Vision enabled, and extra Device StateImage slots. Defaults are `15 1 1 8 bf16 0 3`. Run GPU
+integration tests serially. The individual Op suites remain the numerical/state-transition oracle;
+the fixed Engine fixture does not define bit parity across arbitrary floating-point routes.

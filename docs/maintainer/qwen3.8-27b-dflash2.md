@@ -1,6 +1,6 @@
 # Qwen3.8-27B DFlash2 算法核心
 
-> 状态：已按运行时 `K=1..15` 修正算法表述；Op 扩展与重新 qualification 待完成，Engine 尚未接入。
+> 状态：正式 Engine 已接入，支持启动固定 `K=1..15`、`B=1..8`、eager/CUDA Graph、Text/Vision 和 Device/Host 状态复用。
 >
 > 范围：本文只固定 Qwen3.8-27B DFlash2 的模型计算、proposal、target
 > verification 和状态语义。Artifact inventory 与存储格式由
@@ -526,3 +526,34 @@ committed target prefix + unprocessed target anchor
 共享的是 target-feature conditioning、masked-block 并行 proposal、causal target verify 和提交事务。
 DFlash2 不能通过在 DFlash1 schedule 上只换一组权重来实现；dynamic convolution、
 candidate edge/conditional walk 和 sparse-`q` accept 都是必须的语义边界。
+
+## 11. Engine 实现与验收
+
+27B package 的 immutable model view 绑定本 checkpoint 的 DFlash2 payload；family runtime
+拥有共同的 masked-draft prefill、round、Frontend commit、StateImage 和 Graph 生命周期。
+五层动态卷积及 coherent selector 在 family 的 `dflash_impl.h` 中按编译期配置选择，target
+projection/post-mixer 继续使用既有三个 execution-leaf families。所有计算 kernel 仍归 `src/ops`。
+
+每个 Engine 仅为所选 K 分配 proposal、verify、top-16 ids/q 和 ReplaySSM records。Graph
+按 exact B 和有界 attention frontier 区间构造；普通 target KV 保持所选 codec，DFlash2
+local ring 的格式固定。DFlash2 不建立 full backend KV pool，其 paged backend frontier
+恒为零；local context coverage 由独立的 `dflash_context_frontier` 记录，保留的完整
+StateImage 对齐 main frontier。
+
+Sparse accept 保留实际 q 且只读 token counts。Frontend preview 后，Program 仅为最终提交
+的 N 个 token 增加 counts，以 N fold ReplaySSM；partial terminal 的 continuation hidden
+选 N−1。terminal、checkpoint 和保留状态的 context materialization 包含全部已提交输入。
+
+真实 Engine 验证入口为 `ninfer_qwen3_8_27b_dflash2_real_test`，命令和所覆盖行为见
+[tests README](../../tests/README.md)。RTX 5090、sm_120a、CUDA 13.1 上已验证两种本地
+companion artifact、K=1/2/7/15、full/optimized head、BF16/INT8 target KV、eager/Graph、
+B=1/2/8、penalty counts、固定 seed 重放、partial terminal、超过 2048 token 的 ring
+替换/续接、image/video 及 Host State restore。固定贪心 fixture 与 ordinary decoding
+比较用于检测接线/状态回归；它不把不同浮点执行路线的任意输入都要求为 token parity。
+各 Op 的数学或 exact-state 判据仍由对应 qualification 定义。
+
+正式吞吐/逐阶段测量使用 [product benchmark](../../bench/README.md) 的
+`--spec dflash2 --draft-tokens K`；无需私有推理入口。每个常规 decode round 传输固定
+1184 B ingress 和 576 B egress，前者为位置/slot/采样控制，后者为 token ids 和接受数量。
+q、hidden、KV、ReplaySSM records 和 local ring 留在 Device；Host StateImage 传输属于
+checkpoint/restore 生命周期。Frontend 确定最终 N 后，fold 的 row 描述通过 kernel 参数传入。

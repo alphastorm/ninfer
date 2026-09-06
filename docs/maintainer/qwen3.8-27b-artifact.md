@@ -23,10 +23,22 @@ target_key = qwen3_8_27b
 recipe_id  = qwen3_8_27b_nvfp4-v1
 ```
 
-The artifact is one complete image containing Text, the optimized MTP draft head, MTP, Vision, and
-six frontend resources. These components are not separate artifacts or selectable storage
-profiles. A runtime may choose not to materialize a supported component, but that does not change
-the artifact inventory or identity.
+The current artifact is one complete image containing Text, the optimized proposal head, MTP,
+Vision, DFlash2, and six frontend resources. These components are not separate artifacts or
+selectable storage profiles. A runtime may choose not to materialize a supported component, but
+that does not change the current artifact inventory or identity.
+
+Earlier published artifacts with the same identity contain only the first 1124 objects and no
+`dflash2/` objects. They remain valid for Text, Vision, and MTP. Selecting DFlash2 with such an
+artifact reports that the DFlash2 capability is absent; no other route requires the suffix. A
+current artifact contains the complete 66-object suffix. A partial suffix is malformed rather than
+a third compatible inventory.
+
+At startup, `none` and MTP do not materialize DFlash2 weights; DFlash2 does not materialize MTP
+weights. Vision and DFlash2 may be resident together. The target always materializes `text/output_head`. The full proposal-head route reuses it; the
+optimized route additionally materializes `text/draft_head` and `text/draft_head_token_ids`.
+The Engine accepts startup-fixed `draft_tokens=1..15` (recommended 7), independently of the
+checkpoint’s source block size. See [DFlash2 mathematics and state](qwen3.8-27b-dflash2.md).
 
 The identity is read from the version-2 artifact directory. The filename, object count, and any
 representative tensor descriptor do not select the model or weights profile.
@@ -56,6 +68,23 @@ groupwise integer formats quantize along `K`; row-scaled FP8 owns one scale per 
 | Vision heads / patch input width | 16 / 1536 |
 | Vision position rows | 2304 |
 | Vision merger input / output | 4608 / 5120 |
+| DFlash2 architecture / source dtype | `DFlash2DraftModel / bfloat16` |
+| DFlash2 layers / hidden / intermediate width | 5 / 5120 / 17408 |
+| DFlash2 query heads / KV heads / head width | 32 / 8 / 128 |
+| DFlash2 activation / attention bias | `silu / false` |
+| DFlash2 target layers | 64 |
+| DFlash2 target-feature layers | `[5,19,33,47,61]` |
+| DFlash2 target-feature input width | `5 x 5120 = 25600` |
+| DFlash2 source recommended block size / draft positions | 8 / 7; runtime K=1..15 |
+| DFlash2 mask token id | 248070 |
+| DFlash2 sliding window | 2048 |
+| DFlash2 dynamic-conv taps / group size | 2 / 16 |
+| DFlash2 selector rank / top-k | 256 / 16 |
+| DFlash2 RoPE theta / type | `10000000 / default` |
+| DFlash2 maximum positions / RMS epsilon | `262144 / 1e-6` |
+
+DFlash2 has five non-causal sliding-attention layers. Its effective `sample_from_anchor` is false,
+input-embedding scale and candidate-logit multiplier are 1.0, and final-logit softcap is disabled.
 
 Full-attention Text layers are:
 
