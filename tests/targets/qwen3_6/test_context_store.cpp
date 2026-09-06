@@ -184,7 +184,7 @@ void test_kv_store(ninfer::DeviceContext& device) {
 
     const auto address = addresses.create_active(3, 0);
     expect(address.has_value(), "active KV address allocation");
-    addresses.materialize_to_tokens(*address, 65, device.stream);
+    addresses.ensure_mapped_to_tokens(*address, 65, device.stream);
     device.synchronize();
     expect(addresses.mapped_pages(*address) == 2 && addresses.committed_frontier(*address) == 0,
            "physical KV append does not publish canonical coverage before commit");
@@ -197,7 +197,7 @@ void test_kv_store(ninfer::DeviceContext& device) {
     expect(pages.active_address_references(addresses.logical_page(*address, 0)) == 1 &&
                pages.active_address_references(addresses.logical_page(*address, 1)) == 1,
            "active KV membership is counted on each logical page");
-    addresses.materialize_to_tokens(*address, 129, device.stream);
+    addresses.ensure_mapped_to_tokens(*address, 129, device.stream);
     device.synchronize();
     expect(read_block_table(physical_tables, 0, 3) == std::vector<std::int32_t>({0, 1, 2}),
            "incremental KV materialization preserves the existing mapping prefix");
@@ -316,10 +316,47 @@ void test_kv_store(ninfer::DeviceContext& device) {
                physical_pages.allocated_pages() == 0 && physical_pages.reserved_pages() == 0,
            "KV release invalidates generations and closes physical ownership");
 
+    // Verify crosses a page boundary, but the terminal commit consumes only its first column.
+    const auto terminal = addresses.create_active(3, 0);
+    expect(terminal.has_value(), "terminal boundary KV address allocation");
+    addresses.ensure_mapped_to_tokens(*terminal, 63, device.stream);
+    addresses.commit_frontier(*terminal, 63);
+    addresses.ensure_mapped_to_tokens(*terminal, 71, device.stream);
+    device.synchronize();
+    const auto terminal_mapping   = read_block_table(physical_tables, 0, 2);
+    const auto unchanged_terminal = [&] {
+        return addresses.mapped_pages(*terminal) == 2 &&
+               addresses.committed_frontier(*terminal) == 63 &&
+               addresses.entitlement(*terminal) == 3 && physical_pages.allocated_pages() == 2 &&
+               physical_pages.reserved_pages() == 1 && physical_pages.available_pages() == 5 &&
+               read_block_table(physical_tables, 0, 2) == terminal_mapping;
+    };
+    addresses.ensure_mapped_to_tokens(*terminal, 71, device.stream);
+    addresses.ensure_mapped_to_tokens(*terminal, 64, device.stream);
+    device.synchronize();
+    expect(unchanged_terminal(), "covered KV requests preserve speculative mappings and ownership");
+    bool exceeded = false;
+    try {
+        addresses.ensure_mapped_to_tokens(*terminal, 193, device.stream);
+    } catch (const std::invalid_argument&) { exceeded = true; }
+    expect(exceeded && unchanged_terminal(),
+           "KV coverage beyond entitlement fails without mutation");
+    addresses.commit_frontier(*terminal, 64);
+    addresses.destructive_truncate(*terminal, 64);
+    expect(addresses.mapped_pages(*terminal) == 1 &&
+               addresses.committed_frontier(*terminal) == 64 &&
+               addresses.entitlement(*terminal) == 3 && physical_pages.allocated_pages() == 1 &&
+               physical_pages.reserved_pages() == 2 && physical_pages.available_pages() == 5,
+           "terminal trim returns the uncommitted page to the same active reservation");
+    addresses.deactivate(*terminal);
+    expect(addresses.release(*terminal) && physical_pages.allocated_pages() == 0 &&
+               physical_pages.reserved_pages() == 0 && physical_pages.available_pages() == 8,
+           "terminal settlement releases both mappings and unused growth");
+
     const auto snapshot_source      = addresses.create_active(3, 0);
     const auto snapshot_destination = addresses.create_inactive();
     expect(snapshot_source && snapshot_destination, "active KV snapshot endpoints allocate");
-    addresses.materialize_to_tokens(*snapshot_source, 65, device.stream);
+    addresses.ensure_mapped_to_tokens(*snapshot_source, 65, device.stream);
     addresses.commit_frontier(*snapshot_source, 65);
     const auto snapshot_full = addresses.logical_page(*snapshot_source, 0);
     const auto snapshot_tail = addresses.logical_page(*snapshot_source, 1);
@@ -344,7 +381,7 @@ void test_kv_store(ninfer::DeviceContext& device) {
 
     const auto alternating = addresses.create_active(4, 0);
     expect(alternating.has_value(), "alternating Host release address allocation");
-    addresses.materialize_to_tokens(*alternating, 193, device.stream);
+    addresses.ensure_mapped_to_tokens(*alternating, 193, device.stream);
     addresses.commit_frontier(*alternating, 193);
     addresses.deactivate(*alternating);
     const std::array alternating_pages{
@@ -377,7 +414,7 @@ void test_kv_store(ninfer::DeviceContext& device) {
 
     const auto shared = addresses.create_active(3, 0);
     expect(shared.has_value(), "shared-prefix source address allocation");
-    addresses.materialize_to_tokens(*shared, 65, device.stream);
+    addresses.ensure_mapped_to_tokens(*shared, 65, device.stream);
     addresses.commit_frontier(*shared, 65);
     addresses.set_checkpoint_requirement(*shared, 65);
     addresses.deactivate(*shared);
@@ -399,7 +436,7 @@ void test_kv_store(ninfer::DeviceContext& device) {
                branch_one_tail != shared_tail && pages.address_references(shared_full) == 2 &&
                pages.address_references(shared_tail) == 1,
            "shared branch references full pages and publishes a private partial tail");
-    addresses.materialize_to_tokens(*branch_one, 66, device.stream);
+    addresses.ensure_mapped_to_tokens(*branch_one, 66, device.stream);
     addresses.commit_frontier(*branch_one, 66);
     expect(pages.committed_columns(shared_tail) == 1 &&
                pages.committed_columns(branch_one_tail) == 2,
@@ -430,16 +467,17 @@ void test_kv_store(ninfer::DeviceContext& device) {
                physical_pages.allocated_pages() == 0,
            "shared full-page occupancy survives until its final address reference releases");
 
+
     const auto filler = addresses.create_active(4, 0);
     expect(filler.has_value(), "full-capacity staged-fork filler allocation");
-    addresses.materialize_to_tokens(*filler, 193, device.stream);
+    addresses.ensure_mapped_to_tokens(*filler, 193, device.stream);
     addresses.commit_frontier(*filler, 193);
     addresses.set_checkpoint_requirement(*filler, 193);
     addresses.deactivate(*filler);
 
     const auto retained = addresses.create_active(4, 0);
     expect(retained.has_value(), "full-capacity retained source allocation");
-    addresses.materialize_to_tokens(*retained, 65, device.stream);
+    addresses.ensure_mapped_to_tokens(*retained, 65, device.stream);
     addresses.commit_frontier(*retained, 65);
     addresses.set_checkpoint_requirement(*retained, 65);
     addresses.deactivate(*retained);

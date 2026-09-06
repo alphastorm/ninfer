@@ -216,7 +216,11 @@ clang++ -std=c++23 -Isrc -Iinclude -Itests/support/nvtx-stub \
 The real test uses one explicit companion artifact and compares a fixed greedy fixture and its
 penalty-count variant with ordinary decoding. It also checks compact batches with unequal output
 budgets, same-seed stochastic replay, retained/fresh prefix behavior, and absence of a full backend
-KV pool. K>=7 exercises a stop inside a licensed block; K=15 additionally checks oversized prefill,
+KV pool. A shared DFlash/DFlash2 fixture starts decode at token 63, verifies across the page
+boundary, stops after one target column at token 64, and checks the exact retained frontier and
+subsequent generation with and without reuse.
+The KV Store test checks exact mapping and reservation accounting for the same transition.
+K>=7 also exercises a stop inside a licensed block; K=15 additionally checks oversized prefill,
 local ring wrap, and the logical context-capacity tail. Optional Vision runs image/video capture
 and prefix restore. Zero extra Device StateImage slots exercise Host snapshot/restore.
 

@@ -1400,6 +1400,7 @@ ProgramImplCore::~ProgramImplCore() noexcept {
     if (device.stream != nullptr) { (void)cudaStreamSynchronize(device.stream); }
 }
 
+
 void ProgramImplCore::start_context_transfer_timer(runtime::ContextResourceClass resource) {
     context_transfer_timers_[context_resource_index(resource)].start();
 }
@@ -7949,7 +7950,7 @@ ActiveCaptureResult ProgramImplCore::publish_active_capture(ActiveCaptureTransac
                                                         : prefill.initial_mtp_extent - 1U))
             : speculative_backend == SpeculativeBackend::DFlash ? prefill.prompt_tokens
                                                                 : 0U;
-        materialize_sequence_kv(sequence, prefill.prompt_tokens, backend_materialized);
+        ensure_sequence_kv_mapped(sequence, prefill.prompt_tokens, backend_materialized);
     }
 
     detail::PhysicalResources removed = transaction.capacity_preparation_removed;
@@ -8253,7 +8254,7 @@ runtime::ExecutionTiming ProgramImplCore::append_forced_tokens(
                 timing.resume_submit();
             }
 
-            materialize_sequence_kv(sequence, end, backend_kv_cache() ? end : 0U);
+            ensure_sequence_kv_mapped(sequence, end, backend_kv_cache() ? end : 0U);
 
             sequence.ledger.insert(sequence.ledger.end(), forced.begin(), forced.end());
             if (sequence.ledger.size() != static_cast<std::size_t>(end) + 1U) {
@@ -9842,7 +9843,7 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
                            prompt_tokens + (initial_mtp_extent == 0 ? 0U : initial_mtp_extent - 1U))
             : speculative_backend == SpeculativeBackend::DFlash ? prompt_tokens
                                                                 : 0U;
-        materialize_sequence_kv(sequence, prompt_tokens, backend_materialized);
+        ensure_sequence_kv_mapped(sequence, prompt_tokens, backend_materialized);
         install_sampling(sequence, request, request_plan.sampling);
         sequence.rope_delta = staged.prompt.rope_delta;
         set_device_i32(io.rope_delta, sequence.rope_delta);
@@ -10472,18 +10473,18 @@ void ProgramImplCore::unbind_sequence_kv(SequenceState& sequence) noexcept {
     } catch (...) {}
 }
 
-void ProgramImplCore::materialize_sequence_kv(SequenceState& sequence, std::uint32_t main_tokens,
-                                              std::uint32_t backend_tokens) {
+void ProgramImplCore::ensure_sequence_kv_mapped(SequenceState& sequence, std::uint32_t main_tokens,
+                                                std::uint32_t backend_tokens) {
     if (!sequence.kv || main_tokens > capacity || backend_tokens > capacity) {
         throw std::logic_error("KV materialization request is outside the sequence bundle");
     }
     if (backend_tokens != 0 && !sequence.kv->backend) {
         throw std::logic_error("backend KV materialization requested without an allocation");
     }
-    text_kv_addresses->materialize_to_tokens(sequence.kv->text, main_tokens, device.stream);
+    text_kv_addresses->ensure_mapped_to_tokens(sequence.kv->text, main_tokens, device.stream);
     if (backend_tokens != 0) {
-        backend_kv_addresses->materialize_to_tokens(*sequence.kv->backend, backend_tokens,
-                                                    device.stream);
+        backend_kv_addresses->ensure_mapped_to_tokens(*sequence.kv->backend, backend_tokens,
+                                                      device.stream);
     }
 }
 
@@ -10608,7 +10609,7 @@ void ProgramImplCore::prepare_graphs() {
                 addresses.create_active(1, static_cast<std::int32_t>(row));
             if (!allocation) { throw std::bad_alloc(); }
             allocations.push_back(*allocation);
-            addresses.materialize_to_tokens(*allocation, 1, device.stream);
+            addresses.ensure_mapped_to_tokens(*allocation, 1, device.stream);
 
             // Capture profiles exercise arbitrary context envelopes. Repeating each row's private
             // page across its temporary table keeps every dummy read/write address valid without
@@ -11016,8 +11017,13 @@ void ProgramImplCore::enqueue_dflash_context_append(std::span<const std::uint32_
         const StateImageSelectors selectors               = state_selectors(sequence);
         dflash_host_ingress->state_source_slots[row]      = selectors.source;
         dflash_host_ingress->state_destination_slots[row] = selectors.destination;
-        materialize_sequence_kv(sequence, std::max(sequence.text_kv_valid, end),
-                                backend_kv_cache() ? end : 0U);
+        // Context append writes only the draft caches. Target execution owns Main KV
+        // coverage, including any uncommitted suffix that survives until the round is settled.
+        // DFlash2 has only fixed cyclic state; DFlash also grows its Full backend KV here.
+        if (sequence.kv->backend) {
+            backend_kv_addresses->ensure_mapped_to_tokens(*sequence.kv->backend, end,
+                                                          device.stream);
+        }
         minimum_count = std::min(minimum_count, counts[row]);
         maximum_count = std::max(maximum_count, counts[row]);
     }
@@ -11402,7 +11408,7 @@ ProgramImplCore::decode_ordinary_batch(std::span<const std::uint32_t> lanes,
             ordinary_host_ingress->state_source_slots[row]      = selectors.source;
             ordinary_host_ingress->state_destination_slots[row] = selectors.destination;
             ordinary_host_ingress->sampling[row]                = request.sampling_host;
-            materialize_sequence_kv(sequence, frontier + 1, 0);
+            ensure_sequence_kv_mapped(sequence, frontier + 1, 0);
         }
 
         schedule::OrdinaryBatchContext schedule_state{{device, model, work, state_images->linear(),
@@ -11549,8 +11555,8 @@ ProgramImplCore::decode_mtp_batch(std::span<const std::uint32_t> lanes,
             mtp_host_ingress->state_destination_slots[row] = selectors.destination;
             mtp_host_ingress->rope_deltas[row]             = sequence.rope_delta;
             mtp_host_ingress->sampling[row]                = request.sampling_host;
-            materialize_sequence_kv(sequence, frontier + extent + 1,
-                                    std::min(capacity, frontier + extent + draft_window));
+            ensure_sequence_kv_mapped(sequence, frontier + extent + 1,
+                                      std::min(capacity, frontier + extent + draft_window));
         }
 
         schedule::MtpBatchContext schedule_state{{device, model, work, state_images->linear(),
@@ -11715,7 +11721,7 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             dflash_host_ingress->context_frontiers[row] =
                 checked_i32(sequence.dflash_context_frontier, "DFlash context frontier");
             dflash_host_ingress->proposal_valid_columns[row] = static_cast<std::int32_t>(width);
-            dflash_host_ingress->proposal_extents[row]     = static_cast<std::int32_t>(extent);
+            dflash_host_ingress->proposal_extents[row]       = static_cast<std::int32_t>(extent);
             dflash_host_ingress->target_valid_columns[row] = static_cast<std::int32_t>(extent + 1U);
             for (std::uint32_t column = 0; column < width; ++column) {
                 const std::uint32_t position = frontier + std::min(column, extent);
@@ -11731,8 +11737,8 @@ ProgramImplCore::decode_dflash_batch(std::span<const std::uint32_t> lanes,
             dflash_host_ingress->state_source_slots[row] = selectors.source;
             dflash_host_ingress->state_destination_slots[row] = selectors.destination;
             dflash_host_ingress->sampling[row]                = request.sampling_host;
-            materialize_sequence_kv(sequence, frontier + extent + 1U,
-                                    backend_kv_cache() ? frontier : 0U);
+            ensure_sequence_kv_mapped(sequence, frontier + extent + 1U,
+                                      backend_kv_cache() ? frontier : 0U);
         }
 
         schedule::DFlashBatchContext schedule_state{{device, model, work, state_images->linear(),
