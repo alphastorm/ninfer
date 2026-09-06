@@ -15,12 +15,12 @@
 namespace ninfer::ops::detail {
 namespace {
 
-template <int ActiveColumns, class Schedule>
+template <int Capacity, class Schedule>
 __global__
 __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_grouped_ksplit_topk_kernel(
     const __nv_bfloat16* __restrict__ hidden, const std::uint8_t* __restrict__ weight_codes,
     const __nv_bfloat16* __restrict__ row_scales, std::int32_t valid_rows,
-    std::uint64_t* __restrict__ partial_keys, std::int32_t producer_groups) {
+    std::uint64_t* __restrict__ partial_keys, std::int32_t producer_groups, int columns) {
     constexpr int kHidden    = Fp8VocabularyGeometry::kInputRows;
     constexpr int kTileK     = Schedule::kTileKPerWarp;
     constexpr int kWarps     = Schedule::kKWarps;
@@ -32,7 +32,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_groupe
     constexpr int kRowTiles  = kLinearTopKGroupedRows / kRows;
     static_assert(kRows == 16 && kLinearTopKGroupedRows == 128);
     static_assert((kHidden % kGroupK) == 0);
-    static_assert(ActiveColumns <= kTileCols);
+    static_assert(Capacity <= kTileCols);
 
     union SharedStorage {
         struct {
@@ -44,7 +44,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_groupe
     };
 
     __shared__ __align__(16) SharedStorage shared;
-    __shared__ GroupedKSplitTopKStorage<ActiveColumns, kWarps> topk;
+    __shared__ GroupedKSplitTopKStorage<Capacity, kWarps> topk;
     auto& code_shared = shared.staging.codes;
     auto& x_shared    = shared.staging.activations;
 
@@ -64,14 +64,15 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_groupe
             static_cast<int>(blockIdx.x) * kLinearTopKGroupedRows + row_tile * kRows;
 
         const auto stage_activation = [&](int group_k0) {
-            constexpr int kItems = ActiveColumns * (kTileK / 8);
+            constexpr int kItems = Capacity * (kTileK / 8);
             for (int item = lane; item < kItems; item += 32) {
                 const int column = item / (kTileK / 8);
                 const int k8     = item - column * (kTileK / 8);
-                cp_async<16, Cache::ca>(
+                const int source = column < columns ? column : 0;
+                cp_async_zfill<16, Cache::ca>(
                     &x_shared[warp][column * kTileK + fp8_a16_shared_col_64(column, k8 * 8)],
-                    hidden + static_cast<std::int64_t>(column) * kHidden + group_k0 +
-                        warp * kTileK + k8 * 8);
+                    hidden + static_cast<std::int64_t>(source) * kHidden + group_k0 +
+                        warp * kTileK + k8 * 8, column < columns ? 16 : 0);
             }
         };
 
@@ -196,54 +197,54 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void fp8_groupe
                     sum.w += value.w;
                 }
                 const int column0 = token_mma * 8 + 2 * lid;
-                if (column0 < ActiveColumns) {
+                if (column0 < Capacity) {
                     partial[gid * kTileCols + column0]       = sum.x * top_scale;
                     partial[(gid + 8) * kTileCols + column0] = sum.z * bot_scale;
                 }
-                if (column0 + 1 < ActiveColumns) {
+                if (column0 + 1 < Capacity) {
                     partial[gid * kTileCols + column0 + 1]       = sum.y * top_scale;
                     partial[(gid + 8) * kTileCols + column0 + 1] = sum.w * bot_scale;
                 }
             }
         }
         __syncthreads();
-        grouped_ksplit_topk_consume<ActiveColumns, kTileCols, kWarps, false>(partial, topk,
-                                                                             row_begin, valid_rows);
+        grouped_ksplit_topk_consume<Capacity, kTileCols, kWarps>(partial, topk,
+                                                                             row_begin, valid_rows, columns);
     }
 
-    grouped_ksplit_topk_publish(topk, partial_keys, producer_groups);
+    grouped_ksplit_topk_publish(topk, partial_keys, producer_groups, columns);
 }
 
 using Launch = void (*)(const Tensor&, const Weight&, std::int32_t, const LinearTopKWorkspace&,
                         cudaStream_t);
 
-template <int ActiveColumns>
-void launch_exact(const Tensor& hidden, const Weight& head, std::int32_t valid_rows,
+template <int Capacity>
+void launch_tile(const Tensor& hidden, const Weight& head, std::int32_t valid_rows,
                   const LinearTopKWorkspace& workspace, cudaStream_t stream) {
     using Schedule =
-        Fp8A16SmallTMmaSchedule<ActiveColumns <= 24 ? 8 : 4, ((ActiveColumns + 7) / 8) * 8, 2>;
-    fp8_grouped_ksplit_topk_kernel<ActiveColumns, Schedule>
+        Fp8A16SmallTMmaSchedule<8, Capacity, 2>;
+    fp8_grouped_ksplit_topk_kernel<Capacity, Schedule>
         <<<workspace.producer_groups, Schedule::kThreads, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(hidden.data),
             static_cast<const std::uint8_t*>(head.qdata),
             static_cast<const __nv_bfloat16*>(head.scales), valid_rows,
-            static_cast<std::uint64_t*>(workspace.partial_keys.data), workspace.producer_groups);
+            static_cast<std::uint64_t*>(workspace.partial_keys.data), workspace.producer_groups, hidden.ne[1]);
     CUDA_CHECK(cudaGetLastError());
 }
 
 template <std::size_t... Indices>
 constexpr auto make_launchers(std::index_sequence<Indices...>) {
-    return std::array<Launch, sizeof...(Indices)>{&launch_exact<1 + Indices>...};
+    return std::array<Launch, sizeof...(Indices)>{&launch_tile<8 * (1 + Indices)>...};
 }
 
-constexpr auto kLaunchers = make_launchers(std::make_index_sequence<24>{});
+constexpr auto kLaunchers = make_launchers(std::make_index_sequence<3>{});
 
 } // namespace
 
 void linear_topk_fp8_launch(const Tensor& hidden, const Weight& head, std::int32_t valid_rows,
                             const LinearTopKWorkspace& workspace, cudaStream_t stream) {
     if (workspace.tile_columns == 0) {
-        kLaunchers[hidden.ne[1] - 1](hidden, head, valid_rows, workspace, stream);
+        kLaunchers[(hidden.ne[1] - 1) / 8](hidden, head, valid_rows, workspace, stream);
     } else {
         linear_topk_fp8_m64_launch(hidden, head, valid_rows, workspace, stream);
     }

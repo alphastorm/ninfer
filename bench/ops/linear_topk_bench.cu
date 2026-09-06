@@ -5,11 +5,14 @@
 #include "quantized_weight.cuh"
 
 #include <cuda_runtime.h>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
 
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
+#include <sstream>
 #include <string_view>
 #include <string>
 #include <vector>
@@ -24,6 +27,39 @@ enum class Profile {
     Fp8,
     Q4,
 };
+
+__device__ unsigned pattern(unsigned x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    return x ^ (x >> 16);
+}
+
+__global__ void varied_codes(std::uint8_t* codes, std::uint64_t count, Profile profile) {
+    const auto stride = std::uint64_t(gridDim.x) * blockDim.x;
+    for (auto i = std::uint64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < count; i += stride) {
+        const unsigned bits = pattern(static_cast<unsigned>(i) ^ 0x8351729bu);
+        if (profile == Profile::Q4) {
+            const int a = static_cast<int>(bits % 15) - 7;
+            const int b = static_cast<int>((bits >> 8) % 15) - 7;
+            codes[i]    = (a & 15) | ((b & 15) << 4);
+        } else if (profile == Profile::Fp8) {
+            codes[i] = (bits % 127) | ((bits >> 24) & 128);
+        } else {
+            codes[i] = static_cast<std::uint8_t>(static_cast<int>(bits % 255) - 127);
+        }
+    }
+}
+
+__global__ void varied_scales(std::uint16_t* scales, std::uint64_t count, bool bf16) {
+    const auto stride = std::uint64_t(gridDim.x) * blockDim.x;
+    for (auto i = std::uint64_t(blockIdx.x) * blockDim.x + threadIdx.x; i < count; i += stride) {
+        const float value = 0.002f * (1 + pattern(static_cast<unsigned>(i) ^ 0x91f237u) % 31);
+        scales[i]         = bf16 ? __bfloat16_as_ushort(__float2bfloat16_rn(value))
+                                 : __half_as_ushort(__float2half_rn(value));
+    }
+}
 
 const char* profile_name(Profile profile) {
     if (profile == Profile::W8) { return "w8-full"; }
@@ -46,6 +82,13 @@ void run(Profile profile, std::int32_t columns, int warmup, int repeat) {
                                     QuantizedWeightFill{profile == Profile::Q4 ? std::uint8_t{0x11}
                                                                                : std::uint8_t{0x01},
                                                         0, 0x3c00});
+    varied_codes<<<4096, 256>>>(static_cast<std::uint8_t*>(packed.storage.p), packed.low_bytes,
+                                profile);
+    varied_scales<<<1024, 256>>>(
+        reinterpret_cast<std::uint16_t*>(static_cast<std::uint8_t*>(packed.storage.p) +
+                                         packed.scale_offset),
+        packed.scale_bytes / 2, profile == Profile::Fp8);
+    CUDA_CHECK(cudaGetLastError());
     DeviceBuffer hidden = make_bf16(static_cast<std::size_t>(kHidden) * columns);
     DeviceBuffer ids(static_cast<std::size_t>(kTopK) * columns * sizeof(std::int32_t));
     DeviceBuffer scores(static_cast<std::size_t>(kTopK) * columns * sizeof(float));
@@ -78,6 +121,7 @@ void run(Profile profile, std::int32_t columns, int warmup, int repeat) {
         }
     };
     TimedGraph graph;
+    CUDA_CHECK(cudaDeviceSynchronize());
     graph.capture(stream, launch);
     const ColdTiming timing    = measure_cold_graph(graph, flush, stream, warmup, repeat);
     const double weight_bytes  = static_cast<double>(packed.model_weight_bytes());
@@ -107,13 +151,15 @@ int main(int argc, char** argv) {
     }
     try {
         std::string profile = "all";
-        int columns = 0, warmup = 8, repeat = 60;
+        std::vector<int> columns;
+        int warmup = 8, repeat = 60;
         for (int i = 1; i < argc; ++i) {
             const std::string flag = argv[i];
             if (flag == "--help") {
-                std::printf("usage: %s [--profile all|w8-full|fp8-full|q4-optimized] [--columns U] "
-                            "[--warmup N] [--repeat N]\n",
-                            argv[0]);
+                std::printf(
+                    "usage: %s [--profile all|w8-full|fp8-full|q4-optimized] [--columns U,...] "
+                    "[--warmup N] [--repeat N]\n",
+                    argv[0]);
                 return 0;
             }
             if (i + 1 == argc) throw std::invalid_argument("missing option value");
@@ -121,8 +167,16 @@ int main(int argc, char** argv) {
             if (flag == "--profile")
                 profile = value;
             else if (flag == "--columns") {
-                columns = std::stoi(value);
-                if (columns < 1) throw std::invalid_argument("columns must be positive");
+                std::istringstream input(value);
+                std::string item;
+                while (std::getline(input, item, ',')) {
+                    std::size_t end = 0;
+                    const int n     = std::stoi(item, &end);
+                    if (n < 1 || end != item.size())
+                        throw std::invalid_argument("columns must be positive integers");
+                    columns.push_back(n);
+                }
+                if (columns.empty()) throw std::invalid_argument("columns must not be empty");
             } else if (flag == "--warmup")
                 warmup = std::stoi(value);
             else if (flag == "--repeat")
@@ -136,12 +190,13 @@ int main(int argc, char** argv) {
             profiles = {Profile::W8, Profile::Fp8, Profile::Q4};
         else
             profiles = {parse_profile(profile)};
-        std::puts("profile,U,median_us,min_us,p95_us,weight_GBs,useful_TFLOPs,workspace_bytes,"
-                  "graph_nodes");
+        std::puts(
+            "profile,U,median_us,min_us,p95_us,logical_weight_GBs,useful_TFLOPs,workspace_bytes,"
+            "graph_nodes");
         for (auto selected : profiles) {
-            if (columns)
-                run(selected, columns, warmup, repeat);
-            else
+            if (!columns.empty()) {
+                for (int n : columns) run(selected, n, warmup, repeat);
+            } else
                 for (int n = 1; n <= 120; ++n) run(selected, n, warmup, repeat);
         }
         return 0;

@@ -253,16 +253,19 @@ utilization still require NCU.
 `ninfer_linear_topk_bench` measures the complete public projection-plus-stable-top-16 Op for the
 W8 and row-FP8 full heads and the mapped Q4 optimized head. Its independent matrix-column axis is
 `U`; the default sweep covers every `U=1..120` needed by variable-width DFlash2 proposals. A fixed
-positive `--columns U` also exercises larger matrices. Each sample replays the complete Op in a
+positive `--columns U` also exercises larger matrices; `--columns U,...` selects a representative
+set without a full sweep. Codes and stored scales vary across the physical head, including signs,
+so ranking is not timed only on identical weight rows. Each sample replays the complete Op in a
 CUDA Graph after a 256 MiB L2 eviction write; projection, partial-key reduction, workspace counter
 initialization, and final ids/scores publication are included. Defaults are 8 warmups and 60 samples.
-Reported bandwidth counts the encoded head once, useful FLOPs count candidate-eligible rows, and
+Reported logical bandwidth counts the encoded head once, useful FLOPs count candidate-eligible rows, and
 workspace bytes and Graph nodes describe the actual public call. These are Op measurements.
 
 ```bash
 cmake --build build -j --target ninfer_linear_topk_bench
 ./build/bench/ninfer_linear_topk_bench
 ./build/bench/ninfer_linear_topk_bench --profile w8-full --columns 7
+./build/bench/ninfer_linear_topk_bench --columns 1,7,16,24,64,120 --repeat 25
 ./build/bench/ninfer_linear_topk_bench --profile fp8-full --columns 120
 ./build/bench/ninfer_linear_topk_bench --profile q4-optimized --columns 129 --repeat 60
 ```

@@ -60,13 +60,13 @@ __device__ __forceinline__ unsigned q4_small_t_bf16_pair(std::uint8_t packed) {
 }
 
 template <class Geometry, int TileCols, int ActiveCols, class Epilogue = Q4SmallTMmaStoreEpilogue,
-          class RowPolicy = Q4SmallTMmaIdentityRows>
+          class RowPolicy = Q4SmallTMmaIdentityRows, bool MaskedColumns = false>
 __launch_bounds__(256, 6) __global__
     void q4_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
                                const std::uint8_t* __restrict__ codes,
                                const std::uint8_t* __restrict__ scales,
                                __nv_bfloat16* __restrict__ out, Epilogue epilogue = {},
-                               RowPolicy row_policy = {}) {
+                               RowPolicy row_policy = {}, int columns = ActiveCols) {
     using Schedule              = Q4DraftSmallTSchedule;
     constexpr int kHidden       = Geometry::kInputRows;
     constexpr int kTileK        = Schedule::kTileKPerWarp;
@@ -101,23 +101,31 @@ __launch_bounds__(256, 6) __global__
 
     __shared__ __align__(16) SharedStorage shared;
 
-    const int tid     = static_cast<int>(threadIdx.x);
-    const int warp    = tid >> 5;
-    const int lane    = tid & 31;
-    const int gid     = lane >> 2;
-    const int lid     = lane & 3;
-    const int k_split = warp;
-    const int row0    = static_cast<int>(blockIdx.x) * RowPolicy::kOutputRowsPerCta;
+    const int tid          = static_cast<int>(threadIdx.x);
+    const int warp         = tid >> 5;
+    const int lane         = tid & 31;
+    const int gid          = lane >> 2;
+    const int lid          = lane & 3;
+    const int k_split      = warp;
+    const int row0         = static_cast<int>(blockIdx.x) * RowPolicy::kOutputRowsPerCta;
+    const int live_columns = MaskedColumns ? columns : ActiveCols;
 
     const auto stage_x = [&](int group_k0, Staging& st) {
         constexpr int kItemsPerSplit = ActiveCols * (kTileK / 8);
         for (int item = lane; item < kItemsPerSplit; item += 32) {
             const int col = item / (kTileK / 8);
             const int k8  = item - col * (kTileK / 8);
-            auto* dst = &st.activations[warp][col * kTileK + q4_small_t_swizzle_64(col, k8 * 8)];
-            cp_async<16>(
-                dst,
-                &x[static_cast<std::int64_t>(col) * kHidden + group_k0 + warp * kTileK + k8 * 8]);
+            auto* dst     = &st.activations[warp][col * kTileK + q4_small_t_swizzle_64(col, k8 * 8)];
+            if constexpr (MaskedColumns) {
+                const int source = col < live_columns ? col : 0;
+                cp_async_zfill<16>(dst,
+                                   &x[static_cast<std::int64_t>(source) * kHidden + group_k0 +
+                                      warp * kTileK + k8 * 8],
+                                   col < live_columns ? 16 : 0);
+            } else {
+                cp_async<16>(dst, &x[static_cast<std::int64_t>(col) * kHidden + group_k0 +
+                                     warp * kTileK + k8 * 8]);
+            }
         }
     };
 
@@ -257,13 +265,13 @@ __launch_bounds__(256, 6) __global__
             }
             const int col0 = nt * 8 + 2 * lid;
             if constexpr (std::is_same_v<Epilogue, Q4SmallTMmaStoreEpilogue>) {
-                if (col0 < ActiveCols) {
+                if (col0 < live_columns) {
                     out[static_cast<std::int64_t>(col0) * Geometry::kOutputRows + row0 + gid] =
                         __float2bfloat16_rn(sum.x);
                     out[static_cast<std::int64_t>(col0) * Geometry::kOutputRows + row0 + gid + 8] =
                         __float2bfloat16_rn(sum.z);
                 }
-                if (col0 + 1 < ActiveCols) {
+                if (col0 + 1 < live_columns) {
                     out[static_cast<std::int64_t>(col0 + 1) * Geometry::kOutputRows + row0 + gid] =
                         __float2bfloat16_rn(sum.y);
                     out[static_cast<std::int64_t>(col0 + 1) * Geometry::kOutputRows + row0 + gid +
