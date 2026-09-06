@@ -1,6 +1,8 @@
 #include "ninfer/ops/speculative_round.h"
 #include "ops/op_tester.h"
 #include "core/decode_graph.h"
+#include "core/device.h"
+#include <string_view>
 
 #include <algorithm>
 #include <cmath>
@@ -33,67 +35,54 @@ DeviceBuffer device_config(const ops::SamplingConfig& config) {
     return to_device(std::vector<ops::SamplingConfig>{config});
 }
 
-struct VerifyInputsExpected {
-    std::vector<std::int32_t> verify_ids;
-    std::vector<std::int32_t> positions;
-};
-
-VerifyInputsExpected verify_inputs_oracle(std::int32_t token,
-                                          const std::vector<std::int32_t>& drafts,
-                                          std::int32_t length) {
-    VerifyInputsExpected expected{
-        .verify_ids = std::vector<std::int32_t>(drafts.size() + 1),
-        .positions  = std::vector<std::int32_t>(drafts.size() + 1),
-    };
-    expected.verify_ids[0] = token;
-    for (std::size_t i = 0; i < drafts.size(); ++i) expected.verify_ids[i + 1] = drafts[i];
-    for (std::size_t i = 0; i < expected.positions.size(); ++i) {
-        expected.positions[i] = length + static_cast<std::int32_t>(i);
+int prepare_verify_case(int k, int batch) {
+    const int width = k + 1;
+    std::vector<std::int32_t> anchors(batch), lengths(batch), extents(batch), drafts(k * batch);
+    for (int b = 0; b < batch; ++b) {
+        anchors[b] = 70000 + 11 * b;
+        lengths[b] = 131072 + 1009 * b;
+        for (int j = 0; j < k; ++j) drafts[b * k + j] = 37 + 257 * b + 7919 * j;
     }
-    return expected;
-}
-
-int prepare_verify_case(int k) {
-    const std::int32_t token_value  = 70000 + k;
-    const std::int32_t length_value = 1000 - k;
-    std::vector<std::int32_t> drafts(static_cast<std::size_t>(k));
-    for (int i = 0; i < k; ++i) drafts[static_cast<std::size_t>(i)] = 37 + 7919 * i;
-    const auto expected = verify_inputs_oracle(token_value, drafts, length_value);
-
-    DeviceBuffer d_token  = to_device<std::int32_t>({token_value});
-    DeviceBuffer d_drafts = to_device(drafts);
-    DeviceBuffer d_length = to_device<std::int32_t>({length_value});
-    DeviceBuffer d_extent = to_device<std::int32_t>({k});
-    GuardedDeviceBuffer d_verify(expected.verify_ids.size() * sizeof(std::int32_t));
-    GuardedDeviceBuffer d_positions(expected.positions.size() * sizeof(std::int32_t));
-    d_verify.fill(0xcd);
-    d_positions.fill(0xef);
-
-    Tensor token(d_token.p, DType::I32, {1});
-    Tensor draft_tensor(d_drafts.p, DType::I32, {k});
-    Tensor length(d_length.p, DType::I32, {1});
-    Tensor extent(d_extent.p, DType::I32, {1});
-    Tensor verify(d_verify.data(), DType::I32, {k + 1});
-    Tensor positions(d_positions.data(), DType::I32, {k + 1});
-    ops::speculative_prepare_verify_inputs(token, draft_tensor, length, extent, verify, positions,
-                                           nullptr);
+    DeviceBuffer d_anchors = to_device(anchors), d_lengths = to_device(lengths), d_drafts = to_device(drafts);
+    DeviceBuffer d_extents = to_device(extents);
+    GuardedDeviceBuffer d_full(width * batch * sizeof(std::int32_t));
+    GuardedDeviceBuffer d_ids(d_full.bytes()), d_positions(d_full.bytes());
+    Tensor a(d_anchors.p, DType::I32, {batch}), l(d_lengths.p, DType::I32, {batch});
+    Tensor d(d_drafts.p, DType::I32, {k, batch}), e(d_extents.p, DType::I32, {batch});
+    Tensor full(d_full.data(), DType::I32, {width, batch}), ids(d_ids.data(), DType::I32, {width, batch});
+    Tensor positions(d_positions.data(), DType::I32, {width, batch});
+    DeviceContext context;
     cuda_synchronize();
-
-    const std::string label = "speculative prepare K=" + std::to_string(k);
-    int failures =
-        verify_exact((label + " verify ids").c_str(),
-                     read<std::int32_t>(d_verify, expected.verify_ids.size()), expected.verify_ids);
-    failures += verify_exact((label + " positions").c_str(),
-                             read<std::int32_t>(d_positions, expected.positions.size()),
-                             expected.positions);
-    failures += verify_exact((label + " token unchanged").c_str(),
-                             from_device<std::int32_t>(d_token, 1), {token_value});
-    failures += verify_exact((label + " drafts unchanged").c_str(),
-                             from_device<std::int32_t>(d_drafts, drafts.size()), drafts);
-    failures += verify_exact((label + " length unchanged").c_str(),
-                             from_device<std::int32_t>(d_length, 1), {length_value});
-    failures += d_verify.verify_guards((label + " verify guards").c_str());
-    failures += d_positions.verify_guards((label + " positions guards").c_str());
+    const auto launch = [&] {
+        ops::speculative_prepare_verify_inputs(a, d, l, e, full, positions, context.stream);
+        ops::speculative_prepare_verify_ids(a, d, e, ids, context.stream);
+    };
+    DecodeGraphDefinition definition;
+    DecodeGraphExecutable graph;
+    if (k == 15 && batch == 8) { definition.capture(context.stream, launch); graph.instantiate(definition); }
+    int failures = 0;
+    for (int phase = 0; phase <= k; ++phase) {
+        for (int b = 0; b < batch; ++b) extents[b] = (phase + 3 * b) % width;
+        CUDA_CHECK(cudaMemcpyAsync(d_extents.p, extents.data(), d_extents.bytes, cudaMemcpyHostToDevice, context.stream));
+        if (graph.ready()) graph.launch(context.stream); else launch();
+        context.synchronize();
+        std::vector<std::int32_t> expected_ids(width * batch), expected_positions(width * batch);
+        for (int b = 0; b < batch; ++b)
+            for (int j = 0; j < width; ++j) {
+                expected_ids[b * width + j] = j > 0 && j <= extents[b] ? drafts[b * k + j - 1] : anchors[b];
+                expected_positions[b * width + j] = lengths[b] + std::min(j, extents[b]);
+            }
+        failures += verify_exact("verify ids", read<std::int32_t>(d_ids, expected_ids.size()), expected_ids);
+        failures += verify_exact("verify full ids", read<std::int32_t>(d_full, expected_ids.size()), expected_ids);
+        failures += verify_exact("verify positions", read<std::int32_t>(d_positions, expected_positions.size()), expected_positions);
+        failures += verify_exact("extents unchanged", from_device<std::int32_t>(d_extents, batch), extents);
+    }
+    failures += verify_exact("anchors unchanged", from_device<std::int32_t>(d_anchors, batch), anchors);
+    failures += verify_exact("lengths unchanged", from_device<std::int32_t>(d_lengths, batch), lengths);
+    failures += verify_exact("drafts unchanged", from_device<std::int32_t>(d_drafts, drafts.size()), drafts);
+    failures += d_full.verify_guards("verify full ids");
+    failures += d_ids.verify_guards("verify ids");
+    failures += d_positions.verify_guards("verify positions");
     return failures;
 }
 
@@ -1132,15 +1121,36 @@ int remap_case(int token_count) {
     return failures;
 }
 
+int transforms_conformance() {
+    int failures = 0;
+    for (int k = 1; k <= 15; ++k)
+        for (int batch : {1, 8}) failures += prepare_verify_case(k, batch);
+    failures += select_hidden_case(5120, 6, 0);
+    failures += select_hidden_case(5120, 6, 5);
+    failures += select_hidden_case(2048, 16, 7);
+    failures += remap_case(1);
+    failures += remap_case(15);
+    failures += remap_case(120);
+    return failures;
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     if (cuda_unavailable()) {
         std::cout << "speculative_round: SKIP (CUDA unavailable)\n";
         return 77;
     }
 
-    int failures = 0;
+    if (argc > 2 || (argc == 2 && std::string_view(argv[1]) != "--transforms-only")) {
+        std::cerr << "usage: ninfer_speculative_round_test [--transforms-only]\n";
+        return 2;
+    }
+    int failures = transforms_conformance();
+    if (argc == 2) {
+        std::cout << (failures == 0 ? "PASS" : "FAIL") << " speculative transforms\n";
+        return failures == 0 ? 0 : 1;
+    }
     const std::size_t k15 =
         ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(257, 15, 15, 1, 1);
     if (k15 == 0 || k15 != ops::sampling_workspace_capacity_bytes(257, 16, 16) ||
@@ -1156,7 +1166,6 @@ int main() {
         std::cerr << "speculative accept workspace accepted an invalid draft interval\n";
         ++failures;
     } catch (const std::invalid_argument&) {}
-    for (const int k : {1, 5, 15}) failures += prepare_verify_case(k);
     failures += greedy_accept_case(1, 0);
     failures += greedy_accept_case(5, 2);
     failures += greedy_accept_case(5, 5);
@@ -1197,12 +1206,6 @@ int main() {
         failures += SparseAcceptSuite(k, 1).repeated_history_case(false);
         failures += SparseAcceptSuite(k, 1).repeated_history_case(true);
     }
-    failures += select_hidden_case(5120, 6, 0);
-    failures += select_hidden_case(5120, 6, 5);
-    failures += select_hidden_case(2048, 16, 7);
-    failures += remap_case(1);
-    failures += remap_case(15);
-    failures += remap_case(120);
 
     if (failures != 0) {
         std::cerr << "speculative_round failures=" << failures << '\n';
