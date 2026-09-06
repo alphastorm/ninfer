@@ -25,7 +25,6 @@ enum class W8LinearSwiGluScheduleId {
     DFlash2MmaR32C64K128,
     DFlash2MmaR64C64K128,
     DFlash2MmaR64C80K128,
-    DFlash2MmaR64C88K128,
     DFlash2MmaR64C96K128,
     DFlash2MmaR64C128,
 };

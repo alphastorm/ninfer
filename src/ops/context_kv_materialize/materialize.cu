@@ -321,11 +321,10 @@ struct MaterializeProjectionEpilogue {
     const int* counts;
     const int* slots;
     float* scratch;
-    int layer_index, width, batch, column_begin, min_count, max_count;
+    int layer_index, width, batch, min_count, max_count;
     bool value;
 
-    __device__ void store(int row, int local, float result) const {
-        const int packed_column = column_begin + local;
+    __device__ void store(int row, int packed_column, float result) const {
         if (packed_column >= max_count * batch) return;
         const int column  = context_column(packed_column, width, max_count);
         const int request = column / width, count = counts[request];
@@ -340,12 +339,15 @@ struct MaterializeProjectionEpilogue {
         }
     }
 
-    template <int Columns>
-    __device__ void store_pair(int row, int col, float4 sum) const {
-        store(row, col, sum.x);
-        store(row + 8, col, sum.z);
-        store(row, col + 1, sum.y);
-        store(row + 8, col + 1, sum.w);
+    __device__ void store_pair(int row, int col, float4 sum, int columns) const {
+        if (col < columns) {
+            store(row, col, sum.x);
+            store(row + 8, col, sum.z);
+        }
+        if (col + 1 < columns) {
+            store(row, col + 1, sum.y);
+            store(row + 8, col + 1, sum.w);
+        }
     }
 };
 
@@ -369,11 +371,8 @@ __global__ __launch_bounds__(KWarps * 32, 1) void context_kv_grouped_kernel(
     const auto layer   = layers.layer[l];
     const auto* codes  = value ? layer.value_codes : layer.key_codes;
     const auto* scales = value ? layer.value_scales : layer.key_scales;
-    const MaterializeProjectionEpilogue epilogue{
-        layer,     positions, counts,
-        slots,     scratch,   l,
-        width,     batch,     static_cast<int>(blockIdx.y) * Columns,
-        min_count, max_count, value};
+    const MaterializeProjectionEpilogue epilogue{layer, positions, counts,    slots,     scratch, l,
+                                                 width, batch,     min_count, max_count, value};
     w8_small_t_mma<W8LinearGeometry<1024, 5120>, Columns, GroupedSchedule<Columns, KWarps>,
                    W8ContiguousOutput, MaterializeProjectionEpilogue, W8SmallTMmaIdentityRows, true,
                    true>(x, codes, scales, {nullptr, 0}, epilogue, {}, max_count * batch,

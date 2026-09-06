@@ -17,31 +17,13 @@ namespace {
 
 using Geometry                       = W8MtpGateUpProjectionGeometry;
 constexpr std::int32_t kIntermediate = Geometry::kOutputRows / 2;
-constexpr std::int32_t kFirstExactT  = 1;
-constexpr std::int32_t kLastExactT   = 40;
+constexpr std::int32_t kFirstSmallT  = 1;
+constexpr std::int32_t kLastSmallT   = 40;
 using Launch = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
 
-template <int ActiveTokens>
-struct DFlash2SmallTSchedule {
-    static_assert(ActiveTokens >= kFirstExactT && ActiveTokens <= kLastExactT);
-
-    static constexpr int kTileTokens = ActiveTokens <= 8    ? 8
-                                       : ActiveTokens <= 16 ? 16
-                                       : ActiveTokens <= 24 ? 24
-                                       : ActiveTokens <= 32 ? 32
-                                                            : 40;
-    static constexpr int kKWarps     = ActiveTokens >= 22 && ActiveTokens <= 24 ? 8 : 4;
-    static constexpr auto kActivationStage =
-        ActiveTokens <= 4 || (ActiveTokens >= 9 && ActiveTokens <= 15)
-            ? W8SmallTMmaActivationStage::PaddedZero
-            : W8SmallTMmaActivationStage::ActiveOnly;
-    using Type = W8SmallTMmaSchedule<kKWarps, kTileTokens, 2, W8SmallTMmaScaleAccess::Shared,
-                                     Cache::ca, Cache::cg, kActivationStage>;
-};
-
-template <int ActiveTokens>
-void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
-    using Schedule  = typename DFlash2SmallTSchedule<ActiveTokens>::Type;
+template <int Capacity>
+void launch_tile(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+    using Schedule = W8SmallTMmaSchedule<Capacity == 24 ? 8 : 4, Capacity, 2, W8SmallTMmaScaleAccess::Shared>;
     using RowPolicy = W8SwiGluPairedRows<kIntermediate>;
     static_assert((Geometry::kInputRows % Schedule::kGroupK) == 0);
     static_assert((kIntermediate % RowPolicy::kOutputRowsPerCta) == 0);
@@ -50,32 +32,32 @@ void launch_exact(const Tensor& x, const Weight& weight, Tensor& out, cudaStream
     const W8SwiGluDirectEpilogue epilogue{static_cast<__nv_bfloat16*>(out.data), kIntermediate};
     const RowPolicy row_policy{};
     constexpr int kBlocks = kIntermediate / RowPolicy::kOutputRowsPerCta;
-    w8_small_t_mma_kernel<Geometry, ActiveTokens, Schedule, W8ContiguousOutput,
-                          W8SwiGluDirectEpilogue, RowPolicy, true>
+    w8_small_t_mma_kernel<Geometry, Capacity, Schedule, W8ContiguousOutput,
+                          W8SwiGluDirectEpilogue, RowPolicy, true, true>
         <<<kBlocks, Schedule::kThreads, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data),
             static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const std::uint8_t*>(weight.scales), ignored_output, epilogue, row_policy);
+            static_cast<const std::uint8_t*>(weight.scales), ignored_output, epilogue, row_policy, x.ne[1]);
     CUDA_CHECK(cudaGetLastError());
 }
 
 template <std::size_t... Offsets>
 constexpr auto make_launchers(std::index_sequence<Offsets...>) {
     return std::array<Launch, sizeof...(Offsets)>{
-        &launch_exact<kFirstExactT + static_cast<int>(Offsets)>...};
+        &launch_tile<8 * (1 + static_cast<int>(Offsets))>...};
 }
 
 constexpr auto kLaunchers =
-    make_launchers(std::make_index_sequence<kLastExactT - kFirstExactT + 1>{});
+    make_launchers(std::make_index_sequence<kLastSmallT / 8>{});
 
 } // namespace
 
 void w8_dflash2_linear_swiglu_small_t_launch(const Tensor& x, const Weight& weight, Tensor& out,
                                              cudaStream_t stream) {
-    if (x.ne[1] < kFirstExactT || x.ne[1] > kLastExactT) {
+    if (x.ne[1] < kFirstSmallT || x.ne[1] > kLastSmallT) {
         throw std::invalid_argument("W8 DFlash2 LinearSwiGLU small-T: unsupported T");
     }
-    const std::size_t index = static_cast<std::size_t>(x.ne[1] - kFirstExactT);
+    const std::size_t index = static_cast<std::size_t>((x.ne[1] - 1) / 8);
     kLaunchers[index](x, weight, out, stream);
 }
 

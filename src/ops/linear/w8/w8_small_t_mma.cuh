@@ -346,7 +346,8 @@ w8_small_t_mma(const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restri
                     store(cta_row0 + gid + 8, col0 + 1, sum.w);
                 }
             } else if constexpr (DirectPairEpilogue) {
-                epilogue.template store_pair<ActiveCols>(cta_row0 + gid, col0, sum);
+                epilogue.store_pair(cta_row0 + gid, col0 + column_offset, sum,
+                                    TiledColumns ? columns : ActiveCols);
             } else {
                 if (col0 < ActiveCols) {
                     projected[gid * kTileCols + col0]       = sum.x;

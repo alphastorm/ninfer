@@ -44,9 +44,6 @@ void w8_dflash2_linear_swiglu_mma_r64_c64_k128_launch(const Tensor&, const Weigh
 void w8_dflash2_linear_swiglu_mma_r64_c80_k128_launch(const Tensor&, const Weight&, Tensor&,
                                                       cudaStream_t);
 
-void w8_dflash2_linear_swiglu_mma_r64_c88_k128_launch(const Tensor&, const Weight&, Tensor&,
-                                                      cudaStream_t);
-
 void w8_dflash2_linear_swiglu_mma_r64_c96_k128_launch(const Tensor&, const Weight&, Tensor&,
                                                       cudaStream_t);
 
