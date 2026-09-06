@@ -1,4 +1,8 @@
 #include "ninfer/ops/scatter.h"
+#include "ninfer/ops/speculative_round.h"
+#include "core/device.h"
+#include "core/decode_graph.h"
+#include <algorithm>
 #include "ops/op_tester.h"
 
 #include <cstddef>
@@ -105,6 +109,53 @@ int extract_case(std::int32_t source_rows, std::int32_t destination_rows,
     return failures;
 }
 
+int continuation_case(int width, int batch) {
+    constexpr int rows = 5120, slots = 11;
+    const auto hidden = bit_pattern(static_cast<std::size_t>(rows) * width * batch, 1709U + width);
+    const auto initial = bit_pattern(static_cast<std::size_t>(rows) * slots, 1721U + batch);
+    std::vector<std::int32_t> lanes{10, 2, 8, 0, 6, 4, 9, 1};
+    lanes.resize(batch);
+    std::vector<std::int32_t> selectors(batch);
+    GuardedDeviceBuffer d_hidden(hidden.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer d_destination(initial.size() * sizeof(std::uint16_t));
+    GuardedDeviceBuffer d_selected(static_cast<std::size_t>(rows) * batch * sizeof(std::uint16_t));
+    DeviceBuffer d_lanes = to_device(lanes), d_selectors = to_device(selectors);
+    d_hidden.copy_from_host(hidden.data(), d_hidden.bytes());
+    Tensor h(d_hidden.data(), DType::BF16, {rows, width, batch});
+    Tensor selected(d_selected.data(), DType::BF16, {rows, batch});
+    Tensor dst(d_destination.data(), DType::BF16, {rows, slots});
+    Tensor indices(d_lanes.p, DType::I32, {batch}), sel(d_selectors.p, DType::I32, {batch});
+    DeviceContext context;
+    cuda_synchronize();
+    const auto launch = [&] {
+        ops::speculative_select_accepted_hidden(h, sel, selected, context.stream);
+        ops::scatter(selected, indices, dst, context.stream);
+    };
+    DecodeGraphDefinition definition;
+    DecodeGraphExecutable graph;
+    if (width == 16 && batch == 8) { definition.capture(context.stream, launch); graph.instantiate(definition); }
+    int failures = 0;
+    for (int phase = 0; phase < width; ++phase) {
+        auto expected = initial;
+        for (int b = 0; b < batch; ++b) {
+            selectors[b] = (phase + 3 * b) % width;
+            std::copy_n(hidden.begin() + static_cast<std::size_t>(b * width + selectors[b]) * rows,
+                         rows, expected.begin() + static_cast<std::size_t>(lanes[b]) * rows);
+        }
+        CUDA_CHECK(cudaMemcpyAsync(d_selectors.p, selectors.data(), d_selectors.bytes, cudaMemcpyHostToDevice, context.stream));
+        CUDA_CHECK(cudaMemcpyAsync(d_destination.data(), initial.data(), d_destination.bytes(), cudaMemcpyHostToDevice, context.stream));
+        if (graph.ready()) graph.launch(context.stream); else launch();
+        context.synchronize();
+        failures += verify_exact("continuation slots", from_device<std::uint16_t>(d_destination.data(), expected.size()), expected);
+    }
+    failures += verify_exact("continuation input unchanged", from_device<std::uint16_t>(d_hidden.data(), hidden.size()), hidden);
+    failures += verify_exact("continuation lanes unchanged", from_device<std::int32_t>(d_lanes, batch), lanes);
+    failures += d_hidden.verify_guards("continuation input");
+    failures += d_selected.verify_guards("continuation selected");
+    failures += d_destination.verify_guards("continuation destination");
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -114,6 +165,9 @@ int main() {
     }
 
     int failures = 0;
+    for (int width : {2, 7, 16})
+        for (int batch : {1, 8}) failures += continuation_case(width, batch);
+    failures += continuation_case(5, 3);
     failures += scatter_case(5120, {4, 0, 7, 2}, 9);
     failures += scatter_case(2048, {5, 1, 3}, 7);
     failures += extract_case(10240, 6144, 4096, 6);
