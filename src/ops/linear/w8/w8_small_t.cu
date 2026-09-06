@@ -56,9 +56,6 @@ constexpr auto kMtpDownLaunchers =
 constexpr auto k35bMtpProjectionLaunchers = make_launchers<W835bMtpProjectionGeometry,
                                                            kW835bMtpProjectionFirstSmallT>(
     std::make_index_sequence<kW835bMtpProjectionLastSmallT - kW835bMtpProjectionFirstSmallT + 1>{});
-constexpr auto kN5120K25600Launchers =
-    make_launchers<W8N5120K25600Geometry, kW8N5120K25600FirstSmallT>(
-        std::make_index_sequence<kW8N5120K25600LastSmallT - kW8N5120K25600FirstSmallT + 1>{});
 constexpr auto kDFlash2AttentionLaunchers = make_launchers<W8DFlash2AttentionProjectionGeometry,
                                                            kW8DFlash2AttentionFirstSmallT>(
     std::make_index_sequence<kW8DFlash2AttentionLastSmallT - kW8DFlash2AttentionFirstSmallT + 1>{});
@@ -122,14 +119,6 @@ void launch_w8_small_t(const Tensor& x, const Weight& weight, Tensor& out, cudaS
         const std::size_t index =
             static_cast<std::size_t>(x.ne[1] - kW835bMtpProjectionFirstSmallT);
         k35bMtpProjectionLaunchers[index](x, weight, out, stream);
-        return;
-    }
-    if (weight.n == W8N5120K25600Geometry::kOutputRows &&
-        weight.k == W8N5120K25600Geometry::kInputRows &&
-        weight.padded_shape[1] == W8N5120K25600Geometry::kInputRows &&
-        x.ne[1] >= kW8N5120K25600FirstSmallT && x.ne[1] <= kW8N5120K25600LastSmallT) {
-        const std::size_t index = static_cast<std::size_t>(x.ne[1] - kW8N5120K25600FirstSmallT);
-        kN5120K25600Launchers[index](x, weight, out, stream);
         return;
     }
     if (weight.n == W8DFlash2AttentionProjectionGeometry::kOutputRows &&

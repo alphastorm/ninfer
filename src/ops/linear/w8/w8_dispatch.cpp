@@ -59,7 +59,7 @@ W8Launch select_w8_a16_launch(std::int32_t n, std::int32_t k, std::int32_t t) {
         break;
     case 25600:
         if (n == 5120) {
-            if (t <= 56) { return launch_w8_small_t; }
+            if (t <= 56) { return launch_w8_feature_small_t; }
             if (t <= 64) { return launch_w8_feature_r16_c64; }
             if (t <= 128) { return launch_w8_feature_r32_c64; }
             return launch_w8_mma_r64_c128;

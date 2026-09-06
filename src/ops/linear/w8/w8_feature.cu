@@ -2,9 +2,38 @@
 
 #include "core/device.h"
 #include "ops/linear/w8/w8_rowsplit_gemm_mma.cuh"
+#include "ops/linear/w8/w8_small_t_mma.cuh"
+
+#include <array>
+#include <utility>
 
 namespace ninfer::ops::detail {
 namespace {
+
+template <int Capacity>
+void launch_small(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+    using Geometry = W8N5120K25600Geometry;
+    using Schedule =
+        W8SmallTMmaSchedule<Capacity <= 32 ? 8 : 4, Capacity, 2, W8SmallTMmaScaleAccess::Shared>;
+    const W8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), Geometry::kOutputRows};
+    w8_small_t_mma_kernel<Geometry, Capacity, Schedule, W8ContiguousOutput,
+                          W8SmallTMmaStoreEpilogue, W8SmallTMmaIdentityRows, false, true>
+        <<<Geometry::kOutputRows / 16, Schedule::kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), output, W8SmallTMmaStoreEpilogue{},
+            W8SmallTMmaIdentityRows{}, x.ne[1]);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+using SmallLaunch = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
+
+template <std::size_t... I>
+constexpr auto small_launchers(std::index_sequence<I...>) {
+    return std::array<SmallLaunch, sizeof...(I)>{&launch_small<8 * (static_cast<int>(I) + 1)>...};
+}
+
+constexpr auto kSmallLaunchers = small_launchers(std::make_index_sequence<7>{});
 
 template <int Rows>
 void launch(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
@@ -21,6 +50,10 @@ void launch(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t str
 }
 
 } // namespace
+
+void launch_w8_feature_small_t(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+    kSmallLaunchers[(x.ne[1] - 1) / 8](x, w, out, stream);
+}
 
 void launch_w8_feature_r16_c64(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
     launch<16>(x, w, out, stream);

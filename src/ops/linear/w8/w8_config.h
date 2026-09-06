@@ -87,8 +87,6 @@ inline constexpr std::int32_t kW8MtpDownFirstSmallT            = 1;
 inline constexpr std::int32_t kW8MtpDownLastSmallT             = 48;
 inline constexpr std::int32_t kW835bMtpProjectionFirstSmallT   = 1;
 inline constexpr std::int32_t kW835bMtpProjectionLastSmallT    = 48;
-inline constexpr std::int32_t kW8N5120K25600FirstSmallT        = 1;
-inline constexpr std::int32_t kW8N5120K25600LastSmallT         = 56;
 inline constexpr std::int32_t kW8DFlash2AttentionFirstSmallT   = 1;
 inline constexpr std::int32_t kW8DFlash2AttentionLastSmallT    = 53;
 
@@ -228,29 +226,6 @@ struct W8LinearSmallTProductionSchedule<W835bMtpProjectionGeometry, ActiveTokens
         ActiveTokens == 4 || (ActiveTokens >= 27 && ActiveTokens <= 40) ? Cache::cg : Cache::ca;
     using Type =
         W8SmallTMmaSchedule<kKWarps, kTileTokens, kMinBlocks, kScaleAccess, kActivationCache>;
-};
-
-template <int ActiveTokens>
-struct W8LinearSmallTProductionSchedule<W8N5120K25600Geometry, ActiveTokens> {
-    static_assert(ActiveTokens >= kW8N5120K25600FirstSmallT);
-    static_assert(ActiveTokens <= kW8N5120K25600LastSmallT);
-
-    static constexpr int kTileTokens = ActiveTokens <= 8    ? 8
-                                       : ActiveTokens <= 16 ? 16
-                                       : ActiveTokens <= 24 ? 24
-                                       : ActiveTokens <= 32 ? 32
-                                       : ActiveTokens <= 40 ? 40
-                                       : ActiveTokens <= 48 ? 48
-                                       : ActiveTokens <= 56 ? 56
-                                                            : 64;
-    // RTX 5090 cold-cache profile retained over T=1..56: eight K-split warps through
-    // T=32, then four. Both regions retain two-block launch bounds; shared scale staging wins from
-    // T=5 onward while direct loads avoid its fixed cost at T=1..4.
-    static constexpr int kKWarps    = ActiveTokens <= 32 ? 8 : 4;
-    static constexpr int kMinBlocks = 2;
-    static constexpr auto kScaleAccess =
-        ActiveTokens > 4 ? W8SmallTMmaScaleAccess::Shared : W8SmallTMmaScaleAccess::Direct;
-    using Type = W8SmallTMmaSchedule<kKWarps, kTileTokens, kMinBlocks, kScaleAccess>;
 };
 
 template <int ActiveTokens>
