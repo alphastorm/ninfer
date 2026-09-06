@@ -29,31 +29,6 @@ __device__ __forceinline__ void finish_value(int row, int col, int width, float 
 
 using Launch = W8Launch;
 
-template <int InputRows, int Tokens>
-void launch_projection(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
-    constexpr int Warps = InputRows == 4096 ? (Tokens <= 40 ? 8 : 4) : (Tokens <= 32 ? 8 : 4);
-    constexpr Cache Activation =
-        InputRows == 4096 && ((Tokens > 24 && Tokens <= 40) || Tokens > 48) ? Cache::cg : Cache::ca;
-    using Geometry = W8LinearGeometry<kRows, InputRows>;
-    using Schedule = W8SmallTMmaSchedule<Warps, (Tokens + 7) / 8 * 8, Warps == 8 ? 2 : 3,
-                                         W8SmallTMmaScaleAccess::Shared, Activation>;
-    W8ContiguousOutput output{static_cast<__nv_bfloat16*>(out.data), kRows};
-    w8_small_t_mma_kernel<Geometry, Tokens, Schedule>
-        <<<kRows / 16, Schedule::kThreads, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const std::uint8_t*>(weight.qdata),
-            static_cast<const std::uint8_t*>(weight.scales), output);
-    CUDA_CHECK(cudaGetLastError());
-}
-
-template <int C, std::size_t... I>
-constexpr auto make_launchers(std::index_sequence<I...>) {
-    return std::array<Launch, sizeof...(I)>{&launch_projection<C, 1 + static_cast<int>(I)>...};
-}
-
-constexpr auto attention = make_launchers<4096>(std::make_index_sequence<64>{});
-constexpr auto mlp       = make_launchers<17408>(std::make_index_sequence<64>{});
-
 template <int InputRows, int TileColumns>
 void tiled_projection(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
     constexpr int Warps =
@@ -86,6 +61,15 @@ void tiled_projection(const Tensor& x, const Weight& weight, Tensor& out, cudaSt
     CUDA_CHECK(cudaGetLastError());
 }
 
+// Live columns stay dynamic; only the eight-column MMA accumulator layout is specialized.
+template <int C, std::size_t... I>
+constexpr auto make_launchers(std::index_sequence<I...>) {
+    return std::array<Launch, sizeof...(I)>{&tiled_projection<C, 8 * (1 + static_cast<int>(I))>...};
+}
+
+constexpr auto attention = make_launchers<4096>(std::make_index_sequence<11>{});
+constexpr auto mlp       = make_launchers<17408>(std::make_index_sequence<11>{});
+
 __global__ void finish_kernel(const __nv_bfloat16* projected, const __nv_bfloat16* base,
                               const __nv_bfloat16* delta, __nv_bfloat16* residual, int width) {
     const int row = blockIdx.x * blockDim.x + threadIdx.x, col = blockIdx.y;
@@ -103,25 +87,11 @@ void materialized(W8DynamicConvAddSchedule schedule, const Tensor& x, const Weig
     const Tensor flat = x.view({x.ne[0], tokens});
     Tensor result     = projected.view({kRows, tokens});
     switch (schedule) {
-    case W8DynamicConvAddSchedule::SmallT: {
+    case W8DynamicConvAddSchedule::TiledMma: {
         const auto& launchers = x.ne[0] == 4096 ? attention : mlp;
-        launchers[tokens - 1](flat, weight, result, stream);
+        launchers[(tokens - 1) / 8](flat, weight, result, stream);
         break;
     }
-    case W8DynamicConvAddSchedule::Tiled32:
-        tiled_projection<4096, 32>(flat, weight, result, stream);
-        break;
-#define TILE(COLUMNS)                                                                              \
-    case W8DynamicConvAddSchedule::Tiled##COLUMNS:                                                 \
-        if (x.ne[0] == 4096)                                                                       \
-            tiled_projection<4096, COLUMNS>(flat, weight, result, stream);                         \
-        else                                                                                       \
-            tiled_projection<17408, COLUMNS>(flat, weight, result, stream);                        \
-        break
-        TILE(72);
-        TILE(80);
-        TILE(88);
-#undef TILE
     case W8DynamicConvAddSchedule::MmaK128:
         launch_w8_mma_r64x32_c64_k128_a1(flat, weight, result, stream);
         break;

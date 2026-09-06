@@ -16,12 +16,7 @@ Plan resolve_plan(int input_rows, int width, int batch) {
         throw std::invalid_argument("linear dynamic grouped conv add: invalid W/B profile");
     const int columns = width * batch;
     using S           = W8DynamicConvAddSchedule;
-    const S schedule  = columns <= 64                         ? S::SmallT
-                        : columns <= 72                       ? S::Tiled72
-                        : columns <= 80                       ? S::Tiled80
-                        : columns <= 88                       ? S::Tiled88
-                        : input_rows == 4096 && columns <= 96 ? S::Tiled32
-                                                              : S::MmaK128;
+    const S schedule = columns <= 88 ? S::TiledMma : S::MmaK128;
     return {schedule, static_cast<std::size_t>(5120) * columns * sizeof(std::uint16_t)};
 }
 } // namespace
@@ -38,16 +33,8 @@ std::size_t w8_linear_dynamic_grouped_conv_add_workspace_capacity_bytes(
 
 const char* w8_linear_dynamic_grouped_conv_add_route_name(int input_rows, int width, int batch) {
     switch (resolve_plan(input_rows, width, batch).schedule) {
-    case W8DynamicConvAddSchedule::SmallT:
-        return "dynamic_grouped_conv_add.w8.small_t.materialized_bf16";
-    case W8DynamicConvAddSchedule::Tiled32:
-        return "dynamic_grouped_conv_add.w8.tiled32.materialized_bf16";
-    case W8DynamicConvAddSchedule::Tiled72:
-        return "dynamic_grouped_conv_add.w8.tiled72.materialized_bf16";
-    case W8DynamicConvAddSchedule::Tiled80:
-        return "dynamic_grouped_conv_add.w8.tiled80.materialized_bf16";
-    case W8DynamicConvAddSchedule::Tiled88:
-        return "dynamic_grouped_conv_add.w8.tiled88.materialized_bf16";
+    case W8DynamicConvAddSchedule::TiledMma:
+        return "dynamic_grouped_conv_add.w8.tiled_mma.materialized_bf16";
     case W8DynamicConvAddSchedule::MmaK128:
         return "dynamic_grouped_conv_add.w8.r64_c64_k128.materialized_bf16";
     }

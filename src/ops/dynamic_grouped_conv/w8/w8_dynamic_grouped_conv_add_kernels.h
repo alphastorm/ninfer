@@ -6,7 +6,7 @@
 
 namespace ninfer::ops::detail {
 
-enum class W8DynamicConvAddSchedule { SmallT, Tiled32, Tiled72, Tiled80, Tiled88, MmaK128 };
+enum class W8DynamicConvAddSchedule { TiledMma, MmaK128 };
 
 void w8_dynamic_grouped_conv_add_materialized_launch(W8DynamicConvAddSchedule schedule,
                                                      const Tensor& x, const Weight& weight,
