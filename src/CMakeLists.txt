@@ -58,15 +58,17 @@ target_link_libraries(ninfer_artifact PUBLIC ninfer_core)
 # producer warpgroup to its consumer warpgroups. Relocatable device code makes ptxas
 # discard that contract, so this self-contained kernel is intentionally compiled in a
 # non-RDC archive and called through a host launcher from ninfer_ops.
-add_library(ninfer_nvfp4_tma STATIC
-  ops/linear/nvfp4/nvfp4_w4a4_tma.cu
-  ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4_tma.cu)
-ninfer_internal_includes(ninfer_nvfp4_tma)
-set_target_properties(ninfer_nvfp4_tma PROPERTIES
-  CUDA_SEPARABLE_COMPILATION OFF
-  CUDA_RESOLVE_DEVICE_SYMBOLS OFF)
-target_compile_options(ninfer_nvfp4_tma PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
-target_link_libraries(ninfer_nvfp4_tma PRIVATE ninfer_core CUDA::cudart CUDA::cuda_driver)
+if(CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
+  add_library(ninfer_nvfp4_tma STATIC
+    ops/linear/nvfp4/nvfp4_w4a4_tma.cu
+    ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4_tma.cu)
+  ninfer_internal_includes(ninfer_nvfp4_tma)
+  set_target_properties(ninfer_nvfp4_tma PROPERTIES
+    CUDA_SEPARABLE_COMPILATION OFF
+    CUDA_RESOLVE_DEVICE_SYMBOLS OFF)
+  target_compile_options(ninfer_nvfp4_tma PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
+  target_link_libraries(ninfer_nvfp4_tma PRIVATE ninfer_core CUDA::cudart CUDA::cuda_driver)
+endif()
 
 # Shared mathematical Ops. The list is intentionally explicit: adding a
 # source is a build-boundary decision, not an accidental recursive-glob side effect.
@@ -275,7 +277,18 @@ add_library(ninfer_ops STATIC
   ops/wrapper/vision_pos_embed.cpp)
 ninfer_internal_includes(ninfer_ops)
 ninfer_cuda_archive(ninfer_ops)
-target_link_libraries(ninfer_ops PUBLIC ninfer_core PRIVATE ninfer_nvfp4_tma)
+# Ada and Ampere have no NVFP4 W4A4 tensor-core path: the W4A4 launchers are replaced by
+# stubs that reject A4 execution, and the A16 NVFP4 decode/small-T kernels stay in the build.
+if(NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
+  get_target_property(ninfer_ops_sources ninfer_ops SOURCES)
+  list(FILTER ninfer_ops_sources EXCLUDE REGEX "nvfp4/.+_w4a4\\.cu$")
+  set_property(TARGET ninfer_ops PROPERTY SOURCES ${ninfer_ops_sources})
+  target_sources(ninfer_ops PRIVATE ops/nvfp4_a16_only_stubs.cpp)
+endif()
+target_link_libraries(ninfer_ops PUBLIC ninfer_core)
+if(TARGET ninfer_nvfp4_tma)
+  target_link_libraries(ninfer_ops PRIVATE ninfer_nvfp4_tma)
+endif()
 
 # Product-independent text and media mechanisms.
 add_library(ninfer_text STATIC

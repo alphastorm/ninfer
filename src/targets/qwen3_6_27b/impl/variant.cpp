@@ -43,7 +43,13 @@ void validate_token_interval(std::int32_t first, std::int32_t last) {
     }
 }
 
+// NVFP4 A4 (W4A4 tensor-core) execution exists only on sm_120a; Ada and Ampere builds run the
+// NVFP4 artifacts through the A16 paths.
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+constexpr ops::LinearPolicy kNvfp4TextPolicy = ops::LinearPolicy::A16Only;
+#else
 constexpr ops::LinearPolicy kNvfp4TextPolicy = ops::LinearPolicy::AllowA4;
+#endif
 constexpr ops::LinearPolicy kFp8TextPolicy   = ops::LinearPolicy::AllowA8;
 
 ops::LinearPolicy text_policy(const Weight& weight) {

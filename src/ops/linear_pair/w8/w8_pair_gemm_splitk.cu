@@ -7,6 +7,7 @@
 
 #include <cuda_bf16.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -89,6 +90,7 @@ constexpr auto make_launchers(std::index_sequence<Offsets...>) {
 constexpr auto kLaunchers =
     make_launchers(std::make_index_sequence<kLastExactT - kFirstExactT + 1>{});
 
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
 template <int TileCols, int KSplits, int NGroups, int MinBlocks>
 void launch_medium(const Tensor& x, const Weight& first_weight, const Weight& second_weight,
                    Tensor& first_out, Tensor& second_out, cudaStream_t stream) {
@@ -105,6 +107,7 @@ void launch_medium(const Tensor& x, const Weight& first_weight, const Weight& se
         <<<(2 * kRows) / 16, KSplits * NGroups * 32, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(x.data), first_codes, first_scales, output, x.ne[1]);
 }
+#endif
 
 } // namespace
 
@@ -128,6 +131,27 @@ void w8_pair_splitk_medium_launch(W8PairScheduleId schedule, const Tensor& x,
         first_out.ne[1] != x.ne[1] || second_out.ne[0] != kRows || second_out.ne[1] != x.ne[1]) {
         throw std::invalid_argument("W8 medium pair requires [1024,2048] and T>=33");
     }
+    // The medium split-K tiles exceed the static shared memory Ada and Ampere allow; those
+    // targets serve every T by slicing into exact-T tiles.
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+    (void)schedule;
+    std::int32_t offset = 0;
+    while (offset < x.ne[1]) {
+        const std::int32_t count = std::min<std::int32_t>(kLastExactT, x.ne[1] - offset);
+        const Tensor x_slice     = x.slice(1, offset, count);
+        Tensor first_slice       = first_out.slice(1, offset, count);
+        Tensor second_slice      = second_out.slice(1, offset, count);
+        if (count == 1) {
+            w8_pair_decode_r16_launch(x_slice, first_weight, second_weight, first_slice,
+                                      second_slice, stream);
+        } else {
+            w8_pair_splitk_exact_t_launch(x_slice, first_weight, second_weight, first_slice,
+                                          second_slice, stream);
+        }
+        offset += count;
+    }
+    return;
+#else
     switch (schedule) {
     case W8PairScheduleId::DualSplitKMediumC48:
         if (x.ne[1] <= 48) {
@@ -229,6 +253,7 @@ void w8_pair_splitk_medium_launch(W8PairScheduleId schedule, const Tensor& x,
         break;
     }
     throw std::invalid_argument("W8 medium pair schedule does not cover this T");
+#endif
 }
 
 } // namespace ninfer::ops::detail
