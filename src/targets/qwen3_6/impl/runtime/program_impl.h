@@ -9298,6 +9298,40 @@ void ProgramImplCore::start_sequence(std::uint32_t lane, SequenceState& sequence
             sequence.rewrite_state.reset();
             sequence.rewrite_checkpoint = {};
 
+            // A sibling fork born from a long anchor must carry that anchor itself. The session
+            // binding follows the newest continuation and a session checkpoint serialises exactly
+            // one continuation, so an anchor left on the parent is absent from the checkpoint:
+            // after a restart the first fork of a restored template re-prefilled the whole
+            // prompt (22.1 s against 1.2 s at 57.9K tokens) and only thereby recreated the
+            // anchor. The image is immutable and now shared, so this reference is not charged to
+            // this sequence - state_exclusive_to_sequence sees the parent's reference too.
+            if (request_plan.reuse == ReusePath::PrivateLongAnchor && private_source_ready &&
+                context_cache.max_long_anchors_per_continuation.value_or(0) != 0) {
+                if (!sequence.long_anchors.empty()) {
+                    throw std::logic_error("retained materialization destination holds anchors");
+                }
+                if (!request_plan.selected_checkpoint) {
+                    throw std::logic_error("long-anchor materialization has no selected anchor");
+                }
+                const SequenceState& anchor_source = continuation_states[transaction.source_index];
+                const runtime::CheckpointRef selected_anchor = *request_plan.selected_checkpoint;
+                const auto inherited =
+                    std::find_if(anchor_source.long_anchors.begin(),
+                                 anchor_source.long_anchors.end(),
+                                 [&](const LongAnchorCheckpoint& candidate) {
+                                     return candidate.frontier == selected_anchor.frontier &&
+                                            candidate.ordinal == selected_anchor.ordinal;
+                                 });
+                if (inherited == anchor_source.long_anchors.end()) {
+                    throw std::logic_error("selected long anchor left the materialization source");
+                }
+                state_store->retain_checkpoint_reference(inherited->state);
+                sequence.long_anchors.push_back(*inherited);
+                validate_long_anchor_ordinals(
+                    sequence.long_anchors,
+                    context_cache.max_long_anchors_per_continuation.value());
+            }
+
             SequenceKVBundle bundle{.text = *transaction.root_text_address};
             transaction.root_text_address.reset();
             if (transaction.root_backend_address) {
