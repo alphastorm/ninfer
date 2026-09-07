@@ -25,10 +25,12 @@
 #include <bit>
 #include <cerrno>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <exception>
 #include <filesystem>
 #include <limits>
@@ -1697,11 +1699,51 @@ private:
 
 namespace {
 
-class CompletedCheckpointRead final : public ContinuationCheckpointReadCompletion {
+// One submitted read batch. The worker thread fills it in submission order; wait() blocks the
+// caller until the reads have landed (or failed) so hashing of the previous batch can overlap
+// the next batch's disk time.
+class PendingCheckpointRead final : public ContinuationCheckpointReadCompletion {
 public:
-    void wait() override {}
+    PendingCheckpointRead(UniqueFd file, std::uint64_t file_bytes,
+                          std::span<const ContinuationCheckpointReadRequest> requests)
+        : file_(std::move(file)), file_bytes_(file_bytes),
+          requests_(requests.begin(), requests.end()) {}
+
+    void wait() override {
+        std::unique_lock lock(mutex_);
+        done_.wait(lock, [&] { return finished_; });
+        if (error_) { std::rethrow_exception(error_); }
+    }
+
+    [[nodiscard]] int fd() const noexcept { return file_.get(); }
+    [[nodiscard]] std::uint64_t file_bytes() const noexcept { return file_bytes_; }
+    [[nodiscard]] std::span<const ContinuationCheckpointReadRequest> requests() const noexcept {
+        return requests_;
+    }
+
+    void finish(std::exception_ptr error) noexcept {
+        {
+            std::lock_guard lock(mutex_);
+            error_    = std::move(error);
+            finished_ = true;
+        }
+        done_.notify_all();
+    }
+
+private:
+    UniqueFd file_;
+    std::uint64_t file_bytes_ = 0;
+    std::vector<ContinuationCheckpointReadRequest> requests_;
+    std::mutex mutex_;
+    std::condition_variable done_;
+    bool finished_ = false;
+    std::exception_ptr error_;
 };
 
+// O_DIRECT reads of published payloads, executed on one worker thread that owns the ring.
+// Each batch is issued kIoQueueDepth chunks at a time, so a 32 MiB request keeps eight 4 MiB
+// reads in flight instead of one; submit() only validates and queues, and the returned
+// completion lets the caller pipeline verification against the reads still on the device.
 class IoUringContinuationReadQueue final : public ContinuationCheckpointReadQueue {
 public:
     explicit IoUringContinuationReadQueue(const std::filesystem::path& root)
@@ -1711,6 +1753,19 @@ public:
         require_local_filesystem(root_fd.get(), environment);
         ring_.initialize();
         alignment_ = verify_storage_capabilities(root_fd.get(), ring_);
+        const std::size_t buffer_bytes = static_cast<std::size_t>(
+            round_up(kDirectChunkBytes + alignment_.offset, alignment_.offset));
+        buffers_ = make_batch_buffers(kIoQueueDepth, alignment_, buffer_bytes);
+        worker_  = std::thread([this] { serve(); });
+    }
+
+    ~IoUringContinuationReadQueue() override {
+        {
+            std::lock_guard lock(mutex_);
+            stopping_ = true;
+        }
+        pending_.notify_all();
+        if (worker_.joinable()) { worker_.join(); }
     }
 
     [[nodiscard]] bool available() const noexcept override { return true; }
@@ -1742,50 +1797,118 @@ public:
             throw CheckpointContractError("io_uring checkpoint payload is not a regular file");
         }
         const std::uint64_t file_bytes = static_cast<std::uint64_t>(status.st_size);
-        const std::size_t allocation_alignment =
-            std::max(alignment_.memory, static_cast<std::size_t>(alignof(std::max_align_t)));
-        const std::size_t buffer_bytes = static_cast<std::size_t>(
-            round_up(kDirectChunkBytes + alignment_.offset, alignment_.offset));
-        AlignedBuffer buffer(allocation_alignment, buffer_bytes);
-
-        std::lock_guard lock(mutex_);
         for (const ContinuationCheckpointReadRequest& request : requests) {
             if (request.destination.empty() || request.file_offset > file_bytes ||
                 request.destination.size() > file_bytes - request.file_offset) {
                 throw CheckpointContractError("io_uring checkpoint read exceeds the payload file");
             }
-            std::uint64_t offset = request.file_offset;
-            std::size_t copied   = 0;
-            while (copied < request.destination.size()) {
-                const std::uint64_t aligned_offset =
-                    offset & ~(static_cast<std::uint64_t>(alignment_.offset) - 1U);
-                const std::size_t prefix = static_cast<std::size_t>(offset - aligned_offset);
-                const std::size_t logical =
-                    std::min(request.destination.size() - copied,
-                             std::min(kDirectChunkBytes, buffer.size() - prefix));
-                const std::size_t required = prefix + logical;
-                const std::size_t submitted =
-                    static_cast<std::size_t>(round_up(required, alignment_.offset));
-                if (submitted > buffer.size() ||
-                    submitted > std::numeric_limits<std::uint32_t>::max()) {
-                    throw CheckpointContractError("io_uring checkpoint read chunk is invalid");
-                }
-                const std::int32_t result = ring_.execute_one(
-                    RingRequest{IORING_OP_READ, file.get(), aligned_offset, buffer.data(),
-                                static_cast<std::uint32_t>(submitted), 0});
-                if (result < 0) { throw_system_error("io_uring checkpoint payload read", -result); }
-                if (static_cast<std::size_t>(result) < required) {
-                    throw CheckpointContractError("io_uring checkpoint payload read was short");
-                }
-                std::memcpy(request.destination.data() + copied, buffer.data() + prefix, logical);
-                copied += logical;
-                offset += logical;
-            }
         }
-        return std::make_unique<CompletedCheckpointRead>();
+
+        auto completion = std::make_shared<PendingCheckpointRead>(std::move(file), file_bytes,
+                                                                  requests);
+        {
+            std::lock_guard lock(mutex_);
+            if (stopping_) {
+                throw CheckpointContractError("io_uring checkpoint read queue is stopping");
+            }
+            queue_.push_back(completion);
+        }
+        pending_.notify_one();
+        // The caller owns a handle to the same completion the worker fills in.
+        struct Handle final : ContinuationCheckpointReadCompletion {
+            explicit Handle(std::shared_ptr<PendingCheckpointRead> shared)
+                : shared_(std::move(shared)) {}
+            void wait() override { shared_->wait(); }
+            std::shared_ptr<PendingCheckpointRead> shared_;
+        };
+        return std::make_unique<Handle>(std::move(completion));
     }
 
 private:
+    struct Chunk {
+        std::size_t request = 0;
+        std::size_t copied  = 0;
+        std::size_t prefix  = 0;
+        std::size_t logical = 0;
+        std::size_t submitted = 0;
+    };
+
+    void serve() noexcept {
+        for (;;) {
+            std::shared_ptr<PendingCheckpointRead> job;
+            {
+                std::unique_lock lock(mutex_);
+                pending_.wait(lock, [&] { return stopping_ || !queue_.empty(); });
+                if (queue_.empty()) { return; }
+                job = std::move(queue_.front());
+                queue_.pop_front();
+            }
+            std::exception_ptr error;
+            try {
+                execute(*job);
+            } catch (...) { error = std::current_exception(); }
+            job->finish(std::move(error));
+        }
+    }
+
+    // Every request is split into aligned chunks of at most kDirectChunkBytes and issued to the
+    // ring kIoQueueDepth at a time; each landed chunk is copied from its bounce buffer into the
+    // caller's destination before the next batch is issued.
+    void execute(PendingCheckpointRead& job) {
+        const std::span<const ContinuationCheckpointReadRequest> requests = job.requests();
+        std::array<RingRequest, kIoQueueDepth> ring_requests{};
+        std::array<Chunk, kIoQueueDepth> chunks{};
+        std::array<std::int32_t, kIoQueueDepth> results{};
+        std::size_t request = 0;
+        std::size_t copied  = 0;
+        while (request < requests.size()) {
+            std::size_t count = 0;
+            while (count < kIoQueueDepth && request < requests.size()) {
+                const ContinuationCheckpointReadRequest& current = requests[request];
+                const std::uint64_t offset                       = current.file_offset + copied;
+                const std::uint64_t aligned_offset =
+                    offset & ~(static_cast<std::uint64_t>(alignment_.offset) - 1U);
+                const std::size_t prefix  = static_cast<std::size_t>(offset - aligned_offset);
+                const std::size_t logical = std::min(
+                    current.destination.size() - copied,
+                    std::min(kDirectChunkBytes, buffers_[count].size() - prefix));
+                const std::size_t required  = prefix + logical;
+                const std::size_t submitted =
+                    static_cast<std::size_t>(round_up(required, alignment_.offset));
+                if (submitted > buffers_[count].size() ||
+                    submitted > std::numeric_limits<std::uint32_t>::max()) {
+                    throw CheckpointContractError("io_uring checkpoint read chunk is invalid");
+                }
+                chunks[count] = Chunk{.request   = request,
+                                      .copied    = copied,
+                                      .prefix    = prefix,
+                                      .logical   = logical,
+                                      .submitted = submitted};
+                ring_requests[count] =
+                    RingRequest{IORING_OP_READ, job.fd(), aligned_offset, buffers_[count].data(),
+                                static_cast<std::uint32_t>(submitted), 0};
+                ++count;
+                copied += logical;
+                if (copied == current.destination.size()) {
+                    ++request;
+                    copied = 0;
+                }
+            }
+            ring_.execute(std::span(ring_requests).first(count), std::span(results).first(count));
+            for (std::size_t index = 0; index < count; ++index) {
+                const Chunk& chunk = chunks[index];
+                if (results[index] < 0) {
+                    throw_system_error("io_uring checkpoint payload read", -results[index]);
+                }
+                if (static_cast<std::size_t>(results[index]) < chunk.prefix + chunk.logical) {
+                    throw CheckpointContractError("io_uring checkpoint payload read was short");
+                }
+                std::memcpy(requests[chunk.request].destination.data() + chunk.copied,
+                            buffers_[index].data() + chunk.prefix, chunk.logical);
+            }
+        }
+    }
+
     [[nodiscard]] bool contains(const std::filesystem::path& path) const {
         auto root      = root_.begin();
         auto candidate = path.begin();
@@ -1798,7 +1921,12 @@ private:
     std::filesystem::path root_;
     NativeIoUring ring_;
     DirectIoAlignment alignment_;
+    std::vector<AlignedBuffer> buffers_;
     std::mutex mutex_;
+    std::condition_variable pending_;
+    std::deque<std::shared_ptr<PendingCheckpointRead>> queue_;
+    bool stopping_ = false;
+    std::thread worker_;
 };
 
 } // namespace

@@ -276,10 +276,12 @@ enum class ManifestOriginState : std::uint8_t { Authentic, Unauthenticated, Forg
                                                        : ManifestOriginState::Forged;
 }
 
-[[nodiscard]] FileDescriptor
-hash_file(const std::filesystem::path& root, const std::string& relative,
-          std::uint64_t expected_bytes,
-          const std::shared_ptr<runtime::ContinuationCheckpointReadQueue>& read_queue) {
+// Payload bytes are hashed once, as the engine streams them (DirectoryCheckpointReader). Load
+// only proves the payload exists as a regular file of the promised size, so file_size() answers
+// and the manifest's byte summary are trustworthy before any read is issued.
+void require_payload_shape(const std::filesystem::path& root, const std::string& relative,
+                           std::uint64_t expected_bytes,
+                           const std::shared_ptr<runtime::ContinuationCheckpointReadQueue>& read_queue) {
     const std::filesystem::path path = root / relative;
     std::error_code error;
     const std::filesystem::file_status status = std::filesystem::symlink_status(path, error);
@@ -297,37 +299,6 @@ hash_file(const std::filesystem::path& root, const std::string& relative,
     if (!read_queue || !read_queue->available()) {
         throw CheckpointUnavailable("checkpoint native read queue is unavailable");
     }
-    crypto::Sha256 hasher;
-    std::vector<std::byte> buffer(
-        static_cast<std::size_t>(std::min<std::uint64_t>(expected_bytes, 4ULL << 20)));
-    std::uint64_t consumed = 0;
-    try {
-        while (consumed < expected_bytes) {
-            const std::size_t requested = static_cast<std::size_t>(
-                std::min<std::uint64_t>(buffer.size(), expected_bytes - consumed));
-            const runtime::ContinuationCheckpointReadRequest request{
-                .file_offset = consumed,
-                .destination = std::span(buffer).first(requested),
-            };
-            std::unique_ptr<runtime::ContinuationCheckpointReadCompletion> completion =
-                read_queue->submit(path, std::span(&request, 1));
-            if (!completion) {
-                throw CheckpointUnavailable("checkpoint native read returned no completion");
-            }
-            completion->wait();
-            hasher.update(std::span<const std::byte>(buffer.data(), requested));
-            consumed += requested;
-        }
-        const std::uintmax_t final_bytes = std::filesystem::file_size(path, error);
-        if (error) { throw CheckpointUnavailable("checkpoint payload size is unavailable"); }
-        if (final_bytes != expected_bytes) {
-            throw CheckpointCorruption("checkpoint payload size changed during verification");
-        }
-    } catch (const CheckpointCorruption&) { throw; } catch (const CheckpointUnavailable&) {
-        throw;
-    } catch (...) { throw CheckpointUnavailable("checkpoint native read failed"); }
-    return {
-        .path = relative, .bytes = expected_bytes, .sha256 = crypto::sha256_hex(hasher.finish())};
 }
 
 [[nodiscard]] std::uint64_t directory_bytes(const std::filesystem::path& path) {
@@ -970,12 +941,20 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
            inventory.used <= options.disk_quota_bytes + tolerated_transient_bytes;
 }
 
-// A checkpoint payload entry whose content hash was verified at load time.
+// A checkpoint payload entry and the digest the manifest promises for it.
 struct VerifiedFile {
     std::uint64_t bytes;
     std::string sha256;
 };
 
+// Serves published payloads to the engine and verifies them as they stream: every payload is
+// consumed exactly once, front to back, and the digest of the bytes handed to the engine must
+// match the manifest before the final chunk is accepted. This is the only hash pass over a
+// restore. Load-time hashing was dropped because it doubled the restore's dominant cost and
+// verified bytes the engine never saw (the backend reopens the pathname on every submit,
+// alphastorm/ninfer#21); hashing the streamed bytes closes that window by construction. A
+// mismatch fails the import closed - the engine publishes nothing until every read succeeds -
+// and marks the generation corrupt so the next load quarantines it.
 class DirectoryCheckpointReader final : public ContinuationCheckpointReader {
 public:
     DirectoryCheckpointReader(std::filesystem::path root,
@@ -1010,27 +989,57 @@ public:
             return false;
         }
         if (!read_queue_->available()) { return false; }
-        // Load-time hashing verified the then-current bytes, but the backend reopens the
-        // pathname on every submit, so a post-verification replacement could otherwise feed
-        // unchecked bytes into the engine import (alphastorm/ninfer#21). Engine restores
-        // consume each payload exactly once, front to back; enforce that coverage and
-        // re-hash the streamed chunks, failing the import closed on any divergence.
         std::lock_guard verify_lock(verify_mutex_);
         ReadVerifyState& state = verify_[found->first];
         if (state.failed || state.verified || offset != state.next_offset) { return false; }
+
+        // The destination belongs to the engine, so no read may still be landing in it when
+        // this call returns: every issued batch is awaited on every exit path.
+        const std::filesystem::path file = root_ / found->first;
+        std::vector<std::unique_ptr<runtime::ContinuationCheckpointReadCompletion>> issued;
+        issued.reserve(2);
+        const auto settle = [&]() noexcept {
+            for (auto& completion : issued) {
+                try {
+                    completion->wait();
+                } catch (...) {}
+            }
+            issued.clear();
+        };
         try {
-            const runtime::ContinuationCheckpointReadRequest request{.file_offset = offset,
-                                                                     .destination = destination};
-            std::unique_ptr<runtime::ContinuationCheckpointReadCompletion> completion =
-                read_queue_->submit(root_ / found->first, std::span(&request, 1));
-            if (!completion) { return false; }
-            completion->wait();
-            state.hasher.update(destination);
-            state.next_offset += destination.size();
+            // One batch hashes while the next is still on the device.
+            const auto issue = [&](std::size_t begin) {
+                const std::size_t count = std::min(kReadBatchBytes, destination.size() - begin);
+                const runtime::ContinuationCheckpointReadRequest request{
+                    .file_offset = offset + begin,
+                    .destination = destination.subspan(begin, count),
+                };
+                std::unique_ptr<runtime::ContinuationCheckpointReadCompletion> completion =
+                    read_queue_->submit(file, std::span(&request, 1));
+                if (!completion) {
+                    throw CheckpointUnavailable("checkpoint native read returned no completion");
+                }
+                issued.push_back(std::move(completion));
+                return count;
+            };
+            std::size_t landed_begin = 0;
+            std::size_t landed_count = issue(0);
+            for (;;) {
+                const std::size_t next_begin = landed_begin + landed_count;
+                std::size_t next_count       = 0;
+                if (next_begin < destination.size()) { next_count = issue(next_begin); }
+                issued.front()->wait();
+                issued.erase(issued.begin());
+                state.hasher.update(destination.subspan(landed_begin, landed_count));
+                state.next_offset += landed_count;
+                if (next_count == 0) { break; }
+                landed_begin = next_begin;
+                landed_count = next_count;
+            }
             if (state.next_offset == found->second.bytes) {
                 if (crypto::sha256_hex(state.hasher.finish()) != found->second.sha256) {
                     state.failed = true;
-                    // Divergence from the load-time digest is corruption evidence, not a
+                    // Divergence from the manifest digest is corruption evidence, not a
                     // transient read error: surface it so the next load or status call
                     // quarantines this generation instead of advertising it available.
                     owner_->mark_corrupt(active_key_);
@@ -1040,12 +1049,17 @@ public:
             }
             return true;
         } catch (...) {
+            settle();
             state.failed = true;
             return false;
         }
     }
 
 private:
+    // Sized so the io_uring backend keeps its whole queue depth busy per batch while the
+    // previous batch is being hashed.
+    static constexpr std::size_t kReadBatchBytes = 32ULL << 20;
+
     struct ReadVerifyState {
         crypto::Sha256 hasher;
         std::uint64_t next_offset = 0;
@@ -1469,11 +1483,7 @@ SessionCheckpointStore::load(std::string_view session_sha256,
                      .second) {
                 throw CheckpointCorruption("checkpoint manifest file descriptor is corrupt");
             }
-            const FileDescriptor actual =
-                hash_file(root, expected->path, expected->bytes, options_.read_queue);
-            if (actual.sha256 != expected->sha256) {
-                throw CheckpointCorruption("checkpoint payload checksum mismatch");
-            }
+            require_payload_shape(root, expected->path, expected->bytes, options_.read_queue);
             if (expected->bytes > std::numeric_limits<std::uint64_t>::max() - verified_bytes) {
                 throw CheckpointCorruption("checkpoint verified byte count overflowed");
             }
@@ -1496,12 +1506,12 @@ SessionCheckpointStore::load(std::string_view session_sha256,
         }
         const std::vector<std::byte> response_bytes =
             read_bounded(root / "responses.cbor", options_.staging_bytes);
-        // The verification pass above hashed the then-current file; this reopen must match the
-        // verified digest or the import is fed different bytes (alphastorm/ninfer#21).
+        // The response snapshot is the one payload consumed here rather than streamed by the
+        // engine, so it is verified against its manifest digest on these exact bytes.
         if (response_bytes.size() != response_file->second.bytes ||
             crypto::sha256_hex(crypto::sha256(std::span<const std::byte>(response_bytes))) !=
                 response_file->second.sha256) {
-            throw CheckpointCorruption("checkpoint response payload changed after verification");
+            throw CheckpointCorruption("checkpoint response payload checksum mismatch");
         }
         std::optional<ResponseStoreSnapshot> responses =
             decode_response_store_snapshot(response_bytes, options_.staging_bytes);

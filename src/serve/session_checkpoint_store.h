@@ -99,9 +99,12 @@ public:
     save(const ResponseStoreSnapshot& responses, const nlohmann::json& runtime_fingerprint,
          const EngineExporter& exporter, runtime::SessionCheckpointSkipDetail* skip = nullptr);
 
-    // Verifies identity, manifest schema, every size/checksum, and the requested response id before
-    // exposing either ResponseStore state or an Engine reader. Verified corruption is quarantined;
-    // transient filesystem failures preserve current for a later retry.
+    // Verifies identity, manifest schema, origin, every payload's presence and size, the response
+    // snapshot's checksum, and the requested response id before exposing either ResponseStore
+    // state or an Engine reader. Engine payload checksums are verified by the reader as the
+    // engine streams them, exactly once; a mismatch fails the import closed and quarantines the
+    // generation on the next load. Verified corruption is quarantined; transient filesystem
+    // failures preserve current for a later retry.
     [[nodiscard]] SessionCheckpointLoadResult
     load(std::string_view session_sha256, const nlohmann::json& runtime_fingerprint,
          std::optional<std::string_view> required_response_id = std::nullopt);

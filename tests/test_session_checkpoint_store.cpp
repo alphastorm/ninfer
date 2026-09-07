@@ -401,15 +401,16 @@ int test_transaction_restart_compatibility_and_corruption() {
                           loaded.checkpoint->generation == saved->generation,
                       "standalone restart ignores interrupted staging and restores prior current");
     if (!loaded.checkpoint) { return failures; }
+    // Load issues no payload reads: every engine byte is hashed once, as the engine streams it.
     const std::size_t verification_submits = read_queue->submit_count;
     const std::size_t verification_waits   = read_queue->wait_count;
     std::vector<std::byte> restored(payload.size());
     failures += check(
         loaded.checkpoint->engine->read_file("engine/state-0.bin", 0, restored) &&
             restored == payload && loaded.checkpoint->expected_engine.restored_tokens == 97500 &&
-            verification_submits >= 3 && read_queue->submit_count == verification_submits + 1 &&
+            verification_submits == 0 && read_queue->submit_count == 1 &&
             read_queue->wait_count == verification_waits + 1,
-        "verified engine reader restores exact payload and token summary");
+        "engine reader restores exact payload and token summary with one streamed read");
     ResponseStore response_store(8, 1ULL << 20);
     failures +=
         check(response_store.restore_session(loaded.checkpoint->responses, [] { return true; }),
@@ -509,11 +510,23 @@ int test_transaction_restart_compatibility_and_corruption() {
     corrupt.seekp(0);
     corrupt.write(&byte, 1);
     corrupt.close();
-    const SessionCheckpointLoadResult corrupted =
+    // A flipped payload byte is caught by the streamed verification, not at load: the reader
+    // refuses the payload, the engine import fails closed, and the next load quarantines.
+    SessionCheckpointLoadResult corrupted =
         restarted.load(responses.client_session_sha256, fingerprint());
-    failures +=
-        check(corrupted.state == SessionCheckpointLoadState::Corrupt && !corrupted.checkpoint,
-              "checksum corruption cannot enter ResponseStore or Engine");
+    failures += check(corrupted.state == SessionCheckpointLoadState::Available &&
+                          corrupted.checkpoint.has_value(),
+                      "a size-preserving flip is not visible before the payload is streamed");
+    if (!corrupted.checkpoint) { return failures; }
+    std::vector<std::byte> refused(payload.size());
+    failures += check(!corrupted.checkpoint->engine->read_file("engine/state-0.bin", 0, refused),
+                      "checksum corruption is refused as the engine streams the payload");
+    corrupted.checkpoint.reset();
+    const SessionCheckpointLoadResult quarantined =
+        restarted.load(responses.client_session_sha256, fingerprint());
+    failures += check(quarantined.state == SessionCheckpointLoadState::Corrupt &&
+                          !quarantined.checkpoint,
+                      "checksum corruption cannot enter ResponseStore or Engine");
     failures += check(!std::filesystem::exists(session / "current") &&
                           !std::filesystem::exists(generation_root) &&
                           std::filesystem::exists(session / "generations" / saved->generation),
@@ -964,9 +977,9 @@ int test_post_verification_replacement_fails_closed() {
     failures += check(saved.has_value(), "tamper fixture publishes");
     if (!saved) { return failures; }
 
-    // alphastorm/ninfer#21: load() hashes the then-current bytes, but every backend read
-    // reopens the pathname. A same-size replacement inside the checkpoint root after
-    // verification must fail the streamed re-hash instead of feeding the engine.
+    // alphastorm/ninfer#21: every backend read reopens the pathname, so the bytes the engine
+    // receives are the bytes that get hashed. A same-size replacement inside the checkpoint root
+    // after load must fail that streamed hash instead of feeding the engine.
     SessionCheckpointLoadResult loaded = store.load(
         responses.client_session_sha256, fingerprint(), responses.latest_response_id);
     failures += check(loaded.state == SessionCheckpointLoadState::Available &&
