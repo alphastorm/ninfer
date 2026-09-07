@@ -586,6 +586,14 @@ std::optional<AdmissionCandidate> ProgramImplCore::inspect_lane(
                     continue;
                 }
                 unique.push_back(state);
+                // Only an image this lineage owns outright becomes part of the active
+                // entitlement. An anchor shared with another continuation - a sibling that
+                // inherited it, or the parent it was inherited from - is already resident and
+                // charged there, and resident_resources() likewise counts a state only when it
+                // is exclusive to the sequence. Charging it twice makes the materialized
+                // sequence disagree with its entitlement and fails the request. The
+                // rewrite-checkpoint branch below has always made this distinction.
+                if (!state_exclusive_to_sequence(*source, state)) { continue; }
                 const StateReplicaResidency residency = state_store->residency(state);
                 if (residency == StateReplicaResidency::DeviceOnly ||
                     residency == StateReplicaResidency::Both) {
