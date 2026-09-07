@@ -56,6 +56,37 @@ struct CheckpointObservation {
     RetentionObservation observation;
 };
 
+// Chooses which retained long anchor a full continuation gives up for a new capture. The victim
+// is the anchor whose loss costs the least re-prefill: the one closest above its lower neighbour
+// (root for the earliest), so the surviving set keeps the widest spacing of recovery points.
+// Evicting the lowest frontier instead threw away the lineage's earliest anchor - the template
+// boundary every sibling fork reuses - on the first continuing turn, because each request
+// captures two anchors into a set of two. Ties evict the newer anchor so the earliest survives.
+// Deterministic and free of hit history, so it holds right after a restart.
+[[nodiscard]] inline CheckpointRef
+select_long_anchor_replacement(std::span<const CheckpointRef> candidates) {
+    if (candidates.empty()) { throw std::invalid_argument("anchor replacement has no candidates"); }
+    std::vector<CheckpointRef> ordered(candidates.begin(), candidates.end());
+    std::sort(ordered.begin(), ordered.end(), [](CheckpointRef lhs, CheckpointRef rhs) {
+        return std::tuple{lhs.frontier, lhs.ordinal} < std::tuple{rhs.frontier, rhs.ordinal};
+    });
+    std::size_t victim      = 0;
+    std::uint32_t least_gap = std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t previous  = 0;
+    for (std::size_t index = 0; index < ordered.size(); ++index) {
+        if (ordered[index].kind != CheckpointKind::LongAnchor) {
+            throw std::invalid_argument("anchor replacement candidate is not a long anchor");
+        }
+        const std::uint32_t gap = ordered[index].frontier - previous;
+        if (gap <= least_gap) {
+            least_gap = gap;
+            victim    = index;
+        }
+        previous = ordered[index].frontier;
+    }
+    return ordered[victim];
+}
+
 // ResourceManager owns logical policy only.  Every physical feasibility decision and mutation is
 // represented by an opaque Package::ResourcePlan sealed against Program::resource_revision().
 template <class Package>
@@ -502,12 +533,7 @@ public:
         std::optional<CheckpointRef> private_replacement;
         if (!assessment.private_replacement_candidates.empty()) {
             private_replacement =
-                *std::min_element(assessment.private_replacement_candidates.begin(),
-                                  assessment.private_replacement_candidates.end(),
-                                  [](CheckpointRef lhs, CheckpointRef rhs) {
-                                      return std::tuple{lhs.kind, lhs.frontier, lhs.ordinal} <
-                                             std::tuple{rhs.kind, rhs.frontier, rhs.ordinal};
-                                  });
+                select_long_anchor_replacement(assessment.private_replacement_candidates);
         }
 
         std::uint32_t publication_slot        = kInvalidCatalogSlot;

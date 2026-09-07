@@ -748,12 +748,14 @@ public:
 
     [[nodiscard]] ContextTransactionReserveStatus
     reserve_active_capture(FakeCaptureOffer&&, const FakeSharedPrefixHandle*,
-                           const FakeSharedPrefixHandle*, std::optional<CheckpointRef>,
+                           const FakeSharedPrefixHandle*,
+                           std::optional<CheckpointRef> private_replacement,
                            CancellationFlagView cancellation) {
         if (cancellation.requested() || abort_capture_start) {
             return ContextTransactionReserveStatus::Aborted;
         }
-        transaction_kind_ = TransactionKind::Capture;
+        last_private_replacement = private_replacement;
+        transaction_kind_        = TransactionKind::Capture;
         advance_revision();
         return ContextTransactionReserveStatus::Reserved;
     }
@@ -844,6 +846,7 @@ public:
     ContextTransactionStatus capture_status = ContextTransactionStatus::Published;
     FakeCaptureAssessment capture_assessment;
     FakeContinuationSummary capture_summary;
+    std::optional<CheckpointRef> last_private_replacement;
     FakePhysicalUsage usage;
 
     std::uint64_t admission_inspections         = 0;
@@ -1907,6 +1910,61 @@ void test_in_progress_adoption_and_private_capture() {
     (void)finish_active(manager, program, active, 24);
 }
 
+void test_full_anchor_set_replaces_the_least_valuable_anchor() {
+    const auto anchor = [](std::uint32_t frontier, std::uint32_t ordinal) {
+        return CheckpointRef{
+            .kind = CheckpointKind::LongAnchor, .frontier = frontier, .ordinal = ordinal};
+    };
+    // A fork consumed the template lineage: the template boundary (57898) and the fork's own
+    // pre-generation frontier (57916) fill the set. The continuing turn's next capture must
+    // give up the 18-token anchor, never the template boundary every sibling fork reuses.
+    {
+        const std::array<CheckpointRef, 2> candidates{anchor(57916, 1), anchor(57898, 2)};
+        const CheckpointRef victim =
+            ninfer::runtime::select_long_anchor_replacement(candidates);
+        require(victim.frontier == 57916 && victim.ordinal == 1,
+                "continuing turn evicted the template anchor");
+    }
+    // Evenly spaced anchors: the newer one goes so the earliest recovery point survives.
+    {
+        const std::array<CheckpointRef, 2> candidates{anchor(1000, 1), anchor(2000, 2)};
+        require(ninfer::runtime::select_long_anchor_replacement(candidates).frontier == 2000,
+                "tie did not evict the newer anchor");
+    }
+    // A tiny earliest anchor is worth less than the gap between two later ones.
+    {
+        const std::array<CheckpointRef, 3> candidates{anchor(64, 1), anchor(8000, 2),
+                                                      anchor(20000, 3)};
+        require(ninfer::runtime::select_long_anchor_replacement(candidates).frontier == 64,
+                "worthless earliest anchor survived");
+    }
+    // The manager passes the policy's choice through to the Program unchanged.
+    FakeManager manager = make_manager(1, 2);
+    FakeProgram program;
+    const ActiveRequest active = start_active(manager, program, 12, make_base(12), 1);
+    program.capture_assessment = FakeCaptureAssessment{
+        .shortlist_key                  = FakeShortlistKey{.digest = 12, .frontier = 2040},
+        .private_replacement_candidates = {anchor(2028, 1), anchor(2010, 2)},
+        .publishes_private              = true,
+    };
+    program.capture_summary.endpoint = endpoint(12, 2040);
+    program.capture_summary.long_anchors.push_back(long_anchor(12, 2010, 2));
+    program.capture_summary.long_anchors.push_back(long_anchor(12, 2040, 1));
+    const auto reserved =
+        manager.reserve_active_capture(program, active.lane, FakeCaptureOffer{.id = 1}, true, {});
+    require(reserved == FakeManager::ActiveCaptureReserveResult::Reserved,
+            "replacing capture was not reserved");
+    require(program.last_private_replacement &&
+                program.last_private_replacement->frontier == 2028 &&
+                program.last_private_replacement->ordinal == 1,
+            "manager did not hand the Program the least valuable anchor");
+    auto progress = manager.progress_context_transaction(program, {});
+    auto outcome  = std::get<FakeManager::ActiveCaptureOutcome>(std::move(progress));
+    require(outcome.status == ContextTransactionStatus::Published,
+            "replacing capture was not published");
+    (void)finish_active(manager, program, active, 2040);
+}
+
 void test_terminal_fallback_releases_failed_retention() {
     FakeManager manager = make_manager(1, 1);
     FakeProgram program;
@@ -2245,6 +2303,7 @@ int main() {
     run_test("combined target exact repricing",
              test_combined_target_reprices_cancelled_pressure_copy);
     run_test("in-progress and capture", test_in_progress_adoption_and_private_capture);
+    run_test("full anchor set replacement", test_full_anchor_set_replaces_the_least_valuable_anchor);
     run_test("terminal fallback", test_terminal_fallback_releases_failed_retention);
     run_test("terminal waits for resource transaction",
              test_terminal_settlement_waits_for_open_resource_transaction);
