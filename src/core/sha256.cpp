@@ -1,5 +1,7 @@
 #include "core/sha256.h"
 
+#include "core/sha256_x86.h"
+
 #include <algorithm>
 #include <bit>
 #include <limits>
@@ -104,9 +106,16 @@ void Sha256::update(std::span<const std::byte> input) {
             tail_bytes_ = 0;
         }
     }
-    while (input.size() >= tail_.size()) {
-        process_block(input.data());
-        input = input.subspan(tail_.size());
+    const std::size_t blocks = input.size() / tail_.size();
+    if (blocks != 0) {
+        if (x86::sha256_available()) {
+            x86::sha256_process_blocks(state_, input.data(), blocks);
+        } else {
+            for (std::size_t block = 0; block < blocks; ++block) {
+                process_block(input.data() + block * tail_.size());
+            }
+        }
+        input = input.subspan(blocks * tail_.size());
     }
     std::copy(input.begin(), input.end(), tail_.begin());
     tail_bytes_ = input.size();

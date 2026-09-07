@@ -14,7 +14,8 @@ function(ninfer_cuda_archive target)
 endfunction()
 
 add_library(ninfer_sha256 STATIC
-  core/sha256.cpp)
+  core/sha256.cpp
+  core/sha256_x86.cpp)
 ninfer_internal_includes(ninfer_sha256)
 
 # Device/tensor/layout/graph primitives and the model-independent request runtime.
