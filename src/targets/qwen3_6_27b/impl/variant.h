@@ -1,6 +1,7 @@
 #pragma once
 
 #include "targets/qwen3_6_27b/impl/config.h"
+#include "ninfer/ops/sparse_moe.h"
 #include "targets/qwen3_6_27b/impl/load/bindings.h"
 #include <ninfer/targets/qwen3_6/runtime.h>
 
@@ -27,6 +28,16 @@ struct Variant {
     using MtpPostMixerWeights            = detail::DensePostMixerPayload;
     using VisionWeights                  = qwen3_6::VisionWeights;
     using GraphExecutionProfile          = detail::GraphExecutionProfile;
+
+    // The dense post-mixer streams no MoE weights, so this target names no prefetch span.
+    static ::ninfer::ops::SparseMoeHints
+    projection_prefetch_hints(const FullAttentionProjectionWeights&) {
+        return {};
+    }
+
+    static ::ninfer::ops::SparseMoeHints projection_prefetch_hints(const GdnProjectionWeights&) {
+        return {};
+    }
 
     static constexpr float attention_scale                     = kAttentionScale;
     static constexpr float gdn_scale                           = kGdnScale;
@@ -78,8 +89,8 @@ struct Variant {
                                             Tensor& hidden, Tensor& g, Tensor& beta,
                                             WorkspaceArena& workspace, cudaStream_t stream);
     static void post_mixer(const Tensor& hidden, const PostMixerWeights& weights, Tensor& residual,
-                           qwen3_6::TextPhase phase, WorkspaceArena& workspace,
-                           cudaStream_t stream);
+                           qwen3_6::TextPhase phase, const ::ninfer::ops::SparseMoeHints& hints,
+                           WorkspaceArena& workspace, cudaStream_t stream);
     static void mtp_post_mixer(const Tensor& hidden, const MtpPostMixerWeights& weights,
                                Tensor& residual, WorkspaceArena& workspace, cudaStream_t stream);
     [[nodiscard]] static std::size_t
