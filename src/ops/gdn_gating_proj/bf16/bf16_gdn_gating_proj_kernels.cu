@@ -384,7 +384,7 @@ void bf16_gdn_gating_proj_small_t_split10_launch(const Tensor& x, const Weight& 
 
 namespace {
 
-template <class Geometry, int SplitK, int Warps>
+template <class Geometry, int SplitK, int Warps = kBf16GdnWarps>
 std::int32_t cooperative_resident_ctas() {
     constexpr int kSmemBytes = kBf16GdnSmemBytes<Geometry::kBlockN>;
     int device               = 0;
