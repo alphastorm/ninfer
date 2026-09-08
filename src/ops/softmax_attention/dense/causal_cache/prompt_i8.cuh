@@ -17,9 +17,21 @@
 
 namespace ninfer::ops {
 
-inline constexpr int kCausalPromptI8Warps      = 16;
+// CTA shape per architecture. On sm_120a sixteen warps cover a 64-row query tile at 120
+// registers without spilling. The sm_89/sm_86 allocator needs about 180 registers for the same
+// loops, which a 512-thread CTA cannot have (64K per SM), so those builds halve the query tile:
+// eight warps per 32 rows keep the same four 64-dimension PV slices per row tile and can take
+// up to 255 registers each. Grid and shared-memory sizes derive from these constants.
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+inline constexpr int kCausalPromptI8Warps        = 8;
+inline constexpr int kCausalPromptI8Br           = 32;
+inline constexpr int kCausalPromptI8MaxRegisters = 255;
+#else
+inline constexpr int kCausalPromptI8Warps        = 16;
+inline constexpr int kCausalPromptI8Br           = 64;
+inline constexpr int kCausalPromptI8MaxRegisters = 120;
+#endif
 inline constexpr int kCausalPromptI8Threads    = kCausalPromptI8Warps * 32;
-inline constexpr int kCausalPromptI8Br         = 64;
 inline constexpr int kCausalPromptI8Bc         = 64;
 inline constexpr int kCausalPromptI8Groups     = kCausalPromptHeadDim / kKVCacheInt8Group;
 inline constexpr int kCausalPromptI8DB16       = kCausalPromptHeadDim / 2;
@@ -46,7 +58,7 @@ inline constexpr int kCausalPromptI8SmemBytes =
 
 static_assert(kCausalPromptI8Groups == 4);
 static_assert(kCausalPromptI8DConsumers == 4);
-static_assert(kCausalPromptI8SmemBytes == 92672);
+static_assert(kCausalPromptI8SmemBytes == (kCausalPromptI8Br == 64 ? 92672 : 79616));
 
 __device__ __forceinline__ void causal_prompt_i8_store_swz(std::int8_t* tile, int row, int d,
                                                            std::int8_t code) {
@@ -79,7 +91,7 @@ __device__ __forceinline__ int4 causal_prompt_i8_dequant_f16x8(const std::int8_t
 }
 
 template <typename Geometry, typename Metadata>
-__global__ __maxnreg__(120) void causal_attention_prompt_i8_kernel(
+__global__ __maxnreg__(kCausalPromptI8MaxRegisters) void causal_attention_prompt_i8_kernel(
     const __nv_bfloat16* __restrict__ q, const std::int8_t* __restrict__ cache_k,
     const std::int8_t* __restrict__ cache_v, const __half* __restrict__ cache_k_scale,
     const __half* __restrict__ cache_v_scale, Metadata metadata,
