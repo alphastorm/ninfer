@@ -2,6 +2,7 @@
 
 #include "core/arena.h"
 #include "ninfer/ops/linear_swiglu.h"
+#include "ops/excluded_paths.h"
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
 
@@ -300,6 +301,11 @@ int run_profile(std::string_view label, const Profile& profile,
             ops::linear_swiglu(x, weight, destination, policy, workspace, nullptr);
             test::cuda_check(cudaDeviceSynchronize(), "synchronize LinearSwiGLU");
         } catch (const std::exception& error) {
+            if (test::build_excludes(error.what())) {
+                std::cout << case_label << ": excluded on this build (" << error.what() << ")\n";
+                ++test::excluded_arm_count();
+                continue;
+            }
             std::cerr << case_label << ": unexpected exception: " << error.what() << '\n';
             ++failures;
             continue;

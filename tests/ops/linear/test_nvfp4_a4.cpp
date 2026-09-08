@@ -53,8 +53,9 @@ int main() {
         return 77;
     }
     try {
-        const int failures = run_nvfp4_a4() + ninfer::test::require_excluded(
-                                 "NVFP4_A4 Linear", ninfer::test::kBuildRunsNvfp4A4);
+        int failures = run_nvfp4_a4();
+        failures += ninfer::test::require_excluded("NVFP4_A4 Linear",
+                                                   ninfer::test::kBuildRunsNvfp4A4);
         std::cout << (failures == 0 ? "OK" : "FAIL") << " NVFP4_A4 Linear\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {

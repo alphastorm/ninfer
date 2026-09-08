@@ -2015,6 +2015,12 @@ int test_media_preparation_cancellation() {
 } // namespace
 
 int main() {
+    const char* tokenizer_directory = std::getenv("NINFER_QWEN3_6_TOKENIZER_DIR");
+    if (tokenizer_directory == nullptr || tokenizer_directory[0] == '\0') {
+        std::cout << "SKIP: NINFER_QWEN3_6_TOKENIZER_DIR is not set; the official tokenizer files "
+                     "are external test data (tests/README.md)\n";
+        return 77;
+    }
     const FrontendResources owned = resources();
     const Frontend frontend       = FrontendFactory::create_component(owned);
     int failures                  = 0;
