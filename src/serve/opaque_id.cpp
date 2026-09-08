@@ -1,13 +1,63 @@
 #include "serve/opaque_id.h"
 
-#include <openssl/rand.h>
-
 #include <array>
+#include <cerrno>
+#include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <bcrypt.h>
+#elif defined(__linux__)
+#include <sys/random.h>
+#elif defined(__APPLE__)
+#include <cstdlib>
+#else
+#include <random>
+#endif
+
 namespace ninfer::serve {
+namespace {
+
+int system_entropy(unsigned char* output, int length) {
+    if (output == nullptr || length < 0) { return 0; }
+#if defined(_WIN32)
+    const NTSTATUS status = BCryptGenRandom(nullptr, output, static_cast<ULONG>(length),
+                                            BCRYPT_USE_SYSTEM_PREFERRED_RNG);
+    return status >= 0 ? 1 : 0;
+#elif defined(__linux__)
+    std::size_t offset = 0;
+    while (offset < static_cast<std::size_t>(length)) {
+        const ssize_t read = getrandom(output + offset, static_cast<std::size_t>(length) - offset, 0);
+        if (read > 0) {
+            offset += static_cast<std::size_t>(read);
+            continue;
+        }
+        if (read < 0 && errno == EINTR) { continue; }
+        return 0;
+    }
+    return 1;
+#elif defined(__APPLE__)
+    arc4random_buf(output, static_cast<std::size_t>(length));
+    return 1;
+#else
+    try {
+        std::random_device source;
+        for (int index = 0; index < length; ++index) {
+            output[index] = static_cast<unsigned char>(source());
+        }
+        return 1;
+    } catch (...) {
+        return 0;
+    }
+#endif
+}
+
+} // namespace
 
 std::string new_opaque_id_with_entropy(std::string_view prefix, OpaqueIdEntropySource source) {
     if (prefix.empty()) {
@@ -34,7 +84,7 @@ std::string new_opaque_id_with_entropy(std::string_view prefix, OpaqueIdEntropyS
 }
 
 std::string new_opaque_id(std::string_view prefix) {
-    return new_opaque_id_with_entropy(prefix, RAND_bytes);
+    return new_opaque_id_with_entropy(prefix, system_entropy);
 }
 
 } // namespace ninfer::serve

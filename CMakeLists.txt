@@ -90,6 +90,33 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 20)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)        # clangd / IDE tooling
+
+if(MSVC)
+  add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+  add_compile_options(
+    # MSVC host C/C++
+    $<$<COMPILE_LANGUAGE:C,CXX>:/Zc:preprocessor>
+    $<$<COMPILE_LANGUAGE:C,CXX>:/EHsc>
+    $<$<COMPILE_LANGUAGE:C,CXX>:/O2>
+    $<$<COMPILE_LANGUAGE:C,CXX>:/Ob3>
+    $<$<COMPILE_LANGUAGE:C,CXX>:/Oi>
+    $<$<COMPILE_LANGUAGE:C,CXX>:/Ot>
+    $<$<COMPILE_LANGUAGE:C,CXX>:/arch:AVX2>
+    # NVCC host pass-through
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/EHsc>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/O2>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Ob3>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Oi>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Ot>
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/arch:AVX2>
+    # Device optimisation; IEEE semantics untouched (no -ftz/-prec-div/-prec-sqrt) so goldens
+    # stay comparable across lanes.
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xptxas=-O3>)
+  # Prefix ensures CMake passes this strictly to link.exe via -Xlinker for CUDA targets.
+  add_link_options("LINKER:/NODEFAULTLIB:LIBCMT")
+endif()
+
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
 endif()
@@ -121,14 +148,32 @@ if(NINFER_BUILD_APPS OR BUILD_TESTING)
 endif()
 
 find_package(CUDAToolkit REQUIRED)
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
-  libavformat>=60 libavcodec>=60 libavutil>=58 libswscale>=7)
-if(NINFER_BUILD_MEDIA_ACQUIRE)
-  pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl>=7.85)
+if(WIN32)
+  set(NINFER_CUDART_TARGET CUDA::cudart_static)
+else()
+  set(NINFER_CUDART_TARGET CUDA::cudart)
 endif()
-if(NINFER_BUILD_SERVE)
-  find_package(OpenSSL 3.0 REQUIRED COMPONENTS Crypto)
+if(WIN32 OR DEFINED VCPKG_TARGET_TRIPLET)
+  # vcpkg manifest (vcpkg.json): ffmpeg, curl, pkgconf.
+  find_package(FFMPEG REQUIRED)
+  add_library(ninfer_ffmpeg_dependencies INTERFACE)
+  target_include_directories(ninfer_ffmpeg_dependencies INTERFACE ${FFMPEG_INCLUDE_DIRS})
+  target_link_directories(ninfer_ffmpeg_dependencies INTERFACE ${FFMPEG_LIBRARY_DIRS})
+  target_link_libraries(ninfer_ffmpeg_dependencies INTERFACE ${FFMPEG_LIBRARIES})
+  set(NINFER_FFMPEG_TARGET ninfer_ffmpeg_dependencies)
+  if(NINFER_BUILD_MEDIA_ACQUIRE)
+    find_package(CURL 7.85 REQUIRED)
+    set(NINFER_CURL_TARGET CURL::libcurl)
+  endif()
+else()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
+    libavformat>=60 libavcodec>=60 libavutil>=58 libswscale>=7)
+  set(NINFER_FFMPEG_TARGET PkgConfig::FFMPEG)
+  if(NINFER_BUILD_MEDIA_ACQUIRE)
+    pkg_check_modules(LIBCURL REQUIRED IMPORTED_TARGET libcurl>=7.85)
+    set(NINFER_CURL_TARGET PkgConfig::LIBCURL)
+  endif()
 endif()
 find_package(Threads REQUIRED)
 

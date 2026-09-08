@@ -299,14 +299,17 @@ ninfer_internal_includes(ninfer_text)
 add_library(ninfer_media_decode STATIC
   media/decode/decode.cpp)
 ninfer_internal_includes(ninfer_media_decode)
-target_link_libraries(ninfer_media_decode PRIVATE PkgConfig::FFMPEG)
+target_link_libraries(ninfer_media_decode PRIVATE ${NINFER_FFMPEG_TARGET})
 
 if(NINFER_BUILD_MEDIA_ACQUIRE)
   # Product-only path/data/HTTP acquisition. No target package links this library.
   add_library(ninfer_media_acquire STATIC
     product/media_acquire/acquire.cpp)
   ninfer_internal_includes(ninfer_media_acquire)
-  target_link_libraries(ninfer_media_acquire PRIVATE PkgConfig::LIBCURL)
+  target_link_libraries(ninfer_media_acquire PRIVATE ${NINFER_CURL_TARGET})
+  if(WIN32)
+    target_link_libraries(ninfer_media_acquire PRIVATE ws2_32)
+  endif()
 endif()
 
 if(NINFER_BUILD_PROMPT_INPUT)
@@ -400,5 +403,9 @@ if(NINFER_BUILD_SERVE)
     ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
   target_link_libraries(ninfer_serve
     PUBLIC ninfer_engine Threads::Threads
-    PRIVATE ninfer_media_acquire CUDA::cudart OpenSSL::Crypto)
+    PRIVATE ninfer_media_acquire CUDA::cudart)
+  if(WIN32)
+    # BCryptGenRandom (opaque identifiers) and winsock for cpp-httplib.
+    target_link_libraries(ninfer_serve PRIVATE bcrypt ws2_32)
+  endif()
 endif()
