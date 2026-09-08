@@ -2,6 +2,7 @@
 
 #include "core/nvtx.h"
 #include "core/transfer_work.h"
+#include "core/uint128.h"
 #include "ninfer/types.h"
 
 #include <atomic>
@@ -237,15 +238,13 @@ struct PrefillWork {
     result.tokens                       = suffix_tokens;
     result.vision_items                 = vision_items;
     result.vision_patches               = vision_patches;
-    const unsigned __int128 suffix      = suffix_tokens;
-    const unsigned __int128 linear      = static_cast<unsigned __int128>(prefix_tokens) * suffix;
-    const unsigned __int128 triangular  = suffix * (suffix + 1U) / 2U;
-    constexpr unsigned __int128 maximum = ~static_cast<unsigned __int128>(0);
-    const unsigned __int128 attention =
-        triangular > maximum - linear ? maximum : linear + triangular;
-    result.attention_pairs = attention > std::numeric_limits<std::uint64_t>::max()
-                                 ? std::numeric_limits<std::uint64_t>::max()
-                                 : static_cast<std::uint64_t>(attention);
+    const core::Uint128 linear = core::wide_multiply(prefix_tokens, suffix_tokens);
+    // suffix * (suffix + 1) = suffix^2 + suffix, which cannot overflow 128 bits.
+    const core::Uint128 triangular = core::wide_shift_right(
+        core::wide_add_saturating(core::wide_multiply(suffix_tokens, suffix_tokens),
+                                  core::Uint128{0, suffix_tokens}),
+        1U);
+    result.attention_pairs = core::saturate_to_uint64(core::wide_add_saturating(linear, triangular));
     return result;
 }
 
