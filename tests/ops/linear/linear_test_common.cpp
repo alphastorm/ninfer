@@ -1,6 +1,7 @@
 #include "ops/linear/linear_test_common.h"
 
 #include "core/arena.h"
+#include "ops/excluded_paths.h"
 #include "ops/op_tester.h"
 
 #include <cuda_runtime.h>
@@ -343,6 +344,11 @@ int run_shape(std::string_view label, ActivationCompute activation_compute,
             }
             cuda_check(cudaDeviceSynchronize(), "synchronize linear");
         } catch (const std::exception& error) {
+            if (build_excludes(error.what())) {
+                std::cout << case_label << ": excluded on this build (" << error.what() << ")\n";
+                ++excluded_arm_count();
+                continue;
+            }
             std::cerr << case_label << ": unexpected exception: " << error.what() << '\n';
             ++failures;
             continue;

@@ -1,3 +1,4 @@
+#include "ops/excluded_paths.h"
 #include "ops/linear/linear_test_common.h"
 
 #include <array>
@@ -114,7 +115,8 @@ int main() {
         return 77;
     }
     try {
-        const int failures = run_fp8_a8();
+        const int failures = run_fp8_a8() + ninfer::test::require_excluded(
+                                 "FP8 A8 Linear", ninfer::test::kBuildRunsFp8);
         std::cout << (failures == 0 ? "OK" : "FAIL") << " FP8 A8 Linear\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {

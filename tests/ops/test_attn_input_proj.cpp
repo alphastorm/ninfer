@@ -1,6 +1,7 @@
 #include "ninfer/ops/attn_input_proj.h"
 
 #include "ops/direct_bf16_weight.h"
+#include "ops/excluded_paths.h"
 #include "ops/input_projection_test_common.h"
 
 #include <cuda_runtime.h>
@@ -497,8 +498,8 @@ int main() {
     int failures = 0;
     failures += run_q4_q5();
     failures += run_bf16_target();
-    failures += run_nvfp4_target();
-    failures += run_fp8_target();
+    failures += test::arm("attn NVFP4", run_nvfp4_target);
+    failures += test::arm("attn FP8", run_fp8_target);
     failures += run_w8_target();
     failures += run_w8_companion();
     std::cout << (failures == 0 ? "OK" : "FAIL") << " attn_input_proj\n";

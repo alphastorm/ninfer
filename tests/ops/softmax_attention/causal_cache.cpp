@@ -2,6 +2,7 @@
 #include "core/paged_kv_cache.h"
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/softmax_attention.h"
+#include "ops/excluded_paths.h"
 #include "ops/op_tester.h"
 #include "ops/softmax_attention/oracle.h"
 
@@ -1497,9 +1498,11 @@ int run_batch_cases() {
                        {6, {61, 127, 511}, {6, 3, 0}, {2, 0, 1}, MappingPattern::Fragmented, 503u});
     failures += run_batch_case(kGeometries[1], DType::BF16,
                                {16, {49, 2041}, {16, 7}, {1, 0}, MappingPattern::Identity, 504u});
-    failures +=
-        run_batch_case(kGeometries[0], DType::FP8_E4M3FN,
-                       {6, {61, 127, 511}, {6, 3, 0}, {2, 0, 1}, MappingPattern::Fragmented, 505u});
+    failures += arm("causal_cache FP8 KV batch", [] {
+        return run_batch_case(kGeometries[0], DType::FP8_E4M3FN,
+                              {6, {61, 127, 511}, {6, 3, 0}, {2, 0, 1}, MappingPattern::Fragmented,
+                               505u});
+    });
     return failures;
 }
 
@@ -1609,7 +1612,7 @@ int run_softmax_attention_causal_cache_tests() {
     int failures = 0;
     failures += verify_workspace_capacity_contract();
     for (const Geometry& geometry : kGeometries) { failures += run_geometry(geometry); }
-    failures += run_fp8_cases();
+    failures += arm("causal_cache FP8 KV", run_fp8_cases);
     failures += run_batch_cases();
     std::cout << (failures == 0 ? "PASS" : "FAIL")
               << " causal_softmax_attention public-contract correctness\n";

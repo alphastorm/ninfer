@@ -1,3 +1,4 @@
+#include "ops/excluded_paths.h"
 #include "ops/linear/linear_test_common.h"
 
 #include <array>
@@ -52,7 +53,8 @@ int main() {
         return 77;
     }
     try {
-        const int failures = run_nvfp4_a4();
+        const int failures = run_nvfp4_a4() + ninfer::test::require_excluded(
+                                 "NVFP4_A4 Linear", ninfer::test::kBuildRunsNvfp4A4);
         std::cout << (failures == 0 ? "OK" : "FAIL") << " NVFP4_A4 Linear\n";
         return failures == 0 ? 0 : 1;
     } catch (const std::exception& error) {

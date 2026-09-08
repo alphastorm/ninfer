@@ -1,5 +1,6 @@
 #include "ninfer/ops/gdn_input_proj.h"
 
+#include "ops/excluded_paths.h"
 #include "ops/input_projection_test_common.h"
 
 #include <cuda_runtime.h>
@@ -565,8 +566,8 @@ int main() {
     }
     failures += run_q4_q5();
     failures += run_w8();
-    failures += run_nvfp4();
-    failures += run_fp8();
+    failures += test::arm("gdn record NVFP4", run_nvfp4);
+    failures += test::arm("gdn record FP8", run_fp8);
     std::cout << (failures == 0 ? "OK" : "FAIL") << " gdn_input_proj_conv_record\n";
     return failures == 0 ? 0 : 1;
 }

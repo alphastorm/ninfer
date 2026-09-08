@@ -1,5 +1,6 @@
 #include "ninfer/ops/linear_add.h"
 
+#include "ops/excluded_paths.h"
 #include "ops/op_tester.h"
 #include "ops/quantized_weight.h"
 
@@ -204,8 +205,8 @@ int main() {
         return 77;
     }
     int failures = 0;
-    failures += run_shape(5120, 6144, 22, 861U);
-    failures += run_shape(5120, 17408, 25, 863U);
+    failures += ninfer::test::arm("FP8 linear_add [5120,6144]", [] { return run_shape(5120, 6144, 22, 861U); });
+    failures += ninfer::test::arm("FP8 linear_add [5120,17408]", [] { return run_shape(5120, 17408, 25, 863U); });
     std::cout << (failures == 0 ? "OK" : "FAIL") << " FP8 linear_add\n";
     return failures == 0 ? 0 : 1;
 }
