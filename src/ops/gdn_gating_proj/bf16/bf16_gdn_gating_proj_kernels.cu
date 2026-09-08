@@ -9,8 +9,10 @@
 
 #include <cuda_bf16.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -378,6 +380,59 @@ void bf16_gdn_gating_proj_small_t_split10_launch(const Tensor& x, const Weight& 
         static_cast<const float*>(dt_bias.data), static_cast<float*>(g.data),
         static_cast<float*>(beta.data), t);
     CUDA_CHECK(cudaGetLastError());
+}
+
+namespace {
+
+template <class Geometry, int SplitK, int Warps>
+std::int32_t cooperative_resident_ctas() {
+    constexpr int kSmemBytes = kBf16GdnSmemBytes<Geometry::kBlockN>;
+    int device               = 0;
+    CUDA_CHECK(cudaGetDevice(&device));
+    int sm_count = 0;
+    CUDA_CHECK(cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device));
+    int resident = std::numeric_limits<int>::max();
+    const auto measure = [&](auto full_tokens) {
+        constexpr bool FullTokens = decltype(full_tokens)::value;
+        auto* kernel = bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, FullTokens, Warps,
+                                                            false, 0>;
+        CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                        kSmemBytes));
+        int blocks_per_sm = 0;
+        CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&blocks_per_sm, kernel,
+                                                                 Warps * 32, kSmemBytes));
+        resident = std::min(resident, blocks_per_sm);
+    };
+    measure(std::true_type{});
+    measure(std::false_type{});
+    if (resident == std::numeric_limits<int>::max() || resident <= 0 || sm_count <= 0) {
+        return 0;
+    }
+    return static_cast<std::int32_t>(
+        std::min<long long>(static_cast<long long>(resident) * sm_count,
+                            std::numeric_limits<std::int32_t>::max()));
+}
+
+} // namespace
+
+std::int32_t bf16_gdn_gating_proj_cooperative_resident_ctas(int split_k, bool geometry_35) {
+    // One query per instantiation for the life of the process: the device does not change.
+    if (geometry_35) {
+        switch (split_k) {
+        case 32: { static const std::int32_t v = cooperative_resident_ctas<Bf16Gdn35Geometry, 32, 8>(); return v; }
+        case 16: { static const std::int32_t v = cooperative_resident_ctas<Bf16Gdn35Geometry, 16, 8>(); return v; }
+        case 8: { static const std::int32_t v = cooperative_resident_ctas<Bf16Gdn35Geometry, 8, 8>(); return v; }
+        case 4: { static const std::int32_t v = cooperative_resident_ctas<Bf16Gdn35Geometry, 4, 8>(); return v; }
+        case 2: { static const std::int32_t v = cooperative_resident_ctas<Bf16Gdn35Geometry, 2, 8>(); return v; }
+        default: return 0;
+        }
+    }
+    switch (split_k) {
+    case 8: { static const std::int32_t v = cooperative_resident_ctas<Bf16Gdn27Geometry, 8, 8>(); return v; }
+    case 4: { static const std::int32_t v = cooperative_resident_ctas<Bf16Gdn27Geometry, 4>(); return v; }
+    case 2: { static const std::int32_t v = cooperative_resident_ctas<Bf16Gdn27Geometry, 2>(); return v; }
+    default: return 0;
+    }
 }
 
 void bf16_gdn_gating_proj_mma_split8_launch(Bf16GdnGatingTokenVariant variant, const Tensor& x,

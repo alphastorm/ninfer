@@ -26,6 +26,11 @@ struct RouteSpec {
     Bf16GdnGatingScheduleId schedule;
 };
 
+// Preferred schedule per column interval, tuned on the RTX 5090 (170 SMs). A cooperative split
+// is only legal while its whole grid is co-resident, and that ceiling is a property of the
+// device the process runs on, so a route whose grid does not fit falls through to the next
+// cheaper split (and finally to the unsplit GEMM, which has no residency constraint) at plan
+// resolution rather than being encoded per architecture.
 constexpr std::array<RouteSpec, 6> k27Routes{{
     {{1, 1}, Bf16GdnGatingScheduleId::GemvPairedRows},
     {{2, 8}, Bf16GdnGatingScheduleId::SmallTSplit10},
@@ -46,6 +51,22 @@ constexpr std::array<RouteSpec, 5> k35Routes{{
     {{2049, 4096}, Bf16GdnGatingScheduleId::MmaCooperativeSplit2},
     {{4097, kAnyCols}, Bf16GdnGatingScheduleId::MmaUnsplit},
 }};
+
+// The next cheaper cooperative split, ending at the unsplit GEMM.
+constexpr Bf16GdnGatingScheduleId narrower_split(Bf16GdnGatingScheduleId schedule) noexcept {
+    switch (schedule) {
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
+        return Bf16GdnGatingScheduleId::MmaCooperativeSplit16;
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit16:
+        return Bf16GdnGatingScheduleId::MmaCooperativeSplit8;
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
+        return Bf16GdnGatingScheduleId::MmaCooperativeSplit4;
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
+        return Bf16GdnGatingScheduleId::MmaCooperativeSplit2;
+    default:
+        return Bf16GdnGatingScheduleId::MmaUnsplit;
+    }
+}
 
 template <std::size_t N>
 constexpr bool catalog_is_closed(const std::array<RouteSpec, N>& routes,
@@ -124,20 +145,18 @@ bool cooperative_grid_is_resident(Bf16GdnGatingScheduleId schedule, std::int32_t
 }
 
 bool cooperative_27_grid_is_resident(Bf16GdnGatingScheduleId schedule, std::int32_t cols) noexcept {
-    // BN128 uses 40 KiB of dynamic shared memory. Split8 uses 71 registers with 256 threads;
-    // split4/2 use 62 registers with 512 threads. Each specialization admits two CTAs/SM, hence
-    // 340 resident CTAs device-wide. There are three 16-row tiles per token tile.
-    return cooperative_grid_is_resident(schedule, cols, 128, 3, 340);
+    // BN128 tiles with three 16-row tiles per token tile; the resident-CTA budget is the
+    // driver's occupancy for this exact instantiation on the current device (RTX 5090: 340).
+    return cooperative_grid_is_resident(
+        schedule, cols, 128, 3,
+        bf16_gdn_gating_proj_cooperative_resident_ctas(schedule_split_k(schedule), false));
 }
 
 bool cooperative_35_grid_is_resident(Bf16GdnGatingScheduleId schedule, std::int32_t cols) noexcept {
-    // BN64 uses 24 KiB of dynamic shared memory and two 16-row tiles. With the registered CUDA
-    // 13.1/sm_120a build, split32 uses 91/93 registers per thread and admits two CTAs/SM;
-    // split16/8/4/2 use at most 62 registers and admit four CTAs/SM. Across 170 SMs the
-    // device-wide limits are 340 and 680 CTAs respectively.
-    const std::int32_t resident_ctas =
-        schedule == Bf16GdnGatingScheduleId::MmaCooperativeSplit32 ? 340 : 680;
-    return cooperative_grid_is_resident(schedule, cols, 64, 2, resident_ctas);
+    // BN64 tiles with two 16-row tiles per token tile (RTX 5090: 340 for split32, 680 below).
+    return cooperative_grid_is_resident(
+        schedule, cols, 64, 2,
+        bf16_gdn_gating_proj_cooperative_resident_ctas(schedule_split_k(schedule), true));
 }
 
 bool candidate_is_legal(Bf16GdnGatingScheduleId schedule,
@@ -276,11 +295,19 @@ void execute_resolved(const Bf16GdnGatingPlan& plan, const Bf16GdnGatingProblem&
 template <std::size_t N>
 std::size_t route_capacity(const std::array<RouteSpec, N>& routes, const Bf16GdnGatingProblem& base,
                            std::int32_t min_cols, std::int32_t max_cols) {
+    // The workspace is split_k * cols * 2 * heads floats, so within one route it grows with the
+    // column endpoint, and a route whose split falls through to a narrower one on this device
+    // needs less than the preferred split would. Sizing at each route's endpoint with the
+    // preferred split therefore bounds every resolution inside the interval.
     std::size_t maximum = 0;
     for (const RouteSpec& route : routes) {
         if (route.cols.last < min_cols || route.cols.first > max_cols) { continue; }
         const std::int32_t endpoint = std::min(route.cols.last, max_cols);
+        const std::int32_t split_k  = schedule_split_k(route.schedule);
         maximum                     = std::max(
+            maximum,
+            split_k > 1 ? checked_partial_bytes(base.heads, split_k, endpoint) : std::size_t{0});
+        maximum = std::max(
             maximum,
             bf16_gdn_gating_resolve_plan({base.heads, base.input_rows, endpoint}).workspace_bytes);
     }
@@ -351,17 +378,21 @@ Bf16GdnGatingPlan bf16_gdn_gating_resolve_plan(const Bf16GdnGatingProblem& probl
         throw std::invalid_argument(
             "BF16 GDN gating: exact problem or column count is not admitted");
     }
+    const auto resolve_route = [&](Bf16GdnGatingScheduleId preferred) {
+        Bf16GdnGatingScheduleId schedule = preferred;
+        while (!candidate_is_legal(schedule, problem)) {
+            if (schedule == Bf16GdnGatingScheduleId::MmaUnsplit) { break; }
+            schedule = narrower_split(schedule);
+        }
+        return bf16_gdn_gating_resolve_candidate(schedule, problem);
+    };
     if (is_27(problem)) {
         for (const RouteSpec& route : k27Routes) {
-            if (route.cols.contains(problem.cols)) {
-                return bf16_gdn_gating_resolve_candidate(route.schedule, problem);
-            }
+            if (route.cols.contains(problem.cols)) { return resolve_route(route.schedule); }
         }
     } else {
         for (const RouteSpec& route : k35Routes) {
-            if (route.cols.contains(problem.cols)) {
-                return bf16_gdn_gating_resolve_candidate(route.schedule, problem);
-            }
+            if (route.cols.contains(problem.cols)) { return resolve_route(route.schedule); }
         }
     }
     throw std::logic_error("BF16 GDN gating: admitted problem has no covering route");

@@ -5,6 +5,7 @@
 #include <cuda_runtime.h>
 
 #include <cstddef>
+#include <cstdint>
 
 namespace ninfer::ops::detail {
 
@@ -13,6 +14,14 @@ enum class Bf16GdnGatingTokenVariant {
     Full,
     Predicated,
 };
+
+// Device-wide count of CTAs the current device can keep resident for one cooperative BF16 GDN
+// gating GEMM launch with the given split-K on the 27B (128-column) or 35B (64-column) geometry:
+// the occupancy the driver reports for that exact kernel instantiation times the SM count. The
+// cooperative reduction needs every CTA co-resident, so a plan must never launch a larger grid.
+// Cached per process; returns 0 for splits the geometry does not instantiate.
+[[nodiscard]] std::int32_t bf16_gdn_gating_proj_cooperative_resident_ctas(int split_k,
+                                                                          bool geometry_35);
 
 void bf16_gdn_gating_proj_gemv_launch(const Tensor& x, const Weight& a_weight,
                                       const Weight& b_weight, const Tensor& A_log,
