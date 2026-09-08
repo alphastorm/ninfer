@@ -550,6 +550,9 @@ public:
 
     std::string_view unavailable_reason() const noexcept override { return {}; }
 
+    // One status slot and one fence: a batch holds the queue until its completion is waited.
+    bool overlaps_batches() const noexcept override { return false; }
+
     std::unique_ptr<ContinuationCheckpointReadCompletion>
     submit(const std::filesystem::path& path,
            std::span<const ContinuationCheckpointReadRequest> requests) override {

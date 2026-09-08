@@ -29,6 +29,9 @@ public:
     [[nodiscard]] virtual std::string_view backend_name() const noexcept       = 0;
     [[nodiscard]] virtual bool available() const noexcept                      = 0;
     [[nodiscard]] virtual std::string_view unavailable_reason() const noexcept = 0;
+    // True when a second batch may be submitted while an earlier completion is still
+    // outstanding; a queue that serialises batches must be drained before the next submit.
+    [[nodiscard]] virtual bool overlaps_batches() const noexcept = 0;
     [[nodiscard]] virtual std::unique_ptr<ContinuationCheckpointReadCompletion>
     submit(const std::filesystem::path& path,
            std::span<const ContinuationCheckpointReadRequest> requests) = 0;

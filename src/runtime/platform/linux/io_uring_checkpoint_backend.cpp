@@ -1770,6 +1770,8 @@ public:
 
     [[nodiscard]] bool available() const noexcept override { return true; }
 
+    [[nodiscard]] bool overlaps_batches() const noexcept override { return true; }
+
     [[nodiscard]] std::string_view backend_name() const noexcept override {
         return "io_uring-odirect";
     }

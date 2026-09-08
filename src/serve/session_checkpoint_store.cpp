@@ -1007,7 +1007,10 @@ public:
             issued.clear();
         };
         try {
-            // One batch hashes while the next is still on the device.
+            // One batch hashes while the next is still on the device when the backend can hold
+            // two in flight (io_uring); a serialising queue (DirectStorage) is drained between
+            // batches, so hashing then follows each landing instead of overlapping it.
+            const bool overlap = read_queue_->overlaps_batches();
             const auto issue = [&](std::size_t begin) {
                 const std::size_t count = std::min(kReadBatchBytes, destination.size() - begin);
                 const runtime::ContinuationCheckpointReadRequest request{
@@ -1027,11 +1030,12 @@ public:
             for (;;) {
                 const std::size_t next_begin = landed_begin + landed_count;
                 std::size_t next_count       = 0;
-                if (next_begin < destination.size()) { next_count = issue(next_begin); }
+                if (overlap && next_begin < destination.size()) { next_count = issue(next_begin); }
                 issued.front()->wait();
                 issued.erase(issued.begin());
                 state.hasher.update(destination.subspan(landed_begin, landed_count));
                 state.next_offset += landed_count;
+                if (!overlap && next_begin < destination.size()) { next_count = issue(next_begin); }
                 if (next_count == 0) { break; }
                 landed_begin = next_begin;
                 landed_count = next_count;

@@ -54,13 +54,24 @@ public:
     public:
         explicit Completion(TestReadQueue& owner) : owner_(owner) {}
 
-        void wait() override { ++owner_.wait_count; }
+        void wait() override {
+            if (!done_) {
+                done_ = true;
+                ++owner_.wait_count;
+                --owner_.outstanding;
+            }
+        }
+
+        ~Completion() override { wait(); }
 
     private:
         TestReadQueue& owner_;
+        bool done_ = false;
     };
 
     [[nodiscard]] bool available() const noexcept override { return is_available; }
+
+    [[nodiscard]] bool overlaps_batches() const noexcept override { return overlaps; }
 
     [[nodiscard]] std::string_view backend_name() const noexcept override { return "test-queue"; }
 
@@ -70,6 +81,8 @@ public:
     submit(const std::filesystem::path& path,
            std::span<const runtime::ContinuationCheckpointReadRequest> requests) override {
         ++submit_count;
+        if (!overlaps && outstanding != 0) { ++overlap_violations; }
+        ++outstanding;
         for (const runtime::ContinuationCheckpointReadRequest& request : requests) {
             std::ifstream input(path, std::ios::binary);
             input.seekg(static_cast<std::streamoff>(request.file_offset));
@@ -85,9 +98,12 @@ public:
     }
 
     bool is_available = true;
+    bool overlaps     = true;
     std::string reason;
-    std::size_t submit_count = 0;
-    std::size_t wait_count   = 0;
+    std::size_t submit_count       = 0;
+    std::size_t wait_count         = 0;
+    std::size_t outstanding        = 0;
+    std::size_t overlap_violations = 0;
 };
 
 ChatTurn rich_turn() {
@@ -859,6 +875,46 @@ int test_large_session_resaves_within_quota() {
     return failures;
 }
 
+// A queue that cannot hold two batches in flight (Windows DirectStorage: one status slot, one
+// fence) must be drained between the reader's batches; issuing the next batch early used to be
+// caught as a failed read and surfaced to the client as previous_response_not_found.
+int test_serialising_read_queue_streams_batches_in_order() {
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot();
+    std::vector<std::byte> payload((32ULL << 20) + (5ULL << 20) + 4093);
+    for (std::size_t index = 0; index < payload.size(); ++index) {
+        payload[index] = static_cast<std::byte>((index * 131U + (index >> 12)) & 0xffU);
+    }
+    auto read_queue      = std::make_shared<TestReadQueue>();
+    read_queue->overlaps = false;
+    SessionCheckpointStore store({.root             = temporary.path,
+                                  .disk_quota_bytes = 128ULL << 20,
+                                  .staging_bytes    = 1ULL << 20,
+                                  .read_queue       = read_queue});
+    const auto exporter =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        if (!write_chunked(writer, "engine/state.bin", payload)) { return std::nullopt; }
+        return ContinuationCheckpointStats{
+            .frontier_tokens = 4096, .restored_tokens = 4096, .payload_bytes = payload.size()};
+    };
+    int failures     = 0;
+    const auto saved = store.save(responses, fingerprint(), exporter);
+    failures += check(saved.has_value(), "multi-batch payload saves");
+    if (!saved) { return failures; }
+    SessionCheckpointLoadResult loaded = store.load(responses.client_session_sha256, fingerprint());
+    failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+                          loaded.checkpoint.has_value(),
+                      "multi-batch generation loads");
+    if (!loaded.checkpoint) { return failures; }
+    std::vector<std::byte> restored(payload.size());
+    const bool read = loaded.checkpoint->engine->read_file("engine/state.bin", 0, restored);
+    failures += check(read && restored == payload,
+                      "serialising queue restores the exact multi-batch payload");
+    failures += check(read_queue->submit_count == 2 && read_queue->overlap_violations == 0,
+                      "reader issues one batch at a time on a queue that cannot overlap");
+    return failures;
+}
+
 // Reclamation failure after the current pointer swaps must never fail the acknowledged save:
 // publication is durable, eviction is best effort, and the next save's own enforcement pass
 // withdraws the transient tolerance while cleanup keeps failing (council CR-20260831 R1).
@@ -1353,6 +1409,7 @@ int main() {
     failures += test_load_scan_failure_does_not_deadlock();
     failures += test_native_read_queue_is_required();
     failures += test_large_session_resaves_within_quota();
+    failures += test_serialising_read_queue_streams_batches_in_order();
     failures += test_post_publish_reclaim_failure_keeps_save_acknowledged();
     failures += test_post_verification_replacement_fails_closed();
     failures += test_buffered_write_backpressure_round_trips();
