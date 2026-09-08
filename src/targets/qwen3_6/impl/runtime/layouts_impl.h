@@ -631,8 +631,12 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         }
         break;
     }
-    if (device.sm() != 120) {
-        throw std::invalid_argument("Qwen3.6 family runtime requires compute capability 12.0");
+    if (device.sm() != kCompiledComputeCapability) {
+        throw std::invalid_argument(
+            "Qwen3.6 family runtime was compiled for compute capability " +
+            std::to_string(kCompiledComputeCapability / 10) + "." +
+            std::to_string(kCompiledComputeCapability % 10) + "; this device reports " +
+            std::to_string(device.sm() / 10) + "." + std::to_string(device.sm() % 10));
     }
 }
 

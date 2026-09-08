@@ -6,6 +6,17 @@
 
 namespace ninfer {
 
+// The compute capability every device kernel in this binary was compiled for. A build serves
+// exactly one architecture; the family runtime refuses any other device at planning time.
+#if defined(NINFER_SM86)
+inline constexpr int kCompiledComputeCapability = 86;
+#elif defined(NINFER_SM89)
+inline constexpr int kCompiledComputeCapability = 89;
+#else
+inline constexpr int kCompiledComputeCapability = 120;
+#endif
+
+
 void cuda_check(cudaError_t err, const char* expr, const char* file, int line);
 
 #define CUDA_CHECK(expr) ::ninfer::cuda_check((expr), #expr, __FILE__, __LINE__)
