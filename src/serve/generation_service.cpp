@@ -7,6 +7,7 @@
 #include "product/media_acquire/acquire.h"
 #include "runtime/engine/checkpoint_engine_access.h"
 #include "serve/client_identity.h"
+#include "serve/console_log.h"
 #include "serve/tool_call_parser.h"
 #include "serve/server_identity.h"
 #include "serve/translate.h"
@@ -586,13 +587,27 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
         if (!loaded.checkpoint) { return false; }
         VerifiedSessionCheckpoint checkpoint = std::move(*loaded.checkpoint);
         const std::string checkpoint_tag     = checkpoint.responses.latest_response_id;
-        return responses.restore_session(std::move(checkpoint.responses), [&] {
+        const bool restored = responses.restore_session(std::move(checkpoint.responses), [&] {
             return runtime::CheckpointEngineAccess::restore_session(
                        *engine_, session_sha256, checkpoint_tag, *checkpoint.engine,
                        checkpoint.expected_engine, checkpoint_store_->options().staging_bytes)
                 .has_value();
         });
-    } catch (...) { return false; }
+        if (!restored) {
+            write_console_log(ConsoleLogLevel::Warning,
+                              "checkpoint restore declined for session " +
+                                  std::string(session_sha256.substr(0, 12)) +
+                                  ": the engine did not accept the checkpointed continuation");
+        }
+        return restored;
+    } catch (const std::exception& error) {
+        // A restore that fails here surfaces to the client as previous_response_not_found;
+        // the cause must be diagnosable from the server log.
+        write_console_log(ConsoleLogLevel::Warning,
+                          "checkpoint restore failed for session " +
+                              std::string(session_sha256.substr(0, 12)) + ": " + error.what());
+        return false;
+    }
 }
 
 nlohmann::json GenerationService::checkpoint_status(std::string_view session_sha256) const {
