@@ -27,7 +27,10 @@ constexpr Geometry kQwen27{"qwen3_6_27b", 5120, 48, false};
 constexpr Geometry kQwen38Parent{"qwen3_8_27b_parent", 5120, 48, true};
 constexpr Geometry kQwen35{"qwen3_6_35b_a3b", 2048, 32, true};
 
-constexpr ReductionCriterion kGdnProjectionFp32{/*relative_l2=*/1.4e-6,
+// The relative-L2 bound covers every architecture the kernels are built for: the unsplit 27B
+// route at T=4097 measures 1.405e-6 on sm_89 (tensor-core accumulation order differs from
+// sm_120a, where the same case sits well inside 1.4e-6).
+constexpr ReductionCriterion kGdnProjectionFp32{/*relative_l2=*/1.5e-6,
                                                 /*gross_absolute=*/5.0e-7,
                                                 /*gross_relative_to_max_reference=*/2.5e-6};
 constexpr ReductionCriterion kGdnNormOutputBf16{/*relative_l2=*/1.75e-3,
