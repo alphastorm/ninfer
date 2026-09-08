@@ -631,6 +631,13 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
         }
         break;
     }
+    // The FP8-KV causal Attention kernels issue e4m3 MMA and are excluded from Ampere builds,
+    // which serve the same sequences from the BF16 and INT8 caches.
+#if defined(NINFER_SM86)
+    if (options.kv_cache == KvCacheStorage::Fp8E4M3Row256) {
+        throw std::invalid_argument("FP8 KV cache requires an sm_89 or newer GPU");
+    }
+#endif
     if (device.sm() != 120) {
         throw std::invalid_argument("Qwen3.6 family runtime requires compute capability 12.0");
     }
