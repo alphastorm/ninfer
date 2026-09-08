@@ -57,7 +57,10 @@ __device__ __forceinline__ void mma_s8(int& c0, int& c1, int& c2, int& c3, unsig
 }
 
 // The same e4m3 x e4m3 -> f32 shape on both tensor-core generations: Blackwell spells it with
-// the .kind::f8f6f4 qualifier, Ada with the original sm_89 FP8 form. Ampere has no FP8 MMA.
+// the .kind::f8f6f4 qualifier, Ada with the original sm_89 FP8 form. Ampere has no FP8 MMA at
+// all, so the helper is absent there and every kernel that would issue it is excluded from the
+// sm_86 build.
+#if !defined(NINFER_SM86)
 __device__ __forceinline__ void mma_fp8_e4m3(float& c0, float& c1, float& c2, float& c3,
                                              unsigned a0, unsigned a1, unsigned a2, unsigned a3,
                                              unsigned b0, unsigned b1) {
@@ -73,6 +76,7 @@ __device__ __forceinline__ void mma_fp8_e4m3(float& c0, float& c1, float& c2, fl
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
 #endif
 }
+#endif
 
 __device__ __forceinline__ void mma_tf32_bits(float& c0, float& c1, float& c2, float& c3,
                                               unsigned a0, unsigned a1, unsigned a2, unsigned a3,

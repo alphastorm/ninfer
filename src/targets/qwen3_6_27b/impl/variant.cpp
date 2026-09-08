@@ -50,7 +50,13 @@ constexpr ops::LinearPolicy kNvfp4TextPolicy = ops::LinearPolicy::A16Only;
 #else
 constexpr ops::LinearPolicy kNvfp4TextPolicy = ops::LinearPolicy::AllowA4;
 #endif
-constexpr ops::LinearPolicy kFp8TextPolicy   = ops::LinearPolicy::AllowA8;
+// FP8 A8 (e4m3 tensor-core) execution needs sm_89 or newer; Ampere builds run the FP8 artifacts
+// through the A16 paths.
+#if defined(NINFER_SM86)
+constexpr ops::LinearPolicy kFp8TextPolicy = ops::LinearPolicy::A16Only;
+#else
+constexpr ops::LinearPolicy kFp8TextPolicy = ops::LinearPolicy::AllowA8;
+#endif
 
 ops::LinearPolicy text_policy(const Weight& weight) {
     switch (weight.qtype) {

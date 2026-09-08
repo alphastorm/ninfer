@@ -1,17 +1,18 @@
 cmake_minimum_required(VERSION 3.28)
 
-# One architecture per build: Blackwell sm_120a (the RTX 5090 lane) or Ada sm_89 (RTX 4090).
-# Set and validate it before CUDA compiler detection so CMake never injects a generic
-# host-toolchain default or accepts an unsupported target. The NVFP4 W4A4 tensor-core path and
-# programmatic dependent launch exist only on sm_120a; Ada builds the same runtime without them
-# and issues FP8 MMA in its own spelling. Ampere sm_86 (RTX 3090) additionally lacks FP8 tensor
-# cores, so it joins once the FP8 A8 and FP8-KV attention kernels are excluded for it.
+# One architecture per build: Blackwell sm_120a (the RTX 5090 lane), Ada sm_89 (RTX 4090), or
+# Ampere sm_86 (RTX 3090). Set and validate it before CUDA compiler detection so CMake never
+# injects a generic host-toolchain default or accepts an unsupported target. The NVFP4 W4A4
+# tensor-core path and programmatic dependent launch exist only on sm_120a; Ada builds the same
+# runtime without them and issues FP8 MMA in its own spelling. Ampere has no FP8 MMA at all, so
+# it additionally drops the FP8 A8 contraction kernels and the FP8-KV causal Attention kernels,
+# and refuses FP8 activations and FP8 KV at the linear-policy and engine-option boundaries.
 if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
   set(CMAKE_CUDA_ARCHITECTURES 120a CACHE STRING "CUDA architectures to build")
 endif()
-if(NOT CMAKE_CUDA_ARCHITECTURES MATCHES "^(120a|89)$")
+if(NOT CMAKE_CUDA_ARCHITECTURES MATCHES "^(120a|89|86)$")
   message(FATAL_ERROR
-    "NInfer supports CMAKE_CUDA_ARCHITECTURES=120a or 89; got "
+    "NInfer supports CMAKE_CUDA_ARCHITECTURES=120a, 89 or 86; got "
     "'${CMAKE_CUDA_ARCHITECTURES}'")
 endif()
 if(CMAKE_CUDA_ARCHITECTURES STREQUAL "86")

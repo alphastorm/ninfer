@@ -285,6 +285,16 @@ if(NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
   set_property(TARGET ninfer_ops PROPERTY SOURCES ${ninfer_ops_sources})
   target_sources(ninfer_ops PRIVATE ops/nvfp4_a16_only_stubs.cpp)
 endif()
+# Ampere has no FP8 tensor cores: the five FP8 A8 contraction kernels and the two FP8-KV causal
+# Attention kernels are the only device code that issues e4m3 MMA, so they are replaced by
+# stubs that reject FP8 A8 and FP8 KV. The FP8 A16 decode/small-T kernels, which dequantize
+# through the CUDA FP8 conversion path, stay in the build.
+if(CMAKE_CUDA_ARCHITECTURES STREQUAL "86")
+  get_target_property(ninfer_ops_sources ninfer_ops SOURCES)
+  list(FILTER ninfer_ops_sources EXCLUDE REGEX "fp8/.+_a8\\.cu$|causal_cache/.+_fp8\\.cu$")
+  set_property(TARGET ninfer_ops PROPERTY SOURCES ${ninfer_ops_sources})
+  target_sources(ninfer_ops PRIVATE ops/fp8_sm86_stubs.cpp)
+endif()
 target_link_libraries(ninfer_ops PUBLIC ninfer_core)
 if(TARGET ninfer_nvfp4_tma)
   target_link_libraries(ninfer_ops PRIVATE ninfer_nvfp4_tma)
