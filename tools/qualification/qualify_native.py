@@ -8,6 +8,9 @@ configuration the model id. The builder host compiles a neutral deterministic ca
 packages it twice; the target host installs it beside the incumbent lineage, proves the
 protocol, 128K retrieval, restart continuation, rollback (when a previous release exists),
 state security, the OMP client run, and the bounded C1 benchmark, then restores its found state.
+When the builder and target are different hosts the package travels between them directly as
+ranged HTTP (``--transfer-tool``, a script with ``serve``/``fetch`` subcommands such as
+omp-ninfer's ``scripts/hosts/pscp.py``); one host copies locally.
 """
 
 from __future__ import annotations
