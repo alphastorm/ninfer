@@ -991,6 +991,8 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
         context = self.state["phases"]["context_128k"]["receipt"]
         restart = self.state["phases"]["restart"]["receipt"]
         benchmark = self.state["phases"]["benchmark_c1"]["receipt"]
+        package_receipt = self.state["phases"]["package"]["receipt"]
+        build = self.state["phases"]["neutral_build"]["receipt"]
         summary = {
             "artifact_type": "ninfer_native_qualification_summary",
             "schema_version": 1,
@@ -1002,7 +1004,15 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
             "qualified_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "source_commit": self.head,
             "qualification_tool_commit": self.tool_head,
-            "package": self.state["phases"]["package"]["receipt"]["package"],
+            "package": package_receipt["package"],
+            "build_profile": package_receipt["build_profile"],
+            "upstream_base_sha": package_receipt["upstream_base_sha"],
+            "lineage_base_sha": package_receipt["lineage_base_sha"],
+            "model_sha256": package_receipt["model_sha256"],
+            "server_binary_sha256": package_receipt["binaries"]["server_sha256"],
+            "configuration_sha256": package_receipt["config_sha256"],
+            "support_assets": package_receipt["support_assets"],
+            "runtime_dlls": build.get("runtime_dlls", []),
             "evidence": evidence,
             "observed": {
                 "context_prompt_tokens": context["prompt_tokens"],
@@ -1012,7 +1022,13 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
                 "c1_decode_tokens_per_second": benchmark["decode_tokens_per_second"],
                 "c1_prefill_tokens_per_second": benchmark["prefill_tokens_per_second"],
                 "c1_max_power_w": benchmark["max_power_w"],
+                "c1_max_memory_used_mib": benchmark["max_memory_used_mib"],
+                "c1_mtp_acceptance_percent": benchmark["mtp_acceptance_percent"],
+                "context_elapsed_seconds": context["elapsed_seconds"],
+                "protocol_checks": self.state["phases"]["protocol"]["receipt"]["checks"],
                 "rollback": self.state["phases"]["rollback"]["receipt"]["status"],
+                "security_low_privilege_read_denials": self.state["phases"]["security"]["receipt"]["low_privilege_read_denials"],
+                "omp_exact_final_answer": self.state["phases"]["omp"]["receipt"]["exact_final_answer"],
             },
             "automatic_route_activation_allowed": False,
             "stable_promotion_performed": False,
