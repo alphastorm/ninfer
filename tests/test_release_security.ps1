@@ -18,7 +18,15 @@ param(
 
     [switch]$ExerciseManagedRollback,
 
-    [switch]$InstrumentGpuPowerFixture
+    [switch]$InstrumentGpuPowerFixture,
+
+    # The lane's GPU-owner power policy: the managed cap while the release runs (0 for a lane
+    # that leaves the limit alone) and the owner limit the fixture starts from.
+    [ValidateRange(0, 1000)]
+    [int]$QualifiedPowerLimitW = 300,
+
+    [ValidateRange(1, 1000)]
+    [int]$OwnerPowerLimitW = 370
 )
 
 Set-StrictMode -Version Latest
@@ -132,7 +140,7 @@ try {
     $testRoot = Initialize-NInferProtectedStateRoot $testRoot
     $env:ProgramData = $testRoot
     $cleanDefaultParent = Join-Path $env:ProgramData 'NInfer'
-    $cleanDefaultRoot = Join-Path $cleanDefaultParent 'qwen38-3090'
+    $cleanDefaultRoot = Join-Path $cleanDefaultParent 'qwen38-native-fixture'
     Assert-True (-not (Test-Path -LiteralPath $cleanDefaultParent)) 'clean default managed parent fixture already exists'
     $cleanDefaultRoot = Initialize-NInferProtectedStateRoot $cleanDefaultRoot
     Assert-NInferProtectedAcl $cleanDefaultParent $true
@@ -363,7 +371,9 @@ try {
         $GpuOwnerControllerPath = $instrumentedGpuOwner
     }
 
-    $global:NInferTestPowerLimitW = 370
+    $managedLimitW = if ($QualifiedPowerLimitW -gt 0) { $QualifiedPowerLimitW } else { $OwnerPowerLimitW }
+    $ownerPolicy = @{ QualifiedPowerLimitW = $QualifiedPowerLimitW; PriorPowerLimitMinW = 100; PriorPowerLimitMaxW = 1000 }
+    $global:NInferTestPowerLimitW = $OwnerPowerLimitW
     $global:NInferTestInteractiveGpuActive = $false
     $global:NInferNvidiaShimCalls = 0
     $preparedLeaseRestoreAssertions = 0
@@ -399,34 +409,34 @@ try {
     }
 
     $gpuRoot = Join-Path $testRoot 'gpu-owner'
-    $gpuStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot) | Out-String).Trim() | ConvertFrom-Json)
-    Assert-True ([int]$gpuStatus.power_limit_w -eq 370 -and -not [bool]$gpuStatus.paused) 'initial GPU-owner status envelope mismatch'
-    & $GpuOwnerControllerPath -Action stop -StateRoot $gpuRoot | Out-Null
-    $pausedStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot) | Out-String).Trim() | ConvertFrom-Json)
-    Assert-True ([bool]$pausedStatus.paused -and [int]$pausedStatus.power_limit_w -eq 300) 'GPU owner did not enter the qualified cap'
-    & $GpuOwnerControllerPath -Action stop -StateRoot $gpuRoot | Out-Null
-    $idempotentPausedStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot) | Out-String).Trim() | ConvertFrom-Json)
-    Assert-True ([bool]$idempotentPausedStatus.paused -and [int]$idempotentPausedStatus.power_limit_w -eq 300) 'non-default GPU-owner idempotent stop changed roots or power state'
+    $gpuStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy) | Out-String).Trim() | ConvertFrom-Json)
+    Assert-True ([int]$gpuStatus.power_limit_w -eq $OwnerPowerLimitW -and -not [bool]$gpuStatus.paused) 'initial GPU-owner status envelope mismatch'
+    & $GpuOwnerControllerPath -Action stop -StateRoot $gpuRoot @ownerPolicy | Out-Null
+    $pausedStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy) | Out-String).Trim() | ConvertFrom-Json)
+    Assert-True ([bool]$pausedStatus.paused -and [int]$pausedStatus.power_limit_w -eq $managedLimitW) 'GPU owner did not enter the qualified cap'
+    & $GpuOwnerControllerPath -Action stop -StateRoot $gpuRoot @ownerPolicy | Out-Null
+    $idempotentPausedStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy) | Out-String).Trim() | ConvertFrom-Json)
+    Assert-True ([bool]$idempotentPausedStatus.paused -and [int]$idempotentPausedStatus.power_limit_w -eq $managedLimitW) 'non-default GPU-owner idempotent stop changed roots or power state'
     Assert-NInferProtectedStateTree $gpuRoot
 
     $global:NInferTestInteractiveGpuActive = $true
     $activeRejected = $false
-    try { & $GpuOwnerControllerPath -Action stop -StateRoot $gpuRoot | Out-Null }
+    try { & $GpuOwnerControllerPath -Action stop -StateRoot $gpuRoot @ownerPolicy | Out-Null }
     catch { $activeRejected = $_.Exception.Message -like '*active interactive workload*' }
     Assert-True $activeRejected 'state-present lease acquisition did not re-check active interactive GPU work'
     $global:NInferTestInteractiveGpuActive = $false
-    & $GpuOwnerControllerPath -Action start -StateRoot $gpuRoot | Out-Null
-    $restoredStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot) | Out-String).Trim() | ConvertFrom-Json)
-    Assert-True (-not [bool]$restoredStatus.paused -and [int]$restoredStatus.power_limit_w -eq 370) 'GPU owner did not restore the prior power limit'
-    if ($InstrumentGpuPowerFixture) {
+    & $GpuOwnerControllerPath -Action start -StateRoot $gpuRoot @ownerPolicy | Out-Null
+    $restoredStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy) | Out-String).Trim() | ConvertFrom-Json)
+    Assert-True (-not [bool]$restoredStatus.paused -and [int]$restoredStatus.power_limit_w -eq $OwnerPowerLimitW) 'GPU owner did not restore the prior power limit'
+    if ($InstrumentGpuPowerFixture -and $QualifiedPowerLimitW -gt 0) {
         [IO.File]::WriteAllText(
             (Join-Path $gpuRoot 'lease.json'),
-            '{"schema_version":1,"paused":true,"phase":"prepared","qualified_power_limit_w":300,"prior_power_limit_w":370}',
+            ('{"schema_version":1,"paused":true,"phase":"prepared","qualified_power_limit_w":' + $QualifiedPowerLimitW + ',"prior_power_limit_w":' + $OwnerPowerLimitW + '}'),
             [Text.UTF8Encoding]::new($false)
         )
-        $global:NInferTestPowerLimitW = 300
-        & $GpuOwnerControllerPath -Action start -StateRoot $gpuRoot | Out-Null
-        Assert-True ($global:NInferTestPowerLimitW -eq 370 -and
+        $global:NInferTestPowerLimitW = $QualifiedPowerLimitW
+        & $GpuOwnerControllerPath -Action start -StateRoot $gpuRoot @ownerPolicy | Out-Null
+        Assert-True ($global:NInferTestPowerLimitW -eq $OwnerPowerLimitW -and
             -not (Test-Path -LiteralPath (Join-Path $gpuRoot 'lease.json'))) 'prepared GPU-owner lease did not restore its prior limit'
         $preparedLeaseRestoreAssertions = 1
     }
@@ -439,7 +449,7 @@ try {
         [Text.UTF8Encoding]::new($false)
     )
     Assert-Rejected {
-        & $GpuOwnerControllerPath -Action status -StateRoot $preplantedGpu | Out-Null
+        & $GpuOwnerControllerPath -Action status -StateRoot $preplantedGpu @ownerPolicy | Out-Null
     } '*protected state inherits an external DACL*' 'preplanted generic GPU-owner state was accepted'
 
     $releaseScriptRoot = Split-Path -Parent $InstallerPath
@@ -447,14 +457,10 @@ try {
     foreach ($scriptFile in @(Get-ChildItem -LiteralPath $releaseScriptRoot -File | Where-Object {
             $_.Name -in @(
                 'Install-Release.ps1', 'Control-Release.ps1', 'Control-GpuOwner.ps1',
-                'Protect-StateRoot.ps1', 'New-Package.ps1', 'New-QualificationReceipt.ps1'
+                'Protect-StateRoot.ps1', 'New-Package.ps1'
             )
         })) { $releaseScripts.Add($scriptFile) }
-    $installedConstructor = Join-Path (Join-Path (Split-Path -Parent $releaseScriptRoot) 'qualification') 'New-QualificationReceipt.ps1'
-    if (Test-Path -LiteralPath $installedConstructor -PathType Leaf) {
-        $releaseScripts.Add((Get-Item -LiteralPath $installedConstructor))
-    }
-    Assert-True ($releaseScripts.Count -ge 5) 'published release script inventory is incomplete'
+    Assert-True ($releaseScripts.Count -ge 4) 'published release script inventory is incomplete'
     $forbiddenHookPatterns = @(
         'InstallTestMode', 'Invoke-InstallFault', 'NINFER_TEST_INSTALL_',
         'NInferSimulatedInterruption', 'NInferLifecycleHarness',
@@ -488,8 +494,8 @@ try {
         preplanted_gpu_owner_rejections = 1
         installer_prewrite_root_rejections = 3
         active_interactive_gpu_rejections = 1
-        qualified_power_limit_w = 300
-        restored_power_limit_w = 370
+        qualified_power_limit_w = $QualifiedPowerLimitW
+        restored_power_limit_w = $OwnerPowerLimitW
         gpu_power_evidence_class = $(if ($InstrumentGpuPowerFixture) { 'instrumented-function-shim-no-hardware-claim' } else { 'real-trusted-absolute-nvidia-smi' })
         absolute_nvidia_shim_interceptions = $absoluteNvidiaShimInterceptions
         gpu_power_fixture_calls = $(if ($InstrumentGpuPowerFixture) { $global:NInferNvidiaShimCalls } else { 0 })

@@ -27,8 +27,12 @@ param(
     [ValidateNotNullOrEmpty()]
     [string[]]$RuntimeFile,
 
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^rtx[0-9]{4}$')]
+    [string]$Lane,
+
     [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
-    [string]$ServerConfig = (Join-Path $PSScriptRoot 'server-config.json'),
+    [string]$ServerConfig,
 
     [string]$PythonExecutable = 'python3',
 
@@ -40,14 +44,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$releaseId = 'qwen38-3090-omp-v0.2.5-beta.1'
-$releaseVersion = 'v0.2.5-beta.1'
-$deploymentProfile = 'qwen38-3090-omp-v0.2.5-beta.1-c1'
-$buildProfile = 'omp-v0.2.5-rtx3090'
-$platform = 'windows-x86_64-cuda13.3-rtx3090'
-$upstreamBaseSha = 'ef6ecc3c139b43fc4d3e1b92df474305e8429544'
-$lineageBaseSha = 'c467349e375d6aa76afca63c0042bbc0869549aa'
-$assetStem = "ninfer-rtx3090-omp-$releaseVersion-$platform"
+$laneDirectory = Join-Path (Join-Path $PSScriptRoot 'lanes') $Lane
+if (-not (Test-Path -LiteralPath (Join-Path $laneDirectory 'release-spec.json') -PathType Leaf)) {
+    throw "unknown native lane: $Lane"
+}
+if (-not $ServerConfig) { $ServerConfig = Join-Path $laneDirectory 'server-config.json' }
 
 function Read-JsonFile([string]$Path) {
     return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -98,40 +99,45 @@ if (-not (Test-Path -LiteralPath $packageTool -PathType Leaf)) {
     throw 'source tree does not contain tools/release/package.py'
 }
 
-$spec = Read-JsonFile (Join-Path $PSScriptRoot 'release-spec.json')
+$spec = Read-JsonFile (Join-Path $laneDirectory 'release-spec.json')
 $config = Read-JsonFile $configPath
 if ($spec.artifact_type -cne 'ninfer_windows_release_spec' -or
-    [int]$spec.schema_version -ne 2 -or
-    [string]$spec.release_id -cne $releaseId -or
-    [string]$spec.release_version -cne $releaseVersion.Substring(1) -or
-    [string]$spec.deployment_profile -cne $deploymentProfile -or
-    [string]$spec.build_profile -cne $buildProfile -or
-    [string]$spec.platform -cne $platform -or
-    [string]$spec.source.upstream_base_sha -cne $upstreamBaseSha -or
-    [string]$spec.source.lineage_base_sha -cne $lineageBaseSha -or
-    [string]$spec.gpu.cuda_architecture -cne 'sm_86' -or
-    [string]$spec.gpu.cmake_cuda_architecture -cne '86' -or
-    [string]$spec.model.revision -cne '18dfc887423fa5aabf3cb56fac41490e462b3fab' -or
-    [Int64]$spec.model.bytes -ne 18210531328 -or
-    [string]$spec.model.sha256 -cne 'eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e') {
+    [int]$spec.schema_version -ne 3 -or
+    [string]$spec.lane -cne $Lane -or
+    [string]$spec.gpu.cuda_architecture -cne ('sm_' + [string]$spec.gpu.cmake_cuda_architecture) -or
+    [string]$spec.model.revision -cnotmatch '^[0-9a-f]{40}$' -or
+    [string]$spec.model.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+    [Int64]$spec.model.bytes -le 0 -or
+    [string]$spec.source.upstream_base_sha -cnotmatch '^[0-9a-f]{40}$' -or
+    [string]$spec.source.lineage_base_sha -cnotmatch '^[0-9a-f]{40}$') {
     throw 'release specification immutable identity mismatch'
 }
+$releaseId = [string]$spec.release_id
+$releaseVersion = 'v' + [string]$spec.release_version
+$deploymentProfile = [string]$spec.deployment_profile
+$buildProfile = [string]$spec.build_profile
+$platform = [string]$spec.platform
+$productPrefix = [string]$spec.product_prefix
+$upstreamBaseSha = [string]$spec.source.upstream_base_sha
+$lineageBaseSha = [string]$spec.source.lineage_base_sha
+$cmakeCudaArchitecture = [string]$spec.gpu.cmake_cuda_architecture
+$assetStem = "$productPrefix-$releaseVersion-$platform"
+# The exact engine tuning is bound by hash into the build identity; the structural profile
+# every native lane ships - one authenticated request at a time, MTP, durable checkpoints, no
+# prompt disk cache - is asserted here.
 if ($config.artifact_type -cne 'ninfer_windows_server_config' -or
-    [int]$config.schema_version -ne 2 -or
+    [int]$config.schema_version -ne 3 -or
     [string]$config.release_id -cne $releaseId -or
     [string]$config.deployment_profile -cne $deploymentProfile -or
-    [int]$config.engine.max_context -ne 131072 -or
-    [string]$config.engine.kv_capacity -cne 'auto' -or
-    [int]$config.engine.prefill_chunk -ne 1024 -or
-    [string]$config.engine.kv_dtype -cne 'int8' -or
     [int]$config.engine.max_concurrency -ne 1 -or
     [string]$config.speculative.backend -cne 'mtp' -or
-    [int]$config.speculative.draft_tokens -ne 3 -or
+    [int]$config.speculative.draft_tokens -lt 1 -or
     -not [bool]$config.session_checkpoint.enabled -or
-    [int]$config.session_checkpoint.quota_mib -ne 65536 -or
-    [int]$config.session_checkpoint.staging_mib -ne 256 -or
-    $null -ne $config.PSObject.Properties['persistent_cache']) {
-    throw 'server configuration is not the immutable authenticated C1 profile'
+    [int]$config.session_checkpoint.staging_mib -le 0 -or
+    [int]$config.context_cache.device_state_slots -lt 1 -or
+    $null -ne $config.PSObject.Properties['persistent_cache'] -or
+    $null -ne $config.reasoning.PSObject.Properties['effort']) {
+    throw 'server configuration is not an authenticated native lane profile'
 }
 Assert-AllowedListenHost $spec $config
 $expectedConfigSha256 = Get-LowerSha256 $configPath
@@ -174,6 +180,12 @@ try {
             '--runtime-source-sha', $RuntimeSourceSha,
             '--build-profile', $buildProfile,
             '--lineage-base-sha', $lineageBaseSha,
+            '--product-prefix', $productPrefix,
+            '--cuda-architecture', $cmakeCudaArchitecture,
+            '--lane-dir', "packaging/windows/lanes/$Lane",
+            '--release-notes', 'packaging/windows/RELEASE_NOTES.md',
+            '--sbom-namespace', 'https://github.com/alphastorm/ninfer/releases',
+            '--sbom-package-name', ('NInfer native ' + [string]$spec.gpu.name),
             '--windows-server-config', $configPath
         )) {
         $arguments.Add([string]$argument)
@@ -200,7 +212,8 @@ try {
         [string]$packageReceipt.lineage_base_sha -cne $lineageBaseSha -or
         [string]$packageReceipt.patch_stack_sha -cne $RuntimeSourceSha -or
         [string]$packageReceipt.package_source_sha -cne $ReleaseHeadSha -or
-        [string]$packageReceipt.build_profile -cne $buildProfile) {
+        [string]$packageReceipt.build_profile -cne $buildProfile -or
+        [string]$packageReceipt.cuda_architecture -cne $cmakeCudaArchitecture) {
         throw 'package.py receipt identity mismatch'
     }
 
@@ -223,7 +236,7 @@ try {
     if ([string]$identity.patch_stack_sha -cne $RuntimeSourceSha -or
         [string]$identity.lineage_base_sha -cne $lineageBaseSha -or
         [string]$identity.build_profile -cne $buildProfile -or
-        [string]$identity.cuda_architecture -cne '86' -or
+        [string]$identity.cuda_architecture -cne $cmakeCudaArchitecture -or
         [string]$identity.configuration_sha256 -cne $expectedConfigSha256 -or
         (Get-LowerSha256 (Join-Path $payload 'server-config.json')) -cne $expectedConfigSha256 -or
         [string]$packagedSpec.release_id -cne $releaseId -or
@@ -240,7 +253,7 @@ try {
             throw "generated package omitted app-local DLL: $runtimeName"
         }
     }
-    foreach ($name in @('Install-Release.ps1', 'Control-Release.ps1', 'Control-GpuOwner.ps1', 'Protect-StateRoot.ps1', 'New-QualificationReceipt.ps1', 'SHA256SUMS.txt')) {
+    foreach ($name in @('Install-Release.ps1', 'Control-Release.ps1', 'Control-GpuOwner.ps1', 'Protect-StateRoot.ps1', 'SHA256SUMS.txt', 'VERSION', 'RELEASE_NOTES.md')) {
         if (-not (Test-Path -LiteralPath (Join-Path $payload $name) -PathType Leaf)) {
             throw "generated package omitted lifecycle asset: $name"
         }
@@ -269,7 +282,8 @@ try {
         patch_stack_sha = $RuntimeSourceSha
         runtime_source_sha = $RuntimeSourceSha
         package_source_sha = $ReleaseHeadSha
-        cuda_architecture = 'sm_86'
+        cuda_architecture = [string]$spec.gpu.cuda_architecture
+        lane = $Lane
         binaries = [ordered]@{
             ninfer_sha256 = [string]$identity.binaries.ninfer
             server_sha256 = [string]$identity.binaries.'ninfer-serve'
@@ -293,17 +307,10 @@ try {
             controller_sha256 = Get-LowerSha256 (Join-Path $packageOutput 'Control-Release.ps1')
             gpu_owner_controller_sha256 = Get-LowerSha256 (Join-Path $packageOutput 'Control-GpuOwner.ps1')
             state_protection_sha256 = Get-LowerSha256 (Join-Path $packageOutput 'Protect-StateRoot.ps1')
-            qualification_constructor_sha256 = Get-LowerSha256 (Join-Path $payload 'New-QualificationReceipt.ps1')
         }
         qualification_status = 'hardware-pending'
         qualification_status_authority = 'immutable-pre-hardware-package-build'
-        later_external_beta_authority = [ordered]@{
-            artifact_type = 'ninfer_rtx3090_beta_qualification'
-            schema_version = 3
-            public_receipt_path = 'docs/qualification/receipts/qwen3.8-27b-rtx-3090-v0.2.5-beta.1.json'
-            supersedes_only_when_exact_package_sha256_matches = $true
-            mutates_this_build_receipt = $false
-        }
+        qualification_summary_artifact_type = [string]$spec.qualification.summary_artifact_type
         secret_values_recorded = 0
     }
     [IO.File]::WriteAllText(

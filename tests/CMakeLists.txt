@@ -3,6 +3,10 @@ add_test(NAME ninfer_openai_responses_adapter_test
   COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_openai_responses_adapter)
 set_tests_properties(ninfer_openai_responses_adapter_test PROPERTIES
   WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+add_test(NAME ninfer_windows_release_contract_test
+  COMMAND ${Python3_EXECUTABLE} -m unittest tests.test_windows_release)
+set_tests_properties(ninfer_windows_release_contract_test PROPERTIES
+  WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
 
 # This target deliberately receives no src/, CUDA, artifact, kernel, or target
 # include root. It proves that the installed product headers stand alone.

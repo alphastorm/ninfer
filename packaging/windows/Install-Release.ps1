@@ -19,7 +19,9 @@ param(
     [Parameter(ParameterSetName = 'Install')]
     [string]$GpuOwnerControllerPath,
 
-    [string]$StateRoot = (Join-Path $env:ProgramData 'NInfer\qwen38-3090-omp-v0.2'),
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string]$StateRoot,
 
     [Parameter(ParameterSetName = 'Install')]
     [switch]$NoStart,
@@ -468,7 +470,7 @@ function Assert-HostPrerequisites([object]$Spec, [object]$Config) {
             throw 'NVIDIA GPU prerequisite query returned an invalid row'
         }
         if ($rowIndex -ne $deviceIndex) { continue }
-        if ($parts[2] -cne [string]$Spec.gpu.name -or $parts[3] -cne [string]$Spec.gpu.compute_capability) { throw 'configured GPU device is not the qualified RTX 3090' }
+        if ($parts[2] -cne [string]$Spec.gpu.name -or $parts[3] -cne [string]$Spec.gpu.compute_capability) { throw ('configured GPU device is not the qualified ' + [string]$Spec.gpu.name) }
         if ([Version]$parts[4] -lt [Version]("$([int]$Spec.gpu.minimum_driver_major).0")) { throw 'NVIDIA driver is too old' }
         return [ordered]@{ index = [int]$parts[0]; uuid = [string]$parts[1]; name = [string]$parts[2] }
     }
@@ -561,7 +563,7 @@ function Register-ReleaseTask([string]$TaskName, [string]$ControllerPath) {
     $taskAction = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval ([TimeSpan]::FromMinutes(1)) -StartWhenAvailable
     $taskPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
-    Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Description 'Owns only the isolated NInfer Qwen3.8 RTX 3090 release process; explicit start only.' -Settings $settings -Principal $taskPrincipal -Force | Out-Null
+    Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Description ('Owns only the isolated NInfer Qwen3.8 ' + [string]$script:releaseGpuName + ' native release process; explicit start only.') -Settings $settings -Principal $taskPrincipal -Force | Out-Null
 }
 
 function Assert-AllowedListenHost([object]$Spec, [object]$Config) {
@@ -618,28 +620,30 @@ function Assert-InstallerArchitectureContract([object]$Spec, [object]$Config) {
         throw 'release specification lifecycle pointer contract mismatch'
     }
     Assert-AllowedListenHost $Spec $Config
-    if ([Int64]$Spec.model.bytes -ne 18210531328 -or
-        [string]$Spec.model.sha256 -cne 'eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e') {
+    if ([Int64]$Spec.model.bytes -le 0 -or
+        [string]$Spec.model.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$Spec.model.revision -cnotmatch '^[0-9a-f]{40}$') {
         throw 'release specification pinned model identity mismatch'
     }
-    if ([string]$Spec.build_profile -cne 'omp-v0.2.5-rtx3090' -or
-        [string]$Spec.gpu.cuda_architecture -cne 'sm_86' -or
-        [string]$Spec.source.lineage_base_sha -cne 'c467349e375d6aa76afca63c0042bbc0869549aa') {
+    if ([string]$Spec.lane -cnotmatch '^rtx[0-9]{4}$' -or
+        [string]$Spec.build_profile -cnotmatch '^native-v[0-9][0-9A-Za-z.-]*-rtx[0-9]{4}$' -or
+        [string]$Spec.gpu.cuda_architecture -cne ('sm_' + [string]$Spec.gpu.cmake_cuda_architecture) -or
+        [string]$Spec.source.lineage_base_sha -cnotmatch '^[0-9a-f]{40}$' -or
+        [string]$Spec.lifecycle.state_root_name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
         throw 'release specification immutable build identity mismatch'
     }
-    if ([string]$Config.deployment_profile -cne 'qwen38-3090-omp-v0.2.5-beta.1-c1' -or
-        [int]$Config.engine.max_context -ne 131072 -or
-        [string]$Config.engine.kv_capacity -cne 'auto' -or
-        [string]$Config.engine.kv_dtype -cne 'int8' -or
-        [int]$Config.engine.prefill_chunk -ne 1024 -or
+    # The exact engine tuning is bound by hash into the build identity; the structural profile
+    # every native lane ships is asserted here.
+    if ([string]$Config.deployment_profile -cne [string]$Spec.deployment_profile -or
         [int]$Config.engine.max_concurrency -ne 1 -or
         [string]$Config.speculative.backend -cne 'mtp' -or
-        [int]$Config.speculative.draft_tokens -ne 3 -or
+        [int]$Config.speculative.draft_tokens -lt 1 -or
         -not [bool]$Config.session_checkpoint.enabled -or
-        [int]$Config.session_checkpoint.quota_mib -ne 65536 -or
-        [int]$Config.session_checkpoint.staging_mib -ne 256 -or
-        $null -ne $Config.PSObject.Properties['persistent_cache']) {
-        throw 'release server configuration is not the immutable C1 profile'
+        [int]$Config.session_checkpoint.staging_mib -le 0 -or
+        [int]$Config.context_cache.device_state_slots -lt 1 -or
+        $null -ne $Config.PSObject.Properties['persistent_cache'] -or
+        $null -ne $Config.reasoning.PSObject.Properties['effort']) {
+        throw 'release server configuration is not an authenticated native lane profile'
     }
 }
 
@@ -849,7 +853,7 @@ try {
     }
 
     $package = (Resolve-Path -LiteralPath $PackagePath).Path
-    if ([IO.Path]::GetFileName($package) -cne 'ninfer-rtx3090-omp-v0.2.5-beta.1-windows-x86_64-cuda13.3-rtx3090.tar.gz') {
+    if ([IO.Path]::GetFileName($package) -cnotmatch '^ninfer-rtx[0-9]{4}-native-v[0-9][0-9A-Za-z.-]*-windows-x86_64-cuda[0-9.]+-rtx[0-9]{4}\.tar\.gz$') {
         throw 'unexpected release package filename'
     }
     Write-InstallEvent 'package_identity_started' 'Verifying release package identity' ([ordered]@{ path = $package })
@@ -961,9 +965,9 @@ try {
         Assert-InstallerArchitectureContract $spec $config
         $configSha = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $payload 'server-config.json')).Hash.ToLowerInvariant()
         if ($spec.artifact_type -cne 'ninfer_windows_release_spec' -or
-            [int]$spec.schema_version -ne 2 -or
+            [int]$spec.schema_version -ne 3 -or
             $config.artifact_type -cne 'ninfer_windows_server_config' -or
-            [int]$config.schema_version -ne 2 -or
+            [int]$config.schema_version -ne 3 -or
             $config.release_id -cne $spec.release_id -or
             $config.deployment_profile -cne $spec.deployment_profile -or
             $buildIdentity.artifact_type -cne 'ninfer_release_build_identity' -or
@@ -987,7 +991,14 @@ try {
         }
 
         $taskName = [string]$spec.lifecycle.task_name
-        if ($taskName -cne 'NInfer-Qwen38-3090-OMP-v0.2') { throw 'unexpected lifecycle task identity' }
+        if ($taskName -cnotmatch '^NInfer-Qwen38-[0-9]{4}-Native$') { throw 'unexpected lifecycle task identity' }
+        $ownerProtocol = $spec.lifecycle.gpu_owner_controller_protocol
+        $ownerRecord['qualified_power_limit_w'] = if ($null -eq $ownerProtocol.qualified_power_limit_w) { $null } else { [int]$ownerProtocol.qualified_power_limit_w }
+        $ownerRecord['prior_power_limit_range_w'] = @([int]$ownerProtocol.prior_power_limit_range_w[0], [int]$ownerProtocol.prior_power_limit_range_w[1])
+        $expectedPackageName = [string]$spec.product_prefix + '-v' + [string]$spec.release_version + '-' + [string]$spec.platform + '.tar.gz'
+        if ([IO.Path]::GetFileName($package) -cne $expectedPackageName) { throw 'release package filename does not match its specification' }
+        if ((Split-Path -Leaf $StateRoot) -cne [string]$spec.lifecycle.state_root_name) { throw 'state root does not match the lane specification' }
+        $script:releaseGpuName = [string]$spec.gpu.name
         if ($null -ne $oldState -and [string]$oldState.task_name -cne $taskName) {
             throw 'installed lifecycle task identity mismatch'
         }
@@ -1120,13 +1131,6 @@ try {
             else {
                 throw "release package is missing lifecycle binary: $name"
             }
-        }
-        $qualificationSource = Join-Path $payload 'New-QualificationReceipt.ps1'
-        if (Test-Path -LiteralPath $qualificationSource -PathType Leaf) {
-            Move-Item -LiteralPath $qualificationSource -Destination $qualificationBin
-        }
-        else {
-            throw 'release package is missing its qualification receipt constructor'
         }
         $smokeSource = Join-Path $payload 'smoke'
         foreach ($name in @('agent_protocol.py', 'serve_contract.py')) {

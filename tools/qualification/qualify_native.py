@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
-"""Idempotent two-host RTX 3090 build, qualification, and restoration lane."""
+"""Idempotent two-host build, qualification, and restoration lane for a native Windows NInfer release.
+
+One orchestrator serves every native lane. ``--lane`` selects the lane directory under
+``packaging/windows/lanes``; its release specification supplies the identity (release id,
+package names, GPU, architecture, power policy, task and state-root names) and its server
+configuration the model id. The builder host compiles a neutral deterministic candidate and
+packages it twice; the target host installs it beside the incumbent lineage, proves the
+protocol, 128K retrieval, restart continuation, rollback (when a previous release exists),
+state security, the OMP client run, and the bounded C1 benchmark, then restores its found state.
+"""
 
 from __future__ import annotations
 
@@ -37,23 +46,106 @@ PHASES = (
     "receipt",
     "restore",
 )
-MODEL_SHA256 = "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e"
-UPSTREAM_SHA = "ef6ecc3c139b43fc4d3e1b92df474305e8429544"
-LINEAGE_SHA = "c467349e375d6aa76afca63c0042bbc0869549aa"
-RELEASE_ID = "qwen38-3090-omp-v0.2.5-beta.1"
-PACKAGE_NAME = (
-    "ninfer-rtx3090-omp-v0.2.5-beta.1-"
-    "windows-x86_64-cuda13.3-rtx3090.tar.gz"
-)
-SOURCE_NAME = "ninfer-rtx3090-omp-v0.2.5-beta.1-source.tar.gz"
-SPDX_NAME = (
-    "ninfer-rtx3090-omp-v0.2.5-beta.1-"
-    "windows-x86_64-cuda13.3-rtx3090.spdx.json"
-)
 EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 EXPECTED_LONG = "ORCHID=493817; COLOR=COBALT"
 LONG_PROMPT_TOKENS = 130048
-CHECKPOINT_MARKER = "CHECKPOINT-3090-731942"
+CHECKPOINT_MARKER = "CHECKPOINT-NATIVE-731942"
+# The app-local DLLs a native package carries are the binaries' own imports resolved from the
+# builder's vcpkg tree plus the DirectStorage redistributables the build stages beside the apps.
+DIRECTSTORAGE_DLLS = ("dstorage.dll", "dstoragecore.dll")
+
+
+@dataclasses.dataclass(frozen=True)
+class Lane:
+    """The identity a lane's release specification and server configuration declare."""
+
+    name: str
+    spec: dict[str, Any]
+    config: dict[str, Any]
+
+    @classmethod
+    def load(cls, source_root: Path, name: str, head: str) -> "Lane":
+        lane_dir = f"packaging/windows/lanes/{name}"
+        try:
+            spec = json.loads(run(["git", "show", f"{head}:{lane_dir}/release-spec.json"], cwd=source_root).stdout)
+            config = json.loads(run(["git", "show", f"{head}:{lane_dir}/server-config.json"], cwd=source_root).stdout)
+        except LaneError as error:
+            raise LaneError(f"lane {name} is not committed at {head[:8]}: {error}") from error
+        if spec.get("artifact_type") != "ninfer_windows_release_spec" or spec.get("schema_version") != 3:
+            raise LaneError("release specification is not a schema 3 native lane spec")
+        if spec.get("lane") != name or config.get("release_id") != spec.get("release_id"):
+            raise LaneError("lane specification and server configuration disagree")
+        return cls(name, spec, config)
+
+    @property
+    def release_id(self) -> str:
+        return self.spec["release_id"]
+
+    @property
+    def release_version(self) -> str:
+        return "v" + self.spec["release_version"]
+
+    @property
+    def asset_stem(self) -> str:
+        return f"{self.spec['product_prefix']}-{self.release_version}-{self.spec['platform']}"
+
+    @property
+    def package_name(self) -> str:
+        return self.asset_stem + ".tar.gz"
+
+    @property
+    def source_name(self) -> str:
+        return f"{self.spec['product_prefix']}-{self.release_version}-source.tar.gz"
+
+    @property
+    def spdx_name(self) -> str:
+        return self.asset_stem + ".spdx.json"
+
+    @property
+    def cuda_architecture(self) -> str:
+        return self.spec["gpu"]["cmake_cuda_architecture"]
+
+    @property
+    def build_profile(self) -> str:
+        return self.spec["build_profile"]
+
+    @property
+    def upstream_sha(self) -> str:
+        return self.spec["source"]["upstream_base_sha"]
+
+    @property
+    def lineage_sha(self) -> str:
+        return self.spec["source"]["lineage_base_sha"]
+
+    @property
+    def model_sha256(self) -> str:
+        return self.spec["model"]["sha256"]
+
+    @property
+    def model_id(self) -> str:
+        return self.config["model_id"]
+
+    @property
+    def task_name(self) -> str:
+        return self.spec["lifecycle"]["task_name"]
+
+    @property
+    def state_root(self) -> str:
+        return "C:/ProgramData/NInfer/" + self.spec["lifecycle"]["state_root_name"]
+
+    @property
+    def owner_power_limit_w(self) -> int:
+        return int(self.spec["lifecycle"]["gpu_owner_controller_protocol"]["owner_power_limit_w"])
+
+    @property
+    def qualified_power_limit_w(self) -> int:
+        value = self.spec["lifecycle"]["gpu_owner_controller_protocol"].get("qualified_power_limit_w")
+        return 0 if value is None else int(value)
+
+    @property
+    def managed_power_envelope_w(self) -> float | None:
+        value = self.spec["lifecycle"]["gpu_owner_controller_protocol"].get("managed_power_envelope_w")
+        return None if value is None else float(value)
 CREDENTIAL_PATTERNS = (
     re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
     re.compile(rb"\bAKIA[A-Z0-9]{16}\b"),
@@ -234,7 +326,7 @@ def response_text(value: dict[str, Any]) -> str:
 
 
 def digest(label: str) -> str:
-    return hashlib.sha256(f"ninfer-3090-orchestrated-v1/{label}".encode()).hexdigest()
+    return hashlib.sha256(f"ninfer-native-orchestrated-v1/{label}".encode()).hexdigest()
 
 
 def marker_findings(
@@ -300,16 +392,16 @@ def scan_archive(path: Path, source_archive: bool = False) -> dict[str, Any]:
 class Config:
     source_root: Path
     state_dir: Path
+    lane: str
     builder: str
     target: str
     builder_vcpkg: str
-    builder_vcpkg_installed: str
-    neutral_runtime_release_root: str
+    builder_cuda_compiler: str
+    builder_cxx_compiler: str
     model_path: str
     long_fixture: Path
     omp_root: str
-    state_root: str
-    task_name: str
+    incumbent_state_root: str | None
     resume: bool
     dry_run: bool
     through_phase: str | None
@@ -324,27 +416,31 @@ class Orchestrator:
         self.head = config.candidate_source or self.tool_head
         run(["git", "cat-file", "-e", f"{self.head}^{{commit}}"], cwd=config.source_root)
         self.head8 = self.head[:8]
+        self.lane = Lane.load(config.source_root, config.lane, self.head)
         self.script = Path(__file__).resolve()
         self.script_sha = sha256_file(self.script)
         self.state_path = config.state_dir / "state.json"
         self.receipt_dir = config.state_dir / "receipts"
         self.local_stage = config.state_dir / "stage"
-        self.builder_root = f"C:/b/ninfer-3090-{self.head8}"
+        self.builder_root = f"C:/b/ninfer-{self.lane.name}-{self.head8}"
         self.builder_source = f"{self.builder_root}/source"
         self.builder_build = f"{self.builder_root}/build"
         self.builder_bin = f"{self.builder_root}/neutral-bin"
-        self.builder_runtime = f"{self.builder_root}/neutral-runtime"
         self.builder_out_a = f"{self.builder_root}/package-a"
         self.builder_out_b = f"{self.builder_root}/package-b"
-        self.builder_script = f"{self.builder_root}/qualify_rtx3090.py"
-        self.target_root = f"C:/ProgramData/NInferQualification/orchestrated-{self.head8}"
+        self.builder_script = f"{self.builder_root}/qualify_native.py"
+        self.target_root = f"C:/ProgramData/NInferQualification/orchestrated-{self.lane.name}-{self.head8}"
         self.state = self._load_state()
+
+    @property
+    def state_root(self) -> str:
+        return self.lane.state_root
 
     def _load_state(self) -> dict[str, Any]:
         if self.state_path.exists():
             state = json.loads(self.state_path.read_text(encoding="utf-8"))
-            if state.get("source_commit") != self.head:
-                raise LaneError("checkpoint belongs to another source or orchestrator revision")
+            if state.get("source_commit") != self.head or state.get("lane") != self.lane.name:
+                raise LaneError("checkpoint belongs to another source, lane, or orchestrator revision")
             if state.get("orchestrator_sha256") != self.script_sha:
                 if not self.config.upgrade_orchestrator_state:
                     raise LaneError("checkpoint belongs to another source or orchestrator revision")
@@ -364,8 +460,10 @@ class Orchestrator:
                 atomic_json(self.state_path, state)
             return state
         state = {
-            "artifact_type": "ninfer_rtx3090_qualification_orchestration",
-            "schema_version": 1,
+            "artifact_type": "ninfer_native_qualification_orchestration",
+            "schema_version": 2,
+            "lane": self.lane.name,
+            "release_id": self.lane.release_id,
             "source_commit": self.head,
             "orchestrator_sha256": self.script_sha,
             "qualification_tool_commit": self.tool_head,
@@ -396,14 +494,14 @@ foreach($item in @($items)){{
             if name == "package":
                 expected = receipt["package"]["sha256"]
                 script = f"""
-$path=Join-Path {ps_quote(self.builder_out_a)} {ps_quote(PACKAGE_NAME)}
+$path=Join-Path {ps_quote(self.builder_out_a)} {ps_quote(self.lane.package_name)}
 $ok=(Test-Path $path -PathType Leaf) -and ((Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant() -eq {ps_quote(expected)})
 [Console]::Out.WriteLine(([ordered]@{{ok=$ok}}|ConvertTo-Json -Compress))
 """
                 return bool(self.remote_json(self.config.builder, script)["ok"])
             if name == "transfer_install":
                 script = f"""
-$s=Get-Content (Join-Path {ps_quote(self.config.state_root)} 'state.json') -Raw|ConvertFrom-Json
+$s=Get-Content (Join-Path {ps_quote(self.state_root)} 'state.json') -Raw|ConvertFrom-Json
 $r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
 [Console]::Out.WriteLine(([ordered]@{{ok=([string]$r.patch_stack_sha -eq {ps_quote(self.head)})}}|ConvertTo-Json -Compress))
 """
@@ -423,12 +521,14 @@ $path=Join-Path {ps_quote(self.target_root)} {ps_quote('evidence/' + evidence_na
                 return bool(self.remote_json(self.config.target, script)["ok"])
             if name == "receipt":
                 return (self.config.state_dir / "qualification-summary.json").is_file()
+            if name == "rollback":
+                return True
             if name == "restore":
                 script = f"""
-$root={ps_quote(self.config.state_root)}
+$root={ps_quote(self.state_root)}
 $status=&(Join-Path $root 'Control-Release.ps1') -Action Status -StateRoot $root|ConvertFrom-Json
 $limit=[int][double](nvidia-smi.exe --query-gpu=power.limit --format=csv,noheader,nounits)
-[Console]::Out.WriteLine(([ordered]@{{ok=([string]$status.process_state -eq 'stopped' -and -not [bool]$status.gpu_owner.lease_active -and $limit -eq 370)}}|ConvertTo-Json -Compress))
+[Console]::Out.WriteLine(([ordered]@{{ok=([string]$status.process_state -eq 'stopped' -and -not [bool]$status.gpu_owner.lease_active -and $limit -eq {self.lane.owner_power_limit_w})}}|ConvertTo-Json -Compress))
 """
                 return bool(self.remote_json(self.config.target, script)["ok"])
             return True
@@ -492,25 +592,45 @@ $limit=[int][double](nvidia-smi.exe --query-gpu=power.limit --format=csv,noheade
             raise LaneError("128K fixture is empty")
         run(["ssh", "-T", self.config.builder, "exit"], timeout=30)
         run(["ssh", "-T", self.config.target, "exit"], timeout=30)
+        incumbent = self.config.incumbent_state_root
         status = self.remote_json(
             self.config.target,
             f"""
 $ErrorActionPreference='Stop'
-$root={ps_quote(self.config.state_root)}
+$root={ps_quote(self.state_root)}
+$incumbentRoot={ps_quote(incumbent or "")}
+$incumbentRunning=$false
+if($incumbentRoot -and (Test-Path (Join-Path $incumbentRoot 'Control-Release.ps1'))){{
+  $incumbentStatus=&(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Status -StateRoot $incumbentRoot|ConvertFrom-Json
+  $incumbentRunning=([string]$incumbentStatus.process_state -eq 'running')
+  &(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Stop -StateRoot $incumbentRoot|Out-Null
+}}
 $controller=Join-Path $root 'Control-Release.ps1'
 if(Test-Path $controller){{&$controller -Action Stop -StateRoot $root|Out-Null}}
-$s=Get-Content (Join-Path $root 'state.json') -Raw|ConvertFrom-Json
-$r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
+$active='';$previous='';$modelSha=''
+if(Test-Path (Join-Path $root 'state.json')){{
+  $s=Get-Content (Join-Path $root 'state.json') -Raw|ConvertFrom-Json
+  $r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
+  $active=[string]$s.active_release;$previous=[string]$s.previous_release;$modelSha=[string]$r.model_artifact_sha256
+}}
+if((Get-Process ninfer-serve -ErrorAction SilentlyContinue).Count -ne 0){{throw 'a ninfer-serve process is still running on the target'}}
 $limit=[int][double](nvidia-smi.exe --query-gpu=power.limit --format=csv,noheader,nounits)
 $gpu=nvidia-smi.exe --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits
-[Console]::Out.WriteLine(([ordered]@{{active_release=[string]$s.active_release;previous_release=[string]$s.previous_release;api_key_file=[string]$r.api_key_file;task_name=[string]$s.task_name;power_limit_w=$limit;gpu=[string]$gpu;model_sha256=[string]$r.model_artifact_sha256}}|ConvertTo-Json -Compress))
+$modelPath={ps_quote(self.config.model_path)}
+if(-not (Test-Path -LiteralPath $modelPath -PathType Leaf)){{throw 'pinned model artifact is missing on the target'}}
+[Console]::Out.WriteLine(([ordered]@{{lineage_exists=(Test-Path (Join-Path $root 'state.json'));active_release=$active;previous_release=$previous;incumbent_state_root=$incumbentRoot;incumbent_was_running=$incumbentRunning;power_limit_w=$limit;gpu=[string]$gpu;model_sha256=$modelSha}}|ConvertTo-Json -Compress))
 """,
+            timeout=900,
         )
-        if status["power_limit_w"] != 370:
-            raise LaneError("target did not restore its 370 W owner state")
-        if status["model_sha256"] != MODEL_SHA256:
+        if status["power_limit_w"] != self.lane.owner_power_limit_w:
+            raise LaneError(f"target is not at its {self.lane.owner_power_limit_w} W owner state")
+        if status["lineage_exists"] and status["model_sha256"] != self.lane.model_sha256:
             raise LaneError("target predecessor model binding changed")
+        if not status["gpu"].startswith(self.lane.spec["gpu"]["name"]):
+            raise LaneError(f"target GPU is not the lane's {self.lane.spec['gpu']['name']}")
         return {
+            "lane": self.lane.name,
+            "release_id": self.lane.release_id,
             "source_commit": self.head,
             "builder": self.config.builder,
             "target": self.config.target,
@@ -531,19 +651,20 @@ Get-CimInstance Win32_Process | Where-Object {{
 }} | ForEach-Object {{ & taskkill.exe /PID $_.ProcessId /T /F 2>$null | Out-Null }}
 Start-Sleep -Seconds 1
 if(Test-Path $root){{Remove-Item -LiteralPath $root -Recurse -Force}}
-New-Item -ItemType Directory -Path $root,{ps_quote(self.builder_runtime)}|Out-Null
+New-Item -ItemType Directory -Path $root|Out-Null
 """
         remote_ps(self.config.builder, bootstrap)
         scp(str(bundle), remote_spec(self.config.builder, f"{self.builder_root}/source.bundle"))
         self.stage_script(self.config.builder, self.builder_script)
-        scp(
-            remote_spec(
-                self.config.target,
-                self.config.neutral_runtime_release_root.rstrip("/\\") + "/bin/*.dll",
-            ),
-            remote_spec(self.config.builder, self.builder_runtime + "/"),
-            through_local=True,
-        )
+        focused_tests = "|".join((
+            "ninfer_direct_storage_checkpoint_windows_test",
+            "ninfer_direct_storage_checkpoint_backend_test",
+            "ninfer_session_checkpoint_store_test",
+            "ninfer_response_store_test",
+            "ninfer_automatic_checkpoint_queue_test",
+            "ninfer_http_error_handler_test",
+            "ninfer_serve_options_test",
+        ))
         build_script = f"""
 $ErrorActionPreference='Stop'
 $root={ps_quote(self.builder_root)}
@@ -558,21 +679,35 @@ $pf=[Environment]::GetFolderPath('ProgramFilesX86')
 $vsdev=Join-Path $pf 'Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat'
 $lines=&cmd.exe /d /s /c ('"'+$vsdev+'" -arch=x64 -host_arch=x64 >nul && set')
 foreach($line in $lines){{$i=$line.IndexOf('=');if($i -gt 0){{[Environment]::SetEnvironmentVariable($line.Substring(0,$i),$line.Substring($i+1),'Process')}}}}
-&cmake -S $source -B $build -G Ninja '-DCMAKE_BUILD_TYPE=Release' '-DCMAKE_CUDA_ARCHITECTURES=86' '-DNINFER_BUILD_APPS=ON' '-DBUILD_TESTING=ON' '-DNINFER_BUILD_BENCHMARKS=ON' '-DNINFER_BUILD_PROFILE=omp-v0.2.5-rtx3090' '-DNINFER_UPSTREAM_BASE_SHA={UPSTREAM_SHA}' '-DNINFER_PATCH_STACK_SHA={self.head}' ('-DCMAKE_TOOLCHAIN_FILE='+{ps_quote(self.config.builder_vcpkg)}) ('-DVCPKG_INSTALLED_DIR='+{ps_quote(self.config.builder_vcpkg_installed)})
+&cmake -S $source -B $build -G Ninja '-DCMAKE_BUILD_TYPE=Release' '-DCMAKE_CUDA_ARCHITECTURES={self.lane.cuda_architecture}' ('-DCMAKE_CUDA_COMPILER='+{ps_quote(self.config.builder_cuda_compiler)}) ('-DCMAKE_CXX_COMPILER='+{ps_quote(self.config.builder_cxx_compiler)}) ('-DCMAKE_C_COMPILER='+{ps_quote(self.config.builder_cxx_compiler)}) '-DNINFER_BUILD_APPS=ON' '-DBUILD_TESTING=ON' '-DNINFER_BUILD_BENCHMARKS=ON' '-DNINFER_BUILD_PROFILE={self.lane.build_profile}' '-DNINFER_UPSTREAM_BASE_SHA={self.lane.upstream_sha}' '-DNINFER_PATCH_STACK_SHA={self.head}' ('-DCMAKE_TOOLCHAIN_FILE='+{ps_quote(self.config.builder_vcpkg)}) '-DVCPKG_TARGET_TRIPLET=x64-windows'
 if($LASTEXITCODE -ne 0){{throw'configure failed'}}
-&cmake --build $build --target ninfer_direct_storage_checkpoint_read_queue_windows_test ninfer_session_checkpoint_store_test ninfer_response_store_test ninfer_http_contract_test ninfer_automatic_checkpoint_queue_test ninfer-serve ninfer ninfer_bench --parallel 16
+&cmake --build $build --target {" ".join(focused_tests.split("|"))} ninfer-serve ninfer ninfer_bench --parallel 16
 if($LASTEXITCODE -ne 0){{throw'build failed'}}
-&ctest --test-dir $build -C Release --output-on-failure -R '^(ninfer_direct_storage_checkpoint_read_queue_windows_test|ninfer_session_checkpoint_store_test|ninfer_response_store_test|ninfer_http_contract_test|ninfer_automatic_checkpoint_queue_test)$'
+&ctest --test-dir $build -C Release --output-on-failure -R '^({focused_tests})$'
 if($LASTEXITCODE -ne 0){{throw'focused tests failed'}}
 $bin={ps_quote(self.builder_bin)}
 New-Item -ItemType Directory -Path $bin|Out-Null
 Copy-Item (Join-Path $build 'apps\\ninfer.exe'),(Join-Path $build 'apps\\ninfer-serve.exe'),(Join-Path $build 'bench\\ninfer_bench.exe') -Destination $bin
-Copy-Item (Join-Path {ps_quote(self.builder_runtime)} '*.dll') -Destination $bin
-Copy-Item (Join-Path $build 'apps\\dstorage.dll'),(Join-Path $build 'apps\\dstoragecore.dll') -Destination $bin -Force
+# App-local runtime: the binaries' DLL imports resolved transitively from the build's vcpkg tree,
+# plus the DirectStorage redistributables the build stages beside the apps.
+$vcpkgBin=Join-Path $build 'vcpkg_installed\\x64-windows\\bin'
+$dumpbin=(Get-Command dumpbin.exe).Source
+$pending=[Collections.Generic.Queue[string]]::new()
+foreach($exe in @('ninfer.exe','ninfer-serve.exe','ninfer_bench.exe')){{$pending.Enqueue((Join-Path $bin $exe))}}
+$copied=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+while($pending.Count -gt 0){{
+  $file=$pending.Dequeue()
+  $imports=@(&$dumpbin /nologo /dependents $file|Where-Object{{$_ -match '^\\s+([A-Za-z0-9_.-]+\\.dll)\\s*$'}}|ForEach-Object{{$Matches[1]}})
+  foreach($import in $imports){{
+    $candidate=Join-Path $vcpkgBin $import
+    if((Test-Path -LiteralPath $candidate -PathType Leaf) -and $copied.Add($import)){{Copy-Item -LiteralPath $candidate -Destination (Join-Path $bin $import);$pending.Enqueue((Join-Path $bin $import))}}
+  }}
+}}
+foreach($name in @({", ".join(ps_quote(name) for name in DIRECTSTORAGE_DLLS)})){{Copy-Item -LiteralPath (Join-Path $build ('apps\\'+$name)) -Destination (Join-Path $bin $name) -Force}}
 $items=Get-ChildItem $bin -File|Sort-Object Name|ForEach-Object{{[ordered]@{{name=$_.Name;bytes=$_.Length;sha256=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}}}}
-[Console]::Out.WriteLine(([ordered]@{{status='passed';source_commit=(git -C $source rev-parse HEAD);bundle_sha256={ps_quote(bundle_sha)};files=$items}}|ConvertTo-Json -Depth 6 -Compress))
+[Console]::Out.WriteLine(([ordered]@{{status='passed';source_commit=(git -C $source rev-parse HEAD);bundle_sha256={ps_quote(bundle_sha)};cuda_architecture={ps_quote(self.lane.cuda_architecture)};build_profile={ps_quote(self.lane.build_profile)};runtime_dlls=@($copied);files=$items}}|ConvertTo-Json -Depth 6 -Compress))
 """
-        receipt = self.remote_json(self.config.builder, build_script, timeout=3600)
+        receipt = self.remote_json(self.config.builder, build_script, timeout=5400)
         return receipt
 
     def private_scan(self) -> dict[str, Any]:
@@ -622,7 +757,7 @@ $ErrorActionPreference='Stop'
 $source={ps_quote(self.builder_source)}
 $bin={ps_quote(self.builder_bin)}
 $runtime=@(Get-ChildItem $bin -Filter '*.dll' -File|Sort-Object Name|ForEach-Object FullName)
-function Build-One([string]$Out){{if(Test-Path $Out){{Remove-Item $Out -Recurse -Force}};&(Join-Path $source 'packaging\\windows\\qwen38-3090-omp-v0.2\\New-Package.ps1') -SourceRoot $source -NInferExecutable (Join-Path $bin 'ninfer.exe') -ServerExecutable (Join-Path $bin 'ninfer-serve.exe') -BenchmarkExecutable (Join-Path $bin 'ninfer_bench.exe') -ReleaseHeadSha {ps_quote(self.head)} -RuntimeSourceSha {ps_quote(self.head)} -RuntimeFile $runtime -PythonExecutable python -SourceDateEpoch {epoch} -OutputDirectory $Out|Out-Null}}
+function Build-One([string]$Out){{if(Test-Path $Out){{Remove-Item $Out -Recurse -Force}};&(Join-Path $source 'packaging\\windows\\New-Package.ps1') -Lane {ps_quote(self.lane.name)} -SourceRoot $source -NInferExecutable (Join-Path $bin 'ninfer.exe') -ServerExecutable (Join-Path $bin 'ninfer-serve.exe') -BenchmarkExecutable (Join-Path $bin 'ninfer_bench.exe') -ReleaseHeadSha {ps_quote(self.head)} -RuntimeSourceSha {ps_quote(self.head)} -RuntimeFile $runtime -PythonExecutable python -SourceDateEpoch {epoch} -OutputDirectory $Out|Out-Null}}
 Build-One {ps_quote(self.builder_out_a)}
 Build-One {ps_quote(self.builder_out_b)}
 $a=Get-Content (Join-Path {ps_quote(self.builder_out_a)} 'package-build-receipt.json') -Raw | ConvertFrom-Json
@@ -640,7 +775,7 @@ if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw'package is n
                 self.builder_script,
                 "_scan-archive",
                 "--path",
-                f"{self.builder_out_a}/{PACKAGE_NAME}",
+                f"{self.builder_out_a}/{self.lane.package_name}",
             ],
             timeout=900,
         ).stdout
@@ -658,7 +793,7 @@ if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw'package is n
             f"$p={ps_quote(target_root)};New-Item -ItemType Directory -Path $p,(Join-Path $p 'evidence') -Force|Out-Null",
         )
         for name in (
-            PACKAGE_NAME,
+            self.lane.package_name,
             "Install-Release.ps1",
             "Protect-StateRoot.ps1",
             "Control-GpuOwner.ps1",
@@ -669,55 +804,71 @@ if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw'package is n
                 remote_spec(self.config.target, f"{target_root}/{name}"),
                 through_local=True,
             )
-        self.stage_script(self.config.target, f"{target_root}/qualify_rtx3090.py")
+        self.stage_script(self.config.target, f"{target_root}/qualify_native.py")
         scp(str(self.config.long_fixture), remote_spec(self.config.target, f"{target_root}/long_niah_128k.json"))
         scp(
             str(self.config.source_root / "tests" / "test_release_security.ps1"),
             remote_spec(self.config.target, f"{target_root}/test_release_security.ps1"),
         )
+        # The lane's API key: reused from the lineage when it exists, otherwise from the
+        # incumbent lineage on the same host (the same operator secret keeps the OMP client
+        # configuration valid), and never printed.
         install_script = f"""
 $ErrorActionPreference='Stop'
-$root={ps_quote(self.config.state_root)}
+$root={ps_quote(self.state_root)}
 $stage={ps_quote(target_root)}
-$controller=Join-Path $root 'Control-Release.ps1'
-&$controller -Action Stop -StateRoot $root|Out-Null
-$s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
-$before=[string]$s.active_release
-$r=$s.releases.PSObject.Properties[$before].Value
-$package=Join-Path $stage {ps_quote(PACKAGE_NAME)}
+$incumbentRoot={ps_quote(self.config.incumbent_state_root or "")}
+$taskName={ps_quote(self.lane.task_name)}
+$before=''
+$apiKeyFile=$null
+if(Test-Path (Join-Path $root 'state.json')){{
+  &(Join-Path $root 'Control-Release.ps1') -Action Stop -StateRoot $root|Out-Null
+  $s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
+  $before=[string]$s.active_release
+  $apiKeyFile=[string]$s.releases.PSObject.Properties[$before].Value.api_key_file
+}}elseif($incumbentRoot -and (Test-Path (Join-Path $incumbentRoot 'state.json'))){{
+  $i=Get-Content (Join-Path $incumbentRoot 'state.json') -Raw | ConvertFrom-Json
+  $apiKeyFile=[string]$i.releases.PSObject.Properties[[string]$i.active_release].Value.api_key_file
+}}
+if(-not $apiKeyFile -or -not (Test-Path -LiteralPath $apiKeyFile -PathType Leaf)){{throw'no operator API-key file is available for the lane'}}
+$package=Join-Path $stage {ps_quote(self.lane.package_name)}
 if((Get-FileHash $package -Algorithm SHA256).Hash.ToLowerInvariant() -ne {ps_quote(package['sha256'])}){{throw'package transfer hash mismatch'}}
-$taskName=[string]$s.task_name
-$taskXml=Export-ScheduledTask -TaskName $taskName
-$cleanRoot='C:\\ProgramData\\NInferQualification\\orchestrated-clean-{self.head8}'
+$cleanRoot='C:\\ProgramData\\NInferQualification\\orchestrated-clean-{self.lane.name}-{self.head8}\\{self.lane.spec['lifecycle']['state_root_name']}'
 if(Test-Path $cleanRoot){{throw'clean-install root already exists'}}
-Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
+$existingTask=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+$taskXml=$null
+if($null -ne $existingTask){{$taskXml=Export-ScheduledTask -TaskName $taskName;Unregister-ScheduledTask -TaskName $taskName -Confirm:$false}}
 try{{
-  $cleanLines=@(&(Join-Path $stage 'Install-Release.ps1') -PackagePath $package -PackageSha256 {ps_quote(package['sha256'])} -ModelArtifactPath {ps_quote(self.config.model_path)} -ApiKeyFile ([string]$r.api_key_file) -GpuOwnerControllerPath (Join-Path $stage 'Control-GpuOwner.ps1') -StateRoot $cleanRoot -NoStart)
+  $cleanLines=@(&(Join-Path $stage 'Install-Release.ps1') -PackagePath $package -PackageSha256 {ps_quote(package['sha256'])} -ModelArtifactPath {ps_quote(self.config.model_path)} -ApiKeyFile $apiKeyFile -GpuOwnerControllerPath (Join-Path $stage 'Control-GpuOwner.ps1') -StateRoot $cleanRoot -NoStart)
   $clean=[string]$cleanLines[-1]|ConvertFrom-Json
   if([string]$clean.status -cne 'passed'){{throw'clean install did not pass'}}
   &(Join-Path $cleanRoot 'Control-Release.ps1') -Action Uninstall -StateRoot $cleanRoot|Out-Null
 }}finally{{
-  if($null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)){{Register-ScheduledTask -TaskName $taskName -Xml $taskXml -Force|Out-Null}}
+  if($null -ne $taskXml -and $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)){{Register-ScheduledTask -TaskName $taskName -Xml $taskXml -Force|Out-Null}}
 }}
-$upgradeLines=@(&(Join-Path $stage 'Install-Release.ps1') -PackagePath $package -PackageSha256 {ps_quote(package['sha256'])} -ModelArtifactPath {ps_quote(self.config.model_path)} -ApiKeyFile ([string]$r.api_key_file) -NoStart)
+$managedArguments=@('-PackagePath',$package,'-PackageSha256',{ps_quote(package['sha256'])},'-ModelArtifactPath',{ps_quote(self.config.model_path)},'-ApiKeyFile',$apiKeyFile,'-StateRoot',$root,'-NoStart')
+if(-not $before){{$managedArguments+=@('-GpuOwnerControllerPath',(Join-Path $stage 'Control-GpuOwner.ps1'))}}
+$upgradeLines=@(&(Join-Path $stage 'Install-Release.ps1') @managedArguments)
 $upgrade=[string]$upgradeLines[-1]|ConvertFrom-Json
-if([string]$upgrade.status -cnotin @('passed','already_installed')){{throw'managed upgrade did not pass'}}
+if([string]$upgrade.status -cnotin @('passed','already_installed')){{throw'managed install did not pass'}}
 $after=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
-[Console]::Out.WriteLine(([ordered]@{{status='passed';before=$before;active_release=[string]$after.active_release;previous_release=[string]$after.previous_release;package_sha256={ps_quote(package['sha256'])};clean_installs=1;upgrades=1}}|ConvertTo-Json -Compress))
+[Console]::Out.WriteLine(([ordered]@{{status='passed';before=$before;active_release=[string]$after.active_release;previous_release=[string]$after.previous_release;package_sha256={ps_quote(package['sha256'])};clean_installs=1;managed_installs=1;first_release_of_lineage=(-not $before)}}|ConvertTo-Json -Compress))
 """
-        return self.remote_json(self.config.target, install_script, timeout=900)
+        return self.remote_json(self.config.target, install_script, timeout=1800)
 
     def target_internal(self, phase: str, *arguments: str, timeout: int = 1800) -> dict[str, Any]:
-        self.stage_script(self.config.target, f"{self.target_root}/qualify_rtx3090.py")
+        self.stage_script(self.config.target, f"{self.target_root}/qualify_native.py")
         command = [
             "ssh",
             "-T",
             self.config.target,
             "python",
-            f"{self.target_root}/qualify_rtx3090.py",
+            f"{self.target_root}/qualify_native.py",
             phase,
             "--state-root",
-            self.config.state_root,
+            self.state_root,
+            "--model-id",
+            self.lane.model_id,
             "--evidence-root",
             f"{self.target_root}/evidence",
             *arguments,
@@ -727,7 +878,7 @@ $after=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
     def protocol(self) -> dict[str, Any]:
         script = f"""
 $ErrorActionPreference='Stop'
-$root={ps_quote(self.config.state_root)}
+$root={ps_quote(self.state_root)}
 $stage={ps_quote(self.target_root)}
 New-Item -ItemType Directory -Path (Join-Path $stage 'evidence') -Force|Out-Null
 $controller=Join-Path $root 'Control-Release.ps1'
@@ -736,7 +887,7 @@ $s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
 $r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
 $path=Join-Path ([string]$r.release_root) 'bin\\qualification\\agent_protocol.py'
 $out=Join-Path $stage 'evidence\\agent-protocol.json'
-&python $path --base-url ('http://'+[string]$r.host+':'+[string]$r.port) --model q38-ninfer --api-key-file ([string]$r.api_key_file) --expect-binary-sha256 ([string]$r.binary_sha256) --expect-model-artifact-sha256 ([string]$r.model_artifact_sha256) --expect-config-sha256 ([string]$r.config_sha256) --expect-deployment-profile ([string]$r.deployment_profile) 1>$out
+&python $path --base-url ('http://'+[string]$r.host+':'+[string]$r.port) --model {ps_quote(self.lane.model_id)} --api-key-file ([string]$r.api_key_file) --expect-binary-sha256 ([string]$r.binary_sha256) --expect-model-artifact-sha256 ([string]$r.model_artifact_sha256) --expect-config-sha256 ([string]$r.config_sha256) --expect-deployment-profile ([string]$r.deployment_profile) 1>$out
 if($LASTEXITCODE -ne 0){{throw'protocol failed'}}
 $v=Get-Content $out -Raw | ConvertFrom-Json
 [Console]::Out.WriteLine(([ordered]@{{status=[string]$v.status;checks=@($v.checks.PSObject.Properties).Count;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant()}}|ConvertTo-Json -Compress))
@@ -750,10 +901,16 @@ $v=Get-Content $out -Raw | ConvertFrom-Json
         return self.target_internal("_restart", timeout=1800)
 
     def rollback(self) -> dict[str, Any]:
-        candidate = self.state["phases"]["transfer_install"]["receipt"]["active_release"]
+        install = self.state["phases"]["transfer_install"]["receipt"]
+        candidate = install["active_release"]
+        if not install.get("previous_release"):
+            # The first release of a lineage has nothing to roll back to; the bidirectional
+            # rollback is proven on the next release of the same lineage.
+            return {"status": "not_applicable", "reason": "first release of the lineage",
+                    "active_release": candidate, "directions": 0}
         script = f"""
 $ErrorActionPreference='Stop'
-$root={ps_quote(self.config.state_root)}
+$root={ps_quote(self.state_root)}
 $c={ps_quote(candidate)}
 $controller=Join-Path $root 'Control-Release.ps1'
 &$controller -Action Stop -StateRoot $root|Out-Null
@@ -771,14 +928,14 @@ if([string]$b.active_release -cne $c){{throw'bidirectional rollback did not rest
     def security(self) -> dict[str, Any]:
         script = f"""
 $ErrorActionPreference='Stop'
-$root={ps_quote(self.config.state_root)}
+$root={ps_quote(self.state_root)}
 $stage={ps_quote(self.target_root)}
 $controller=Join-Path $root 'Control-Release.ps1'
 &$controller -Action Stop -StateRoot $root|Out-Null
 $s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
 $r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
 $l=Join-Path ([string]$r.release_root) 'bin\\lifecycle'
-$lines=@(&(Join-Path $stage 'test_release_security.ps1') -StateProtectionPath (Join-Path $l 'Protect-StateRoot.ps1') -GpuOwnerControllerPath (Join-Path $l 'Control-GpuOwner.ps1') -InstallerPath (Join-Path $l 'Install-Release.ps1') -ManagedStateRoot $root)
+$lines=@(&(Join-Path $stage 'test_release_security.ps1') -StateProtectionPath (Join-Path $l 'Protect-StateRoot.ps1') -GpuOwnerControllerPath (Join-Path $l 'Control-GpuOwner.ps1') -InstallerPath (Join-Path $l 'Install-Release.ps1') -ManagedStateRoot $root -QualifiedPowerLimitW {self.lane.qualified_power_limit_w} -OwnerPowerLimitW {self.lane.owner_power_limit_w})
 $v=[string]$lines[-1] | ConvertFrom-Json
 if([string]$v.status -cne 'passed'){{throw'security failed'}}
 $out=Join-Path $stage 'evidence\\state-security.json'
@@ -790,7 +947,7 @@ $out=Join-Path $stage 'evidence\\state-security.json'
     def omp(self) -> dict[str, Any]:
         script = f"""
 $ErrorActionPreference='Stop'
-$root={ps_quote(self.config.state_root)}
+$root={ps_quote(self.state_root)}
 $stage={ps_quote(self.target_root)}
 $ompRoot={ps_quote(self.config.omp_root)}
 $controller=Join-Path $root 'Control-Release.ps1'
@@ -802,7 +959,7 @@ $env:PI_CODING_AGENT_DIR=Join-Path $ompRoot 'agent'
 $env:NINFER_ACCEPTANCE_API_KEY=(Get-Content ([string]$r.api_key_file) -Raw).Trim()
 $env:NO_COLOR='1'
 $events=Join-Path $stage 'evidence\\omp-events.jsonl'
-$args=@('--mode','json','--print','--no-session','--no-title','--no-extensions','--no-skills','--no-rules','--no-lsp','--no-pty','--no-tools','--tools','read','--auto-approve','--approval-mode','yolo','--model','ninfer-client-acceptance/q38-ninfer','--thinking','off','--system-prompt','Use the read tool exactly once on marker.txt, then return exactly its single line with no other text.','--cwd',(Join-Path $ompRoot 'workspace'),'--max-time','300','Read marker.txt with the read tool and return its exact single line.')
+$args=@('--mode','json','--print','--no-session','--no-title','--no-extensions','--no-skills','--no-rules','--no-lsp','--no-pty','--no-tools','--tools','read','--auto-approve','--approval-mode','yolo','--model',('ninfer-client-acceptance/'+{ps_quote(self.lane.model_id)}),'--thinking','off','--system-prompt','Use the read tool exactly once on marker.txt, then return exactly its single line with no other text.','--cwd',(Join-Path $ompRoot 'workspace'),'--max-time','300','Read marker.txt with the read tool and return its exact single line.')
 &(Join-Path $env:LOCALAPPDATA 'OMP\\omp.cmd') @args 1>$events
 if($LASTEXITCODE -ne 0){{throw'OMP failed'}}
 $parsed=@(Get-Content $events|Where-Object{{$_.Trim()}}|ForEach-Object{{$_|ConvertFrom-Json}})
@@ -816,7 +973,10 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
         return self.remote_json(self.config.target, script, timeout=900)
 
     def benchmark(self) -> dict[str, Any]:
-        return self.target_internal("_benchmark", timeout=1800)
+        arguments: list[str] = []
+        if self.lane.managed_power_envelope_w is not None:
+            arguments += ["--power-envelope-w", str(self.lane.managed_power_envelope_w)]
+        return self.target_internal("_benchmark", *arguments, timeout=1800)
 
     def receipt(self) -> dict[str, Any]:
         evidence = {
@@ -832,8 +992,12 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
         restart = self.state["phases"]["restart"]["receipt"]
         benchmark = self.state["phases"]["benchmark_c1"]["receipt"]
         summary = {
-            "artifact_type": "ninfer_rtx3090_qualification_summary",
+            "artifact_type": "ninfer_native_qualification_summary",
             "schema_version": 1,
+            "lane": self.lane.name,
+            "release_id": self.lane.release_id,
+            "deployment_profile": self.lane.spec["deployment_profile"],
+            "cuda_architecture": self.lane.spec["gpu"]["cuda_architecture"],
             "status": "passed",
             "qualified_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             "source_commit": self.head,
@@ -848,6 +1012,7 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
                 "c1_decode_tokens_per_second": benchmark["decode_tokens_per_second"],
                 "c1_prefill_tokens_per_second": benchmark["prefill_tokens_per_second"],
                 "c1_max_power_w": benchmark["max_power_w"],
+                "rollback": self.state["phases"]["rollback"]["receipt"]["status"],
             },
             "automatic_route_activation_allowed": False,
             "stable_promotion_performed": False,
@@ -858,25 +1023,35 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
         return summary
 
     def restore(self) -> dict[str, Any]:
+        preflight = self.state["phases"].get("preflight", {}).get("receipt", {}).get("initial", {})
+        incumbent = self.config.incumbent_state_root or ""
+        restart_incumbent = bool(preflight.get("incumbent_was_running")) and bool(incumbent)
         status = self.remote_json(
             self.config.target,
             f"""
 $ErrorActionPreference='Stop'
-$root={ps_quote(self.config.state_root)}
+$root={ps_quote(self.state_root)}
+$taskName={ps_quote(self.lane.task_name)}
 $controller=Join-Path $root 'Control-Release.ps1'
 if(Test-Path $controller){{&$controller -Action Stop -StateRoot $root|Out-Null}}
-$task=Get-ScheduledTask -TaskName {ps_quote(self.config.task_name)} -ErrorAction Stop
-if($task.State -eq 'Running'){{Stop-ScheduledTask -TaskName {ps_quote(self.config.task_name)}}}
-$status=&$controller -Action Status -StateRoot $root|ConvertFrom-Json
+$task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if($null -ne $task -and $task.State -eq 'Running'){{Stop-ScheduledTask -TaskName $taskName}}
+$leaseActive=$false
+if(Test-Path $controller){{$status=&$controller -Action Status -StateRoot $root|ConvertFrom-Json;$leaseActive=([bool]$status.gpu_owner.lease_active -or [bool]$status.gpu_owner.current_paused)}}
 $limit=[int][double](nvidia-smi.exe --query-gpu=power.limit --format=csv,noheader,nounits)
-if($limit -ne 370){{throw'370 W owner state was not restored'}}
-if([bool]$status.gpu_owner.lease_active -or [bool]$status.gpu_owner.current_paused){{throw'GPU-owner lease remained active'}}
-[Console]::Out.WriteLine(([ordered]@{{status='passed';task_state=[string](Get-ScheduledTask -TaskName {ps_quote(self.config.task_name)}).State;power_limit_w=$limit;gpu_lease_active=[bool]$status.gpu_owner.lease_active;process_count=@(Get-Process ninfer-serve -ErrorAction SilentlyContinue).Count}}|ConvertTo-Json -Compress))
+if($limit -ne {self.lane.owner_power_limit_w}){{throw'{self.lane.owner_power_limit_w} W owner state was not restored'}}
+if($leaseActive){{throw'GPU-owner lease remained active'}}
+$incumbentRoot={ps_quote(incumbent)}
+$incumbentState='untouched'
+if({'$true' if restart_incumbent else '$false'}){{&(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Start -StateRoot $incumbentRoot|Out-Null;$incumbentState='running'}}
+$taskState=if($null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)){{'absent'}}else{{[string](Get-ScheduledTask -TaskName $taskName).State}}
+[Console]::Out.WriteLine(([ordered]@{{status='passed';task_state=$taskState;power_limit_w=$limit;gpu_lease_active=$leaseActive;incumbent_state=$incumbentState;process_count=@(Get-Process ninfer-serve -ErrorAction SilentlyContinue).Count}}|ConvertTo-Json -Compress))
 """,
-            timeout=300,
+            timeout=900,
         )
-        if status["process_count"] != 0:
-            raise LaneError("managed runtime remained active after restoration")
+        expected_processes = 1 if restart_incumbent else 0
+        if status["process_count"] != expected_processes:
+            raise LaneError("target process count after restoration does not match its found state")
         return status
 
     def cleanup(self) -> None:
@@ -891,6 +1066,10 @@ if([bool]$status.gpu_owner.lease_active -or [bool]$status.gpu_owner.current_paus
         if self.config.dry_run:
             return {
                 "status": "dry_run",
+                "lane": self.lane.name,
+                "release_id": self.lane.release_id,
+                "package_name": self.lane.package_name,
+                "state_root": self.state_root,
                 "source_commit": self.head,
                 "phases": list(PHASES),
                 "builder_root": self.builder_root,
@@ -941,7 +1120,7 @@ def internal_long(args: argparse.Namespace) -> dict[str, Any]:
     started = time.perf_counter()
     result = request_json(
         f"http://{release['host']}:{release['port']}", key, "POST", "/v1/chat/completions",
-        {"model": "q38-ninfer", "messages": messages, "max_completion_tokens": 128, "temperature": 0, "reasoning_effort": "none"},
+        {"model": args.model_id, "messages": messages, "max_completion_tokens": 128, "temperature": 0, "reasoning_effort": "none"},
     )
     usage = result["usage"]
     content = result["choices"][0]["message"]["content"].strip()
@@ -968,7 +1147,7 @@ def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
     key = read_key(Path(release["api_key_file"]))
     base = f"http://{release['host']}:{release['port']}"
     session = digest("checkpoint-session")
-    seed = request_json(base, key, "POST", "/v1/responses", {"model": "q38-ninfer", "input": f"Memorize this exact marker for the next turn: {CHECKPOINT_MARKER}. Reply only SAVED.", "max_output_tokens": 32, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "ninfer_request_id": digest("seed")})
+    seed = request_json(base, key, "POST", "/v1/responses", {"model": args.model_id, "input": f"Memorize this exact marker for the next turn: {CHECKPOINT_MARKER}. Reply only SAVED.", "max_output_tokens": 32, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "ninfer_request_id": digest("seed")})
     old_pid = int(
         run(
             [
@@ -979,7 +1158,7 @@ def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
     )
     run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(controller), "-Action", "Restart", "-StateRoot", str(state_root)], timeout=900)
     new_pid = int(run(["powershell", "-NoProfile", "-Command", "(Get-NetTCPConnection -State Listen -LocalPort 18082).OwningProcess"]).stdout.strip())
-    continued = request_json(base, key, "POST", "/v1/responses", {"model": "q38-ninfer", "input": "Return only the exact marker from the previous turn.", "previous_response_id": seed["id"], "max_output_tokens": 64, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "ninfer_request_id": digest("continue")})
+    continued = request_json(base, key, "POST", "/v1/responses", {"model": args.model_id, "input": "Return only the exact marker from the previous turn.", "previous_response_id": seed["id"], "max_output_tokens": 64, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "ninfer_request_id": digest("continue")})
     content = response_text(continued).strip()
     if old_pid == new_pid or content != CHECKPOINT_MARKER:
         raise LaneError("durable process restart continuation failed")
@@ -1006,7 +1185,7 @@ def internal_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(controller), "-Action", "Start", "-StateRoot", str(state_root)], timeout=900)
     key = read_key(Path(release["api_key_file"]))
     base = f"http://{release['host']}:{release['port']}"
-    request_json(base, key, "POST", "/v1/chat/completions", {"model": "q38-ninfer", "messages": [{"role": "user", "content": "Warm the managed path."}], "max_tokens": 32, "temperature": 0})
+    request_json(base, key, "POST", "/v1/chat/completions", {"model": args.model_id, "messages": [{"role": "user", "content": "Warm the managed path."}], "max_tokens": 32, "temperature": 0})
     log = Path(release["release_root"]) / "logs" / "requests.jsonl"
     before = len(log.read_text(encoding="utf-8").splitlines())
     paragraph = "A reliable GPU inference service separates admission control, scheduling, memory accounting, observability, and failure recovery. "
@@ -1019,7 +1198,7 @@ def internal_benchmark(args: argparse.Namespace) -> dict[str, Any]:
             for index, value in enumerate(values): maximums[index] = max(maximums[index], value)
     thread = threading.Thread(target=poll, daemon=True); thread.start()
     started = time.perf_counter()
-    request_json(base, key, "POST", "/v1/chat/completions", {"model": "q38-ninfer", "messages": [{"role": "user", "content": prompt + "\nContinue until the output limit."}], "max_tokens": 1024, "temperature": 0, "seed": 57004, "reasoning_effort": "medium"})
+    request_json(base, key, "POST", "/v1/chat/completions", {"model": args.model_id, "messages": [{"role": "user", "content": prompt + "\nContinue until the output limit."}], "max_tokens": 1024, "temperature": 0, "seed": 57004, "reasoning_effort": "medium"})
     wall = time.perf_counter() - started; stop.set(); thread.join()
     records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()[before:]]
     done = [record for record in records if record.get("event") == "request_done"]
@@ -1027,8 +1206,10 @@ def internal_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         raise LaneError("managed C1 did not produce exactly 1024 tokens")
     record = done[0]; result = record["result"]; timing = record["timings_seconds"]; spec = record["speculative"]
     receipt = {"status": "passed", "completion_tokens": 1024, "prompt_tokens": result["prompt_tokens"], "computed_prefill_tokens": result["computed_prefill_tokens"], "decode_tokens_per_second": 1024 / timing["decode"], "prefill_tokens_per_second": result["computed_prefill_tokens"] / timing["prefill"], "wall_seconds": wall, "max_power_w": maximums[0], "max_temperature_c": maximums[1], "max_gpu_utilization_percent": maximums[2], "max_memory_used_mib": maximums[3], "mtp_acceptance_percent": 100 * spec["accepted_tokens"] / spec["drafted_tokens"]}
-    if receipt["max_power_w"] > 301.0:
-        raise LaneError("managed C1 exceeded the 300 W qualification envelope")
+    if args.power_envelope_w is not None:
+        receipt["power_envelope_w"] = args.power_envelope_w
+        if receipt["max_power_w"] > args.power_envelope_w:
+            raise LaneError(f"managed C1 exceeded the {args.power_envelope_w:g} W qualification envelope")
     atomic_json(evidence / "managed-c1.json", receipt)
     return receipt
 
@@ -1039,6 +1220,8 @@ def internal_parser() -> argparse.ArgumentParser:
     parser.add_argument("--state-root")
     parser.add_argument("--evidence-root")
     parser.add_argument("--fixture")
+    parser.add_argument("--model-id", default="q38-ninfer")
+    parser.add_argument("--power-envelope-w", type=float)
     return parser
 
 
@@ -1058,16 +1241,18 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parents[2])
     parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--lane", required=True, help="lane directory name under packaging/windows/lanes")
     parser.add_argument("--builder", required=True)
     parser.add_argument("--target", required=True)
-    parser.add_argument("--builder-vcpkg", required=True)
-    parser.add_argument("--builder-vcpkg-installed", required=True)
-    parser.add_argument("--neutral-runtime-release-root", required=True)
+    parser.add_argument("--builder-vcpkg", required=True, help="vcpkg.cmake toolchain file on the builder")
+    parser.add_argument("--builder-cuda-compiler", required=True, help="nvcc.exe on the builder")
+    parser.add_argument("--builder-cxx-compiler", required=True, help="cl.exe on the builder")
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--long-fixture", type=Path, required=True)
     parser.add_argument("--omp-root", required=True)
-    parser.add_argument("--state-root", default=r"C:\ProgramData\NInfer\qwen38-3090-omp-v0.2")
-    parser.add_argument("--task-name", default="NInfer-Qwen38-3090-OMP-v0.2")
+    parser.add_argument("--incumbent-state-root",
+                        help="another lineage's state root on the target, stopped for the window and "
+                             "restarted afterwards when it was running")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--through-phase", choices=PHASES)
@@ -1075,11 +1260,11 @@ def main() -> int:
     parser.add_argument("--upgrade-orchestrator-state", action="store_true")
     args = parser.parse_args()
     config = Config(
-        source_root=args.source_root.resolve(), state_dir=args.state_dir.resolve(), builder=args.builder,
-        target=args.target, builder_vcpkg=args.builder_vcpkg, builder_vcpkg_installed=args.builder_vcpkg_installed,
-        neutral_runtime_release_root=args.neutral_runtime_release_root, model_path=args.model_path,
-        long_fixture=args.long_fixture.resolve(), omp_root=args.omp_root, state_root=args.state_root,
-        task_name=args.task_name, resume=args.resume, dry_run=args.dry_run,
+        source_root=args.source_root.resolve(), state_dir=args.state_dir.resolve(), lane=args.lane,
+        builder=args.builder, target=args.target, builder_vcpkg=args.builder_vcpkg,
+        builder_cuda_compiler=args.builder_cuda_compiler, builder_cxx_compiler=args.builder_cxx_compiler,
+        model_path=args.model_path, long_fixture=args.long_fixture.resolve(), omp_root=args.omp_root,
+        incumbent_state_root=args.incumbent_state_root, resume=args.resume, dry_run=args.dry_run,
         through_phase=args.through_phase,
         candidate_source=args.candidate_source,
         upgrade_orchestrator_state=args.upgrade_orchestrator_state,

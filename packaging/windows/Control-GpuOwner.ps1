@@ -4,7 +4,20 @@ param(
     [ValidateSet('status', 'stop', 'start')]
     [string]$Action,
 
-    [string]$StateRoot = (Join-Path $env:ProgramData 'NInfer\qwen38-3090-gpu-owner')
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string]$StateRoot,
+
+    # The lane's managed power cap while the release runs; 0 leaves the power limit untouched
+    # and the lease only records the paused state.
+    [ValidateRange(0, 1000)]
+    [int]$QualifiedPowerLimitW = 0,
+
+    [ValidateRange(1, 1000)]
+    [int]$PriorPowerLimitMinW = 100,
+
+    [ValidateRange(1, 1000)]
+    [int]$PriorPowerLimitMaxW = 1000
 )
 
 Set-StrictMode -Version Latest
@@ -14,7 +27,8 @@ $ErrorActionPreference = 'Stop'
 $StateRoot = Initialize-NInferProtectedStateRoot $StateRoot
 Assert-NInferProtectedStateTree $StateRoot
 $statePath = Join-Path $StateRoot 'lease.json'
-$qualifiedPowerLimitW = 300
+$qualifiedPowerLimitW = $QualifiedPowerLimitW
+$managesPowerLimit = $qualifiedPowerLimitW -gt 0
 $interactiveGpuMemoryThresholdBytes = 1GB
 $nvidiaSmi = Join-Path ([Environment]::GetFolderPath('System')) 'nvidia-smi.exe'
 if (-not (Test-Path -LiteralPath $nvidiaSmi -PathType Leaf)) {
@@ -122,11 +136,15 @@ switch ($Action) {
                 -not [bool]$state.paused -or
                 $phase -cnotin @('prepared', 'paused') -or
                 [int]$state.qualified_power_limit_w -ne $qualifiedPowerLimitW -or
-                [int]$state.prior_power_limit_w -lt 100 -or
-                [int]$state.prior_power_limit_w -gt 390) {
+                [int]$state.prior_power_limit_w -lt $PriorPowerLimitMinW -or
+                [int]$state.prior_power_limit_w -gt $PriorPowerLimitMaxW) {
                 throw 'GPU-owner lease state is invalid or the safe power cap drifted'
             }
-            if ($phase -ceq 'prepared') {
+            if (-not $managesPowerLimit) {
+                if ($phase -ceq 'prepared') { Write-State ([int]$state.prior_power_limit_w) 'paused' }
+                Write-Status $true $limit
+            }
+            elseif ($phase -ceq 'prepared') {
                 if ($limit -eq $qualifiedPowerLimitW) {
                     Write-State ([int]$state.prior_power_limit_w) 'paused'
                     Write-Status $true $limit
@@ -152,7 +170,7 @@ switch ($Action) {
         if ($null -ne $state) {
             Assert-InteractiveGpuWorkloadAbsent
             $phase = if ($null -eq $state.PSObject.Properties['phase']) { 'paused' } else { [string]$state.phase }
-            if ($phase -ceq 'prepared') {
+            if ($phase -ceq 'prepared' -and $managesPowerLimit) {
                 if ((Get-PowerLimitW) -ne $qualifiedPowerLimitW) {
                     Invoke-NvidiaSmi @('-pl', [string]$qualifiedPowerLimitW) | Out-Null
                 }
@@ -161,11 +179,16 @@ switch ($Action) {
                 }
                 Write-State ([int]$state.prior_power_limit_w) 'paused'
             }
-            & $PSCommandPath -Action status -StateRoot $StateRoot
+            & $PSCommandPath -Action status -StateRoot $StateRoot -QualifiedPowerLimitW $QualifiedPowerLimitW -PriorPowerLimitMinW $PriorPowerLimitMinW -PriorPowerLimitMaxW $PriorPowerLimitMaxW
             break
         }
         Assert-InteractiveGpuWorkloadAbsent
         $prior = Get-PowerLimitW
+        if (-not $managesPowerLimit) {
+            Write-State $prior 'paused'
+            Write-Status $true $prior
+            break
+        }
         Write-State $prior 'prepared'
         try {
             Invoke-NvidiaSmi @('-pl', [string]$qualifiedPowerLimitW) | Out-Null
@@ -198,10 +221,12 @@ switch ($Action) {
             break
         }
         $prior = [int]$state.prior_power_limit_w
-        if ($prior -lt 100 -or $prior -gt 390) { throw 'recorded prior GPU power limit is invalid' }
-        Invoke-NvidiaSmi @('-pl', [string]$prior) | Out-Null
-        if ((Get-PowerLimitW) -ne $prior) { throw 'GPU prior power limit was not restored' }
+        if ($prior -lt $PriorPowerLimitMinW -or $prior -gt $PriorPowerLimitMaxW) { throw 'recorded prior GPU power limit is invalid' }
+        if ($managesPowerLimit) {
+            Invoke-NvidiaSmi @('-pl', [string]$prior) | Out-Null
+            if ((Get-PowerLimitW) -ne $prior) { throw 'GPU prior power limit was not restored' }
+        }
         Remove-Item -LiteralPath $statePath -Force
-        Write-Status $false $prior
+        Write-Status $false (Get-PowerLimitW)
     }
 }

@@ -1,20 +1,20 @@
 {
   "artifact_type": "ninfer_windows_release_spec",
   "schema_version": 3,
-  "lane": "rtx3090",
-  "release_id": "qwen38-3090-native-v0.6.0-beta.1",
+  "lane": "rtx4090",
+  "release_id": "qwen38-4090-native-v0.6.0-beta.1",
   "release_version": "0.6.0-beta.1",
-  "deployment_profile": "qwen38-3090-native-v0.6.0-beta.1",
-  "build_profile": "native-v0.6.0-beta.1-rtx3090",
-  "platform": "windows-x86_64-cuda13.3-rtx3090",
-  "product_prefix": "ninfer-rtx3090-native",
+  "deployment_profile": "qwen38-4090-native-v0.6.0-beta.1",
+  "build_profile": "native-v0.6.0-beta.1-rtx4090",
+  "platform": "windows-x86_64-cuda13.3-rtx4090",
+  "product_prefix": "ninfer-rtx4090-native",
   "gpu": {
-    "name": "NVIDIA GeForce RTX 3090",
-    "class": "rtx-3090",
-    "cuda_architecture": "sm_86",
-    "cmake_cuda_architecture": "86",
-    "compute_capability": "8.6",
-    "minimum_driver_major": 570
+    "name": "NVIDIA GeForce RTX 4090",
+    "class": "rtx-4090",
+    "cuda_architecture": "sm_89",
+    "cmake_cuda_architecture": "89",
+    "compute_capability": "8.9",
+    "minimum_driver_major": 580
   },
   "source": {
     "repository": "https://github.com/alphastorm/ninfer",
@@ -48,8 +48,8 @@
     "cors": false
   },
   "lifecycle": {
-    "task_name": "NInfer-Qwen38-3090-Native",
-    "state_root_name": "qwen38-3090-native",
+    "task_name": "NInfer-Qwen38-4090-Native",
+    "state_root_name": "qwen38-4090-native",
     "listen_port": 18082,
     "installation_scope": "isolated-version-root",
     "candidate_root_directories": [
@@ -71,13 +71,13 @@
       "required_on_first_install": true,
       "bundled_default": "Control-GpuOwner.ps1",
       "state_protection_helper": "Protect-StateRoot.ps1",
-      "qualified_power_limit_w": 300,
-      "owner_power_limit_w": 370,
+      "qualified_power_limit_w": null,
+      "owner_power_limit_w": 450,
       "prior_power_limit_range_w": [
         100,
-        390
+        600
       ],
-      "managed_power_envelope_w": 301,
+      "managed_power_envelope_w": null,
       "interactive_gpu_memory_threshold_bytes": 1073741824,
       "inherited_on_upgrade": true,
       "actions": [

@@ -4,7 +4,9 @@ param(
     [ValidateSet('Run', 'Status', 'Start', 'Stop', 'Restart', 'Rollback', 'Uninstall')]
     [string]$Action,
 
-    [string]$StateRoot = (Join-Path $env:ProgramData 'NInfer\qwen38-3090-omp-v0.2')
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string]$StateRoot
 )
 
 Set-StrictMode -Version Latest
@@ -95,8 +97,14 @@ function Get-Release([object]$State, [string]$ReleaseId) {
             throw "installed release source identity is invalid: $field"
         }
     }
-    if ([string]$release.build_profile -cnotin @('omp-v0.2.0-rtx3090', 'omp-v0.2.1-rtx3090', 'omp-v0.2.2-rtx3090', 'omp-v0.2.3-rtx3090', 'omp-v0.2.4-rtx3090', 'omp-v0.2.5-rtx3090') -or
-        [string]$release.cuda_architecture -cne 'sm_86') {
+    # A native mainline release names its lane in the build profile and records the architecture
+    # it was compiled for; the two must agree with each other and with the release identity.
+    if ([string]$release.build_profile -cnotmatch '^native-v[0-9][0-9A-Za-z.-]*-rtx([0-9]{4})$') {
+        throw 'installed release immutable build profile is invalid'
+    }
+    $laneNumber = $Matches[1]
+    if ([string]$release.cuda_architecture -cnotmatch '^sm_[0-9]{2,3}a?$' -or
+        [string]$release.deployment_profile -cne ('qwen38-' + $laneNumber + '-native-v' + ([string]$release.build_profile).Substring(8, ([string]$release.build_profile).Length - 16))) {
         throw 'installed release immutable build profile is invalid'
     }
     return $release
@@ -249,7 +257,15 @@ function Get-GpuOwner([object]$State) {
 function Invoke-GpuOwner([object]$State, [ValidateSet('status', 'stop', 'start')][string]$OwnerAction) {
     $owner = Get-GpuOwner $State
     if ($null -eq $owner) { return $null }
-    $output = ((& ([string]$owner.controller_path) -Action $OwnerAction -StateRoot ([string]$owner.state_root)) | Out-String).Trim()
+    $policy = @{}
+    if ($null -ne $owner.PSObject.Properties['qualified_power_limit_w'] -and $null -ne $owner.qualified_power_limit_w) {
+        $policy['QualifiedPowerLimitW'] = [int]$owner.qualified_power_limit_w
+    }
+    if ($null -ne $owner.PSObject.Properties['prior_power_limit_range_w']) {
+        $policy['PriorPowerLimitMinW'] = [int]$owner.prior_power_limit_range_w[0]
+        $policy['PriorPowerLimitMaxW'] = [int]$owner.prior_power_limit_range_w[1]
+    }
+    $output = ((& ([string]$owner.controller_path) -Action $OwnerAction -StateRoot ([string]$owner.state_root) @policy) | Out-String).Trim()
     if ($OwnerAction -cne 'status') { return $null }
     if ([string]::IsNullOrWhiteSpace($output)) { throw 'GPU-owner status returned no JSON' }
     $status = $output | ConvertFrom-Json
@@ -653,7 +669,9 @@ function Invoke-Run {
                 '--max-concurrency', [string]$config.engine.max_concurrency,
                 '--max-pending-requests', [string]$config.engine.max_pending_requests,
                 '--pending-timeout-ms', [string]$config.engine.pending_timeout_ms,
-                '--reasoning-effort', [string]$config.reasoning.effort,
+                '--device-state-slots', [string]$config.context_cache.device_state_slots,
+                '--host-state-slots', [string]$config.context_cache.host_state_slots,
+                '--max-private-continuations', [string]$config.context_cache.max_private_continuations,
                 '--response-store-max-records', [string]$config.response_store.max_records,
                 '--response-store-max-mib', [string]$config.response_store.max_mib,
                 '--session-checkpoint-dir', $checkpointRoot,
@@ -668,6 +686,7 @@ function Invoke-Run {
         }
         if (-not [bool]$config.engine.cuda_graph) { $serverArguments.Add('--no-cuda-graph') }
         if (-not [bool]$config.engine.prefix_reuse) { $serverArguments.Add('--no-prefix-reuse') }
+        if (-not [bool]$config.reasoning.thinking) { $serverArguments.Add('--no-thinking') }
         if ([bool]$config.reasoning.preserve_thinking) { $serverArguments.Add('--preserve-thinking') }
         if ([bool]$config.engine.vision) { $serverArguments.Add('--vision') }
 
