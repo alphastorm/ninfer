@@ -13,8 +13,11 @@ engine configuration is bound by hash into the build identity; the lane specific
 GPU, architecture, power policy, and task identity the installer enforces.
 
 The lane configuration also sizes the pinned host pools (`context_cache.host_state_slots`,
-`context_cache.host_kv_mib`) for the host that runs the lane, because `cudaMallocHost` on
-Windows must find the pages at startup right after the controller has hashed the 18 GB model
-through the file cache: on the 32 GiB RTX 4090 host 24 state slots plus the 8 GiB default KV
-pool (13.3 GB pinned) failed that allocation on two of four starts, so that lane ships 8 slots
-and 4 GiB (about 6.6 GB); the 64 GiB RTX 3090 host keeps 24 slots and 8 GiB.
+`context_cache.host_kv_mib`) for the host that runs the lane. `cudaMallocHost` has to find the
+pages at startup immediately after the controller has read the 18 GB model artifact through the
+file cache, which leaves the free-and-zero list empty: on the 32 GiB RTX 4090 host the 8 GiB
+default Host KV pool with 24 state slots (13.3 GB pinned) failed that allocation on two managed
+starts, while 4 GiB with 24 slots (9.2 GB pinned) starts and serves the whole agent-protocol
+contract. The 64 GiB RTX 3090 host keeps the 8 GiB pool. Host state slots are not a memory
+dial to trade away: at 8 slots the protocol's post-delete continuation fails, so both lanes
+carry 24.
