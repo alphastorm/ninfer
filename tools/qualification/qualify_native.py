@@ -401,6 +401,7 @@ class Config:
     model_path: str
     long_fixture: Path
     omp_root: str
+    transfer_tool: Path | None
     incumbent_state_root: str | None
     resume: bool
     dry_run: bool
@@ -790,6 +791,70 @@ if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw'package is n
         receipt["public_scan"] = scan
         return receipt
 
+    def transfer_package(self) -> dict[str, Any]:
+        """Move the package and its lifecycle scripts from the builder's package-a to the target.
+
+        The same host copies locally. Two Windows hosts cannot carry bulk over ssh in either
+        direction, and relaying through the operator's machine (``scp -3``) moves a 0.6 GB
+        package at well under 1 MB/s across two long links, so the package travels as ranged
+        HTTP served by the builder and fetched by the target (95 MB/s measured on the SF LAN)
+        while the small scripts still relay. Both ends verify the SHA-256; the installer
+        checks it again against the package receipt.
+        """
+        names = (
+            "Install-Release.ps1",
+            "Protect-StateRoot.ps1",
+            "Control-GpuOwner.ps1",
+            "package-build-receipt.json",
+        )
+        if self.config.builder == self.config.target:
+            items = ",".join(ps_quote(f"{self.builder_out_a}/{name}") for name in (self.lane.package_name, *names))
+            remote_ps(
+                self.config.target,
+                f"Copy-Item -LiteralPath @({items}) -Destination {ps_quote(self.target_root)} -Force",
+            )
+            return {"transport": "local_copy"}
+        for name in names:
+            scp(
+                remote_spec(self.config.builder, f"{self.builder_out_a}/{name}"),
+                remote_spec(self.config.target, f"{self.target_root}/{name}"),
+                through_local=True,
+            )
+        tool = self.config.transfer_tool
+        if tool is None:
+            raise LaneError("--transfer-tool is required when the builder and target are different hosts")
+        source = f"{self.builder_out_a}/{self.lane.package_name}"
+        destination = f"{self.target_root}/{self.lane.package_name}"
+        scp(str(tool), remote_spec(self.config.builder, f"{self.builder_root}/transfer.py"))
+        scp(str(tool), remote_spec(self.config.target, f"{self.target_root}/transfer.py"))
+        server = subprocess.Popen(
+            ["ssh", "-T", self.config.builder, "python", f"{self.builder_root}/transfer.py", "serve",
+             "--local", source, "--timeout", "900"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            announced = json.loads(server.stdout.readline() or "{}")
+            if announced.get("status") != "serving":
+                raise LaneError(f"the builder did not start serving the package: {announced}")
+            address = run(["ssh", "-G", self.config.builder]).stdout
+            host = next(line.split()[1] for line in address.splitlines() if line.startswith("hostname "))
+            fetched = compact_json_from_output(run(
+                ["ssh", "-T", self.config.target, "python", f"{self.target_root}/transfer.py", "fetch",
+                 "--url", f"http://{host}:{announced['port']}", "--token", announced["token"],
+                 "--local", destination, "--timeout", "300"],
+                timeout=900,
+            ).stdout)
+            served, _ = server.communicate(timeout=120)
+        finally:
+            if server.poll() is None:
+                server.kill()
+        if fetched.get("status") != "passed" or fetched.get("sha256") != announced.get("sha256"):
+            raise LaneError(f"package fetch did not pass: {fetched}")
+        if compact_json_from_output(served).get("status") != "passed":
+            raise LaneError(f"package serve did not complete: {served[-400:]}")
+        return {"transport": "ranged_http", "streams": fetched.get("streams"), "wall_s": fetched.get("wall_s"),
+                "mb_per_s": fetched.get("mb_per_s"), "bytes": fetched.get("bytes")}
+
     def transfer_install(self) -> dict[str, Any]:
         package = self.state["phases"]["package"]["receipt"]["package"]
         target_root = self.target_root
@@ -797,18 +862,7 @@ if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw'package is n
             self.config.target,
             f"$p={ps_quote(target_root)};New-Item -ItemType Directory -Path $p,(Join-Path $p 'evidence') -Force|Out-Null",
         )
-        for name in (
-            self.lane.package_name,
-            "Install-Release.ps1",
-            "Protect-StateRoot.ps1",
-            "Control-GpuOwner.ps1",
-            "package-build-receipt.json",
-        ):
-            scp(
-                remote_spec(self.config.builder, f"{self.builder_out_a}/{name}"),
-                remote_spec(self.config.target, f"{target_root}/{name}"),
-                through_local=True,
-            )
+        transfer = self.transfer_package()
         self.stage_script(self.config.target, f"{target_root}/qualify_native.py")
         scp(str(self.config.long_fixture), remote_spec(self.config.target, f"{target_root}/long_niah_128k.json"))
         scp(
@@ -859,7 +913,9 @@ if([string]$upgrade.status -cnotin @('passed','already_installed')){{throw'manag
 $after=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
 [Console]::Out.WriteLine(([ordered]@{{status='passed';before=$before;active_release=[string]$after.active_release;previous_release=[string]$after.previous_release;package_sha256={ps_quote(package['sha256'])};clean_installs=1;managed_installs=1;first_release_of_lineage=(-not $before)}}|ConvertTo-Json -Compress))
 """
-        return self.remote_json(self.config.target, install_script, timeout=1800)
+        receipt = self.remote_json(self.config.target, install_script, timeout=1800)
+        receipt["transfer"] = transfer
+        return receipt
 
     def target_internal(self, phase: str, *arguments: str, timeout: int = 1800) -> dict[str, Any]:
         self.stage_script(self.config.target, f"{self.target_root}/qualify_native.py")
@@ -1271,6 +1327,9 @@ def main() -> int:
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--long-fixture", type=Path, required=True)
     parser.add_argument("--omp-root", required=True)
+    parser.add_argument("--transfer-tool", type=Path,
+                        help="ranged-HTTP transfer script with serve/fetch subcommands (omp-ninfer "
+                             "scripts/hosts/pscp.py); required when the builder and target differ")
     parser.add_argument("--incumbent-state-root",
                         help="another lineage's state root on the target, stopped for the window and "
                              "restarted afterwards when it was running")
@@ -1285,6 +1344,7 @@ def main() -> int:
         builder=args.builder, target=args.target, builder_vcpkg=args.builder_vcpkg,
         builder_cuda_compiler=args.builder_cuda_compiler, builder_cxx_compiler=args.builder_cxx_compiler,
         model_path=args.model_path, long_fixture=args.long_fixture.resolve(), omp_root=args.omp_root,
+        transfer_tool=args.transfer_tool.resolve() if args.transfer_tool else None,
         incumbent_state_root=args.incumbent_state_root, resume=args.resume, dry_run=args.dry_run,
         through_phase=args.through_phase,
         candidate_source=args.candidate_source,
