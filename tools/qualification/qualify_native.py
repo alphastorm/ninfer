@@ -858,9 +858,31 @@ if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw'package is n
     def transfer_install(self) -> dict[str, Any]:
         package = self.state["phases"]["package"]["receipt"]["package"]
         target_root = self.target_root
+        # The staging root and the clean-install root live under the qualification parent, so
+        # the parent must be a protected root (SYSTEM and Administrators only, no inherited
+        # DACL): a plain New-Item under ProgramData would inherit BUILTIN\Users write access,
+        # and the installer refuses to create protected state beneath such an ancestor. The
+        # candidate's own protection library creates or checks it before anything is staged.
+        protect = self.config.source_root / "packaging" / "windows" / "Protect-StateRoot.ps1"
+        helper = f"C:/Windows/Temp/ninfer-protect-{self.head8}.ps1"
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".ps1", delete=False) as stream:
+            stream.write(run(["git", "show", f"{self.head}:{protect.relative_to(self.config.source_root).as_posix()}"],
+                             cwd=self.config.source_root).stdout)
+            local_helper = Path(stream.name)
+        try:
+            scp(str(local_helper), remote_spec(self.config.target, helper))
+        finally:
+            local_helper.unlink(missing_ok=True)
         remote_ps(
             self.config.target,
-            f"$p={ps_quote(target_root)};New-Item -ItemType Directory -Path $p,(Join-Path $p 'evidence') -Force|Out-Null",
+            f"""
+$ErrorActionPreference='Stop'
+. {ps_quote(helper)}
+$p={ps_quote(target_root)}
+Initialize-NInferProtectedStateRoot (Split-Path -Parent $p)|Out-Null
+New-Item -ItemType Directory -Path $p,(Join-Path $p 'evidence') -Force|Out-Null
+Remove-Item -LiteralPath {ps_quote(helper)} -Force
+""",
         )
         transfer = self.transfer_package()
         self.stage_script(self.config.target, f"{target_root}/qualify_native.py")
@@ -905,8 +927,8 @@ try{{
 }}finally{{
   if($null -ne $taskXml -and $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)){{Register-ScheduledTask -TaskName $taskName -Xml $taskXml -Force|Out-Null}}
 }}
-$managedArguments=@('-PackagePath',$package,'-PackageSha256',{ps_quote(package['sha256'])},'-ModelArtifactPath',{ps_quote(self.config.model_path)},'-ApiKeyFile',$apiKeyFile,'-StateRoot',$root,'-NoStart')
-if(-not $before){{$managedArguments+=@('-GpuOwnerControllerPath',(Join-Path $stage 'Control-GpuOwner.ps1'))}}
+$managedArguments=@{{PackagePath=$package;PackageSha256={ps_quote(package['sha256'])};ModelArtifactPath={ps_quote(self.config.model_path)};ApiKeyFile=$apiKeyFile;StateRoot=$root;NoStart=$true}}
+if(-not $before){{$managedArguments['GpuOwnerControllerPath']=(Join-Path $stage 'Control-GpuOwner.ps1')}}
 $upgradeLines=@(&(Join-Path $stage 'Install-Release.ps1') @managedArguments)
 $upgrade=[string]$upgradeLines[-1]|ConvertFrom-Json
 if([string]$upgrade.status -cnotin @('passed','already_installed')){{throw'managed install did not pass'}}
