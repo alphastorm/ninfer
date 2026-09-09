@@ -4798,19 +4798,27 @@ void ProgramImplCore::prepare_materialization(MaterializationTransaction& transa
     SharedPrefixState* shared_state = transaction.has_shared_source
                                           ? &shared_prefix_states[transaction.shared_source_index]
                                           : nullptr;
-    if (source_state != nullptr && resident_resources(*source_state).device.state_slots == 0 &&
-        resident_resources(*source_state).host.state_slots == 0) {
-        throw std::logic_error("materialization source has no resident state");
+    // Residency, not exclusive ownership, decides whether the planned source is materializable.
+    // resident_resources() reports only what an owner holds exclusively - it is the owner's exact
+    // transition effect - so a long anchor a sibling continuation also references measures as zero
+    // while being perfectly resident. Under Host StateImage pressure that is the ordinary fanout
+    // shape: a catalogued continuation whose endpoint has been retired still reuses its shared
+    // anchor. Ask the question the planner asked (request_plan_impl.h selected_state + residency).
+    const StateImageHandle selected_source =
+        source_state != nullptr
+            ? selected_state(*source_state, details.reuse, details.selected_checkpoint)
+            : (shared_state != nullptr ? shared_state->state : StateImageHandle{});
+    if ((source_state != nullptr || shared_state != nullptr) &&
+        (!state_store->valid(selected_source) ||
+         state_store->residency(selected_source) == StateReplicaResidency::None)) {
+        throw std::logic_error("materialization source has no resident state replica");
     }
 
     std::uint32_t state_count = demand.reservation_added.device.state_slots;
     std::optional<StateImageHandle> host_state_restore;
     std::optional<StateImageHandle> host_state_fork_destination;
     if (source_state != nullptr || shared_state != nullptr) {
-        const StateImageHandle state =
-            source_state != nullptr
-                ? selected_state(*source_state, details.reuse, details.selected_checkpoint)
-                : shared_state->state;
+        const StateImageHandle state = selected_source;
         const bool consuming_fork =
             source_state != nullptr &&
             details.source_disposition == runtime::ClaimDisposition::ConsumedToActive &&
