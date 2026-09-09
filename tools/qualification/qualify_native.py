@@ -675,11 +675,16 @@ if((Get-FileHash $bundle -Algorithm SHA256).Hash.ToLowerInvariant()-ne{ps_quote(
 git clone --quiet $bundle $source
 git -C $source checkout --quiet --detach {self.head}
 $env:_CL_="/experimental:deterministic /pathmap:$env:USERPROFILE=C:\\build"
+# The app-local DLLs are built by vcpkg from the manifest under short neutral roots, so the
+# paths they embed (__FILE__ strings, PDB references) never name the builder's profile; the
+# neutral binary cache lets the second lane reuse them.
+$env:VCPKG_BINARY_SOURCES='clear;files,C:\\b\\vcpkg-neutral-cache,readwrite'
+New-Item -ItemType Directory -Force -Path 'C:\\b\\vcpkg-neutral-cache','C:\\b\\vt','C:\\b\\vp'|Out-Null
 $pf=[Environment]::GetFolderPath('ProgramFilesX86')
 $vsdev=Join-Path $pf 'Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat'
 $lines=&cmd.exe /d /s /c ('"'+$vsdev+'" -arch=x64 -host_arch=x64 >nul && set')
 foreach($line in $lines){{$i=$line.IndexOf('=');if($i -gt 0){{[Environment]::SetEnvironmentVariable($line.Substring(0,$i),$line.Substring($i+1),'Process')}}}}
-&cmake -S $source -B $build -G Ninja '-DCMAKE_BUILD_TYPE=Release' '-DCMAKE_CUDA_ARCHITECTURES={self.lane.cuda_architecture}' ('-DCMAKE_CUDA_COMPILER='+{ps_quote(self.config.builder_cuda_compiler)}) ('-DCMAKE_CXX_COMPILER='+{ps_quote(self.config.builder_cxx_compiler)}) ('-DCMAKE_C_COMPILER='+{ps_quote(self.config.builder_cxx_compiler)}) '-DNINFER_BUILD_APPS=ON' '-DBUILD_TESTING=ON' '-DNINFER_BUILD_BENCHMARKS=ON' '-DNINFER_BUILD_PROFILE={self.lane.build_profile}' '-DNINFER_UPSTREAM_BASE_SHA={self.lane.upstream_sha}' '-DNINFER_PATCH_STACK_SHA={self.head}' ('-DCMAKE_TOOLCHAIN_FILE='+{ps_quote(self.config.builder_vcpkg)}) '-DVCPKG_TARGET_TRIPLET=x64-windows'
+&cmake -S $source -B $build -G Ninja '-DCMAKE_BUILD_TYPE=Release' '-DCMAKE_CUDA_ARCHITECTURES={self.lane.cuda_architecture}' ('-DCMAKE_CUDA_COMPILER='+{ps_quote(self.config.builder_cuda_compiler)}) ('-DCMAKE_CXX_COMPILER='+{ps_quote(self.config.builder_cxx_compiler)}) ('-DCMAKE_C_COMPILER='+{ps_quote(self.config.builder_cxx_compiler)}) '-DNINFER_BUILD_APPS=ON' '-DBUILD_TESTING=ON' '-DNINFER_BUILD_BENCHMARKS=ON' '-DNINFER_BUILD_PROFILE={self.lane.build_profile}' '-DNINFER_UPSTREAM_BASE_SHA={self.lane.upstream_sha}' '-DNINFER_PATCH_STACK_SHA={self.head}' ('-DCMAKE_TOOLCHAIN_FILE='+{ps_quote(self.config.builder_vcpkg)}) '-DVCPKG_TARGET_TRIPLET=x64-windows' '-DVCPKG_INSTALL_OPTIONS=--x-buildtrees-root=C:/b/vt;--x-packages-root=C:/b/vp'
 if($LASTEXITCODE -ne 0){{throw'configure failed'}}
 &cmake --build $build --target {" ".join(focused_tests.split("|"))} ninfer-serve ninfer ninfer_bench --parallel 16
 if($LASTEXITCODE -ne 0){{throw'build failed'}}
