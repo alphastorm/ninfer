@@ -206,6 +206,22 @@ std::optional<std::string> parse_client_session_header(const httplib::Request& r
     return identity.client_session_sha256;
 }
 
+void apply_client_session_header(const httplib::Request& request, bool authentication_configured,
+                                 GenerationRequest& generation) {
+    const std::optional<std::string> header =
+        parse_client_session_header(request, authentication_configured);
+    if (!header) { return; }
+    if (generation.client_session_sha256 && generation.client_session_sha256 != header) {
+        ApiError error;
+        error.status  = 400;
+        error.message = "X-NInfer-Session and ninfer_session must identify the same session";
+        error.param   = "ninfer_session";
+        error.code    = "invalid_ninfer_identity";
+        throw ApiException(std::move(error));
+    }
+    generation.client_session_sha256 = header;
+}
+
 std::optional<std::string> checkpoint_session_path_argument(const httplib::Request& request) {
     if (request.matches.size() > 1) { return request.matches[1].str(); }
     return std::nullopt;

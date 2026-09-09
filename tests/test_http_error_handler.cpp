@@ -92,6 +92,29 @@ int main() {
     httplib::Request missing_session_header;
     failures += check(!ninfer::serve::parse_client_session_header(missing_session_header, true),
                       "optional session parser invented a missing credential");
+    ninfer::serve::GenerationRequest header_only;
+    ninfer::serve::apply_client_session_header(session_header, true, header_only);
+    failures += check(header_only.client_session_sha256 == session_digest,
+                      "session header alone did not bind the Responses request to its session");
+    ninfer::serve::GenerationRequest agreeing;
+    agreeing.client_session_sha256 = session_digest;
+    ninfer::serve::apply_client_session_header(session_header, true, agreeing);
+    failures += check(agreeing.client_session_sha256 == session_digest,
+                      "agreeing session header and body were rejected");
+    ninfer::serve::GenerationRequest bodyless;
+    ninfer::serve::apply_client_session_header(missing_session_header, true, bodyless);
+    failures += check(!bodyless.client_session_sha256,
+                      "absent session header invented a Responses session");
+    ninfer::serve::GenerationRequest disagreeing;
+    disagreeing.client_session_sha256 = std::string(64, 'b');
+    try {
+        ninfer::serve::apply_client_session_header(session_header, true, disagreeing);
+        failures += check(false, "disagreeing session header and body were accepted");
+    } catch (const ninfer::serve::ApiException& error) {
+        failures +=
+            check(error.error().status == 400 && error.error().code == "invalid_ninfer_identity",
+                  "disagreeing Responses session identities returned the wrong error");
+    }
     try {
         (void)ninfer::serve::require_checkpoint_session_identity(std::nullopt,
                                                                  missing_session_header, true);

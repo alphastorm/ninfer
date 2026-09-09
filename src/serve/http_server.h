@@ -36,6 +36,12 @@ httplib::Server::HandlerResponse handle_unrendered_http_error(const ServeOptions
 [[nodiscard]] std::optional<std::string>
 parse_client_session_header(const httplib::Request& request, bool authentication_configured);
 
+// Responses create accepts the session credential on either surface: the header alone binds the
+// request to that session, and a header that disagrees with the body's ninfer_session is
+// rejected rather than silently choosing one of them.
+void apply_client_session_header(const httplib::Request& request, bool authentication_configured,
+                                 GenerationRequest& generation);
+
 // Checkpoint status/delete resolve the session credential from the URL path parameter
 // (the released OMP client's addressing: /v1/ninfer/checkpoints/<sha256>...) or from
 // X-NInfer-Session on the collection routes; disagreement between the two is rejected.

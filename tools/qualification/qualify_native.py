@@ -672,7 +672,7 @@ $root={ps_quote(self.builder_root)}
 $source={ps_quote(self.builder_source)}
 $build={ps_quote(self.builder_build)}
 $bundle=Join-Path $root 'source.bundle'
-if((Get-FileHash $bundle -Algorithm SHA256).Hash.ToLowerInvariant()-ne{ps_quote(bundle_sha)}){{throw'bundle hash mismatch'}}
+if((Get-FileHash $bundle -Algorithm SHA256).Hash.ToLowerInvariant()-ne{ps_quote(bundle_sha)}){{throw 'bundle hash mismatch'}}
 git clone --quiet $bundle $source
 git -C $source checkout --quiet --detach {self.head}
 $env:_CL_="/experimental:deterministic /pathmap:$env:USERPROFILE=C:\\build"
@@ -686,11 +686,11 @@ $vsdev=Join-Path $pf 'Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\
 $lines=&cmd.exe /d /s /c ('"'+$vsdev+'" -arch=x64 -host_arch=x64 >nul && set')
 foreach($line in $lines){{$i=$line.IndexOf('=');if($i -gt 0){{[Environment]::SetEnvironmentVariable($line.Substring(0,$i),$line.Substring($i+1),'Process')}}}}
 &cmake -S $source -B $build -G Ninja '-DCMAKE_BUILD_TYPE=Release' '-DCMAKE_CUDA_ARCHITECTURES={self.lane.cuda_architecture}' ('-DCMAKE_CUDA_COMPILER='+{ps_quote(self.config.builder_cuda_compiler)}) ('-DCMAKE_CXX_COMPILER='+{ps_quote(self.config.builder_cxx_compiler)}) ('-DCMAKE_C_COMPILER='+{ps_quote(self.config.builder_cxx_compiler)}) '-DNINFER_BUILD_APPS=ON' '-DBUILD_TESTING=ON' '-DNINFER_BUILD_BENCHMARKS=ON' '-DNINFER_BUILD_PROFILE={self.lane.build_profile}' '-DNINFER_UPSTREAM_BASE_SHA={self.lane.upstream_sha}' '-DNINFER_PATCH_STACK_SHA={self.head}' ('-DCMAKE_TOOLCHAIN_FILE='+{ps_quote(self.config.builder_vcpkg)}) '-DVCPKG_TARGET_TRIPLET=x64-windows' '-DVCPKG_INSTALL_OPTIONS=--x-buildtrees-root=C:/b/vt;--x-packages-root=C:/b/vp'
-if($LASTEXITCODE -ne 0){{throw'configure failed'}}
+if($LASTEXITCODE -ne 0){{throw 'configure failed'}}
 &cmake --build $build --target {" ".join(focused_tests.split("|"))} ninfer-serve ninfer ninfer_bench --parallel 16
-if($LASTEXITCODE -ne 0){{throw'build failed'}}
+if($LASTEXITCODE -ne 0){{throw 'build failed'}}
 &ctest --test-dir $build -C Release --output-on-failure -R '^({focused_tests})$'
-if($LASTEXITCODE -ne 0){{throw'focused tests failed'}}
+if($LASTEXITCODE -ne 0){{throw 'focused tests failed'}}
 $bin={ps_quote(self.builder_bin)}
 New-Item -ItemType Directory -Path $bin|Out-Null
 Copy-Item (Join-Path $build 'apps\\ninfer.exe'),(Join-Path $build 'apps\\ninfer-serve.exe'),(Join-Path $build 'bench\\ninfer_bench.exe') -Destination $bin
@@ -768,7 +768,7 @@ Build-One {ps_quote(self.builder_out_a)}
 Build-One {ps_quote(self.builder_out_b)}
 $a=Get-Content (Join-Path {ps_quote(self.builder_out_a)} 'package-build-receipt.json') -Raw | ConvertFrom-Json
 $b=Get-Content (Join-Path {ps_quote(self.builder_out_b)} 'package-build-receipt.json') -Raw | ConvertFrom-Json
-if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw'package is not deterministic'}}
+if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw 'package is not deterministic'}}
 [Console]::Out.WriteLine(($a|ConvertTo-Json -Depth 8 -Compress))
 """
         receipt = self.remote_json(self.config.builder, package_script, timeout=1800)
@@ -911,18 +911,18 @@ if(Test-Path (Join-Path $root 'state.json')){{
   $i=Get-Content (Join-Path $incumbentRoot 'state.json') -Raw | ConvertFrom-Json
   $apiKeyFile=[string]$i.releases.PSObject.Properties[[string]$i.active_release].Value.api_key_file
 }}
-if(-not $apiKeyFile -or -not (Test-Path -LiteralPath $apiKeyFile -PathType Leaf)){{throw'no operator API-key file is available for the lane'}}
+if(-not $apiKeyFile -or -not (Test-Path -LiteralPath $apiKeyFile -PathType Leaf)){{throw 'no operator API-key file is available for the lane'}}
 $package=Join-Path $stage {ps_quote(self.lane.package_name)}
-if((Get-FileHash $package -Algorithm SHA256).Hash.ToLowerInvariant() -ne {ps_quote(package['sha256'])}){{throw'package transfer hash mismatch'}}
+if((Get-FileHash $package -Algorithm SHA256).Hash.ToLowerInvariant() -ne {ps_quote(package['sha256'])}){{throw 'package transfer hash mismatch'}}
 $cleanRoot='C:\\ProgramData\\NInferQualification\\orchestrated-clean-{self.lane.name}-{self.head8}\\{self.lane.spec['lifecycle']['state_root_name']}'
-if(Test-Path $cleanRoot){{throw'clean-install root already exists'}}
+if(Test-Path $cleanRoot){{throw 'clean-install root already exists'}}
 $existingTask=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 $taskXml=$null
 if($null -ne $existingTask){{$taskXml=Export-ScheduledTask -TaskName $taskName;Unregister-ScheduledTask -TaskName $taskName -Confirm:$false}}
 try{{
   $cleanLines=@(&(Join-Path $stage 'Install-Release.ps1') -PackagePath $package -PackageSha256 {ps_quote(package['sha256'])} -ModelArtifactPath {ps_quote(self.config.model_path)} -ApiKeyFile $apiKeyFile -GpuOwnerControllerPath (Join-Path $stage 'Control-GpuOwner.ps1') -StateRoot $cleanRoot -NoStart)
   $clean=[string]$cleanLines[-1]|ConvertFrom-Json
-  if([string]$clean.status -cne 'passed'){{throw'clean install did not pass'}}
+  if([string]$clean.status -cne 'passed'){{throw 'clean install did not pass'}}
   &(Join-Path $cleanRoot 'Control-Release.ps1') -Action Uninstall -StateRoot $cleanRoot|Out-Null
 }}finally{{
   if($null -ne $taskXml -and $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)){{Register-ScheduledTask -TaskName $taskName -Xml $taskXml -Force|Out-Null}}
@@ -931,7 +931,7 @@ $managedArguments=@{{PackagePath=$package;PackageSha256={ps_quote(package['sha25
 if(-not $before){{$managedArguments['GpuOwnerControllerPath']=(Join-Path $stage 'Control-GpuOwner.ps1')}}
 $upgradeLines=@(&(Join-Path $stage 'Install-Release.ps1') @managedArguments)
 $upgrade=[string]$upgradeLines[-1]|ConvertFrom-Json
-if([string]$upgrade.status -cnotin @('passed','already_installed')){{throw'managed install did not pass'}}
+if([string]$upgrade.status -cnotin @('passed','already_installed')){{throw 'managed install did not pass'}}
 $after=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
 [Console]::Out.WriteLine(([ordered]@{{status='passed';before=$before;active_release=[string]$after.active_release;previous_release=[string]$after.previous_release;package_sha256={ps_quote(package['sha256'])};clean_installs=1;managed_installs=1;first_release_of_lineage=(-not $before)}}|ConvertTo-Json -Compress))
 """
@@ -971,7 +971,7 @@ $r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
 $path=Join-Path ([string]$r.release_root) 'bin\\qualification\\agent_protocol.py'
 $out=Join-Path $stage 'evidence\\agent-protocol.json'
 &python $path --base-url ('http://'+[string]$r.host+':'+[string]$r.port) --model {ps_quote(self.lane.model_id)} --api-key-file ([string]$r.api_key_file) --expect-binary-sha256 ([string]$r.binary_sha256) --expect-model-artifact-sha256 ([string]$r.model_artifact_sha256) --expect-config-sha256 ([string]$r.config_sha256) --expect-deployment-profile ([string]$r.deployment_profile) 1>$out
-if($LASTEXITCODE -ne 0){{throw'protocol failed'}}
+if($LASTEXITCODE -ne 0){{throw 'protocol failed'}}
 $v=Get-Content $out -Raw | ConvertFrom-Json
 [Console]::Out.WriteLine(([ordered]@{{status=[string]$v.status;checks=@($v.checks.PSObject.Properties).Count;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant()}}|ConvertTo-Json -Compress))
 """
@@ -1003,7 +1003,7 @@ $first=[string]$a.active_release
 &$controller -Action Stop -StateRoot $root|Out-Null
 &$controller -Action Rollback -StateRoot $root|Out-Null
 $b=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
-if([string]$b.active_release -cne $c){{throw'bidirectional rollback did not restore candidate'}}
+if([string]$b.active_release -cne $c){{throw 'bidirectional rollback did not restore candidate'}}
 [Console]::Out.WriteLine(([ordered]@{{status='passed';directions=2;intermediate_release=$first;active_release=[string]$b.active_release}}|ConvertTo-Json -Compress))
 """
         return self.remote_json(self.config.target, script, timeout=1800)
@@ -1020,7 +1020,7 @@ $r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
 $l=Join-Path ([string]$r.release_root) 'bin\\lifecycle'
 $lines=@(&(Join-Path $stage 'test_release_security.ps1') -StateProtectionPath (Join-Path $l 'Protect-StateRoot.ps1') -GpuOwnerControllerPath (Join-Path $l 'Control-GpuOwner.ps1') -InstallerPath (Join-Path $l 'Install-Release.ps1') -ManagedStateRoot $root -QualifiedPowerLimitW {self.lane.qualified_power_limit_w} -OwnerPowerLimitW {self.lane.owner_power_limit_w})
 $v=[string]$lines[-1] | ConvertFrom-Json
-if([string]$v.status -cne 'passed'){{throw'security failed'}}
+if([string]$v.status -cne 'passed'){{throw 'security failed'}}
 $out=Join-Path $stage 'evidence\\state-security.json'
 [IO.File]::WriteAllText($out,($v|ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false))
 [Console]::Out.WriteLine(([ordered]@{{status='passed';root_dacl_protected=[bool]$v.root_dacl_protected;low_privilege_read_denials=[int]$v.low_privilege_effective_read_denials;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant()}}|ConvertTo-Json -Compress))
@@ -1044,13 +1044,13 @@ $env:NO_COLOR='1'
 $events=Join-Path $stage 'evidence\\omp-events.jsonl'
 $args=@('--mode','json','--print','--no-session','--no-title','--no-extensions','--no-skills','--no-rules','--no-lsp','--no-pty','--no-tools','--tools','read','--auto-approve','--approval-mode','yolo','--model',('ninfer-client-acceptance/'+{ps_quote(self.lane.model_id)}),'--thinking','off','--system-prompt','Use the read tool exactly once on marker.txt, then return exactly its single line with no other text.','--cwd',(Join-Path $ompRoot 'workspace'),'--max-time','300','Read marker.txt with the read tool and return its exact single line.')
 &(Join-Path $env:LOCALAPPDATA 'OMP\\omp.cmd') @args 1>$events
-if($LASTEXITCODE -ne 0){{throw'OMP failed'}}
+if($LASTEXITCODE -ne 0){{throw 'OMP failed'}}
 $parsed=@(Get-Content $events|Where-Object{{$_.Trim()}}|ForEach-Object{{$_|ConvertFrom-Json}})
 $ended=@($parsed|Where-Object{{$_.type -eq 'message_end' -and $null -ne $_.message}}|ForEach-Object{{$_.message}})
 $assistants=@($ended|Where-Object{{$_.role -eq 'assistant'}});$results=@($ended|Where-Object{{$_.role -eq 'toolResult'}})
 $calls=@($assistants|ForEach-Object{{@($_.content|Where-Object{{$_.type -eq 'toolCall'}})}})
 $text=[string]::Join('',@($assistants[-1].content|Where-Object{{$_.type -eq 'text'}}|ForEach-Object{{[string]$_.text}}))
-if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -or $text -cne 'OMP_NINFER_WINDOWS_C12_OK'){{throw'OMP exact oracle failed'}}
+if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -or $text -cne 'OMP_NINFER_WINDOWS_C12_OK'){{throw 'OMP exact oracle failed'}}
 [Console]::Out.WriteLine(([ordered]@{{status='passed';events=$parsed.Count;typed_tool_name='read';tool_results=$results.Count;exact_final_answer=$true}}|ConvertTo-Json -Compress))
 """
         return self.remote_json(self.config.target, script, timeout=900)
@@ -1138,8 +1138,8 @@ if($null -ne $task -and $task.State -eq 'Running'){{Stop-ScheduledTask -TaskName
 $leaseActive=$false
 if(Test-Path $controller){{$status=&$controller -Action Status -StateRoot $root|ConvertFrom-Json;$leaseActive=([bool]$status.gpu_owner.lease_active -or [bool]$status.gpu_owner.current_paused)}}
 $limit=[int][double](nvidia-smi.exe --query-gpu=power.limit --format=csv,noheader,nounits)
-if($limit -ne {self.lane.owner_power_limit_w}){{throw'{self.lane.owner_power_limit_w} W owner state was not restored'}}
-if($leaseActive){{throw'GPU-owner lease remained active'}}
+if($limit -ne {self.lane.owner_power_limit_w}){{throw '{self.lane.owner_power_limit_w} W owner state was not restored'}}
+if($leaseActive){{throw 'GPU-owner lease remained active'}}
 $incumbentRoot={ps_quote(incumbent)}
 $incumbentState='untouched'
 if({'$true' if restart_incumbent else '$false'}){{&(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Start -StateRoot $incumbentRoot|Out-Null;$incumbentState='running'}}

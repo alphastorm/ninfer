@@ -671,6 +671,7 @@ function Invoke-Run {
                 '--pending-timeout-ms', [string]$config.engine.pending_timeout_ms,
                 '--device-state-slots', [string]$config.context_cache.device_state_slots,
                 '--host-state-slots', [string]$config.context_cache.host_state_slots,
+                '--host-kv-mib', [string]$config.context_cache.host_kv_mib,
                 '--max-private-continuations', [string]$config.context_cache.max_private_continuations,
                 '--response-store-max-records', [string]$config.response_store.max_records,
                 '--response-store-max-mib', [string]$config.response_store.max_mib,

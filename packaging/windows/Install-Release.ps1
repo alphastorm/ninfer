@@ -641,6 +641,8 @@ function Assert-InstallerArchitectureContract([object]$Spec, [object]$Config) {
         -not [bool]$Config.session_checkpoint.enabled -or
         [int]$Config.session_checkpoint.staging_mib -le 0 -or
         [int]$Config.context_cache.device_state_slots -lt 1 -or
+        [int]$Config.context_cache.host_state_slots -lt 1 -or
+        [int]$Config.context_cache.host_kv_mib -lt 1 -or
         $null -ne $Config.PSObject.Properties['persistent_cache'] -or
         $null -ne $Config.reasoning.PSObject.Properties['effort']) {
         throw 'release server configuration is not an authenticated native lane profile'

@@ -30,7 +30,8 @@
   },
   "context_cache": {
     "device_state_slots": 2,
-    "host_state_slots": 24,
+    "host_state_slots": 8,
+    "host_kv_mib": 4096,
     "max_private_continuations": 8
   },
   "speculative": {

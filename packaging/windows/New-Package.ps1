@@ -135,6 +135,8 @@ if ($config.artifact_type -cne 'ninfer_windows_server_config' -or
     -not [bool]$config.session_checkpoint.enabled -or
     [int]$config.session_checkpoint.staging_mib -le 0 -or
     [int]$config.context_cache.device_state_slots -lt 1 -or
+    [int]$config.context_cache.host_state_slots -lt 1 -or
+    [int]$config.context_cache.host_kv_mib -lt 1 -or
     $null -ne $config.PSObject.Properties['persistent_cache'] -or
     $null -ne $config.reasoning.PSObject.Properties['effort']) {
     throw 'server configuration is not an authenticated native lane profile'
