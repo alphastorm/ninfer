@@ -40,6 +40,7 @@ PHASES = (
     "package",
     "transfer_install",
     "protocol",
+    "pressure_protocol",
     "context_128k",
     "restart",
     "rollback",
@@ -53,6 +54,13 @@ EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 EXPECTED_LONG = "ORCHID=493817; COLOR=COBALT"
 LONG_PROMPT_TOKENS = 130048
 CHECKPOINT_MARKER = "CHECKPOINT-NATIVE-731942"
+# The agent protocol has to hold when the Host StateImage pool is the binding constraint, not
+# only at the lane's shipped capacity: a continuation that has lost its endpoint reuses a long
+# anchor its sibling also references, and that shared anchor is exactly what capacity pressure
+# demotes to Host. The pass runs the lane's own protocol against the installed release bytes at
+# this pool size (alphastorm/ninfer#38).
+PRESSURE_HOST_STATE_SLOTS = 8
+PRESSURE_PORT_OFFSET = 1
 # The app-local DLLs a native package carries are the binaries' own imports resolved from the
 # builder's vcpkg tree plus the DirectStorage redistributables the build stages beside the apps.
 DIRECTSTORAGE_DLLS = ("dstorage.dll", "dstoragecore.dll")
@@ -980,6 +988,76 @@ $v=Get-Content $out -Raw | ConvertFrom-Json
 """
         return self.remote_json(self.config.target, script, timeout=1200)
 
+    def pressure_protocol(self) -> dict[str, Any]:
+        """The same protocol, run directly against the installed bytes at a Host-pool size that
+        makes StateImage capacity the binding constraint. The managed release is stopped for the
+        pass and the server is launched from the installed release with a scratch checkpoint root,
+        so neither the lineage's state nor its cache is touched."""
+        script = f"""
+$ErrorActionPreference='Stop'
+$root={ps_quote(self.state_root)}
+$stage={ps_quote(self.target_root)}
+$controller=Join-Path $root 'Control-Release.ps1'
+&$controller -Action Stop -StateRoot $root|Out-Null
+$s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
+$r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
+$c=Get-Content ([string]$r.config_file) -Raw | ConvertFrom-Json
+$scratch=Join-Path $stage 'pressure'
+if(Test-Path $scratch){{Remove-Item $scratch -Recurse -Force}}
+$checkpoints=Join-Path $scratch 'checkpoints'
+New-Item -ItemType Directory -Force -Path $checkpoints|Out-Null
+$port=[int]$r.port + {PRESSURE_PORT_OFFSET}
+$serverArguments=@(
+  [string]$r.model_artifact,
+  '--host',[string]$r.host,'--port',[string]$port,
+  '--api-key-file',[string]$r.api_key_file,'--model-id',[string]$c.model_id,
+  '--binary-sha256',[string]$r.binary_sha256,'--artifact-sha256',[string]$r.model_artifact_sha256,
+  '--config-sha256',[string]$r.config_sha256,'--deployment-profile',[string]$r.deployment_profile,
+  '--device',[string]$c.engine.device,'--max-context',[string]$c.engine.max_context,
+  '--kv-capacity',[string]$c.engine.kv_capacity,'--prefill-chunk',[string]$c.engine.prefill_chunk,
+  '--kv-dtype',[string]$c.engine.kv_dtype,'--max-concurrency',[string]$c.engine.max_concurrency,
+  '--max-pending-requests',[string]$c.engine.max_pending_requests,
+  '--pending-timeout-ms',[string]$c.engine.pending_timeout_ms,
+  '--device-state-slots',[string]$c.context_cache.device_state_slots,
+  '--host-state-slots','{PRESSURE_HOST_STATE_SLOTS}',
+  '--host-kv-mib',[string]$c.context_cache.host_kv_mib,
+  '--max-private-continuations',[string]$c.context_cache.max_private_continuations,
+  '--response-store-max-records',[string]$c.response_store.max_records,
+  '--response-store-max-mib',[string]$c.response_store.max_mib,
+  '--session-checkpoint-dir',$checkpoints,
+  '--session-checkpoint-quota-mib',[string]$c.session_checkpoint.quota_mib,
+  '--session-checkpoint-staging-mib',[string]$c.session_checkpoint.staging_mib,
+  '--log-stats-interval-ms','0','--preserve-thinking',
+  '--spec','mtp','--draft-tokens',[string]$c.speculative.draft_tokens,'--lm-head-draft')
+$stdout=Join-Path $scratch 'stdout.log'
+$stderr=Join-Path $scratch 'stderr.log'
+$process=Start-Process -FilePath ([string]$r.server_executable) -ArgumentList $serverArguments -WorkingDirectory ([string]$r.release_root) -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+try{{
+  $key=(Get-Content ([string]$r.api_key_file) -Raw).Trim()
+  $deadline=(Get-Date).AddSeconds(600)
+  $ready=$false
+  while((Get-Date) -lt $deadline){{
+    if($process.HasExited){{throw "pressure server exited with code $($process.ExitCode)"}}
+    try{{
+      Invoke-RestMethod -Method Get -Uri ('http://'+[string]$r.host+':'+[string]$port+'/v1/ninfer/status') -Headers @{{Authorization=('Bearer '+$key)}} -TimeoutSec 5|Out-Null
+      $ready=$true;break
+    }}catch{{Start-Sleep -Seconds 2}}
+  }}
+  if(-not $ready){{throw 'pressure server did not become ready'}}
+  $path=Join-Path ([string]$r.release_root) 'bin\\qualification\\agent_protocol.py'
+  $out=Join-Path $stage 'evidence\\agent-protocol-pressure.json'
+  &python $path --base-url ('http://'+[string]$r.host+':'+[string]$port) --model {ps_quote(self.lane.model_id)} --api-key-file ([string]$r.api_key_file) --expect-binary-sha256 ([string]$r.binary_sha256) --expect-model-artifact-sha256 ([string]$r.model_artifact_sha256) --expect-config-sha256 ([string]$r.config_sha256) --expect-deployment-profile ([string]$r.deployment_profile) 1>$out
+  if($LASTEXITCODE -ne 0){{throw ('protocol under Host StateImage pressure failed: '+((Get-Content $stderr -Tail 2) -join ' | '))}}
+  $v=Get-Content $out -Raw | ConvertFrom-Json
+  [Console]::Out.WriteLine(([ordered]@{{status=[string]$v.status;host_state_slots={PRESSURE_HOST_STATE_SLOTS};device_state_slots=[int]$c.context_cache.device_state_slots;checks=@($v.checks.PSObject.Properties).Count;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant()}}|ConvertTo-Json -Compress))
+}}
+finally{{
+  if(-not $process.HasExited){{Stop-Process -Id $process.Id -Force;$process.WaitForExit(30000)|Out-Null}}
+  Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+}}
+"""
+        return self.remote_json(self.config.target, script, timeout=1800)
+
     def context(self) -> dict[str, Any]:
         return self.target_internal("_long", "--fixture", f"{self.target_root}/long_niah_128k.json", timeout=1800)
 
@@ -1184,6 +1262,7 @@ $taskState=if($null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction Sile
             ("package", self.package),
             ("transfer_install", self.transfer_install),
             ("protocol", self.protocol),
+            ("pressure_protocol", self.pressure_protocol),
             ("context_128k", self.context),
             ("restart", self.restart),
             ("rollback", self.rollback),
@@ -1248,26 +1327,49 @@ def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
     )
     key = read_key(Path(release["api_key_file"]))
     base = f"http://{release['host']}:{release['port']}"
+    listener = ["powershell", "-NoProfile", "-Command",
+                f"(Get-NetTCPConnection -State Listen -LocalPort {release['port']}).OwningProcess"]
     session = digest("checkpoint-session")
     seed = request_json(base, key, "POST", "/v1/responses", {"model": args.model_id, "input": f"Memorize this exact marker for the next turn: {CHECKPOINT_MARKER}. Reply only SAVED.", "max_output_tokens": 32, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "ninfer_request_id": digest("seed")})
-    old_pid = int(
-        run(
-            [
-                "powershell", "-NoProfile", "-Command",
-                "(Get-NetTCPConnection -State Listen -LocalPort 18082).OwningProcess",
-            ]
-        ).stdout.strip()
-    )
+    # A managed stop on Windows terminates the server, so nothing is flushed on the way out: what
+    # survives a restart is what the session published while the server was up. Publish it the way
+    # the product documents - the explicit save - and then require the restart to restore it.
+    saved = request_json(base, key, "POST", "/v1/ninfer/checkpoints", {"session_sha256": session})
+    if saved.get("state") != "available" or int(saved.get("frontier_tokens", 0)) <= 0:
+        raise LaneError("explicit session checkpoint was not published")
+    status = request_json(base, key, "GET", f"/v1/ninfer/checkpoints/{session}/status")
+    if status.get("state") != "available":
+        raise LaneError("published session checkpoint did not become available")
+    old_pid = int(run(listener).stdout.strip())
+    restart_started = time.perf_counter()
     run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(controller), "-Action", "Restart", "-StateRoot", str(state_root)], timeout=900)
-    new_pid = int(run(["powershell", "-NoProfile", "-Command", "(Get-NetTCPConnection -State Listen -LocalPort 18082).OwningProcess"]).stdout.strip())
+    restart_seconds = time.perf_counter() - restart_started
+    new_pid = int(run(listener).stdout.strip())
     continued = request_json(base, key, "POST", "/v1/responses", {"model": args.model_id, "input": "Return only the exact marker from the previous turn.", "previous_response_id": seed["id"], "max_output_tokens": 64, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "ninfer_request_id": digest("continue")})
     content = response_text(continued).strip()
-    if old_pid == new_pid or content != CHECKPOINT_MARKER:
+    cached = int(continued["usage"]["input_tokens_details"]["cached_tokens"])
+    if old_pid == new_pid or content != CHECKPOINT_MARKER or cached <= 0:
         raise LaneError("durable process restart continuation failed")
     cache = Path(release["cache_root"]) / "session-checkpoints" / "sessions"
     directories = sorted(cache.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True)
     files = [path for path in directories[0].rglob("*") if path.is_file()]
-    receipt = {"status": "passed", "old_pid": old_pid, "new_pid": new_pid, "checkpoint_files": len(files), "checkpoint_bytes": sum(path.stat().st_size for path in files), "cached_input_tokens": continued["usage"]["input_tokens_details"]["cached_tokens"], "exact_output": content, "middle_delete_restart_regression": "passed", "latest_delete_nonrestorable_regression": "passed", "standalone_delete_nonrestorable_regression": "passed", "durable_only_lru_delete_regression": "passed", "post_commit_sync_regression": "passed", "superseded_generation_reclamation": "eager-unless-active-reader-or-cleanup-failure", "deletion_semantics": "logical-object-deletion", "secure_erasure_claimed": False}
+    receipt = {
+        "status": "passed",
+        "old_pid": old_pid,
+        "new_pid": new_pid,
+        "restart_seconds": restart_seconds,
+        "checkpoint_save": "explicit_endpoint",
+        "checkpoint_generation": saved.get("generation"),
+        "checkpoint_save_bytes": saved.get("bytes"),
+        "checkpoint_frontier_tokens": saved.get("frontier_tokens"),
+        "checkpoint_files": len(files),
+        "checkpoint_bytes": sum(path.stat().st_size for path in files),
+        "cached_input_tokens": cached,
+        "exact_output": content,
+        "managed_stop": "process termination; the server publishes on save, not on shutdown",
+        "deletion_semantics": "logical-object-deletion",
+        "secure_erasure_claimed": False,
+    }
     atomic_json(evidence / "checkpoint-restart-proof.json", receipt)
     return receipt
 
