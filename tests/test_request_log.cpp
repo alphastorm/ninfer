@@ -37,7 +37,7 @@ int main() {
         !compiled_build.upstream_base_sha.empty() && !compiled_build.patch_stack_sha.empty() &&
             !compiled_build.build_profile.empty() && !compiled_build.build_type.empty() &&
             !compiled_build.cxx_compiler.empty() && !compiled_build.cuda_compiler.empty() &&
-            !compiled_build.cuda_toolkit.empty(),
+            !compiled_build.cuda_toolkit.empty() && !compiled_build.cuda_architecture.empty(),
         "compiled build identity contains an empty field");
     const std::string version = ninfer::format_build_info("ninfer-serve");
     failures += check(version.rfind("ninfer-serve upstream_base_sha=", 0) == 0 &&

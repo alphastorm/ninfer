@@ -27,6 +27,7 @@ nlohmann::json server_identity_json(const ServeOptions& options, const ninfer::L
         {"cxx_compiler", std::string(build.cxx_compiler)},
         {"cuda_compiler", std::string(build.cuda_compiler)},
         {"cuda_toolkit", std::string(build.cuda_toolkit)},
+        {"cuda_architecture", std::string(build.cuda_architecture)},
         {"deployment_profile", optional_identity(options.deployment_profile)},
         {"binary_sha256", optional_identity(options.binary_sha256)},
         {"model_artifact_sha256", optional_identity(options.artifact_sha256)},
