@@ -58,7 +58,7 @@ CHECKPOINT_MARKER = "CHECKPOINT-NATIVE-731942"
 # only at the lane's shipped capacity: a continuation that has lost its endpoint reuses a long
 # anchor its sibling also references, and that shared anchor is exactly what capacity pressure
 # demotes to Host. The pass runs the lane's own protocol against the installed release bytes at
-# this pool size (alphastorm/ninfer#38).
+# this pool size (alphastorm/ninfer#37).
 PRESSURE_HOST_STATE_SLOTS = 8
 PRESSURE_PORT_OFFSET = 1
 # The app-local DLLs a native package carries are the binaries' own imports resolved from the

@@ -754,7 +754,12 @@ private:
         request->cv.notify_one();
     }
 
-    void complete_success(const std::shared_ptr<Request>& request, FinishReason reason) {
+    // A finished request leaves the engine in two steps: its result is finalized while the
+    // request still owns its lane, and it is delivered only after the lane has been released
+    // and the runtime statistics republished. A consumer that returns from wait() therefore
+    // never observes its own request as live membership.
+    [[nodiscard]] GenerationResult finalize_success(const std::shared_ptr<Request>& request,
+                                                    FinishReason reason) {
         HostPhaseMeasurement completion = begin_host_phase();
         release_planning_state(request);
         request->prompt      = {};
@@ -798,6 +803,10 @@ private:
         request->terminal_reason.reset();
         finish_engine_phase(completion, EngineHostPhase::CommitOutput);
         result.engine_timing = request->host_timing.public_snapshot();
+        return result;
+    }
+
+    void deliver_success(const std::shared_ptr<Request>& request, GenerationResult&& result) {
         {
             std::lock_guard lock(request->mutex);
             if (request->response_done) { return; }
@@ -806,6 +815,20 @@ private:
         }
         if (mark_completed(request)) { release_reserved_capacity(); }
         request->cv.notify_one();
+    }
+
+    void complete_success(const std::shared_ptr<Request>& request, FinishReason reason) {
+        deliver_success(request, finalize_success(request, reason));
+    }
+
+    // Retire a lane's finished request: finalize, release the lane, publish the statistics
+    // that no longer count it, then deliver.
+    void retire_completed_slot(std::uint32_t lane, const std::shared_ptr<Request>& request,
+                               FinishReason reason) {
+        GenerationResult result = finalize_success(request, reason);
+        remove_completed_slot(lane);
+        publish_runtime_stats();
+        deliver_success(request, std::move(result));
     }
 
     void complete_cancelled(const std::shared_ptr<Request>& request) {
@@ -879,21 +902,19 @@ private:
             request->terminal_reason.reset();
 
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
-            complete_success(request, reason);
-            remove_completed_slot(lane);
+            retire_completed_slot(lane, request, reason);
             boundary = begin_host_phase();
             changed  = true;
         }
-        if (changed) { publish_runtime_stats(); }
         return changed;
     }
 
     void cancel_active_requests(const std::array<bool, kMaximumConcurrency>& cancelled_at_boundary,
                                 HostPhaseMeasurement& boundary) {
         if (instance_.program->has_context_transaction()) { return; }
-        bool changed = false;
+        // Each retirement republishes the statistics itself; nothing is deferred to the end.
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
-            const auto& request = slots_[lane];
+            const auto request = slots_[lane];
             if (request == nullptr || !cancelled_at_boundary[lane]) { continue; }
             if (request->capture_pending) { continue; }
             if (!request->sequence || !request->lane || request->lane->value != lane) {
@@ -906,12 +927,9 @@ private:
             if (scheduler_.prefill_lane() == lane) { scheduler_.clear_prefill_lane(lane); }
             append_output(request, request->output.commit_preview());
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
-            complete_success(request, FinishReason::Cancelled);
-            remove_completed_slot(lane);
+            retire_completed_slot(lane, request, FinishReason::Cancelled);
             boundary = begin_host_phase();
-            changed  = true;
         }
-        if (changed) { publish_runtime_stats(); }
     }
 
     [[nodiscard]] bool expire_pending_requests() {
@@ -1182,15 +1200,15 @@ private:
         } catch (...) {
             phase.finish();
             for (std::size_t index = 0; index < terminal_count; ++index) {
-                complete_success(terminal_requests[index], terminal_reasons[index]);
-                remove_completed_slot(terminal_lanes[index]);
+                retire_completed_slot(terminal_lanes[index], terminal_requests[index],
+                                      terminal_reasons[index]);
             }
             throw;
         }
         phase.finish();
         for (std::size_t index = 0; index < terminal_count; ++index) {
-            complete_success(terminal_requests[index], terminal_reasons[index]);
-            remove_completed_slot(terminal_lanes[index]);
+            retire_completed_slot(terminal_lanes[index], terminal_requests[index],
+                                  terminal_reasons[index]);
         }
     }
 
