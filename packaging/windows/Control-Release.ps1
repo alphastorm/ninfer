@@ -644,6 +644,7 @@ function Stop-ManagedProcess {
         outcome = 'already_stopped'
         forced = $false
         exit_code = $null
+        wrapper_result = $null
         reason = $null
         pid = if ($null -eq $owned) { $null } else { [int]$owned.Id }
         started_utc = $started.ToString('o')
@@ -667,13 +668,22 @@ function Stop-ManagedProcess {
             if (-not $owned.HasExited) {
                 $receipt.reason = "the server did not exit within $([int]$plan.timeout_seconds)s of the stop request"
             }
-            elseif ($owned.ExitCode -ne 0) {
-                $receipt.exit_code = [int]$owned.ExitCode
-                $receipt.outcome = 'graceful_nonzero_exit'
-                $receipt.reason = 'the server exited nonzero after the stop request'
-            }
             else {
-                $receipt.exit_code = 0
+                # A process this controller did not start does not always expose an exit code:
+                # Get-Process hands back a handle without the rights .NET needs, and reading it
+                # yields $null rather than 0. What is observable is that the request was
+                # delivered and the process exited; classify on that, record the code when the
+                # host gives one, and never treat its absence as a nonzero exit. The flush
+                # itself is proven by the session that comes back, not by an exit code.
+                $exitCode = $null
+                try { $exitCode = $owned.ExitCode } catch { $exitCode = $null }
+                if ($null -ne $exitCode) {
+                    $receipt.exit_code = [int]$exitCode
+                    if ([int]$exitCode -ne 0) {
+                        $receipt.outcome = 'graceful_nonzero_exit'
+                        $receipt.reason = 'the server exited nonzero after the stop request'
+                    }
+                }
             }
         }
         else {
@@ -720,6 +730,11 @@ function Stop-ManagedProcess {
         Write-ManagedStopReceipt $receipt
         throw 'the managed wrapper did not release the run lock after its server stopped'
     }
+    # The wrapper does have a real child handle, so its own result is the observable record of
+    # how the server exited. Evidence, not a verdict: Task Scheduler result codes also carry
+    # its own lifecycle (a terminated task never reports zero).
+    $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+    $receipt.wrapper_result = if ($null -eq $info) { $null } else { [int]$info.LastTaskResult }
     $receipt.completed_utc = [DateTime]::UtcNow.ToString('o')
     $receipt.elapsed_seconds = [Math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 3)
     Write-ManagedStopReceipt $receipt

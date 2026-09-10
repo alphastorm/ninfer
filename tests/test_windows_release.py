@@ -92,6 +92,13 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         # lease already gone.
         restore = body("Restore-GpuOwnerLease")
         self.assertRegex(restore, r"gpu-owner-lease\.json'\)[^\n]*(\n\s*)?-ErrorAction SilentlyContinue")
+        # A process the controller did not start does not always expose an exit code; a receipt
+        # that classified on the unobservable value called a clean graceful stop a nonzero exit
+        # (alphastorm/ninfer#40). Only an observed code may decide an outcome.
+        stop = body("Stop-ManagedProcess")
+        self.assertNotRegex(stop, r"\$owned\.ExitCode -ne 0")
+        self.assertIn("try { $exitCode = $owned.ExitCode } catch", stop)
+        self.assertRegex(stop, r"if \(\$null -ne \$exitCode\)")
 
     def test_shared_scripts_carry_no_lane_literals(self) -> None:
         """One tree serves every lane: GPU names, architectures, power figures, release ids, and
