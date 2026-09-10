@@ -1404,6 +1404,14 @@ def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
         raise LaneError("explicit session checkpoint was not published")
     if request_json(base, key, "GET", f"/v1/ninfer/checkpoints/{control_session}/status").get("state") != "available":
         raise LaneError("published session checkpoint did not become available")
+    # The proof is that nothing published this session, and this cache root outlives the phase:
+    # a generation an earlier run left behind is exactly the state the precondition denies. Own
+    # it rather than assume it, so the phase is as re-runnable as the rest of the lane.
+    try:
+        request_json(base, key, "DELETE", f"/v1/ninfer/checkpoints/{flush_session}")
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
     flush_seed = seed(flush_session, FLUSH_MARKER, "flush-seed")
     flush_before = checkpoint_state(base, key, flush_session)
     if flush_before == "available":
