@@ -69,6 +69,30 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         installer = (WINDOWS / "Install-Release.ps1").read_text(encoding="utf-8")
         self.assertIn("managed_stop = [string]$spec.lifecycle.managed_stop", installer)
 
+    def test_controller_never_touches_state_a_wrapper_still_owns(self) -> None:
+        """A terminated launch released nothing, so the controller could always follow straight
+        on. A graceful one unwinds: it restores the GPU owner and drops the run lock on its own
+        thread of control, so every controller action that touches either must first wait for it
+        (alphastorm/ninfer#39)."""
+        controller = (WINDOWS / "Control-Release.ps1").read_text(encoding="utf-8")
+
+        def body(name: str) -> str:
+            start = controller.index(f"function {name}")
+            rest = controller[start + 1:]
+            end = rest.index("\nfunction ") if "\nfunction " in rest else len(rest)
+            return rest[:end]
+
+        for name in ("Stop-ManagedProcess", "Start-ManagedRelease"):
+            with self.subTest(function=name):
+                self.assertIn("Wait-ManagedWrapperExit", body(name))
+        wait = body("Wait-ManagedWrapperExit")
+        self.assertIn("run.lock", wait)
+        self.assertIn("Wait-TaskIdle", wait)
+        # Both callers converge on the same end state, so the loser must not fail for finding the
+        # lease already gone.
+        restore = body("Restore-GpuOwnerLease")
+        self.assertRegex(restore, r"gpu-owner-lease\.json'\)[^\n]*(\n\s*)?-ErrorAction SilentlyContinue")
+
     def test_shared_scripts_carry_no_lane_literals(self) -> None:
         """One tree serves every lane: GPU names, architectures, power figures, release ids, and
         task names come from the lane specification, never from the scripts."""

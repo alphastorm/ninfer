@@ -367,7 +367,11 @@ function Restore-GpuOwnerLease {
     if ([bool]$after.paused -ne [bool]$lease.prior_paused) {
         throw 'GPU-owner prior state was not restored exactly'
     }
-    Remove-Item -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json') -Force
+    # The lease is a claim, not a record: its absence is the end state. A graceful stop lets the
+    # managed wrapper reach its own restore, so both callers can converge on the same result and
+    # whichever finishes second must not fail for finding the work already done.
+    Remove-Item -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json') -Force `
+        -ErrorAction SilentlyContinue
 }
 
 function Get-GpuOwnerStatus([object]$State) {
@@ -603,6 +607,25 @@ function Wait-TaskIdle([string]$TaskName, [DateTime]$DeadlineUtc) {
     return $false
 }
 
+# A managed launch owns two pieces of shared state while it runs: the run lock and the
+# GPU-owner lease. Terminating it never released either, so the controller could always follow
+# straight on; a server that exits gracefully lets its wrapper reach its own cleanup, and a
+# controller that restored the lease or started the next release in that window would race it.
+function Wait-ManagedWrapperExit([string]$TaskName, [DateTime]$DeadlineUtc) {
+    if (-not (Wait-TaskIdle $TaskName $DeadlineUtc)) { return $false }
+    $lockPath = Join-Path $StateRoot 'run.lock'
+    while ([DateTime]::UtcNow -lt $DeadlineUtc) {
+        try {
+            $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate,
+                                    [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+            $lock.Dispose()
+            return $true
+        }
+        catch [IO.IOException] { Start-Sleep -Milliseconds 250 }
+    }
+    return $false
+}
+
 function Stop-ManagedProcess {
     $state = Get-State
     $release = Get-Release $state ([string]$state.active_release)
@@ -651,15 +674,6 @@ function Stop-ManagedProcess {
             }
             else {
                 $receipt.exit_code = 0
-                # The wrapper still has to release its run lock and the GPU-owner lease; a start
-                # that overlapped that cleanup would race it.
-                if (-not (Wait-TaskIdle $taskName $deadline)) {
-                    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-                    if ($null -ne $task -and $task.State -eq 'Running') {
-                        Stop-ScheduledTask -TaskName $taskName
-                    }
-                    $receipt.reason = 'the managed wrapper did not finish its cleanup within the graceful wait'
-                }
             }
         }
         else {
@@ -694,6 +708,18 @@ function Stop-ManagedProcess {
             throw 'owned server process did not stop'
         }
     }
+
+    # Unconditional: a stop returns only once no wrapper still holds the run lock or the
+    # GPU-owner lease, whether this call signalled the server, terminated it, or found it already
+    # gone while its wrapper was still unwinding.
+    if (-not (Wait-ManagedWrapperExit $taskName ([DateTime]::UtcNow.AddSeconds(120)))) {
+        $receipt.outcome = 'wrapper_cleanup_stalled'
+        $receipt.reason = 'the managed wrapper still held the run lock after its server stopped'
+        $receipt.completed_utc = [DateTime]::UtcNow.ToString('o')
+        $receipt.elapsed_seconds = [Math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 3)
+        Write-ManagedStopReceipt $receipt
+        throw 'the managed wrapper did not release the run lock after its server stopped'
+    }
     $receipt.completed_utc = [DateTime]::UtcNow.ToString('o')
     $receipt.elapsed_seconds = [Math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 3)
     Write-ManagedStopReceipt $receipt
@@ -716,6 +742,12 @@ function Start-ManagedRelease {
     }
     $listener = Get-NetTCPConnection -State Listen -LocalPort ([int]$release.port) -ErrorAction SilentlyContinue
     if ($null -ne $listener) { throw 'release listen port is already owned by another process' }
+    # A server that exited on its own - gracefully, or by crashing - leaves its wrapper restoring
+    # the GPU owner and releasing the run lock. Acquiring the lease across that is the same race
+    # a stop closes, and the next launch would find its own lock held.
+    if (-not (Wait-ManagedWrapperExit ([string]$state.task_name) ([DateTime]::UtcNow.AddSeconds(120)))) {
+        throw 'a managed wrapper still holds the run lock; the previous launch has not finished'
+    }
 
     Acquire-GpuOwnerLease
     try {
