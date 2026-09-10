@@ -11,6 +11,8 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <filesystem>
+#include <fstream>
 #include <cstddef>
 #include <exception>
 #include <iomanip>
@@ -40,6 +42,26 @@ std::string format_bytes(std::size_t bytes) {
         out << static_cast<double>(bytes) / kMiB << " MiB";
     }
     return out.str();
+}
+
+// The manager reads this after the process is gone: with redirected streams a Windows parent
+// gets no usable exit code, so what the flush achieved has to be written down.
+void write_shutdown_report(const ninfer::serve::ServeOptions& options,
+                           const ninfer::serve::ShutdownCheckpointSummary& flushed) noexcept {
+    if (options.shutdown_report.empty()) { return; }
+    try {
+        const std::filesystem::path path(options.shutdown_report);
+        const std::filesystem::path temporary = path.string() + ".tmp";
+        {
+            std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+            out << "{\"artifact_type\":\"ninfer_serve_shutdown_report\",\"schema_version\":1"
+                << ",\"saved\":" << flushed.saved << ",\"skipped\":" << flushed.skipped
+                << ",\"refused\":" << flushed.refused
+                << ",\"complete\":" << (flushed.complete() ? "true" : "false") << "}\n";
+            if (!out) { return; }
+        }
+        std::filesystem::rename(temporary, path);
+    } catch (...) {}
 }
 
 } // namespace
@@ -156,6 +178,7 @@ int main(int argc, char** argv) {
         ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Info,
                                          "listener closed; in-flight requests finished");
         const ninfer::serve::ShutdownCheckpointSummary flushed = server.save_all_checkpoints();
+        write_shutdown_report(options, flushed);
         if (!ok) {
             ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Error,
                                              "failed to bind " + options.host + ':' +
@@ -163,8 +186,9 @@ int main(int argc, char** argv) {
             return 1;
         }
         if (!flushed.complete()) {
-            // A stop that lost live state must not look like a clean one: the manager reads this
-            // through its wrapper and records it against the stop it requested.
+            // A stop that lost live state must not look like a clean one. The exit code alone
+            // cannot say so - a manager with redirected streams cannot read it - which is what
+            // the shutdown report above is for.
             ninfer::serve::write_console_log(
                 ninfer::serve::ConsoleLogLevel::Error,
                 "shutdown did not save " + std::to_string(flushed.refused) +

@@ -154,7 +154,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--device-state-slots N] [--host-state-slots N] [--host-kv-mib N] "
            "[--max-private-continuations N] [--max-shared-prefixes N] "
            "[--max-long-anchors-per-continuation N] [--max-cache-markers-per-request N] "
-           "[--request-log-jsonl FILE] [--stop-event NAME] "
+           "[--request-log-jsonl FILE] [--stop-event NAME] [--shutdown-report FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--session-checkpoint-dir DIR] [--session-checkpoint-quota-mib N] "
            "[--session-checkpoint-staging-mib N] [--session-checkpoint-write-buffer-mib N] "
@@ -344,6 +344,11 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.request_log_jsonl = require_value("--request-log-jsonl");
             if (options.request_log_jsonl.empty()) {
                 throw std::invalid_argument("--request-log-jsonl must not be empty");
+            }
+        } else if (arg == "--shutdown-report") {
+            options.shutdown_report = require_value("--shutdown-report");
+            if (options.shutdown_report.empty()) {
+                throw std::invalid_argument("--shutdown-report must not be empty");
             }
         } else if (arg == "--stop-event") {
             options.stop_event = parse_stop_event_name(require_value("--stop-event"));

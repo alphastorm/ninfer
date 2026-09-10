@@ -37,6 +37,10 @@ struct ServeOptions {
     // Windows only: a manager-minted named kernel event whose signal requests a graceful stop
     // (the SIGTERM Windows never delivers). Shape: <Global|Local>\NInfer-Serve-Stop-<32 hex>.
     std::string stop_event;
+    // Where to record what the shutdown flush saved. The exit code is not a usable channel for
+    // a manager that launches this process with redirected streams: Windows hands such a parent
+    // a handle whose ExitCode reads as absent, clean exit or not.
+    std::string shutdown_report;
     std::uint32_t max_context          = 8192;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(8192);
     std::uint32_t max_concurrency      = 1;

@@ -684,6 +684,8 @@ function Stop-ManagedProcess {
         forced = $false
         exit_code = $null
         wrapper_result = $null
+        sessions_saved = $null
+        sessions_refused = $null
         reason = $null
         pid = if ($null -eq $owned) { $null } else { [int]$owned.Id }
         started_utc = $started.ToString('o')
@@ -769,16 +771,33 @@ function Stop-ManagedProcess {
             throw 'owned server process did not stop'
         }
 
-        # The wrapper does have a real child handle, so its own result is the observable record
-        # of how the server exited - including a shutdown that could not save every live
-        # session, which exits nonzero. Task Scheduler result codes also carry the task's own
-        # lifecycle, so a terminated task never reports zero and is not judged by it.
+        # What the shutdown achieved comes from the server's own report, written after its flush.
+        # The wrapper's task result cannot say: with redirected streams it never sees the child's
+        # exit code, and a terminated task never reports zero anyway. It is recorded as context.
         $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
         $receipt.wrapper_result = if ($null -eq $info) { $null } else { [int]$info.LastTaskResult }
-        if ($receipt.outcome -ceq 'graceful' -and $null -ne $receipt.wrapper_result -and
-            [int]$receipt.wrapper_result -ne 0) {
-            $receipt.outcome = 'graceful_incomplete_shutdown'
-            $receipt.reason = "the server reported an unclean shutdown (wrapper result $([int]$receipt.wrapper_result)); a live session may not have been saved"
+        if ($receipt.outcome -ceq 'graceful') {
+            $report = $null
+            $reportPath = if ($null -eq $runtime -or
+                              $null -eq $runtime.PSObject.Properties['shutdown_report']) { $null }
+                          else { [string]$runtime.shutdown_report }
+            if (-not [string]::IsNullOrWhiteSpace($reportPath) -and
+                (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+                try { $report = Read-JsonFile $reportPath } catch { $report = $null }
+            }
+            if ($null -eq $report -or
+                [string]$report.artifact_type -cne 'ninfer_serve_shutdown_report') {
+                $receipt.outcome = 'graceful_unreported'
+                $receipt.reason = 'the server exited on request without recording what its shutdown saved'
+            }
+            else {
+                $receipt.sessions_saved = [int]$report.saved
+                $receipt.sessions_refused = [int]$report.refused
+                if (-not [bool]$report.complete) {
+                    $receipt.outcome = 'graceful_incomplete_shutdown'
+                    $receipt.reason = "the shutdown could not save $([int]$report.refused) live session(s); their state is lost"
+                }
+            }
         }
         Remove-Item -LiteralPath (Join-Path $StateRoot 'runtime.json') -Force -ErrorAction SilentlyContinue
     }
@@ -955,11 +974,25 @@ function Invoke-Run {
             $serverArguments.Add($stopEventName)
         }
 
+        # The report is this launch's own: a stale one must never be read as its outcome.
+        $shutdownReport = Join-Path $logs 'shutdown.json'
+        Remove-Item -LiteralPath $shutdownReport -Force -ErrorAction SilentlyContinue
+        $serverArguments.Add('--shutdown-report')
+        $serverArguments.Add($shutdownReport)
+
         $argumentLine = [string]::Join(' ', @($serverArguments | ForEach-Object {
                     Quote-NativeArgument $_
                 }))
         $stdout = Join-Path $logs 'stdout.log'
         $stderr = Join-Path $logs 'stderr.log'
+        # Redirection truncates, so the log that explains a stop would be destroyed by the next
+        # launch - which is exactly the launch an operator compares it against. Keep one.
+        foreach ($log in @($stdout, $stderr)) {
+            if (Test-Path -LiteralPath $log -PathType Leaf) {
+                Move-Item -LiteralPath $log -Destination "$log.previous" -Force `
+                    -ErrorAction SilentlyContinue
+            }
+        }
         Assert-FileHash ([string]$release.server_executable) ([string]$release.binary_sha256) 'server executable before launch'
         Assert-FileHash ([string]$release.config_file) ([string]$release.config_sha256) 'server config before launch'
         $process = Start-Process -FilePath ([string]$release.server_executable) -ArgumentList $argumentLine `
@@ -973,9 +1006,17 @@ function Invoke-Run {
                 start_time_utc_ticks = $process.StartTime.ToUniversalTime().Ticks
                 managed_stop = [string]$stopPlan.mode
                 stop_event = $stopEventName
+                shutdown_report = $shutdownReport
             })
         $process.WaitForExit()
-        if ($process.ExitCode -ne 0) { throw "ninfer-serve exited with code $($process.ExitCode)" }
+        # Windows hands a parent that redirected the child's streams a handle whose ExitCode
+        # reads as absent - clean exit or not - so an unreadable code carries no information and
+        # must not be read as failure. The server's own shutdown report is the outcome channel.
+        $serverExit = $null
+        try { $serverExit = $process.ExitCode } catch { $serverExit = $null }
+        if ($null -ne $serverExit -and [int]$serverExit -ne 0) {
+            throw "ninfer-serve exited with code $([int]$serverExit)"
+        }
     }
     finally {
         if ($null -ne $state) {

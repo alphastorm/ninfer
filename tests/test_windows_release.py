@@ -152,6 +152,32 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         owner = (WINDOWS / "Control-GpuOwner.ps1").read_text(encoding="utf-8")
         self.assertRegex(owner, r"Remove-Item -LiteralPath \$statePath -Force -ErrorAction SilentlyContinue")
 
+    def test_no_lifecycle_decision_reads_an_unreadable_exit_code(self) -> None:
+        """Windows hands a parent that redirected a child's streams a handle whose ExitCode
+        reads as absent, clean exit or not, and `$null -ne 0` is true - so any comparison
+        against it decides on nothing. Measured on the RTX 4090 host; three receipts and one
+        wrapper failure came from this (alphastorm/ninfer#40, #41)."""
+        for name in SHARED_SCRIPTS:
+            text = (WINDOWS / name).read_text(encoding="utf-8")
+            with self.subTest(script=name):
+                self.assertNotRegex(text, r"\$\w+\.ExitCode -(?:ne|eq|gt|lt) ",
+                                    f"{name} decides on an exit code it may not be able to read")
+        controller = (WINDOWS / "Control-Release.ps1").read_text(encoding="utf-8")
+        # Both readers guard the value and treat its absence as no information.
+        self.assertEqual(controller.count("catch { $serverExit = $null }"), 1)
+        self.assertEqual(controller.count("catch { $exitCode = $null }"), 1)
+        # The outcome comes from the server's own report instead.
+        self.assertIn("ninfer_serve_shutdown_report", controller)
+        self.assertIn("--shutdown-report", controller)
+        self.assertIn("graceful_unreported", controller)
+        # A stale report from an earlier launch must never be read as this launch's outcome.
+        run = controller[controller.index("function Invoke-Run"):]
+        run = run[:run.index("\nfunction ")]
+        self.assertLess(run.index("Remove-Item -LiteralPath $shutdownReport"),
+                        run.index("Start-Process -FilePath"))
+        # One prior launch's logs survive, because they are what explains a stop.
+        self.assertIn('Move-Item -LiteralPath $log -Destination "$log.previous"', run)
+
     def test_the_server_reports_a_shutdown_that_lost_state(self) -> None:
         """The manager can only record what the server tells it: a flush that could not save a
         live session must fail the exit, not log and return zero."""
