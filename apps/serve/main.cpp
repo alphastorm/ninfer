@@ -4,6 +4,7 @@
 #include "serve/http_server.h"
 #include "serve/serve_options.h"
 #include "serve/server_identity.h"
+#include "serve/stop_event.h"
 
 #include "ninfer/build_info.h"
 
@@ -14,6 +15,7 @@
 #include <exception>
 #include <iomanip>
 #include <iostream>
+#include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -24,7 +26,7 @@ std::atomic<ninfer::serve::HttpServer*> g_server{nullptr};
 
 void handle_signal(int) {
     ninfer::serve::HttpServer* server = g_server.load();
-    if (server != nullptr) { server->stop(); }
+    if (server != nullptr) { (void)server->stop(); }
 }
 
 std::string format_bytes(std::size_t bytes) {
@@ -71,6 +73,12 @@ int main(int argc, char** argv) {
                                              "failed to bind " + options.host + ':' +
                                                  std::to_string(options.port));
             return 1;
+        }
+        // Created before the model loads so a manager can request a stop at any point of the
+        // launch; a request that lands before listen() makes listen() return without serving.
+        std::optional<ninfer::serve::StopEventWatcher> stop_event;
+        if (!options.stop_event.empty()) {
+            stop_event.emplace(options.stop_event, [&server] { return server.stop(); });
         }
 
         ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Info, "loading model...");
@@ -145,6 +153,8 @@ int main(int argc, char** argv) {
 
         const bool ok = server.listen();
         g_server.store(nullptr);
+        ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Info,
+                                         "listener closed; in-flight requests finished");
         server.save_all_checkpoints();
         if (!ok) {
             ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Error,

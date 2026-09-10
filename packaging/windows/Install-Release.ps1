@@ -619,6 +619,14 @@ function Assert-InstallerArchitectureContract([object]$Spec, [object]$Config) {
         [string]::Join(',', $expectedPointers)) {
         throw 'release specification lifecycle pointer contract mismatch'
     }
+    # This installer ships with a server that stops on its named event; the lane must declare the
+    # channel and the bounded wait the controller grants a stop before it terminates the process.
+    if ([string]$Spec.lifecycle.managed_stop -cne 'stop-event' -or
+        $null -eq $Spec.lifecycle.PSObject.Properties['graceful_stop_timeout_seconds'] -or
+        [int]$Spec.lifecycle.graceful_stop_timeout_seconds -lt 1 -or
+        [int]$Spec.lifecycle.graceful_stop_timeout_seconds -gt 3600) {
+        throw 'release specification managed-stop contract mismatch'
+    }
     Assert-AllowedListenHost $Spec $Config
     if ([Int64]$Spec.model.bytes -le 0 -or
         [string]$Spec.model.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
@@ -1218,6 +1226,10 @@ try {
             gpu_uuid = [string]$selectedGpu.uuid
             gpu_name = [string]$selectedGpu.name
             installed_utc = [DateTime]::UtcNow.ToString('o')
+            # The controller passes --stop-event only to releases whose record declares it; a
+            # release installed before this field existed is stopped by termination.
+            managed_stop = [string]$spec.lifecycle.managed_stop
+            graceful_stop_timeout_seconds = [int]$spec.lifecycle.graceful_stop_timeout_seconds
         }
         $incumbent = if ($null -eq $oldState) { $null } else { [string]$oldState.active_release }
         $priorPrevious = if ($null -eq $oldState) { $null } else { [string]$oldState.previous_release }

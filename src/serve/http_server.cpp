@@ -1183,15 +1183,21 @@ void HttpServer::save_all_checkpoints() noexcept {
     if (service_ == nullptr || !service_->checkpoint_enabled()) { return; }
     if (automatic_checkpoints_) { automatic_checkpoints_->drain(); }
     try {
+        std::size_t saved = 0;
+        std::size_t total = 0;
         for (const std::string& digest : response_store_.session_digests()) {
+            ++total;
             try {
-                (void)service_->save_checkpoint(digest, response_store_);
+                if (service_->save_checkpoint(digest, response_store_).has_value()) { ++saved; }
             } catch (const std::exception& exception) {
                 write_console_log(ConsoleLogLevel::Warning,
                                   std::string("shutdown checkpoint save failed (continuing): ") +
                                       exception.what());
             }
         }
+        write_console_log(ConsoleLogLevel::Info, "shutdown: saved " + std::to_string(saved) +
+                                                     " of " + std::to_string(total) +
+                                                     " live sessions");
     } catch (...) {}
 }
 
@@ -1215,6 +1221,11 @@ void HttpServer::attach(GenerationService& service) {
 }
 
 bool HttpServer::listen() {
+    if (stop_requested_.load(std::memory_order_acquire)) {
+        write_console_log(ConsoleLogLevel::Info,
+                          "stop requested before the server started listening; not serving");
+        return true;
+    }
     if (service_ == nullptr) { throw std::logic_error("HTTP generation service is not attached"); }
     if (public_model_id_.empty()) {
         throw std::logic_error("HTTP public model id is not resolved");
@@ -1233,6 +1244,11 @@ bool HttpServer::listen() {
     }
 }
 
-void HttpServer::stop() { server_.stop(); }
+bool HttpServer::stop() noexcept {
+    stop_requested_.store(true, std::memory_order_release);
+    const bool running = server_.is_running();
+    server_.stop();
+    return running;
+}
 
 } // namespace ninfer::serve

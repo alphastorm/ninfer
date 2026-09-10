@@ -108,6 +108,36 @@ std::string parse_profile_name(const char* text) {
     return value;
 }
 
+// A manager mints one kernel-object name per launch; the fixed shape keeps the argument from
+// naming anything else in the object namespace.
+std::string parse_stop_event_name(const char* text) {
+    const std::string value(text == nullptr ? "" : text);
+    std::string_view rest(value);
+    bool namespaced = false;
+    for (const std::string_view prefix : {std::string_view("Global\\"), std::string_view("Local\\")}) {
+        if (rest.starts_with(prefix)) {
+            rest.remove_prefix(prefix.size());
+            namespaced = true;
+            break;
+        }
+    }
+    constexpr std::string_view kInfix = "NInfer-Serve-Stop-";
+    constexpr std::size_t kHexDigits  = 32;
+    const bool valid =
+        namespaced && rest.size() == kInfix.size() + kHexDigits && rest.starts_with(kInfix) &&
+        std::all_of(rest.begin() + static_cast<std::ptrdiff_t>(kInfix.size()), rest.end(),
+                    [](unsigned char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'); });
+    if (!valid) {
+        throw std::invalid_argument(
+            "--stop-event must match (Global|Local)\\NInfer-Serve-Stop-<32 lowercase hex>");
+    }
+#if !defined(_WIN32)
+    throw std::invalid_argument("--stop-event is only supported on Windows");
+#else
+    return value;
+#endif
+}
+
 } // namespace
 
 std::string serve_usage_text(const char* argv0) {
@@ -124,7 +154,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--device-state-slots N] [--host-state-slots N] [--host-kv-mib N] "
            "[--max-private-continuations N] [--max-shared-prefixes N] "
            "[--max-long-anchors-per-continuation N] [--max-cache-markers-per-request N] "
-           "[--request-log-jsonl FILE] "
+           "[--request-log-jsonl FILE] [--stop-event NAME] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--session-checkpoint-dir DIR] [--session-checkpoint-quota-mib N] "
            "[--session-checkpoint-staging-mib N] [--session-checkpoint-write-buffer-mib N] "
@@ -144,6 +174,8 @@ std::string serve_usage_text(const char* argv0) {
            "       --media-live-mib defaults to 2048 and bounds all live BF16 patch payloads\n"
            "       --media-preprocess-threads defaults to 0 (auto, at most 16 workers)\n"
            "       --request-log-jsonl appends full-precision server/request records\n"
+           "       --stop-event (Windows) names a manager-minted kernel event whose signal stops "
+           "the server like SIGTERM: in-flight requests finish, live sessions are saved\n"
            "       --model-id overrides the artifact identity.model_id reported by the server\n"
            "       Responses state is process-local and bounded to 1024 records / 256 MiB by "
            "default\n"
@@ -313,6 +345,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             if (options.request_log_jsonl.empty()) {
                 throw std::invalid_argument("--request-log-jsonl must not be empty");
             }
+        } else if (arg == "--stop-event") {
+            options.stop_event = parse_stop_event_name(require_value("--stop-event"));
         } else if (arg == "--response-store-max-records") {
             const int records = parse_nonnegative_int(require_value("--response-store-max-records"),
                                                       "response-store-max-records");

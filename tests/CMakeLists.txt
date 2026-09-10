@@ -234,6 +234,18 @@ ninfer_add_test(ninfer_http_error_handler_test
   LIBRARIES ninfer_serve)
 target_include_directories(ninfer_http_error_handler_test PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
+ninfer_add_test(ninfer_http_server_stop_test
+  SOURCES test_http_server_stop.cpp
+  LIBRARIES ninfer_serve)
+target_include_directories(ninfer_http_server_stop_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
+if(WIN32)
+  ninfer_add_test(ninfer_stop_event_test
+    SOURCES test_stop_event.cpp
+    LIBRARIES ninfer_serve)
+  target_link_libraries(ninfer_stop_event_test PRIVATE advapi32)
+  set_tests_properties(ninfer_stop_event_test PROPERTIES SKIP_RETURN_CODE 77)
+endif()
 ninfer_add_test(ninfer_bench_support_test
   SOURCES test_ninfer_bench_support.cpp
           ${PROJECT_SOURCE_DIR}/bench/targets/qwen3_6_27b/ninfer_bench_support.cpp

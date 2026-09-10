@@ -65,7 +65,11 @@ public:
     bool bind();
     void attach(GenerationService& service);
     bool listen();
-    void stop();
+    // Requests the accept loop to exit: in-flight requests finish, then listen() returns. A request
+    // that arrives before listen() is remembered, and listen() then returns at once instead of
+    // serving. Returns whether the loop was running, i.e. whether the request could take effect
+    // now; a caller on another thread re-asserts it until it does (StopEventWatcher).
+    bool stop() noexcept;
     void save_all_checkpoints() noexcept;
 
     [[nodiscard]] const std::string& public_model_id() const noexcept { return public_model_id_; }
@@ -114,6 +118,7 @@ private:
     JsonlRequestLog request_jsonl_;
     httplib::Server server_;
     std::atomic<std::uint64_t> request_seq_{0};
+    std::atomic<bool> stop_requested_{false};
     std::mutex stats_mutex_;
     std::condition_variable stats_cv_;
     std::thread stats_thread_;

@@ -396,6 +396,35 @@ int main() {
         check(serve_usage_text("ninfer-serve").find("--request-log-jsonl") != std::string::npos,
               "serve help omits --request-log-jsonl");
 
+    // The stop event is one manager-minted kernel-object name of a fixed shape, Windows only.
+    const std::string stop_event = "Global\\NInfer-Serve-Stop-0123456789abcdef0123456789abcdef";
+#if defined(_WIN32)
+    const ServeOptions stoppable =
+        parse({"ninfer-serve", "model.ninfer", "--stop-event", stop_event});
+    failures += check(stoppable.stop_event == stop_event, "--stop-event did not preserve its name");
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--stop-event",
+                             "Local\\NInfer-Serve-Stop-0123456789abcdef0123456789abcdef"})
+                              .stop_event.starts_with("Local\\"),
+                      "--stop-event rejected the session-local namespace");
+#else
+    failures += check(rejects([&] {
+                          (void)parse({"ninfer-serve", "model.ninfer", "--stop-event", stop_event});
+                      }),
+                      "--stop-event was accepted off Windows");
+#endif
+    for (const char* malformed :
+         {"NInfer-Serve-Stop-0123456789abcdef0123456789abcdef",
+          "Global\\NInfer-Serve-Stop-0123456789ABCDEF0123456789abcdef",
+          "Global\\NInfer-Serve-Stop-0123456789abcdef0123456789abcde",
+          "Global\\Other-0123456789abcdef0123456789abcdef", "Global\\", ""}) {
+        failures += check(rejects([&] {
+                              (void)parse({"ninfer-serve", "model.ninfer", "--stop-event", malformed});
+                          }),
+                          "a malformed --stop-event name was accepted");
+    }
+    failures += check(serve_usage_text("ninfer-serve").find("--stop-event") != std::string::npos,
+                      "serve help omits --stop-event");
+
     std::filesystem::remove(api_key_path);
     std::filesystem::remove(invalid_api_key_path);
     if (failures == 0) { std::cout << "ok\n"; }

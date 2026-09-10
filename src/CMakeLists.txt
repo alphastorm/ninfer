@@ -408,7 +408,8 @@ if(NINFER_BUILD_SERVE)
     serve/request_log.cpp
     serve/http_server.cpp
     serve/responses_http.cpp
-    serve/serve_options.cpp)
+    serve/serve_options.cpp
+    serve/stop_event.cpp)
   ninfer_internal_includes(ninfer_serve)
   target_include_directories(ninfer_serve PRIVATE
     ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
@@ -416,7 +417,8 @@ if(NINFER_BUILD_SERVE)
     PUBLIC ninfer_engine Threads::Threads
     PRIVATE ninfer_media_acquire CUDA::cudart)
   if(WIN32)
-    # BCryptGenRandom (opaque identifiers) and winsock for cpp-httplib.
-    target_link_libraries(ninfer_serve PRIVATE bcrypt ws2_32)
+    # BCryptGenRandom (opaque identifiers), winsock for cpp-httplib, and the SDDL conversion
+    # behind the stop event's DACL.
+    target_link_libraries(ninfer_serve PRIVATE bcrypt ws2_32 advapi32)
   endif()
 endif()

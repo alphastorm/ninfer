@@ -48,6 +48,27 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         self.assertTrue({"--reasoning-effort", "--disk-cache", "--prompt-cache", "--no-ui",
                          "--wddm-evictable-budget"}.isdisjoint(controller_flags))
 
+    def test_managed_stop_is_a_signal_before_a_termination(self) -> None:
+        """A managed stop must reach the server's graceful path (which saves live sessions), and
+        only terminate a release that cannot receive it."""
+        controller = (WINDOWS / "Control-Release.ps1").read_text(encoding="utf-8")
+        stop = controller[controller.index("function Stop-ManagedProcess"):]
+        stop = stop[:stop.index("\nfunction ")] if "\nfunction " in stop else stop
+        self.assertLess(stop.index("Request-ManagedStop"), stop.index("Stop-ScheduledTask"),
+                        "the stop terminates the task before it signals the server")
+        self.assertLess(stop.index("Request-ManagedStop"), stop.index("Stop-Process"),
+                        "the stop forces the process before it signals the server")
+        # The name is attributed to this launch and this release, never taken on trust.
+        attribution = controller[controller.index("function Get-RuntimeStopEvent"):]
+        for guard in ("ninfer_windows_runtime_state", "schema_version", "release_id",
+                      r"^(Global|Local)\\NInfer-Serve-Stop-[0-9a-f]{32}$"):
+            self.assertIn(guard, attribution[:attribution.index("\nfunction ")])
+        # A release installed before the channel existed has no managed_stop field at all.
+        plan = controller[controller.index("function Get-ManagedStopPlan"):]
+        self.assertIn("'terminate'", plan[:plan.index("\nfunction ")])
+        installer = (WINDOWS / "Install-Release.ps1").read_text(encoding="utf-8")
+        self.assertIn("managed_stop = [string]$spec.lifecycle.managed_stop", installer)
+
     def test_shared_scripts_carry_no_lane_literals(self) -> None:
         """One tree serves every lane: GPU names, architectures, power figures, release ids, and
         task names come from the lane specification, never from the scripts."""
@@ -94,6 +115,9 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertIn(number, gpu["name"])
                 self.assertEqual(spec["lifecycle"]["task_name"], f"NInfer-Qwen38-{number}-Native")
                 self.assertEqual(spec["lifecycle"]["state_root_name"], f"qwen38-{number}-native")
+                self.assertEqual(spec["lifecycle"]["managed_stop"], "stop-event")
+                wait = spec["lifecycle"]["graceful_stop_timeout_seconds"]
+                self.assertTrue(1 <= wait <= 3600)
                 owner = spec["lifecycle"]["gpu_owner_controller_protocol"]
                 self.assertGreater(owner["owner_power_limit_w"], 0)
                 low, high = owner["prior_power_limit_range_w"]

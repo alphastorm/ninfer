@@ -539,8 +539,10 @@ coalesce, and a full queue drops only that automatic acceleration attempt. An au
 additionally yields to live traffic: it starts only after the engine stays quiet for consecutive samples (bounded at 60 s),
 skips entirely when the catalogued checkpoint already covers the session's newest
 stored response, and never queues foreground requests behind an elective save. Graceful server
-shutdown
-drains the worker and then attempts every live session. Explicit `POST` remains the synchronous
+shutdown - `SIGINT`/`SIGTERM`, or on Windows the manager's `--stop-event` - closes the listener,
+lets in-flight requests finish, drains the worker, then attempts every live session and logs
+`shutdown: saved N of M live sessions`. A stop that arrives while the model is still loading is
+remembered: the server exits without ever serving. Explicit `POST` remains the synchronous
 crash-test boundary: it never waits and starts immediately; do not kill the process until it
 returns.
 `--session-checkpoint-staging-mib` bounds transfer/codec staging.
@@ -691,6 +693,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--media-live-mib N` | all live prepared BF16 media payloads | `2048` |
 | `--media-preprocess-threads N` | bounded media preprocessing workers; `0` selects at most 16 from host concurrency | `0` |
 | `--request-log-jsonl FILE` | append full-precision server/request records | disabled |
+| `--stop-event NAME` | Windows: create the named kernel event `(Global\|Local)\NInfer-Serve-Stop-<32 hex>` and stop gracefully when it is signalled | disabled |
 | `--response-store-max-records N` | maximum locally retained Responses objects | `1024` |
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
 | `--session-checkpoint-dir DIR` | enable authenticated durable session generations at this root | disabled |
@@ -851,6 +854,19 @@ python3 tools/lifecycle/ninfer_container.py stop --config candidate.json
 verified build/configuration receipt; the lifecycle never executes the candidate image to hash its
 binary. Receipts and status output contain identities and counters but omit
 model/log paths, process argv, API-key values, prompts, and generated text.
+
+## Managed stop on Windows
+
+`--stop-event NAME` is the counterpart of `SIGTERM` for a process that has no console and is
+not a service (the native lanes run under Task Scheduler as `SYSTEM`). The server creates the
+manual-reset kernel event `NAME`, refuses a name that already exists, and gives it a DACL that
+admits only `SYSTEM` and `Administrators` - the principals that could already terminate the
+process. A signal is a stop request: the listener closes, in-flight requests finish, live
+sessions are saved, and the process exits `0`. `NAME` must match
+`(Global|Local)\NInfer-Serve-Stop-<32 lowercase hex>`; the manager mints one per launch and
+never reuses it. The shipped Windows lifecycle records the name in `runtime.json` and signals it
+from `Control-Release.ps1 -Action Stop|Restart|Rollback|Uninstall`, terminating the process only
+after a bounded wait.
 
 ## Structured request log
 

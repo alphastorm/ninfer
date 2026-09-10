@@ -421,6 +421,66 @@ function Get-RuntimeState {
     try { return Read-JsonFile $path } catch { return $null }
 }
 
+# A release installed before the stop-event channel existed is stopped the only way it can be:
+# by termination. A release that declares the channel also declares the bounded wait its stop
+# gets before the controller terminates it anyway.
+function Get-ManagedStopPlan([object]$Release) {
+    $mode = 'terminate'
+    $timeoutSeconds = 30
+    $declared = $Release.PSObject.Properties['managed_stop']
+    if ($null -ne $declared -and [string]$declared.Value -ceq 'stop-event') {
+        $bound = $Release.PSObject.Properties['graceful_stop_timeout_seconds']
+        if ($null -eq $bound) {
+            throw 'installed release declares a stop event without a bounded graceful wait'
+        }
+        $timeoutSeconds = [int]$bound.Value
+        if ($timeoutSeconds -lt 1 -or $timeoutSeconds -gt 3600) {
+            throw 'installed release graceful-stop wait is out of range'
+        }
+        $mode = 'stop-event'
+    }
+    return [ordered]@{ mode = $mode; timeout_seconds = $timeoutSeconds }
+}
+
+# The name is only usable when this exact launch published it for this exact release. A stale,
+# older-schema, or foreign record yields nothing, and the stop falls back to termination rather
+# than signalling an object it cannot attribute.
+function Get-RuntimeStopEvent([object]$Runtime, [string]$ReleaseId) {
+    if ($null -eq $Runtime) { return $null }
+    foreach ($field in @('artifact_type', 'schema_version', 'release_id', 'managed_stop',
+                         'stop_event')) {
+        if ($null -eq $Runtime.PSObject.Properties[$field]) { return $null }
+    }
+    if ([string]$Runtime.artifact_type -cne 'ninfer_windows_runtime_state' -or
+        [int]$Runtime.schema_version -ne 2 -or
+        [string]$Runtime.release_id -cne $ReleaseId -or
+        [string]$Runtime.managed_stop -cne 'stop-event') {
+        return $null
+    }
+    $name = [string]$Runtime.stop_event
+    if ($name -cnotmatch '^(Global|Local)\\NInfer-Serve-Stop-[0-9a-f]{32}$') { return $null }
+    return $name
+}
+
+function Request-ManagedStop([string]$Name) {
+    $handle = $null
+    try {
+        $handle = [Threading.EventWaitHandle]::OpenExisting($Name)
+    }
+    catch [Threading.WaitHandleCannotBeOpenedException] { return $false }
+    try { return $handle.Set() } finally { $handle.Dispose() }
+}
+
+function Write-ManagedStopReceipt([object]$Receipt) {
+    Write-JsonAtomic (Join-Path $StateRoot 'last-stop.json') $Receipt
+}
+
+function Get-ManagedStopReceipt {
+    $path = Join-Path $StateRoot 'last-stop.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
+    try { return Read-JsonFile $path } catch { return $null }
+}
+
 function Invoke-ServerStatus([object]$Release) {
     $key = Read-OneLineSecret ([string]$Release.api_key_file)
     $headers = @{ Authorization = "Bearer $key" }
@@ -484,6 +544,7 @@ function Get-StatusObject {
         endpoint_state = $endpointState
         gpu_owner = Get-GpuOwnerStatus $state
         server = $serverStatus
+        last_stop = Get-ManagedStopReceipt
     }
 }
 
@@ -533,29 +594,109 @@ function Wait-Ready([int]$TimeoutSeconds) {
     throw "release did not become ready: $lastError"
 }
 
+function Wait-TaskIdle([string]$TaskName, [DateTime]$DeadlineUtc) {
+    while ([DateTime]::UtcNow -lt $DeadlineUtc) {
+        $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+        if ($null -eq $task -or [string]$task.State -cne 'Running') { return $true }
+        Start-Sleep -Milliseconds 250
+    }
+    return $false
+}
+
 function Stop-ManagedProcess {
     $state = Get-State
     $release = Get-Release $state ([string]$state.active_release)
     $runtime = Get-RuntimeState
-    $task = Get-ScheduledTask -TaskName ([string]$state.task_name) -ErrorAction SilentlyContinue
-    if ($null -ne $task -and $task.State -eq 'Running') {
-        Stop-ScheduledTask -TaskName ([string]$state.task_name)
-    }
-    $deadline = [DateTime]::UtcNow.AddSeconds(30)
-    do {
-        $owned = Get-OwnedProcess $runtime $release
-        if ($null -eq $owned) { break }
-        Start-Sleep -Milliseconds 250
-    } while ([DateTime]::UtcNow -lt $deadline)
-
+    $taskName = [string]$state.task_name
+    $plan = Get-ManagedStopPlan $release
+    $eventName = Get-RuntimeStopEvent $runtime ([string]$state.active_release)
     $owned = Get-OwnedProcess $runtime $release
-    if ($null -ne $owned) {
-        Stop-Process -Id $owned.Id -Force
-        $owned.WaitForExit(10000) | Out-Null
+    $started = [DateTime]::UtcNow
+    $receipt = [ordered]@{
+        artifact_type = 'ninfer_windows_managed_stop_receipt'
+        schema_version = 1
+        release_id = [string]$state.active_release
+        mode = [string]$plan.mode
+        graceful_wait_seconds = [int]$plan.timeout_seconds
+        outcome = 'already_stopped'
+        forced = $false
+        exit_code = $null
+        reason = $null
+        pid = if ($null -eq $owned) { $null } else { [int]$owned.Id }
+        started_utc = $started.ToString('o')
+        completed_utc = $null
+        elapsed_seconds = 0.0
     }
+
+    if ($null -ne $owned -and $plan.mode -ceq 'stop-event' -and $null -ne $eventName) {
+        $deadline = $started.AddSeconds([int]$plan.timeout_seconds)
+        # The wrapper publishes runtime.json before the server creates its event, so a stop that
+        # lands during startup retries until the object exists or the process is gone.
+        $signalled = $false
+        while (-not $signalled -and -not $owned.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+            $signalled = Request-ManagedStop $eventName
+            if (-not $signalled) { Start-Sleep -Milliseconds 250 }
+        }
+        if ($signalled) {
+            $receipt.outcome = 'graceful'
+            $remaining = [Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+            $owned.WaitForExit([int][Math]::Max(0, $remaining)) | Out-Null
+            if (-not $owned.HasExited) {
+                $receipt.reason = "the server did not exit within $([int]$plan.timeout_seconds)s of the stop request"
+            }
+            elseif ($owned.ExitCode -ne 0) {
+                $receipt.exit_code = [int]$owned.ExitCode
+                $receipt.outcome = 'graceful_nonzero_exit'
+                $receipt.reason = 'the server exited nonzero after the stop request'
+            }
+            else {
+                $receipt.exit_code = 0
+                # The wrapper still has to release its run lock and the GPU-owner lease; a start
+                # that overlapped that cleanup would race it.
+                if (-not (Wait-TaskIdle $taskName $deadline)) {
+                    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+                    if ($null -ne $task -and $task.State -eq 'Running') {
+                        Stop-ScheduledTask -TaskName $taskName
+                    }
+                    $receipt.reason = 'the managed wrapper did not finish its cleanup within the graceful wait'
+                }
+            }
+        }
+        else {
+            $receipt.outcome = 'signal_failed'
+            $receipt.reason = 'the published stop event could not be opened'
+        }
+    }
+    elseif ($null -ne $owned) {
+        $receipt.outcome = 'terminated'
+        if ($plan.mode -ceq 'stop-event') {
+            $receipt.reason = 'this launch published no usable stop event'
+        }
+    }
+
     if ($null -ne (Get-OwnedProcess $runtime $release)) {
-        throw 'owned server process did not stop'
+        if ($receipt.outcome -ceq 'graceful') { $receipt.outcome = 'graceful_wait_expired' }
+        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+        if ($null -ne $task -and $task.State -eq 'Running') { Stop-ScheduledTask -TaskName $taskName }
+        $terminationDeadline = [DateTime]::UtcNow.AddSeconds(30)
+        do {
+            if ($null -eq (Get-OwnedProcess $runtime $release)) { break }
+            Start-Sleep -Milliseconds 250
+        } while ([DateTime]::UtcNow -lt $terminationDeadline)
+
+        $stubborn = Get-OwnedProcess $runtime $release
+        if ($null -ne $stubborn) {
+            Stop-Process -Id $stubborn.Id -Force
+            $stubborn.WaitForExit(10000) | Out-Null
+            $receipt.forced = $true
+        }
+        if ($null -ne (Get-OwnedProcess $runtime $release)) {
+            throw 'owned server process did not stop'
+        }
     }
+    $receipt.completed_utc = [DateTime]::UtcNow.ToString('o')
+    $receipt.elapsed_seconds = [Math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 3)
+    Write-ManagedStopReceipt $receipt
     Remove-Item -LiteralPath (Join-Path $StateRoot 'runtime.json') -Force -ErrorAction SilentlyContinue
 }
 
@@ -709,6 +850,16 @@ function Invoke-Run {
             throw "unsupported release speculative backend: $speculativeBackend"
         }
 
+        # One kernel-object name per launch, never reused: the server refuses a name that already
+        # exists, and only a release that declares the channel is asked to honour it.
+        $stopPlan = Get-ManagedStopPlan $release
+        $stopEventName = $null
+        if ([string]$stopPlan.mode -ceq 'stop-event') {
+            $stopEventName = 'Global\NInfer-Serve-Stop-' + [Guid]::NewGuid().ToString('N')
+            $serverArguments.Add('--stop-event')
+            $serverArguments.Add($stopEventName)
+        }
+
         $argumentLine = [string]::Join(' ', @($serverArguments | ForEach-Object {
                     Quote-NativeArgument $_
                 }))
@@ -720,10 +871,13 @@ function Invoke-Run {
             -WorkingDirectory ([string]$release.release_root) -RedirectStandardOutput $stdout `
             -RedirectStandardError $stderr -PassThru
         Write-JsonAtomic (Join-Path $StateRoot 'runtime.json') ([ordered]@{
-                schema_version = 1
+                artifact_type = 'ninfer_windows_runtime_state'
+                schema_version = 2
                 release_id = [string]$state.active_release
                 pid = $process.Id
                 start_time_utc_ticks = $process.StartTime.ToUniversalTime().Ticks
+                managed_stop = [string]$stopPlan.mode
+                stop_event = $stopEventName
             })
         $process.WaitForExit()
         if ($process.ExitCode -ne 0) { throw "ninfer-serve exited with code $($process.ExitCode)" }
