@@ -155,11 +155,20 @@ int main(int argc, char** argv) {
         g_server.store(nullptr);
         ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Info,
                                          "listener closed; in-flight requests finished");
-        server.save_all_checkpoints();
+        const ninfer::serve::ShutdownCheckpointSummary flushed = server.save_all_checkpoints();
         if (!ok) {
             ninfer::serve::write_console_log(ninfer::serve::ConsoleLogLevel::Error,
                                              "failed to bind " + options.host + ':' +
                                                  std::to_string(options.port));
+            return 1;
+        }
+        if (!flushed.complete()) {
+            // A stop that lost live state must not look like a clean one: the manager reads this
+            // through its wrapper and records it against the stop it requested.
+            ninfer::serve::write_console_log(
+                ninfer::serve::ConsoleLogLevel::Error,
+                "shutdown did not save " + std::to_string(flushed.refused) +
+                    " live session(s); their state is lost");
             return 1;
         }
         return 0;

@@ -54,10 +54,12 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         controller = (WINDOWS / "Control-Release.ps1").read_text(encoding="utf-8")
         stop = controller[controller.index("function Stop-ManagedProcess"):]
         stop = stop[:stop.index("\nfunction ")] if "\nfunction " in stop else stop
-        self.assertLess(stop.index("Request-ManagedStop"), stop.index("Stop-ScheduledTask"),
-                        "the stop terminates the task before it signals the server")
-        self.assertLess(stop.index("Request-ManagedStop"), stop.index("Stop-Process"),
-                        "the stop forces the process before it signals the server")
+        self.assertLess(stop.index("Request-ManagedStop"), stop.index("Stop-LaunchNow"),
+                        "the stop terminates the launch before it signals the server")
+        # Termination lives in one best-effort helper; the stop path must not reach the
+        # scheduler or the process any other way.
+        self.assertNotIn("Stop-ScheduledTask", stop)
+        self.assertNotIn("Stop-Process", stop)
         # The name is attributed to this launch and this release, never taken on trust.
         attribution = controller[controller.index("function Get-RuntimeStopEvent"):]
         for guard in ("ninfer_windows_runtime_state", "schema_version", "release_id",
@@ -99,6 +101,47 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         self.assertNotRegex(stop, r"\$owned\.ExitCode -ne 0")
         self.assertIn("try { $exitCode = $owned.ExitCode } catch", stop)
         self.assertRegex(stop, r"if \(\$null -ne \$exitCode\)")
+
+    def test_a_stop_is_fail_closed_and_reports_an_unclean_shutdown(self) -> None:
+        """A stop must end with no server running whatever fails on the way, must decide from
+        state read now rather than the snapshot it opened with, and must not call a shutdown
+        that lost live state graceful (alphastorm/ninfer#41)."""
+        controller = (WINDOWS / "Control-Release.ps1").read_text(encoding="utf-8")
+
+        def body(name: str) -> str:
+            start = controller.index(f"function {name}")
+            rest = controller[start + 1:]
+            end = rest.index("\nfunction ") if "\nfunction " in rest else len(rest)
+            return rest[:end]
+
+        # Errors are terminating in this script, so each termination step needs its own catch or
+        # the step after it never runs.
+        terminate = body("Stop-LaunchNow")
+        self.assertRegex(terminate, r"try \{ Stop-ScheduledTask[^}]*\}\s*\n\s*catch")
+        self.assertRegex(terminate, r"try \{\s*\n\s*Stop-Process -Id \$live\.Id -Force")
+        stop = body("Stop-ManagedProcess")
+        # Fresh reads, not the opening snapshot, decide what still needs stopping.
+        self.assertEqual(stop.count("Get-OwnedProcess (Get-RuntimeState) $release"), 2)
+        self.assertEqual(terminate.count("Get-OwnedProcess (Get-RuntimeState) $Release"), 2)
+        self.assertIn("Stop-LaunchNow $release $taskName $receipt", stop)
+        # The receipt records every outcome, including the ones that throw.
+        self.assertRegex(stop, r"finally \{\s*\n(\s*.*\n)*?\s*Write-ManagedStopReceipt \$receipt")
+        self.assertIn("graceful_incomplete_shutdown", stop)
+        # Concurrent mutating actions cannot interleave over the lease.
+        for action in ("Start-ManagedRelease", "Stop-ManagedRelease", "Uninstall-ManagedRelease"):
+            self.assertIn(f"Invoke-WithActionLock {{ {action}", controller)
+        self.assertIn("action.lock", body("Invoke-WithActionLock"))
+
+    def test_the_server_reports_a_shutdown_that_lost_state(self) -> None:
+        """The manager can only record what the server tells it: a flush that could not save a
+        live session must fail the exit, not log and return zero."""
+        flush = (ROOT / "src/serve/http_server.cpp").read_text(encoding="utf-8")
+        start = flush.index("ShutdownCheckpointSummary HttpServer::save_all_checkpoints")
+        flush = flush[start:flush.index("\nbool HttpServer::bind", start)]
+        self.assertIn("++summary.refused", flush)
+        self.assertIn("++summary.skipped", flush)
+        main = (ROOT / "apps/serve/main.cpp").read_text(encoding="utf-8")
+        self.assertRegex(main, r"if \(!flushed\.complete\(\)\) \{(.|\n)*?return 1;")
 
     def test_shared_scripts_carry_no_lane_literals(self) -> None:
         """One tree serves every lane: GPU names, architectures, power figures, release ids, and

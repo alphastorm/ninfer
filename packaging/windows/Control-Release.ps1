@@ -626,6 +626,31 @@ function Wait-ManagedWrapperExit([string]$TaskName, [DateTime]$DeadlineUtc) {
     return $false
 }
 
+# The termination fallback, in order and best-effort: stop the task, then force whatever is
+# still the owned process. Neither failure may skip the one after it - a scheduler API error
+# that aborted the stop would leave a serving process alive and no record of why.
+function Stop-LaunchNow([object]$Release, [string]$TaskName, [object]$Receipt) {
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($null -ne $task -and [string]$task.State -ceq 'Running') {
+        try { Stop-ScheduledTask -TaskName $TaskName }
+        catch { $Receipt.reason = "scheduled-task stop failed: $($_.Exception.Message)" }
+    }
+    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ($null -eq (Get-OwnedProcess (Get-RuntimeState) $Release)) { return }
+        Start-Sleep -Milliseconds 250
+    }
+    $live = Get-OwnedProcess (Get-RuntimeState) $Release
+    if ($null -ne $live) {
+        try {
+            Stop-Process -Id $live.Id -Force
+            $live.WaitForExit(10000) | Out-Null
+            $Receipt.forced = $true
+        }
+        catch { $Receipt.reason = "force termination failed: $($_.Exception.Message)" }
+    }
+}
+
 function Stop-ManagedProcess {
     $state = Get-State
     $release = Get-Release $state ([string]$state.active_release)
@@ -698,47 +723,56 @@ function Stop-ManagedProcess {
         }
     }
 
-    if ($null -ne (Get-OwnedProcess $runtime $release)) {
-        if ($receipt.outcome -ceq 'graceful') { $receipt.outcome = 'graceful_wait_expired' }
-        $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-        if ($null -ne $task -and $task.State -eq 'Running') { Stop-ScheduledTask -TaskName $taskName }
-        $terminationDeadline = [DateTime]::UtcNow.AddSeconds(30)
-        do {
-            if ($null -eq (Get-OwnedProcess $runtime $release)) { break }
-            Start-Sleep -Milliseconds 250
-        } while ([DateTime]::UtcNow -lt $terminationDeadline)
-
-        $stubborn = Get-OwnedProcess $runtime $release
-        if ($null -ne $stubborn) {
-            Stop-Process -Id $stubborn.Id -Force
-            $stubborn.WaitForExit(10000) | Out-Null
-            $receipt.forced = $true
+    # The fallback reads state now, not the snapshot this call opened with: a stop that raced a
+    # start would otherwise find no owned process in a stale record, skip both the task stop and
+    # the force-kill, and return while the newly launched server keeps serving. It also gives a
+    # wrapper that is merely unwinding its grace first, so a graceful stop does not kill the
+    # cleanup it just asked for. The receipt is written on every path.
+    try {
+        if ($null -ne (Get-OwnedProcess (Get-RuntimeState) $release)) {
+            if ($receipt.outcome -ceq 'graceful') { $receipt.outcome = 'graceful_wait_expired' }
+            if ($receipt.outcome -ceq 'already_stopped') {
+                $receipt.outcome = 'terminated'
+                $receipt.reason = 'a launch appeared while this stop was in progress'
+            }
+            Stop-LaunchNow $release $taskName $receipt
         }
-        if ($null -ne (Get-OwnedProcess $runtime $release)) {
+
+        # A stop returns only once no wrapper still holds the run lock or the GPU-owner lease,
+        # whether this call signalled the server, terminated it, or found it already gone while
+        # its wrapper was still unwinding.
+        if (-not (Wait-ManagedWrapperExit $taskName ([DateTime]::UtcNow.AddSeconds(120)))) {
+            $receipt.reason = 'the managed wrapper did not release the run lock after its server stopped'
+            Stop-LaunchNow $release $taskName $receipt
+            if (-not (Wait-ManagedWrapperExit $taskName ([DateTime]::UtcNow.AddSeconds(60)))) {
+                $receipt.outcome = 'wrapper_cleanup_stalled'
+                throw 'the managed wrapper did not release the run lock after its server stopped'
+            }
+        }
+        if ($null -ne (Get-OwnedProcess (Get-RuntimeState) $release)) {
+            $receipt.outcome = 'still_running'
+            $receipt.reason = 'the owned server process survived termination'
             throw 'owned server process did not stop'
         }
-    }
 
-    # Unconditional: a stop returns only once no wrapper still holds the run lock or the
-    # GPU-owner lease, whether this call signalled the server, terminated it, or found it already
-    # gone while its wrapper was still unwinding.
-    if (-not (Wait-ManagedWrapperExit $taskName ([DateTime]::UtcNow.AddSeconds(120)))) {
-        $receipt.outcome = 'wrapper_cleanup_stalled'
-        $receipt.reason = 'the managed wrapper still held the run lock after its server stopped'
+        # The wrapper does have a real child handle, so its own result is the observable record
+        # of how the server exited - including a shutdown that could not save every live
+        # session, which exits nonzero. Task Scheduler result codes also carry the task's own
+        # lifecycle, so a terminated task never reports zero and is not judged by it.
+        $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
+        $receipt.wrapper_result = if ($null -eq $info) { $null } else { [int]$info.LastTaskResult }
+        if ($receipt.outcome -ceq 'graceful' -and $null -ne $receipt.wrapper_result -and
+            [int]$receipt.wrapper_result -ne 0) {
+            $receipt.outcome = 'graceful_incomplete_shutdown'
+            $receipt.reason = "the server reported an unclean shutdown (wrapper result $([int]$receipt.wrapper_result)); a live session may not have been saved"
+        }
+        Remove-Item -LiteralPath (Join-Path $StateRoot 'runtime.json') -Force -ErrorAction SilentlyContinue
+    }
+    finally {
         $receipt.completed_utc = [DateTime]::UtcNow.ToString('o')
         $receipt.elapsed_seconds = [Math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 3)
         Write-ManagedStopReceipt $receipt
-        throw 'the managed wrapper did not release the run lock after its server stopped'
     }
-    # The wrapper does have a real child handle, so its own result is the observable record of
-    # how the server exited. Evidence, not a verdict: Task Scheduler result codes also carry
-    # its own lifecycle (a terminated task never reports zero).
-    $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
-    $receipt.wrapper_result = if ($null -eq $info) { $null } else { [int]$info.LastTaskResult }
-    $receipt.completed_utc = [DateTime]::UtcNow.ToString('o')
-    $receipt.elapsed_seconds = [Math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 3)
-    Write-ManagedStopReceipt $receipt
-    Remove-Item -LiteralPath (Join-Path $StateRoot 'runtime.json') -Force -ErrorAction SilentlyContinue
 }
 
 function Stop-ManagedRelease([bool]$RestoreOwner = $true) {
@@ -996,6 +1030,29 @@ function Uninstall-ManagedRelease {
     Write-Output $receiptJson
 }
 
+# Two controller invocations that mutate the lifecycle must not interleave: a stop that restored
+# the GPU owner while a start was acquiring the lease would leave the next server running with
+# the owner's power cap. The wrapper's run lock is a different claim - held for a launch's whole
+# life - so `Run` deliberately does not take this one.
+function Invoke-WithActionLock([ScriptBlock]$Body) {
+    $path = Join-Path $StateRoot 'action.lock'
+    $deadline = [DateTime]::UtcNow.AddSeconds(300)
+    $lock = $null
+    while ($null -eq $lock) {
+        try {
+            $lock = [IO.File]::Open($path, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite,
+                                    [IO.FileShare]::None)
+        }
+        catch [IO.IOException] {
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw 'another managed lifecycle action is still in progress'
+            }
+            Start-Sleep -Milliseconds 500
+        }
+    }
+    try { & $Body } finally { $lock.Dispose() }
+}
+
 switch ($Action) {
     'Run' {
         Invoke-Run
@@ -1004,52 +1061,56 @@ switch ($Action) {
         Get-StatusObject | ConvertTo-Json -Depth 20
     }
     'Start' {
-        Start-ManagedRelease
+        Invoke-WithActionLock { Start-ManagedRelease }
         Get-StatusObject | ConvertTo-Json -Depth 20
     }
     'Stop' {
-        Stop-ManagedRelease
+        Invoke-WithActionLock { Stop-ManagedRelease }
         Get-StatusObject | ConvertTo-Json -Depth 20
     }
     'Restart' {
-        Assert-NoPreparedRelease (Get-State)
-        Stop-ManagedRelease $false
-        try {
-            Start-ManagedRelease
-        }
-        catch {
-            Restore-GpuOwnerLease
-            throw
+        Invoke-WithActionLock {
+            Assert-NoPreparedRelease (Get-State)
+            Stop-ManagedRelease $false
+            try {
+                Start-ManagedRelease
+            }
+            catch {
+                Restore-GpuOwnerLease
+                throw
+            }
         }
         Get-StatusObject | ConvertTo-Json -Depth 20
     }
     'Rollback' {
-        $state = Get-State
-        Assert-NoPreparedRelease $state
-        if ($null -eq $state.previous_release -or [string]::IsNullOrWhiteSpace([string]$state.previous_release)) {
-            throw 'no previous installed release is available for rollback'
-        }
-        $current = [string]$state.active_release
-        $previous = [string]$state.previous_release
-        Get-Release $state $previous | Out-Null
-        Stop-ManagedRelease
-        $state.active_release = $previous
-        $state.previous_release = $current
-        Write-JsonAtomic (Join-Path $StateRoot 'state.json') $state
-        try {
-            Start-ManagedRelease
-        }
-        catch {
+        Invoke-WithActionLock {
+            $state = Get-State
+            Assert-NoPreparedRelease $state
+            if ($null -eq $state.previous_release -or [string]::IsNullOrWhiteSpace([string]$state.previous_release)) {
+                throw 'no previous installed release is available for rollback'
+            }
+            $current = [string]$state.active_release
+            $previous = [string]$state.previous_release
+            Get-Release $state $previous | Out-Null
             Stop-ManagedRelease
-            $state.active_release = $current
-            $state.previous_release = $previous
+            $state.active_release = $previous
+            $state.previous_release = $current
             Write-JsonAtomic (Join-Path $StateRoot 'state.json') $state
-            Start-ManagedRelease
-            throw
+            try {
+                Start-ManagedRelease
+            }
+            catch {
+                Stop-ManagedRelease
+                $state.active_release = $current
+                $state.previous_release = $previous
+                Write-JsonAtomic (Join-Path $StateRoot 'state.json') $state
+                Start-ManagedRelease
+                throw
+            }
         }
         Get-StatusObject | ConvertTo-Json -Depth 20
     }
     'Uninstall' {
-        Uninstall-ManagedRelease
+        Invoke-WithActionLock { Uninstall-ManagedRelease }
     }
 }

@@ -56,6 +56,17 @@ require_checkpoint_session_identity(const std::optional<std::string>& path_value
 void write_checkpoint_delete_response(httplib::Response& response,
                                       SessionCheckpointEraseResult result);
 
+// What the shutdown flush managed to do. A session with nothing durable to export is not a
+// loss; a session whose live state the engine refused to export is, and a stop that reports
+// success while losing it would be a false durability claim.
+struct ShutdownCheckpointSummary {
+    std::size_t saved   = 0;
+    std::size_t skipped = 0; // nothing durable to export
+    std::size_t refused = 0; // live state that could not be exported
+
+    [[nodiscard]] bool complete() const noexcept { return refused == 0; }
+};
+
 class HttpServer {
 public:
     explicit HttpServer(ServeOptions options);
@@ -70,7 +81,9 @@ public:
     // serving. Returns whether the loop was running, i.e. whether the request could take effect
     // now; a caller on another thread re-asserts it until it does (StopEventWatcher).
     bool stop() noexcept;
-    void save_all_checkpoints() noexcept;
+    // Saves every live session after the listener has closed. Reports what it could not save so
+    // the exit status can tell an operator that a deliberate stop lost state.
+    ShutdownCheckpointSummary save_all_checkpoints() noexcept;
 
     [[nodiscard]] const std::string& public_model_id() const noexcept { return public_model_id_; }
 

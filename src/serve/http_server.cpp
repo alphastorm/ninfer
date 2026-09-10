@@ -1179,26 +1179,53 @@ void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noex
     }
 }
 
-void HttpServer::save_all_checkpoints() noexcept {
-    if (service_ == nullptr || !service_->checkpoint_enabled()) { return; }
+ShutdownCheckpointSummary HttpServer::save_all_checkpoints() noexcept {
+    ShutdownCheckpointSummary summary;
+    if (service_ == nullptr || !service_->checkpoint_enabled()) { return summary; }
     if (automatic_checkpoints_) { automatic_checkpoints_->drain(); }
     try {
-        std::size_t saved = 0;
-        std::size_t total = 0;
         for (const std::string& digest : response_store_.session_digests()) {
-            ++total;
             try {
-                if (service_->save_checkpoint(digest, response_store_).has_value()) { ++saved; }
+                runtime::SessionCheckpointSkipDetail skip;
+                if (service_->save_checkpoint(digest, response_store_, &skip).has_value()) {
+                    ++summary.saved;
+                    continue;
+                }
+                // A session the store or the engine has nothing to export for loses nothing;
+                // any other refusal means live state existed and did not reach disk.
+                switch (skip.reason) {
+                case runtime::SessionCheckpointSkipReason::None:
+                case runtime::SessionCheckpointSkipReason::StoreDisabled:
+                case runtime::SessionCheckpointSkipReason::NoSessionRecords:
+                case runtime::SessionCheckpointSkipReason::CacheDisabled:
+                case runtime::SessionCheckpointSkipReason::SessionNotIndexed:
+                    ++summary.skipped;
+                    break;
+                default:
+                    ++summary.refused;
+                    write_console_log(
+                        ConsoleLogLevel::Error,
+                        std::string("shutdown checkpoint save refused: ") +
+                            std::string(
+                                runtime::session_checkpoint_skip_reason_name(skip.reason)));
+                    break;
+                }
             } catch (const std::exception& exception) {
-                write_console_log(ConsoleLogLevel::Warning,
+                ++summary.refused;
+                write_console_log(ConsoleLogLevel::Error,
                                   std::string("shutdown checkpoint save failed (continuing): ") +
                                       exception.what());
             }
         }
-        write_console_log(ConsoleLogLevel::Info, "shutdown: saved " + std::to_string(saved) +
-                                                     " of " + std::to_string(total) +
-                                                     " live sessions");
-    } catch (...) {}
+        write_console_log(summary.complete() ? ConsoleLogLevel::Info : ConsoleLogLevel::Error,
+                          "shutdown: saved " + std::to_string(summary.saved) + ", nothing to save " +
+                              std::to_string(summary.skipped) + ", refused " +
+                              std::to_string(summary.refused));
+    } catch (...) {
+        // The enumeration itself failed, so what was live is unknown: report it as loss.
+        ++summary.refused;
+    }
+    return summary;
 }
 
 bool HttpServer::bind() { return server_.bind_to_port(options_.host, options_.port); }
