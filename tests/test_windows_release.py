@@ -138,6 +138,20 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         self.assertLess(uninstall.index("Invoke-WithActionLock { Stop-ManagedRelease }"),
                         uninstall.index("Remove-Item -LiteralPath $fullStateRoot -Recurse -Force"))
 
+    def test_the_gpu_owner_lease_has_one_restorer_per_stop(self) -> None:
+        """The wrapper and the controller both end a launch. Exactly one of them may restore the
+        GPU owner, or the loser fails on work the winner already did - and while a controller
+        action holds the action lock, the decision is that action's (alphastorm/ninfer#41)."""
+        controller = (WINDOWS / "Control-Release.ps1").read_text(encoding="utf-8")
+        run = controller[controller.index("function Invoke-Run"):]
+        run = run[:run.index("\nfunction ")]
+        self.assertIn("if ($ownerLeaseHeld -and -not (Test-ManagedActionInProgress)) "
+                      "{ Restore-GpuOwnerLease }", run)
+        probe = controller[controller.index("function Test-ManagedActionInProgress"):]
+        self.assertIn("action.lock", probe[:probe.index("\nfunction ")])
+        owner = (WINDOWS / "Control-GpuOwner.ps1").read_text(encoding="utf-8")
+        self.assertRegex(owner, r"Remove-Item -LiteralPath \$statePath -Force -ErrorAction SilentlyContinue")
+
     def test_the_server_reports_a_shutdown_that_lost_state(self) -> None:
         """The manager can only record what the server tells it: a flush that could not save a
         live session must fail the exit, not log and return zero."""

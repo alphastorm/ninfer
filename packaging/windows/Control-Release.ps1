@@ -626,6 +626,20 @@ function Wait-ManagedWrapperExit([string]$TaskName, [DateTime]$DeadlineUtc) {
     return $false
 }
 
+# Whether a controller action is mutating this lifecycle right now. The managed wrapper reads
+# this to decide whether the GPU-owner lease is its to restore.
+function Test-ManagedActionInProgress {
+    $path = Join-Path $StateRoot 'action.lock'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    try {
+        $probe = [IO.File]::Open($path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite,
+                                 [IO.FileShare]::None)
+        $probe.Dispose()
+        return $false
+    }
+    catch [IO.IOException] { return $true }
+}
+
 # The termination fallback, in order and best-effort: stop the task, then force whatever is
 # still the owned process. Neither failure may skip the one after it - a scheduler API error
 # that aborted the stop would leave a serving process alive and no record of why.
@@ -971,7 +985,12 @@ function Invoke-Run {
             }
         }
         if ($null -ne $lock) { $lock.Dispose() }
-        if ($ownerLeaseHeld) { Restore-GpuOwnerLease }
+        # One restorer per stop. While a controller action holds the action lock it owns the
+        # lease decision - Stop and Rollback restore the owner, Restart deliberately keeps it -
+        # and a wrapper that restored here too would race that action's own restore, leaving one
+        # of them to fail on work the other had already done. A launch that ends without a
+        # controller action (a crash, or an operator stopping the task) still restores here.
+        if ($ownerLeaseHeld -and -not (Test-ManagedActionInProgress)) { Restore-GpuOwnerLease }
     }
 }
 

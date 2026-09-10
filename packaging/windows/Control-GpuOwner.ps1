@@ -226,7 +226,9 @@ switch ($Action) {
             Invoke-NvidiaSmi @('-pl', [string]$prior) | Out-Null
             if ((Get-PowerLimitW) -ne $prior) { throw 'GPU prior power limit was not restored' }
         }
-        Remove-Item -LiteralPath $statePath -Force
+        # The end state is that no lease remains; another caller reaching it first is not an
+        # error, only the same outcome arriving twice.
+        Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
         Write-Status $false (Get-PowerLimitW)
     }
 }
