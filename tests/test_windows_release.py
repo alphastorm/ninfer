@@ -128,9 +128,15 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         self.assertRegex(stop, r"finally \{\s*\n(\s*.*\n)*?\s*Write-ManagedStopReceipt \$receipt")
         self.assertIn("graceful_incomplete_shutdown", stop)
         # Concurrent mutating actions cannot interleave over the lease.
-        for action in ("Start-ManagedRelease", "Stop-ManagedRelease", "Uninstall-ManagedRelease"):
+        for action in ("Start-ManagedRelease", "Stop-ManagedRelease"):
             self.assertIn(f"Invoke-WithActionLock {{ {action}", controller)
         self.assertIn("action.lock", body("Invoke-WithActionLock"))
+        # The lock file lives inside the state root, so the uninstall - which deletes that root -
+        # must scope it, not hold it to the end (alphastorm/ninfer#41).
+        self.assertNotIn("Invoke-WithActionLock { Uninstall-ManagedRelease", controller)
+        uninstall = body("Uninstall-ManagedRelease")
+        self.assertLess(uninstall.index("Invoke-WithActionLock { Stop-ManagedRelease }"),
+                        uninstall.index("Remove-Item -LiteralPath $fullStateRoot -Recurse -Force"))
 
     def test_the_server_reports_a_shutdown_that_lost_state(self) -> None:
         """The manager can only record what the server tells it: a flush that could not save a

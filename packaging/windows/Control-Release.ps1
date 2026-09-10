@@ -1005,7 +1005,10 @@ function Uninstall-ManagedRelease {
             }
         }
 
-        Stop-ManagedRelease
+        # Scoped, not wrapped: the lock file lives in the tree this function goes on to delete,
+        # so its handle must be closed before that delete - the same reason install.lock is
+        # released in the finally below rather than held to the end.
+        Invoke-WithActionLock { Stop-ManagedRelease }
         Unregister-ScheduledTask -TaskName ([string]$state.task_name) -Confirm:$false -ErrorAction SilentlyContinue
         $receiptJson = ([ordered]@{
                 artifact_type = 'ninfer_windows_release_uninstall_receipt'
@@ -1111,6 +1114,6 @@ switch ($Action) {
         Get-StatusObject | ConvertTo-Json -Depth 20
     }
     'Uninstall' {
-        Invoke-WithActionLock { Uninstall-ManagedRelease }
+        Uninstall-ManagedRelease
     }
 }
