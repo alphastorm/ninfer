@@ -54,6 +54,9 @@ EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
 EXPECTED_LONG = "ORCHID=493817; COLOR=COBALT"
 LONG_PROMPT_TOKENS = 130048
 CHECKPOINT_MARKER = "CHECKPOINT-NATIVE-731942"
+# The second restart marker belongs to a session nothing ever published: only the shutdown flush
+# a managed stop now reaches can carry it across the restart.
+FLUSH_MARKER = "MANAGED-STOP-FLUSH-408137"
 # The agent protocol has to hold when the Host StateImage pool is the binding constraint, not
 # only at the lane's shipped capacity: a continuation that has lost its endpoint reuses a long
 # anchor its sibling also references, and that shared anchor is exactly what capacity pressure
@@ -1072,20 +1075,46 @@ finally{{
             # rollback is proven on the next release of the same lineage.
             return {"status": "not_applicable", "reason": "first release of the lineage",
                     "active_release": candidate, "directions": 0}
+        # Each direction records how its stop reached the server. The candidate declares the
+        # stop-event channel, so its stop is a signal; the predecessor predates the channel and
+        # its record says so, which is exactly why the shared controller must not pass the flag
+        # to a binary that would refuse it.
         script = f"""
 $ErrorActionPreference='Stop'
 $root={ps_quote(self.state_root)}
 $c={ps_quote(candidate)}
 $controller=Join-Path $root 'Control-Release.ps1'
-&$controller -Action Stop -StateRoot $root|Out-Null
+function Stop-And-Report {{
+  &$controller -Action Stop -StateRoot $root|Out-Null
+  $s=Get-Content (Join-Path $root 'last-stop.json') -Raw | ConvertFrom-Json
+  return [ordered]@{{release=[string]$s.release_id;mode=[string]$s.mode;outcome=[string]$s.outcome;forced=[bool]$s.forced;exit_code=$s.exit_code}}
+}}
+$stops=[Collections.Generic.List[object]]::new()
+&$controller -Action Start -StateRoot $root|Out-Null
+$stops.Add((Stop-And-Report))
 &$controller -Action Rollback -StateRoot $root|Out-Null
 $a=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
 $first=[string]$a.active_release
-&$controller -Action Stop -StateRoot $root|Out-Null
+$stops.Add((Stop-And-Report))
 &$controller -Action Rollback -StateRoot $root|Out-Null
 $b=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
 if([string]$b.active_release -cne $c){{throw 'bidirectional rollback did not restore candidate'}}
-[Console]::Out.WriteLine(([ordered]@{{status='passed';directions=2;intermediate_release=$first;active_release=[string]$b.active_release}}|ConvertTo-Json -Compress))
+$candidateStop=@($stops|Where-Object{{[string]$_.release -ceq $c}})
+if($candidateStop.Count -lt 1){{throw 'no recorded stop belongs to the candidate'}}
+if([string]$candidateStop[0].mode -cne 'stop-event' -or [string]$candidateStop[0].outcome -cne 'graceful'){{
+  throw ('the candidate was not stopped by its signal: '+([string]$candidateStop[0].mode)+'/'+([string]$candidateStop[0].outcome))
+}}
+$predecessorStop=@($stops|Where-Object{{[string]$_.release -cne $c}})
+$predecessorMode=$null
+if($predecessorStop.Count -ge 1){{
+  $predecessorMode=[string]$predecessorStop[0].mode
+  $record=$b.releases.PSObject.Properties[[string]$predecessorStop[0].release].Value
+  $declared=if($null -eq $record.PSObject.Properties['managed_stop']){{'terminate'}}else{{[string]$record.managed_stop}}
+  if($predecessorMode -cne $declared){{
+    throw ('the predecessor stop used '+$predecessorMode+' against a release that declares '+$declared)
+  }}
+}}
+[Console]::Out.WriteLine(([ordered]@{{status='passed';directions=2;intermediate_release=$first;active_release=[string]$b.active_release;stops=$stops;candidate_stop_mode=[string]$candidateStop[0].mode;predecessor_stop_mode=$predecessorMode}}|ConvertTo-Json -Depth 6 -Compress))
 """
         return self.remote_json(self.config.target, script, timeout=1800)
 
@@ -1183,6 +1212,11 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
                 "context_exact_output": context["exact_output"],
                 "restart_cached_input_tokens": restart["cached_input_tokens"],
                 "restart_process_replaced": restart["old_pid"] != restart["new_pid"],
+                "managed_stop_mode": restart["managed_stop"]["mode"],
+                "managed_stop_outcome": restart["managed_stop"]["outcome"],
+                "managed_stop_forced": restart["managed_stop"]["forced"],
+                "unsaved_session_survived_managed_stop": restart["managed_stop_flush"]["exact_output"] == FLUSH_MARKER,
+                "unsaved_session_cached_input_tokens": restart["managed_stop_flush"]["cached_input_tokens"],
                 "c1_decode_tokens_per_second": benchmark["decode_tokens_per_second"],
                 "c1_prefill_tokens_per_second": benchmark["prefill_tokens_per_second"],
                 "c1_max_power_w": benchmark["max_power_w"],
@@ -1191,6 +1225,7 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
                 "context_elapsed_seconds": context["elapsed_seconds"],
                 "protocol_checks": self.state["phases"]["protocol"]["receipt"]["checks"],
                 "rollback": self.state["phases"]["rollback"]["receipt"]["status"],
+                "rollback_predecessor_stop_mode": self.state["phases"]["rollback"]["receipt"].get("predecessor_stop_mode"),
                 "security_low_privilege_read_denials": self.state["phases"]["security"]["receipt"]["low_privilege_read_denials"],
                 "omp_exact_final_answer": self.state["phases"]["omp"]["receipt"]["exact_final_answer"],
             },
@@ -1312,6 +1347,27 @@ def internal_long(args: argparse.Namespace) -> dict[str, Any]:
     return receipt
 
 
+def controller_status(controller: Path, state_root: Path, action: str, timeout: int = 900) -> dict[str, Any]:
+    """Runs a controller action and returns the lifecycle status object it prints."""
+    text = run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(controller),
+         "-Action", action, "-StateRoot", str(state_root)],
+        timeout=timeout,
+    ).stdout
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        raise LaneError(f"controller -Action {action} printed no status object")
+    return json.loads(text[start:end + 1])
+
+
+def checkpoint_state(base: str, key: str, session: str) -> str:
+    try:
+        return str(request_json(base, key, "GET", f"/v1/ninfer/checkpoints/{session}/status").get("state"))
+    except urllib.error.HTTPError as error:
+        return f"http_{error.code}"
+
+
 def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
     evidence = Path(args.evidence_root)
     state_root = Path(args.state_root)
@@ -1329,27 +1385,48 @@ def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
     base = f"http://{release['host']}:{release['port']}"
     listener = ["powershell", "-NoProfile", "-Command",
                 f"(Get-NetTCPConnection -State Listen -LocalPort {release['port']}).OwningProcess"]
-    session = digest("checkpoint-session")
-    seed = request_json(base, key, "POST", "/v1/responses", {"model": args.model_id, "input": f"Memorize this exact marker for the next turn: {CHECKPOINT_MARKER}. Reply only SAVED.", "max_output_tokens": 32, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "ninfer_request_id": digest("seed")})
-    # A managed stop on Windows terminates the server, so nothing is flushed on the way out: what
-    # survives a restart is what the session published while the server was up. Publish it the way
-    # the product documents - the explicit save - and then require the restart to restore it.
-    saved = request_json(base, key, "POST", "/v1/ninfer/checkpoints", {"session_sha256": session})
+
+    def seed(session: str, marker: str, label: str) -> dict[str, Any]:
+        return request_json(base, key, "POST", "/v1/responses", {"model": args.model_id, "input": f"Memorize this exact marker for the next turn: {marker}. Reply only SAVED.", "max_output_tokens": 32, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "ninfer_request_id": digest(label)})
+
+    def resume(session: str, previous: str, label: str) -> tuple[str, int]:
+        value = request_json(base, key, "POST", "/v1/responses", {"model": args.model_id, "input": "Return only the exact marker from the previous turn.", "max_output_tokens": 64, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "previous_response_id": previous, "ninfer_request_id": digest(label)})
+        return response_text(value).strip(), int(value["usage"]["input_tokens_details"]["cached_tokens"])
+
+    # Two sessions, both far below the 32,768-token automatic gate. The control is published the
+    # documented explicit way; the second is never saved at all, so only the managed stop's
+    # shutdown flush can carry it across the restart.
+    control_session = digest("checkpoint-session")
+    flush_session = digest("managed-stop-session")
+    control_seed = seed(control_session, CHECKPOINT_MARKER, "seed")
+    saved = request_json(base, key, "POST", "/v1/ninfer/checkpoints", {"session_sha256": control_session})
     if saved.get("state") != "available" or int(saved.get("frontier_tokens", 0)) <= 0:
         raise LaneError("explicit session checkpoint was not published")
-    status = request_json(base, key, "GET", f"/v1/ninfer/checkpoints/{session}/status")
-    if status.get("state") != "available":
+    if request_json(base, key, "GET", f"/v1/ninfer/checkpoints/{control_session}/status").get("state") != "available":
         raise LaneError("published session checkpoint did not become available")
+    flush_seed = seed(flush_session, FLUSH_MARKER, "flush-seed")
+    flush_before = checkpoint_state(base, key, flush_session)
+    if flush_before == "available":
+        raise LaneError("the managed-stop session was already published before the stop")
+
     old_pid = int(run(listener).stdout.strip())
     restart_started = time.perf_counter()
-    run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(controller), "-Action", "Restart", "-StateRoot", str(state_root)], timeout=900)
+    status = controller_status(controller, state_root, "Restart")
     restart_seconds = time.perf_counter() - restart_started
     new_pid = int(run(listener).stdout.strip())
-    continued = request_json(base, key, "POST", "/v1/responses", {"model": args.model_id, "input": "Return only the exact marker from the previous turn.", "previous_response_id": seed["id"], "max_output_tokens": 64, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "ninfer_request_id": digest("continue")})
-    content = response_text(continued).strip()
-    cached = int(continued["usage"]["input_tokens_details"]["cached_tokens"])
-    if old_pid == new_pid or content != CHECKPOINT_MARKER or cached <= 0:
-        raise LaneError("durable process restart continuation failed")
+    stop = status.get("last_stop") or {}
+    if stop.get("mode") != "stop-event" or stop.get("outcome") != "graceful" or stop.get("forced"):
+        raise LaneError(f"the managed stop was not a graceful signal: {json.dumps(stop)}")
+
+    control_answer, control_cached = resume(control_session, control_seed["id"], "continue")
+    flush_answer, flush_cached = resume(flush_session, flush_seed["id"], "flush-continue")
+    if old_pid == new_pid:
+        raise LaneError("the managed restart did not replace the server process")
+    if control_answer != CHECKPOINT_MARKER or control_cached <= 0:
+        raise LaneError("explicitly published session did not resume across the restart")
+    if flush_answer != FLUSH_MARKER or flush_cached <= 0:
+        raise LaneError("the managed stop did not flush the unsaved session")
+
     cache = Path(release["cache_root"]) / "session-checkpoints" / "sessions"
     directories = sorted(cache.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True)
     files = [path for path in directories[0].rglob("*") if path.is_file()]
@@ -1358,15 +1435,33 @@ def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
         "old_pid": old_pid,
         "new_pid": new_pid,
         "restart_seconds": restart_seconds,
-        "checkpoint_save": "explicit_endpoint",
-        "checkpoint_generation": saved.get("generation"),
-        "checkpoint_save_bytes": saved.get("bytes"),
-        "checkpoint_frontier_tokens": saved.get("frontier_tokens"),
+        "managed_stop": {
+            "mode": stop.get("mode"),
+            "outcome": stop.get("outcome"),
+            "forced": bool(stop.get("forced")),
+            "exit_code": stop.get("exit_code"),
+            "elapsed_seconds": stop.get("elapsed_seconds"),
+            "graceful_wait_seconds": stop.get("graceful_wait_seconds"),
+        },
+        "explicit_control": {
+            "checkpoint_save": "explicit_endpoint",
+            "generation": saved.get("generation"),
+            "save_bytes": saved.get("bytes"),
+            "frontier_tokens": saved.get("frontier_tokens"),
+            "cached_input_tokens": control_cached,
+            "exact_output": control_answer,
+        },
+        "managed_stop_flush": {
+            "checkpoint_save": "shutdown_flush",
+            "state_before_stop": flush_before,
+            "state_after_restart": checkpoint_state(base, key, flush_session),
+            "cached_input_tokens": flush_cached,
+            "exact_output": flush_answer,
+        },
         "checkpoint_files": len(files),
         "checkpoint_bytes": sum(path.stat().st_size for path in files),
-        "cached_input_tokens": cached,
-        "exact_output": content,
-        "managed_stop": "process termination; the server publishes on save, not on shutdown",
+        "cached_input_tokens": control_cached,
+        "exact_output": control_answer,
         "deletion_semantics": "logical-object-deletion",
         "secure_erasure_claimed": False,
     }
