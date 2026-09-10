@@ -1338,6 +1338,26 @@ int exercise_concurrent_resource_settlement(const char* artifact,
         return 1;
     }
 
+    // Localize a settlement leak: an abandoned materialization must retire its logical
+    // membership before the next request completes, so a later staggered-row failure means the
+    // rows leaked rather than this cancellation.
+    const ninfer::RuntimeStats settled_after_cancel = engine.runtime_stats();
+    if (settled_after_cancel.running_requests != 0 ||
+        settled_after_cancel.materializing_requests != 0 ||
+        settled_after_cancel.prefilling_requests != 0 ||
+        settled_after_cancel.decode_ready_requests != 0 ||
+        settled_after_cancel.capture_pending_requests != 0 ||
+        settled_after_cancel.terminal_pending_requests != 0) {
+        std::cerr << "cancelled materialization left live logical membership: running="
+                  << settled_after_cancel.running_requests
+                  << " materializing=" << settled_after_cancel.materializing_requests
+                  << " prefill=" << settled_after_cancel.prefilling_requests
+                  << " decode=" << settled_after_cancel.decode_ready_requests
+                  << " capture=" << settled_after_cancel.capture_pending_requests
+                  << " terminal=" << settled_after_cancel.terminal_pending_requests << '\n';
+        return 1;
+    }
+
     std::vector<ninfer::GenerationHandle> handles;
     handles.reserve(8);
     for (std::uint32_t row = 0; row < 8; ++row) {
