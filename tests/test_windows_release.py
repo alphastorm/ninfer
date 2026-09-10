@@ -158,11 +158,42 @@ class SharedLifecycleTreeTests(unittest.TestCase):
             self.assertIn(f"Invoke-WithActionLock {{ {action}", controller)
         self.assertIn("action.lock", body("Invoke-WithActionLock"))
         # The lock file lives inside the state root, so the uninstall - which deletes that root -
-        # must scope it, not hold it to the end (alphastorm/ninfer#41).
+        # must scope it, not hold it to the end (alphastorm/ninfer#41); and stop plus task
+        # removal are one step under it, or a Start between them launches a server that
+        # outlives its release identity.
         self.assertNotIn("Invoke-WithActionLock { Uninstall-ManagedRelease", controller)
         uninstall = body("Uninstall-ManagedRelease")
-        self.assertLess(uninstall.index("Invoke-WithActionLock { Stop-ManagedRelease }"),
+        scoped = uninstall[uninstall.index("Invoke-WithActionLock {"):]
+        scoped = scoped[:scoped.index("\n        }\n")]
+        self.assertIn("Stop-ManagedRelease", scoped)
+        self.assertIn("Unregister-ScheduledTask", scoped)
+        self.assertLess(uninstall.index("Invoke-WithActionLock {"),
                         uninstall.index("Remove-Item -LiteralPath $fullStateRoot -Recurse -Force"))
+        # Delivering the request cannot throw past the fail-closed scope: every failure mode of
+        # opening or signalling the event is a return value the stop acts on.
+        request = body("Request-ManagedStop")
+        self.assertNotIn("throw", request)
+        self.assertEqual(request.count("catch"), 3)
+        self.assertLess(stop.index("try {"), stop.index("Request-ManagedStop $eventName"))
+        # A shutdown report is evidence only when it is this launch's.
+        self.assertIn("[string]$report.launch_id -cne $expectedLaunch", stop)
+        run = body("Invoke-Run")
+        self.assertIn("launch_id = $launchId", run)
+        # A launch that ended by request must not be retried by the scheduler.
+        self.assertIn("$stoppedByRequest", run)
+        self.assertRegex(run, r"if \(-not \$stoppedByRequest\) \{\s*\n\s*throw")
+
+    def test_installer_reconstruction_keeps_the_managed_stop_capability(self) -> None:
+        """The installer rewrites every existing release record when a new release is installed.
+        A copy that dropped managed_stop would turn the incumbent's next stop - and every later
+        rollback to it - into a termination, silently reopening the loss the channel closes."""
+        installer = (WINDOWS / "Install-Release.ps1").read_text(encoding="utf-8")
+        start = installer.index("function Copy-InstalledRelease")
+        copy = installer[start:installer.index("\nfunction ", start + 1)]
+        self.assertIn("$copy['managed_stop'] = [string]$declared.Value", copy)
+        self.assertIn("$copy['graceful_stop_timeout_seconds'] = [int]$bound.Value", copy)
+        # A record that never had the field is a release that predates the channel and stays so.
+        self.assertNotIn("$copy['managed_stop'] = 'terminate'", copy)
 
     def test_the_gpu_owner_lease_has_one_restorer_per_stop(self) -> None:
         """The wrapper and the controller both end a launch. Exactly one of them may restore the

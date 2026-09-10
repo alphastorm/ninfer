@@ -45,18 +45,23 @@ std::string format_bytes(std::size_t bytes) {
 }
 
 // The manager reads this after the process is gone: with redirected streams a Windows parent
-// gets no usable exit code, so what the flush achieved has to be written down.
+// gets no usable exit code, so what the flush achieved has to be written down. The report
+// carries the launch identity the manager minted into the stop-event name, so the manager can
+// tell this launch's report from one a previous launch left behind.
 void write_shutdown_report(const ninfer::serve::ServeOptions& options,
                            const ninfer::serve::ShutdownCheckpointSummary& flushed) noexcept {
     if (options.shutdown_report.empty()) { return; }
     try {
+        const std::string::size_type tail = options.stop_event.rfind('-');
+        const std::string launch_id =
+            tail == std::string::npos ? std::string() : options.stop_event.substr(tail + 1);
         const std::filesystem::path path(options.shutdown_report);
-        const std::filesystem::path temporary = path.string() + ".tmp";
+        const std::filesystem::path temporary = path.string() + "." + launch_id + ".tmp";
         {
             std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
             out << "{\"artifact_type\":\"ninfer_serve_shutdown_report\",\"schema_version\":1"
-                << ",\"saved\":" << flushed.saved << ",\"skipped\":" << flushed.skipped
-                << ",\"refused\":" << flushed.refused
+                << ",\"launch_id\":\"" << launch_id << "\",\"saved\":" << flushed.saved
+                << ",\"skipped\":" << flushed.skipped << ",\"refused\":" << flushed.refused
                 << ",\"complete\":" << (flushed.complete() ? "true" : "false") << "}\n";
             if (!out) { return; }
         }

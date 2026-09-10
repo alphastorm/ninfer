@@ -387,7 +387,7 @@ function Copy-InstalledRelease([string]$ReleaseId, [object]$Release) {
         throw "installed release '$ReleaseId' stores an external model reference inside its candidate root"
     }
 
-    return [ordered]@{
+    $copy = [ordered]@{
         release_root = $releaseRoot
         server_executable = [string]$values.server_executable
         model_artifact = $modelPath
@@ -419,6 +419,20 @@ function Copy-InstalledRelease([string]$ReleaseId, [object]$Release) {
         gpu_name = [string]$values.gpu_name
         installed_utc = [string]$values.installed_utc
     }
+    # The capability is the installed release's own and must survive every reconstruction of
+    # its record: a copy that dropped it would turn the incumbent's next stop into a termination,
+    # which is exactly the loss the channel exists to prevent. A record that never had it is a
+    # release that predates the channel, and stays so.
+    $declared = $Release.PSObject.Properties['managed_stop']
+    if ($null -ne $declared -and -not [string]::IsNullOrWhiteSpace([string]$declared.Value)) {
+        $copy['managed_stop'] = [string]$declared.Value
+        $bound = $Release.PSObject.Properties['graceful_stop_timeout_seconds']
+        if ($null -eq $bound) {
+            throw "installed release '$ReleaseId' declares a stop channel without a bounded graceful wait"
+        }
+        $copy['graceful_stop_timeout_seconds'] = [int]$bound.Value
+    }
+    return $copy
 }
 
 function Get-InstalledReleases([object]$State) {

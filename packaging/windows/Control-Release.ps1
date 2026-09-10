@@ -466,13 +466,22 @@ function Get-RuntimeStopEvent([object]$Runtime, [string]$ReleaseId) {
     return $name
 }
 
+# Returns 'signalled', 'absent' (the object does not exist yet, retry), or 'failed:<reason>'.
+# Nothing here throws: a failure to deliver the request is a reason to terminate, never a
+# reason to return with the server still running.
 function Request-ManagedStop([string]$Name) {
     $handle = $null
     try {
         $handle = [Threading.EventWaitHandle]::OpenExisting($Name)
     }
-    catch [Threading.WaitHandleCannotBeOpenedException] { return $false }
-    try { return $handle.Set() } finally { $handle.Dispose() }
+    catch [Threading.WaitHandleCannotBeOpenedException] { return 'absent' }
+    catch { return "failed: $($_.Exception.GetType().Name): $($_.Exception.Message)" }
+    try {
+        if ($handle.Set()) { return 'signalled' }
+        return 'failed: SetEvent returned false'
+    }
+    catch { return "failed: $($_.Exception.GetType().Name): $($_.Exception.Message)" }
+    finally { $handle.Dispose() }
 }
 
 function Write-ManagedStopReceipt([object]$Receipt) {
@@ -693,58 +702,58 @@ function Stop-ManagedProcess {
         elapsed_seconds = 0.0
     }
 
-    if ($null -ne $owned -and $plan.mode -ceq 'stop-event' -and $null -ne $eventName) {
-        $deadline = $started.AddSeconds([int]$plan.timeout_seconds)
-        # The wrapper publishes runtime.json before the server creates its event, so a stop that
-        # lands during startup retries until the object exists or the process is gone.
-        $signalled = $false
-        while (-not $signalled -and -not $owned.HasExited -and [DateTime]::UtcNow -lt $deadline) {
-            $signalled = Request-ManagedStop $eventName
-            if (-not $signalled) { Start-Sleep -Milliseconds 250 }
-        }
-        if ($signalled) {
-            $receipt.outcome = 'graceful'
-            $remaining = [Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds)
-            $owned.WaitForExit([int][Math]::Max(0, $remaining)) | Out-Null
-            if (-not $owned.HasExited) {
-                $receipt.reason = "the server did not exit within $([int]$plan.timeout_seconds)s of the stop request"
+    # Everything from the first attempt to deliver the request onwards runs inside one scope
+    # that ends in termination-of-whatever-is-alive and a written receipt: no exception raised
+    # on the way - opening the event, signalling it, waiting - may return with the server up.
+    try {
+        if ($null -ne $owned -and $plan.mode -ceq 'stop-event' -and $null -ne $eventName) {
+            $deadline = $started.AddSeconds([int]$plan.timeout_seconds)
+            # The wrapper publishes runtime.json before the server creates its event, so a stop
+            # that lands during startup retries until the object exists or the process is gone.
+            $delivery = 'absent'
+            while ($delivery -ceq 'absent' -and -not $owned.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+                $delivery = Request-ManagedStop $eventName
+                if ($delivery -ceq 'absent') { Start-Sleep -Milliseconds 250 }
             }
-            else {
-                # A process this controller did not start does not always expose an exit code:
-                # Get-Process hands back a handle without the rights .NET needs, and reading it
-                # yields $null rather than 0. What is observable is that the request was
-                # delivered and the process exited; classify on that, record the code when the
-                # host gives one, and never treat its absence as a nonzero exit. The flush
-                # itself is proven by the session that comes back, not by an exit code.
-                $exitCode = $null
-                try { $exitCode = $owned.ExitCode } catch { $exitCode = $null }
-                if ($null -ne $exitCode) {
-                    $receipt.exit_code = [int]$exitCode
-                    if ([int]$exitCode -ne 0) {
-                        $receipt.outcome = 'graceful_nonzero_exit'
-                        $receipt.reason = 'the server exited nonzero after the stop request'
+            if ($delivery -ceq 'signalled') {
+                $receipt.outcome = 'graceful'
+                $remaining = [Math]::Ceiling(($deadline - [DateTime]::UtcNow).TotalMilliseconds)
+                $owned.WaitForExit([int][Math]::Max(0, $remaining)) | Out-Null
+                if (-not $owned.HasExited) {
+                    $receipt.reason = "the server did not exit within $([int]$plan.timeout_seconds)s of the stop request"
+                }
+                else {
+                    # A process this controller did not start does not always expose an exit
+                    # code; what is observable is that the request was delivered and the process
+                    # exited. An exit code decides only when the host provides one.
+                    $exitCode = $null
+                    try { $exitCode = $owned.ExitCode } catch { $exitCode = $null }
+                    if ($null -ne $exitCode) {
+                        $receipt.exit_code = [int]$exitCode
+                        if ([int]$exitCode -ne 0) {
+                            $receipt.outcome = 'graceful_nonzero_exit'
+                            $receipt.reason = 'the server exited nonzero after the stop request'
+                        }
                     }
                 }
             }
+            else {
+                $receipt.outcome = 'signal_failed'
+                $receipt.reason = if ($delivery -ceq 'absent') { 'the published stop event never appeared' } else { "the stop request could not be delivered: $delivery" }
+            }
         }
-        else {
-            $receipt.outcome = 'signal_failed'
-            $receipt.reason = 'the published stop event could not be opened'
+        elseif ($null -ne $owned) {
+            $receipt.outcome = 'terminated'
+            if ($plan.mode -ceq 'stop-event') {
+                $receipt.reason = 'this launch published no usable stop event'
+            }
         }
-    }
-    elseif ($null -ne $owned) {
-        $receipt.outcome = 'terminated'
-        if ($plan.mode -ceq 'stop-event') {
-            $receipt.reason = 'this launch published no usable stop event'
-        }
-    }
 
-    # The fallback reads state now, not the snapshot this call opened with: a stop that raced a
-    # start would otherwise find no owned process in a stale record, skip both the task stop and
-    # the force-kill, and return while the newly launched server keeps serving. It also gives a
-    # wrapper that is merely unwinding its grace first, so a graceful stop does not kill the
-    # cleanup it just asked for. The receipt is written on every path.
-    try {
+        # The fallback reads state now, not the snapshot this call opened with: a stop that raced
+        # a start would otherwise find no owned process in a stale record, skip both the task stop
+        # and the force-kill, and return while the newly launched server keeps serving. It also
+        # gives a wrapper that is merely unwinding its grace first, so a graceful stop does not
+        # kill the cleanup it just asked for.
         if ($null -ne (Get-OwnedProcess (Get-RuntimeState) $release)) {
             if ($receipt.outcome -ceq 'graceful') { $receipt.outcome = 'graceful_wait_expired' }
             if ($receipt.outcome -ceq 'already_stopped') {
@@ -785,10 +794,17 @@ function Stop-ManagedProcess {
                 (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
                 try { $report = Read-JsonFile $reportPath } catch { $report = $null }
             }
+            # The report must be this launch's: the server echoes the launch identity the
+            # wrapper handed it, so a report a previous launch left behind - or one anything
+            # else wrote - is not evidence about this stop.
+            $expectedLaunch = if ($null -eq $runtime -or $null -eq $runtime.PSObject.Properties['launch_id']) { $null } else { [string]$runtime.launch_id }
             if ($null -eq $report -or
-                [string]$report.artifact_type -cne 'ninfer_serve_shutdown_report') {
+                [string]$report.artifact_type -cne 'ninfer_serve_shutdown_report' -or
+                [string]::IsNullOrWhiteSpace($expectedLaunch) -or
+                $null -eq $report.PSObject.Properties['launch_id'] -or
+                [string]$report.launch_id -cne $expectedLaunch) {
                 $receipt.outcome = 'graceful_unreported'
-                $receipt.reason = 'the server exited on request without recording what its shutdown saved'
+                $receipt.reason = 'the server exited on request without a shutdown report bound to this launch'
             }
             else {
                 $receipt.sessions_saved = [int]$report.saved
@@ -972,8 +988,12 @@ function Invoke-Run {
         $stopPlan = Get-ManagedStopPlan $release
         $stopEventName = $null
         $shutdownReport = $null
+        $launchId = $null
         if ([string]$stopPlan.mode -ceq 'stop-event') {
-            $stopEventName = 'Global\NInfer-Serve-Stop-' + [Guid]::NewGuid().ToString('N')
+            # One identity per launch, carried by the event name and echoed in the report the
+            # server writes, so the report the controller reads is provably this launch's.
+            $launchId = [Guid]::NewGuid().ToString('N')
+            $stopEventName = 'Global\NInfer-Serve-Stop-' + $launchId
             $shutdownReport = Join-Path $logs 'shutdown.json'
             Remove-Item -LiteralPath $shutdownReport -Force -ErrorAction SilentlyContinue
             foreach ($argument in @('--stop-event', $stopEventName,
@@ -1009,6 +1029,7 @@ function Invoke-Run {
                 managed_stop = [string]$stopPlan.mode
                 stop_event = $stopEventName
                 shutdown_report = $shutdownReport
+                launch_id = $launchId
             })
         $process.WaitForExit()
         # Windows hands a parent that redirected the child's streams a handle whose ExitCode
@@ -1017,7 +1038,22 @@ function Invoke-Run {
         $serverExit = $null
         try { $serverExit = $process.ExitCode } catch { $serverExit = $null }
         if ($null -ne $serverExit -and [int]$serverExit -ne 0) {
-            throw "ninfer-serve exited with code $([int]$serverExit)"
+            # The scheduled task retries a failed wrapper. That is right for a server that died
+            # on its own; it is the opposite of right for one the controller asked to stop and
+            # that reported an unclean shutdown on the way out - a retry would relaunch what an
+            # operator just stopped. The report says which; a launch that ended by request exits
+            # clean here and leaves the verdict to the stop receipt.
+            $stoppedByRequest = $false
+            if ($null -ne $shutdownReport -and (Test-Path -LiteralPath $shutdownReport -PathType Leaf)) {
+                try {
+                    $report = Read-JsonFile $shutdownReport
+                    $stoppedByRequest = [string]$report.launch_id -ceq $launchId
+                }
+                catch { $stoppedByRequest = $false }
+            }
+            if (-not $stoppedByRequest) {
+                throw "ninfer-serve exited with code $([int]$serverExit)"
+            }
         }
     }
     finally {
@@ -1067,11 +1103,18 @@ function Uninstall-ManagedRelease {
             }
         }
 
-        # Scoped, not wrapped: the lock file lives in the tree this function goes on to delete,
-        # so its handle must be closed before that delete - the same reason install.lock is
-        # released in the finally below rather than held to the end.
-        Invoke-WithActionLock { Stop-ManagedRelease }
-        Unregister-ScheduledTask -TaskName ([string]$state.task_name) -Confirm:$false -ErrorAction SilentlyContinue
+        # Stop and task removal are one step under the action lock: a Start between them would
+        # launch a server that outlives its release identity. Scoped, not wrapped around the
+        # whole function - the lock file lives in the tree this function goes on to delete, so
+        # its handle must be closed before that delete, the same reason install.lock is released
+        # in the finally below. With the task gone nothing can launch afterwards.
+        Invoke-WithActionLock {
+            Stop-ManagedRelease
+            Unregister-ScheduledTask -TaskName ([string]$state.task_name) -Confirm:$false -ErrorAction SilentlyContinue
+            if ($null -ne (Get-OwnedProcess (Get-RuntimeState) (Get-Release $state ([string]$state.active_release)))) {
+                throw 'a server process survived the uninstall stop'
+            }
+        }
         $receiptJson = ([ordered]@{
                 artifact_type = 'ninfer_windows_release_uninstall_receipt'
                 schema_version = 1
