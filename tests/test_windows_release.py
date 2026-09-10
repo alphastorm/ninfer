@@ -48,6 +48,32 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         self.assertTrue({"--reasoning-effort", "--disk-cache", "--prompt-cache", "--no-ui",
                          "--wddm-evictable-budget"}.isdisjoint(controller_flags))
 
+    def test_flags_newer_than_the_shipped_lineage_are_capability_gated(self) -> None:
+        """The shared controller launches every installed release, including the shipped v0.6.0
+        one after a rollback, and an older ninfer-serve.exe refuses an argument it never learned
+        (`unknown argument`) and does not start. So a flag the runtime gained after that release
+        may reach a server only inside the branch that checks the release's declared capability.
+        Measured twice on the RTX 4090 host - once each for --stop-event and --shutdown-report."""
+        shipped_parser = subprocess.run(
+            ["git", "show", "075d442e:src/serve/serve_options.cpp"],
+            capture_output=True, text=True, check=True, cwd=ROOT,
+        ).stdout
+        shipped_flags = set(re.findall(r'arg == "(--[a-z0-9-]+)"', shipped_parser))
+        parser = (ROOT / "src/serve/serve_options.cpp").read_text(encoding="utf-8")
+        newer_flags = set(re.findall(r'arg == "(--[a-z0-9-]+)"', parser)) - shipped_flags
+        self.assertEqual(newer_flags, {"--stop-event", "--shutdown-report"})
+        controller = (WINDOWS / "Control-Release.ps1").read_text(encoding="utf-8")
+        start = controller.index("$serverArguments =")
+        end = controller.index("$argumentLine =", start)
+        launch = controller[start:end]
+        gate = launch.index("if ([string]$stopPlan.mode -ceq 'stop-event') {")
+        gated = launch[gate:]
+        gated = gated[:gated.index("\n        }\n")]
+        for flag in newer_flags:
+            with self.subTest(flag=flag):
+                self.assertEqual(launch.count(f"'{flag}'"), 1)
+                self.assertIn(f"'{flag}'", gated)
+
     def test_managed_stop_is_a_signal_before_a_termination(self) -> None:
         """A managed stop must reach the server's graceful path (which saves live sessions), and
         only terminate a release that cannot receive it."""

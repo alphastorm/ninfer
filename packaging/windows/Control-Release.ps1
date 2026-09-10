@@ -964,21 +964,23 @@ function Invoke-Run {
             throw "unsupported release speculative backend: $speculativeBackend"
         }
 
-        # One kernel-object name per launch, never reused: the server refuses a name that already
-        # exists, and only a release that declares the channel is asked to honour it.
+        # Both flags belong to the graceful-stop channel and only a release that declares it
+        # knows them: a release installed before the channel existed refuses either as an unknown
+        # argument and never starts. One kernel-object name per launch, never reused - the server
+        # refuses a name that already exists - and one report path, cleared first so a stale
+        # report can never be read as this launch's outcome.
         $stopPlan = Get-ManagedStopPlan $release
         $stopEventName = $null
+        $shutdownReport = $null
         if ([string]$stopPlan.mode -ceq 'stop-event') {
             $stopEventName = 'Global\NInfer-Serve-Stop-' + [Guid]::NewGuid().ToString('N')
-            $serverArguments.Add('--stop-event')
-            $serverArguments.Add($stopEventName)
+            $shutdownReport = Join-Path $logs 'shutdown.json'
+            Remove-Item -LiteralPath $shutdownReport -Force -ErrorAction SilentlyContinue
+            foreach ($argument in @('--stop-event', $stopEventName,
+                                    '--shutdown-report', $shutdownReport)) {
+                $serverArguments.Add($argument)
+            }
         }
-
-        # The report is this launch's own: a stale one must never be read as its outcome.
-        $shutdownReport = Join-Path $logs 'shutdown.json'
-        Remove-Item -LiteralPath $shutdownReport -Force -ErrorAction SilentlyContinue
-        $serverArguments.Add('--shutdown-report')
-        $serverArguments.Add($shutdownReport)
 
         $argumentLine = [string]::Join(' ', @($serverArguments | ForEach-Object {
                     Quote-NativeArgument $_
