@@ -402,29 +402,34 @@ int run_norm_projection_case(const Geometry& geometry, std::int32_t tokens, std:
     return failures;
 }
 
-int verify_workspace_capacity_contract(const Geometry& geometry,
-                                       std::initializer_list<std::int32_t> route_endpoints) {
-    const std::int32_t last = *std::max_element(route_endpoints.begin(), route_endpoints.end());
+// The interval query must equal the largest point query inside it on this device - no route
+// endpoint, and no column count where a cooperative split stops being resident and the plan
+// falls through to a narrower one, may be missed or over-bounded. Sweeping every column count is
+// cheap: resolution is arithmetic over a residency budget queried once per process.
+int verify_workspace_capacity_contract(const Geometry& geometry, std::int32_t last) {
     const std::size_t interval =
         ops::gdn_gating_proj_workspace_capacity_bytes(geometry.heads, geometry.hidden, 1, last);
     std::size_t witness = 0;
-    for (const std::int32_t tokens : route_endpoints) {
+    for (std::int32_t tokens = 1; tokens <= last; ++tokens) {
         witness = std::max(witness, ops::gdn_gating_proj_workspace_capacity_bytes(
                                         geometry.heads, geometry.hidden, tokens, tokens));
     }
     int failures = 0;
     if (interval != witness) {
-        std::cerr << geometry.label << ": GDN control interval missed a route endpoint\n";
+        std::cerr << geometry.label << ": GDN control interval capacity " << interval
+                  << " != point maximum " << witness << " over [1, " << last << "]\n";
         ++failures;
     }
     const std::size_t norm_interval =
         ops::gdn_norm_gating_proj_workspace_capacity_bytes(geometry.heads, geometry.hidden, 1, 64);
-    const std::size_t norm_witness = std::max(
-        ops::gdn_norm_gating_proj_workspace_capacity_bytes(geometry.heads, geometry.hidden, 16, 16),
-        ops::gdn_norm_gating_proj_workspace_capacity_bytes(geometry.heads, geometry.hidden, 64,
-                                                           64));
+    std::size_t norm_witness = 0;
+    for (std::int32_t tokens = 1; tokens <= 64; ++tokens) {
+        norm_witness = std::max(norm_witness, ops::gdn_norm_gating_proj_workspace_capacity_bytes(
+                                                  geometry.heads, geometry.hidden, tokens, tokens));
+    }
     if (norm_interval != norm_witness) {
-        std::cerr << geometry.label << ": GDN norm/control interval missed a route endpoint\n";
+        std::cerr << geometry.label << ": GDN norm/control interval capacity " << norm_interval
+                  << " != point maximum " << norm_witness << " over [1, 64]\n";
         ++failures;
     }
     return failures;
@@ -439,8 +444,8 @@ int main() {
     }
 
     int failures = 0;
-    failures += verify_workspace_capacity_contract(kQwen27, {1, 8, 1024, 2048, 4096, 4097});
-    failures += verify_workspace_capacity_contract(kQwen35, {1, 127, 1024, 2048, 4096, 4097});
+    failures += verify_workspace_capacity_contract(kQwen27, 4097);
+    failures += verify_workspace_capacity_contract(kQwen35, 4097);
 
     // Every registered 27B projection route, including predicated and full token tiles.
     for (const std::int32_t tokens : {1, 8, 9, 1024, 1025, 2049, 4097}) {

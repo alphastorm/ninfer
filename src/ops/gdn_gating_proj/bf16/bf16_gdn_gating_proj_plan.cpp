@@ -135,28 +135,53 @@ std::int32_t schedule_split_k(Bf16GdnGatingScheduleId schedule) {
     throw std::logic_error("BF16 GDN gating: unknown schedule");
 }
 
-bool cooperative_grid_is_resident(Bf16GdnGatingScheduleId schedule, std::int32_t cols,
-                                  std::int32_t tile_cols, std::int32_t row_tiles,
-                                  std::int32_t resident_ctas) noexcept {
-    const std::int64_t column_tiles = (static_cast<std::int64_t>(cols) + tile_cols - 1) / tile_cols;
-    const std::int64_t grid_ctas =
-        column_tiles * row_tiles * static_cast<std::int64_t>(schedule_split_k(schedule));
-    return grid_ctas <= resident_ctas;
+bool schedule_is_cooperative(Bf16GdnGatingScheduleId schedule) noexcept {
+    switch (schedule) {
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit16:
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
+    case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
+        return true;
+    default:
+        return false;
+    }
 }
 
-bool cooperative_27_grid_is_resident(Bf16GdnGatingScheduleId schedule, std::int32_t cols) noexcept {
-    // BN128 tiles with three 16-row tiles per token tile; the resident-CTA budget is the
-    // driver's occupancy for this exact instantiation on the current device (RTX 5090: 340).
-    return cooperative_grid_is_resident(
-        schedule, cols, 128, 3,
-        bf16_gdn_gating_proj_cooperative_resident_ctas(schedule_split_k(schedule), false));
+// The cooperative GEMM's grid shape per exact problem: 27B runs BN128 tiles with three 16-row
+// tiles per token tile, 35B BN64 tiles with two.
+struct CooperativeGeometry {
+    std::int32_t tile_cols;
+    std::int32_t row_tiles;
+    bool geometry_35;
+};
+
+constexpr CooperativeGeometry k27Cooperative{128, 3, false};
+constexpr CooperativeGeometry k35Cooperative{64, 2, true};
+
+const CooperativeGeometry& cooperative_geometry(const Bf16GdnGatingProblem& problem) noexcept {
+    return is_35(problem) ? k35Cooperative : k27Cooperative;
 }
 
-bool cooperative_35_grid_is_resident(Bf16GdnGatingScheduleId schedule, std::int32_t cols) noexcept {
-    // BN64 tiles with two 16-row tiles per token tile (RTX 5090: 340 for split32, 680 below).
-    return cooperative_grid_is_resident(
-        schedule, cols, 64, 2,
-        bf16_gdn_gating_proj_cooperative_resident_ctas(schedule_split_k(schedule), true));
+// The largest column count whose cooperative grid is co-resident for this split on the current
+// device: whole column tiles up to the driver's occupancy for the exact instantiation times the
+// SM count (RTX 5090: 340 CTAs for the 27B splits, 340 for the 35B split32 and 680 below). A
+// split fits exactly the column counts up to this bound, so it is both the legality test and,
+// for capacity sizing, the last column count at which the split is still resolved.
+std::int32_t cooperative_fit_cols(Bf16GdnGatingScheduleId schedule,
+                                  const CooperativeGeometry& geometry) {
+    const std::int32_t split_k = schedule_split_k(schedule);
+    const std::int64_t budget =
+        bf16_gdn_gating_proj_cooperative_resident_ctas(split_k, geometry.geometry_35);
+    const std::int64_t column_tiles =
+        budget / (static_cast<std::int64_t>(geometry.row_tiles) * split_k);
+    return static_cast<std::int32_t>(
+        std::min<std::int64_t>(column_tiles * geometry.tile_cols, kAnyCols));
+}
+
+bool cooperative_grid_is_resident(Bf16GdnGatingScheduleId schedule,
+                                  const Bf16GdnGatingProblem& problem) {
+    return problem.cols <= cooperative_fit_cols(schedule, cooperative_geometry(problem));
 }
 
 bool candidate_is_legal(Bf16GdnGatingScheduleId schedule,
@@ -171,7 +196,7 @@ bool candidate_is_legal(Bf16GdnGatingScheduleId schedule,
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
-            return cooperative_27_grid_is_resident(schedule, problem.cols);
+            return cooperative_grid_is_resident(schedule, problem);
         case Bf16GdnGatingScheduleId::MmaUnsplit:
             return true;
         case Bf16GdnGatingScheduleId::SimtWarpRowC4:
@@ -194,7 +219,7 @@ bool candidate_is_legal(Bf16GdnGatingScheduleId schedule,
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
-        return cooperative_35_grid_is_resident(schedule, problem.cols);
+        return cooperative_grid_is_resident(schedule, problem);
     case Bf16GdnGatingScheduleId::GemvPairedRows:
     case Bf16GdnGatingScheduleId::SmallTSplit10:
         return false;
@@ -295,21 +320,29 @@ void execute_resolved(const Bf16GdnGatingPlan& plan, const Bf16GdnGatingProblem&
 template <std::size_t N>
 std::size_t route_capacity(const std::array<RouteSpec, N>& routes, const Bf16GdnGatingProblem& base,
                            std::int32_t min_cols, std::int32_t max_cols) {
-    // The workspace is split_k * cols * 2 * heads floats, so within one route it grows with the
-    // column endpoint, and a route whose split falls through to a narrower one on this device
-    // needs less than the preferred split would. Sizing at each route's endpoint with the
-    // preferred split therefore bounds every resolution inside the interval.
+    // The workspace is split_k * cols * 2 * heads floats. Inside a route the resolved split is a
+    // step function of the column count on this device - the preferred split until its
+    // cooperative grid stops being resident, then each narrower one in turn - and within a step
+    // the workspace grows with the column count. The interval's maximum therefore sits at a
+    // step's right end: the route endpoint, or the last column count at which a split in the
+    // chain still fits. Resolving at exactly those points sizes what this device executes, so
+    // the query equals the execution high-water instead of bounding it from an architecture
+    // the process is not running on.
+    const CooperativeGeometry& geometry = cooperative_geometry(base);
+    const auto resolved_bytes           = [&](std::int32_t cols) {
+        return bf16_gdn_gating_resolve_plan({base.heads, base.input_rows, cols}).workspace_bytes;
+    };
     std::size_t maximum = 0;
     for (const RouteSpec& route : routes) {
-        if (route.cols.last < min_cols || route.cols.first > max_cols) { continue; }
-        const std::int32_t endpoint = std::min(route.cols.last, max_cols);
-        const std::int32_t split_k  = schedule_split_k(route.schedule);
-        maximum                     = std::max(
-            maximum,
-            split_k > 1 ? checked_partial_bytes(base.heads, split_k, endpoint) : std::size_t{0});
-        maximum = std::max(
-            maximum,
-            bf16_gdn_gating_resolve_plan({base.heads, base.input_rows, endpoint}).workspace_bytes);
+        const std::int32_t first = std::max(route.cols.first, min_cols);
+        const std::int32_t last  = std::min(route.cols.last, max_cols);
+        if (first > last) { continue; }
+        maximum = std::max(maximum, resolved_bytes(last));
+        for (Bf16GdnGatingScheduleId schedule = route.schedule; schedule_is_cooperative(schedule);
+             schedule                         = narrower_split(schedule)) {
+            const std::int32_t fit = cooperative_fit_cols(schedule, geometry);
+            if (fit >= first && fit < last) { maximum = std::max(maximum, resolved_bytes(fit)); }
+        }
     }
     return maximum;
 }
