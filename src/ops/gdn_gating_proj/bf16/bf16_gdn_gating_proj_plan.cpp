@@ -135,54 +135,11 @@ std::int32_t schedule_split_k(Bf16GdnGatingScheduleId schedule) {
     throw std::logic_error("BF16 GDN gating: unknown schedule");
 }
 
-bool schedule_is_cooperative(Bf16GdnGatingScheduleId schedule) noexcept {
-    switch (schedule) {
-    case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
-    case Bf16GdnGatingScheduleId::MmaCooperativeSplit16:
-    case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
-    case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
-    case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
-        return true;
-    default:
-        return false;
-    }
-}
-
-// The cooperative GEMM's grid shape per exact problem: 27B runs BN128 tiles with three 16-row
-// tiles per token tile, 35B BN64 tiles with two.
-struct CooperativeGeometry {
-    std::int32_t tile_cols;
-    std::int32_t row_tiles;
-    bool geometry_35;
-};
-
-constexpr CooperativeGeometry k27Cooperative{128, 3, false};
-constexpr CooperativeGeometry k35Cooperative{64, 2, true};
-
-const CooperativeGeometry& cooperative_geometry(const Bf16GdnGatingProblem& problem) noexcept {
-    return is_35(problem) ? k35Cooperative : k27Cooperative;
-}
-
-// The largest column count whose cooperative grid is co-resident for this split on the current
-// device: whole column tiles up to the driver's occupancy for the exact instantiation times the
-// SM count (RTX 5090: 340 CTAs for the 27B splits, 340 for the 35B split32 and 680 below). A
-// split fits exactly the column counts up to this bound, so it is both the legality test and,
-// for capacity sizing, the last column count at which the split is still resolved.
-std::int32_t cooperative_fit_cols(Bf16GdnGatingScheduleId schedule,
-                                  const CooperativeGeometry& geometry) {
-    const std::int32_t split_k = schedule_split_k(schedule);
-    const std::int64_t budget =
-        bf16_gdn_gating_proj_cooperative_resident_ctas(split_k, geometry.geometry_35);
-    const std::int64_t column_tiles =
-        budget / (static_cast<std::int64_t>(geometry.row_tiles) * split_k);
-    return static_cast<std::int32_t>(
-        std::min<std::int64_t>(column_tiles * geometry.tile_cols, kAnyCols));
-}
-
-bool cooperative_grid_is_resident(Bf16GdnGatingScheduleId schedule,
-                                  const Bf16GdnGatingProblem& problem) {
-    return problem.cols <= cooperative_fit_cols(schedule, cooperative_geometry(problem));
-}
+// Cooperative split-K residency is the launcher's concern: a grid that exceeds the running
+// device's budget is partitioned over token-tile intervals there, and only a single tile that
+// cannot fit falls back to the unsplit GEMM (see bf16_gdn_gating_proj_kernels.h). The plan
+// therefore resolves the same schedule for a problem on every device, which is what makes the
+// workspace query below equal the execution high-water without knowing the device.
 
 bool candidate_is_legal(Bf16GdnGatingScheduleId schedule,
                         const Bf16GdnGatingProblem& problem) noexcept {
@@ -196,7 +153,7 @@ bool candidate_is_legal(Bf16GdnGatingScheduleId schedule,
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
         case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
-            return cooperative_grid_is_resident(schedule, problem);
+            return true;
         case Bf16GdnGatingScheduleId::MmaUnsplit:
             return true;
         case Bf16GdnGatingScheduleId::SimtWarpRowC4:
@@ -219,7 +176,7 @@ bool candidate_is_legal(Bf16GdnGatingScheduleId schedule,
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
-        return cooperative_grid_is_resident(schedule, problem);
+        return true;
     case Bf16GdnGatingScheduleId::GemvPairedRows:
     case Bf16GdnGatingScheduleId::SmallTSplit10:
         return false;
@@ -250,6 +207,21 @@ void execute_resolved(const Bf16GdnGatingPlan& plan, const Bf16GdnGatingProblem&
     DeviceSpan scratch{};
     if (plan.workspace_bytes != 0) { scratch = ws.alloc_bytes(plan.workspace_bytes); }
 
+    const auto launch_unsplit = [&] {
+        if (is_35(problem)) {
+            bf16_gdn_gating_proj_35_mma_unsplit_launch(plan.token_variant, x, a_weight, b_weight,
+                                                       A_log, dt_bias, g, beta, stream);
+        } else {
+            bf16_gdn_gating_proj_mma_unsplit_launch(plan.token_variant, x, a_weight, b_weight,
+                                                    A_log, dt_bias, g, beta, stream);
+        }
+    };
+    // A cooperative launch reports false only when one token tile alone exceeds the device's
+    // co-resident budget; the unsplit GEMM has no such bound.
+    const auto finish_cooperative = [&](bool launched) {
+        if (!launched) { launch_unsplit(); }
+    };
+
     switch (plan.schedule) {
     case Bf16GdnGatingScheduleId::GemvPairedRows:
         bf16_gdn_gating_proj_gemv_launch(x, a_weight, b_weight, A_log, dt_bias, g, beta, stream);
@@ -267,51 +239,50 @@ void execute_resolved(const Bf16GdnGatingPlan& plan, const Bf16GdnGatingProblem&
                                                stream);
         return;
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit32:
-        bf16_gdn_gating_proj_35_mma_split32_launch(plan.token_variant, x, a_weight, b_weight, A_log,
-                                                   dt_bias, scratch.data, g, beta, stream);
+        finish_cooperative(bf16_gdn_gating_proj_35_mma_split32_launch(
+            plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
+            stream));
         return;
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit16:
-        bf16_gdn_gating_proj_35_mma_split16_launch(plan.token_variant, x, a_weight, b_weight, A_log,
-                                                   dt_bias, scratch.data, g, beta, stream);
+        finish_cooperative(bf16_gdn_gating_proj_35_mma_split16_launch(
+            plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
+            stream));
         return;
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit8:
         if (is_35(problem)) {
-            bf16_gdn_gating_proj_35_mma_split8_launch(plan.token_variant, x, a_weight, b_weight,
-                                                      A_log, dt_bias, scratch.data, g, beta,
-                                                      stream);
+            finish_cooperative(bf16_gdn_gating_proj_35_mma_split8_launch(
+                plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
+                stream));
         } else {
-            bf16_gdn_gating_proj_mma_split8_launch(plan.token_variant, x, a_weight, b_weight, A_log,
-                                                   dt_bias, scratch.data, g, beta, stream);
+            finish_cooperative(bf16_gdn_gating_proj_mma_split8_launch(
+                plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
+                stream));
         }
         return;
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit4:
         if (is_35(problem)) {
-            bf16_gdn_gating_proj_35_mma_split4_launch(plan.token_variant, x, a_weight, b_weight,
-                                                      A_log, dt_bias, scratch.data, g, beta,
-                                                      stream);
+            finish_cooperative(bf16_gdn_gating_proj_35_mma_split4_launch(
+                plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
+                stream));
         } else {
-            bf16_gdn_gating_proj_mma_split4_launch(plan.token_variant, x, a_weight, b_weight, A_log,
-                                                   dt_bias, scratch.data, g, beta, stream);
+            finish_cooperative(bf16_gdn_gating_proj_mma_split4_launch(
+                plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
+                stream));
         }
         return;
     case Bf16GdnGatingScheduleId::MmaCooperativeSplit2:
         if (is_35(problem)) {
-            bf16_gdn_gating_proj_35_mma_split2_launch(plan.token_variant, x, a_weight, b_weight,
-                                                      A_log, dt_bias, scratch.data, g, beta,
-                                                      stream);
+            finish_cooperative(bf16_gdn_gating_proj_35_mma_split2_launch(
+                plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
+                stream));
         } else {
-            bf16_gdn_gating_proj_mma_split2_launch(plan.token_variant, x, a_weight, b_weight, A_log,
-                                                   dt_bias, scratch.data, g, beta, stream);
+            finish_cooperative(bf16_gdn_gating_proj_mma_split2_launch(
+                plan.token_variant, x, a_weight, b_weight, A_log, dt_bias, scratch.data, g, beta,
+                stream));
         }
         return;
     case Bf16GdnGatingScheduleId::MmaUnsplit:
-        if (is_35(problem)) {
-            bf16_gdn_gating_proj_35_mma_unsplit_launch(plan.token_variant, x, a_weight, b_weight,
-                                                       A_log, dt_bias, g, beta, stream);
-        } else {
-            bf16_gdn_gating_proj_mma_unsplit_launch(plan.token_variant, x, a_weight, b_weight,
-                                                    A_log, dt_bias, g, beta, stream);
-        }
+        launch_unsplit();
         return;
     }
     throw std::logic_error("BF16 GDN gating: unknown schedule");
@@ -320,29 +291,19 @@ void execute_resolved(const Bf16GdnGatingPlan& plan, const Bf16GdnGatingProblem&
 template <std::size_t N>
 std::size_t route_capacity(const std::array<RouteSpec, N>& routes, const Bf16GdnGatingProblem& base,
                            std::int32_t min_cols, std::int32_t max_cols) {
-    // The workspace is split_k * cols * 2 * heads floats. Inside a route the resolved split is a
-    // step function of the column count on this device - the preferred split until its
-    // cooperative grid stops being resident, then each narrower one in turn - and within a step
-    // the workspace grows with the column count. The interval's maximum therefore sits at a
-    // step's right end: the route endpoint, or the last column count at which a split in the
-    // chain still fits. Resolving at exactly those points sizes what this device executes, so
-    // the query equals the execution high-water instead of bounding it from an architecture
-    // the process is not running on.
-    const CooperativeGeometry& geometry = cooperative_geometry(base);
-    const auto resolved_bytes           = [&](std::int32_t cols) {
-        return bf16_gdn_gating_resolve_plan({base.heads, base.input_rows, cols}).workspace_bytes;
-    };
+    // The workspace is split_k * cols * 2 * heads floats. The split a route resolves does not
+    // depend on the device (the launcher partitions a grid the device cannot keep resident instead
+    // of the plan narrowing the split), so inside a route the workspace grows with the column
+    // count and the interval's maximum is at the route endpoint. Resolving there sizes exactly
+    // what executes, which tests/ops/test_gdn_gating_proj.cpp checks at every column count.
     std::size_t maximum = 0;
     for (const RouteSpec& route : routes) {
         const std::int32_t first = std::max(route.cols.first, min_cols);
         const std::int32_t last  = std::min(route.cols.last, max_cols);
         if (first > last) { continue; }
-        maximum = std::max(maximum, resolved_bytes(last));
-        for (Bf16GdnGatingScheduleId schedule = route.schedule; schedule_is_cooperative(schedule);
-             schedule                         = narrower_split(schedule)) {
-            const std::int32_t fit = cooperative_fit_cols(schedule, geometry);
-            if (fit >= first && fit < last) { maximum = std::max(maximum, resolved_bytes(fit)); }
-        }
+        maximum = std::max(
+            maximum,
+            bf16_gdn_gating_resolve_plan({base.heads, base.input_rows, last}).workspace_bytes);
     }
     return maximum;
 }
@@ -519,9 +480,14 @@ void bf16_gdn_norm_gating_dispatch(const Tensor& x, const Tensor& norm_weight, f
     auto scratch_scope = ws.scope();
     DeviceSpan scratch{};
     if (plan.workspace_bytes != 0) { scratch = ws.alloc_bytes(plan.workspace_bytes); }
-    bf16_gdn_norm_gating_proj_35_mma_split32_launch(plan.control.token_variant, x, norm_weight, eps,
-                                                    h, a_weight, b_weight, A_log, dt_bias,
-                                                    scratch.data, g, beta, stream);
+    if (!bf16_gdn_norm_gating_proj_35_mma_split32_launch(plan.control.token_variant, x, norm_weight,
+                                                         eps, h, a_weight, b_weight, A_log, dt_bias,
+                                                         scratch.data, g, beta, stream)) {
+        // The fused kernel's single cooperative tile exceeds this device's budget: compose.
+        rmsnorm(x, norm_weight, eps, true, h, stream);
+        execute_resolved(plan.control, problem, h, a_weight, b_weight, A_log, dt_bias, ws, g, beta,
+                         stream);
+    }
 }
 
 } // namespace ninfer::ops::detail
