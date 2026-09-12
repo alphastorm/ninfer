@@ -1045,7 +1045,10 @@ private:
     void clear_lane(SequenceState& sequence, RequestControl& request) noexcept;
     void ordered_reset(SequenceState& sequence);
     [[nodiscard]] StateImageSelectors state_selectors(const SequenceState& sequence) const;
-    [[nodiscard]] std::uint32_t state_footprint(const SequenceState& sequence) const noexcept;
+    // The device StateImage slots this sequence alone owns: what its entitlement pays for. A
+    // checkpoint a sibling also holds is not one of them, however it is currently resident.
+    [[nodiscard]] std::uint32_t exclusive_device_state_slots(
+        const SequenceState& sequence) const noexcept;
     [[nodiscard]] std::uint32_t owned_checkpoint_references(const SequenceState& sequence,
                                                             StateImageHandle state) const noexcept;
     [[nodiscard]] bool state_exclusive_to_sequence(const SequenceState& sequence,

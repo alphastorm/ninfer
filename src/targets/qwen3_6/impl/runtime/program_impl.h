@@ -9993,21 +9993,30 @@ StateImageSelectors ProgramImplCore::state_selectors(const SequenceState& sequen
     return state_store->selectors(sequence.state.read, sequence.state.write);
 }
 
-std::uint32_t ProgramImplCore::state_footprint(const SequenceState& sequence) const noexcept {
+// A request's device-state entitlement pays for the slots its own sequence occupies. A long
+// anchor a sibling fork also holds is not one of them: both siblings reference one image, the
+// store counts it once, and whichever sibling runs next would otherwise be charged for the
+// residency the other one caused (HTTP 500 "sequence StateImage entitlement is inconsistent" on
+// the second sibling's continuation). Exclusivity, not residency, is the question here - the
+// materialization guard asks the opposite one and measures residency instead (ninfer#37).
+std::uint32_t ProgramImplCore::exclusive_device_state_slots(
+    const SequenceState& sequence) const noexcept {
     if (!state_store) { return 0; }
     std::array<StateImageHandle, 4> unique{};
     std::uint32_t count = 0;
-    const auto add      = [&](StateImageHandle handle) {
-        if (!state_store->valid(handle)) { return; }
+    const auto device_resident = [&](StateImageHandle handle) {
+        if (!state_store->valid(handle)) { return false; }
         const StateReplicaResidency residency = state_store->residency(handle);
-        if (residency != StateReplicaResidency::DeviceOnly &&
-            residency != StateReplicaResidency::Both) {
-            return;
-        }
-        for (std::uint32_t index = 0; index < count; ++index) {
+        return residency == StateReplicaResidency::DeviceOnly ||
+               residency == StateReplicaResidency::Both;
+    };
+    const auto add = [&](StateImageHandle handle) {
+        if (!device_resident(handle) || !state_exclusive_to_sequence(sequence, handle)) { return; }
+        for (std::uint32_t index = 0; index < count && index < unique.size(); ++index) {
             if (unique[index] == handle) { return; }
         }
-        unique[count++] = handle;
+        if (count < unique.size()) { unique[count] = handle; }
+        ++count;
     };
     add(sequence.state.read);
     add(sequence.state.write);
@@ -10016,10 +10025,7 @@ std::uint32_t ProgramImplCore::state_footprint(const SequenceState& sequence) co
     for (std::size_t anchor_index = 0; anchor_index < sequence.long_anchors.size();
          ++anchor_index) {
         const StateImageHandle handle = sequence.long_anchors[anchor_index].state;
-        if (!state_store->valid(handle)) { continue; }
-        const StateReplicaResidency residency = state_store->residency(handle);
-        if (residency != StateReplicaResidency::DeviceOnly &&
-            residency != StateReplicaResidency::Both) {
+        if (!device_resident(handle) || !state_exclusive_to_sequence(sequence, handle)) {
             continue;
         }
         bool seen = false;
@@ -10071,7 +10077,7 @@ void ProgramImplCore::refresh_state_views(SequenceState& sequence) {
 }
 
 void ProgramImplCore::reserve_state_entitlement(SequenceState& sequence, std::uint32_t slots) {
-    const std::uint32_t footprint = state_footprint(sequence);
+    const std::uint32_t footprint = exclusive_device_state_slots(sequence);
     if (slots == 0 || footprint > slots) {
         throw std::logic_error("sequence StateImage entitlement is inconsistent");
     }
@@ -10082,7 +10088,7 @@ void ProgramImplCore::reserve_state_entitlement(SequenceState& sequence, std::ui
     std::optional<StateImageHandle> reserved = state_store->reserve_destination();
     if (!reserved) { throw std::bad_alloc(); }
     sequence.reserved_state = *reserved;
-    if (state_footprint(sequence) != slots) {
+    if (exclusive_device_state_slots(sequence) != slots) {
         throw std::logic_error("sequence StateImage entitlement did not materialize exactly");
     }
 }
