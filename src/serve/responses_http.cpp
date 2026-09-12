@@ -87,7 +87,7 @@ Json parse_json_body(const httplib::Request& request) {
 }
 
 bool disconnected(const httplib::Request& request) {
-    return request.is_connection_alive && !request.is_connection_alive();
+    return request.is_connection_closed && request.is_connection_closed();
 }
 
 void write_stream_item(httplib::DataSink& sink, StreamingResponse& request,
@@ -107,7 +107,7 @@ void write_stream_items(httplib::DataSink& sink, StreamingResponse& request,
 void set_owned_content(httplib::Response& response, std::string body,
                        std::shared_ptr<RequestLifetime> lifetime) {
     response.set_content(std::move(body), "application/json");
-    response.hold_resource(std::move(lifetime));
+    response.user_data.set("ninfer.request_lifetime", std::move(lifetime));
 }
 
 ResponseContext terminal_context(ResponseContext previous, std::vector<ChatTurn> input_turns,
