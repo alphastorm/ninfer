@@ -422,6 +422,7 @@ bool decode_parameter(std::string_view encoded_value, const Contract::Parameter*
 
 bool find_parameter_open_before(std::string_view text, std::size_t scan, std::size_t limit,
                                 std::size_t& open_end) {
+    text                  = text.substr(0, limit);
     std::size_t candidate = text.find(kParamOpen, scan);
     while (candidate != std::string_view::npos && candidate < limit) {
         const std::size_t name_begin = candidate + kParamOpen.size();
@@ -449,8 +450,10 @@ bool parse_parameter(std::string_view block, std::size_t& pos,
     const std::size_t value_begin = name_end + 1;
     std::size_t depth             = 1;
     std::size_t scan              = value_begin;
+    // Nested openings do not change the next closing delimiter. Keep it until consumed
+    // rather than rescanning the remaining payload once per opening.
+    std::size_t close = block.find(kParamClose, scan);
     for (;;) {
-        const std::size_t close = block.find(kParamClose, scan);
         if (close == std::string_view::npos) { return false; }
         std::size_t nested_open_end = 0;
         if (find_parameter_open_before(block, scan, close, nested_open_end)) {
@@ -463,7 +466,8 @@ bool parse_parameter(std::string_view block, std::size_t& pos,
             pos = close + kParamClose.size();
             return true;
         }
-        scan = close + kParamClose.size();
+        scan  = close + kParamClose.size();
+        close = block.find(kParamClose, scan);
     }
 }
 
