@@ -448,10 +448,12 @@ std::int32_t cooperative_resident_ctas() {
     int sm_count = 0;
     CUDA_CHECK(cudaDeviceGetAttribute(&sm_count, cudaDevAttrMultiProcessorCount, device));
     int resident       = std::numeric_limits<int>::max();
-    const auto measure = [&](auto full_tokens) {
-        constexpr bool FullTokens = decltype(full_tokens)::value;
-        auto* kernel =
-            bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, FullTokens, Warps, false, 0>;
+    const auto measure = [&](auto full_tokens, auto normalize, auto token_capacity) {
+        constexpr bool FullTokens   = decltype(full_tokens)::value;
+        constexpr bool Normalize    = decltype(normalize)::value;
+        constexpr int TokenCapacity = decltype(token_capacity)::value;
+        auto* kernel = bf16_gdn_gating_proj_gemm_mma_kernel<Geometry, SplitK, FullTokens, Warps,
+                                                            Normalize, TokenCapacity>;
         CUDA_CHECK(
             cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, kSmemBytes));
         int blocks_per_sm = 0;
@@ -459,8 +461,22 @@ std::int32_t cooperative_resident_ctas() {
                                                                  kSmemBytes));
         resident = std::min(resident, blocks_per_sm);
     };
-    measure(std::true_type{});
-    measure(std::false_type{});
+    // The budget is the minimum over every specialization this split launches: the plain kernel
+    // in both token variants and, for the 35B split-32 route, the fused norm/control kernel at
+    // each token capacity it instantiates. A fused specialization that admits fewer CTAs per SM
+    // than the plain one would otherwise be launched against a budget it does not fit.
+    measure(std::true_type{}, std::false_type{}, std::integral_constant<int, 0>{});
+    measure(std::false_type{}, std::false_type{}, std::integral_constant<int, 0>{});
+    if constexpr (std::is_same_v<Geometry, Bf16Gdn35Geometry> && SplitK == 32) {
+        measure(std::true_type{}, std::true_type{}, std::integral_constant<int, 6>{});
+        measure(std::true_type{}, std::true_type{}, std::integral_constant<int, 8>{});
+        measure(std::true_type{}, std::true_type{}, std::integral_constant<int, 12>{});
+        measure(std::true_type{}, std::true_type{}, std::integral_constant<int, 16>{});
+        measure(std::false_type{}, std::true_type{}, std::integral_constant<int, 6>{});
+        measure(std::false_type{}, std::true_type{}, std::integral_constant<int, 8>{});
+        measure(std::false_type{}, std::true_type{}, std::integral_constant<int, 12>{});
+        measure(std::false_type{}, std::true_type{}, std::integral_constant<int, 16>{});
+    }
     if (resident == std::numeric_limits<int>::max() || resident <= 0 || sm_count <= 0) { return 0; }
     return static_cast<std::int32_t>(std::min<long long>(
         static_cast<long long>(resident) * sm_count, std::numeric_limits<std::int32_t>::max()));

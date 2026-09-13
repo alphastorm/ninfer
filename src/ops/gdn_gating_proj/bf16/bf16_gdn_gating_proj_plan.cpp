@@ -477,13 +477,20 @@ void bf16_gdn_norm_gating_dispatch(const Tensor& x, const Tensor& norm_weight, f
         return;
     }
 
-    auto scratch_scope = ws.scope();
-    DeviceSpan scratch{};
-    if (plan.workspace_bytes != 0) { scratch = ws.alloc_bytes(plan.workspace_bytes); }
-    if (!bf16_gdn_norm_gating_proj_35_mma_split32_launch(plan.control.token_variant, x, norm_weight,
-                                                         eps, h, a_weight, b_weight, A_log, dt_bias,
-                                                         scratch.data, g, beta, stream)) {
-        // The fused kernel's single cooperative tile exceeds this device's budget: compose.
+    bool launched = false;
+    {
+        auto scratch_scope = ws.scope();
+        DeviceSpan scratch{};
+        if (plan.workspace_bytes != 0) { scratch = ws.alloc_bytes(plan.workspace_bytes); }
+        launched = bf16_gdn_norm_gating_proj_35_mma_split32_launch(
+            plan.control.token_variant, x, norm_weight, eps, h, a_weight, b_weight, A_log, dt_bias,
+            scratch.data, g, beta, stream);
+    }
+    if (!launched) {
+        // The fused kernel's single cooperative tile exceeds this device's budget: compose. The
+        // fused scratch is released first so the control plan's own allocation stays within the
+        // capacity query (control.workspace_bytes <= plan.workspace_bytes), which
+        // tests/ops/test_gdn_gating_proj.cpp holds the execution high-water to.
         rmsnorm(x, norm_weight, eps, true, h, stream);
         execute_resolved(plan.control, problem, h, a_weight, b_weight, A_log, dt_bias, ws, g, beta,
                          stream);
