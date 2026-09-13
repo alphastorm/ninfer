@@ -103,10 +103,12 @@ The request `model` must equal the public model ID: the artifact `identity.model
 the explicit `--model-id` override. Reasoning is returned separately as `reasoning_content`; answer
 text remains in `content`.
 
-Across Chat Completions, Responses, and Anthropic Messages, an explicit top-level tool-parameter
-type controls conversion of Qwen's untyped parameter text. String-admitting values remain strings;
-other explicitly typed values are decoded as JSON without coercion. NInfer does not validate
-generated arguments against the full JSON Schema.
+Across Chat Completions, Responses, and Anthropic Messages, supported top-level tool-parameter
+types control conversion of Qwen's untyped text. String-admitting values remain strings; other
+values must match the declared types. Boolean words are case-insensitive, and numeric arguments
+retain their JSON spelling rather than being rounded by the parser. Unsupported or absent type
+schemas retain legacy JSON-or-string inference. This is decoding, not full JSON Schema validation
+or constrained generation; details and malformed-output behavior are below.
 
 Message roles retain their input order through schema translation. The Qwen family frontend maps
 both `system` and `developer` to system-class ChatML blocks at their original positions; it does not
@@ -1031,16 +1033,34 @@ a following compatible turn can reuse it. Output-limit and context-capacity fini
 `length`/ `max_tokens`; ordinary model or string stops map to `stop`/ `end_turn`.
 
 Function tools are rendered into the model prompt and generated calls are parsed into protocol
-responses. NInfer does not execute tools and does not validate tool arguments against the full
-client JSON Schema through constrained decoding; that remains the client's responsibility. When
-parsing a generated call, NInfer does consult the top-level parameter `"type"` declared in each
-tool's schema to decide whether a parameter value that is valid JSON may be deserialized into the
-corresponding JSON type (number, boolean, array, object, null): only parameters whose declared
-type(s) are all valid non-string JSON Schema types are deserialized. Parameters typed as `"string"`
-(or declared via a type array that includes `"string"`), parameters with an unknown or misspelled
-`"type"`, and parameters absent from the schema preserve the model's raw text so the string
-contract reaches the client intact. Full JSON Schema validation (constraints, required sets,
-formats, nested keywords) is not performed server-side and remains the client's job.
+responses. NInfer does not execute tools. The terminal parser uses supported top-level parameter
+`type` declarations, including type arrays and `anyOf`/`oneOf` type unions:
+
+- If the types admit a string, preserve its tag payload as a string, removing at most one framing
+  newline from either end (LF or CRLF). JSON-looking strings are not reinterpreted.
+- Otherwise require the decoded JSON value to match an admitted type. Boolean words such as
+  `True` and `FALSE` normalize to JSON booleans; numeric or quoted boolean substitutes do not.
+  An integer must be mathematically integral, including decimal/exponent forms such as `7.0`
+  and `100e-2`; a large fractional value cannot pass through floating-point rounding.
+- Numeric and other valid non-string JSON payloads retain their original spelling in the parser's
+  argument string. Chat Completions and Responses preserve that string in terminal and SSE output.
+  This is not a universal wire-precision guarantee: nonstreaming Anthropic Messages reparses the
+  arguments into a JSON object.
+- Missing or unsupported schemas, including partially understood unions, use legacy inference:
+  valid JSON stays JSON; otherwise the format-whitespace-trimmed payload becomes a string.
+  Full validation of required properties, constraints, formats, nested values, and exclusive
+  `oneOf` matching remains the client's responsibility.
+
+Function argument text can contain balanced nested `<parameter=...>...</parameter>` markup and
+literal `</function>` or `</tool_call>` text. Standalone `</parameter>` or unmatched parameter
+openings remain ambiguous and are rejected; this grammar is not a general delimiter-escape format.
+Duplicate parameter names, wrong supported types, malformed structure, or a non-whitespace suffix
+reject the complete tool-call region: no partial calls are returned, and streaming and terminal
+output preserve the original text. Format whitespace is exactly space, tab, CR, and LF.
+
+Custom tools retain their separate raw `input` framing, including standalone closing tags in the
+payload. Active declarations and history-only tools retain name/kind authority, and named tool
+choice retains its existing selection behavior. Call IDs still use the opaque-ID generator.
 Duplicate tool names within a single request are rejected with a 400 on all three
 protocol surfaces (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages),
 keeping the per-tool parameter type map unambiguous.

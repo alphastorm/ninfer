@@ -5,41 +5,69 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
-#include <array>
-#include <cctype>
-#include <cstdio>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <utility>
-#include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace ninfer::serve {
 namespace {
 
-using Json = nlohmann::json;
+using Json         = nlohmann::json;
+using Contract     = ToolArgumentTypeContracts;
+using DecodePolicy = Contract::DecodePolicy;
+using SchemaType   = Contract::SchemaType;
+using TypeSet      = Contract::TypeSet;
 
-std::string trim_ascii(std::string_view text) {
-    std::size_t begin = 0;
-    while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin])) != 0) {
-        ++begin;
-    }
-    std::size_t end = text.size();
-    while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1])) != 0) { --end; }
-    return std::string(text.substr(begin, end - begin));
+constexpr std::string_view kToolOpen      = "<tool_call>";
+constexpr std::string_view kToolClose     = "</tool_call>";
+constexpr std::string_view kFunctionOpen  = "<function=";
+constexpr std::string_view kFunctionClose = "</function>";
+constexpr std::string_view kParamOpen     = "<parameter=";
+constexpr std::string_view kParamClose    = "</parameter>";
+
+struct RawParameter {
+    std::string_view name;
+    std::string_view value;
+};
+
+enum class JsonValueKind : std::uint8_t {
+    Null,
+    Boolean,
+    Integer,
+    Number,
+    String,
+    Object,
+    Array,
+};
+
+constexpr bool is_format_whitespace(char byte) {
+    return byte == ' ' || byte == '\t' || byte == '\r' || byte == '\n';
 }
 
-std::string rtrim_ascii(std::string_view text) {
+constexpr bool is_ascii_digit(char byte) { return byte >= '0' && byte <= '9'; }
+
+constexpr bool is_ascii_alphanumeric(char byte) {
+    return (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z') || is_ascii_digit(byte);
+}
+
+std::string_view trim_format_whitespace(std::string_view text) {
+    std::size_t begin = 0;
+    while (begin < text.size() && is_format_whitespace(text[begin])) { ++begin; }
     std::size_t end = text.size();
-    while (end != 0 && std::isspace(static_cast<unsigned char>(text[end - 1])) != 0) { --end; }
+    while (end > begin && is_format_whitespace(text[end - 1])) { --end; }
+    return text.substr(begin, end - begin);
+}
+
+std::string rtrim_format_whitespace(std::string_view text) {
+    std::size_t end = text.size();
+    while (end != 0 && is_format_whitespace(text[end - 1])) { --end; }
     return std::string(text.substr(0, end));
 }
 
-void skip_ws(std::string_view text, std::size_t& pos) {
-    while (pos < text.size() && std::isspace(static_cast<unsigned char>(text[pos])) != 0) { ++pos; }
+void skip_format_whitespace(std::string_view text, std::size_t& pos) {
+    while (pos < text.size() && is_format_whitespace(text[pos])) { ++pos; }
 }
 
 bool starts_with_at(std::string_view text, std::size_t pos, std::string_view prefix) {
@@ -48,42 +76,80 @@ bool starts_with_at(std::string_view text, std::size_t pos, std::string_view pre
 
 bool valid_function_name(std::string_view name, std::size_t max_name_length) {
     if (name.empty() || name.size() > max_name_length) { return false; }
-    for (const unsigned char c : name) {
-        if (std::isalnum(c) == 0 && c != '_' && c != '-') { return false; }
-    }
-    return true;
+    return std::all_of(name.begin(), name.end(), [](char byte) {
+        return is_ascii_alphanumeric(byte) || byte == '_' || byte == '-';
+    });
 }
 
 std::string new_tool_call_id() { return new_opaque_id("call_"); }
 
-bool is_json_schema_type(std::string_view type) {
-    return type == "string" || type == "integer" || type == "number" || type == "boolean" ||
-           type == "object" || type == "array" || type == "null";
+constexpr std::uint8_t type_bit(SchemaType type) { return static_cast<std::uint8_t>(type); }
+
+constexpr bool admits_type(TypeSet types, SchemaType type) {
+    return (types.bits & type_bit(type)) != 0;
 }
 
-bool explicit_parameter_encoding(const Json& property,
-                                 ToolArgumentTypeContracts::Encoding& encoding) {
-    if (!property.is_object()) { return false; }
-    const auto type = property.find("type");
-    if (type == property.end()) { return false; }
+bool schema_type(std::string_view name, SchemaType& type) {
+    if (name == "null") {
+        type = SchemaType::Null;
+    } else if (name == "boolean") {
+        type = SchemaType::Boolean;
+    } else if (name == "integer") {
+        type = SchemaType::Integer;
+    } else if (name == "number") {
+        type = SchemaType::Number;
+    } else if (name == "string") {
+        type = SchemaType::String;
+    } else if (name == "object") {
+        type = SchemaType::Object;
+    } else if (name == "array") {
+        type = SchemaType::Array;
+    } else {
+        return false;
+    }
+    return true;
+}
 
-    if (type->is_string()) {
-        const std::string& name = type->get_ref<const std::string&>();
-        if (!is_json_schema_type(name)) { return false; }
-        encoding = name == "string" ? ToolArgumentTypeContracts::Encoding::String
-                                    : ToolArgumentTypeContracts::Encoding::Json;
+bool compile_direct_types(const Json& type_definition, TypeSet& types) {
+    types = {};
+    if (type_definition.is_string()) {
+        SchemaType type;
+        if (!schema_type(type_definition.get_ref<const std::string&>(), type)) { return false; }
+        types.bits = type_bit(type);
         return true;
     }
-    if (!type->is_array() || type->empty()) { return false; }
-    bool admits_string = false;
-    for (const Json& member : *type) {
+    if (!type_definition.is_array() || type_definition.empty()) { return false; }
+    for (const Json& member : type_definition) {
         if (!member.is_string()) { return false; }
-        const std::string& name = member.get_ref<const std::string&>();
-        if (!is_json_schema_type(name)) { return false; }
-        admits_string |= name == "string";
+        SchemaType type;
+        if (!schema_type(member.get_ref<const std::string&>(), type)) { return false; }
+        types.bits |= type_bit(type);
     }
-    encoding = admits_string ? ToolArgumentTypeContracts::Encoding::String
-                             : ToolArgumentTypeContracts::Encoding::Json;
+    return types.bits != 0;
+}
+
+bool compile_schema_types(const Json& schema, TypeSet& types) {
+    if (!schema.is_object()) { return false; }
+    const auto direct = schema.find("type");
+    if (direct != schema.end()) { return compile_direct_types(*direct, types); }
+
+    const auto any_of     = schema.find("anyOf");
+    const auto one_of     = schema.find("oneOf");
+    const bool has_any_of = any_of != schema.end();
+    const bool has_one_of = one_of != schema.end();
+    if (has_any_of == has_one_of) { return false; }
+
+    const Json& alternatives = has_any_of ? *any_of : *one_of;
+    if (!alternatives.is_array() || alternatives.empty()) { return false; }
+
+    TypeSet combined;
+    for (const Json& alternative : alternatives) {
+        TypeSet branch;
+        if (!compile_schema_types(alternative, branch)) { return false; }
+        combined.bits |= branch.bits;
+    }
+    if (combined.bits == 0) { return false; }
+    types = combined;
     return true;
 }
 
@@ -97,11 +163,14 @@ ToolArgumentTypeContracts::Tool compile_tool_contract(const ToolDefinition& defi
     const auto properties = schema.find("properties");
     if (properties == schema.end() || !properties->is_object()) { return contract; }
 
+    contract.parameters.reserve(properties->size());
     for (const auto& [name, property] : properties->items()) {
-        ToolArgumentTypeContracts::Encoding encoding;
-        if (explicit_parameter_encoding(property, encoding)) {
-            contract.parameters.push_back({name, encoding});
+        Contract::Parameter parameter;
+        parameter.name = name;
+        if (compile_schema_types(property, parameter.types)) {
+            parameter.policy = DecodePolicy::DeclaredTypes;
         }
+        contract.parameters.push_back(std::move(parameter));
     }
     return contract;
 }
@@ -111,7 +180,8 @@ bool same_contract(const ToolArgumentTypeContracts::Tool& lhs,
     if (lhs.kind != rhs.kind || lhs.parameters.size() != rhs.parameters.size()) { return false; }
     for (std::size_t i = 0; i < lhs.parameters.size(); ++i) {
         if (lhs.parameters[i].name != rhs.parameters[i].name ||
-            lhs.parameters[i].encoding != rhs.parameters[i].encoding) {
+            lhs.parameters[i].policy != rhs.parameters[i].policy ||
+            lhs.parameters[i].types.bits != rhs.parameters[i].types.bits) {
             return false;
         }
     }
@@ -147,9 +217,6 @@ void append_history_tool_contract(ToolArgumentTypeContracts& contracts, const To
     ToolArgumentTypeContracts::Tool contract;
     contract.name = call.name;
     contract.kind = call.kind;
-    if (call.kind == ToolKind::Custom) {
-        contract.parameters.push_back({"input", ToolArgumentTypeContracts::Encoding::String});
-    }
     contracts.tools.push_back(std::move(contract));
 }
 
@@ -188,103 +255,284 @@ std::string_view remove_parameter_framing_newlines(std::string_view text) {
     return text.substr(begin, end - begin);
 }
 
-bool parse_parameter(std::string_view inner, std::size_t& pos, Json& args,
-                     std::string_view tool_name, const ToolArgumentTypeContracts& contracts) {
-    constexpr std::string_view kParamOpen  = "<parameter=";
-    constexpr std::string_view kParamClose = "</parameter>";
-    if (!starts_with_at(inner, pos, kParamOpen)) { return false; }
-    const std::size_t name_begin = pos + kParamOpen.size();
-    const std::size_t name_end   = inner.find('>', name_begin);
-    if (name_end == std::string_view::npos || name_end == name_begin) { return false; }
-    const std::string key       = std::string(inner.substr(name_begin, name_end - name_begin));
-    pos                         = name_end + 1;
-    const std::size_t value_end = inner.find(kParamClose, pos);
-    if (value_end == std::string_view::npos) { return false; }
-    const std::string_view encoded_value = inner.substr(pos, value_end - pos);
-    const ToolArgumentTypeContracts::Parameter* contract =
-        find_parameter_contract(contracts, tool_name, key);
-    if (contract == nullptr) {
-        const std::string legacy_value = trim_ascii(encoded_value);
-        Json parsed                    = Json::parse(legacy_value, nullptr, false);
-        args[key] = parsed.is_discarded() ? Json(legacy_value) : std::move(parsed);
-    } else {
-        const std::string value(remove_parameter_framing_newlines(encoded_value));
-        if (contract->encoding == ToolArgumentTypeContracts::Encoding::String) {
-            // The tag grammar writes strings without JSON quoting. If a union admits string,
-            // retaining the tag payload as a string is the only unambiguous interpretation.
-            args[key] = value;
-        } else {
-            Json parsed = Json::parse(value, nullptr, false);
-            if (parsed.is_discarded()) { return false; }
-            args[key] = std::move(parsed);
+bool ascii_case_equal(std::string_view text, std::string_view lowercase) {
+    if (text.size() != lowercase.size()) { return false; }
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        char byte = text[i];
+        if (byte >= 'A' && byte <= 'Z') { byte = static_cast<char>(byte + ('a' - 'A')); }
+        if (byte != lowercase[i]) { return false; }
+    }
+    return true;
+}
+
+bool json_number_is_integer(std::string_view number) {
+    std::size_t pos = number.starts_with('-') ? 1 : 0;
+    if (pos >= number.size()) { return false; }
+
+    const std::size_t integer_begin = pos;
+    while (pos < number.size() && is_ascii_digit(number[pos])) { ++pos; }
+    const std::size_t integer_end = pos;
+
+    std::size_t fraction_begin = pos;
+    std::size_t fraction_end   = pos;
+    if (pos < number.size() && number[pos] == '.') {
+        fraction_begin = ++pos;
+        while (pos < number.size() && is_ascii_digit(number[pos])) { ++pos; }
+        fraction_end = pos;
+    }
+
+    bool exponent_negative     = false;
+    std::size_t exponent_value = 0;
+    if (pos < number.size() && (number[pos] == 'e' || number[pos] == 'E')) {
+        ++pos;
+        if (pos < number.size() && (number[pos] == '+' || number[pos] == '-')) {
+            exponent_negative = number[pos] == '-';
+            ++pos;
+        }
+        const std::size_t cap = number.size();
+        while (pos < number.size() && is_ascii_digit(number[pos])) {
+            const std::size_t digit = static_cast<std::size_t>(number[pos] - '0');
+            if (exponent_value != cap) {
+                if (exponent_value > cap / 10 || (exponent_value == cap / 10 && digit > cap % 10)) {
+                    exponent_value = cap;
+                } else {
+                    exponent_value = exponent_value * 10 + digit;
+                }
+            }
+            ++pos;
         }
     }
-    pos = value_end + kParamClose.size();
+    if (integer_begin == integer_end || pos != number.size()) { return false; }
+
+    bool coefficient_is_zero   = true;
+    std::size_t trailing_zeros = 0;
+    const auto observe_digit   = [&](char digit) {
+        if (digit == '0') {
+            ++trailing_zeros;
+        } else {
+            coefficient_is_zero = false;
+            trailing_zeros      = 0;
+        }
+    };
+    for (std::size_t i = integer_begin; i < integer_end; ++i) { observe_digit(number[i]); }
+    for (std::size_t i = fraction_begin; i < fraction_end; ++i) { observe_digit(number[i]); }
+    if (coefficient_is_zero) { return true; }
+
+    const std::size_t fraction_digits = fraction_end - fraction_begin;
+    if (!exponent_negative) {
+        if (exponent_value >= fraction_digits) { return true; }
+        return fraction_digits - exponent_value <= trailing_zeros;
+    }
+    if (exponent_value > trailing_zeros) { return false; }
+    return fraction_digits <= trailing_zeros - exponent_value;
+}
+
+bool classify_json_value(std::string_view value, JsonValueKind& kind) {
+    if (value.empty() || !Json::accept(value.begin(), value.end())) { return false; }
+    switch (value.front()) {
+    case 'n':
+        kind = JsonValueKind::Null;
+        return true;
+    case 't':
+    case 'f':
+        kind = JsonValueKind::Boolean;
+        return true;
+    case '"':
+        kind = JsonValueKind::String;
+        return true;
+    case '{':
+        kind = JsonValueKind::Object;
+        return true;
+    case '[':
+        kind = JsonValueKind::Array;
+        return true;
+    default:
+        if (value.front() == '-' || is_ascii_digit(value.front())) {
+            kind = json_number_is_integer(value) ? JsonValueKind::Integer : JsonValueKind::Number;
+            return true;
+        }
+        return false;
+    }
+}
+
+bool admits_value(TypeSet types, JsonValueKind kind) {
+    switch (kind) {
+    case JsonValueKind::Null:
+        return admits_type(types, SchemaType::Null);
+    case JsonValueKind::Boolean:
+        return admits_type(types, SchemaType::Boolean);
+    case JsonValueKind::Integer:
+        return admits_type(types, SchemaType::Integer) || admits_type(types, SchemaType::Number);
+    case JsonValueKind::Number:
+        return admits_type(types, SchemaType::Number);
+    case JsonValueKind::String:
+        return admits_type(types, SchemaType::String);
+    case JsonValueKind::Object:
+        return admits_type(types, SchemaType::Object);
+    case JsonValueKind::Array:
+        return admits_type(types, SchemaType::Array);
+    }
+    return false;
+}
+
+std::string encode_json_string(std::string_view value) { return Json(std::string(value)).dump(); }
+
+bool decode_declared_parameter(std::string_view encoded_value, TypeSet types,
+                               std::string& json_value) {
+    const std::string_view framed = remove_parameter_framing_newlines(encoded_value);
+    if (admits_type(types, SchemaType::String)) {
+        json_value = encode_json_string(framed);
+        return true;
+    }
+
+    const std::string_view value = trim_format_whitespace(framed);
+    JsonValueKind kind;
+    if (classify_json_value(value, kind)) {
+        if (!admits_value(types, kind)) { return false; }
+        json_value = std::string(value);
+        return true;
+    }
+
+    if (!admits_type(types, SchemaType::Boolean)) { return false; }
+    if (ascii_case_equal(value, "true")) {
+        json_value = "true";
+        return true;
+    }
+    if (ascii_case_equal(value, "false")) {
+        json_value = "false";
+        return true;
+    }
+    return false;
+}
+
+bool decode_parameter(std::string_view encoded_value, const Contract::Parameter* parameter,
+                      std::string& json_value) {
+    if (parameter != nullptr && parameter->policy == DecodePolicy::DeclaredTypes) {
+        return decode_declared_parameter(encoded_value, parameter->types, json_value);
+    }
+
+    const std::string_view value = trim_format_whitespace(encoded_value);
+    if (Json::accept(value.begin(), value.end())) {
+        json_value = std::string(value);
+    } else {
+        json_value = encode_json_string(value);
+    }
     return true;
+}
+
+bool find_parameter_open_before(std::string_view text, std::size_t scan, std::size_t limit,
+                                std::size_t& open_end) {
+    std::size_t candidate = text.find(kParamOpen, scan);
+    while (candidate != std::string_view::npos && candidate < limit) {
+        const std::size_t name_begin = candidate + kParamOpen.size();
+        const std::size_t name_end   = text.find('>', name_begin);
+        if (name_end != std::string_view::npos && name_end < limit && name_end != name_begin) {
+            open_end = name_end + 1;
+            return true;
+        }
+        candidate = text.find(kParamOpen, candidate + 1);
+    }
+    return false;
+}
+
+bool parse_parameter(std::string_view block, std::size_t& pos,
+                     std::vector<RawParameter>& parameters) {
+    if (!starts_with_at(block, pos, kParamOpen)) { return false; }
+    const std::size_t name_begin = pos + kParamOpen.size();
+    const std::size_t name_end   = block.find('>', name_begin);
+    if (name_end == std::string_view::npos || name_end == name_begin) { return false; }
+    const std::string_view name = block.substr(name_begin, name_end - name_begin);
+    if (std::any_of(parameters.begin(), parameters.end(),
+                    [&](const RawParameter& parameter) { return parameter.name == name; })) {
+        return false;
+    }
+    const std::size_t value_begin = name_end + 1;
+    std::size_t depth             = 1;
+    std::size_t scan              = value_begin;
+    for (;;) {
+        const std::size_t close = block.find(kParamClose, scan);
+        if (close == std::string_view::npos) { return false; }
+        std::size_t nested_open_end = 0;
+        if (find_parameter_open_before(block, scan, close, nested_open_end)) {
+            ++depth;
+            scan = nested_open_end;
+            continue;
+        }
+        if (--depth == 0) {
+            parameters.push_back({name, block.substr(value_begin, close - value_begin)});
+            pos = close + kParamClose.size();
+            return true;
+        }
+        scan = close + kParamClose.size();
+    }
 }
 
 bool parse_one_tool_call(std::string_view block, std::size_t max_name_length,
                          const ToolArgumentTypeContracts& contracts, ToolCall& out) {
-    constexpr std::string_view kFunctionOpen  = "<function=";
-    constexpr std::string_view kFunctionClose = "</function>";
-    std::size_t pos                           = 0;
-    skip_ws(block, pos);
+    std::size_t pos = 0;
+    skip_format_whitespace(block, pos);
     if (!starts_with_at(block, pos, kFunctionOpen)) { return false; }
     const std::size_t name_begin = pos + kFunctionOpen.size();
     const std::size_t name_end   = block.find('>', name_begin);
-    if (name_end == std::string_view::npos || name_end == name_begin) { return false; }
-    const std::string name = std::string(block.substr(name_begin, name_end - name_begin));
+    if (name_end == std::string_view::npos) { return false; }
+    const std::string_view name = block.substr(name_begin, name_end - name_begin);
     if (!valid_function_name(name, max_name_length)) { return false; }
     pos = name_end + 1;
 
-    const ToolArgumentTypeContracts::Tool* contract = find_tool_contract(contracts, name);
+    const Contract::Tool* contract = find_tool_contract(contracts, name);
     if (contract == nullptr && contracts.names_authoritative) { return false; }
     const bool custom = contract != nullptr && contract->kind == ToolKind::Custom;
-    const std::size_t function_end =
-        custom ? block.rfind(kFunctionClose) : block.find(kFunctionClose, pos);
-    if (function_end == std::string_view::npos) { return false; }
-    const std::string_view params = block.substr(pos, function_end - pos);
-    Json args                     = Json::object();
-    std::size_t param_pos         = 0;
-    std::size_t parameter_count   = 0;
+    std::string arguments;
     if (custom) {
+        // Custom tools carry raw input, not the balanced function-argument grammar.
+        // Preserve the existing outermost framing even when input contains closing tags.
+        const std::size_t function_end = block.rfind(kFunctionClose);
+        if (function_end == std::string_view::npos || function_end < pos) { return false; }
+        const std::string_view params          = block.substr(pos, function_end - pos);
         constexpr std::string_view kCustomOpen = "<parameter=input>";
-        skip_ws(params, param_pos);
+        std::size_t param_pos                  = 0;
+        skip_format_whitespace(params, param_pos);
         if (!starts_with_at(params, param_pos, kCustomOpen)) { return false; }
         const std::size_t value_begin = param_pos + kCustomOpen.size();
-        const std::size_t value_end   = params.rfind("</parameter>");
+        const std::size_t value_end   = params.rfind(kParamClose);
         if (value_end == std::string_view::npos || value_end < value_begin) { return false; }
-        param_pos = value_end + std::string_view("</parameter>").size();
-        skip_ws(params, param_pos);
+        param_pos = value_end + kParamClose.size();
+        skip_format_whitespace(params, param_pos);
         if (param_pos != params.size()) { return false; }
-        args["input"] = std::string(
-            remove_parameter_framing_newlines(params.substr(value_begin, value_end - value_begin)));
-        parameter_count = 1;
+        arguments =
+            remove_parameter_framing_newlines(params.substr(value_begin, value_end - value_begin));
+        pos = function_end + kFunctionClose.size();
     } else {
+        std::vector<RawParameter> parameters;
         for (;;) {
-            skip_ws(params, param_pos);
-            if (param_pos >= params.size()) { break; }
-            if (!parse_parameter(params, param_pos, args, name, contracts)) { return false; }
-            ++parameter_count;
+            skip_format_whitespace(block, pos);
+            if (starts_with_at(block, pos, kFunctionClose)) {
+                pos += kFunctionClose.size();
+                break;
+            }
+            if (!parse_parameter(block, pos, parameters)) { return false; }
         }
+        arguments = "{";
+        for (const RawParameter& parameter : parameters) {
+            std::string value;
+            if (!decode_parameter(parameter.value,
+                                  find_parameter_contract(contracts, name, parameter.name),
+                                  value)) {
+                return false;
+            }
+            if (arguments.size() != 1) { arguments.push_back(','); }
+            arguments += encode_json_string(parameter.name);
+            arguments.push_back(':');
+            arguments += value;
+        }
+        arguments.push_back('}');
     }
-
-    pos = function_end + kFunctionClose.size();
-    skip_ws(block, pos);
+    skip_format_whitespace(block, pos);
     if (pos != block.size()) { return false; }
-
-    out.id   = new_tool_call_id();
-    out.name = name;
-    if (custom) {
-        if (parameter_count != 1 || args.size() != 1 || !args.contains("input") ||
-            !args.at("input").is_string()) {
-            return false;
-        }
-        out.arguments_json = args.at("input").get<std::string>();
-        out.kind           = ToolKind::Custom;
-    } else {
-        out.arguments_json = args.dump();
-    }
+    out.id             = new_tool_call_id();
+    out.name           = name;
+    out.arguments_json = std::move(arguments);
+    out.kind           = custom ? ToolKind::Custom : ToolKind::Function;
     return true;
 }
 
@@ -319,18 +567,15 @@ ToolArgumentTypeContracts build_tool_argument_type_contracts(const GenerationReq
 ParsedToolCallOutput parse_qwen_tool_call_output(const std::string& text,
                                                  std::size_t max_tool_name_length,
                                                  const ToolArgumentTypeContracts& contracts) {
-    constexpr std::string_view kToolOpen  = "<tool_call>";
-    constexpr std::string_view kToolClose = "</tool_call>";
-
     const std::size_t first = text.find(kToolOpen);
     if (first == std::string::npos) { return fallback(text); }
 
     ParsedToolCallOutput out;
-    out.content = rtrim_ascii(std::string_view(text).substr(0, first));
+    out.content = rtrim_format_whitespace(std::string_view(text).substr(0, first));
 
     std::size_t pos = first;
     while (pos < text.size()) {
-        skip_ws(text, pos);
+        skip_format_whitespace(text, pos);
         if (pos >= text.size()) { break; }
         if (!starts_with_at(text, pos, kToolOpen)) { return fallback(text); }
         const std::size_t inner_begin = pos + kToolOpen.size();
@@ -340,7 +585,7 @@ ParsedToolCallOutput parse_qwen_tool_call_output(const std::string& text,
         while (close != std::string::npos) {
             ToolCall candidate;
             std::size_t after = close + kToolClose.size();
-            skip_ws(text, after);
+            skip_format_whitespace(text, after);
             const bool valid_boundary =
                 after == text.size() || starts_with_at(text, after, kToolOpen);
             if (valid_boundary &&
@@ -370,7 +615,6 @@ std::string ToolCallStreamFilter::feed(std::string_view text) {
         return {};
     }
 
-    constexpr std::string_view kToolOpen = "<tool_call>";
     std::string visible;
     for (std::size_t index = 0; index < text.size(); ++index) {
         const char byte = text[index];
@@ -396,7 +640,7 @@ std::string ToolCallStreamFilter::feed(std::string_view text) {
 
         if (byte == kToolOpen.front()) {
             marker_prefix_bytes_ = 1;
-        } else if (std::isspace(static_cast<unsigned char>(byte)) != 0) {
+        } else if (is_format_whitespace(byte)) {
             trailing_whitespace_.push_back(byte);
         } else {
             visible.append(trailing_whitespace_);
@@ -417,8 +661,7 @@ std::string ToolCallStreamFilter::finish(bool is_tool_call_response) {
         marker_prefix_bytes_ = 0;
         return {};
     }
-    constexpr std::string_view kToolOpen = "<tool_call>";
-    std::string tail                     = std::move(trailing_whitespace_);
+    std::string tail = std::move(trailing_whitespace_);
     tail.append(kToolOpen.substr(0, marker_prefix_bytes_));
     marker_prefix_bytes_ = 0;
     tail += tool_region_;

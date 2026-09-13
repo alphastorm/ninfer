@@ -218,45 +218,110 @@ int test_declared_non_string_values_are_json_decoded() {
     return failures;
 }
 
-int test_declared_type_mismatches_are_forwarded_without_coercion() {
-    const auto contracts =
-        contracts_for("configure", Json{{"object_as_integer", Json{{"type", "integer"}}},
-                                        {"one_as_boolean", Json{{"type", "boolean"}}},
-                                        {"string_as_boolean", Json{{"type", "boolean"}}},
-                                        {"python_boolean", Json{{"type", "boolean"}}},
-                                        {"null_as_boolean", Json{{"type", "boolean"}}}});
+std::string parameter_call(std::string_view value) {
+    return "prefix  \n<tool_call>\n<function=configure>\n<parameter=value>\n" + std::string(value) +
+           "\n</parameter>\n</function>\n</tool_call>";
+}
 
-    const auto parsed = ninfer::serve::parse_qwen_tool_call_output(
-        "<tool_call>\n"
-        "<function=configure>\n"
-        "<parameter=object_as_integer>\n{}\n</parameter>\n"
-        "<parameter=one_as_boolean>\n1\n</parameter>\n"
-        "<parameter=string_as_boolean>\n\"true\"\n</parameter>\n"
-        "<parameter=null_as_boolean>\nnull\n</parameter>\n"
-        "</function>\n"
-        "</tool_call>",
-        64, contracts);
+int check_parse_and_stream(const std::string& text,
+                           const ninfer::serve::ToolArgumentTypeContracts& contracts,
+                           const std::string* expected_arguments,
+                           std::string_view expected_content = "prefix") {
+    const auto parsed = ninfer::serve::parse_qwen_tool_call_output(text, 64, contracts);
+    int failures      = 0;
+    if (expected_arguments != nullptr) {
+        failures += check(parsed.is_tool_call_response && parsed.tool_calls.size() == 1 &&
+                              parsed.tool_calls.front().arguments_json == *expected_arguments &&
+                              parsed.content == expected_content,
+                          "argument contract mismatch: " + text);
+    } else {
+        failures += check(!parsed.is_tool_call_response && parsed.tool_calls.empty() &&
+                              parsed.content == text,
+                          "invalid region did not fall back atomically: " + text);
+    }
+    // Every two-chunk boundary includes splits inside delimiters, CRLF, and UTF-8.
+    for (std::size_t split = 0; split <= text.size(); ++split) {
+        ninfer::serve::ToolCallStreamFilter filter;
+        std::string visible = filter.feed(std::string_view(text).substr(0, split));
+        visible += filter.feed(std::string_view(text).substr(split));
+        visible += filter.finish(parsed.is_tool_call_response);
+        failures += check(visible == parsed.content,
+                          "stream/terminal text differs at split " + std::to_string(split));
+    }
+    return failures;
+}
 
-    int failures = 0;
-    failures += check(parsed.is_tool_call_response && parsed.tool_calls.size() == 1,
-                      "valid JSON was rejected because it did not match the declared type");
-    const Json args = Json::parse(parsed.tool_calls.at(0).arguments_json);
-    failures += check(args.at("object_as_integer").is_object(),
-                      "object-shaped JSON was coerced to the declared integer type");
-    failures += check(args.at("one_as_boolean").is_number_integer(),
-                      "numeric JSON was coerced to the declared boolean type");
-    failures += check(args.at("string_as_boolean").is_string(),
-                      "string JSON was coerced to the declared boolean type");
-    failures += check(args.at("null_as_boolean").is_null(),
-                      "null JSON was coerced to the declared boolean type");
+int test_declared_types_normalize_or_fall_back() {
+    int failures       = 0;
+    const auto boolean = contracts_for("configure", Json{{"value", Json{{"type", "boolean"}}}});
+    const std::string truth = R"({"value":true})";
+    failures += check_parse_and_stream(parameter_call("TrUe"), boolean, &truth);
+    for (const std::string_view value : {"1", "\"true\"", "null", "yes"}) {
+        failures += check_parse_and_stream(parameter_call(value), boolean, nullptr);
+    }
+    const auto integer = contracts_for("configure", Json{{"value", Json{{"type", "integer"}}}});
+    for (const std::string_view value : {"{}", "7.5", "1e-1", "9007199254740992.5"}) {
+        failures += check_parse_and_stream(parameter_call(value), integer, nullptr);
+    }
+    for (const std::string_view value : {"7.0", "100e-2", "-0.0", "9007199254740992.0"}) {
+        const std::string expected = "{\"value\":" + std::string(value) + "}";
+        failures += check_parse_and_stream(parameter_call(value), integer, &expected);
+    }
+    const auto number = contracts_for("configure", Json{{"value", Json{{"type", "number"}}}});
+    const std::string precise = R"({"value":9007199254740992.5})";
+    failures += check_parse_and_stream(parameter_call("9007199254740992.5"), number, &precise);
+    return failures;
+}
 
-    const std::string invalid =
-        "<tool_call>\n<function=configure>\n<parameter=python_boolean>\nTrue\n</parameter>\n"
-        "</function>\n</tool_call>";
-    const auto rejected = ninfer::serve::parse_qwen_tool_call_output(invalid, 64, contracts);
-    failures += check(!rejected.is_tool_call_response && rejected.content == invalid &&
-                          rejected.tool_calls.empty(),
-                      "non-JSON value for a declared non-string parameter did not fall back");
+int test_composed_type_contracts() {
+    int failures             = 0;
+    const auto boolean_union = contracts_for(
+        "configure",
+        Json{{"value",
+              Json{{"anyOf", Json::array({Json{{"oneOf", Json::array({Json{{"type", "boolean"}},
+                                                                      Json{{"type", "null"}}})}},
+                                          Json{{"type", "integer"}}})}}}});
+    const std::string falsity = R"({"value":false})";
+    failures += check_parse_and_stream(parameter_call("False"), boolean_union, &falsity);
+    failures += check_parse_and_stream(parameter_call("7.5"), boolean_union, nullptr);
+    const auto string_union = contracts_for(
+        "configure",
+        Json{{"value",
+              Json{{"oneOf", Json::array({Json{{"type", "string"}}, Json{{"type", "number"}}})}}}});
+    const std::string string_value = R"({"value":"7"})";
+    failures += check_parse_and_stream(parameter_call("7"), string_union, &string_value);
+    const auto unsupported = contracts_for(
+        "configure",
+        Json{{"value", Json{{"anyOf", Json::array({Json{{"type", "integer"}},
+                                                   Json{{"enum", Json::array({1, 2})}}})}}}});
+    const std::string legacy = R"({"value":"False"})";
+    failures += check_parse_and_stream(parameter_call("False"), unsupported, &legacy);
+    return failures;
+}
+
+int test_balanced_markup_and_atomic_fallback() {
+    const auto strings = contracts_for("configure", Json{{"value", Json{{"type", "string"}}}});
+    const std::string markup   = "é \r\n<parameter=inner><parameter=deep>x</parameter></parameter> "
+                                 "</function> </tool_call>\n";
+    const std::string expected = Json{{"value", markup}}.dump();
+    int failures               = check_parse_and_stream(parameter_call(markup), strings, &expected);
+    for (const std::string_view value :
+         {"echo '<parameter=unterminated>'", "echo '</parameter>'"}) {
+        failures += check_parse_and_stream(parameter_call(value), strings, nullptr);
+    }
+    const std::string duplicate =
+        "<tool_call><function=configure><parameter=value>first</parameter>"
+        "<parameter=value>second</parameter></function></tool_call>";
+    failures += check_parse_and_stream(duplicate, strings, nullptr);
+    const auto boolean = contracts_for("configure", Json{{"value", Json{{"type", "boolean"}}}});
+    const std::string valid_then_invalid =
+        parameter_call("true") + "\n" + parameter_call("yes").substr(9);
+    failures += check_parse_and_stream(valid_then_invalid, boolean, nullptr);
+    const std::string non_format_suffix = parameter_call("text") + '\v';
+    failures += check_parse_and_stream(non_format_suffix, strings, nullptr);
+    const std::string prefix   = "prefix\v\f" + parameter_call("text").substr(9);
+    const std::string ordinary = R"({"value":"text"})";
+    failures += check_parse_and_stream(prefix, strings, &ordinary, "prefix\v\f");
     return failures;
 }
 
@@ -407,7 +472,9 @@ int main() {
     failures += test_configured_name_limit();
     failures += test_declared_strings_are_not_json_sniffed();
     failures += test_declared_non_string_values_are_json_decoded();
-    failures += test_declared_type_mismatches_are_forwarded_without_coercion();
+    failures += test_declared_types_normalize_or_fall_back();
+    failures += test_composed_type_contracts();
+    failures += test_balanced_markup_and_atomic_fallback();
     failures += test_unknown_schema_keeps_legacy_inference();
     failures += test_custom_tool_raw_input();
     failures += test_custom_tool_kind_survives_history_only_generation();

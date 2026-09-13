@@ -17,18 +17,32 @@ struct ParsedToolCallOutput {
     std::vector<ToolCall> tool_calls;
 };
 
-// The Qwen tool syntax carries each top-level argument as untyped text between
-// <parameter> tags. This request-owned contract retains only whether an explicit
-// JSON Schema type admits a string or requires JSON decoding.
+// Qwen arguments are untyped tag payloads. Retain supported top-level JSON Schema
+// types for decoding; this is not recursive validation or constrained generation.
 struct ToolArgumentTypeContracts {
-    enum class Encoding : std::uint8_t {
-        Json,
-        String,
+    enum class SchemaType : std::uint8_t {
+        Null    = 1U << 0U,
+        Boolean = 1U << 1U,
+        Integer = 1U << 2U,
+        Number  = 1U << 3U,
+        String  = 1U << 4U,
+        Object  = 1U << 5U,
+        Array   = 1U << 6U,
+    };
+
+    struct TypeSet {
+        std::uint8_t bits = 0;
+    };
+
+    enum class DecodePolicy : std::uint8_t {
+        Legacy,
+        DeclaredTypes,
     };
 
     struct Parameter {
         std::string name;
-        Encoding encoding = Encoding::Json;
+        DecodePolicy policy = DecodePolicy::Legacy;
+        TypeSet types;
     };
 
     struct Tool {
