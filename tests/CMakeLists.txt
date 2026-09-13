@@ -220,6 +220,8 @@ ninfer_add_test(ninfer_anthropic_schema_test
 ninfer_add_test(ninfer_tool_call_parser_test
   SOURCES test_tool_call_parser.cpp
   LIBRARIES ninfer_serve)
+# The large malformed-region case defends bounded completion, not a throughput number.
+set_tests_properties(ninfer_tool_call_parser_test PROPERTIES TIMEOUT 30)
 ninfer_add_test(ninfer_serve_options_test
   SOURCES test_serve_options.cpp
   LIBRARIES ninfer_serve)

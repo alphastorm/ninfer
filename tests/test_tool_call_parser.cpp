@@ -239,6 +239,11 @@ int check_parse_and_stream(const std::string& text,
                               parsed.content == text,
                           "invalid region did not fall back atomically: " + text);
     }
+    ninfer::serve::ToolCallStreamFilter bytewise;
+    std::string bytewise_visible;
+    for (const char& byte : text) { bytewise_visible += bytewise.feed(std::string_view(&byte, 1)); }
+    bytewise_visible += bytewise.finish(parsed.is_tool_call_response);
+    failures += check(bytewise_visible == parsed.content, "bytewise stream/terminal text differs");
     // Every two-chunk boundary includes splits inside delimiters, CRLF, and UTF-8.
     for (std::size_t split = 0; split <= text.size(); ++split) {
         ninfer::serve::ToolCallStreamFilter filter;
@@ -322,6 +327,38 @@ int test_balanced_markup_and_atomic_fallback() {
     const std::string prefix   = "prefix\v\f" + parameter_call("text").substr(9);
     const std::string ordinary = R"({"value":"text"})";
     failures += check_parse_and_stream(prefix, strings, &ordinary, "prefix\v\f");
+    return failures;
+}
+
+int test_deep_supported_union_without_recursive_compilation() {
+    ninfer::serve::GenerationRequest request;
+    ninfer::serve::ToolDefinition tool;
+    tool.name            = "configure";
+    tool.parameters_json = R"({"type":"object","properties":{"value":)";
+    for (int i = 0; i < 8192; ++i) { tool.parameters_json += R"({"anyOf":[)"; }
+    tool.parameters_json += R"({"type":"boolean"})";
+    for (int i = 0; i < 8192; ++i) { tool.parameters_json += "]}"; }
+    tool.parameters_json += "}}";
+    request.tools.push_back(std::move(tool));
+    const auto contracts       = ninfer::serve::build_tool_argument_type_contracts(request);
+    const std::string expected = R"({"value":false})";
+    return check_parse_and_stream(parameter_call("False"), contracts, &expected);
+}
+
+int test_large_malformed_region_completes_without_reparse() {
+    std::string text = "<tool_call><function=configure><parameter=value>";
+    for (int i = 0; i < 22000; ++i) { text += "<parameter="; }
+    text += "</parameter>";
+    for (int i = 0; i < 1000; ++i) { text += "</tool_call><tool_call>"; }
+    const auto parsed = ninfer::serve::parse_qwen_tool_call_output(text, 64, kNoTypeContracts);
+    int failures =
+        check(!parsed.is_tool_call_response && parsed.tool_calls.empty() && parsed.content == text,
+              "large malformed region must finish with exact atomic fallback");
+    ninfer::serve::ToolCallStreamFilter filter;
+    std::string visible;
+    for (const char& byte : text) { visible += filter.feed(std::string_view(&byte, 1)); }
+    visible += filter.finish(parsed.is_tool_call_response);
+    failures += check(visible == text, "large malformed stream must preserve every byte");
     return failures;
 }
 
@@ -474,7 +511,9 @@ int main() {
     failures += test_declared_non_string_values_are_json_decoded();
     failures += test_declared_types_normalize_or_fall_back();
     failures += test_composed_type_contracts();
+    failures += test_deep_supported_union_without_recursive_compilation();
     failures += test_balanced_markup_and_atomic_fallback();
+    failures += test_large_malformed_region_completes_without_reparse();
     failures += test_unknown_schema_keeps_legacy_inference();
     failures += test_custom_tool_raw_input();
     failures += test_custom_tool_kind_survives_history_only_generation();

@@ -9,6 +9,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <unordered_set>
 #include <vector>
 
 namespace ninfer::serve {
@@ -129,28 +130,34 @@ bool compile_direct_types(const Json& type_definition, TypeSet& types) {
 }
 
 bool compile_schema_types(const Json& schema, TypeSet& types) {
-    if (!schema.is_object()) { return false; }
-    const auto direct = schema.find("type");
-    if (direct != schema.end()) { return compile_direct_types(*direct, types); }
-
-    const auto any_of     = schema.find("anyOf");
-    const auto one_of     = schema.find("oneOf");
-    const bool has_any_of = any_of != schema.end();
-    const bool has_one_of = one_of != schema.end();
-    if (has_any_of == has_one_of) { return false; }
-
-    const Json& alternatives = has_any_of ? *any_of : *one_of;
-    if (!alternatives.is_array() || alternatives.empty()) { return false; }
-
-    TypeSet combined;
-    for (const Json& alternative : alternatives) {
-        TypeSet branch;
-        if (!compile_schema_types(alternative, branch)) { return false; }
-        combined.bits |= branch.bits;
+    types               = {};
+    const Json* current = &schema;
+    std::vector<const Json*> pending;
+    for (;;) {
+        if (!current->is_object()) { return false; }
+        const auto direct = current->find("type");
+        if (direct != current->end()) {
+            TypeSet branch;
+            if (!compile_direct_types(*direct, branch)) { return false; }
+            types.bits |= branch.bits;
+        } else {
+            const auto any_of     = current->find("anyOf");
+            const auto one_of     = current->find("oneOf");
+            const bool has_any_of = any_of != current->end();
+            const bool has_one_of = one_of != current->end();
+            if (has_any_of == has_one_of) { return false; }
+            const Json& alternatives = has_any_of ? *any_of : *one_of;
+            if (!alternatives.is_array() || alternatives.empty()) { return false; }
+            for (std::size_t i = 1; i < alternatives.size(); ++i) {
+                pending.push_back(&alternatives[i]);
+            }
+            current = &alternatives.front();
+            continue;
+        }
+        if (pending.empty()) { return types.bits != 0; }
+        current = pending.back();
+        pending.pop_back();
     }
-    if (combined.bits == 0) { return false; }
-    types = combined;
-    return true;
 }
 
 ToolArgumentTypeContracts::Tool compile_tool_contract(const ToolDefinition& definition) {
@@ -424,35 +431,29 @@ bool find_parameter_open_before(std::string_view text, std::size_t scan, std::si
                                 std::size_t& open_end) {
     text                  = text.substr(0, limit);
     std::size_t candidate = text.find(kParamOpen, scan);
-    while (candidate != std::string_view::npos && candidate < limit) {
+    while (candidate != std::string_view::npos) {
         const std::size_t name_begin = candidate + kParamOpen.size();
         const std::size_t name_end   = text.find('>', name_begin);
-        if (name_end != std::string_view::npos && name_end < limit && name_end != name_begin) {
+        // No later candidate can end before this close either. Do not rescan the suffix.
+        if (name_end == std::string_view::npos) { return false; }
+        if (name_end != name_begin) {
             open_end = name_end + 1;
             return true;
         }
-        candidate = text.find(kParamOpen, candidate + 1);
+        candidate = text.find(kParamOpen, name_end + 1);
     }
     return false;
 }
 
-bool parse_parameter(std::string_view block, std::size_t& pos,
-                     std::vector<RawParameter>& parameters) {
+bool parse_parameter(std::string_view block, std::size_t& pos, RawParameter& parameter) {
     if (!starts_with_at(block, pos, kParamOpen)) { return false; }
     const std::size_t name_begin = pos + kParamOpen.size();
     const std::size_t name_end   = block.find('>', name_begin);
     if (name_end == std::string_view::npos || name_end == name_begin) { return false; }
-    const std::string_view name = block.substr(name_begin, name_end - name_begin);
-    if (std::any_of(parameters.begin(), parameters.end(),
-                    [&](const RawParameter& parameter) { return parameter.name == name; })) {
-        return false;
-    }
     const std::size_t value_begin = name_end + 1;
     std::size_t depth             = 1;
     std::size_t scan              = value_begin;
-    // Nested openings do not change the next closing delimiter. Keep it until consumed
-    // rather than rescanning the remaining payload once per opening.
-    std::size_t close = block.find(kParamClose, scan);
+    std::size_t close             = block.find(kParamClose, scan);
     for (;;) {
         if (close == std::string_view::npos) { return false; }
         std::size_t nested_open_end = 0;
@@ -462,8 +463,9 @@ bool parse_parameter(std::string_view block, std::size_t& pos,
             continue;
         }
         if (--depth == 0) {
-            parameters.push_back({name, block.substr(value_begin, close - value_begin)});
-            pos = close + kParamClose.size();
+            parameter = {block.substr(name_begin, name_end - name_begin),
+                         block.substr(value_begin, close - value_begin)};
+            pos       = close + kParamClose.size();
             return true;
         }
         scan  = close + kParamClose.size();
@@ -471,8 +473,42 @@ bool parse_parameter(std::string_view block, std::size_t& pos,
     }
 }
 
+bool consume_suffix(std::string_view block, std::size_t& end, std::string_view token) {
+    while (end != 0 && is_format_whitespace(block[end - 1])) { --end; }
+    if (end < token.size() || block.substr(end - token.size(), token.size()) != token) {
+        return false;
+    }
+    end -= token.size();
+    return true;
+}
+
+bool parse_custom_input(std::string_view block, std::size_t pos, std::string& arguments,
+                        std::size_t& consumed) {
+    constexpr std::string_view kCustomOpen = "<parameter=input>";
+    skip_format_whitespace(block, pos);
+    if (!starts_with_at(block, pos, kCustomOpen)) { return false; }
+    const std::size_t value_begin = pos + kCustomOpen.size();
+    for (std::size_t close = block.find(kToolClose, value_begin); close != std::string_view::npos;
+         close             = block.find(kToolClose, close + kToolClose.size())) {
+        std::size_t after = close + kToolClose.size();
+        skip_format_whitespace(block, after);
+        if (after != block.size() && !starts_with_at(block, after, kToolOpen)) { continue; }
+        std::size_t end = close;
+        // Preserve custom outermost raw framing, including standalone tags in its input.
+        if (!consume_suffix(block, end, kFunctionClose) ||
+            !consume_suffix(block, end, kParamClose) || end < value_begin) {
+            continue;
+        }
+        arguments = remove_parameter_framing_newlines(block.substr(value_begin, end - value_begin));
+        consumed  = after;
+        return true;
+    }
+    return false;
+}
+
 bool parse_one_tool_call(std::string_view block, std::size_t max_name_length,
-                         const ToolArgumentTypeContracts& contracts, ToolCall& out) {
+                         const ToolArgumentTypeContracts& contracts, ToolCall& out,
+                         std::size_t& consumed) {
     std::size_t pos = 0;
     skip_format_whitespace(block, pos);
     if (!starts_with_at(block, pos, kFunctionOpen)) { return false; }
@@ -481,43 +517,26 @@ bool parse_one_tool_call(std::string_view block, std::size_t max_name_length,
     if (name_end == std::string_view::npos) { return false; }
     const std::string_view name = block.substr(name_begin, name_end - name_begin);
     if (!valid_function_name(name, max_name_length)) { return false; }
-    pos = name_end + 1;
-
+    pos                            = name_end + 1;
     const Contract::Tool* contract = find_tool_contract(contracts, name);
     if (contract == nullptr && contracts.names_authoritative) { return false; }
     const bool custom = contract != nullptr && contract->kind == ToolKind::Custom;
     std::string arguments;
     if (custom) {
-        // Custom tools carry raw input, not the balanced function-argument grammar.
-        // Preserve the existing outermost framing even when input contains closing tags.
-        const std::size_t function_end = block.rfind(kFunctionClose);
-        if (function_end == std::string_view::npos || function_end < pos) { return false; }
-        const std::string_view params          = block.substr(pos, function_end - pos);
-        constexpr std::string_view kCustomOpen = "<parameter=input>";
-        std::size_t param_pos                  = 0;
-        skip_format_whitespace(params, param_pos);
-        if (!starts_with_at(params, param_pos, kCustomOpen)) { return false; }
-        const std::size_t value_begin = param_pos + kCustomOpen.size();
-        const std::size_t value_end   = params.rfind(kParamClose);
-        if (value_end == std::string_view::npos || value_end < value_begin) { return false; }
-        param_pos = value_end + kParamClose.size();
-        skip_format_whitespace(params, param_pos);
-        if (param_pos != params.size()) { return false; }
-        arguments =
-            remove_parameter_framing_newlines(params.substr(value_begin, value_end - value_begin));
-        pos = function_end + kFunctionClose.size();
+        if (!parse_custom_input(block, pos, arguments, consumed)) { return false; }
     } else {
-        std::vector<RawParameter> parameters;
+        std::unordered_set<std::string_view> names;
+        arguments = "{";
         for (;;) {
             skip_format_whitespace(block, pos);
             if (starts_with_at(block, pos, kFunctionClose)) {
                 pos += kFunctionClose.size();
                 break;
             }
-            if (!parse_parameter(block, pos, parameters)) { return false; }
-        }
-        arguments = "{";
-        for (const RawParameter& parameter : parameters) {
+            RawParameter parameter;
+            if (!parse_parameter(block, pos, parameter) || !names.insert(parameter.name).second) {
+                return false;
+            }
             std::string value;
             if (!decode_parameter(parameter.value,
                                   find_parameter_contract(contracts, name, parameter.name),
@@ -530,9 +549,13 @@ bool parse_one_tool_call(std::string_view block, std::size_t max_name_length,
             arguments += value;
         }
         arguments.push_back('}');
+        skip_format_whitespace(block, pos);
+        if (!starts_with_at(block, pos, kToolClose)) { return false; }
+        pos += kToolClose.size();
+        skip_format_whitespace(block, pos);
+        if (pos != block.size() && !starts_with_at(block, pos, kToolOpen)) { return false; }
+        consumed = pos;
     }
-    skip_format_whitespace(block, pos);
-    if (pos != block.size()) { return false; }
     out.id             = new_tool_call_id();
     out.name           = name;
     out.arguments_json = std::move(arguments);
@@ -583,27 +606,14 @@ ParsedToolCallOutput parse_qwen_tool_call_output(const std::string& text,
         if (pos >= text.size()) { break; }
         if (!starts_with_at(text, pos, kToolOpen)) { return fallback(text); }
         const std::size_t inner_begin = pos + kToolOpen.size();
-        std::size_t close             = text.find(kToolClose, inner_begin);
         ToolCall call;
-        bool parsed = false;
-        while (close != std::string::npos) {
-            ToolCall candidate;
-            std::size_t after = close + kToolClose.size();
-            skip_format_whitespace(text, after);
-            const bool valid_boundary =
-                after == text.size() || starts_with_at(text, after, kToolOpen);
-            if (valid_boundary &&
-                parse_one_tool_call(std::string_view(text).substr(inner_begin, close - inner_begin),
-                                    max_tool_name_length, contracts, candidate)) {
-                call   = std::move(candidate);
-                parsed = true;
-                break;
-            }
-            close = text.find(kToolClose, close + kToolClose.size());
+        std::size_t consumed = 0;
+        if (!parse_one_tool_call(std::string_view(text).substr(inner_begin), max_tool_name_length,
+                                 contracts, call, consumed)) {
+            return fallback(text);
         }
-        if (!parsed) { return fallback(text); }
         out.tool_calls.push_back(std::move(call));
-        pos = close + kToolClose.size();
+        pos = inner_begin + consumed;
     }
 
     if (out.tool_calls.empty()) { return fallback(text); }
