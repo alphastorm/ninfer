@@ -8765,21 +8765,29 @@ ProgramImplCore::checkpoint_continuation(const ContinuationHandle& continuation,
 
 std::optional<RestoredContinuation>
 ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReader& reader,
-                                      std::size_t staging_bytes) {
+                                      std::size_t staging_bytes,
+                                      runtime::ContinuationImportSkipReason* skip_reason) {
+    // Diagnostics are write-only and allocation-free: naming a gate must never change which
+    // branch a refusal takes (alphastorm/ninfer#31 applied to the import path).
+    const auto refuse = [skip_reason](runtime::ContinuationImportSkipReason reason) noexcept
+        -> std::optional<RestoredContinuation> {
+        if (skip_reason != nullptr) { *skip_reason = reason; }
+        return std::nullopt;
+    };
     if (staging_bytes == 0 || has_context_transaction() || pending_transaction_ || !host_kv_arena ||
         !host_kv_extents) {
-        return std::nullopt;
+        return refuse(runtime::ContinuationImportSkipReason::NotReady);
     }
     try {
         const std::optional<std::uint64_t> metadata_size =
             reader.file_size("engine/continuation.bin");
         if (!metadata_size || *metadata_size == 0 || *metadata_size > staging_bytes ||
             *metadata_size > std::numeric_limits<std::size_t>::max()) {
-            return std::nullopt;
+            return refuse(runtime::ContinuationImportSkipReason::MetadataUnreadable);
         }
         std::vector<std::byte> metadata_bytes(static_cast<std::size_t>(*metadata_size));
         if (!reader.read_file("engine/continuation.bin", 0, metadata_bytes)) {
-            return std::nullopt;
+            return refuse(runtime::ContinuationImportSkipReason::MetadataUnreadable);
         }
         const std::uint32_t maximum_anchors =
             context_cache.max_long_anchors_per_continuation.value_or(0);
@@ -8798,12 +8806,12 @@ ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReade
              (metadata.mtp_kv_valid != 0 || metadata.mtp_draft_count != 0 ||
               metadata.backend_kv_frontier == 0 ||
               metadata.backend_kv_frontier != metadata.dflash_context_frontier))) {
-            return std::nullopt;
+            return refuse(runtime::ContinuationImportSkipReason::SpeculativeMismatch);
         }
 
         const qwen3_6::StateImageHostLayout& state_layout = state_store->host_layout();
         if (state_layout.image_bytes == 0 || state_layout.image_bytes > staging_bytes) {
-            return std::nullopt;
+            return refuse(runtime::ContinuationImportSkipReason::StateStagingTooSmall);
         }
         PinnedHostBuffer state_staging(state_layout.image_bytes);
         auto state_bytes = std::span<std::byte>(static_cast<std::byte*>(state_staging.data()),
@@ -8819,7 +8827,7 @@ ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReade
             const std::optional<std::uint64_t> size = reader.file_size(path);
             if (!size || *size != state_bytes.size() || !reader.read_file(path, 0, state_bytes)) {
                 release_states();
-                return std::nullopt;
+                return refuse(runtime::ContinuationImportSkipReason::StatePayloadInvalid);
             }
             std::optional<StateImageHandle> state = state_store->import_checkpoint(
                 qwen3_6::HostStateImageConstView{.data   = state_bytes.data(),
@@ -8827,17 +8835,25 @@ ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReade
                 device.transfer_stream);
             if (!state) {
                 release_states();
-                return std::nullopt;
+                return refuse(runtime::ContinuationImportSkipReason::StateImportFailed);
             }
             CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream));
             states.push_back(*state);
         }
 
+        // kv_reason carries the finest gate the extent restore reached; the lambda's catch-all
+        // maps anything unnamed to KvPayloadInvalid so a capacity bound is never reported as a
+        // malformed payload.
+        runtime::ContinuationImportSkipReason kv_reason =
+            runtime::ContinuationImportSkipReason::KvPayloadInvalid;
         const auto restore_kv = [&](std::string_view path, LogicalKVPageStore& pages,
                                     KVAddressSpaceStore& addresses,
                                     std::uint32_t frontier) -> std::optional<KVAddressSpaceHandle> {
             std::optional<KVAddressSpaceHandle> address = addresses.create_inactive();
-            if (!address) { return std::nullopt; }
+            if (!address) {
+                kv_reason = runtime::ContinuationImportSkipReason::KvAddressSpaceExhausted;
+                return std::nullopt;
+            }
             std::vector<LogicalKVPageHandle> restored_pages;
             std::optional<HostKVExtentReservation> reservation;
             try {
@@ -8861,12 +8877,18 @@ ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReade
                     const std::uint32_t committed = std::min(page_columns, frontier - begin);
                     std::optional<LogicalKVPageHandle> logical =
                         pages.import_host_descriptor(committed);
-                    if (!logical) { throw std::bad_alloc(); }
+                    if (!logical) {
+                        kv_reason = runtime::ContinuationImportSkipReason::KvLogicalPagesExhausted;
+                        throw std::bad_alloc();
+                    }
                     restored_pages.push_back(*logical);
                 }
                 std::optional<HostKVExtentReservation> prepared =
                     host_kv_extents->prepare_restore(pages, restored_pages);
-                if (!prepared) { throw std::bad_alloc(); }
+                if (!prepared) {
+                    kv_reason = runtime::ContinuationImportSkipReason::KvHostCapacityExhausted;
+                    throw std::bad_alloc();
+                }
                 reservation.emplace(std::move(*prepared));
                 HostKVAllocationView destination = host_kv_extents->writable_view(*reservation);
                 std::uint64_t offset             = 0;
@@ -8884,6 +8906,7 @@ ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReade
                 (void)host_kv_extents->publish(std::move(*reservation));
                 reservation.reset();
                 if (!addresses.restore_inactive(*address, restored_pages, frontier)) {
+                    kv_reason = runtime::ContinuationImportSkipReason::KvAddressRestoreFailed;
                     throw std::logic_error("continuation checkpoint KV address is not restorable");
                 }
                 return address;
@@ -8902,7 +8925,7 @@ ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReade
             "engine/text-kv.bin", *text_kv_pages, *text_kv_addresses, metadata.text_kv_frontier);
         if (!text) {
             release_states();
-            return std::nullopt;
+            return refuse(kv_reason);
         }
         std::optional<KVAddressSpaceHandle> backend;
         if (expects_backend) {
@@ -8912,7 +8935,7 @@ ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReade
                 (void)text_kv_addresses->release(*text);
                 (void)host_kv_extents->release_unreferenced();
                 release_states();
-                return std::nullopt;
+                return refuse(kv_reason);
             }
         }
 
@@ -8976,14 +8999,14 @@ ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReade
             (void)text_kv_addresses->release(*text);
             (void)host_kv_extents->release_unreferenced();
             release_states();
-            return std::nullopt;
+            return refuse(runtime::ContinuationImportSkipReason::SequenceAssemblyFailed);
         }
 
         const std::optional<std::uint32_t> slot = allocate_continuation_slot();
         if (!slot) {
             release_sequence_kv(sequence);
             release_sequence_state(sequence);
-            return std::nullopt;
+            return refuse(runtime::ContinuationImportSkipReason::ContinuationSlotsExhausted);
         }
         continuation_states[*slot] = std::move(sequence);
         try {
@@ -9021,9 +9044,9 @@ ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReade
             };
         } catch (...) {
             release_continuation_slot(*slot);
-            return std::nullopt;
+            return refuse(runtime::ContinuationImportSkipReason::CommitFailed);
         }
-    } catch (...) { return std::nullopt; }
+    } catch (...) { return refuse(runtime::ContinuationImportSkipReason::MetadataInvalid); }
 }
 
 detail::PhysicalResources

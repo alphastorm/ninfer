@@ -327,18 +327,25 @@ std::optional<runtime::ContinuationCheckpointStats>
 runtime::CheckpointEngineAccess::restore_session(
     Engine& engine, std::string_view session_sha256, std::string checkpoint_tag,
     const runtime::ContinuationCheckpointReader& reader,
-    runtime::ContinuationCheckpointStats expected, std::size_t staging_bytes) {
-    if (engine.impl_ == nullptr || checkpoint_tag.empty()) { return std::nullopt; }
+    runtime::ContinuationCheckpointStats expected, std::size_t staging_bytes,
+    runtime::SessionRestoreSkipDetail* skip) {
+    if (engine.impl_ == nullptr || checkpoint_tag.empty()) {
+        if (skip != nullptr) { skip->reason = runtime::SessionRestoreSkipReason::EmptyTag; }
+        return std::nullopt;
+    }
     return std::visit(
         [&](auto& core) -> std::optional<runtime::ContinuationCheckpointStats> {
             using CorePointer = std::remove_cvref_t<decltype(core)>;
             if constexpr (std::is_same_v<CorePointer, std::monostate>) {
+                if (skip != nullptr) {
+                    skip->reason = runtime::SessionRestoreSkipReason::CacheDisabled;
+                }
                 return std::nullopt;
             } else {
                 using Core = typename CorePointer::element_type;
                 return core->restore_session_checkpoint(
                     checkpoint_session_key<Core>(session_sha256), std::move(checkpoint_tag), reader,
-                    expected, staging_bytes);
+                    expected, staging_bytes, skip);
             }
         },
         engine.impl_->core);

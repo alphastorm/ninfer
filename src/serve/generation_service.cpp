@@ -587,17 +587,28 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
         if (!loaded.checkpoint) { return false; }
         VerifiedSessionCheckpoint checkpoint = std::move(*loaded.checkpoint);
         const std::string checkpoint_tag     = checkpoint.responses.latest_response_id;
+        runtime::SessionRestoreSkipDetail skip;
         const bool restored = responses.restore_session(std::move(checkpoint.responses), [&] {
             return runtime::CheckpointEngineAccess::restore_session(
                        *engine_, session_sha256, checkpoint_tag, *checkpoint.engine,
-                       checkpoint.expected_engine, checkpoint_store_->options().staging_bytes)
+                       checkpoint.expected_engine, checkpoint_store_->options().staging_bytes,
+                       &skip)
                 .has_value();
         });
         if (!restored) {
+            // A decline used to read as "the engine did not accept the checkpointed
+            // continuation", which cannot distinguish a capacity bound from a drifted binding.
+            // Name the gate, and the target's import gate when it reported one
+            // (alphastorm/omp-ninfer#40).
+            std::string detail(runtime::session_restore_skip_reason_name(skip.reason));
+            if (skip.import_reason != runtime::ContinuationImportSkipReason::None) {
+                detail += " (";
+                detail += runtime::continuation_import_skip_reason_name(skip.import_reason);
+                detail += ")";
+            }
             write_console_log(ConsoleLogLevel::Warning,
                               "checkpoint restore declined for session " +
-                                  std::string(session_sha256.substr(0, 12)) +
-                                  ": the engine did not accept the checkpointed continuation");
+                                  std::string(session_sha256.substr(0, 12)) + ": " + detail);
         }
         return restored;
     } catch (const std::exception& error) {

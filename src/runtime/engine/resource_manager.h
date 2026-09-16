@@ -721,11 +721,21 @@ public:
     [[nodiscard]] std::optional<ContinuationCheckpointStats> restore_session_checkpoint(
         Program& program, const CacheSessionKey& session, std::string checkpoint_tag,
         const ContinuationCheckpointReader& reader, ContinuationCheckpointStats expected,
-        std::size_t staging_bytes, std::uint64_t publication_order) {
-        if (!cache_enabled_ || checkpoint_tag.empty() || publication_order == 0 ||
-            !std::holds_alternative<std::monostate>(transaction_) ||
-            program.has_context_transaction()) {
+        std::size_t staging_bytes, std::uint64_t publication_order,
+        SessionRestoreSkipDetail* skip = nullptr) {
+        const auto refuse = [&](SessionRestoreSkipReason reason)
+            -> std::optional<ContinuationCheckpointStats> {
+            if (skip != nullptr) { skip->reason = reason; }
             return std::nullopt;
+        };
+        if (!cache_enabled_) { return refuse(SessionRestoreSkipReason::CacheDisabled); }
+        if (checkpoint_tag.empty()) { return refuse(SessionRestoreSkipReason::EmptyTag); }
+        if (publication_order == 0) {
+            return refuse(SessionRestoreSkipReason::PublicationOrderInvalid);
+        }
+        if (!std::holds_alternative<std::monostate>(transaction_) ||
+            program.has_context_transaction()) {
+            return refuse(SessionRestoreSkipReason::TransactionBusy);
         }
         if (const std::optional<std::size_t> cell = find_session_cell(session)) {
             // Lazy restore may race the session's own liveness: when the exact catalogued
@@ -736,22 +746,22 @@ public:
             // binding - stays a refusal that mutates nothing.
             const SessionIndexEntry& binding = session_index_[*cell];
             if (binding.state != SessionIndexState::Occupied || binding.slot >= catalog_count_) {
-                return std::nullopt;
+                return refuse(SessionRestoreSkipReason::LiveSessionDrift);
             }
             const CatalogEntry& entry = catalog_[binding.slot];
             if (entry.state != CatalogState::Catalogued || !entry.handle ||
                 entry.id != binding.owner_id || entry.revision != binding.revision ||
                 entry.session != std::optional<CacheSessionKey>(session)) {
-                return std::nullopt;
+                return refuse(SessionRestoreSkipReason::LiveSessionDrift);
             }
             if (entry.checkpoint_tag.empty() || entry.checkpoint_tag != checkpoint_tag) {
-                return std::nullopt;
+                return refuse(SessionRestoreSkipReason::LiveTagMismatch);
             }
             if (expected.frontier_tokens == 0 || expected.restored_tokens == 0 ||
                 expected.restored_tokens > expected.frontier_tokens ||
                 expected.payload_bytes == 0 || !entry.summary.endpoint ||
                 entry.summary.endpoint->ref.frontier != expected.frontier_tokens) {
-                return std::nullopt;
+                return refuse(SessionRestoreSkipReason::LiveStatsInvalid);
             }
             return expected;
         }
@@ -762,14 +772,23 @@ public:
                 break;
             }
         }
-        if (slot == kInvalidCatalogSlot) { return std::nullopt; }
+        if (slot == kInvalidCatalogSlot) { return refuse(SessionRestoreSkipReason::CatalogFull); }
 
+        ContinuationImportSkipReason import_reason = ContinuationImportSkipReason::None;
         std::optional<typename Package::RestoredContinuation> restored =
-            program.restore_continuation(reader, staging_bytes);
-        if (!restored || restored->stats != expected || restored->summary.active_references != 0 ||
+            program.restore_continuation(reader, staging_bytes, &import_reason);
+        if (!restored) {
+            if (skip != nullptr) { skip->import_reason = import_reason; }
+            return refuse(SessionRestoreSkipReason::ProgramRejected);
+        }
+        if (restored->stats != expected) {
+            (void)program.release_continuation(std::move(restored->handle));
+            return refuse(SessionRestoreSkipReason::StatsMismatch);
+        }
+        if (restored->summary.active_references != 0 ||
             !valid_continuation_summary(restored->summary)) {
-            if (restored) { (void)program.release_continuation(std::move(restored->handle)); }
-            return std::nullopt;
+            (void)program.release_continuation(std::move(restored->handle));
+            return refuse(SessionRestoreSkipReason::SummaryInvalid);
         }
 
         CatalogEntry& entry = catalog_[slot];
@@ -798,7 +817,7 @@ public:
                 (void)program.release_continuation(std::move(restored->handle));
             }
             clear_catalog_entry(entry);
-            return std::nullopt;
+            return refuse(SessionRestoreSkipReason::PublicationFailed);
         }
     }
 

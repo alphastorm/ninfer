@@ -260,7 +260,8 @@ public:
     [[nodiscard]] std::optional<ContinuationCheckpointStats>
     restore_session_checkpoint(const CacheSessionKey& session, std::string checkpoint_tag,
                                const ContinuationCheckpointReader& reader,
-                               ContinuationCheckpointStats expected, std::size_t staging_bytes) {
+                               ContinuationCheckpointStats expected, std::size_t staging_bytes,
+                               SessionRestoreSkipDetail* skip = nullptr) {
         std::uint64_t publication_order = 0;
         {
             std::lock_guard queue_lock(queue_mutex_);
@@ -273,7 +274,7 @@ public:
         std::scoped_lock lock(execution_mutex_);
         return resources_.restore_session_checkpoint(*instance_.program, session,
                                                      std::move(checkpoint_tag), reader, expected,
-                                                     staging_bytes, publication_order);
+                                                     staging_bytes, publication_order, skip);
     }
 
     [[nodiscard]] RuntimeStats runtime_stats() const {

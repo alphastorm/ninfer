@@ -371,8 +371,9 @@ Program<Variant>::checkpoint_continuation(const ContinuationHandle<Variant>& con
 template <>
 std::optional<RestoredContinuation<Variant>>
 Program<Variant>::restore_continuation(const runtime::ContinuationCheckpointReader& reader,
-                                       std::size_t staging_bytes) {
-    return impl_->restore_continuation(reader, staging_bytes);
+                                       std::size_t staging_bytes,
+                                       runtime::ContinuationImportSkipReason* skip_reason) {
+    return impl_->restore_continuation(reader, staging_bytes, skip_reason);
 }
 
 template <>

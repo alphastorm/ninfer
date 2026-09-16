@@ -31,7 +31,8 @@ public:
     [[nodiscard]] static std::optional<ContinuationCheckpointStats>
     restore_session(Engine& engine, std::string_view session_sha256, std::string checkpoint_tag,
                     const ContinuationCheckpointReader& reader,
-                    ContinuationCheckpointStats expected, std::size_t staging_bytes);
+                    ContinuationCheckpointStats expected, std::size_t staging_bytes,
+                    SessionRestoreSkipDetail* skip = nullptr);
 };
 
 } // namespace ninfer::runtime

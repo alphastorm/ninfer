@@ -805,10 +805,23 @@ public:
             .frontier_tokens = 16, .restored_tokens = 16, .payload_bytes = 64};
     }
 
+    // Set to force a refusal that names an import gate, the way a host-KV capacity bound does.
+    std::optional<ninfer::runtime::ContinuationImportSkipReason> forced_import_refusal;
+
     [[nodiscard]] std::optional<FakeRestoredContinuation>
     restore_continuation(const ninfer::runtime::ContinuationCheckpointReader&,
-                         std::size_t staging_bytes) {
-        if (staging_bytes == 0) { return std::nullopt; }
+                         std::size_t staging_bytes,
+                         ninfer::runtime::ContinuationImportSkipReason* skip_reason = nullptr) {
+        if (staging_bytes == 0) {
+            if (skip_reason != nullptr) {
+                *skip_reason = ninfer::runtime::ContinuationImportSkipReason::NotReady;
+            }
+            return std::nullopt;
+        }
+        if (forced_import_refusal) {
+            if (skip_reason != nullptr) { *skip_reason = *forced_import_refusal; }
+            return std::nullopt;
+        }
         ++restore_calls;
         FakeContinuationSummary summary;
         summary.endpoint = endpoint(88, 16);
@@ -2194,6 +2207,70 @@ void test_session_checkpoint_tag_and_restore_identity() {
                                         writer, 1024)
                     .has_value(),
             "refused restores disturbed the live endpoint");
+
+    // A decline must name the gate it failed. The serve layer logs this verbatim, and an
+    // operator cannot tell a capacity bound from a drifted binding without it
+    // (alphastorm/omp-ninfer#40).
+    using Reason        = ninfer::runtime::SessionRestoreSkipReason;
+    using ImportReason  = ninfer::runtime::ContinuationImportSkipReason;
+    const auto decline_reason = [&](FakeManager& manager, FakeProgram& program,
+                                    FakeCacheSessionKey session, std::string tag,
+                                    ninfer::runtime::ContinuationCheckpointStats stats,
+                                    std::size_t staging, std::uint64_t order) {
+        ninfer::runtime::SessionRestoreSkipDetail skip;
+        const auto result = manager.restore_session_checkpoint(program, session, std::move(tag),
+                                                               reader, stats, staging, order,
+                                                               &skip);
+        require(!result, "expected a declined restore");
+        return skip;
+    };
+
+    require(decline_reason(live, live_program, FakeCacheSessionKey{66}, "resp_other", expected,
+                           1024, 10)
+                    .reason == Reason::LiveTagMismatch,
+            "stale tag over a live session did not name LiveTagMismatch");
+    require(decline_reason(live, live_program, FakeCacheSessionKey{66}, "resp_live", wrong_frontier,
+                           1024, 11)
+                    .reason == Reason::LiveStatsInvalid,
+            "frontier mismatch over a live session did not name LiveStatsInvalid");
+    require(decline_reason(live, live_program, FakeCacheSessionKey{55}, "", expected, 1024, 12)
+                    .reason == Reason::EmptyTag,
+            "empty tag did not name EmptyTag");
+    require(decline_reason(live, live_program, FakeCacheSessionKey{55}, "resp_x", expected, 1024, 0)
+                    .reason == Reason::PublicationOrderInvalid,
+            "zero publication order did not name PublicationOrderInvalid");
+
+    FakeProgram mismatch_program;
+    FakeManager mismatch = make_manager(1, 2);
+    require(decline_reason(mismatch, mismatch_program, FakeCacheSessionKey{88}, "resp_2",
+                           ninfer::runtime::ContinuationCheckpointStats{
+                               .frontier_tokens = 16, .restored_tokens = 16, .payload_bytes = 63},
+                           1024, 1)
+                    .reason == Reason::StatsMismatch,
+            "summary disagreement did not name StatsMismatch");
+
+    // The capacity bound this instrumentation exists for: the target refuses the import and the
+    // manager forwards which allocation ran out.
+    FakeProgram exhausted_program;
+    exhausted_program.forced_import_refusal = ImportReason::KvHostCapacityExhausted;
+    FakeManager exhausted = make_manager(1, 2);
+    const auto exhausted_skip =
+        decline_reason(exhausted, exhausted_program, FakeCacheSessionKey{88}, "resp_2", expected,
+                       1024, 1);
+    require(exhausted_skip.reason == Reason::ProgramRejected &&
+                exhausted_skip.import_reason == ImportReason::KvHostCapacityExhausted,
+            "an exhausted host KV pool did not surface as a named import gate");
+
+    // Every catalog slot occupied is a distinct, actionable refusal from a rejected payload.
+    FakeProgram full_program;
+    FakeManager full              = make_manager(1, 1);
+    FakeRequestBasePlan full_seed = make_base(44);
+    full_seed.cache.session_key   = FakeCacheSessionKey{44};
+    const ActiveRequest full_turn = start_active(full, full_program, 44, full_seed, 1, "resp_full");
+    (void)finish_active(full, full_program, full_turn);
+    require(decline_reason(full, full_program, FakeCacheSessionKey{45}, "resp_2", expected, 1024, 2)
+                    .reason == Reason::CatalogFull,
+            "a full continuation catalog did not name CatalogFull");
 }
 
 void test_replay_selected_successor_retags_session() {

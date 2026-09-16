@@ -576,7 +576,8 @@ public:
                             std::size_t staging_bytes) const;
     [[nodiscard]] std::optional<RestoredContinuation>
     restore_continuation(const runtime::ContinuationCheckpointReader& reader,
-                         std::size_t staging_bytes);
+                         std::size_t staging_bytes,
+                         runtime::ContinuationImportSkipReason* skip_reason = nullptr);
     void fail_all_cleanup() noexcept;
     [[nodiscard]] detail::PhysicalResources admission_capacity() const noexcept;
     [[nodiscard]] bool isolated_request_feasible(const RequestBasePlan& base) const noexcept;
