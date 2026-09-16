@@ -588,6 +588,14 @@ public:
 
     [[nodiscard]] MemorySummary memory_summary() const noexcept;
 
+    // Restore materialises a continuation's KV into the host pool, so the pool - not the device
+    // arena - bounds the largest session this configuration can admit back. Reported in the
+    // startup summary and enforced at export, so a save can never succeed for a session this
+    // configuration could not restore (alphastorm/omp-ninfer#42).
+    [[nodiscard]] std::uint32_t host_kv_restorable_tokens() const noexcept;
+    [[nodiscard]] std::uint64_t host_kv_bytes_for_frontier(std::uint32_t text_frontier,
+                                                           std::uint32_t backend_frontier) const noexcept;
+
     void reset_memory_peaks() noexcept;
 
     friend struct qwen3_6::detail::PressurePlanningSessionImpl<Variant>;

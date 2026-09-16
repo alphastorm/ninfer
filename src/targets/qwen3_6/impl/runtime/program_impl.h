@@ -8660,6 +8660,16 @@ ProgramImplCore::checkpoint_continuation(const ContinuationHandle& continuation,
         const std::uint32_t backend_frontier =
             sequence.kv->backend ? backend_kv_addresses->committed_frontier(*sequence.kv->backend)
                                  : 0U;
+        // An export whose checkpoint this configuration could not admit back is a false durable
+        // save: the operator sees a byte count, then a restart answers previous_response_not_found
+        // (alphastorm/omp-ninfer#42). Restore materialises the KV into the host pool, so ask the
+        // pool the same question here, while the session is still alive and can be pinned another
+        // way.
+        if (host_kv_arena != nullptr &&
+            host_kv_bytes_for_frontier(text_frontier, backend_frontier) >
+                host_kv_arena->capacity_bytes()) {
+            return std::nullopt;
+        }
         CheckpointEncoder metadata =
             encode_continuation_metadata(sequence, endpoint_state, rewrite_state, anchor_states,
                                          static_cast<std::uint32_t>(states.size()), text_frontier,
@@ -11760,10 +11770,32 @@ MemorySummary ProgramImplCore::memory_summary() const noexcept {
         out.host_state_occupied_slots = host_state_images->occupied();
     }
     if (host_kv_arena) {
-        out.host_kv_capacity_bytes = host_kv_arena->capacity_bytes();
-        out.host_kv_occupied_bytes = host_kv_arena->occupied_bytes();
+        out.host_kv_capacity_bytes      = host_kv_arena->capacity_bytes();
+        out.host_kv_occupied_bytes      = host_kv_arena->occupied_bytes();
+        out.host_kv_restorable_tokens   = host_kv_restorable_tokens();
     }
     return out;
+}
+
+std::uint64_t
+ProgramImplCore::host_kv_bytes_for_frontier(std::uint32_t text_frontier,
+                                            std::uint32_t backend_frontier) const noexcept {
+    return host_kv_bytes_for_kv_pages(kv_pages_for_frontier(text_frontier),
+                                      text_host_kv_page_stride, 0U) +
+           host_kv_bytes_for_kv_pages(kv_pages_for_frontier(backend_frontier), 0U,
+                                      backend_host_kv_page_stride);
+}
+
+std::uint32_t ProgramImplCore::host_kv_restorable_tokens() const noexcept {
+    if (!host_kv_arena) { return 0U; }
+    // A restore reserves its extents in a fresh arena, so total capacity - not current free space -
+    // is the bound. A speculative backend carries a second extent per page group.
+    const std::size_t backend_stride =
+        speculative_backend != SpeculativeBackend::None ? backend_host_kv_page_stride : 0U;
+    return ninfer::host_kv_restorable_tokens(host_kv_arena->capacity_bytes(),
+                                             text_host_kv_page_stride, backend_stride,
+                                             static_cast<std::uint32_t>(kPagedKVPageSize),
+                                             kv_capacity);
 }
 
 void ProgramImplCore::reset_memory_peaks() noexcept {

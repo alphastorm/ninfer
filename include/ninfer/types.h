@@ -625,6 +625,9 @@ struct MemorySummary {
     std::uint32_t host_state_occupied_slots       = 0;
     std::size_t host_kv_capacity_bytes            = 0;
     std::size_t host_kv_occupied_bytes            = 0;
+    // Restore materialises a continuation's KV into the host pool, so the pool bounds the largest
+    // session this configuration can admit back. 0 means the context cache is off.
+    std::uint32_t host_kv_restorable_tokens       = 0;
 };
 
 // Worker-owned monotonic nanosecond counters. Top-level Host phases are mutually exclusive;

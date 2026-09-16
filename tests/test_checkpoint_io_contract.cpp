@@ -1,3 +1,4 @@
+#include "core/host_kv_arena.h"
 #include "runtime/contract/checkpoint_io.h"
 
 #include <algorithm>
@@ -507,10 +508,67 @@ int test_shared_single_flight_lock() {
     return failures;
 }
 
+int test_restorable_bound_is_the_host_pool() {
+    // A save is only durable if the same configuration can admit it back, and restore materialises
+    // the KV into the host pool. The shipped RTX 4090 pool was 4096 MiB against a 5.02 GiB
+    // ceiling-sized session: the export reported bytes saved and the restart answered
+    // previous_response_not_found (alphastorm/omp-ninfer#41, #42). These are the real measured
+    // page strides for that lane (INT8, 2.61 MiB per 64-token page) and for the RTX 5090 (BF16,
+    // 5.06 MiB per page).
+    int failures = 0;
+    constexpr std::uint32_t page_size = 64;
+    constexpr std::uint32_t ceiling   = 131072;
+    constexpr std::size_t int8_stride = 2739930;  // 2.61 MiB
+    constexpr std::size_t bf16_stride = 5305794;  // 5.06 MiB
+
+    const std::uint32_t shipped_4090 = ninfer::host_kv_restorable_tokens(
+        4096ULL << 20, int8_stride, 0, page_size, ceiling);
+    failures += check(shipped_4090 < ceiling,
+                      "a 4096 MiB pool must not claim it can restore a ceiling-sized INT8 session");
+    failures += check(shipped_4090 == 100288,
+                      "the 4096 MiB INT8 restorable bound moved");
+
+    const std::uint32_t fixed_4090 = ninfer::host_kv_restorable_tokens(
+        11264ULL << 20, int8_stride, 0, page_size, ceiling);
+    failures += check(fixed_4090 == ceiling,
+                      "an 11264 MiB pool must restore a ceiling-sized INT8 session");
+
+    const std::uint32_t shipped_5090 = ninfer::host_kv_restorable_tokens(
+        16384ULL << 20, bf16_stride, 0, page_size, ceiling);
+    failures += check(shipped_5090 == ceiling,
+                      "a 16384 MiB pool must restore one ceiling-sized BF16 session");
+
+    // Two ceiling sessions restore into the same pool, so the bound is their sum: the 5090's pool
+    // holds one and declines the second (alphastorm/omp-ninfer#40).
+    const std::uint64_t one_bf16_session =
+        ninfer::host_kv_bytes_for_kv_pages(ceiling / page_size, bf16_stride, 0);
+    failures += check(2 * one_bf16_session > (16384ULL << 20),
+                      "two ceiling-sized BF16 sessions were expected to exceed a 16 GiB pool");
+    failures += check(2 * ninfer::host_kv_bytes_for_kv_pages(ceiling / page_size, int8_stride, 0) <
+                          (11264ULL << 20),
+                      "two ceiling-sized INT8 sessions were expected to fit an 11 GiB pool");
+
+    // Degenerate inputs must report "nothing is restorable", never a wrapped or infinite bound.
+    failures += check(ninfer::host_kv_restorable_tokens(1ULL << 30, 0, 0, page_size, ceiling) == 0,
+                      "a zero page stride must not report a restorable session");
+    failures += check(ninfer::host_kv_restorable_tokens(1ULL << 30, int8_stride, 0, 0, ceiling) == 0,
+                      "a zero page size must not report a restorable session");
+    failures += check(ninfer::host_kv_restorable_tokens(0, int8_stride, 0, page_size, ceiling) == 0,
+                      "an empty pool must not report a restorable session");
+
+    // A speculative backend carries a second extent per page group, which halves the bound.
+    const std::uint32_t with_backend = ninfer::host_kv_restorable_tokens(
+        11264ULL << 20, int8_stride, int8_stride, page_size, ceiling);
+    failures += check(with_backend < fixed_4090,
+                      "a speculative backend extent must reduce the restorable bound");
+    return failures;
+}
+
 } // namespace
 
 int main() {
     int failures = 0;
+    failures += test_restorable_bound_is_the_host_pool();
     failures += test_sha256_and_manifest_anchor();
     failures += test_compatibility_matrix();
     failures += test_save_order_and_abort();

@@ -146,6 +146,7 @@ int main(int argc, char** argv) {
                  << " device-state=" << *cache.device_state_slots << "-cache+"
                  << engine.max_concurrency << "-active" << " host-state=" << cache.host_state_slots
                  << " host-kv=" << format_bytes(cache.host_kv_capacity_bytes)
+                 << " host-kv-restorable=" << memory.host_kv_restorable_tokens << "-tokens"
                  << " private=" << *cache.max_private_continuations
                  << " shared=" << *cache.max_shared_prefixes
                  << " anchors=" << *cache.max_long_anchors_per_continuation
