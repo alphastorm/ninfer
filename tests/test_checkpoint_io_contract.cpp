@@ -556,11 +556,15 @@ int test_restorable_bound_is_the_host_pool() {
     failures += check(ninfer::host_kv_restorable_tokens(0, int8_stride, 0, page_size, ceiling) == 0,
                       "an empty pool must not report a restorable session");
 
-    // A speculative backend carries a second extent per page group, which halves the bound.
-    const std::uint32_t with_backend = ninfer::host_kv_restorable_tokens(
-        11264ULL << 20, int8_stride, int8_stride, page_size, ceiling);
-    failures += check(with_backend < fixed_4090,
-                      "a speculative backend extent must reduce the restorable bound");
+    // A speculative backend carries a second extent per page group, so it halves the bound. The
+    // comparison needs a pool where the halved bound is still below the ceiling, or the clamp to
+    // kv_capacity hides it - which is what a first version of this test got wrong.
+    const std::uint32_t text_only_6g =
+        ninfer::host_kv_restorable_tokens(6144ULL << 20, int8_stride, 0, page_size, ceiling);
+    const std::uint32_t with_backend_6g = ninfer::host_kv_restorable_tokens(
+        6144ULL << 20, int8_stride, int8_stride, page_size, ceiling);
+    failures += check(text_only_6g == ceiling && with_backend_6g == 75200,
+                      "a speculative backend extent must halve the restorable bound");
     return failures;
 }
 
