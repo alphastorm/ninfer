@@ -1,4 +1,4 @@
-#include "core/host_kv_arena.h"
+#include "core/host_kv_restore_bound.h"
 #include "runtime/contract/checkpoint_io.h"
 
 #include <algorithm>
