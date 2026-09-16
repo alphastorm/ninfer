@@ -1,8 +1,8 @@
 {
   "artifact_type": "ninfer_windows_server_config",
   "schema_version": 3,
-  "release_id": "qwen38-4090-native-v0.6.3-beta.1",
-  "deployment_profile": "qwen38-4090-native-v0.6.3-beta.1",
+  "release_id": "qwen38-4090-native-v0.6.4-beta.1",
+  "deployment_profile": "qwen38-4090-native-v0.6.4-beta.1",
   "listen": {
     "host": "127.0.0.1",
     "port": 18082,
@@ -31,7 +31,7 @@
   "context_cache": {
     "device_state_slots": 2,
     "host_state_slots": 24,
-    "host_kv_mib": 4096,
+    "host_kv_mib": 11264,
     "max_private_continuations": 8
   },
   "speculative": {
@@ -54,5 +54,9 @@
   "telemetry": {
     "request_log_jsonl": true,
     "stats_interval_ms": 5000
+  },
+  "runtime_host": {
+    "minimum_runtime_memory_mib": 32768,
+    "reason": "the host-KV pool is pinned memory and bounds what restore can admit: a session at the 131,072-token ceiling needs 5.02 GiB of INT8 KV, and restore materialises every checkpointed session into the pool, so two of them need 11264 MiB. Measured on a 32.4 GiB host: 11264 MiB pins with 11.6 GiB still free, 12288 MiB fails cudaMallocHost."
   }
 }
