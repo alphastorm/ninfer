@@ -23,8 +23,9 @@ When shared capacity blocks restore, the engine may reclaim another inactive res
 whose checkpoint is current. The verified generation stays pinned against quota eviction for
 the entire restore, including saves of later victims. A resident session ahead of its checkpoint
 is saved and pinned first; a refused save leaves that resident intact. Every retry reads from a
-fresh checkpoint reader, and retries require progress rather than a fixed attempt cutoff. State
-image slots, KV capacity, and continuation slots all participate in guarded reclaim. Normal disk
+fresh checkpoint reader. The retry bound allows two progress steps per catalog slot plus the final
+import, so new arrivals cannot extend one restore indefinitely. State image slots, KV capacity,
+and continuation slots all participate in guarded reclaim. Normal disk
 quota retention still applies after the restore finishes. Automatic checkpointing remains best
 effort under live traffic;
 explicit checkpoint requests and graceful managed shutdown provide the observable save outcome.

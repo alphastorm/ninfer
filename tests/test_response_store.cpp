@@ -155,6 +155,46 @@ int test_oversized_record() {
     return failures;
 }
 
+int test_restore_preserves_unrelated_session_on_capacity_refusal() {
+    const std::string resident_session(64, 'a');
+    const std::string target_session(64, 'b');
+    ResponseStore store(2, 1ULL << 20);
+
+    StoredResponse resident =
+        record("resp_resident",
+               append_response_context({}, {text_turn(ninfer::ChatRole::User, "resident")}));
+    resident.client_session_sha256 = resident_session;
+    store.put(std::move(resident));
+
+    StoredResponse first =
+        record("resp_target_first",
+               append_response_context({}, {text_turn(ninfer::ChatRole::User, "first")}));
+    first.client_session_sha256 = target_session;
+    StoredResponse second =
+        record("resp_target_second",
+               append_response_context({}, {text_turn(ninfer::ChatRole::User, "second")}));
+    second.client_session_sha256 = target_session;
+    second.previous_response_id  = first.id;
+    ResponseStoreSnapshot target{.client_session_sha256 = target_session,
+                                 .latest_response_id    = second.id,
+                                 .records               = {std::move(first), std::move(second)}};
+
+    bool external_committed = false;
+    const bool restored     = store.restore_session(std::move(target), [&] {
+        external_committed = true;
+        return true;
+    });
+    int failures            = 0;
+    failures += check(!restored && !external_committed,
+                      "capacity refusal committed the external engine restore");
+    failures += check(store.get_for_session("resp_resident", resident_session) != nullptr,
+                      "target restore evicted an unrelated resident session");
+    failures += check(store.get_for_session("resp_target_first", target_session) == nullptr &&
+                          store.get_for_session("resp_target_second", target_session) == nullptr,
+                      "refused target restore published a partial lineage");
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -163,6 +203,7 @@ int main() {
     failures += test_lru_and_delete();
     failures += test_session_continuation_and_dag_deletion();
     failures += test_oversized_record();
+    failures += test_restore_preserves_unrelated_session_on_capacity_refusal();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

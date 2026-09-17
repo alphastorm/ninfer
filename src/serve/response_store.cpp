@@ -275,51 +275,38 @@ bool ResponseStore::restore_session(ResponseStoreSnapshot snapshot,
         return stored->client_session_sha256 &&
                credential_equal(*stored->client_session_sha256, snapshot.client_session_sha256);
     };
-    std::size_t unrelated_count = 0;
-    for (const auto& [id, entry] : records_) {
-        (void)id;
-        if (!target_session(entry.response)) { ++unrelated_count; }
-    }
     for (const auto& record : owned) {
         const auto found = records_.find(record->id);
         if (found != records_.end() && !target_session(found->second.response)) { return false; }
     }
-    const std::size_t minimum_victims = unrelated_count + owned.size() > max_records_
-                                            ? unrelated_count + owned.size() - max_records_
-                                            : 0;
     try {
-        for (std::size_t victim_count = minimum_victims; victim_count <= unrelated_count;
-             ++victim_count) {
-            ResponseStore replacement(max_records_, max_bytes_);
-            std::size_t oldest_rank = 0;
-            // insert_locked pushes to the MRU end, so replay survivors from oldest to newest.
-            // Target-session records are replacement input, never capacity victims.
-            for (auto position = lru_.rbegin(); position != lru_.rend(); ++position) {
-                const Entry& entry = records_.at(*position);
-                if (target_session(entry.response)) { continue; }
-                if (oldest_rank++ < victim_count) { continue; }
-                replacement.insert_locked(entry.response, entry.envelope_bytes, entry.sequence);
-            }
-            replacement.next_sequence_ = next_sequence_;
-            for (std::size_t index = 0; index < owned.size(); ++index) {
-                const std::uint64_t sequence = replacement.next_sequence_++;
-                if (replacement.next_sequence_ == 0) { replacement.next_sequence_ = 1; }
-                replacement.insert_locked(owned[index], envelopes[index], sequence);
-            }
-            if (replacement.records_.size() > max_records_ ||
-                replacement.current_bytes_ > max_bytes_) {
-                continue;
-            }
-            if (!commit_external()) { return false; }
-            records_.swap(replacement.records_);
-            lru_.swap(replacement.lru_);
-            live_context_references_.swap(replacement.live_context_references_);
-            std::swap(current_bytes_, replacement.current_bytes_);
-            std::swap(next_sequence_, replacement.next_sequence_);
-            return true;
+        ResponseStore replacement(max_records_, max_bytes_);
+        // insert_locked pushes to the MRU end, so replay unrelated records from oldest to newest.
+        // A restore may replace its own lineage, but it must never make another session
+        // unrestorable merely to fit. Ordinary put() retains the store's documented LRU policy.
+        for (auto position = lru_.rbegin(); position != lru_.rend(); ++position) {
+            const Entry& entry = records_.at(*position);
+            if (target_session(entry.response)) { continue; }
+            replacement.insert_locked(entry.response, entry.envelope_bytes, entry.sequence);
         }
+        replacement.next_sequence_ = next_sequence_;
+        for (std::size_t index = 0; index < owned.size(); ++index) {
+            const std::uint64_t sequence = replacement.next_sequence_++;
+            if (replacement.next_sequence_ == 0) { replacement.next_sequence_ = 1; }
+            replacement.insert_locked(owned[index], envelopes[index], sequence);
+        }
+        if (replacement.records_.size() > max_records_ ||
+            replacement.current_bytes_ > max_bytes_) {
+            return false;
+        }
+        if (!commit_external()) { return false; }
+        records_.swap(replacement.records_);
+        lru_.swap(replacement.lru_);
+        live_context_references_.swap(replacement.live_context_references_);
+        std::swap(current_bytes_, replacement.current_bytes_);
+        std::swap(next_sequence_, replacement.next_sequence_);
+        return true;
     } catch (...) { return false; }
-    return false;
 }
 
 std::size_t ResponseStore::size() const {

@@ -659,15 +659,31 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
         // worth repeating only when something actually changed: the engine dropped a resident
         // session, or this layer brought a stale one up to date so the engine may drop it next
         // time. Pins survive all attempts, including saves of later victims. Every retry either
-        // releases a resident or pins a previously unpinned one, so the finite catalog bounds
-        // the loop without an arbitrary cutoff between the final release and its retry.
-        unsigned reclaimed_total = 0;
+        // releases a resident or pins a previously unpinned one; the derived bound below includes
+        // both steps for every initial catalog slot and the final import.
+        const std::size_t catalog_limit = std::max<std::size_t>(
+            1, engine_->options().context_cache.max_private_continuations.value_or(1));
+        // One pass may pin one stale resident and the next may reclaim it. Reserve the final
+        // import after every initially resident catalog entry has made both progress steps. This
+        // admits the shipped eight-entry worst case (17 reads) while sustained new arrivals
+        // cannot extend one restore indefinitely.
+        const std::size_t max_attempts = catalog_limit * 2 + 1;
+        unsigned reclaimed_total       = 0;
         StoredCheckpointOracle reclaim(*checkpoint_store_, checkpoint_runtime_fingerprint_);
-        for (;;) {
+        for (std::size_t attempt = 0; attempt < max_attempts; ++attempt) {
             reclaim.begin_attempt();
             SessionCheckpointLoadResult loaded = checkpoint_store_->load(
                 session_sha256, checkpoint_runtime_fingerprint_, required_response_id);
-            if (!loaded.checkpoint) { return false; }
+            if (!loaded.checkpoint) {
+                if (reclaimed_total != 0) {
+                    write_console_log(ConsoleLogLevel::Warning,
+                                      "checkpoint restore for session " +
+                                          std::string(session_sha256.substr(0, 12)) +
+                                          " became unavailable after reclaiming " +
+                                          std::to_string(reclaimed_total) + " resident(s)");
+                }
+                return false;
+            }
             VerifiedSessionCheckpoint checkpoint = std::move(*loaded.checkpoint);
             const std::string checkpoint_tag     = checkpoint.responses.latest_response_id;
             runtime::SessionRestoreSkipDetail skip;
@@ -699,10 +715,22 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
             if (capacity_bound && !reclaim.stale().empty()) {
                 std::size_t saved = 0;
                 for (const auto& stale : reclaim.stale()) {
-                    if (save_checkpoint_locked(stale.session_sha256, responses, nullptr) &&
-                        reclaim.recoverable(stale.session_sha256, stale.checkpoint_tag)) {
-                        ++saved;
+                    runtime::SessionCheckpointSkipDetail save_skip;
+                    const auto result =
+                        save_checkpoint_locked(stale.session_sha256, responses, &save_skip);
+                    if (result && reclaim.recoverable(stale.session_sha256, stale.checkpoint_tag)) {
+                        saved = 1;
+                        // The engine releases at most one victim per import attempt, so saving
+                        // more residents here only adds latency and can exhaust the disk quota.
+                        break;
                     }
+                    const std::string reason =
+                        result ? "published checkpoint was not current"
+                               : std::string(runtime::session_checkpoint_skip_reason_name(
+                                     save_skip.reason));
+                    write_console_log(ConsoleLogLevel::Warning,
+                                      "checkpoint save refused for resident session " +
+                                          stale.session_sha256.substr(0, 12) + ": " + reason);
                 }
                 write_console_log(ConsoleLogLevel::Info,
                                   "checkpoint restore for session " +
@@ -716,7 +744,10 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
             // continuation", which cannot distinguish a capacity bound from a drifted binding.
             // Name the gate, and the target's import gate when it reported one
             // (alphastorm/omp-ninfer#40).
-            std::string detail(runtime::session_restore_skip_reason_name(skip.reason));
+            std::string detail =
+                skip.reason == runtime::SessionRestoreSkipReason::None
+                    ? "response store capacity cannot preserve unrelated sessions"
+                    : std::string(runtime::session_restore_skip_reason_name(skip.reason));
             if (skip.import_reason != runtime::ContinuationImportSkipReason::None) {
                 detail += " (";
                 detail += runtime::continuation_import_skip_reason_name(skip.import_reason);
@@ -725,7 +756,7 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
             if (skip.reclaimed != 0 || skip.reclaim_declined != 0) {
                 // Distinguishes "the pool cannot hold this session at all" from "the pool is
                 // full of sessions that are not safe to drop yet".
-                detail += " after reclaiming " + std::to_string(skip.reclaimed) + ", kept " +
+                detail += " after reclaiming " + std::to_string(reclaimed_total) + ", kept " +
                           std::to_string(skip.reclaim_declined) + " unreproducible";
             }
             write_console_log(ConsoleLogLevel::Warning,
@@ -733,6 +764,13 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
                                   std::string(session_sha256.substr(0, 12)) + ": " + detail);
             return false;
         }
+        write_console_log(ConsoleLogLevel::Warning,
+                          "checkpoint restore declined for session " +
+                              std::string(session_sha256.substr(0, 12)) + ": reached the " +
+                              std::to_string(max_attempts) +
+                              "-attempt catalog progress bound after reclaiming " +
+                              std::to_string(reclaimed_total) + " resident(s)");
+        return false;
     } catch (const std::exception& error) {
         // A restore that fails here surfaces to the client as previous_response_not_found;
         // the cause must be diagnosable from the server log.

@@ -8847,8 +8847,16 @@ ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReade
                 release_states();
                 return refuse(runtime::ContinuationImportSkipReason::StateImportFailed);
             }
-            CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream));
             states.push_back(*state);
+            try {
+                CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream));
+            } catch (...) {
+                // The imported handle owns a host-state slot before the transfer settles. Keep
+                // it in the release set so a transient CUDA error cannot become permanent slot
+                // exhaustion that later restore attempts misclassify as reclaimable pressure.
+                release_states();
+                throw;
+            }
         }
 
         // kv_reason carries the finest gate the extent restore reached; the lambda's catch-all
