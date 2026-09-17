@@ -3,8 +3,8 @@
 One runtime for the RTX 4090 (`sm_89`) and RTX 3090 (`sm_86`) lanes, built from mainline
 `port/native-lanes-on-mainline` rather than the two divergent lane branches. The package carries
 the same context cache, warm arrival across a restart, and streamed verified-or-refused restore
-that ship on the RTX 5090 container lane, with the Windows platform code (D3D12 residency arena,
-DirectStorage read queue) and the MSVC build of the host tree.
+that ship on the RTX 5090 container lane, with Windows platform support, the DirectStorage read
+queue, and the MSVC build of the host tree.
 
 Each lane installs into its own isolated state root through `Install-Release.ps1`, runs one
 authenticated request at a time on a loopback or Tailscale address under a scheduled task owned by
@@ -20,9 +20,13 @@ the restorable token bound and export refuses a session larger than that bound. 
 profile is unchanged. No smaller-host deployment profile is qualified by this change.
 
 When shared capacity blocks restore, the engine may reclaim another inactive resident session
-whose checkpoint is current. A resident session ahead of its checkpoint is saved first; every
-retry reads from a fresh verified checkpoint reader. Reclaim trades a later restore for resident
-memory, not an unsaved turn. Automatic checkpointing remains best effort under live traffic;
+whose checkpoint is current. The verified generation stays pinned against quota eviction for
+the entire restore, including saves of later victims. A resident session ahead of its checkpoint
+is saved and pinned first; a refused save leaves that resident intact. Every retry reads from a
+fresh checkpoint reader, and retries require progress rather than a fixed attempt cutoff. State
+image slots, KV capacity, and continuation slots all participate in guarded reclaim. Normal disk
+quota retention still applies after the restore finishes. Automatic checkpointing remains best
+effort under live traffic;
 explicit checkpoint requests and graceful managed shutdown provide the observable save outcome.
 
 The Responses endpoint continues to reject unsupported cache hints, reasoning summaries, and

@@ -810,6 +810,8 @@ public:
     // been released. Set it to released_continuations.size() + N to demand N reclaims, which is
     // how the real host KV arena behaves - releasing a continuation frees its extents.
     std::size_t releases_required_for_import = 0;
+    ninfer::runtime::ContinuationImportSkipReason shared_capacity_refusal =
+        ninfer::runtime::ContinuationImportSkipReason::KvHostCapacityExhausted;
 
     [[nodiscard]] std::optional<FakeRestoredContinuation>
     restore_continuation(const ninfer::runtime::ContinuationCheckpointReader&,
@@ -823,8 +825,7 @@ public:
         }
         if (released_continuations.size() < releases_required_for_import) {
             if (skip_reason != nullptr) {
-                *skip_reason =
-                    ninfer::runtime::ContinuationImportSkipReason::KvHostCapacityExhausted;
+                *skip_reason = shared_capacity_refusal;
             }
             return std::nullopt;
         }
@@ -2325,7 +2326,8 @@ void test_restore_reclaims_reproducible_sessions() {
             .has_value();
     };
 
-    {
+    for (const ImportReason capacity_reason :
+         {ImportReason::KvHostCapacityExhausted, ImportReason::StateImportFailed}) {
         // Two sessions are reproducible, one is not. The pool needs one release: the oldest
         // *reproducible* session goes, not the oldest session and not the newest. The checkpoint
         // reader is spent by the refused attempt, so the manager frees room and reports it rather
@@ -2336,6 +2338,7 @@ void test_restore_reclaims_reproducible_sessions() {
         seed_session(manager, program, 22, 2, "resp_22");
         seed_session(manager, program, 33, 3, "resp_33");
         program.releases_required_for_import = program.released_continuations.size() + 1;
+        program.shared_capacity_refusal = capacity_reason;
         const auto reproducible = [](const FakeCacheSessionKey& session, std::string_view tag) {
             return (session == FakeCacheSessionKey{22} && tag == "resp_22") ||
                    (session == FakeCacheSessionKey{33} && tag == "resp_33");
@@ -2347,7 +2350,7 @@ void test_restore_reclaims_reproducible_sessions() {
                                                     reproducible),
                 "a full pool accepted an import it had no room for");
         require(first.reason == Reason::ProgramRejected &&
-                    first.import_reason == ImportReason::KvHostCapacityExhausted,
+                    first.import_reason == capacity_reason,
                 "the refused attempt did not name the capacity gate");
         require(first.reclaimed == 1 && first.reclaim_declined == 1,
                 "reclaim did not report exactly one drop and one unprovable session");

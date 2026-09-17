@@ -245,30 +245,61 @@ namespace {
 //
 // A live session that has taken a turn since its last save is exactly that unprovable case, and
 // it is the common one: the caller collects those names so it can bring them up to date and try
-// again, which is what makes the guarantee unconditional rather than a matter of timing.
+// again. If saving or pinning fails, the resident continuation remains untouched.
 class StoredCheckpointOracle final : public runtime::ReclaimableSessionOracle {
 public:
-    StoredCheckpointOracle(const SessionCheckpointStore& store,
+    struct Candidate {
+        std::string session_sha256;
+        std::string checkpoint_tag;
+    };
+
+    StoredCheckpointOracle(SessionCheckpointStore& store,
                            const nlohmann::json& fingerprint) noexcept
         : store_(store), fingerprint_(fingerprint) {}
+
+    void begin_attempt() noexcept { stale_.clear(); }
 
     [[nodiscard]] bool recoverable(std::string_view session_sha256,
                                    std::string_view checkpoint_tag) const noexcept override {
         try {
-            if (store_.covers(session_sha256, fingerprint_, checkpoint_tag)) { return true; }
-            if (std::find(stale_.begin(), stale_.end(), session_sha256) == stale_.end()) {
-                stale_.emplace_back(session_sha256);
+            const auto matches = [&](const Candidate& candidate) {
+                return candidate.session_sha256 == session_sha256 &&
+                       candidate.checkpoint_tag == checkpoint_tag;
+            };
+            if (std::any_of(pinned_.begin(), pinned_.end(),
+                            [&](const PinnedCheckpoint& pin) { return matches(pin.identity); })) {
+                return true;
+            }
+            // load verifies the response snapshot and payload inventory. Retaining its reader
+            // pins the generation against quota eviction until the entire restore finishes.
+            auto loaded = store_.load(session_sha256, fingerprint_, checkpoint_tag);
+            if (loaded.checkpoint &&
+                loaded.checkpoint->responses.latest_response_id == checkpoint_tag) {
+                auto& checkpoint = *loaded.checkpoint;
+                pinned_.push_back({{std::move(checkpoint.responses.client_session_sha256),
+                                    std::move(checkpoint.responses.latest_response_id)},
+                                   std::move(checkpoint.engine)});
+                return true;
+            }
+            if (std::none_of(stale_.begin(), stale_.end(), matches)) {
+                stale_.push_back({std::string(session_sha256), std::string(checkpoint_tag)});
             }
         } catch (...) {}
         return false;
     }
 
-    [[nodiscard]] const std::vector<std::string>& stale() const noexcept { return stale_; }
+    [[nodiscard]] const std::vector<Candidate>& stale() const noexcept { return stale_; }
 
 private:
-    const SessionCheckpointStore& store_;
+    struct PinnedCheckpoint {
+        Candidate identity;
+        std::shared_ptr<const runtime::ContinuationCheckpointReader> reader;
+    };
+
+    SessionCheckpointStore& store_;
     const nlohmann::json& fingerprint_;
-    mutable std::vector<std::string> stale_;
+    mutable std::vector<Candidate> stale_;
+    mutable std::vector<PinnedCheckpoint> pinned_;
 };
 
 // The lifecycle passes the artifact digest it hashed at deployment time. The serve
@@ -627,18 +658,19 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
         // and the engine consumes it before it can discover that the pool is full. An attempt is
         // worth repeating only when something actually changed: the engine dropped a resident
         // session, or this layer brought a stale one up to date so the engine may drop it next
-        // time. Bounded by the catalog: every pass frees at least one resident session.
-        constexpr unsigned kMaxAttempts = 16;
-        unsigned reclaimed_total        = 0;
-        for (unsigned attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        // time. Pins survive all attempts, including saves of later victims. Every retry either
+        // releases a resident or pins a previously unpinned one, so the finite catalog bounds
+        // the loop without an arbitrary cutoff between the final release and its retry.
+        unsigned reclaimed_total = 0;
+        StoredCheckpointOracle reclaim(*checkpoint_store_, checkpoint_runtime_fingerprint_);
+        for (;;) {
+            reclaim.begin_attempt();
             SessionCheckpointLoadResult loaded = checkpoint_store_->load(
                 session_sha256, checkpoint_runtime_fingerprint_, required_response_id);
             if (!loaded.checkpoint) { return false; }
             VerifiedSessionCheckpoint checkpoint = std::move(*loaded.checkpoint);
             const std::string checkpoint_tag     = checkpoint.responses.latest_response_id;
             runtime::SessionRestoreSkipDetail skip;
-            const StoredCheckpointOracle reclaim(*checkpoint_store_,
-                                                 checkpoint_runtime_fingerprint_);
             const bool restored = responses.restore_session(std::move(checkpoint.responses), [&] {
                 return runtime::CheckpointEngineAccess::restore_session(
                            *engine_, session_sha256, checkpoint_tag, *checkpoint.engine,
@@ -666,8 +698,11 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
             if (capacity_bound && skip.reclaimed != 0) { continue; }
             if (capacity_bound && !reclaim.stale().empty()) {
                 std::size_t saved = 0;
-                for (const std::string& stale : reclaim.stale()) {
-                    if (save_checkpoint_locked(stale, responses, nullptr)) { ++saved; }
+                for (const auto& stale : reclaim.stale()) {
+                    if (save_checkpoint_locked(stale.session_sha256, responses, nullptr) &&
+                        reclaim.recoverable(stale.session_sha256, stale.checkpoint_tag)) {
+                        ++saved;
+                    }
                 }
                 write_console_log(ConsoleLogLevel::Info,
                                   "checkpoint restore for session " +
@@ -698,13 +733,6 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
                                   std::string(session_sha256.substr(0, 12)) + ": " + detail);
             return false;
         }
-        // Every retried pass frees at least one resident session, so the budget cannot be spent
-        // unless the catalog is larger than it: report rather than loop forever.
-        write_console_log(ConsoleLogLevel::Warning,
-                          "checkpoint restore declined for session " +
-                              std::string(session_sha256.substr(0, 12)) + ": reclaim did not " +
-                              "free room within " + std::to_string(kMaxAttempts) + " attempts");
-        return false;
     } catch (const std::exception& error) {
         // A restore that fails here surfaces to the client as previous_response_not_found;
         // the cause must be diagnosable from the server log.

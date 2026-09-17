@@ -194,6 +194,7 @@ continuation_import_skip_reason_name(ContinuationImportSkipReason reason) noexce
 [[nodiscard]] constexpr bool
 contended_import_capacity(ContinuationImportSkipReason reason) noexcept {
     switch (reason) {
+    case ContinuationImportSkipReason::StateImportFailed:
     case ContinuationImportSkipReason::KvAddressSpaceExhausted:
     case ContinuationImportSkipReason::KvLogicalPagesExhausted:
     case ContinuationImportSkipReason::KvHostCapacityExhausted:
