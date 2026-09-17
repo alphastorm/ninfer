@@ -147,6 +147,11 @@ private:
         ReadWrite,
     };
 
+    // Caller already holds checkpoint_mutex_.
+    [[nodiscard]] std::optional<SessionCheckpointSaveResult>
+    save_checkpoint_locked(std::string_view session_sha256, ResponseStore& responses,
+                           runtime::SessionCheckpointSkipDetail* skip);
+
     enum class DeadlinePolicy : std::uint8_t {
         ClientPendingTimeout,
         UnboundedStartup,

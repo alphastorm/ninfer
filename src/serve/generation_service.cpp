@@ -242,6 +242,10 @@ namespace {
 // refusing, but only the ones this store can already reproduce: the current generation must be
 // fingerprint-compatible and already hold the tag the engine is carrying. Anything unprovable -
 // including a store that throws - is kept, so reclaim can cost latency but never context.
+//
+// A live session that has taken a turn since its last save is exactly that unprovable case, and
+// it is the common one: the caller collects those names so it can bring them up to date and try
+// again, which is what makes the guarantee unconditional rather than a matter of timing.
 class StoredCheckpointOracle final : public runtime::ReclaimableSessionOracle {
 public:
     StoredCheckpointOracle(const SessionCheckpointStore& store,
@@ -251,13 +255,20 @@ public:
     [[nodiscard]] bool recoverable(std::string_view session_sha256,
                                    std::string_view checkpoint_tag) const noexcept override {
         try {
-            return store_.covers(session_sha256, fingerprint_, checkpoint_tag);
-        } catch (...) { return false; }
+            if (store_.covers(session_sha256, fingerprint_, checkpoint_tag)) { return true; }
+            if (std::find(stale_.begin(), stale_.end(), session_sha256) == stale_.end()) {
+                stale_.emplace_back(session_sha256);
+            }
+        } catch (...) {}
+        return false;
     }
+
+    [[nodiscard]] const std::vector<std::string>& stale() const noexcept { return stale_; }
 
 private:
     const SessionCheckpointStore& store_;
     const nlohmann::json& fingerprint_;
+    mutable std::vector<std::string> stale_;
 };
 
 // The lifecycle passes the artifact digest it hashed at deployment time. The serve
@@ -578,6 +589,14 @@ GenerationService::save_checkpoint(std::string_view session_sha256, ResponseStor
         return std::nullopt;
     }
     std::lock_guard lock(checkpoint_mutex_);
+    return save_checkpoint_locked(session_sha256, responses, skip);
+}
+
+// Caller holds checkpoint_mutex_. Restore needs this to bring a session's stored copy up to date
+// before the engine may drop it, and re-taking the mutex there would deadlock.
+std::optional<SessionCheckpointSaveResult>
+GenerationService::save_checkpoint_locked(std::string_view session_sha256, ResponseStore& responses,
+                                          runtime::SessionCheckpointSkipDetail* skip) {
     std::optional<ResponseStoreSnapshot> snapshot = responses.snapshot_session(session_sha256);
     if (!snapshot) {
         if (skip != nullptr) {
@@ -604,30 +623,54 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
     if (!checkpoint_store_) { return false; }
     std::lock_guard lock(checkpoint_mutex_);
     try {
-        SessionCheckpointLoadResult loaded = checkpoint_store_->load(
-            session_sha256, checkpoint_runtime_fingerprint_, required_response_id);
-        if (!loaded.checkpoint) { return false; }
-        VerifiedSessionCheckpoint checkpoint = std::move(*loaded.checkpoint);
-        const std::string checkpoint_tag     = checkpoint.responses.latest_response_id;
-        runtime::SessionRestoreSkipDetail skip;
-        const StoredCheckpointOracle reclaim(*checkpoint_store_, checkpoint_runtime_fingerprint_);
-        const bool restored = responses.restore_session(std::move(checkpoint.responses), [&] {
-            return runtime::CheckpointEngineAccess::restore_session(
-                       *engine_, session_sha256, checkpoint_tag, *checkpoint.engine,
-                       checkpoint.expected_engine, checkpoint_store_->options().staging_bytes,
-                       &skip, &reclaim)
-                .has_value();
-        });
-        if (restored && skip.reclaimed != 0) {
-            // The session only fit because other sessions were dropped. Their next request pays
-            // a restore, so the operator needs to see that the pool is running at its limit.
-            write_console_log(ConsoleLogLevel::Info,
-                              "checkpoint restore for session " +
-                                  std::string(session_sha256.substr(0, 12)) + " reclaimed " +
-                                  std::to_string(skip.reclaimed) +
-                                  " checkpoint-backed session(s)");
-        }
-        if (!restored) {
+        // One retry, and only after making progress the first attempt proved was needed: the
+        // engine had room to spare except for sessions whose stored copy had fallen a turn
+        // behind. Saving those is what lets the engine drop them without losing anything.
+        for (unsigned attempt = 0;; ++attempt) {
+            SessionCheckpointLoadResult loaded = checkpoint_store_->load(
+                session_sha256, checkpoint_runtime_fingerprint_, required_response_id);
+            if (!loaded.checkpoint) { return false; }
+            VerifiedSessionCheckpoint checkpoint = std::move(*loaded.checkpoint);
+            const std::string checkpoint_tag     = checkpoint.responses.latest_response_id;
+            runtime::SessionRestoreSkipDetail skip;
+            const StoredCheckpointOracle reclaim(*checkpoint_store_,
+                                                 checkpoint_runtime_fingerprint_);
+            const bool restored = responses.restore_session(std::move(checkpoint.responses), [&] {
+                return runtime::CheckpointEngineAccess::restore_session(
+                           *engine_, session_sha256, checkpoint_tag, *checkpoint.engine,
+                           checkpoint.expected_engine, checkpoint_store_->options().staging_bytes,
+                           &skip, &reclaim)
+                    .has_value();
+            });
+            if (restored) {
+                if (skip.reclaimed != 0) {
+                    // The session only fit because others were dropped. Their next request pays a
+                    // restore, so the operator needs to see the pool running at its limit.
+                    write_console_log(ConsoleLogLevel::Info,
+                                      "checkpoint restore for session " +
+                                          std::string(session_sha256.substr(0, 12)) +
+                                          " reclaimed " + std::to_string(skip.reclaimed) +
+                                          " checkpoint-backed session(s)");
+                }
+                return true;
+            }
+            const bool capacity_bound =
+                skip.reason == runtime::SessionRestoreSkipReason::ProgramRejected
+                    ? runtime::contended_import_capacity(skip.import_reason)
+                    : skip.reason == runtime::SessionRestoreSkipReason::CatalogFull;
+            if (attempt == 0 && capacity_bound && !reclaim.stale().empty()) {
+                std::size_t saved = 0;
+                for (const std::string& stale : reclaim.stale()) {
+                    if (save_checkpoint_locked(stale, responses, nullptr)) { ++saved; }
+                }
+                write_console_log(ConsoleLogLevel::Info,
+                                  "checkpoint restore for session " +
+                                      std::string(session_sha256.substr(0, 12)) + " saved " +
+                                      std::to_string(saved) + " of " +
+                                      std::to_string(reclaim.stale().size()) +
+                                      " resident session(s) to make room");
+                if (saved != 0) { continue; }
+            }
             // A decline used to read as "the engine did not accept the checkpointed
             // continuation", which cannot distinguish a capacity bound from a drifted binding.
             // Name the gate, and the target's import gate when it reported one
@@ -647,8 +690,8 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
             write_console_log(ConsoleLogLevel::Warning,
                               "checkpoint restore declined for session " +
                                   std::string(session_sha256.substr(0, 12)) + ": " + detail);
+            return false;
         }
-        return restored;
     } catch (const std::exception& error) {
         // A restore that fails here surfaces to the client as previous_response_not_found;
         // the cause must be diagnosable from the server log.
