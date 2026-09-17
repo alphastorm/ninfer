@@ -30,6 +30,10 @@ quota retention still applies after the restore finishes. Automatic checkpointin
 effort under live traffic;
 explicit checkpoint requests and graceful managed shutdown provide the observable save outcome.
 
+The unauthenticated `/health` route now reflects the engine worker's latched state. It returns
+`503 {"status":"error"}` after a fatal worker failure or once shutdown begins, while preserving
+`200 {"status":"ok"}` before model attachment and during normal GPU work.
+
 The Responses endpoint continues to reject unsupported cache hints, reasoning summaries, and
 encrypted reasoning requests. A client must omit options this runtime does not implement;
 server-side continuation is not a substitute for a requested encrypted output field.

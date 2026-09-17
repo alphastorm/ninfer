@@ -100,6 +100,8 @@ public:
     [[nodiscard]] MemorySummary memory_summary() const;
     [[nodiscard]] RuntimeStats runtime_stats() const;
     [[nodiscard]] MediaCacheSummary media_cache_summary() const;
+    // False once the worker has failed or begun shutting down; either state is permanent.
+    [[nodiscard]] bool healthy() const;
     void reset_memory_peaks() noexcept;
 
 private:

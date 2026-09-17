@@ -481,8 +481,12 @@ void HttpServer::register_routes() {
             }
         });
 
-    server_.Get("/health", [](const httplib::Request&, httplib::Response& res) {
-        res.set_content(nlohmann::json{{"status", "ok"}}.dump(), "application/json");
+    server_.Get("/health", [this](const httplib::Request&, httplib::Response& res) {
+        // Keep bind-before-load observable, but never mask a latched worker failure or shutdown.
+        const bool ready = service_ == nullptr || service_->engine_healthy();
+        res.status        = ready ? 200 : 503;
+        res.set_content(nlohmann::json{{"status", ready ? "ok" : "error"}}.dump(),
+                        "application/json");
     });
     server_.Get("/v1/ninfer/status", [this](const httplib::Request& req, httplib::Response& res) {
         handle_status(req, res);
