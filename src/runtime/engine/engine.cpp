@@ -256,7 +256,7 @@ typename Core::CacheSessionKey checkpoint_session_key(std::string_view digest) {
         })) {
         throw std::invalid_argument("checkpoint session digest must be 64 lowercase hex bytes");
     }
-    constexpr std::string_view prefix = "http:";
+    constexpr std::string_view prefix = runtime::kCheckpointSessionKeyScheme;
     typename Core::CacheSessionKey key;
     if (prefix.size() + digest.size() > key.bytes.size()) {
         throw std::length_error("checkpoint session key exceeds target capacity");
@@ -328,7 +328,7 @@ runtime::CheckpointEngineAccess::restore_session(
     Engine& engine, std::string_view session_sha256, std::string checkpoint_tag,
     const runtime::ContinuationCheckpointReader& reader,
     runtime::ContinuationCheckpointStats expected, std::size_t staging_bytes,
-    runtime::SessionRestoreSkipDetail* skip) {
+    runtime::SessionRestoreSkipDetail* skip, const runtime::ReclaimableSessionOracle* reclaim) {
     if (engine.impl_ == nullptr || checkpoint_tag.empty()) {
         if (skip != nullptr) { skip->reason = runtime::SessionRestoreSkipReason::EmptyTag; }
         return std::nullopt;
@@ -345,7 +345,7 @@ runtime::CheckpointEngineAccess::restore_session(
                 using Core = typename CorePointer::element_type;
                 return core->restore_session_checkpoint(
                     checkpoint_session_key<Core>(session_sha256), std::move(checkpoint_tag), reader,
-                    expected, staging_bytes, skip);
+                    expected, staging_bytes, skip, reclaim);
             }
         },
         engine.impl_->core);

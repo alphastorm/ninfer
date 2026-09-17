@@ -238,6 +238,28 @@ private:
 
 namespace {
 
+// Lets a restore that has run out of shared engine capacity drop other live sessions instead of
+// refusing, but only the ones this store can already reproduce: the current generation must be
+// fingerprint-compatible and already hold the tag the engine is carrying. Anything unprovable -
+// including a store that throws - is kept, so reclaim can cost latency but never context.
+class StoredCheckpointOracle final : public runtime::ReclaimableSessionOracle {
+public:
+    StoredCheckpointOracle(const SessionCheckpointStore& store,
+                           const nlohmann::json& fingerprint) noexcept
+        : store_(store), fingerprint_(fingerprint) {}
+
+    [[nodiscard]] bool recoverable(std::string_view session_sha256,
+                                   std::string_view checkpoint_tag) const noexcept override {
+        try {
+            return store_.covers(session_sha256, fingerprint_, checkpoint_tag);
+        } catch (...) { return false; }
+    }
+
+private:
+    const SessionCheckpointStore& store_;
+    const nlohmann::json& fingerprint_;
+};
+
 // The lifecycle passes the artifact digest it hashed at deployment time. The serve
 // re-hashes the bytes it will actually load and refuses a mismatch, so a mutated
 // bind-mount source cannot restart under a stale identity and accept checkpoints
@@ -588,13 +610,23 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
         VerifiedSessionCheckpoint checkpoint = std::move(*loaded.checkpoint);
         const std::string checkpoint_tag     = checkpoint.responses.latest_response_id;
         runtime::SessionRestoreSkipDetail skip;
+        const StoredCheckpointOracle reclaim(*checkpoint_store_, checkpoint_runtime_fingerprint_);
         const bool restored = responses.restore_session(std::move(checkpoint.responses), [&] {
             return runtime::CheckpointEngineAccess::restore_session(
                        *engine_, session_sha256, checkpoint_tag, *checkpoint.engine,
                        checkpoint.expected_engine, checkpoint_store_->options().staging_bytes,
-                       &skip)
+                       &skip, &reclaim)
                 .has_value();
         });
+        if (restored && skip.reclaimed != 0) {
+            // The session only fit because other sessions were dropped. Their next request pays
+            // a restore, so the operator needs to see that the pool is running at its limit.
+            write_console_log(ConsoleLogLevel::Info,
+                              "checkpoint restore for session " +
+                                  std::string(session_sha256.substr(0, 12)) + " reclaimed " +
+                                  std::to_string(skip.reclaimed) +
+                                  " checkpoint-backed session(s)");
+        }
         if (!restored) {
             // A decline used to read as "the engine did not accept the checkpointed
             // continuation", which cannot distinguish a capacity bound from a drifted binding.
@@ -605,6 +637,12 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
                 detail += " (";
                 detail += runtime::continuation_import_skip_reason_name(skip.import_reason);
                 detail += ")";
+            }
+            if (skip.reclaimed != 0 || skip.reclaim_declined != 0) {
+                // Distinguishes "the pool cannot hold this session at all" from "the pool is
+                // full of sessions that are not safe to drop yet".
+                detail += " after reclaiming " + std::to_string(skip.reclaimed) + ", kept " +
+                          std::to_string(skip.reclaim_declined) + " unreproducible";
             }
             write_console_log(ConsoleLogLevel::Warning,
                               "checkpoint restore declined for session " +

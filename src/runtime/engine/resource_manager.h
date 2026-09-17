@@ -11,6 +11,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <optional>
 #include <span>
@@ -718,14 +719,37 @@ public:
         return stats;
     }
 
+    // Nothing is reclaimable unless the caller proves otherwise. Restores that predate the
+    // reclaim path keep the original behaviour: refuse rather than drop a live continuation.
+    struct NeverReclaimable {
+        [[nodiscard]] bool operator()(const CacheSessionKey&, std::string_view) const noexcept {
+            return false;
+        }
+    };
+
+    // reclaimable(session, tag) answers whether that live session's checkpoint is current on
+    // disk. When a shared pool - host KV bytes, address rows, logical pages, continuation slots,
+    // catalog slots - is the only thing standing between this checkpoint and a restore, drop the
+    // least recently published session that answers true and try again. Dropping one costs a
+    // later restore; refusing costs the caller its context (alphastorm/omp-ninfer#40).
+    template <typename Reclaimable = NeverReclaimable>
     [[nodiscard]] std::optional<ContinuationCheckpointStats> restore_session_checkpoint(
         Program& program, const CacheSessionKey& session, std::string checkpoint_tag,
         const ContinuationCheckpointReader& reader, ContinuationCheckpointStats expected,
         std::size_t staging_bytes, std::uint64_t publication_order,
-        SessionRestoreSkipDetail* skip = nullptr) {
+        SessionRestoreSkipDetail* skip = nullptr, Reclaimable&& reclaimable = Reclaimable{}) {
+        std::uint32_t reclaimed = 0;
+        std::uint32_t declined  = 0;
+        const auto note         = [&]() noexcept {
+            if (skip != nullptr) {
+                skip->reclaimed        = reclaimed;
+                skip->reclaim_declined = declined;
+            }
+        };
         const auto refuse = [&](SessionRestoreSkipReason reason)
             -> std::optional<ContinuationCheckpointStats> {
             if (skip != nullptr) { skip->reason = reason; }
+            note();
             return std::nullopt;
         };
         if (!cache_enabled_) { return refuse(SessionRestoreSkipReason::CacheDisabled); }
@@ -765,22 +789,34 @@ public:
             }
             return expected;
         }
-        std::uint32_t slot = kInvalidCatalogSlot;
-        for (std::uint32_t candidate = 0; candidate < catalog_count_; ++candidate) {
-            if (catalog_[candidate].state == CatalogState::Vacant) {
-                slot = candidate;
+        std::uint32_t slot = vacant_catalog_slot();
+        while (slot == kInvalidCatalogSlot) {
+            if (!reclaim_for_restore(program, session, reclaimable, declined)) {
+                return refuse(SessionRestoreSkipReason::CatalogFull);
+            }
+            ++reclaimed;
+            slot = vacant_catalog_slot();
+        }
+
+        // A restored continuation is move-constructible but not move-assignable, so each attempt
+        // gets its own object rather than overwriting the last one.
+        std::optional<typename Package::RestoredContinuation> restored;
+        for (;;) {
+            ContinuationImportSkipReason import_reason = ContinuationImportSkipReason::None;
+            std::optional<typename Package::RestoredContinuation> attempt =
+                program.restore_continuation(reader, staging_bytes, &import_reason);
+            if (attempt) {
+                restored.emplace(std::move(*attempt));
                 break;
             }
+            if (!contended_import_capacity(import_reason) ||
+                !reclaim_for_restore(program, session, reclaimable, declined)) {
+                if (skip != nullptr) { skip->import_reason = import_reason; }
+                return refuse(SessionRestoreSkipReason::ProgramRejected);
+            }
+            ++reclaimed;
         }
-        if (slot == kInvalidCatalogSlot) { return refuse(SessionRestoreSkipReason::CatalogFull); }
-
-        ContinuationImportSkipReason import_reason = ContinuationImportSkipReason::None;
-        std::optional<typename Package::RestoredContinuation> restored =
-            program.restore_continuation(reader, staging_bytes, &import_reason);
-        if (!restored) {
-            if (skip != nullptr) { skip->import_reason = import_reason; }
-            return refuse(SessionRestoreSkipReason::ProgramRejected);
-        }
+        note();
         if (restored->stats != expected) {
             (void)program.release_continuation(std::move(restored->handle));
             return refuse(SessionRestoreSkipReason::StatsMismatch);
@@ -2267,6 +2303,60 @@ private:
                 entry.revision          = 0;
             }
         }
+    }
+
+    [[nodiscard]] std::uint32_t vacant_catalog_slot() const noexcept {
+        for (std::uint32_t candidate = 0; candidate < catalog_count_; ++candidate) {
+            if (catalog_[candidate].state == CatalogState::Vacant) { return candidate; }
+        }
+        return kInvalidCatalogSlot;
+    }
+
+    // Drops the least recently published catalogued session the caller can prove is already on
+    // disk, freeing its continuation slot, KV addresses, logical pages and host extents. Never
+    // touches the session being restored, an entry with live references, or a binding that has
+    // drifted from its catalog slot. Counts candidates the caller could not prove into declined.
+    template <typename Reclaimable>
+    [[nodiscard]] bool reclaim_for_restore(Program& program, const CacheSessionKey& exclude,
+                                           Reclaimable& reclaimable,
+                                           std::uint32_t& declined) noexcept {
+        std::uint32_t victim       = kInvalidCatalogSlot;
+        std::uint64_t victim_order = 0;
+        declined                   = 0;
+        for (std::uint32_t candidate = 0; candidate < catalog_count_; ++candidate) {
+            CatalogEntry& entry = catalog_[candidate];
+            if (entry.state != CatalogState::Catalogued || !entry.handle || !entry.session ||
+                entry.checkpoint_tag.empty() || entry.active_references != 0 ||
+                entry.summary.active_references != 0 || *entry.session == exclude) {
+                continue;
+            }
+            const std::optional<std::size_t> cell = find_session_cell(*entry.session);
+            if (!cell) { continue; }
+            const SessionIndexEntry& binding = session_index_[*cell];
+            if (binding.state != SessionIndexState::Occupied || binding.slot != candidate ||
+                binding.owner_id != entry.id || binding.revision != entry.revision) {
+                continue;
+            }
+            bool proven = false;
+            try {
+                proven = reclaimable(*entry.session, std::string_view{entry.checkpoint_tag});
+            } catch (...) { proven = false; }
+            if (!proven) {
+                ++declined;
+                continue;
+            }
+            if (victim == kInvalidCatalogSlot || binding.publication_order < victim_order) {
+                victim       = candidate;
+                victim_order = binding.publication_order;
+            }
+        }
+        if (victim == kInvalidCatalogSlot) { return false; }
+        CatalogEntry& entry = catalog_[victim];
+        (void)program.release_continuation(std::move(*entry.handle));
+        entry.handle.reset();
+        erase_session_if_owner(entry.id);
+        clear_catalog_entry(entry);
+        return true;
     }
 
     void refresh_session_owner_revision(std::uint64_t owner_id, std::uint32_t slot,

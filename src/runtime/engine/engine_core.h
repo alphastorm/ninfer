@@ -34,6 +34,17 @@
 
 namespace ninfer::runtime {
 
+// Checkpoint session keys are minted as the session digest behind this scheme prefix. Reclaim
+// has to read the digest back out of a key, so the convention lives in one place.
+inline constexpr std::string_view kCheckpointSessionKeyScheme = "http:";
+
+template <class Key>
+[[nodiscard]] constexpr std::string_view session_key_digest(const Key& key) noexcept {
+    const std::string_view view = key.view();
+    if (!view.starts_with(kCheckpointSessionKeyScheme)) { return {}; }
+    return view.substr(kCheckpointSessionKeyScheme.size());
+}
+
 template <class Instance>
 class EngineCore {
 
@@ -257,11 +268,15 @@ public:
                                              staging_bytes, skip);
     }
 
+    // reclaim, when supplied, lets a restore that runs out of shared capacity drop other
+    // sessions whose checkpoints are already current on disk instead of refusing. The engine
+    // holds session keys, not digests, so the digest the oracle speaks is recovered here.
     [[nodiscard]] std::optional<ContinuationCheckpointStats>
     restore_session_checkpoint(const CacheSessionKey& session, std::string checkpoint_tag,
                                const ContinuationCheckpointReader& reader,
                                ContinuationCheckpointStats expected, std::size_t staging_bytes,
-                               SessionRestoreSkipDetail* skip = nullptr) {
+                               SessionRestoreSkipDetail* skip            = nullptr,
+                               const ReclaimableSessionOracle* reclaim   = nullptr) {
         std::uint64_t publication_order = 0;
         {
             std::lock_guard queue_lock(queue_mutex_);
@@ -271,10 +286,16 @@ public:
             }
             publication_order = next_publication_order_++;
         }
+        const auto recoverable = [reclaim](const CacheSessionKey& key,
+                                           std::string_view tag) noexcept {
+            const std::string_view digest = session_key_digest(key);
+            return reclaim != nullptr && !digest.empty() && reclaim->recoverable(digest, tag);
+        };
         std::scoped_lock lock(execution_mutex_);
         return resources_.restore_session_checkpoint(*instance_.program, session,
                                                      std::move(checkpoint_tag), reader, expected,
-                                                     staging_bytes, publication_order, skip);
+                                                     staging_bytes, publication_order, skip,
+                                                     recoverable);
     }
 
     [[nodiscard]] RuntimeStats runtime_stats() const {

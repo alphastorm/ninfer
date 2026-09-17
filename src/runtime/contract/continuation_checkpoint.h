@@ -188,6 +188,22 @@ continuation_import_skip_reason_name(ContinuationImportSkipReason reason) noexce
     return "unknown";
 }
 
+// True when the gate names a pool shared across live continuations rather than a property of the
+// checkpoint being imported. Only these are worth retrying after dropping another session: the
+// rest fail identically no matter how much room is freed.
+[[nodiscard]] constexpr bool
+contended_import_capacity(ContinuationImportSkipReason reason) noexcept {
+    switch (reason) {
+    case ContinuationImportSkipReason::KvAddressSpaceExhausted:
+    case ContinuationImportSkipReason::KvLogicalPagesExhausted:
+    case ContinuationImportSkipReason::KvHostCapacityExhausted:
+    case ContinuationImportSkipReason::ContinuationSlotsExhausted:
+        return true;
+    default:
+        return false;
+    }
+}
+
 // Names the first failed gate when a verified checkpoint is declined at restore. Export has had
 // named gates since alphastorm/ninfer#31; restore returned a bare nullopt, so a decline read as
 // "the engine did not accept the checkpointed continuation" with no way to tell a capacity bound
@@ -241,10 +257,33 @@ session_restore_skip_reason_name(SessionRestoreSkipReason reason) noexcept {
     return "unknown";
 }
 
+// A restore that needs room may drop a *different* live continuation instead of refusing, but
+// only when dropping it loses nothing: that session's own checkpoint must already be current on
+// disk, so its next request restores it. Only the serve layer owns the checkpoint store, so it
+// answers per candidate. Absent oracle means nothing is reclaimable, which is the old behaviour.
+class ReclaimableSessionOracle {
+public:
+    ReclaimableSessionOracle()                                           = default;
+    virtual ~ReclaimableSessionOracle()                                  = default;
+    ReclaimableSessionOracle(const ReclaimableSessionOracle&)            = delete;
+    ReclaimableSessionOracle& operator=(const ReclaimableSessionOracle&) = delete;
+
+    // True when session_sha256's stored checkpoint already covers checkpoint_tag. Must answer
+    // false - never throw - when the store cannot prove it: an unprovable candidate is kept.
+    [[nodiscard]] virtual bool recoverable(std::string_view session_sha256,
+                                           std::string_view checkpoint_tag) const noexcept = 0;
+};
+
 struct SessionRestoreSkipDetail {
     SessionRestoreSkipReason reason = SessionRestoreSkipReason::None;
     // ProgramRejected only: the gate the target's import path reported, when it named one.
     ContinuationImportSkipReason import_reason = ContinuationImportSkipReason::None;
+    // Checkpoint-backed continuations dropped to make room before this outcome. Non-zero on
+    // success means the restore only fit because reclaim ran.
+    std::uint32_t reclaimed = 0;
+    // Reclaimable candidates the oracle declined to confirm, i.e. capacity held by sessions
+    // whose checkpoints are not current. Separates "pool too small" from "nothing safe to drop".
+    std::uint32_t reclaim_declined = 0;
 };
 
 } // namespace ninfer::runtime

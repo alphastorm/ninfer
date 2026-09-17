@@ -28,11 +28,14 @@ public:
                        std::string_view checkpoint_tag, ContinuationCheckpointWriter& writer,
                        std::size_t staging_bytes, SessionCheckpointSkipDetail* skip = nullptr);
 
+    // reclaim is consulted only when a shared capacity gate blocks the import: it decides which
+    // other live sessions may be dropped because their checkpoints are already current on disk.
     [[nodiscard]] static std::optional<ContinuationCheckpointStats>
     restore_session(Engine& engine, std::string_view session_sha256, std::string checkpoint_tag,
                     const ContinuationCheckpointReader& reader,
                     ContinuationCheckpointStats expected, std::size_t staging_bytes,
-                    SessionRestoreSkipDetail* skip = nullptr);
+                    SessionRestoreSkipDetail* skip                = nullptr,
+                    const ReclaimableSessionOracle* reclaim       = nullptr);
 };
 
 } // namespace ninfer::runtime
