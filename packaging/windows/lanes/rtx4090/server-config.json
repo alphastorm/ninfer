@@ -57,6 +57,6 @@
   },
   "runtime_host": {
     "minimum_runtime_memory_mib": 32768,
-    "reason": "the host-KV pool is pinned memory and bounds what restore can admit: a session at the 131,072-token ceiling needs 5.02 GiB of INT8 KV, and restore materialises every checkpointed session into the pool, so two of them need 11264 MiB. Measured on a 32.4 GiB host: 11264 MiB pins with 11.6 GiB still free, 12288 MiB fails cudaMallocHost."
+    "reason": "the host-KV pool is pinned memory and must hold the session being restored: a session at the 131,072-token ceiling needs 5.02 GiB of INT8 KV. Restore may reclaim another resident session only when its latest checkpoint is reproducible. Retain the qualified 11264 MiB allocation and 32768 MiB host floor rather than declare an unmeasured smaller-host profile. On the measured 32.4 GiB host, 11264 MiB pins with 11.6 GiB still free; 12288 MiB fails cudaMallocHost. Automatic checkpoints remain best effort under live traffic."
   }
 }

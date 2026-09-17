@@ -632,23 +632,10 @@ void parse_reasoning(const Json& body, ResponsesRequest& out) {
     const Json& reasoning = body.at("reasoning");
     if (!reasoning.is_object()) { bad_request("reasoning must be an object", "reasoning"); }
     for (auto it = reasoning.begin(); it != reasoning.end(); ++it) {
-        if (it.key() == "effort" || it.value().is_null()) { continue; }
-        // summary=auto asks for a summary only if the provider has one. This engine streams its
-        // raw reasoning instead of synthesising a summary, so auto is honoured by emitting none;
-        // concise and detailed name a shape it cannot produce (alphastorm/omp-ninfer#43).
-        if (it.key() == "summary") {
-            if (!it.value().is_string()) {
-                bad_request("reasoning.summary must be a string", "reasoning");
-            }
-            if (it.value().get<std::string>() != "auto") {
-                bad_request("reasoning.summary must be 'auto'; this server emits raw reasoning "
-                            "rather than synthesised summaries",
-                            "reasoning", "reasoning_option_not_supported");
-            }
-            continue;
+        if (it.key() != "effort" && !it.value().is_null()) {
+            bad_request("reasoning." + it.key() + " is not supported", "reasoning",
+                        "reasoning_option_not_supported");
         }
-        bad_request("reasoning." + it.key() + " is not supported", "reasoning",
-                    "reasoning_option_not_supported");
     }
     if (!reasoning.contains("effort") || reasoning.at("effort").is_null()) { return; }
     if (!reasoning.at("effort").is_string()) {
@@ -729,26 +716,10 @@ void reject_unknown_top_level(const Json& body) {
 
 void reject_server_managed_features(const Json& body) {
     for (const char* key : {"context_management", "conversation", "max_tool_calls", "moderation",
-                            "prompt", "prompt_cache_options", "prompt_cache_retention",
-                            "safety_identifier", "user"}) {
+                            "prompt", "prompt_cache_key", "prompt_cache_options",
+                            "prompt_cache_retention", "safety_identifier", "user"}) {
         if (body.contains(key) && !body.at(key).is_null()) {
             bad_request(std::string(key) + " is not supported", key, "parameter_not_supported");
-        }
-    }
-    // prompt_cache_key is an advisory affinity hint: it asks the provider to route requests that
-    // share a prefix to the same cache. One appliance has one content-addressed cache, so the
-    // hint is satisfied by construction and refusing it only broke stock clients
-    // (alphastorm/omp-ninfer#43). The retention and options siblings stay refused because they
-    // promise a policy this server does not implement.
-    if (body.contains("prompt_cache_key") && !body.at("prompt_cache_key").is_null()) {
-        const Json& key = body.at("prompt_cache_key");
-        if (!key.is_string() || key.get<std::string>().empty()) {
-            bad_request("prompt_cache_key must be a non-empty string", "prompt_cache_key",
-                        "invalid_value");
-        }
-        if (key.get<std::string>().size() > 512) {
-            bad_request("prompt_cache_key must be at most 512 characters", "prompt_cache_key",
-                        "invalid_value");
         }
     }
     if (body.contains("background") && !body.at("background").is_null()) {
@@ -762,23 +733,9 @@ void reject_server_managed_features(const Json& body) {
     }
     if (body.contains("include") && !body.at("include").is_null()) {
         if (!body.at("include").is_array()) { bad_request("include must be an array", "include"); }
-        // reasoning.encrypted_content asks for reasoning the caller can carry itself. A stored
-        // response already keeps it server-side and replays it through previous_response_id, so
-        // the guarantee holds; a store=false caller genuinely needs the payload, and this engine
-        // emits reasoning as plaintext reasoning_text rather than an encrypted blob.
-        const bool stored = optional_bool(body, "store", true);
-        for (const Json& entry : body.at("include")) {
-            if (!entry.is_string()) { bad_request("include entries must be strings", "include"); }
-            const std::string value = entry.get<std::string>();
-            if (value != "reasoning.encrypted_content") {
-                bad_request("additional response fields are not supported", "include",
-                            "include_not_supported");
-            }
-            if (!stored) {
-                bad_request("reasoning.encrypted_content requires store=true; this server replays "
-                            "reasoning through previous_response_id",
-                            "include", "include_not_supported");
-            }
+        if (!body.at("include").empty()) {
+            bad_request("additional response fields are not supported", "include",
+                        "include_not_supported");
         }
     }
     if (body.contains("parallel_tool_calls") && !body.at("parallel_tool_calls").is_null()) {

@@ -690,70 +690,23 @@ int test_explicit_rejections() {
     return failures;
 }
 
-// A stock upstream client sends three fields this server used to refuse outright, which made it
-// unusable without a patched client (alphastorm/omp-ninfer#43). Each is accepted exactly as far
-// as this deployment genuinely satisfies it, and no further.
-int test_stock_client_request_shape() {
+// A client option must not be accepted when the requested output is not implemented.
+int test_unsupported_client_fields() {
     const Json base = {{"model", "qwen3.6-27b"}, {"input", "hello"}, {"max_output_tokens", 32}};
-    int failures    = 0;
-
-    Json hinted                = base;
-    hinted["prompt_cache_key"] = "agent-session-7f3a";
-    failures += check(api_code([&] { (void)parse_responses_request(hinted, limits()); }).empty(),
-                      "prompt cache affinity hint accepted");
-
-    Json empty_hint                = base;
-    empty_hint["prompt_cache_key"] = "";
-    failures += check(api_code([&] { (void)parse_responses_request(empty_hint, limits()); }) ==
-                          "invalid_value",
-                      "empty prompt cache key rejected");
-
-    Json long_hint                = base;
-    long_hint["prompt_cache_key"] = std::string(513, 'k');
-    failures += check(api_code([&] { (void)parse_responses_request(long_hint, limits()); }) ==
-                          "invalid_value",
-                      "oversized prompt cache key rejected");
-
-    Json retention                      = base;
-    retention["prompt_cache_retention"] = "24h";
-    failures += check(api_code([&] { (void)parse_responses_request(retention, limits()); }) ==
-                          "parameter_not_supported",
-                      "cache retention policy still refused");
-
-    Json encrypted       = base;
+    int failures = 0;
+    Json cache_hint = base;
+    cache_hint["prompt_cache_key"] = "client-session";
+    failures += check(api_code([&] { (void)parse_responses_request(cache_hint, limits()); }) ==
+                          "parameter_not_supported", "unimplemented client cache hint refused");
+    Json encrypted = base;
+    encrypted["store"] = true;
     encrypted["include"] = Json::array({"reasoning.encrypted_content"});
-    failures += check(api_code([&] { (void)parse_responses_request(encrypted, limits()); }).empty(),
-                      "stored request may ask for carryable reasoning");
-
-    Json stateless       = encrypted;
-    stateless["store"]   = false;
-    failures += check(api_code([&] { (void)parse_responses_request(stateless, limits()); }) ==
-                          "include_not_supported",
-                      "unstored request cannot be promised reasoning this server never emits");
-
-    Json other_include       = base;
-    other_include["include"] = Json::array({"file_search_call.results"});
-    failures += check(api_code([&] { (void)parse_responses_request(other_include, limits()); }) ==
-                          "include_not_supported",
-                      "other include values still refused");
-
-    Json summary_auto      = base;
-    summary_auto["reasoning"] = Json{{"effort", "low"}, {"summary", "auto"}};
-    failures += check(api_code([&] { (void)parse_responses_request(summary_auto, limits()); })
-                           .empty(),
-                      "best-effort reasoning summary accepted");
-
-    Json summary_detailed      = base;
-    summary_detailed["reasoning"] = Json{{"summary", "detailed"}};
-    failures += check(api_code([&] { (void)parse_responses_request(summary_detailed, limits()); }) ==
-                          "reasoning_option_not_supported",
-                      "a demanded summary shape is still refused");
-
-    Json legacy_summary      = base;
-    legacy_summary["reasoning"] = Json{{"generate_summary", "auto"}};
-    failures += check(api_code([&] { (void)parse_responses_request(legacy_summary, limits()); }) ==
-                          "reasoning_option_not_supported",
-                      "unknown reasoning options still refused");
+    failures += check(api_code([&] { (void)parse_responses_request(encrypted, limits()); }) ==
+                          "include_not_supported", "stored reasoning is not encrypted output");
+    Json summary = base;
+    summary["reasoning"] = Json{{"summary", "auto"}};
+    failures += check(api_code([&] { (void)parse_responses_request(summary, limits()); }) ==
+                          "reasoning_option_not_supported", "raw reasoning is not a requested summary");
     return failures;
 }
 
@@ -1033,7 +986,7 @@ int main() {
     failures += test_typed_items_and_tools();
     failures += test_custom_tools_and_omp_replay();
     failures += test_explicit_rejections();
-    failures += test_stock_client_request_shape();
+    failures += test_unsupported_client_fields();
     failures += test_response_object();
     failures += test_sse_sequence();
     failures += test_sse_function_call();

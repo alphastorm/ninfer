@@ -12,12 +12,19 @@ SYSTEM, and keeps durable session checkpoints under its per-release cache. The l
 engine configuration is bound by hash into the build identity; the lane specification names the
 GPU, architecture, power policy, and task identity the installer enforces.
 
-The lane configuration also sizes the pinned host pools (`context_cache.host_state_slots`,
-`context_cache.host_kv_mib`) for the host that runs the lane. `cudaMallocHost` has to find the
-pages at startup immediately after the controller has read the 18 GB model artifact through the
-file cache, which leaves the free-and-zero list empty: on the 32 GiB RTX 4090 host the 8 GiB
-default Host KV pool with 24 state slots (13.3 GB pinned) failed that allocation on two managed
-starts, while 4 GiB with 24 slots (9.2 GB pinned) starts and serves the whole agent-protocol
-contract. The 64 GiB RTX 3090 host keeps the 8 GiB pool. Host state slots are not a memory
-dial to trade away: at 8 slots the protocol's post-delete continuation fails, so both lanes
-carry 24.
+The lane configuration sizes the pinned host pools (`context_cache.host_state_slots`,
+`context_cache.host_kv_mib`) for the host that runs the lane. The RTX 4090 keeps the qualified
+11,264 MiB Host KV pool, 24 host state slots, and 32,768 MiB runtime-host floor. A 4 GiB pool
+could serve a ceiling-sized session but could not restore its checkpoint; startup now discloses
+the restorable token bound and export refuses a session larger than that bound. The RTX 3090
+profile is unchanged. No smaller-host deployment profile is qualified by this change.
+
+When shared capacity blocks restore, the engine may reclaim another inactive resident session
+whose checkpoint is current. A resident session ahead of its checkpoint is saved first; every
+retry reads from a fresh verified checkpoint reader. Reclaim trades a later restore for resident
+memory, not an unsaved turn. Automatic checkpointing remains best effort under live traffic;
+explicit checkpoint requests and graceful managed shutdown provide the observable save outcome.
+
+The Responses endpoint continues to reject unsupported cache hints, reasoning summaries, and
+encrypted reasoning requests. A client must omit options this runtime does not implement;
+server-side continuation is not a substitute for a requested encrypted output field.
