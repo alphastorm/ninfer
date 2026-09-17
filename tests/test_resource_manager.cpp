@@ -202,11 +202,9 @@ struct FakeContinuationHandle {
     FakeContinuationHandle(FakeContinuationHandle&& other) noexcept
         : id(std::exchange(other.id, 0)), content_key(other.content_key) {}
 
-    FakeContinuationHandle& operator=(FakeContinuationHandle&& other) noexcept {
-        id          = std::exchange(other.id, 0);
-        content_key = other.content_key;
-        return *this;
-    }
+    // Deleted exactly as every target's ContinuationHandle deletes it. A fixture that is more
+    // permissive than the contract lets manager code compile here and fail in the CUDA build.
+    FakeContinuationHandle& operator=(FakeContinuationHandle&&) = delete;
 
     FakeContinuationHandle(const FakeContinuationHandle&)            = delete;
     FakeContinuationHandle& operator=(const FakeContinuationHandle&) = delete;
@@ -808,6 +806,11 @@ public:
     // Set to force a refusal that names an import gate, the way a host-KV capacity bound does.
     std::optional<ninfer::runtime::ContinuationImportSkipReason> forced_import_refusal;
 
+    // Models the pool live continuations share: imports refuse until this many continuations have
+    // been released. Set it to released_continuations.size() + N to demand N reclaims, which is
+    // how the real host KV arena behaves - releasing a continuation frees its extents.
+    std::size_t releases_required_for_import = 0;
+
     [[nodiscard]] std::optional<FakeRestoredContinuation>
     restore_continuation(const ninfer::runtime::ContinuationCheckpointReader&,
                          std::size_t staging_bytes,
@@ -815,6 +818,13 @@ public:
         if (staging_bytes == 0) {
             if (skip_reason != nullptr) {
                 *skip_reason = ninfer::runtime::ContinuationImportSkipReason::NotReady;
+            }
+            return std::nullopt;
+        }
+        if (released_continuations.size() < releases_required_for_import) {
+            if (skip_reason != nullptr) {
+                *skip_reason =
+                    ninfer::runtime::ContinuationImportSkipReason::KvHostCapacityExhausted;
             }
             return std::nullopt;
         }
@@ -2273,6 +2283,144 @@ void test_session_checkpoint_tag_and_restore_identity() {
             "a full continuation catalog did not name CatalogFull");
 }
 
+// A restore must not fail just because other sessions hold the shared pools. When the caller can
+// prove another live session is already on disk, dropping it costs that session a later restore;
+// refusing costs this caller its context outright (alphastorm/omp-ninfer#40).
+void test_restore_reclaims_reproducible_sessions() {
+    class Writer final : public ninfer::runtime::ContinuationCheckpointWriter {
+    public:
+        bool write_file(std::string_view, std::uint64_t, std::uint64_t,
+                        std::span<const std::byte>) override {
+            return true;
+        }
+    } writer;
+
+    class Reader final : public ninfer::runtime::ContinuationCheckpointReader {
+    public:
+        std::optional<std::uint64_t> file_size(std::string_view) const override {
+            return std::nullopt;
+        }
+
+        bool read_file(std::string_view, std::uint64_t, std::span<std::byte>) const override {
+            return false;
+        }
+    } reader;
+
+    using Reason       = ninfer::runtime::SessionRestoreSkipReason;
+    using ImportReason = ninfer::runtime::ContinuationImportSkipReason;
+    const ninfer::runtime::ContinuationCheckpointStats expected{
+        .frontier_tokens = 16, .restored_tokens = 16, .payload_bytes = 64};
+
+    const auto seed_session = [&](FakeManager& manager, FakeProgram& program, std::uint32_t key,
+                                  std::uint64_t order, const std::string& tag) {
+        FakeRequestBasePlan base = make_base(key);
+        base.cache.session_key   = FakeCacheSessionKey{key};
+        const ActiveRequest turn = start_active(manager, program, key, base, order, tag);
+        (void)finish_active(manager, program, turn);
+    };
+    // A session is catalogued exactly while the manager can still export it under its tag.
+    const auto catalogued = [&](FakeManager& manager, FakeProgram& program, std::uint32_t key,
+                                const std::string& tag) {
+        return manager.checkpoint_session(program, FakeCacheSessionKey{key}, tag, writer, 1024)
+            .has_value();
+    };
+
+    {
+        // Two sessions are reproducible, one is not. The pool needs one release: the oldest
+        // *reproducible* session goes, not the oldest session and not the newest.
+        FakeProgram program;
+        FakeManager manager = make_manager(1, 4);
+        seed_session(manager, program, 11, 1, "resp_11");
+        seed_session(manager, program, 22, 2, "resp_22");
+        seed_session(manager, program, 33, 3, "resp_33");
+        program.releases_required_for_import = program.released_continuations.size() + 1;
+
+        ninfer::runtime::SessionRestoreSkipDetail skip;
+        const auto restored = manager.restore_session_checkpoint(
+            program, FakeCacheSessionKey{44}, "resp_44", reader, expected, 1024, 4, &skip,
+            [](const FakeCacheSessionKey& session, std::string_view tag) {
+                return (session == FakeCacheSessionKey{22} && tag == "resp_22") ||
+                       (session == FakeCacheSessionKey{33} && tag == "resp_33");
+            });
+        require(restored && restored->frontier_tokens == 16,
+                "a restore blocked only by pool capacity was refused instead of reclaiming");
+        require(skip.reclaimed == 1 && skip.reclaim_declined == 1,
+                "reclaim did not report exactly one drop and one unprovable session");
+        require(catalogued(manager, program, 11, "resp_11") &&
+                    !catalogued(manager, program, 22, "resp_22") &&
+                    catalogued(manager, program, 33, "resp_33"),
+                "reclaim dropped the wrong session: the oldest reproducible one must go");
+        require(catalogued(manager, program, 44, "resp_44"),
+                "the reclaiming restore did not publish its own session");
+    }
+
+    {
+        // Nothing is provable, so nothing may be dropped: the restore still refuses, and it
+        // refuses without having touched a single live continuation.
+        FakeProgram program;
+        FakeManager manager = make_manager(1, 4);
+        seed_session(manager, program, 11, 1, "resp_11");
+        seed_session(manager, program, 22, 2, "resp_22");
+        const std::size_t released_before    = program.released_continuations.size();
+        program.releases_required_for_import = released_before + 1;
+
+        ninfer::runtime::SessionRestoreSkipDetail skip;
+        const auto restored = manager.restore_session_checkpoint(
+            program, FakeCacheSessionKey{44}, "resp_44", reader, expected, 1024, 3, &skip,
+            [](const FakeCacheSessionKey&, std::string_view) { return false; });
+        require(!restored && skip.reason == Reason::ProgramRejected &&
+                    skip.import_reason == ImportReason::KvHostCapacityExhausted,
+                "an unreclaimable capacity bound did not surface as a named import gate");
+        require(skip.reclaimed == 0 && skip.reclaim_declined == 2,
+                "refusal did not report both sessions as unprovable");
+        require(program.released_continuations.size() == released_before &&
+                    catalogued(manager, program, 11, "resp_11") &&
+                    catalogued(manager, program, 22, "resp_22"),
+                "a refused restore destroyed live context it could not prove was on disk");
+    }
+
+    {
+        // A session with an unfinished turn is never a candidate, however reproducible the
+        // caller claims it is: dropping it would strand the request that owns it.
+        FakeProgram program;
+        FakeManager manager      = make_manager(1, 4);
+        FakeRequestBasePlan base = make_base(11);
+        base.cache.session_key   = FakeCacheSessionKey{11};
+        const ActiveRequest live = start_active(manager, program, 11, base, 1, "resp_11");
+        const std::size_t released_before    = program.released_continuations.size();
+        program.releases_required_for_import = released_before + 1;
+
+        ninfer::runtime::SessionRestoreSkipDetail skip;
+        const auto restored = manager.restore_session_checkpoint(
+            program, FakeCacheSessionKey{44}, "resp_44", reader, expected, 1024, 2, &skip,
+            [](const FakeCacheSessionKey&, std::string_view) { return true; });
+        require(!restored && skip.reclaimed == 0 &&
+                    program.released_continuations.size() == released_before,
+                "reclaim dropped a session that still had an active request");
+        (void)finish_active(manager, program, live);
+    }
+
+    {
+        // The catalog is the other shared pool. A full catalog of reproducible sessions is not a
+        // reason to refuse: free the slot the same way.
+        FakeProgram program;
+        FakeManager manager = make_manager(1, 1);
+        seed_session(manager, program, 11, 1, "resp_11");
+
+        ninfer::runtime::SessionRestoreSkipDetail skip;
+        const auto restored = manager.restore_session_checkpoint(
+            program, FakeCacheSessionKey{44}, "resp_44", reader, expected, 1024, 2, &skip,
+            [](const FakeCacheSessionKey& session, std::string_view) {
+                return session == FakeCacheSessionKey{11};
+            });
+        require(restored && skip.reclaimed == 1,
+                "a full catalog of reproducible sessions was not reclaimed");
+        require(!catalogued(manager, program, 11, "resp_11") &&
+                    catalogued(manager, program, 44, "resp_44"),
+                "catalog reclaim did not hand the freed slot to the restored session");
+    }
+}
+
 void test_replay_selected_successor_retags_session() {
     class Writer final : public ninfer::runtime::ContinuationCheckpointWriter {
     public:
@@ -2389,6 +2537,7 @@ int main() {
     run_test("shortlist exact verification",
              test_shortlist_collision_requires_program_exact_verification);
     run_test("session checkpoint identity", test_session_checkpoint_tag_and_restore_identity);
+    run_test("restore reclaims reproducible sessions", test_restore_reclaims_reproducible_sessions);
     run_test("replay successor retags session", test_replay_selected_successor_retags_session);
     if (failures != 0) { return 1; }
     std::cout << "ok\n";
