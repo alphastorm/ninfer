@@ -798,23 +798,20 @@ public:
             slot = vacant_catalog_slot();
         }
 
-        // A restored continuation is move-constructible but not move-assignable, so each attempt
-        // gets its own object rather than overwriting the last one.
-        std::optional<typename Package::RestoredContinuation> restored;
-        for (;;) {
-            ContinuationImportSkipReason import_reason = ContinuationImportSkipReason::None;
-            std::optional<typename Package::RestoredContinuation> attempt =
-                program.restore_continuation(reader, staging_bytes, &import_reason);
-            if (attempt) {
-                restored.emplace(std::move(*attempt));
-                break;
+        // A checkpoint reader is a single pass over verified bytes: once the import has consumed
+        // the metadata it cannot be read again, so retrying here would fail as unreadable no
+        // matter how much room was freed. Free what this attempt proved it needs and report it;
+        // the caller owns the store and retries with a fresh reader.
+        ContinuationImportSkipReason import_reason = ContinuationImportSkipReason::None;
+        std::optional<typename Package::RestoredContinuation> restored =
+            program.restore_continuation(reader, staging_bytes, &import_reason);
+        if (!restored) {
+            if (contended_import_capacity(import_reason) &&
+                reclaim_for_restore(program, session, reclaimable, declined)) {
+                ++reclaimed;
             }
-            if (!contended_import_capacity(import_reason) ||
-                !reclaim_for_restore(program, session, reclaimable, declined)) {
-                if (skip != nullptr) { skip->import_reason = import_reason; }
-                return refuse(SessionRestoreSkipReason::ProgramRejected);
-            }
-            ++reclaimed;
+            if (skip != nullptr) { skip->import_reason = import_reason; }
+            return refuse(SessionRestoreSkipReason::ProgramRejected);
         }
         note();
         if (restored->stats != expected) {

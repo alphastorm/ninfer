@@ -623,10 +623,14 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
     if (!checkpoint_store_) { return false; }
     std::lock_guard lock(checkpoint_mutex_);
     try {
-        // One retry, and only after making progress the first attempt proved was needed: the
-        // engine had room to spare except for sessions whose stored copy had fallen a turn
-        // behind. Saving those is what lets the engine drop them without losing anything.
-        for (unsigned attempt = 0;; ++attempt) {
+        // Each attempt gets a fresh reader, because a checkpoint reader is a single verified pass
+        // and the engine consumes it before it can discover that the pool is full. An attempt is
+        // worth repeating only when something actually changed: the engine dropped a resident
+        // session, or this layer brought a stale one up to date so the engine may drop it next
+        // time. Bounded by the catalog: every pass frees at least one resident session.
+        constexpr unsigned kMaxAttempts = 16;
+        unsigned reclaimed_total        = 0;
+        for (unsigned attempt = 0; attempt < kMaxAttempts; ++attempt) {
             SessionCheckpointLoadResult loaded = checkpoint_store_->load(
                 session_sha256, checkpoint_runtime_fingerprint_, required_response_id);
             if (!loaded.checkpoint) { return false; }
@@ -642,14 +646,15 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
                            &skip, &reclaim)
                     .has_value();
             });
+            reclaimed_total += skip.reclaimed;
             if (restored) {
-                if (skip.reclaimed != 0) {
+                if (reclaimed_total != 0) {
                     // The session only fit because others were dropped. Their next request pays a
                     // restore, so the operator needs to see the pool running at its limit.
                     write_console_log(ConsoleLogLevel::Info,
                                       "checkpoint restore for session " +
                                           std::string(session_sha256.substr(0, 12)) +
-                                          " reclaimed " + std::to_string(skip.reclaimed) +
+                                          " reclaimed " + std::to_string(reclaimed_total) +
                                           " checkpoint-backed session(s)");
                 }
                 return true;
@@ -658,7 +663,8 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
                 skip.reason == runtime::SessionRestoreSkipReason::ProgramRejected
                     ? runtime::contended_import_capacity(skip.import_reason)
                     : skip.reason == runtime::SessionRestoreSkipReason::CatalogFull;
-            if (attempt == 0 && capacity_bound && !reclaim.stale().empty()) {
+            if (capacity_bound && skip.reclaimed != 0) { continue; }
+            if (capacity_bound && !reclaim.stale().empty()) {
                 std::size_t saved = 0;
                 for (const std::string& stale : reclaim.stale()) {
                     if (save_checkpoint_locked(stale, responses, nullptr)) { ++saved; }
@@ -692,6 +698,13 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
                                   std::string(session_sha256.substr(0, 12)) + ": " + detail);
             return false;
         }
+        // Every retried pass frees at least one resident session, so the budget cannot be spent
+        // unless the catalog is larger than it: report rather than loop forever.
+        write_console_log(ConsoleLogLevel::Warning,
+                          "checkpoint restore declined for session " +
+                              std::string(session_sha256.substr(0, 12)) + ": reclaim did not " +
+                              "free room within " + std::to_string(kMaxAttempts) + " attempts");
+        return false;
     } catch (const std::exception& error) {
         // A restore that fails here surfaces to the client as previous_response_not_found;
         // the cause must be diagnosable from the server log.

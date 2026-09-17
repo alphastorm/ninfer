@@ -2327,29 +2327,42 @@ void test_restore_reclaims_reproducible_sessions() {
 
     {
         // Two sessions are reproducible, one is not. The pool needs one release: the oldest
-        // *reproducible* session goes, not the oldest session and not the newest.
+        // *reproducible* session goes, not the oldest session and not the newest. The checkpoint
+        // reader is spent by the refused attempt, so the manager frees room and reports it rather
+        // than retrying; the caller restores from a fresh reader, which is the second call here.
         FakeProgram program;
         FakeManager manager = make_manager(1, 4);
         seed_session(manager, program, 11, 1, "resp_11");
         seed_session(manager, program, 22, 2, "resp_22");
         seed_session(manager, program, 33, 3, "resp_33");
         program.releases_required_for_import = program.released_continuations.size() + 1;
+        const auto reproducible = [](const FakeCacheSessionKey& session, std::string_view tag) {
+            return (session == FakeCacheSessionKey{22} && tag == "resp_22") ||
+                   (session == FakeCacheSessionKey{33} && tag == "resp_33");
+        };
 
-        ninfer::runtime::SessionRestoreSkipDetail skip;
-        const auto restored = manager.restore_session_checkpoint(
-            program, FakeCacheSessionKey{44}, "resp_44", reader, expected, 1024, 4, &skip,
-            [](const FakeCacheSessionKey& session, std::string_view tag) {
-                return (session == FakeCacheSessionKey{22} && tag == "resp_22") ||
-                       (session == FakeCacheSessionKey{33} && tag == "resp_33");
-            });
-        require(restored && restored->frontier_tokens == 16,
-                "a restore blocked only by pool capacity was refused instead of reclaiming");
-        require(skip.reclaimed == 1 && skip.reclaim_declined == 1,
+        ninfer::runtime::SessionRestoreSkipDetail first;
+        require(!manager.restore_session_checkpoint(program, FakeCacheSessionKey{44}, "resp_44",
+                                                    reader, expected, 1024, 4, &first,
+                                                    reproducible),
+                "a full pool accepted an import it had no room for");
+        require(first.reason == Reason::ProgramRejected &&
+                    first.import_reason == ImportReason::KvHostCapacityExhausted,
+                "the refused attempt did not name the capacity gate");
+        require(first.reclaimed == 1 && first.reclaim_declined == 1,
                 "reclaim did not report exactly one drop and one unprovable session");
         require(catalogued(manager, program, 11, "resp_11") &&
                     !catalogued(manager, program, 22, "resp_22") &&
                     catalogued(manager, program, 33, "resp_33"),
                 "reclaim dropped the wrong session: the oldest reproducible one must go");
+
+        ninfer::runtime::SessionRestoreSkipDetail second;
+        const auto restored = manager.restore_session_checkpoint(
+            program, FakeCacheSessionKey{44}, "resp_44", reader, expected, 1024, 5, &second,
+            reproducible);
+        require(restored && restored->frontier_tokens == 16,
+                "the room reclaim freed did not admit the retried restore");
+        require(second.reclaimed == 0, "the retry dropped a session it did not need");
         require(catalogued(manager, program, 44, "resp_44"),
                 "the reclaiming restore did not publish its own session");
     }
