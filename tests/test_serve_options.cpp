@@ -1,3 +1,4 @@
+#include "runtime/engine/options.h"
 #include "serve/serve_options.h"
 #include "serve/translate.h"
 
@@ -273,6 +274,22 @@ int main() {
                           context_cache.context_cache.max_long_anchors_per_continuation == 2 &&
                           context_cache.context_cache.max_cache_markers_per_request == 6,
                       "context-cache capacities did not reach serving options");
+    // Each agent type's system and tool prefix is its own shared owner, so the default must hold
+    // several even at one active request; an explicit capacity is kept as configured.
+    const auto normalized = [](std::uint32_t concurrency, std::optional<std::uint32_t> shared,
+                               std::optional<std::uint32_t> markers) {
+        ninfer::EngineOptions options;
+        options.max_concurrency                             = concurrency;
+        options.context_cache.max_shared_prefixes           = shared;
+        options.context_cache.max_cache_markers_per_request = markers;
+        return *ninfer::runtime::normalize_engine_options(options)
+                    .context_cache.max_shared_prefixes;
+    };
+    failures +=
+        check(normalized(1, std::nullopt, std::nullopt) == 4 &&
+                  normalized(8, std::nullopt, std::nullopt) == 8 &&
+                  normalized(1, std::nullopt, 6) == 6 && normalized(1, 1, std::nullopt) == 1,
+              "shared-prefix capacity default does not cover concurrency and markers");
     bool disabled_cache_capacity_rejected = false;
     try {
         (void)parse({"ninfer-serve", "model.ninfer", "--no-prefix-reuse", "--host-kv-mib", "64"});

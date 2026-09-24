@@ -55,9 +55,13 @@ EngineOptions normalize_engine_options(EngineOptions options) {
     const std::uint64_t default_private = 2ULL * concurrency;
     cache.max_private_continuations =
         cache.max_private_continuations.value_or(static_cast<std::uint32_t>(default_private));
-    cache.max_shared_prefixes               = cache.max_shared_prefixes.value_or(concurrency);
     cache.max_long_anchors_per_continuation = cache.max_long_anchors_per_continuation.value_or(2U);
     cache.max_cache_markers_per_request     = cache.max_cache_markers_per_request.value_or(4U);
+    // One shared owner per active request starves agent traffic: each agent type's system and tool
+    // prefix is its own owner, so a single entry evicts one type for the next (upstream a140e7ae).
+    // The default covers every active request and every marker one request may place.
+    cache.max_shared_prefixes = cache.max_shared_prefixes.value_or(
+        std::max(concurrency, *cache.max_cache_markers_per_request));
 
     if (*cache.max_private_continuations < concurrency) {
         throw std::invalid_argument(
