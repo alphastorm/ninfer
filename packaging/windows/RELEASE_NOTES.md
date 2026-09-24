@@ -38,6 +38,25 @@ graceful stop counts a session whose newest response is already on disk as nothi
 Automatic checkpointing remains best effort under live traffic; explicit checkpoint requests and
 graceful managed shutdown provide the observable save outcome.
 
-The Responses endpoint continues to reject unsupported cache hints, reasoning summaries, and
-encrypted reasoning requests. A client must omit options this runtime does not implement;
-server-side continuation is not a substitute for a requested encrypted output field.
+Unmodified OpenAI clients get durable sessions. A Responses or chat request's `prompt_cache_key`
+becomes the session identity when API authentication is configured: the key is hashed under its
+own domain and never stored raw, and a request that also sends `ninfer_session` or
+`X-NInfer-Session` is refused on both endpoints. Without authentication the key names nothing and
+the request stays in the anonymous pool; a null key is the same as no key. A client that resumes
+after both it and the server restarted, and so replays its transcript without
+`previous_response_id`, has its session's checkpoint restored on that session's first request
+since the start; the engine's exact prefix match decides how much it reuses. This applies to every
+session name, so a `ninfer_session` or `X-NInfer-Session` client that opens a new conversation
+under a saved session name also imports that checkpoint first. Requests without a session identity
+behave exactly as before. The endpoint still rejects reasoning summaries, encrypted reasoning
+requests, and the other cache options it does not implement.
+
+The shared-prefix catalog defaults to one owner per active request or per cache marker a request
+may place, whichever is larger (four at one active request), so each agent type's system and tool
+prefix keeps its own owner instead of evicting the previous type's.
+
+When Windows refuses to pin a host pool while most available memory is standby file cache
+(alphastorm/omp-ninfer#48), the start retries once. If free plus standby memory covers the
+request, it first commits and touches an equal pageable region so Windows repurposes standby
+pages, then releases it; otherwise the start fails exactly as before. The refusal is intermittent
+and did not reproduce on demand, so the retry path has not run on hardware and #48 stays open.
