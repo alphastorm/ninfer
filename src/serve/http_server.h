@@ -17,6 +17,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 namespace ninfer::serve {
 
@@ -136,6 +137,10 @@ private:
     std::condition_variable stats_cv_;
     std::thread stats_thread_;
     bool stats_stopping_ = false;
+    // Transient refusals of an automatic save retry a bounded number of times per completed turn
+    // (serve/checkpoint_policy.h) instead of dropping the session's newest state.
+    std::mutex automatic_retry_mutex_;
+    std::unordered_map<std::string, unsigned> automatic_retries_;
     // Declared last so it drains and joins before the service pointer and ResponseStore disappear.
     std::unique_ptr<AutomaticCheckpointQueue> automatic_checkpoints_;
 };

@@ -1,6 +1,7 @@
 #include "serve/http_server.h"
 
 #include "serve/anthropic_schema.h"
+#include "serve/checkpoint_policy.h"
 #include "serve/client_identity.h"
 #include "serve/credential_compare.h"
 #include "serve/console_log.h"
@@ -1104,6 +1105,12 @@ void HttpServer::maybe_checkpoint_completed_turn(const std::optional<std::string
         static_cast<std::uint64_t>(std::max(outcome.prompt_tokens, 0)) +
         static_cast<std::uint64_t>(std::max(outcome.completion_tokens, 0));
     if (frontier < options_.session_checkpoint_min_tokens) { return; }
+    // A new turn gives the session a fresh retry budget: earlier transient refusals were for
+    // older state.
+    try {
+        std::lock_guard lock(automatic_retry_mutex_);
+        automatic_retries_.erase(*session_sha256);
+    } catch (...) {}
     if (automatic_checkpoints_->enqueue(*session_sha256) ==
         AutomaticCheckpointEnqueueResult::Dropped) {
         try {
@@ -1148,12 +1155,35 @@ void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noex
             const bool saved =
                 service_->save_checkpoint(session_sha256, response_store_, &skip).has_value();
             if (saved) {
+                std::lock_guard lock(automatic_retry_mutex_);
+                automatic_retries_.erase(std::string(session_sha256));
                 write_console_log(ConsoleLogLevel::Info, "automatic session checkpoint saved");
-            } else {
-                write_console_log(
-                    ConsoleLogLevel::Warning,
-                    format_session_checkpoint_skip("automatic session checkpoint skipped: ",
-                                                   session_sha256, skip).view());
+                return;
+            }
+            // A save that ran during a request's transaction, or before the newest turn's
+            // continuation was catalogued, is early rather than impossible: requeue it so it runs
+            // again once the engine is quiet, instead of dropping the session's newest state until
+            // eviction makes it unrecoverable.
+            bool retry = false;
+            if (checkpoint_refusal_is_transient(skip)) {
+                std::lock_guard lock(automatic_retry_mutex_);
+                unsigned& attempts = automatic_retries_[std::string(session_sha256)];
+                retry              = attempts < kAutomaticCheckpointRetries;
+                if (retry) {
+                    ++attempts;
+                } else {
+                    automatic_retries_.erase(std::string(session_sha256));
+                }
+            }
+            write_console_log(
+                ConsoleLogLevel::Warning,
+                format_session_checkpoint_skip(retry ? "automatic session checkpoint deferred: "
+                                                     : "automatic session checkpoint skipped: ",
+                                               session_sha256, skip).view());
+            if (retry && automatic_checkpoints_->enqueue(std::string(session_sha256)) ==
+                             AutomaticCheckpointEnqueueResult::Dropped) {
+                write_console_log(ConsoleLogLevel::Warning,
+                                  "automatic session checkpoint queue dropped a deferred save");
             }
         }
     } catch (const std::exception& exception) {
@@ -1172,22 +1202,22 @@ ShutdownCheckpointSummary HttpServer::save_all_checkpoints() noexcept {
     try {
         for (const std::string& digest : response_store_.session_digests()) {
             try {
+                // A session whose newest stored response is already on disk loses nothing, even
+                // after the engine evicted its continuation, so it is not exported again.
+                const std::optional<std::string> newest = response_store_.latest_response_id(digest);
+                const bool on_disk =
+                    newest && !newest->empty() && service_->checkpoint_covers(digest, *newest);
                 runtime::SessionCheckpointSkipDetail skip;
-                if (service_->save_checkpoint(digest, response_store_, &skip).has_value()) {
+                const bool saved =
+                    !on_disk && service_->save_checkpoint(digest, response_store_, &skip).has_value();
+                switch (classify_shutdown_checkpoint(on_disk, saved, skip)) {
+                case ShutdownCheckpointOutcome::Saved:
                     ++summary.saved;
-                    continue;
-                }
-                // A session the store or the engine has nothing to export for loses nothing;
-                // any other refusal means live state existed and did not reach disk.
-                switch (skip.reason) {
-                case runtime::SessionCheckpointSkipReason::None:
-                case runtime::SessionCheckpointSkipReason::StoreDisabled:
-                case runtime::SessionCheckpointSkipReason::NoSessionRecords:
-                case runtime::SessionCheckpointSkipReason::CacheDisabled:
-                case runtime::SessionCheckpointSkipReason::SessionNotIndexed:
+                    break;
+                case ShutdownCheckpointOutcome::NothingToSave:
                     ++summary.skipped;
                     break;
-                default:
+                case ShutdownCheckpointOutcome::Refused:
                     ++summary.refused;
                     write_console_log(
                         ConsoleLogLevel::Error,
