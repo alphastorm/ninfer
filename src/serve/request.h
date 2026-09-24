@@ -182,6 +182,9 @@ struct GenerationRequest {
     std::string model;
     std::optional<std::string> client_session_sha256;
     std::optional<std::string> client_request_id;
+    // Digest of an OpenAI prompt_cache_key, never the raw key. resolve_client_session makes it the
+    // session identity under API authentication and then clears it.
+    std::optional<std::string> prompt_cache_session_sha256;
     std::vector<ChatTurn> messages;
     std::vector<ToolDefinition> tools;
     std::size_t tool_name_max_length = 64;

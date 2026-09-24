@@ -1,3 +1,4 @@
+#include "serve/client_identity.h"
 #include "serve/http_server.h"
 #include "serve/responses_schema.h"
 
@@ -114,6 +115,17 @@ int main() {
         failures +=
             check(error.error().status == 400 && error.error().code == "invalid_ninfer_identity",
                   "disagreeing Responses session identities returned the wrong error");
+    }
+    ninfer::serve::GenerationRequest keyed_with_header;
+    keyed_with_header.prompt_cache_session_sha256 = std::string(64, 'c');
+    ninfer::serve::apply_client_session_header(session_header, true, keyed_with_header);
+    try {
+        ninfer::serve::resolve_client_session(keyed_with_header, true);
+        failures += check(false, "prompt_cache_key and X-NInfer-Session both named the session");
+    } catch (const ninfer::serve::ApiException& error) {
+        failures +=
+            check(error.error().status == 400 && error.error().code == "invalid_ninfer_identity",
+                  "prompt_cache_key with X-NInfer-Session returned the wrong error");
     }
     try {
         (void)ninfer::serve::require_checkpoint_session_identity(std::nullopt,

@@ -1,9 +1,12 @@
 #include "serve/client_identity.h"
 
+#include "core/sha256.h"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -21,6 +24,14 @@ std::optional<std::string> parse_sha256_field(const nlohmann::json& body, const 
         throw ApiException(std::move(error));
     }
     return parse_client_identity_sha256(body.at(field).get<std::string>(), field);
+}
+
+[[noreturn]] void throw_prompt_cache_key_error(std::string message) {
+    ApiError error;
+    error.message = std::move(message);
+    error.param   = "prompt_cache_key";
+    error.code    = "invalid_ninfer_identity";
+    throw ApiException(std::move(error));
 }
 
 } // namespace
@@ -76,6 +87,37 @@ void apply_client_identity_cache_hints(const GenerationRequest& request,
     cache_hints.session_key          = "http:" + *request.client_session_sha256;
     cache_hints.retention            = CacheRetentionHint::LiveSession;
     cache_hints.update_session_index = true;
+}
+
+std::string prompt_cache_key_session_sha256(std::string_view key) {
+    // The terminating NUL of the domain separates it from the key.
+    static constexpr char domain[] = "ninfer:prompt_cache_key:v1";
+    crypto::Sha256 hasher;
+    hasher.update(std::as_bytes(std::span(domain, sizeof(domain))));
+    hasher.update(std::as_bytes(std::span(key.data(), key.size())));
+    return crypto::sha256_hex(hasher.finish());
+}
+
+void parse_prompt_cache_key(const nlohmann::json& body, GenerationRequest& request) {
+    if (!body.contains("prompt_cache_key") || body.at("prompt_cache_key").is_null()) { return; }
+    const nlohmann::json& key = body.at("prompt_cache_key");
+    if (!key.is_string() || key.get_ref<const std::string&>().empty()) {
+        throw_prompt_cache_key_error("prompt_cache_key must be a non-empty string");
+    }
+    request.prompt_cache_session_sha256 =
+        prompt_cache_key_session_sha256(key.get_ref<const std::string&>());
+}
+
+void resolve_client_session(GenerationRequest& request, bool authentication_configured) {
+    if (!request.prompt_cache_session_sha256) { return; }
+    if (request.client_session_sha256) {
+        throw_prompt_cache_key_error(
+            "prompt_cache_key cannot be combined with ninfer_session or X-NInfer-Session");
+    }
+    if (authentication_configured) {
+        request.client_session_sha256 = std::move(request.prompt_cache_session_sha256);
+    }
+    request.prompt_cache_session_sha256.reset();
 }
 
 } // namespace ninfer::serve

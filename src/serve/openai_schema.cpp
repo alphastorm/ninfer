@@ -567,6 +567,7 @@ GenerationRequest parse_chat_completion_request(const Json& body, const RequestL
     }
     out.model = body.at("model").get<std::string>();
     parse_client_identity(body, out);
+    parse_prompt_cache_key(body, out);
 
     parse_tools(body, out);
     parse_tool_choice(body, out);

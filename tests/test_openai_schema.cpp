@@ -828,6 +828,26 @@ int test_client_identity() {
                           (void)parse_chat_completion_request(non_string, default_limits());
                       }) == "invalid_ninfer_identity",
                       "non-string ninfer_request_id was accepted");
+
+    // Stock clients opt into prompt_cache_key on chat completions; under authentication it names
+    // the same session the Responses route would, sha256("ninfer:prompt_cache_key:v1\0key").
+    const std::string keyed_digest =
+        "2b43cd7e2260dbfbd14f6777e3c1970a12c998807a18d617a31d1f1fa5e7864c";
+    Json keyed_body = {{"model", "m"},
+                       {"messages", Json::array({Json{{"role", "user"}, {"content", "hello"}}})},
+                       {"prompt_cache_key", "client-session"}};
+    GenerationRequest keyed = parse_chat_completion_request(keyed_body, default_limits());
+    resolve_client_session(keyed, true);
+    ninfer::ContextCacheHints keyed_hints;
+    apply_client_identity_cache_hints(keyed, true, keyed_hints);
+    failures += check(keyed.client_session_sha256 == keyed_digest &&
+                          keyed_hints.session_key == "http:" + keyed_digest,
+                      "chat prompt_cache_key did not become the authenticated session identity");
+    keyed_body["ninfer_session"] = session_digest;
+    GenerationRequest doubled    = parse_chat_completion_request(keyed_body, default_limits());
+    failures +=
+        check(api_code([&] { resolve_client_session(doubled, true); }) == "invalid_ninfer_identity",
+              "chat prompt_cache_key and ninfer_session both named the session");
     return failures;
 }
 

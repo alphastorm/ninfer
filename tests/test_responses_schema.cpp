@@ -245,6 +245,60 @@ int test_client_identity() {
     return failures;
 }
 
+// Stock OpenAI clients name their session with prompt_cache_key; it is the session identity under
+// API authentication and names nothing without it.
+int test_prompt_cache_key_identity() {
+    // sha256("ninfer:prompt_cache_key:v1\0client-session"): a changed domain orphans every stored
+    // session, so the derivation is pinned rather than recomputed.
+    const std::string digest = "2b43cd7e2260dbfbd14f6777e3c1970a12c998807a18d617a31d1f1fa5e7864c";
+    const Json body          = {
+        {"model", "qwen3.6-27b"}, {"input", "hello"}, {"prompt_cache_key", "client-session"}};
+    int failures = 0;
+
+    ResponsesRequest keyed = parse_responses_request(body, limits());
+    failures += check(keyed.generation.prompt_cache_session_sha256 == digest &&
+                          !keyed.generation.client_session_sha256,
+                      "prompt_cache_key did not parse to its domain-separated digest");
+    resolve_client_session(keyed.generation, true);
+    ninfer::ContextCacheHints hints;
+    apply_client_identity_cache_hints(keyed.generation, true, hints);
+    failures += check(keyed.generation.client_session_sha256 == digest &&
+                          !keyed.generation.prompt_cache_session_sha256 &&
+                          hints.session_key == "http:" + digest && hints.update_session_index,
+                      "an authenticated prompt_cache_key did not become the session identity");
+
+    ResponsesRequest anonymous = parse_responses_request(body, limits());
+    resolve_client_session(anonymous.generation, false);
+    ninfer::ContextCacheHints anonymous_hints;
+    apply_client_identity_cache_hints(anonymous.generation, false, anonymous_hints);
+    failures +=
+        check(!anonymous.generation.client_session_sha256 &&
+                  !anonymous.generation.prompt_cache_session_sha256 && !anonymous_hints.session_key,
+              "prompt_cache_key named a session without API authentication");
+
+    Json other                = body;
+    other["prompt_cache_key"] = "another-session";
+    failures +=
+        check(parse_responses_request(other, limits()).generation.prompt_cache_session_sha256 ==
+                  std::string("93a5fa7aeaab5f7fd95c9956d16dc48e20012405c60760d9fccfbb5f3af60faf"),
+              "distinct prompt_cache_key values did not name distinct sessions");
+
+    Json doubled               = body;
+    doubled["ninfer_session"]  = std::string(64, 'a');
+    ResponsesRequest ambiguous = parse_responses_request(doubled, limits());
+    failures += check(api_code([&] { resolve_client_session(ambiguous.generation, true); }) ==
+                          "invalid_ninfer_identity",
+                      "prompt_cache_key and ninfer_session both named the session");
+    for (const Json& invalid : {Json(""), Json(7), Json::object()}) {
+        Json malformed                = body;
+        malformed["prompt_cache_key"] = invalid;
+        failures += check(api_code([&] { (void)parse_responses_request(malformed, limits()); }) ==
+                              "invalid_ninfer_identity",
+                          "a non-string or empty prompt_cache_key was accepted");
+    }
+    return failures;
+}
+
 int test_response_ids_are_opaque() {
     const auto fixed_entropy = [](unsigned char* output, int length) -> int {
         for (int index = 0; index < length; ++index) {
@@ -694,10 +748,6 @@ int test_explicit_rejections() {
 int test_unsupported_client_fields() {
     const Json base = {{"model", "qwen3.6-27b"}, {"input", "hello"}, {"max_output_tokens", 32}};
     int failures = 0;
-    Json cache_hint = base;
-    cache_hint["prompt_cache_key"] = "client-session";
-    failures += check(api_code([&] { (void)parse_responses_request(cache_hint, limits()); }) ==
-                          "parameter_not_supported", "unimplemented client cache hint refused");
     Json encrypted = base;
     encrypted["store"] = true;
     encrypted["include"] = Json::array({"reasoning.encrypted_content"});
@@ -979,6 +1029,7 @@ int main() {
     int failures = 0;
     failures += test_basic_request();
     failures += test_client_identity();
+    failures += test_prompt_cache_key_identity();
     failures += test_response_ids_are_opaque();
     failures += test_instruction_message_order();
     failures += test_preserve_thinking_options_and_inheritance();

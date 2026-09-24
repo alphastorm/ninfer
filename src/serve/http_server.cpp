@@ -699,6 +699,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             error.message = "model '" + request.model + "' not found";
             throw ApiException(std::move(error));
         }
+        resolve_client_session(request, !options_.api_key.empty());
     } catch (const ApiException& e) {
         write_error(res, e.error());
         return;
