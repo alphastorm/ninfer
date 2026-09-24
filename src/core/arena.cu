@@ -63,6 +63,11 @@ void free_pinned(void*& ptr) noexcept {
 // touching an equal pageable region makes the memory manager repurpose standby pages; releasing it
 // returns them as free pages the driver can pin. Needs no privilege.
 bool convert_standby_to_free(std::size_t size_bytes) noexcept {
+    // Available memory is free plus standby pages. With less than the request available the
+    // refusal is genuine exhaustion: touching the region would only page out other processes.
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    if (!GlobalMemoryStatusEx(&status) || status.ullAvailPhys < size_bytes) { return false; }
     void* region = VirtualAlloc(nullptr, size_bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (region == nullptr) { return false; }
     SYSTEM_INFO info{};
