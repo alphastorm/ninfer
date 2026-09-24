@@ -93,6 +93,7 @@ struct PreparedRequest {
 class GenerationService {
 public:
     explicit GenerationService(ServeOptions options, LoadProgress load_progress = {});
+    ~GenerationService();
 
     [[nodiscard]] const ServeOptions& options() const noexcept { return options_; }
 
@@ -138,6 +139,10 @@ public:
     [[nodiscard]] bool checkpoint_covers(std::string_view session_sha256,
                                          std::string_view response_id) const;
     [[nodiscard]] SessionCheckpointEraseResult erase_checkpoint(std::string_view session_sha256);
+    // Makes admission save a live session's newest turn before pressure drops it
+    // (runtime::PressureCheckpointHandler). Destroy this service before responses; a service
+    // without a checkpoint store ignores the call.
+    void save_sessions_before_eviction(ResponseStore& responses);
 
     void warmup();
 

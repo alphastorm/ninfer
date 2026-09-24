@@ -298,6 +298,16 @@ public:
                                                      recoverable);
     }
 
+    // Installs the handler admission consults before dropping a live session's newest turn; null
+    // removes it. Removal waits out a call in progress, so the handler's owner may be destroyed
+    // once this returns. Never call it from the handler.
+    void set_pressure_checkpoint_handler(std::shared_ptr<PressureCheckpointHandler> handler) {
+        std::unique_lock lock(pressure_handler_mutex_);
+        pressure_handler_idle_.wait(lock, [&] { return !pressure_handler_busy_; });
+        pressure_protection_.store(handler != nullptr, std::memory_order_release);
+        std::swap(pressure_handler_, handler);
+    }
+
     [[nodiscard]] RuntimeStats runtime_stats() const {
         std::lock_guard lock(stats_mutex_);
         return published_stats_;
@@ -1484,6 +1494,57 @@ private:
             std::move(outcome));
     }
 
+    // True when every live session the choice would drop has been through the pressure handler,
+    // or none is installed. Otherwise the unhandled victims wait in pressure_saves_ for the
+    // worker, which must not call the handler while it holds execution_mutex_.
+    [[nodiscard]] bool pressure_victims_saved(const typename ResourceManagement::Choice& choice) {
+        if (!pressure_protection_.load(std::memory_order_acquire)) { return true; }
+        bool saved = true;
+        resources_.for_each_pressure_victim(
+            choice, [&](const CacheSessionKey& session, std::string_view tag) {
+                const std::string_view digest = session_key_digest(session);
+                if (digest.empty()) { return; }
+                const auto same = [&](const PressureCheckpointVictim& victim) {
+                    return victim.session_sha256 == digest && victim.checkpoint_tag == tag;
+                };
+                if (std::any_of(pressure_saved_.begin(), pressure_saved_.end(), same)) { return; }
+                saved = false;
+                if (std::none_of(pressure_saves_.begin(), pressure_saves_.end(), same)) {
+                    pressure_saves_.push_back({std::string(digest), std::string(tag)});
+                }
+            });
+        return saved;
+    }
+
+    // Runs on the worker without execution_mutex_, because the handler saves through the ordinary
+    // checkpoint path, which takes it. Afterwards every victim handed over may be dropped: it was
+    // saved, its save was refused for good and reported, or no handler is left to ask.
+    void save_pressure_victims() noexcept {
+        std::shared_ptr<PressureCheckpointHandler> handler;
+        {
+            std::lock_guard lock(pressure_handler_mutex_);
+            handler                = pressure_handler_;
+            pressure_handler_busy_ = handler != nullptr;
+        }
+        if (handler) {
+            handler->save_before_eviction(pressure_saves_);
+            {
+                std::lock_guard lock(pressure_handler_mutex_);
+                pressure_handler_busy_ = false;
+            }
+            pressure_handler_idle_.notify_all();
+        }
+        try {
+            pressure_saved_.insert(pressure_saved_.end(),
+                                   std::make_move_iterator(pressure_saves_.begin()),
+                                   std::make_move_iterator(pressure_saves_.end()));
+        } catch (...) {
+            // An unrecorded victim is handed over again by the next plan that drops it.
+        }
+        pressure_saves_.clear();
+        request_admission_check();
+    }
+
     [[nodiscard]] AdmissionProgress
     admit_planned_request(const std::shared_ptr<Request>& request,
                           typename ResourceManagement::Choice&& choice, AdmissionGrant grant) {
@@ -1511,6 +1572,12 @@ private:
             grant.service_work_quanta() != summary.service_work_quanta ||
             !scheduler_.validate_grant(grant)) {
             throw std::logic_error("admission choice lost its Scheduler grant");
+        }
+        if (!pressure_victims_saved(choice)) {
+            // Nothing is claimed yet: drop the choice, let the worker save the victims outside
+            // the execution lock, and plan again, like a stale choice.
+            request_admission_check();
+            return AdmissionProgress::ControlProgress;
         }
         GenerationBudget prepared_budget(summary.effective_output_tokens,
                                          summary.effective_limit_reason);
@@ -1552,6 +1619,8 @@ private:
         if (!erase_pending(request)) {
             throw std::logic_error("admitted request disappeared from the FIFO queue");
         }
+        // The saves covered this admission; the next one checks its own victims afresh.
+        pressure_saved_.clear();
         release_planning_state(request);
         if (materializing_ || slots_[lane] != nullptr) {
             throw std::logic_error("reserved materialization destination is not empty");
@@ -1818,6 +1887,8 @@ private:
         materializing_.reset();
         instance_.program->fail_all_cleanup();
         resources_.clear_after_program_cleanup();
+        pressure_saves_.clear();
+        pressure_saved_.clear();
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
             if (slots_[lane] != nullptr) {
                 complete_error(slots_[lane], error);
@@ -1832,6 +1903,7 @@ private:
     void worker_loop() noexcept {
         bool previous_unit_was_decode = false;
         for (;;) {
+            if (!pressure_saves_.empty()) { save_pressure_victims(); }
             {
                 std::unique_lock lock(queue_mutex_);
                 if (!stopping_ && pending_.empty()) {
@@ -1959,6 +2031,16 @@ private:
     RuntimeStats published_stats_;
     bool stopping_ = false;
     bool failed_   = false;
+    // Save-before-evict. pressure_handler_mutex_ guards the handler and its busy flag; the two
+    // victim lists belong to the worker thread: sessions the dropped choice waits on, and
+    // sessions the handler has been through since the last admission.
+    std::mutex pressure_handler_mutex_;
+    std::condition_variable pressure_handler_idle_;
+    std::shared_ptr<PressureCheckpointHandler> pressure_handler_;
+    bool pressure_handler_busy_ = false;
+    std::atomic<bool> pressure_protection_{false};
+    std::vector<PressureCheckpointVictim> pressure_saves_;
+    std::vector<PressureCheckpointVictim> pressure_saved_;
     std::thread worker_;
 };
 

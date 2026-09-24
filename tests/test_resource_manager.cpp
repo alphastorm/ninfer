@@ -2455,6 +2455,154 @@ void test_restore_reclaims_reproducible_sessions() {
     }
 }
 
+// Save-before-evict (alphastorm/omp-ninfer#45): a choice names the live sessions whose newest turn
+// its pressure actions would make unexportable, and naming them claims nothing, so the engine can
+// drop the choice, save those sessions, and plan again.
+void test_pressure_names_live_sessions_it_would_lose() {
+    class Writer final : public ninfer::runtime::ContinuationCheckpointWriter {
+    public:
+        bool write_file(std::string_view, std::uint64_t, std::uint64_t,
+                        std::span<const std::byte>) override {
+            return true;
+        }
+    } writer;
+
+    using Victims      = std::vector<std::pair<std::uint32_t, std::string>>;
+    const auto victims = [](const FakeManager& manager, const FakeManager::Choice& choice) {
+        Victims named;
+        manager.for_each_pressure_victim(
+            choice, [&](const FakeCacheSessionKey& session, std::string_view tag) {
+                named.emplace_back(session.value, std::string(tag));
+            });
+        return named;
+    };
+    const auto seed = [](FakeManager& manager, FakeProgram& program, std::uint32_t session,
+                         std::uint32_t content, std::uint64_t order, const std::string& tag) {
+        const ActiveRequest turn = start_active(
+            manager, program, content,
+            make_base(content, FakeCacheSessionKey{session}, RetentionClass::LiveSession), order,
+            tag);
+        (void)finish_active(manager, program, turn);
+        return turn.sequence.id;
+    };
+    const auto request = [](std::uint32_t content, std::uint32_t session) {
+        return make_base(content, FakeCacheSessionKey{session}, RetentionClass::LiveSession);
+    };
+    // The pressure actions a choice actually starts. FakeProgram numbers them per owner: 1000+id
+    // keeps everything, 5000+id keeps the continuation but drops a checkpoint, 2000+id evicts.
+    const auto started_actions = [&](FakeManager& manager, FakeProgram& program,
+                                     std::uint32_t content, std::uint32_t session,
+                                     std::uint64_t order) {
+        auto inspection =
+            manager.inspect(program, FakePreparedPrompt{content}, request(content, session), order);
+        require(inspection.choice.has_value(), "pressure produced no admission choice");
+        program.abort_start = true;
+        (void)manager.reserve_materialization(program, std::move(*inspection.choice),
+                                              FakePreparedPrompt{content}, {});
+        program.abort_start = false;
+        return program.started_action_ids;
+    };
+
+    {
+        // A full catalog evicts another session's newest turn. Naming it leaves it claimable and
+        // exportable, and the next plan evicts exactly the session that was named.
+        FakeProgram program;
+        FakeManager manager       = make_manager(1, 1);
+        const std::uint32_t owner = seed(manager, program, 11, 11, 1, "resp_11");
+        auto inspection = manager.inspect(program, FakePreparedPrompt{44}, request(44, 44), 2);
+        require(inspection.choice.has_value(), "a full catalog produced no eviction closure");
+        require(victims(manager, *inspection.choice) == Victims{{11, "resp_11"}},
+                "the evicted session's newest turn was not named");
+        inspection.choice.reset();
+        require(manager.lane_state(LaneId{0}) == ninfer::runtime::LogicalLaneState::Free &&
+                    manager.catalog_state(0) == FakeManager::CatalogState::Catalogued &&
+                    manager.checkpoint_session(program, FakeCacheSessionKey{11}, "resp_11",
+                                               writer, 1024)
+                        .has_value(),
+                "a dropped choice left its victim claimed or unexportable");
+        const ActiveRequest next = start_active(manager, program, 44, request(44, 44), 2, "resp_44");
+        require(program.started_action_ids == std::vector<std::uint64_t>{2000U + owner},
+                "the replanned choice did not evict the named session");
+        (void)finish_active(manager, program, next);
+        require(!manager.checkpoint_session(program, FakeCacheSessionKey{11}, "resp_11", writer,
+                                            1024)
+                     .has_value(),
+                "the named session survived the eviction it was named for");
+    }
+
+    {
+        // A catalog entry the session index has moved past is a cached copy of an older turn:
+        // evicting it loses nothing the session still needs.
+        FakeProgram program;
+        FakeManager manager         = make_manager(1, 2);
+        const std::uint32_t earlier = seed(manager, program, 11, 11, 1, "resp_11a");
+        (void)seed(manager, program, 11, 12, 2, "resp_11b");
+        auto inspection = manager.inspect(program, FakePreparedPrompt{30}, request(30, 30), 3);
+        require(inspection.choice.has_value() && victims(manager, *inspection.choice).empty(),
+                "a superseded copy was named as a session's newest turn");
+        inspection.choice.reset();
+        require(started_actions(manager, program, 30, 30, 3) ==
+                    std::vector<std::uint64_t>{2000U + earlier},
+                "the scenario did not evict the superseded copy");
+    }
+
+    {
+        // A request that evicts its own session's previous turn is about to supersede it.
+        FakeProgram program;
+        FakeManager manager       = make_manager(1, 1);
+        const std::uint32_t owner = seed(manager, program, 11, 11, 1, "resp_11a");
+        auto inspection = manager.inspect(program, FakePreparedPrompt{12}, request(12, 11), 2);
+        require(inspection.choice.has_value() && victims(manager, *inspection.choice).empty(),
+                "a session's own next turn was told to save the turn it replaces");
+        inspection.choice.reset();
+        require(started_actions(manager, program, 12, 11, 2) ==
+                    std::vector<std::uint64_t>{2000U + owner},
+                "the scenario did not evict the session's previous turn");
+    }
+
+    {
+        // Nothing to save: a session without a checkpoint tag cannot be checkpointed at all.
+        FakeProgram program;
+        FakeManager manager       = make_manager(1, 1);
+        const std::uint32_t owner = seed(manager, program, 11, 11, 1, "");
+        auto inspection = manager.inspect(program, FakePreparedPrompt{44}, request(44, 44), 2);
+        require(inspection.choice.has_value() && victims(manager, *inspection.choice).empty(),
+                "an untagged session was named for a save it cannot take");
+        inspection.choice.reset();
+        require(started_actions(manager, program, 44, 44, 2) ==
+                    std::vector<std::uint64_t>{2000U + owner},
+                "the scenario did not evict the untagged session");
+    }
+
+    {
+        // Retained is not safe when the action drops checkpoints: the session endpoint an export
+        // needs can be one of them. A retaining action that drops nothing costs no save.
+        FakeProgram program;
+        FakeManager manager                       = make_manager(1, 2);
+        const std::uint32_t owner                 = seed(manager, program, 31, 31, 1, "resp_31");
+        program.required_pressure_actions         = 1;
+        program.include_cumulative_private_target = true;
+        program.required_action_id                = 5000U + owner;
+        auto dropping = manager.inspect(program, FakePreparedPrompt{32}, request(32, 32), 2);
+        require(dropping.choice.has_value() &&
+                    victims(manager, *dropping.choice) == Victims{{31, "resp_31"}},
+                "a checkpoint-dropping pressure action did not name its session");
+        dropping.choice.reset();
+        require(started_actions(manager, program, 32, 32, 2) ==
+                    std::vector<std::uint64_t>{5000U + owner},
+                "the scenario did not drop a checkpoint from a retained session");
+
+        program.required_action_id = 1000U + owner;
+        auto keeping = manager.inspect(program, FakePreparedPrompt{32}, request(32, 32), 2);
+        require(keeping.choice.has_value() && victims(manager, *keeping.choice).empty(),
+                "a pressure action that drops nothing named its session");
+        keeping.choice.reset();
+        require(started_actions(manager, program, 32, 32, 2) ==
+                    std::vector<std::uint64_t>{1000U + owner},
+                "the scenario did not keep the retained session whole");
+    }
+}
+
 void test_replay_selected_successor_retags_session() {
     class Writer final : public ninfer::runtime::ContinuationCheckpointWriter {
     public:
@@ -2572,6 +2720,8 @@ int main() {
              test_shortlist_collision_requires_program_exact_verification);
     run_test("session checkpoint identity", test_session_checkpoint_tag_and_restore_identity);
     run_test("restore reclaims reproducible sessions", test_restore_reclaims_reproducible_sessions);
+    run_test("pressure names live sessions it would lose",
+             test_pressure_names_live_sessions_it_would_lose);
     run_test("replay successor retags session", test_replay_selected_successor_retags_session);
     if (failures != 0) { return 1; }
     std::cout << "ok\n";

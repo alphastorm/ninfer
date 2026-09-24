@@ -1259,6 +1259,9 @@ void HttpServer::attach(GenerationService& service) {
     if (service.checkpoint_enabled()) {
         automatic_checkpoints_ = std::make_unique<AutomaticCheckpointQueue>(
             [this](std::string_view digest) { save_automatic_checkpoint(digest); });
+        // Background saves can still trail a busy engine; this covers the moment it would drop a
+        // session anyway. apps/serve/main.cpp destroys the service before this server.
+        service.save_sessions_before_eviction(response_store_);
     }
 }
 

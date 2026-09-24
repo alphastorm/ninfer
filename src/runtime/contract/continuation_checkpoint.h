@@ -545,4 +545,30 @@ struct SessionRestoreSkipDetail {
     std::uint32_t reclaim_declined = 0;
 };
 
+// A live session that admission is about to drop from engine memory to make room for another
+// request, named the way the checkpoint store names it.
+struct PressureCheckpointVictim {
+    std::string session_sha256;
+    std::string checkpoint_tag;
+};
+
+// Admission can make room by evicting another session's continuation, or by dropping checkpoints
+// that its export needs. When that session's newest turn is not on disk yet, the drop loses the
+// turn for good (alphastorm/omp-ninfer#45). With a handler installed, the engine first hands such
+// sessions to it - on the engine worker, outside the execution lock, so the handler saves through
+// the ordinary checkpoint path, which takes that lock itself - and replans afterwards.
+class PressureCheckpointHandler {
+public:
+    PressureCheckpointHandler()                                            = default;
+    virtual ~PressureCheckpointHandler()                                   = default;
+    PressureCheckpointHandler(const PressureCheckpointHandler&)            = delete;
+    PressureCheckpointHandler& operator=(const PressureCheckpointHandler&) = delete;
+
+    // Returns once every victim's checkpoint covers its tag, or its save was refused for a reason
+    // retrying cannot fix. The engine then may drop all of them, so the handler reports each
+    // refusal: refusing admission instead would trade the waiting request for cache.
+    virtual void
+    save_before_eviction(std::span<const PressureCheckpointVictim> victims) noexcept = 0;
+};
+
 } // namespace ninfer::runtime

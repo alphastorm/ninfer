@@ -412,6 +412,39 @@ public:
                                                  persistent_borrowers);
     }
 
+    // Visits each session whose newest state lives only in this engine and that the choice's
+    // pressure actions would leave unexportable: its continuation is evicted, or it loses
+    // checkpoints, which can include its session endpoint. Only the indexed owner of a
+    // checkpoint-tagged session counts - a superseded catalog entry is a cached copy, not a
+    // session's newest turn - and never the admitting request's own session, whose turn is about
+    // to supersede that state. The choice has claimed nothing yet, so a caller that must save a
+    // victim first can drop it and plan again.
+    template <typename Visit>
+    void for_each_pressure_victim(const Choice& choice, Visit&& visit) const {
+        for (std::size_t row = 0; row < choice.private_claim_slots_.size(); ++row) {
+            if (choice.private_claim_dispositions_[row] != ClaimDisposition::Evicted &&
+                choice.private_claim_dropped_checkpoints_[row] == 0) {
+                continue;
+            }
+            const std::uint32_t slot = choice.private_claim_slots_[row];
+            if (slot >= catalog_count_) { continue; }
+            const CatalogEntry& entry = catalog_[slot];
+            if (!entry.session || entry.checkpoint_tag.empty() || entry.session == choice.session_ ||
+                entry.id != choice.private_claim_ids_[row] ||
+                entry.revision != choice.private_claim_revisions_[row]) {
+                continue;
+            }
+            const std::optional<std::size_t> cell = find_session_cell(*entry.session);
+            if (!cell) { continue; }
+            const SessionIndexEntry& binding = session_index_[*cell];
+            if (binding.state != SessionIndexState::Occupied || binding.slot != slot ||
+                binding.owner_id != entry.id || binding.revision != entry.revision) {
+                continue;
+            }
+            visit(*entry.session, std::string_view{entry.checkpoint_tag});
+        }
+    }
+
     [[nodiscard]] MaterializationReserveResult
     reserve_materialization(Program& program, Choice&& choice, PreparedPrompt&& prompt,
                             CancellationFlagView cancellation) {

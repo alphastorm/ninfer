@@ -36,6 +36,11 @@ public:
                     ContinuationCheckpointStats expected, std::size_t staging_bytes,
                     SessionRestoreSkipDetail* skip                = nullptr,
                     const ReclaimableSessionOracle* reclaim       = nullptr);
+
+    // Installs, or with null removes, the handler admission consults before it drops a live
+    // session's newest turn. Removal waits out a call in progress.
+    static void set_pressure_checkpoint_handler(Engine& engine,
+                                                std::shared_ptr<PressureCheckpointHandler> handler);
 };
 
 } // namespace ninfer::runtime

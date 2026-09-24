@@ -17,8 +17,10 @@
 #include <cstddef>
 #include <iterator>
 #include <mutex>
+#include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 
 namespace ninfer::serve {
@@ -302,6 +304,67 @@ private:
     mutable std::vector<PinnedCheckpoint> pinned_;
 };
 
+// Saves each live session the engine is about to drop under pressure, so the drop costs cache
+// rather than the session's newest turn (alphastorm/omp-ninfer#45). It runs on the engine worker
+// with the execution lock released, and every save takes the ordinary checkpoint path.
+class PressureCheckpointSaver final : public runtime::PressureCheckpointHandler {
+public:
+    PressureCheckpointSaver(GenerationService& service, ResponseStore& responses) noexcept
+        : service_(service), responses_(responses) {}
+
+    void save_before_eviction(
+        std::span<const runtime::PressureCheckpointVictim> victims) noexcept override {
+        for (const runtime::PressureCheckpointVictim& victim : victims) {
+            try {
+                save(victim);
+            } catch (const std::exception& error) {
+                try {
+                    write_console_log(ConsoleLogLevel::Warning,
+                                      "session checkpoint before eviction failed for session " +
+                                          victim.session_sha256.substr(0, 12) + ": " +
+                                          error.what());
+                } catch (...) {}
+            } catch (...) {}
+        }
+    }
+
+private:
+    // The HTTP thread that ran a turn stores its response around the time the engine catalogues
+    // the continuation, so the store can briefly trail the engine. A response that never arrives
+    // - its client left first - can never be checkpointed under this tag.
+    static constexpr std::chrono::milliseconds kStoredResponseWait{2000};
+    static constexpr std::chrono::milliseconds kStoredResponsePoll{10};
+
+    void save(const runtime::PressureCheckpointVictim& victim) {
+        const std::string session = victim.session_sha256.substr(0, 12);
+        if (service_.checkpoint_covers(victim.session_sha256, victim.checkpoint_tag)) { return; }
+        const auto deadline = std::chrono::steady_clock::now() + kStoredResponseWait;
+        while (responses_.latest_response_id(victim.session_sha256) != victim.checkpoint_tag) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                write_console_log(ConsoleLogLevel::Warning,
+                                  "session checkpoint before eviction skipped: newest turn was "
+                                  "never stored (session " +
+                                      session + ")");
+                return;
+            }
+            std::this_thread::sleep_for(kStoredResponsePoll);
+        }
+        runtime::SessionCheckpointSkipDetail skip;
+        if (service_.save_checkpoint(victim.session_sha256, responses_, &skip)) {
+            write_console_log(ConsoleLogLevel::Info,
+                              "session checkpoint saved before eviction (session " + session + ")");
+            return;
+        }
+        write_console_log(ConsoleLogLevel::Warning,
+                          format_session_checkpoint_skip("session checkpoint before eviction refused: ",
+                                                         victim.session_sha256, skip)
+                              .view());
+    }
+
+    GenerationService& service_;
+    ResponseStore& responses_;
+};
+
 // The lifecycle passes the artifact digest it hashed at deployment time. The serve
 // re-hashes the bytes it will actually load and refuses a mismatch, so a mutated
 // bind-mount source cannot restart under a stale identity and accept checkpoints
@@ -404,6 +467,21 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
             .read_queue       = std::move(read_queue),
         });
     }
+}
+
+GenerationService::~GenerationService() {
+    // The engine worker may be inside the pressure handler, saving through this service's store
+    // and mutex, and those are destroyed before the engine. Detach it, waiting that call out.
+    if (engine_ == nullptr) { return; }
+    try {
+        runtime::CheckpointEngineAccess::set_pressure_checkpoint_handler(*engine_, nullptr);
+    } catch (...) {}
+}
+
+void GenerationService::save_sessions_before_eviction(ResponseStore& responses) {
+    if (!checkpoint_store_) { return; }
+    runtime::CheckpointEngineAccess::set_pressure_checkpoint_handler(
+        *engine_, std::make_shared<PressureCheckpointSaver>(*this, responses));
 }
 
 std::shared_ptr<RequestLifetime>

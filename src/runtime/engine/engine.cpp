@@ -351,6 +351,19 @@ runtime::CheckpointEngineAccess::restore_session(
         engine.impl_->core);
 }
 
+void runtime::CheckpointEngineAccess::set_pressure_checkpoint_handler(
+    Engine& engine, std::shared_ptr<runtime::PressureCheckpointHandler> handler) {
+    if (engine.impl_ == nullptr) { throw std::logic_error("Engine is moved from"); }
+    std::visit(
+        [&](auto& core) {
+            using CorePointer = std::remove_cvref_t<decltype(core)>;
+            if constexpr (!std::is_same_v<CorePointer, std::monostate>) {
+                core->set_pressure_checkpoint_handler(std::move(handler));
+            }
+        },
+        engine.impl_->core);
+}
+
 Engine::Engine(EngineOptions options) : impl_(std::make_shared<Impl>(std::move(options))) {}
 
 Engine::~Engine()                            = default;
