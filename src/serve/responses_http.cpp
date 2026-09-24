@@ -43,6 +43,7 @@ struct StreamingResponse {
     std::atomic<bool> cancelled{false};
     bool store   = false;
     bool started = false;
+    ResponsePublication publication;
 };
 
 void write_error(httplib::Response& response, const ApiError& error) {
@@ -247,6 +248,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
     const std::uint64_t req_id = ++request_seq_;
     std::string id;
     PreparedRequest prepared;
+    ResponsePublication publication;
     try {
         id = new_response_id();
         if (session_key.empty() && request.store) {
@@ -258,9 +260,13 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                 request.store ? CacheRetentionHint::LiveSession : CacheRetentionHint::Disposable;
             cache_hints.update_session_index = request.store;
         }
+        // Only a stored turn of a client session carries a checkpoint tag, and from here until
+        // its record is stored a save of that turn waits for it instead of evicting it unsaved.
+        const bool checkpointed = request.store && request.generation.client_session_sha256;
+        if (checkpointed) { publication = ResponsePublication(response_store_, id); }
         prepared = service_->prepare(
             request.generation, [&req] { return disconnected(req); }, std::move(cache_hints),
-            request.store && request.generation.client_session_sha256 ? id : std::string());
+            checkpointed ? id : std::string());
     } catch (const ApiException& exception) {
         const ApiError error = responses_error(exception.error());
         log_request_rejected(make_request_rejection_log_context(req_id, "openai_responses",
@@ -316,6 +322,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
     }
 
     auto stream                   = std::make_shared<StreamingResponse>();
+    stream->publication           = std::move(publication);
     stream->prepared              = std::move(prepared);
     stream->input_turns           = std::move(request.input_turns);
     stream->input_items           = std::move(request.input_items);
@@ -338,6 +345,11 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                 return true;
             }
             stream->started = true;
+            // However this reply ends, its publication ends with it; storing it already did.
+            struct EndPublication {
+                ResponsePublication& publication;
+                ~EndPublication() { publication.end(); }
+            } end_publication{stream->publication};
             try {
                 write_stream_items(sink, *stream, stream->encoder->start());
                 StreamSink output;

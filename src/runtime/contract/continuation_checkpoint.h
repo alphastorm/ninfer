@@ -545,11 +545,24 @@ struct SessionRestoreSkipDetail {
     std::uint32_t reclaim_declined = 0;
 };
 
+// What save-before-evict found for one victim.
+enum class PressureCheckpointOutcome : std::uint8_t {
+    // Dropping the continuation loses nothing more: the checkpoint covers the turn, the turn is
+    // not the session's newest stored response and never will be, or its save was refused for a
+    // reason retrying cannot fix (the handler reports that refusal).
+    Settled,
+    // The turn may still become savable: its response is still being stored, or its save hit a
+    // gate that clears once the engine quiesces. The engine keeps the continuation and asks again
+    // when it next plans an admission that drops it.
+    Pending,
+};
+
 // A live session that admission is about to drop from engine memory to make room for another
-// request, named the way the checkpoint store names it.
+// request, named the way the checkpoint store names it. The handler fills in the outcome.
 struct PressureCheckpointVictim {
     std::string session_sha256;
     std::string checkpoint_tag;
+    PressureCheckpointOutcome outcome = PressureCheckpointOutcome::Pending;
 };
 
 // Admission can make room by evicting another session's continuation, or by dropping checkpoints
@@ -564,11 +577,10 @@ public:
     PressureCheckpointHandler(const PressureCheckpointHandler&)            = delete;
     PressureCheckpointHandler& operator=(const PressureCheckpointHandler&) = delete;
 
-    // Returns once every victim's checkpoint covers its tag, or its save was refused for a reason
-    // retrying cannot fix. The engine then may drop all of them, so the handler reports each
-    // refusal: refusing admission instead would trade the waiting request for cache.
-    virtual void
-    save_before_eviction(std::span<const PressureCheckpointVictim> victims) noexcept = 0;
+    // Answers every victim through its outcome. The engine drops only Settled victims; a plan that
+    // would drop a Pending one is abandoned, so the waiting request waits - bounded by its own
+    // deadline - rather than trading a turn that can still be saved for cache.
+    virtual void save_before_eviction(std::span<PressureCheckpointVictim> victims) noexcept = 0;
 };
 
 } // namespace ninfer::runtime

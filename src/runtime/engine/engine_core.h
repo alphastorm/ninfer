@@ -1494,9 +1494,9 @@ private:
             std::move(outcome));
     }
 
-    // True when every live session the choice would drop has been through the pressure handler,
-    // or none is installed. Otherwise the unhandled victims wait in pressure_saves_ for the
-    // worker, which must not call the handler while it holds execution_mutex_.
+    // True when the pressure handler has settled every live session the choice would drop, or
+    // none is installed. Otherwise the unsettled victims wait in pressure_saves_ for the worker,
+    // which must not call the handler while it holds execution_mutex_.
     [[nodiscard]] bool pressure_victims_saved(const typename ResourceManagement::Choice& choice) {
         if (!pressure_protection_.load(std::memory_order_acquire)) { return true; }
         bool saved = true;
@@ -1517,8 +1517,10 @@ private:
     }
 
     // Runs on the worker without execution_mutex_, because the handler saves through the ordinary
-    // checkpoint path, which takes it. Afterwards every victim handed over may be dropped: it was
-    // saved, its save was refused for good and reported, or no handler is left to ask.
+    // checkpoint path, which takes it. Afterwards each victim the handler settled may be dropped -
+    // it was saved, or its save was refused for good and reported - as may every victim once no
+    // handler is left to ask. A pending victim stays resident and is handed over again by the next
+    // plan that drops it.
     void save_pressure_victims() noexcept {
         std::shared_ptr<PressureCheckpointHandler> handler;
         {
@@ -1535,9 +1537,10 @@ private:
             pressure_handler_idle_.notify_all();
         }
         try {
-            pressure_saved_.insert(pressure_saved_.end(),
-                                   std::make_move_iterator(pressure_saves_.begin()),
-                                   std::make_move_iterator(pressure_saves_.end()));
+            for (PressureCheckpointVictim& victim : pressure_saves_) {
+                if (handler && victim.outcome != PressureCheckpointOutcome::Settled) { continue; }
+                pressure_saved_.push_back(std::move(victim));
+            }
         } catch (...) {
             // An unrecorded victim is handed over again by the next plan that drops it.
         }
@@ -1941,9 +1944,10 @@ private:
                         previous_unit_was_decode, instance_.program->has_context_transaction()) &&
                     consume_admission_check()) {
                     (void)try_admit_one();
-                    // Handled victims cover the pass that follows their handler call, and the
-                    // passes of the same pending save cycle; any later plan checks its victims
-                    // afresh instead of trusting a checkpoint that may have been deleted since.
+                    // Settled victims cover the passes of the save cycle that settled them,
+                    // including passes that wait on a pending one; once no save is outstanding,
+                    // any later plan checks its victims afresh instead of trusting a checkpoint
+                    // that may have been deleted since.
                     if (pressure_saves_.empty()) { pressure_saved_.clear(); }
                     membership = scheduler_.build_round_membership(slots_, max_concurrency_);
                 }

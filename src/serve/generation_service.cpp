@@ -6,6 +6,7 @@
 
 #include "product/media_acquire/acquire.h"
 #include "runtime/engine/checkpoint_engine_access.h"
+#include "serve/checkpoint_policy.h"
 #include "serve/client_identity.h"
 #include "serve/console_log.h"
 #include "serve/tool_call_parser.h"
@@ -313,10 +314,14 @@ public:
         : service_(service), responses_(responses) {}
 
     void save_before_eviction(
-        std::span<const runtime::PressureCheckpointVictim> victims) noexcept override {
-        for (const runtime::PressureCheckpointVictim& victim : victims) {
+        std::span<runtime::PressureCheckpointVictim> victims) noexcept override {
+        std::vector<Deferral> deferred;
+        for (runtime::PressureCheckpointVictim& victim : victims) {
+            victim.outcome = Outcome::Settled;
             try {
-                save(victim);
+                Deferral deferral = take_deferral(victim);
+                victim.outcome    = save(victim, deferral);
+                if (victim.outcome == Outcome::Pending) { deferred.push_back(std::move(deferral)); }
             } catch (const std::exception& error) {
                 try {
                     write_console_log(ConsoleLogLevel::Warning,
@@ -326,43 +331,85 @@ public:
                 } catch (...) {}
             } catch (...) {}
         }
+        deferred_ = std::move(deferred);
     }
 
 private:
-    // The HTTP thread that ran a turn stores its response around the time the engine catalogues
-    // the continuation, so the store can briefly trail the engine. A response that never arrives
-    // - its client left first - can never be checkpointed under this tag.
-    static constexpr std::chrono::milliseconds kStoredResponseWait{2000};
-    static constexpr std::chrono::milliseconds kStoredResponsePoll{10};
+    using Outcome = runtime::PressureCheckpointOutcome;
 
-    void save(const runtime::PressureCheckpointVictim& victim) {
-        const std::string session = victim.session_sha256.substr(0, 12);
-        if (service_.checkpoint_covers(victim.session_sha256, victim.checkpoint_tag)) { return; }
-        const auto deadline = std::chrono::steady_clock::now() + kStoredResponseWait;
-        while (responses_.latest_response_id(victim.session_sha256) != victim.checkpoint_tag) {
-            if (std::chrono::steady_clock::now() >= deadline) {
-                write_console_log(ConsoleLogLevel::Warning,
-                                  "session checkpoint before eviction skipped: newest turn was "
-                                  "never stored (session " +
-                                      session + ")");
-                return;
+    // A victim answered Pending by the previous call, and what has been reported about it. Only
+    // the victims of one call are carried into the next, so this never outgrows a single plan.
+    struct Deferral {
+        std::string session_sha256;
+        std::string checkpoint_tag;
+        unsigned transient_refusals = 0;
+        bool publication_reported   = false;
+    };
+
+    // A reply still being stored - a streamed one is stored only after its last delta reaches the
+    // client - is awaited this long per call; after that the victim stays resident until the next
+    // admission pass asks again, and the waiting request's own deadline bounds the whole wait.
+    static constexpr std::chrono::milliseconds kPublicationWait{1000};
+
+    Deferral take_deferral(const runtime::PressureCheckpointVictim& victim) {
+        for (Deferral& deferral : deferred_) {
+            if (deferral.session_sha256 == victim.session_sha256 &&
+                deferral.checkpoint_tag == victim.checkpoint_tag) {
+                return std::move(deferral);
             }
-            std::this_thread::sleep_for(kStoredResponsePoll);
+        }
+        return Deferral{.session_sha256 = victim.session_sha256,
+                        .checkpoint_tag = victim.checkpoint_tag};
+    }
+
+    Outcome save(const runtime::PressureCheckpointVictim& victim, Deferral& deferral) {
+        const std::string session = victim.session_sha256.substr(0, 12);
+        if (service_.checkpoint_covers(victim.session_sha256, victim.checkpoint_tag)) {
+            return Outcome::Settled;
+        }
+        switch (responses_.await_publication(victim.session_sha256, victim.checkpoint_tag,
+                                             kPublicationWait)) {
+        case ResponsePublicationState::Stored:
+            break;
+        case ResponsePublicationState::Publishing:
+            if (!deferral.publication_reported) {
+                write_console_log(ConsoleLogLevel::Info,
+                                  "session checkpoint before eviction deferred: newest turn is "
+                                  "still being stored (session " +
+                                      session + ")");
+                deferral.publication_reported = true;
+            }
+            return Outcome::Pending;
+        case ResponsePublicationState::Absent:
+            write_console_log(ConsoleLogLevel::Warning,
+                              "session checkpoint before eviction skipped: newest turn is not the "
+                              "session's newest stored response (session " +
+                                  session + ")");
+            return Outcome::Settled;
         }
         runtime::SessionCheckpointSkipDetail skip;
         if (service_.save_checkpoint(victim.session_sha256, responses_, &skip)) {
             write_console_log(ConsoleLogLevel::Info,
                               "session checkpoint saved before eviction (session " + session + ")");
-            return;
+            return Outcome::Settled;
         }
+        // A gate that clears once the engine quiesces keeps the victim resident for another
+        // admission pass, a bounded number of times; any other refusal is final.
+        const bool retry = checkpoint_refusal_is_transient(skip) &&
+                           deferral.transient_refusals < kTransientCheckpointRetries;
+        if (retry) { ++deferral.transient_refusals; }
         write_console_log(ConsoleLogLevel::Warning,
-                          format_session_checkpoint_skip("session checkpoint before eviction refused: ",
-                                                         victim.session_sha256, skip)
+                          format_session_checkpoint_skip(
+                              retry ? "session checkpoint before eviction deferred: "
+                                    : "session checkpoint before eviction refused: ",
+                              victim.session_sha256, skip)
                               .view());
+        return retry ? Outcome::Pending : Outcome::Settled;
     }
 
     GenerationService& service_;
     ResponseStore& responses_;
+    std::vector<Deferral> deferred_;
 };
 
 // The lifecycle passes the artifact digest it hashed at deployment time. The serve

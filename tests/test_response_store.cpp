@@ -2,10 +2,12 @@
 
 #include <nlohmann/json.hpp>
 
+#include <chrono>
 #include <functional>
 #include <iostream>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -139,6 +141,62 @@ int test_session_continuation_and_dag_deletion() {
     return failures;
 }
 
+// A save that must checkpoint a finished turn waits on its reply's publication rather than a fixed
+// guess: a reply stored well after the engine finished still reads as stored and wakes the waiter,
+// an abandoned one reads as absent at once, and a newer stored reply supersedes an older one
+// (council CR-20260924-ninfer-durable-evict-r1, daybreak-blue R2).
+int test_publication_is_awaited_until_stored_or_abandoned() {
+    using namespace std::chrono_literals;
+    const std::string session(64, 'c');
+    int failures = 0;
+    ResponseStore store(8, 1ULL << 20);
+    const auto session_record = [&](std::string id) {
+        StoredResponse value = record(
+            std::move(id), append_response_context({}, {text_turn(ninfer::ChatRole::User, "go")}));
+        value.client_session_sha256 = session;
+        return value;
+    };
+
+    ResponsePublication slow(store, "resp_slow");
+    failures += check(store.await_publication(session, "resp_slow", 0ms) ==
+                          ResponsePublicationState::Publishing,
+                      "a reply its handler has yet to store did not read as publishing");
+    std::thread handler([&] {
+        std::this_thread::sleep_for(200ms);
+        store.put(session_record("resp_slow"));
+    });
+    const auto started                   = std::chrono::steady_clock::now();
+    const ResponsePublicationState state = store.await_publication(session, "resp_slow", 30s);
+    const auto waited                    = std::chrono::steady_clock::now() - started;
+    handler.join();
+    failures += check(state == ResponsePublicationState::Stored,
+                      "a reply stored after the waiter started was not seen as stored");
+    failures += check(waited < 10s, "storing the reply did not wake the waiting save");
+    slow.end();
+
+    { ResponsePublication abandoned(store, "resp_abandoned"); }
+    failures += check(store.await_publication(session, "resp_abandoned", 30s) ==
+                          ResponsePublicationState::Absent,
+                      "a reply its handler abandoned did not read as absent");
+
+    ResponsePublication moved(store, "resp_moved");
+    ResponsePublication owner = std::move(moved);
+    moved.end();
+    failures += check(store.await_publication(session, "resp_moved", 0ms) ==
+                          ResponsePublicationState::Publishing,
+                      "ending a moved-from publication ended its new owner's");
+    owner.end();
+    failures += check(store.await_publication(session, "resp_moved", 0ms) ==
+                          ResponsePublicationState::Absent,
+                      "the owner of a moved publication could not end it");
+
+    store.put(session_record("resp_newer"));
+    failures += check(store.await_publication(session, "resp_slow", 0ms) ==
+                          ResponsePublicationState::Absent,
+                      "a reply superseded by a newer stored one still read as the newest");
+    return failures;
+}
+
 int test_oversized_record() {
     ResponseStore store(4, 256);
     StoredResponse large = record(
@@ -204,6 +262,7 @@ int main() {
     failures += test_session_continuation_and_dag_deletion();
     failures += test_oversized_record();
     failures += test_restore_preserves_unrelated_session_on_capacity_refusal();
+    failures += test_publication_is_awaited_until_stored_or_abandoned();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

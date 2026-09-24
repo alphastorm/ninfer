@@ -129,6 +129,9 @@ void ResponseStore::put(StoredResponse response) {
     }
     const std::uint64_t sequence = next_sequence_++;
     if (next_sequence_ == 0) { next_sequence_ = 1; }
+    // Storing ends the id's publication under the same lock, so a waiter never observes it as
+    // neither stored nor publishing. A failed insert leaves it Absent, which is what it is.
+    if (publishing_.erase(owned->id) != 0) { publication_changed_.notify_all(); }
     insert_locked(std::move(owned), envelope_bytes, sequence);
 
     while (records_.size() > max_records_ || current_bytes_ > max_bytes_) {
@@ -199,10 +202,9 @@ ResponseStore::snapshot_session(std::string_view client_session_sha256) const {
     return snapshot;
 }
 
-std::optional<std::string>
-ResponseStore::latest_response_id(std::string_view client_session_sha256) const {
-    std::lock_guard lock(mutex_);
-    const StoredResponse* newest = nullptr;
+const StoredResponse*
+ResponseStore::newest_locked(std::string_view client_session_sha256) const noexcept {
+    const StoredResponse* newest  = nullptr;
     std::uint64_t newest_sequence = 0;
     for (const auto& [id, entry] : records_) {
         (void)id;
@@ -213,8 +215,70 @@ ResponseStore::latest_response_id(std::string_view client_session_sha256) const 
             newest_sequence = entry.sequence;
         }
     }
+    return newest;
+}
+
+std::optional<std::string>
+ResponseStore::latest_response_id(std::string_view client_session_sha256) const {
+    std::lock_guard lock(mutex_);
+    const StoredResponse* newest = newest_locked(client_session_sha256);
     if (newest == nullptr) { return std::nullopt; }
     return newest->id;
+}
+
+ResponsePublicationState
+ResponseStore::await_publication(std::string_view client_session_sha256,
+                                 const std::string& response_id,
+                                 std::chrono::milliseconds timeout) const {
+    std::unique_lock lock(mutex_);
+    ResponsePublicationState state = ResponsePublicationState::Publishing;
+    (void)publication_changed_.wait_for(lock, timeout, [&] {
+        const StoredResponse* newest = newest_locked(client_session_sha256);
+        if (newest != nullptr && newest->id == response_id) {
+            state = ResponsePublicationState::Stored;
+        } else if (publishing_.contains(response_id)) {
+            state = ResponsePublicationState::Publishing;
+        } else {
+            state = ResponsePublicationState::Absent;
+        }
+        return state != ResponsePublicationState::Publishing;
+    });
+    return state;
+}
+
+void ResponseStore::begin_publication(const std::string& response_id) {
+    std::lock_guard lock(mutex_);
+    publishing_.insert(response_id);
+}
+
+void ResponseStore::end_publication(const std::string& response_id) noexcept {
+    std::lock_guard lock(mutex_);
+    if (publishing_.erase(response_id) != 0) { publication_changed_.notify_all(); }
+}
+
+ResponsePublication::ResponsePublication(ResponseStore& store, std::string response_id)
+    : store_(&store), response_id_(std::move(response_id)) {
+    store_->begin_publication(response_id_);
+}
+
+ResponsePublication::ResponsePublication(ResponsePublication&& other) noexcept
+    : store_(std::exchange(other.store_, nullptr)), response_id_(std::move(other.response_id_)) {}
+
+ResponsePublication& ResponsePublication::operator=(ResponsePublication&& other) noexcept {
+    if (this != &other) {
+        end();
+        store_       = std::exchange(other.store_, nullptr);
+        response_id_ = std::move(other.response_id_);
+    }
+    return *this;
+}
+
+ResponsePublication::~ResponsePublication() { end(); }
+
+void ResponsePublication::end() noexcept {
+    if (store_ == nullptr) { return; }
+    store_->end_publication(response_id_);
+    store_ = nullptr;
 }
 
 std::vector<std::string> ResponseStore::session_digests() const {
