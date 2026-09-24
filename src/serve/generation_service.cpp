@@ -782,6 +782,10 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
     if (!required_response_id && !checkpoint_store_->may_hold(session_sha256)) { return false; }
     std::lock_guard lock(checkpoint_mutex_);
     try {
+        // Another request for the same session may have restored it, or stored its reply, while
+        // this one waited here; restoring again would replace that newer lineage with the
+        // checkpoint.
+        if (!required_response_id && responses.latest_response_id(session_sha256)) { return false; }
         // Each attempt gets a fresh reader, because a checkpoint reader is a single verified pass
         // and the engine consumes it before it can discover that the pool is full. An attempt is
         // worth repeating only when something actually changed: the engine dropped a resident
