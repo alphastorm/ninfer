@@ -1619,8 +1619,6 @@ private:
         if (!erase_pending(request)) {
             throw std::logic_error("admitted request disappeared from the FIFO queue");
         }
-        // The saves covered this admission; the next one checks its own victims afresh.
-        pressure_saved_.clear();
         release_planning_state(request);
         if (materializing_ || slots_[lane] != nullptr) {
             throw std::logic_error("reserved materialization destination is not empty");
@@ -1943,6 +1941,10 @@ private:
                         previous_unit_was_decode, instance_.program->has_context_transaction()) &&
                     consume_admission_check()) {
                     (void)try_admit_one();
+                    // Handled victims cover the pass that follows their handler call, and the
+                    // passes of the same pending save cycle; any later plan checks its victims
+                    // afresh instead of trusting a checkpoint that may have been deleted since.
+                    if (pressure_saves_.empty()) { pressure_saved_.clear(); }
                     membership = scheduler_.build_round_membership(slots_, max_concurrency_);
                 }
 
@@ -2033,7 +2035,7 @@ private:
     bool failed_   = false;
     // Save-before-evict. pressure_handler_mutex_ guards the handler and its busy flag; the two
     // victim lists belong to the worker thread: sessions the dropped choice waits on, and
-    // sessions the handler has been through since the last admission.
+    // sessions the handler has been through for the admission pass under way.
     std::mutex pressure_handler_mutex_;
     std::condition_variable pressure_handler_idle_;
     std::shared_ptr<PressureCheckpointHandler> pressure_handler_;
