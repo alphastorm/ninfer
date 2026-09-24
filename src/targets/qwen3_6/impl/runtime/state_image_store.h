@@ -2,6 +2,8 @@
 
 #include <ninfer/targets/qwen3_6/state_image.h>
 
+#include "runtime/contract/continuation_checkpoint.h"
+
 #include <cstring>
 #include <cstdint>
 #include <limits>
@@ -149,15 +151,26 @@ public:
 
     void copy_checkpoint_to_host(StateImageHandle handle,
                                  qwen3_6::HostStateImageView destination,
-                                 cudaStream_t stream = nullptr) const {
-        const Object& object = require(handle);
+                                 cudaStream_t stream = nullptr,
+                                 runtime::ContinuationExportSkipDetail* skip = nullptr) const {
+        using Reason = runtime::ContinuationExportSkipReason;
+        const Object& object = require(handle, skip);
         const auto& layout   = host_layout();
-        if (object.role != StateImageRole::CheckpointImmutable || destination.data == nullptr ||
-            destination.layout != &layout) {
+        if (object.role != StateImageRole::CheckpointImmutable) {
+            runtime::ContinuationExportSkipDetail::record(skip, Reason::StateNotImmutable);
+            throw std::invalid_argument("StateImage checkpoint export view is invalid");
+        }
+        if (destination.data == nullptr) {
+            runtime::ContinuationExportSkipDetail::record(skip, Reason::StateExportDestinationMissing);
+            throw std::invalid_argument("StateImage checkpoint export view is invalid");
+        }
+        if (destination.layout != &layout) {
+            runtime::ContinuationExportSkipDetail::record(skip, Reason::StateExportLayoutMismatch);
             throw std::invalid_argument("StateImage checkpoint export view is invalid");
         }
         if (object.host_slot) {
             if (host_ == nullptr) {
+                runtime::ContinuationExportSkipDetail::record(skip, Reason::StateHostBackingMissing);
                 throw std::logic_error("StateImage Host replica has no backing pool");
             }
             const qwen3_6::HostStateImageConstView source = host_->view(*object.host_slot);
@@ -165,6 +178,7 @@ public:
             return;
         }
         if (!object.device_slot) {
+            runtime::ContinuationExportSkipDetail::record(skip, Reason::StateReplicaMissing);
             throw std::logic_error("StateImage checkpoint has no exportable replica");
         }
         device_->copy_to_host(*object.device_slot, destination, stream);
@@ -752,8 +766,13 @@ private:
         return objects_[handle.index_];
     }
 
-    [[nodiscard]] const Object& require(StateImageHandle handle) const {
-        if (!valid(handle)) { throw std::invalid_argument("StateImage handle is stale"); }
+    [[nodiscard]] const Object& require(
+        StateImageHandle handle, runtime::ContinuationExportSkipDetail* skip = nullptr) const {
+        if (!valid(handle)) {
+            runtime::ContinuationExportSkipDetail::record(
+                skip, runtime::ContinuationExportSkipReason::StateHandleInvalid);
+            throw std::invalid_argument("StateImage handle is stale");
+        }
         return objects_[handle.index_];
     }
 

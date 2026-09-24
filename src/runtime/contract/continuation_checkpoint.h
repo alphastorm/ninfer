@@ -110,8 +110,266 @@ session_checkpoint_skip_reason_name(SessionCheckpointSkipReason reason) noexcept
     return "unknown";
 }
 
+// Names the first failed target or store-local export gate. Outer engine gates retain the
+// SessionCheckpointSkipReason vocabulary above; none of these diagnostics change admission.
+enum class ContinuationExportSkipReason : std::uint8_t {
+    None = 0,
+    StagingBufferEmpty,
+    ContinuationInvalid,
+    ContextTransactionBusy,
+    ExecutionBatchPending,
+    MaterializationPinned,
+    KvMissing,
+    EndpointNotRetained,
+    StateForkPending,
+    StateSourceRetained,
+    StateDestinationReserved,
+    StateBindingSplit,
+    SharedPrefixReferences,
+    RewriteStateMismatch,
+    EmptyFrontier,
+    TextKvFrontierMismatch,
+    SpeculativeKvPresenceMismatch,
+    SpeculativeKvFrontierMismatch,
+    BackendStateWithoutSpeculation,
+    StateHandleInvalid,
+    StateNotImmutable,
+    StateCountOverflow,
+    HostKvCapacityExceeded,
+    MetadataWriteFailed,
+    StateLayoutEmpty,
+    StateStagingTooSmall,
+    StateWriteFailed,
+    HostKvArenaMissing,
+    HostKvExtentsMissing,
+    KvPayloadEmpty,
+    KvStrideZero,
+    KvPayloadOverflow,
+    KvTemporaryPageUnavailable,
+    KvReplicaMissing,
+    TextKvWriteFailed,
+    SpeculativeKvWriteFailed,
+    PayloadOverflow,
+    MetadataStagingTooSmall,
+    SequenceLedgerOverflow,
+    AnchorStateCountMismatch,
+    PrefixDigestCountOverflow,
+    PrefixTokenCountOverflow,
+    PrefixVisionCountOverflow,
+    PrefixRewriteCountOverflow,
+    VisionTimestampCountOverflow,
+    VisionTokenSpanCountOverflow,
+    StateExportDestinationMissing,
+    StateExportLayoutMismatch,
+    StateHostBackingMissing,
+    StateReplicaMissing,
+    UnexpectedException,
+    StoreInputInvalid,
+    StoreStatsInvalid,
+};
+
+[[nodiscard]] constexpr std::string_view
+continuation_export_skip_reason_name(ContinuationExportSkipReason reason) noexcept {
+    switch (reason) {
+    case ContinuationExportSkipReason::None:
+        return "none";
+    case ContinuationExportSkipReason::StagingBufferEmpty:
+        return "staging buffer is zero";
+    case ContinuationExportSkipReason::ContinuationInvalid:
+        return "continuation handle invalid";
+    case ContinuationExportSkipReason::ContextTransactionBusy:
+        return "context transaction in progress";
+    case ContinuationExportSkipReason::ExecutionBatchPending:
+        return "execution batch pending";
+    case ContinuationExportSkipReason::MaterializationPinned:
+        return "continuation pinned by materialization";
+    case ContinuationExportSkipReason::KvMissing:
+        return "continuation has no KV";
+    case ContinuationExportSkipReason::EndpointNotRetained:
+        return "endpoint is not retained";
+    case ContinuationExportSkipReason::StateForkPending:
+        return "state fork pending";
+    case ContinuationExportSkipReason::StateSourceRetained:
+        return "state read source retained";
+    case ContinuationExportSkipReason::StateDestinationReserved:
+        return "state destination reserved";
+    case ContinuationExportSkipReason::StateBindingSplit:
+        return "state binding split";
+    case ContinuationExportSkipReason::SharedPrefixReferences:
+        return "active shared-prefix references remain";
+    case ContinuationExportSkipReason::RewriteStateMismatch:
+        return "rewrite state/metadata disagree";
+    case ContinuationExportSkipReason::EmptyFrontier:
+        return "empty execution frontier";
+    case ContinuationExportSkipReason::TextKvFrontierMismatch:
+        return "text KV frontier differs";
+    case ContinuationExportSkipReason::SpeculativeKvPresenceMismatch:
+        return "speculative KV presence differs";
+    case ContinuationExportSkipReason::SpeculativeKvFrontierMismatch:
+        return "speculative KV frontier differs";
+    case ContinuationExportSkipReason::BackendStateWithoutSpeculation:
+        return "backend state exists with speculation disabled";
+    case ContinuationExportSkipReason::StateHandleInvalid:
+        return "state handle invalid";
+    case ContinuationExportSkipReason::StateNotImmutable:
+        return "state image not immutable";
+    case ContinuationExportSkipReason::StateCountOverflow:
+        return "state count not representable";
+    case ContinuationExportSkipReason::HostKvCapacityExceeded:
+        return "checkpoint exceeds total host KV capacity";
+    case ContinuationExportSkipReason::MetadataWriteFailed:
+        return "metadata write refused";
+    case ContinuationExportSkipReason::StateLayoutEmpty:
+        return "state layout empty";
+    case ContinuationExportSkipReason::StateStagingTooSmall:
+        return "state image exceeds staging buffer";
+    case ContinuationExportSkipReason::StateWriteFailed:
+        return "state write refused";
+    case ContinuationExportSkipReason::HostKvArenaMissing:
+        return "host KV arena unavailable";
+    case ContinuationExportSkipReason::HostKvExtentsMissing:
+        return "host KV extent store unavailable";
+    case ContinuationExportSkipReason::KvPayloadEmpty:
+        return "empty KV payload";
+    case ContinuationExportSkipReason::KvStrideZero:
+        return "KV page stride is zero";
+    case ContinuationExportSkipReason::KvPayloadOverflow:
+        return "KV payload size overflows";
+    case ContinuationExportSkipReason::KvTemporaryPageUnavailable:
+        return "temporary host KV page unavailable";
+    case ContinuationExportSkipReason::KvReplicaMissing:
+        return "KV page has no exportable replica";
+    case ContinuationExportSkipReason::TextKvWriteFailed:
+        return "text KV write refused";
+    case ContinuationExportSkipReason::SpeculativeKvWriteFailed:
+        return "speculative KV write refused";
+    case ContinuationExportSkipReason::PayloadOverflow:
+        return "aggregate payload size overflows";
+    case ContinuationExportSkipReason::MetadataStagingTooSmall:
+        return "metadata exceeds staging limit";
+    case ContinuationExportSkipReason::SequenceLedgerOverflow:
+        return "sequence ledger count exceeds uint32";
+    case ContinuationExportSkipReason::AnchorStateCountMismatch:
+        return "anchor state count differs";
+    case ContinuationExportSkipReason::PrefixDigestCountOverflow:
+        return "prefix digest count exceeds uint32";
+    case ContinuationExportSkipReason::PrefixTokenCountOverflow:
+        return "prefix token count exceeds uint32";
+    case ContinuationExportSkipReason::PrefixVisionCountOverflow:
+        return "prefix vision item count exceeds uint32";
+    case ContinuationExportSkipReason::PrefixRewriteCountOverflow:
+        return "prefix rewrite frontier count exceeds uint32";
+    case ContinuationExportSkipReason::VisionTimestampCountOverflow:
+        return "vision timestamp count exceeds uint32";
+    case ContinuationExportSkipReason::VisionTokenSpanCountOverflow:
+        return "vision token span count exceeds uint32";
+    case ContinuationExportSkipReason::StateExportDestinationMissing:
+        return "state export destination is null";
+    case ContinuationExportSkipReason::StateExportLayoutMismatch:
+        return "state export layout differs";
+    case ContinuationExportSkipReason::StateHostBackingMissing:
+        return "host state replica has no backing pool";
+    case ContinuationExportSkipReason::StateReplicaMissing:
+        return "state image has no exportable replica";
+    case ContinuationExportSkipReason::UnexpectedException:
+        return "exception during export";
+    case ContinuationExportSkipReason::StoreInputInvalid:
+        return "checkpoint store input invalid";
+    case ContinuationExportSkipReason::StoreStatsInvalid:
+        return "returned checkpoint statistics invalid";
+    }
+    return "unknown";
+}
+
+enum class ContinuationExportStage : std::uint8_t {
+    None = 0,
+    Preconditions,
+    StateInventory,
+    HostKvCapacity,
+    MetadataEncode,
+    MetadataWrite,
+    ComputeFence,
+    StateStaging,
+    StateCopy,
+    StateSync,
+    StateWrite,
+    KvLookup,
+    KvHostAllocation,
+    KvCopy,
+    KvSync,
+    KvWrite,
+    PayloadAccounting,
+};
+
+[[nodiscard]] constexpr std::string_view
+continuation_export_stage_name(ContinuationExportStage reason) noexcept {
+    switch (reason) {
+    case ContinuationExportStage::None:
+        return "none";
+    case ContinuationExportStage::Preconditions:
+        return "preconditions";
+    case ContinuationExportStage::StateInventory:
+        return "state inventory";
+    case ContinuationExportStage::HostKvCapacity:
+        return "host KV capacity check";
+    case ContinuationExportStage::MetadataEncode:
+        return "metadata encode";
+    case ContinuationExportStage::MetadataWrite:
+        return "metadata write";
+    case ContinuationExportStage::ComputeFence:
+        return "compute fence";
+    case ContinuationExportStage::StateStaging:
+        return "state staging allocation";
+    case ContinuationExportStage::StateCopy:
+        return "state copy";
+    case ContinuationExportStage::StateSync:
+        return "state synchronization";
+    case ContinuationExportStage::StateWrite:
+        return "state write";
+    case ContinuationExportStage::KvLookup:
+        return "KV page lookup";
+    case ContinuationExportStage::KvHostAllocation:
+        return "temporary host KV allocation";
+    case ContinuationExportStage::KvCopy:
+        return "KV page copy";
+    case ContinuationExportStage::KvSync:
+        return "KV synchronization";
+    case ContinuationExportStage::KvWrite:
+        return "KV page write";
+    case ContinuationExportStage::PayloadAccounting:
+        return "payload accounting";
+    }
+    return "unknown";
+}
+
+enum class ContinuationExportKind : std::uint8_t { None = 0, State, TextKv, SpeculativeKv };
+enum class ContinuationExportException : std::uint8_t { None = 0, Standard, NonStandard };
+
+// Fixed enums and scalar context only: reporting a refusal cannot allocate or throw.
+struct ContinuationExportSkipDetail {
+    ContinuationExportSkipReason reason = ContinuationExportSkipReason::None;
+    ContinuationExportStage stage       = ContinuationExportStage::None;
+    ContinuationExportKind kind         = ContinuationExportKind::None;
+    ContinuationExportException exception = ContinuationExportException::None;
+    std::optional<std::uint32_t> ordinal;
+    std::optional<std::uint64_t> required_bytes;
+    std::optional<std::uint64_t> capacity_bytes;
+    std::optional<std::uint64_t> occupied_bytes;
+
+    static void record(ContinuationExportSkipDetail* detail,
+                       ContinuationExportSkipReason reason) noexcept {
+        if (detail != nullptr && detail->reason == ContinuationExportSkipReason::None) {
+            detail->reason = reason;
+        }
+    }
+};
+
 struct SessionCheckpointSkipDetail {
     SessionCheckpointSkipReason reason = SessionCheckpointSkipReason::None;
+    // The store keeps ProgramRejected for legacy shutdown accounting, but must not erase
+    // the engine gate that arrived first. The formatter reports both classifications.
+    SessionCheckpointSkipReason first_reason = SessionCheckpointSkipReason::None;
+    ContinuationExportSkipDetail export_detail;
     // The checkpoint tag the refused save attempted (response-id correlation for logs).
     std::string attempted_tag;
     // TagMismatch only: the tag the catalogued continuation actually carries.

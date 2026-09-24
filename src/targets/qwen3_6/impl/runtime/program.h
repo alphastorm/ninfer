@@ -573,7 +573,8 @@ public:
     [[nodiscard]] std::optional<runtime::ContinuationCheckpointStats>
     checkpoint_continuation(const ContinuationHandle& continuation,
                             runtime::ContinuationCheckpointWriter& writer,
-                            std::size_t staging_bytes) const;
+                            std::size_t staging_bytes,
+                            runtime::ContinuationExportSkipDetail* skip = nullptr) const;
     [[nodiscard]] std::optional<RestoredContinuation>
     restore_continuation(const runtime::ContinuationCheckpointReader& reader,
                          std::size_t staging_bytes,

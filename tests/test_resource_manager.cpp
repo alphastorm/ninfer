@@ -794,11 +794,18 @@ public:
         return FakeReleaseResult{.status = ConsumeStatus::Consumed};
     }
 
+    std::optional<ninfer::runtime::ContinuationExportSkipReason> forced_export_refusal;
+
     [[nodiscard]] std::optional<ninfer::runtime::ContinuationCheckpointStats>
     checkpoint_continuation(const FakeContinuationHandle& continuation,
                             ninfer::runtime::ContinuationCheckpointWriter&,
-                            std::size_t staging_bytes) const {
+                            std::size_t staging_bytes,
+                            ninfer::runtime::ContinuationExportSkipDetail* skip = nullptr) const {
         if (continuation.id == 0 || staging_bytes == 0) { return std::nullopt; }
+        if (forced_export_refusal) {
+            ninfer::runtime::ContinuationExportSkipDetail::record(skip, *forced_export_refusal);
+            return std::nullopt;
+        }
         return ninfer::runtime::ContinuationCheckpointStats{
             .frontier_tokens = 16, .restored_tokens = 16, .payload_bytes = 64};
     }
@@ -2146,6 +2153,17 @@ void test_session_checkpoint_tag_and_restore_identity() {
         source.checkpoint_session(source_program, FakeCacheSessionKey{77}, "resp_1", writer, 1024);
     require(saved && saved->restored_tokens == 16,
             "checkpoint did not export the exact tagged session endpoint");
+
+    source_program.forced_export_refusal =
+        ninfer::runtime::ContinuationExportSkipReason::EndpointNotRetained;
+    ninfer::runtime::SessionCheckpointSkipDetail export_skip;
+    require(!source.checkpoint_session(source_program, FakeCacheSessionKey{77}, "resp_1", writer,
+                                       1024, &export_skip) &&
+                export_skip.reason == ninfer::runtime::SessionCheckpointSkipReason::ProgramRejected &&
+                export_skip.export_detail.reason ==
+                    ninfer::runtime::ContinuationExportSkipReason::EndpointNotRetained,
+            "a retired endpoint did not reach the session skip detail as a named export gate");
+    source_program.forced_export_refusal.reset();
 
     const ninfer::runtime::ContinuationCheckpointStats expected{
         .frontier_tokens = 16, .restored_tokens = 16, .payload_bytes = 64};

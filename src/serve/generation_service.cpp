@@ -724,13 +724,18 @@ bool GenerationService::restore_checkpoint(std::string_view session_sha256,
                         // more residents here only adds latency and can exhaust the disk quota.
                         break;
                     }
-                    const std::string reason =
-                        result ? "published checkpoint was not current"
-                               : std::string(runtime::session_checkpoint_skip_reason_name(
-                                     save_skip.reason));
-                    write_console_log(ConsoleLogLevel::Warning,
-                                      "checkpoint save refused for resident session " +
-                                          stale.session_sha256.substr(0, 12) + ": " + reason);
+                    if (result) {
+                        write_console_log(ConsoleLogLevel::Warning,
+                                          "checkpoint save refused for resident session " +
+                                              stale.session_sha256.substr(0, 12) +
+                                              ": published checkpoint was not current");
+                    } else {
+                        write_console_log(
+                            ConsoleLogLevel::Warning,
+                            format_session_checkpoint_skip(
+                                "checkpoint save refused for resident session: ",
+                                stale.session_sha256, save_skip).view());
+                    }
                 }
                 write_console_log(ConsoleLogLevel::Info,
                                   "checkpoint restore for session " +

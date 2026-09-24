@@ -714,7 +714,8 @@ public:
             return refuse(SessionCheckpointSkipReason::TagMismatch);
         }
         std::optional<ContinuationCheckpointStats> stats =
-            program.checkpoint_continuation(*entry.handle, writer, staging_bytes);
+            program.checkpoint_continuation(*entry.handle, writer, staging_bytes,
+                                            skip != nullptr ? &skip->export_detail : nullptr);
         if (!stats) { return refuse(SessionCheckpointSkipReason::ProgramRejected); }
         return stats;
     }

@@ -60,7 +60,12 @@ inline constexpr std::uint32_t kMissingCheckpointState = std::numeric_limits<std
 
 class CheckpointEncoder {
 public:
-    explicit CheckpointEncoder(std::size_t limit) : limit_(limit) {}
+    explicit CheckpointEncoder(std::size_t limit, runtime::ContinuationExportSkipDetail* skip)
+        : limit_(limit), skip_(skip) {}
+
+    void note(runtime::ContinuationExportSkipReason reason) const noexcept {
+        runtime::ContinuationExportSkipDetail::record(skip_, reason);
+    }
 
     void u8(std::uint8_t value) { append_byte(value); }
 
@@ -82,6 +87,7 @@ public:
 
     void raw(std::span<const std::byte> bytes) {
         if (bytes.size() > limit_ - data_.size()) {
+            note(runtime::ContinuationExportSkipReason::MetadataStagingTooSmall);
             throw std::length_error("continuation checkpoint metadata exceeds staging limit");
         }
         data_.insert(data_.end(), bytes.begin(), bytes.end());
@@ -92,6 +98,7 @@ public:
 private:
     void append_byte(std::uint8_t value) {
         if (data_.size() == limit_) {
+            note(runtime::ContinuationExportSkipReason::MetadataStagingTooSmall);
             throw std::length_error("continuation checkpoint metadata exceeds staging limit");
         }
         data_.push_back(static_cast<std::byte>(value));
@@ -99,6 +106,7 @@ private:
 
     std::vector<std::byte> data_;
     std::size_t limit_ = 0;
+    runtime::ContinuationExportSkipDetail* skip_ = nullptr;
 };
 
 class CheckpointDecoder {
@@ -218,8 +226,12 @@ void encode_vision_item(CheckpointEncoder& encoder, const qwen3_6::VisionItem& i
     encoder.u64(item.patch_begin);
     encoder.u64(item.patch_count);
     encoder.raw(std::as_bytes(std::span(item.content_digest)));
-    if (item.timestamps.size() > std::numeric_limits<std::uint32_t>::max() ||
-        item.token_spans.size() > std::numeric_limits<std::uint32_t>::max()) {
+    if (item.timestamps.size() > std::numeric_limits<std::uint32_t>::max()) {
+        encoder.note(runtime::ContinuationExportSkipReason::VisionTimestampCountOverflow);
+        throw std::overflow_error("Vision checkpoint identity collection exceeds uint32");
+    }
+    if (item.token_spans.size() > std::numeric_limits<std::uint32_t>::max()) {
+        encoder.note(runtime::ContinuationExportSkipReason::VisionTokenSpanCountOverflow);
         throw std::overflow_error("Vision checkpoint identity collection exceeds uint32");
     }
     encoder.u32(static_cast<std::uint32_t>(item.timestamps.size()));
@@ -273,6 +285,7 @@ qwen3_6::VisionItem decode_vision_item(CheckpointDecoder& decoder, std::uint32_t
 void encode_prefix_identity(CheckpointEncoder& encoder,
                             const qwen3_6::detail::ResidentPrefixIdentity& identity) {
     if (identity.size() > std::numeric_limits<std::uint32_t>::max()) {
+        encoder.note(runtime::ContinuationExportSkipReason::PrefixTokenCountOverflow);
         throw std::overflow_error("continuation checkpoint prefix exceeds uint32");
     }
     encoder.u32(static_cast<std::uint32_t>(identity.size()));
@@ -280,8 +293,12 @@ void encode_prefix_identity(CheckpointEncoder& encoder,
     for (std::size_t axis = 0; axis < 3; ++axis) {
         for (const std::int32_t position : identity.position_axis(axis)) { encoder.i32(position); }
     }
-    if (identity.vision_items().size() > std::numeric_limits<std::uint32_t>::max() ||
-        identity.rewrite_execution_frontiers().size() > std::numeric_limits<std::uint32_t>::max()) {
+    if (identity.vision_items().size() > std::numeric_limits<std::uint32_t>::max()) {
+        encoder.note(runtime::ContinuationExportSkipReason::PrefixVisionCountOverflow);
+        throw std::overflow_error("continuation checkpoint identity collection exceeds uint32");
+    }
+    if (identity.rewrite_execution_frontiers().size() > std::numeric_limits<std::uint32_t>::max()) {
+        encoder.note(runtime::ContinuationExportSkipReason::PrefixRewriteCountOverflow);
         throw std::overflow_error("continuation checkpoint identity collection exceeds uint32");
     }
     encoder.u32(static_cast<std::uint32_t>(identity.vision_items().size()));
@@ -324,12 +341,19 @@ qwen3_6::detail::ResidentPrefixIdentity decode_prefix_identity(CheckpointDecoder
 CheckpointEncoder encode_continuation_metadata(
     const SequenceState& sequence, std::uint32_t endpoint_state, std::uint32_t rewrite_state,
     std::span<const std::uint32_t> anchor_states, std::uint32_t state_count,
-    std::uint32_t text_kv_frontier, std::uint32_t backend_kv_frontier, std::size_t staging_bytes) {
-    if (sequence.ledger.size() > std::numeric_limits<std::uint32_t>::max() ||
-        sequence.long_anchors.size() != anchor_states.size()) {
+    std::uint32_t text_kv_frontier, std::uint32_t backend_kv_frontier, std::size_t staging_bytes,
+    runtime::ContinuationExportSkipDetail* skip) {
+    if (sequence.ledger.size() > std::numeric_limits<std::uint32_t>::max()) {
+        runtime::ContinuationExportSkipDetail::record(
+            skip, runtime::ContinuationExportSkipReason::SequenceLedgerOverflow);
         throw std::overflow_error("continuation checkpoint sequence exceeds metadata limits");
     }
-    CheckpointEncoder encoder(staging_bytes);
+    if (sequence.long_anchors.size() != anchor_states.size()) {
+        runtime::ContinuationExportSkipDetail::record(
+            skip, runtime::ContinuationExportSkipReason::AnchorStateCountMismatch);
+        throw std::overflow_error("continuation checkpoint sequence exceeds metadata limits");
+    }
+    CheckpointEncoder encoder(staging_bytes, skip);
     encoder.u64(kContinuationCheckpointMagic);
     encoder.u32(kContinuationCheckpointVersion);
     encoder.u32(sequence.execution_frontier);
@@ -338,6 +362,7 @@ CheckpointEncoder encode_continuation_metadata(
     for (const TokenId token : sequence.ledger) { encoder.u32(static_cast<std::uint32_t>(token)); }
     encode_prefix_identity(encoder, sequence.prefix_identity);
     if (sequence.prefix_digests.values().size() > std::numeric_limits<std::uint32_t>::max()) {
+        encoder.note(runtime::ContinuationExportSkipReason::PrefixDigestCountOverflow);
         throw std::overflow_error("continuation checkpoint digest collection exceeds uint32");
     }
     encoder.u32(static_cast<std::uint32_t>(sequence.prefix_digests.values().size()));
@@ -8598,41 +8623,75 @@ ReleaseResult ProgramImplCore::release_continuation(ContinuationHandle&& continu
 std::optional<runtime::ContinuationCheckpointStats>
 ProgramImplCore::checkpoint_continuation(const ContinuationHandle& continuation,
                                          runtime::ContinuationCheckpointWriter& writer,
-                                         std::size_t staging_bytes) const {
+                                         std::size_t staging_bytes,
+                                         runtime::ContinuationExportSkipDetail* skip) const {
+    using Reason = runtime::ContinuationExportSkipReason;
+    using Stage  = runtime::ContinuationExportStage;
+    using Kind   = runtime::ContinuationExportKind;
+    const auto note = [skip](Reason reason) noexcept {
+        runtime::ContinuationExportSkipDetail::record(skip, reason);
+    };
+    const auto stage = [skip](Stage value) noexcept {
+        if (skip != nullptr) { skip->stage = value; }
+    };
+    const auto refuse = [&](Reason reason) noexcept
+        -> std::optional<runtime::ContinuationCheckpointStats> {
+        note(reason);
+        return std::nullopt;
+    };
     try {
-        if (staging_bytes == 0 || !valid_continuation(continuation) || has_context_transaction() ||
-            pending_transaction_) {
-            return std::nullopt;
-        }
+        stage(Stage::Preconditions);
+        if (staging_bytes == 0) { return refuse(Reason::StagingBufferEmpty); }
+        if (!valid_continuation(continuation)) { return refuse(Reason::ContinuationInvalid); }
+        if (has_context_transaction()) { return refuse(Reason::ContextTransactionBusy); }
+        if (pending_transaction_) { return refuse(Reason::ExecutionBatchPending); }
         const std::uint32_t continuation_index = ContractAccess::index(continuation);
         if (materialization_pins(continuation_index, ContractAccess::epoch(continuation))) {
-            return std::nullopt;
+            return refuse(Reason::MaterializationPinned);
         }
         const SequenceState& sequence = continuation_states[continuation_index];
-        if (!sequence.kv || !sequence.endpoint_valid || sequence.state.fork_pending ||
-            sequence.state_source_retained || sequence.reserved_state ||
-            sequence.state.read != sequence.state.write ||
-            !sequence.shared_prefix_references.empty() ||
-            sequence.rewrite_checkpoint.valid != sequence.rewrite_state.has_value() ||
-            sequence.execution_frontier == 0 ||
-            text_kv_addresses->committed_frontier(sequence.kv->text) !=
-                sequence.execution_frontier) {
-            return std::nullopt;
+        if (!sequence.kv) { return refuse(Reason::KvMissing); }
+        if (!sequence.endpoint_valid) { return refuse(Reason::EndpointNotRetained); }
+        if (sequence.state.fork_pending) { return refuse(Reason::StateForkPending); }
+        if (sequence.state_source_retained) { return refuse(Reason::StateSourceRetained); }
+        if (sequence.reserved_state) { return refuse(Reason::StateDestinationReserved); }
+        if (sequence.state.read != sequence.state.write) { return refuse(Reason::StateBindingSplit); }
+        if (!sequence.shared_prefix_references.empty()) {
+            return refuse(Reason::SharedPrefixReferences);
+        }
+        if (sequence.rewrite_checkpoint.valid != sequence.rewrite_state.has_value()) {
+            return refuse(Reason::RewriteStateMismatch);
+        }
+        if (sequence.execution_frontier == 0) { return refuse(Reason::EmptyFrontier); }
+        if (text_kv_addresses->committed_frontier(sequence.kv->text) !=
+            sequence.execution_frontier) {
+            return refuse(Reason::TextKvFrontierMismatch);
         }
         const bool expects_backend = speculative_backend != SpeculativeBackend::None;
-        if (sequence.kv->backend.has_value() != expects_backend ||
-            (expects_backend && backend_kv_addresses->committed_frontier(*sequence.kv->backend) !=
-                                    backend_kv_valid(sequence)) ||
-            (!expects_backend &&
-             (sequence.mtp_kv_valid != 0 || sequence.dflash_context_frontier != 0))) {
-            return std::nullopt;
+        if (sequence.kv->backend.has_value() != expects_backend) {
+            return refuse(Reason::SpeculativeKvPresenceMismatch);
+        }
+        if (expects_backend && backend_kv_addresses->committed_frontier(*sequence.kv->backend) !=
+                                   backend_kv_valid(sequence)) {
+            return refuse(Reason::SpeculativeKvFrontierMismatch);
+        }
+        if (!expects_backend &&
+            (sequence.mtp_kv_valid != 0 || sequence.dflash_context_frontier != 0)) {
+            return refuse(Reason::BackendStateWithoutSpeculation);
         }
 
+        stage(Stage::StateInventory);
+        if (skip != nullptr) { skip->kind = Kind::State; }
         std::vector<StateImageHandle> states;
         states.reserve(sequence.long_anchors.size() + 2U);
         const auto state_index = [&](StateImageHandle state) -> std::uint32_t {
-            if (!state_store->valid(state) ||
-                state_store->role(state) != StateImageRole::CheckpointImmutable) {
+            if (skip != nullptr) { skip->ordinal = static_cast<std::uint32_t>(states.size()); }
+            if (!state_store->valid(state)) {
+                note(Reason::StateHandleInvalid);
+                throw std::logic_error("continuation checkpoint StateImage is not immutable");
+            }
+            if (state_store->role(state) != StateImageRole::CheckpointImmutable) {
+                note(Reason::StateNotImmutable);
                 throw std::logic_error("continuation checkpoint StateImage is not immutable");
             }
             const auto found = std::find(states.begin(), states.end(), state);
@@ -8640,6 +8699,7 @@ ProgramImplCore::checkpoint_continuation(const ContinuationHandle& continuation,
                 return static_cast<std::uint32_t>(found - states.begin());
             }
             if (states.size() == std::numeric_limits<std::uint32_t>::max()) {
+                note(Reason::StateCountOverflow);
                 throw std::overflow_error(
                     "continuation checkpoint StateImage count exceeds uint32");
             }
@@ -8655,6 +8715,11 @@ ProgramImplCore::checkpoint_continuation(const ContinuationHandle& continuation,
             anchor_states.push_back(state_index(anchor.state));
         }
 
+        stage(Stage::HostKvCapacity);
+        if (skip != nullptr) {
+            skip->kind = Kind::None;
+            skip->ordinal.reset();
+        }
         const std::uint32_t text_frontier =
             text_kv_addresses->committed_frontier(sequence.kv->text);
         const std::uint32_t backend_frontier =
@@ -8665,23 +8730,34 @@ ProgramImplCore::checkpoint_continuation(const ContinuationHandle& continuation,
         // (alphastorm/omp-ninfer#42). Restore materialises the KV into the host pool, so ask the
         // pool the same question here, while the session is still alive and can be pinned another
         // way.
-        if (host_kv_arena != nullptr &&
-            host_kv_bytes_for_frontier(text_frontier, backend_frontier) >
-                host_kv_arena->capacity_bytes()) {
-            return std::nullopt;
+        if (host_kv_arena != nullptr) {
+            const std::uint64_t required =
+                host_kv_bytes_for_frontier(text_frontier, backend_frontier);
+            const std::uint64_t capacity = host_kv_arena->capacity_bytes();
+            if (required > capacity) {
+                if (skip != nullptr) {
+                    skip->required_bytes = required;
+                    skip->capacity_bytes = capacity;
+                }
+                return refuse(Reason::HostKvCapacityExceeded);
+            }
         }
+        stage(Stage::MetadataEncode);
         CheckpointEncoder metadata =
             encode_continuation_metadata(sequence, endpoint_state, rewrite_state, anchor_states,
                                          static_cast<std::uint32_t>(states.size()), text_frontier,
-                                         backend_frontier, staging_bytes);
+                                         backend_frontier, staging_bytes, skip);
+        stage(Stage::MetadataWrite);
         if (!writer.write_file("engine/continuation.bin", 0, metadata.bytes().size(),
                                metadata.bytes())) {
-            return std::nullopt;
+            return refuse(Reason::MetadataWriteFailed);
         }
         std::uint64_t payload_bytes = metadata.bytes().size();
 
         const auto add_payload = [&](std::uint64_t bytes) {
+            stage(Stage::PayloadAccounting);
             if (bytes > std::numeric_limits<std::uint64_t>::max() - payload_bytes) {
+                note(Reason::PayloadOverflow);
                 throw std::overflow_error("continuation checkpoint payload size overflows uint64");
             }
             payload_bytes += bytes;
@@ -8690,43 +8766,77 @@ ProgramImplCore::checkpoint_continuation(const ContinuationHandle& continuation,
         // Export copies ride transfer_stream while the caller only holds execution_mutex_.
         // Order them explicitly behind every already-enqueued compute-stream KV/state write
         // instead of relying on unit-boundary synchronization (alphastorm/ninfer#24).
+        stage(Stage::ComputeFence);
         CudaCompletionEvent compute_fence(device);
         compute_fence.record(device.stream);
         compute_fence.wait(device.transfer_stream);
 
+        stage(Stage::StateStaging);
+        if (skip != nullptr) { skip->kind = Kind::State; }
         const qwen3_6::StateImageHostLayout& state_layout = state_store->host_layout();
-        if (state_layout.image_bytes == 0 || state_layout.image_bytes > staging_bytes) {
-            return std::nullopt;
+        if (state_layout.image_bytes == 0) { return refuse(Reason::StateLayoutEmpty); }
+        if (state_layout.image_bytes > staging_bytes) {
+            if (skip != nullptr) {
+                skip->required_bytes = state_layout.image_bytes;
+                skip->capacity_bytes = staging_bytes;
+            }
+            return refuse(Reason::StateStagingTooSmall);
         }
         PinnedHostBuffer state_staging(state_layout.image_bytes);
         const auto state_bytes = std::span<std::byte>(static_cast<std::byte*>(state_staging.data()),
                                                       state_layout.image_bytes);
         for (std::uint32_t index = 0; index < states.size(); ++index) {
+            stage(Stage::StateCopy);
+            if (skip != nullptr) { skip->ordinal = index; }
             state_store->copy_checkpoint_to_host(
                 states[index],
                 qwen3_6::HostStateImageView{.data = state_bytes.data(), .layout = &state_layout},
-                device.transfer_stream);
+                device.transfer_stream, skip);
+            stage(Stage::StateSync);
             CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream));
+            stage(Stage::StateWrite);
             const std::string path = "engine/state/" + std::to_string(index) + ".bin";
             if (!writer.write_file(path, 0, state_bytes.size(), state_bytes)) {
-                return std::nullopt;
+                return refuse(Reason::StateWriteFailed);
             }
             add_payload(state_bytes.size());
         }
 
         const auto write_kv = [&](std::string_view path, const KVAddressSpaceStore& addresses,
                                   const LogicalKVPageStore& pages,
-                                  KVAddressSpaceHandle address) -> bool {
-            if (!host_kv_arena || !host_kv_extents) { return false; }
+                                  KVAddressSpaceHandle address, Kind kind) -> bool {
+            stage(Stage::KvLookup);
+            if (skip != nullptr) {
+                skip->kind = kind;
+                skip->ordinal.reset();
+            }
+            if (!host_kv_arena) {
+                note(Reason::HostKvArenaMissing);
+                return false;
+            }
+            if (!host_kv_extents) {
+                note(Reason::HostKvExtentsMissing);
+                return false;
+            }
             const std::uint32_t page_count = addresses.mapped_pages(address);
             const HostKVPageLayout& layout = host_kv_extents->page_layout(pages);
-            if (page_count == 0 || layout.page_stride == 0 ||
-                page_count > std::numeric_limits<std::uint64_t>::max() / layout.page_stride) {
+            if (page_count == 0) {
+                note(Reason::KvPayloadEmpty);
+                return false;
+            }
+            if (layout.page_stride == 0) {
+                note(Reason::KvStrideZero);
+                return false;
+            }
+            if (page_count > std::numeric_limits<std::uint64_t>::max() / layout.page_stride) {
+                note(Reason::KvPayloadOverflow);
                 return false;
             }
             const std::uint64_t total_bytes =
                 static_cast<std::uint64_t>(page_count) * layout.page_stride;
             for (std::uint32_t page_index = 0; page_index < page_count; ++page_index) {
+                stage(Stage::KvLookup);
+                if (skip != nullptr) { skip->ordinal = page_index; }
                 const LogicalKVPageHandle logical = addresses.logical_page(address, page_index);
                 const std::byte* source           = nullptr;
                 std::optional<HostKVAllocation> temporary;
@@ -8736,22 +8846,37 @@ ProgramImplCore::checkpoint_continuation(const ContinuationHandle& continuation,
                                                            .subview(replica.page_offset, 1)
                                                            .data();
                 } else if (pages.device_resident(logical)) {
+                    stage(Stage::KvHostAllocation);
                     temporary = host_kv_arena->allocate(layout, 1);
-                    if (!temporary) { return false; }
+                    if (!temporary) {
+                        if (skip != nullptr) {
+                            skip->required_bytes = layout.page_stride;
+                            skip->capacity_bytes = host_kv_arena->capacity_bytes();
+                            skip->occupied_bytes = host_kv_arena->occupied_bytes();
+                        }
+                        note(Reason::KvTemporaryPageUnavailable);
+                        return false;
+                    }
+                    stage(Stage::KvCopy);
                     HostKVAllocationView destination  = host_kv_arena->writable_view(*temporary);
                     const DeviceKVPageHandle physical = pages.physical(logical);
                     pages.physical_pool().copy_to_host(
                         std::span<const DeviceKVPageHandle>(&physical, 1), destination,
                         device.transfer_stream);
+                    stage(Stage::KvSync);
                     CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream));
                     source = destination.data();
                 } else {
+                    note(Reason::KvReplicaMissing);
                     return false;
                 }
                 const std::uint64_t offset =
                     static_cast<std::uint64_t>(page_index) * layout.page_stride;
+                stage(Stage::KvWrite);
                 if (!writer.write_file(path, offset, total_bytes,
                                        std::span<const std::byte>(source, layout.page_stride))) {
+                    note(kind == Kind::TextKv ? Reason::TextKvWriteFailed
+                                             : Reason::SpeculativeKvWriteFailed);
                     return false;
                 }
             }
@@ -8760,9 +8885,10 @@ ProgramImplCore::checkpoint_continuation(const ContinuationHandle& continuation,
         };
 
         if (!write_kv("engine/text-kv.bin", *text_kv_addresses, *text_kv_pages,
-                      sequence.kv->text) ||
+                      sequence.kv->text, Kind::TextKv) ||
             (sequence.kv->backend && !write_kv("engine/backend-kv.bin", *backend_kv_addresses,
-                                               *backend_kv_pages, *sequence.kv->backend))) {
+                                               *backend_kv_pages, *sequence.kv->backend,
+                                               Kind::SpeculativeKv))) {
             return std::nullopt;
         }
         return runtime::ContinuationCheckpointStats{
@@ -8770,7 +8896,13 @@ ProgramImplCore::checkpoint_continuation(const ContinuationHandle& continuation,
             .restored_tokens = sequence.execution_frontier,
             .payload_bytes   = payload_bytes,
         };
-    } catch (...) { return std::nullopt; }
+    } catch (const std::exception&) {
+        if (skip != nullptr) { skip->exception = runtime::ContinuationExportException::Standard; }
+        return refuse(Reason::UnexpectedException);
+    } catch (...) {
+        if (skip != nullptr) { skip->exception = runtime::ContinuationExportException::NonStandard; }
+        return refuse(Reason::UnexpectedException);
+    }
 }
 
 std::optional<RestoredContinuation>

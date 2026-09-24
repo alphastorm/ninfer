@@ -369,6 +369,85 @@ int test_codec_round_trip() {
     return failures;
 }
 
+int test_export_refusal_diagnostics() {
+    using Reason = runtime::SessionCheckpointSkipReason;
+    using ExportReason = runtime::ContinuationExportSkipReason;
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .read_queue = std::make_shared<TestReadQueue>()});
+    int failures = 0;
+    for (const Reason gate : {Reason::SessionNotIndexed, Reason::TagMismatch}) {
+        runtime::SessionCheckpointSkipDetail skip;
+        skip.attempted_tag = responses.latest_response_id;
+        const auto saved = store.save(responses, fingerprint(),
+            [&](ContinuationCheckpointWriter&) -> std::optional<ContinuationCheckpointStats> {
+                skip.reason = gate;
+                if (gate == Reason::TagMismatch) { skip.catalogued_tag = "resp_catalogued"; }
+                return std::nullopt;
+            }, &skip);
+        const auto message = format_session_checkpoint_skip(
+            "checkpoint save refused: ", responses.client_session_sha256, skip);
+        failures += check(!saved && skip.reason == Reason::ProgramRejected &&
+                              skip.first_reason == gate,
+                          "store preserves the first engine gate and legacy refusal accounting");
+        failures += check(message.view().find(runtime::session_checkpoint_skip_reason_name(gate)) !=
+                                  std::string_view::npos &&
+                              message.view().find(responses.client_session_sha256.substr(0, 12)) !=
+                                  std::string_view::npos &&
+                              message.view().find(responses.latest_response_id) != std::string_view::npos,
+                          "formatted store refusal retains the engine gate, session, and attempted tag");
+        if (gate == Reason::TagMismatch) {
+            failures += check(message.view().find(skip.catalogued_tag) != std::string_view::npos,
+                              "masked tag mismatch still logs the catalogued tag");
+        }
+    }
+
+    runtime::SessionCheckpointSkipDetail program_skip;
+    const auto program_saved = store.save(responses, fingerprint(),
+        [&](ContinuationCheckpointWriter&) -> std::optional<ContinuationCheckpointStats> {
+            program_skip.reason = Reason::ProgramRejected;
+            runtime::ContinuationExportSkipDetail::record(
+                &program_skip.export_detail, ExportReason::EndpointNotRetained);
+            return std::nullopt;
+        }, &program_skip);
+    const auto program_message = format_session_checkpoint_skip(
+        "checkpoint save refused: ", responses.client_session_sha256, program_skip);
+    failures += check(!program_saved && program_skip.reason == Reason::ProgramRejected &&
+                          program_skip.export_detail.reason == ExportReason::EndpointNotRetained &&
+                          program_message.view().find(runtime::continuation_export_skip_reason_name(
+                              ExportReason::EndpointNotRetained)) != std::string_view::npos,
+                      "store retains and formats a named program refusal");
+
+    runtime::SessionCheckpointSkipDetail stats_skip;
+    const auto invalid_stats = store.save(responses, fingerprint(),
+        [](ContinuationCheckpointWriter&) -> std::optional<ContinuationCheckpointStats> {
+            return ContinuationCheckpointStats{
+                .frontier_tokens = 100, .restored_tokens = 94, .payload_bytes = 64};
+        }, &stats_skip);
+    failures += check(!invalid_stats && stats_skip.reason == Reason::ProgramRejected &&
+                          stats_skip.export_detail.reason == ExportReason::StoreStatsInvalid,
+                      "invalid returned statistics name the store gate without changing accounting");
+
+    ResponseStoreSnapshot invalid = responses;
+    invalid.client_session_sha256 = "invalid";
+    runtime::SessionCheckpointSkipDetail input_skip;
+    bool exporter_called = false;
+    const auto invalid_input = store.save(invalid, fingerprint(),
+        [&](ContinuationCheckpointWriter&) -> std::optional<ContinuationCheckpointStats> {
+            exporter_called = true;
+            return std::nullopt;
+        }, &input_skip);
+    const auto input_message = format_session_checkpoint_skip(
+        "checkpoint save refused: ", invalid.client_session_sha256, input_skip);
+    failures += check(!invalid_input && !exporter_called && input_skip.reason == Reason::None &&
+                          input_skip.export_detail.reason == ExportReason::StoreInputInvalid &&
+                          input_message.view().find(runtime::continuation_export_skip_reason_name(
+                              ExportReason::StoreInputInvalid)) != std::string_view::npos,
+                      "invalid input is diagnosed without entering export or changing its category");
+    return failures;
+}
+
 int test_transaction_restart_compatibility_and_corruption() {
     TemporaryDirectory temporary;
     const ResponseStoreSnapshot responses = sample_snapshot();
@@ -1403,6 +1482,7 @@ int main() {
     int failures = 0;
     failures += test_sha256_streaming();
     failures += test_codec_round_trip();
+    failures += test_export_refusal_diagnostics();
     failures += test_transaction_restart_compatibility_and_corruption();
     failures += test_active_reader_delete_and_gc();
     failures += test_store_wide_quota_across_sessions();

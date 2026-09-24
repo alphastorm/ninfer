@@ -364,8 +364,9 @@ template <>
 std::optional<runtime::ContinuationCheckpointStats>
 Program<Variant>::checkpoint_continuation(const ContinuationHandle<Variant>& continuation,
                                           runtime::ContinuationCheckpointWriter& writer,
-                                          std::size_t staging_bytes) const {
-    return impl_->checkpoint_continuation(continuation, writer, staging_bytes);
+                                          std::size_t staging_bytes,
+                                          runtime::ContinuationExportSkipDetail* skip) const {
+    return impl_->checkpoint_continuation(continuation, writer, staging_bytes, skip);
 }
 
 template <>

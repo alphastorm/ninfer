@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <charconv>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -1238,6 +1239,105 @@ decode_response_store_snapshot(std::span<const std::byte> bytes, std::size_t byt
     } catch (...) { return std::nullopt; }
 }
 
+void SessionCheckpointSkipMessage::append(std::string_view value) noexcept {
+    const std::size_t count = std::min(value.size(), bytes_.size() - size_);
+    if (count != 0) { std::memcpy(bytes_.data() + size_, value.data(), count); }
+    size_ += count;
+}
+
+void SessionCheckpointSkipMessage::number(std::uint64_t value) noexcept {
+    std::array<char, 20> digits;
+    const auto result = std::to_chars(digits.data(), digits.data() + digits.size(), value);
+    append({digits.data(), static_cast<std::size_t>(result.ptr - digits.data())});
+}
+
+SessionCheckpointSkipMessage format_session_checkpoint_skip(
+    std::string_view prefix, std::string_view session_sha256,
+    const runtime::SessionCheckpointSkipDetail& skip) noexcept {
+    using Reason = runtime::SessionCheckpointSkipReason;
+    using ExportReason = runtime::ContinuationExportSkipReason;
+    SessionCheckpointSkipMessage message;
+    message.append(prefix);
+    const auto& detail = skip.export_detail;
+    const bool store_gate = detail.reason == ExportReason::StoreInputInvalid ||
+                            detail.reason == ExportReason::StoreStatsInvalid;
+    message.append(skip.reason == Reason::None && store_gate
+                       ? "checkpoint store refused export"
+                       : runtime::session_checkpoint_skip_reason_name(skip.reason));
+    if (skip.first_reason != Reason::None && skip.first_reason != Reason::ProgramRejected &&
+        skip.first_reason != skip.reason) {
+        message.append(" (engine gate: ");
+        message.append(runtime::session_checkpoint_skip_reason_name(skip.first_reason));
+        message.append(")");
+    }
+    if (detail.reason != ExportReason::None) {
+        message.append(store_gate ? " (store gate: " : " (program gate: ");
+        message.append(runtime::continuation_export_skip_reason_name(detail.reason));
+        if (detail.stage != runtime::ContinuationExportStage::None) {
+            message.append("; stage=");
+            message.append(runtime::continuation_export_stage_name(detail.stage));
+        }
+        switch (detail.kind) {
+        case runtime::ContinuationExportKind::None:
+            break;
+        case runtime::ContinuationExportKind::State:
+            message.append("; kind=state");
+            break;
+        case runtime::ContinuationExportKind::TextKv:
+            message.append("; kind=text");
+            break;
+        case runtime::ContinuationExportKind::SpeculativeKv:
+            message.append("; kind=speculative");
+            break;
+        }
+        if (detail.ordinal) {
+            message.append("; ordinal=");
+            message.number(*detail.ordinal);
+        }
+        if (detail.required_bytes) {
+            message.append("; required_bytes=");
+            message.number(*detail.required_bytes);
+        }
+        if (detail.capacity_bytes) {
+            message.append("; capacity_bytes=");
+            message.number(*detail.capacity_bytes);
+        }
+        if (detail.occupied_bytes) {
+            message.append("; occupied_bytes=");
+            message.number(*detail.occupied_bytes);
+        }
+        if (detail.exception != runtime::ContinuationExportException::None) {
+            message.append(detail.exception == runtime::ContinuationExportException::Standard
+                               ? "; exception=standard" : "; exception=non-standard");
+        }
+        message.append(")");
+    }
+    message.append(" (session ");
+    message.append(session_sha256.substr(0, 12));
+    message.append(")");
+    const auto tag = [&](std::string_view value) noexcept {
+        if (value.empty()) {
+            message.append("<empty>");
+        } else if (value.size() > 256) {
+            message.append(value.substr(0, 253));
+            message.append("...");
+        } else {
+            message.append(value);
+        }
+        message.append(")");
+    };
+    if (!skip.attempted_tag.empty()) {
+        message.append(" (attempted ");
+        tag(skip.attempted_tag);
+    }
+    if (!skip.catalogued_tag.empty() || skip.first_reason == Reason::TagMismatch ||
+        skip.reason == Reason::TagMismatch) {
+        message.append(" (catalogued ");
+        tag(skip.catalogued_tag);
+    }
+    return message;
+}
+
 SessionCheckpointStore::SessionCheckpointStore(SessionCheckpointStoreOptions options)
     : options_(std::move(options)), impl_(std::make_shared<Impl>()) {
     if (options_.root.empty() || options_.disk_quota_bytes == 0 || options_.staging_bytes == 0) {
@@ -1278,6 +1378,10 @@ SessionCheckpointStore::save(const ResponseStoreSnapshot& responses,
                              runtime::SessionCheckpointSkipDetail* skip) {
     if (!valid_digest(responses.client_session_sha256) || !runtime_fingerprint.is_object() ||
         !exporter) {
+        if (skip != nullptr) {
+            runtime::ContinuationExportSkipDetail::record(
+                &skip->export_detail, runtime::ContinuationExportSkipReason::StoreInputInvalid);
+        }
         return std::nullopt;
     }
     std::lock_guard lock(impl_->mutex);
@@ -1311,6 +1415,15 @@ SessionCheckpointStore::save(const ResponseStoreSnapshot& responses,
         if (!engine || !valid_checkpoint_stats(*engine)) {
             std::filesystem::remove_all(staging, cleanup_error);
             if (skip != nullptr) {
+                if (skip->first_reason == runtime::SessionCheckpointSkipReason::None) {
+                    skip->first_reason = skip->reason;
+                }
+                if (engine && skip->export_detail.reason ==
+                                  runtime::ContinuationExportSkipReason::None) {
+                    skip->export_detail = {
+                        .reason = runtime::ContinuationExportSkipReason::StoreStatsInvalid};
+                }
+                // Preserve the released shutdown category; only diagnostics retain the gate.
                 skip->reason = runtime::SessionCheckpointSkipReason::ProgramRejected;
             }
             return std::nullopt;

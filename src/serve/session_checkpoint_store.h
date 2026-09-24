@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -81,6 +82,26 @@ enum class SessionCheckpointEraseResult : std::uint8_t {
 encode_response_store_snapshot(const ResponseStoreSnapshot& snapshot, std::size_t byte_limit);
 [[nodiscard]] std::optional<ResponseStoreSnapshot>
 decode_response_store_snapshot(std::span<const std::byte> bytes, std::size_t byte_limit);
+
+// Log-only, bounded storage: formatting a refusal never allocates or throws. Ordinary response
+// ids fit in full; overlong tags are explicitly truncated so both tags and the session remain.
+class SessionCheckpointSkipMessage {
+public:
+    [[nodiscard]] std::string_view view() const noexcept { return {bytes_.data(), size_}; }
+
+private:
+    friend SessionCheckpointSkipMessage format_session_checkpoint_skip(
+        std::string_view prefix, std::string_view session_sha256,
+        const runtime::SessionCheckpointSkipDetail& skip) noexcept;
+    void append(std::string_view value) noexcept;
+    void number(std::uint64_t value) noexcept;
+    std::array<char, 1024> bytes_;
+    std::size_t size_ = 0;
+};
+
+[[nodiscard]] SessionCheckpointSkipMessage format_session_checkpoint_skip(
+    std::string_view prefix, std::string_view session_sha256,
+    const runtime::SessionCheckpointSkipDetail& skip) noexcept;
 
 class SessionCheckpointStore {
 public:

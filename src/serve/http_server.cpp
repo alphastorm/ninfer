@@ -595,14 +595,9 @@ void HttpServer::handle_checkpoint_save(const httplib::Request& req, httplib::Re
         // The HTTP body keeps its released closed vocabulary; the named gate and the
         // attempted response id go to the server log only (alphastorm/ninfer#31).
         try {
-            std::string refusal = "checkpoint save refused: ";
-            refusal += runtime::session_checkpoint_skip_reason_name(skip.reason);
-            if (!skip.attempted_tag.empty()) {
-                refusal += " (attempted ";
-                refusal += skip.attempted_tag;
-                refusal += ")";
-            }
-            write_console_log(ConsoleLogLevel::Warning, refusal);
+            write_console_log(
+                ConsoleLogLevel::Warning,
+                format_session_checkpoint_skip("checkpoint save refused: ", digest, skip).view());
         } catch (...) {}
         ApiError error;
         error.status  = 409;
@@ -1155,19 +1150,10 @@ void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noex
             if (saved) {
                 write_console_log(ConsoleLogLevel::Info, "automatic session checkpoint saved");
             } else {
-                std::string message = "automatic session checkpoint skipped: ";
-                message += runtime::session_checkpoint_skip_reason_name(skip.reason);
-                if (!skip.attempted_tag.empty()) {
-                    message += " (attempted ";
-                    message += skip.attempted_tag;
-                    message += ")";
-                }
-                if (skip.reason == runtime::SessionCheckpointSkipReason::TagMismatch) {
-                    message += " (catalogued ";
-                    message += skip.catalogued_tag.empty() ? "<empty>" : skip.catalogued_tag;
-                    message += ")";
-                }
-                write_console_log(ConsoleLogLevel::Warning, message);
+                write_console_log(
+                    ConsoleLogLevel::Warning,
+                    format_session_checkpoint_skip("automatic session checkpoint skipped: ",
+                                                   session_sha256, skip).view());
             }
         }
     } catch (const std::exception& exception) {
@@ -1205,9 +1191,8 @@ ShutdownCheckpointSummary HttpServer::save_all_checkpoints() noexcept {
                     ++summary.refused;
                     write_console_log(
                         ConsoleLogLevel::Error,
-                        std::string("shutdown checkpoint save refused: ") +
-                            std::string(
-                                runtime::session_checkpoint_skip_reason_name(skip.reason)));
+                        format_session_checkpoint_skip("shutdown checkpoint save refused: ",
+                                                       digest, skip).view());
                     break;
                 }
             } catch (const std::exception& exception) {

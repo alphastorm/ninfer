@@ -721,7 +721,8 @@ public:
     [[nodiscard]] std::optional<runtime::ContinuationCheckpointStats>
     checkpoint_continuation(const ContinuationHandle<Variant>& continuation,
                             runtime::ContinuationCheckpointWriter& writer,
-                            std::size_t staging_bytes) const;
+                            std::size_t staging_bytes,
+                            runtime::ContinuationExportSkipDetail* skip = nullptr) const;
     // skip_reason, when provided, names the first failed import gate so a decline is
     // diagnosable without a debugger (alphastorm/omp-ninfer#40).
     [[nodiscard]] std::optional<RestoredContinuation<Variant>>
