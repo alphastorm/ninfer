@@ -1107,10 +1107,7 @@ void HttpServer::maybe_checkpoint_completed_turn(const std::optional<std::string
     if (frontier < options_.session_checkpoint_min_tokens) { return; }
     // A new turn gives the session a fresh retry budget: earlier transient refusals were for
     // older state.
-    try {
-        std::lock_guard lock(automatic_retry_mutex_);
-        automatic_retries_.erase(*session_sha256);
-    } catch (...) {}
+    automatic_retries_.settle(*session_sha256);
     if (automatic_checkpoints_->enqueue(*session_sha256) ==
         AutomaticCheckpointEnqueueResult::Dropped) {
         try {
@@ -1121,6 +1118,16 @@ void HttpServer::maybe_checkpoint_completed_turn(const std::optional<std::string
 }
 
 void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noexcept {
+    // Every outcome but a queued retry is final for this turn and settles its retry budget, so the
+    // budget holds only sessions whose retry is still queued.
+    struct SettleUnlessRequeued {
+        TransientRetryBudget& budget;
+        std::string_view session;
+        bool requeued = false;
+        ~SettleUnlessRequeued() {
+            if (!requeued) { budget.settle(session); }
+        }
+    } settlement{automatic_retries_, session_sha256};
     try {
         if (service_ != nullptr) {
             // Even with buffered export writes, staging briefly holds the engine. An automatic
@@ -1155,8 +1162,6 @@ void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noex
             const bool saved =
                 service_->save_checkpoint(session_sha256, response_store_, &skip).has_value();
             if (saved) {
-                std::lock_guard lock(automatic_retry_mutex_);
-                automatic_retries_.erase(std::string(session_sha256));
                 write_console_log(ConsoleLogLevel::Info, "automatic session checkpoint saved");
                 return;
             }
@@ -1164,27 +1169,21 @@ void HttpServer::save_automatic_checkpoint(std::string_view session_sha256) noex
             // continuation was catalogued, is early rather than impossible: requeue it so it runs
             // again once the engine is quiet, instead of dropping the session's newest state until
             // eviction makes it unrecoverable.
-            bool retry = false;
-            if (checkpoint_refusal_is_transient(skip)) {
-                std::lock_guard lock(automatic_retry_mutex_);
-                unsigned& attempts = automatic_retries_[std::string(session_sha256)];
-                retry              = attempts < kAutomaticCheckpointRetries;
-                if (retry) {
-                    ++attempts;
-                } else {
-                    automatic_retries_.erase(std::string(session_sha256));
-                }
-            }
+            const bool retry = checkpoint_refusal_is_transient(skip) &&
+                               automatic_retries_.retry(session_sha256);
             write_console_log(
                 ConsoleLogLevel::Warning,
                 format_session_checkpoint_skip(retry ? "automatic session checkpoint deferred: "
                                                      : "automatic session checkpoint skipped: ",
                                                session_sha256, skip).view());
-            if (retry && automatic_checkpoints_->enqueue(std::string(session_sha256)) ==
-                             AutomaticCheckpointEnqueueResult::Dropped) {
+            if (!retry) { return; }
+            if (automatic_checkpoints_->enqueue(std::string(session_sha256)) ==
+                AutomaticCheckpointEnqueueResult::Dropped) {
                 write_console_log(ConsoleLogLevel::Warning,
                                   "automatic session checkpoint queue dropped a deferred save");
+                return;
             }
+            settlement.requeued = true;
         }
     } catch (const std::exception& exception) {
         try {

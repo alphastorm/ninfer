@@ -1,8 +1,9 @@
-// Which refused saves an automatic checkpoint retries, and how a graceful stop accounts a session
-// whose engine continuation is gone.
+// Which refused saves an automatic checkpoint retries, how many times, and how a graceful stop
+// accounts a session whose engine continuation is gone.
 #include "serve/checkpoint_policy.h"
 
 #include <iostream>
+#include <string>
 
 namespace {
 
@@ -100,6 +101,25 @@ int main() {
                           program_gate(ContinuationExportSkipReason::EndpointNotRetained)) ==
                           ShutdownCheckpointOutcome::Refused,
                       "a program refusal of live state is not a loss");
+
+    // Retries are bounded per turn, and the budget holds only sessions whose retry is still
+    // queued: spending every retry or settling releases the entry, so session churn cannot grow
+    // it (council CR-20260924-ninfer-durable-evict-r1, daybreak-blue R3).
+    ninfer::serve::TransientRetryBudget budget;
+    const std::string first(64, 'a');
+    const std::string second(64, 'b');
+    unsigned granted = 0;
+    while (granted <= ninfer::serve::kTransientCheckpointRetries && budget.retry(first)) {
+        ++granted;
+    }
+    failures += check(granted == ninfer::serve::kTransientCheckpointRetries,
+                      "a turn's transient refusals were not retried exactly the bounded number");
+    failures += check(budget.size() == 0, "a session whose retries are spent still holds an entry");
+    failures += check(budget.retry(second) && budget.size() == 1,
+                      "a queued retry is not held until it settles");
+    budget.settle(second);
+    budget.settle(second);
+    failures += check(budget.size() == 0, "settling a session did not release its entry");
 
     if (failures == 0) { std::cout << "checkpoint policy tests passed\n"; }
     return failures == 0 ? 0 : 1;

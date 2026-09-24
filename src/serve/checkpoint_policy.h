@@ -2,6 +2,13 @@
 
 #include "runtime/contract/continuation_checkpoint.h"
 
+#include <cstddef>
+#include <functional>
+#include <mutex>
+#include <string>
+#include <string_view>
+#include <unordered_map>
+
 namespace ninfer::serve {
 
 // The gate a refused save actually stopped at. The store keeps ProgramRejected as its coarse
@@ -37,9 +44,56 @@ checkpoint_refusal_is_transient(const runtime::SessionCheckpointSkipDetail& skip
     }
 }
 
-// Retries allowed per completed turn before an automatic save gives up on a transient refusal.
-// Each retry waits for the engine to quiesce again, so this bounds background work, not latency.
-inline constexpr unsigned kAutomaticCheckpointRetries = 6;
+// Retries a save gets per completed turn before a transient refusal counts as final: an automatic
+// save requeues, and save-before-evict keeps its victim resident for another admission pass.
+// Each retry waits for the engine to quiesce again, so this bounds work, not latency.
+inline constexpr unsigned kTransientCheckpointRetries = 6;
+
+// Transient-refusal retries of automatic saves, per session. A session holds an entry only while
+// a retry of its save is queued - every final outcome settles it - so session churn cannot grow
+// the table past what the automatic queue itself holds.
+class TransientRetryBudget {
+public:
+    // Counts one transient refusal of the session's save. False once every retry is spent, which
+    // settles the session.
+    [[nodiscard]] bool retry(std::string_view session_sha256) {
+        std::lock_guard lock(mutex_);
+        auto found = attempts_.find(session_sha256);
+        if (found == attempts_.end()) {
+            found = attempts_.emplace(std::string(session_sha256), 0U).first;
+        }
+        if (found->second >= kTransientCheckpointRetries) {
+            attempts_.erase(found);
+            return false;
+        }
+        ++found->second;
+        return true;
+    }
+
+    // The session's save reached a final outcome, or a new turn restarts its retries.
+    void settle(std::string_view session_sha256) noexcept {
+        std::lock_guard lock(mutex_);
+        if (const auto found = attempts_.find(session_sha256); found != attempts_.end()) {
+            attempts_.erase(found);
+        }
+    }
+
+    [[nodiscard]] std::size_t size() const {
+        std::lock_guard lock(mutex_);
+        return attempts_.size();
+    }
+
+private:
+    struct Hash {
+        using is_transparent = void;
+        std::size_t operator()(std::string_view text) const noexcept {
+            return std::hash<std::string_view>{}(text);
+        }
+    };
+
+    mutable std::mutex mutex_;
+    std::unordered_map<std::string, unsigned, Hash, std::equal_to<>> attempts_;
+};
 
 enum class ShutdownCheckpointOutcome { Saved, NothingToSave, Refused };
 
