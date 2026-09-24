@@ -211,7 +211,8 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         limits.default_max_tokens = options_.default_max_tokens;
         request                   = parse_responses_request(parse_json_body(req), limits);
         apply_client_session_header(req, !options_.api_key.empty(), request.generation);
-        resolve_client_session(request.generation, !options_.api_key.empty());
+        resolve_client_session(request.generation, !options_.api_key.empty(),
+                               has_client_session_header(req));
         validate_model(request.generation.model, public_model_id_);
         apply_client_identity_cache_hints(request.generation, !options_.api_key.empty(),
                                           cache_hints);

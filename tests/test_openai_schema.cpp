@@ -837,7 +837,7 @@ int test_client_identity() {
                        {"messages", Json::array({Json{{"role", "user"}, {"content", "hello"}}})},
                        {"prompt_cache_key", "client-session"}};
     GenerationRequest keyed = parse_chat_completion_request(keyed_body, default_limits());
-    resolve_client_session(keyed, true);
+    resolve_client_session(keyed, true, false);
     ninfer::ContextCacheHints keyed_hints;
     apply_client_identity_cache_hints(keyed, true, keyed_hints);
     failures += check(keyed.client_session_sha256 == keyed_digest &&
@@ -845,9 +845,9 @@ int test_client_identity() {
                       "chat prompt_cache_key did not become the authenticated session identity");
     keyed_body["ninfer_session"] = session_digest;
     GenerationRequest doubled    = parse_chat_completion_request(keyed_body, default_limits());
-    failures +=
-        check(api_code([&] { resolve_client_session(doubled, true); }) == "invalid_ninfer_identity",
-              "chat prompt_cache_key and ninfer_session both named the session");
+    failures += check(api_code([&] { resolve_client_session(doubled, true, false); }) ==
+                          "invalid_ninfer_identity",
+                      "chat prompt_cache_key and ninfer_session both named the session");
     return failures;
 }
 

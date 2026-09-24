@@ -108,9 +108,10 @@ void parse_prompt_cache_key(const nlohmann::json& body, GenerationRequest& reque
         prompt_cache_key_session_sha256(key.get_ref<const std::string&>());
 }
 
-void resolve_client_session(GenerationRequest& request, bool authentication_configured) {
+void resolve_client_session(GenerationRequest& request, bool authentication_configured,
+                            bool session_header_present) {
     if (!request.prompt_cache_session_sha256) { return; }
-    if (request.client_session_sha256) {
+    if (request.client_session_sha256 || session_header_present) {
         throw_prompt_cache_key_error(
             "prompt_cache_key cannot be combined with ninfer_session or X-NInfer-Session");
     }

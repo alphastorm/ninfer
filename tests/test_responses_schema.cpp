@@ -259,7 +259,7 @@ int test_prompt_cache_key_identity() {
     failures += check(keyed.generation.prompt_cache_session_sha256 == digest &&
                           !keyed.generation.client_session_sha256,
                       "prompt_cache_key did not parse to its domain-separated digest");
-    resolve_client_session(keyed.generation, true);
+    resolve_client_session(keyed.generation, true, false);
     ninfer::ContextCacheHints hints;
     apply_client_identity_cache_hints(keyed.generation, true, hints);
     failures += check(keyed.generation.client_session_sha256 == digest &&
@@ -268,7 +268,7 @@ int test_prompt_cache_key_identity() {
                       "an authenticated prompt_cache_key did not become the session identity");
 
     ResponsesRequest anonymous = parse_responses_request(body, limits());
-    resolve_client_session(anonymous.generation, false);
+    resolve_client_session(anonymous.generation, false, false);
     ninfer::ContextCacheHints anonymous_hints;
     apply_client_identity_cache_hints(anonymous.generation, false, anonymous_hints);
     failures +=
@@ -286,8 +286,9 @@ int test_prompt_cache_key_identity() {
     Json doubled               = body;
     doubled["ninfer_session"]  = std::string(64, 'a');
     ResponsesRequest ambiguous = parse_responses_request(doubled, limits());
-    failures += check(api_code([&] { resolve_client_session(ambiguous.generation, true); }) ==
-                          "invalid_ninfer_identity",
+    failures += check(api_code([&] {
+                          resolve_client_session(ambiguous.generation, true, false);
+                      }) == "invalid_ninfer_identity",
                       "prompt_cache_key and ninfer_session both named the session");
     for (const Json& invalid : {Json(""), Json(7), Json::object()}) {
         Json malformed                = body;

@@ -185,12 +185,17 @@ bool valid_session_digest(std::string_view digest) {
     throw ApiException(std::move(error));
 }
 
+constexpr const char* kClientSessionHeader = "X-NInfer-Session";
+
 } // namespace
+
+bool has_client_session_header(const httplib::Request& request) {
+    return request.get_header_value_count(kClientSessionHeader) != 0;
+}
 
 std::optional<std::string> parse_client_session_header(const httplib::Request& request,
                                                        bool authentication_configured) {
-    constexpr const char* header = "X-NInfer-Session";
-    const std::size_t count      = request.get_header_value_count(header);
+    const std::size_t count = request.get_header_value_count(kClientSessionHeader);
     if (count == 0) { return std::nullopt; }
     if (count != 1) {
         ApiError error;
@@ -201,8 +206,8 @@ std::optional<std::string> parse_client_session_header(const httplib::Request& r
         throw ApiException(std::move(error));
     }
     GenerationRequest identity;
-    identity.client_session_sha256 =
-        parse_client_identity_sha256(request.get_header_value(header), "ninfer_session");
+    identity.client_session_sha256 = parse_client_identity_sha256(
+        request.get_header_value(kClientSessionHeader), "ninfer_session");
     require_authenticated_client_identity(identity, authentication_configured);
     return identity.client_session_sha256;
 }
@@ -699,7 +704,7 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
             error.message = "model '" + request.model + "' not found";
             throw ApiException(std::move(error));
         }
-        resolve_client_session(request, !options_.api_key.empty());
+        resolve_client_session(request, !options_.api_key.empty(), has_client_session_header(req));
     } catch (const ApiException& e) {
         write_error(res, e.error());
         return;

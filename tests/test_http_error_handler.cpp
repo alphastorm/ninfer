@@ -120,13 +120,35 @@ int main() {
     keyed_with_header.prompt_cache_session_sha256 = std::string(64, 'c');
     ninfer::serve::apply_client_session_header(session_header, true, keyed_with_header);
     try {
-        ninfer::serve::resolve_client_session(keyed_with_header, true);
+        ninfer::serve::resolve_client_session(
+            keyed_with_header, true, ninfer::serve::has_client_session_header(session_header));
         failures += check(false, "prompt_cache_key and X-NInfer-Session both named the session");
     } catch (const ninfer::serve::ApiException& error) {
         failures +=
             check(error.error().status == 400 && error.error().code == "invalid_ninfer_identity",
                   "prompt_cache_key with X-NInfer-Session returned the wrong error");
     }
+    // Chat completions never bind X-NInfer-Session, so the header must still refuse a key there
+    // instead of letting the key silently win; a header without a key stays unbound, as before.
+    ninfer::serve::GenerationRequest chat_keyed;
+    chat_keyed.prompt_cache_session_sha256 = std::string(64, 'c');
+    try {
+        ninfer::serve::resolve_client_session(
+            chat_keyed, true, ninfer::serve::has_client_session_header(session_header));
+        failures += check(false, "chat prompt_cache_key with X-NInfer-Session was accepted");
+    } catch (const ninfer::serve::ApiException& error) {
+        failures +=
+            check(error.error().status == 400 && error.error().code == "invalid_ninfer_identity" &&
+                      error.error().param == "prompt_cache_key",
+                  "chat prompt_cache_key with X-NInfer-Session returned the wrong error");
+    }
+    ninfer::serve::GenerationRequest chat_header_only;
+    ninfer::serve::resolve_client_session(chat_header_only, true,
+                                          ninfer::serve::has_client_session_header(session_header));
+    failures += check(!chat_header_only.client_session_sha256,
+                      "a chat session header without a key bound a session");
+    failures += check(!ninfer::serve::has_client_session_header(missing_session_header),
+                      "an absent session header was reported present");
     try {
         (void)ninfer::serve::require_checkpoint_session_identity(std::nullopt,
                                                                  missing_session_header, true);

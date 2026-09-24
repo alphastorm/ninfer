@@ -36,6 +36,8 @@ httplib::Server::HandlerResponse handle_unrendered_http_error(const ServeOptions
 // malformed, or unauthenticated value is rejected without echoing it.
 [[nodiscard]] std::optional<std::string>
 parse_client_session_header(const httplib::Request& request, bool authentication_configured);
+// True when the request carries X-NInfer-Session at all, whether or not the route binds it.
+[[nodiscard]] bool has_client_session_header(const httplib::Request& request);
 
 // Responses create accepts the session credential on either surface: the header alone binds the
 // request to that session, and a header that disagrees with the body's ninfer_session is

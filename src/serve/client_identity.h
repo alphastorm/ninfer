@@ -25,9 +25,11 @@ void apply_client_identity_cache_hints(const GenerationRequest& request,
 std::string prompt_cache_key_session_sha256(std::string_view key);
 void parse_prompt_cache_key(const nlohmann::json& body, GenerationRequest& request);
 // Makes a parsed prompt_cache_key the session identity when API authentication is configured.
-// A request names its session once: a key together with ninfer_session or X-NInfer-Session is
-// refused. Without authentication the key names nothing and the request stays in the anonymous
-// pool, exactly as omission does.
-void resolve_client_session(GenerationRequest& request, bool authentication_configured);
+// A request names its session once: a key together with ninfer_session, or on a request that
+// carries X-NInfer-Session, is refused on every route, including chat completions, which never
+// binds the header. Without authentication the key names nothing and the request stays in the
+// anonymous pool, exactly as omission does.
+void resolve_client_session(GenerationRequest& request, bool authentication_configured,
+                            bool session_header_present);
 
 } // namespace ninfer::serve
