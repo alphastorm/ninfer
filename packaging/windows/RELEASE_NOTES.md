@@ -26,9 +26,17 @@ is saved and pinned first; a refused save leaves that resident intact. Every ret
 fresh checkpoint reader. The retry bound allows two progress steps per catalog slot plus the final
 import, so new arrivals cannot extend one restore indefinitely. State image slots, KV capacity,
 and continuation slots all participate in guarded reclaim. Normal disk
-quota retention still applies after the restore finishes. Automatic checkpointing remains best
-effort under live traffic;
-explicit checkpoint requests and graceful managed shutdown provide the observable save outcome.
+quota retention still applies after the restore finishes.
+
+Live sessions survive a graceful stop. An automatic checkpoint refused at a transient gate - the
+newest turn not yet catalogued, or another request's transaction in progress - retries up to six
+times per completed turn once the engine quiesces. Before admission evicts a session whose newest
+turn is not on disk, the engine saves it, waiting while that turn's reply is still being stored;
+the admitting request waits, bounded by its own queue deadline. Re-saving a session under the
+disk quota no longer deletes other sessions' only checkpoints, including when a cleanup fails. A
+graceful stop counts a session whose newest response is already on disk as nothing to save.
+Automatic checkpointing remains best effort under live traffic; explicit checkpoint requests and
+graceful managed shutdown provide the observable save outcome.
 
 The Responses endpoint continues to reject unsupported cache hints, reasoning summaries, and
 encrypted reasoning requests. A client must omit options this runtime does not implement;
