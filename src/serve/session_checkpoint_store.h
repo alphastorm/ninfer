@@ -140,8 +140,8 @@ public:
                               const nlohmann::json& runtime_fingerprint,
                               std::string_view response_id) const;
     [[nodiscard]] SessionCheckpointEraseResult erase(std::string_view session_sha256);
-    // Lock-free pre-filter: false only when no generation was ever saved for the session, so a
-    // caller can skip load() and its locks for sessions that have nothing to restore.
+    // Lock-free pre-filter: false only when the session has no published current generation, so
+    // a caller can skip load() and its locks for sessions that have nothing to restore.
     [[nodiscard]] bool may_hold(std::string_view session_sha256) const noexcept;
     void collect_garbage();
 

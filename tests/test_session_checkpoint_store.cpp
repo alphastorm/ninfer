@@ -719,7 +719,8 @@ int test_active_reader_delete_and_gc() {
 }
 
 // A first request without a response id consults may_hold before taking any lock, so it must
-// never rule out a session that saved and must rule out one that never did.
+// never rule out a session that saved and must rule out one that never published, including one
+// whose refused first save left its session directory behind.
 int test_may_hold_prefilter() {
     TemporaryDirectory temporary;
     const ResponseStoreSnapshot responses = sample_snapshot();
@@ -738,6 +739,16 @@ int test_may_hold_prefilter() {
     failures += check(!store.may_hold(responses.client_session_sha256) &&
                           !store.may_hold("not-a-session-digest"),
                       "a session that never saved was reported as holding a checkpoint");
+    const auto refused_export =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        (void)write_chunked(writer, "engine/partial.bin", payload);
+        return std::nullopt;
+    };
+    failures += check(!store.save(responses, fingerprint(), refused_export) &&
+                          std::filesystem::exists(temporary.path / "sessions" /
+                                                  responses.client_session_sha256) &&
+                          !store.may_hold(responses.client_session_sha256),
+                      "a refused first save left a session that may_hold reported as restorable");
     const auto saved = store.save(responses, fingerprint(), exporter);
     failures += check(saved.has_value() && store.may_hold(responses.client_session_sha256),
                       "a saved session was ruled out before its restore");
