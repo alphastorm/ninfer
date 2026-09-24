@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <memory>
@@ -1017,6 +1018,103 @@ int test_resave_keeps_other_sessions_within_quota() {
     return failures;
 }
 
+// A reclamation that fails must not turn into more evictions: through a broken cleanup path each
+// evicted session loses its only checkpoint without freeing a byte. Whether the failure hits the
+// superseded generation after publish or a stuck tombstone before it, the other session keeps its
+// checkpoint, and usage stays within one generation of the quota (council
+// CR-20260924-ninfer-durable-evict-r1, daybreak-blue R1).
+int test_failed_reclamation_keeps_other_sessions() {
+    const ResponseStoreSnapshot first_session  = sample_snapshot('a');
+    const ResponseStoreSnapshot second_session = sample_snapshot('b');
+    const std::vector<std::byte> payload       = engine_payload();
+    const auto exporter =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        if (!write_chunked(writer, "engine/state.bin", payload)) { return std::nullopt; }
+        return ContinuationCheckpointStats{
+            .frontier_tokens = 4096, .restored_tokens = 4096, .payload_bytes = payload.size()};
+    };
+    TemporaryDirectory measurement;
+    SessionCheckpointStore measuring_store({
+        .root             = measurement.path,
+        .disk_quota_bytes = 1ULL << 20,
+        .staging_bytes    = 1ULL << 20,
+        .read_queue       = std::make_shared<TestReadQueue>(),
+    });
+    const auto measured = measuring_store.save(first_session, fingerprint(), exporter);
+    int failures        = 0;
+    failures += check(measured.has_value(), "quota fixture generation size is measurable");
+    if (!measured) { return failures; }
+    const std::uint64_t quota = measured->bytes * 5 / 2;
+
+    // Cleanup refuses exactly the paths this predicate names; everything else is deleted.
+    struct Fixture {
+        TemporaryDirectory temporary;
+        std::function<bool(const std::filesystem::path&)> stuck;
+        SessionCheckpointStore store;
+        explicit Fixture(std::uint64_t quota)
+            : store({.root              = temporary.path,
+                     .disk_quota_bytes  = quota,
+                     .staging_bytes     = 1ULL << 20,
+                     .read_queue        = std::make_shared<TestReadQueue>(),
+                     .tombstone_cleanup = [this](const std::filesystem::path& path) {
+                         if (stuck && stuck(path)) { return false; }
+                         std::error_code error;
+                         std::filesystem::remove_all(path, error);
+                         return !error;
+                     }}) {}
+    };
+
+    {
+        Fixture fixture(quota);
+        const auto first  = fixture.store.save(first_session, fingerprint(), exporter);
+        const auto second = fixture.store.save(second_session, fingerprint(), exporter);
+        failures += check(first && second, "post-publish fixture publishes two sessions");
+        if (!first || !second) { return failures; }
+        const std::string superseded = first_session.client_session_sha256 + "--generation--";
+        fixture.stuck                = [&](const std::filesystem::path& path) {
+            return path.filename().string().starts_with(superseded);
+        };
+        const auto resaved = fixture.store.save(first_session, fingerprint(), exporter);
+        failures += check(resaved.has_value(),
+                          "re-save is acknowledged although its superseded generation is stuck");
+        failures += check(
+            fixture.store.status(second_session.client_session_sha256, fingerprint())
+                    .at("state") == "available",
+            "a stuck superseded generation evicted another session's only checkpoint");
+        failures += check(retained_generation_bytes(fixture.temporary.path) <=
+                              quota + measured->bytes,
+                          "usage left more than one generation above the quota");
+    }
+
+    {
+        Fixture fixture(quota);
+        const auto first  = fixture.store.save(first_session, fingerprint(), exporter);
+        const auto second = fixture.store.save(second_session, fingerprint(), exporter);
+        failures += check(first && second, "stuck-tombstone fixture publishes two sessions");
+        if (!first || !second) { return failures; }
+        const std::filesystem::path stuck = fixture.temporary.path / ".tombstones" / "stuck";
+        std::filesystem::create_directories(stuck);
+        std::ofstream(stuck / "held", std::ios::binary) << "held open by another process";
+        fixture.stuck = [&](const std::filesystem::path& path) { return path == stuck; };
+        ninfer::runtime::SessionCheckpointSkipDetail skip;
+        const auto resaved = fixture.store.save(first_session, fingerprint(), exporter, &skip);
+        failures += check(!resaved.has_value() &&
+                              skip.reason ==
+                                  ninfer::runtime::SessionCheckpointSkipReason::QuotaExceeded,
+                          "a stuck tombstone must refuse the re-save that no longer fits");
+        failures += check(
+            fixture.store.status(second_session.client_session_sha256, fingerprint())
+                    .at("state") == "available",
+            "a stuck tombstone evicted another session's only checkpoint");
+        SessionCheckpointLoadResult kept =
+            fixture.store.load(first_session.client_session_sha256, fingerprint());
+        failures += check(kept.state == SessionCheckpointLoadState::Available && kept.checkpoint &&
+                              kept.checkpoint->generation == first->generation,
+                          "the refused re-save left the session's previous checkpoint in place");
+    }
+    return failures;
+}
+
 // A queue that cannot hold two batches in flight (Windows DirectStorage: one status slot, one
 // fence) must be drained between the reader's batches; issuing the next batch early used to be
 // caught as a failed read and surfaced to the client as previous_response_not_found.
@@ -1553,6 +1651,7 @@ int main() {
     failures += test_native_read_queue_is_required();
     failures += test_large_session_resaves_within_quota();
     failures += test_resave_keeps_other_sessions_within_quota();
+    failures += test_failed_reclamation_keeps_other_sessions();
     failures += test_serialising_read_queue_streams_batches_in_order();
     failures += test_post_publish_reclaim_failure_keeps_save_acknowledged();
     failures += test_post_verification_replacement_fails_closed();

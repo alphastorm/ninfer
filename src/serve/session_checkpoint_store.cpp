@@ -905,7 +905,10 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
         inventory_generations(options, impl, protected_generation, protected_session);
     // The transient tolerance below only applies while reclamation is fully healthy: if any
     // eviction this pass fails, the store falls back to the hard cap so a broken cleanup path
-    // can never let disk usage creep past the quota one tolerated save at a time.
+    // can never let disk usage creep past the quota one tolerated save at a time. A failed pass
+    // also stops evicting other sessions' current checkpoints: through a broken cleanup path each
+    // one would lose its only copy without freeing a byte, so the save is refused instead and
+    // usage stays over the cap by the stuck bytes alone.
     bool reclamation_healthy = true;
     for (const GenerationCandidate& candidate : inventory.candidates) {
         const bool unconditional = candidate.kind == CandidateKind::Tombstone ||
@@ -916,6 +919,7 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
         const std::uint64_t allowed =
             options.disk_quota_bytes + (reclamation_healthy ? tolerated_transient_bytes : 0);
         if (inventory.used <= allowed && !unconditional) { continue; }
+        if (!reclamation_healthy && candidate.kind == CandidateKind::CurrentSession) { continue; }
         if (candidate.kind == CandidateKind::Tombstone) {
             if (cleanup_tombstone(options, candidate.path)) {
                 inventory.used -= candidate.bytes;
