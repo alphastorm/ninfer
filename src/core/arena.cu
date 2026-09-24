@@ -56,11 +56,12 @@ void free_pinned(void*& ptr) noexcept {
 }
 
 #if defined(_WIN32)
-// Windows can refuse a large pinned allocation while most memory is standby file cache: the RTX
-// 4090 lane's 11 GiB host-KV pool failed with 3.9 GiB free and 22.7 GiB standby after the start's
-// own model hash pass, and the same start pinned it once the standby list was released.
-// Committing and touching an equal pageable region makes the memory manager repurpose standby
-// pages; releasing it returns them as free pages the driver can pin. Needs no privilege.
+// Windows can refuse a large pinned allocation while most memory is standby file cache: managed
+// starts of the RTX 4090 lane failed to pin its 11 GiB host-KV pool with 3.9 GiB free and 22.7 GiB
+// standby, then pinned it once the standby list was purged (alphastorm/omp-ninfer#48). The refusal
+// is intermittent; hand-launched starts with the same free and standby sizes pin. Committing and
+// touching an equal pageable region makes the memory manager repurpose standby pages; releasing it
+// returns them as free pages the driver can pin. Needs no privilege.
 bool convert_standby_to_free(std::size_t size_bytes) noexcept {
     void* region = VirtualAlloc(nullptr, size_bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (region == nullptr) { return false; }
