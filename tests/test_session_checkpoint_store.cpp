@@ -821,8 +821,19 @@ int test_store_wide_quota_across_sessions() {
     const std::string previous_responses = read_file_bytes(previous_generation / "responses.cbor");
     const std::string previous_engine = read_file_bytes(previous_generation / "engine/state.bin");
 
+    // Re-saving at the same size fits the tolerated publish transient and evicts nobody. A
+    // successor that grows past it (while still fitting the quota on its own) needs a real
+    // eviction, and when that eviction cannot be cleaned up the save is refused before publication.
+    std::vector<std::byte> grown = payload;
+    grown.insert(grown.end(), payload.begin(), payload.begin() + payload.size() / 2);
+    const auto grown_exporter =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        if (!write_chunked(writer, "engine/state.bin", grown)) { return std::nullopt; }
+        return ContinuationCheckpointStats{
+            .frontier_tokens = 4096, .restored_tokens = 4096, .payload_bytes = grown.size()};
+    };
     refuse_cleanup                = true;
-    const auto failed_replacement = failure_store.save(second_session, fingerprint(), exporter);
+    const auto failed_replacement = failure_store.save(second_session, fingerprint(), grown_exporter);
     SessionCheckpointLoadResult previous_loaded =
         failure_store.load(second_session.client_session_sha256, fingerprint());
     std::filesystem::path deferred_tombstone;
@@ -951,6 +962,58 @@ int test_large_session_resaves_within_quota() {
     failures += check(store.status(responses.client_session_sha256, fingerprint())
                               .at("state") == "available",
                       "refused oversized save leaves the published successor untouched");
+    return failures;
+}
+
+// Re-saving one session must not cost another session its only checkpoint: the superseded
+// generation is the publish transient, and the post-publish pass reclaims it first. Deleting the
+// other session instead lost every session evicted from engine memory whenever a resident one
+// was saved again under quota pressure (alphastorm/omp-ninfer#46).
+int test_resave_keeps_other_sessions_within_quota() {
+    const ResponseStoreSnapshot first_session  = sample_snapshot('a');
+    const ResponseStoreSnapshot second_session = sample_snapshot('b');
+    const std::vector<std::byte> payload       = engine_payload();
+    const auto exporter =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        if (!write_chunked(writer, "engine/state.bin", payload)) { return std::nullopt; }
+        return ContinuationCheckpointStats{
+            .frontier_tokens = 4096, .restored_tokens = 4096, .payload_bytes = payload.size()};
+    };
+
+    TemporaryDirectory measurement;
+    SessionCheckpointStore measuring_store({
+        .root             = measurement.path,
+        .disk_quota_bytes = 1ULL << 20,
+        .staging_bytes    = 1ULL << 20,
+        .read_queue       = std::make_shared<TestReadQueue>(),
+    });
+    const auto measured = measuring_store.save(first_session, fingerprint(), exporter);
+    int failures        = 0;
+    failures += check(measured.has_value(), "quota fixture generation size is measurable");
+    if (!measured) { return failures; }
+
+    // Two sessions fit; the transient of re-saving one of them does not.
+    const std::uint64_t quota = measured->bytes * 5 / 2;
+    TemporaryDirectory temporary;
+    SessionCheckpointStore store({.root             = temporary.path,
+                                  .disk_quota_bytes = quota,
+                                  .staging_bytes    = 1ULL << 20,
+                                  .read_queue       = std::make_shared<TestReadQueue>()});
+    const auto first   = store.save(first_session, fingerprint(), exporter);
+    const auto second  = store.save(second_session, fingerprint(), exporter);
+    const auto resaved = store.save(first_session, fingerprint(), exporter);
+    failures += check(first && second && resaved, "both sessions publish and the first re-saves");
+    if (!first || !second || !resaved) { return failures; }
+    failures += check(
+        store.status(second_session.client_session_sha256, fingerprint()).at("state") ==
+            "available",
+        "re-saving one session evicted another session's only checkpoint");
+    failures += check(!std::filesystem::exists(temporary.path / "sessions" /
+                                               first_session.client_session_sha256 /
+                                               "generations" / first->generation),
+                      "the superseded generation outlived the re-save");
+    failures += check(retained_generation_bytes(temporary.path) <= quota,
+                      "re-save left the store above its disk quota");
     return failures;
 }
 
@@ -1489,6 +1552,7 @@ int main() {
     failures += test_load_scan_failure_does_not_deadlock();
     failures += test_native_read_queue_is_required();
     failures += test_large_session_resaves_within_quota();
+    failures += test_resave_keeps_other_sessions_within_quota();
     failures += test_serialising_read_queue_streams_batches_in_order();
     failures += test_post_publish_reclaim_failure_keeps_save_acknowledged();
     failures += test_post_verification_replacement_fails_closed();

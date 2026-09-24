@@ -910,7 +910,12 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
     for (const GenerationCandidate& candidate : inventory.candidates) {
         const bool unconditional = candidate.kind == CandidateKind::Tombstone ||
                                    candidate.kind == CandidateKind::AbandonedStaging;
-        if (inventory.used <= options.disk_quota_bytes && !unconditional) { continue; }
+        // The tolerated transient is the saving session's superseded generation, which the
+        // post-publish pass reclaims first. Evicting another session to make room for it would
+        // delete that session's only checkpoint and leave the superseded copy on disk.
+        const std::uint64_t allowed =
+            options.disk_quota_bytes + (reclamation_healthy ? tolerated_transient_bytes : 0);
+        if (inventory.used <= allowed && !unconditional) { continue; }
         if (candidate.kind == CandidateKind::Tombstone) {
             if (cleanup_tombstone(options, candidate.path)) {
                 inventory.used -= candidate.bytes;
