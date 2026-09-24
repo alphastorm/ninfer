@@ -718,6 +718,32 @@ int test_active_reader_delete_and_gc() {
     return failures;
 }
 
+// A first request without a response id consults may_hold before taking any lock, so it must
+// never rule out a session that saved and must rule out one that never did.
+int test_may_hold_prefilter() {
+    TemporaryDirectory temporary;
+    const ResponseStoreSnapshot responses = sample_snapshot();
+    const std::vector<std::byte> payload  = engine_payload();
+    SessionCheckpointStore store({.root             = temporary.path,
+                                  .disk_quota_bytes = 64ULL << 10,
+                                  .staging_bytes    = 1ULL << 20,
+                                  .read_queue       = std::make_shared<TestReadQueue>()});
+    const auto exporter =
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+        if (!write_chunked(writer, "engine/state.bin", payload)) { return std::nullopt; }
+        return ContinuationCheckpointStats{
+            .frontier_tokens = 4096, .restored_tokens = 4096, .payload_bytes = payload.size()};
+    };
+    int failures = 0;
+    failures += check(!store.may_hold(responses.client_session_sha256) &&
+                          !store.may_hold("not-a-session-digest"),
+                      "a session that never saved was reported as holding a checkpoint");
+    const auto saved = store.save(responses, fingerprint(), exporter);
+    failures += check(saved.has_value() && store.may_hold(responses.client_session_sha256),
+                      "a saved session was ruled out before its restore");
+    return failures;
+}
+
 int test_store_wide_quota_across_sessions() {
     const ResponseStoreSnapshot first_session  = sample_snapshot('a');
     const ResponseStoreSnapshot second_session = sample_snapshot('b');
@@ -1646,6 +1672,7 @@ int main() {
     failures += test_export_refusal_diagnostics();
     failures += test_transaction_restart_compatibility_and_corruption();
     failures += test_active_reader_delete_and_gc();
+    failures += test_may_hold_prefilter();
     failures += test_store_wide_quota_across_sessions();
     failures += test_load_scan_failure_does_not_deadlock();
     failures += test_native_read_queue_is_required();

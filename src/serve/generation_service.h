@@ -130,8 +130,10 @@ public:
     [[nodiscard]] std::optional<SessionCheckpointSaveResult>
     save_checkpoint(std::string_view session_sha256, ResponseStore& responses,
                     runtime::SessionCheckpointSkipDetail* skip = nullptr);
+    // Restores the session's current checkpoint. With a required response id the checkpoint must
+    // end at that response; without one it restores whatever response the checkpoint ends at.
     [[nodiscard]] bool restore_checkpoint(std::string_view session_sha256,
-                                          std::string_view required_response_id,
+                                          std::optional<std::string_view> required_response_id,
                                           ResponseStore& responses);
     [[nodiscard]] nlohmann::json checkpoint_status(std::string_view session_sha256) const;
     // True when the catalogued checkpoint already records response_id as the session's

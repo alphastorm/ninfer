@@ -1380,6 +1380,16 @@ std::filesystem::path SessionCheckpointStore::session_path(std::string_view dige
     return options_.root / "sessions" / std::string(digest);
 }
 
+bool SessionCheckpointStore::may_hold(std::string_view session_sha256) const noexcept {
+    if (!valid_digest(session_sha256)) { return false; }
+    try {
+        std::error_code error;
+        const bool exists = std::filesystem::exists(session_path(session_sha256), error);
+        // A filesystem error cannot rule the session out; load() decides under its lock.
+        return exists || static_cast<bool>(error);
+    } catch (...) { return true; }
+}
+
 std::optional<SessionCheckpointSaveResult>
 SessionCheckpointStore::save(const ResponseStoreSnapshot& responses,
                              const nlohmann::json& runtime_fingerprint,

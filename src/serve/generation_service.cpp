@@ -774,9 +774,12 @@ GenerationService::save_checkpoint_locked(std::string_view session_sha256, Respo
 }
 
 bool GenerationService::restore_checkpoint(std::string_view session_sha256,
-                                           std::string_view required_response_id,
+                                           std::optional<std::string_view> required_response_id,
                                            ResponseStore& responses) {
     if (!checkpoint_store_) { return false; }
+    // A restore without a response id is attempted on every new session's first request; a
+    // session that never saved must not wait behind another session's in-flight save to learn it.
+    if (!required_response_id && !checkpoint_store_->may_hold(session_sha256)) { return false; }
     std::lock_guard lock(checkpoint_mutex_);
     try {
         // Each attempt gets a fresh reader, because a checkpoint reader is a single verified pass

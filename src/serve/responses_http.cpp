@@ -1,6 +1,7 @@
 #include "serve/http_server.h"
 
 #include "serve/client_identity.h"
+#include "serve/console_log.h"
 #include "serve/openai_schema.h"
 #include "serve/responses_schema.h"
 
@@ -231,6 +232,21 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
             inherit_responses_preserve_thinking(request, previous->preserve_thinking);
             previous_context = previous->context;
             session_key      = previous->session_key;
+        } else if (request.store && request.generation.client_session_sha256 &&
+                   service_->checkpoint_enabled() &&
+                   !response_store_.latest_response_id(*request.generation.client_session_sha256)) {
+            // A client that keys its session without naming the last response (a stock OpenAI
+            // client resuming after both it and this server restarted) replays its transcript. On
+            // the session's first stored request in this process, restore its checkpoint so the
+            // Engine's exact prefix match can reuse it; a transcript that diverged from the
+            // checkpoint only reuses less. That request's stored response ends further attempts.
+            if (service_->restore_checkpoint(*request.generation.client_session_sha256,
+                                             std::nullopt, response_store_)) {
+                write_console_log(ConsoleLogLevel::Info,
+                                  "checkpoint restored for session " +
+                                      request.generation.client_session_sha256->substr(0, 12) +
+                                      " on its first request without a response id");
+            }
         }
         if (cache_hints.session_key) {
             session_key = *cache_hints.session_key;
