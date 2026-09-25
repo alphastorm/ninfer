@@ -71,9 +71,10 @@ server now commits and releases its size plus 1/64 through an ordinary allocatio
 the pagefile to extend, so the pin itself never waits on an extension. A refusal that still occurs
 reports the commit limit, available commit and available memory.
 
-Decode rounds are shorter. The MTP verify pass's small-extent Q4 and Q5 projections share each
-activation load across weight rows, and the Q4 MLP gate/up kernel pads its staged weight rows so
-its shared-memory reads no longer conflict. Each row keeps its arithmetic order. On the RTX 5090,
+Decode rounds are shorter. The MTP verify pass's small-extent Q4 and Q5 input projections share
+each activation load across weight rows, and the Q4 MLP gate/up kernel pads its staged weight rows
+so its shared-memory reads no longer conflict. Each row keeps its arithmetic order. On the RTX 5090,
 where the routes were tuned, outputs are bit-identical to the previous kernels and MTP3 decode is
-about 10% faster from 1K to 31K tokens of context; this lane runs the same routes built for
-`sm_89`.
+about 10% faster from 1K to 31K tokens of context. The native lanes build these routes for their
+architecture, except that the MLP down and mixer output projections keep one row per warp: sharing
+loads across two rows made them 2-22% slower on the RTX 4090.
