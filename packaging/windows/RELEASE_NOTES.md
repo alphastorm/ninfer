@@ -64,7 +64,9 @@ prefix keeps its own owner instead of evicting the previous type's.
 A start could fail when the driver refused to pin the 11 GiB host-KV pool
 (alphastorm/omp-ninfer#48): the lane's task exited before the release was ready. On a 32 GiB host
 the running server commits about 39 GiB, so a start extends the system-managed pagefile, and the
-pool is its largest charge. The server now commits the pool's size through an ordinary allocation,
-which waits for the pagefile to extend, immediately before pinning it; a refusal that still occurs
-reports the commit limit, available commit and available memory. The refusal was not reproduced
-on demand, so #48 stays open until a start either pins or reports those numbers.
+pool is its largest charge. A pin charges its size and then a page-lock remainder of 11-20 MiB;
+when free commit covered the size but not the remainder, the pin raced the pagefile extension, and
+a start that lost was refused with 10 MiB of commit free. Before every pinned host allocation the
+server now commits and releases its size plus 1/64 through an ordinary allocation, which waits for
+the pagefile to extend, so the pin itself never waits on an extension. A refusal that still occurs
+reports the commit limit, available commit and available memory.

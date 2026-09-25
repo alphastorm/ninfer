@@ -60,13 +60,17 @@ void free_pinned(void*& ptr) noexcept {
 
 #if defined(_WIN32)
 // The RTX 4090 lane's server commits about 39 GiB on a 32 GiB host, so its start extends the
-// system-managed pagefile, and the pinned host-KV pool is the last and largest charge. A
-// user-mode commit waits while Windows extends the pagefile; the driver's pinned allocation was
-// refused during an extension, and a VirtualAlloc of the pool's size in the same process then
-// succeeded (alphastorm/omp-ninfer#48). Committing the pool's size here first leaves the
-// extended limit to cudaMallocHost. Failure is left to cudaMallocHost, which reports it.
+// system-managed pagefile, and the pinned host-KV pool is the last and largest charge. A pinned
+// allocation charges its size and then a page-lock remainder, measured at 11-20 MiB for the 11 GiB
+// pool. When free commit covers the size but not the remainder, the pin races the pagefile
+// extension Windows performs meanwhile; a start that lost the race was refused with 10 MiB of
+// commit free (alphastorm/omp-ninfer#48), and a retry in the same process fails too. A user-mode
+// commit waits for the extension instead, so committing and releasing the size plus size/64 first
+// leaves the pin free commit it never has to wait for. Failure is left to cudaMallocHost, which
+// reports it.
 void extend_commit_limit_for(std::size_t size_bytes) noexcept {
-    void* region = VirtualAlloc(nullptr, size_bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    const std::size_t precharge = size_bytes + size_bytes / 64;
+    void* region = VirtualAlloc(nullptr, precharge, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     if (region != nullptr) { VirtualFree(region, 0, MEM_RELEASE); }
 }
 
