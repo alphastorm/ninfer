@@ -70,3 +70,10 @@ a start that lost was refused with 10 MiB of commit free. Before every pinned ho
 server now commits and releases its size plus 1/64 through an ordinary allocation, which waits for
 the pagefile to extend, so the pin itself never waits on an extension. A refusal that still occurs
 reports the commit limit, available commit and available memory.
+
+Decode rounds are shorter. The MTP verify pass's small-extent Q4 and Q5 projections share each
+activation load across weight rows, and the Q4 MLP gate/up kernel pads its staged weight rows so
+its shared-memory reads no longer conflict. Each row keeps its arithmetic order. On the RTX 5090,
+where the routes were tuned, outputs are bit-identical to the previous kernels and MTP3 decode is
+about 10% faster from 1K to 31K tokens of context; this lane runs the same routes built for
+`sm_89`.
