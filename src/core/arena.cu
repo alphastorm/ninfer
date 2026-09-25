@@ -2,6 +2,13 @@
 
 #include <cuda_runtime.h>
 
+#if defined(_WIN32)
+#    ifndef NOMINMAX
+#        define NOMINMAX
+#    endif
+#    include <windows.h>
+#endif
+
 #include <cstdio>
 #include <limits>
 #include <new>
@@ -50,6 +57,28 @@ void free_pinned(void*& ptr) noexcept {
         ptr = nullptr;
     }
 }
+
+#if defined(_WIN32)
+// The RTX 4090 lane's server commits about 39 GiB on a 32 GiB host, so its start extends the
+// system-managed pagefile, and the pinned host-KV pool is the last and largest charge. A
+// user-mode commit waits while Windows extends the pagefile; the driver's pinned allocation was
+// refused during an extension, and a VirtualAlloc of the pool's size in the same process then
+// succeeded (alphastorm/omp-ninfer#48). Committing the pool's size here first leaves the
+// extended limit to cudaMallocHost. Failure is left to cudaMallocHost, which reports it.
+void extend_commit_limit_for(std::size_t size_bytes) noexcept {
+    void* region = VirtualAlloc(nullptr, size_bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    if (region != nullptr) { VirtualFree(region, 0, MEM_RELEASE); }
+}
+
+std::string commit_state() {
+    MEMORYSTATUSEX status{};
+    status.dwLength = sizeof(status);
+    if (!GlobalMemoryStatusEx(&status)) { return {}; }
+    return "; commit available " + std::to_string(status.ullAvailPageFile >> 20) + " of " +
+           std::to_string(status.ullTotalPageFile >> 20) + " MiB, physical available " +
+           std::to_string(status.ullAvailPhys >> 20) + " MiB";
+}
+#endif
 
 } // namespace
 
@@ -244,10 +273,17 @@ void DeviceArena::reset_peak() noexcept { peak_ = off_; }
 PinnedHostBuffer::PinnedHostBuffer(std::size_t size_bytes) {
     if (size_bytes == 0) { throw std::invalid_argument("PinnedHostBuffer size must be nonzero"); }
 
-    void* ptr             = nullptr;
+    void* ptr = nullptr;
+#if defined(_WIN32)
+    extend_commit_limit_for(size_bytes);
+#endif
     const cudaError_t err = cudaMallocHost(&ptr, size_bytes);
     if (err != cudaSuccess) {
-        throw std::runtime_error(cuda_error_message("cudaMallocHost failed", err));
+        std::string message = cuda_error_message("cudaMallocHost failed", err);
+#if defined(_WIN32)
+        message += commit_state();
+#endif
+        throw std::runtime_error(message);
     }
 
     data_ = ptr;
