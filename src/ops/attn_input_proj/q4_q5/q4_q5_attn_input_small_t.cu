@@ -22,6 +22,9 @@ constexpr std::int32_t kHidden     = 5120;
 using Q4AttnSimtR8C4Schedule = Q4RowSplitSimtGemmSchedule<8, 4, 16, 2, Cache::ca, 1>;
 using Q4AttnSimtR8C8Schedule = Q4RowSplitSimtGemmSchedule<8, 8, 16, 2, Cache::ca, 1>;
 
+static_assert(kParentRows % (2 * kQ4SimtRowsWarpsPerCta) == 0 &&
+              kParentRows % kQ5SimtRowsPerWarp == 0 && kHidden % 1024 == 0);
+
 void launch_q4_gemv(const Tensor& x, const Weight& weight, Tensor& q, Tensor& key,
                     cudaStream_t stream) {
     using Schedule = Q4GemvR1W8DirectSchedule;
@@ -63,14 +66,37 @@ void launch_q4_simt_route(const Tensor& x, const Weight& weight, Tensor& q, Tens
     }
 }
 
+// Up to four columns the query/key side runs two rows per warp with direct loads (EXP-055: 7-44%
+// faster than the staged R8C4 schedule on RTX 5090 at T=2-4, bit-identical per row).
+template <int Cols>
+void launch_q4_rows(const Tensor& x, const Weight& weight, Tensor& q, Tensor& key,
+                    cudaStream_t stream) {
+    constexpr int kRowsPerWarp = 2;
+    const dim3 grid(kParentRows / (kRowsPerWarp * kQ4SimtRowsWarpsPerCta), 1u, 1u);
+    q4_rowsplit_gemm_simt_rows_kernel<Cols, kHidden / 1024, kRowsPerWarp, true, kSplitRow>
+        <<<grid, kQ4SimtRowsWarpsPerCta * 32, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(q.data),
+            static_cast<__nv_bfloat16*>(key.data), q.ne[0], key.ne[0], kHidden,
+            weight.padded_shape[1]);
+    CUDA_CHECK(cudaGetLastError());
+}
+
 void launch_q4(const Tensor& x, const Weight& weight, Tensor& q, Tensor& key, cudaStream_t stream) {
     switch (x.ne[1]) {
     case 1:
         launch_q4_gemv(x, weight, q, key, stream);
         return;
     case 2:
+        launch_q4_rows<2>(x, weight, q, key, stream);
+        return;
     case 3:
+        launch_q4_rows<3>(x, weight, q, key, stream);
+        return;
     case 4:
+        launch_q4_rows<4>(x, weight, q, key, stream);
+        return;
     case 5:
     case 6:
     case 7:
@@ -107,19 +133,33 @@ void launch_q5_gemv(const Tensor& x, const Weight& weight, Tensor& gate, Tensor&
     CUDA_CHECK(cudaGetLastError());
 }
 
+// From three columns the gate/value side runs two rows per warp (EXP-055: 17% faster than one row
+// on RTX 5090 at T=4, bit-identical per row); at T=2 the one-row kernel is as fast.
 template <int Cols>
 void launch_q5_split4(const Tensor& x, const Weight& weight, Tensor& gate, Tensor& value,
                       cudaStream_t stream) {
     constexpr int kThreads = 4 * 32;
-    const dim3 grid(static_cast<unsigned>(kParentRows), 1u, 1u);
-    q5_rowsplit_gemm_simt_split4_kernel<Q5RowSplitSimtSchedule, Cols, 5, kHidden, true, kSplitRow>
-        <<<grid, kThreads, 0, stream>>>(static_cast<const __nv_bfloat16*>(x.data),
-                                        static_cast<const std::uint8_t*>(weight.qdata),
-                                        static_cast<const std::uint8_t*>(weight.qhigh),
-                                        static_cast<const std::uint8_t*>(weight.scales),
-                                        static_cast<__nv_bfloat16*>(gate.data),
-                                        static_cast<__nv_bfloat16*>(value.data), kParentRows,
-                                        gate.ne[0], kHidden, Cols, weight.padded_shape[1], 5);
+    if constexpr (Cols >= 3) {
+        const dim3 grid(static_cast<unsigned>(kParentRows / kQ5SimtRowsPerWarp), 1u, 1u);
+        q5_rowsplit_gemm_simt_split4_rows_kernel<Cols, 5, kHidden, true, kSplitRow>
+            <<<grid, kThreads, 0, stream>>>(static_cast<const __nv_bfloat16*>(x.data),
+                                            static_cast<const std::uint8_t*>(weight.qdata),
+                                            static_cast<const std::uint8_t*>(weight.qhigh),
+                                            static_cast<const std::uint8_t*>(weight.scales),
+                                            static_cast<__nv_bfloat16*>(gate.data),
+                                            static_cast<__nv_bfloat16*>(value.data), kParentRows,
+                                            gate.ne[0], weight.padded_shape[1]);
+    } else {
+        const dim3 grid(static_cast<unsigned>(kParentRows), 1u, 1u);
+        q5_rowsplit_gemm_simt_split4_kernel<Q5RowSplitSimtSchedule, Cols, 5, kHidden, true,
+                                            kSplitRow><<<grid, kThreads, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.qhigh),
+            static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(gate.data),
+            static_cast<__nv_bfloat16*>(value.data), kParentRows, gate.ne[0], kHidden, Cols,
+            weight.padded_shape[1], 5);
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 

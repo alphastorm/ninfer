@@ -319,4 +319,130 @@ __global__ __launch_bounds__(
     if constexpr (JoinPdl) { pdl::wait_for_dependencies(); }
 }
 
+// Direct row-blocked Q4 SIMT: one warp owns RowsPerWarp consecutive rows across the whole K and
+// every one of kTt columns. Lane L owns K values [1024s + 256p + 8L, +8) for slab s and phase p,
+// which is the staged kernel's ownership for 16-group stages, and accumulates them in the same
+// (slab, phase, column) order before one warp reduction per output, so every output is
+// bit-identical to that kernel. Codes and scales are read straight from global memory, two steps
+// ahead of their use, and each activation vector is loaded and widened once per phase for all rows
+// of the warp. Launch grids cover rows / (kQ4SimtRowsWarpsPerCta * RowsPerWarp) CTAs of
+// kQ4SimtRowsWarpsPerCta warps and require rows to be a multiple of that.
+inline constexpr int kQ4SimtRowsWarpsPerCta = 4;
+
+template <int kTt, int kSlabs, int RowsPerWarp, bool SplitOutput = false, int SplitRow = 0,
+          bool TriggerPdl = false, bool JoinPdl = false>
+__global__ __launch_bounds__(kQ4SimtRowsWarpsPerCta * 32, 8) void q4_rowsplit_gemm_simt_rows_kernel(
+    const __nv_bfloat16* __restrict__ x, const std::uint8_t* __restrict__ codes,
+    const std::uint8_t* __restrict__ scales, __nv_bfloat16* __restrict__ out,
+    __nv_bfloat16* __restrict__ out_tail, std::int32_t out_ld, std::int32_t out_tail_ld,
+    std::int32_t k, std::int32_t padded_k) {
+    constexpr int kRows = RowsPerWarp;
+    static_assert(kTt > 0 && kSlabs > 0 && kRows > 0);
+    static_assert(!SplitOutput || SplitRow > 0);
+    if constexpr (TriggerPdl) {
+        if (threadIdx.x == 0) { pdl::trigger_dependents(); }
+    }
+
+    const int lane = static_cast<int>(threadIdx.x) & 31;
+    const int warp = static_cast<int>(threadIdx.x) >> 5;
+    const int row0 = (static_cast<int>(blockIdx.x) * kQ4SimtRowsWarpsPerCta + warp) * kRows;
+
+    const int padded_groups = padded_k / Q4RowSplitStorage::kGroupK;
+    const std::uint8_t* code_row[kRows];
+    const std::uint8_t* scale_row[kRows];
+#pragma unroll
+    for (int r = 0; r < kRows; ++r) {
+        const std::int64_t row = row0 + r;
+        code_row[r]  = codes + row * padded_groups * Q4RowSplitStorage::kCodeBytesPerGroup;
+        scale_row[r] = scales + row * padded_groups * Q4RowSplitStorage::kScaleBytesPerGroup;
+    }
+
+    float acc[kRows][kTt];
+#pragma unroll
+    for (int r = 0; r < kRows; ++r) {
+#pragma unroll
+        for (int col = 0; col < kTt; ++col) { acc[r][col] = 0.0f; }
+    }
+
+    // Step i is (slab i / 4, phase i % 4); each step's code words and scales are loaded kPrefetch
+    // steps ahead so their DRAM latency overlaps earlier steps' arithmetic.
+    constexpr int kSteps    = kSlabs * 4;
+    constexpr int kPrefetch = 2;
+    const auto load_packed  = [&](int i, int r) {
+        return *reinterpret_cast<const std::uint32_t*>(
+            code_row[r] + static_cast<std::int64_t>(i >> 2) * 512 + (i & 3) * 128 + lane * 4);
+    };
+    const auto load_scale = [&](int i, int r) {
+        const int group = (i >> 2) * 16 + (i & 3) * 4 + (lane >> 3);
+        return *reinterpret_cast<const std::uint16_t*>(scale_row[r] + group * 2);
+    };
+    std::uint32_t ring_packed[kPrefetch][kRows];
+    std::uint16_t ring_scale[kPrefetch][kRows];
+#pragma unroll
+    for (int i = 0; i < kPrefetch && i < kSteps; ++i) {
+#pragma unroll
+        for (int r = 0; r < kRows; ++r) {
+            ring_packed[i][r] = load_packed(i, r);
+            ring_scale[i][r]  = load_scale(i, r);
+        }
+    }
+
+#pragma unroll
+    for (int i = 0; i < kSteps; ++i) {
+        float weights[kRows][8];
+#pragma unroll
+        for (int r = 0; r < kRows; ++r) {
+            const std::uint32_t packed     = ring_packed[i % kPrefetch][r];
+            const std::uint16_t scale_bits = ring_scale[i % kPrefetch][r];
+            if (i + kPrefetch < kSteps) {
+                ring_packed[i % kPrefetch][r] = load_packed(i + kPrefetch, r);
+                ring_scale[i % kPrefetch][r]  = load_scale(i + kPrefetch, r);
+            }
+            Q4SimtDecodeAtom::decode_eight(packed, scale_bits, weights[r]);
+        }
+        const std::int64_t xk = static_cast<std::int64_t>(i >> 2) * 1024 + (i & 3) * 256 + lane * 8;
+#pragma unroll
+        for (int col = 0; col < kTt; ++col) {
+            const uint4 values = load_vec<uint4>(x + static_cast<std::int64_t>(col) * k + xk);
+            const float2 x0    = bf16x2_bits_to_float2(values.x);
+            const float2 x1    = bf16x2_bits_to_float2(values.y);
+            const float2 x2    = bf16x2_bits_to_float2(values.z);
+            const float2 x3    = bf16x2_bits_to_float2(values.w);
+#pragma unroll
+            for (int r = 0; r < kRows; ++r) {
+                acc[r][col] = fmaf(weights[r][0], x0.x, acc[r][col]);
+                acc[r][col] = fmaf(weights[r][1], x0.y, acc[r][col]);
+                acc[r][col] = fmaf(weights[r][2], x1.x, acc[r][col]);
+                acc[r][col] = fmaf(weights[r][3], x1.y, acc[r][col]);
+                acc[r][col] = fmaf(weights[r][4], x2.x, acc[r][col]);
+                acc[r][col] = fmaf(weights[r][5], x2.y, acc[r][col]);
+                acc[r][col] = fmaf(weights[r][6], x3.x, acc[r][col]);
+                acc[r][col] = fmaf(weights[r][7], x3.y, acc[r][col]);
+            }
+        }
+    }
+
+#pragma unroll
+    for (int r = 0; r < kRows; ++r) {
+        const int row = row0 + r;
+#pragma unroll
+        for (int col = 0; col < kTt; ++col) {
+            const float sum = warp_reduce_sum(acc[r][col]);
+            if (lane == 0) {
+                if constexpr (SplitOutput) {
+                    if (row < SplitRow) {
+                        out[static_cast<std::int64_t>(col) * out_ld + row] = __float2bfloat16(sum);
+                    } else {
+                        out_tail[static_cast<std::int64_t>(col) * out_tail_ld + row - SplitRow] =
+                            __float2bfloat16(sum);
+                    }
+                } else {
+                    out[static_cast<std::int64_t>(col) * out_ld + row] = __float2bfloat16(sum);
+                }
+            }
+        }
+    }
+    if constexpr (JoinPdl) { pdl::wait_for_dependencies(); }
+}
+
 } // namespace ninfer::ops::detail

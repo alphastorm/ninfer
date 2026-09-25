@@ -37,6 +37,9 @@ struct Q4DraftSmallTSchedule {
     static constexpr int kGroupK            = kKWarps * kTileKPerWarp;
     static constexpr int kRowsPerCta        = 16;
     static constexpr int kRowsPerLoaderWarp = kRowsPerCta / kKWarps;
+    // Staged code rows are padded by 16 bytes so the eight fragment rows gid read in one byte load
+    // fall in eight different banks; unpadded 256-byte rows put them all in one.
+    static constexpr int kCodeRowPad = 16;
 };
 
 __device__ __forceinline__ int q4_small_t_swizzle_64(int row, int col) {
@@ -78,21 +81,25 @@ __launch_bounds__(256, 6) __global__
     static_assert(ActiveCols >= 2 && ActiveCols <= kTileCols && ActiveCols > kTileCols - 8);
     static_assert((kHidden % kGroupK) == 0);
     static_assert(RowPolicy::kOutputRowsPerCta <= kRowsPerCta);
+    static_assert(((kGroupK / 2 + Schedule::kCodeRowPad) % 16) == 0,
+                  "code rows stay 16-byte aligned");
+
+    // Single-tile widths double-buffer the staging, loading group g+1 while group g computes;
+    // wider tiles keep one buffer, where a second one bought nothing measurable.
+    constexpr int kStages = kTileCols == 8 ? 2 : 1;
+
+    struct Staging {
+        std::uint8_t codes[kRowsPerCta][kGroupK / 2 + Schedule::kCodeRowPad];
+        __nv_bfloat16 activations[kWarps][kTileCols * kTileK];
+        std::uint16_t scales[kRowsPerCta][kWarps];
+    };
 
     union SharedStorage {
-        struct {
-            std::uint8_t codes[kRowsPerCta][kGroupK / 2];
-            __nv_bfloat16 activations[kWarps][kTileCols * kTileK];
-            std::uint16_t scales[kRowsPerCta][kWarps];
-        } staging;
-
+        Staging staging[kStages];
         float partial[kWarps * kNt * 32 * 4];
     };
 
     __shared__ __align__(16) SharedStorage shared;
-    auto& code_shared  = shared.staging.codes;
-    auto& x_shared     = shared.staging.activations;
-    auto& scale_shared = shared.staging.scales;
 
     const int tid     = static_cast<int>(threadIdx.x);
     const int warp    = tid >> 5;
@@ -102,33 +109,33 @@ __launch_bounds__(256, 6) __global__
     const int k_split = warp;
     const int row0    = static_cast<int>(blockIdx.x) * RowPolicy::kOutputRowsPerCta;
 
-    const auto stage_x = [&](int group_k0) {
+    const auto stage_x = [&](int group_k0, Staging& st) {
         constexpr int kItemsPerSplit = ActiveCols * (kTileK / 8);
         for (int item = lane; item < kItemsPerSplit; item += 32) {
             const int col = item / (kTileK / 8);
             const int k8  = item - col * (kTileK / 8);
-            auto* dst     = &x_shared[warp][col * kTileK + q4_small_t_swizzle_64(col, k8 * 8)];
+            auto* dst = &st.activations[warp][col * kTileK + q4_small_t_swizzle_64(col, k8 * 8)];
             cp_async<16>(
                 dst,
                 &x[static_cast<std::int64_t>(col) * kHidden + group_k0 + warp * kTileK + k8 * 8]);
         }
     };
 
-    const auto stage_weight = [&](int group_k0) {
+    const auto stage_weight = [&](int group_k0, Staging& st) {
 #pragma unroll
         for (int row_item = 0; row_item < Schedule::kRowsPerLoaderWarp; ++row_item) {
             const int row        = warp * Schedule::kRowsPerLoaderWarp + row_item;
             const int weight_row = row_policy.weight_row(row0, row);
             for (int chunk = lane; chunk < kGroupK / 32; chunk += 32) {
                 cp_async<16, Schedule::kCodeCache>(
-                    &code_shared[row][chunk * 16],
+                    &st.codes[row][chunk * 16],
                     codes + static_cast<std::int64_t>(weight_row) * kCodeRowBytes + group_k0 / 2 +
                         chunk * 16);
             }
         }
         for (int row = tid; row < kRowsPerCta; row += kWarps * 32) {
             const int weight_row = row_policy.weight_row(row0, row);
-            cp_async<16>(&scale_shared[row][0],
+            cp_async<16>(&st.scales[row][0],
                          scales + (static_cast<std::int64_t>(weight_row) * Geometry::kGroupsPerRow +
                                    group_k0 / 64) *
                                       2);
@@ -140,38 +147,52 @@ __launch_bounds__(256, 6) __global__
     const int warp_koff = k_split * kTileK;
     float acc[kNt][4]   = {};
 
-    stage_weight(0);
-    stage_x(0);
+    stage_weight(0, shared.staging[0]);
+    stage_x(0, shared.staging[0]);
     cp_commit();
-    cp_wait<0>();
-    __syncthreads();
+    if constexpr (kStages == 1) {
+        cp_wait<0>();
+        __syncthreads();
+    }
 
 #pragma unroll
     for (int group_index = 0; group_index < kGroups; ++group_index) {
-        const int group_k0      = group_index * kGroupK;
+        const int group_k0 = group_index * kGroupK;
+        if constexpr (kStages == 2) {
+            // Prefetch the next group into the other buffer, then wait only for this group.
+            if (group_index + 1 < kGroups) {
+                stage_weight(group_k0 + kGroupK, shared.staging[(group_index + 1) & 1]);
+                stage_x(group_k0 + kGroupK, shared.staging[(group_index + 1) & 1]);
+            }
+            cp_commit();
+            cp_wait<1>();
+            __syncthreads();
+        }
+        const Staging& st       = shared.staging[kStages == 2 ? (group_index & 1) : 0];
         float group_acc[kNt][4] = {};
 
 #pragma unroll
         for (int ks = 0; ks < 4; ++ks) {
             const int byte_col = warp_koff / 2 + ks * 8 + lid;
-            const unsigned af0 = q4_small_t_bf16_pair(code_shared[gid][byte_col]);
-            const unsigned af1 = q4_small_t_bf16_pair(code_shared[gid + 8][byte_col]);
-            const unsigned af2 = q4_small_t_bf16_pair(code_shared[gid][byte_col + 4]);
-            const unsigned af3 = q4_small_t_bf16_pair(code_shared[gid + 8][byte_col + 4]);
+            const unsigned af0 = q4_small_t_bf16_pair(st.codes[gid][byte_col]);
+            const unsigned af1 = q4_small_t_bf16_pair(st.codes[gid + 8][byte_col]);
+            const unsigned af2 = q4_small_t_bf16_pair(st.codes[gid][byte_col + 4]);
+            const unsigned af3 = q4_small_t_bf16_pair(st.codes[gid + 8][byte_col + 4]);
 #pragma unroll
             for (int nt = 0; nt < kNt; ++nt) {
                 unsigned bf0, bf1;
                 const int br = nt * 8 + b_rin;
-                ldmatrix_x2(bf0, bf1,
-                            smem_addr(&x_shared[k_split][br * kTileK + q4_small_t_swizzle_64(
-                                                                           br, ks * 16 + b_koff)]));
+                ldmatrix_x2(
+                    bf0, bf1,
+                    smem_addr(&st.activations[k_split][br * kTileK + q4_small_t_swizzle_64(
+                                                                         br, ks * 16 + b_koff)]));
                 mma_bf16(group_acc[nt][0], group_acc[nt][1], group_acc[nt][2], group_acc[nt][3],
                          af0, af1, af2, af3, bf0, bf1);
             }
         }
 
-        const float top_scale = __half2float(__ushort_as_half(scale_shared[gid][k_split]));
-        const float bot_scale = __half2float(__ushort_as_half(scale_shared[gid + 8][k_split]));
+        const float top_scale = __half2float(__ushort_as_half(st.scales[gid][k_split]));
+        const float bot_scale = __half2float(__ushort_as_half(st.scales[gid + 8][k_split]));
 #pragma unroll
         for (int nt = 0; nt < kNt; ++nt) {
             acc[nt][0] = fmaf(group_acc[nt][0], top_scale, acc[nt][0]);
@@ -180,10 +201,13 @@ __launch_bounds__(256, 6) __global__
             acc[nt][3] = fmaf(group_acc[nt][3], bot_scale, acc[nt][3]);
         }
 
-        if (group_index + 1 < kGroups) {
+        if constexpr (kStages == 2) {
+            // The next iteration prefetches into this buffer.
             __syncthreads();
-            stage_weight(group_k0 + kGroupK);
-            stage_x(group_k0 + kGroupK);
+        } else if (group_index + 1 < kGroups) {
+            __syncthreads();
+            stage_weight(group_k0 + kGroupK, shared.staging[0]);
+            stage_x(group_k0 + kGroupK, shared.staging[0]);
             cp_commit();
             cp_wait<0>();
             __syncthreads();

@@ -11,16 +11,35 @@
 namespace ninfer::ops::detail {
 namespace {
 
+// Up to five columns, two rows per warp share each activation load (EXP-055: 11-16% faster at T=4
+// on RTX 5090); at six columns the pair is no faster and wider tiles spill it, so those keep one
+// row per warp.
+constexpr int kRowPairMaxCols = 5;
+
 template <int Cols, int FullSlabs, int Stride>
 void launch_split2(const Tensor& x, const Weight& w, Tensor& residual_out, cudaStream_t stream) {
+    const std::int32_t rows = residual_out.ne[0];
+    if constexpr (Cols <= kRowPairMaxCols) {
+        if (rows % kQ5SimtRowsPerWarp == 0) {
+            const dim3 grid(static_cast<unsigned>(rows / kQ5SimtRowsPerWarp), 1u, 1u);
+            q5_rowsplit_gemm_simt_split2_rows_kernel<Cols, FullSlabs, Stride, true>
+                <<<grid, 2 * 32, 0, stream>>>(static_cast<const __nv_bfloat16*>(x.data),
+                                              static_cast<const std::uint8_t*>(w.qdata),
+                                              static_cast<const std::uint8_t*>(w.qhigh),
+                                              static_cast<const std::uint8_t*>(w.scales),
+                                              static_cast<__nv_bfloat16*>(residual_out.data), rows,
+                                              w.padded_shape[1]);
+            return;
+        }
+    }
     constexpr int kThreads = 2 * 32;
-    const dim3 grid(static_cast<unsigned>(residual_out.ne[0]), 1u, 1u);
+    const dim3 grid(static_cast<unsigned>(rows), 1u, 1u);
     q5_rowsplit_gemm_simt_split2_kernel<Q5RowSplitSimtSchedule, Cols, FullSlabs, Stride, false, 0,
                                         true><<<grid, kThreads, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
         static_cast<const std::uint8_t*>(w.qhigh), static_cast<const std::uint8_t*>(w.scales),
-        static_cast<__nv_bfloat16*>(residual_out.data), residual_out.ne[0], x.ne[0], x.ne[1],
-        w.padded_shape[1], FullSlabs);
+        static_cast<__nv_bfloat16*>(residual_out.data), rows, x.ne[0], x.ne[1], w.padded_shape[1],
+        FullSlabs);
 }
 
 template <int Cols>
