@@ -2,10 +2,6 @@
 
 #include <cuda_runtime.h>
 
-#if defined(_WIN32)
-#    include <windows.h>
-#endif
-
 #include <cstdio>
 #include <limits>
 #include <new>
@@ -54,32 +50,6 @@ void free_pinned(void*& ptr) noexcept {
         ptr = nullptr;
     }
 }
-
-#if defined(_WIN32)
-// Windows can refuse a large pinned allocation while most memory is standby file cache: managed
-// starts of the RTX 4090 lane failed to pin its 11 GiB host-KV pool with 3.9 GiB free and 22.7 GiB
-// standby, then pinned it once the standby list was purged (alphastorm/omp-ninfer#48). The refusal
-// is intermittent; hand-launched starts with the same free and standby sizes pin. Committing and
-// touching an equal pageable region makes the memory manager repurpose standby pages; releasing it
-// returns them as free pages the driver can pin. Needs no privilege.
-bool convert_standby_to_free(std::size_t size_bytes) noexcept {
-    // Available memory is free plus standby pages. With less than the request available the
-    // refusal is genuine exhaustion: touching the region would only page out other processes.
-    MEMORYSTATUSEX status{};
-    status.dwLength = sizeof(status);
-    if (!GlobalMemoryStatusEx(&status) || status.ullAvailPhys < size_bytes) { return false; }
-    void* region = VirtualAlloc(nullptr, size_bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-    if (region == nullptr) { return false; }
-    SYSTEM_INFO info{};
-    GetSystemInfo(&info);
-    auto* bytes = static_cast<volatile unsigned char*>(region);
-    for (std::size_t offset = 0; offset < size_bytes; offset += info.dwPageSize) {
-        bytes[offset] = 1;
-    }
-    VirtualFree(region, 0, MEM_RELEASE);
-    return true;
-}
-#endif
 
 } // namespace
 
@@ -274,20 +244,8 @@ void DeviceArena::reset_peak() noexcept { peak_ = off_; }
 PinnedHostBuffer::PinnedHostBuffer(std::size_t size_bytes) {
     if (size_bytes == 0) { throw std::invalid_argument("PinnedHostBuffer size must be nonzero"); }
 
-    void* ptr       = nullptr;
-    cudaError_t err = cudaMallocHost(&ptr, size_bytes);
-#if defined(_WIN32)
-    if (err == cudaErrorMemoryAllocation) {
-        (void)cudaGetLastError();
-        if (convert_standby_to_free(size_bytes)) {
-            std::fprintf(stderr,
-                         "cudaMallocHost refused %zu bytes; retrying after converting standby "
-                         "memory to free pages\n",
-                         size_bytes);
-            err = cudaMallocHost(&ptr, size_bytes);
-        }
-    }
-#endif
+    void* ptr             = nullptr;
+    const cudaError_t err = cudaMallocHost(&ptr, size_bytes);
     if (err != cudaSuccess) {
         throw std::runtime_error(cuda_error_message("cudaMallocHost failed", err));
     }

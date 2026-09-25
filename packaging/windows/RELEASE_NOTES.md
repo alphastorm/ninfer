@@ -55,8 +55,8 @@ The shared-prefix catalog defaults to one owner per active request or per cache 
 may place, whichever is larger (four at one active request), so each agent type's system and tool
 prefix keeps its own owner instead of evicting the previous type's.
 
-When Windows refuses to pin a host pool while most available memory is standby file cache
-(alphastorm/omp-ninfer#48), the start retries once. If free plus standby memory covers the
-request, it first commits and touches an equal pageable region so Windows repurposes standby
-pages, then releases it; otherwise the start fails exactly as before. The refusal is intermittent
-and did not reproduce on demand, so the retry path has not run on hardware and #48 stays open.
+A start can still fail when Windows refuses to pin a host pool while most available memory is
+standby file cache (alphastorm/omp-ninfer#48): the lane's task exits before the release is ready.
+The refusal is intermittent; after the one refusal seen during this release's qualification, the
+next start pinned the pool. Retrying inside the same process does not recover it - there the
+retried allocation failed with `cudaErrorAlreadyMapped` - so the package carries no retry.
