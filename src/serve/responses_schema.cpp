@@ -345,8 +345,11 @@ ChatTurn parse_tool_call_output_item(const Json& item, ToolKind kind, Json& cano
         item.at("call_id").get<std::string>().empty()) {
         bad_request(std::string(wire_type) + " must contain a non-empty call_id", "input");
     }
-    if (!item.contains("output") || !item.at("output").is_string()) {
-        bad_request(std::string(wire_type) + " output must be a string", "input");
+    if (!item.contains("output") ||
+        (!item.at("output").is_string() && !item.at("output").is_array())) {
+        bad_request(std::string(wire_type) +
+                        " output must be a string or an array of content parts",
+                    "input");
     }
     if (item.contains("status") && !item.at("status").is_null() &&
         (!item.at("status").is_string() || item.at("status").get<std::string>() != "completed")) {
@@ -356,16 +359,60 @@ ChatTurn parse_tool_call_output_item(const Json& item, ToolKind kind, Json& cano
     turn.role         = ChatRole::Tool;
     turn.tool_call_id = item.at("call_id").get<std::string>();
     turn.tool_kind    = kind;
-    ContentPart content;
-    content.kind     = ContentKind::Text;
-    content.type_raw = "input_text";
-    content.text     = item.at("output").get<std::string>();
-    turn.content.push_back(std::move(content));
+    const Json& output     = item.at("output");
+    const auto append_text = [&](std::string text) {
+        ContentPart content;
+        content.kind     = ContentKind::Text;
+        content.type_raw = "input_text";
+        content.text     = std::move(text);
+        turn.content.push_back(std::move(content));
+    };
+    Json canonical_output;
+    if (output.is_string()) {
+        append_text(output.get<std::string>());
+        canonical_output = output;
+    } else {
+        // A tool that returns an image (OMP's read tool on a PNG, for one) answers with content
+        // parts, which the Responses API allows in place of a string.
+        canonical_output = Json::array();
+        for (const Json& value : output) {
+            if (!value.is_object() || !value.contains("type") || !value.at("type").is_string()) {
+                bad_request(std::string(wire_type) + " output parts must have a string type",
+                            "input");
+            }
+            const std::string type = value.at("type").get<std::string>();
+            if (type == "input_text") {
+                if (!value.contains("text") || !value.at("text").is_string()) {
+                    bad_request("input_text must contain a string text", "input");
+                }
+                append_text(value.at("text").get<std::string>());
+                canonical_output.push_back(
+                    Json{{"type", "input_text"}, {"text", value.at("text")}});
+            } else if (type == "input_image") {
+                ContentPart part;
+                part.kind     = ContentKind::Image;
+                part.type_raw = type;
+                part.source   = parse_image_source(value);
+                turn.content.push_back(std::move(part));
+                canonical_output.push_back(Json{{"type", "input_image"},
+                                                {"image_url", value.at("image_url")},
+                                                {"detail", "auto"}});
+            } else if (type == "input_file") {
+                bad_request("input_file is not supported", "input", "file_inputs_not_supported");
+            } else {
+                bad_request("unsupported " + std::string(wire_type) + " output part type: " + type,
+                            "input", "modality_not_supported");
+            }
+        }
+        if (turn.content.empty()) {
+            bad_request(std::string(wire_type) + " output must not be an empty array", "input");
+        }
+    }
     canonical = {{"id", item_id(item, item_id_prefix, "input")},
                  {"type", wire_type},
                  {"status", "completed"},
                  {"call_id", turn.tool_call_id},
-                 {"output", item.at("output")}};
+                 {"output", std::move(canonical_output)}};
     return turn;
 }
 

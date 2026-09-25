@@ -603,6 +603,67 @@ int test_custom_tools_and_omp_replay() {
     return failures;
 }
 
+// Stock OMP answers a read of an image file with content parts instead of a string; the
+// continuation that carries it must reach the model with the image inside the tool turn.
+int test_tool_output_content_parts() {
+    const Json image = {{"type", "input_image"},
+                        {"image_url", "data:image/png;base64,iVBORw0KGgo="},
+                        {"detail", "auto"}};
+    const Json output =
+        Json::array({Json{{"type", "input_text"}, {"text", "Read image file [image/png]"}}, image});
+    const Json item = {
+        {"type", "function_call_output"}, {"call_id", "call_read_1"}, {"output", output}};
+    ResponsesRequest continuation = parse_responses_request(
+        Json{{"model", "qwen3.6-27b"}, {"input", Json::array({item})}, {"max_output_tokens", 32}},
+        limits());
+
+    int failures         = 0;
+    const ChatTurn& turn = continuation.input_turns.at(0);
+    failures +=
+        check(turn.role == ninfer::ChatRole::Tool && turn.tool_call_id == "call_read_1" &&
+                  turn.content.size() == 2 && turn.content[0].kind == ContentKind::Text &&
+                  turn.content[0].text == "Read image file [image/png]" &&
+                  turn.content[1].kind == ContentKind::Image &&
+                  turn.content[1].source.kind == ninfer::product::media_acquire::SourceKind::Data,
+              "tool output content parts became one tool turn with its image");
+    failures += check(continuation.input_items.at(0).at("output") == output,
+                      "tool output content parts canonicalized for replay");
+
+    ToolCall read;
+    read.id             = "call_read_1";
+    read.name           = "read";
+    read.kind           = ToolKind::Function;
+    read.arguments_json = R"({"path":"assets/icon-512.png"})";
+    ChatTurn prior;
+    prior.role = ninfer::ChatRole::Assistant;
+    prior.tool_calls.push_back(read);
+    compose_responses_generation_messages(continuation, {std::move(prior)});
+    failures += check(continuation.generation.messages.size() == 2 &&
+                          continuation.generation.media_item_count() == 1,
+                      "the image in a tool output counts as request media");
+
+    const auto request_with = [&](Json parts) {
+        Json refused_item      = item;
+        refused_item["output"] = std::move(parts);
+        return [refused_item] {
+            (void)parse_responses_request(Json{{"model", "qwen3.6-27b"},
+                                               {"input", Json::array({refused_item})},
+                                               {"max_output_tokens", 32}},
+                                          limits());
+        };
+    };
+    const auto refused = [&](Json parts) { return api_code(request_with(std::move(parts))); };
+    failures +=
+        check(throws_api(request_with(Json::array())), "an empty tool output array was accepted");
+    failures += check(refused(Json::array({Json{{"type", "input_file"}, {"file_id", "f"}}})) ==
+                          "file_inputs_not_supported",
+                      "a file part in a tool output was not refused as a file input");
+    failures += check(refused(Json::array({Json{{"type", "output_text"}, {"text", "x"}}})) ==
+                          "modality_not_supported",
+                      "a non-input part in a tool output was not refused");
+    return failures;
+}
+
 int test_explicit_rejections() {
     const Json base = {{"model", "qwen3.6-27b"}, {"input", "hello"}, {"max_output_tokens", 32}};
     int failures    = 0;
@@ -1037,6 +1098,7 @@ int main() {
     failures += test_reasoning_effort();
     failures += test_typed_items_and_tools();
     failures += test_custom_tools_and_omp_replay();
+    failures += test_tool_output_content_parts();
     failures += test_explicit_rejections();
     failures += test_unsupported_client_fields();
     failures += test_response_object();
