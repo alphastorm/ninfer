@@ -13,8 +13,13 @@ namespace {
 
 // Up to five columns, two rows per warp share each activation load (EXP-055: 11-16% faster at T=4
 // on RTX 5090); at six columns the pair is no faster and wider tiles spill it, so those keep one
-// row per warp.
+// row per warp. On the native Windows lanes the pair measured 2-22% slower at T=2-5 (RTX 4090), so
+// they keep one row per warp at every width.
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+constexpr int kRowPairMaxCols = 0;
+#else
 constexpr int kRowPairMaxCols = 5;
+#endif
 
 template <int Cols, int FullSlabs, int Stride>
 void launch_split2(const Tensor& x, const Weight& w, Tensor& residual_out, cudaStream_t stream) {
