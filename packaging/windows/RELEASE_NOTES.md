@@ -51,12 +51,20 @@ under a saved session name also imports that checkpoint first. Requests without 
 behave exactly as before. The endpoint still rejects reasoning summaries, encrypted reasoning
 requests, and the other cache options it does not implement.
 
+A tool result may be content parts instead of a string: a Responses `function_call_output` or
+`custom_tool_call_output` whose `output` is an array of `input_text` and `input_image` parts - what
+stock OMP sends after its read tool opens an image file - becomes one tool turn with its image.
+This lane is text-only, so it refuses that image as `vision_disabled` rather than as a malformed
+request; `input_file` parts and empty arrays are refused.
+
 The shared-prefix catalog defaults to one owner per active request or per cache marker a request
 may place, whichever is larger (four at one active request), so each agent type's system and tool
 prefix keeps its own owner instead of evicting the previous type's.
 
-A start can still fail when Windows refuses to pin a host pool while most available memory is
-standby file cache (alphastorm/omp-ninfer#48): the lane's task exits before the release is ready.
-The refusal is intermittent; after the one refusal seen during this release's qualification, the
-next start pinned the pool. Retrying inside the same process does not recover it - there the
-retried allocation failed with `cudaErrorAlreadyMapped` - so the package carries no retry.
+A start could fail when the driver refused to pin the 11 GiB host-KV pool
+(alphastorm/omp-ninfer#48): the lane's task exited before the release was ready. On a 32 GiB host
+the running server commits about 39 GiB, so a start extends the system-managed pagefile, and the
+pool is its largest charge. The server now commits the pool's size through an ordinary allocation,
+which waits for the pagefile to extend, immediately before pinning it; a refusal that still occurs
+reports the commit limit, available commit and available memory. The refusal was not reproduced
+on demand, so #48 stays open until a start either pins or reports those numbers.
