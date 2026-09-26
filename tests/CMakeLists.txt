@@ -71,6 +71,7 @@ ninfer_add_test(ninfer_media_decode_test
   SOURCES test_media_decode.cpp
   LIBRARIES ninfer_media_decode)
 ninfer_add_test(ninfer_device_test       SOURCES test_device.cpp)
+ninfer_add_test(ninfer_gpu_keep_warm_test SOURCES test_gpu_keep_warm.cpp)
 ninfer_add_test(ninfer_decode_graph_test SOURCES test_decode_graph.cpp)
 ninfer_add_test(ninfer_tensor_test       SOURCES test_tensor.cpp)
 ninfer_add_test(ninfer_arena_test        SOURCES test_arena.cpp)
