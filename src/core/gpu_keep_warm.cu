@@ -28,6 +28,16 @@ GpuKeepWarm::~GpuKeepWarm() {
 }
 
 bool GpuKeepWarm::launch() const noexcept {
+    // Another context holding the GPU can delay a spin past the next period; skip rather than
+    // queue behind it. The runtime can record cudaErrorNotReady as this thread's last error, which
+    // the Engine's next launch check would report, so clear it (as PyTorch's CUDAStream::query
+    // does).
+    const cudaError_t previous = cudaStreamQuery(stream_);
+    if (previous == cudaErrorNotReady) {
+        (void)cudaGetLastError();
+        return true;
+    }
+    if (previous != cudaSuccess) { return false; }
     constexpr auto busy_ns = std::chrono::nanoseconds(kBusy).count();
     gpu_keep_warm_spin_kernel<<<1, 32, 0, stream_>>>(static_cast<unsigned long long>(busy_ns));
     return cudaGetLastError() == cudaSuccess;
