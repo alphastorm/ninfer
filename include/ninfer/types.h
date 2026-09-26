@@ -109,6 +109,9 @@ struct EngineOptions {
     std::uint32_t max_concurrency      = 1;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
+    // After the Engine goes idle, keep the GPU out of its low-power idle states this long, so a
+    // request arriving within it starts at full clocks; costs board power while held. 0 = off.
+    std::uint32_t gpu_keep_warm_ms     = 0;
     std::uint32_t prefill_chunk        = 1024;
     KvCacheStorage kv_cache            = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;

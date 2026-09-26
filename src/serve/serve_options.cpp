@@ -146,7 +146,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--model-id ID] [--binary-sha256 SHA] [--artifact-sha256 SHA] "
            "[--config-sha256 SHA] [--deployment-profile NAME] "
            "[--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
-           "[--max-pending-requests N] [--pending-timeout-ms N] "
+           "[--max-pending-requests N] [--pending-timeout-ms N] [--gpu-keep-warm-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
            "[--context-cost-presets FILE] "
            "[--max-request-mib N] [--media-cache-mib N] [--media-live-mib N] "
@@ -180,6 +180,8 @@ std::string serve_usage_text(const char* argv0) {
            "       Responses state is process-local and bounded to 1024 records / 256 MiB by "
            "default\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
+           "       --gpu-keep-warm-ms keeps the GPU out of its idle power states that long after "
+           "the last request, so the next one starts at full clocks; defaults to 0 (off)\n"
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
            "       --kv-capacity auto leaves " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
@@ -267,6 +269,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--pending-timeout-ms") {
             options.pending_timeout_ms = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--pending-timeout-ms"), "pending-timeout-ms"));
+        } else if (arg == "--gpu-keep-warm-ms") {
+            options.gpu_keep_warm_ms = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--gpu-keep-warm-ms"), "gpu-keep-warm-ms"));
         } else if (arg == "--prefill-chunk") {
             options.prefill_chunk = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--prefill-chunk"), "prefill-chunk"));

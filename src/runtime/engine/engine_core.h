@@ -3,6 +3,7 @@
 // Small fixed-capacity request execution for every backend.
 
 #include "core/device.h"
+#include "core/gpu_keep_warm.h"
 #include "core/nvtx.h"
 #include "ninfer/types.h"
 #include "runtime/contract/types.h"
@@ -79,6 +80,7 @@ public:
           max_outstanding_(static_cast<std::size_t>(options.max_concurrency) +
                            options.max_pending_requests),
           pending_timeout_(std::chrono::milliseconds(options.pending_timeout_ms)),
+          keep_warm_grace_(std::chrono::milliseconds(options.gpu_keep_warm_ms)),
           resources_(max_concurrency_, options.context_cache.max_private_continuations.value(),
                      options.context_cache.max_shared_prefixes.value(),
                      options.context_cache.enabled,
@@ -97,12 +99,14 @@ public:
         worker_                   = std::thread([this, startup = std::move(startup)]() mutable {
             try {
                 device_.bind_to_current_thread();
+                if (keep_warm_grace_.count() > 0) { keep_warm_.emplace(); }
                 startup.set_value();
             } catch (...) {
                 startup.set_exception(std::current_exception());
                 return;
             }
             worker_loop();
+            keep_warm_.reset();
         });
         try {
             started.get();
@@ -1901,6 +1905,25 @@ private:
         publish_runtime_stats();
     }
 
+    // The worker's wait for work once nothing is pending or active. After the Engine has run
+    // work, a configured grace period keeps the GPU out of its low-power idle states (see
+    // GpuKeepWarm) until a request is pending, the Engine stops, or the period ends. Launches
+    // are asynchronous, so a pending request never waits on them.
+    void idle_wait(std::unique_lock<std::mutex>& lock) {
+        const auto wake = [&] { return stopping_ || !pending_.empty(); };
+        if (keep_warm_ && std::exchange(keep_warm_armed_, false)) {
+            const Clock::time_point until = Clock::now() + keep_warm_grace_;
+            while (!wake() && Clock::now() < until) {
+                if (!keep_warm_->launch()) {
+                    keep_warm_.reset();
+                    break;
+                }
+                queue_cv_.wait_for(lock, GpuKeepWarm::kPeriod, wake);
+            }
+        }
+        queue_cv_.wait(lock, wake);
+    }
+
     void worker_loop() noexcept {
         bool previous_unit_was_decode = false;
         for (;;) {
@@ -1912,9 +1935,7 @@ private:
                     for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
                         active = active || slots_[lane] != nullptr;
                     }
-                    if (!active) {
-                        queue_cv_.wait(lock, [&] { return stopping_ || !pending_.empty(); });
-                    }
+                    if (!active) { idle_wait(lock); }
                 }
                 if (stopping_) {
                     lock.unlock();
@@ -1927,6 +1948,7 @@ private:
             }
 
             std::unique_lock execution_lock(execution_mutex_);
+            keep_warm_armed_ = true;
             try {
                 set_host_work_class(HostWorkClass::Control);
                 HostPhaseMeasurement boundary = begin_host_phase();
@@ -2015,6 +2037,7 @@ private:
     const std::uint32_t max_concurrency_;
     const std::size_t max_outstanding_;
     const std::chrono::milliseconds pending_timeout_;
+    const std::chrono::milliseconds keep_warm_grace_;
     ResourceManagement resources_;
 
     mutable std::mutex execution_mutex_;
@@ -2047,6 +2070,10 @@ private:
     std::atomic<bool> pressure_protection_{false};
     std::vector<PressureCheckpointVictim> pressure_saves_;
     std::vector<PressureCheckpointVictim> pressure_saved_;
+    // Worker-thread state: the idle keep-warm (engaged when a grace period is configured) and
+    // whether the worker has run work since it last went idle.
+    std::optional<GpuKeepWarm> keep_warm_;
+    bool keep_warm_armed_ = false;
     std::thread worker_;
 };
 

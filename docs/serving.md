@@ -686,6 +686,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--max-concurrency N` | maximum admitted requests; valid range `1..8` | `1` |
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
+| `--gpu-keep-warm-ms N` | after the last request, keep the GPU out of its low-power idle states this long (a single-warp spin 3.5 ms of every 10 ms, stopped when a request is pending) so the next request starts at full clocks; costs board power while held; `0` disables it | `0` |
 | `--prefill-chunk N` | text-prefill chunk | `1024` |
 | `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
 | `--device N` | CUDA device index | `0` |

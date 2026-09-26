@@ -23,6 +23,7 @@ add_library(ninfer_core STATIC
   core/arena.cu
   core/build_info.cpp
   core/device.cu
+  core/gpu_keep_warm.cu
   core/dtype.cpp
   core/host_worker_pool.cpp
   core/gdn_replay_records.cpp
