@@ -7,6 +7,7 @@
 #include "ops/linear/q4/q4_rowsplit_gemv.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemv.cuh"
+#include "ops/linear/q5/q5_small_t_mma.cuh"
 
 #include <cuda_bf16.h>
 
@@ -220,7 +221,26 @@ void launch_t4_pdl(const Tensor& x, const Weight& qk_weight, const Weight& value
                    Tensor& qk, Tensor& value, Tensor& z, cudaStream_t stream) {
     // Q5 and Q4 publish disjoint row ranges. Q4 can execute while Q5 drains and joins Q5 only at
     // exit, before the following convolution/snapshot kernel becomes runnable.
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+    // The value/z side runs on the tensor cores (EXP-057) and still triggers the Q4 launch from
+    // every CTA.
+    if (value_z_weight.padded_shape[1] == kHidden) {
+        q5_small_t_mma_launch<kHidden, true>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(value_z_weight.qdata),
+            static_cast<const std::uint8_t*>(value_z_weight.qhigh),
+            static_cast<const std::uint8_t*>(value_z_weight.scales), kValueZRows,
+            Q5SmallTMmaSplitStore{static_cast<__nv_bfloat16*>(value.data),
+                                  static_cast<__nv_bfloat16*>(z.data), kValueZRows, kValueRows,
+                                  static_cast<int>(value.nb[1] / sizeof(__nv_bfloat16))},
+            stream);
+        CUDA_CHECK(cudaGetLastError());
+    } else {
+        launch_q5_split4<4, true>(x, value_z_weight, value, z, stream);
+    }
+#else
     launch_q5_split4<4, true>(x, value_z_weight, value, z, stream);
+#endif
     launch_q4_rows<4, true>(x, qk_weight, qk, stream);
 }
 

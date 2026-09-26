@@ -6,6 +6,7 @@
 #include "ops/linear/q4/q4_rowsplit_gemv.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemv.cuh"
+#include "ops/linear/q5/q5_small_t_mma.cuh"
 
 #include <cuda_bf16.h>
 
@@ -139,6 +140,24 @@ template <int Cols>
 void launch_q5_split4(const Tensor& x, const Weight& weight, Tensor& gate, Tensor& value,
                       cudaStream_t stream) {
     constexpr int kThreads = 4 * 32;
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+    // The T=4 verify extent runs on the tensor cores (EXP-057).
+    if constexpr (Cols == kQ5SmallTMmaTokens) {
+        if (weight.padded_shape[1] == kHidden) {
+            q5_small_t_mma_launch<kHidden>(
+                static_cast<const __nv_bfloat16*>(x.data),
+                static_cast<const std::uint8_t*>(weight.qdata),
+                static_cast<const std::uint8_t*>(weight.qhigh),
+                static_cast<const std::uint8_t*>(weight.scales), kParentRows,
+                Q5SmallTMmaSplitStore{static_cast<__nv_bfloat16*>(gate.data),
+                                      static_cast<__nv_bfloat16*>(value.data), kParentRows,
+                                      kSplitRow, static_cast<int>(gate.ne[0])},
+                stream);
+            CUDA_CHECK(cudaGetLastError());
+            return;
+        }
+    }
+#endif
     if constexpr (Cols >= 3) {
         const dim3 grid(static_cast<unsigned>(kParentRows / kQ5SimtRowsPerWarp), 1u, 1u);
         q5_rowsplit_gemm_simt_split4_rows_kernel<Cols, 5, kHidden, true, kSplitRow>

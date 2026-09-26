@@ -2,6 +2,7 @@
 
 #include "core/device.h"
 #include "ops/linear/q5/q5_rowsplit_gemm_simt.cuh"
+#include "ops/linear/q5/q5_small_t_mma.cuh"
 
 #include <cuda_bf16.h>
 
@@ -24,6 +25,21 @@ constexpr int kRowPairMaxCols = 5;
 template <int Cols, int FullSlabs, int Stride>
 void launch_split2(const Tensor& x, const Weight& w, Tensor& residual_out, cudaStream_t stream) {
     const std::int32_t rows = residual_out.ne[0];
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+    // The T=4 verify extent runs on the tensor cores (EXP-057).
+    if constexpr (Cols == kQ5SmallTMmaTokens) {
+        if (rows % kQ5SmallTMmaRows == 0 && w.padded_shape[1] == Stride) {
+            q5_small_t_mma_launch<Stride>(
+                static_cast<const __nv_bfloat16*>(x.data),
+                static_cast<const std::uint8_t*>(w.qdata),
+                static_cast<const std::uint8_t*>(w.qhigh),
+                static_cast<const std::uint8_t*>(w.scales), rows,
+                Q5SmallTMmaAddResidual{static_cast<__nv_bfloat16*>(residual_out.data), rows},
+                stream);
+            return;
+        }
+    }
+#endif
     if constexpr (Cols <= kRowPairMaxCols) {
         if (rows % kQ5SimtRowsPerWarp == 0) {
             const dim3 grid(static_cast<unsigned>(rows / kQ5SimtRowsPerWarp), 1u, 1u);
