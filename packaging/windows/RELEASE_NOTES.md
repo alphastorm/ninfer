@@ -78,3 +78,14 @@ where the routes were tuned, outputs are bit-identical to the previous kernels a
 about 10% faster from 1K to 31K tokens of context. The native lanes build these routes for their
 architecture, except that the MLP down and mixer output projections keep one row per warp: sharing
 loads across two rows made them 2-22% slower on the RTX 4090.
+
+New sessions after idle start at back-to-back speed on the RTX 4090. After its last work the card
+steps P2 -> P3 -> P5 -> P8 (210 MHz SM, 405 MHz memory) within about 6 s, and a new session's
+prefill after 12-58 s idle took 0.29-0.47 s against 0.146 s back to back. The RTX 4090 lane sets
+`engine.gpu_keep_warm_ms` to 60000: for 60 s after the engine goes idle, a single-warp kernel on
+its own stream spins 50 ms of every 100 ms, which holds P2 at about 72 W above idle, until a
+request is pending. The RTX 5090's pattern of 3.5 ms every 10 ms does not hold this card. With it,
+sessions after 12-58 s idle prefilled in 0.146 s and every output was unchanged (omp-ninfer EXP-064,
+EXP-066). The spin reads and writes no memory. The controller passes `--gpu-keep-warm-ms` only when
+a release's own configuration declares a positive value, so a rollback to an earlier release never
+receives it. The RTX 3090 lane declares 0.
