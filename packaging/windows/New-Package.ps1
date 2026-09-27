@@ -141,6 +141,13 @@ if ($config.artifact_type -cne 'ninfer_windows_server_config' -or
     $null -ne $config.reasoning.PSObject.Properties['effort']) {
     throw 'server configuration is not an authenticated native lane profile'
 }
+# Every package this script builds declares keep-warm explicitly, 0 included; the controller
+# reads a missing field as off only for releases packaged before the field existed.
+$gpuKeepWarm = $config.engine.PSObject.Properties['gpu_keep_warm_ms']
+if ($null -eq $gpuKeepWarm -or -not ($gpuKeepWarm.Value -is [int] -or $gpuKeepWarm.Value -is [long]) -or
+    $gpuKeepWarm.Value -lt 0 -or $gpuKeepWarm.Value -gt [int]::MaxValue) {
+    throw 'server configuration must declare engine.gpu_keep_warm_ms as an integer in [0, 2147483647]'
+}
 Assert-AllowedListenHost $spec $config
 $expectedConfigSha256 = Get-LowerSha256 $configPath
 

@@ -1032,6 +1032,8 @@ $serverArguments=@(
   '--session-checkpoint-staging-mib',[string]$c.session_checkpoint.staging_mib,
   '--log-stats-interval-ms','0','--preserve-thinking',
   '--spec','mtp','--draft-tokens',[string]$c.speculative.draft_tokens,'--lm-head-draft')
+$keepWarm=$c.engine.PSObject.Properties['gpu_keep_warm_ms']
+if($null -ne $keepWarm -and [int]$keepWarm.Value -gt 0){{$serverArguments+=@('--gpu-keep-warm-ms',[string]$keepWarm.Value)}}
 $stdout=Join-Path $scratch 'stdout.log'
 $stderr=Join-Path $scratch 'stderr.log'
 $process=Start-Process -FilePath ([string]$r.server_executable) -ArgumentList $serverArguments -WorkingDirectory ([string]$r.release_root) -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru

@@ -52,8 +52,10 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         """The shared controller launches every installed release, including the shipped v0.6.0
         one after a rollback, and an older ninfer-serve.exe refuses an argument it never learned
         (`unknown argument`) and does not start. So a flag the runtime gained after that release
-        may reach a server only inside the branch that checks the release's declared capability.
-        Measured twice on the RTX 4090 host - once each for --stop-event and --shutdown-report."""
+        may reach a server only inside the branch that checks the release's declared capability:
+        the managed-stop plan for --stop-event and --shutdown-report (measured twice on the RTX
+        4090 host), and a positive engine.gpu_keep_warm_ms in the release's own packaged config
+        for --gpu-keep-warm-ms - a config packaged before the field existed reads as off."""
         shipped_parser = subprocess.run(
             ["git", "show", "075d442e:src/serve/serve_options.cpp"],
             capture_output=True, text=True, check=True, cwd=ROOT,
@@ -61,18 +63,26 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         shipped_flags = set(re.findall(r'arg == "(--[a-z0-9-]+)"', shipped_parser))
         parser = (ROOT / "src/serve/serve_options.cpp").read_text(encoding="utf-8")
         newer_flags = set(re.findall(r'arg == "(--[a-z0-9-]+)"', parser)) - shipped_flags
-        self.assertEqual(newer_flags, {"--stop-event", "--shutdown-report"})
+        gates = {
+            "--stop-event": "if ([string]$stopPlan.mode -ceq 'stop-event') {",
+            "--shutdown-report": "if ([string]$stopPlan.mode -ceq 'stop-event') {",
+            "--gpu-keep-warm-ms": "if ($gpuKeepWarmMs -gt 0) {",
+        }
+        self.assertEqual(newer_flags, set(gates))
         controller = (WINDOWS / "Control-Release.ps1").read_text(encoding="utf-8")
         start = controller.index("$serverArguments =")
         end = controller.index("$argumentLine =", start)
         launch = controller[start:end]
-        gate = launch.index("if ([string]$stopPlan.mode -ceq 'stop-event') {")
-        gated = launch[gate:]
-        gated = gated[:gated.index("\n        }\n")]
-        for flag in newer_flags:
+        for flag, opener in gates.items():
             with self.subTest(flag=flag):
+                gated = launch[launch.index(opener):]
+                gated = gated[:gated.index("\n        }\n")]
                 self.assertEqual(launch.count(f"'{flag}'"), 1)
                 self.assertIn(f"'{flag}'", gated)
+        self.assertEqual(launch.count("$gpuKeepWarmMs = Get-GpuKeepWarmMs $config"), 1)
+        reader = controller[controller.index("function Get-GpuKeepWarmMs"):]
+        reader = reader[:reader.index("\n}\n")]
+        self.assertIn("if ($null -eq $property) { return 0 }", reader)
 
     def test_managed_stop_is_a_signal_before_a_termination(self) -> None:
         """A managed stop must reach the server's graceful path (which saves live sessions), and
@@ -314,6 +324,9 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertEqual(config["authentication"]["mode"], "required-api-key-file")
                 self.assertEqual(config["engine"]["max_concurrency"], 1)
                 self.assertEqual(config["engine"]["kv_dtype"], "int8")
+                keep_warm = config["engine"]["gpu_keep_warm_ms"]
+                self.assertIs(type(keep_warm), int)
+                self.assertTrue(0 <= keep_warm <= 2**31 - 1)
                 self.assertEqual(config["speculative"]["backend"], "mtp")
                 self.assertTrue(config["session_checkpoint"]["enabled"])
                 self.assertGreaterEqual(config["context_cache"]["device_state_slots"], 1)

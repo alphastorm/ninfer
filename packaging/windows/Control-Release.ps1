@@ -23,6 +23,18 @@ function Read-JsonFile([string]$Path) {
     return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
 }
 
+# engine.gpu_keep_warm_ms is optional: a release packaged before the runtime learned
+# --gpu-keep-warm-ms has no such field, and 0 keeps the GPU's idle power states.
+function Get-GpuKeepWarmMs([object]$Config) {
+    $property = $Config.engine.PSObject.Properties['gpu_keep_warm_ms']
+    if ($null -eq $property) { return 0 }
+    $value = $property.Value
+    if (-not ($value -is [int] -or $value -is [long]) -or $value -lt 0 -or $value -gt [int]::MaxValue) {
+        throw 'release server config engine.gpu_keep_warm_ms must be an integer in [0, 2147483647]'
+    }
+    return [int]$value
+}
+
 function Get-TrustedNvidiaSmiPath {
     $path = Join-Path ([Environment]::GetFolderPath('System')) 'nvidia-smi.exe'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -961,6 +973,15 @@ function Invoke-Run {
         if (-not [bool]$config.reasoning.thinking) { $serverArguments.Add('--no-thinking') }
         if ([bool]$config.reasoning.preserve_thinking) { $serverArguments.Add('--preserve-thinking') }
         if ([bool]$config.engine.vision) { $serverArguments.Add('--vision') }
+        # The runtime gained --gpu-keep-warm-ms after the shipped lineage, and an older server refuses
+        # it as an unknown argument: only a release whose own packaged config declares a positive
+        # value passes it, so a rollback to an earlier release never receives it.
+        $gpuKeepWarmMs = Get-GpuKeepWarmMs $config
+        if ($gpuKeepWarmMs -gt 0) {
+            foreach ($argument in @('--gpu-keep-warm-ms', [string]$gpuKeepWarmMs)) {
+                $serverArguments.Add($argument)
+            }
+        }
 
         $speculativeBackend = [string]$config.speculative.backend
         $draftTokens = [int]$config.speculative.draft_tokens

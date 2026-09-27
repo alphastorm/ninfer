@@ -24,6 +24,7 @@
     "max_concurrency": 1,
     "max_pending_requests": 16,
     "pending_timeout_ms": 30000,
+    "gpu_keep_warm_ms": 0,
     "cuda_graph": true,
     "prefix_reuse": true,
     "vision": false
