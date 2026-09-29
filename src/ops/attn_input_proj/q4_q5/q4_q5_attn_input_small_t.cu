@@ -134,6 +134,27 @@ void launch_q5_gemv(const Tensor& x, const Weight& weight, Tensor& gate, Tensor&
     CUDA_CHECK(cudaGetLastError());
 }
 
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+// The verify extents run on the tensor cores: one request's T=4 pass (EXP-057) and two requests'
+// T=8 pass (EXP-077). False when the weight is not the exact shape the route is compiled for.
+template <int Cols>
+bool launch_q5_mma(const Tensor& x, const Weight& weight, Tensor& gate, Tensor& value,
+                   cudaStream_t stream) {
+    static_assert(q5_small_t_mma_tokens(Cols));
+    if (weight.padded_shape[1] != kHidden) { return false; }
+    q5_small_t_mma_launch<kHidden, Cols>(
+        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.qhigh),
+        static_cast<const std::uint8_t*>(weight.scales), kParentRows,
+        Q5SmallTMmaSplitStore{static_cast<__nv_bfloat16*>(gate.data),
+                              static_cast<__nv_bfloat16*>(value.data), kParentRows, kSplitRow,
+                              static_cast<int>(gate.ne[0])},
+        stream);
+    CUDA_CHECK(cudaGetLastError());
+    return true;
+}
+#endif
+
 // From three columns the gate/value side runs two rows per warp (EXP-055: 17% faster than one row
 // on RTX 5090 at T=4, bit-identical per row); at T=2 the one-row kernel is as fast.
 template <int Cols>
@@ -141,21 +162,8 @@ void launch_q5_split4(const Tensor& x, const Weight& weight, Tensor& gate, Tenso
                       cudaStream_t stream) {
     constexpr int kThreads = 4 * 32;
 #if !defined(NINFER_SM86) && !defined(NINFER_SM89)
-    // The T=4 verify extent runs on the tensor cores (EXP-057).
-    if constexpr (Cols == kQ5SmallTMmaTokens) {
-        if (weight.padded_shape[1] == kHidden) {
-            q5_small_t_mma_launch<kHidden>(
-                static_cast<const __nv_bfloat16*>(x.data),
-                static_cast<const std::uint8_t*>(weight.qdata),
-                static_cast<const std::uint8_t*>(weight.qhigh),
-                static_cast<const std::uint8_t*>(weight.scales), kParentRows,
-                Q5SmallTMmaSplitStore{static_cast<__nv_bfloat16*>(gate.data),
-                                      static_cast<__nv_bfloat16*>(value.data), kParentRows,
-                                      kSplitRow, static_cast<int>(gate.ne[0])},
-                stream);
-            CUDA_CHECK(cudaGetLastError());
-            return;
-        }
+    if constexpr (q5_small_t_mma_tokens(Cols)) {
+        if (launch_q5_mma<Cols>(x, weight, gate, value, stream)) { return; }
     }
 #endif
     if constexpr (Cols >= 3) {
@@ -234,6 +242,9 @@ void launch_q5(const Tensor& x, const Weight& weight, Tensor& gate, Tensor& valu
         launch_q5_split4_exact(x, weight, gate, value, stream);
         return;
     }
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+    if (x.ne[1] == 8 && launch_q5_mma<8>(x, weight, gate, value, stream)) { return; }
+#endif
     if (x.ne[1] <= 16) {
         launch_q5_simt<4>(x, weight, gate, value, stream);
         return;

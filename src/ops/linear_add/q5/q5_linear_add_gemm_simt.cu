@@ -14,8 +14,9 @@ namespace {
 
 // Up to five columns, two rows per warp share each activation load (EXP-055: 11-16% faster at T=4
 // on RTX 5090); at six columns the pair is no faster and wider tiles spill it, so those keep one
-// row per warp. On the native Windows lanes the pair measured 2-22% slower at T=2-5 (RTX 4090), so
-// they keep one row per warp at every width.
+// row per warp. On sm_120 the verify extents T=4 and T=8 run on the tensor cores instead. On the
+// native Windows lanes the pair measured 2-22% slower at T=2-5 (RTX 4090), so they keep one row
+// per warp at every width.
 #if defined(NINFER_SM86) || defined(NINFER_SM89)
 constexpr int kRowPairMaxCols = 0;
 #else
@@ -26,10 +27,11 @@ template <int Cols, int FullSlabs, int Stride>
 void launch_split2(const Tensor& x, const Weight& w, Tensor& residual_out, cudaStream_t stream) {
     const std::int32_t rows = residual_out.ne[0];
 #if !defined(NINFER_SM86) && !defined(NINFER_SM89)
-    // The T=4 verify extent runs on the tensor cores (EXP-057).
-    if constexpr (Cols == kQ5SmallTMmaTokens) {
+    // One request's T=4 verify pass (EXP-057) and two requests' T=8 pass (EXP-077) run on the
+    // tensor cores.
+    if constexpr (q5_small_t_mma_tokens(Cols)) {
         if (rows % kQ5SmallTMmaRows == 0 && w.padded_shape[1] == Stride) {
-            q5_small_t_mma_launch<Stride>(
+            q5_small_t_mma_launch<Stride, Cols>(
                 static_cast<const __nv_bfloat16*>(x.data),
                 static_cast<const std::uint8_t*>(w.qdata),
                 static_cast<const std::uint8_t*>(w.qhigh),

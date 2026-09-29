@@ -1,6 +1,6 @@
 #pragma once
 
-// Q5 small-T tensor-core GEMM for the T=4 verify pass: out[N,4] = W[N,K] . x[K,4].
+// Q5 small-T tensor-core GEMM for the verify pass: out[N,T] = W[N,K] . x[K,T], T = 4 or 8.
 //
 // A CTA owns 16 output rows and each of its KWarps warps one 64-value group of every
 // KWarps*64-value K step, as in the Q4 small-T MMA kernel. Codes enter the MMA as exact bf16
@@ -20,8 +20,16 @@
 
 namespace ninfer::ops::detail {
 
-inline constexpr int kQ5SmallTMmaTokens = 4;
-inline constexpr int kQ5SmallTMmaRows   = 16;
+inline constexpr int kQ5SmallTMmaRows = 16;
+
+// Token extents that run on the tensor cores: one request's MTP3 verify pass (T=4, EXP-057) and
+// two requests' verify passes in one round at --max-concurrency 2 (T=8, EXP-077). An m16n8k16
+// MMA has eight columns, so T=4 computes and discards four of them and T=8 uses all eight at the
+// same instruction count. Each output column depends only on its own activation column, so a
+// token's result does not depend on the other tokens in the batch.
+__host__ __device__ constexpr bool q5_small_t_mma_tokens(int tokens) {
+    return tokens == 4 || tokens == 8;
+}
 
 union Q5SmallTBf16PairBits {
     __nv_bfloat162 pair;
@@ -71,14 +79,14 @@ struct Q5SmallTMmaAddResidual {
     }
 };
 
-template <int K, int KWarps, int Stages, class Epilogue, bool TriggerPdl = false>
+template <int K, int Tokens, int KWarps, int Stages, class Epilogue, bool TriggerPdl = false>
 __global__ __launch_bounds__(KWarps *
                              32) void q5_small_t_mma_kernel(const __nv_bfloat16* __restrict__ x,
                                                             const std::uint8_t* __restrict__ codes,
                                                             const std::uint8_t* __restrict__ high,
                                                             const std::uint8_t* __restrict__ scales,
                                                             Epilogue epilogue) {
-    constexpr int kT          = kQ5SmallTMmaTokens;
+    constexpr int kT          = Tokens;
     constexpr int kRows       = kQ5SmallTMmaRows;
     constexpr int kTileK      = 64;
     constexpr int kGroupK     = KWarps * kTileK;
@@ -87,6 +95,7 @@ __global__ __launch_bounds__(KWarps *
     constexpr int kCodeStride = kGroupK / 2 + 16; // 16-byte pad: 8 fragment rows, 8 banks
     constexpr int kHighStride = kGroupK / 8 + 16;
     static_assert(K % kGroupK == 0 && (KWarps == 8 || KWarps == 16) && Stages >= 2);
+    static_assert(q5_small_t_mma_tokens(Tokens));
 
     if constexpr (TriggerPdl) {
         if (threadIdx.x == 0) { pdl::trigger_dependents(); }
@@ -145,15 +154,19 @@ __global__ __launch_bounds__(KWarps *
             }
         }
         {
-            const int col = lane >> 3;
-            const int k8  = lane & 7;
-            cp_async<16>(&st.act[warp][col * kTileK + q4_small_t_swizzle_64(col, k8 * 8)],
-                         x + static_cast<std::int64_t>(col) * K + k0 + warp * kTileK + k8 * 8);
+            // One 16-byte chunk per lane covers four tokens' 64 values; T=8 takes two passes.
+            const int k8 = lane & 7;
+#pragma unroll
+            for (int pass = 0; pass < kT / 4; ++pass) {
+                const int col = (lane >> 3) + 4 * pass;
+                cp_async<16>(&st.act[warp][col * kTileK + q4_small_t_swizzle_64(col, k8 * 8)],
+                             x + static_cast<std::int64_t>(col) * K + k0 + warp * kTileK + k8 * 8);
+            }
         }
     };
 
-    // B rows 4..7 alias tokens 0..3: their MMA columns are computed and discarded.
-    const int b_row  = lane & 3;
+    // At T=4, B rows 4..7 alias tokens 0..3: their MMA columns are computed and discarded.
+    const int b_row  = lane & (kT - 1);
     const int b_koff = ((lane >> 3) & 1) << 3;
     float acc[4]     = {};
 
@@ -221,14 +234,15 @@ __global__ __launch_bounds__(KWarps *
     }
 }
 
-// Launches the T=4 route over n rows (a multiple of 16) of a Q5 weight whose padded K is K.
-template <int K, bool TriggerPdl = false, class Epilogue>
+// Launches the route over n rows (a multiple of 16) of a Q5 weight whose padded K is K; x holds
+// Tokens columns of K values.
+template <int K, int Tokens, bool TriggerPdl = false, class Epilogue>
 void q5_small_t_mma_launch(const __nv_bfloat16* x, const std::uint8_t* codes,
                            const std::uint8_t* high, const std::uint8_t* scales, int n,
                            Epilogue epilogue, cudaStream_t stream) {
     constexpr int kWarps  = 8;
     constexpr int kStages = 3;
-    q5_small_t_mma_kernel<K, kWarps, kStages, Epilogue, TriggerPdl>
+    q5_small_t_mma_kernel<K, Tokens, kWarps, kStages, Epilogue, TriggerPdl>
         <<<n / kQ5SmallTMmaRows, kWarps * 32, 0, stream>>>(x, codes, high, scales, epilogue);
 }
 

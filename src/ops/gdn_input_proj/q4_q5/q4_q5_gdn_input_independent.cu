@@ -200,6 +200,28 @@ void launch_q5_simt_r8_c8(const Tensor& x, const Weight& weight, Tensor& value, 
     CUDA_CHECK(cudaGetLastError());
 }
 
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+// The value/z side of the verify extents runs on the tensor cores: one request's T=4 pass
+// (EXP-057) and two requests' T=8 pass (EXP-077). False when the weight is not the exact shape
+// the route is compiled for.
+template <int Cols, bool TriggerPdl = false>
+bool launch_q5_mma(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
+                   cudaStream_t stream) {
+    static_assert(q5_small_t_mma_tokens(Cols));
+    if (weight.padded_shape[1] != kHidden) { return false; }
+    q5_small_t_mma_launch<kHidden, Cols, TriggerPdl>(
+        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.qhigh),
+        static_cast<const std::uint8_t*>(weight.scales), kValueZRows,
+        Q5SmallTMmaSplitStore{static_cast<__nv_bfloat16*>(value.data),
+                              static_cast<__nv_bfloat16*>(z.data), kValueZRows, kValueRows,
+                              static_cast<int>(value.nb[1] / sizeof(__nv_bfloat16))},
+        stream);
+    CUDA_CHECK(cudaGetLastError());
+    return true;
+}
+#endif
+
 void launch_q5(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
                cudaStream_t stream) {
     if (x.ne[1] == 1) {
@@ -210,6 +232,9 @@ void launch_q5(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
         launch_q5_split4_exact(x, weight, value, z, stream);
         return;
     }
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+    if (x.ne[1] == 8 && launch_q5_mma<8>(x, weight, value, z, stream)) { return; }
+#endif
     if (x.ne[1] <= 16) {
         launch_q5_simt_r8_c8(x, weight, value, z, stream);
         return;
@@ -222,20 +247,8 @@ void launch_t4_pdl(const Tensor& x, const Weight& qk_weight, const Weight& value
     // Q5 and Q4 publish disjoint row ranges. Q4 can execute while Q5 drains and joins Q5 only at
     // exit, before the following convolution/snapshot kernel becomes runnable.
 #if !defined(NINFER_SM86) && !defined(NINFER_SM89)
-    // The value/z side runs on the tensor cores (EXP-057) and still triggers the Q4 launch from
-    // every CTA.
-    if (value_z_weight.padded_shape[1] == kHidden) {
-        q5_small_t_mma_launch<kHidden, true>(
-            static_cast<const __nv_bfloat16*>(x.data),
-            static_cast<const std::uint8_t*>(value_z_weight.qdata),
-            static_cast<const std::uint8_t*>(value_z_weight.qhigh),
-            static_cast<const std::uint8_t*>(value_z_weight.scales), kValueZRows,
-            Q5SmallTMmaSplitStore{static_cast<__nv_bfloat16*>(value.data),
-                                  static_cast<__nv_bfloat16*>(z.data), kValueZRows, kValueRows,
-                                  static_cast<int>(value.nb[1] / sizeof(__nv_bfloat16))},
-            stream);
-        CUDA_CHECK(cudaGetLastError());
-    } else {
+    // The value/z side still triggers the Q4 launch from every CTA on the tensor-core route.
+    if (!launch_q5_mma<4, true>(x, value_z_weight, value, z, stream)) {
         launch_q5_split4<4, true>(x, value_z_weight, value, z, stream);
     }
 #else
