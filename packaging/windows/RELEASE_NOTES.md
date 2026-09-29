@@ -118,3 +118,8 @@ below `--session-checkpoint-min-tokens` now go first. On the RTX 4090, a 60,026-
 (2.30 GiB checkpoint), then 11.9K-token sessions (702-704 MiB each) past the 24 GiB quota, then a
 crash: the long session's next turn reused 60,057 cached tokens in 3.1 s. The previous runtime had
 reclaimed its checkpoint first, and the same turn failed with `previous_response_not_found`.
+
+A controller action no longer fails when the server is writing a checkpoint. Every action walks
+the lane's state tree, and the walk could reach a checkpoint staging directory the server had just
+renamed into its generation (`Cannot find path ...\.staging-...`). An entry that disappears during
+the walk is now skipped; any other failure still stops the action.

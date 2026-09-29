@@ -75,12 +75,26 @@ function Assert-NInferNoReparseAncestors([string]$Path) {
     }
 }
 
+# A running server writes its checkpoint store while a controller walks the state tree: it renames
+# staging directories into generations and reclaims old ones, so an entry listed a moment ago can be
+# gone by the time the walk reaches it. A walk skips an entry only when checking it failed because
+# the entry no longer exists; every other failure, and any failure at the walk's root, still throws.
+function Test-NInferVanishedEntry([Management.Automation.ErrorRecord]$ErrorRecord, [string]$Path) {
+    $exception = $ErrorRecord.Exception
+    $notFound = $exception -is [Management.Automation.ItemNotFoundException] -or
+        $exception -is [IO.FileNotFoundException] -or $exception -is [IO.DirectoryNotFoundException]
+    return $notFound -and -not (Test-Path -LiteralPath $Path)
+}
+
 function Assert-NInferNoReparseTree([string]$Path) {
     $queue = [Collections.Generic.Queue[string]]::new()
     $queue.Enqueue($Path)
     while ($queue.Count -ne 0) {
         $directory = $queue.Dequeue()
-        foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force)) {
+        $items = @()
+        try { $items = @(Get-ChildItem -LiteralPath $directory -Force) }
+        catch { if ($directory -ceq $Path -or -not (Test-NInferVanishedEntry $_ $directory)) { throw } }
+        foreach ($item in $items) {
             if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
                 throw "protected state contains a reparse point: $($item.FullName)"
             }
@@ -287,16 +301,7 @@ function Protect-NInferRetainedSecretAcls([string]$Path) {
     Assert-NInferNoReparseAncestors $fullPath
     Assert-NInferNoReparseTree $fullPath
 
-    $queue = [Collections.Generic.Queue[string]]::new()
-    $queue.Enqueue($fullPath)
-    while ($queue.Count -ne 0) {
-        $directory = $queue.Dequeue()
-        Assert-NInferTrustedMigrationAcl $directory ($directory -ceq $fullPath)
-        foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force)) {
-            Assert-NInferTrustedMigrationAcl $item.FullName
-            if ($item.PSIsContainer) { $queue.Enqueue($item.FullName) }
-        }
-    }
+    Invoke-NInferAclTreeWalk $fullPath { param($Entry, $IsRoot) Assert-NInferTrustedMigrationAcl $Entry $IsRoot }
 
     $secrets = Join-Path $fullPath 'secrets'
     if (-not (Test-Path -LiteralPath $secrets)) { return }
@@ -319,18 +324,33 @@ function Protect-NInferRetainedSecretAcls([string]$Path) {
     }
 }
 
+# Applies $AssertAcl to $Root and every entry below it, breadth first; see Test-NInferVanishedEntry
+# for entries a running server removes during the walk.
+function Invoke-NInferAclTreeWalk([string]$Root, [scriptblock]$AssertAcl) {
+    $queue = [Collections.Generic.Queue[string]]::new()
+    $queue.Enqueue($Root)
+    while ($queue.Count -ne 0) {
+        $directory = $queue.Dequeue()
+        $items = @()
+        try {
+            & $AssertAcl $directory ($directory -ceq $Root)
+            $items = @(Get-ChildItem -LiteralPath $directory -Force)
+        }
+        catch { if ($directory -ceq $Root -or -not (Test-NInferVanishedEntry $_ $directory)) { throw } }
+        foreach ($item in $items) {
+            try { & $AssertAcl $item.FullName $false }
+            catch {
+                if (Test-NInferVanishedEntry $_ $item.FullName) { continue }
+                throw
+            }
+            if ($item.PSIsContainer) { $queue.Enqueue($item.FullName) }
+        }
+    }
+}
+
 function Assert-NInferProtectedStateTree([string]$Path) {
     $fullPath = [IO.Path]::GetFullPath($Path)
     Assert-NInferNoReparseAncestors $fullPath
     Assert-NInferNoReparseTree $fullPath
-    $queue = [Collections.Generic.Queue[string]]::new()
-    $queue.Enqueue($fullPath)
-    while ($queue.Count -ne 0) {
-        $directory = $queue.Dequeue()
-        Assert-NInferProtectedAcl $directory ($directory -ceq $fullPath)
-        foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force)) {
-            Assert-NInferProtectedAcl $item.FullName
-            if ($item.PSIsContainer) { $queue.Enqueue($item.FullName) }
-        }
-    }
+    Invoke-NInferAclTreeWalk $fullPath { param($Entry, $IsRoot) Assert-NInferProtectedAcl $Entry $IsRoot }
 }

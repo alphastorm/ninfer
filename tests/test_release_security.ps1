@@ -231,6 +231,43 @@ try {
     Assert-Rejected { Assert-NInferProtectedStateTree $childRoot } `
         '*contains a reparse point*' 'junction child was accepted'
 
+    # A running server renames checkpoint staging directories into generations while a controller
+    # walks the state tree; v0.8.7's first qualification failed its rollback phase on one. This
+    # Get-ChildItem shadows the cmdlet for the walks and removes the staging directory right after
+    # its parent is listed for the (skip+1)th time, the order that race produced.
+    $walkRoot = Initialize-NInferProtectedStateRoot (Join-Path $testRoot 'walk-root')
+    $walkGenerations = Join-Path $walkRoot 'cache\session-checkpoints\sessions\fixture\generations'
+    $walkStaging = Join-Path $walkGenerations '.staging-1'
+    function Get-ChildItem([string]$LiteralPath, [switch]$Force, [switch]$Recurse) {
+        $listed = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $LiteralPath -Force:$Force -Recurse:$Recurse)
+        if ($null -ne $script:vanish -and $LiteralPath -ceq $walkGenerations) {
+            if ($script:vanish.skip -gt 0) { $script:vanish.skip -= 1 }
+            else {
+                Remove-Item -LiteralPath $walkStaging -Recurse -Force
+                $script:vanish = $null
+            }
+        }
+        $listed
+    }
+    try {
+        foreach ($case in @(
+                [ordered]@{ name = 'controller state-root walk'; skip = 0; walk = { Initialize-NInferProtectedStateRoot $walkRoot | Out-Null } },
+                [ordered]@{ name = 'protected ACL walk'; skip = 1; walk = { Assert-NInferProtectedStateTree $walkRoot } }
+            )) {
+            New-Item -ItemType Directory -Force -Path (Join-Path $walkStaging 'engine') | Out-Null
+            $script:vanish = @{ skip = [int]$case.skip }
+            & $case.walk
+            Assert-True ($null -eq $script:vanish -and -not (Test-Path -LiteralPath $walkStaging)) `
+                "$($case.name): the staging directory did not vanish during the walk"
+        }
+    }
+    finally {
+        $script:vanish = $null
+        Remove-Item -LiteralPath Function:\Get-ChildItem
+    }
+    Assert-Rejected { Assert-NInferNoReparseTree (Join-Path $testRoot 'no-such-walk-root') } `
+        '*does not exist*' 'a missing walk root was accepted'
+
     $requestLogRoot = Initialize-NInferProtectedStateRoot (Join-Path $testRoot 'request-log-root')
     $requestLog = Join-Path $requestLogRoot 'releases\fixture\logs\requests.jsonl'
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $requestLog) | Out-Null
