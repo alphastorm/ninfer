@@ -1495,6 +1495,85 @@ void test_dominating_identity_does_not_build_pressure_graph() {
             "dominating identity eagerly constructed the pressure graph");
 }
 
+// A search that stops at its budget before reaching a feasible target must still keep the
+// admitting session's own continuation. Near capacity the reuse candidate needs every other owner
+// degraded; sealing the root candidate's maximal target instead evicted the session and prefilled
+// ~100K tokens again from root. An expansion wider than the target budget stops the search here
+// deterministically, the way the time budget stopped it in production.
+void test_exhausted_pressure_search_keeps_the_reuse_source() {
+    using Planner = ninfer::runtime::MaterializationPlanner<FakePackage>;
+
+    FakeProgram program;
+    program.required_pressure_actions     = 1;
+    program.private_pressure_alternatives = 5000;
+
+    FakeAdmissionCandidate root;
+    root.identity.machine.minimum_request_ns = 50'000'000'000;
+    root.identity.machine.immediate_ns       = 50'000'000'000;
+    root.identity.physical_status    = ninfer::runtime::MaterializationPhysicalStatus::Infeasible;
+    root.identity.source_disposition = ClaimDisposition::ConsumedToActive;
+    root.identity.expandable         = true;
+    root.identity.assessment_digest  = 31;
+
+    FakeAdmissionCandidate reuse;
+    reuse.private_source_id                   = 7;
+    reuse.identity.machine.minimum_request_ns = 8'000'000'000;
+    reuse.identity.machine.immediate_ns       = 8'000'000'000;
+    reuse.identity.physical_status    = ninfer::runtime::MaterializationPhysicalStatus::Infeasible;
+    reuse.identity.source_disposition = ClaimDisposition::ConsumedToActive;
+    reuse.identity.expandable         = true;
+    reuse.identity.assessment_digest  = 32;
+
+    const std::array<Planner::CandidateInput, 2> candidates{
+        Planner::CandidateInput{.candidate = &root, .stable_ordinal = 0},
+        Planner::CandidateInput{
+            .candidate = &reuse, .stable_ordinal = 1, .current_session_binding = true},
+    };
+    FakeContinuationHandle source{7, 0};
+    FakeContinuationHandle other{8, 0};
+    const std::array<const FakeContinuationHandle*, 2> private_owners{&source, &other};
+    const std::array<std::uint32_t, 2> private_ordinals{0, 1};
+    const std::array<ninfer::runtime::MaterializationOwnerPolicy, 2> owner_policy{
+        ninfer::runtime::MaterializationOwnerPolicy{.ordinal = 0},
+        ninfer::runtime::MaterializationOwnerPolicy{.ordinal = 1},
+    };
+    const auto pressure_inputs = [&]() -> Planner::PressureInputs {
+        return Planner::PressureInputs{
+            .private_owners         = private_owners,
+            .private_owner_ordinals = private_ordinals,
+            .shared_owners          = {},
+            .shared_owner_ordinals  = {},
+            .owner_policy           = owner_policy,
+            .checkpoint_policy      = {},
+        };
+    };
+    const auto plan = [&](bool reuse_publishable) {
+        program.seal_attempts.clear();
+        const auto logical_goal = [&](std::uint32_t candidate, ClaimDisposition,
+                                      std::span<const ninfer::runtime::PressureOwnerOutcome>)
+            -> std::optional<Planner::LogicalGoal> {
+            if (candidate == 1 && !reuse_publishable) { return std::nullopt; }
+            return Planner::LogicalGoal{.publication_slot = 0};
+        };
+        Planner planner;
+        return planner.plan(program, FakePreparedPrompt{}, test_cost_model(), candidates, 0,
+                            pressure_inputs, logical_goal, Planner::Clock::now());
+    };
+
+    const auto kept = plan(true);
+    require(kept && kept->candidate_index == 1 &&
+                kept->diagnostics.stop_reason ==
+                    ninfer::MaterializationStopReason::ExpansionCapacity &&
+                kept->diagnostics.selected_maximal_fallback && !program.seal_attempts.empty() &&
+                program.seal_attempts.back() == std::vector<std::uint64_t>{2008},
+            "an exhausted pressure search evicted the reuse candidate's own source");
+
+    const auto refused = plan(false);
+    require(refused && refused->candidate_index == 0 && !program.seal_attempts.empty() &&
+                program.seal_attempts.back() == std::vector<std::uint64_t>{2007, 2008},
+            "a maximal target its logical goal refused became the plan");
+}
+
 FakeFinishResult finish_active(FakeManager& manager, FakeProgram& program, ActiveRequest request,
                                std::uint32_t frontier = 16) {
     program.finish_frontier = frontier;
@@ -2689,6 +2768,8 @@ int main() {
              test_feasible_identity_expands_when_pressure_can_remove_copy);
     run_test("dominating identity fast path",
              test_dominating_identity_does_not_build_pressure_graph);
+    run_test("exhausted pressure search keeps the reuse source",
+             test_exhausted_pressure_search_keeps_the_reuse_source);
     run_test("root lifecycle and prefix reuse", test_root_lifecycle_and_prefix_reuse);
     run_test("stale revision is retryable", test_stale_revision_is_retryable);
     run_test("materialization abort preserves source", test_materialization_abort_preserves_source);

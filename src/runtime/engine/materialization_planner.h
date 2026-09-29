@@ -178,19 +178,32 @@ public:
             incumbent.target =
                 session.identity_target(*candidates[incumbent.candidate_index].candidate);
         } else {
-            PressureTargetHandle root_maximal =
-                session.root_maximal_target(*candidates[root_candidate_index].candidate);
-            PressureTargetAssessment assessment = session.assess(root_maximal);
-            ++targets_evaluated;
-            planning_saturating_add(projection_work, assessment.projection_work);
-            std::optional<LogicalGoal> goal;
-            if (assessment.physical_status == MaterializationPhysicalStatus::Feasible) {
-                goal = logical_goal(root_candidate_index, assessment.source_disposition,
-                                    assessment.owner_outcomes);
+            // With no feasible identity, seed the search with the cheapest feasible maximal target
+            // of the root candidate and of every candidate pressure can help. A reuse candidate's
+            // maximal target keeps its own source and pressures every other owner, so a search
+            // that stops at its budget still extends the session. Seeding only the root candidate
+            // made such a stop evict the session's own continuation and prefill it again from
+            // root, which near capacity is a whole ~100K-token turn.
+            std::optional<Incumbent> seeded;
+            for (const IdentityRoot& root : roots) {
+                if (root.candidate_index != root_candidate_index && !root.expandable) { continue; }
+                const CandidateInput& input = candidates[root.candidate_index];
+                PressureTargetHandle maximal = session.root_maximal_target(*input.candidate);
+                PressureTargetAssessment assessment = session.assess(maximal);
+                ++targets_evaluated;
+                planning_saturating_add(projection_work, assessment.projection_work);
+                if (assessment.physical_status != MaterializationPhysicalStatus::Feasible) {
+                    continue;
+                }
+                const std::optional<LogicalGoal> goal = logical_goal(
+                    root.candidate_index, assessment.source_disposition, assessment.owner_outcomes);
+                if (!goal) { continue; }
+                Incumbent option = make_incumbent(maximal, assessment, input, pressure.owner_policy,
+                                                  pressure.checkpoint_policy, *goal);
+                if (!seeded || option.cost.less(seeded->cost)) { seeded = std::move(option); }
             }
-            if (!goal) { return std::nullopt; }
-            incumbent = make_incumbent(root_maximal, assessment, candidates[root_candidate_index],
-                                       pressure.owner_policy, pressure.checkpoint_policy, *goal);
+            if (!seeded) { return std::nullopt; }
+            incumbent = std::move(*seeded);
         }
 
         for (const IdentityRoot& root : roots) {
