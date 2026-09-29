@@ -89,3 +89,32 @@ sessions after 12-58 s idle prefilled in 0.146 s and every output was unchanged 
 EXP-066). The spin reads and writes no memory. The controller passes `--gpu-keep-warm-ms` only when
 a release's own configuration declares a positive value, so a rollback to an earlier release never
 receives it. The RTX 3090 lane declares 0.
+
+Long sessions keep their cache. OMP's compaction handoff resends the whole session with
+`tool_choice: none`, and the runtime rendered that turn without the declared tools, which Qwen
+places before the leading instruction: every handoff re-prefilled the session from root (63.8-66.3 s
+to first token for 97.4-97.5K tokens on the RTX 4090). The tools now render for `none` as for
+`auto`, and the template's tool-call opening token ends the turn instead. Handoffs of 78.4-80.4K
+tokens reused 78.0-79.9K cached tokens and started in 0.58-0.70 s, and their summaries ran
+3,235-5,241 bytes.
+
+Near capacity the materialization planner's 5 ms search can stop before it reaches a target that
+keeps the session's own continuation. It then fell back to evicting that continuation and
+prefilling the whole turn again from root (about 102,600 tokens and 68 s on the RTX 4090,
+omp-ninfer EXP-072). The fallback now starts from the cheapest feasible target that keeps it: in
+three such stops during a long session, each turn reused 79.2-101.6K cached tokens.
+
+A crash after a compaction restored the pre-compaction checkpoint. The compacted session's turns
+stayed under the 32,768-token automatic-save minimum, and an unstored handoff under the session's
+key could move its indexed lineage. A session that has a checkpoint on disk now keeps it current at
+any size, and an unstored Responses turn leaves the lineage alone. After a hard kill, the next turn
+reused 32,167 cached tokens in 2.9 s; the previous runtime prefilled 32,173 tokens from root
+(29.2 s).
+
+Long sessions keep their checkpoints when short sessions fill the store. Quota reclamation took the
+oldest checkpoint first, so a run of short sessions could delete every long session's checkpoint:
+about 26 short OMP sessions of about 930 MiB each filled the RTX 5090's 24 GiB store. Checkpoints
+below `--session-checkpoint-min-tokens` now go first. On the RTX 4090, a 60,026-token session
+(2.30 GiB checkpoint), then 11.9K-token sessions (702-704 MiB each) past the 24 GiB quota, then a
+crash: the long session's next turn reused 60,057 cached tokens in 3.1 s. The previous runtime had
+reclaimed its checkpoint first, and the same turn failed with `previous_response_not_found`.
