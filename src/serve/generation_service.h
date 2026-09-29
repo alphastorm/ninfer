@@ -140,6 +140,9 @@ public:
     // newest stored response under the current runtime fingerprint (redundant-save skip).
     [[nodiscard]] bool checkpoint_covers(std::string_view session_sha256,
                                          std::string_view response_id) const;
+    // False only when the session has no published generation on disk; a store error answers
+    // true, so a caller skipping small saves on this answer never skips on an unknown.
+    [[nodiscard]] bool checkpoint_may_hold(std::string_view session_sha256) const noexcept;
     [[nodiscard]] SessionCheckpointEraseResult erase_checkpoint(std::string_view session_sha256);
     // Makes admission save a live session's newest turn before pressure drops it
     // (runtime::PressureCheckpointHandler). Destroy this service before responses; a service

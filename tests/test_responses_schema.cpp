@@ -300,6 +300,46 @@ int test_prompt_cache_key_identity() {
     return failures;
 }
 
+// OMP's compaction handoff is an unstored turn under the session's prompt_cache_key. Advancing the
+// session index with it displaced the stored lineage, so every export of the session after a
+// compaction was refused (tag mismatch, then not indexed) and a restart restored stale state. The
+// hints run the route's order: identity, store policy, then identity again in GenerationService.
+int test_unstored_turn_stays_out_of_the_session_index() {
+    const std::string digest = "2b43cd7e2260dbfbd14f6777e3c1970a12c998807a18d617a31d1f1fa5e7864c";
+    int failures             = 0;
+    const auto route_hints   = [](const Json& body, bool authenticated) {
+        ResponsesRequest request = parse_responses_request(body, limits());
+        resolve_client_session(request.generation, authenticated, false);
+        ninfer::ContextCacheHints hints;
+        apply_client_identity_cache_hints(request.generation, authenticated, hints);
+        apply_responses_store_cache_policy(request, hints);
+        apply_client_identity_cache_hints(request.generation, authenticated, hints);
+        return hints;
+    };
+
+    Json handoff = {{"model", "qwen3.6-27b"},
+                    {"input", "hello"},
+                    {"prompt_cache_key", "client-session"},
+                    {"store", false}};
+    const ninfer::ContextCacheHints side = route_hints(handoff, true);
+    failures += check(side.session_key == "http:" + digest &&
+                          side.retention == ninfer::CacheRetentionHint::LiveSession &&
+                          !side.update_session_index,
+                      "an unstored turn advanced its session's lineage");
+
+    handoff["store"] = true;
+    failures += check(route_hints(handoff, true).update_session_index,
+                      "a stored turn did not advance its session's lineage");
+
+    handoff["store"]                          = false;
+    const ninfer::ContextCacheHints anonymous = route_hints(handoff, false);
+    failures += check(!anonymous.session_key &&
+                          anonymous.retention == ninfer::CacheRetentionHint::Disposable &&
+                          !anonymous.update_session_index,
+                      "an anonymous unstored turn was retained or indexed");
+    return failures;
+}
+
 int test_response_ids_are_opaque() {
     const auto fixed_entropy = [](unsigned char* output, int length) -> int {
         for (int index = 0; index < length; ++index) {
@@ -1092,6 +1132,7 @@ int main() {
     failures += test_basic_request();
     failures += test_client_identity();
     failures += test_prompt_cache_key_identity();
+    failures += test_unstored_turn_stays_out_of_the_session_index();
     failures += test_response_ids_are_opaque();
     failures += test_instruction_message_order();
     failures += test_preserve_thinking_options_and_inheritance();

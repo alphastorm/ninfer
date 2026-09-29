@@ -273,11 +273,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
             session_key             = id;
             cache_hints.session_key = id;
         }
-        if (!request.generation.client_session_sha256) {
-            cache_hints.retention =
-                request.store ? CacheRetentionHint::LiveSession : CacheRetentionHint::Disposable;
-            cache_hints.update_session_index = request.store;
-        }
+        apply_responses_store_cache_policy(request, cache_hints);
         // Only a stored turn of a client session carries a checkpoint tag, and from here until
         // its record is stored a save of that turn waits for it instead of evicting it unsaved.
         const bool checkpointed = request.store && request.generation.client_session_sha256;

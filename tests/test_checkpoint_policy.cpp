@@ -1,5 +1,5 @@
-// Which refused saves an automatic checkpoint retries, how many times, and how a graceful stop
-// accounts a session whose engine continuation is gone.
+// Which turns are worth a checkpoint, which refused saves an automatic checkpoint retries, how many
+// times, and how a graceful stop accounts a session whose engine continuation is gone.
 #include "serve/checkpoint_policy.h"
 
 #include <iostream>
@@ -120,6 +120,17 @@ int main() {
     budget.settle(second);
     budget.settle(second);
     failures += check(budget.size() == 0, "settling a session did not release its entry");
+
+    // Automatic saves skip short sessions, but a session with a generation on disk keeps it
+    // current at any size: after a compaction its new lineage starts below the minimum, and
+    // skipping it left a crash restoring the pre-compaction generation.
+    using ninfer::serve::checkpoint_worth_saving;
+    failures += check(!checkpoint_worth_saving(7'400, 32'768, false),
+                      "a short session with nothing on disk was saved");
+    failures += check(checkpoint_worth_saving(32'768, 32'768, false),
+                      "a session at the minimum was not saved");
+    failures += check(checkpoint_worth_saving(24'700, 32'768, true),
+                      "a compacted session's on-disk generation was left stale");
 
     if (failures == 0) { std::cout << "checkpoint policy tests passed\n"; }
     return failures == 0 ? 0 : 1;

@@ -938,6 +938,12 @@ bool GenerationService::checkpoint_covers(std::string_view session_sha256,
                                      response_id);
 }
 
+// Lock-free like the store's pre-filter: an automatic save asks it after every completed turn, and
+// must not wait behind another session's in-flight save to learn a session has nothing on disk.
+bool GenerationService::checkpoint_may_hold(std::string_view session_sha256) const noexcept {
+    return checkpoint_store_ != nullptr && checkpoint_store_->may_hold(session_sha256);
+}
+
 SessionCheckpointEraseResult GenerationService::erase_checkpoint(std::string_view session_sha256) {
     if (!checkpoint_store_) { return SessionCheckpointEraseResult::Missing; }
     std::lock_guard lock(checkpoint_mutex_);

@@ -84,9 +84,11 @@ void apply_client_identity_cache_hints(const GenerationRequest& request,
     // client-supplied digest is a subordinate session capability inside that principal, not an
     // independent tenant credential; callers must keep it unguessable and private.
 
-    cache_hints.session_key          = "http:" + *request.client_session_sha256;
-    cache_hints.retention            = CacheRetentionHint::LiveSession;
-    cache_hints.update_session_index = true;
+    // Naming the session leaves update_session_index as the caller set it: a turn the caller keeps
+    // out of the session's lineage (an unstored Responses side call) must not displace the stored
+    // lineage its checkpoint follows. It is already true for every other caller.
+    cache_hints.session_key = "http:" + *request.client_session_sha256;
+    cache_hints.retention   = CacheRetentionHint::LiveSession;
 }
 
 std::string prompt_cache_key_session_sha256(std::string_view key) {

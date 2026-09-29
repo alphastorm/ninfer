@@ -789,8 +789,7 @@ int test_client_identity() {
                       "ninfer_request_id digest was not parsed");
 
     ninfer::ContextCacheHints cache_hints;
-    cache_hints.retention            = ninfer::CacheRetentionHint::Disposable;
-    cache_hints.update_session_index = false;
+    cache_hints.retention = ninfer::CacheRetentionHint::Disposable;
     cache_hints.markers.emplace_back();
     apply_client_identity_cache_hints(request, true, cache_hints);
     failures += check(cache_hints.session_key == "http:" + session_digest,
@@ -800,6 +799,17 @@ int test_client_identity() {
                       "authenticated session cache retention is not live/indexed");
     failures += check(cache_hints.markers.size() == 1,
                       "client session hints discarded protocol cache markers");
+
+    // A turn its caller keeps out of the session's lineage (an unstored Responses side call such
+    // as OMP's compaction handoff) stays out: naming the session must not re-enable indexing, or
+    // the side call displaces the stored lineage and the session's checkpoint exports refuse.
+    ninfer::ContextCacheHints unindexed;
+    unindexed.update_session_index = false;
+    apply_client_identity_cache_hints(request, true, unindexed);
+    failures += check(unindexed.session_key == "http:" + session_digest &&
+                          unindexed.retention == ninfer::CacheRetentionHint::LiveSession &&
+                          !unindexed.update_session_index,
+                      "client identity re-enabled session indexing its caller turned off");
 
     GenerationRequest session_only;
     session_only.client_session_sha256 = session_digest;

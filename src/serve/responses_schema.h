@@ -65,6 +65,12 @@ void compose_responses_generation_messages(ResponsesRequest& request,
 
 void inherit_responses_preserve_thinking(ResponsesRequest& request, bool parent_value);
 
+// The cache policy a turn's store flag implies. An unstored turn (a client's summary or handoff
+// side call) has no checkpoint tag and can never be continued by id, so it must not advance the
+// session's lineage in the engine's session index; it still reuses, and retains, that lineage's
+// cache. An anonymous turn also takes its retention from store.
+void apply_responses_store_cache_policy(const ResponsesRequest& request, ContextCacheHints& hints);
+
 BuiltResponse make_response_object(const std::string& id, std::int64_t created_at,
                                    const ResponsesRequest& request,
                                    const ResponsesRuntimeValues& runtime,

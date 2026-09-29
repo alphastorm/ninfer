@@ -1110,7 +1110,11 @@ void HttpServer::maybe_checkpoint_completed_turn(const std::optional<std::string
     const std::uint64_t frontier =
         static_cast<std::uint64_t>(std::max(outcome.prompt_tokens, 0)) +
         static_cast<std::uint64_t>(std::max(outcome.completion_tokens, 0));
-    if (frontier < options_.session_checkpoint_min_tokens) { return; }
+    if (!checkpoint_worth_saving(frontier, options_.session_checkpoint_min_tokens,
+                                 service_ != nullptr &&
+                                     service_->checkpoint_may_hold(*session_sha256))) {
+        return;
+    }
     // A new turn gives the session a fresh retry budget: earlier transient refusals were for
     // older state.
     automatic_retries_.settle(*session_sha256);

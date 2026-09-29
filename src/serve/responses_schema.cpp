@@ -1166,6 +1166,14 @@ void inherit_responses_preserve_thinking(ResponsesRequest& request, bool parent_
     request.generation.preserve_thinking = parent_value;
 }
 
+void apply_responses_store_cache_policy(const ResponsesRequest& request, ContextCacheHints& hints) {
+    if (!request.generation.client_session_sha256) {
+        hints.retention = request.store ? CacheRetentionHint::LiveSession
+                                        : CacheRetentionHint::Disposable;
+    }
+    hints.update_session_index = request.store;
+}
+
 void compose_responses_generation_messages(ResponsesRequest& request,
                                            std::vector<ChatTurn> previous_context) {
     std::vector<ChatTurn> current_input = std::move(request.generation.messages);

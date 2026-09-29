@@ -534,8 +534,11 @@ Verified structural or checksum corruption is quarantined and ignored. A transie
 missing/open/read filesystem failure reports `unavailable` without changing the generation or
 `current` pointer, so a later request can retry the same checkpoint.
 
-A completed stored turn at or above `--session-checkpoint-min-tokens` is enqueued to one
-bounded background checkpoint worker; the default threshold is `32768`. The request publishes its
+A completed stored turn at or above `--session-checkpoint-min-tokens`, or of a session that already
+has a generation on disk, is enqueued to one bounded background checkpoint worker; the default
+threshold is `32768`. The on-disk case keeps a compacted session current: its new lineage starts
+below the threshold, and a stale generation restores a prefix the next request no longer shares.
+The request publishes its
 terminal HTTP/SSE response without waiting for checkpoint I/O, repeated saves for the same session
 coalesce, and a full queue drops only that automatic acceleration attempt. An automatic save
 additionally yields to live traffic: it starts only after the engine stays quiet for consecutive samples (bounded at 60 s),

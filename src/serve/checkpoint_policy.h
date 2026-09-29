@@ -3,6 +3,7 @@
 #include "runtime/contract/continuation_checkpoint.h"
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -48,6 +49,18 @@ checkpoint_refusal_is_transient(const runtime::SessionCheckpointSkipDetail& skip
 // save requeues, and save-before-evict keeps its victim resident for another admission pass.
 // Each retry waits for the engine to quiesce again, so this bounds work, not latency.
 inline constexpr unsigned kTransientCheckpointRetries = 6;
+
+// Whether a completed turn is worth an automatic checkpoint. A session below the configured minimum
+// is cheaper to prefill again than to write out after every turn, so automatic saves skip it; a
+// graceful stop and save-before-eviction still save it, which keeps its responses resumable across
+// a restart. A session that already has a generation on disk keeps it current at any size: after a
+// compaction its new lineage starts below the minimum, and a stale generation restores a prefix
+// the next request no longer shares.
+[[nodiscard]] inline bool checkpoint_worth_saving(std::uint64_t frontier_tokens,
+                                                  std::uint64_t minimum_tokens,
+                                                  bool generation_on_disk) noexcept {
+    return frontier_tokens >= minimum_tokens || generation_on_disk;
+}
 
 // Transient-refusal retries of automatic saves, per session. A session holds an entry only while
 // a retry of its save is queued - every final outcome settles it - so session churn cannot grow
