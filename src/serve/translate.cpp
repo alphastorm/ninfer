@@ -85,9 +85,13 @@ ninfer::SamplingOverrides resolve_sampling_overrides(const SamplingParams& reque
     return sampling;
 }
 
+// tool_choice none still renders every declaration: Qwen renders tools before the leading
+// instruction, so dropping them changed the prompt from its first token and a client's no-tools
+// side call (OMP's compaction handoff) re-prefilled the whole session. The tool-call stop token
+// enforces none instead.
 std::vector<const ToolDefinition*> effective_tools(const GenerationRequest& request) {
     std::vector<const ToolDefinition*> tools;
-    if (!request.uses_tools()) { return tools; }
+    if (request.tools.empty()) { return tools; }
     if (request.tool_choice.mode == ToolChoiceMode::Named) {
         for (const ToolDefinition& tool : request.tools) {
             if (tool.name == request.tool_choice.name) {
@@ -290,6 +294,8 @@ ninfer::RequestOptions to_request_options(const GenerationRequest& request,
     options.execution.sampling             = resolve_sampling_overrides(request.sampling, server);
     options.output.raw                     = false;
     options.output.preserve_special_tokens = request.uses_tools() || request.has_tool_history();
+    options.stop.stop_at_tool_call =
+        request.tool_choice.mode == ToolChoiceMode::None && !request.tools.empty();
     options.stop.strings.reserve(request.stop_strings.size());
     for (const std::string& stop : request.stop_strings) {
         if (!stop.empty()) {

@@ -385,6 +385,16 @@ StopPolicy merge_stop_policy(const fi::Tokenizer& tokenizer, const StopPolicy& c
         for (const int token : tokenizer.default_stop_token_ids()) { append_token(token); }
     }
     for (const TokenId token : caller.token_ids) { append_token(token); }
+    if (caller.stop_at_tool_call) {
+        // The model opens a call with the single added token (Qwen marks it non-special). A text
+        // match instead would publish part of the marker first and would also stop on prose that
+        // merely spells it out.
+        const std::vector<int> opening = tokenizer.encode(fi::kToolCallOpen);
+        if (opening.size() != 1) {
+            throw std::invalid_argument("the tokenizer has no single tool-call opening token");
+        }
+        append_token(opening.front());
+    }
 
     result.strings.reserve(caller.strings.size());
     for (const StopString& stop : caller.strings) {

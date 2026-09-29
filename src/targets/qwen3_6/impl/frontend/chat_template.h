@@ -9,10 +9,15 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 namespace ninfer::targets::qwen3_6::frontend_internal {
+
+// The added token that opens every tool call the template renders and instructs the model to emit.
+// A request that forbids tool calls stops generation on it.
+inline constexpr std::string_view kToolCallOpen = "<tool_call>";
 
 struct ToolCall {
     std::string id;

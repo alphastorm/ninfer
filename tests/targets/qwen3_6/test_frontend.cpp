@@ -60,6 +60,8 @@ constexpr ninfer::TokenId kByte9FToken = 21;
 constexpr ninfer::TokenId kByte98Token = 22;
 constexpr ninfer::TokenId kByteC2Token = 23;
 constexpr ninfer::TokenId kByteA2Token = 24;
+// The official tokenizer's id; Qwen marks the tool-call opening token non-special.
+constexpr ninfer::TokenId kToolCallToken = 248058;
 
 int check(bool condition, const char* message) {
     if (condition) { return 0; }
@@ -174,8 +176,8 @@ FrontendResources resources(const std::string& chat_template = thinking_toggle_t
          added(31, "assistant\n"), added(32, "\n"), added(248045, "<|im_start|>", true),
          added(248046, "<|im_end|>", true), added(248053, "<|vision_start|>", true),
          added(248054, "<|vision_end|>", true), added(248056, "<|image_pad|>", true),
-         added(248057, "<|video_pad|>", true), added(248068, "<think>"),
-         added(248069, "</think>")});
+         added(248057, "<|video_pad|>", true), added(kToolCallToken, "<tool_call>"),
+         added(248068, "<think>"), added(248069, "</think>")});
     nlohmann::json vocab           = {{"x", 0}, {"ä", 10}, {"¸", 11}, {"Ń", 12}};
     vocab[byte_level_symbol(0x80)] = kByte80Token;
     vocab[byte_level_symbol(0xe0)] = kByteE0Token;
@@ -1814,6 +1816,32 @@ int test_utf8_and_hidden_eos(const Frontend& frontend) {
     return failures;
 }
 
+// tool_choice none still renders the declared tools, so the model can open a call; the opening
+// token ends the turn without reaching the client. Qwen marks it non-special, so a turn that may
+// call tools keeps generating through it.
+int test_tool_call_stop(const Frontend& frontend) {
+    auto prompt = frontend.prepare_tokens({0});
+    ninfer::StopPolicy stop;
+    stop.stop_at_tool_call = true;
+    auto session           = frontend.make_output_session(prompt, stop);
+    const auto decision    = session.preview_model(std::array<ninfer::TokenId, 2>{1, kToolCallToken},
+                                                   4, ninfer::FinishReason::OutputLimit);
+    int failures           = check(decision.accepted_tokens == 2 &&
+                                       decision.finish_reason == ninfer::FinishReason::StopToken,
+                                   "a tool-call opening token did not end a no-tools turn");
+    failures += check(channel_text(session.commit_preview(), ninfer::OutputChannel::Content) ==
+                          "helloST",
+                      "a no-tools turn lost its text or published the tool-call marker");
+
+    auto open_prompt   = frontend.prepare_tokens({0});
+    auto open          = frontend.make_output_session(open_prompt, {});
+    const auto allowed = open.preview_model(std::array<ninfer::TokenId, 1>{kToolCallToken}, 4,
+                                            ninfer::FinishReason::OutputLimit);
+    failures += check(allowed.accepted_tokens == 1 && !allowed.finished(),
+                      "a turn allowed to call tools stopped at the tool-call token");
+    return failures;
+}
+
 int test_disabled_vision() {
     const Frontend frontend = FrontendFactory::create_component(resources(), false);
     int failures = check(throws_invalid_argument([&] { (void)frontend.prepare(image_input()); }),
@@ -2051,6 +2079,7 @@ int main() {
     failures += test_reasoning_split(frontend);
     failures += test_thinking_budget_control(frontend);
     failures += test_utf8_and_hidden_eos(frontend);
+    failures += test_tool_call_stop(frontend);
     failures += test_media_cache_reuses_immutable_payload();
     failures += test_media_payload_outlives_frontend_cache();
     failures += test_media_live_bytes_follow_last_payload_reference();

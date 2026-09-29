@@ -190,6 +190,9 @@ struct StopPolicy {
     std::vector<StopString> strings;
     bool include_model_defaults = true;
     bool publish_stop_token     = false;
+    // Stop before the target's tool-call opening token. Enforces tool_choice none on a prompt
+    // that still renders the declared tools, which the sampler cannot mask.
+    bool stop_at_tool_call = false;
 };
 
 struct ThinkingControlOptions {

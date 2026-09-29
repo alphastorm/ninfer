@@ -430,6 +430,8 @@ int test_parse_function_tools_and_choices() {
     failures += check(req.uses_tools(), "tools enabled by default");
     failures += check(translate_options(req).output.preserve_special_tokens,
                       "active tools preserve special tokens in Engine output");
+    failures += check(!translate_options(req).stop.stop_at_tool_call,
+                      "tool_choice auto stops before a tool call");
 
     Json none           = base;
     none["tool_choice"] = "none";
@@ -438,6 +440,16 @@ int test_parse_function_tools_and_choices() {
     failures += check(!req.uses_tools(), "tool_choice none disables tools");
     failures += check(!translate_options(req).output.preserve_special_tokens,
                       "disabled tools do not preserve special tokens");
+    // none still renders the declarations, so its prompt keeps the prefix every other turn of the
+    // conversation cached: OMP's compaction handoff re-prefilled whole sessions without them.
+    const std::vector<std::string> rendered_none = translate(req).options.tool_jsons;
+    failures += check(!rendered_none.empty() &&
+                          rendered_none == translate(parse_chat_completion_request(
+                                                         base, default_limits()))
+                                               .options.tool_jsons,
+                      "tool_choice none dropped the declared tools from the prompt");
+    failures += check(translate_options(req).stop.stop_at_tool_call,
+                      "tool_choice none can still emit a tool call");
 
     Json required           = base;
     required["tool_choice"] = "required";
