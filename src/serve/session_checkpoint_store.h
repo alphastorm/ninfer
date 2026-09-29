@@ -23,7 +23,12 @@ inline constexpr std::uint32_t kSessionCheckpointSchemaVersion = 2;
 struct SessionCheckpointStoreOptions {
     std::filesystem::path root;
     std::uint64_t disk_quota_bytes = 64ULL << 30;
-    std::size_t staging_bytes      = 256ULL << 20;
+    // When the quota is exceeded, other sessions' current checkpoints whose frontier is below this
+    // many tokens are reclaimed before longer ones, oldest first within each group. A short session
+    // costs little to prefill again; oldest-first alone let a run of short sessions reclaim every
+    // long session's checkpoint. Zero keeps plain oldest-first order.
+    std::uint64_t short_session_tokens = 0;
+    std::size_t staging_bytes          = 256ULL << 20;
     // Bounds the in-memory chunk queue between the engine-held export and the drain thread
     // that performs the disk writes (ninfer#34). The engine blocks only when the queue is
     // full; sizing it at or above the typical payload keeps engine-held time at staging cost.

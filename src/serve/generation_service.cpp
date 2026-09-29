@@ -507,6 +507,7 @@ GenerationService::GenerationService(ServeOptions options, LoadProgress load_pro
         checkpoint_store_ = std::make_unique<SessionCheckpointStore>(SessionCheckpointStoreOptions{
             .root             = options_.session_checkpoint_root,
             .disk_quota_bytes = options_.session_checkpoint_quota_bytes,
+            .short_session_tokens = options_.session_checkpoint_min_tokens,
             .staging_bytes      = options_.session_checkpoint_staging_bytes,
             .write_buffer_bytes = options_.session_checkpoint_write_buffer_bytes,
             .origin_mac_key = std::string(reinterpret_cast<const char*>(origin_key.data()),

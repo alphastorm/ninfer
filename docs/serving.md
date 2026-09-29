@@ -555,8 +555,11 @@ save before anything publishes. The bound covers queued plus in-flight bytes; be
 exporter blocks (engine-held) until the drain catches up, so lower it on small-RAM hosts.
 `--session-checkpoint-quota-mib` is a store-wide cap over all retained current and stale
 generations, including deferred tombstones. Before publishing a new `current`, admission cleans
-tombstones and abandoned staging, then reclaims the oldest inactive stale generations and inactive
-current sessions, with path order breaking equal timestamps. Reclaimed paths are atomically renamed
+tombstones and abandoned staging, then reclaims the oldest inactive stale generations, then
+inactive current sessions: those checkpointing fewer tokens than `--session-checkpoint-min-tokens`
+before longer ones, oldest first within each group, with path order breaking equal timestamps. A
+short session costs little to prefill again, so a run of short sessions cannot reclaim the long
+sessions' checkpoints first. Reclaimed paths are atomically renamed
 to internal tombstones before physical cleanup, so no current pointer can dangle. The generation
 being published, its session, and every active restore reader are never eviction candidates. A
 cleanup failure or insufficient reclaimable space refuses the save before its prior `current`
@@ -703,7 +706,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--session-checkpoint-quota-mib N` | total retained durable-checkpoint budget | `65536` |
 | `--session-checkpoint-staging-mib N` | bounded checkpoint codec and transfer staging | `256` |
 | `--session-checkpoint-write-buffer-mib N` | in-memory queue decoupling checkpoint disk writes from the engine (queued + in-flight) | `6144` |
-| `--session-checkpoint-min-tokens N` | completed-turn frontier that triggers an automatic save | `32768` |
+| `--session-checkpoint-min-tokens N` | completed-turn frontier that triggers an automatic save; current checkpoints below it are reclaimed first under the quota | `32768` |
 | `--session-checkpoint-require-origin-auth` | refuse checkpoint generations without a valid `manifest.mac` (remote-import posture) | off |
 | `--kv-dtype bf16\|int8\|fp8` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash` | speculative backend | off |

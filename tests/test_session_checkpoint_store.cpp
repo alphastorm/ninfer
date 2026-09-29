@@ -909,6 +909,54 @@ int test_store_wide_quota_across_sessions() {
     return failures;
 }
 
+// Oldest-first reclamation let a run of short sessions reclaim every long session's checkpoint
+// (26 short OMP sessions filled an RTX 5090's 24 GiB store). A short session is reclaimed first,
+// though it is newer than the long session the save displaces.
+int test_quota_reclaims_short_sessions_first() {
+    const ResponseStoreSnapshot long_first   = sample_snapshot('a');
+    const ResponseStoreSnapshot short_middle = sample_snapshot('b');
+    const ResponseStoreSnapshot long_last    = sample_snapshot('c');
+    const std::vector<std::byte> payload     = engine_payload();
+    const auto exporter                      = [&payload](std::uint32_t frontier) {
+        return [&payload, frontier](ContinuationCheckpointWriter& writer)
+                   -> std::optional<ContinuationCheckpointStats> {
+            if (!write_chunked(writer, "engine/state.bin", payload)) { return std::nullopt; }
+            return ContinuationCheckpointStats{.frontier_tokens = frontier,
+                                               .restored_tokens = frontier,
+                                               .payload_bytes   = payload.size()};
+        };
+    };
+
+    TemporaryDirectory measurement;
+    SessionCheckpointStore measuring_store({
+        .root             = measurement.path,
+        .disk_quota_bytes = 1ULL << 20,
+        .staging_bytes    = 1ULL << 20,
+        .read_queue       = std::make_shared<TestReadQueue>(),
+    });
+    const auto measured = measuring_store.save(long_first, fingerprint(), exporter(40'000));
+    int failures = check(measured.has_value(), "short-first fixture generation is measurable");
+    if (!measured) { return failures; }
+
+    TemporaryDirectory temporary;
+    SessionCheckpointStore store({.root                 = temporary.path,
+                                  .disk_quota_bytes     = measured->bytes * 2,
+                                  .short_session_tokens = 32'768,
+                                  .staging_bytes        = 1ULL << 20,
+                                  .read_queue           = std::make_shared<TestReadQueue>()});
+    const bool saved = store.save(long_first, fingerprint(), exporter(40'000)).has_value() &&
+                       store.save(short_middle, fingerprint(), exporter(4'096)).has_value() &&
+                       store.save(long_last, fingerprint(), exporter(40'000)).has_value();
+    failures += check(saved, "three sessions publish under a two-generation cap");
+    const auto state = [&](const ResponseStoreSnapshot& session) {
+        return store.status(session.client_session_sha256, fingerprint()).at("state");
+    };
+    failures += check(state(long_first) == "available" && state(short_middle) == "missing" &&
+                          state(long_last) == "available",
+                      "quota reclamation took an older long session before a short one");
+    return failures;
+}
+
 int test_load_scan_failure_does_not_deadlock() {
     TemporaryDirectory temporary;
     const ResponseStoreSnapshot responses = sample_snapshot();
@@ -1685,6 +1733,7 @@ int main() {
     failures += test_active_reader_delete_and_gc();
     failures += test_may_hold_prefilter();
     failures += test_store_wide_quota_across_sessions();
+    failures += test_quota_reclaims_short_sessions_first();
     failures += test_load_scan_failure_does_not_deadlock();
     failures += test_native_read_queue_is_required();
     failures += test_large_session_resaves_within_quota();

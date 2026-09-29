@@ -729,6 +729,8 @@ struct GenerationCandidate {
     std::string name;
     std::filesystem::file_time_type time;
     std::uint64_t bytes = 0;
+    // A current session checkpointing fewer than options.short_session_tokens tokens.
+    bool short_session = false;
 };
 
 struct GenerationInventory {
@@ -760,6 +762,19 @@ void account_bytes(std::uint64_t& used, std::uint64_t bytes) {
         return session_generation_bytes(path);
     }
     return directory_bytes(path);
+}
+
+// Whether a published generation checkpoints fewer tokens than options.short_session_tokens. Only
+// the reclamation order reads it, never a load or a skip decision, so a manifest that cannot be
+// read orders its session as long - kept longer - instead of failing the pass.
+[[nodiscard]] bool short_session_generation(const SessionCheckpointStoreOptions& options,
+                                            const std::filesystem::path& generation) noexcept {
+    if (options.short_session_tokens == 0) { return false; }
+    try {
+        const nlohmann::json manifest =
+            nlohmann::json::parse(read_text_bounded(generation / "manifest.json", 16ULL << 20));
+        return manifest.at("frontier_tokens").get<std::uint64_t>() < options.short_session_tokens;
+    } catch (...) { return false; }
 }
 
 [[nodiscard]] GenerationInventory inventory_generations(
@@ -831,17 +846,20 @@ void account_bytes(std::uint64_t& used, std::uint64_t bytes) {
         }
         if (current_readable && current && current_time && !session_active &&
             (!protected_session || session_entry.path() != *protected_session)) {
-            inventory.candidates.push_back({.kind   = CandidateKind::CurrentSession,
-                                            .path   = session_entry.path(),
-                                            .digest = digest,
-                                            .name   = *current,
-                                            .time   = *current_time,
-                                            .bytes  = session_bytes});
+            inventory.candidates.push_back(
+                {.kind          = CandidateKind::CurrentSession,
+                 .path          = session_entry.path(),
+                 .digest        = digest,
+                 .name          = *current,
+                 .time          = *current_time,
+                 .bytes         = session_bytes,
+                 .short_session = short_session_generation(options, generations / *current)});
         }
     }
     std::sort(inventory.candidates.begin(), inventory.candidates.end(),
               [](const GenerationCandidate& left, const GenerationCandidate& right) {
                   if (left.kind != right.kind) { return left.kind < right.kind; }
+                  if (left.short_session != right.short_session) { return left.short_session; }
                   if (left.time != right.time) { return left.time < right.time; }
                   return left.path.generic_string() < right.path.generic_string();
               });
