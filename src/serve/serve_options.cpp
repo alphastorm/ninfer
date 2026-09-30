@@ -512,6 +512,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         }
     }
     if (!options.session_checkpoint_root.empty()) {
+        if (options.speculative.backend == SpeculativeBackend::DFlash2) {
+            throw std::invalid_argument(
+                "DFlash2 does not support --session-checkpoint-dir; omit it for this backend");
+        }
         if (options.api_key.empty()) {
             throw std::invalid_argument(
                 "--session-checkpoint-dir requires --api-key or --api-key-file");

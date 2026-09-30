@@ -166,6 +166,7 @@ enum class ContinuationExportSkipReason : std::uint8_t {
     UnexpectedException,
     StoreInputInvalid,
     StoreStatsInvalid,
+    DFlash2StateUnsupported,
 };
 
 [[nodiscard]] constexpr std::string_view
@@ -173,6 +174,8 @@ continuation_export_skip_reason_name(ContinuationExportSkipReason reason) noexce
     switch (reason) {
     case ContinuationExportSkipReason::None:
         return "none";
+    case ContinuationExportSkipReason::DFlash2StateUnsupported:
+        return "DFlash2 checkpoint export is unsupported";
     case ContinuationExportSkipReason::StagingBufferEmpty:
         return "staging buffer is zero";
     case ContinuationExportSkipReason::ContinuationInvalid:

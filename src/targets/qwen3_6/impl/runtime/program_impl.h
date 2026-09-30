@@ -8636,6 +8636,11 @@ ProgramImplCore::checkpoint_continuation(const ContinuationHandle& continuation,
     };
     try {
         stage(Stage::Preconditions);
+        // The durable format does not encode DFlash2 draft-context rings. Reject before
+        // exposing metadata or payload bytes to the writer.
+        if (speculative_backend == SpeculativeBackend::DFlash2) {
+            return refuse(Reason::DFlash2StateUnsupported);
+        }
         if (staging_bytes == 0) { return refuse(Reason::StagingBufferEmpty); }
         if (!valid_continuation(continuation)) { return refuse(Reason::ContinuationInvalid); }
         if (has_context_transaction()) { return refuse(Reason::ContextTransactionBusy); }

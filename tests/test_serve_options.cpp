@@ -209,6 +209,15 @@ int main() {
                           "serve options did not preserve DFlash2 configuration");
     }
 
+    failures += check(
+        rejects([&] {
+            (void)parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2", "--draft-tokens", "7",
+                         "--api-key", "secret", "--binary-sha256", binary_sha,
+                         "--artifact-sha256", artifact_sha, "--config-sha256", config_sha,
+                         "--session-checkpoint-dir", "/tmp/ninfer-checkpoints"});
+        }),
+        "DFlash2 accepted durable checkpoints that cannot represent its state");
+
     const ServeOptions dflash_vision = parse(
         {"ninfer-serve", "model.ninfer", "--spec", "dflash", "--draft-tokens", "15", "--vision"});
     failures += check(dflash_vision.enable_vision &&
