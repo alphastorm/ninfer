@@ -111,7 +111,8 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  * Algorithm:
  *   This is the variable-K, 16-candidate form of speculative rejection sampling.
  *   For row b, let P=clamp(current_extents[b],0,K). Only target columns 0..P are live.
- *   Greedy rows accept the longest prefix matching the penalty-adjusted target argmax,
+ *   Greedy rows accept the longest prefix matching the raw target argmax (penalties are
+ *   ignored, as in sampling.h),
  *   then emit that argmax as correction/bonus. Positive-temperature rows construct p
  *   using sampling.h penalties and filters. A live draft d is accepted with probability
  *   min(1,p(d)/q(d)); first rejection samples normalized max(p-q,0). After accepting all
@@ -125,7 +126,7 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
  *   The registered domain is token_domain=248077, K=1..15, B=1..8. Each live draft
  *   position has distinct global candidate ids in [0,token_domain). proposal_q is the
  *   normalized FP32 distribution used to draw that draft; the draft occurs with positive q.
- *   For greedy rows without penalties, live target_tokens are the unpenalized target argmax
+ *   For greedy rows, live target_tokens are the unpenalized target argmax
  *   over the valid token domain, with lower ids breaking ties.
  *
  * Numeric:

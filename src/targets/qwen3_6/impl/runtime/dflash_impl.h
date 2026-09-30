@@ -257,8 +257,6 @@ void propose_dflash2_batch(DFlashBatchContext& state, qwen3_6::DFlashDecodeState
                        stream);
         for (std::size_t layer_index = 0; layer_index < weights.layers.size(); ++layer_index) {
             const auto& layer = weights.layers[layer_index];
-            nvtx::ScopedRange layer_range(nvtx::Name::DFlashLayer, nvtx::Category::DFlash,
-                                          layer_index);
             {
                 auto scope  = work.scope();
                 auto branch = workspace_recipe::dflash2_branch<Config>(work, width, batch);
@@ -333,8 +331,6 @@ void propose_batch_impl(DFlashBatchContext& state, qwen3_6::DFlashDecodeState& f
     if constexpr (!V::supports_dflash) {
         throw std::logic_error("DFlash proposal is unavailable for this target");
     } else if constexpr (V::DFlashConfig::coherent_selector) {
-        nvtx::ScopedRange proposal_range(nvtx::Name::DFlashProposal, nvtx::Category::DFlash,
-                                         static_cast<std::uint64_t>(k + 1U) * batch_size);
         propose_dflash2_batch<V>(state, frame, batch_size, k, envelopes);
     } else {
         using Config               = typename V::DFlashConfig;

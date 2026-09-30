@@ -10000,7 +10000,8 @@ runtime::ExecutionTiming ProgramImplCore::resolve_pending_raw(
         // Sparse acceptance reads counts. Publish only the prefix licensed by the Frontend.
         if (speculative_backend == SpeculativeBackend::DFlash2) {
             for (std::size_t row = 0; row < lanes.size(); ++row) {
-                if (cancelled[row] || !requests[lanes[row]].sampling_host.token_counts) {
+                if (cancelled[row] || !(requests[lanes[row]].sampling_host.temperature > 0.0f) ||
+                    !requests[lanes[row]].sampling_host.token_counts) {
                     continue;
                 }
                 const auto count = static_cast<std::int32_t>(accepted_tokens[row]);

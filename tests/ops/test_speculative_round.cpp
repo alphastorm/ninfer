@@ -172,7 +172,8 @@ struct SparseAcceptSuite {
         if (!(config.temperature > 0.0f)) {
             std::pair<double, std::int32_t> best{-std::numeric_limits<double>::infinity(), 0};
             for (int token = 0; token < kSparseTokenDomain; ++token) {
-                const std::pair<double, std::int32_t> candidate{adjusted(token), token};
+                const std::pair<double, std::int32_t> candidate{
+                    bf16_to_f32(logits[sparse_logit_index(row, column, token)]), token};
                 if (better(candidate, best)) best = candidate;
             }
             return {{best.second}, {1.0}};
@@ -759,7 +760,7 @@ struct SparseAcceptSuite {
             }
         }
 
-        // A committed-history penalty changes row 0's first target argmax.
+        // Greedy rows must ignore committed-history penalties, even on the mixed route.
         configs[0].temperature      = 0.0f;
         configs[0].presence_penalty = 2.0f;
         const int row0_draft        = drafts[0];
