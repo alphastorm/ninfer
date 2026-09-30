@@ -1,6 +1,11 @@
 # Qwen3.8-27B DFlash2 算法核心
 
-> 状态：正式 Engine 已接入，支持启动固定 `K=1..15`、`B=1..8`、eager/CUDA Graph、Text/Vision 和 Device/Host 状态复用。
+> Fork spike status (2026-09-30): the upstream Engine integration is ported for fixed
+> `K=1..15`, `B=1..8`, eager/CUDA Graph, Text/Vision and transient state reuse. CPU build,
+> argument contracts and real-artifact binding have been exercised; GPU qualification is
+> pending. Durable checkpoint export is deliberately unsupported and fails closed.
+> The fork's greedy sampling contract remains penalty/count-free; the positive-temperature
+> sparse path publishes counts only for the Frontend-committed prefix.
 >
 > 范围：本文只固定 Qwen3.8-27B DFlash2 的模型计算、proposal、target
 > verification 和状态语义。Artifact inventory 与存储格式由

@@ -32,9 +32,15 @@ pinned Host KV retain inactive continuations under Device pressure. Active reque
 Other artifacts use the same command shape with their own path. For 35B-A3B DFlash, replace the MTP
 selection with `--spec dflash --draft-tokens 7 --lm-head-draft`. Qwen3.8-27B
 artifacts with DFlash2 companion weights also support `--spec dflash2 --draft-tokens 7`, with
-`--lm-head-draft` optional. DFlash2 accepts draft counts 1..15 and supports the same sampling,
+`--lm-head-draft` optional. This fork integration is an experimental spike: CPU build, argument
+contracts, and artifact binding are checked; GPU serving and MTP parity still require a reserved
+GPU window. DFlash2 must omit `--session-checkpoint-dir`: the server rejects that combination,
+and direct continuation export refuses DFlash2 before writing checkpoint metadata or payload.
+DFlash2 accepts draft counts 1..15 and supports the same sampling,
 concurrency, prefix reuse, and image/video request surfaces. It may remain combined with
-`--vision`.
+`--vision`. The fork's existing sampling contract is retained: greedy mode ignores penalties and
+does not update token counts; positive-temperature sparse acceptance publishes only the
+Frontend-committed token prefix.
 
 When `--model-id` is omitted, the server advertises and accepts the loaded container's exact
 `identity.model_id`. An explicit `--model-id` remains a public HTTP alias override and does not
