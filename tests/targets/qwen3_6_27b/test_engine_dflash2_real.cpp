@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
             ordinary_options.use_cuda_graph  = false;
             ordinary_options.enable_vision   = false;
             ninfer::Engine ordinary(ordinary_options);
-            prompt = ordinary.tokenize_text("Count from one to twenty: one, two, three,");
+            prompt = ninfer::test::counting_prompt_tokens();
             reference =
                 ordinary.generate(ordinary.prepare_tokens(prompt), request(24)).generated_token_ids;
             penalty_reference =

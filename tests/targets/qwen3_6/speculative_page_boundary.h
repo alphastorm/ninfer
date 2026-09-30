@@ -8,6 +8,11 @@
 
 namespace ninfer::test {
 
+// Encoded with the pinned Qwen3.8 tokenizer: "Count from one to twenty: one, two, three,".
+inline std::vector<TokenId> counting_prompt_tokens() {
+    return {2427, 494, 799, 310, 16570, 25, 799, 11, 1330, 11, 2250, 11};
+}
+
 // Exercise the same resource transition for DFlash's Full KV and DFlash2's cyclic-only state.
 inline void speculative_page_boundary(Engine& engine) {
     const auto check = [](bool condition, const char* message) {
@@ -22,7 +27,7 @@ inline void speculative_page_boundary(Engine& engine) {
         return options;
     };
 
-    auto prompt = engine.tokenize_text("Count from one to twenty: one, two, three,");
+    auto prompt = counting_prompt_tokens();
     check(prompt.size() <= 63, "page-boundary prompt exceeds its fixed prefix");
     prompt.insert(prompt.begin(), 63 - prompt.size(), 198);
     const auto reference = engine.generate(engine.prepare_tokens(prompt), request(false));
