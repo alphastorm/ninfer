@@ -667,6 +667,7 @@ public:
     std::optional<PinnedHostBuffer> dflash_host;
     qwen3_6::DFlashDecodeIngress* dflash_host_ingress = nullptr;
     qwen3_6::DFlashDecodeEgress* dflash_host_egress   = nullptr;
+    qwen3_6::DFlashPrefillIngress* dflash_prefill_host_ingress = nullptr;
 
     std::size_t workspace_logical_peak_bytes = 0;
     std::size_t vision_handoff_peak_bytes    = 0;
