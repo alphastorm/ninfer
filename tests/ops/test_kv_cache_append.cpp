@@ -43,6 +43,14 @@ std::size_t full_input_index(int d, int head, int token, int kv_heads) {
                 static_cast<std::size_t>(kv_heads) * static_cast<std::size_t>(token));
 }
 
+std::vector<std::uint16_t> finite_patterned_bf16_bits(std::size_t count, std::uint32_t seed) {
+    auto bits = patterned_bits(count, seed);
+    for (auto& value : bits) {
+        if ((value & 0x7f80u) == 0x7f80u) { value ^= 0x0080u; }
+    }
+    return bits;
+}
+
 std::size_t full_cache_index(int leading_extent, int leading, int head, int position,
                              int physical_page, int kv_heads) {
     return static_cast<std::size_t>(leading) +
