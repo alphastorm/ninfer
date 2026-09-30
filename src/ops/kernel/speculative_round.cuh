@@ -450,31 +450,6 @@ __global__ void proposal_remap_token_ids_kernel(std::int32_t* proposal_tokens,
     if (idx >= 0 && idx < n) { proposal_tokens[i] = id_map[idx]; }
 }
 
-template <bool UpdateTokenCounts>
-__device__ __forceinline__ void
-speculative_store_accept_result(const std::int32_t* row_drafts, std::int32_t k, std::int32_t row,
-                                std::int32_t accepted_count, std::int32_t terminal_token,
-                                std::int32_t* lengths, std::int32_t* anchors,
-                                std::int32_t* row_tokens, std::int32_t* licensed_counts,
-                                std::int32_t* accepted, const SamplingConfig* config) {
-    for (int i = 0; i <= k; ++i) { row_tokens[i] = 0; }
-    for (int i = 0; i < accepted_count; ++i) { row_tokens[i] = row_drafts[i]; }
-    row_tokens[accepted_count] = terminal_token;
-
-    const int produced   = accepted_count + 1;
-    licensed_counts[row] = produced;
-    accepted[row]        = accepted_count;
-    anchors[row]         = terminal_token;
-    lengths[row] += produced;
-    if constexpr (UpdateTokenCounts) {
-        if (config->token_counts != nullptr) {
-            for (int i = 0; i < produced; ++i) {
-                atomicAdd(&config->token_counts[row_tokens[i]], 1);
-            }
-        }
-    }
-}
-
 __device__ __forceinline__ float speculative_sparse_probability(const std::int32_t* candidate_ids,
                                                                 const float* proposal_q,
                                                                 std::int32_t token) {

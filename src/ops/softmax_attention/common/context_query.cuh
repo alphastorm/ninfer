@@ -10,6 +10,7 @@
 
 #include <cstdint>
 #include <type_traits>
+#include <type_traits>
 
 namespace ninfer::ops {
 
@@ -120,12 +121,21 @@ context_query_stage_v_tile(__half* dst, const __half* context, const __nv_bfloat
     }
 }
 
+template <typename ContextPolicy, int KeyBlock, int Threads>
+__device__ __forceinline__ void
+context_query_stage_v_tile(__nv_bfloat16* dst, const __nv_bfloat16* context,
+                           const __nv_bfloat16* query, int key0, int valid_keys, bool query_tile,
+                           int kv_head, int physical_page, ContextPolicy& policy, int tid) {
+    context_query_stage_tile<ContextPolicy, KeyBlock, Threads>(
+        dst, context, query, key0, valid_keys, query_tile, kv_head, physical_page, policy, tid);
+}
+
 template <typename ContextPolicy, int Tokens, int WarpsPerCta, int KeyBlock, bool DirectOutput,
-          typename Partial>
+          typename Value, typename Partial>
 __device__ __forceinline__ void context_query_split_partial_body(
     const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __restrict__ query_k,
     const __nv_bfloat16* __restrict__ query_v, const std::int32_t* __restrict__ valid_columns,
-    const __nv_bfloat16* __restrict__ context_k, const __half* __restrict__ context_v,
+    const __nv_bfloat16* __restrict__ context_k, const Value* __restrict__ context_v,
     ContextPolicy policy, int length, int max_context, int split_capacity, float scale,
     Partial* __restrict__ partial_acc, float* __restrict__ partial_m, float* __restrict__ partial_l,
     __nv_bfloat16* __restrict__ out) {
@@ -211,7 +221,11 @@ __device__ __forceinline__ void context_query_split_partial_body(
 
     extern __shared__ __align__(16) __nv_bfloat16 shared[];
     __nv_bfloat16* k_s = shared;
-    __half* v_s        = reinterpret_cast<__half*>(shared + KeyBlock * D);
+    Value* v_s        = reinterpret_cast<Value*>(shared + KeyBlock * D);
+    const auto pack_pv = [](float lo, float hi) {
+        if constexpr (std::is_same_v<Value, __half>) { return pack_f16x2(lo, hi); }
+        else { return pack_bf16x2(lo, hi); }
+    };
 
     // The two K/V buffers together hold at least Br rows. Use them once as Q staging, then retain
     // all Q MMA fragments in registers for the complete split.
@@ -395,11 +409,11 @@ __device__ __forceinline__ void context_query_split_partial_body(
             block_l1 += p10 + p11;
             const int pk = nt >> 1;
             if ((nt & 1) == 0) {
-                p_frag[pk][0] = pack_f16x2(p00, p01);
-                p_frag[pk][1] = pack_f16x2(p10, p11);
+                p_frag[pk][0] = pack_pv(p00, p01);
+                p_frag[pk][1] = pack_pv(p10, p11);
             } else {
-                p_frag[pk][2] = pack_f16x2(p00, p01);
-                p_frag[pk][3] = pack_f16x2(p10, p11);
+                p_frag[pk][2] = pack_pv(p00, p01);
+                p_frag[pk][3] = pack_pv(p10, p11);
             }
         }
         block_l0 = warp_sum<4>(block_l0, FullMask);
@@ -436,12 +450,23 @@ __device__ __forceinline__ void context_query_split_partial_body(
                                   v_lane_base + static_cast<unsigned>(next_pk * 16 * RowBytes),
                                   static_cast<unsigned>(next_n2 << 4), v_as, v_r));
             }
-            mma_f16(acc[n2][0], acc[n2][1], acc[n2][2], acc[n2][3], p_frag[pk][0], p_frag[pk][1],
+            if constexpr (std::is_same_v<Value, __half>) {
+                mma_f16(acc[n2][0], acc[n2][1], acc[n2][2], acc[n2][3], p_frag[pk][0], p_frag[pk][1],
                     p_frag[pk][2], p_frag[pk][3], vf[cur][0], vf[cur][1]);
+            } else {
+                mma_bf16(acc[n2][0], acc[n2][1], acc[n2][2], acc[n2][3], p_frag[pk][0], p_frag[pk][1],
+                    p_frag[pk][2], p_frag[pk][3], vf[cur][0], vf[cur][1]);
+            }
             if (n2 + 1 < PVNt) {
-                mma_f16(acc[n2 + 1][0], acc[n2 + 1][1], acc[n2 + 1][2], acc[n2 + 1][3],
+                if constexpr (std::is_same_v<Value, __half>) {
+                    mma_f16(acc[n2 + 1][0], acc[n2 + 1][1], acc[n2 + 1][2], acc[n2 + 1][3],
                         p_frag[pk][0], p_frag[pk][1], p_frag[pk][2], p_frag[pk][3], vf[cur][2],
                         vf[cur][3]);
+                } else {
+                    mma_bf16(acc[n2 + 1][0], acc[n2 + 1][1], acc[n2 + 1][2], acc[n2 + 1][3],
+                        p_frag[pk][0], p_frag[pk][1], p_frag[pk][2], p_frag[pk][3], vf[cur][2],
+                        vf[cur][3]);
+                }
             }
         }
 

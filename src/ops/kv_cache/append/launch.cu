@@ -132,7 +132,7 @@ void launch_cyclic_profile(const Tensor& k, const Tensor& v, const Tensor& posit
                            const KVCacheAppendPrefixPlan& plan, cudaStream_t stream) {
     if (plan.max_count == 0) return;
     auto* cache_k       = static_cast<__nv_bfloat16*>(cache.k.data);
-    auto* cache_v       = static_cast<__nv_bfloat16*>(cache.v.data);
+    auto* cache_v       = static_cast<__half*>(cache.v.data);
     const auto* input_k = static_cast<const __nv_bfloat16*>(k.data);
     const auto* input_v = static_cast<const __nv_bfloat16*>(v.data);
     const auto* pos     = static_cast<const std::int32_t*>(positions.data);

@@ -76,10 +76,10 @@ void kv_cache_append_prefix(const Tensor& k, const Tensor& v, const Tensor& posi
                             PagedKVBatchLayerView cache, cudaStream_t stream);
 
 /**
- * Append device-selected exact BF16 prefixes to lane-owned cyclic storage.
+ * Append device-selected BF16 prefixes to lane-owned cyclic BF16-K/FP16-V storage.
  *
- * k/v, positions, counts, and their exact-copy and mutation contracts match the paged
- * overload; lanes[b] selects the destination lane. The registered profiles have fixed geometry
+ * K is copied exactly; V stores FP16_RNE of the represented BF16 input. Positions, counts,
+ * and mutation contracts match the paged overload; lanes[b] selects the destination lane. The registered profiles have fixed geometry
  * D=128, Hkv=8 and capacity 2048 or 4096. Absolute position p maps to slot p mod capacity.
  * For a nonempty prefix, the caller guarantees that the row's existing live interval ends
  * immediately before positions[0,b]. Advancing it by counts[b] makes every overwritten old slot

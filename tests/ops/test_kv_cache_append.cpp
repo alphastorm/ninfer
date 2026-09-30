@@ -91,6 +91,10 @@ std::uint16_t f32_to_f16_bits(float value) {
     return static_cast<std::uint16_t>(sign | (rounded_exp << 10) | half_mantissa);
 }
 
+std::uint16_t bf16_bits_to_f16_bits(std::uint16_t bits) {
+    return f32_to_f16_bits(bf16_to_f32(bits));
+}
+
 float f16_bits_to_f32(std::uint16_t bits) {
     const bool negative = (bits & 0x8000u) != 0;
     const int exp       = (bits >> 10) & 0x1f;
@@ -493,7 +497,7 @@ void append_oracle(std::vector<std::uint16_t>& cache_k, std::vector<std::uint16_
                 const auto dst = cyclic ? cyclic_cache_index(d, head, slot, cyclic_capacity)
                                         : paged_cache_index(d, head, position, mapping);
                 cache_k[dst]   = input_k[src];
-                cache_v[dst]   = input_v[src];
+                cache_v[dst]   = cyclic ? bf16_bits_to_f16_bits(input_v[src]) : input_v[src];
             }
         }
     }
@@ -516,7 +520,7 @@ CyclicKVCacheLayerView cyclic_view(GuardedDeviceBuffer& k, GuardedDeviceBuffer& 
                                    int lane_capacity = 1) {
     return {
         .k        = Tensor(k.data(), DType::BF16, {kHeadDim, capacity, kKVHeads, lane_capacity}),
-        .v        = Tensor(v.data(), DType::BF16, {kHeadDim, capacity, kKVHeads, lane_capacity}),
+        .v        = Tensor(v.data(), DType::FP16, {kHeadDim, capacity, kKVHeads, lane_capacity}),
         .capacity = static_cast<std::uint32_t>(capacity),
         .padded_capacity = static_cast<std::uint32_t>(capacity),
         .num_kv_heads    = kKVHeads,
@@ -801,7 +805,7 @@ int batch_selector_case(bool cyclic, int cyclic_capacity = kDFlashWindow) {
                                                         cyclic_capacity)
                                : paged_cache_index(d, head, position, mapping);
                     expected_k[dst] = host_k[src];
-                    expected_v[dst] = host_v[src];
+                    expected_v[dst] = cyclic ? bf16_bits_to_f16_bits(host_v[src]) : host_v[src];
                 }
             }
         }
