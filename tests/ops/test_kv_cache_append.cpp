@@ -548,7 +548,7 @@ int run_case(int tokens, int commit_count, int first_position, bool cyclic,
                                     (cyclic ? cyclic_capacity : kPage * kPhysicalPages);
     const auto host_k = patterned_bits(input_count, 0x10203040u + static_cast<unsigned>(tokens));
     const auto host_v =
-        patterned_bits(input_count, 0x50607080u + static_cast<unsigned>(commit_count));
+        finite_patterned_bf16_bits(input_count, 0x50607080u + static_cast<unsigned>(commit_count));
     const auto initial_k = patterned_bits(cache_count, 0x90a0b0c0u);
     const auto initial_v = patterned_bits(cache_count, 0xd0e0f001u);
     std::vector<std::int32_t> positions(static_cast<std::size_t>(tokens));
@@ -617,7 +617,7 @@ int cyclic_graph_replay_case(int capacity, int tokens) {
     const std::size_t input_count = static_cast<std::size_t>(kHeadDim) * kKVHeads * tokens;
     const std::size_t cache_count = static_cast<std::size_t>(kHeadDim) * capacity * kKVHeads;
     const auto host_k             = patterned_bits(input_count, 0x11223344u);
-    const auto host_v             = patterned_bits(input_count, 0x55667788u);
+    const auto host_v             = finite_patterned_bf16_bits(input_count, 0x55667788u);
     const auto initial_k          = patterned_bits(cache_count, 0x99aabbccu);
     const auto initial_v          = patterned_bits(cache_count, 0xddeeff01u);
     std::vector<std::int32_t> positions(tokens);
@@ -696,7 +696,7 @@ int paged_graph_replay_case() {
     const std::size_t cache_count =
         static_cast<std::size_t>(kHeadDim) * kPage * kKVHeads * kPhysicalPages;
     const auto host_k    = patterned_bits(input_count, 0x12345678u);
-    const auto host_v    = patterned_bits(input_count, 0x87654321u);
+    const auto host_v    = finite_patterned_bf16_bits(input_count, 0x87654321u);
     const auto initial_k = patterned_bits(cache_count, 0xabcdef01u);
     const auto initial_v = patterned_bits(cache_count, 0x10fedcbau);
     std::vector<std::int32_t> positions(tokens);
@@ -787,7 +787,7 @@ int batch_selector_case(bool cyclic, int cyclic_capacity = kDFlashWindow) {
     const std::size_t lane_cache_count = static_cast<std::size_t>(kHeadDim) * kKVHeads *
                                          (cyclic ? cyclic_capacity : kPage * kPhysicalPages);
     const auto host_k    = patterned_bits(row_input_count * batch, 0x31415926u);
-    const auto host_v    = patterned_bits(row_input_count * batch, 0x27182818u);
+    const auto host_v    = finite_patterned_bf16_bits(row_input_count * batch, 0x27182818u);
     const auto initial_k = patterned_bits(lane_cache_count * (cyclic ? batch : 1), 0x16180339u);
     const auto initial_v = patterned_bits(lane_cache_count * (cyclic ? batch : 1), 0x57721566u);
     const std::vector<std::int32_t> tables{0, 1, 2, 3, 4, 5};
