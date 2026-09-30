@@ -1,13 +1,43 @@
-# DFlash2 fork spike — recorded clean pause, 2026-09-30
+# DFlash2 fork spike — measured on the RTX 5090, 2026-09-30 (EXP-079: no-go as ported)
 
 ## State and boundaries
 
 - Branch: `spike/dflash2-5090`, based on `e20060b6`, in `~/Development/ninfer-dflash2`.
 - Built source: **`905101229dac18c3eabeba115d32873e7c24196f`**. This report is committed separately after that source revision; it does not alter the executable source.
-- Port implementation and CPU build are complete at this pause. **GPU serving, numerical parity, and speed are not yet proven on this fork.** No upstream integration commits remain identified; no cherry-pick or merge conflicts remain open.
-- All work is local; nothing was pushed. The parent checkout, omp-ninfer, production container `ninfer-5090-v070p`, and service/window directories were not changed. No command requested GPU access or ran a GPU test.
+- Port implementation and CPU build are complete. The GPU window below measured serving, MTP3 parity and speed: MTP3 is unchanged, DFlash2 drafts as well as upstream, and its decode round grows with context. No upstream integration commits remain identified; no cherry-pick or merge conflicts remain open.
+- All work is local; nothing was pushed. The parent checkout and omp-ninfer's sources were not changed by the port; the window ran on production's GPU under the appliance's hold and dead-man and restored production.
 - The lead requested a clean stop before 09:55Z. The owned build container `ninfer-dflash2-spike-build` has been stopped after its builds completed. It is retained for resumption, not running a build.
 - This is a bounded local experiment, not a production cutover. Verification is limited to the evidence below; no fork speedup is claimed. EXP-078's upstream result remains a separate measurement.
+
+## GPU window, 2026-09-30 (EXP-079)
+
+Measured on nyc-pc's RTX 5090 with production stopped from 11:27:38Z to 11:55:49Z. Image
+`ninfer-5090:90510122-dflash2-spike` (`sha256:4ad7cf3a…`) is the published v0.6.14 runtime image
+with this build's `ninfer` and `ninfer-serve` (`0ed2a048…`); the artifact is the one below.
+Receipt: omp-ninfer `docs/measurements/2026-09-30-dflash2-fork-spike-rtx5090.json`. The
+pre-registered rule said **no-go as ported**: the corpus gain was -3.6% against a +5% floor.
+
+- GPU tests (logs in the build root's `gpu-tests/`): the DFlash2 real-model test passed at K=7,
+  CUDA graph, B=1, BF16 KV with both LM heads (accepted 20/20 each), and 12 of 13 op tests passed.
+  `ninfer_kv_cache_append_test` failed 12 cyclic cases on exact FP16 V mismatches. `90510122`
+  added `finite_patterned_bf16_bits` but used it in one fixture; the others fed BF16 NaN patterns,
+  which the device converts to canonical `0x7fff` while the host oracle keeps the sign (`0x7e00`).
+  `139903c4` feeds finite V to all five fixtures, as upstream does; the rebuilt test passed on the
+  GPU at the end of the next window (EXP-080, 12:20Z).
+- MTP3 preservation: v0.8.7's one-request arguments with the durable store on answered all 89
+  role-corpus cases byte-identically to shipped v0.9.0 and v0.8.7, at 238.41 against 237.37 tok/s.
+- DFlash2 K=7, one request: 228.90 tok/s on the corpus (-3.6% against shipped), 4.596 tokens per
+  round (upstream 4.631), 20.08 ms per round (upstream 18.26; this binary's MTP3 14.02). Behind
+  0/32K/64K/120K tokens a code answer decoded at 355.15/126.78/83.74/44.54 tok/s: rounds of
+  16.2/45.6/75.0/126.3 ms, about 16 ms plus 0.92 ms per 1,000 context tokens, where upstream's
+  DFlash2 rounds rise from 17.7 to 23.0 ms. Prefill matches shipped.
+- Two requests with two device state slots: 131,520 KV tokens, as upstream; a pair decoded at
+  276.53 tok/s against shipped 388.42 and upstream DFlash2's 453.95.
+- Next: a kernel timeline of one DFlash2 round at 64K to find the cost that grows with context.
+  Two candidates, neither measured: the target attention for one request's 8-token verify, a shape
+  this fork had not run at long context (MTP3 verifies 4 tokens; v0.6.14's 8-row rounds are two
+  4-token requests), or a draft-side operation that scales with the prefix rather than the
+  2,048-token draft window.
 
 ## Artifact
 
@@ -62,7 +92,7 @@ cmake -S /workspace/src -B /workspace/build -G Ninja -DCMAKE_BUILD_TYPE=Release 
   `6e8b2e2ad5d53597c3ba8e7989f9546d40b921fc`, profile `dflash2-spike-5090`, GNU 13.3.0, CUDA 13.1.115, and architecture `120a`.
   **`source_dirty=true` is intentional conservative archive-build metadata:** the source was shipped
   with `git archive` and the build tree has no .git checkout. The binary is not stamped as a clean production build.
-- No GPU numerical oracle, real-engine execution, HTTP generation, or performance comparison was run.
+- At the CPU-only pause, no GPU numerical oracle, real-engine execution, HTTP generation, or performance comparison had run.
   Tests that require a CUDA device were compiled, not invoked or counted as skipped passes.
 
 Binaries:
