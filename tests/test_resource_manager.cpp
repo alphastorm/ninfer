@@ -2667,6 +2667,13 @@ void test_pressure_names_live_sessions_it_would_lose() {
                     victims(manager, *dropping.choice) == Victims{{31, "resp_31"}},
                 "a checkpoint-dropping pressure action did not name its session");
         dropping.choice.reset();
+        auto side_call = request(32, 31);
+        side_call.cache.update_session_index = false;
+        auto own_dropping = manager.inspect(program, FakePreparedPrompt{32}, side_call, 2);
+        require(own_dropping.choice.has_value() &&
+                    victims(manager, *own_dropping.choice) == Victims{{31, "resp_31"}},
+                "an unstored turn could drop its stored session checkpoint without a save");
+        own_dropping.choice.reset();
         require(started_actions(manager, program, 32, 32, 2) ==
                     std::vector<std::uint64_t>{5000U + owner},
                 "the scenario did not drop a checkpoint from a retained session");
@@ -2679,6 +2686,74 @@ void test_pressure_names_live_sessions_it_would_lose() {
         require(started_actions(manager, program, 32, 32, 2) ==
                     std::vector<std::uint64_t>{1000U + owner},
                 "the scenario did not keep the retained session whole");
+    }
+}
+
+// Two stored seeds followed by concurrent store:false root admissions. Resource pressure may
+// retire either seed, but the side calls never replace its stored response or session binding.
+void test_unstored_turn_pressure_saves_both_stored_sessions() {
+    class Writer final : public ninfer::runtime::ContinuationCheckpointWriter {
+    public:
+        bool write_file(std::string_view, std::uint64_t, std::uint64_t,
+                        std::span<const std::byte>) override {
+            return true;
+        }
+    } writer;
+
+    FakeProgram program;
+    FakeManager manager = make_manager(2, 4);
+    const std::array<FakeCacheSessionKey, 2> sessions{FakeCacheSessionKey{1},
+                                                    FakeCacheSessionKey{2}};
+    const std::array<std::string, 2> tags{"resp_D1", "resp_D2"};
+    std::array<std::uint32_t, 2> owners{};
+    std::array<ActiveRequest, 2> side_calls{};
+    std::array<std::optional<ninfer::runtime::ContinuationCheckpointStats>, 2> saved;
+    for (std::size_t i = 0; i < sessions.size(); ++i) {
+        const std::uint32_t content = static_cast<std::uint32_t>(i + 1);
+        const ActiveRequest seed = start_active(
+            manager, program, content, make_base(content, sessions[i], RetentionClass::LiveSession),
+            i + 1, tags[i]);
+        (void)finish_active(manager, program, seed);
+        owners[i] = seed.sequence.id;
+    }
+
+    // The first root admission retires both seeds; the second then needs no pressure, as in
+    // the two-slot restart receipt. Catalog space remains available for both active requests.
+    program.require_evictions = true;
+    for (std::size_t i = 0; i < sessions.size(); ++i) {
+        program.required_pressure_actions = i == 0 ? 2 : 0;
+        const std::uint32_t content = static_cast<std::uint32_t>(i + 101);
+        const auto base = make_base(content, sessions[i], RetentionClass::RecentPrivate, false);
+        auto inspection = manager.inspect(program, FakePreparedPrompt{content}, base, i + 3);
+        require(inspection.choice.has_value(), "unstored root admission had no pressure plan");
+        manager.for_each_pressure_victim(
+            *inspection.choice, [&](const FakeCacheSessionKey& session, std::string_view tag) {
+                for (std::size_t victim = 0; victim < sessions.size(); ++victim) {
+                    if (session != sessions[victim]) { continue; }
+                    require(tag == tags[victim], "pressure selected a non-stored response tag");
+                    saved[victim] = manager.checkpoint_session(program, session, tag, writer, 1024);
+                    require(saved[victim].has_value(), "pressure victim was already unexportable");
+                }
+            });
+        // As in EngineCore, saving precedes claiming resources and the choice is then replanned.
+        inspection.choice.reset();
+        side_calls[i] = start_active(manager, program, content, base, i + 3);
+        const std::vector<std::uint64_t> expected_actions =
+            i == 0 ? std::vector<std::uint64_t>{2000U + owners[0], 2000U + owners[1]}
+                   : std::vector<std::uint64_t>{};
+        require(program.started_source_id == 0 && program.started_action_ids == expected_actions,
+                "unstored root admissions did not retire both seeds before the second request");
+    }
+    for (const ActiveRequest& side_call : side_calls) {
+        (void)finish_active(manager, program, side_call, 32);
+    }
+    for (std::size_t i = 0; i < sessions.size(); ++i) {
+        ninfer::runtime::SessionCheckpointSkipDetail skip;
+        require(!manager.checkpoint_session(program, sessions[i], tags[i], writer, 1024, &skip) &&
+                    skip.reason == ninfer::runtime::SessionCheckpointSkipReason::SessionNotIndexed,
+                "an unstored turn replaced the evicted stored session binding");
+        require(saved[i] && saved[i]->frontier_tokens == 16 && saved[i]->restored_tokens == 16,
+                "a stored seed became unindexed without a checkpoint before its unstored turn");
     }
 }
 
@@ -2803,6 +2878,8 @@ int main() {
     run_test("restore reclaims reproducible sessions", test_restore_reclaims_reproducible_sessions);
     run_test("pressure names live sessions it would lose",
              test_pressure_names_live_sessions_it_would_lose);
+    run_test("unstored turn pressure saves both stored sessions",
+             test_unstored_turn_pressure_saves_both_stored_sessions);
     run_test("replay successor retags session", test_replay_selected_successor_retags_session);
     if (failures != 0) { return 1; }
     std::cout << "ok\n";

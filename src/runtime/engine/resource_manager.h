@@ -416,9 +416,10 @@ public:
     // pressure actions would leave unexportable: its continuation is evicted, or it loses
     // checkpoints, which can include its session endpoint. Only the indexed owner of a
     // checkpoint-tagged session counts - a superseded catalog entry is a cached copy, not a
-    // session's newest turn - and never the admitting request's own session, whose turn is about
-    // to supersede that state. The choice has claimed nothing yet, so a caller that must save a
-    // victim first can drop it and plan again.
+    // session's newest turn. Only an index-updating request supersedes its own session: an
+    // unstored side call must save the stored turn before dropping it, just like a foreign
+    // request. The choice has claimed nothing yet, so a caller that must save a victim first
+    // can drop it and plan again.
     template <typename Visit>
     void for_each_pressure_victim(const Choice& choice, Visit&& visit) const {
         for (std::size_t row = 0; row < choice.private_claim_slots_.size(); ++row) {
@@ -429,7 +430,8 @@ public:
             const std::uint32_t slot = choice.private_claim_slots_[row];
             if (slot >= catalog_count_) { continue; }
             const CatalogEntry& entry = catalog_[slot];
-            if (!entry.session || entry.checkpoint_tag.empty() || entry.session == choice.session_ ||
+            if (!entry.session || entry.checkpoint_tag.empty() ||
+                (entry.session == choice.session_ && choice.update_session_index_) ||
                 entry.id != choice.private_claim_ids_[row] ||
                 entry.revision != choice.private_claim_revisions_[row]) {
                 continue;
