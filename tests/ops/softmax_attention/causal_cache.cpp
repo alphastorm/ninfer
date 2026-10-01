@@ -2950,8 +2950,10 @@ int verify_workspace_capacity_contract(KvCacheStorage storage) {
                                            ops::kCausalAttentionMaximumVisibleKeys}) {
             const ops::CausalAttentionExecutionEnvelope envelope{1, maximum};
             for (const int batch : {1, 2, 8}) {
-                for (const auto interval : {std::pair{1, 17}, std::pair{8, 8},
+                for (const auto interval : {std::pair{1, 16}, std::pair{1, 17}, std::pair{8, 8},
                                              std::pair{17, 193}, std::pair{17, 1025}}) {
+                    // Batched verification carries at most 16 columns per request.
+                    if (batch > 1 && interval.second > 16) continue;
                     const auto capacity = ops::causal_softmax_attention_workspace_capacity_bytes(
                         op_geometry(geometry), DType::U8, envelope, batch, interval.first,
                         interval.second, storage);
@@ -2975,6 +2977,12 @@ int verify_workspace_capacity_contract(KvCacheStorage storage) {
             }
         }
     }
+    try {
+        (void)ops::causal_softmax_attention_workspace_capacity_bytes(
+            op_geometry(kGeometries[0]), DType::U8, {1, 131072}, 2, 1, 17, storage);
+        std::cerr << "NVFP4 accepted a batched width outside the verify domain\n";
+        ++failures;
+    } catch (const std::invalid_argument&) {}
     try {
         (void)ops::causal_softmax_attention_workspace_capacity_bytes(
             op_geometry(kGeometries[0]), DType::U8,
