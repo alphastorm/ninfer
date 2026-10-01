@@ -209,14 +209,13 @@ int main() {
                           "serve options did not preserve DFlash2 configuration");
     }
 
-    failures += check(
-        rejects([&] {
-            (void)parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2", "--draft-tokens", "7",
-                         "--api-key", "secret", "--binary-sha256", binary_sha,
-                         "--artifact-sha256", artifact_sha, "--config-sha256", config_sha,
-                         "--session-checkpoint-dir", "/tmp/ninfer-checkpoints"});
-        }),
-        "DFlash2 accepted durable checkpoints that cannot represent its state");
+    const ServeOptions durable_dflash2 = parse(
+        {"ninfer-serve", "model.ninfer", "--spec", "dflash2", "--draft-tokens", "7", "--api-key",
+         "secret", "--binary-sha256", binary_sha, "--artifact-sha256", artifact_sha,
+         "--config-sha256", config_sha, "--session-checkpoint-dir", "/tmp/ninfer-checkpoints"});
+    failures += check(durable_dflash2.speculative.backend == ninfer::SpeculativeBackend::DFlash2 &&
+                          durable_dflash2.session_checkpoint_root == "/tmp/ninfer-checkpoints",
+                      "DFlash2 did not keep durable session checkpoints");
 
     const ServeOptions dflash_vision = parse(
         {"ninfer-serve", "model.ninfer", "--spec", "dflash", "--draft-tokens", "15", "--vision"});

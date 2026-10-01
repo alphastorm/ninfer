@@ -8636,11 +8636,6 @@ ProgramImplCore::checkpoint_continuation(const ContinuationHandle& continuation,
     };
     try {
         stage(Stage::Preconditions);
-        // The durable format does not encode DFlash2 draft-context rings. Reject before
-        // exposing metadata or payload bytes to the writer.
-        if (speculative_backend == SpeculativeBackend::DFlash2) {
-            return refuse(Reason::DFlash2StateUnsupported);
-        }
         if (staging_bytes == 0) { return refuse(Reason::StagingBufferEmpty); }
         if (!valid_continuation(continuation)) { return refuse(Reason::ContinuationInvalid); }
         if (has_context_transaction()) { return refuse(Reason::ContextTransactionBusy); }
@@ -8667,17 +8662,25 @@ ProgramImplCore::checkpoint_continuation(const ContinuationHandle& continuation,
             sequence.execution_frontier) {
             return refuse(Reason::TextKvFrontierMismatch);
         }
-        const bool expects_backend = speculative_backend != SpeculativeBackend::None;
-        if (sequence.kv->backend.has_value() != expects_backend) {
+        // MTP and DFlash keep paged backend KV, exported as its own file. DFlash2 has none: its
+        // five-layer cyclic draft context lives inside every StateImage the export writes.
+        const bool expects_backend_kv = backend_kv_cache() != nullptr;
+        if (sequence.kv->backend.has_value() != expects_backend_kv) {
             return refuse(Reason::SpeculativeKvPresenceMismatch);
         }
-        if (expects_backend && backend_kv_addresses->committed_frontier(*sequence.kv->backend) !=
-                                   backend_kv_valid(sequence)) {
+        if (expects_backend_kv && backend_kv_addresses->committed_frontier(*sequence.kv->backend) !=
+                                      backend_kv_valid(sequence)) {
             return refuse(Reason::SpeculativeKvFrontierMismatch);
         }
-        if (!expects_backend &&
+        if (speculative_backend == SpeculativeBackend::None &&
             (sequence.mtp_kv_valid != 0 || sequence.dflash_context_frontier != 0)) {
             return refuse(Reason::BackendStateWithoutSpeculation);
+        }
+        // A DFlash2 ring behind the frontier still needs the lane's pending features, which a
+        // restored process does not have; terminal settlement flushes them before retention.
+        if (speculative_backend == SpeculativeBackend::DFlash2 &&
+            sequence.dflash_context_frontier != sequence.execution_frontier) {
+            return refuse(Reason::DFlash2ContextFrontierMismatch);
         }
 
         stage(Stage::StateInventory);
@@ -8936,8 +8939,8 @@ ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReade
         ContinuationCheckpointMetadata metadata =
             decode_continuation_metadata(metadata_bytes, capacity, maximum_anchors);
 
-        const bool expects_backend = speculative_backend != SpeculativeBackend::None;
-        if ((metadata.backend_kv_frontier != 0) != expects_backend ||
+        const bool expects_backend_kv = backend_kv_cache() != nullptr;
+        if ((metadata.backend_kv_frontier != 0) != expects_backend_kv ||
             (speculative_backend == SpeculativeBackend::None &&
              (metadata.mtp_kv_valid != 0 || metadata.dflash_context_frontier != 0 ||
               metadata.mtp_draft_count != 0)) ||
@@ -8947,7 +8950,10 @@ ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReade
             (speculative_backend == SpeculativeBackend::DFlash &&
              (metadata.mtp_kv_valid != 0 || metadata.mtp_draft_count != 0 ||
               metadata.backend_kv_frontier == 0 ||
-              metadata.backend_kv_frontier != metadata.dflash_context_frontier))) {
+              metadata.backend_kv_frontier != metadata.dflash_context_frontier)) ||
+            (speculative_backend == SpeculativeBackend::DFlash2 &&
+             (metadata.mtp_kv_valid != 0 || metadata.mtp_draft_count != 0 ||
+              metadata.dflash_context_frontier != metadata.execution_frontier))) {
             return refuse(runtime::ContinuationImportSkipReason::SpeculativeMismatch);
         }
 
@@ -9078,7 +9084,7 @@ ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReade
             return refuse(kv_reason);
         }
         std::optional<KVAddressSpaceHandle> backend;
-        if (expects_backend) {
+        if (expects_backend_kv) {
             backend = restore_kv("engine/backend-kv.bin", *backend_kv_pages, *backend_kv_addresses,
                                  metadata.backend_kv_frontier);
             if (!backend) {
@@ -9181,7 +9187,7 @@ ProgramImplCore::restore_continuation(const runtime::ContinuationCheckpointReade
             };
             add_file_size("engine/continuation.bin");
             add_file_size("engine/text-kv.bin");
-            if (expects_backend) { add_file_size("engine/backend-kv.bin"); }
+            if (expects_backend_kv) { add_file_size("engine/backend-kv.bin"); }
             for (std::uint32_t index = 0; index < metadata.state_count; ++index) {
                 add_file_size("engine/state/" + std::to_string(index) + ".bin");
             }
