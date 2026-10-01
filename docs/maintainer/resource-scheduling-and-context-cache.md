@@ -402,6 +402,12 @@ TerminalPending request 继续持有 `SequenceHandle` 和完整 reservation，�
 若 Finish 无法形成合法保留终态，必须采用 Discard。Optional capture 在缺少 logical publication slot、
 物理容量或已有 resource transition 时跳过，不阻塞 active request。
 
+存在 waiting request 时，默认跳过需要 transfer 的 capture，避免占用 resource transaction 而延迟 admission。
+唯一例外是具名且 `update_session_index=true` 的 session：允许 masked-draft `DeviceFork` 为
+`ResponseReplay` boundary 复制 draft local state，否则 decode 后只能重新 prefill 才能恢复该边界。
+此例外不改变容量约束、MTP capture 或 `HostSnapshot` 的调度规则，也不适用于匿名、`store:false`、
+单独的 long-anchor 或 shared-prefix capture。
+
 ### 6.3 Persistent backfill proof
 
 Scheduler 是否允许 backfill 由 [Engine 架构](engine-architecture.md#52-admission-顺序)决定。Program

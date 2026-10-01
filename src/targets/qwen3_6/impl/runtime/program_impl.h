@@ -7474,6 +7474,8 @@ ProgramImplCore::inspect_capture(const CaptureOffer& offer, const SharedPrefixHa
     } else if (is_masked_draft_backend(speculative_backend)) {
         assessment.transfer_requirements.push_back(state_transfer_requirement(
             state_images->host_layout(), runtime::ContextTransferDirection::DeviceToDevice, true));
+        assessment.response_replay_draft_copy =
+            group.rewrite == RewriteCheckpointKind::ResponseReplay;
     }
     if (added.device.main_kv_pages != 0) {
         assessment.transfer_requirements.push_back(kv_transfer_requirement(

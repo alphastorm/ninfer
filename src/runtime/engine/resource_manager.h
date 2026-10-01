@@ -609,7 +609,13 @@ public:
         }
 
         assessment = program.inspect_capture(offer, exact_shared, replacement, private_replacement);
-        if ((!permit_transfer && assessment.needs_transfer) ||
+        // A stored replay boundary cannot be recovered from the final decode state. Keep its
+        // masked-draft DeviceFork copy even when optional captures yield to queued admission.
+        const bool skip_transfer =
+            !permit_transfer && assessment.needs_transfer &&
+            !(assessment.response_replay_draft_copy && active_[lane.value].session &&
+              active_[lane.value].update_session_index);
+        if (skip_transfer ||
             (!assessment.publishes_private && !assessment.publishes_shared)) {
             program.skip_capture(std::move(offer));
             return ActiveCaptureReserveResult::Skipped;

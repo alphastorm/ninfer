@@ -1271,6 +1271,8 @@ private:
             post_capture_state == EngineRequestState::ModelFinished) {
             throw std::logic_error("committed capture offer has invalid Engine ownership");
         }
+        // Optional transfers must not occupy the resource transaction ahead of queued admission.
+        // ResourceManager can still preserve a stored session response-replay DeviceFork.
         const bool permit_transfer = !has_pending_requests();
         const auto reserved        = resources_.reserve_active_capture(
             *instance_.program, *request->lane, std::move(offer), permit_transfer,

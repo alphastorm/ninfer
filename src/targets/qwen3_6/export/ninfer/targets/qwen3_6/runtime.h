@@ -524,6 +524,8 @@ struct CaptureAssessment {
     std::uint32_t frontier                = 0;
     bool publishes_private                = false;
     bool publishes_shared                 = false;
+    // Only the masked-draft DeviceFork D2D copy at a response-replay boundary.
+    bool response_replay_draft_copy        = false;
     bool needs_transfer                   = false;
     bool recycles_private_state           = false;
     CaptureStatePlacement state_placement = CaptureStatePlacement::DeviceFork;
