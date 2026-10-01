@@ -35,6 +35,15 @@ function Get-GpuKeepWarmMs([object]$Config) {
     return [int]$value
 }
 
+# context_cache.host_kv_mib arrived with per-lane host pools. A release packaged before it (a
+# shipped v0.6.0) declares no such field and was qualified on the runtime's own default host
+# pool, so it launches without --host-kv-mib; under strict mode a direct read would throw.
+function Get-HostKvMib([object]$Config) {
+    $property = $Config.context_cache.PSObject.Properties['host_kv_mib']
+    if ($null -eq $property) { return $null }
+    return [string]$property.Value
+}
+
 function Get-TrustedNvidiaSmiPath {
     $path = Join-Path ([Environment]::GetFolderPath('System')) 'nvidia-smi.exe'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -954,7 +963,6 @@ function Invoke-Run {
                 '--pending-timeout-ms', [string]$config.engine.pending_timeout_ms,
                 '--device-state-slots', [string]$config.context_cache.device_state_slots,
                 '--host-state-slots', [string]$config.context_cache.host_state_slots,
-                '--host-kv-mib', [string]$config.context_cache.host_kv_mib,
                 '--max-private-continuations', [string]$config.context_cache.max_private_continuations,
                 '--response-store-max-records', [string]$config.response_store.max_records,
                 '--response-store-max-mib', [string]$config.response_store.max_mib,
@@ -979,6 +987,12 @@ function Invoke-Run {
         $gpuKeepWarmMs = Get-GpuKeepWarmMs $config
         if ($gpuKeepWarmMs -gt 0) {
             foreach ($argument in @('--gpu-keep-warm-ms', [string]$gpuKeepWarmMs)) {
+                $serverArguments.Add($argument)
+            }
+        }
+        $hostKvMib = Get-HostKvMib $config
+        if ($null -ne $hostKvMib) {
+            foreach ($argument in @('--host-kv-mib', $hostKvMib)) {
                 $serverArguments.Add($argument)
             }
         }

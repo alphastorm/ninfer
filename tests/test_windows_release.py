@@ -84,6 +84,39 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         reader = reader[:reader.index("\n}\n")]
         self.assertIn("if ($null -eq $property) { return 0 }", reader)
 
+    def test_config_fields_newer_than_the_shipped_lineage_are_read_as_optional(self) -> None:
+        """The controller runs under strict mode, where reading a field a JSON object lacks
+        throws, and a rollback hands the launch an older release's own packaged config. The RTX
+        3090's installed v0.6.0 config predates context_cache.host_kv_mib: a direct read killed
+        the managed wrapper before it launched v0.6.0, and the 2026-10-01 RTX 3090 qualification
+        failed its rollback. Every field the launch reads directly must exist in each shipped
+        lane config; a newer field goes through a reader that treats absence as undeclared."""
+        controller = (WINDOWS / "Control-Release.ps1").read_text(encoding="utf-8")
+        start = controller.index("$config = Read-JsonFile")
+        end = controller.index("$argumentLine =", start)
+        direct = set(re.findall(r"\$config((?:\.[a-z_]+)+)", controller[start:end]))
+        self.assertIn(".context_cache.host_state_slots", direct)
+        for commit in ("075d442e", "03f56e58"):
+            for lane in ("rtx3090", "rtx4090"):
+                shipped = json.loads(subprocess.run(
+                    ["git", "show", f"{commit}:packaging/windows/lanes/{lane}/server-config.json"],
+                    capture_output=True, text=True, check=True, cwd=ROOT,
+                ).stdout)
+                for path in sorted(direct):
+                    with self.subTest(commit=commit, lane=lane, field=path):
+                        node = shipped
+                        for key in path[1:].split("."):
+                            self.assertIn(key, node)
+                            node = node[key]
+        for reader, field in (("Get-GpuKeepWarmMs", "gpu_keep_warm_ms"),
+                              ("Get-HostKvMib", "host_kv_mib")):
+            with self.subTest(reader=reader):
+                body = controller[controller.index(f"function {reader}"):]
+                body = body[:body.index("\n}\n")]
+                self.assertIn(f"PSObject.Properties['{field}']", body)
+                self.assertIn("if ($null -eq $property) { return", body)
+                self.assertEqual(controller[start:end].count(f"{reader} $config"), 1)
+
     def test_managed_stop_is_a_signal_before_a_termination(self) -> None:
         """A managed stop must reach the server's graceful path (which saves live sessions), and
         only terminate a release that cannot receive it."""
