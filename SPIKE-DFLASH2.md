@@ -1,10 +1,10 @@
-# DFlash2 fork spike — measured on the RTX 5090, 2026-09-30 (EXP-079: no-go as ported; EXP-081: go with upstream's 24-head verify route)
+# DFlash2 fork spike — measured on the RTX 5090, 2026-09-30/10-01 (EXP-079: no-go as ported; EXP-081: go with upstream's 24-head verify route; EXP-082: two requests on the Q5 tensor cores, kept)
 
 ## State and boundaries
 
 - Branch: `spike/dflash2-5090`, based on `e20060b6`, in `~/Development/ninfer-dflash2`.
-- Built source: **`28a1abe65f17d8790c26750669ec0014e34e9860`** for EXP-081; EXP-079 built `905101229dac18c3eabeba115d32873e7c24196f`. This report is committed separately after the built source; it does not alter the executable source.
-- Port implementation and build are complete. EXP-079 measured serving, MTP3 parity and speed: MTP3 unchanged, DFlash2 drafting as well as upstream, and a decode round that grew with context. EXP-081 located that cost in the target attention route of one request's 8-token verify and took upstream's route (`4b0eb36c`). No cherry-pick or merge conflicts remain open.
+- Built source: **`7e4d120a025eac2a5898acb0d3a4006801e5fd1c`** for EXP-082; EXP-081 built `28a1abe65f17d8790c26750669ec0014e34e9860` and EXP-079 `905101229dac18c3eabeba115d32873e7c24196f`. This report is committed separately after the built source; it does not alter the executable source.
+- Port implementation and build are complete. EXP-079 measured serving, MTP3 parity and speed: MTP3 unchanged, DFlash2 drafting as well as upstream, and a decode round that grew with context. EXP-081 located that cost in the target attention route of one request's 8-token verify and took upstream's route (`4b0eb36c`). EXP-082 put two requests' 16-column verify on the fork's Q5 tensor-core route (`7e4d120a`). No cherry-pick or merge conflicts remain open.
 - The branch is pushed to `alphastorm/ninfer` as `spike/dflash2-5090`. The parent checkout and omp-ninfer's sources were not changed by the port; both windows ran on production's GPU under the appliance's hold and dead-man and restored production.
 - The build container `ninfer-dflash2-spike-build` holds the incremental build tree; it has no GPU request and is stopped between builds.
 - This is a bounded experiment, not a production cutover. No profile changes until the durable integration, the two-request profile and a powered quality screen pass.
@@ -73,6 +73,32 @@ DFlash2 request errors.
   share the routes. The remaining long-context slope, twice upstream's, is consistent with
   ChunkedSmallT reading the KV once per query chunk (6 and 2 columns) where upstream's
   `a7818988`/`c71795e1` attend 8 columns in one SmallT pass; not measured.
+
+## GPU window, 2026-10-01 (EXP-082)
+
+Measured on nyc-pc's RTX 5090 with production stopped from 01:09:16Z to 01:21:38Z; the driver
+(`exp082-window.sh`) ran on the appliance. Image `ninfer-5090:7e4d120a-dflash2-spike`
+(`sha256:06ac429f…`, `ninfer-serve` `4a559dda…`). Receipt: omp-ninfer
+`docs/measurements/2026-10-01-dflash2-pair-q5-tensor-cores-rtx5090.json`. The pre-registered rule
+said **keep**: 9/9 GPU tests, MTP3 89/89 identical, no request errors, pair round 22.7 ms against
+a 33.0 ms bar.
+
+- Cause: `q5_small_t_mma_tokens` accepted 4 and 8 columns, so two requests' 16-column verify ran
+  the MLP-down (Q5 linear-add, K=17408), GDN value/z and attention gate/value Q5 projections on
+  SIMT row kernels. `7e4d120a` lets the kernel take 16 columns (a second m16n8k16 MMA per k16
+  step, two pipeline stages inside 48 KiB of static shared memory) and routes 16 columns to it at
+  the three call sites. Per-column arithmetic is unchanged; T=4 and T=8 compute what they did.
+- GPU tests: linear_add_q5_a16 (16 registered as a region start at K=17408), gdn_input_proj,
+  gdn_input_proj_conv_record, gdn_input_proj_conv_snapshot, attn_input_proj, softmax_attention,
+  and the DFlash2 real-model test at K=7 with both heads at batch 1 and the full head at batch 2.
+- Two requests with two device state slots: a pair at 420.86 tok/s (223.86 and 220.97) in 22.7 ms
+  rounds, against 269.17 in 37.1 ms before, upstream DFlash2's 453.95 in 22.0-22.4 ms and shipped
+  MTP3's 388.42; a lone request on the same server at 369.64.
+- MTP3: 89/89 byte-identical to shipped v0.9.0 and v0.8.7, 238.38 tok/s.
+- An Nsight Systems trace of the pair (`/home/sunil/builds/exp082/nsys/`) is kept, not attributed.
+- Next: the durable context ring (checkpoints, fanout, restore) so DFlash2 can keep the durable
+  store, then the two-request profile with NVFP4 KV and four device state slots, and a powered
+  quality screen.
 
 ## Artifact
 
