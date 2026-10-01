@@ -102,6 +102,8 @@ std::string format_kv_cache(ninfer::KvCacheStorage storage) {
         return "int8-group64";
     case ninfer::KvCacheStorage::Fp8E4M3Row256:
         return "fp8-e4m3-row256";
+    case ninfer::KvCacheStorage::Nvfp4:
+        return "nvfp4-group16";
     }
     return "unknown";
 }

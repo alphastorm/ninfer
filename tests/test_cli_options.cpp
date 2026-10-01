@@ -31,6 +31,18 @@ int check(bool condition, const char* message) {
 } // namespace
 
 int main() {
+    for (const auto& [name, storage] :
+         std::vector<std::pair<std::string, ninfer::KvCacheStorage>>{
+             {"bf16", ninfer::KvCacheStorage::BFloat16},
+             {"int8", ninfer::KvCacheStorage::Int8Group64},
+             {"fp8", ninfer::KvCacheStorage::Fp8E4M3Row256},
+             {"nvfp4", ninfer::KvCacheStorage::Nvfp4}}) {
+        if (parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--kv-dtype", name})
+                .kv_cache != storage) {
+            std::cerr << "KV storage selection mismatch: " << name << '\n';
+            return 1;
+        }
+    }
     int failures                       = 0;
     const ninfer::cli::Options version = parse({"ninfer-cli", "--version"});
     failures += check(version.version_requested && version.artifact_path.empty(),
