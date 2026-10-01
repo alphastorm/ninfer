@@ -1,13 +1,13 @@
-# DFlash2 fork spike — measured on the RTX 5090, 2026-09-30/10-01 (EXP-079: no-go as ported; EXP-081: go with upstream's 24-head verify route; EXP-082: two requests on the Q5 tensor cores, kept; EXP-083: sessions on the durable store, kept)
+# DFlash2 fork spike — measured on the RTX 5090, 2026-09-30/10-01 (EXP-079: no-go as ported; EXP-081: go with upstream's 24-head verify route; EXP-082: two requests on the Q5 tensor cores, kept; EXP-083: sessions on the durable store, kept; EXP-084: NVFP4 paged KV, kept)
 
 ## State and boundaries
 
-- Branch: `spike/dflash2-5090`, based on `e20060b6`, in `~/Development/ninfer-dflash2`.
-- Built source: **`03212c9dc15403d98deaa5b2dc9bbedb79b120f7`** for EXP-083; EXP-082 built `7e4d120a025eac2a5898acb0d3a4006801e5fd1c`, EXP-081 `28a1abe65f17d8790c26750669ec0014e34e9860` and EXP-079 `905101229dac18c3eabeba115d32873e7c24196f`. This report is committed separately after the built source; it does not alter the executable source.
-- Port implementation and build are complete. EXP-079 measured serving, MTP3 parity and speed: MTP3 unchanged, DFlash2 drafting as well as upstream, and a decode round that grew with context. EXP-081 located that cost in the target attention route of one request's 8-token verify and took upstream's route (`4b0eb36c`). EXP-082 put two requests' 16-column verify on the fork's Q5 tensor-core route (`7e4d120a`). EXP-083 carried the draft context ring through durable session checkpoints (`03212c9d`). No cherry-pick or merge conflicts remain open.
-- The branch is pushed to `alphastorm/ninfer` as `spike/dflash2-5090`. The parent checkout and omp-ninfer's sources were not changed by the port; both windows ran on production's GPU under the appliance's hold and dead-man and restored production.
-- The build container `ninfer-dflash2-spike-build` holds the incremental build tree; it has no GPU request and is stopped between builds.
-- This is a bounded experiment, not a production cutover. No profile changes until the two-request profile (NVFP4 KV, four device state slots) and a powered quality screen pass.
+- Branches: `spike/dflash2-5090` (based on `e20060b6`, in `~/Development/ninfer-dflash2`) through EXP-083, and `spike/dflash2-nvfp4-5090` (on its `52f38907`, in `~/Development/ninfer-dflash2-nvfp4`) for EXP-084.
+- Built source: **`008a77810b83475c924273759bbd68a45163164f`** for EXP-084 (plus test-only `9805085f` for its attention test binary); EXP-083 built `03212c9dc15403d98deaa5b2dc9bbedb79b120f7`, EXP-082 `7e4d120a025eac2a5898acb0d3a4006801e5fd1c`, EXP-081 `28a1abe65f17d8790c26750669ec0014e34e9860` and EXP-079 `905101229dac18c3eabeba115d32873e7c24196f`. This report is committed separately after the built source; it does not alter the executable source.
+- Port implementation and build are complete. EXP-079 measured serving, MTP3 parity and speed: MTP3 unchanged, DFlash2 drafting as well as upstream, and a decode round that grew with context. EXP-081 located that cost in the target attention route of one request's 8-token verify and took upstream's route (`4b0eb36c`). EXP-082 put two requests' 16-column verify on the fork's Q5 tensor-core route (`7e4d120a`). EXP-083 carried the draft context ring through durable session checkpoints (`03212c9d`). EXP-084 ported upstream's NVFP4 paged KV (`a9d2844a`..`008a7781`; provenance in `docs/maintainer/nvfp4-kv-port.md`). No cherry-pick or merge conflicts remain open.
+- Both branches are pushed to `alphastorm/ninfer`. The parent checkout and omp-ninfer's sources were not changed by the port; every window ran on production's GPU under the appliance's hold and dead-man and restored production.
+- The build containers `ninfer-dflash2-spike-build` (through EXP-083) and `ninfer-dflash2-nvfp4-build` (EXP-084, tree `/home/sunil/builds/dflash2-nvfp4`) hold the incremental build trees; neither has a GPU request.
+- This is a bounded experiment, not a production cutover. No profile changes until a powered quality screen of the two-request DFlash2 NVFP4 profile against shipped MTP3 passes.
 
 ## GPU window, 2026-09-30 (EXP-079)
 
@@ -125,6 +125,38 @@ omp-ninfer `docs/measurements/2026-10-01-dflash2-durable-store-rtx5090.json`.
   reuse (bar of zero set without the incumbent's value); the ring is kept.
 - Next: NVFP4 paged KV for four device state slots and 262,144 tokens at two requests, then a
   powered quality screen.
+
+## GPU windows, 2026-10-01 (EXP-084)
+
+Measured on nyc-pc's RTX 5090 with production stopped from 07:23:21Z to 07:49:45Z and, to rerun
+the attention tests, from 07:54:58Z to 08:06:46Z; both drivers ran on the appliance. Image
+`ninfer-5090:008a7781-dflash2-nvfp4` (`sha256:e3113d97…`, `ninfer-serve` `c260dde9…`). Receipt:
+omp-ninfer `docs/measurements/2026-10-01-dflash2-nvfp4-kv-rtx5090.json`.
+
+- Change: six commits port upstream's NVFP4-G16 paged KV as final files from `d44ab584`: four U8
+  planes per layer (K and V E2M1 codes, K and V E4M3 group-16 scales, Hadamard-rotated), the
+  standalone and fused append, and the Grouped, ParallelGrouped and Tiled causal attention with
+  the width-192 planner. `KvCacheStorage::Nvfp4` rides planning, page geometry, views, workspace
+  sizing, the memory summary, capture identities and checkpoint identities, and NVFP4 dispatches
+  before the legacy router. Legacy append and attention kernels, `causal_attention_resolve_route`,
+  the Q5 routes and the cyclic draft cache are byte-identical to `52f38907`.
+- GPU tests: append (with NVFP4 exact code and scale bytes), KV cache, the new two-request NVFP4
+  real test (262,144 tokens, four slots, rows equal to a serial eager NVFP4 oracle), the checkpoint
+  real test with NVFP4 and BF16 KV, and the DFlash2 real test passed in the first window. Both
+  attention invocations aborted there: the ported workspace-contract test asked for two- and
+  eight-request intervals wider than the 16 columns batched verify carries, which the API rejects
+  (upstream checks those intervals at one request). `9805085f` keeps batched intervals within 16
+  columns and requires the 17-column rejection; the second window passed every NVFP4 and legacy
+  attention case.
+- Serve: two requests started with four device state slots and 262,144 KV tokens in 4.50 GiB of
+  KV (BF16: two slots, 131,520 tokens in 8.03 GiB). Rounds matched BF16 at context 0 and in the
+  pair and were 12%, 19% and 27% shorter behind 32K, 64K and 120K tokens (18.82 against 25.89 ms).
+  The durable sequence restored a 57,889-token session hot after two restarts (214 and 236 tokens
+  computed) from a 1.66 GB checkpoint; the sibling probe reused on shipped's four steps and the
+  multi-session probe lost none. MTP3 89/89 byte-identical to shipped.
+- Quality, one unpowered run: 79 of 89 role-corpus outputs differ from shipped; decode +24.0% over
+  MTP3; evidence precision 0.951 against 0.994.
+- Next: a powered quality screen of the two-request DFlash2 NVFP4 profile against shipped MTP3.
 
 ## Artifact
 
