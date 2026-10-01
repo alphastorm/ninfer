@@ -73,6 +73,7 @@ struct SequencePlanningInputs {
     std::uint32_t prefill_chunk            = 0;
     std::uint32_t draft_window             = 0;
     SpeculativeBackend speculative_backend = SpeculativeBackend::None;
+    KvCacheStorage kv_storage              = KvCacheStorage::BFloat16;
     DType kv_dtype                         = DType::BF16;
     std::int32_t kv_quant_group            = 0;
     ProposalHead proposal_head             = ProposalHead::Full;
@@ -96,6 +97,7 @@ struct SequencePlanImpl<NINFER_QWEN36_VARIANT> {
     std::uint32_t prefill_chunk            = 0;
     std::uint32_t draft_window             = 0;
     SpeculativeBackend speculative_backend = SpeculativeBackend::None;
+    KvCacheStorage kv_storage              = KvCacheStorage::BFloat16;
     DType kv_dtype                         = DType::BF16;
     std::int32_t kv_quant_group            = 0;
     ProposalHead proposal_head             = ProposalHead::Full;

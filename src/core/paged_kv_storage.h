@@ -11,6 +11,13 @@ namespace ninfer {
 
 inline constexpr std::int32_t kD256KVCacheHeadDim = 256;
 
+// Preserve every legacy dtype tag byte; packed NVFP4 is not identified by U8 alone.
+[[nodiscard]] constexpr std::uint32_t paged_kv_storage_identity_bits(
+    KvCacheStorage storage, DType dtype) noexcept {
+    return (static_cast<std::uint32_t>(dtype) << 16U) |
+           (storage == KvCacheStorage::Nvfp4 ? (1U << 24U) : 0U);
+}
+
 /** Physical data/scale planes for one K or V vector. */
 struct PagedKVVectorLayout {
     DType data_dtype                  = DType::BF16;
