@@ -1,4 +1,4 @@
-# DFlash2 fork spike — measured on the RTX 5090, 2026-09-30/10-01 (EXP-079: no-go as ported; EXP-081: go with upstream's 24-head verify route; EXP-082: two requests on the Q5 tensor cores, kept; EXP-083: sessions on the durable store, kept; EXP-084: NVFP4 paged KV, kept)
+# DFlash2 fork spike — measured on the RTX 5090, 2026-09-30/10-01 (EXP-079: no-go as ported; EXP-081: go with upstream's 24-head verify route; EXP-082: two requests on the Q5 tensor cores, kept; EXP-083: sessions on the durable store, kept; EXP-084: NVFP4 paged KV, kept; EXP-085/088: powered quality screens, BF16 KV passes, NVFP4 and FP8 KV fail)
 
 ## State and boundaries
 
@@ -7,7 +7,7 @@
 - Port implementation and build are complete. EXP-079 measured serving, MTP3 parity and speed: MTP3 unchanged, DFlash2 drafting as well as upstream, and a decode round that grew with context. EXP-081 located that cost in the target attention route of one request's 8-token verify and took upstream's route (`4b0eb36c`). EXP-082 put two requests' 16-column verify on the fork's Q5 tensor-core route (`7e4d120a`). EXP-083 carried the draft context ring through durable session checkpoints (`03212c9d`). EXP-084 ported upstream's NVFP4 paged KV (`a9d2844a`..`008a7781`; provenance in `docs/maintainer/nvfp4-kv-port.md`). No cherry-pick or merge conflicts remain open.
 - Both branches are pushed to `alphastorm/ninfer`. The parent checkout and omp-ninfer's sources were not changed by the port; every window ran on production's GPU under the appliance's hold and dead-man and restored production.
 - The build containers `ninfer-dflash2-spike-build` (through EXP-083) and `ninfer-dflash2-nvfp4-build` (EXP-084, tree `/home/sunil/builds/dflash2-nvfp4`) hold the incremental build trees; neither has a GPU request.
-- This is a bounded experiment, not a production cutover. No profile changes until a powered quality screen of the two-request DFlash2 NVFP4 profile against shipped MTP3 passes.
+- This is a bounded experiment, not a production cutover. The powered quality screens cleared DFlash2 only with BF16 KV (two device state slots, 131,520 KV tokens at two requests); adopting that profile is a release decision.
 
 ## GPU window, 2026-09-30 (EXP-079)
 
@@ -157,6 +157,29 @@ omp-ninfer `docs/measurements/2026-10-01-dflash2-nvfp4-kv-rtx5090.json`.
 - Quality, one unpowered run: 79 of 89 role-corpus outputs differ from shipped; decode +24.0% over
   MTP3; evidence precision 0.951 against 0.994.
 - Next: a powered quality screen of the two-request DFlash2 NVFP4 profile against shipped MTP3.
+
+## Quality windows, 2026-10-01 (EXP-085, EXP-087, EXP-088)
+
+Measured on nyc-pc's RTX 5090 with production stopped 08:28-13:15Z, 13:18-13:33Z and 13:35-15:11Z;
+every driver ran on the appliance and restored production. Same binary (`c260dde9`) and artifact
+throughout. Receipts: omp-ninfer
+`docs/measurements/2026-10-01-dflash2-powered-quality-screen-rtx5090.json`,
+`…-dflash2-fp8-kv-precheck-rtx5090.json` and `…-dflash2-fp8-kv-quality-screen-rtx5090.json`.
+
+- Method: omp-ninfer `scripts/quality_screen.py`, with the rule fixed before any data. 84 counted
+  role-corpus cases × 8 whitespace variants and 7 redaction controls × 72: 1,120 prompts per arm
+  against shipped v0.9.0 MTP3, paired by prompt. One-sided 95% bootstrap bounds; margins 2.0
+  points, 3.0 for unsupported claims, EXP-063's for redaction. Every arm reproduced its first 80
+  prompts exactly on a fresh server.
+- BF16 KV (`spk5-df2k7-c2ds2`) passes: 1,091 of 1,120 outputs byte-identical to shipped, leaks
+  561 against 561.
+- NVFP4 KV fails: unsupported claims +1.8 points (upper bound 3.7), leaks 609 (ratio upper bound
+  1.141).
+- FP8 E4M3 row-256 KV (`--kv-dtype fp8`, existing path) starts with four slots and 249,216 KV
+  tokens, rounds 7-18% shorter than BF16's at 32K-120K, and exact 130K retrieval. It fails on
+  leaks only: 604 (ratio upper bound 1.135).
+- Every DFlash2 arm decoded 15-18% faster than MTP3 over the screen: BF16 279.5, NVFP4 278.6 and
+  FP8 274.6 tok/s, against 237.8.
 
 ## Artifact
 
