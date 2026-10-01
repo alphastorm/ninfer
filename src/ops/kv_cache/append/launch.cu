@@ -176,6 +176,10 @@ void launch_cyclic(const Tensor& k, const Tensor& v, const Tensor& positions, co
 
 void kv_cache_append_launch(const Tensor& k, const Tensor& v, const Tensor& positions,
                             PagedKVLayerView cache, cudaStream_t stream) {
+    if (cache.storage == KvCacheStorage::Nvfp4) {
+        kv_cache_append_nvfp4_launch(k, v, positions, cache, stream);
+        return;
+    }
     const KVCacheAppendDirectMetadata metadata{
         static_cast<const std::int32_t*>(cache.block_table.data)};
     if (k.ne[1] == KVCacheAppendD256Kv4::KVHeads) {
@@ -188,6 +192,10 @@ void kv_cache_append_launch(const Tensor& k, const Tensor& v, const Tensor& posi
 void kv_cache_append_batch_launch(const Tensor& k, const Tensor& v, const Tensor& positions,
                                   const Tensor& valid_columns, const Tensor& table_rows,
                                   PagedKVBatchLayerView cache, cudaStream_t stream) {
+    if (cache.storage == KvCacheStorage::Nvfp4) {
+        kv_cache_append_nvfp4_batch_launch(k, v, positions, valid_columns, table_rows, cache, stream);
+        return;
+    }
     const auto launch = [&]<bool Masked>() {
         const KVCacheAppendBatchMetadata<Masked> metadata{
             .tables = static_cast<const std::int32_t*>(cache.block_tables.data),

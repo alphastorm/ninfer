@@ -306,6 +306,11 @@ add_library(ninfer_ops STATIC
   ops/wrapper/vision_pos_embed.cpp)
 ninfer_internal_includes(ninfer_ops)
 ninfer_cuda_archive(ninfer_ops)
+if(CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
+  target_sources(ninfer_ops PRIVATE ops/kv_cache/append/nvfp4_launch.cu)
+else()
+  target_sources(ninfer_ops PRIVATE ops/kv_cache/append/nvfp4_stubs.cpp)
+endif()
 # Ada and Ampere have no NVFP4 W4A4 tensor-core path: the W4A4 launchers are replaced by
 # stubs that reject A4 execution, and the A16 NVFP4 decode/small-T kernels stay in the build.
 if(NOT CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
