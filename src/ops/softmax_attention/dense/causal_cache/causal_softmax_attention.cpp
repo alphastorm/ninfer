@@ -4,6 +4,8 @@
 #include "core/layout.h"
 #include "ops/kv_cache/d256_profile.h"
 #include "ops/softmax_attention/dense/causal_cache/launch.h"
+#include "ops/softmax_attention/dense/causal_cache/nvfp4/launch.h"
+#include "ops/softmax_attention/dense/causal_cache/nvfp4/plan.h"
 
 #include <algorithm>
 #include <cmath>
@@ -51,7 +53,7 @@ void require_contiguous_nonnull(const Tensor& tensor, const char* op, const char
 std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_heads, const char* op) {
     D256KVCacheProfile profile{};
     try {
-        profile = d256_kv_cache_profile(cache.dtype);
+        profile = d256_kv_cache_profile(cache.dtype, cache.storage);
     } catch (const std::invalid_argument&) {
         throw std::invalid_argument(std::string(op) + ": invalid KV cache geometry or dtype");
     }
@@ -71,9 +73,9 @@ std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_head
     if (cache.k_pages.dtype != profile.code_dtype || cache.v_pages.dtype != profile.code_dtype) {
         throw std::invalid_argument(std::string(op) + ": invalid KV cache code dtype");
     }
-    require_shape(cache.k_pages, kHeadDim, kPagedKVPageSize, kv_heads, physical_pages, op,
+    require_shape(cache.k_pages, profile.code_leading_extent, kPagedKVPageSize, kv_heads, physical_pages, op,
                   "cache k pages");
-    require_shape(cache.v_pages, kHeadDim, kPagedKVPageSize, kv_heads, physical_pages, op,
+    require_shape(cache.v_pages, profile.code_leading_extent, kPagedKVPageSize, kv_heads, physical_pages, op,
                   "cache v pages");
     require_contiguous_nonnull(cache.k_pages, op, "cache k pages");
     require_contiguous_nonnull(cache.v_pages, op, "cache v pages");
@@ -90,7 +92,8 @@ std::uint32_t validate_cache(const PagedKVLayerView& cache, std::int32_t kv_head
         return static_cast<std::uint32_t>(capacity);
     }
 
-    if (cache.k_scale_pages.dtype != DType::FP16 || cache.v_scale_pages.dtype != DType::FP16) {
+    if (cache.k_scale_pages.dtype != profile.scale_dtype ||
+        cache.v_scale_pages.dtype != profile.scale_dtype) {
         throw std::invalid_argument(std::string(op) + ": invalid KV cache scale dtype");
     }
     require_shape(cache.k_scale_pages, profile.scale_leading_extent, kPagedKVPageSize, kv_heads,
@@ -106,7 +109,7 @@ std::uint32_t validate_batch_cache(const PagedKVBatchLayerView& cache, std::int3
                                    const char* op) {
     D256KVCacheProfile profile{};
     try {
-        profile = d256_kv_cache_profile(cache.dtype);
+        profile = d256_kv_cache_profile(cache.dtype, cache.storage);
     } catch (const std::invalid_argument&) {
         throw std::invalid_argument(std::string(op) + ": invalid KV cache geometry or dtype");
     }
@@ -127,9 +130,9 @@ std::uint32_t validate_batch_cache(const PagedKVBatchLayerView& cache, std::int3
     if (cache.k_pages.dtype != profile.code_dtype || cache.v_pages.dtype != profile.code_dtype) {
         throw std::invalid_argument(std::string(op) + ": invalid KV cache code dtype");
     }
-    require_shape(cache.k_pages, kHeadDim, kPagedKVPageSize, kv_heads, physical_pages, op,
+    require_shape(cache.k_pages, profile.code_leading_extent, kPagedKVPageSize, kv_heads, physical_pages, op,
                   "cache k pages");
-    require_shape(cache.v_pages, kHeadDim, kPagedKVPageSize, kv_heads, physical_pages, op,
+    require_shape(cache.v_pages, profile.code_leading_extent, kPagedKVPageSize, kv_heads, physical_pages, op,
                   "cache v pages");
     require_contiguous_nonnull(cache.k_pages, op, "cache k pages");
     require_contiguous_nonnull(cache.v_pages, op, "cache v pages");
@@ -146,7 +149,8 @@ std::uint32_t validate_batch_cache(const PagedKVBatchLayerView& cache, std::int3
         return static_cast<std::uint32_t>(capacity);
     }
 
-    if (cache.k_scale_pages.dtype != DType::FP16 || cache.v_scale_pages.dtype != DType::FP16) {
+    if (cache.k_scale_pages.dtype != profile.scale_dtype ||
+        cache.v_scale_pages.dtype != profile.scale_dtype) {
         throw std::invalid_argument(std::string(op) + ": invalid KV cache scale dtype");
     }
     require_shape(cache.k_scale_pages, profile.scale_leading_extent, kPagedKVPageSize, kv_heads,
@@ -245,7 +249,8 @@ void validate_batched_attention_tensors(const Tensor& q, const Tensor& positions
         envelope.min_visible_keys > envelope.max_visible_keys ||
         envelope.max_visible_keys > kCausalAttentionMaximumVisibleKeys ||
         envelope.max_visible_keys > capacity ||
-        envelope.max_visible_keys < static_cast<std::uint32_t>(width)) {
+        ((cache.storage != KvCacheStorage::Nvfp4 || !masked) &&
+         envelope.max_visible_keys < static_cast<std::uint32_t>(width))) {
         throw std::invalid_argument(std::string(op) + ": invalid execution envelope or table");
     }
 }
@@ -355,20 +360,26 @@ const char* causal_attention_route_name(CausalAttentionRoute route) {
 
 std::size_t causal_softmax_attention_workspace_capacity_bytes(
     AttentionHeadGeometry geometry, DType cache_dtype, CausalAttentionExecutionEnvelope envelope,
-    std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width) {
+    std::int32_t batch_size, std::int32_t min_width, std::int32_t max_width,
+    KvCacheStorage storage) {
     require_causal_geometry(geometry, "causal_softmax_attention workspace");
     const std::int32_t q_heads = geometry.query_heads;
     bool supported_dtype       = true;
     try {
-        (void)d256_kv_cache_profile(cache_dtype);
+        (void)d256_kv_cache_profile(cache_dtype, storage);
     } catch (const std::invalid_argument&) { supported_dtype = false; }
     if (!supported_dtype || batch_size <= 0 || batch_size > kMaximumBatchSize || min_width <= 0 ||
         max_width < min_width || (batch_size > 1 && max_width > kMaximumVerifyTokens) ||
         envelope.min_visible_keys == 0 || envelope.min_visible_keys > envelope.max_visible_keys ||
         envelope.max_visible_keys > kCausalAttentionMaximumVisibleKeys ||
-        envelope.max_visible_keys < static_cast<std::uint32_t>(max_width)) {
+        (storage != KvCacheStorage::Nvfp4 &&
+         envelope.max_visible_keys < static_cast<std::uint32_t>(max_width))) {
         throw std::invalid_argument(
             "causal_softmax_attention workspace: invalid profile or interval");
+    }
+
+    if (storage == KvCacheStorage::Nvfp4) {
+        return detail::nvfp4_kv_workspace_bytes(q_heads, batch_size, min_width, max_width, envelope);
     }
 
     const auto chunk_capacity = [&](std::int32_t width) {
@@ -422,6 +433,11 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
     require_contiguous_nonnull(v, op, "v");
 
     auto scope = workspace.scope();
+    if (cache.storage == KvCacheStorage::Nvfp4) {
+        detail::nvfp4_kv_append_attention(q, k, v, positions, valid_columns, kv_table_rows, scale,
+                                         cache, envelope, workspace, out, stream);
+        return;
+    }
     const detail::CausalAttentionRoute route =
         detail::causal_attention_resolve_route(q.ne[1], width, batch, envelope);
     if (route == detail::CausalAttentionRoute::ChunkedSmallT) {
@@ -452,6 +468,11 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
     validate_attention_tensors(q, positions, out, geometry, cache, envelope, scale, op);
 
     auto scope = workspace.scope();
+    if (cache.storage == KvCacheStorage::Nvfp4) {
+        detail::nvfp4_kv_cached_attention(q, positions, scale, cache, envelope, workspace, out,
+                                         stream);
+        return;
+    }
     const detail::CausalAttentionRoute route =
         detail::causal_attention_resolve_route(q.ne[1], q.ne[2], 1, envelope);
     if (route == detail::CausalAttentionRoute::ChunkedSmallT) {

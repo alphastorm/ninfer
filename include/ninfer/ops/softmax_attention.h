@@ -47,6 +47,12 @@ struct ContextAttentionExecutionEnvelope {
  * through the matching private Q/K profile. The fixed orthogonal preparation and transient Q
  * quantization are implementation details, not intermediate values in the ideal oracle above.
  *
+ * NVFP4 stores both K and V in the sign/Hadamard D256 basis, with E2M1 codes
+ * and UE4M3 group16 scales. Its paired Q transform and inverse output transform
+ * restore logical coordinates; the private attention family expands codes to FP16,
+ * accumulates and merges in FP32, and writes BF16. Its numerical criterion is independent
+ * of the BF16/INT8/FP8 criteria.
+ *
  * The qualified FP8 compute profile uses native E4M3FN QK MMA with FP32 accumulation, FP32
  * Softmax, exact E4M3FN-to-FP16 V-code conversion followed by one represented FP16 scale multiply,
  * FP16 P/V MMA with FP32 accumulation, FP32 split merge/normalization, and a final BF16 output
@@ -108,7 +114,7 @@ void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
  * The registered profiles are [D,Hq,Hkv]=[256,24,4] (group 6) and [256,16,2] (group 8), with
  * scale=1/sqrt(256). q/out are contiguous BF16 [D,Hq,W,B], k/v are contiguous BF16
  * [D,Hkv,W,B], positions are contiguous device I32 [W,B], kv_table_rows is contiguous device I32
- * [B], and the cache is BF16, INT8-G64, or row-scaled FP8-E4M3FN. valid_columns is either
+ * [B], and the cache is BF16, INT8-G64, row-scaled FP8-E4M3FN, or explicit NVFP4. valid_columns is either
  * contiguous device I32 [B] or an empty Tensor meaning every row has W live columns. This
  * dense/masked topology is chosen by the caller and never inferred by copying device metadata to
  * the host. B=1 accepts every positive W in the current prompt/decode domain; B=2..8 accepts
@@ -153,10 +159,13 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
  * Return transient capacity for every W in the inclusive interval at one exact batch size. The
  * head geometry, cache dtype, and execution envelope are fixed implementation-profile inputs.
  * Invalid profiles or intervals throw; a legal prompt route may return zero.
+ * NVFP4 requires explicit storage identity with U8 code dtype. Its masked physical width
+ * may exceed the live-key envelope; legacy profile validation is unchanged.
  */
 [[nodiscard]] std::size_t causal_softmax_attention_workspace_capacity_bytes(
     AttentionHeadGeometry geometry, DType cache_dtype, CausalAttentionExecutionEnvelope envelope,
-    std::int32_t batch_size, std::int32_t min_tokens, std::int32_t max_tokens);
+    std::int32_t batch_size, std::int32_t min_tokens, std::int32_t max_tokens,
+    KvCacheStorage storage = KvCacheStorage::BFloat16);
 
 /**
  * Non-causal grouped-query attention over persistent context plus one live query block.

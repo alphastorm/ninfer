@@ -62,7 +62,8 @@ target_link_libraries(ninfer_artifact PUBLIC ninfer_core)
 if(CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
   add_library(ninfer_nvfp4_tma STATIC
     ops/linear/nvfp4/nvfp4_w4a4_tma.cu
-    ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4_tma.cu)
+    ops/linear_swiglu/nvfp4/nvfp4_linear_swiglu_w4a4_tma.cu
+    ops/softmax_attention/dense/causal_cache/nvfp4/tiled_launch.cu)
   ninfer_internal_includes(ninfer_nvfp4_tma)
   set_target_properties(ninfer_nvfp4_tma PROPERTIES
     CUDA_SEPARABLE_COMPILATION OFF
@@ -107,6 +108,7 @@ add_library(ninfer_ops STATIC
   ops/candidate_selector/bf16/candidate_selector_path_plan.cpp
   # Softmax Attention and KV-cache state transitions.
   ops/softmax_attention/dense/causal_cache/causal_softmax_attention.cpp
+  ops/softmax_attention/dense/causal_cache/nvfp4/plan.cpp
   ops/softmax_attention/dense/causal_cache/small_t.cu
   ops/softmax_attention/dense/causal_cache/small_t_fp8.cu
   ops/softmax_attention/dense/causal_cache/prompt.cu
@@ -307,9 +309,13 @@ add_library(ninfer_ops STATIC
 ninfer_internal_includes(ninfer_ops)
 ninfer_cuda_archive(ninfer_ops)
 if(CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
-  target_sources(ninfer_ops PRIVATE ops/kv_cache/append/nvfp4_launch.cu)
+  target_sources(ninfer_ops PRIVATE
+    ops/kv_cache/append/nvfp4_launch.cu
+    ops/softmax_attention/dense/causal_cache/nvfp4/launch.cu)
 else()
-  target_sources(ninfer_ops PRIVATE ops/kv_cache/append/nvfp4_stubs.cpp)
+  target_sources(ninfer_ops PRIVATE
+    ops/kv_cache/append/nvfp4_stubs.cpp
+    ops/softmax_attention/dense/causal_cache/nvfp4/stubs.cpp)
 endif()
 # Ada and Ampere have no NVFP4 W4A4 tensor-core path: the W4A4 launchers are replaced by
 # stubs that reject A4 execution, and the A16 NVFP4 decode/small-T kernels stay in the build.
