@@ -201,9 +201,9 @@ void launch_q5_simt_r8_c8(const Tensor& x, const Weight& weight, Tensor& value, 
 }
 
 #if !defined(NINFER_SM86) && !defined(NINFER_SM89)
-// The value/z side of the verify extents runs on the tensor cores: one request's T=4 pass
-// (EXP-057) and two requests' T=8 pass (EXP-077). False when the weight is not the exact shape
-// the route is compiled for.
+// The value/z side of the verify extents runs on the tensor cores: one request's MTP3 T=4 pass
+// (EXP-057), two requests' MTP3 T=8 pass (EXP-077) and two requests' DFlash2 K=7 T=16 pass. False
+// when the weight is not the exact shape the route is compiled for.
 template <int Cols, bool TriggerPdl = false>
 bool launch_q5_mma(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
                    cudaStream_t stream) {
@@ -234,6 +234,7 @@ void launch_q5(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
     }
 #if !defined(NINFER_SM86) && !defined(NINFER_SM89)
     if (x.ne[1] == 8 && launch_q5_mma<8>(x, weight, value, z, stream)) { return; }
+    if (x.ne[1] == 16 && launch_q5_mma<16>(x, weight, value, z, stream)) { return; }
 #endif
     if (x.ne[1] <= 16) {
         launch_q5_simt_r8_c8(x, weight, value, z, stream);

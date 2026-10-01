@@ -1,6 +1,6 @@
 #pragma once
 
-// Q5 small-T tensor-core GEMM for the verify pass: out[N,T] = W[N,K] . x[K,T], T = 4 or 8.
+// Q5 small-T tensor-core GEMM for the verify pass: out[N,T] = W[N,K] . x[K,T], T = 4, 8 or 16.
 //
 // A CTA owns 16 output rows and each of its KWarps warps one 64-value group of every
 // KWarps*64-value K step, as in the Q4 small-T MMA kernel. Codes enter the MMA as exact bf16
@@ -22,13 +22,15 @@ namespace ninfer::ops::detail {
 
 inline constexpr int kQ5SmallTMmaRows = 16;
 
-// Token extents that run on the tensor cores: one request's MTP3 verify pass (T=4, EXP-057) and
-// two requests' verify passes in one round at --max-concurrency 2 (T=8, EXP-077). An m16n8k16
-// MMA has eight columns, so T=4 computes and discards four of them and T=8 uses all eight at the
-// same instruction count. Each output column depends only on its own activation column, so a
-// token's result does not depend on the other tokens in the batch.
+// Token extents that run on the tensor cores: one request's MTP3 verify pass (T=4, EXP-057), two
+// requests' MTP3 verify passes in one round at --max-concurrency 2 (T=8, EXP-077), and two
+// requests' DFlash2 K=7 verify passes (T=16). An m16n8k16 MMA has eight columns, so T=4 computes
+// and discards four of them, T=8 uses all eight, and T=16 issues a second MMA per k16 step for
+// columns 8..15. Each output column depends only on its own activation column, so a token's
+// result does not depend on the other tokens in the batch: column j of a T=16 pass is computed
+// exactly as column j mod 8 of a T=8 pass over the same eight tokens.
 __host__ __device__ constexpr bool q5_small_t_mma_tokens(int tokens) {
-    return tokens == 4 || tokens == 8;
+    return tokens == 4 || tokens == 8 || tokens == 16;
 }
 
 union Q5SmallTBf16PairBits {
@@ -87,6 +89,7 @@ __global__ __launch_bounds__(KWarps *
                                                             const std::uint8_t* __restrict__ scales,
                                                             Epilogue epilogue) {
     constexpr int kT          = Tokens;
+    constexpr int kTiles      = kT > 8 ? kT / 8 : 1; // eight-column MMA tiles
     constexpr int kRows       = kQ5SmallTMmaRows;
     constexpr int kTileK      = 64;
     constexpr int kGroupK     = KWarps * kTileK;
@@ -110,7 +113,7 @@ __global__ __launch_bounds__(KWarps *
 
     union Shared {
         Stage stage[Stages];
-        float partial[KWarps][32][4];
+        float partial[KWarps][32][4 * kTiles];
     };
 
     __shared__ __align__(16) Shared shared;
@@ -154,7 +157,8 @@ __global__ __launch_bounds__(KWarps *
             }
         }
         {
-            // One 16-byte chunk per lane covers four tokens' 64 values; T=8 takes two passes.
+            // One 16-byte chunk per lane covers four tokens' 64 values; T=8 takes two passes and
+            // T=16 four.
             const int k8 = lane & 7;
 #pragma unroll
             for (int pass = 0; pass < kT / 4; ++pass) {
@@ -165,10 +169,11 @@ __global__ __launch_bounds__(KWarps *
         }
     };
 
-    // At T=4, B rows 4..7 alias tokens 0..3: their MMA columns are computed and discarded.
-    const int b_row  = lane & (kT - 1);
+    // At T=4, B rows 4..7 alias tokens 0..3: their MMA columns are computed and discarded. At
+    // T=16, tile t reads B rows 8t..8t+7.
+    const int b_row  = lane & (kT > 8 ? 7 : kT - 1);
     const int b_koff = ((lane >> 3) & 1) << 3;
-    float acc[4]     = {};
+    float acc[kTiles][4] = {};
 
 #pragma unroll
     for (int s = 0; s < Stages - 1; ++s) {
@@ -184,8 +189,8 @@ __global__ __launch_bounds__(KWarps *
         cp_wait<Stages - 1>();
         __syncthreads();
 
-        const Stage& st = shared.stage[it % Stages];
-        float group[4]  = {};
+        const Stage& st         = shared.stage[it % Stages];
+        float group[kTiles][4] = {};
 #pragma unroll
         for (int ks = 0; ks < 4; ++ks) {
             const int byte_col = warp * 32 + ks * 8 + lid;
@@ -199,38 +204,53 @@ __global__ __launch_bounds__(KWarps *
                 q5_small_t_bf16_pair(st.codes[gid][byte_col + 4], h0 >> (8 + 2 * lid));
             const unsigned a3 =
                 q5_small_t_bf16_pair(st.codes[gid + 8][byte_col + 4], h1 >> (8 + 2 * lid));
-            unsigned b0, b1;
-            ldmatrix_x2(b0, b1,
-                        smem_addr(&st.act[warp][b_row * kTileK +
-                                                q4_small_t_swizzle_64(b_row, ks * 16 + b_koff)]));
-            mma_bf16(group[0], group[1], group[2], group[3], a0, a1, a2, a3, b0, b1);
+#pragma unroll
+            for (int tile = 0; tile < kTiles; ++tile) {
+                const int row = b_row + 8 * tile;
+                unsigned b0, b1;
+                ldmatrix_x2(b0, b1,
+                            smem_addr(&st.act[warp][row * kTileK +
+                                                    q4_small_t_swizzle_64(row, ks * 16 + b_koff)]));
+                mma_bf16(group[tile][0], group[tile][1], group[tile][2], group[tile][3], a0, a1,
+                         a2, a3, b0, b1);
+            }
         }
         const float top_scale    = __half2float(__ushort_as_half(st.scales[gid][warp]));
         const float bottom_scale = __half2float(__ushort_as_half(st.scales[gid + 8][warp]));
-        acc[0]                   = fmaf(group[0], top_scale, acc[0]);
-        acc[1]                   = fmaf(group[1], top_scale, acc[1]);
-        acc[2]                   = fmaf(group[2], bottom_scale, acc[2]);
-        acc[3]                   = fmaf(group[3], bottom_scale, acc[3]);
+#pragma unroll
+        for (int tile = 0; tile < kTiles; ++tile) {
+            acc[tile][0] = fmaf(group[tile][0], top_scale, acc[tile][0]);
+            acc[tile][1] = fmaf(group[tile][1], top_scale, acc[tile][1]);
+            acc[tile][2] = fmaf(group[tile][2], bottom_scale, acc[tile][2]);
+            acc[tile][3] = fmaf(group[tile][3], bottom_scale, acc[tile][3]);
+        }
         __syncthreads();
     }
 
-    store_vec(&shared.partial[warp][lane][0], make_float4(acc[0], acc[1], acc[2], acc[3]));
+#pragma unroll
+    for (int tile = 0; tile < kTiles; ++tile) {
+        store_vec(&shared.partial[warp][lane][4 * tile],
+                  make_float4(acc[tile][0], acc[tile][1], acc[tile][2], acc[tile][3]));
+    }
     __syncthreads();
     if (warp == 0 && lid < kT / 2) {
-        float4 sum = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
 #pragma unroll
-        for (int w = 0; w < KWarps; ++w) {
-            const float4 value = load_vec<float4>(&shared.partial[w][lane][0]);
-            sum.x += value.x;
-            sum.y += value.y;
-            sum.z += value.z;
-            sum.w += value.w;
+        for (int tile = 0; tile < kTiles; ++tile) {
+            float4 sum = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
+#pragma unroll
+            for (int w = 0; w < KWarps; ++w) {
+                const float4 value = load_vec<float4>(&shared.partial[w][lane][4 * tile]);
+                sum.x += value.x;
+                sum.y += value.y;
+                sum.z += value.z;
+                sum.w += value.w;
+            }
+            const int col0 = 8 * tile + 2 * lid;
+            epilogue.store(row0 + gid, col0, sum.x);
+            epilogue.store(row0 + gid, col0 + 1, sum.y);
+            epilogue.store(row0 + gid + 8, col0, sum.z);
+            epilogue.store(row0 + gid + 8, col0 + 1, sum.w);
         }
-        const int col0 = 2 * lid;
-        epilogue.store(row0 + gid, col0, sum.x);
-        epilogue.store(row0 + gid, col0 + 1, sum.y);
-        epilogue.store(row0 + gid + 8, col0, sum.z);
-        epilogue.store(row0 + gid + 8, col0 + 1, sum.w);
     }
 }
 
@@ -240,8 +260,10 @@ template <int K, int Tokens, bool TriggerPdl = false, class Epilogue>
 void q5_small_t_mma_launch(const __nv_bfloat16* x, const std::uint8_t* codes,
                            const std::uint8_t* high, const std::uint8_t* scales, int n,
                            Epilogue epilogue, cudaStream_t stream) {
+    // T=16 doubles each stage's activation tile, so it keeps two stages inside 48 KiB of static
+    // shared memory (44,544 bytes with eight warps).
     constexpr int kWarps  = 8;
-    constexpr int kStages = 3;
+    constexpr int kStages = Tokens > 8 ? 2 : 3;
     q5_small_t_mma_kernel<K, Tokens, kWarps, kStages, Epilogue, TriggerPdl>
         <<<n / kQ5SmallTMmaRows, kWarps * 32, 0, stream>>>(x, codes, high, scales, epilogue);
 }

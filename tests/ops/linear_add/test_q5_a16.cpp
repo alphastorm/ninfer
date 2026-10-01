@@ -13,7 +13,8 @@ int q5_a16_conformance() {
     // Starts of the registered positive-T regions. run_shape checks b-1/b/b+1 for every start,
     // plus one interior point for every region, through the public Op. On sm_120 the row pair
     // runs T=2-3 and T=5 around the T=4 tensor-core route, one row per warp T=6-7, the T=8
-    // tensor-core route, and one row per warp again from T=9.
+    // tensor-core route, and one row per warp again from T=9; at K=17408 the row split ends with
+    // the T=16 tensor-core route (two requests' DFlash2 K=7 verify).
     constexpr std::array<std::int32_t, 10> kK6144RouteStarts{2, 4, 5, 6, 8, 9, 14, 33, 49, 129};
     constexpr std::array<std::int32_t, 6> kK6144RouteInteriors{1, 8, 24, 40, 96, 256};
 
@@ -21,7 +22,8 @@ int q5_a16_conformance() {
     failures += ninfer::test::linear_add::run_shape(
         "Q5_A16 LinearAdd", WeightFormat::Q5G64F16S,
         ShapeCase{5120, 6144, 401U, kK6144RouteStarts, kK6144RouteInteriors});
-    constexpr std::array<std::int32_t, 10> kK17408RouteStarts{2, 4, 5, 6, 8, 9, 17, 33, 49, 129};
+    constexpr std::array<std::int32_t, 11> kK17408RouteStarts{2,  4,  5,  6,  8,  9,
+                                                              16, 17, 33, 49, 129};
     constexpr std::array<std::int32_t, 7> kK17408RouteInteriors{1, 4, 8, 24, 40, 96, 256};
     const ShapeCase kK17408Shape{5120, 17408, 409U, kK17408RouteStarts, kK17408RouteInteriors};
     failures += ninfer::test::linear_add::run_shape("Q5_A16 LinearAdd", WeightFormat::Q5G64F16S,
