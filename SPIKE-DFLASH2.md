@@ -1,13 +1,13 @@
-# DFlash2 fork spike — measured on the RTX 5090, 2026-09-30/10-01 (EXP-079: no-go as ported; EXP-081: go with upstream's 24-head verify route; EXP-082: two requests on the Q5 tensor cores, kept)
+# DFlash2 fork spike — measured on the RTX 5090, 2026-09-30/10-01 (EXP-079: no-go as ported; EXP-081: go with upstream's 24-head verify route; EXP-082: two requests on the Q5 tensor cores, kept; EXP-083: sessions on the durable store, kept)
 
 ## State and boundaries
 
 - Branch: `spike/dflash2-5090`, based on `e20060b6`, in `~/Development/ninfer-dflash2`.
-- Built source: **`7e4d120a025eac2a5898acb0d3a4006801e5fd1c`** for EXP-082; EXP-081 built `28a1abe65f17d8790c26750669ec0014e34e9860` and EXP-079 `905101229dac18c3eabeba115d32873e7c24196f`. This report is committed separately after the built source; it does not alter the executable source.
-- Port implementation and build are complete. EXP-079 measured serving, MTP3 parity and speed: MTP3 unchanged, DFlash2 drafting as well as upstream, and a decode round that grew with context. EXP-081 located that cost in the target attention route of one request's 8-token verify and took upstream's route (`4b0eb36c`). EXP-082 put two requests' 16-column verify on the fork's Q5 tensor-core route (`7e4d120a`). No cherry-pick or merge conflicts remain open.
+- Built source: **`03212c9dc15403d98deaa5b2dc9bbedb79b120f7`** for EXP-083; EXP-082 built `7e4d120a025eac2a5898acb0d3a4006801e5fd1c`, EXP-081 `28a1abe65f17d8790c26750669ec0014e34e9860` and EXP-079 `905101229dac18c3eabeba115d32873e7c24196f`. This report is committed separately after the built source; it does not alter the executable source.
+- Port implementation and build are complete. EXP-079 measured serving, MTP3 parity and speed: MTP3 unchanged, DFlash2 drafting as well as upstream, and a decode round that grew with context. EXP-081 located that cost in the target attention route of one request's 8-token verify and took upstream's route (`4b0eb36c`). EXP-082 put two requests' 16-column verify on the fork's Q5 tensor-core route (`7e4d120a`). EXP-083 carried the draft context ring through durable session checkpoints (`03212c9d`). No cherry-pick or merge conflicts remain open.
 - The branch is pushed to `alphastorm/ninfer` as `spike/dflash2-5090`. The parent checkout and omp-ninfer's sources were not changed by the port; both windows ran on production's GPU under the appliance's hold and dead-man and restored production.
 - The build container `ninfer-dflash2-spike-build` holds the incremental build tree; it has no GPU request and is stopped between builds.
-- This is a bounded experiment, not a production cutover. No profile changes until the durable integration, the two-request profile and a powered quality screen pass.
+- This is a bounded experiment, not a production cutover. No profile changes until the two-request profile (NVFP4 KV, four device state slots) and a powered quality screen pass.
 
 ## GPU window, 2026-09-30 (EXP-079)
 
@@ -100,6 +100,32 @@ a 33.0 ms bar.
   store, then the two-request profile with NVFP4 KV and four device state slots, and a powered
   quality screen.
 
+## GPU windows, 2026-10-01 (EXP-083)
+
+Measured on nyc-pc's RTX 5090 with production stopped from 05:39:40Z to 05:54:29Z and, for a
+registered addendum, from 05:58:22Z to 06:04:18Z; both drivers ran on the appliance. Image
+`ninfer-5090:03212c9d-dflash2-spike` (`sha256:4ab71266…`, `ninfer-serve` `017f40fb…`). Receipt:
+omp-ninfer `docs/measurements/2026-10-01-dflash2-durable-store-rtx5090.json`.
+
+- Change: each DFlash2 StateImage already held the five-layer, 2,048-position draft K/V. `03212c9d`
+  keys `engine/backend-kv.bin` on the paged backend cache (MTP and DFlash have one, DFlash2 does
+  not), refuses a DFlash2 export unless the ring frontier equals the execution frontier
+  (`DFlash2ContextFrontierMismatch`), accepts DFlash2 import metadata only with no MTP state and
+  the ring at the frontier, and removes the serve-level `--session-checkpoint-dir` refusal.
+- GPU tests: the new `ninfer_qwen3_8_27b_dflash2_checkpoint_real_test` (export from one Engine,
+  restore into a fresh one, next turn identical in tokens, 13 rounds and per-position acceptance)
+  and the DFlash2 real test at K=7 (optimized head B=1, full head B=2) passed. A throwaway copy
+  that zeroed the exported rings drafted 14 rounds with 81 of 95 accepted against 13 and 82 of 89.
+- Serve: a 57,889-token session restored hot across two container restarts (52 and 260 tokens
+  computed), planted keys exact, 5.47 and 6.67 tokens per round against 5.10 in process; no export
+  refused, no request error, shutdown saves clean. MTP3 89/89 byte-identical to shipped.
+- Reuse: the multi-session probe lost the same two of twelve steps as shipped v0.9.0 on the same
+  sequence; one 140-token sibling went to root under device-state pressure with two extra slots
+  where shipped (four) reused a 61-token anchor. The pre-registered rule as written said reject on
+  reuse (bar of zero set without the incumbent's value); the ring is kept.
+- Next: NVFP4 paged KV for four device state slots and 262,144 tokens at two requests, then a
+  powered quality screen.
+
 ## Artifact
 
 Use `/home/sunil/builds/models/v2-dflash2/hf-dc370fb6/qwen3_8_27b.ninfer` on nyc-pc-wsl.
@@ -120,7 +146,7 @@ the MTP input projection was not selected. No converter changes were made.
 3. `21a0e85f8819edc644a3bc036fca6d05cf52ac6e` was **not** imported wholesale because it changes target KV V to FP16. Hand ports `e84a1a65` and `90510122` carry `Port-of` trailers: cyclic draft V alone is FP16; paged target V stays BF16. The full-context helper supports BF16 and cyclic-context helper supports FP16 without changing the target causal-attention path.
 4. `70434721b1ae29d0616f3de9b376c8a4d91590b5` was **not** imported wholesale because it changes ordinary/MTP greedy sampling. `97d10e1c` ports only the explicit accepted-token increment operation. Sparse greedy acceptance ignores penalties and does not publish counts, matching this fork; positive-temperature counts are published only for the Frontend-committed prefix. Existing one-hot kernels and ordering helpers are retained.
 5. **4201b5d2 decision: the defect exists in the pre-v3 fork.** The old prefill sink sliced destination slots and KV rows from the last decode ingress. Decode compaction or a retained-state fork could leave those controls stale. `ee25a0b9` ports `4201b5d2d0f6afe235f4ed8e70cd753800770eca`: independent `DFlashPrefillIngress`, pinned host backing, separate local append scratch, and per-chunk current destination-slot / full-KV-row upload. Forced-token prefill and normal chunk prefill both bind their current controls. This is source-confirmed and compiled; its on-device state-transition regression remains for the GPU window.
-6. `c99204b4` rejects `--spec dflash2` plus `--session-checkpoint-dir` at startup with a clear error. Direct continuation export returns `DFlash2StateUnsupported` before touching the continuation writer. By code inspection, the resource manager propagates that refusal and the existing checkpoint store removes its staging directory before publication; it may have staged the Response envelope, but no checkpoint generation is published. Durable DFlash2 import/export is deliberately not implemented.
+6. `c99204b4` rejected `--spec dflash2` plus `--session-checkpoint-dir` and refused DFlash2 continuation export. `03212c9d` replaces both refusals with durable DFlash2 checkpoints (EXP-083): the ring rides the StateImages, no backend-KV file is written, and an export whose ring lags its frontier is refused.
 7. `95142b1f` removes the obsolete produced-count-member test assertion. `31a86a08` replaces an upstream-only `Engine::tokenize_text` call with the actual raw token IDs obtained by CPU tokenization of this artifact; no new Engine API is introduced. `78a9b985` records spike limits and removes the superseded September 4 checklist.
 
 ## Build and exercised evidence
@@ -230,10 +256,9 @@ GPU-qualified. The default CTest real-test invocation uses a wider
 batch than this spike's one-request target.
 
 Server flags for that authorized window are `--spec dflash2 --draft-tokens 7`, optionally
-`--lm-head-draft`, with `--max-concurrency 1` and **no** `--session-checkpoint-dir`.
-Use explicit bounded context/KV capacity appropriate to the reserved GPU; do not reuse the
-production checkpoint/window directories. An HTTP generation smoke and role-corpus comparison
-against shipped MTP3 still remain.
+`--lm-head-draft`; since `03212c9d` (EXP-083) the durable store's `--session-checkpoint-dir`
+is supported. Use explicit bounded context/KV capacity appropriate to the reserved GPU; do not
+reuse the production checkpoint/window directories.
 
 Exact CTest names of the **14 compiled GPU fixture executables** (none run):
 
