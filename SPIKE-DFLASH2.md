@@ -1,13 +1,13 @@
-# DFlash2 fork spike — measured on the RTX 5090, 2026-09-30 (EXP-079: no-go as ported)
+# DFlash2 fork spike — measured on the RTX 5090, 2026-09-30 (EXP-079: no-go as ported; EXP-081: go with upstream's 24-head verify route)
 
 ## State and boundaries
 
 - Branch: `spike/dflash2-5090`, based on `e20060b6`, in `~/Development/ninfer-dflash2`.
-- Built source: **`905101229dac18c3eabeba115d32873e7c24196f`**. This report is committed separately after that source revision; it does not alter the executable source.
-- Port implementation and CPU build are complete. The GPU window below measured serving, MTP3 parity and speed: MTP3 is unchanged, DFlash2 drafts as well as upstream, and its decode round grows with context. No upstream integration commits remain identified; no cherry-pick or merge conflicts remain open.
-- All work is local; nothing was pushed. The parent checkout and omp-ninfer's sources were not changed by the port; the window ran on production's GPU under the appliance's hold and dead-man and restored production.
-- The lead requested a clean stop before 09:55Z. The owned build container `ninfer-dflash2-spike-build` has been stopped after its builds completed. It is retained for resumption, not running a build.
-- This is a bounded local experiment, not a production cutover. Verification is limited to the evidence below; no fork speedup is claimed. EXP-078's upstream result remains a separate measurement.
+- Built source: **`28a1abe65f17d8790c26750669ec0014e34e9860`** for EXP-081; EXP-079 built `905101229dac18c3eabeba115d32873e7c24196f`. This report is committed separately after the built source; it does not alter the executable source.
+- Port implementation and build are complete. EXP-079 measured serving, MTP3 parity and speed: MTP3 unchanged, DFlash2 drafting as well as upstream, and a decode round that grew with context. EXP-081 located that cost in the target attention route of one request's 8-token verify and took upstream's route (`4b0eb36c`). No cherry-pick or merge conflicts remain open.
+- The branch is pushed to `alphastorm/ninfer` as `spike/dflash2-5090`. The parent checkout and omp-ninfer's sources were not changed by the port; both windows ran on production's GPU under the appliance's hold and dead-man and restored production.
+- The build container `ninfer-dflash2-spike-build` holds the incremental build tree; it has no GPU request and is stopped between builds.
+- This is a bounded experiment, not a production cutover. No profile changes until the durable integration, the two-request profile and a powered quality screen pass.
 
 ## GPU window, 2026-09-30 (EXP-079)
 
@@ -39,6 +39,41 @@ pre-registered rule said **no-go as ported**: the corpus gain was -3.6% against 
   4-token requests), or a draft-side operation that scales with the prefix rather than the
   2,048-token draft window.
 
+## GPU window, 2026-09-30 evening (EXP-081)
+
+Measured on nyc-pc's RTX 5090 with production stopped from 20:10:07Z to 20:30:10Z; the driver
+(`exp081-window.sh`) ran on the appliance itself. Image `ninfer-5090:28a1abe6-dflash2-spike`
+(`sha256:c0f3db62…`) is EXP-079's image with this build's `ninfer` and `ninfer-serve`
+(`d9fbae37…`). Receipt: omp-ninfer
+`docs/measurements/2026-09-30-dflash2-verify-route-rtx5090.json`. The pre-registered rule
+(EXP-079's) said **go**: corpus decode +21.4% against a +15% bar, MTP3 89/89 identical, no
+DFlash2 request errors.
+
+- Cause: the 27B's full attention has 24 query and 4 KV heads. One request's 7- or 8-column call
+  on that geometry resolved to the Prompt kernel (one CTA per query head per 64 query rows, no KV
+  split), so all 16 full-attention layers grew with context. `28a1abe6` cherry-picks upstream
+  `4b0eb36c`: above 320 visible keys that call takes ChunkedSmallT. The first port skipped it as
+  35B retuning; the 35B-A3B has 16 query heads.
+- GPU tests: `ninfer_softmax_attention_test` passed (its 24-head width-7 cases at 512 keys now
+  take ChunkedSmallT); the DFlash2 real-model test passed at K=7, graph, B=1 with both heads
+  (20/20 each).
+- DFlash2 K=7, one request: 288.09 tok/s on the corpus (+21.4% over shipped, +13.6% over
+  upstream's DFlash2), 4.679 tokens per round, 16.24 ms per round. Behind 0/32K/64K/120K tokens a
+  code answer decoded at 367.67/303.18/290.63/222.95 tok/s in rounds of 15.6/18.6/21.3/25.8 ms,
+  about 15.7 ms plus 0.085 ms per 1,000 context tokens (upstream 0.044). Prefill matches shipped.
+- MTP3: 89/89 byte-identical to shipped v0.9.0 and v0.8.7, 238.17 tok/s. DFlash2 matched shipped
+  MTP3 on 86 of 89 cases (EXP-079: 41).
+- Two requests with two device state slots: unchanged from EXP-079, a pair at 269.17 tok/s in
+  37.1 ms rounds against upstream DFlash2's 453.95 in 22.0-22.4 ms.
+- Next: the two-request verify is 16 columns, and the fork's Q5 tensor-core route accepts only 4
+  and 8 (`q5_small_t_mma_tokens`). Read from source, at 16 columns the MLP-down, GDN value/z and
+  attention gate/value projections fall back to SIMT; upstream has 16-column routes in `aa429f28`
+  (GDN input), `f6a658ef` with `9e163eee` (attention input) and `fc62790a` (Q5 linear-add, after
+  `385b30ce`). Port those for 16 columns and recheck MTP3 identity, since 16-token prefill pieces
+  share the routes. The remaining long-context slope, twice upstream's, is consistent with
+  ChunkedSmallT reading the KV once per query chunk (6 and 2 columns) where upstream's
+  `a7818988`/`c71795e1` attend 8 columns in one SmallT pass; not measured.
+
 ## Artifact
 
 Use `/home/sunil/builds/models/v2-dflash2/hf-dc370fb6/qwen3_8_27b.ninfer` on nyc-pc-wsl.
@@ -52,7 +87,7 @@ the MTP input projection was not selected. No converter changes were made.
 
 ## Implemented integration and deliberate hand ports
 
-1. Cherry-picked 51 of the 79 commits in `863aa8a5^..385b30ce` with `-x`; three already existed in the fork and 25 were skipped. The complete ledger is below.
+1. Cherry-picked 51 of the 79 commits in `863aa8a5^..385b30ce` with `-x` for the first port, and a 52nd (`4b0eb36c`) after EXP-079; three already existed in the fork and 24 remain skipped. The complete ledger is below.
 2. Additional prerequisite/fix cherry-picks:
 - `03177b910e70f783b00c4f980ce0d1896a6b8592` → `50239f857c0f4f8372e52990c0682627b67d003d`: fix(runtime): preserve kv coverage during speculative terminal settlement.
 - `9f0575bb2fa97adfe869740c1ae7f137f53e9c17` → `b418f32430fadc0d6353aba2ebf47d6b19d7d5db`: fix(build): include bf16 definitions in q4 topk kernel.
@@ -110,8 +145,12 @@ failures; none is an open compiler error.
 
 ## MTP3 preservation and remaining risk
 
-- Target paged KV V remains BF16. Target causal attention, GDN, Q5, RMSNorm, embeddings, vocabulary
-  schedules, and optional target retunes in the skipped commits were not imported.
+- Target paged KV V remains BF16. Target GDN, Q5, RMSNorm, embeddings, vocabulary schedules, and
+  optional target retunes in the skipped commits were not imported. One target causal-attention
+  route was: `28a1abe6` (upstream `4b0eb36c`) sends one-request calls of width 7 or 8 on 24 query
+  heads above 320 keys to ChunkedSmallT. MTP3 decode never issues that call (it verifies 4 tokens
+  per request); a one-request prefill piece of exactly 7 or 8 tokens can, and EXP-081's corpus
+  stayed 89/89 identical.
 - A source comparison against `e20060b6` found all six original global kernels in
   `src/ops/kernel/speculative_round.cuh` byte-identical, including the original one-hot partial
   and group-finalize kernels. Sparse acceptance has separate kernels. The original
@@ -260,7 +299,7 @@ not cherry-picked. Existing rows cite their already-present fork commits.
 | `050b21382783e2be0642ae9cdde77229147a70b5` | feat(ops): add dflash2 dynamic grouped conv finish | taken → `a1bfa5cd18e8b56b6ed2b081abf7a399325d7d90` | DFlash2 implementation, qualification, or required integration. |
 | `3447146d2ff25f56be68d3b62e636148e8d2a68a` | feat(ops): add dflash2 candidate selector | taken → `f32946471ab567c99cdaaeeed0aa0c042e3e56c6` | DFlash2 implementation, qualification, or required integration. |
 | `6d1da9cef7d3d596730478c5ddd02b0ae6f82245` | perf(ops): remove q5 linear add aggregate cliff | skipped | Optional Q5 retuning; preserve fork target schedules. |
-| `4b0eb36ccd29dc1b96c6a02c77570f2937eb2c9b` | perf(ops): route h24 verify attention through small t | skipped | Unrelated 35B h24 attention retuning. |
+| `4b0eb36ccd29dc1b96c6a02c77570f2937eb2c9b` | perf(ops): route h24 verify attention through small t | taken → `28a1abe65f17d8790c26750669ec0014e34e9860` | First skipped as 35B retuning; 24 query heads is the 27B target (the 35B-A3B has 16). Taken after EXP-079: the 27B's one-request DFlash2 verify ran on the Prompt kernel, whose cost grew with context (EXP-081). |
 | `1c8f8acc7f315fd020091c88a388d43d7884dbc2` | perf(ops): fuse nvfp4 swiglu through t96 | skipped | NVFP4 SwiGLU optimization; not a groupwise artifact dependency. |
 | `aa429f28b4de0c0872c25fab50b31f6afe70b428` | perf(ops): route gdn input t16 through grouped mma | skipped | Optional GDN retuning; preserve fork MTP replay schedules. |
 | `22d8a1d3600bbc7ca385f045f5d709a5b8796875` | perf(ops): optimize w8 vocabulary t64 route | already present → `e5551e442e0a3a0cea704106b36cb55403516c22` | Existing fork provenance; do not duplicate. |
