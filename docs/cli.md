@@ -198,7 +198,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--prefill-chunk N` | positive text-prefill chunk, in multiples of 128 | `1024` |
 | `--max-new N` | requested output-token limit | `128` |
 | `--device N` | CUDA device index | `0` |
-| `--kv-dtype bf16\|int8\|fp8` | KV-cache storage | `bf16` |
+| `--kv-dtype bf16\|int8\|fp8\|nvfp4` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
@@ -242,7 +242,10 @@ Run `./build/apps/ninfer --help` for the exact option contract.
 The registered model IDs have a native context limit of 262,144 tokens. The practical allocation
 on one RTX 5090 depends on the selected artifact, media workload, output budget, and KV-cache type.
 The compact large-context profile uses `--kv-dtype fp8`, which selects row-scaled E4M3 D256 KV
-storage. INT8 group-64 and BF16 are also available. Artifact identity selects the weight profile;
+storage. INT8 group-64 and BF16 are also available. The SM120a-only `nvfp4` profile packs
+both D256 K and V into E2M1 group16 storage with U8 UE4M3 scales; it does not change weight
+quantization or the DFlash2 cyclic draft cache. See [the port qualification boundary](maintainer/nvfp4-kv-port.md)
+before selecting it for a deployment. Artifact identity selects the weight profile;
 `--kv-dtype` selects runtime KV storage. The prepared prompt must fit
 `--max-context`; generation stops at the remaining context capacity when necessary.
 `--kv-capacity N` controls the shared physical Main Text KV pool independently and is rounded up to

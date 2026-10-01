@@ -1,4 +1,5 @@
 #include "core/layout.h"
+#include "core/paged_kv_storage.h"
 #include <ninfer/targets/qwen3_6/decoder_state.h>
 #include <ninfer/targets/qwen3_6/hybrid_topology.h>
 #include <ninfer/targets/qwen3_6/mtp_alignment.h>
@@ -12,6 +13,7 @@
 #include <cstdint>
 #include <iostream>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -109,6 +111,78 @@ void test_decoder_layout() {
            "FP8 MTP KV has row-scaled code and scale planes");
     expect(fp8.kv_payload_bytes() == fp8.text_kv.payload_bytes() + fp8.mtp_kv->payload_bytes(),
            "FP8 Text/MTP KV payload accounting");
+}
+
+void test_nvfp4_decoder_layout() {
+    static_assert(static_cast<unsigned>(ninfer::KvCacheStorage::BFloat16) == 0);
+    static_assert(static_cast<unsigned>(ninfer::KvCacheStorage::Int8Group64) == 1);
+    static_assert(static_cast<unsigned>(ninfer::KvCacheStorage::Fp8E4M3Row256) == 2);
+    static_assert(static_cast<unsigned>(ninfer::KvCacheStorage::Nvfp4) == 3);
+    for (const auto [storage, dtype] :
+         {std::pair{ninfer::KvCacheStorage::BFloat16, ninfer::DType::BF16},
+          std::pair{ninfer::KvCacheStorage::Int8Group64, ninfer::DType::I8},
+          std::pair{ninfer::KvCacheStorage::Fp8E4M3Row256, ninfer::DType::FP8_E4M3FN}}) {
+        expect(ninfer::paged_kv_storage_identity_bits(storage, dtype) ==
+                   (static_cast<std::uint32_t>(dtype) << 16U),
+               "legacy capture/checkpoint storage tag bytes are unchanged");
+    }
+    expect(ninfer::paged_kv_storage_identity_bits(ninfer::KvCacheStorage::Nvfp4, ninfer::DType::U8) !=
+               ninfer::paged_kv_storage_identity_bits(ninfer::KvCacheStorage::BFloat16, ninfer::DType::U8),
+           "NVFP4 identity is distinct from an untyped U8 cache");
+    const auto schema = ninfer::paged_kv_storage_layout(ninfer::KvCacheStorage::Nvfp4, 256);
+    expect(schema.key.data_dtype == ninfer::DType::U8 &&
+               schema.value.data_dtype == ninfer::DType::U8 &&
+               schema.key.data_leading_extent == 128 &&
+               schema.value.data_leading_extent == 128 &&
+               schema.key.scale_dtype == ninfer::DType::U8 &&
+               schema.value.scale_dtype == ninfer::DType::U8 &&
+               schema.key.scale_leading_extent == 16 &&
+               schema.value.scale_leading_extent == 16,
+           "NVFP4 packs D256 K/V into 128 code bytes and 16 UE4M3 scale bytes each");
+    expect(schema.planes_per_layer() == 4 &&
+               schema.physical_bytes_per_token_head() == 288 &&
+               schema.logical_bytes_per_token_head() == 1024,
+           "NVFP4 physical payload includes both code and both scale planes");
+
+    auto spec               = decoder_spec(ninfer::DType::U8, true);
+    spec.attention_head_dim = 256;
+    spec.kv_quant_group     = 16;
+    spec.kv_table_rows      = 2;
+    spec.kv_storage         = ninfer::KvCacheStorage::Nvfp4;
+    ninfer::LayoutBuilder builder;
+    const auto layout = q36::plan_decoder_state(builder, spec);
+    (void)builder.finish(256);
+    const auto check_cache = [](const q36::PagedKVCacheLayout& cache, std::uint32_t layers,
+                                std::uint32_t physical_pages) {
+        expect(cache.storage == ninfer::KvCacheStorage::Nvfp4 &&
+                   cache.dtype == ninfer::DType::U8 && cache.quant_group == 16 &&
+                   cache.head_dim == 256 && cache.kv_heads == 2 && cache.layers == layers,
+               "NVFP4 Text/MTP retains the effective storage profile");
+        expect(cache.execution_tables.spec.logical_page_capacity == 3 &&
+                   cache.execution_tables.spec.table_rows == 2 &&
+                   cache.pages.spec.page_group_count == physical_pages,
+               "NVFP4 Text/MTP separates logical capacity, batch rows and physical pages");
+        expect(cache.pages.planes.size() == layers * 4,
+               "NVFP4 Text/MTP has four physical planes per layer");
+        for (std::size_t index = 0; index < cache.pages.planes.size(); ++index) {
+            const auto& plane = cache.pages.planes[index];
+            const int extent  = index % 4 < 2 ? 128 : 16;
+            expect(plane.geometry.dtype == ninfer::DType::U8 &&
+                       plane.geometry.leading_extent == extent &&
+                       plane.geometry.head_extent == 2,
+                   "NVFP4 Text/MTP plane order is K, V, K scale, V scale");
+            expect(plane.storage.region.bytes ==
+                       static_cast<std::size_t>(extent) * 64 * 2 * physical_pages,
+                   "NVFP4 Text/MTP allocates packed, not logical D256, plane bytes");
+        }
+        expect(cache.payload_bytes() == 288ULL * 64 * 2 * layers * physical_pages,
+               "NVFP4 Text/MTP payload accounts for every code and scale byte");
+    };
+    check_cache(layout.text_kv, 2, 5);
+    expect(layout.mtp_kv.has_value(), "NVFP4 enabled MTP has a KV allocation");
+    if (layout.mtp_kv) { check_cache(*layout.mtp_kv, 1, 4); }
+    expect(layout.kv_payload_bytes() == 288ULL * 64 * 2 * (2 * 5 + 4),
+           "NVFP4 combined Text/MTP payload has no missing scale planes");
 }
 
 void test_round_layout() {
@@ -362,6 +436,7 @@ void test_rebuild_work_prompt_frontier_boundary() {
 int main() {
     test_topology();
     test_decoder_layout();
+    test_nvfp4_decoder_layout();
     test_round_layout();
     test_mtp_alignment();
     test_vision_control();

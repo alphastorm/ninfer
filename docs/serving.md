@@ -722,7 +722,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--session-checkpoint-write-buffer-mib N` | in-memory queue decoupling checkpoint disk writes from the engine (queued + in-flight) | `6144` |
 | `--session-checkpoint-min-tokens N` | completed-turn frontier that triggers an automatic save; current checkpoints below it are reclaimed first under the quota | `32768` |
 | `--session-checkpoint-require-origin-auth` | refuse checkpoint generations without a valid `manifest.mac` (remote-import posture) | off |
-| `--kv-dtype bf16\|int8\|fp8` | KV-cache storage | `bf16` |
+| `--kv-dtype bf16\|int8\|fp8\|nvfp4` | KV-cache storage (`nvfp4` requires SM120a) | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |

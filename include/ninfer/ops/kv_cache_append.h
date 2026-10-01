@@ -44,7 +44,14 @@ struct KVCacheAppendPrefixExecutionEnvelope {
  *           code[i]    = E4M3FN_RNE_SATFINITE(FP32(x[i]) * inv)
  *   decode[i] = FP32(E4M3FN(code[i])) * s.
  *
- * V uses represented BF16 source values directly as x. For both quantized profiles, K is a paired
+ * NVFP4 is explicitly selected by storage identity, not inferred from U8 dtype. Both K and V
+ * use the fixed sign/Hadamard D256 basis, then sixteen contiguous group16 encodings. Each
+ * nonzero group stores UE4M3_RNE(clamp(max(abs(x))/6, 2^-9, 448)) and packed
+ * E2M1_RNE_SATFINITE(x/represented_scale); a zero group stores zero codes and scale.
+ * Each row has 128 U8 code bytes and 16 U8 scale bytes. Causal attention owns the paired
+ * Q preparation and inverse V-basis output transform.
+ *
+ * For INT8 and FP8, V uses represented BF16 source values directly as x. K is a paired
  * physical representation for causal Attention: its implementation-owned fixed orthogonal
  * preparation selects x, and the causal consumer applies the matching private Q preparation. The
  * transform and raw K code/scale bytes are not standalone mathematical outputs. Standalone and

@@ -1,10 +1,12 @@
 #include "core/device.h"
 #include "core/host_kv_arena.h"
 #include "core/paged_kv_cache.h"
+#include "core/paged_kv_storage.h"
 
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -12,6 +14,7 @@
 #include <new>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -48,6 +51,43 @@ int expect(bool condition, const std::string& message) {
 int expect_size(std::size_t actual, std::size_t expected, const std::string& label) {
     return expect(actual == expected, label + " expected " + std::to_string(expected) + ", got " +
                                           std::to_string(actual));
+}
+
+int exercise_nvfp4_host_layout() {
+    int failures = 0;
+    const auto storage = ninfer::paged_kv_storage_layout(ninfer::KvCacheStorage::Nvfp4, 256);
+    for (const auto order : {ninfer::PagedKVPlaneOrder::PageMajor,
+                             ninfer::PagedKVPlaneOrder::HeadMajor}) {
+        // Deliberately larger Device alignment must not leak into durable Host records.
+        const ninfer::KVPageGeometry geometry{
+            .device_plane_order = order,
+            .planes = {{storage.key.data_dtype, storage.key.data_leading_extent, 2, 8192},
+                       {storage.value.data_dtype, storage.value.data_leading_extent, 2, 8192},
+                       {storage.key.scale_dtype, storage.key.scale_leading_extent, 2, 8192},
+                       {storage.value.scale_dtype, storage.value.scale_leading_extent, 2, 8192}},
+        };
+        const auto host = ninfer::plan_host_kv_page_layout(geometry);
+        failures += expect(host.geometry == geometry, "NVFP4 Host layout lost its plane schema");
+        failures += expect_size(host.planes.size(), 4, "NVFP4 durable Host plane count");
+        if (host.planes.size() != 4) { continue; }
+        constexpr std::array<std::size_t, 4> offsets{0, 16384, 32768, 34816};
+        constexpr std::array<std::size_t, 4> payloads{16384, 16384, 2048, 2048};
+        for (std::size_t plane = 0; plane < 4; ++plane) {
+            const auto label = "NVFP4 durable Host plane " + std::to_string(plane);
+            failures += expect_size(host.planes[plane].offset, offsets[plane], label + " offset");
+            failures += expect_size(host.planes[plane].page_payload_bytes, payloads[plane],
+                                    label + " page bytes");
+            failures += expect_size(host.planes[plane].head_payload_bytes, payloads[plane] / 2,
+                                    label + " head bytes");
+        }
+        failures += expect_size(host.page_stride, 36864, "NVFP4 durable Host record bytes");
+        const auto work = ninfer::plan_host_kv_transfer_work(host, 3, 2);
+        failures += expect_size(work.payload_bytes, 110592, "NVFP4 all-plane transfer bytes");
+        failures += expect_size(work.copy_operations,
+                                order == ninfer::PagedKVPlaneOrder::PageMajor ? 8 : 16,
+                                "NVFP4 all-plane transfer operations");
+    }
+    return failures;
 }
 
 std::vector<ninfer::DeviceKVPageLease> materialize(ninfer::DeviceKVPagePool& pool,
@@ -419,7 +459,22 @@ int exercise_layout_and_transfer(ninfer::DeviceContext& context, ninfer::KVPageG
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    const bool layout_only = argc == 2 && std::string_view(argv[1]) == "--layout-only";
+    if (argc > 1 && !layout_only) {
+        std::cerr << "usage: ninfer_kv_cache_test [--layout-only]\n";
+        return 1;
+    }
+    try {
+        if (exercise_nvfp4_host_layout() != 0) { return 1; }
+    } catch (const std::exception& error) {
+        std::cerr << "NVFP4 Host layout test failed: " << error.what() << '\n';
+        return 1;
+    }
+    if (layout_only) {
+        std::cout << "NVFP4 durable Host layout checks passed\n";
+        return 0;
+    }
     int device_count              = 0;
     const cudaError_t count_error = cudaGetDeviceCount(&device_count);
     if (cuda_unavailable(count_error) || (count_error == cudaSuccess && device_count == 0)) {

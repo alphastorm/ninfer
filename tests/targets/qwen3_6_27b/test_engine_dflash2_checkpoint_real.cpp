@@ -121,7 +121,7 @@ std::string describe(const ninfer::GenerationResult& result) {
 }
 } // namespace
 
-// Optional arguments: K and optimized-head selection, as in the DFlash2 real test.
+// Optional arguments: K, optimized-head selection, and bf16 (default) or nvfp4 KV storage.
 int main(int argc, char** argv) {
     const char* artifact = std::getenv("NINFER_QWEN3_8_27B_DFLASH2_WEIGHTS");
     if (!artifact || !*artifact) {
@@ -129,8 +129,13 @@ int main(int argc, char** argv) {
         return 77;
     }
     try {
+        const std::string_view kv_storage = argc > 3 ? argv[3] : "bf16";
+        require(kv_storage == "bf16" || kv_storage == "nvfp4",
+                "checkpoint KV storage must be bf16 or nvfp4");
         ninfer::EngineOptions options;
         options.artifact_path       = artifact;
+        options.kv_cache            = kv_storage == "nvfp4" ? ninfer::KvCacheStorage::Nvfp4
+                                                            : ninfer::KvCacheStorage::BFloat16;
         options.max_context         = 8192;
         options.kv_capacity         = ninfer::KvCapacityPolicy::explicit_capacity(2 * 8192);
         options.prefill_chunk       = 1024;
@@ -158,6 +163,9 @@ int main(int argc, char** argv) {
         std::vector<ninfer::ChatMessage> second_turn;
         {
             ninfer::Engine source(options);
+            require(source.options().kv_cache == options.kv_cache &&
+                        source.memory_summary().kv_cache == options.kv_cache,
+                    "source Engine did not retain the requested checkpoint KV storage");
             first = source.generate(prepare(source, {system, first_user}, "turn-1"), request(128));
             require(first.speculative.backend == ninfer::SpeculativeBackend::DFlash2 &&
                         first.speculative.accepted_tokens != 0,
@@ -192,6 +200,9 @@ int main(int argc, char** argv) {
         }
 
         ninfer::Engine restored(options);
+        require(restored.options().kv_cache == options.kv_cache &&
+                    restored.memory_summary().kv_cache == options.kv_cache,
+                "fresh Engine did not retain the requested checkpoint KV storage");
         ninfer::runtime::SessionRestoreSkipDetail restore_skip;
         const auto imported = CheckpointEngineAccess::restore_session(
             restored, kSession, "turn-1", files, exported, kStagingBytes, &restore_skip);
@@ -217,7 +228,7 @@ int main(int argc, char** argv) {
                     resumed.prefix_reuse_path == live.prefix_reuse_path,
                 "restored session reused a different prefix: live " + describe(live) +
                     ", restored " + describe(resumed));
-        std::cout << "ok K=" << options.speculative.draft_tokens
+        std::cout << "ok K=" << options.speculative.draft_tokens << " kv=" << kv_storage
                   << " exported=" << exported.restored_tokens << " tokens/"
                   << exported.payload_bytes << " bytes; live " << describe(live) << "; restored "
                   << describe(resumed) << '\n';

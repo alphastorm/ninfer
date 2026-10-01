@@ -26,10 +26,18 @@ and UE4M3 group16 scales. This representation is separate from weight NVFP4.
 The product enum is appended as `Nvfp4` (donor `Nvfp4Group16`). Legacy dtype/
 quant-group views remain valid; an explicit storage identity selects NVFP4.
 The final shared causal helpers are new files in this fork and used only by
-NVFP4. Existing BF16/INT8/FP8 routers and kernel implementations are retained.
+NVFP4. The donor log2(e) constant is kept with those new helpers rather than
+changing the fork shared math header. The cached launcher rebinds its one-row
+view locally, preserving the fork dtype/quant-group fields as well as storage.
+Existing BF16/INT8/FP8 routers and kernel implementations are retained.
 The tiled NVFP4 translation unit is non-RDC in the existing SM120a archive;
 other builds receive rejecting entry points, not unresolved device symbols.
 Checkpoint payload transfer remains format-agnostic and copies every plane.
+Final binary metadata is rebound to the port HEAD and build profile
+`dflash2-nvfp4-5090`; the source-archive build conservatively retains
+`source_dirty=true`. Qualification compares sorted per-file SHA256 manifests of
+all tracked HEAD blobs against the appliance source copy rather than claiming a
+Git-verified clean archive.
 
 ## Exclusions
 
@@ -45,6 +53,26 @@ adapted without replacing the fork BF16 oracle or graph scheduling policy.
 The intended appliance profile is two requests, DFlash2 K=7,
 `--max-context 131072 --kv-capacity auto --device-state-slots 4` with NVFP4 KV.
 262,144 tokens is the desired **aggregate** capacity, not per-request context.
+The existing device-state-slots option counts extra checkpoint slots (H); with
+two active lanes (C), H=4 reserves C+H=6 StateImages. This option is not redefined.
 Builds and CPU checks run in the GPU-less NVFP4 build container. Append bytes,
 attention numerics, graph replay, real-model checkpoint resume, memory fit and
 the existing 89-case MTP3 BF16 byte-identity corpus require the lead GPU window.
+
+The GPU-free qualification passed all ten requested CPU executables plus
+`ninfer_kv_cache_test --layout-only`. A standalone public-API smoke observed four
+host planes, 73,728 bytes per D256/KV4 page/layer, 8,322,048 bytes of B2/W8
+workspace at a 131,072-key envelope, Grouped/ParallelGrouped/Tiled selection at
+widths 8/192/193, and rejection of U8 without explicit NVFP4 identity.
+
+GPU-window commands (not executed by the port worker):
+
+```sh
+build/tests/ninfer_kv_cache_append_test --nvfp4-only
+build/tests/ninfer_softmax_attention_test --causal-only --kv-dtype nvfp4
+export NINFER_QWEN3_8_27B_DFLASH2_WEIGHTS=/absolute/path/to/model.ninfer
+build/tests/ninfer_qwen3_8_27b_dflash2_nvfp4_real_test
+build/tests/ninfer_qwen3_8_27b_dflash2_checkpoint_real_test 7 1 nvfp4
+# Existing BF16 checkpoint control (default selection):
+build/tests/ninfer_qwen3_8_27b_dflash2_checkpoint_real_test 7 1
+```

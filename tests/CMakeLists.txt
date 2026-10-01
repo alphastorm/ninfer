@@ -126,6 +126,8 @@ target_include_directories(ninfer_cli_options_test PRIVATE ${PROJECT_SOURCE_DIR}
 ninfer_add_test(ninfer_kv_cache_test
   SOURCES test_kv_cache.cpp
   LIBRARIES ninfer_core)
+add_test(NAME ninfer_kv_cache_layout_test
+  COMMAND $<TARGET_FILE:ninfer_kv_cache_test> --layout-only)
 ninfer_add_test(ninfer_state_store_test
   SOURCES test_state_store.cpp
   LIBRARIES ninfer_core)
@@ -179,10 +181,19 @@ ninfer_add_test(ninfer_qwen3_8_27b_dflash2_real_test
   SOURCES targets/qwen3_6_27b/test_engine_dflash2_real.cpp
   LIBRARIES ninfer_engine)
 set_tests_properties(ninfer_qwen3_8_27b_dflash2_real_test PROPERTIES SKIP_RETURN_CODE 77)
+ninfer_add_test(ninfer_qwen3_8_27b_dflash2_nvfp4_real_test
+  SOURCES targets/qwen3_6_27b/test_engine_dflash2_nvfp4_real.cpp
+  LIBRARIES ninfer_engine)
+set_tests_properties(ninfer_qwen3_8_27b_dflash2_nvfp4_real_test
+  PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
 ninfer_add_test(ninfer_qwen3_8_27b_dflash2_checkpoint_real_test
   SOURCES targets/qwen3_6_27b/test_engine_dflash2_checkpoint_real.cpp
   LIBRARIES ninfer_engine)
 set_tests_properties(ninfer_qwen3_8_27b_dflash2_checkpoint_real_test PROPERTIES SKIP_RETURN_CODE 77)
+add_test(NAME ninfer_qwen3_8_27b_dflash2_nvfp4_checkpoint_real_test
+  COMMAND $<TARGET_FILE:ninfer_qwen3_8_27b_dflash2_checkpoint_real_test> 7 1 nvfp4)
+set_tests_properties(ninfer_qwen3_8_27b_dflash2_nvfp4_checkpoint_real_test
+  PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
 ninfer_add_test(ninfer_qwen3_6_27b_load_plan_test
   SOURCES targets/qwen3_6_27b/test_load_plan.cpp
   NEEDS_SOURCE_DIR

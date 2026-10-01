@@ -1,5 +1,7 @@
 #include "core/sha256.h"
 #include "serve/session_checkpoint_store.h"
+#include "serve/server_identity.h"
+#include "runtime/engine/options.h"
 
 #include <nlohmann/json.hpp>
 
@@ -446,6 +448,49 @@ int test_export_refusal_diagnostics() {
                           input_message.view().find(runtime::continuation_export_skip_reason_name(
                               ExportReason::StoreInputInvalid)) != std::string_view::npos,
                       "invalid input is diagnosed without entering export or changing its category");
+    return failures;
+}
+
+int test_nvfp4_runtime_fingerprint_rejection() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .read_queue = std::make_shared<TestReadQueue>()});
+    EngineOptions engine;
+    engine.artifact_path = "fixture.ninfer";
+    engine.kv_cache = KvCacheStorage::Nvfp4;
+    engine = runtime::normalize_engine_options(std::move(engine));
+    ServeOptions server;
+    LoadSummary load;
+    const auto nvfp4 = session_checkpoint_runtime_fingerprint(server, engine, load);
+    const auto saved = store.save(
+        responses, nvfp4,
+        [&](ContinuationCheckpointWriter& writer) -> std::optional<ContinuationCheckpointStats> {
+            if (!write_chunked(writer, "engine/state.bin", payload)) { return std::nullopt; }
+            return ContinuationCheckpointStats{.frontier_tokens = 100000,
+                                               .restored_tokens = 97500,
+                                               .payload_bytes = payload.size()};
+        });
+    int failures = check(saved.has_value(), "NVFP4 checkpoint publishes");
+    if (!saved) { return failures; }
+    for (const auto storage : {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64,
+                               KvCacheStorage::Fp8E4M3Row256}) {
+        engine.kv_cache = storage;
+        const auto incompatible = store.load(
+            responses.client_session_sha256,
+            session_checkpoint_runtime_fingerprint(server, engine, load));
+        failures += check(incompatible.state == SessionCheckpointLoadState::Incompatible &&
+                              !incompatible.checkpoint,
+                          "NVFP4 checkpoint cannot be loaded under a legacy KV profile");
+    }
+    auto compatible = store.load(responses.client_session_sha256, nvfp4);
+    failures += check(compatible.state == SessionCheckpointLoadState::Available &&
+                          compatible.checkpoint && compatible.checkpoint->generation == saved->generation,
+                      "wrong KV profile does not quarantine the compatible NVFP4 checkpoint");
+    compatible.checkpoint.reset();
     return failures;
 }
 
@@ -1730,6 +1775,7 @@ int main() {
     failures += test_codec_round_trip();
     failures += test_export_refusal_diagnostics();
     failures += test_transaction_restart_compatibility_and_corruption();
+    failures += test_nvfp4_runtime_fingerprint_rejection();
     failures += test_active_reader_delete_and_gc();
     failures += test_may_hold_prefilter();
     failures += test_store_wide_quota_across_sessions();
