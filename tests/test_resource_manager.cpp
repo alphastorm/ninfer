@@ -1,4 +1,5 @@
 #include "runtime/engine/resource_manager.h"
+#include <ninfer/targets/qwen3_6/runtime.h>
 
 #include <algorithm>
 #include <array>
@@ -17,6 +18,7 @@ namespace {
 
 using ninfer::PrefixReusePath;
 using ninfer::RuntimeStats;
+using ninfer::SpeculativeBackend;
 using ninfer::runtime::CancellationFlagView;
 using ninfer::runtime::CheckpointKind;
 using ninfer::runtime::CheckpointRef;
@@ -36,6 +38,9 @@ using ninfer::runtime::PrefillWork;
 using ninfer::runtime::Readiness;
 using ninfer::runtime::RequestPlanSummary;
 using ninfer::runtime::RetentionClass;
+using ninfer::targets::qwen3_6::CaptureStatePlacement;
+using ninfer::targets::qwen3_6::RewriteCheckpointKind;
+using ninfer::targets::qwen3_6::detail::inspect_capture_state;
 
 int failures = 0;
 
@@ -2021,25 +2026,32 @@ void test_in_progress_adoption_and_private_capture() {
     (void)finish_active(manager, program, active, 24);
 }
 
-void test_queued_peer_preserves_stored_response_replay_capture() {
+void check_queued_peer_preserves_stored_response_replay_capture(
+    std::uint32_t device_occupied, CaptureStatePlacement expected_placement) {
     FakeManager manager = make_manager(2, 4);
     FakeProgram program;
     const ActiveRequest first = start_active(
         manager, program, 12, make_base(12, FakeCacheSessionKey{1}, RetentionClass::LiveSession), 1);
     const FakeRequestBasePlan queued_peer =
         make_base(13, FakeCacheSessionKey{2}, RetentionClass::LiveSession);
+    program.usage.device_state_slots = device_occupied;
+    const auto capture_state = inspect_capture_state(
+        program.usage.device_state_slots, 4, false, true, ninfer::SpeculativeBackend::DFlash2,
+        RewriteCheckpointKind::ResponseReplay);
+    require(capture_state.placement == expected_placement,
+            "replay capture did not select the placement required by device occupancy");
     program.capture_assessment = FakeCaptureAssessment{
         .shortlist_key             = FakeShortlistKey{.digest = 12, .frontier = 24},
         .publishes_private         = true,
-        .response_replay_draft_copy = true,
+        .response_replay_draft_copy = capture_state.response_replay_draft_copy,
         .needs_transfer            = true,
     };
     program.capture_summary.endpoint = endpoint(12, 24);
     program.capture_summary.rewrite  = replay_checkpoint(12, 24);
     program.progress_in_progress_once = true;
 
-    // EngineCore passes false while the second request is queued. DFlash2 DeviceFork
-    // captures need a D2D draft-state copy; skipping it loses this replay frontier.
+    // EngineCore passes false while the second request is queued. Both the D2D draft
+    // copy and the HostSnapshot transfer must preserve this stored replay frontier.
     const auto reserved =
         manager.reserve_active_capture(program, first.lane, FakeCaptureOffer{.id = 1}, false, {});
     require(reserved == FakeManager::ActiveCaptureReserveResult::Reserved,
@@ -2053,7 +2065,8 @@ void test_queued_peer_preserves_stored_response_replay_capture() {
         manager.progress_context_transaction(program, {}));
     require(completed.status == ContextTransactionStatus::Published &&
                 !manager.context_transaction_kind() &&
-                manager.lane_state(first.lane) == ninfer::runtime::LogicalLaneState::Active,
+                manager.lane_state(first.lane) == ninfer::runtime::LogicalLaneState::Active &&
+                program.skipped_captures == 0,
             "stored replay capture did not publish and release the resource transaction");
     const ActiveRequest second = start_active(manager, program, 13, queued_peer, 2);
     require(second.lane.value != first.lane.value,
@@ -2062,43 +2075,62 @@ void test_queued_peer_preserves_stored_response_replay_capture() {
     (void)manager.abort(program, second.lane, second.sequence);
 }
 
+void test_queued_peer_preserves_stored_response_replay_capture() {
+    check_queued_peer_preserves_stored_response_replay_capture(3, CaptureStatePlacement::DeviceFork);
+}
+
+void test_queued_peer_preserves_stored_response_replay_host_snapshot() {
+    check_queued_peer_preserves_stored_response_replay_capture(4, CaptureStatePlacement::HostSnapshot);
+}
+
 void test_queued_peer_still_gates_optional_capture_transfers() {
     struct Case {
         std::optional<FakeCacheSessionKey> session;
         bool update_session_index;
         bool private_capture;
-        bool replay_draft_copy;
-        bool needs_transfer;
-        bool expect_reserved;
+        SpeculativeBackend backend;
+        std::optional<RewriteCheckpointKind> rewrite;
     };
     const std::array cases{
-        Case{std::nullopt, true, true, true, true, false},  // Anonymous replay.
-        Case{FakeCacheSessionKey{1}, false, true, true, true, false}, // store:false.
-        Case{FakeCacheSessionKey{1}, true, true, false, true, false}, // Other private / HostSnapshot.
-        Case{FakeCacheSessionKey{1}, true, false, false, true, false}, // Shared only.
-        Case{FakeCacheSessionKey{1}, true, true, false, false, true}, // MTP DeviceFork.
+        Case{std::nullopt, true, true, SpeculativeBackend::DFlash2,
+             RewriteCheckpointKind::ResponseReplay}, // Anonymous replay.
+        Case{FakeCacheSessionKey{1}, false, true, SpeculativeBackend::DFlash2,
+             RewriteCheckpointKind::ResponseReplay}, // store:false.
+        Case{FakeCacheSessionKey{1}, true, true, SpeculativeBackend::DFlash2,
+             RewriteCheckpointKind::TurnClosure}, // Other private rewrite.
+        Case{FakeCacheSessionKey{1}, true, true, SpeculativeBackend::DFlash2,
+             std::nullopt}, // Standalone long anchor.
+        Case{FakeCacheSessionKey{1}, true, false, SpeculativeBackend::DFlash2,
+             std::nullopt}, // Shared only.
+        Case{FakeCacheSessionKey{1}, true, true, SpeculativeBackend::Mtp,
+             RewriteCheckpointKind::ResponseReplay}, // MTP.
     };
-    for (const Case& item : cases) {
+    const auto check_case = [](std::uint32_t device_occupied, const Case& item) {
         FakeManager manager = make_manager(1, 2, 1);
         FakeProgram program;
         const ActiveRequest active = start_active(
             manager, program, 12,
             make_base(12, item.session, RetentionClass::LiveSession, item.update_session_index), 1);
+        const auto capture_state = inspect_capture_state(
+            device_occupied, 4, false, true, item.backend, item.rewrite);
+        const bool needs_transfer =
+            capture_state.placement == CaptureStatePlacement::HostSnapshot ||
+            ninfer::targets::qwen3_6::is_masked_draft_backend(item.backend);
         program.capture_assessment = FakeCaptureAssessment{
             .shortlist_key             = FakeShortlistKey{.digest = 12, .frontier = 24},
             .publishes_private         = item.private_capture,
             .publishes_shared          = !item.private_capture,
-            .response_replay_draft_copy = item.replay_draft_copy,
-            .needs_transfer            = item.needs_transfer,
+            .response_replay_draft_copy = capture_state.response_replay_draft_copy,
+            .needs_transfer            = needs_transfer,
         };
         program.capture_summary.endpoint = endpoint(12, 24);
         program.capture_summary.rewrite  = replay_checkpoint(12, 24);
         const auto reserved = manager.reserve_active_capture(
             program, active.lane, FakeCaptureOffer{.id = 1}, false, {});
         require((reserved == FakeManager::ActiveCaptureReserveResult::Reserved) ==
-                    item.expect_reserved,
+                    !needs_transfer,
                 "queued-peer transfer exception escaped stored response-replay captures");
-        if (item.expect_reserved) {
+        if (!needs_transfer) {
             const auto completed = std::get<FakeManager::ActiveCaptureOutcome>(
                 manager.progress_context_transaction(program, {}));
             require(completed.status == ContextTransactionStatus::Published,
@@ -2108,6 +2140,9 @@ void test_queued_peer_still_gates_optional_capture_transfers() {
                     "optional capture started a transfer ahead of the queued peer");
         }
         (void)manager.abort(program, active.lane, active.sequence);
+    };
+    for (std::uint32_t device_occupied : {3U, 4U}) {
+        for (const Case& item : cases) { check_case(device_occupied, item); }
     }
 }
 
@@ -2959,6 +2994,8 @@ int main() {
     run_test("in-progress and capture", test_in_progress_adoption_and_private_capture);
     run_test("queued peer preserves stored response replay",
              test_queued_peer_preserves_stored_response_replay_capture);
+    run_test("queued peer preserves stored response replay HostSnapshot",
+             test_queued_peer_preserves_stored_response_replay_host_snapshot);
     run_test("queued peer gates optional capture transfers",
              test_queued_peer_still_gates_optional_capture_transfers);
     run_test("full anchor set replacement", test_full_anchor_set_replaces_the_least_valuable_anchor);

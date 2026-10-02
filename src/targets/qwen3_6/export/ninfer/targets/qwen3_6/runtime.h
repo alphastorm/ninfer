@@ -4,6 +4,7 @@
 #include "runtime/contract/continuation_checkpoint.h"
 #include "runtime/contract/types.h"
 #include <ninfer/targets/qwen3_6/prepared_prompt.h>
+#include <ninfer/targets/qwen3_6/startup_features.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -511,6 +512,33 @@ enum class CaptureStatePlacement : std::uint8_t {
     DeviceFork,
     HostSnapshot,
 };
+
+namespace detail {
+
+struct CaptureStateDecision {
+    CaptureStatePlacement placement;
+    bool response_replay_draft_copy;
+};
+
+[[nodiscard]] constexpr CaptureStateDecision
+inspect_capture_state(std::uint32_t device_occupied, std::uint32_t device_capacity,
+                      bool recycles_private_state, bool host_storage_available,
+                      SpeculativeBackend backend, std::optional<RewriteCheckpointKind> rewrite) noexcept {
+    const bool device_destination_available =
+        recycles_private_state || device_occupied < device_capacity;
+    const CaptureStatePlacement placement =
+        device_destination_available || !host_storage_available
+            ? CaptureStatePlacement::DeviceFork
+            : CaptureStatePlacement::HostSnapshot;
+    return CaptureStateDecision{
+        .placement = placement,
+        .response_replay_draft_copy =
+            placement == CaptureStatePlacement::DeviceFork && is_masked_draft_backend(backend) &&
+            rewrite == RewriteCheckpointKind::ResponseReplay,
+    };
+}
+
+} // namespace detail
 
 struct CaptureAssessment {
     CaptureAssessment();

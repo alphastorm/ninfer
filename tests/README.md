@@ -204,6 +204,7 @@ The resource-manager suite is pure host C++. On a CUDA-less workstation:
 
 ```sh
 clang++ -std=c++23 -Isrc -Iinclude -Itests/support/nvtx-stub \
+  -Isrc/targets/qwen3_6/export \
   -Ithird_party -Ithird_party/nlohmann/include -include exception \
   -o /tmp/rm_test tests/test_resource_manager.cpp \
   src/runtime/engine/context_cost.cpp src/runtime/engine/context_cost_defaults.cpp && /tmp/rm_test

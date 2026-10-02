@@ -7423,19 +7423,20 @@ ProgramImplCore::inspect_capture(const CaptureOffer& offer, const SharedPrefixHa
     }
     const std::uint32_t device_state_after_preparation =
         state_store->device_occupied() - replaced_shared.device.state_slots;
-    const bool device_destination_available =
-        assessment.recycles_private_state ||
-        device_state_after_preparation < state_store->device_capacity();
-    if (device_destination_available || host_state_images == nullptr) {
-        assessment.state_placement = qwen3_6::CaptureStatePlacement::DeviceFork;
-        added.device.state_slots   = 1;
+    const auto capture_state = qwen3_6::detail::inspect_capture_state(
+        device_state_after_preparation, state_store->device_capacity(),
+        assessment.recycles_private_state, host_state_images != nullptr,
+        speculative_backend, group.rewrite);
+    assessment.state_placement = capture_state.placement;
+    assessment.response_replay_draft_copy = capture_state.response_replay_draft_copy;
+    if (assessment.state_placement == qwen3_6::CaptureStatePlacement::DeviceFork) {
+        added.device.state_slots = 1;
     } else {
         // A capture must not require a third Device image when the active image and a retained
         // checkpoint already occupy the C+H pool.  Snapshot the frozen logical checkpoint to
         // Host, then transfer ownership of its unchanged Device replica to the continuing active
         // identity.  This preserves both logical checkpoints without assigning fixed slot roles.
-        assessment.state_placement = qwen3_6::CaptureStatePlacement::HostSnapshot;
-        added.host.state_slots     = 1;
+        added.host.state_slots = 1;
     }
     const detail::PhysicalResources replaced =
         checked_resource_sum(replaced_private, replaced_shared);
@@ -7474,8 +7475,6 @@ ProgramImplCore::inspect_capture(const CaptureOffer& offer, const SharedPrefixHa
     } else if (is_masked_draft_backend(speculative_backend)) {
         assessment.transfer_requirements.push_back(state_transfer_requirement(
             state_images->host_layout(), runtime::ContextTransferDirection::DeviceToDevice, true));
-        assessment.response_replay_draft_copy =
-            group.rewrite == RewriteCheckpointKind::ResponseReplay;
     }
     if (added.device.main_kv_pages != 0) {
         assessment.transfer_requirements.push_back(kv_transfer_requirement(

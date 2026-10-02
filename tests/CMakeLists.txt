@@ -78,6 +78,8 @@ ninfer_add_test(ninfer_arena_test        SOURCES test_arena.cpp)
 ninfer_add_test(ninfer_admission_policy_test SOURCES test_admission_policy.cpp)
 ninfer_add_test(ninfer_context_cost_test SOURCES test_context_cost.cpp)
   ninfer_add_test(ninfer_resource_manager_test SOURCES test_resource_manager.cpp)
+  target_include_directories(ninfer_resource_manager_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
   ninfer_add_test(ninfer_automatic_checkpoint_queue_test
     SOURCES test_automatic_checkpoint_queue.cpp
             ${PROJECT_SOURCE_DIR}/src/serve/automatic_checkpoint_queue.cpp)
