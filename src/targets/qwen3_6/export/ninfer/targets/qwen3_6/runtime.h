@@ -533,8 +533,7 @@ inspect_capture_state(std::uint32_t device_occupied, std::uint32_t device_capaci
     return CaptureStateDecision{
         .placement = placement,
         .response_replay_draft_copy =
-            placement == CaptureStatePlacement::DeviceFork && is_masked_draft_backend(backend) &&
-            rewrite == RewriteCheckpointKind::ResponseReplay,
+            is_masked_draft_backend(backend) && rewrite == RewriteCheckpointKind::ResponseReplay,
     };
 }
 
@@ -552,7 +551,7 @@ struct CaptureAssessment {
     std::uint32_t frontier                = 0;
     bool publishes_private                = false;
     bool publishes_shared                 = false;
-    // Only the masked-draft DeviceFork D2D copy at a response-replay boundary.
+    // Masked-draft state preservation at a response-replay boundary, in either placement.
     bool response_replay_draft_copy        = false;
     bool needs_transfer                   = false;
     bool recycles_private_state           = false;
