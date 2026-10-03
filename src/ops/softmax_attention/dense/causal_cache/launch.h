@@ -23,14 +23,14 @@ struct CausalSmallTInvocation {
     std::int32_t batch_size     = 1;
 };
 
+// BF16 KV admits seven and eight tokens for the 24-head geometry (one fused launch); every other
+// profile admits one to six.
 std::int32_t causal_attention_split_capacity(std::int32_t q_heads, std::int32_t tokens,
                                              DType cache_dtype,
                                              CausalAttentionExecutionEnvelope envelope);
 
-bool causal_attention_uses_small_t(std::int32_t tokens);
-
 CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::int32_t width,
-                                                    std::int32_t batch_size,
+                                                    std::int32_t batch_size, DType cache_dtype,
                                                     CausalAttentionExecutionEnvelope envelope);
 
 const char* causal_attention_route_name(CausalAttentionRoute route);

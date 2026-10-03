@@ -21,6 +21,12 @@ namespace ninfer::ops {
 
 inline constexpr int kCausalHeadDim = 256;
 
+// A 24-head BF16 verify of seven or eight columns runs as one fused launch (small_t_bf16.cuh).
+// Its rows keep the split partitions ChunkedSmallT gave them: the first six columns' chunk ends at
+// column 5, the tail chunk at the last column.
+inline constexpr int kCausalFusedHeadTokens = 6;
+inline constexpr int kCausalFusedMaxTokens  = 8;
+
 struct CausalAppendInput {
     static constexpr bool writes_cache = true;
     const __nv_bfloat16* k;
@@ -153,7 +159,9 @@ __device__ __forceinline__ void causal_small_t_tc_row_to_qt(int row, int tokens,
     q_head            = kv_head * Geometry::GroupSize + local_q;
 }
 
-template <typename Geometry, int DChunk, bool Int8, bool MultiBatch, bool Masked, bool Offset>
+// Phased reduces a fused launch: each column takes the window of the chunk ChunkedSmallT gave it.
+template <typename Geometry, int DChunk, bool Int8, bool MultiBatch, bool Masked, bool Offset,
+          bool Phased = false>
 __launch_bounds__(256) __global__ void causal_attention_small_t_reduce_output_kernel(
     const __nv_bfloat16* partial_acc, const float* partial_m, const float* partial_l,
     const std::int32_t* positions, const std::int32_t* valid_columns, std::int32_t tokens,
@@ -178,7 +186,9 @@ __launch_bounds__(256) __global__ void causal_attention_small_t_reduce_output_ke
 
     if constexpr (Offset) { positions += column_begin; }
     if constexpr (MultiBatch) { positions += batch * full_width; }
-    const int last_pos = positions[tokens - 1];
+    const int last_pos =
+        positions[(Phased && token < kCausalFusedHeadTokens) ? kCausalFusedHeadTokens - 1
+                                                              : tokens - 1];
     int output_column  = token;
     if constexpr (Offset) { output_column += column_begin; }
     if constexpr (MultiBatch) { output_column += batch * full_width; }

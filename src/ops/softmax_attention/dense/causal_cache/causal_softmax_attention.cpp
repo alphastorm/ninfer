@@ -23,6 +23,9 @@ constexpr std::int32_t kSmallTChunkTokens            = 6;
 constexpr std::int32_t kMaximumVerifyTokens          = 16;
 constexpr std::int32_t kMaximumBatchSize             = 8;
 constexpr std::uint32_t kH24VerifyChunkedVisibleKeys = 320;
+// Widths 7-8 of the 24-head BF16 route run one fused SmallT launch whose first six columns are the
+// old kSmallTChunkTokens chunk (kCausalFusedHeadTokens/kCausalFusedMaxTokens in small_t.cuh).
+constexpr std::int32_t kH24FusedVerifyTokens = 8;
 constexpr std::uint32_t kTwoChunkPromptVisibleKeys   = 512;
 constexpr std::uint32_t kThreeChunkPromptVisibleKeys = 1024;
 
@@ -328,13 +331,17 @@ void launch_cached_chunked_small_t(const Tensor& q, const Tensor& positions, flo
 namespace detail {
 
 CausalAttentionRoute causal_attention_resolve_route(std::int32_t q_heads, std::int32_t width,
-                                                    std::int32_t batch_size,
+                                                    std::int32_t batch_size, DType cache_dtype,
                                                     CausalAttentionExecutionEnvelope envelope) {
     if (width >= 1 && width <= kSmallTChunkTokens) { return CausalAttentionRoute::SmallT; }
+    // A 24-head BF16 verify of seven or eight columns that would chunk runs as one SmallT launch
+    // reproducing the chunks' bytes, so each layer reads its KV once (small_t_bf16.cuh, EXP-092).
+    const bool chunks_h24_verify =
+        q_heads == 24 && width <= kH24FusedVerifyTokens &&
+        (batch_size > 1 || envelope.max_visible_keys > kH24VerifyChunkedVisibleKeys);
+    if (chunks_h24_verify && cache_dtype == DType::BF16) { return CausalAttentionRoute::SmallT; }
     if (batch_size > 1) { return CausalAttentionRoute::ChunkedSmallT; }
-    if (q_heads == 24 && width <= 8 && envelope.max_visible_keys > kH24VerifyChunkedVisibleKeys) {
-        return CausalAttentionRoute::ChunkedSmallT;
-    }
+    if (chunks_h24_verify) { return CausalAttentionRoute::ChunkedSmallT; }
     const std::uint32_t prompt_visible_keys =
         width <= 2 * kSmallTChunkTokens ? kTwoChunkPromptVisibleKeys : kThreeChunkPromptVisibleKeys;
     if (q_heads == 16 && width <= kMaximumVerifyTokens &&
@@ -391,7 +398,8 @@ std::size_t causal_softmax_attention_workspace_capacity_bytes(
     };
     const auto exact_capacity = [&](std::int32_t width) {
         const detail::CausalAttentionRoute route =
-            detail::causal_attention_resolve_route(q_heads, width, batch_size, envelope);
+            detail::causal_attention_resolve_route(q_heads, width, batch_size, cache_dtype,
+                                                   envelope);
         if (route == detail::CausalAttentionRoute::Prompt) { return std::size_t{0}; }
         if (route == detail::CausalAttentionRoute::SmallT) { return chunk_capacity(width); }
         std::size_t maximum = 0;
@@ -439,7 +447,7 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
         return;
     }
     const detail::CausalAttentionRoute route =
-        detail::causal_attention_resolve_route(q.ne[1], width, batch, envelope);
+        detail::causal_attention_resolve_route(q.ne[1], width, batch, cache.dtype, envelope);
     if (route == detail::CausalAttentionRoute::ChunkedSmallT) {
         launch_chunked_small_t(q, k, v, positions, valid_columns, kv_table_rows, scale, cache,
                                envelope, workspace, out, stream);
@@ -474,12 +482,12 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
         return;
     }
     const detail::CausalAttentionRoute route =
-        detail::causal_attention_resolve_route(q.ne[1], q.ne[2], 1, envelope);
+        detail::causal_attention_resolve_route(q.ne[1], q.ne[2], 1, cache.dtype, envelope);
     if (route == detail::CausalAttentionRoute::ChunkedSmallT) {
         launch_cached_chunked_small_t(q, positions, scale, cache, envelope, workspace, out, stream);
         return;
     }
-    if (detail::causal_attention_uses_small_t(q.ne[2])) {
+    if (route == detail::CausalAttentionRoute::SmallT) {
         const std::int32_t splits =
             detail::causal_attention_split_capacity(q.ne[1], q.ne[2], cache.dtype, envelope);
         SmallTWorkspace partial =

@@ -1,10 +1,20 @@
 #pragma once
 
-// ninfer::ops - split-KV causal small-T attention, BF16 KV-cache partial kernel.
+// ninfer::ops - split-KV causal small-T attention, BF16 KV-cache partial kernels.
 // Standalone from the int8 kernel (causal_attention_small_t_i8.cuh): shared scaffolding
 // lives in causal_attention_small_t.cuh, but the body/append/load are not shared so the
-// bf16 path can be tuned independently. Processes one KV head, one query-head
-// subgroup, and one token tile; a reducer combines the split-local partials.
+// bf16 path can be tuned independently. Each CTA processes one KV head, one query-head
+// subgroup, and one split of the key window; a reducer combines the split-local partials.
+//
+// causal_attention_small_t_tc_partial_bf16_kernel runs one token tile of up to six columns.
+// causal_attention_small_t_tc_fused_bf16_kernel runs a 24-head verify of seven or eight columns
+// in one launch where ChunkedSmallT ran a six-column and a one- or two-column launch, each
+// reading the whole KV once. It reproduces those launches byte for byte: the split partition is
+// a function of the chunk's last position, so rows of the first six columns keep the partition of
+// pos[5]+1 and the rest keep pos[W-1]+1. When both windows give the same split boundaries, one
+// pass serves every row: a key past a row's position is masked to -inf exactly as a key past the
+// old chunk's window was, and a split that holds none of a row's keys leaves it at the neutral
+// partial the reducer skips. Otherwise the CTA runs the two old chunks in sequence.
 
 #include <cuda_bf16.h>
 #include <math_constants.h>
@@ -15,71 +25,59 @@
 
 namespace ninfer::ops {
 
-template <typename Geometry, int TokenTile, int WarpsPerCta, bool MultiBatch, bool Masked,
-          typename CacheInput>
-__launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf16_kernel(
-    const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, __nv_bfloat16* cache_k,
-    __nv_bfloat16* cache_v, const std::int32_t* block_tables, const std::int32_t* valid_columns,
-    const std::int32_t* table_rows, std::int32_t table_stride, std::int32_t tokens,
-    std::int32_t full_width, std::int32_t column_begin, std::int32_t logical_capacity, float scale,
-    __nv_bfloat16* partial_acc, float* partial_m, float* partial_l) {
-    static_assert(TokenTile >= 1 && TokenTile <= 6);
-    static_assert(WarpsPerCta >= 1 && WarpsPerCta <= 4);
+inline constexpr int kCausalSmallTBf16KeyTile = 32;
 
-    constexpr int Wc      = WarpsPerCta;
-    constexpr int Br      = Wc * 16;
-    constexpr int Bc      = 32;
-    constexpr int D       = kCausalHeadDim;
-    constexpr int Threads = Wc * 32;
-    constexpr int QKNt    = Bc / 8;
-    constexpr int QKKs    = D / 16;
-    constexpr int PVNt    = D / 8;
-    constexpr int PVKs    = Bc / 16;
+template <int WarpsPerCta>
+struct CausalSmallTBf16Shared {
+    static constexpr int Bc      = kCausalSmallTBf16KeyTile;
+    static constexpr int QkvRows = 2 * Bc;
     // The 262144-key maximum envelope spans at most 49 pages in this split geometry.
-    constexpr int PageIds       = 64;
+    static constexpr int PageIds = 64;
+
+    __nv_bfloat16 qkv[QkvRows * kCausalHeadDim];
+    __nv_bfloat16 p[WarpsPerCta * 16 * Bc];
+    std::int32_t physical_pages[PageIds];
+};
+
+// One split of one token tile. q, input and pos address the tile's first column; the tile writes
+// its own valid rows to the cache and reads keys [source_first_pos, source_first_pos +
+// source_count) from source columns 0.. instead of the cache. Partials land at token
+// partial_token of a layout partial_tokens columns wide.
+template <typename Geometry, int TokenTile, int WarpsPerCta, typename CacheInput>
+__device__ __forceinline__ void causal_small_t_tc_bf16_split(
+    CausalSmallTBf16Shared<WarpsPerCta>& shared, const __nv_bfloat16* q, CacheInput input,
+    const std::int32_t* pos, __nv_bfloat16* cache_k, __nv_bfloat16* cache_v,
+    const std::int32_t* block_table, int tokens, int valid_tokens, CacheInput source,
+    int source_first_pos, int source_count, std::int32_t logical_capacity, float scale,
+    int kv_head, int split, int split_count, __nv_bfloat16* partial_acc, float* partial_m,
+    float* partial_l, int partial_token, int partial_tokens) {
+    static_assert(WarpsPerCta >= 1 && WarpsPerCta <= 4);
+    static_assert(TokenTile >= 1 && TokenTile * Geometry::GroupSize <= WarpsPerCta * 16);
+
+    constexpr int Wc            = WarpsPerCta;
+    constexpr int Br            = Wc * 16;
+    constexpr int Bc            = kCausalSmallTBf16KeyTile;
+    constexpr int D             = kCausalHeadDim;
+    constexpr int Threads       = Wc * 32;
+    constexpr int QKNt          = Bc / 8;
+    constexpr int QKKs          = D / 16;
+    constexpr int PVNt          = D / 8;
+    constexpr int PVKs          = Bc / 16;
     constexpr float Log2E       = 1.4426950408889634074f;
     constexpr unsigned FullMask = 0xffffffffu;
-    constexpr int QkvRows       = 2 * Bc;
 
-    static_assert(QkvRows >= Br);
+    static_assert(CausalSmallTBf16Shared<WarpsPerCta>::QkvRows >= Br);
 
-    __shared__ __align__(16) __nv_bfloat16 qkv_s[QkvRows * D];
-    __shared__ __align__(16) __nv_bfloat16 p_s[Wc * 16 * Bc];
-    __shared__ std::int32_t physical_pages_s[PageIds];
-    __nv_bfloat16* k_s = qkv_s;
-    __nv_bfloat16* v_s = qkv_s + Bc * D;
+    __nv_bfloat16* qkv_s            = shared.qkv;
+    __nv_bfloat16* p_s              = shared.p;
+    std::int32_t* physical_pages_s  = shared.physical_pages;
+    __nv_bfloat16* k_s              = qkv_s;
+    __nv_bfloat16* v_s              = qkv_s + Bc * D;
 
-    const int kv_head     = static_cast<int>(blockIdx.x);
-    const int split       = static_cast<int>(blockIdx.y);
-    const int batch       = MultiBatch ? static_cast<int>(blockIdx.z) : 0;
-    const int split_count = static_cast<int>(gridDim.y);
-    const int tid         = static_cast<int>(threadIdx.x);
-    const int warp        = tid >> 5;
-    const int lane        = tid & 31;
-    int valid_tokens      = tokens;
-    if constexpr (Masked) {
-        const int remaining = valid_columns[batch] - column_begin;
-        valid_tokens        = remaining <= 0 ? 0 : (remaining < tokens ? remaining : tokens);
-    }
+    const int tid       = static_cast<int>(threadIdx.x);
+    const int warp      = tid >> 5;
+    const int lane      = tid & 31;
     const int row_count = tokens * Geometry::GroupSize;
-
-    std::int64_t column_base = column_begin;
-    if constexpr (MultiBatch) { column_base += static_cast<std::int64_t>(batch) * full_width; }
-    q += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::QHeads * column_base;
-    pos += column_base;
-    if constexpr (CacheInput::writes_cache) {
-        input.k += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::KVHeads * column_base;
-        input.v += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::KVHeads * column_base;
-    }
-    const int table_row = table_rows == nullptr ? 0 : table_rows[batch];
-    const std::int32_t* block_table =
-        block_tables + static_cast<std::int64_t>(table_row) * table_stride;
-    if constexpr (MultiBatch) {
-        partial_acc += static_cast<std::int64_t>(batch) * kCausalHeadDim * Geometry::QHeads *
-                       tokens * split_count;
-        partial_m += static_cast<std::int64_t>(batch) * Geometry::QHeads * tokens * split_count;
-        partial_l += static_cast<std::int64_t>(batch) * Geometry::QHeads * tokens * split_count;
-    }
 
     auto write_neutral = [&]() {
         for (int row = tid; row < row_count; row += Threads) {
@@ -87,9 +85,10 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
             int token  = 0;
             causal_small_t_tc_row_to_qt<Geometry>(row, tokens, kv_head, q_head, token);
             if (causal_valid_q_head<Geometry>(kv_head, q_head)) {
-                partial_m[causal_partial_stat_index<Geometry>(q_head, token, split, tokens)] =
-                    -CUDART_INF_F;
-                partial_l[causal_partial_stat_index<Geometry>(q_head, token, split, tokens)] = 0.0f;
+                partial_m[causal_partial_stat_index<Geometry>(q_head, partial_token + token, split,
+                                                              partial_tokens)] = -CUDART_INF_F;
+                partial_l[causal_partial_stat_index<Geometry>(q_head, partial_token + token, split,
+                                                              partial_tokens)] = 0.0f;
             }
         }
         for (int idx = tid; idx < row_count * D; idx += Threads) {
@@ -99,7 +98,8 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
             int token     = 0;
             causal_small_t_tc_row_to_qt<Geometry>(row, tokens, kv_head, q_head, token);
             if (causal_valid_q_head<Geometry>(kv_head, q_head)) {
-                partial_acc[causal_partial_acc_index<Geometry>(q_head, d, token, split, tokens)] =
+                partial_acc[causal_partial_acc_index<Geometry>(
+                    q_head, d, partial_token + token, split, partial_tokens)] =
                     __float2bfloat16(0.0f);
             }
         }
@@ -228,14 +228,14 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
             __nv_bfloat16* v_dst = &v_s[key_l * D + causal_small_t_tc_swz(key_l, d)];
             if (key >= split_start && key < split_end) {
                 if constexpr (CacheInput::writes_cache) {
-                    const int new_token = key - first_pos;
+                    const int new_token = key - source_first_pos;
                     const bool from_new =
-                        new_token >= 0 && new_token < valid_tokens && key >= first_pos;
+                        new_token >= 0 && new_token < source_count && key >= source_first_pos;
                     if (from_new) {
                         const std::int64_t off =
                             kv_cache_int8_new_index<Geometry>(kv_head, d, new_token);
-                        ninfer::ops::cp_async<16>(k_dst, &input.k[off]);
-                        ninfer::ops::cp_async<16>(v_dst, &input.v[off]);
+                        ninfer::ops::cp_async<16>(k_dst, &source.k[off]);
+                        ninfer::ops::cp_async<16>(v_dst, &source.v[off]);
                     } else {
                         const std::int64_t off = causal_cache_index<Geometry>(
                             physical_page, kv_head, d, key & kPagedKVPageMask);
@@ -383,15 +383,19 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
             int q_head = 0;
             int token  = 0;
             causal_small_t_tc_row_to_qt<Geometry>(row0, tokens, kv_head, q_head, token);
-            partial_m[causal_partial_stat_index<Geometry>(q_head, token, split, tokens)] = m0;
-            partial_l[causal_partial_stat_index<Geometry>(q_head, token, split, tokens)] = l0;
+            partial_m[causal_partial_stat_index<Geometry>(q_head, partial_token + token, split,
+                                                          partial_tokens)] = m0;
+            partial_l[causal_partial_stat_index<Geometry>(q_head, partial_token + token, split,
+                                                          partial_tokens)] = l0;
         }
         if (row1 < row_count) {
             int q_head = 0;
             int token  = 0;
             causal_small_t_tc_row_to_qt<Geometry>(row1, tokens, kv_head, q_head, token);
-            partial_m[causal_partial_stat_index<Geometry>(q_head, token, split, tokens)] = m1;
-            partial_l[causal_partial_stat_index<Geometry>(q_head, token, split, tokens)] = l1;
+            partial_m[causal_partial_stat_index<Geometry>(q_head, partial_token + token, split,
+                                                          partial_tokens)] = m1;
+            partial_l[causal_partial_stat_index<Geometry>(q_head, partial_token + token, split,
+                                                          partial_tokens)] = l1;
         }
     }
 
@@ -421,11 +425,162 @@ __launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf
         int token     = 0;
         causal_small_t_tc_row_to_qt<Geometry>(row, tokens, kv_head, q_head, token);
         if (causal_valid_q_head<Geometry>(kv_head, q_head)) {
-            const std::int64_t dst =
-                causal_partial_acc_index<Geometry>(q_head, d, token, split, tokens);
+            const std::int64_t dst = causal_partial_acc_index<Geometry>(
+                q_head, d, partial_token + token, split, partial_tokens);
             store_vec(&partial_acc[dst], load_vec<int4>(&qkv_s[row * D + d]));
         }
     }
+}
+
+template <typename Geometry, int TokenTile, int WarpsPerCta, bool MultiBatch, bool Masked,
+          typename CacheInput>
+__launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_partial_bf16_kernel(
+    const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, __nv_bfloat16* cache_k,
+    __nv_bfloat16* cache_v, const std::int32_t* block_tables, const std::int32_t* valid_columns,
+    const std::int32_t* table_rows, std::int32_t table_stride, std::int32_t tokens,
+    std::int32_t full_width, std::int32_t column_begin, std::int32_t logical_capacity, float scale,
+    __nv_bfloat16* partial_acc, float* partial_m, float* partial_l) {
+    static_assert(TokenTile >= 1 && TokenTile <= 6);
+
+    __shared__ __align__(16) CausalSmallTBf16Shared<WarpsPerCta> shared;
+
+    const int kv_head     = static_cast<int>(blockIdx.x);
+    const int split       = static_cast<int>(blockIdx.y);
+    const int batch       = MultiBatch ? static_cast<int>(blockIdx.z) : 0;
+    const int split_count = static_cast<int>(gridDim.y);
+    int valid_tokens      = tokens;
+    if constexpr (Masked) {
+        const int remaining = valid_columns[batch] - column_begin;
+        valid_tokens        = remaining <= 0 ? 0 : (remaining < tokens ? remaining : tokens);
+    }
+
+    std::int64_t column_base = column_begin;
+    if constexpr (MultiBatch) { column_base += static_cast<std::int64_t>(batch) * full_width; }
+    q += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::QHeads * column_base;
+    pos += column_base;
+    if constexpr (CacheInput::writes_cache) {
+        input.k += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::KVHeads * column_base;
+        input.v += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::KVHeads * column_base;
+    }
+    const int table_row = table_rows == nullptr ? 0 : table_rows[batch];
+    const std::int32_t* block_table =
+        block_tables + static_cast<std::int64_t>(table_row) * table_stride;
+    if constexpr (MultiBatch) {
+        partial_acc += static_cast<std::int64_t>(batch) * kCausalHeadDim * Geometry::QHeads *
+                       tokens * split_count;
+        partial_m += static_cast<std::int64_t>(batch) * Geometry::QHeads * tokens * split_count;
+        partial_l += static_cast<std::int64_t>(batch) * Geometry::QHeads * tokens * split_count;
+    }
+
+    causal_small_t_tc_bf16_split<Geometry, TokenTile, WarpsPerCta>(
+        shared, q, input, pos, cache_k, cache_v, block_table, tokens, valid_tokens, input, pos[0],
+        valid_tokens, logical_capacity, scale, kv_head, split, split_count, partial_acc, partial_m,
+        partial_l, 0, tokens);
+}
+
+// True when the old six-column chunk (window_head) and the old tail chunk (window_tail) cut the
+// key range at the same split boundaries, so one pass with the tail's partition reproduces both.
+// The head may have fewer active splits; those of the tail beyond them hold none of its keys.
+template <typename Geometry>
+__device__ __forceinline__ bool causal_small_t_bf16_same_partition(int window_head,
+                                                                   int window_tail,
+                                                                   int launch_capacity) {
+    constexpr int Bc   = kCausalSmallTBf16KeyTile;
+    const int active_h = causal_small_t_active_splits<Geometry, false>(window_head, launch_capacity,
+                                                                        kCausalFusedHeadTokens);
+    const int active_t = causal_small_t_active_splits<Geometry, false>(window_tail, launch_capacity,
+                                                                        kCausalFusedHeadTokens);
+    if (active_h > active_t) { return false; }
+    const int tiles_h  = div_up(window_head, Bc);
+    const int tiles_t  = div_up(window_tail, Bc);
+    const bool by_tile = tiles_h >= active_h;
+    if (by_tile != (tiles_t >= active_t)) { return false; }
+    const int units_h = by_tile ? div_up(tiles_h, active_h) : div_up(window_head, active_h);
+    const int units_t = by_tile ? div_up(tiles_t, active_t) : div_up(window_tail, active_t);
+    return units_h == units_t;
+}
+
+template <typename Geometry, int WarpsPerCta, bool MultiBatch, bool Masked, typename CacheInput>
+__launch_bounds__(128, 2) __global__ void causal_attention_small_t_tc_fused_bf16_kernel(
+    const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos, __nv_bfloat16* cache_k,
+    __nv_bfloat16* cache_v, const std::int32_t* block_tables, const std::int32_t* valid_columns,
+    const std::int32_t* table_rows, std::int32_t table_stride, std::int32_t width,
+    std::int32_t full_width, std::int32_t logical_capacity, float scale,
+    __nv_bfloat16* partial_acc, float* partial_m, float* partial_l) {
+    constexpr int Head = kCausalFusedHeadTokens;
+    static_assert(kCausalFusedMaxTokens * Geometry::GroupSize <= WarpsPerCta * 16);
+
+    __shared__ __align__(16) CausalSmallTBf16Shared<WarpsPerCta> shared;
+
+    const int kv_head     = static_cast<int>(blockIdx.x);
+    const int split       = static_cast<int>(blockIdx.y);
+    const int batch       = MultiBatch ? static_cast<int>(blockIdx.z) : 0;
+    const int split_count = static_cast<int>(gridDim.y);
+    if (width <= Head || width > kCausalFusedMaxTokens) { return; }
+
+    int valid = width;
+    if constexpr (Masked) {
+        const int live = valid_columns[batch];
+        valid          = live <= 0 ? 0 : (live < width ? live : width);
+    }
+    const int tail       = width - Head;
+    const int valid_head = valid < Head ? valid : Head;
+    const int valid_tail = valid <= Head ? 0 : valid - Head;
+
+    if constexpr (MultiBatch) {
+        const std::int64_t column_base = static_cast<std::int64_t>(batch) * full_width;
+        q += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::QHeads * column_base;
+        pos += column_base;
+        if constexpr (CacheInput::writes_cache) {
+            input.k += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::KVHeads * column_base;
+            input.v += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::KVHeads * column_base;
+        }
+        partial_acc += static_cast<std::int64_t>(batch) * kCausalHeadDim * Geometry::QHeads *
+                       width * split_count;
+        partial_m += static_cast<std::int64_t>(batch) * Geometry::QHeads * width * split_count;
+        partial_l += static_cast<std::int64_t>(batch) * Geometry::QHeads * width * split_count;
+    }
+    const int table_row = table_rows == nullptr ? 0 : table_rows[batch];
+    const std::int32_t* block_table =
+        block_tables + static_cast<std::int64_t>(table_row) * table_stride;
+
+    // The call's own valid columns are this launch's new rows for every key read.
+    const int source_first = pos[0];
+    bool one_pass          = false;
+    if (valid_head > 0 && valid_tail > 0 && split_count > 0) {
+        const int head_first = pos[0];
+        const int head_last  = pos[Head - 1];
+        const int tail_first = pos[Head];
+        const int tail_last  = pos[width - 1];
+        if (head_first >= 0 && head_last >= 0 && head_last < logical_capacity &&
+            tail_first >= 0 && tail_last >= 0 && tail_last < logical_capacity) {
+            one_pass = causal_small_t_bf16_same_partition<Geometry>(head_last + 1, tail_last + 1,
+                                                                    split_count);
+        }
+    }
+    if (one_pass) {
+        causal_small_t_tc_bf16_split<Geometry, kCausalFusedMaxTokens, WarpsPerCta>(
+            shared, q, input, pos, cache_k, cache_v, block_table, width, valid, input,
+            source_first, valid, logical_capacity, scale, kv_head, split, split_count, partial_acc,
+            partial_m, partial_l, 0, width);
+        return;
+    }
+
+    causal_small_t_tc_bf16_split<Geometry, kCausalFusedMaxTokens, WarpsPerCta>(
+        shared, q, input, pos, cache_k, cache_v, block_table, Head, valid_head, input, source_first,
+        valid, logical_capacity, scale, kv_head, split, split_count, partial_acc, partial_m,
+        partial_l, 0, width);
+    __syncthreads();
+    CacheInput tail_input = input;
+    if constexpr (CacheInput::writes_cache) {
+        tail_input.k += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::KVHeads * Head;
+        tail_input.v += static_cast<std::int64_t>(kCausalHeadDim) * Geometry::KVHeads * Head;
+    }
+    causal_small_t_tc_bf16_split<Geometry, kCausalFusedMaxTokens, WarpsPerCta>(
+        shared, q + static_cast<std::int64_t>(kCausalHeadDim) * Geometry::QHeads * Head,
+        tail_input, pos + Head, cache_k, cache_v, block_table, tail, valid_tail, input,
+        source_first, valid, logical_capacity, scale, kv_head, split, split_count, partial_acc,
+        partial_m, partial_l, Head, width);
 }
 
 } // namespace ninfer::ops

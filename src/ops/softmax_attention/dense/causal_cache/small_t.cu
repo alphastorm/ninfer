@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <stdexcept>
+#include <type_traits>
 
 namespace ninfer::ops::detail {
 namespace {
@@ -120,6 +121,34 @@ void launch_tc_partial_bf16(const Tensor& q, CacheInput input, const Tensor& pos
     CUDA_CHECK(cudaGetLastError());
 }
 
+// One launch for a 24-head BF16 verify of seven or eight columns, byte-identical to the six-column
+// and tail-column ChunkedSmallT launches it replaces (small_t_bf16.cuh).
+template <typename Geometry, bool MultiBatch, bool Masked, typename CacheInput>
+void launch_tc_fused_bf16(const Tensor& q, CacheInput input, const Tensor& pos, float scale,
+                          PagedKVBatchLayerView cache, const CausalSmallTInvocation& invocation,
+                          std::int32_t logical_capacity, std::int32_t splits, Tensor& partial_acc,
+                          Tensor& partial_m, Tensor& partial_l, cudaStream_t stream) {
+    constexpr int kWarps = 4;
+    const dim3 grid(Geometry::KVHeads, splits, invocation.batch_size);
+    causal_attention_small_t_tc_fused_bf16_kernel<Geometry, kWarps, MultiBatch, Masked, CacheInput>
+        <<<grid, 32 * kWarps, 0, stream>>>(
+            static_cast<const __nv_bfloat16*>(q.data), input,
+            static_cast<const std::int32_t*>(pos.data),
+            static_cast<__nv_bfloat16*>(cache.k_pages.data),
+            static_cast<__nv_bfloat16*>(cache.v_pages.data),
+            static_cast<const std::int32_t*>(cache.block_tables.data),
+            invocation.valid_columns == nullptr
+                ? nullptr
+                : static_cast<const std::int32_t*>(invocation.valid_columns->data),
+            invocation.table_rows == nullptr
+                ? nullptr
+                : static_cast<const std::int32_t*>(invocation.table_rows->data),
+            cache.block_tables.ne[0], invocation.width, invocation.full_width, logical_capacity,
+            scale, static_cast<__nv_bfloat16*>(partial_acc.data),
+            static_cast<float*>(partial_m.data), static_cast<float*>(partial_l.data));
+    CUDA_CHECK(cudaGetLastError());
+}
+
 template <typename Geometry, int TokenTile, bool MultiBatch, bool Masked, typename CacheInput>
 void launch_tc_partial_i8(const Tensor& q, CacheInput input, const Tensor& pos, float scale,
                           PagedKVBatchLayerView cache, const CausalSmallTInvocation& invocation,
@@ -225,12 +254,13 @@ PagedKVBatchLayerView single_row_batch_view(const PagedKVLayerView& cache) {
 
 } // namespace
 
-bool causal_attention_uses_small_t(std::int32_t tokens) { return tokens >= 1 && tokens <= 6; }
-
 std::int32_t causal_attention_split_capacity(std::int32_t q_heads, std::int32_t tokens,
                                              DType cache_dtype,
                                              CausalAttentionExecutionEnvelope envelope) {
-    if (tokens < 1 || tokens > 6 ||
+    const std::int32_t max_tokens =
+        q_heads == CausalD256H24Kv4::QHeads && cache_dtype == DType::BF16 ? kCausalFusedMaxTokens
+                                                                         : kCausalFusedHeadTokens;
+    if (tokens < 1 || tokens > max_tokens ||
         (cache_dtype != DType::BF16 && cache_dtype != DType::I8 &&
          cache_dtype != DType::FP8_E4M3FN) ||
         envelope.min_visible_keys == 0 || envelope.min_visible_keys > envelope.max_visible_keys) {
@@ -287,27 +317,57 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
         }                                                                                          \
     } while (0)
 
-    switch (invocation.width) {
-    case 1:
-        NINFER_CAUSAL_SMALL_T_DISPATCH(1, 2);
-        break;
-    case 2:
-        NINFER_CAUSAL_SMALL_T_DISPATCH(2, 4);
-        break;
-    case 3:
-        NINFER_CAUSAL_SMALL_T_DISPATCH(3, 4);
-        break;
-    case 4:
-        NINFER_CAUSAL_SMALL_T_DISPATCH(4, 4);
-        break;
-    case 5:
-        NINFER_CAUSAL_SMALL_T_DISPATCH(5, 4);
-        break;
-    case 6:
-        NINFER_CAUSAL_SMALL_T_DISPATCH(6, 4);
-        break;
-    default:
-        throw std::invalid_argument("causal_attention_small_t_launch: unsupported T");
+    const bool fused = invocation.width > kCausalFusedHeadTokens;
+    if (fused) {
+        if constexpr (std::is_same_v<Geometry, CausalD256H24Kv4>) {
+            if (cache.dtype != DType::BF16 || invocation.column_begin != 0 ||
+                invocation.width > kCausalFusedMaxTokens) {
+                throw std::invalid_argument(
+                    "causal_attention_small_t_launch: fused T needs BF16 KV at column 0");
+            }
+            const auto launch_profile = [&]<bool MultiBatch, bool Masked>() {
+                launch_tc_fused_bf16<Geometry, MultiBatch, Masked>(
+                    q, input, pos, scale, cache, invocation, logical_capacity, splits, partial_acc,
+                    partial_m, partial_l, stream);
+            };
+            const bool masked = invocation.valid_columns != nullptr;
+            if (invocation.batch_size == 1) {
+                if (masked) {
+                    launch_profile.template operator()<false, true>();
+                } else {
+                    launch_profile.template operator()<false, false>();
+                }
+            } else if (masked) {
+                launch_profile.template operator()<true, true>();
+            } else {
+                launch_profile.template operator()<true, false>();
+            }
+        } else {
+            throw std::invalid_argument("causal_attention_small_t_launch: unsupported T");
+        }
+    } else {
+        switch (invocation.width) {
+        case 1:
+            NINFER_CAUSAL_SMALL_T_DISPATCH(1, 2);
+            break;
+        case 2:
+            NINFER_CAUSAL_SMALL_T_DISPATCH(2, 4);
+            break;
+        case 3:
+            NINFER_CAUSAL_SMALL_T_DISPATCH(3, 4);
+            break;
+        case 4:
+            NINFER_CAUSAL_SMALL_T_DISPATCH(4, 4);
+            break;
+        case 5:
+            NINFER_CAUSAL_SMALL_T_DISPATCH(5, 4);
+            break;
+        case 6:
+            NINFER_CAUSAL_SMALL_T_DISPATCH(6, 4);
+            break;
+        default:
+            throw std::invalid_argument("causal_attention_small_t_launch: unsupported T");
+        }
     }
 #undef NINFER_CAUSAL_SMALL_T_DISPATCH
 
@@ -315,9 +375,10 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
     constexpr int kDChunk      = 64;
     const dim3 reduce_grid(Geometry::QHeads, div_up(kCausalHeadDim, kDChunk),
                            invocation.width * invocation.batch_size);
-    const auto launch_reduce = [&]<bool Int8, bool MultiBatch, bool Masked, bool Offset>() {
+    const auto launch_reduce = [&]<bool Int8, bool MultiBatch, bool Masked, bool Offset,
+                                   bool Phased>() {
         causal_attention_small_t_reduce_output_kernel<Geometry, kDChunk, Int8, MultiBatch, Masked,
-                                                      Offset>
+                                                      Offset, Phased>
             <<<reduce_grid, kReduceBlock, 0, stream>>>(
                 static_cast<const __nv_bfloat16*>(partial_acc.data),
                 static_cast<const float*>(partial_m.data),
@@ -331,10 +392,14 @@ void causal_attention_small_t_launch_for(const Tensor& q, CacheInput input, cons
     };
     const bool masked         = invocation.valid_columns != nullptr;
     const auto launch_profile = [&]<bool Int8, bool MultiBatch, bool Masked>() {
-        if (invocation.column_begin == 0) {
-            launch_reduce.template operator()<Int8, MultiBatch, Masked, false>();
+        if (fused) {
+            if constexpr (!Int8) {
+                launch_reduce.template operator()<false, MultiBatch, Masked, false, true>();
+            }
+        } else if (invocation.column_begin == 0) {
+            launch_reduce.template operator()<Int8, MultiBatch, Masked, false, false>();
         } else {
-            launch_reduce.template operator()<Int8, MultiBatch, Masked, true>();
+            launch_reduce.template operator()<Int8, MultiBatch, Masked, true, false>();
         }
     };
     const auto launch_for_dtype = [&]<bool Int8>() {
