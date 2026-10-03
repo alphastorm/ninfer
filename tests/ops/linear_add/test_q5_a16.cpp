@@ -13,9 +13,11 @@ int q5_a16_conformance() {
     // Starts of the registered positive-T regions. run_shape checks b-1/b/b+1 for every start,
     // plus one interior point for every region, through the public Op. On sm_120 the row pair
     // runs T=2-3 and T=5 around the T=4 tensor-core route, one row per warp T=6-7, the T=8
-    // tensor-core route, and one row per warp again from T=9; at K=17408 the row split ends with
-    // the T=16 tensor-core route (two requests' DFlash2 K=7 verify).
-    constexpr std::array<std::int32_t, 10> kK6144RouteStarts{2, 4, 5, 6, 8, 9, 14, 33, 49, 129};
+    // tensor-core route, and one row per warp again from T=9; at both K the T=16 tensor-core
+    // route (two requests' DFlash2 K=7 verify) sits between prompt-GEMM regions at K=6144 and
+    // ends the row split at K=17408.
+    constexpr std::array<std::int32_t, 12> kK6144RouteStarts{2,  4,  5,  6,  8,  9,
+                                                             14, 16, 17, 33, 49, 129};
     constexpr std::array<std::int32_t, 6> kK6144RouteInteriors{1, 8, 24, 40, 96, 256};
 
     int failures = 0;

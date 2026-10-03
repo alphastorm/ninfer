@@ -36,6 +36,11 @@ constexpr std::array<SupportSpec, 2> kSupports{{
     {5120, 17408, 17408},
 }};
 
+// Two requests' DFlash2 K=7 verify is T=16. Split2ExactResidual runs it on the Q5 small-T tensor-core
+// MMA on sm_120, whose column j computes exactly what column j mod 8 of a T=8 pass does, so a paired
+// request's mixer outputs match its solo round; the 80-CTA R64C16 prompt GEMM took 53 us per call
+// there (EXP-092). The native lanes have no small-T MMA and keep R64C16 at T=16.
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
 constexpr std::array<RouteSpec, 6> kK6144Routes{{
     {{1, 1}, Q5LinearAddScheduleId::GemvResidual},
     {{2, 13}, Q5LinearAddScheduleId::Split2ExactResidual},
@@ -44,6 +49,18 @@ constexpr std::array<RouteSpec, 6> kK6144Routes{{
     {{49, 128}, Q5LinearAddScheduleId::MmaResidualR64C64},
     {{129, kAnyCols}, Q5LinearAddScheduleId::MmaResidualR64C128},
 }};
+#else
+constexpr std::array<RouteSpec, 8> kK6144Routes{{
+    {{1, 1}, Q5LinearAddScheduleId::GemvResidual},
+    {{2, 13}, Q5LinearAddScheduleId::Split2ExactResidual},
+    {{14, 15}, Q5LinearAddScheduleId::MmaResidualR64C16},
+    {{16, 16}, Q5LinearAddScheduleId::Split2ExactResidual},
+    {{17, 32}, Q5LinearAddScheduleId::MmaResidualR64C16},
+    {{33, 48}, Q5LinearAddScheduleId::MmaResidualR64C24},
+    {{49, 128}, Q5LinearAddScheduleId::MmaResidualR64C64},
+    {{129, kAnyCols}, Q5LinearAddScheduleId::MmaResidualR64C128},
+}};
+#endif
 
 constexpr std::array<RouteSpec, 6> kK17408Routes{{
     {{1, 1}, Q5LinearAddScheduleId::GemvResidual},
