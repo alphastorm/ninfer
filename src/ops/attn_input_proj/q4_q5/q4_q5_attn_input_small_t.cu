@@ -4,6 +4,7 @@
 #include "ops/common/math.h"
 #include "ops/linear/q4/q4_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q4/q4_rowsplit_gemv.cuh"
+#include "ops/linear/q4/q4_small_t_mma.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemv.cuh"
 #include "ops/linear/q5/q5_small_t_mma.cuh"
@@ -84,6 +85,34 @@ void launch_q4_rows(const Tensor& x, const Weight& weight, Tensor& q, Tensor& ke
     CUDA_CHECK(cudaGetLastError());
 }
 
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+struct Q4AttnQkSmallTGeometry {
+    static constexpr int kInputRows    = kHidden;
+    static constexpr int kGroupsPerRow = kHidden / Q4RowSplitStorage::kGroupK;
+};
+
+// The query/key side of the DFlash2 K=7 verify extents runs on the tensor cores: one request's
+// 8 columns and two requests' 16 (EXP-094). False when the weight is not the exact shape the route
+// is compiled for.
+template <int Cols>
+bool launch_q4_mma(const Tensor& x, const Weight& weight, Tensor& q, Tensor& key,
+                   cudaStream_t stream) {
+    static_assert(kSplitRow % Q4DraftSmallTSchedule::kRowsPerCta == 0);
+    if (weight.padded_shape[1] != kHidden) { return false; }
+    q4_small_t_mma_kernel<Q4AttnQkSmallTGeometry, Cols, Cols, Q4SmallTMmaSplitStore>
+        <<<kParentRows / Q4DraftSmallTSchedule::kRowsPerCta, Q4DraftSmallTSchedule::kThreads, 0,
+           stream>>>(
+            static_cast<const __nv_bfloat16*>(x.data),
+            static_cast<const std::uint8_t*>(weight.qdata),
+            static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(q.data),
+            Q4SmallTMmaSplitStore{static_cast<__nv_bfloat16*>(q.data),
+                                  static_cast<__nv_bfloat16*>(key.data), static_cast<int>(q.ne[0]),
+                                  static_cast<int>(key.ne[0]), kSplitRow});
+    CUDA_CHECK(cudaGetLastError());
+    return true;
+}
+#endif
+
 void launch_q4(const Tensor& x, const Weight& weight, Tensor& q, Tensor& key, cudaStream_t stream) {
     switch (x.ne[1]) {
     case 1:
@@ -111,7 +140,15 @@ void launch_q4(const Tensor& x, const Weight& weight, Tensor& q, Tensor& key, cu
         launch_q4_simt_route<Q4AttnSimtR8C4Schedule>(x, weight, q, key, stream);
         return;
     case 8:
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+        if (launch_q4_mma<8>(x, weight, q, key, stream)) { return; }
+#endif
+        launch_q4_simt_route<Q4AttnSimtR8C8Schedule>(x, weight, q, key, stream);
+        return;
     case 16:
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+        if (launch_q4_mma<16>(x, weight, q, key, stream)) { return; }
+#endif
         launch_q4_simt_route<Q4AttnSimtR8C8Schedule>(x, weight, q, key, stream);
         return;
     default:

@@ -13,6 +13,31 @@ namespace ninfer::ops::detail {
 
 struct Q4SmallTMmaStoreEpilogue {};
 
+// Stores output rows below split_row to out and the rest to tail, each column-major with its own
+// leading dimension. A CTA's 16 rows stay on one side when split_row is a multiple of 16.
+struct Q4SmallTMmaSplitStore {
+    __nv_bfloat16* out;
+    __nv_bfloat16* tail;
+    int out_ld;
+    int tail_ld;
+    int split_row;
+
+    template <int ActiveCols>
+    __device__ __forceinline__ void store(int row, int col0, float4 sum) const {
+        const bool head       = row < split_row;
+        __nv_bfloat16* base   = head ? out + row : tail + (row - split_row);
+        const std::int64_t ld = head ? out_ld : tail_ld;
+        if (col0 < ActiveCols) {
+            base[col0 * ld]     = __float2bfloat16_rn(sum.x);
+            base[col0 * ld + 8] = __float2bfloat16_rn(sum.z);
+        }
+        if (col0 + 1 < ActiveCols) {
+            base[(col0 + 1) * ld]     = __float2bfloat16_rn(sum.y);
+            base[(col0 + 1) * ld + 8] = __float2bfloat16_rn(sum.w);
+        }
+    }
+};
+
 struct Q4SmallTMmaIdentityRows {
     static constexpr int kOutputRowsPerCta = 16;
 

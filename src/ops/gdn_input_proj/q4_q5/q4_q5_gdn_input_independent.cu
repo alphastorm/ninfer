@@ -5,6 +5,7 @@
 #include "ops/common/math.h"
 #include "ops/linear/q4/q4_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q4/q4_rowsplit_gemv.cuh"
+#include "ops/linear/q4/q4_small_t_mma.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemm_simt.cuh"
 #include "ops/linear/q5/q5_rowsplit_gemv.cuh"
 #include "ops/linear/q5/q5_small_t_mma.cuh"
@@ -87,6 +88,29 @@ void launch_q4_rows(const Tensor& x, const Weight& weight, Tensor& out, cudaStre
     }
 }
 
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+struct Q4GdnQkSmallTGeometry {
+    static constexpr int kInputRows    = kHidden;
+    static constexpr int kGroupsPerRow = kHidden / Q4RowSplitStorage::kGroupK;
+};
+
+// The query/key side of the DFlash2 K=7 verify extents runs on the tensor cores: one request's
+// 8 columns and two requests' 16 (EXP-094). False when the weight is not the exact shape the route
+// is compiled for.
+template <int Cols>
+bool launch_q4_mma(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
+    if (weight.padded_shape[1] != kHidden) { return false; }
+    const int out_ld = static_cast<int>(out.nb[1] / sizeof(__nv_bfloat16));
+    q4_small_t_mma_kernel<Q4GdnQkSmallTGeometry, Cols, Cols, Q4SmallTMmaSplitStore><<<
+        kQkRows / Q4DraftSmallTSchedule::kRowsPerCta, Q4DraftSmallTSchedule::kThreads, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(weight.qdata),
+        static_cast<const std::uint8_t*>(weight.scales), static_cast<__nv_bfloat16*>(out.data),
+        Q4SmallTMmaSplitStore{static_cast<__nv_bfloat16*>(out.data), nullptr, out_ld, 0, kQkRows});
+    CUDA_CHECK(cudaGetLastError());
+    return true;
+}
+#endif
+
 void launch_q4(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t stream) {
     switch (x.ne[1]) {
     case 1:
@@ -104,6 +128,10 @@ void launch_q4(const Tensor& x, const Weight& weight, Tensor& out, cudaStream_t 
     default:
         break;
     }
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+    if (x.ne[1] == 8 && launch_q4_mma<8>(x, weight, out, stream)) { return; }
+    if (x.ne[1] == 16 && launch_q4_mma<16>(x, weight, out, stream)) { return; }
+#endif
     if (x.ne[1] <= 16) {
         launch_q4_simt_route<Q4GdnSimtR8C8Schedule>(x, weight, out, stream);
         return;
