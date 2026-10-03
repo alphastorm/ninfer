@@ -1512,6 +1512,257 @@ int run_batch_cases() {
     return failures;
 }
 
+// EXP-092: a 24-head BF16 verify of seven or eight columns that ChunkedSmallT split into a
+// six-column and a tail launch now runs one fused SmallT launch, which must reproduce both chunks
+// byte for byte. The reference issues exactly those launches as two public calls on an identical
+// cache: the six-column call appends its rows and the tail call reads them back from the cache,
+// as the old tail chunk did. Each chunk derives its split partition from its last position, so the
+// contexts straddle every point where the two windows cut the key range differently: small
+// windows split by keys, the four-split tile boundary, the 4096/8198/16390 tiers and the 85-split
+// cap. There the fused CTA must fall back to the two old partitions.
+struct FusedIdentityCase {
+    std::int32_t width;
+    std::vector<std::int32_t> contexts;
+    std::vector<std::int32_t> valid_columns;
+    std::vector<std::int32_t> table_rows;
+    MappingPattern mapping;
+    std::uint32_t seed;
+    bool exact_envelope;
+};
+
+template <typename T>
+std::vector<T> select_columns(const std::vector<T>& source, std::size_t column_elements,
+                              std::int32_t width, std::int32_t batch, std::int32_t begin,
+                              std::int32_t count) {
+    std::vector<T> result(column_elements * static_cast<std::size_t>(count) * batch);
+    for (std::int32_t row = 0; row < batch; ++row) {
+        for (std::int32_t column = 0; column < count; ++column) {
+            const std::size_t from =
+                (static_cast<std::size_t>(row) * width + begin + column) * column_elements;
+            const std::size_t to = (static_cast<std::size_t>(row) * count + column) * column_elements;
+            std::copy_n(source.begin() + static_cast<std::ptrdiff_t>(from), column_elements,
+                        result.begin() + static_cast<std::ptrdiff_t>(to));
+        }
+    }
+    return result;
+}
+
+int run_fused_identity_case(const FusedIdentityCase& test_case) {
+    const Geometry& geometry = kGeometries[0];
+    constexpr DType dtype    = DType::BF16;
+    constexpr std::int32_t kHead = 6;
+    const std::int32_t width     = test_case.width;
+    const std::int32_t tail      = width - kHead;
+    const std::int32_t batch     = static_cast<std::int32_t>(test_case.contexts.size());
+    if (geometry.q_heads != 24 || width <= kHead || width > 8 || batch <= 0 ||
+        test_case.valid_columns.size() != static_cast<std::size_t>(batch) ||
+        test_case.table_rows.size() != static_cast<std::size_t>(batch)) {
+        throw std::invalid_argument("invalid fused causal-attention identity profile");
+    }
+
+    std::int32_t maximum_visible = 1;
+    for (std::int32_t row = 0; row < batch; ++row) {
+        maximum_visible =
+            std::max(maximum_visible, test_case.contexts[static_cast<std::size_t>(row)] +
+                                          test_case.valid_columns[static_cast<std::size_t>(row)]);
+    }
+    // A loose envelope keeps a short single request on the chunked (now fused) route and gives
+    // the launch more split capacity than any window uses, as a decode-graph bucket does.
+    const std::int32_t envelope_max =
+        test_case.exact_envelope ? maximum_visible : std::max(maximum_visible, 512);
+    const std::int32_t max_context       = envelope_max + 3;
+    const std::size_t q_column_elements  = static_cast<std::size_t>(kHeadDim) * geometry.q_heads;
+    const std::size_t kv_column_elements = static_cast<std::size_t>(kHeadDim) * geometry.kv_heads;
+    const std::size_t columns            = static_cast<std::size_t>(width) * batch;
+    std::vector<float> q =
+        make_bf16_values(q_column_elements * columns, test_case.seed, -0.25f, 0.25f);
+    std::vector<float> k =
+        make_bf16_values(kv_column_elements * columns, test_case.seed + 1u, -0.25f, 0.25f);
+    std::vector<float> v =
+        make_bf16_values(kv_column_elements * columns, test_case.seed + 2u, -1.0f, 1.0f);
+
+    std::vector<std::int32_t> positions(columns, 0);
+    for (std::int32_t row = 0; row < batch; ++row) {
+        const std::int32_t context = test_case.contexts[static_cast<std::size_t>(row)];
+        const std::int32_t valid   = test_case.valid_columns[static_cast<std::size_t>(row)];
+        const std::int32_t padding = valid == 0 ? 0 : context + valid - 1;
+        for (std::int32_t token = 0; token < width; ++token) {
+            positions[static_cast<std::size_t>(row) * width + token] =
+                token < valid ? context + token : padding;
+        }
+    }
+
+    std::vector<HostCache> initial;
+    initial.reserve(static_cast<std::size_t>(batch));
+    for (std::int32_t row = 0; row < batch; ++row) {
+        initial.push_back(make_cache(geometry, dtype, max_context, test_case.seed + 20u + 3u * row));
+    }
+    std::vector<HostCache> expected = initial;
+    std::vector<double> reference(q_column_elements * columns, 0.0);
+    const bool check_oracle = maximum_visible <= 20000;
+    for (std::int32_t request = 0; request < batch; ++request) {
+        const std::int32_t valid = test_case.valid_columns[static_cast<std::size_t>(request)];
+        if (valid == 0) { continue; }
+        const std::int32_t table_row = test_case.table_rows[static_cast<std::size_t>(request)];
+        std::vector<std::int32_t> row_positions(static_cast<std::size_t>(valid));
+        std::copy_n(positions.begin() + static_cast<std::ptrdiff_t>(request * width), valid,
+                    row_positions.begin());
+        append_cache(expected[static_cast<std::size_t>(table_row)],
+                     extract_request_columns(k, kv_column_elements, width, request, valid),
+                     extract_request_columns(v, kv_column_elements, width, request, valid),
+                     row_positions);
+        if (check_oracle) {
+            insert_request_columns(
+                ideal_attention(extract_request_columns(q, q_column_elements, width, request, valid),
+                                expected[static_cast<std::size_t>(table_row)], row_positions),
+                q_column_elements, width, request, reference);
+        }
+    }
+
+    const bool masked = std::any_of(test_case.valid_columns.begin(), test_case.valid_columns.end(),
+                                    [&](std::int32_t valid) { return valid != width; });
+    const ops::CausalAttentionExecutionEnvelope envelope{
+        static_cast<std::uint32_t>(test_case.exact_envelope ? maximum_visible : 1),
+        static_cast<std::uint32_t>(envelope_max)};
+    const std::vector<std::uint16_t> q_bits = to_bf16_bits(q);
+    const std::vector<std::uint16_t> k_bits = to_bf16_bits(k);
+    const std::vector<std::uint16_t> v_bits = to_bf16_bits(v);
+    std::string label = std::string("causal_softmax_attention fused identity ") + geometry.name +
+                        " W=" + std::to_string(width) + " B=" + std::to_string(batch) +
+                        " mapping=" + mapping_name(test_case.mapping) +
+                        (test_case.exact_envelope ? " exact" : " loose") + " contexts=";
+    for (const std::int32_t context : test_case.contexts) { label += std::to_string(context) + ","; }
+    label += " valid=";
+    for (const std::int32_t valid : test_case.valid_columns) { label += std::to_string(valid) + ","; }
+
+    int failures = 0;
+    // One public call over columns [begin, begin + count) of every request.
+    const auto run_call = [&](BatchDeviceCache& cache, std::int32_t begin, std::int32_t count,
+                              const std::vector<std::int32_t>& call_valid) {
+        const std::vector<std::uint16_t> call_q =
+            select_columns(q_bits, q_column_elements, width, batch, begin, count);
+        const std::vector<std::uint16_t> call_k =
+            select_columns(k_bits, kv_column_elements, width, batch, begin, count);
+        const std::vector<std::uint16_t> call_v =
+            select_columns(v_bits, kv_column_elements, width, batch, begin, count);
+        const std::vector<std::int32_t> call_positions =
+            select_columns(positions, 1, width, batch, begin, count);
+        GuardedDeviceBuffer dq(call_q.size() * sizeof(std::uint16_t));
+        GuardedDeviceBuffer dk(call_k.size() * sizeof(std::uint16_t));
+        GuardedDeviceBuffer dv(call_v.size() * sizeof(std::uint16_t));
+        GuardedDeviceBuffer dp(call_positions.size() * sizeof(std::int32_t));
+        GuardedDeviceBuffer dvalid(call_valid.size() * sizeof(std::int32_t));
+        GuardedDeviceBuffer dtable_rows(test_case.table_rows.size() * sizeof(std::int32_t));
+        GuardedDeviceBuffer dout(call_q.size() * sizeof(std::uint16_t));
+        dq.copy_from_host(call_q.data(), call_q.size() * sizeof(std::uint16_t));
+        dk.copy_from_host(call_k.data(), call_k.size() * sizeof(std::uint16_t));
+        dv.copy_from_host(call_v.data(), call_v.size() * sizeof(std::uint16_t));
+        dp.copy_from_host(call_positions.data(), call_positions.size() * sizeof(std::int32_t));
+        dvalid.copy_from_host(call_valid.data(), call_valid.size() * sizeof(std::int32_t));
+        dtable_rows.copy_from_host(test_case.table_rows.data(),
+                                   test_case.table_rows.size() * sizeof(std::int32_t));
+        const std::vector<std::uint16_t> canary(call_q.size(), kOutputCanary);
+        dout.copy_from_host(canary.data(), canary.size() * sizeof(std::uint16_t));
+
+        Tensor tq(dq.data(), DType::BF16, {kHeadDim, geometry.q_heads, count, batch});
+        Tensor tk(dk.data(), DType::BF16, {kHeadDim, geometry.kv_heads, count, batch});
+        Tensor tv(dv.data(), DType::BF16, {kHeadDim, geometry.kv_heads, count, batch});
+        Tensor tp(dp.data(), DType::I32, {count, batch});
+        Tensor tvalid(dvalid.data(), DType::I32, {batch});
+        Tensor ttable_rows(dtable_rows.data(), DType::I32, {batch});
+        Tensor tout(dout.data(), DType::BF16, {kHeadDim, geometry.q_heads, count, batch});
+        const std::size_t workspace_bytes = ops::causal_softmax_attention_workspace_capacity_bytes(
+            op_geometry(geometry), dtype, envelope, batch, count, count);
+        GuardedDeviceBuffer workspace_buffer(std::max<std::size_t>(workspace_bytes, 256));
+        WorkspaceArena workspace(DeviceSpan{workspace_buffer.data(), workspace_buffer.bytes()});
+        ops::causal_softmax_attention(tq, tk, tv, tp, masked ? tvalid : Tensor{}, ttable_rows,
+                                      op_geometry(geometry), kAttentionScale, cache.view(),
+                                      envelope, workspace, tout, nullptr);
+        cuda_synchronize();
+        const std::string call_label =
+            label + " columns " + std::to_string(begin) + "+" + std::to_string(count);
+        failures += dout.verify_guards((call_label + " output").c_str());
+        failures += workspace_buffer.verify_guards((call_label + " workspace").c_str());
+        if (workspace.used() != 0 || workspace.peak_used() != workspace_bytes) {
+            std::cerr << call_label << ": workspace query/execution high-water mismatch\n";
+            ++failures;
+        }
+        return copy_from_guarded<std::uint16_t>(dout, call_q.size());
+    };
+
+    BatchDeviceCache fused_cache(initial, test_case.mapping);
+    const std::vector<std::uint16_t> fused =
+        run_call(fused_cache, 0, width, test_case.valid_columns);
+
+    std::vector<std::int32_t> head_valid(static_cast<std::size_t>(batch));
+    std::vector<std::int32_t> tail_valid(static_cast<std::size_t>(batch));
+    for (std::size_t row = 0; row < head_valid.size(); ++row) {
+        head_valid[row] = std::min(test_case.valid_columns[row], kHead);
+        tail_valid[row] = std::clamp(test_case.valid_columns[row] - kHead, 0, tail);
+    }
+    BatchDeviceCache chunked_cache(initial, test_case.mapping);
+    const std::vector<std::uint16_t> head = run_call(chunked_cache, 0, kHead, head_valid);
+    const std::vector<std::uint16_t> rest = run_call(chunked_cache, kHead, tail, tail_valid);
+    std::vector<std::uint16_t> chunked(fused.size(), 0);
+    for (std::int32_t row = 0; row < batch; ++row) {
+        for (std::int32_t column = 0; column < width; ++column) {
+            const bool in_head      = column < kHead;
+            const std::int32_t from = in_head ? row * kHead + column : row * tail + column - kHead;
+            std::copy_n((in_head ? head : rest).begin() +
+                            static_cast<std::ptrdiff_t>(from * q_column_elements),
+                        q_column_elements,
+                        chunked.begin() + static_cast<std::ptrdiff_t>(
+                                              (static_cast<std::size_t>(row) * width + column) *
+                                              q_column_elements));
+        }
+    }
+
+    failures += verify_exact((label + " output bits fused == chunked").c_str(), fused, chunked);
+    failures += fused_cache.verify(label + " fused", expected);
+    failures += chunked_cache.verify(label + " chunked", expected);
+    failures += verify_invalid_columns_zero(label, fused, geometry, width, test_case.valid_columns);
+    if (check_oracle) {
+        failures += verify_attention(label, bf16_bits_to_double(fused), reference,
+                                     attention_criterion(dtype));
+    }
+    return failures;
+}
+
+int run_fused_identity_cases() {
+    int failures = 0;
+    std::uint32_t seed = 5100u;
+    for (const std::int32_t width : {8, 7}) {
+        // One request: key-split widths (50), the four-split tile boundary (121/122), single-pass
+        // windows (300, 4100, 20000), each tier straddle (4089/4090, 8191/8192, 16383/16384) and
+        // the cap's units-per-split steps (40793/40794 and 43513/43514 for W=8; one less for W=7).
+        const std::int32_t step = 8 - width;
+        for (const std::int32_t context :
+             {50, 121, 122, 300, 4089 + step, 4090 + step, 4100, 8191 + step, 8192 + step,
+              16383 + step, 16384 + step, 20000, 40793 + step, 40794 + step, 43513 + step,
+              43514 + step}) {
+            failures += run_fused_identity_case(
+                {width, {context}, {width}, {0}, MappingPattern::Fragmented, seed++, false});
+        }
+        failures += run_fused_identity_case(
+            {width, {4090 + step}, {width}, {0}, MappingPattern::Identity, seed++, true});
+        failures += run_fused_identity_case(
+            {width, {16384 + step}, {width}, {0}, MappingPattern::Offset, seed++, true});
+        // Two requests (DFlash2 pairs): one straddling, one single-pass, reordered tables.
+        failures += run_fused_identity_case({width, {4090 + step, 300}, {width, width}, {1, 0},
+                                             MappingPattern::Fragmented, seed++, false});
+        failures += run_fused_identity_case({width, {40794 + step, 8192 + step}, {width, width},
+                                             {0, 1}, MappingPattern::Fragmented, seed++, false});
+        // Masked lanes: a short head, an empty tail, an empty request, and a full lane.
+        failures += run_fused_identity_case({width, {700, 900}, {5, width}, {1, 0},
+                                             MappingPattern::Fragmented, seed++, false});
+        failures += run_fused_identity_case({width, {700, 4089 + step}, {6, width - 1}, {0, 1},
+                                             MappingPattern::Fragmented, seed++, false});
+        failures += run_fused_identity_case({width, {700, 900}, {0, width}, {0, 1},
+                                             MappingPattern::Fragmented, seed++, false});
+    }
+    return failures;
+}
+
 int run_geometry(const Geometry& geometry) {
     int failures = 0;
     for (const DType dtype : {DType::BF16, DType::I8}) {
@@ -3087,6 +3338,7 @@ int run_softmax_attention_causal_cache_tests(bool nvfp4_only) {
     for (const Geometry& geometry : kGeometries) { failures += run_geometry(geometry); }
     failures += arm("causal_cache FP8 KV", run_fp8_cases);
     failures += run_batch_cases();
+    failures += run_fused_identity_cases();
     std::cout << (failures == 0 ? "PASS" : "FAIL")
               << " causal_softmax_attention public-contract correctness\n";
     return failures == 0 ? 0 : 1;
