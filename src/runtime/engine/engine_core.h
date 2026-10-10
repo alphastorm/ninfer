@@ -739,7 +739,8 @@ private:
         request->cv.notify_one();
     }
 
-    void complete_success(const std::shared_ptr<Request>& request, FinishReason reason) {
+    [[nodiscard]] GenerationResult finalize_success(const std::shared_ptr<Request>& request,
+                                                    FinishReason reason) {
         HostPhaseMeasurement completion = begin_host_phase();
         if (request->preemption_count) {
             observe_scheduling(request, GenerationSchedulingTransition::Terminal);
@@ -813,6 +814,10 @@ private:
         finish_engine_phase(completion, EngineHostPhase::CommitOutput);
         result.engine_timing       = request->host_timing.public_snapshot();
         result.first_output_timing = request->first_output_timing;
+        return result;
+    }
+
+    void deliver_success(const std::shared_ptr<Request>& request, GenerationResult&& result) {
         {
             std::lock_guard lock(request->mutex);
             if (request->response_done) { return; }
@@ -821,6 +826,18 @@ private:
         }
         if (mark_completed(request)) { release_reserved_capacity(); }
         request->cv.notify_one();
+    }
+
+    void complete_success(const std::shared_ptr<Request>& request, FinishReason reason) {
+        deliver_success(request, finalize_success(request, reason));
+    }
+
+    void retire_completed_slot(std::uint32_t lane, const std::shared_ptr<Request>& request,
+                               FinishReason reason) {
+        GenerationResult result = finalize_success(request, reason);
+        remove_completed_slot(lane);
+        publish_runtime_stats();
+        deliver_success(request, std::move(result));
     }
 
     void complete_cancelled(const std::shared_ptr<Request>& request) {
@@ -895,21 +912,18 @@ private:
             request->terminal_reason.reset();
 
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
-            complete_success(request, reason);
-            remove_completed_slot(lane);
+            retire_completed_slot(lane, request, reason);
             boundary = begin_host_phase();
             changed  = true;
         }
-        if (changed) { publish_runtime_stats(); }
         return changed;
     }
 
     void cancel_active_requests(const std::array<bool, kMaximumConcurrency>& cancelled_at_boundary,
                                 HostPhaseMeasurement& boundary) {
         if (instance_.program->has_context_operation()) { return; }
-        bool changed = false;
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
-            const auto& request = slots_[lane];
+            const auto request = slots_[lane];
             if (request == nullptr || !cancelled_at_boundary[lane]) { continue; }
             if (request->capture_pending) { continue; }
             if (!request->sequence || !request->lane || request->lane->value != lane) {
@@ -921,12 +935,9 @@ private:
             request->speculative_stats  = std::move(aborted.speculative);
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
             append_output(request, request->output.commit_preview());
-            complete_success(request, FinishReason::Cancelled);
-            remove_completed_slot(lane);
+            retire_completed_slot(lane, request, FinishReason::Cancelled);
             boundary = begin_host_phase();
-            changed  = true;
         }
-        if (changed) { publish_runtime_stats(); }
     }
 
     [[nodiscard]] bool expire_pending_requests() {
@@ -1209,15 +1220,15 @@ private:
         } catch (...) {
             phase.finish();
             for (std::size_t index = 0; index < terminal_count; ++index) {
-                complete_success(terminal_requests[index], terminal_reasons[index]);
-                remove_completed_slot(terminal_lanes[index]);
+                retire_completed_slot(terminal_lanes[index], terminal_requests[index],
+                                      terminal_reasons[index]);
             }
             throw;
         }
         phase.finish();
         for (std::size_t index = 0; index < terminal_count; ++index) {
-            complete_success(terminal_requests[index], terminal_reasons[index]);
-            remove_completed_slot(terminal_lanes[index]);
+            retire_completed_slot(terminal_lanes[index], terminal_requests[index],
+                                  terminal_reasons[index]);
         }
     }
 

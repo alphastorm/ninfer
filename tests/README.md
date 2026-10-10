@@ -256,7 +256,9 @@ CausalScoring always uses eager execution.
 Without `NINFER_TEST_ARTIFACT`, CTest marks these real Engine tests as skipped. Real-artifact targets
 carry the `real` label and `RUN_SERIAL` so CTest runs them alone. Run directly invoked GPU
 integration tests serially. `NINFER_PREFIX_REAL_SCENARIO` selects a focused prefix scenario such as
-`vision`, `late-instructions` or `concurrent`; the default is `all`. These integration checks
+`vision`, `late-instructions`, `concurrent` or `retirement`; the default is `all`. The registered
+`ninfer_qwen3_5_response_retirement_real_test` checks immediate live membership and cumulative
+statistics after successful and resident-cancelled `wait()` calls. These integration checks
 use behavior and state accounting rather than another numerical path's generated tokens as a golden.
 
 The `attention` scenario checks the selected KV type, chunked prefill, concurrent Graph decode
