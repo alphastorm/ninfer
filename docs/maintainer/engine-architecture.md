@@ -391,7 +391,9 @@ Forced control 使用同一提交机制，token 由 Frontend 提供，不调用 
 ## 6. 结束、取消与失败
 
 成功结束时，Program 将可保留 continuation 交给 ResourceManager，或释放 sequence；ResourceManager
-更新私有 owner、共享索引和 session，然后 Engine 释放 lane、完成 response。
+更新私有 owner、共享索引和 session，然后 Engine 完成结果、释放 lane、发布不再包含该请求的
+runtime statistics，最后完成 response。成功结束和 resident 取消使用相同顺序；`wait()` 返回后
+读取的统计不得仍将该请求计入 live membership。
 
 取消在 worker 边界生效：Waiting 直接结束；绑定或传输中的请求先结算/中止事务；resident 请求在
 GPU unit 稳定后 abort；paused 请求释放 ResumeState 及相关 owner。取消不改写 in-flight mapping，

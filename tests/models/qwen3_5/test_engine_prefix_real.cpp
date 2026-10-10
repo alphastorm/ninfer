@@ -1,6 +1,7 @@
 #include "ninfer/engine.h"
 #include "kv_cache_storage.h"
 
+#include <chrono>
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
@@ -8,6 +9,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1791,6 +1793,58 @@ int exercise_concurrent_resource_settlement(const char* artifact) {
     return 0;
 }
 
+int exercise_response_retirement(const char* artifact) {
+    auto configuration = explicit_anchor_engine_options(artifact);
+    configuration.context_cache.enabled = false;
+    ninfer::Engine engine(std::move(configuration));
+    const auto check_settled = [&]() {
+        const auto stats = engine.runtime_stats();
+        if (stats.running_requests || stats.waiting_requests || stats.paused_requests ||
+            stats.materializing_requests || stats.replaying_requests || stats.prefilling_requests ||
+            stats.decode_ready_requests || stats.capture_pending_requests ||
+            stats.terminal_pending_requests) {
+            std::cerr << "response preceded lane retirement: running=" << stats.running_requests
+                      << " terminal=" << stats.terminal_pending_requests << '\n';
+            return 1;
+        }
+        return 0;
+    };
+
+    for (std::uint32_t iteration = 0; iteration < 64; ++iteration) {
+        auto handle = engine.submit(
+            engine.prepare_tokens({248045, 846, 198, 5834, 248046, 198}), fixed_output(1, false));
+        const auto result = handle.wait();
+        if (result.finish_reason != ninfer::FinishReason::OutputLimit ||
+            result.generated_token_ids.size() != 1 || check_settled()) {
+            return 1;
+        }
+        if (engine.runtime_stats().generated_tokens != iteration + 1) {
+            std::cerr << "response preceded cumulative token publication\n";
+            return 1;
+        }
+    }
+
+    for (std::uint32_t iteration = 0; iteration < 16; ++iteration) {
+        auto handle = engine.submit(
+            engine.prepare_tokens({248045, 846, 198, 5834, 248046, 198}), fixed_output(128, false));
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (engine.runtime_stats().decode_ready_requests == 0) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                (void)handle.wait(nullptr, ninfer::CancellationView([] { return true; }));
+                std::cerr << "cancellation fixture did not reach a resident decode boundary\n";
+                return 1;
+            }
+            std::this_thread::yield();
+        }
+        const auto result =
+            handle.wait(nullptr, ninfer::CancellationView([] { return true; }));
+        if (result.finish_reason != ninfer::FinishReason::Cancelled || check_settled()) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 int verify_loaded_product(const ninfer::Engine& engine) {
     const ninfer::LoadSummary load = engine.load_summary();
     if (load.architecture != "Qwen3_5ForCausalLM" || load.model_name.empty() ||
@@ -1988,6 +2042,8 @@ int main() {
         result = exercise_artifact(artifact);
     } else if (scenario == "concurrent") {
         result = exercise_concurrent_resource_settlement(artifact);
+    } else if (scenario == "retirement") {
+        result = exercise_response_retirement(artifact);
     } else if (scenario == "anthropic-prefix-regression") {
         result = exercise_anthropic_prefix_regression(artifact);
     } else if (scenario == "nested-tool-markers") {
