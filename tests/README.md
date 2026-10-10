@@ -106,6 +106,9 @@ statistics still drive the normal verdict. Passing tests remain quiet without it
 The default invocation also runs packed and context attention. Large causal oracle calculations
 use at most eight CPU workers while preserving each output's FP64 accumulation order; small cases
 remain serial. The runner reports elapsed time per KV type.
+BF16 verify coverage includes widths 6,7,8,9 around the exact 7/8-column instances,
+append/cached-only entry points, fragmented/offset page maps, broad envelopes, and ragged batches
+with an empty row. The independent FP64 oracle and named criteria are unchanged.
 
 Run the RMSNorm and GDN control families together:
 

@@ -2712,6 +2712,27 @@ int run_small_prefill_cases(CudaExecutionView execution, KvCacheStorage storage)
     return failures;
 }
 
+int run_bf16_verify_cases(CudaExecutionView execution) {
+    int failures = 0;
+    const auto& geometry = kGeometries[0];
+    for (const int width : {6, 7, 8, 9}) {
+        for (const int context : {121, 32761, 32768}) {
+            const AttentionCase test_case{width, context, 131072, 1401u};
+            failures += run_a1_case(execution, geometry, KvCacheStorage::BFloat16, test_case,
+                                    MappingPattern::Fragmented);
+            failures += run_a3_case(execution, geometry, KvCacheStorage::BFloat16, test_case,
+                                    MappingPattern::Offset);
+        }
+    }
+    for (const int width : {7, 8}) {
+        failures += run_batch_case(
+            execution, geometry, KvCacheStorage::BFloat16,
+            {width, {511, 127, 31}, {width, 3, 0}, {2, 0, 1}, MappingPattern::Fragmented, 1402u},
+            131072);
+    }
+    return failures;
+}
+
 int run_storage_cases(CudaExecutionView execution, KvCacheStorage storage) {
     int failures = verify_workspace_capacity_contract(execution, storage);
     if (storage == KvCacheStorage::Nvfp4Group16) {
@@ -2730,6 +2751,7 @@ int run_storage_cases(CudaExecutionView execution, KvCacheStorage storage) {
         failures += run_quantized_causal_cases(execution, storage);
     } else {
         const std::array<int, 7> queries{0, 63, 64, 127, 128, 511, 1023};
+        failures += run_bf16_verify_cases(execution);
         for (const auto& geometry : kGeometries)
             failures += run_a1_case(execution, geometry, storage, {1024, 8192, 9216, 951u},
                                     MappingPattern::Fragmented, queries);

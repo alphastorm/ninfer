@@ -28,7 +28,9 @@ Bf16KvCausalPlan select_bf16_kv_causal_plan(int heads, int width, int batch,
         return {instance, {}, heads, width, batch, envelope};
     }
     const int rows                  = width * group;
-    const auto instance             = width == 1   ? Bf16KvInstance::GroupedDecode
+    const auto instance             = heads == 24 && width == 7 ? Bf16KvInstance::GroupedVerify7
+                                      : heads == 24 && width == 8 ? Bf16KvInstance::GroupedVerify8
+                                      : width == 1   ? Bf16KvInstance::GroupedDecode
                                       : rows <= 32 ? Bf16KvInstance::Grouped32
                                                    : Bf16KvInstance::Grouped64;
     const auto description          = bf16_kv_instance_description(instance);

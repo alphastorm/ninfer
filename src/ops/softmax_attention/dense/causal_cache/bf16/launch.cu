@@ -39,6 +39,10 @@ void grouped_instance(const CausalAttentionOperands& p, Bf16KvCacheView<Writable
         return grouped<G, Bf16KvInstance::Grouped32>(p, cache, input, plan, partial, stream);
     case Bf16KvInstance::Grouped64:
         return grouped<G, Bf16KvInstance::Grouped64>(p, cache, input, plan, partial, stream);
+    case Bf16KvInstance::GroupedVerify7:
+        return grouped<G, Bf16KvInstance::GroupedVerify7>(p, cache, input, plan, partial, stream);
+    case Bf16KvInstance::GroupedVerify8:
+        return grouped<G, Bf16KvInstance::GroupedVerify8>(p, cache, input, plan, partial, stream);
     default:
         throw std::logic_error("BF16 grouped launch received a tiled plan");
     }

@@ -13,7 +13,7 @@ struct Bf16KvGroupedMmaSchedule {
     static_assert(KVWarps == 1 || KVWarps == 2 || KVWarps == 4);
     static_assert(KeyRows % (16 * KVWarps) == 0);
     static_assert(QueryRows <= 2 * KeyRows);
-    static_assert(FixedWidth == 0 || FixedWidth == 1);
+    static_assert(FixedWidth == 0 || FixedWidth == 1 || FixedWidth == 7 || FixedWidth == 8);
     static constexpr int kFixedWidth = FixedWidth;
     static constexpr int kQueryRows  = QueryRows;
     static constexpr int kKeyRows    = KeyRows;
