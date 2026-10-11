@@ -1,5 +1,12 @@
 # NInfer native Windows lanes
 
+## 2026-10-11 — Native lane versions for multi-GPU hosts (qualification pending)
+
+RTX 3090 advances from `v0.6.2-beta.1` to `v0.6.3-beta.1`; RTX 4090 advances from
+`v0.6.10-beta.1` to `v0.6.11-beta.1`. These are new packages for the UUID-bound
+multi-GPU-host lifecycle scripts. Runtime source is unchanged. Hardware qualification
+of both new packages is pending.
+
 ## 2026-10-10 — UUID-bound multi-GPU hosts (qualification pending)
 
 Native RTX 3090 and RTX 4090 packaging can select its own card on a host with several
