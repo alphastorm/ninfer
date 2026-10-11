@@ -986,6 +986,11 @@ try {
         $spec = Read-JsonFile (Join-Path $payload 'release-spec.json')
         $config = Read-JsonFile (Join-Path $payload 'server-config.json')
         $selectedGpu = Assert-HostPrerequisites $spec
+        foreach ($installed in $installedReleases.Values) {
+            if ([string]$installed.gpu_uuid -cne [string]$selectedGpu.uuid) {
+                throw 'all releases in a state root must retain the same GPU UUID; card replacement requires a separate install'
+            }
+        }
         Assert-InstallerArchitectureContract $spec $config
         $configSha = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $payload 'server-config.json')).Hash.ToLowerInvariant()
         if ($spec.artifact_type -cne 'ninfer_windows_release_spec' -or
@@ -1024,6 +1029,12 @@ try {
         if ($null -eq $ownerStatus.PSObject.Properties['paused'] -or $ownerStatus.paused -isnot [bool]) {
             throw 'GPU-owner controller status must expose a paused boolean'
         }
+        if ($null -eq $ownerStatus.PSObject.Properties['gpu_uuid'] -or
+            [string]$ownerStatus.gpu_uuid -cne [string]$selectedGpu.uuid -or
+            $null -eq $ownerStatus.PSObject.Properties['gpu_pci_bus_id'] -or
+            [string]$ownerStatus.gpu_pci_bus_id -cne [string]$selectedGpu.pci_bus_id) {
+            throw 'GPU-owner controller status does not attest the selected UUID and PCI identity'
+        }
         $expectedPackageName = [string]$spec.product_prefix + '-v' + [string]$spec.release_version + '-' + [string]$spec.platform + '.tar.gz'
         if ([IO.Path]::GetFileName($package) -cne $expectedPackageName) { throw 'release package filename does not match its specification' }
         if ((Split-Path -Leaf $StateRoot) -cne [string]$spec.lifecycle.state_root_name) { throw 'state root does not match the lane specification' }
@@ -1040,6 +1051,10 @@ try {
         $taskXmlPath = $null
         if ($oldTaskExisted) {
             $oldTaskWasRunning = [string]$oldTask.State -ceq 'Running'
+            $oldOwner = $oldState.gpu_owner
+            if ($oldTaskWasRunning -and -not (Get-Command -Name ([string]$oldOwner.controller_path)).Parameters.ContainsKey('GpuUuid')) {
+                throw 'legacy unscoped GPU-owner wrapper is running; establish safe quiescence before upgrade'
+            }
             $taskXmlPath = Join-Path $snapshotRoot 'scheduled-task.xml'
             [IO.File]::WriteAllText(
                 $taskXmlPath,

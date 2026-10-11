@@ -83,6 +83,7 @@ function Resolve-OwnerGpu {
         throw 'GPU owner cannot resolve the selected UUID and PCI address (only PCI domain zero is observable)'
     }
     $script:GpuUuid = $parts[0]
+    $script:gpuPciBusId = $parts[1].ToUpperInvariant()
     $script:gpuPciAddress = $parts[1].Substring(9).ToUpperInvariant()
 }
 
@@ -129,12 +130,26 @@ namespace NInfer {
 }
 
 function Get-InteractiveGpuWorkloadCount {
+    # An idle card may have no process-memory instance. Establish observability from the
+    # adapter-memory inventory first, then count processes on its exact adapter LUIDs.
+    $adapters = @(Get-CimInstance -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory -ErrorAction Stop)
+    $addresses = @{}
+    $selectedLuids = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($adapter in $adapters) {
+        if ([string]$adapter.Name -notmatch '^luid_0x([0-9a-f]{8})_0x([0-9a-f]{8})_phys_\d+$') { continue }
+        $high = $Matches[1]; $low = $Matches[2]
+        $luid = $high + ':' + $low
+        if (-not $addresses.ContainsKey($luid)) {
+            try { $addresses[$luid] = Get-AdapterPciAddress $high $low }
+            catch { continue } # Another adapter may be disappearing; active unknown LUIDs fail below.
+        }
+        if ($addresses[$luid] -ceq $gpuPciAddress) { [void]$selectedLuids.Add($luid) }
+    }
+    if ($selectedLuids.Count -eq 0) { throw 'cannot observe selected GPU: no adapter-memory counter LUID maps to its PCI address' }
     $rows = @(Get-CimInstance `
         -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory `
         -ErrorAction Stop)
     $owners = [Collections.Generic.HashSet[int]]::new()
-    $addresses = @{}
-    $observed = $false
     foreach ($row in $rows) {
         $usage = 0L
         if (-not [Int64]::TryParse([string]$row.DedicatedUsage, [ref]$usage) -or $usage -lt 0) {
@@ -149,13 +164,14 @@ function Get-InteractiveGpuWorkloadCount {
         $ownerPid = [int]$Matches[1]
         $high = $Matches[2]; $low = $Matches[3]
         $luid = $high + ':' + $low
-        if (-not $addresses.ContainsKey($luid)) { $addresses[$luid] = Get-AdapterPciAddress $high $low }
-        if ($addresses[$luid] -cne $gpuPciAddress) { continue }
-        $observed = $true
         if ($usage -lt $interactiveGpuMemoryThresholdBytes) { continue }
+        if (-not $selectedLuids.Contains($luid)) {
+            if (-not $addresses.ContainsKey($luid)) { $addresses[$luid] = Get-AdapterPciAddress $high $low }
+            if ($addresses[$luid] -ceq $gpuPciAddress) { throw 'selected GPU process LUID disappeared from the adapter inventory' }
+            continue
+        }
         [void]$owners.Add($ownerPid)
     }
-    if (-not $observed) { throw 'cannot observe selected GPU: no process-memory counter LUID maps to its PCI address' }
     return $owners.Count
 }
 
@@ -173,6 +189,19 @@ function Read-State {
         ($null -ne $bound -and [string]$bound.Value -cne $GpuUuid)) {
         throw 'GPU-owner lease UUID is absent or differs; restore with its original controller before upgrading'
     }
+    $pci = $state.PSObject.Properties['gpu_pci_bus_id']
+    if (($null -eq $pci -and $null -ne $bound) -or
+        ($null -ne $pci -and [string]$pci.Value -cne $gpuPciBusId)) {
+        throw 'GPU-owner lease PCI identity is absent or differs'
+    }
+    $phase = if ($null -eq $state.PSObject.Properties['phase']) { 'paused' } else { [string]$state.phase }
+    if ([int]$state.schema_version -ne 1 -or -not [bool]$state.paused -or
+        $phase -cnotin @('prepared', 'paused') -or
+        [int]$state.qualified_power_limit_w -ne $qualifiedPowerLimitW -or
+        [int]$state.prior_power_limit_w -lt $PriorPowerLimitMinW -or
+        [int]$state.prior_power_limit_w -gt $PriorPowerLimitMaxW) {
+        throw 'GPU-owner lease state is invalid or the safe power cap drifted'
+    }
     return $state
 }
 
@@ -184,6 +213,7 @@ function Write-State([int]$PriorPowerLimitW, [ValidateSet('prepared', 'paused')]
             (([ordered]@{
                 schema_version = 1
                 gpu_uuid = $GpuUuid
+                gpu_pci_bus_id = $gpuPciBusId
                 paused = $true
                 phase = $Phase
                 qualified_power_limit_w = $qualifiedPowerLimitW
@@ -203,6 +233,7 @@ function Write-Status([bool]$Paused, [int]$PowerLimitW) {
     [ordered]@{
         schema_version = 1
         gpu_uuid = $GpuUuid
+        gpu_pci_bus_id = $gpuPciBusId
         paused = $Paused
         power_limit_w = $PowerLimitW
         qualified_power_limit_w = $qualifiedPowerLimitW
@@ -218,14 +249,6 @@ switch ($Action) {
         $limit = Get-PowerLimitW
         if ($null -ne $state) {
             $phase = if ($null -eq $state.PSObject.Properties['phase']) { 'paused' } else { [string]$state.phase }
-            if ([int]$state.schema_version -ne 1 -or
-                -not [bool]$state.paused -or
-                $phase -cnotin @('prepared', 'paused') -or
-                [int]$state.qualified_power_limit_w -ne $qualifiedPowerLimitW -or
-                [int]$state.prior_power_limit_w -lt $PriorPowerLimitMinW -or
-                [int]$state.prior_power_limit_w -gt $PriorPowerLimitMaxW) {
-                throw 'GPU-owner lease state is invalid or the safe power cap drifted'
-            }
             if (-not $managesPowerLimit) {
                 if ($phase -ceq 'prepared') { Write-State ([int]$state.prior_power_limit_w) 'paused' }
                 Write-Status $true $limit

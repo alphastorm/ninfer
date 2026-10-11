@@ -299,6 +299,13 @@ function Invoke-GpuOwner([object]$State, [ValidateSet('status', 'stop', 'start')
         $status.paused -isnot [bool]) {
         throw 'GPU-owner status must expose a paused boolean'
     }
+    $pci = $release.PSObject.Properties['gpu_pci_bus_id']
+    if ($null -eq $status.PSObject.Properties['gpu_uuid'] -or
+        [string]$status.gpu_uuid -cne [string]$release.gpu_uuid -or
+        $null -eq $status.PSObject.Properties['gpu_pci_bus_id'] -or
+        ($null -ne $pci -and [string]$status.gpu_pci_bus_id -cne [string]$pci.Value)) {
+        throw 'GPU-owner status does not attest the bound UUID and PCI identity'
+    }
     return $status
 }
 
@@ -552,21 +559,50 @@ function Assert-ServerIdentity([object]$Status, [object]$Release) {
     }
 }
 
-function Test-ServerStartGpu([string]$RequestLog, [string]$ExpectedUuid) {
+function Test-ServerStartGpu([string]$RequestLog, [string]$ExpectedUuid, [Int64]$StartOffset,
+    [Int64]$CreationTicks, [int]$ServerPid) {
     if (-not (Test-Path -LiteralPath $RequestLog -PathType Leaf)) { return $false }
-    # The request log was rotated before this launch; its first record is server_start.
-    $line = Get-Content -LiteralPath $RequestLog -TotalCount 1 -Encoding UTF8
-    if ([string]::IsNullOrWhiteSpace($line)) { return $false }
-    try { $record = $line | ConvertFrom-Json } catch { return $false } # Incomplete write.
-    $event = $record.PSObject.Properties['event']
-    $environment = $record.PSObject.Properties['environment']
-    if ($null -eq $event -or [string]$event.Value -cne 'server_start' -or
-        $null -eq $environment -or $null -eq $environment.Value) { throw 'missing server_start GPU identity' }
-    $uuid = $environment.Value.PSObject.Properties['gpu_uuid']
-    if ($null -eq $uuid -or [string]$uuid.Value -cne $ExpectedUuid) {
-        throw 'server_start GPU UUID differs from the bound GPU'
+    if ($CreationTicks -ne 0 -and (Get-Item -LiteralPath $RequestLog).CreationTimeUtc.Ticks -ne $CreationTicks) {
+        throw 'request log was replaced after launch'
     }
-    return $true
+    $stream = [IO.File]::Open($RequestLog, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+        if ($StartOffset -lt 0 -or $stream.Length -lt $StartOffset) { throw 'request log was truncated after launch' }
+        [void]$stream.Seek($StartOffset, [IO.SeekOrigin]::Begin)
+        $bytes = [byte[]]::new([int][Math]::Min(1MB, $stream.Length - $StartOffset))
+        $count = 0
+        while ($count -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $count, $bytes.Length - $count)
+            if ($read -eq 0) { break }
+            $count += $read
+        }
+        $text = [Text.Encoding]::UTF8.GetString($bytes, 0, $count)
+    }
+    finally { $stream.Dispose() }
+    # Ignore an incomplete trailing JSONL record. Only bytes appended after this launch's
+    # captured boundary can attest it; historical server_start records are never examined.
+    $end = $text.LastIndexOf([char]10)
+    if ($end -ge 0) {
+        foreach ($line in ($text.Substring(0, $end) -split "`n")) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $record = $line | ConvertFrom-Json
+            $event = $record.PSObject.Properties['event']
+            if ($null -eq $event -or [string]$event.Value -cne 'server_start') { continue }
+            $instance = $record.PSObject.Properties['server_instance_id']
+            if ($null -eq $instance -or [string]$instance.Value -cnotmatch ("^serve-$ServerPid-[0-9]+$")) {
+                throw 'server_start does not belong to the launched process'
+            }
+            $environment = $record.PSObject.Properties['environment']
+            if ($null -eq $environment -or $null -eq $environment.Value) { throw 'missing server_start GPU identity' }
+            $uuid = $environment.Value.PSObject.Properties['gpu_uuid']
+            if ($null -eq $uuid -or [string]$uuid.Value -cne $ExpectedUuid) {
+                throw 'server_start GPU UUID differs from the bound GPU'
+            }
+            return $true
+        }
+    }
+    if ($count -eq 1MB) { throw 'server_start GPU evidence exceeded the 1 MiB search bound' }
+    return $false
 }
 
 function Assert-RuntimeGpuReady([object]$Release) {
@@ -1067,11 +1103,10 @@ function Invoke-Run {
         $stopPlan = Get-ManagedStopPlan $release
         $stopEventName = $null
         $shutdownReport = $null
-        $launchId = $null
+        $launchId = [Guid]::NewGuid().ToString('N')
         if ([string]$stopPlan.mode -ceq 'stop-event') {
             # One identity per launch, carried by the event name and echoed in the report the
             # server writes, so the report the controller reads is provably this launch's.
-            $launchId = [Guid]::NewGuid().ToString('N')
             $stopEventName = 'Global\NInfer-Serve-Stop-' + $launchId
             $shutdownReport = Join-Path $logs 'shutdown.json'
             Remove-Item -LiteralPath $shutdownReport -Force -ErrorAction SilentlyContinue
@@ -1089,7 +1124,7 @@ function Invoke-Run {
         $requestLog = Join-Path $logs 'requests.jsonl'
         # Redirection truncates, so the log that explains a stop would be destroyed by the next
         # launch - which is exactly the launch an operator compares it against. Keep one.
-        foreach ($log in @($stdout, $stderr, $requestLog)) {
+        foreach ($log in @($stdout, $stderr)) {
             if (Test-Path -LiteralPath $log -PathType Leaf) {
                 Move-Item -LiteralPath $log -Destination "$log.previous" -Force `
                     -ErrorAction Stop
@@ -1107,6 +1142,13 @@ function Invoke-Run {
         $startInfo.EnvironmentVariables['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
         $stdoutStream = [IO.File]::Open($stdout, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read)
         $stderrStream = [IO.File]::Open($stderr, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+        $requestLogOffset = 0L
+        $requestLogCreationTicks = 0L
+        if (Test-Path -LiteralPath $requestLog -PathType Leaf) {
+            $logItem = Get-Item -LiteralPath $requestLog
+            $requestLogOffset = [Int64]$logItem.Length
+            $requestLogCreationTicks = [Int64]$logItem.CreationTimeUtc.Ticks
+        }
         $process = [Diagnostics.Process]::Start($startInfo)
         $stdoutCopy = $process.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
         $stderrCopy = $process.StandardError.BaseStream.CopyToAsync($stderrStream)
@@ -1122,10 +1164,12 @@ function Invoke-Run {
                 launch_id = $launchId
                 gpu_uuid = [string]$release.gpu_uuid
                 gpu_uuid_verified = $false
+                request_log_start_offset = $requestLogOffset
+                request_log_creation_utc_ticks = $requestLogCreationTicks
             }
         Write-JsonAtomic (Join-Path $StateRoot 'runtime.json') $runtimeRecord
         $gpuDeadline = [DateTime]::UtcNow.AddSeconds(600)
-        while (-not (Test-ServerStartGpu $requestLog ([string]$release.gpu_uuid))) {
+        while (-not (Test-ServerStartGpu $requestLog ([string]$release.gpu_uuid) $requestLogOffset $requestLogCreationTicks $process.Id)) {
             if ($process.HasExited) { throw 'server exited before GPU UUID attestation' }
             if ([DateTime]::UtcNow -ge $gpuDeadline) { throw 'server_start GPU UUID attestation timed out after 600 seconds' }
             Start-Sleep -Milliseconds 200

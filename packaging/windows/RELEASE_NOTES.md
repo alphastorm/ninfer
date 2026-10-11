@@ -13,21 +13,28 @@ are unchanged; `engine.device` is not the hardware selector.
 Only the server child receives `CUDA_DEVICE_ORDER=PCI_BUS_ID`. The operator must still leave
 `CUDA_VISIBLE_DEVICES` absent: hiding cards is not supported. Readiness requires this launch's
 `server_start.environment.gpu_uuid` to match the release binding within 600 seconds; mismatch
-or missing evidence stops the child. Request logs rotate to `requests.jsonl.previous` before
-each launch, preserving one predecessor and excluding stale attestation.
+or missing evidence stops the child. Request logs stay append-only: the wrapper captures the
+pre-launch byte offset and file creation identity, reads only complete new JSONL records,
+and requires `server_instance_id` to contain this child's PID. Truncation, replacement,
+wrong-process startup records, and a 1 MiB search without evidence fail closed.
 
 Every owner-controller power query/set is UUID-indexed. Interactive workload accounting maps
-GPUProcessMemory LUIDs through D3DKMT to the selected PCI bus/device/function; another card's
-desktop workload does not block this card. Missing selected-card counters, failed adapter
-mapping, malformed active counters, and nonzero PCI domains refuse observation rather than
+GPUAdapterMemory LUIDs through D3DKMT to the selected PCI bus/device/function, then counts
+only GPUProcessMemory instances on those LUIDs. An idle selected adapter with no process
+instances is valid; another card's desktop workload does not block it. Missing or unmappable
+selected-adapter counters, unmappable active process LUIDs, malformed active counters, and
+nonzero PCI domains refuse observation rather than
 assuming an idle GPU. Software adapters with no PCI device are excluded. A controller invoked
 without `-GpuUuid` refuses a multi-GPU host.
 
 Install defaults to the bundled UUID-aware owner controller on both clean installs and
-upgrades; explicit adapters must declare `-GpuUuid` before invocation. Old unbound active
+upgrades; explicit adapters must declare `-GpuUuid` and attest UUID/PCI in status. Inner
+leases bind both UUID and PCI and validate policy before any restore. Old unbound active
 owner leases must be restored safely with their original controller before upgrading; they
 are never guessed onto a card. A stopped, lease-free predecessor remains rollback-capable,
-including when its recorded GPU index is stale. No lane version or release spec is changed.
+including when its recorded GPU index is stale. A running legacy unscoped wrapper blocks
+upgrade/qualification; it is never stopped through its unscoped owner on the multi-GPU host.
+No lane version or release spec is changed.
 
 Both lanes still listen on port 18082 and retain separate task names and state roots.
 **Only one lane may run at a time.** Start (including direct scheduled Run) refuses an occupied
