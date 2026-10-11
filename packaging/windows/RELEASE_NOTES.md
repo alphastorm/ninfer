@@ -54,6 +54,10 @@ selection rule, and binds clean/upgrade installs, direct pressure launches, secu
 power restoration probes, and benchmark GPU metrics to that card. Fresh real-host acceptance
 is still required; this packaging change is not a release or a hardware qualification claim.
 
+Qualification preflight runs again on every resume. It records the incumbent's root and running
+state durably before stopping anything, and cleanup uses that record even when preflight fails.
+An interrupted window retains an outstanding incumbent restart obligation until restoration passes.
+
 One runtime for the RTX 4090 (`sm_89`) and RTX 3090 (`sm_86`) lanes, built from mainline
 `port/native-lanes-on-mainline` rather than the two divergent lane branches. The package carries
 the same context cache, warm arrival across a restart, and streamed verified-or-refused restore

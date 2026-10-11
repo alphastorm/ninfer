@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -271,6 +272,91 @@ class MultiGpuHostTests(unittest.TestCase):
         controller = (WINDOWS / "Control-Release.ps1").read_text()
         self.assertIn("Parameters.ContainsKey('GpuUuid')", ps_function(controller, "Get-GpuOwner"))
         self.assertIn("GpuUuid = [string]$release.gpu_uuid", ps_function(controller, "Invoke-GpuOwner"))
+
+
+class QualificationRestorationTests(unittest.TestCase):
+    def orchestrator(self, directory: Path) -> qualify_native.Orchestrator:
+        subject = qualify_native.Orchestrator.__new__(qualify_native.Orchestrator)
+        fixture = directory / "fixture.json"
+        fixture.write_text("{}", encoding="utf-8")
+        subject.config = SimpleNamespace(
+            source_root=directory, state_dir=directory, long_fixture=fixture,
+            incumbent_state_root="C:/incumbent", target="fake-target", builder="fake-builder",
+            model_path="C:/model", gpu_uuid=None, resume=False,
+        )
+        subject.head = subject.tool_head = "source"
+        subject.lane = SimpleNamespace(
+            name="rtx3090", release_id="candidate", state_root="C:/candidate",
+            task_name="candidate-task", owner_power_limit_w=370, model_sha256="model-sha",
+            spec={"gpu": {"name": "NVIDIA GeForce RTX 3090"}},
+        )
+        subject.state_path = directory / "state.json"
+        subject.receipt_dir = directory / "receipts"
+        subject.state = {
+            "gpu_uuid": "GPU-00000000-0000-4000-8000-000000003090",
+            "phases": {}, "restoration": {"status": "required"},
+        }
+        return subject
+
+    def test_preflight_found_state_is_durable_before_stop_and_survives_failure(self) -> None:
+        for was_running, pending_restart in ((True, False), (False, True)):
+            with self.subTest(was_running=was_running, pending_restart=pending_restart), tempfile.TemporaryDirectory() as temporary:
+                subject = self.orchestrator(Path(temporary))
+                if pending_restart:
+                    subject.state["found_incumbent"] = {
+                        "incumbent_state_root": "C:/incumbent", "incumbent_was_running": True,
+                    }
+                # A previous window's successful restore cannot exempt this new window from cleanup.
+                subject.state["phases"]["restore"] = {"status": "passed"}
+                scripts = []
+
+                def remote(host: str, script: str, **kwargs: object) -> dict:
+                    scripts.append(script)
+                    if len(scripts) == 1:
+                        self.assertNotIn("-Action Stop", script)
+                        return {"incumbent_state_root": "C:/incumbent", "incumbent_was_running": was_running}
+                    if len(scripts) == 2:
+                        durable = json.loads(subject.state_path.read_text())
+                        self.assertTrue(durable["found_incumbent"]["incumbent_was_running"])
+                        self.assertEqual(durable["found_incumbent"]["incumbent_state_root"], "C:/incumbent")
+                        self.assertNotIn("restore", durable["phases"])
+                        self.assertIn("-Action Stop", script)
+                        raise qualify_native.LaneError("target refused after incumbent stop")
+                    self.assertIn("$incumbentRoot='C:/incumbent'", script)
+                    self.assertIn("if($true){if(-not (Test-ScopedControllerOrQuiescent $incumbentRoot))", script)
+                    return {"status": "passed", "process_count": 1}
+
+                subject.remote_json = remote
+                with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="")):
+                    with self.assertRaisesRegex(qualify_native.LaneError, "target refused"):
+                        subject.phase("preflight", subject.preflight)
+                self.assertEqual(subject.state["phases"]["preflight"]["status"], "failed")
+                subject.config.incumbent_state_root = "C:/not-the-recorded-root"
+                subject.cleanup()
+                self.assertEqual(subject.state["restoration"]["status"], "passed")
+                self.assertEqual(len(scripts), 3)
+
+    def test_failed_found_state_write_never_reaches_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            subject = self.orchestrator(Path(temporary))
+            with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="")), \
+                    patch.object(subject, "remote_json", return_value={
+                        "incumbent_state_root": "C:/incumbent", "incumbent_was_running": True,
+                    }) as remote, patch.object(subject, "_save", side_effect=OSError("cannot persist")):
+                with self.assertRaisesRegex(OSError, "cannot persist"):
+                    subject.preflight()
+                self.assertEqual(remote.call_count, 1)
+                self.assertNotIn("-Action Stop", remote.call_args.args[1])
+
+    def test_resume_always_reruns_preflight(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            subject = self.orchestrator(Path(temporary))
+            subject.config.resume = True
+            subject.state["phases"]["preflight"] = {"status": "passed", "receipt": {"old": True}}
+            self.assertFalse(subject.verify_checkpoint("preflight", {"old": True}))
+            with patch.object(subject, "preflight", return_value={"fresh": True}) as action:
+                self.assertEqual(subject.phase("preflight", action), {"fresh": True})
+                action.assert_called_once_with()
 
 
 class SharedLifecycleTreeTests(unittest.TestCase):

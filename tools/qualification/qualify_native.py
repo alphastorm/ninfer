@@ -562,6 +562,8 @@ if($LASTEXITCODE -ne 0){throw 'target GPU selection failed'}
         atomic_json(self.state_path, self.state)
 
     def verify_checkpoint(self, name: str, receipt: dict[str, Any]) -> bool:
+        if name == "preflight":
+            return False  # Every window must re-establish target quiescence and found state.
         try:
             if name == "neutral_build":
                 script = f"""
@@ -678,16 +680,37 @@ $limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=pow
         run(["ssh", "-T", self.config.builder, "exit"], timeout=30)
         run(["ssh", "-T", self.config.target, "exit"], timeout=30)
         incumbent = self.config.incumbent_state_root
+        found = self.remote_json(
+            self.config.target,
+            f"""
+$ErrorActionPreference='Stop'
+$incumbentRoot={ps_quote(incumbent or "")}
+$incumbentRunning=$false
+if($incumbentRoot -and (Test-Path (Join-Path $incumbentRoot 'Control-Release.ps1')) -and (Test-ScopedControllerOrQuiescent $incumbentRoot)){{
+  $incumbentStatus=&(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Status -StateRoot $incumbentRoot|ConvertFrom-Json
+  $incumbentRunning=([string]$incumbentStatus.process_state -eq 'running')
+}}
+[Console]::Out.WriteLine(([ordered]@{{incumbent_state_root=$incumbentRoot;incumbent_was_running=$incumbentRunning}}|ConvertTo-Json -Compress))
+""",
+        )
+        pending = self.state.get("found_incumbent")
+        if pending and self.state["restoration"].get("status") != "passed":
+            if pending["incumbent_state_root"] != found["incumbent_state_root"]:
+                raise LaneError("restore the recorded incumbent before changing its state root")
+            # A crash after Stop must not turn an outstanding restart obligation into 'found stopped'.
+            found["incumbent_was_running"] |= pending["incumbent_was_running"]
+        self.state["found_incumbent"] = found
+        self.state["restoration"] = {"status": "required"}
+        self.state["phases"].pop("restore", None)
+        self._save()  # Write-ahead: no target-side stop is permitted before this succeeds.
         status = self.remote_json(
             self.config.target,
             f"""
 $ErrorActionPreference='Stop'
 $root={ps_quote(self.state_root)}
 $incumbentRoot={ps_quote(incumbent or "")}
-$incumbentRunning=$false
+$incumbentRunning={'$true' if found['incumbent_was_running'] else '$false'}
 if($incumbentRoot -and (Test-Path (Join-Path $incumbentRoot 'Control-Release.ps1')) -and (Test-ScopedControllerOrQuiescent $incumbentRoot)){{
-  $incumbentStatus=&(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Status -StateRoot $incumbentRoot|ConvertFrom-Json
-  $incumbentRunning=([string]$incumbentStatus.process_state -eq 'running')
   &(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Stop -StateRoot $incumbentRoot|Out-Null
 }}
 $controller=Join-Path $root 'Control-Release.ps1'
@@ -1343,9 +1366,9 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
         return summary
 
     def restore(self) -> dict[str, Any]:
-        preflight = self.state["phases"].get("preflight", {}).get("receipt", {}).get("initial", {})
-        incumbent = self.config.incumbent_state_root or ""
-        restart_incumbent = bool(preflight.get("incumbent_was_running")) and bool(incumbent)
+        found = self.state.get("found_incumbent", {})
+        incumbent = found.get("incumbent_state_root", "")
+        restart_incumbent = bool(found.get("incumbent_was_running")) and bool(incumbent)
         status = self.remote_json(
             self.config.target,
             f"""
@@ -1373,6 +1396,7 @@ $taskState=if($null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction Sile
         expected_processes = 1 if restart_incumbent else 0
         if status["process_count"] != expected_processes:
             raise LaneError("target process count after restoration does not match its found state")
+        self.state["restoration"] = status
         return status
 
     def cleanup(self) -> None:
