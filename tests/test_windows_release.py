@@ -6,9 +6,11 @@ import json
 from pathlib import Path
 import re
 import subprocess
+from types import SimpleNamespace
 import unittest
 
 from tools.release import package as release_package
+from tools.qualification import qualify_native
 
 ROOT = Path(__file__).resolve().parents[1]
 WINDOWS = ROOT / "packaging/windows"
@@ -27,6 +29,186 @@ def is_ancestor(ancestor: str, descendant: str = "HEAD") -> bool:
         ["git", "-C", str(ROOT), "merge-base", "--is-ancestor", ancestor, descendant],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     ).returncode == 0
+
+
+GPU_SCAN_FILES = tuple(f"packaging/windows/{name}" for name in SHARED_SCRIPTS) + (
+    "tools/qualification/qualify_native.py",
+)
+# Only selection may enumerate. Exact query and enclosing function are both pinned, and
+# each exception can be used once: adding another unindexed probe cannot reuse a waiver.
+GPU_ENUMERATIONS = {
+    ("packaging/windows/Install-Release.ps1", "Assert-HostPrerequisites"):
+        "--query-gpu=index,uuid,name,pci.bus_id,compute_cap,driver_version",
+    ("packaging/windows/Control-GpuOwner.ps1", "Resolve-OwnerGpu"):
+        "--query-gpu=uuid,pci.bus_id",
+    ("tools/qualification/qualify_native.py", "gpu_uuid"):
+        "--query-gpu=index,uuid,name,pci.bus_id,compute_cap,driver_version",
+}
+
+
+def unindexed_gpu_commands(sources: dict[str, str]) -> list[str]:
+    """Inspect literal GPU queries/sets, including PowerShell embedded in Python strings.
+
+    Match the operation, not a particular executable spelling, so a new wrapper or absolute
+    nvidia-smi path gets the same fail-closed rule. Multiline argument arrays and backtick
+    continuations are logical statements; all other statements must carry their own selector.
+    """
+    violations = []
+    used_enumerations = set()
+    operation = re.compile(r"--query-[a-z-]+(?:=[a-z0-9_.,]+)?|(?<![\w-])-pl\b|--power-limit\b|(?<![\w-])-q\b")
+    for path, original in sources.items():
+        text = re.sub(r"\x60\r?\n\s*", " ", original)
+        text = re.sub(r"Invoke-NvidiaSmi\s+@\([^)]*\)",
+                      lambda match: match[0].replace("\n", " "), text)
+        function = ""
+        for number, line in enumerate(text.splitlines(), 1):
+            definition = re.match(r"\s*(?:function\s+([\w-]+)|def\s+(\w+)\()", line)
+            if definition:
+                function = definition[1] or definition[2]
+            if line.lstrip().startswith("#"):
+                continue
+            for statement in line.split(";"):
+                for match in operation.finditer(statement):
+                    if match[0] == "-q" and not re.search(r"nvidia[-_]?smi|NvidiaSmi", statement, re.I):
+                        continue  # e.g. scp -q, not an NVIDIA query.
+                    if re.search(r"(?<![\w-])(?:-i|--id)(?:['\"]?\s*[,=]|\s+)", statement):
+                        continue
+                    key = (path, function)
+                    if GPU_ENUMERATIONS.get(key) == match[0] and key not in used_enumerations:
+                        used_enumerations.add(key)
+                        continue
+                    violations.append(f"{path}:{number}: {match[0]} in {function}")
+    return violations
+
+
+def ps_function(text: str, name: str) -> str:
+    start = text.index(f"function {name}")
+    end = text.find("\nfunction ", start + 1)
+    return text[start:end if end >= 0 else len(text)]
+
+
+class MultiGpuHostTests(unittest.TestCase):
+    def test_no_unindexed_gpu_queries_or_sets(self) -> None:
+        sources = {path: (ROOT / path).read_text(encoding="utf-8") for path in GPU_SCAN_FILES}
+        self.assertEqual(unindexed_gpu_commands(sources), [])
+
+    def test_invariant_is_red_on_f08309da(self) -> None:
+        sources = {path: subprocess.run(
+            ["git", "show", f"f08309da:{path}"], cwd=ROOT, capture_output=True,
+            text=True, check=True,
+        ).stdout for path in GPU_SCAN_FILES}
+        violations = unindexed_gpu_commands(sources)
+        for name in ("Control-Release.ps1", "Control-GpuOwner.ps1", "qualify_native.py"):
+            self.assertTrue(any(name in item for item in violations), violations)
+        with self.assertRaises(AssertionError):
+            self.assertEqual(violations, [], "baseline must fail the same executable invariant")
+
+    def test_invariant_detects_multiline_and_chained_regressions(self) -> None:
+        path = "packaging/windows/Control-GpuOwner.ps1"
+        for command in (
+            "Invoke-NvidiaSmi @(\n '--query-gpu=power.limit',\n '--format=csv,noheader')",
+            "& $absolutePath -pl 300", "nvidia-smi.exe -q -x",
+            "nvidia-smi.exe -i $uuid --query-gpu=name; nvidia-smi.exe --query-gpu=power.limit",
+        ):
+            with self.subTest(command=command):
+                self.assertTrue(unindexed_gpu_commands({path: command}))
+        self.assertEqual(unindexed_gpu_commands({path: "Invoke-NvidiaSmi @(\n '-i', $uuid,\n '-pl', '300')"}), [])
+
+    def test_selection_matches_lane_and_requires_unambiguous_uuid(self) -> None:
+        a = "GPU-00000000-0000-4000-8000-000000004090"
+        b = "GPU-00000000-0000-4000-8000-000000003090"
+        rows = [f"0, {a}, NVIDIA GeForce RTX 4090, 00000000:17:00.0, 8.9, 580.97",
+                f"1, {b}, NVIDIA GeForce RTX 3090, 00000000:65:00.0, 8.6, 580.97"]
+        spec = json.loads((WINDOWS / "lanes/rtx3090/release-spec.json").read_text())
+        self.assertEqual(qualify_native.select_qualified_gpu(rows, spec, None)["uuid"], b)
+        self.assertEqual(qualify_native.select_qualified_gpu(rows[::-1], spec, b.upper())["index"], 1)
+        for candidates, requested in (([], None), (rows, a), (rows * 2, None),
+                                      ([rows[1].replace("8.6", "8.9")], b)):
+            with self.subTest(rows=candidates, requested=requested), self.assertRaises(qualify_native.LaneError):
+                qualify_native.select_qualified_gpu(candidates, spec, requested)
+        duplicate = rows + [rows[1].replace(b, a)]
+        self.assertEqual(qualify_native.select_qualified_gpu(duplicate, spec, b)["uuid"], b)
+        with self.assertRaises(Exception):
+            qualify_native.gpu_uuid_argument("GPU-0")
+        installer = (WINDOWS / "Install-Release.ps1").read_text()
+        selection = ps_function(installer, "Assert-HostPrerequisites")
+        for guard in ("$qualified.Count -eq 0", "$qualified.Count -ne 1", "$Spec.gpu.name",
+                      "$Spec.gpu.compute_capability", "$GpuUuid", "Env:CUDA_VISIBLE_DEVICES"):
+            self.assertIn(guard, selection)
+        self.assertNotIn("$Config.engine.device", selection)
+        self.assertIn("gpu_pci_bus_id = [string]$selectedGpu.pci_bus_id", installer)
+        self.assertIn("PSObject.Properties['gpu_pci_bus_id']", ps_function(installer, "Copy-InstalledRelease"))
+
+    def test_launch_uses_current_index_and_child_only_device_order(self) -> None:
+        controller = (WINDOWS / "Control-Release.ps1").read_text()
+        identity = ps_function(controller, "Assert-SelectedGpuIdentity")
+        for guard in ("-i ([string]$Release.gpu_uuid)", "$rows.Count -ne 1", "return $rowIndex",
+                      "PSObject.Properties['gpu_pci_bus_id']", "$parts[2] -cne [string]$Release.gpu_name"):
+            self.assertIn(guard, identity)
+        self.assertNotIn("$Release.gpu_index", identity)
+        run = ps_function(controller, "Invoke-Run")
+        self.assertIn("$resolvedGpuIndex = Assert-SelectedGpuIdentity $release", run)
+        self.assertIn("'--device', [string]$resolvedGpuIndex", run)
+        self.assertNotIn("$config.engine.device", run)
+        self.assertIn("$startInfo.EnvironmentVariables['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'", run)
+        self.assertNotRegex(controller, r"\$env:CUDA_DEVICE_ORDER\s*=")
+        for name in ("Start-ManagedRelease", "Invoke-Run"):
+            body = ps_function(controller, name)
+            self.assertLess(body.index("Get-NetTCPConnection"), body.index("Acquire-GpuOwnerLease"))
+
+    def test_harness_scopes_install_pressure_and_benchmark(self) -> None:
+        harness = (ROOT / "tools/qualification/qualify_native.py").read_text()
+        for contract in ("--gpu-uuid", "-GpuUuid {ps_quote(self.gpu_uuid)}",
+                         "GpuUuid={ps_quote(self.gpu_uuid)}", "'--device',[string]$gpuIndex",
+                         "EnvironmentVariables['CUDA_DEVICE_ORDER']='PCI_BUS_ID'",
+                         "pressure server_start GPU UUID mismatch", 'gpu_metrics(release["gpu_uuid"])'):
+            self.assertIn(contract, harness)
+        self.assertNotIn("$c.engine.device", harness)
+        self.assertNotRegex(harness, r"\$env:CUDA_DEVICE_ORDER\s*=")
+        captured = []
+        subject = SimpleNamespace(
+            state_root="C:/state", target_root="C:/qualification", gpu_uuid="GPU-00000000-0000-0000-0000-000000000001",
+            lane=SimpleNamespace(model_id="model"),
+            remote_json=lambda host, script, **kwargs: captured.append(script) or {},
+            config=SimpleNamespace(target="not-contacted"),
+        )
+        qualify_native.Orchestrator.pressure_protocol(subject)
+        self.assertIn(r"""'(\\*)"'""", captured[0])
+        self.assertIn(r"'$1$1\"'", captured[0])
+
+    def test_current_launch_attestation_precedes_every_ready_path(self) -> None:
+        controller = (WINDOWS / "Control-Release.ps1").read_text()
+        attestation = ps_function(controller, "Test-ServerStartGpu")
+        self.assertIn("'server_start'", attestation)
+        self.assertIn("PSObject.Properties['gpu_uuid']", attestation)
+        self.assertIn("[string]$uuid.Value -cne $ExpectedUuid", attestation)
+        run = ps_function(controller, "Invoke-Run")
+        self.assertLess(run.index("@($stdout, $stderr, $requestLog)"), run.index("[Diagnostics.Process]::Start"))
+        self.assertLess(run.index("Test-ServerStartGpu $requestLog"), run.index("$runtimeRecord.gpu_uuid_verified = $true"))
+        self.assertIn("UtcNow.AddSeconds(600)", run)
+        self.assertIn("$process.Kill()", run)
+        for name in ("Wait-Ready", "Get-StatusObject", "Start-ManagedRelease"):
+            self.assertIn("Assert-RuntimeGpuReady $release", ps_function(controller, name))
+
+    def test_owner_refuses_ambiguity_and_scopes_counter_luids(self) -> None:
+        owner = (WINDOWS / "Control-GpuOwner.ps1").read_text()
+        self.assertIn("$rows.Count -ne 1", ps_function(owner, "Resolve-OwnerGpu"))
+        count = ps_function(owner, "Get-InteractiveGpuWorkloadCount")
+        for guard in ("Get-AdapterPciAddress $high $low", "$addresses[$luid] -cne $gpuPciAddress",
+                      "if (-not $observed)", "$ownerPid = [int]$Matches[1]"):
+            self.assertIn(guard, count)
+        self.assertIn("'NInfer.GpuAdapterAddress' -as [type]", owner)
+        self.assertIn("Type = 6", owner)
+        self.assertIn("D3DKMTCloseAdapter(ref close)", owner)
+        self.assertIn("PSObject.Properties['gpu_uuid']", ps_function(owner, "Read-State"))
+        installer = (WINDOWS / "Install-Release.ps1").read_text()
+        self.assertNotIn("$oldState.gpu_owner.controller_path", installer)
+        self.assertIn("Parameters.ContainsKey('GpuUuid')", installer)
+        stop = installer.index("if ($oldTaskWasRunning) {", installer.index("$state = [ordered]@{"))
+        self.assertLess(stop, installer.index("Copy-Item -LiteralPath $ownerControllerSource"))
+        controller = (WINDOWS / "Control-Release.ps1").read_text()
+        self.assertIn("Parameters.ContainsKey('GpuUuid')", ps_function(controller, "Get-GpuOwner"))
+        self.assertIn("GpuUuid = [string]$release.gpu_uuid", ps_function(controller, "Invoke-GpuOwner"))
 
 
 class SharedLifecycleTreeTests(unittest.TestCase):
@@ -274,7 +456,7 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         run = controller[controller.index("function Invoke-Run"):]
         run = run[:run.index("\nfunction ")]
         self.assertLess(run.index("Remove-Item -LiteralPath $shutdownReport"),
-                        run.index("Start-Process -FilePath"))
+                        run.index("[Diagnostics.Process]::Start($startInfo)"))
         # One prior launch's logs survive, because they are what explains a stop.
         self.assertIn('Move-Item -LiteralPath $log -Destination "$log.previous"', run)
 
