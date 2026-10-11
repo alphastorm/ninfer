@@ -338,12 +338,21 @@ try {
         }
 
         $initialManagedState = & $getManagedState
-        Assert-True (-not [string]::IsNullOrWhiteSpace([string]$initialManagedState.active_release) -and
-            -not [string]::IsNullOrWhiteSpace([string]$initialManagedState.previous_release) -and
-            [string]$initialManagedState.active_release -cne [string]$initialManagedState.previous_release) `
-            'managed state does not contain a completed upgrade with a retained previous release'
         $initialActive = [string]$initialManagedState.active_release
         $initialPrevious = [string]$initialManagedState.previous_release
+        if ([string]::IsNullOrWhiteSpace($initialPrevious)) {
+            # The first release of a lineage (a lane's first install on a host) retains no predecessor, so there is
+            # nothing to roll back to; its one release's protections are still checked below.
+            Assert-True (-not [string]::IsNullOrWhiteSpace($initialActive) -and
+                @($initialManagedState.releases.PSObject.Properties).Count -eq 1 -and
+                $null -ne $initialManagedState.releases.PSObject.Properties[$initialActive] -and
+                -not $ExerciseManagedRollback) `
+                'managed state without a previous release must hold only its first release, which cannot be rolled back'
+        }
+        else {
+            Assert-True (-not [string]::IsNullOrWhiteSpace($initialActive) -and $initialActive -cne $initialPrevious) `
+                'managed state does not contain a completed upgrade with a retained previous release'
+        }
         $managedStateHelperPath = Join-Path $managedRoot 'Protect-StateRoot.ps1'
         $managedOwnerHelperPath = Join-Path (Join-Path $managedRoot 'gpu-owner') 'Protect-StateRoot.ps1'
         $initialStateHelperSha = (Get-FileHash -Algorithm SHA256 -LiteralPath $managedStateHelperPath).Hash.ToLowerInvariant()
