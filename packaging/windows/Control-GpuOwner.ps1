@@ -27,6 +27,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'Protect-StateRoot.ps1')
 
+# Preserve whether UUID selection was explicit; Resolve-OwnerGpu fills $GpuUuid even when
+# omitted, but the single-GPU legacy lease path must remain implicit in a nested status.
+$statusParameters = @{} + $PSBoundParameters
+$statusParameters['Action'] = 'status'
+
 $StateRoot = Initialize-NInferProtectedStateRoot $StateRoot
 Assert-NInferProtectedStateTree $StateRoot
 $statePath = Join-Path $StateRoot 'lease.json'
@@ -288,7 +293,7 @@ switch ($Action) {
                 }
                 Write-State ([int]$state.prior_power_limit_w) 'paused'
             }
-            & $PSCommandPath -Action status -StateRoot $StateRoot -GpuUuid $GpuUuid -QualifiedPowerLimitW $QualifiedPowerLimitW -PriorPowerLimitMinW $PriorPowerLimitMinW -PriorPowerLimitMaxW $PriorPowerLimitMaxW
+            & $PSCommandPath @statusParameters
             break
         }
         Assert-InteractiveGpuWorkloadAbsent

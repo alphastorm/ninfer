@@ -925,6 +925,14 @@ function Start-ManagedRelease {
     $state = Get-State
     Assert-NoPreparedRelease $state
     $release = Get-Release $state ([string]$state.active_release)
+    # Refuse an invalid binding or release before ownership can change the card's power cap.
+    Assert-CandidateLayout $release ([string]$state.active_release)
+    Assert-FileHash (Join-Path (Join-Path ([string]$release.release_root) 'bin') 'ninfer.exe') ([string]$release.ninfer_sha256) 'CLI executable'
+    Assert-FileHash ([string]$release.server_executable) ([string]$release.binary_sha256) 'server executable'
+    Assert-FileHash (Join-Path (Join-Path ([string]$release.release_root) 'bin') 'ninfer_bench.exe') ([string]$release.benchmark_sha256) 'benchmark executable'
+    Assert-InstalledModelIdentity $release
+    Assert-FileHash ([string]$release.config_file) ([string]$release.config_sha256) 'server config'
+    Assert-SelectedGpuIdentity $release | Out-Null
     $owned = Get-OwnedProcess (Get-RuntimeState) $release
     if ($null -ne $owned) {
         Assert-ServerIdentity (Invoke-ServerStatus $release) $release
@@ -1005,8 +1013,6 @@ function Invoke-Run {
         if ($null -ne (Get-NetTCPConnection -State Listen -LocalPort ([int]$release.port) -ErrorAction SilentlyContinue)) {
             throw 'release listen port is already owned by another process'
         }
-        Acquire-GpuOwnerLease
-        $ownerLeaseHeld = $true
         Assert-CandidateLayout $release ([string]$state.active_release)
         Assert-FileHash (Join-Path (Join-Path ([string]$release.release_root) 'bin') 'ninfer.exe') ([string]$release.ninfer_sha256) 'CLI executable'
         Assert-FileHash ([string]$release.server_executable) ([string]$release.binary_sha256) 'server executable'
@@ -1132,6 +1138,8 @@ function Invoke-Run {
         }
         Assert-FileHash ([string]$release.server_executable) ([string]$release.binary_sha256) 'server executable before launch'
         Assert-FileHash ([string]$release.config_file) ([string]$release.config_sha256) 'server config before launch'
+        Acquire-GpuOwnerLease
+        $ownerLeaseHeld = $true
         $startInfo = [Diagnostics.ProcessStartInfo]::new()
         $startInfo.FileName = [string]$release.server_executable
         $startInfo.Arguments = $argumentLine

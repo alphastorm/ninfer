@@ -36,6 +36,16 @@ including when its recorded GPU index is stale. A running legacy unscoped wrappe
 upgrade/qualification; it is never stopped through its unscoped owner on the multi-GPU host.
 No lane version or release spec is changed.
 
+Pre-UUID packages are unsupported on multi-GPU hosts: their owner restore uses an unindexed
+`nvidia-smi -pl`, which sets every visible card. This also applies when recovering an old
+lease; do not run that legacy restore on a multi-GPU host. Binary predecessor rollback under
+the current UUID-aware shared controller is distinct from running a pre-UUID package's scripts.
+
+Both managed Start and scheduled Run validate release layout/hashes, the selected GPU identity
+and absence of `CUDA_VISIBLE_DEVICES`, and port availability before acquiring a power-changing
+GPU-owner lease. Repeated owner stop preserves the caller's explicit or implicit UUID selection,
+including the legacy lease behavior on a single-visible-GPU host.
+
 Both lanes still listen on port 18082 and retain separate task names and state roots.
 **Only one lane may run at a time.** Start (including direct scheduled Run) refuses an occupied
 port before acquiring a GPU-owner lease. Simultaneous lane operation is not supported.

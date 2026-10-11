@@ -180,6 +180,35 @@ class MultiGpuHostTests(unittest.TestCase):
         self.assertIn(r"""'(\\*)"'""", captured[0])
         self.assertIn(r"'$1$1\"'", captured[0])
 
+    def test_read_only_start_refusals_precede_gpu_owner_acquisition(self) -> None:
+        controller = (WINDOWS / "Control-Release.ps1").read_text()
+        identity = ps_function(controller, "Assert-SelectedGpuIdentity")
+        self.assertIn("Test-Path Env:CUDA_VISIBLE_DEVICES", identity)
+        for name in ("Start-ManagedRelease", "Invoke-Run"):
+            with self.subTest(function=name):
+                body = ps_function(controller, name)
+                acquire = body.index("Acquire-GpuOwnerLease")
+                for refusal in ("Get-State", "Get-Release", "Assert-NoPreparedRelease",
+                                "Assert-CandidateLayout", "Assert-InstalledModelIdentity",
+                                "Assert-SelectedGpuIdentity", "Get-NetTCPConnection"):
+                    self.assertLess(body.index(refusal), acquire, refusal)
+                hashes = list(re.finditer(r"Assert-FileHash[^\n]+", body))
+                self.assertGreaterEqual(len(hashes), 4)
+                for check in hashes:
+                    self.assertLess(check.start(), acquire, check[0])
+                for field in ("ninfer_sha256", "binary_sha256", "benchmark_sha256", "config_sha256"):
+                    self.assertTrue(any(field in check[0] for check in hashes), field)
+
+    def test_existing_owner_lease_preserves_implicit_uuid_selection(self) -> None:
+        owner = (WINDOWS / "Control-GpuOwner.ps1").read_text()
+        capture = "$statusParameters = @{} + $PSBoundParameters"
+        self.assertLess(owner.index(capture), owner.index("\nResolve-OwnerGpu\n"))
+        self.assertIn("$statusParameters['Action'] = 'status'", owner)
+        self.assertIn("& $PSCommandPath @statusParameters", owner)
+        self.assertNotRegex(owner, r"\$statusParameters\['GpuUuid'\]\s*=")
+        self.assertNotRegex(owner, r"& \$PSCommandPath[^\n]*-GpuUuid")
+        self.assertIn("$null -eq $bound -and -not $singleGpuSelection", ps_function(owner, "Read-State"))
+
     def test_gpu_metrics_never_selects_the_first_host_row(self) -> None:
         uuid = "GPU-00000000-0000-0000-0000-000000000001"
         with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="100.5, 50, 99, 12000\n")) as run:
