@@ -683,6 +683,10 @@ $limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=pow
         run(["ssh", "-T", self.config.builder, "exit"], timeout=30)
         run(["ssh", "-T", self.config.target, "exit"], timeout=30)
         incumbent = self.config.incumbent_state_root
+        selector = f"ninfer-client-acceptance/{self.lane.model_id}"
+        # Read-only facts before anything stops: the incumbent's run state, and the models the OMP client fixture
+        # declares, listed by that client's own parser (no request reaches a provider). Listing runs last because it
+        # changes this session's environment.
         found = self.remote_json(
             self.config.target,
             f"""
@@ -693,9 +697,18 @@ if($incumbentRoot -and (Test-Path (Join-Path $incumbentRoot 'Control-Release.ps1
   $incumbentStatus=&(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Status -StateRoot $incumbentRoot|ConvertFrom-Json
   $incumbentRunning=([string]$incumbentStatus.process_state -eq 'running')
 }}
-[Console]::Out.WriteLine(([ordered]@{{incumbent_state_root=$incumbentRoot;incumbent_was_running=$incumbentRunning}}|ConvertTo-Json -Compress))
+$ompRoot={ps_quote(self.config.omp_root)}
+$env:LOCALAPPDATA=Join-Path $ompRoot 'localappdata'
+$env:PI_CODING_AGENT_DIR=Join-Path $ompRoot 'agent'
+$env:NO_COLOR='1'
+$listing=&(Join-Path $env:LOCALAPPDATA 'OMP\\omp.cmd') models ninfer-client-acceptance --json --no-extensions|Out-String
+if($LASTEXITCODE -ne 0){{throw 'the OMP client fixture could not list its models'}}
+$ompModels=@(@(($listing|ConvertFrom-Json).models)|ForEach-Object{{[string]$_.selector}})
+[Console]::Out.WriteLine(([ordered]@{{incumbent_state_root=$incumbentRoot;incumbent_was_running=$incumbentRunning;omp_models=$ompModels}}|ConvertTo-Json -Compress))
 """,
         )
+        if selector not in found.pop("omp_models"):
+            raise LaneError(f"the OMP client fixture does not declare {selector}: add it to {self.config.omp_root}/agent/models.yml")
         pending = self.state.get("found_incumbent")
         if pending and self.state["restoration"].get("status") != "passed":
             if pending["incumbent_state_root"] != found["incumbent_state_root"]:

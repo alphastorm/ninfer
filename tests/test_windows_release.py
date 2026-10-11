@@ -282,13 +282,13 @@ class QualificationRestorationTests(unittest.TestCase):
         subject.config = SimpleNamespace(
             source_root=directory, state_dir=directory, long_fixture=fixture,
             incumbent_state_root="C:/incumbent", target="fake-target", builder="fake-builder",
-            model_path="C:/model", gpu_uuid=None, resume=False,
+            model_path="C:/model", gpu_uuid=None, resume=False, omp_root="C:/omp-fixture",
         )
         subject.head = subject.tool_head = "source"
         subject.lane = SimpleNamespace(
             name="rtx3090", release_id="candidate", state_root="C:/candidate",
             task_name="candidate-task", owner_power_limit_w=370, model_sha256="model-sha",
-            spec={"gpu": {"name": "NVIDIA GeForce RTX 3090"}},
+            model_id="q38-ninfer", spec={"gpu": {"name": "NVIDIA GeForce RTX 3090"}},
         )
         subject.state_path = directory / "state.json"
         subject.receipt_dir = directory / "receipts"
@@ -314,7 +314,8 @@ class QualificationRestorationTests(unittest.TestCase):
                     scripts.append(script)
                     if len(scripts) == 1:
                         self.assertNotIn("-Action Stop", script)
-                        return {"incumbent_state_root": "C:/incumbent", "incumbent_was_running": was_running}
+                        return {"incumbent_state_root": "C:/incumbent", "incumbent_was_running": was_running,
+                                "omp_models": ["ninfer-client-acceptance/q38-ninfer"]}
                     if len(scripts) == 2:
                         durable = json.loads(subject.state_path.read_text())
                         self.assertTrue(durable["found_incumbent"]["incumbent_was_running"])
@@ -342,11 +343,30 @@ class QualificationRestorationTests(unittest.TestCase):
             with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="")), \
                     patch.object(subject, "remote_json", return_value={
                         "incumbent_state_root": "C:/incumbent", "incumbent_was_running": True,
+                        "omp_models": ["ninfer-client-acceptance/q38-ninfer"],
                     }) as remote, patch.object(subject, "_save", side_effect=OSError("cannot persist")):
                 with self.assertRaisesRegex(OSError, "cannot persist"):
                     subject.preflight()
                 self.assertEqual(remote.call_count, 1)
                 self.assertNotIn("-Action Stop", remote.call_args.args[1])
+
+    def test_omp_fixture_without_the_lane_model_refuses_before_anything_stops(self) -> None:
+        # Another lane's model in the shared client fixture is not this lane's: the omp phase would fail late.
+        with tempfile.TemporaryDirectory() as temporary:
+            subject = self.orchestrator(Path(temporary))
+            subject.lane.model_id = "qwen3.8-27b"
+            with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="")), \
+                    patch.object(subject, "remote_json", return_value={
+                        "incumbent_state_root": "C:/incumbent", "incumbent_was_running": True,
+                        "omp_models": ["ninfer-client-acceptance/q38-ninfer"],
+                    }) as remote, patch.object(subject, "_save") as save:
+                with self.assertRaisesRegex(qualify_native.LaneError,
+                                            "does not declare ninfer-client-acceptance/qwen3.8-27b"):
+                    subject.preflight()
+            self.assertEqual(remote.call_count, 1)
+            self.assertNotIn("-Action Stop", remote.call_args.args[1])
+            save.assert_not_called()
+            self.assertNotIn("found_incumbent", subject.state)
 
     def test_resume_always_reruns_preflight(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
