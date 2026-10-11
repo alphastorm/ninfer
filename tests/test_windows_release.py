@@ -358,6 +358,94 @@ class QualificationRestorationTests(unittest.TestCase):
                 self.assertEqual(subject.phase("preflight", action), {"fresh": True})
                 action.assert_called_once_with()
 
+    def ready_for_receipt(self, directory: Path) -> qualify_native.Orchestrator:
+        subject = self.orchestrator(directory)
+        subject.lane.spec["deployment_profile"] = "candidate-profile"
+        subject.lane.spec["gpu"]["cuda_architecture"] = "sm_86"
+        subject.state["phases"] = {
+            name: {"status": "passed", "receipt": {}, "receipt_sha256": "fixture"}
+            for name in qualify_native.PHASES if name not in {"receipt", "restore"}
+        }
+        receipts = {
+            "context_128k": {"prompt_tokens": 130048, "exact_output": "answer", "elapsed_seconds": 1},
+            "restart": {
+                "cached_input_tokens": 100, "old_pid": 1, "new_pid": 2,
+                "managed_stop": {"mode": "stop-event", "outcome": "graceful", "forced": False},
+                "managed_stop_flush": {"exact_output": qualify_native.FLUSH_MARKER, "cached_input_tokens": 100},
+            },
+            "benchmark_c1": {
+                "decode_tokens_per_second": 1, "prefill_tokens_per_second": 1, "max_power_w": 300,
+                "max_memory_used_mib": 1, "mtp_acceptance_percent": 1,
+            },
+            "package": {
+                "package": {}, "build_profile": "fixture", "upstream_base_sha": "fixture",
+                "lineage_base_sha": "fixture", "model_sha256": "fixture",
+                "binaries": {"server_sha256": "fixture"}, "config_sha256": "fixture", "support_assets": {},
+            },
+            "protocol": {"checks": 1}, "rollback": {"status": "passed"},
+            "security": {"low_privilege_read_denials": 1}, "omp": {"exact_final_answer": True},
+        }
+        for name, receipt in receipts.items():
+            subject.state["phases"][name]["receipt"] = receipt
+        return subject
+
+    def test_summary_passes_only_after_restore_and_receipt_hashes_follow_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            subject = self.ready_for_receipt(Path(temporary))
+            pending = subject.phase("receipt", subject.receipt)
+            summary_path = Path(temporary) / "qualification-summary.json"
+            self.assertEqual(pending["status"], "restore-pending")
+            self.assertEqual(json.loads(summary_path.read_text())["status"], "restore-pending")
+            self.assertIsNone(pending["qualified_utc"])
+
+            def restored(host: str, script: str, **kwargs: object) -> dict:
+                self.assertEqual(json.loads(summary_path.read_text())["status"], "restore-pending")
+                return {"status": "passed", "process_count": 0}
+
+            subject.remote_json = restored
+            subject.phase("restore", subject.restore)
+            final = json.loads(summary_path.read_text())
+            self.assertEqual(final["status"], "passed")
+            self.assertEqual(final["restoration"]["status"], "passed")
+            self.assertIsNotNone(final["qualified_utc"])
+            receipt_phase = subject.state["phases"]["receipt"]
+            self.assertEqual(receipt_phase["receipt"]["receipt_sha256"], qualify_native.sha256_file(summary_path))
+            self.assertEqual(receipt_phase["receipt_sha256"], qualify_native.sha256_file(subject.receipt_dir / "receipt.json"))
+
+    def test_failed_restore_or_cleanup_never_leaves_a_passed_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            subject = self.ready_for_receipt(Path(temporary))
+            subject.phase("receipt", subject.receipt)
+            summary_path = Path(temporary) / "qualification-summary.json"
+            with patch.object(subject, "remote_json", return_value={"status": "passed", "process_count": 0}):
+                subject.phase("restore", subject.restore)
+            self.assertEqual(json.loads(summary_path.read_text())["status"], "passed")
+
+            def failed(host: str, script: str, **kwargs: object) -> dict:
+                self.assertEqual(json.loads(summary_path.read_text())["status"], "restore-pending")
+                raise qualify_native.LaneError("power was not restored")
+
+            subject.remote_json = failed
+            with self.assertRaisesRegex(qualify_native.LaneError, "power was not restored"):
+                subject.phase("restore", subject.restore)
+            self.assertEqual(json.loads(summary_path.read_text())["status"], "restore-failed")
+            subject.cleanup()
+            final = json.loads(summary_path.read_text())
+            self.assertEqual(final["status"], "restore-failed")
+            self.assertIsNone(final["qualified_utc"])
+            self.assertEqual(subject.state["restoration"]["status"], "failed")
+
+    def test_successful_cleanup_cannot_mask_failed_preflight_in_an_old_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            subject = self.ready_for_receipt(Path(temporary))
+            subject.phase("receipt", subject.receipt)
+            subject.state["phases"]["preflight"] = {"status": "failed"}
+            with patch.object(subject, "remote_json", return_value={"status": "passed", "process_count": 0}):
+                subject.cleanup()
+            summary = json.loads((Path(temporary) / "qualification-summary.json").read_text())
+            self.assertEqual(summary["status"], "failed")
+            self.assertIsNone(summary["qualified_utc"])
+
 
 class SharedLifecycleTreeTests(unittest.TestCase):
     def test_controller_server_options_match_runtime(self) -> None:

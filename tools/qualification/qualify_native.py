@@ -642,6 +642,9 @@ $limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=pow
                 "error": str(error),
                 "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             }
+            if name == "restore":
+                self.state["restoration"] = {"status": "failed", "error": str(error)}
+                self._record_summary_restoration(self.state["restoration"])
             self._save()
             raise
         receipt_path = self.receipt_dir / f"{name}.json"
@@ -702,6 +705,7 @@ if($incumbentRoot -and (Test-Path (Join-Path $incumbentRoot 'Control-Release.ps1
         self.state["found_incumbent"] = found
         self.state["restoration"] = {"status": "required"}
         self.state["phases"].pop("restore", None)
+        self._record_summary_restoration(self.state["restoration"])
         self._save()  # Write-ahead: no target-side stop is permitted before this succeeds.
         status = self.remote_json(
             self.config.target,
@@ -1321,8 +1325,9 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
             "release_id": self.lane.release_id,
             "deployment_profile": self.lane.spec["deployment_profile"],
             "cuda_architecture": self.lane.spec["gpu"]["cuda_architecture"],
-            "status": "passed",
-            "qualified_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "status": "restore-pending",
+            "qualified_utc": None,
+            "restoration": {"status": "required"},
             "source_commit": self.head,
             "qualification_tool_commit": self.tool_head,
             "package": package_receipt["package"],
@@ -1365,7 +1370,35 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
         summary["receipt_sha256"] = sha256_file(self.config.state_dir / "qualification-summary.json")
         return summary
 
+    def _record_summary_restoration(self, restoration: dict[str, Any]) -> None:
+        path = self.config.state_dir / "qualification-summary.json"
+        if not path.is_file():
+            return
+        summary = json.loads(path.read_text(encoding="utf-8"))
+        checks_passed = all(
+            self.state["phases"].get(name, {}).get("status") == "passed"
+            for name in PHASES if name != "restore"
+        )
+        if restoration["status"] == "passed":
+            summary["status"] = "passed" if checks_passed else "failed"
+        else:
+            summary["status"] = "restore-failed" if restoration["status"] == "failed" else "restore-pending"
+        summary["qualified_utc"] = (
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) if summary["status"] == "passed" else None
+        )
+        summary["restoration"] = restoration
+        atomic_json(path, summary)
+        summary["receipt_sha256"] = sha256_file(path)
+        receipt_phase = self.state["phases"].get("receipt")
+        if receipt_phase and "receipt" in receipt_phase:
+            # Keep the phase receipt and its hash consistent with the finalized summary.
+            receipt_path = self.receipt_dir / "receipt.json"
+            atomic_json(receipt_path, summary)
+            receipt_phase["receipt"] = summary
+            receipt_phase["receipt_sha256"] = sha256_file(receipt_path)
+
     def restore(self) -> dict[str, Any]:
+        self._record_summary_restoration({"status": "required"})
         found = self.state.get("found_incumbent", {})
         incumbent = found.get("incumbent_state_root", "")
         restart_incumbent = bool(found.get("incumbent_was_running")) and bool(incumbent)
@@ -1397,6 +1430,7 @@ $taskState=if($null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction Sile
         if status["process_count"] != expected_processes:
             raise LaneError("target process count after restoration does not match its found state")
         self.state["restoration"] = status
+        self._record_summary_restoration(status)
         return status
 
     def cleanup(self) -> None:
@@ -1405,6 +1439,7 @@ $taskState=if($null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction Sile
             self.state["restoration"] = receipt
         except Exception as error:
             self.state["restoration"] = {"status": "failed", "error": str(error)}
+            self._record_summary_restoration(self.state["restoration"])
         self._save()
 
     def execute(self) -> dict[str, Any]:

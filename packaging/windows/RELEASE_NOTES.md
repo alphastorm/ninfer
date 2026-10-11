@@ -57,6 +57,9 @@ is still required; this packaging change is not a release or a hardware qualific
 Qualification preflight runs again on every resume. It records the incumbent's root and running
 state durably before stopping anything, and cleanup uses that record even when preflight fails.
 An interrupted window retains an outstanding incumbent restart obligation until restoration passes.
+The qualification summary remains `restore-pending` until restoration passes; failed restoration
+cannot leave a passed summary. A resumed window invalidates any prior passed summary before stopping
+the incumbent, and successful cleanup does not hide a failed qualification phase.
 
 One runtime for the RTX 4090 (`sm_89`) and RTX 3090 (`sm_86`) lanes, built from mainline
 `port/native-lanes-on-mainline` rather than the two divergent lane branches. The package carries
