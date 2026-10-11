@@ -231,7 +231,7 @@ function Assert-CandidateLayout([object]$Release, [string]$ReleaseId) {
 }
 
 function Assert-SelectedGpuIdentity([object]$Release) {
-    foreach ($field in @('gpu_index', 'gpu_uuid', 'gpu_name')) {
+    foreach ($field in @('gpu_uuid', 'gpu_name')) {
         if ($null -eq $Release.PSObject.Properties[$field]) {
             throw 'selected GPU identity is missing; reinstall the release'
         }
@@ -239,22 +239,23 @@ function Assert-SelectedGpuIdentity([object]$Release) {
     if (Test-Path Env:CUDA_VISIBLE_DEVICES) {
         throw 'CUDA_VISIBLE_DEVICES must be absent for bound GPU ordinal identity'
     }
-    $rows = @(& (Get-TrustedNvidiaSmiPath) --query-gpu=index,uuid,name --format=csv,noheader,nounits 2>&1)
-    if ($LASTEXITCODE -ne 0) { throw 'selected GPU identity query failed' }
-    $matched = $false
-    foreach ($row in $rows) {
-        $parts = @(([string]$row -split ',') | ForEach-Object { $_.Trim() })
-        $rowIndex = -1
-        if ($parts.Count -ne 3 -or -not [int]::TryParse($parts[0], [ref]$rowIndex)) {
-            throw 'selected GPU identity query returned an invalid row'
-        }
-        if ($rowIndex -ne [int]$Release.gpu_index) { continue }
-        if ($parts[1] -cne [string]$Release.gpu_uuid -or $parts[2] -cne [string]$Release.gpu_name) {
-            throw 'selected GPU identity changed after install'
-        }
-        $matched = $true
+    if ([string]$Release.gpu_uuid -cnotmatch '^GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$') {
+        throw 'selected GPU UUID is invalid'
     }
-    if (-not $matched) { throw 'selected GPU ordinal is unavailable' }
+    $rows = @(& (Get-TrustedNvidiaSmiPath) -i ([string]$Release.gpu_uuid) --query-gpu=index,uuid,name,pci.bus_id --format=csv,noheader,nounits 2>&1)
+    if ($LASTEXITCODE -ne 0 -or $rows.Count -ne 1) { throw 'selected GPU identity query failed' }
+    $parts = @(([string]$rows[0] -split ',') | ForEach-Object { $_.Trim() })
+    $rowIndex = -1
+    if ($parts.Count -ne 4 -or -not [int]::TryParse($parts[0], [ref]$rowIndex) -or $rowIndex -lt 0 -or
+        $parts[3] -notmatch '^[0-9a-f]{8}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$') {
+        throw 'selected GPU identity query returned an invalid row'
+    }
+    $pci = $Release.PSObject.Properties['gpu_pci_bus_id']
+    if ($parts[1] -cne [string]$Release.gpu_uuid -or $parts[2] -cne [string]$Release.gpu_name -or
+        ($null -ne $pci -and $parts[3].ToUpperInvariant() -cne [string]$pci.Value)) {
+        throw 'selected GPU identity changed after install'
+    }
+    return $rowIndex
 }
 
 function Get-GpuOwner([object]$State) {
@@ -272,13 +273,17 @@ function Get-GpuOwner([object]$State) {
     }
     Assert-FileHash ([string]$owner.controller_path) ([string]$owner.controller_sha256) `
         'GPU-owner controller'
+    if (-not (Get-Command -Name ([string]$owner.controller_path)).Parameters.ContainsKey('GpuUuid')) {
+        throw 'GPU-owner controller predates UUID binding; reinstall with the bundled controller'
+    }
     return $owner
 }
 
 function Invoke-GpuOwner([object]$State, [ValidateSet('status', 'stop', 'start')][string]$OwnerAction) {
     $owner = Get-GpuOwner $State
     if ($null -eq $owner) { return $null }
-    $policy = @{}
+    $release = Get-Release $State ([string]$State.active_release)
+    $policy = @{ GpuUuid = [string]$release.gpu_uuid }
     if ($null -ne $owner.PSObject.Properties['qualified_power_limit_w'] -and $null -ne $owner.qualified_power_limit_w) {
         $policy['QualifiedPowerLimitW'] = [int]$owner.qualified_power_limit_w
     }
@@ -293,6 +298,13 @@ function Invoke-GpuOwner([object]$State, [ValidateSet('status', 'stop', 'start')
     if ($null -eq $status.PSObject.Properties['paused'] -or
         $status.paused -isnot [bool]) {
         throw 'GPU-owner status must expose a paused boolean'
+    }
+    $pci = $release.PSObject.Properties['gpu_pci_bus_id']
+    if ($null -eq $status.PSObject.Properties['gpu_uuid'] -or
+        [string]$status.gpu_uuid -cne [string]$release.gpu_uuid -or
+        $null -eq $status.PSObject.Properties['gpu_pci_bus_id'] -or
+        ($null -ne $pci -and [string]$status.gpu_pci_bus_id -cne [string]$pci.Value)) {
+        throw 'GPU-owner status does not attest the bound UUID and PCI identity'
     }
     return $status
 }
@@ -547,6 +559,63 @@ function Assert-ServerIdentity([object]$Status, [object]$Release) {
     }
 }
 
+function Test-ServerStartGpu([string]$RequestLog, [string]$ExpectedUuid, [Int64]$StartOffset,
+    [Int64]$CreationTicks, [int]$ServerPid) {
+    if (-not (Test-Path -LiteralPath $RequestLog -PathType Leaf)) { return $false }
+    if ($CreationTicks -ne 0 -and (Get-Item -LiteralPath $RequestLog).CreationTimeUtc.Ticks -ne $CreationTicks) {
+        throw 'request log was replaced after launch'
+    }
+    $stream = [IO.File]::Open($RequestLog, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    try {
+        if ($StartOffset -lt 0 -or $stream.Length -lt $StartOffset) { throw 'request log was truncated after launch' }
+        [void]$stream.Seek($StartOffset, [IO.SeekOrigin]::Begin)
+        $bytes = [byte[]]::new([int][Math]::Min(1MB, $stream.Length - $StartOffset))
+        $count = 0
+        while ($count -lt $bytes.Length) {
+            $read = $stream.Read($bytes, $count, $bytes.Length - $count)
+            if ($read -eq 0) { break }
+            $count += $read
+        }
+        $text = [Text.Encoding]::UTF8.GetString($bytes, 0, $count)
+    }
+    finally { $stream.Dispose() }
+    # Ignore an incomplete trailing JSONL record. Only bytes appended after this launch's
+    # captured boundary can attest it; historical server_start records are never examined.
+    $end = $text.LastIndexOf([char]10)
+    if ($end -ge 0) {
+        foreach ($line in ($text.Substring(0, $end) -split "`n")) {
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+            $record = $line | ConvertFrom-Json
+            $event = $record.PSObject.Properties['event']
+            if ($null -eq $event -or [string]$event.Value -cne 'server_start') { continue }
+            $instance = $record.PSObject.Properties['server_instance_id']
+            if ($null -eq $instance -or [string]$instance.Value -cnotmatch ("^serve-$ServerPid-[0-9]+$")) {
+                throw 'server_start does not belong to the launched process'
+            }
+            $environment = $record.PSObject.Properties['environment']
+            if ($null -eq $environment -or $null -eq $environment.Value) { throw 'missing server_start GPU identity' }
+            $uuid = $environment.Value.PSObject.Properties['gpu_uuid']
+            if ($null -eq $uuid -or [string]$uuid.Value -cne $ExpectedUuid) {
+                throw 'server_start GPU UUID differs from the bound GPU'
+            }
+            return $true
+        }
+    }
+    if ($count -eq 1MB) { throw 'server_start GPU evidence exceeded the 1 MiB search bound' }
+    return $false
+}
+
+function Assert-RuntimeGpuReady([object]$Release) {
+    $runtime = Get-RuntimeState
+    if ($null -eq (Get-OwnedProcess $runtime $Release) -or
+        $null -eq $runtime.PSObject.Properties['gpu_uuid_verified'] -or
+        -not [bool]$runtime.gpu_uuid_verified -or
+        $null -eq $runtime.PSObject.Properties['gpu_uuid'] -or
+        [string]$runtime.gpu_uuid -cne [string]$Release.gpu_uuid) {
+        throw 'this launch has not attested its bound GPU UUID'
+    }
+}
+
 function Get-StatusObject {
     $state = Get-State
     $release = Get-Release $state ([string]$state.active_release)
@@ -559,6 +628,7 @@ function Get-StatusObject {
         try {
             $serverStatus = Invoke-ServerStatus $release
             Assert-ServerIdentity $serverStatus $release
+            Assert-RuntimeGpuReady $release
             $endpointState = 'ready'
         }
         catch {
@@ -613,6 +683,7 @@ function Wait-Ready([int]$TimeoutSeconds) {
             $release = Get-Release $state ([string]$state.active_release)
             $status = Invoke-ServerStatus $release
             Assert-ServerIdentity $status $release
+            Assert-RuntimeGpuReady $release
             return $status
         }
         catch {
@@ -854,9 +925,18 @@ function Start-ManagedRelease {
     $state = Get-State
     Assert-NoPreparedRelease $state
     $release = Get-Release $state ([string]$state.active_release)
+    # Refuse an invalid binding or release before ownership can change the card's power cap.
+    Assert-CandidateLayout $release ([string]$state.active_release)
+    Assert-FileHash (Join-Path (Join-Path ([string]$release.release_root) 'bin') 'ninfer.exe') ([string]$release.ninfer_sha256) 'CLI executable'
+    Assert-FileHash ([string]$release.server_executable) ([string]$release.binary_sha256) 'server executable'
+    Assert-FileHash (Join-Path (Join-Path ([string]$release.release_root) 'bin') 'ninfer_bench.exe') ([string]$release.benchmark_sha256) 'benchmark executable'
+    Assert-InstalledModelIdentity $release
+    Assert-FileHash ([string]$release.config_file) ([string]$release.config_sha256) 'server config'
+    Assert-SelectedGpuIdentity $release | Out-Null
     $owned = Get-OwnedProcess (Get-RuntimeState) $release
     if ($null -ne $owned) {
         Assert-ServerIdentity (Invoke-ServerStatus $release) $release
+        Assert-RuntimeGpuReady $release
         return
     }
     $listener = Get-NetTCPConnection -State Listen -LocalPort ([int]$release.port) -ErrorAction SilentlyContinue
@@ -917,22 +997,28 @@ function Quote-NativeArgument([string]$Argument) {
 function Invoke-Run {
     $state = $null
     $lock = $null
+    $process = $null
+    $stdoutStream = $null
+    $stderrStream = $null
+    $stdoutCopy = $null
+    $stderrCopy = $null
     $ownerLeaseHeld = $false
     try {
         $lockPath = Join-Path $StateRoot 'run.lock'
         $lock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite,
                                [IO.FileShare]::None)
-        Acquire-GpuOwnerLease
-        $ownerLeaseHeld = $true
         $state = Get-State
         Assert-NoPreparedRelease $state
         $release = Get-Release $state ([string]$state.active_release)
+        if ($null -ne (Get-NetTCPConnection -State Listen -LocalPort ([int]$release.port) -ErrorAction SilentlyContinue)) {
+            throw 'release listen port is already owned by another process'
+        }
         Assert-CandidateLayout $release ([string]$state.active_release)
         Assert-FileHash (Join-Path (Join-Path ([string]$release.release_root) 'bin') 'ninfer.exe') ([string]$release.ninfer_sha256) 'CLI executable'
         Assert-FileHash ([string]$release.server_executable) ([string]$release.binary_sha256) 'server executable'
         Assert-FileHash (Join-Path (Join-Path ([string]$release.release_root) 'bin') 'ninfer_bench.exe') ([string]$release.benchmark_sha256) 'benchmark executable'
         Assert-InstalledModelIdentity $release
-        Assert-SelectedGpuIdentity $release
+        $resolvedGpuIndex = Assert-SelectedGpuIdentity $release
         Assert-FileHash ([string]$release.config_file) ([string]$release.config_sha256) 'server config'
         $config = Read-JsonFile ([string]$release.config_file)
         $cache = [string]$release.cache_root
@@ -953,7 +1039,7 @@ function Invoke-Run {
                 '--artifact-sha256', [string]$release.model_artifact_sha256,
                 '--config-sha256', [string]$release.config_sha256,
                 '--deployment-profile', [string]$release.deployment_profile,
-                '--device', [string]$config.engine.device,
+                '--device', [string]$resolvedGpuIndex,
                 '--max-context', [string]$config.engine.max_context,
                 '--kv-capacity', [string]$config.engine.kv_capacity,
                 '--prefill-chunk', [string]$config.engine.prefill_chunk,
@@ -1023,11 +1109,10 @@ function Invoke-Run {
         $stopPlan = Get-ManagedStopPlan $release
         $stopEventName = $null
         $shutdownReport = $null
-        $launchId = $null
+        $launchId = [Guid]::NewGuid().ToString('N')
         if ([string]$stopPlan.mode -ceq 'stop-event') {
             # One identity per launch, carried by the event name and echoed in the report the
             # server writes, so the report the controller reads is provably this launch's.
-            $launchId = [Guid]::NewGuid().ToString('N')
             $stopEventName = 'Global\NInfer-Serve-Stop-' + $launchId
             $shutdownReport = Join-Path $logs 'shutdown.json'
             Remove-Item -LiteralPath $shutdownReport -Force -ErrorAction SilentlyContinue
@@ -1042,20 +1127,40 @@ function Invoke-Run {
                 }))
         $stdout = Join-Path $logs 'stdout.log'
         $stderr = Join-Path $logs 'stderr.log'
+        $requestLog = Join-Path $logs 'requests.jsonl'
         # Redirection truncates, so the log that explains a stop would be destroyed by the next
         # launch - which is exactly the launch an operator compares it against. Keep one.
         foreach ($log in @($stdout, $stderr)) {
             if (Test-Path -LiteralPath $log -PathType Leaf) {
                 Move-Item -LiteralPath $log -Destination "$log.previous" -Force `
-                    -ErrorAction SilentlyContinue
+                    -ErrorAction Stop
             }
         }
         Assert-FileHash ([string]$release.server_executable) ([string]$release.binary_sha256) 'server executable before launch'
         Assert-FileHash ([string]$release.config_file) ([string]$release.config_sha256) 'server config before launch'
-        $process = Start-Process -FilePath ([string]$release.server_executable) -ArgumentList $argumentLine `
-            -WorkingDirectory ([string]$release.release_root) -RedirectStandardOutput $stdout `
-            -RedirectStandardError $stderr -PassThru
-        Write-JsonAtomic (Join-Path $StateRoot 'runtime.json') ([ordered]@{
+        Acquire-GpuOwnerLease
+        $ownerLeaseHeld = $true
+        $startInfo = [Diagnostics.ProcessStartInfo]::new()
+        $startInfo.FileName = [string]$release.server_executable
+        $startInfo.Arguments = $argumentLine
+        $startInfo.WorkingDirectory = [string]$release.release_root
+        $startInfo.UseShellExecute = $false
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        $startInfo.EnvironmentVariables['CUDA_DEVICE_ORDER'] = 'PCI_BUS_ID'
+        $stdoutStream = [IO.File]::Open($stdout, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+        $stderrStream = [IO.File]::Open($stderr, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read)
+        $requestLogOffset = 0L
+        $requestLogCreationTicks = 0L
+        if (Test-Path -LiteralPath $requestLog -PathType Leaf) {
+            $logItem = Get-Item -LiteralPath $requestLog
+            $requestLogOffset = [Int64]$logItem.Length
+            $requestLogCreationTicks = [Int64]$logItem.CreationTimeUtc.Ticks
+        }
+        $process = [Diagnostics.Process]::Start($startInfo)
+        $stdoutCopy = $process.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
+        $stderrCopy = $process.StandardError.BaseStream.CopyToAsync($stderrStream)
+        $runtimeRecord = [ordered]@{
                 artifact_type = 'ninfer_windows_runtime_state'
                 schema_version = 2
                 release_id = [string]$state.active_release
@@ -1065,7 +1170,20 @@ function Invoke-Run {
                 stop_event = $stopEventName
                 shutdown_report = $shutdownReport
                 launch_id = $launchId
-            })
+                gpu_uuid = [string]$release.gpu_uuid
+                gpu_uuid_verified = $false
+                request_log_start_offset = $requestLogOffset
+                request_log_creation_utc_ticks = $requestLogCreationTicks
+            }
+        Write-JsonAtomic (Join-Path $StateRoot 'runtime.json') $runtimeRecord
+        $gpuDeadline = [DateTime]::UtcNow.AddSeconds(600)
+        while (-not (Test-ServerStartGpu $requestLog ([string]$release.gpu_uuid) $requestLogOffset $requestLogCreationTicks $process.Id)) {
+            if ($process.HasExited) { throw 'server exited before GPU UUID attestation' }
+            if ([DateTime]::UtcNow -ge $gpuDeadline) { throw 'server_start GPU UUID attestation timed out after 600 seconds' }
+            Start-Sleep -Milliseconds 200
+        }
+        $runtimeRecord.gpu_uuid_verified = $true
+        Write-JsonAtomic (Join-Path $StateRoot 'runtime.json') $runtimeRecord
         $process.WaitForExit()
         # Windows hands a parent that redirected the child's streams a handle whose ExitCode
         # reads as absent - clean exit or not - so an unreadable code carries no information and
@@ -1092,19 +1210,33 @@ function Invoke-Run {
         }
     }
     finally {
-        if ($null -ne $state) {
-            $runtime = Get-RuntimeState
-            if ($null -ne $runtime -and [string]$runtime.release_id -ceq [string]$state.active_release) {
-                Remove-Item -LiteralPath (Join-Path $StateRoot 'runtime.json') -Force -ErrorAction SilentlyContinue
+        # Identity mismatch, missing attestation, and any launch failure stop the exact child.
+        try {
+            try {
+                if ($null -ne $process -and -not $process.HasExited) {
+                    $process.Kill()
+                    $process.WaitForExit()
+                }
+                if ($null -ne $stdoutCopy) { $stdoutCopy.GetAwaiter().GetResult() }
+                if ($null -ne $stderrCopy) { $stderrCopy.GetAwaiter().GetResult() }
+            }
+            finally {
+                if ($null -ne $stdoutStream) { $stdoutStream.Dispose() }
+                if ($null -ne $stderrStream) { $stderrStream.Dispose() }
             }
         }
-        if ($null -ne $lock) { $lock.Dispose() }
-        # One restorer per stop. While a controller action holds the action lock it owns the
-        # lease decision - Stop and Rollback restore the owner, Restart deliberately keeps it -
-        # and a wrapper that restored here too would race that action's own restore, leaving one
-        # of them to fail on work the other had already done. A launch that ends without a
-        # controller action (a crash, or an operator stopping the task) still restores here.
-        if ($ownerLeaseHeld -and -not (Test-ManagedActionInProgress)) { Restore-GpuOwnerLease }
+        finally {
+            if ($null -ne $state) {
+                $runtime = Get-RuntimeState
+                if ($null -ne $runtime -and [string]$runtime.release_id -ceq [string]$state.active_release) {
+                    Remove-Item -LiteralPath (Join-Path $StateRoot 'runtime.json') -Force -ErrorAction SilentlyContinue
+                }
+            }
+            if ($null -ne $lock) { $lock.Dispose() }
+            # A controller action owns restoration while holding action.lock. Otherwise the
+            # wrapper restores its own lease, after releasing run.lock.
+            if ($ownerLeaseHeld -and -not (Test-ManagedActionInProgress)) { Restore-GpuOwnerLease }
+        }
     }
 }
 

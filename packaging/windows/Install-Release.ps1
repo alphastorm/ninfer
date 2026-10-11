@@ -19,6 +19,10 @@ param(
     [Parameter(ParameterSetName = 'Install')]
     [string]$GpuOwnerControllerPath,
 
+    [Parameter(ParameterSetName = 'Install')]
+    [ValidatePattern('^GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$')]
+    [string]$GpuUuid,
+
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
     [string]$StateRoot,
@@ -432,6 +436,8 @@ function Copy-InstalledRelease([string]$ReleaseId, [object]$Release) {
         }
         $copy['graceful_stop_timeout_seconds'] = [int]$bound.Value
     }
+    $pci = $Release.PSObject.Properties['gpu_pci_bus_id']
+    if ($null -ne $pci) { $copy['gpu_pci_bus_id'] = [string]$pci.Value }
     return $copy
 }
 
@@ -467,28 +473,31 @@ function Get-InstalledReleases([object]$State) {
     return $installed
 }
 
-function Assert-HostPrerequisites([object]$Spec, [object]$Config) {
-    $deviceText = [string]$Config.engine.device
-    if ($deviceText -notmatch '^(?:cuda:)?([0-9]+)$') { throw 'configured GPU device is invalid' }
-    $deviceIndex = [int]$Matches[1]
+function Assert-HostPrerequisites([object]$Spec) {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT -or -not [Environment]::Is64BitOperatingSystem -or [IntPtr]::Size -ne 8) {
         throw 'this release requires 64-bit Windows on x86-64'
     }
     if (Test-Path Env:CUDA_VISIBLE_DEVICES) { throw 'CUDA_VISIBLE_DEVICES must be absent for bound GPU ordinal identity' }
-    $rows = @(& (Get-TrustedNvidiaSmiPath) --query-gpu=index,uuid,name,compute_cap,driver_version --format=csv,noheader,nounits 2>&1)
+    $rows = @(& (Get-TrustedNvidiaSmiPath) --query-gpu=index,uuid,name,pci.bus_id,compute_cap,driver_version --format=csv,noheader,nounits 2>&1)
     if ($LASTEXITCODE -ne 0 -or $rows.Count -eq 0) { throw 'NVIDIA GPU prerequisite query failed' }
+    $qualified = @()
     foreach ($row in $rows) {
         $parts = @(([string]$row -split ',') | ForEach-Object { $_.Trim() })
         $rowIndex = -1
-        if ($parts.Count -ne 5 -or -not [int]::TryParse($parts[0], [ref]$rowIndex)) {
+        if ($parts.Count -ne 6 -or -not [int]::TryParse($parts[0], [ref]$rowIndex) -or $rowIndex -lt 0 -or
+            $parts[1] -cnotmatch '^GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$' -or
+            $parts[3] -notmatch '^[0-9a-f]{8}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$') {
             throw 'NVIDIA GPU prerequisite query returned an invalid row'
         }
-        if ($rowIndex -ne $deviceIndex) { continue }
-        if ($parts[2] -cne [string]$Spec.gpu.name -or $parts[3] -cne [string]$Spec.gpu.compute_capability) { throw ('configured GPU device is not the qualified ' + [string]$Spec.gpu.name) }
-        if ([Version]$parts[4] -lt [Version]("$([int]$Spec.gpu.minimum_driver_major).0")) { throw 'NVIDIA driver is too old' }
-        return [ordered]@{ index = [int]$parts[0]; uuid = [string]$parts[1]; name = [string]$parts[2] }
+        if ($GpuUuid -and $parts[1] -ine $GpuUuid) { continue }
+        if ($parts[2] -ceq [string]$Spec.gpu.name -and $parts[4] -ceq [string]$Spec.gpu.compute_capability) {
+            $qualified += [pscustomobject]@{ index = $rowIndex; uuid = $parts[1]; name = $parts[2]; pci_bus_id = $parts[3].ToUpperInvariant(); driver = $parts[5] }
+        }
     }
-    throw 'configured GPU ordinal is unavailable'
+    if ($qualified.Count -eq 0) { throw 'no qualified GPU is installed (or -GpuUuid is not qualified for this lane)' }
+    if ($qualified.Count -ne 1) { throw 'more than one qualified GPU is installed; select one with -GpuUuid' }
+    if ([Version]$qualified[0].driver -lt [Version]("$([int]$Spec.gpu.minimum_driver_major).0")) { throw 'NVIDIA driver is too old' }
+    return $qualified[0]
 }
 
 function Get-TarCommand {
@@ -891,7 +900,8 @@ try {
     $installedReleases = if ($null -eq $oldState) { [ordered]@{} } else { Get-InstalledReleases $oldState }
     $ownerControllerSource = $null
     $ownerRecord = $null
-    if ([string]::IsNullOrWhiteSpace($GpuOwnerControllerPath) -and $null -eq $oldState) {
+    # Upgrade the managed controller with the installer, never inherit an unscoped adapter.
+    if ([string]::IsNullOrWhiteSpace($GpuOwnerControllerPath)) {
         $bundledOwnerController = Join-Path $PSScriptRoot 'Control-GpuOwner.ps1'
         if (Test-Path -LiteralPath $bundledOwnerController -PathType Leaf) {
             $GpuOwnerControllerPath = $bundledOwnerController
@@ -902,11 +912,8 @@ try {
             throw 'GPU-owner controller does not exist'
         }
         $ownerControllerSource = (Resolve-Path -LiteralPath $GpuOwnerControllerPath).Path
-        $ownerStatusOutput = @(& $ownerControllerSource -Action status -StateRoot $ownerStateRoot)
-        $ownerStatus = Convert-CommandOutputToJson $ownerStatusOutput 'GPU-owner controller status'
-        if ($null -eq $ownerStatus.PSObject.Properties['paused'] -or
-            $ownerStatus.paused -isnot [bool]) {
-            throw 'GPU-owner controller status must expose a paused boolean'
+        if (-not (Get-Command -Name $ownerControllerSource).Parameters.ContainsKey('GpuUuid')) {
+            throw 'GPU-owner controller must support -GpuUuid; use the bundled controller'
         }
         $ownerRecord = [ordered]@{
             controller_path = $ownerControllerPath
@@ -914,15 +921,8 @@ try {
             state_root = $ownerStateRoot
         }
     }
-    elseif ($null -ne $oldState -and $null -ne $oldState.PSObject.Properties['gpu_owner']) {
-        $ownerRecord = [ordered]@{
-            controller_path = [string]$oldState.gpu_owner.controller_path
-            controller_sha256 = [string]$oldState.gpu_owner.controller_sha256
-            state_root = $ownerStateRoot
-        }
-    }
     if ($null -eq $ownerRecord) {
-        throw 'a GPU-owner controller is required for the first install; upgrades inherit the managed adapter'
+        throw 'a UUID-aware GPU-owner controller is required'
     }
 
     $operationId = [Guid]::NewGuid().ToString('N')
@@ -985,7 +985,12 @@ try {
         $buildIdentity = Read-JsonFile (Join-Path $payload 'build-identity.json')
         $spec = Read-JsonFile (Join-Path $payload 'release-spec.json')
         $config = Read-JsonFile (Join-Path $payload 'server-config.json')
-        $selectedGpu = Assert-HostPrerequisites $spec $config
+        $selectedGpu = Assert-HostPrerequisites $spec
+        foreach ($installed in $installedReleases.Values) {
+            if ([string]$installed.gpu_uuid -cne [string]$selectedGpu.uuid) {
+                throw 'all releases in a state root must retain the same GPU UUID; card replacement requires a separate install'
+            }
+        }
         Assert-InstallerArchitectureContract $spec $config
         $configSha = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $payload 'server-config.json')).Hash.ToLowerInvariant()
         if ($spec.artifact_type -cne 'ninfer_windows_release_spec' -or
@@ -1019,6 +1024,17 @@ try {
         $ownerProtocol = $spec.lifecycle.gpu_owner_controller_protocol
         $ownerRecord['qualified_power_limit_w'] = if ($null -eq $ownerProtocol.qualified_power_limit_w) { $null } else { [int]$ownerProtocol.qualified_power_limit_w }
         $ownerRecord['prior_power_limit_range_w'] = @([int]$ownerProtocol.prior_power_limit_range_w[0], [int]$ownerProtocol.prior_power_limit_range_w[1])
+        $ownerStatusOutput = @(& $ownerControllerSource -Action status -StateRoot $ownerStateRoot -GpuUuid $selectedGpu.uuid -QualifiedPowerLimitW ([int]$ownerRecord.qualified_power_limit_w) -PriorPowerLimitMinW $ownerRecord.prior_power_limit_range_w[0] -PriorPowerLimitMaxW $ownerRecord.prior_power_limit_range_w[1])
+        $ownerStatus = Convert-CommandOutputToJson $ownerStatusOutput 'GPU-owner controller status'
+        if ($null -eq $ownerStatus.PSObject.Properties['paused'] -or $ownerStatus.paused -isnot [bool]) {
+            throw 'GPU-owner controller status must expose a paused boolean'
+        }
+        if ($null -eq $ownerStatus.PSObject.Properties['gpu_uuid'] -or
+            [string]$ownerStatus.gpu_uuid -cne [string]$selectedGpu.uuid -or
+            $null -eq $ownerStatus.PSObject.Properties['gpu_pci_bus_id'] -or
+            [string]$ownerStatus.gpu_pci_bus_id -cne [string]$selectedGpu.pci_bus_id) {
+            throw 'GPU-owner controller status does not attest the selected UUID and PCI identity'
+        }
         $expectedPackageName = [string]$spec.product_prefix + '-v' + [string]$spec.release_version + '-' + [string]$spec.platform + '.tar.gz'
         if ([IO.Path]::GetFileName($package) -cne $expectedPackageName) { throw 'release package filename does not match its specification' }
         if ((Split-Path -Leaf $StateRoot) -cne [string]$spec.lifecycle.state_root_name) { throw 'state root does not match the lane specification' }
@@ -1035,6 +1051,10 @@ try {
         $taskXmlPath = $null
         if ($oldTaskExisted) {
             $oldTaskWasRunning = [string]$oldTask.State -ceq 'Running'
+            $oldOwner = $oldState.gpu_owner
+            if ($oldTaskWasRunning -and -not (Get-Command -Name ([string]$oldOwner.controller_path)).Parameters.ContainsKey('GpuUuid')) {
+                throw 'legacy unscoped GPU-owner wrapper is running; establish safe quiescence before upgrade'
+            }
             $taskXmlPath = Join-Path $snapshotRoot 'scheduled-task.xml'
             [IO.File]::WriteAllText(
                 $taskXmlPath,
@@ -1067,7 +1087,8 @@ try {
             if ([string]$oldState.active_release -cne $instanceId) {
                 throw 'release instance is installed but inactive; use exact rollback instead of reinstalling it'
             }
-            if ([string]$existing.package_sha256 -cne $actualPackageSha -or
+            if ([string]$existing.gpu_uuid -cne [string]$selectedGpu.uuid -or
+                [string]$existing.package_sha256 -cne $actualPackageSha -or
                 [string]$existing.patch_stack_sha -cne $patchStackSha -or
                 [string]$existing.build_profile -cne [string]$buildIdentity.build_profile -or
                 [string]$existing.config_sha256 -cne $configSha -or
@@ -1239,6 +1260,7 @@ try {
             gpu_index = [int]$selectedGpu.index
             gpu_uuid = [string]$selectedGpu.uuid
             gpu_name = [string]$selectedGpu.name
+            gpu_pci_bus_id = [string]$selectedGpu.pci_bus_id
             installed_utc = [DateTime]::UtcNow.ToString('o')
             # The controller passes --stop-event only to releases whose record declares it; a
             # release installed before this field existed is stopped by termination.
@@ -1258,6 +1280,13 @@ try {
             releases = $releases
         }
 
+        # Release the incumbent with its original controller and hash-bound owner before
+        # replacing either. A live outer lease belongs to those exact controller bytes.
+        if ($oldTaskWasRunning) {
+            Set-TransactionFlag $transaction 'incumbent_touched'
+            & $controllerPath -Action Stop -StateRoot $StateRoot | Out-Null
+        }
+
         Set-TransactionFlag $transaction 'state_helpers_touched'
         if ($null -ne $ownerControllerSource) {
             New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ownerControllerPath) | Out-Null
@@ -1273,17 +1302,6 @@ try {
                 throw 'managed GPU-owner controller SHA-256 mismatch'
             }
         }
-        elseif ($null -ne $ownerRecord) {
-            if (-not [string]::Equals(
-                    [IO.Path]::GetFullPath([string]$ownerRecord.controller_path),
-                    [IO.Path]::GetFullPath($ownerControllerPath),
-                    [StringComparison]::OrdinalIgnoreCase) -or
-                -not (Test-Path -LiteralPath $ownerControllerPath -PathType Leaf) -or
-                (Get-FileHash -Algorithm SHA256 -LiteralPath $ownerControllerPath).Hash.ToLowerInvariant() -cne
-                    [string]$ownerRecord.controller_sha256) {
-                throw 'installed GPU-owner controller identity mismatch'
-            }
-        }
         $stateHelperSource = Join-Path $lifecycleBin 'Protect-StateRoot.ps1'
         Copy-Item -LiteralPath $stateHelperSource -Destination $stateHelperPath -Force
         Set-NInferProtectedRootAcl $secretDirectory
@@ -1296,11 +1314,6 @@ try {
         Set-TransactionFlag $transaction 'state_activated'
         Write-JsonAtomic $statePath $state
         Set-TransactionPhase $transaction 'candidate_prepared'
-
-        if ($oldTaskWasRunning) {
-            Set-TransactionFlag $transaction 'incumbent_touched'
-            & $controllerPath -Action Stop -StateRoot $StateRoot | Out-Null
-        }
 
         $state.prepared_release = $null
         $state.active_release = $instanceId

@@ -1,5 +1,73 @@
 # NInfer native Windows lanes
 
+## 2026-10-11 — Native lane versions for multi-GPU hosts (qualification pending)
+
+RTX 3090 advances from `v0.6.2-beta.1` to `v0.6.3-beta.1`; RTX 4090 advances from
+`v0.6.10-beta.1` to `v0.6.11-beta.1`. These are new packages for the UUID-bound
+multi-GPU-host lifecycle scripts. Runtime source is unchanged. Hardware qualification
+of both new packages is pending.
+
+## 2026-10-10 — UUID-bound multi-GPU hosts (qualification pending)
+
+Native RTX 3090 and RTX 4090 packaging can select its own card on a host with several
+NVIDIA GPUs. Install with optional `-GpuUuid` (the full NVIDIA UUID); without it, exactly
+one card must match the lane's GPU name and compute capability. The release records that
+UUID, name, installation-time index, and canonical PCI address. Start resolves the UUID's
+current index, so adding another card does not retarget an older release. Older records
+without a PCI address retain UUID-and-name binding. Packaged config bytes and hash identities
+are unchanged; `engine.device` is not the hardware selector.
+
+Only the server child receives `CUDA_DEVICE_ORDER=PCI_BUS_ID`. The operator must still leave
+`CUDA_VISIBLE_DEVICES` absent: hiding cards is not supported. Readiness requires this launch's
+`server_start.environment.gpu_uuid` to match the release binding within 600 seconds; mismatch
+or missing evidence stops the child. Request logs stay append-only: the wrapper captures the
+pre-launch byte offset and file creation identity, reads only complete new JSONL records,
+and requires `server_instance_id` to contain this child's PID. Truncation, replacement,
+wrong-process startup records, and a 1 MiB search without evidence fail closed.
+
+Every owner-controller power query/set is UUID-indexed. Interactive workload accounting maps
+GPUAdapterMemory LUIDs through D3DKMT to the selected PCI bus/device/function, then counts
+only GPUProcessMemory instances on those LUIDs. An idle selected adapter with no process
+instances is valid; another card's desktop workload does not block it. Missing or unmappable
+selected-adapter counters, unmappable active process LUIDs, malformed active counters, and
+nonzero PCI domains refuse observation rather than
+assuming an idle GPU. Software adapters with no PCI device are excluded. A controller invoked
+without `-GpuUuid` refuses a multi-GPU host.
+
+Install defaults to the bundled UUID-aware owner controller on both clean installs and
+upgrades; explicit adapters must declare `-GpuUuid` and attest UUID/PCI in status. Inner
+leases bind both UUID and PCI and validate policy before any restore. Old unbound active
+owner leases must be restored safely with their original controller before upgrading; they
+are never guessed onto a card. A stopped, lease-free predecessor remains rollback-capable,
+including when its recorded GPU index is stale. A running legacy unscoped wrapper blocks
+upgrade/qualification; it is never stopped through its unscoped owner on the multi-GPU host.
+No lane version or release spec is changed.
+
+Pre-UUID packages are unsupported on multi-GPU hosts: their owner restore uses an unindexed
+`nvidia-smi -pl`, which sets every visible card. This also applies when recovering an old
+lease; do not run that legacy restore on a multi-GPU host. Binary predecessor rollback under
+the current UUID-aware shared controller is distinct from running a pre-UUID package's scripts.
+
+Both managed Start and scheduled Run validate release layout/hashes, the selected GPU identity
+and absence of `CUDA_VISIBLE_DEVICES`, and port availability before acquiring a power-changing
+GPU-owner lease. Repeated owner stop preserves the caller's explicit or implicit UUID selection,
+including the legacy lease behavior on a single-visible-GPU host.
+
+Both lanes still listen on port 18082 and retain separate task names and state roots.
+**Only one lane may run at a time.** Start (including direct scheduled Run) refuses an occupied
+port before acquiring a GPU-owner lease. Simultaneous lane operation is not supported.
+The native qualification harness accepts `--gpu-uuid`, applies the same unique-qualified-card
+selection rule, and binds clean/upgrade installs, direct pressure launches, security checks,
+power restoration probes, and benchmark GPU metrics to that card. Fresh real-host acceptance
+is still required; this packaging change is not a release or a hardware qualification claim.
+
+Qualification preflight runs again on every resume. It records the incumbent's root and running
+state durably before stopping anything, and cleanup uses that record even when preflight fails.
+An interrupted window retains an outstanding incumbent restart obligation until restoration passes.
+The qualification summary remains `restore-pending` until restoration passes; failed restoration
+cannot leave a passed summary. A resumed window invalidates any prior passed summary before stopping
+the incumbent, and successful cleanup does not hide a failed qualification phase.
+
 One runtime for the RTX 4090 (`sm_89`) and RTX 3090 (`sm_86`) lanes, built from mainline
 `port/native-lanes-on-mainline` rather than the two divergent lane branches. The package carries
 the same context cache, warm arrival across a restart, and streamed verified-or-refused restore
