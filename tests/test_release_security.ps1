@@ -16,6 +16,10 @@ param(
 
     [string]$ManagedStateRoot,
 
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$')]
+    [string]$GpuUuid,
+
     [switch]$ExerciseManagedRollback,
 
     [switch]$InstrumentGpuPowerFixture,
@@ -382,9 +386,35 @@ try {
             & $managedController -Action Stop -StateRoot $managedRoot | Out-Null
             $managedOwner = $restoredManagedState.gpu_owner
             & ([string]$managedOwner.controller_path) -Action start `
-                -StateRoot ([string]$managedOwner.state_root) | Out-Null
+                -StateRoot ([string]$managedOwner.state_root) -GpuUuid $GpuUuid -QualifiedPowerLimitW $QualifiedPowerLimitW | Out-Null
         }
     }
+
+    # Use the shipped mapper, not a second P/Invoke definition, to retain real LUID attribution
+    # while the workload fixture changes only dedicated usage on the selected adapter.
+    $ownerAst = [Management.Automation.Language.Parser]::ParseFile($GpuOwnerControllerPath, [ref]$null, [ref]$null)
+    $mapper = $ownerAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-AdapterPciAddress' }, $true)
+    if ($null -eq $mapper) { throw 'shipped GPU-owner LUID mapper is missing' }
+    . ([scriptblock]::Create($mapper.Extent.Text))
+    $absoluteNvidiaSmi = Join-Path ([Environment]::GetFolderPath('System')) 'nvidia-smi.exe'
+    if (-not (Test-Path -LiteralPath $absoluteNvidiaSmi -PathType Leaf)) {
+        $absoluteNvidiaSmi = Join-Path $env:ProgramFiles 'NVIDIA Corporation\NVSMI\nvidia-smi.exe'
+    }
+    $pciRows = @(& $absoluteNvidiaSmi -i $GpuUuid --query-gpu=uuid,pci.bus_id --format=csv,noheader,nounits)
+    Assert-True ($LASTEXITCODE -eq 0 -and $pciRows.Count -eq 1) 'selected GPU PCI identity unavailable'
+    $global:NInferTestGpuIdentity = [string]$pciRows[0]
+    $pciParts = @(([string]$pciRows[0] -split ',') | ForEach-Object { $_.Trim() })
+    $GpuUuid = $pciParts[0]
+    $selectedAddress = $pciParts[1].Substring(9).ToUpperInvariant()
+    $global:NInferTestGpuCounterName = $null
+    $global:NInferTestOtherCounterName = $null
+    foreach ($row in @(Get-CimInstance -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory -ErrorAction Stop)) {
+        if ([string]$row.Name -notmatch '^pid_\d+_luid_0x([0-9a-f]{8})_0x([0-9a-f]{8})_phys_\d+$') { continue }
+        $address = Get-AdapterPciAddress $Matches[1] $Matches[2]
+        if ($address -ceq $selectedAddress) { $global:NInferTestGpuCounterName = [string]$row.Name }
+        elseif ($address) { $global:NInferTestOtherCounterName = [string]$row.Name }
+    }
+    Assert-True ($null -ne $global:NInferTestGpuCounterName) 'cannot observe selected GPU counter LUID for security regression'
 
     if ($InstrumentGpuPowerFixture) {
         $gpuOwnerSource = (Get-Content -LiteralPath $GpuOwnerControllerPath -Raw -Encoding UTF8).Replace(
@@ -409,7 +439,7 @@ try {
     }
 
     $managedLimitW = if ($QualifiedPowerLimitW -gt 0) { $QualifiedPowerLimitW } else { $OwnerPowerLimitW }
-    $ownerPolicy = @{ QualifiedPowerLimitW = $QualifiedPowerLimitW; PriorPowerLimitMinW = 100; PriorPowerLimitMaxW = 1000 }
+    $ownerPolicy = @{ GpuUuid = $GpuUuid; QualifiedPowerLimitW = $QualifiedPowerLimitW; PriorPowerLimitMinW = 100; PriorPowerLimitMaxW = 1000 }
     $global:NInferTestPowerLimitW = $OwnerPowerLimitW
     $global:NInferTestInteractiveGpuActive = $false
     $global:NInferNvidiaShimCalls = 0
@@ -419,30 +449,30 @@ try {
         param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Remaining)
         $global:NInferNvidiaShimCalls++
         $values = @($Remaining | ForEach-Object { [string]$_ })
+        if ($values.Count -lt 3 -or $values[0] -cne '-i' -or $values[1] -cne $GpuUuid) { throw 'fixture received an unbound GPU command' }
         if ($values -contains '--query-gpu=power.limit') {
             ([double]$global:NInferTestPowerLimitW).ToString(
                 '0.00', [Globalization.CultureInfo]::InvariantCulture
             )
         }
-        elseif ($values.Count -ge 2 -and $values[0] -ceq '-pl') {
-            $global:NInferTestPowerLimitW = [int]$values[1]
+        elseif ($values -contains '--query-gpu=uuid,pci.bus_id') {
+            $global:NInferTestGpuIdentity
+        }
+        elseif ($values.Count -ge 4 -and $values[2] -ceq '-pl') {
+            $global:NInferTestPowerLimitW = [int]$values[3]
         }
         Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1
     }
-    $absoluteNvidiaSmi = Join-Path ([Environment]::GetFolderPath('System')) 'nvidia-smi.exe'
-    if (-not (Test-Path -LiteralPath $absoluteNvidiaSmi -PathType Leaf)) {
-        $absoluteNvidiaSmi = Join-Path $env:ProgramFiles 'NVIDIA Corporation\NVSMI\nvidia-smi.exe'
-    }
-    $absolutePower = ((& $absoluteNvidiaSmi --query-gpu=power.limit --format=csv,noheader,nounits) | Out-String).Trim()
+    $absolutePower = ((& $absoluteNvidiaSmi -i $GpuUuid --query-gpu=power.limit --format=csv,noheader,nounits) | Out-String).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $absolutePower -match '^[0-9]+(?:[.][0-9]+)?$') 'trusted absolute nvidia-smi query failed'
     Assert-True ($global:NInferNvidiaShimCalls -eq 0) 'path-qualified nvidia-smi unexpectedly invoked the function shim'
     $absoluteNvidiaShimInterceptions = $global:NInferNvidiaShimCalls
     function global:Get-CimInstance {
         param([string]$ClassName, [object]$ErrorAction)
-        if ($global:NInferTestInteractiveGpuActive) {
-            return [pscustomobject]@{ Name = 'pid_4242_luid_0x00000000_0x00000000_phys_0'; DedicatedUsage = 2GB }
+        [pscustomobject]@{ Name = $global:NInferTestGpuCounterName; DedicatedUsage = $(if ($global:NInferTestInteractiveGpuActive) { 2GB } else { 0L }) }
+        if ($global:NInferTestOtherCounterName) {
+            [pscustomobject]@{ Name = $global:NInferTestOtherCounterName; DedicatedUsage = 2GB }
         }
-        return @()
     }
 
     $gpuRoot = Join-Path $testRoot 'gpu-owner'
@@ -468,7 +498,7 @@ try {
     if ($InstrumentGpuPowerFixture -and $QualifiedPowerLimitW -gt 0) {
         [IO.File]::WriteAllText(
             (Join-Path $gpuRoot 'lease.json'),
-            ('{"schema_version":1,"paused":true,"phase":"prepared","qualified_power_limit_w":' + $QualifiedPowerLimitW + ',"prior_power_limit_w":' + $OwnerPowerLimitW + '}'),
+            ('{"schema_version":1,"gpu_uuid":"' + $GpuUuid + '","paused":true,"phase":"prepared","qualified_power_limit_w":' + $QualifiedPowerLimitW + ',"prior_power_limit_w":' + $OwnerPowerLimitW + '}'),
             [Text.UTF8Encoding]::new($false)
         )
         $global:NInferTestPowerLimitW = $QualifiedPowerLimitW
@@ -553,7 +583,7 @@ try {
 }
 finally {
     if ($null -ne $gpuRoot -and (Test-Path -LiteralPath (Join-Path $gpuRoot 'lease.json') -PathType Leaf)) {
-        try { & $GpuOwnerControllerPath -Action start -StateRoot $gpuRoot | Out-Null }
+        try { & $GpuOwnerControllerPath -Action start -StateRoot $gpuRoot @ownerPolicy | Out-Null }
         catch { Write-Error "failed to restore GPU power limit from retained lease evidence: $($_.Exception.Message)" }
     }
     $env:ProgramData = $originalProgramData

@@ -281,6 +281,36 @@ def ps_quote(value: str) -> str:
     return "'" + value.replace("'", "''") + "'"
 
 
+GPU_UUID = re.compile(r"GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+
+
+def gpu_uuid_argument(value: str) -> str:
+    if not GPU_UUID.fullmatch(value):
+        raise argparse.ArgumentTypeError("expected a full GPU UUID (GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)")
+    return value
+
+
+def select_qualified_gpu(rows: list[str], spec: dict[str, Any], requested: str | None) -> dict[str, Any]:
+    """Match the installer's lane name/compute-capability rule, not the packaged ordinal."""
+    if requested is not None:
+        gpu_uuid_argument(requested)
+    qualified = []
+    for row in rows:
+        parts = [part.strip() for part in row.split(",")]
+        if (len(parts) != 6 or not parts[0].isdigit() or not GPU_UUID.fullmatch(parts[1])
+                or not re.fullmatch(r"[0-9a-fA-F]{8}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]", parts[3])):
+            raise LaneError("target GPU selection returned an invalid row")
+        if requested and parts[1].lower() != requested.lower():
+            continue
+        if parts[2] == spec["gpu"]["name"] and parts[4] == spec["gpu"]["compute_capability"]:
+            qualified.append(dict(index=int(parts[0]), uuid=parts[1], name=parts[2], pci_bus_id=parts[3].upper()))
+    if not qualified:
+        raise LaneError("no qualified target GPU (or --gpu-uuid is not qualified for this lane)")
+    if len(qualified) != 1:
+        raise LaneError("more than one qualified target GPU; select one with --gpu-uuid")
+    return qualified[0]
+
+
 def remote_spec(host: str, path: str) -> str:
     return f"{host}:{path}"
 
@@ -422,6 +452,7 @@ class Config:
     through_phase: str | None
     candidate_source: str | None
     upgrade_orchestrator_state: bool
+    gpu_uuid: str | None = None
 
 
 class Orchestrator:
@@ -450,6 +481,26 @@ class Orchestrator:
     @property
     def state_root(self) -> str:
         return self.lane.state_root
+
+    @property
+    def gpu_uuid(self) -> str:
+        bound = self.state.get("gpu_uuid")
+        if bound:
+            gpu_uuid_argument(bound)
+            if self.config.gpu_uuid and self.config.gpu_uuid.lower() != bound.lower():
+                raise LaneError("checkpoint belongs to another GPU UUID")
+            return bound
+        result = self.remote_json(self.config.target, """
+$ErrorActionPreference='Stop'
+if(Test-Path Env:CUDA_VISIBLE_DEVICES){throw 'CUDA_VISIBLE_DEVICES must be absent'}
+$rows=@(nvidia-smi.exe --query-gpu=index,uuid,name,pci.bus_id,compute_cap,driver_version --format=csv,noheader,nounits)
+if($LASTEXITCODE -ne 0){throw 'target GPU selection failed'}
+[Console]::Out.WriteLine((@{rows=$rows}|ConvertTo-Json -Compress))
+""")
+        selected = select_qualified_gpu(result["rows"], self.lane.spec, self.config.gpu_uuid)
+        self.state["gpu_uuid"] = selected["uuid"]
+        self._save()
+        return selected["uuid"]
 
     def _load_state(self) -> dict[str, Any]:
         if self.state_path.exists():
@@ -542,7 +593,7 @@ $path=Join-Path {ps_quote(self.target_root)} {ps_quote('evidence/' + evidence_na
                 script = f"""
 $root={ps_quote(self.state_root)}
 $status=&(Join-Path $root 'Control-Release.ps1') -Action Status -StateRoot $root|ConvertFrom-Json
-$limit=[int][double](nvidia-smi.exe --query-gpu=power.limit --format=csv,noheader,nounits)
+$limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=power.limit --format=csv,noheader,nounits)
 [Console]::Out.WriteLine(([ordered]@{{ok=([string]$status.process_state -eq 'stopped' -and -not [bool]$status.gpu_owner.lease_active -and $limit -eq {self.lane.owner_power_limit_w})}}|ConvertTo-Json -Compress))
 """
                 return bool(self.remote_json(self.config.target, script)["ok"])
@@ -629,8 +680,8 @@ if(Test-Path (Join-Path $root 'state.json')){{
   $active=[string]$s.active_release;$previous=[string]$s.previous_release;$modelSha=[string]$r.model_artifact_sha256
 }}
 if((Get-Process ninfer-serve -ErrorAction SilentlyContinue).Count -ne 0){{throw 'a ninfer-serve process is still running on the target'}}
-$limit=[int][double](nvidia-smi.exe --query-gpu=power.limit --format=csv,noheader,nounits)
-$gpu=nvidia-smi.exe --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits
+$limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=power.limit --format=csv,noheader,nounits)
+$gpu=nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits
 $modelPath={ps_quote(self.config.model_path)}
 if(-not (Test-Path -LiteralPath $modelPath -PathType Leaf)){{throw 'pinned model artifact is missing on the target'}}
 [Console]::Out.WriteLine(([ordered]@{{lineage_exists=(Test-Path (Join-Path $root 'state.json'));active_release=$active;previous_release=$previous;incumbent_state_root=$incumbentRoot;incumbent_was_running=$incumbentRunning;power_limit_w=$limit;gpu=[string]$gpu;model_sha256=$modelSha}}|ConvertTo-Json -Compress))
@@ -934,15 +985,14 @@ $existingTask=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinu
 $taskXml=$null
 if($null -ne $existingTask){{$taskXml=Export-ScheduledTask -TaskName $taskName;Unregister-ScheduledTask -TaskName $taskName -Confirm:$false}}
 try{{
-  $cleanLines=@(&(Join-Path $stage 'Install-Release.ps1') -PackagePath $package -PackageSha256 {ps_quote(package['sha256'])} -ModelArtifactPath {ps_quote(self.config.model_path)} -ApiKeyFile $apiKeyFile -GpuOwnerControllerPath (Join-Path $stage 'Control-GpuOwner.ps1') -StateRoot $cleanRoot -NoStart)
+  $cleanLines=@(&(Join-Path $stage 'Install-Release.ps1') -PackagePath $package -PackageSha256 {ps_quote(package['sha256'])} -ModelArtifactPath {ps_quote(self.config.model_path)} -ApiKeyFile $apiKeyFile -GpuUuid {ps_quote(self.gpu_uuid)} -GpuOwnerControllerPath (Join-Path $stage 'Control-GpuOwner.ps1') -StateRoot $cleanRoot -NoStart)
   $clean=[string]$cleanLines[-1]|ConvertFrom-Json
   if([string]$clean.status -cne 'passed'){{throw 'clean install did not pass'}}
   &(Join-Path $cleanRoot 'Control-Release.ps1') -Action Uninstall -StateRoot $cleanRoot|Out-Null
 }}finally{{
   if($null -ne $taskXml -and $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)){{Register-ScheduledTask -TaskName $taskName -Xml $taskXml -Force|Out-Null}}
 }}
-$managedArguments=@{{PackagePath=$package;PackageSha256={ps_quote(package['sha256'])};ModelArtifactPath={ps_quote(self.config.model_path)};ApiKeyFile=$apiKeyFile;StateRoot=$root;NoStart=$true}}
-if(-not $before){{$managedArguments['GpuOwnerControllerPath']=(Join-Path $stage 'Control-GpuOwner.ps1')}}
+$managedArguments=@{{PackagePath=$package;PackageSha256={ps_quote(package['sha256'])};ModelArtifactPath={ps_quote(self.config.model_path)};ApiKeyFile=$apiKeyFile;StateRoot=$root;NoStart=$true;GpuUuid={ps_quote(self.gpu_uuid)};GpuOwnerControllerPath=(Join-Path $stage 'Control-GpuOwner.ps1')}}
 $upgradeLines=@(&(Join-Path $stage 'Install-Release.ps1') @managedArguments)
 $upgrade=[string]$upgradeLines[-1]|ConvertFrom-Json
 if([string]$upgrade.status -cnotin @('passed','already_installed')){{throw 'managed install did not pass'}}
@@ -1010,13 +1060,22 @@ if(Test-Path $scratch){{Remove-Item $scratch -Recurse -Force}}
 $checkpoints=Join-Path $scratch 'checkpoints'
 New-Item -ItemType Directory -Force -Path $checkpoints|Out-Null
 $port=[int]$r.port + {PRESSURE_PORT_OFFSET}
+if(Test-Path Env:CUDA_VISIBLE_DEVICES){{throw 'CUDA_VISIBLE_DEVICES must be absent'}}
+if([string]$r.gpu_uuid -cne {ps_quote(self.gpu_uuid)}){{throw 'pressure release GPU differs from qualification target'}}
+$gpuRows=@(nvidia-smi.exe -i ([string]$r.gpu_uuid) --query-gpu=index,uuid --format=csv,noheader,nounits)
+if($LASTEXITCODE -ne 0 -or $gpuRows.Count -ne 1){{throw 'pressure GPU identity query failed'}}
+$gpuParts=@(([string]$gpuRows[0] -split ',')|ForEach-Object {{$_.Trim()}})
+$gpuIndex=-1
+if($gpuParts.Count -ne 2 -or -not [int]::TryParse($gpuParts[0],[ref]$gpuIndex) -or $gpuIndex -lt 0 -or $gpuParts[1] -cne [string]$r.gpu_uuid){{throw 'pressure GPU identity mismatch'}}
+if($null -ne (Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)){{throw 'pressure port is occupied'}}
+$requestLog=Join-Path $scratch 'requests.jsonl'
 $serverArguments=@(
   [string]$r.model_artifact,
   '--host',[string]$r.host,'--port',[string]$port,
   '--api-key-file',[string]$r.api_key_file,'--model-id',[string]$c.model_id,
   '--binary-sha256',[string]$r.binary_sha256,'--artifact-sha256',[string]$r.model_artifact_sha256,
   '--config-sha256',[string]$r.config_sha256,'--deployment-profile',[string]$r.deployment_profile,
-  '--device',[string]$c.engine.device,'--max-context',[string]$c.engine.max_context,
+  '--device',[string]$gpuIndex,'--max-context',[string]$c.engine.max_context,
   '--kv-capacity',[string]$c.engine.kv_capacity,'--prefill-chunk',[string]$c.engine.prefill_chunk,
   '--kv-dtype',[string]$c.engine.kv_dtype,'--max-concurrency',[string]$c.engine.max_concurrency,
   '--max-pending-requests',[string]$c.engine.max_pending_requests,
@@ -1030,14 +1089,27 @@ $serverArguments=@(
   '--session-checkpoint-dir',$checkpoints,
   '--session-checkpoint-quota-mib',[string]$c.session_checkpoint.quota_mib,
   '--session-checkpoint-staging-mib',[string]$c.session_checkpoint.staging_mib,
-  '--log-stats-interval-ms','0','--preserve-thinking',
+  '--request-log-jsonl',$requestLog,'--log-stats-interval-ms','0','--preserve-thinking',
   '--spec','mtp','--draft-tokens',[string]$c.speculative.draft_tokens,'--lm-head-draft')
 $keepWarm=$c.engine.PSObject.Properties['gpu_keep_warm_ms']
 if($null -ne $keepWarm -and [int]$keepWarm.Value -gt 0){{$serverArguments+=@('--gpu-keep-warm-ms',[string]$keepWarm.Value)}}
 $stdout=Join-Path $scratch 'stdout.log'
 $stderr=Join-Path $scratch 'stderr.log'
-$process=Start-Process -FilePath ([string]$r.server_executable) -ArgumentList $serverArguments -WorkingDirectory ([string]$r.release_root) -RedirectStandardOutput $stdout -RedirectStandardError $stderr -PassThru
+$startInfo=[Diagnostics.ProcessStartInfo]::new()
+$startInfo.FileName=[string]$r.server_executable
+# Windows argv quoting: double backslashes before quotes and at the quoted argument's end.
+$startInfo.Arguments=(@($serverArguments|ForEach-Object {{'"'+[regex]::Replace([regex]::Replace($_,'(\\\\*)"','$1$1\\"'),'(\\\\+)$','$1$1')+'"'}}) -join ' ')
+$startInfo.WorkingDirectory=[string]$r.release_root
+$startInfo.UseShellExecute=$false
+$startInfo.RedirectStandardOutput=$true;$startInfo.RedirectStandardError=$true
+$startInfo.EnvironmentVariables['CUDA_DEVICE_ORDER']='PCI_BUS_ID'
+$stdoutStream=$null;$stderrStream=$null;$stdoutCopy=$null;$stderrCopy=$null;$process=$null
 try{{
+  $stdoutStream=[IO.File]::Open($stdout,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+  $stderrStream=[IO.File]::Open($stderr,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+  $process=[Diagnostics.Process]::Start($startInfo)
+  $stdoutCopy=$process.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
+  $stderrCopy=$process.StandardError.BaseStream.CopyToAsync($stderrStream)
   $key=(Get-Content ([string]$r.api_key_file) -Raw).Trim()
   $deadline=(Get-Date).AddSeconds(600)
   $ready=$false
@@ -1049,6 +1121,8 @@ try{{
     }}catch{{Start-Sleep -Seconds 2}}
   }}
   if(-not $ready){{throw 'pressure server did not become ready'}}
+  $start=Get-Content $requestLog -TotalCount 1|ConvertFrom-Json
+  if([string]$start.event -cne 'server_start' -or [string]$start.environment.gpu_uuid -cne [string]$r.gpu_uuid){{throw 'pressure server_start GPU UUID mismatch'}}
   $path=Join-Path ([string]$r.release_root) 'bin\\qualification\\agent_protocol.py'
   $out=Join-Path $stage 'evidence\\agent-protocol-pressure.json'
   &python $path --base-url ('http://'+[string]$r.host+':'+[string]$port) --model {ps_quote(self.lane.model_id)} --api-key-file ([string]$r.api_key_file) --expect-binary-sha256 ([string]$r.binary_sha256) --expect-model-artifact-sha256 ([string]$r.model_artifact_sha256) --expect-config-sha256 ([string]$r.config_sha256) --expect-deployment-profile ([string]$r.deployment_profile) 1>$out
@@ -1057,8 +1131,15 @@ try{{
   [Console]::Out.WriteLine(([ordered]@{{status=[string]$v.status;host_state_slots={PRESSURE_HOST_STATE_SLOTS};device_state_slots=[int]$c.context_cache.device_state_slots;checks=@($v.checks.PSObject.Properties).Count;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant()}}|ConvertTo-Json -Compress))
 }}
 finally{{
-  if(-not $process.HasExited){{Stop-Process -Id $process.Id -Force;$process.WaitForExit(30000)|Out-Null}}
-  Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+  try{{
+    if($null -ne $process -and -not $process.HasExited){{Stop-Process -Id $process.Id -Force;$process.WaitForExit(30000)|Out-Null}}
+    if($null -ne $stdoutCopy){{$stdoutCopy.GetAwaiter().GetResult()}}
+    if($null -ne $stderrCopy){{$stderrCopy.GetAwaiter().GetResult()}}
+  }}finally{{
+    if($null -ne $stdoutStream){{$stdoutStream.Dispose()}}
+    if($null -ne $stderrStream){{$stderrStream.Dispose()}}
+    Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+  }}
 }}
 """
         return self.remote_json(self.config.target, script, timeout=1800)
@@ -1130,7 +1211,7 @@ $controller=Join-Path $root 'Control-Release.ps1'
 $s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
 $r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
 $l=Join-Path ([string]$r.release_root) 'bin\\lifecycle'
-$lines=@(&(Join-Path $stage 'test_release_security.ps1') -StateProtectionPath (Join-Path $l 'Protect-StateRoot.ps1') -GpuOwnerControllerPath (Join-Path $l 'Control-GpuOwner.ps1') -InstallerPath (Join-Path $l 'Install-Release.ps1') -ManagedStateRoot $root -QualifiedPowerLimitW {self.lane.qualified_power_limit_w} -OwnerPowerLimitW {self.lane.owner_power_limit_w})
+$lines=@(&(Join-Path $stage 'test_release_security.ps1') -StateProtectionPath (Join-Path $l 'Protect-StateRoot.ps1') -GpuOwnerControllerPath (Join-Path $l 'Control-GpuOwner.ps1') -InstallerPath (Join-Path $l 'Install-Release.ps1') -ManagedStateRoot $root -GpuUuid {ps_quote(self.gpu_uuid)} -QualifiedPowerLimitW {self.lane.qualified_power_limit_w} -OwnerPowerLimitW {self.lane.owner_power_limit_w})
 $v=[string]$lines[-1] | ConvertFrom-Json
 if([string]$v.status -cne 'passed'){{throw 'security failed'}}
 $out=Join-Path $stage 'evidence\\state-security.json'
@@ -1255,7 +1336,7 @@ $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
 if($null -ne $task -and $task.State -eq 'Running'){{Stop-ScheduledTask -TaskName $taskName}}
 $leaseActive=$false
 if(Test-Path $controller){{$status=&$controller -Action Status -StateRoot $root|ConvertFrom-Json;$leaseActive=([bool]$status.gpu_owner.lease_active -or [bool]$status.gpu_owner.current_paused)}}
-$limit=[int][double](nvidia-smi.exe --query-gpu=power.limit --format=csv,noheader,nounits)
+$limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=power.limit --format=csv,noheader,nounits)
 if($limit -ne {self.lane.owner_power_limit_w}){{throw '{self.lane.owner_power_limit_w} W owner state was not restored'}}
 if($leaseActive){{throw 'GPU-owner lease remained active'}}
 $incumbentRoot={ps_quote(incumbent)}
@@ -1479,8 +1560,11 @@ def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
     return receipt
 
 
-def gpu_metrics() -> tuple[float, int, int, int]:
-    output = run(["nvidia-smi", "--query-gpu=power.draw,temperature.gpu,utilization.gpu,memory.used", "--format=csv,noheader,nounits"]).stdout.strip().splitlines()[0]
+def gpu_metrics(gpu_uuid: str) -> tuple[float, int, int, int]:
+    rows = run(["nvidia-smi", "-i", gpu_uuid, "--query-gpu=power.draw,temperature.gpu,utilization.gpu,memory.used", "--format=csv,noheader,nounits"]).stdout.strip().splitlines()
+    if len(rows) != 1:
+        raise LaneError("selected GPU metrics returned more or fewer than one row")
+    output = rows[0]
     values = [item.strip() for item in output.split(",")]
     return float(values[0]), int(values[1]), int(values[2]), int(values[3])
 
@@ -1499,11 +1583,11 @@ def internal_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     before = len(log.read_text(encoding="utf-8").splitlines())
     paragraph = "A reliable GPU inference service separates admission control, scheduling, memory accounting, observability, and failure recovery. "
     prompt = (paragraph * (28000 // len(paragraph) + 2))[:28000]
-    maximums = list(gpu_metrics())
+    maximums = list(gpu_metrics(release["gpu_uuid"]))
     stop = threading.Event()
     def poll() -> None:
         while not stop.wait(0.1):
-            values = gpu_metrics()
+            values = gpu_metrics(release["gpu_uuid"])
             for index, value in enumerate(values): maximums[index] = max(maximums[index], value)
     thread = threading.Thread(target=poll, daemon=True); thread.start()
     started = time.perf_counter()
@@ -1553,6 +1637,8 @@ def main() -> int:
     parser.add_argument("--lane", required=True, help="lane directory name under packaging/windows/lanes")
     parser.add_argument("--builder", required=True)
     parser.add_argument("--target", required=True)
+    parser.add_argument("--gpu-uuid", type=gpu_uuid_argument,
+                        help="target GPU UUID; otherwise require exactly one lane-qualified card")
     parser.add_argument("--builder-vcpkg", required=True, help="vcpkg.cmake toolchain file on the builder")
     parser.add_argument("--builder-cuda-compiler", required=True, help="nvcc.exe on the builder")
     parser.add_argument("--builder-cxx-compiler", required=True, help="cl.exe on the builder")
@@ -1581,6 +1667,7 @@ def main() -> int:
         through_phase=args.through_phase,
         candidate_source=args.candidate_source,
         upgrade_orchestrator_state=args.upgrade_orchestrator_state,
+        gpu_uuid=args.gpu_uuid,
     )
     result = Orchestrator(config).execute()
     print(json.dumps(result, indent=2, sort_keys=True))
