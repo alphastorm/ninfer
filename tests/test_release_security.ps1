@@ -52,6 +52,7 @@ if ($ExerciseManagedRollback -and [string]::IsNullOrWhiteSpace($ManagedStateRoot
 
 $StateProtectionPath = (Resolve-Path -LiteralPath $StateProtectionPath).Path
 $GpuOwnerControllerPath = (Resolve-Path -LiteralPath $GpuOwnerControllerPath).Path
+$realGpuOwnerControllerPath = $GpuOwnerControllerPath
 $InstallerPath = (Resolve-Path -LiteralPath $InstallerPath).Path
 . $StateProtectionPath
 
@@ -405,16 +406,22 @@ try {
     $global:NInferTestGpuIdentity = [string]$pciRows[0]
     $pciParts = @(([string]$pciRows[0] -split ',') | ForEach-Object { $_.Trim() })
     $GpuUuid = $pciParts[0]
+    $gpuPciBusId = $pciParts[1].ToUpperInvariant()
     $selectedAddress = $pciParts[1].Substring(9).ToUpperInvariant()
     $global:NInferTestGpuCounterName = $null
     $global:NInferTestOtherCounterName = $null
-    foreach ($row in @(Get-CimInstance -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory -ErrorAction Stop)) {
-        if ([string]$row.Name -notmatch '^pid_\d+_luid_0x([0-9a-f]{8})_0x([0-9a-f]{8})_phys_\d+$') { continue }
+    $global:NInferTestAdapterRows = @(Get-CimInstance -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory -ErrorAction Stop)
+    $global:NInferTestSelectedAdapterName = $null
+    foreach ($row in $global:NInferTestAdapterRows) {
+        if ([string]$row.Name -notmatch '^luid_0x([0-9a-f]{8})_0x([0-9a-f]{8})_phys_\d+$') { continue }
         $address = Get-AdapterPciAddress $Matches[1] $Matches[2]
-        if ($address -ceq $selectedAddress) { $global:NInferTestGpuCounterName = [string]$row.Name }
-        elseif ($address) { $global:NInferTestOtherCounterName = [string]$row.Name }
+        if ($address -ceq $selectedAddress) {
+            $global:NInferTestSelectedAdapterName = [string]$row.Name
+            $global:NInferTestGpuCounterName = 'pid_4242_' + [string]$row.Name
+        }
+        elseif ($address) { $global:NInferTestOtherCounterName = 'pid_4243_' + [string]$row.Name }
     }
-    Assert-True ($null -ne $global:NInferTestGpuCounterName) 'cannot observe selected GPU counter LUID for security regression'
+    Assert-True ($null -ne $global:NInferTestGpuCounterName) 'cannot observe selected GPU adapter LUID for security regression'
 
     if ($InstrumentGpuPowerFixture) {
         $gpuOwnerSource = (Get-Content -LiteralPath $GpuOwnerControllerPath -Raw -Encoding UTF8).Replace(
@@ -440,16 +447,22 @@ try {
 
     $managedLimitW = if ($QualifiedPowerLimitW -gt 0) { $QualifiedPowerLimitW } else { $OwnerPowerLimitW }
     $ownerPolicy = @{ GpuUuid = $GpuUuid; QualifiedPowerLimitW = $QualifiedPowerLimitW; PriorPowerLimitMinW = 100; PriorPowerLimitMaxW = 1000 }
+    $realStatus = & $realGpuOwnerControllerPath -Action status -StateRoot (Join-Path $testRoot 'observed-gpu-owner') @ownerPolicy | ConvertFrom-Json
+    Assert-True ([int]$realStatus.interactive_gpu_workload_count -eq 0) 'close selected-card interactive workloads before the real power regression'
     $global:NInferTestPowerLimitW = $OwnerPowerLimitW
     $global:NInferTestInteractiveGpuActive = $false
     $global:NInferNvidiaShimCalls = 0
+    $global:NInferTestHideSelectedAdapter = $false
+    $global:NInferTestCounterFailure = $false
     $preparedLeaseRestoreAssertions = 0
     function global:nvidia-smi.exe {
         [CmdletBinding()]
         param([Parameter(ValueFromRemainingArguments = $true)][object[]]$Remaining)
         $global:NInferNvidiaShimCalls++
         $values = @($Remaining | ForEach-Object { [string]$_ })
-        if ($values.Count -lt 3 -or $values[0] -cne '-i' -or $values[1] -cne $GpuUuid) { throw 'fixture received an unbound GPU command' }
+        $selector = [Array]::IndexOf($values, '-i')
+        $powerOption = [Array]::IndexOf($values, '-pl')
+        if ($selector -lt 0 -or $selector + 1 -ge $values.Count -or $values[$selector + 1] -cne $GpuUuid) { throw 'fixture received an unbound GPU command' }
         if ($values -contains '--query-gpu=power.limit') {
             ([double]$global:NInferTestPowerLimitW).ToString(
                 '0.00', [Globalization.CultureInfo]::InvariantCulture
@@ -458,8 +471,8 @@ try {
         elseif ($values -contains '--query-gpu=uuid,pci.bus_id') {
             $global:NInferTestGpuIdentity
         }
-        elseif ($values.Count -ge 4 -and $values[2] -ceq '-pl') {
-            $global:NInferTestPowerLimitW = [int]$values[3]
+        elseif ($powerOption -ge 0 -and $powerOption + 1 -lt $values.Count) {
+            $global:NInferTestPowerLimitW = [int]$values[$powerOption + 1]
         }
         Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1
     }
@@ -469,15 +482,29 @@ try {
     $absoluteNvidiaShimInterceptions = $global:NInferNvidiaShimCalls
     function global:Get-CimInstance {
         param([string]$ClassName, [object]$ErrorAction)
-        [pscustomobject]@{ Name = $global:NInferTestGpuCounterName; DedicatedUsage = $(if ($global:NInferTestInteractiveGpuActive) { 2GB } else { 0L }) }
+        if ($global:NInferTestCounterFailure) { throw 'counter provider unavailable' }
+        if ($ClassName -ceq 'Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory') {
+            return @($global:NInferTestAdapterRows | Where-Object { -not $global:NInferTestHideSelectedAdapter -or [string]$_.Name -cne $global:NInferTestSelectedAdapterName })
+        }
+        if ($ClassName -cne 'Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory') { throw 'unexpected counter class' }
+        if ($global:NInferTestInteractiveGpuActive) {
+            [pscustomobject]@{ Name = $global:NInferTestGpuCounterName; DedicatedUsage = 2GB }
+        }
         if ($global:NInferTestOtherCounterName) {
-            [pscustomobject]@{ Name = $global:NInferTestOtherCounterName; DedicatedUsage = 2GB }
+            [pscustomobject]@{ Name = $global:NInferTestOtherCounterName; DedicatedUsage = 3800MB }
         }
     }
 
     $gpuRoot = Join-Path $testRoot 'gpu-owner'
     $gpuStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy) | Out-String).Trim() | ConvertFrom-Json)
     Assert-True ([int]$gpuStatus.power_limit_w -eq $OwnerPowerLimitW -and -not [bool]$gpuStatus.paused) 'initial GPU-owner status envelope mismatch'
+    Assert-True ([int]$gpuStatus.interactive_gpu_workload_count -eq 0) 'idle selected adapter was blocked by another card'
+    $global:NInferTestHideSelectedAdapter = $true
+    Assert-Rejected { & $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy | Out-Null } '*cannot observe selected GPU*' 'absent selected adapter was treated as idle'
+    $global:NInferTestHideSelectedAdapter = $false
+    $global:NInferTestCounterFailure = $true
+    Assert-Rejected { & $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy | Out-Null } '*counter provider unavailable*' 'counter provider failure was treated as idle'
+    $global:NInferTestCounterFailure = $false
     & $GpuOwnerControllerPath -Action stop -StateRoot $gpuRoot @ownerPolicy | Out-Null
     $pausedStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy) | Out-String).Trim() | ConvertFrom-Json)
     Assert-True ([bool]$pausedStatus.paused -and [int]$pausedStatus.power_limit_w -eq $managedLimitW) 'GPU owner did not enter the qualified cap'
@@ -485,6 +512,21 @@ try {
     $idempotentPausedStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy) | Out-String).Trim() | ConvertFrom-Json)
     Assert-True ([bool]$idempotentPausedStatus.paused -and [int]$idempotentPausedStatus.power_limit_w -eq $managedLimitW) 'non-default GPU-owner idempotent stop changed roots or power state'
     Assert-NInferProtectedStateTree $gpuRoot
+    $leasePath = Join-Path $gpuRoot 'lease.json'
+    $leaseBefore = [IO.File]::ReadAllText($leasePath)
+    try {
+        $wrongLease = $leaseBefore | ConvertFrom-Json
+        $wrongLease.gpu_pci_bus_id = '00000000:FF:1F.7'
+        [IO.File]::WriteAllText($leasePath, ($wrongLease | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+        Assert-Rejected { & $GpuOwnerControllerPath -Action start -StateRoot $gpuRoot @ownerPolicy | Out-Null } '*lease PCI identity*' 'wrong-card PCI lease was restored'
+        Assert-True (Test-Path -LiteralPath $leasePath) 'rejected PCI lease was deleted'
+        $wrongLease = $leaseBefore | ConvertFrom-Json
+        $wrongLease.gpu_uuid = 'GPU-00000000-0000-0000-0000-000000000000'
+        [IO.File]::WriteAllText($leasePath, ($wrongLease | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
+        Assert-Rejected { & $GpuOwnerControllerPath -Action start -StateRoot $gpuRoot @ownerPolicy | Out-Null } '*lease UUID*' 'wrong-card UUID lease was restored'
+        Assert-True (Test-Path -LiteralPath $leasePath) 'rejected UUID lease was deleted'
+    }
+    finally { [IO.File]::WriteAllText($leasePath, $leaseBefore, [Text.UTF8Encoding]::new($false)) }
 
     $global:NInferTestInteractiveGpuActive = $true
     $activeRejected = $false
@@ -498,7 +540,7 @@ try {
     if ($InstrumentGpuPowerFixture -and $QualifiedPowerLimitW -gt 0) {
         [IO.File]::WriteAllText(
             (Join-Path $gpuRoot 'lease.json'),
-            ('{"schema_version":1,"gpu_uuid":"' + $GpuUuid + '","paused":true,"phase":"prepared","qualified_power_limit_w":' + $QualifiedPowerLimitW + ',"prior_power_limit_w":' + $OwnerPowerLimitW + '}'),
+            ('{"schema_version":1,"gpu_uuid":"' + $GpuUuid + '","gpu_pci_bus_id":"' + $gpuPciBusId + '","paused":true,"phase":"prepared","qualified_power_limit_w":' + $QualifiedPowerLimitW + ',"prior_power_limit_w":' + $OwnerPowerLimitW + '}'),
             [Text.UTF8Encoding]::new($false)
         )
         $global:NInferTestPowerLimitW = $QualifiedPowerLimitW
@@ -520,6 +562,35 @@ try {
     } '*protected state inherits an external DACL*' 'preplanted generic GPU-owner state was accepted'
 
     $releaseScriptRoot = Split-Path -Parent $InstallerPath
+    $controllerAst = [Management.Automation.Language.Parser]::ParseFile((Join-Path $releaseScriptRoot 'Control-Release.ps1'), [ref]$null, [ref]$null)
+    $evidenceReader = $controllerAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Test-ServerStartGpu' }, $true)
+    if ($null -eq $evidenceReader) { throw 'shipped startup GPU evidence reader is missing' }
+    . ([scriptblock]::Create($evidenceReader.Extent.Text))
+    $evidenceLog = Join-Path $testRoot 'startup-evidence.jsonl'
+    $evidencePid = 4242
+    $startup = [ordered]@{ event = 'server_start'; server_instance_id = 'serve-4242-1'; environment = @{ gpu_uuid = $GpuUuid } }
+    $historical = ($startup | ConvertTo-Json -Compress) + "`n"
+    $encoding = [Text.UTF8Encoding]::new($false)
+    [IO.File]::WriteAllText($evidenceLog, $historical, $encoding)
+    $offset = $encoding.GetByteCount($historical)
+    $creation = (Get-Item -LiteralPath $evidenceLog).CreationTimeUtc.Ticks
+    Assert-True (-not (Test-ServerStartGpu $evidenceLog $GpuUuid $offset $creation $evidencePid)) 'historical server_start was accepted for a new launch'
+    $startup.server_instance_id = 'serve-4242-2'
+    $fresh = $startup | ConvertTo-Json -Compress
+    [IO.File]::AppendAllText($evidenceLog, $fresh, $encoding)
+    Assert-True (-not (Test-ServerStartGpu $evidenceLog $GpuUuid $offset $creation $evidencePid)) 'partial JSONL record established readiness'
+    [IO.File]::AppendAllText($evidenceLog, "`n", $encoding)
+    Assert-True (Test-ServerStartGpu $evidenceLog $GpuUuid $offset $creation $evidencePid) 'fresh matching GPU startup was refused'
+    $startup.environment.gpu_uuid = 'GPU-00000000-0000-0000-0000-000000000000'
+    [IO.File]::WriteAllText($evidenceLog, ($historical + ($startup | ConvertTo-Json -Compress) + "`n"), $encoding)
+    Assert-Rejected { Test-ServerStartGpu $evidenceLog $GpuUuid $offset $creation $evidencePid | Out-Null } '*GPU UUID differs*' 'fresh wrong-GPU startup was accepted'
+    $startup.environment.gpu_uuid = $GpuUuid
+    $startup.server_instance_id = 'serve-4243-2'
+    [IO.File]::WriteAllText($evidenceLog, ($historical + ($startup | ConvertTo-Json -Compress) + "`n"), $encoding)
+    Assert-Rejected { Test-ServerStartGpu $evidenceLog $GpuUuid $offset $creation $evidencePid | Out-Null } '*does not belong*' 'foreign PID startup was accepted'
+    [IO.File]::WriteAllText($evidenceLog, '', $encoding)
+    Assert-Rejected { Test-ServerStartGpu $evidenceLog $GpuUuid $offset $creation $evidencePid | Out-Null } '*truncated*' 'truncated request log was accepted'
+    Assert-Rejected { Test-ServerStartGpu $evidenceLog $GpuUuid 0 ($creation + 1) $evidencePid | Out-Null } '*replaced*' 'replaced request log was accepted'
     $releaseScripts = [Collections.Generic.List[IO.FileInfo]]::new()
     foreach ($scriptFile in @(Get-ChildItem -LiteralPath $releaseScriptRoot -File | Where-Object {
             $_.Name -in @(
@@ -567,6 +638,9 @@ try {
         absolute_nvidia_shim_interceptions = $absoluteNvidiaShimInterceptions
         gpu_power_fixture_calls = $(if ($InstrumentGpuPowerFixture) { $global:NInferNvidiaShimCalls } else { 0 })
         prepared_lease_restore_assertions = $preparedLeaseRestoreAssertions
+        gpu_binding_lease_refusal_assertions = 2
+        startup_gpu_evidence_assertions = 7
+        gpu_workload_evidence_class = 'real-adapter-luids-with-synthetic-process-usage-and-real-idle-precheck'
         request_jsonl_under_protected_state = $true
         request_jsonl_effective_access_denials = 2
         managed_release_acl_state_assertions = $managedReleasesVerified

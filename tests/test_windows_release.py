@@ -8,6 +8,7 @@ import re
 import subprocess
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
 from tools.release import package as release_package
 from tools.qualification import qualify_native
@@ -128,7 +129,7 @@ class MultiGpuHostTests(unittest.TestCase):
                 qualify_native.select_qualified_gpu(candidates, spec, requested)
         duplicate = rows + [rows[1].replace(b, a)]
         self.assertEqual(qualify_native.select_qualified_gpu(duplicate, spec, b)["uuid"], b)
-        with self.assertRaises(Exception):
+        with self.assertRaises(qualify_native.argparse.ArgumentTypeError):
             qualify_native.gpu_uuid_argument("GPU-0")
         installer = (WINDOWS / "Install-Release.ps1").read_text()
         selection = ps_function(installer, "Assert-HostPrerequisites")
@@ -165,6 +166,9 @@ class MultiGpuHostTests(unittest.TestCase):
             self.assertIn(contract, harness)
         self.assertNotIn("$c.engine.device", harness)
         self.assertNotRegex(harness, r"\$env:CUDA_DEVICE_ORDER\s*=")
+        self.assertIn("Test-ScopedControllerOrQuiescent", harness)
+        self.assertIn("unscoped qualification checkpoints cannot be reused", harness)
+        self.assertNotIn("Stop-ScheduledTask", harness)
         captured = []
         subject = SimpleNamespace(
             state_root="C:/state", target_root="C:/qualification", gpu_uuid="GPU-00000000-0000-0000-0000-000000000001",
@@ -176,6 +180,24 @@ class MultiGpuHostTests(unittest.TestCase):
         self.assertIn(r"""'(\\*)"'""", captured[0])
         self.assertIn(r"'$1$1\"'", captured[0])
 
+    def test_gpu_metrics_never_selects_the_first_host_row(self) -> None:
+        uuid = "GPU-00000000-0000-0000-0000-000000000001"
+        with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="100.5, 50, 99, 12000\n")) as run:
+            self.assertEqual(qualify_native.gpu_metrics(uuid), (100.5, 50, 99, 12000))
+            self.assertEqual(run.call_args.args[0][1:3], ["-i", uuid])
+        for output in ("", "100, 50, 99, 12000\n200, 40, 0, 12\n"):
+            with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout=output)), self.assertRaises(qualify_native.LaneError):
+                qualify_native.gpu_metrics(uuid)
+
+    def test_predecessors_emit_attributable_startup_gpu_identity(self) -> None:
+        for commit in ("075d442e", "03f56e58"):
+            with self.subTest(commit=commit):
+                source = subprocess.run(["git", "show", f"{commit}:src/serve/request_log.cpp"],
+                                        cwd=ROOT, capture_output=True, text=True, check=True).stdout
+                for marker in ('"server_start"', '"server_instance_id"', '"gpu_uuid"',
+                               '"serve-"', 'core::process_id()'):
+                    self.assertIn(marker, source)
+
     def test_current_launch_attestation_precedes_every_ready_path(self) -> None:
         controller = (WINDOWS / "Control-Release.ps1").read_text()
         attestation = ps_function(controller, "Test-ServerStartGpu")
@@ -183,7 +205,12 @@ class MultiGpuHostTests(unittest.TestCase):
         self.assertIn("PSObject.Properties['gpu_uuid']", attestation)
         self.assertIn("[string]$uuid.Value -cne $ExpectedUuid", attestation)
         run = ps_function(controller, "Invoke-Run")
-        self.assertLess(run.index("@($stdout, $stderr, $requestLog)"), run.index("[Diagnostics.Process]::Start"))
+        self.assertIn("foreach ($log in @($stdout, $stderr))", run)
+        self.assertNotIn("@($stdout, $stderr, $requestLog)", run)
+        self.assertLess(run.index("$requestLogOffset = [Int64]$logItem.Length"), run.index("[Diagnostics.Process]::Start"))
+        for guard in ("$stream.Seek($StartOffset", "$stream.Length -lt $StartOffset",
+                      "$CreationTicks", "$text.LastIndexOf([char]10)", "^serve-$ServerPid-", "1MB"):
+            self.assertIn(guard, attestation)
         self.assertLess(run.index("Test-ServerStartGpu $requestLog"), run.index("$runtimeRecord.gpu_uuid_verified = $true"))
         self.assertIn("UtcNow.AddSeconds(600)", run)
         self.assertIn("$process.Kill()", run)
@@ -194,16 +221,22 @@ class MultiGpuHostTests(unittest.TestCase):
         owner = (WINDOWS / "Control-GpuOwner.ps1").read_text()
         self.assertIn("$rows.Count -ne 1", ps_function(owner, "Resolve-OwnerGpu"))
         count = ps_function(owner, "Get-InteractiveGpuWorkloadCount")
-        for guard in ("Get-AdapterPciAddress $high $low", "$addresses[$luid] -cne $gpuPciAddress",
-                      "if (-not $observed)", "$ownerPid = [int]$Matches[1]"):
+        for guard in ("Get-AdapterPciAddress $high $low", "$addresses[$luid] -ceq $gpuPciAddress",
+                      "$selectedLuids.Count -eq 0", "$ownerPid = [int]$Matches[1]",
+                      "Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory",
+                      "$selectedLuids.Contains($luid)"):
             self.assertIn(guard, count)
+        self.assertNotIn("$observed", count)
         self.assertIn("'NInfer.GpuAdapterAddress' -as [type]", owner)
         self.assertIn("Type = 6", owner)
         self.assertIn("D3DKMTCloseAdapter(ref close)", owner)
         self.assertIn("PSObject.Properties['gpu_uuid']", ps_function(owner, "Read-State"))
+        self.assertIn("PSObject.Properties['gpu_pci_bus_id']", ps_function(owner, "Read-State"))
+        self.assertIn("$state.prior_power_limit_w -gt $PriorPowerLimitMaxW", ps_function(owner, "Read-State"))
         installer = (WINDOWS / "Install-Release.ps1").read_text()
         self.assertNotIn("$oldState.gpu_owner.controller_path", installer)
         self.assertIn("Parameters.ContainsKey('GpuUuid')", installer)
+        self.assertIn("legacy unscoped GPU-owner wrapper is running", installer)
         stop = installer.index("if ($oldTaskWasRunning) {", installer.index("$state = [ordered]@{"))
         self.assertLess(stop, installer.index("Copy-Item -LiteralPath $ownerControllerSource"))
         controller = (WINDOWS / "Control-Release.ps1").read_text()

@@ -283,6 +283,21 @@ def ps_quote(value: str) -> str:
 
 GPU_UUID = re.compile(r"GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
 
+TARGET_CONTROLLER_GUARD = r"""
+function Test-ScopedControllerOrQuiescent([string]$Root) {
+  $state=Get-Content (Join-Path $Root 'state.json') -Raw|ConvertFrom-Json
+  $owner=$state.gpu_owner
+  if((Get-FileHash ([string]$owner.controller_path) -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$owner.controller_sha256){throw 'installed owner hash mismatch'}
+  if((Get-Command -Name ([string]$owner.controller_path)).Parameters.ContainsKey('GpuUuid')){return $true}
+  $task=Get-ScheduledTask -TaskName ([string]$state.task_name) -ErrorAction SilentlyContinue
+  if(($null -ne $task -and [string]$task.State -ceq 'Running') -or
+     (Test-Path (Join-Path $Root 'runtime.json')) -or
+     (Test-Path (Join-Path $Root 'gpu-owner-lease.json')) -or
+     (Test-Path (Join-Path $Root 'gpu-owner-state/lease.json'))){throw 'legacy unscoped installation must be safely quiescent before qualification'}
+  return $false
+}
+"""
+
 
 def gpu_uuid_argument(value: str) -> str:
     if not GPU_UUID.fullmatch(value):
@@ -505,6 +520,8 @@ if($LASTEXITCODE -ne 0){throw 'target GPU selection failed'}
     def _load_state(self) -> dict[str, Any]:
         if self.state_path.exists():
             state = json.loads(self.state_path.read_text(encoding="utf-8"))
+            if state.get("phases") and not state.get("gpu_uuid"):
+                raise LaneError("unscoped qualification checkpoints cannot be reused; use a fresh state directory")
             if state.get("source_commit") != self.head or state.get("lane") != self.lane.name:
                 raise LaneError("checkpoint belongs to another source, lane, or orchestrator revision")
             if state.get("orchestrator_sha256") != self.script_sha:
@@ -569,7 +586,7 @@ $ok=(Test-Path $path -PathType Leaf) -and ((Get-FileHash $path -Algorithm SHA256
                 script = f"""
 $s=Get-Content (Join-Path {ps_quote(self.state_root)} 'state.json') -Raw|ConvertFrom-Json
 $r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
-[Console]::Out.WriteLine(([ordered]@{{ok=([string]$r.patch_stack_sha -eq {ps_quote(self.head)})}}|ConvertTo-Json -Compress))
+[Console]::Out.WriteLine(([ordered]@{{ok=([string]$r.patch_stack_sha -eq {ps_quote(self.head)} -and [string]$r.gpu_uuid -ceq {ps_quote(self.gpu_uuid)})}}|ConvertTo-Json -Compress))
 """
                 return bool(self.remote_json(self.config.target, script)["ok"])
             evidence_names = {
@@ -640,6 +657,8 @@ $limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=pow
         scp(str(self.script), remote_spec(host, destination))
 
     def remote_json(self, host: str, script: str, timeout: int = 600) -> dict[str, Any]:
+        if host == self.config.target:
+            script = TARGET_CONTROLLER_GUARD + script
         return compact_json_from_output(remote_ps(host, script, timeout=timeout))
 
     def preflight(self) -> dict[str, Any]:
@@ -666,13 +685,13 @@ $ErrorActionPreference='Stop'
 $root={ps_quote(self.state_root)}
 $incumbentRoot={ps_quote(incumbent or "")}
 $incumbentRunning=$false
-if($incumbentRoot -and (Test-Path (Join-Path $incumbentRoot 'Control-Release.ps1'))){{
+if($incumbentRoot -and (Test-Path (Join-Path $incumbentRoot 'Control-Release.ps1')) -and (Test-ScopedControllerOrQuiescent $incumbentRoot)){{
   $incumbentStatus=&(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Status -StateRoot $incumbentRoot|ConvertFrom-Json
   $incumbentRunning=([string]$incumbentStatus.process_state -eq 'running')
   &(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Stop -StateRoot $incumbentRoot|Out-Null
 }}
 $controller=Join-Path $root 'Control-Release.ps1'
-if(Test-Path $controller){{&$controller -Action Stop -StateRoot $root|Out-Null}}
+if((Test-Path $controller) -and (Test-ScopedControllerOrQuiescent $root)){{&$controller -Action Stop -StateRoot $root|Out-Null}}
 $active='';$previous='';$modelSha=''
 if(Test-Path (Join-Path $root 'state.json')){{
   $s=Get-Content (Join-Path $root 'state.json') -Raw|ConvertFrom-Json
@@ -968,7 +987,7 @@ $taskName={ps_quote(self.lane.task_name)}
 $before=''
 $apiKeyFile=$null
 if(Test-Path (Join-Path $root 'state.json')){{
-  &(Join-Path $root 'Control-Release.ps1') -Action Stop -StateRoot $root|Out-Null
+  if(Test-ScopedControllerOrQuiescent $root){{&(Join-Path $root 'Control-Release.ps1') -Action Stop -StateRoot $root|Out-Null}}
   $s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
   $before=[string]$s.active_release
   $apiKeyFile=[string]$s.releases.PSObject.Properties[$before].Value.api_key_file
@@ -1016,6 +1035,8 @@ $after=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
             self.state_root,
             "--model-id",
             self.lane.model_id,
+            "--gpu-uuid",
+            self.gpu_uuid,
             "--evidence-root",
             f"{self.target_root}/evidence",
             *arguments,
@@ -1272,6 +1293,7 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
         summary = {
             "artifact_type": "ninfer_native_qualification_summary",
             "schema_version": 1,
+            "gpu_uuid": self.gpu_uuid,
             "lane": self.lane.name,
             "release_id": self.lane.release_id,
             "deployment_profile": self.lane.spec["deployment_profile"],
@@ -1331,17 +1353,18 @@ $ErrorActionPreference='Stop'
 $root={ps_quote(self.state_root)}
 $taskName={ps_quote(self.lane.task_name)}
 $controller=Join-Path $root 'Control-Release.ps1'
-if(Test-Path $controller){{&$controller -Action Stop -StateRoot $root|Out-Null}}
+$scoped=(Test-Path $controller) -and (Test-ScopedControllerOrQuiescent $root)
+if($scoped){{&$controller -Action Stop -StateRoot $root|Out-Null}}
 $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-if($null -ne $task -and $task.State -eq 'Running'){{Stop-ScheduledTask -TaskName $taskName}}
+if($null -ne $task -and $task.State -eq 'Running'){{throw 'managed wrapper did not finish restoration'}}
 $leaseActive=$false
-if(Test-Path $controller){{$status=&$controller -Action Status -StateRoot $root|ConvertFrom-Json;$leaseActive=([bool]$status.gpu_owner.lease_active -or [bool]$status.gpu_owner.current_paused)}}
+if($scoped){{$status=&$controller -Action Status -StateRoot $root|ConvertFrom-Json;if([string]$status.gpu_owner.status -cne 'ok'){{throw 'GPU-owner restoration status failed'}};$leaseActive=([bool]$status.gpu_owner.lease_active -or [bool]$status.gpu_owner.current_paused)}}
 $limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=power.limit --format=csv,noheader,nounits)
 if($limit -ne {self.lane.owner_power_limit_w}){{throw '{self.lane.owner_power_limit_w} W owner state was not restored'}}
 if($leaseActive){{throw 'GPU-owner lease remained active'}}
 $incumbentRoot={ps_quote(incumbent)}
 $incumbentState='untouched'
-if({'$true' if restart_incumbent else '$false'}){{&(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Start -StateRoot $incumbentRoot|Out-Null;$incumbentState='running'}}
+if({'$true' if restart_incumbent else '$false'}){{if(-not (Test-ScopedControllerOrQuiescent $incumbentRoot)){{throw 'refusing to restart legacy unscoped incumbent'}};&(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Start -StateRoot $incumbentRoot|Out-Null;$incumbentState='running'}}
 $taskState=if($null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)){{'absent'}}else{{[string](Get-ScheduledTask -TaskName $taskName).State}}
 [Console]::Out.WriteLine(([ordered]@{{status='passed';task_state=$taskState;power_limit_w=$limit;gpu_lease_active=$leaseActive;incumbent_state=$incumbentState;process_count=@(Get-Process ninfer-serve -ErrorAction SilentlyContinue).Count}}|ConvertTo-Json -Compress))
 """,
@@ -1574,6 +1597,8 @@ def internal_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     state_root = Path(args.state_root)
     state = json.loads((state_root / "state.json").read_text(encoding="utf-8"))
     release = state["releases"][state["active_release"]]
+    if args.gpu_uuid and release["gpu_uuid"] != args.gpu_uuid:
+        raise LaneError("benchmark release GPU differs from qualification target")
     controller = state_root / "Control-Release.ps1"
     run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(controller), "-Action", "Start", "-StateRoot", str(state_root)], timeout=900)
     key = read_key(Path(release["api_key_file"]))
@@ -1585,14 +1610,25 @@ def internal_benchmark(args: argparse.Namespace) -> dict[str, Any]:
     prompt = (paragraph * (28000 // len(paragraph) + 2))[:28000]
     maximums = list(gpu_metrics(release["gpu_uuid"]))
     stop = threading.Event()
+    poll_errors: list[Exception] = []
     def poll() -> None:
-        while not stop.wait(0.1):
-            values = gpu_metrics(release["gpu_uuid"])
-            for index, value in enumerate(values): maximums[index] = max(maximums[index], value)
+        try:
+            while not stop.wait(0.1):
+                values = gpu_metrics(release["gpu_uuid"])
+                for index, value in enumerate(values): maximums[index] = max(maximums[index], value)
+        except Exception as error:
+            poll_errors.append(error)
+            stop.set()
     thread = threading.Thread(target=poll, daemon=True); thread.start()
     started = time.perf_counter()
-    request_json(base, key, "POST", "/v1/chat/completions", {"model": args.model_id, "messages": [{"role": "user", "content": prompt + "\nContinue until the output limit."}], "max_tokens": 1024, "temperature": 0, "seed": 57004, "reasoning_effort": "medium"})
-    wall = time.perf_counter() - started; stop.set(); thread.join()
+    try:
+        request_json(base, key, "POST", "/v1/chat/completions", {"model": args.model_id, "messages": [{"role": "user", "content": prompt + "\nContinue until the output limit."}], "max_tokens": 1024, "temperature": 0, "seed": 57004, "reasoning_effort": "medium"})
+    finally:
+        stop.set()
+        thread.join()
+    wall = time.perf_counter() - started
+    if poll_errors:
+        raise LaneError("selected GPU metrics failed during the benchmark") from poll_errors[0]
     records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()[before:]]
     done = [record for record in records if record.get("event") == "request_done"]
     if len(done) != 1 or done[0]["result"]["completion_tokens"] != 1024:
@@ -1603,6 +1639,7 @@ def internal_benchmark(args: argparse.Namespace) -> dict[str, Any]:
         receipt["power_envelope_w"] = args.power_envelope_w
         if receipt["max_power_w"] > args.power_envelope_w:
             raise LaneError(f"managed C1 exceeded the {args.power_envelope_w:g} W qualification envelope")
+    receipt["gpu_uuid"] = release["gpu_uuid"]
     atomic_json(evidence / "managed-c1.json", receipt)
     return receipt
 
@@ -1615,6 +1652,7 @@ def internal_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fixture")
     parser.add_argument("--model-id", default="q38-ninfer")
     parser.add_argument("--power-envelope-w", type=float)
+    parser.add_argument("--gpu-uuid", type=gpu_uuid_argument)
     return parser
 
 
