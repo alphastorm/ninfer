@@ -1,5 +1,42 @@
 # NInfer native Windows lanes
 
+## 2026-10-10 — UUID-bound multi-GPU hosts (qualification pending)
+
+Native RTX 3090 and RTX 4090 packaging can select its own card on a host with several
+NVIDIA GPUs. Install with optional `-GpuUuid` (the full NVIDIA UUID); without it, exactly
+one card must match the lane's GPU name and compute capability. The release records that
+UUID, name, installation-time index, and canonical PCI address. Start resolves the UUID's
+current index, so adding another card does not retarget an older release. Older records
+without a PCI address retain UUID-and-name binding. Packaged config bytes and hash identities
+are unchanged; `engine.device` is not the hardware selector.
+
+Only the server child receives `CUDA_DEVICE_ORDER=PCI_BUS_ID`. The operator must still leave
+`CUDA_VISIBLE_DEVICES` absent: hiding cards is not supported. Readiness requires this launch's
+`server_start.environment.gpu_uuid` to match the release binding within 600 seconds; mismatch
+or missing evidence stops the child. Request logs rotate to `requests.jsonl.previous` before
+each launch, preserving one predecessor and excluding stale attestation.
+
+Every owner-controller power query/set is UUID-indexed. Interactive workload accounting maps
+GPUProcessMemory LUIDs through D3DKMT to the selected PCI bus/device/function; another card's
+desktop workload does not block this card. Missing selected-card counters, failed adapter
+mapping, malformed active counters, and nonzero PCI domains refuse observation rather than
+assuming an idle GPU. Software adapters with no PCI device are excluded. A controller invoked
+without `-GpuUuid` refuses a multi-GPU host.
+
+Install defaults to the bundled UUID-aware owner controller on both clean installs and
+upgrades; explicit adapters must declare `-GpuUuid` before invocation. Old unbound active
+owner leases must be restored safely with their original controller before upgrading; they
+are never guessed onto a card. A stopped, lease-free predecessor remains rollback-capable,
+including when its recorded GPU index is stale. No lane version or release spec is changed.
+
+Both lanes still listen on port 18082 and retain separate task names and state roots.
+**Only one lane may run at a time.** Start (including direct scheduled Run) refuses an occupied
+port before acquiring a GPU-owner lease. Simultaneous lane operation is not supported.
+The native qualification harness accepts `--gpu-uuid`, applies the same unique-qualified-card
+selection rule, and binds clean/upgrade installs, direct pressure launches, security checks,
+power restoration probes, and benchmark GPU metrics to that card. Fresh real-host acceptance
+is still required; this packaging change is not a release or a hardware qualification claim.
+
 One runtime for the RTX 4090 (`sm_89`) and RTX 3090 (`sm_86`) lanes, built from mainline
 `port/native-lanes-on-mainline` rather than the two divergent lane branches. The package carries
 the same context cache, warm arrival across a restart, and streamed verified-or-refused restore
