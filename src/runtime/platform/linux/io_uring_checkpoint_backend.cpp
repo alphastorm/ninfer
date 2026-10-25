@@ -3,6 +3,7 @@
 #endif
 
 #include "runtime/platform/linux/io_uring_checkpoint_backend.h"
+#include "core/io/durable_file.h"
 
 #include <linux/io_uring.h>
 #include <linux/stat.h>
@@ -28,6 +29,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -1772,7 +1774,8 @@ private:
 class IoUringContinuationReadQueue final : public ContinuationCheckpointReadQueue {
 public:
     explicit IoUringContinuationReadQueue(const std::filesystem::path& root)
-        : root_(std::filesystem::weakly_canonical(root)) {
+        : root_(std::filesystem::absolute(root).lexically_normal()) {
+        if (root_.filename().empty()) { root_ = root_.parent_path(); }
         const LinuxCheckpointEnvironment environment = detect_environment();
         UniqueFd root_fd                             = open_root(root_);
         require_local_filesystem(root_fd.get(), environment);
@@ -1809,13 +1812,28 @@ public:
         if (requests.empty()) {
             throw CheckpointContractError("io_uring checkpoint read batch is empty");
         }
-        const std::filesystem::path canonical = std::filesystem::weakly_canonical(path);
+        const std::filesystem::path canonical = std::filesystem::absolute(path).lexically_normal();
         if (!contains(canonical)) {
             throw CheckpointContractError("io_uring checkpoint read escaped its configured root");
         }
 
-        UniqueFd file(::open(canonical.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_DIRECT));
+        // K6 resolves every parent using anchored no-follow directory handles.
+        // Duplicating the verified descriptor pins these exact bytes for this batch;
+        // enabling O_DIRECT does not reopen the pathname or change the reader contract.
+        const auto close_file = [](std::FILE* file) { std::fclose(file); };
+        std::unique_ptr<std::FILE, decltype(close_file)> stream(nullptr, close_file);
+        try {
+            stream.reset(io::open_binary_read(path));
+        } catch (const std::exception& error) {
+            throw CheckpointContractError(std::string("open checkpoint payload: ") + error.what());
+        }
+        UniqueFd file(::fcntl(::fileno(stream.get()), F_DUPFD_CLOEXEC, 0));
         if (!file) { throw_last_error("open io_uring checkpoint payload"); }
+        const int flags = ::fcntl(file.get(), F_GETFL);
+        if (flags < 0 || ::fcntl(file.get(), F_SETFL, flags | O_DIRECT) != 0) {
+            throw_last_error("enable direct checkpoint payload reads");
+        }
+        stream.reset();
         struct stat status{};
         if (::fstat(file.get(), &status) != 0) {
             throw_last_error("stat io_uring checkpoint payload");
@@ -1979,10 +1997,11 @@ probe_io_uring_checkpoint_capability(const std::filesystem::path& root) noexcept
 
 std::shared_ptr<ContinuationCheckpointReadQueue>
 make_io_uring_checkpoint_read_queue(const std::filesystem::path& root) {
-    std::error_code error;
-    std::filesystem::create_directories(root, error);
-    if (error) {
-        throw CheckpointContractError("create io_uring checkpoint root: " + error.message());
+    try {
+        io::create_directories(root);
+    } catch (const std::exception& error) {
+        throw CheckpointContractError(std::string("create io_uring checkpoint root: ") +
+                                      error.what());
     }
     return std::make_shared<IoUringContinuationReadQueue>(root);
 }
