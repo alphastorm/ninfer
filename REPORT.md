@@ -1,5 +1,27 @@
 # EXP-097: upstream kernel-route handoff
 
+## Continued G2 attribution
+
+`profile-attribution.json` records the shipped/candidate Nsight Systems 2026.1.3
+capture at 32,047 prompt tokens (log-009 plus the frozen depth fixture). The
+candidate's acceptance is slightly higher, 1,198/2,353 versus 1,195/2,376; unequal
+draft arithmetic exists even on the byte-identical 128-token warmup output.
+Acceptance is therefore not assumed equal or blamed for this measured slowdown.
+
+The dominant GPU deltas per round are Q5 residual projections **+0.924 ms**,
+Q4 SwiGLU **+0.584 ms**, and Q5 input projections **+0.270 ms**. BF16 attention
+including merge is **0.191 ms faster** upstream. Draft attention, Q8 projection,
+selector, fused RoPE and dynamic convolution are essentially unchanged; shortlist
+projection is 0.028 ms slower. Between-round idle is 0.358/0.371 ms, with only
+0.019/0.021 ms overlapping host commit. The second upstream graph does not explain
+the gap. No attention, Program-round or Engine change is justified by this capture.
+
+The next measured candidate uses eight K warps for Q5 residual T=8/16 at K=6,144
+and 17,408, retaining upstream's two-stage loading and the shipped linear
+reduction order. sm_86/89 and neighboring extents retain their existing routes.
+Expanded FP64/graph coverage includes both verify widths; GPU results are not yet
+claimed for this candidate. Earlier results below remain the previous baseline.
+
 ## Disposition
 
 - Tested runtime source: `9b391d513726b3ed7d60a80a95daa68cf9dacc97`, branch `rebase/kernel-routes`, upstream base `64d10fbf`.
