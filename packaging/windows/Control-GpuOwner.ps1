@@ -134,7 +134,25 @@ namespace NInfer {
     return [NInfer.GpuAdapterAddress]::Resolve([Convert]::ToUInt32($High, 16), [Convert]::ToUInt32($Low, 16))
 }
 
-function Get-InteractiveGpuWorkloadCount {
+function Get-GpuMemoryUsedBytes {
+    $value = ((Invoke-NvidiaSmi @(
+        '-i', $GpuUuid,
+        '--query-gpu=memory.used',
+        '--format=csv,noheader,nounits'
+    )) | Out-String).Trim()
+    $memoryMiB = 0L
+    if (-not [Int64]::TryParse(
+            $value,
+            [Globalization.NumberStyles]::Integer,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [ref]$memoryMiB
+        ) -or $memoryMiB -lt 0 -or $memoryMiB -gt ([Int64]::MaxValue -shr 20)) {
+        throw 'cannot observe selected GPU resident memory'
+    }
+    return [Int64]($memoryMiB * 1MB)
+}
+
+function Get-WddmProcessMemoryDiagnostics {
     # An idle card may have no process-memory instance. Establish observability from the
     # adapter-memory inventory first, then count processes on its exact adapter LUIDs.
     $adapters = @(Get-CimInstance -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory -ErrorAction Stop)
@@ -155,6 +173,7 @@ function Get-InteractiveGpuWorkloadCount {
         -ClassName Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory `
         -ErrorAction Stop)
     $owners = [Collections.Generic.HashSet[int]]::new()
+    $selectedRows = [Collections.Generic.List[object]]::new()
     foreach ($row in $rows) {
         $usage = 0L
         if (-not [Int64]::TryParse([string]$row.DedicatedUsage, [ref]$usage) -or $usage -lt 0) {
@@ -169,15 +188,29 @@ function Get-InteractiveGpuWorkloadCount {
         $ownerPid = [int]$Matches[1]
         $high = $Matches[2]; $low = $Matches[3]
         $luid = $high + ':' + $low
-        if ($usage -lt $interactiveGpuMemoryThresholdBytes) { continue }
         if (-not $selectedLuids.Contains($luid)) {
             if (-not $addresses.ContainsKey($luid)) { $addresses[$luid] = Get-AdapterPciAddress $high $low }
             if ($addresses[$luid] -ceq $gpuPciAddress) { throw 'selected GPU process LUID disappeared from the adapter inventory' }
             continue
         }
+        $selectedRows.Add([ordered]@{
+            pid = $ownerPid
+            counter_name = [string]$row.Name
+            dedicated_usage_bytes = $usage
+        })
+        if ($usage -lt $interactiveGpuMemoryThresholdBytes) { continue }
         [void]$owners.Add($ownerPid)
     }
-    return $owners.Count
+    return [ordered]@{
+        status = 'available'
+        measurement = 'wddm-process-commit-budget-not-residency'
+        above_threshold_process_count = $owners.Count
+        rows = @($selectedRows.ToArray())
+    }
+}
+
+function Get-InteractiveGpuWorkloadCount {
+    return [int]((Get-GpuMemoryUsedBytes) -ge $interactiveGpuMemoryThresholdBytes)
 }
 
 function Assert-InteractiveGpuWorkloadAbsent {
@@ -235,6 +268,9 @@ function Write-State([int]$PriorPowerLimitW, [ValidateSet('prepared', 'paused')]
 }
 
 function Write-Status([bool]$Paused, [int]$PowerLimitW) {
+    $memoryUsedBytes = Get-GpuMemoryUsedBytes
+    try { $wddm = Get-WddmProcessMemoryDiagnostics }
+    catch { $wddm = [ordered]@{ status = 'unavailable'; error = $_.Exception.Message } }
     [ordered]@{
         schema_version = 1
         gpu_uuid = $GpuUuid
@@ -242,8 +278,12 @@ function Write-Status([bool]$Paused, [int]$PowerLimitW) {
         paused = $Paused
         power_limit_w = $PowerLimitW
         qualified_power_limit_w = $qualifiedPowerLimitW
-        interactive_gpu_workload_count = (Get-InteractiveGpuWorkloadCount)
-    } | ConvertTo-Json -Compress
+        interactive_gpu_workload_count = [int]($memoryUsedBytes -ge $interactiveGpuMemoryThresholdBytes)
+        interactive_gpu_memory_source = 'nvidia-smi.memory.used'
+        interactive_gpu_memory_used_bytes = $memoryUsedBytes
+        interactive_gpu_memory_threshold_bytes = $interactiveGpuMemoryThresholdBytes
+        wddm_process_memory = $wddm
+    } | ConvertTo-Json -Depth 6 -Compress
 }
 
 Resolve-OwnerGpu

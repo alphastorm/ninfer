@@ -630,6 +630,18 @@ def require_port_only_equivalence(
         raise LaneError("scratch configuration differs from the public package beyond /listen/port")
 
 
+def require_product_protocol(value: dict[str, Any]) -> None:
+    """Accept the canonical product smoke's schema-2 result, not legacy authored checks."""
+    if (value.get("artifact_type") != "ninfer_agent_protocol_smoke" or
+            value.get("schema_version") != 2 or value.get("contract") != "product" or
+            value.get("status_identity_verified") is not True or
+            value.get("authenticated_session_identity") is not True or
+            value.get("same_session_reuse_path") not in {
+                "private_endpoint", "private_input_replay", "private_long_anchor",
+            } or value.get("isolated_session_reuse_path") not in {"root", "shared_stable_prefix"}):
+        raise LaneError("canonical product protocol result is incomplete or non-passing")
+
+
 def stage_lane_qualification(state: dict[str, Any], summary: dict[str, Any], lane: Lane) -> dict[str, Any]:
     """Adapt completed receipts, not asserted flags, to the product's native lane shape."""
     if (state.get("status") != "passed" or summary.get("status") != "passed" or
@@ -679,11 +691,7 @@ def stage_lane_qualification(state: dict[str, Any], summary: dict[str, Any], lan
             startup.get("gpu_name") != lane.spec["gpu"]["name"] or type(startup.get("gpu_index")) is not int):
         raise LaneError("lane lacks the controller's completed launch-scoped GPU attestation")
     for name in ("protocol", "pressure_protocol"):
-        observed = receipts[name]["protocol"]
-        checks = observed.get("checks")
-        if (observed.get("status") != "passed" or not isinstance(checks, dict) or
-                not checks or any(value is not True for value in checks.values())):
-            raise LaneError(f"{name} lacks passing real protocol checks")
+        require_product_protocol(receipts[name]["protocol"])
     context = receipts["context_128k"]
     restart = receipts["restart"]
     stop = restart["managed_stop"]
@@ -738,15 +746,8 @@ def stage_lane_qualification(state: dict[str, Any], summary: dict[str, Any], lan
             "managed_stop": lane.spec["lifecycle"]["managed_stop"],
             "graceful_stop_timeout_seconds": lane.spec["lifecycle"]["graceful_stop_timeout_seconds"],
         },
-        "protocol": protocol["protocol"],
-        "protocol_under_pool_pressure": {
-            "artifact_type": receipts["pressure_protocol"]["protocol"]["artifact_type"],
-            "status": receipts["pressure_protocol"]["protocol"]["status"],
-            "host_context_mib": receipts["pressure_protocol"]["host_context_mib"],
-            "device_state_slots": receipts["pressure_protocol"]["device_state_slots"],
-            "checks_passed": len(receipts["pressure_protocol"]["protocol"]["checks"]),
-            "checks": receipts["pressure_protocol"]["protocol"]["checks"],
-        },
+        "protocol": protocol,
+        "protocol_under_pool_pressure": receipts["pressure_protocol"],
         "long_session": context, "persistence": persistence, "rollback": receipts["rollback"],
         "state_security": security,
         "golden_equivalent": {
@@ -833,7 +834,7 @@ class Orchestrator:
         self.state_path = config.state_dir / "state.json"
         self.receipt_dir = config.state_dir / "receipts"
         self.local_stage = config.state_dir / "stage"
-        self.builder_root = f"D:/overnight/C3/native-{self.lane.name}-{self.head8}"
+        self.builder_root = f"D:/overnight/C3/native-{self.lane.name}-{self.tool_head[:8]}"
         self.builder_source = f"{self.builder_root}/source"
         self.builder_build = f"{self.builder_root}/build"
         self.builder_bin = f"{self.builder_root}/neutral-bin"
@@ -843,7 +844,7 @@ class Orchestrator:
         self.builder_scratch_b = f"{self.builder_root}/scratch-package-b"
         self.builder_script = f"{self.builder_root}/qualify_native.py"
         self.target_root = (
-            f"C:/ProgramData/NInferQualification/C3-{config.scratch_task_suffix}-{self.lane.name}-{self.head8}"
+            f"C:/ProgramData/NInferQualification/C3-{config.scratch_task_suffix}-{self.lane.name}-{self.tool_head[:8]}"
         )
         self.state = self._load_state()
 
@@ -1216,7 +1217,10 @@ Copy-Item (Join-Path $build 'apps\\ninfer.exe'),(Join-Path $build 'apps\\ninfer-
 $dumpbin=(Get-Command dumpbin.exe).Source
 $runtimeDlls=@(Copy-NativeRuntimeDependencies -Build $build -Bin $bin -CudaCompiler {ps_quote(self.config.builder_cuda_compiler)} -MsvcRedist ([string]$env:VCToolsRedistDir) -Dumpbin $dumpbin -DirectStorageDlls @({", ".join(ps_quote(name) for name in DIRECTSTORAGE_DLLS)}))
 $items=Get-ChildItem $bin -File|Sort-Object Name|ForEach-Object{{[ordered]@{{name=$_.Name;bytes=$_.Length;sha256=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}}}}
-[Console]::Out.WriteLine(([ordered]@{{status='passed';source_commit=(git -C $source rev-parse HEAD);bundle_sha256={ps_quote(bundle_sha)};cuda_architecture={ps_quote(self.lane.cuda_architecture)};build_profile={ps_quote(self.lane.build_profile)};runtime_dlls=$runtimeDlls;files=$items}}|ConvertTo-Json -Depth 6 -Compress))
+$runtimeSource=[string](&git -C $source rev-parse HEAD)
+git -C $source checkout --quiet --detach {self.tool_head}
+if($LASTEXITCODE -ne 0){{throw 'packaging source checkout failed'}}
+[Console]::Out.WriteLine(([ordered]@{{status='passed';source_commit=$runtimeSource;package_source_sha=(git -C $source rev-parse HEAD);bundle_sha256={ps_quote(bundle_sha)};cuda_architecture={ps_quote(self.lane.cuda_architecture)};build_profile={ps_quote(self.lane.build_profile)};runtime_dlls=$runtimeDlls;files=$items}}|ConvertTo-Json -Depth 6 -Compress))
 """
         receipt = self.remote_json(self.config.builder, build_script, timeout=5400)
         return receipt
@@ -1242,10 +1246,10 @@ if((Get-FileHash $bundle -Algorithm SHA256).Hash.ToLowerInvariant() -cne {ps_quo
 if(-not(Test-Path $source)){{
   git clone --quiet --config core.autocrlf=false $bundle $source
   if($LASTEXITCODE -ne 0){{throw 'qualified source clone failed'}}
-  git -C $source checkout --quiet --detach {self.head}
+  git -C $source checkout --quiet --detach {self.tool_head}
   if($LASTEXITCODE -ne 0){{throw 'qualified source checkout failed'}}
 }}
-if([string](&git -C $source rev-parse HEAD) -cne {ps_quote(self.head)} -or [string](&git -C $source status --porcelain)){{throw 'qualified source staging is not the exact clean candidate'}}
+if([string](&git -C $source rev-parse HEAD) -cne {ps_quote(self.tool_head)} -or [string](&git -C $source status --porcelain)){{throw 'qualified source staging is not the exact clean packaging source'}}
 $inputBin={ps_quote(self.config.qualified_runtime_bin)}
 $bin={ps_quote(self.builder_bin)}
 New-Item -ItemType Directory -Path $bin|Out-Null
@@ -1321,9 +1325,9 @@ if($LASTEXITCODE -ne 0){{throw 'qualified native identity verification failed'}}
                 "public_generic_references": generic_references}
 
     def package(self) -> dict[str, Any]:
-        epoch = run(["git", "show", "-s", "--format=%ct", self.head], cwd=self.config.source_root).stdout.strip()
+        epoch = run(["git", "show", "-s", "--format=%ct", self.tool_head], cwd=self.config.source_root).stdout.strip()
         config_bytes = subprocess.check_output(
-            ["git", "show", f"{self.head}:packaging/windows/lanes/{self.lane.name}/server-config.json"],
+            ["git", "show", f"{self.tool_head}:packaging/windows/lanes/{self.lane.name}/server-config.json"],
             cwd=self.config.source_root,
         )
         config_sha = hashlib.sha256(config_bytes).hexdigest()
@@ -1338,7 +1342,7 @@ function Build-One([string]$Out,[string]$Config){{
   $parameters=@{{
     Lane={ps_quote(self.lane.name)};SourceRoot=$source;
     NInferExecutable=(Join-Path $bin 'ninfer.exe');ServerExecutable=(Join-Path $bin 'ninfer-serve.exe');
-    BenchmarkExecutable=(Join-Path $bin 'ninfer_bench.exe');ReleaseHeadSha={ps_quote(self.head)};RuntimeSourceSha={ps_quote(self.head)};
+    BenchmarkExecutable=(Join-Path $bin 'ninfer_bench.exe');ReleaseHeadSha={ps_quote(self.tool_head)};RuntimeSourceSha={ps_quote(self.head)};
     RuntimeFile=$runtime;DependencySbomTool={ps_quote(self.config.dependency_sbom_tool)};
     VcpkgResolved={ps_quote(self.config.vcpkg_resolved)};CudaInventory={ps_quote(self.config.cuda_inventory)};
     ThirdPartyInventory={ps_quote(self.config.third_party_inventory)};RuntimeInventory={ps_quote(self.config.runtime_inventory)};
@@ -1592,12 +1596,14 @@ if(-not [bool]$launch.gpu_uuid_verified -or [string]$launch.gpu_uuid -cne [strin
    [string]$launch.gpu_name -cne [string]$r.gpu_name){{throw 'protocol launch lacks completed GPU attestation'}}
 $path=Join-Path ([string]$r.release_root) 'bin\\qualification\\agent_protocol.py'
 $out=Join-Path $stage 'evidence\\agent-protocol.json'
-&python $path --base-url ('http://'+[string]$r.host+':'+[string]$r.port) --model {ps_quote(self.lane.model_id)} --api-key-file ([string]$r.api_key_file) --expect-binary-sha256 ([string]$r.binary_sha256) --expect-model-artifact-sha256 ([string]$r.model_artifact_sha256) --expect-config-sha256 ([string]$r.config_sha256) --expect-deployment-profile ([string]$r.deployment_profile) 1>$out
+&python $path --contract product --base-url ('http://'+[string]$r.host+':'+[string]$r.port) --model {ps_quote(self.lane.model_id)} --api-key-file ([string]$r.api_key_file) --expect-binary-sha256 ([string]$r.binary_sha256) --expect-model-artifact-sha256 ([string]$r.model_artifact_sha256) --expect-config-sha256 ([string]$r.config_sha256) --expect-deployment-profile ([string]$r.deployment_profile) 1>$out
 if($LASTEXITCODE -ne 0){{throw 'protocol failed'}}
 $v=Get-Content $out -Raw | ConvertFrom-Json
-[Console]::Out.WriteLine(([ordered]@{{status=[string]$v.status;checks=@($v.checks.PSObject.Properties).Count;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant();protocol=$v;identity=$status.identity;runtime=$status.runtime;startup_attestation=@{{request_log_schema=30;gpu_uuid_verified=$true;gpu_index=[int]$launch.gpu_device;gpu_name=[string]$launch.gpu_name}}}}|ConvertTo-Json -Depth 16 -Compress))
+[Console]::Out.WriteLine(([ordered]@{{status='passed';sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant();protocol=$v;identity=$status.identity;runtime=$status.runtime;startup_attestation=@{{request_log_schema=30;gpu_uuid_verified=$true;gpu_index=[int]$launch.gpu_device;gpu_name=[string]$launch.gpu_name}}}}|ConvertTo-Json -Depth 16 -Compress))
 """
-        return self.remote_json(self.config.target, script, timeout=1200)
+        receipt = self.remote_json(self.config.target, script, timeout=1200)
+        require_product_protocol(receipt["protocol"])
+        return receipt
 
     def pressure_protocol(self) -> dict[str, Any]:
         """Exercise the installed bytes with a reduced shared Host budget and scratch store.
@@ -1687,10 +1693,10 @@ try{{
      [string]$start.server_instance_id -cnotmatch ('^serve-'+$process.Id+'-[0-9]+$')){{throw 'pressure server_start GPU UUID mismatch'}}
   $path=Join-Path ([string]$r.release_root) 'bin\\qualification\\agent_protocol.py'
   $out=Join-Path $stage 'evidence\\agent-protocol-pressure.json'
-  &python $path --base-url ('http://'+[string]$r.host+':'+[string]$port) --model {ps_quote(self.lane.model_id)} --api-key-file ([string]$r.api_key_file) --expect-binary-sha256 ([string]$r.binary_sha256) --expect-model-artifact-sha256 ([string]$r.model_artifact_sha256) --expect-config-sha256 ([string]$r.config_sha256) --expect-deployment-profile ([string]$r.deployment_profile) 1>$out
+  &python $path --contract product --base-url ('http://'+[string]$r.host+':'+[string]$port) --model {ps_quote(self.lane.model_id)} --api-key-file ([string]$r.api_key_file) --expect-binary-sha256 ([string]$r.binary_sha256) --expect-model-artifact-sha256 ([string]$r.model_artifact_sha256) --expect-config-sha256 ([string]$r.config_sha256) --expect-deployment-profile ([string]$r.deployment_profile) 1>$out
   if($LASTEXITCODE -ne 0){{throw ('protocol under shared Host pressure failed: '+((Get-Content $stderr -Tail 2) -join ' | '))}}
   $v=Get-Content $out -Raw | ConvertFrom-Json
-  [Console]::Out.WriteLine(([ordered]@{{status=[string]$v.status;host_context_mib='{pressure_mib}';device_state_slots=[int]$c.context_cache.device_state_slots;checks=@($v.checks.PSObject.Properties).Count;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant();protocol=$v}}|ConvertTo-Json -Depth 16 -Compress))
+  [Console]::Out.WriteLine(([ordered]@{{status='passed';host_context_mib='{pressure_mib}';device_state_slots=[int]$c.context_cache.device_state_slots;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant();protocol=$v}}|ConvertTo-Json -Depth 16 -Compress))
 }}
 finally{{
   try{{
@@ -1704,7 +1710,9 @@ finally{{
   }}
 }}
 """
-        return self.remote_json(self.config.target, script, timeout=1800)
+        receipt = self.remote_json(self.config.target, script, timeout=1800)
+        require_product_protocol(receipt["protocol"])
+        return receipt
 
     def context(self) -> dict[str, Any]:
         return self.target_internal("_long", "--fixture", f"{self.target_root}/long_niah_128k.json", timeout=1800)
@@ -1872,7 +1880,9 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
                 "c1_max_memory_used_mib": benchmark["max_memory_used_mib"],
                 "c1_mtp_acceptance_percent": benchmark["mtp_acceptance_percent"],
                 "context_elapsed_seconds": context["elapsed_seconds"],
-                "protocol_checks": self.state["phases"]["protocol"]["receipt"]["checks"],
+                "protocol_contract": self.state["phases"]["protocol"]["receipt"]["protocol"]["contract"],
+                "same_session_reuse_path": self.state["phases"]["protocol"]["receipt"]["protocol"]["same_session_reuse_path"],
+                "isolated_session_reuse_path": self.state["phases"]["protocol"]["receipt"]["protocol"]["isolated_session_reuse_path"],
                 "rollback": self.state["phases"]["rollback"]["receipt"]["status"],
                 "rollback_predecessor_stop_mode": self.state["phases"]["rollback"]["receipt"].get("predecessor_stop_mode"),
                 "security_low_privilege_read_denials": self.state["phases"]["security"]["receipt"]["low_privilege_read_denials"],

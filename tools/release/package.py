@@ -630,7 +630,7 @@ def windows_support_files(
         ("LICENSE", "LICENSE"),
         ("README.md", "README.md"),
         *[(f"{lifecycle}/{name}", name) for name in _WINDOWS_LIFECYCLE_FILES],
-        (f"{lifecycle}/agent_protocol.py", "smoke/agent_protocol.py"),
+        ("tools/smoke/agent_protocol.py", "smoke/agent_protocol.py"),
         ("tools/smoke/serve_contract.py", "smoke/serve_contract.py"),
         (f"{lane}/release-spec.json", "release-spec.json"),
     ]

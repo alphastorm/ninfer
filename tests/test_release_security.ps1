@@ -432,10 +432,10 @@ try {
     }
     Assert-True ($null -ne $global:NInferTestGpuCounterName) 'cannot observe selected GPU adapter LUID for security regression'
 
+    $gpuOwnerSource = (Get-Content -LiteralPath $GpuOwnerControllerPath -Raw -Encoding UTF8).Replace(
+        [string]([char]13 + [char]10), [string][char]10
+    )
     if ($InstrumentGpuPowerFixture) {
-        $gpuOwnerSource = (Get-Content -LiteralPath $GpuOwnerControllerPath -Raw -Encoding UTF8).Replace(
-            [string]([char]13 + [char]10), [string][char]10
-        )
         $fixtureResolver = '$nvidiaSmi = ''nvidia-smi.exe'''
         $resolverStartMarker = '$nvidiaSmi = Join-Path ([Environment]::GetFolderPath(''System'')) ''nvidia-smi.exe'''
         $resolverEndMarker = "    throw 'trusted nvidia-smi installation is missing'`n}"
@@ -448,18 +448,37 @@ try {
         $resolverEnd += $resolverEndMarker.Length
         $gpuOwnerSource = $gpuOwnerSource.Substring(0, $resolverStart) + $fixtureResolver +
             $gpuOwnerSource.Substring($resolverEnd)
-        $instrumentedGpuOwner = Join-Path $testRoot 'Control-GpuOwner.instrumented.ps1'
-        [IO.File]::WriteAllText($instrumentedGpuOwner, $gpuOwnerSource, [Text.UTF8Encoding]::new($false))
-        Copy-Item -LiteralPath $StateProtectionPath -Destination (Join-Path $testRoot 'Protect-StateRoot.ps1')
-        $GpuOwnerControllerPath = $instrumentedGpuOwner
     }
+    # Only the temporary test copy substitutes resident-memory samples. Physical power
+    # commands keep the trusted absolute executable unless the explicit power fixture is set.
+    $tokens = $null; $errors = $null
+    $ownerAst = [Management.Automation.Language.Parser]::ParseInput($gpuOwnerSource, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -ne 0) { throw 'GPU-owner fixture source does not parse' }
+    $memoryFunction = $ownerAst.Find({
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -ceq 'Get-GpuMemoryUsedBytes'
+    }, $true)
+    if ($null -eq $memoryFunction) { throw 'GPU-owner resident-memory function is missing' }
+    $memoryCalls = @($memoryFunction.FindAll({
+        param($node)
+        $node -is [Management.Automation.Language.CommandAst] -and $node.GetCommandName() -ceq 'Invoke-NvidiaSmi'
+    }, $true))
+    if ($memoryCalls.Count -ne 1) { throw 'GPU-owner resident-memory query fixture anchor changed' }
+    $memoryCommand = $memoryCalls[0].CommandElements[0].Extent
+    $gpuOwnerSource = $gpuOwnerSource.Remove($memoryCommand.StartOffset, $memoryCommand.Text.Length).Insert(
+        $memoryCommand.StartOffset, 'Invoke-NInferMemoryFixture'
+    )
+    $instrumentedGpuOwner = Join-Path $testRoot 'Control-GpuOwner.instrumented.ps1'
+    [IO.File]::WriteAllText($instrumentedGpuOwner, $gpuOwnerSource, [Text.UTF8Encoding]::new($false))
+    Copy-Item -LiteralPath $StateProtectionPath -Destination (Join-Path $testRoot 'Protect-StateRoot.ps1')
+    $GpuOwnerControllerPath = $instrumentedGpuOwner
 
     $managedLimitW = if ($QualifiedPowerLimitW -gt 0) { $QualifiedPowerLimitW } else { $OwnerPowerLimitW }
     $ownerPolicy = @{ GpuUuid = $GpuUuid; QualifiedPowerLimitW = $QualifiedPowerLimitW; PriorPowerLimitMinW = 100; PriorPowerLimitMaxW = 1000 }
     $realStatus = & $realGpuOwnerControllerPath -Action status -StateRoot (Join-Path $testRoot 'observed-gpu-owner') @ownerPolicy | ConvertFrom-Json
     Assert-True ([int]$realStatus.interactive_gpu_workload_count -eq 0) 'close selected-card interactive workloads before the real power regression'
     $global:NInferTestPowerLimitW = $OwnerPowerLimitW
-    $global:NInferTestInteractiveGpuActive = $false
+    $global:NInferTestMemoryUsedMiB = '186'
     $global:NInferNvidiaShimCalls = 0
     $global:NInferTestHideSelectedAdapter = $false
     $global:NInferTestCounterFailure = $false
@@ -485,6 +504,15 @@ try {
         }
         Set-Variable -Name LASTEXITCODE -Value 0 -Scope 1
     }
+    function global:Invoke-NInferMemoryFixture([string[]]$Arguments) {
+        $selector = [Array]::IndexOf($Arguments, '-i')
+        if ($selector -lt 0 -or $selector + 1 -ge $Arguments.Count -or
+            $Arguments[$selector + 1] -cne $GpuUuid -or
+            $Arguments -notcontains '--query-gpu=memory.used') {
+            throw 'resident-memory fixture received an unbound or different measurement'
+        }
+        return $global:NInferTestMemoryUsedMiB
+    }
     $absolutePower = ((& $absoluteNvidiaSmi -i $GpuUuid --query-gpu=power.limit --format=csv,noheader,nounits) | Out-String).Trim()
     Assert-True ($LASTEXITCODE -eq 0 -and $absolutePower -match '^[0-9]+(?:[.][0-9]+)?$') 'trusted absolute nvidia-smi query failed'
     Assert-True ($global:NInferNvidiaShimCalls -eq 0) 'path-qualified nvidia-smi unexpectedly invoked the function shim'
@@ -496,9 +524,7 @@ try {
             return @($global:NInferTestAdapterRows | Where-Object { -not $global:NInferTestHideSelectedAdapter -or [string]$_.Name -cne $global:NInferTestSelectedAdapterName })
         }
         if ($ClassName -cne 'Win32_PerfFormattedData_GPUPerformanceCounters_GPUProcessMemory') { throw 'unexpected counter class' }
-        if ($global:NInferTestInteractiveGpuActive) {
-            [pscustomobject]@{ Name = $global:NInferTestGpuCounterName; DedicatedUsage = 2GB }
-        }
+        [pscustomobject]@{ Name = $global:NInferTestGpuCounterName; DedicatedUsage = 2GB }
         if ($global:NInferTestOtherCounterName) {
             [pscustomobject]@{ Name = $global:NInferTestOtherCounterName; DedicatedUsage = 3800MB }
         }
@@ -508,12 +534,25 @@ try {
     $gpuStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy) | Out-String).Trim() | ConvertFrom-Json)
     Assert-True ([int]$gpuStatus.power_limit_w -eq $OwnerPowerLimitW -and -not [bool]$gpuStatus.paused) 'initial GPU-owner status envelope mismatch'
     Assert-True ([int]$gpuStatus.interactive_gpu_workload_count -eq 0) 'idle selected adapter was blocked by another card'
+    Assert-True ([string]$gpuStatus.interactive_gpu_memory_source -ceq 'nvidia-smi.memory.used' -and
+        [long]$gpuStatus.interactive_gpu_memory_used_bytes -eq 186MB -and
+        [int]$gpuStatus.wddm_process_memory.above_threshold_process_count -eq 1) 'WDDM commit budget replaced selected-card residency'
     $global:NInferTestHideSelectedAdapter = $true
-    Assert-Rejected { & $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy | Out-Null } '*cannot observe selected GPU*' 'absent selected adapter was treated as idle'
+    $missingWddm = & $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy | ConvertFrom-Json
+    Assert-True ([string]$missingWddm.wddm_process_memory.status -ceq 'unavailable' -and
+        [int]$missingWddm.interactive_gpu_workload_count -eq 0) 'missing WDDM diagnostics blocked valid selected-card residency'
     $global:NInferTestHideSelectedAdapter = $false
     $global:NInferTestCounterFailure = $true
-    Assert-Rejected { & $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy | Out-Null } '*counter provider unavailable*' 'counter provider failure was treated as idle'
+    $failedWddm = & $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy | ConvertFrom-Json
+    Assert-True ([string]$failedWddm.wddm_process_memory.status -ceq 'unavailable' -and
+        [int]$failedWddm.interactive_gpu_workload_count -eq 0) 'WDDM diagnostic failure replaced the residency gate'
     $global:NInferTestCounterFailure = $false
+    $global:NInferTestMemoryUsedMiB = 'N/A'
+    Assert-Rejected { & $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy | Out-Null } '*cannot observe selected GPU resident memory*' 'unavailable residency was treated as idle'
+    $global:NInferTestMemoryUsedMiB = '1023'
+    $belowCeiling = & $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy | ConvertFrom-Json
+    Assert-True ([int]$belowCeiling.interactive_gpu_workload_count -eq 0) 'resident memory below 1 GiB was rejected'
+    $global:NInferTestMemoryUsedMiB = '186'
     & $GpuOwnerControllerPath -Action stop -StateRoot $gpuRoot @ownerPolicy | Out-Null
     $pausedStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy) | Out-String).Trim() | ConvertFrom-Json)
     Assert-True ([bool]$pausedStatus.paused -and [int]$pausedStatus.power_limit_w -eq $managedLimitW) 'GPU owner did not enter the qualified cap'
@@ -537,12 +576,12 @@ try {
     }
     finally { [IO.File]::WriteAllText($leasePath, $leaseBefore, [Text.UTF8Encoding]::new($false)) }
 
-    $global:NInferTestInteractiveGpuActive = $true
+    $global:NInferTestMemoryUsedMiB = '1024'
     $activeRejected = $false
     try { & $GpuOwnerControllerPath -Action stop -StateRoot $gpuRoot @ownerPolicy | Out-Null }
     catch { $activeRejected = $_.Exception.Message -like '*active interactive workload*' }
     Assert-True $activeRejected 'state-present lease acquisition did not re-check active interactive GPU work'
-    $global:NInferTestInteractiveGpuActive = $false
+    $global:NInferTestMemoryUsedMiB = '186'
     & $GpuOwnerControllerPath -Action start -StateRoot $gpuRoot @ownerPolicy | Out-Null
     $restoredStatus = (((& $GpuOwnerControllerPath -Action status -StateRoot $gpuRoot @ownerPolicy) | Out-String).Trim() | ConvertFrom-Json)
     Assert-True (-not [bool]$restoredStatus.paused -and [int]$restoredStatus.power_limit_w -eq $OwnerPowerLimitW) 'GPU owner did not restore the prior power limit'
@@ -665,7 +704,10 @@ try {
         prepared_lease_restore_assertions = $preparedLeaseRestoreAssertions
         gpu_binding_lease_refusal_assertions = 2
         startup_gpu_evidence_assertions = 10
-        gpu_workload_evidence_class = 'real-adapter-luids-with-synthetic-process-usage-and-real-idle-precheck'
+        gpu_workload_evidence_class = 'selected-nvml-residency-function-shim-and-real-idle-precheck'
+        gpu_workload_measurement_source = 'nvidia-smi.memory.used'
+        wddm_diagnostics_only_assertions = 2
+        resident_memory_boundary_assertions = 2
         request_jsonl_under_protected_state = $true
         request_jsonl_effective_access_denials = 2
         managed_release_acl_state_assertions = $managedReleasesVerified
@@ -689,5 +731,6 @@ finally {
     if ($userCreated) { & net.exe user $user '/delete' | Out-Null }
     Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath Function:\nvidia-smi.exe -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath Function:\Invoke-NInferMemoryFixture -Force -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath Function:\Get-CimInstance -Force -ErrorAction SilentlyContinue
 }

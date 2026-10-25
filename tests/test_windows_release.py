@@ -7,6 +7,7 @@ import base64
 from decimal import Decimal
 import importlib.util
 import io
+import inspect
 import json
 from pathlib import Path
 import re
@@ -97,6 +98,16 @@ def ps_function(text: str, name: str) -> str:
     return text[start:end if end >= 0 else len(text)]
 
 
+def product_protocol_fixture() -> dict:
+    """Canonical metadata for adapter units, not an observed model-run receipt."""
+    return {
+        "artifact_type": "ninfer_agent_protocol_smoke", "schema_version": 2,
+        "contract": "product", "status_identity_verified": True,
+        "authenticated_session_identity": True, "same_session_reuse_path": "private_input_replay",
+        "isolated_session_reuse_path": "root",
+    }
+
+
 class MultiGpuHostTests(unittest.TestCase):
     def test_no_unindexed_gpu_queries_or_sets(self) -> None:
         sources = {path: (ROOT / path).read_text(encoding="utf-8") for path in GPU_SCAN_FILES}
@@ -184,7 +195,7 @@ class MultiGpuHostTests(unittest.TestCase):
             state_root="C:/state", target_root="C:/qualification", gpu_uuid="GPU-00000000-0000-0000-0000-000000000001",
             lane=SimpleNamespace(model_id="model", spec=json.loads(
                 (WINDOWS / "lanes/rtx3090/release-spec.json").read_text())),
-            remote_json=lambda host, script, **kwargs: captured.append(script) or {},
+            remote_json=lambda host, script, **kwargs: captured.append(script) or {"protocol": product_protocol_fixture()},
             config=SimpleNamespace(target="not-contacted", pressure_port=18201),
         )
         qualify_native.Orchestrator.pressure_protocol(subject)
@@ -257,10 +268,25 @@ class MultiGpuHostTests(unittest.TestCase):
         for name in ("Wait-Ready", "Get-StatusObject", "Start-ManagedRelease"):
             self.assertIn("Assert-RuntimeGpuReady $release", ps_function(controller, name))
 
-    def test_owner_refuses_ambiguity_and_scopes_counter_luids(self) -> None:
+    def test_gpu_workload_gate_uses_selected_resident_memory(self) -> None:
+        owner = (WINDOWS / "Control-GpuOwner.ps1").read_text()
+        memory = ps_function(owner, "Get-GpuMemoryUsedBytes")
+        self.assertIn("'-i', $GpuUuid", memory)
+        self.assertIn("'--query-gpu=memory.used'", memory)
+        gate = ps_function(owner, "Get-InteractiveGpuWorkloadCount")
+        self.assertIn("Get-GpuMemoryUsedBytes", gate)
+        self.assertIn("$interactiveGpuMemoryThresholdBytes", gate)
+        self.assertNotIn("Get-CimInstance", gate)
+        self.assertNotIn("Get-Wddm", gate)
+        self.assertIn("$interactiveGpuMemoryThresholdBytes = 1GB", owner)
+        status = ps_function(owner, "Write-Status")
+        self.assertIn("Get-WddmProcessMemoryDiagnostics", status)
+        self.assertIn("'nvidia-smi.memory.used'", status)
+
+    def test_owner_refuses_ambiguity_and_scopes_diagnostic_counter_luids(self) -> None:
         owner = (WINDOWS / "Control-GpuOwner.ps1").read_text()
         self.assertIn("$rows.Count -ne 1", ps_function(owner, "Resolve-OwnerGpu"))
-        count = ps_function(owner, "Get-InteractiveGpuWorkloadCount")
+        count = ps_function(owner, "Get-WddmProcessMemoryDiagnostics")
         for guard in ("Get-AdapterPciAddress $high $low", "$addresses[$luid] -ceq $gpuPciAddress",
                       "$selectedLuids.Count -eq 0", "$ownerPid = [int]$Matches[1]",
                       "Win32_PerfFormattedData_GPUPerformanceCounters_GPUAdapterMemory",
@@ -493,7 +519,7 @@ class QualificationRestorationTests(unittest.TestCase):
                 "lineage_base_sha": "fixture", "model_sha256": "fixture",
                 "binaries": {"server_sha256": "fixture"}, "config_sha256": "fixture", "support_assets": {},
             },
-            "protocol": {"checks": 1}, "rollback": {"status": "passed"},
+            "protocol": {"protocol": product_protocol_fixture()}, "rollback": {"status": "passed"},
             "security": {"low_privilege_read_denials": 1}, "omp": {"exact_final_answer": True},
         }
         for name, receipt in receipts.items():
@@ -737,8 +763,7 @@ class ScratchQualificationTests(unittest.TestCase):
             "public_configuration_sha256": package["config_sha256"],
             "scratch_configuration_sha256": scratch["config_sha256"],
         }
-        protocol = {"artifact_type": "ninfer_agent_protocol_smoke", "schema_version": 1,
-                    "status": "passed", "checks": {"unit_oracle": True}}
+        protocol = product_protocol_fixture()
         identity = {
             "patch_stack_sha": "a" * 40, "source_dirty": False,
             "upstream_base_sha": package["upstream_base_sha"], "build_profile": package["build_profile"],
@@ -749,11 +774,11 @@ class ScratchQualificationTests(unittest.TestCase):
         receipts = {
             "package": package, "transfer_install": {"package_sha256": scratch["package"]["sha256"]},
             "protocol": {
-                "protocol": protocol, "identity": identity,
+                "status": "passed", "protocol": protocol, "identity": identity,
                 "startup_attestation": {"request_log_schema": 30, "gpu_uuid_verified": True,
                                         "gpu_index": 0, "gpu_name": self.spec["gpu"]["name"]},
             },
-            "pressure_protocol": {"protocol": copy.deepcopy(protocol), "host_context_mib": "1",
+            "pressure_protocol": {"status": "passed", "protocol": copy.deepcopy(protocol), "host_context_mib": "1",
                                   "device_state_slots": 2},
             "context_128k": {"prompt_tokens": 130048, "exact_output": qualify_native.EXPECTED_LONG},
             "restart": {
@@ -795,7 +820,7 @@ class ScratchQualificationTests(unittest.TestCase):
             lambda state, summary: state["phases"]["restart"].update(status="failed"),
             lambda state, summary: summary["restoration"].update(status="failed"),
             lambda state, summary: state["phases"]["protocol"]["receipt"]["identity"].update(config_sha256="c" * 64),
-            lambda state, summary: state["phases"]["protocol"]["receipt"]["protocol"]["checks"].update(unit_oracle=False),
+            lambda state, summary: state["phases"]["protocol"]["receipt"]["protocol"].update(authenticated_session_identity=False),
             lambda state, summary: state["phases"]["package"]["receipt"]["scratch_equivalence"].update(public_package_executed=True),
             lambda state, summary: state["phases"]["transfer_install"]["receipt"].update(package_sha256="f" * 64),
             lambda state, summary: state["phases"]["restart"]["receipt"].update(new_pid=1),
@@ -808,8 +833,36 @@ class ScratchQualificationTests(unittest.TestCase):
             with self.assertRaises(qualify_native.LaneError):
                 qualify_native.stage_lane_qualification(state, summary, self.lane)
 
+    def test_product_protocol_refuses_legacy_or_nonprivate_results(self) -> None:
+        state, _ = self.stage_fixture()
+        protocol = state["phases"]["protocol"]["receipt"]["protocol"]
+        for damage in (
+            {"schema_version": 1}, {"contract": "public"}, {"status_identity_verified": False},
+            {"authenticated_session_identity": False}, {"same_session_reuse_path": "root"},
+            {"isolated_session_reuse_path": "private_input_replay"},
+        ):
+            with self.subTest(damage=damage), self.assertRaises(qualify_native.LaneError):
+                qualify_native.require_product_protocol({**protocol, **damage})
+
 
 class SharedLifecycleTreeTests(unittest.TestCase):
+    def test_native_protocol_uses_canonical_product_smoke(self) -> None:
+        options = SimpleNamespace(
+            lane_dir="packaging/windows/lanes/rtx3090", lifecycle_dir="packaging/windows",
+            release_head_sha="f" * 40, release_notes=None, release_version="0.7.0-beta.1",
+        )
+        with patch.object(release_package, "read_committed_file", return_value=b"committed") as read:
+            release_package.windows_support_files(options, ROOT, "payload")
+        sources = {call.args[2] for call in read.call_args_list}
+        with self.subTest(invariant="one canonical fixture"):
+            self.assertIn("tools/smoke/agent_protocol.py", sources)
+            self.assertNotIn("packaging/windows/agent_protocol.py", sources)
+            self.assertFalse((WINDOWS / "agent_protocol.py").exists())
+        self.assertIn("tools/smoke/serve_contract.py", sources)
+        for method in (qualify_native.Orchestrator.protocol, qualify_native.Orchestrator.pressure_protocol):
+            with self.subTest(method=method.__name__):
+                self.assertIn("--contract product", inspect.getsource(method))
+
     def test_controller_server_options_match_runtime(self) -> None:
         controller = (WINDOWS / "Control-Release.ps1").read_text(encoding="utf-8")
         start = controller.index("$serverArguments =")
@@ -1109,10 +1162,11 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         """One tree serves every lane: GPU names, architectures, power figures, release ids, and
         task names come from the lane specification, never from the scripts."""
         forbidden = re.compile(r"3090|4090|5090|sm_8[69]|sm_120|\b(?:300|370|450)\s*W\b|omp-v0\.2|NInfer-Qwen38-[0-9]{4}")
-        for name in SHARED_SCRIPTS + ("agent_protocol.py",):
-            text = (WINDOWS / name).read_text(encoding="utf-8")
+        paths = [WINDOWS / name for name in SHARED_SCRIPTS] + [ROOT / "tools/smoke/agent_protocol.py"]
+        for path in paths:
+            text = path.read_text(encoding="utf-8")
             hits = {match.group(0) for match in forbidden.finditer(text)}
-            self.assertEqual(hits, set(), f"{name} carries lane literals {sorted(hits)}")
+            self.assertEqual(hits, set(), f"{path.name} carries lane literals {sorted(hits)}")
 
     def test_packaged_lifecycle_inventory_is_one_set(self) -> None:
         packager_files = set(release_package._WINDOWS_LIFECYCLE_FILES)
@@ -1120,9 +1174,10 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         start = installer.index("$lifecycleBin = ")
         installed = set(re.findall(r"'((?:Control|Install|Protect)-[A-Za-z]+\.ps1)'", installer[start:start + 600]))
         self.assertEqual(installed, packager_files)
-        for name in packager_files | {"agent_protocol.py", "RELEASE_NOTES.md"}:
+        for name in packager_files | {"RELEASE_NOTES.md"}:
             self.assertTrue((WINDOWS / name).is_file(), name)
-        self.assertTrue((ROOT / "tools/smoke/serve_contract.py").is_file())
+        for name in ("agent_protocol.py", "serve_contract.py"):
+            self.assertTrue((ROOT / "tools/smoke" / name).is_file())
 
 
 class LaneSpecificationTests(unittest.TestCase):
@@ -1205,7 +1260,7 @@ class LaneSpecificationTests(unittest.TestCase):
 class PackagedStatusTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        spec = importlib.util.spec_from_file_location("packaged_agent_protocol", WINDOWS / "agent_protocol.py")
+        spec = importlib.util.spec_from_file_location("packaged_agent_protocol", ROOT / "tools/smoke/agent_protocol.py")
         assert spec is not None and spec.loader is not None
         cls.protocol = importlib.util.module_from_spec(spec)
         with patch.object(sys, "path", [str(ROOT / "tools/smoke"), *sys.path]):
@@ -1241,7 +1296,7 @@ class PackagedStatusTests(unittest.TestCase):
 
     def test_schema2_accepts_real_counters_with_unavailable_capacity_fields(self) -> None:
         status, args = self.fixture()
-        self.assertEqual(self.protocol.validate_status(status, args)["deployment_profile"], "fixture")
+        self.assertIsNone(self.protocol.validate_status_identity(status, args))
 
     def test_schema1_or_nulled_mandatory_fields_never_pass_as_schema2(self) -> None:
         for path in (
@@ -1255,8 +1310,8 @@ class PackagedStatusTests(unittest.TestCase):
             for key in path[:-1]:
                 node = node[key]
             node[path[-1]] = 1 if path == ("schema_version",) else None
-            with self.subTest(path=path), self.assertRaises(self.protocol.ContractError):
-                self.protocol.validate_status(status, args)
+            with self.subTest(path=path), self.assertRaises(self.protocol.ProtocolError):
+                self.protocol.validate_status_identity(status, args)
 
     def test_layout_translation_refuses_a_mismatched_budget(self) -> None:
         spec = json.loads((WINDOWS / "lanes/rtx4090/release-spec.json").read_text())
@@ -1293,6 +1348,38 @@ ConvertTo-Json -InputObject @($failures) -Compress
 """)
         self.assertEqual(parsed, [])
 
+    def test_residency_ceiling_is_independent_of_wddm_commit(self) -> None:
+        path = qualify_native.ps_quote(str(WINDOWS / "Control-GpuOwner.ps1"))
+        observed = self.invoke(f"""
+$ast=[Management.Automation.Language.Parser]::ParseFile({path},[ref]$null,[ref]$null)
+foreach($name in @('Get-GpuMemoryUsedBytes','Get-InteractiveGpuWorkloadCount','Assert-InteractiveGpuWorkloadAbsent','Write-Status')){{
+  $node=$ast.Find({{param($entry) $entry -is [Management.Automation.Language.FunctionDefinitionAst] -and $entry.Name -ceq $name}},$true)
+  . ([scriptblock]::Create($node.Extent.Text))
+}}
+$GpuUuid='GPU-00000000-0000-4000-8000-000000000001'
+$gpuPciBusId='00000000:01:00.0';$qualifiedPowerLimitW=0
+$interactiveGpuMemoryThresholdBytes=1GB
+function Invoke-NvidiaSmi([string[]]$Arguments){{$script:query=$Arguments;return $script:memoryMiB}}
+function Get-WddmProcessMemoryDiagnostics{{throw 'diagnostic provider unavailable'}}
+$script:memoryMiB='186';Assert-InteractiveGpuWorkloadAbsent
+$idle=Write-Status $false 450|ConvertFrom-Json
+$script:memoryMiB='1023';Assert-InteractiveGpuWorkloadAbsent
+$script:memoryMiB='1024';$ceilingRejected=$false
+try{{Assert-InteractiveGpuWorkloadAbsent}}catch{{$ceilingRejected=$_.Exception.Message -like '*active interactive workload*'}}
+$invalidRejected=0
+foreach($value in @('N/A','-1','1.5')){{
+  $script:memoryMiB=$value
+  try{{Get-GpuMemoryUsedBytes|Out-Null}}catch{{$invalidRejected++}}
+}}
+[ordered]@{{idle_bytes=$idle.interactive_gpu_memory_used_bytes;diagnostics=$idle.wddm_process_memory.status;ceiling_rejected=$ceilingRejected;invalid_rejected=$invalidRejected;query=$script:query}}|ConvertTo-Json -Compress
+""")
+        self.assertEqual(observed["idle_bytes"], 186 * 1024 * 1024)
+        self.assertEqual(observed["diagnostics"], "unavailable")
+        self.assertTrue(observed["ceiling_rejected"])
+        self.assertEqual(observed["invalid_rejected"], 3)
+        self.assertEqual(observed["query"][:2], ["-i", "GPU-00000000-0000-4000-8000-000000000001"])
+        self.assertIn("--query-gpu=memory.used", observed["query"])
+
     def test_orchestrator_scratch_and_package_scripts_parse(self) -> None:
         class CapturedScript(Exception):
             pass
@@ -1314,8 +1401,9 @@ ConvertTo-Json -InputObject @($failures) -Compress
                 "rtx4090", json.loads((WINDOWS / "lanes/rtx4090/release-spec.json").read_text()),
                 json.loads((WINDOWS / "lanes/rtx4090/server-config.json").read_text()),
             )
-            subject.head = "f" * 40
-            subject.head8 = "f" * 8
+            subject.head = "a" * 40
+            subject.tool_head = "f" * 40
+            subject.head8 = "a" * 8
             subject.script = ROOT / "tools/qualification/qualify_native.py"
             subject.local_stage = root / "stage"
             subject.builder_root = "D:/overnight/C3/native-unit"
@@ -1343,6 +1431,9 @@ ConvertTo-Json -InputObject @($failures) -Compress
                                "pressure_protocol", "security", "omp", "restore"):
                     with self.subTest(method=method), self.assertRaises(CapturedScript):
                         getattr(subject, method)()
+            self.assertIn(f"checkout --quiet --detach {subject.tool_head}", scripts[0])
+            self.assertIn(f"--source-commit {subject.head}", scripts[0])
+            self.assertIn(f"ReleaseHeadSha='{subject.tool_head}';RuntimeSourceSha='{subject.head}'", scripts[1])
             paths = []
             for index, script in enumerate(scripts):
                 path = root / f"generated-{index}.ps1"
