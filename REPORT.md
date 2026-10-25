@@ -37,6 +37,11 @@ the padded pairwise schedule only for physical U=7/14 draft extents; native
 dispatch remains unchanged. This numerical hypothesis needs its own controlled
 acceptance comparison, FP64/top-k test, and raw FP32 projection identity proof.
 
+After the revised residual schedule, Q5 input projections are the remaining
+measured projection delta (+0.270 ms/round). The same padded, rolled schedule is
+being measured at K=5,120 in the attention split, GDN split, and separate
+materialized GDN path. Only their existing guarded T=8/16 routes change.
+
 ## Disposition
 
 - Tested runtime source: `9b391d513726b3ed7d60a80a95daa68cf9dacc97`, branch `rebase/kernel-routes`, upstream base `64d10fbf`.

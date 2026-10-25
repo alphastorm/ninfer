@@ -193,8 +193,9 @@ void launch_q5_simt_cols(const Tensor& x, const Weight& weight, const Tensor& va
 template <int Tokens>
 void launch_q5_verify(const Tensor& x, const Weight& weight, const Tensor& value,
                       const Tensor& z, cudaStream_t stream) {
-    using Schedule = Q5A16SlicedKMmaSchedule<16, Tokens, 8, 2, Cache::cg, Cache::ca, 1,
-                                             kHidden, Tokens>;
+    using Schedule = Q5A16SlicedKMmaSchedule<16, Tokens, 8, Tokens == 8 ? 3 : 2,
+                                             Cache::cg, Cache::ca, 1, kHidden, Tokens,
+                                             Q5SlicedKReduction::Linear, 16, false>;
     launch_q5_a16_sliced_k_mma<Schedule>(
         q5_linear_operands(x, weight), q5_projection_output(value, z),
         LinearIdentityEpilogue{}, stream);
