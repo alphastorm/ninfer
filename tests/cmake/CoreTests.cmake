@@ -15,6 +15,9 @@ ninfer_add_test(ninfer_durable_file_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../io/test_durable_file.cpp"
   LIBRARIES ninfer_durable_io)
 set_tests_properties(ninfer_durable_file_test PROPERTIES LABELS "host")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_options(ninfer_durable_file_test PRIVATE "LINKER:--wrap=fsync")
+endif()
 
 ninfer_add_test(ninfer_file_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../io/test_file.cpp"
