@@ -1,8 +1,21 @@
 # Persistence slice
 
+## Current handoff
+
+- **Incomplete qualification:** user requested handoff after the current diagnostic step. Native K3 source is implemented; production restart/D1 and joint A3 runtime acceptance are not proven.
+- Content-safe evidence: `persistence-reservations.json` (both isolated red→green repairs), `persistence-native-r3.json` (native suite passes and genuine #414/#419 failures), `persistence-diagnostic-r4.json` (final stack/quote evidence), `persistence-cpu.json` (CPU builds and typed decoder tests).
+- Last runtime source: `3a96e84d7417a005f409bb73d8a0ac80f8112515`, plus an uncommitted private diagnostic overlay; runner reverses the overlay at exit. No production write guard was relaxed.
+- Both remaining reservation failures reach `EngineCore::run_prefill_step → Program::advance_prefill → ProgramImpl::advance_prefill → ensure_sequence_kv_mapped → KVHistoryStore::prepare_write`. Grammar: `[8,17)`, retained 8, mapped 1; MTP shared prefix: `[280,289)`, retained 280, mapped 5. **Quote 1, reservation 0**, both before and after any trim. Neither failure involves a rewind at the failing call.
+- Native source boundary: `prefill.cpp:200-204` requires an existing permit, prepares the capture boundary, then maps KV. Investigate admission/capture sequencing with EngineCache2; the stack does not establish which earlier operation invalidated the reservation. No third repair is claimed.
+- Corrected restart KV capacity now reaches native setup. None/DFlash2 still fail `matching native source missing` at fixture `generate()` source inspection (`test_checkpoint_restart.cpp:197-198`); MTP fixture still asks for draft window 7 although the runtime requires `[1,5]`. These must be corrected before any D1/Reader/preflight runtime claim.
+- Final diagnostic job `20261025T035300Z-A2-persistence-diagnostic-3a96e84d-r4-484964`: build 9.442 s; grammar/shared MTP 11.850/13.750 s; restart none/MTP/DFlash2 12.301/5.030/12.851 s; whole job 69 s, exit 1, zero leftover/unowned containers.
+- Next owner should isolate the prefill reservation invalidation without changing the guard, resolve the restart source-inspection failure and invalid MTP setup, then run only changed-input affected cases and the joint A3 production-path test. Historical G1 is not a substitute.
+
+## Implemented source and earlier evidence
+
 - Production cutover: removed both Engine tracer hooks, both Program tracer entrypoints, their native implementation, CMake registration and the experimental launcher. `NINFER_TRACER_*` no longer enables an alternative persistence path. G1 below remains historical tracer evidence, not production K3 qualification.
 - Existing K3 export/prepare/commit signatures and `Program::checkpoint_layout()` are unchanged from `cc054663`; the additive Main-approved recoverability API is described below. Native and Engine-adapter runtime qualification remains pending. CMake/launcher removal authorized by Integrator; exact Engine-hook removal authorized by EngineCache.
-- Native restart fixture covers terminal, genuinely partial accepted output, forced control and lagging-frontier pause, retaining anchor/input/endpoint and comparing their exact continuations after a separate-process import. None/MTP use the three-point terminal path. First runtime attempt refused its invalid KV capacity before execution (2048 > context 1024 × concurrency 1); corrected to 1024. **D1 restart remains unproven.**
+- Native restart fixture covers terminal, genuinely partial accepted output, forced control and lagging-frontier pause, retaining anchor/input/endpoint and comparing their exact continuations after a separate-process import. None/MTP use the three-point terminal path. First runtime attempt refused invalid KV capacity; corrected to 1024. The final source-inspection/MTP setup failures above still block execution. **D1 restart remains unproven.**
 - **#414 reproduced and still failing:** the corrected explicit-shared-marker fixture throws `KV write exceeds its page reservation` in both pre-fix and repaired MTP/fp8 candidates, at 14.303/13.750 s. DFlash2/fp8 passes: 12 clients, 1,766 reused tokens, 220 decode rounds / 423 rows, six partial-tail clients, subsequent Engine available; 17.514 s. The earlier raw-token fixture failed only its reuse assertion.
 - Expanded candidate `25571c063cf753e78cf39e3cbf88f56a040725a8` compiled on the CPU lane: **42 Ninja steps**, all seven requested targets linked; codec CTest **PASS**, 0.00 seconds (0.03 seconds total). Detached wait observed 304.39 seconds, including queue/build time; not a GPU qualification.
 - Main-approved K3/K7 amendment: typed Reader `IoUnavailable` becomes native `Unavailable/IoUnavailable`, never corruption; digest/size mismatch remains `Corrupt`. Native import releases all unpublished reservations through existing RAII. Fake-reader cases cover read and final-verification failure at each classification; runtime execution is pending.
@@ -18,8 +31,8 @@
 - G1 tracer re-expressed on `CheckpointStore::Lease`, `StateImageStore::ReadLease`, `ContextSnapshot`, `KVHistoryStore` and native sequence mapping/commit helpers. Full StateImage includes the DFlash2 ring; settled ring frontier is required.
 - G1 is a bounded experiment: one BF16/DFlash2 lane, text-only full-history Chat continuation, authenticated disk payload, real process restart, fresh native ownership. No Responses-store, multi-point, Host-only, concurrent, Windows or performance claim follows from this probe.
 - Input: fork-owned tracer at `49bc4219`; community checkpoint codec read as design reference only, no community source copied.
-- Engine hooks honor `allow_prefix_reuse`, so startup warmup never attempts import. Other architecture Programs are not given a fake persistence implementation.
-- Launcher confines containers to holder `A2` and loopback port `18120`; receipts contain names, hashes and counters, not host paths, model text or credentials.
+- Historical tracer hooks honored `allow_prefix_reuse`; these hooks are now removed. Other architecture Programs are not given a fake persistence implementation.
+- Historical tracer launcher confined containers to holder `A2` and loopback port `18120`; the launcher is now removed. Receipts contain hashes and counters, not host paths, model text or credentials.
 - G1 candidate `e442df4d` compiled successfully: 627 Ninja steps, lease `20261025T010431Z-A2-tracer-build-e442df4d-210506`, exit 0, 192 seconds, zero leftover/unowned containers. Binary SHA-256 `da54f5a633527515f78eef98f9c967f99b176a9036cd2097098aa9bfd9f362cd`; source archive SHA-256 `ac994248f3396b13a86411d656520752f0329c01c4827d0061ab31000d7f8bd6`.
 - Initial restart job `20261025T011218Z-A2-tracer-restart-e442df4d-218677` exited before health with `cudaErrorStubLibrary`; this is an invalid environment, not an engine G1 failure. Corrected image `ov-build-env:master-64d10fbf-r2`, SHA-256 `e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1`, is GPU-qualified by Infra.
 - G1 **PASS**, `G1.json`: real restart, **22,010 checkpoint-hit tokens**, **93 byte-identical continuation bytes**, 10 completion tokens. Priority-1 job `20261025T015558Z-A2-tracer-restart-e442df4d-r2-332480` exited 0 in 64 seconds, zero leftover/unowned containers. Export/import took 6.67914/4.2713 seconds; checkpoint payload 1,638,737,920 bytes. The earlier queued priority-2 proof was canceled before execution to prioritize this lead gate.
@@ -27,7 +40,7 @@
 - Native set export retains checkpoint, state and page leases, resolves views while serialized, then copies/hashes/writes through a dedicated stream and bounded pinned staging outside Engine serialization. Padding and uncommitted KV columns are zeroed. K2 layout derives from immutable geometry, not allocation capacity.
 - Host-only import reserves StateImages, logical pages, extents, inactive histories and checkpoint slots; payload descriptors and delivered-byte verification precede native publication. Prepared reservations abort through RAII; capacity refusal is separate from corruption. Endpoint/input/anchor records preserve exact text/media identity and DFlash2 ring/frontier metadata.
 - Phase 2 source `0e64cc77` built successfully on the approved CPU-only lane: **642 Ninja steps**, serving binary plus all five native/codec test targets linked; `ninfer_checkpoint_codec_test` **PASS**, 0.01 seconds (CTest total 0.04 seconds). CPU image SHA-256 `62a4feee8f308cde61095355ff11977986ecce388ad4f057c23014950b681326`. The queued NYC native job `...333221` was canceled before execution to move compilation off the GPU queue. GPU ownership/restart/regression tests were compiled but not executed; this is not native runtime qualification.
-- Release-blocking upstream [#419](https://github.com/Neroued/ninfer/issues/419): `write_pages` quoted growth against pre-rewind membership, while `prepare_write` first trims/forks to `begin`. The fix quotes post-trim membership and retains the strict write-side reservation guard. Regression: rewind a 65-token history to 8, then write through 65; one new page is required, plus one tail-COW page when the old endpoint remains retained. A separate fix refreshes page reservations for unchanged execution permits: readers acquired after admission can add COW demand. Its real-model regression pins the shared tail after admission, then re-reserves and executes the same unit. Both source-derived regressions await execution; resolution of [#414](https://github.com/Neroued/ninfer/issues/414) is not yet established.
+- Both original reservation regressions are now GPU-proven red→green, but release-blocking [#419](https://github.com/Neroued/ninfer/issues/419) and [#414](https://github.com/Neroued/ninfer/issues/414) remain reproduced in real prefill scenarios. See final stack/quote evidence above; the isolated repairs are insufficient.
 
 ## Upstream-ready draft: #414 / #419 reservation accounting
 
@@ -42,12 +55,20 @@ Patch summary: two production files (`kv_history.cpp`, `planning/request_plan.cp
 
 Evidence status: both isolated reservation regressions are GPU-proven red→green (`persistence-reservations.json`), but they are **not a complete repair**. The corrected two-client fixture reproduces #414 on both baseline and candidate MTP/fp8; the repaired real grammar scenario still reproduces #419's reservation guard. DFlash2/fp8 passes the same two-client fixture. The remaining cause is being isolated. This draft is for ProductOps; nothing has been posted upstream.
 
+The final diagnostic narrows both genuine failures to prefill mapping with one required COW page and zero reserved pages, without a rewind. Preserve the write guard and investigate the interval between admission and `advance_prefill`; this is not evidence that either isolated repair should be reverted. Do not post this as a complete-fix PR until the real scenarios turn green.
+
 ## Commands
 
 Host directory arguments below use the RUNBOOK variables `A2_SCRIPT_ROOT`, `A2_WORK_ROOT` and `V3_MODEL`; this keeps host paths out of committed evidence.
 `CPU_COMMON`, `CPU_SOURCE` and `CPU_BUILD` denote the approved CPU lane's shared wrappers and holder-A2 Git source/build directories. Its source was detached at `0e64cc77`; the build wrapper held one of the two CPU slots and used 12 workers. No GPU model test or production-service change was performed on that lane.
 
 ```sh
+gpu-lease submit --holder A2 --label persistence-proof-de640b20-r3 --priority 2 --minutes 30 -- \
+  python3 "$A2_SCRIPT_ROOT/proof-r3.py" de640b205b6c32bf42f3a56a60d32b2197e06dab
+gpu-lease wait 20261025T032946Z-A2-persistence-proof-de640b20-r3-477212 120
+gpu-lease submit --holder A2 --label persistence-diagnostic-3a96e84d-r4 --priority 2 --minutes 30 -- \
+  python3 "$A2_SCRIPT_ROOT/proof-r4.py" 3a96e84d7417a005f409bb73d8a0ac80f8112515
+gpu-lease wait 20261025T035300Z-A2-persistence-diagnostic-3a96e84d-r4-484964 120
 gpu-lease submit --holder A2 --label persistence-proof-465bccf9 --priority 2 --minutes 30 -- \
   python3 "$A2_SCRIPT_ROOT/proof-r1.py" 465bccf926bad64ed28091a80e4ed3d858ad6b6d
 gpu-lease wait 20261025T031133Z-A2-persistence-proof-465bccf9-465786 120
