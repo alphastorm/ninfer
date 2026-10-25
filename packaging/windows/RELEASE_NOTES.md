@@ -3,10 +3,16 @@
 ## 2026-10-24 — Upstream-master native packages (qualification pending)
 
 The native component candidates are `v0.7.0-qwen38-4090-beta.1` and
-`v0.7.0-qwen38-3090-beta.1`. They use upstream master `64d10fbf`, native model
-format v3 `5476dfd6`, and schema-4 release specifications/server configurations.
+`v0.7.0-qwen38-3090-beta.1`. They use upstream master `64d10fbf`, the published
+model-format-v3 artifact `81f924d4`, and schema-4 release specifications/server configurations.
 Package-build receipts remain `hardware-pending`; only a completed qualification
 and restoration chain can establish a hardware pass.
+
+Both native lanes pin the same published file as the container lane: revision
+`1cbd84e7221e51186bd7f093a149912d2489625b`, 20,437,521,664 bytes. They do not pin a
+native-specific upgrade. MTP3/INT8 KV remain explicit; the artifact's inactive
+DFlash2 component must not be materialized by the native MTP configuration, which
+is a separate native runtime qualification assertion.
 
 Master's `--host-context-mib` replaces the fork's separate Host KV/State pools.
 The layout-aware translation preserves the old Host KV budget plus 24 MTP

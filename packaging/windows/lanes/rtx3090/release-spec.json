@@ -24,13 +24,11 @@
   },
   "model": {
     "repository": "neroued/Qwen3.8-27B-NInfer",
-    "revision": "18dfc887423fa5aabf3cb56fac41490e462b3fab",
+    "revision": "1cbd84e7221e51186bd7f093a149912d2489625b",
     "filename": "qwen3_8_27b.ninfer",
-    "sha256": "5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7",
-    "bytes": 18210749936,
-    "format_version": 3,
-    "upgraded_from_sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
-    "upgrade_tool_sha": "64d10fbf9f8e6bfc79ab0570b94674c5b9997929"
+    "sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+    "bytes": 20437521664,
+    "format_version": 3
   },
   "host_context_translation": {
     "predecessor_host_kv_mib": 8192,
