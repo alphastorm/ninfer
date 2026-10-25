@@ -21,7 +21,7 @@ on:
         required: true
         type: string
       base_image:
-        description: Qualified master-compatible runtime base, ghcr.io/alphastorm/ninfer@sha256 digest
+        description: Immutable image_reference from a publish-runtime-base.yml prerelease receipt
         required: true
         type: string
 
