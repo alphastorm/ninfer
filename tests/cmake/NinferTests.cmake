@@ -62,7 +62,9 @@ function(ninfer_cuda_test_interposition target)
       IMPORTED_LOCATION "${ninfer_test_cudart_dll}" IMPORTED_IMPLIB "${import_file}")
     add_dependencies(ninfer_test_cudart ninfer_test_cudart_archive)
   endif()
-  target_link_libraries(${target} PRIVATE ninfer_test_cudart)
+  # Resolve references from CUDA-bearing static archives before considering the SDK's
+  # monolithic loader. ARGN lists additional existing dependencies of the test.
+  target_link_libraries(${target} PRIVATE ${ARGN} ninfer_core ninfer_test_cudart)
 endfunction()
 
 # Apply these to the translation unit containing the oracle, including shared
