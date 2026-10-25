@@ -60,25 +60,35 @@ std::filesystem::path checked_path(const std::filesystem::path& path) {
         input = &local;
     }
 #endif
-    for (const auto& component : input->relative_path())
-        if (component == "..")
-            throw std::invalid_argument("durable path contains traversal components");
-    const auto absolute = std::filesystem::absolute(*input).lexically_normal();
+    const auto validate_spelling = [](const std::filesystem::path& candidate) {
 #ifdef _WIN32
-    // The native store is local and same-volume. Device/UNC namespaces and alternate streams
-    // are not part of its path contract.
-    const auto root = absolute.root_name().native();
-    if (root.size() != 2 || root[1] != L':' ||
-        !((root[0] >= L'A' && root[0] <= L'Z') || (root[0] >= L'a' && root[0] <= L'z')))
-        throw std::invalid_argument("durable path requires a local drive");
-    for (const auto& component : absolute.relative_path()) {
-        const auto text = component.native();
-        if (text.find(L':') != std::wstring::npos ||
-            (!text.empty() && (text.back() == L'.' || text.back() == L' ')))
-            throw std::invalid_argument("durable path has an unsupported component");
-    }
+        // An unresolved relative path can lack a drive, but never admit UNC/device roots.
+        const auto root = candidate.root_name().native();
+        if (!root.empty() &&
+            (root.size() != 2 || root[1] != L':' ||
+             !((root[0] >= L'A' && root[0] <= L'Z') || (root[0] >= L'a' && root[0] <= L'z'))))
+            throw std::invalid_argument("durable path requires a local drive");
 #endif
-    return absolute;
+        for (const auto& component : candidate.relative_path()) {
+            if (component == "..")
+                throw std::invalid_argument("durable path contains traversal components");
+#ifdef _WIN32
+            // A standalone "." remains supported; named trailing dots/spaces do not.
+            const auto& text = component.native();
+            if (component != "." &&
+                (text.find(L':') != std::wstring::npos ||
+                 (!text.empty() && (text.back() == L'.' || text.back() == L' '))))
+                throw std::invalid_argument("durable path has an unsupported component");
+#endif
+        }
+    };
+    // GetFullPathNameW can erase trailing dots/spaces. Validate the supplied spelling
+    // first, and avoid that conversion entirely for already-absolute local paths.
+    validate_spelling(*input);
+    if (input->is_absolute()) return input->lexically_normal();
+    auto absolute = std::filesystem::absolute(*input);
+    validate_spelling(absolute);
+    return absolute.lexically_normal();
 }
 
 #ifdef _WIN32
