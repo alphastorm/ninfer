@@ -1268,7 +1268,7 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
         if (unpublished_bytes && candidate.kind == CandidateKind::CurrentSession) {
             // Plan only. No current authority may disappear before the requester's
             // durable publication. Re-plan under this lock in the final callback.
-            inventory.used -= std::min(inventory.used, candidate.bytes);
+            inventory.used -= std::min(inventory.used, session_generation_bytes(candidate.path));
             continue;
         }
         if (candidate.kind == CandidateKind::Tombstone) {

@@ -1162,6 +1162,12 @@ void install_pressure_validator(Control& control, Validator validator) {
     }
 }
 
+template <class Victim>
+runtime::DurableReason pressure_reason(const Victim& victim) {
+    if constexpr (requires { victim.reason; }) { return victim.reason; }
+    return runtime::DurableReason::None;
+}
+
 int test_ordinary_pressure_preserves_same_size_corrupt_victim() {
     using namespace runtime;
     TemporaryDirectory temporary;
@@ -1217,7 +1223,7 @@ int test_ordinary_pressure_preserves_same_size_corrupt_victim() {
     const bool release_allowed = control.settle({&victim, 1});
     failures += check(!release_allowed && validations == 1 &&
                       victim.outcome == PressureCheckpointOutcome::Pending &&
-                      victim.reason == DurableReason::PayloadDigestMismatch,
+                      pressure_reason(victim) == DurableReason::PayloadDigestMismatch,
                       "ordinary pressure released the last resident copy on metadata-only coverage");
     return failures;
 }
