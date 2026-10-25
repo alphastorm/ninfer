@@ -362,7 +362,7 @@ bool SessionCheckpointService::erase_response(const std::string& id, const std::
                         return Access::publish_export(engine_, session, tag, epoch, commit);
                     }, &skip);
                 if (!saved && (skip.durable_reason == Reason::SessionNotIndexed ||
-                               skip.durable_reason == Reason::TagMismatch)) {
+                               checkpoint_refusal_is_transient(skip))) {
                     // DELETE never promises that an older native endpoint still resides in
                     // cache. Preserve shipped success semantics through authenticated replay.
                     survivors->replay_only = true;

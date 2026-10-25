@@ -382,9 +382,14 @@ int durable_delete_retains_disk_only_records() {
     std::optional<OpenAIResponseStoreSnapshot> published;
     Reason refusal{};
     int failures = check(responses.erase_for_session_durably("resp_parent", session,
-        [&](const auto& survivors) { published = survivors; return true; }, &refusal, &disk) &&
+        [&](auto& survivors) {
+            // A busy/absent native endpoint may fall back after snapshot preparation.
+            survivors->replay_only = true;
+            published = survivors;
+            return true;
+        }, &refusal, &disk) &&
         published && published->records.size() == 2 && published->records.front().id == "resp_archived" &&
-        published->latest_response_id == "resp_child",
+        published->latest_response_id == "resp_child" && responses.snapshot_session(session)->replay_only,
         "deletion discarded an undeleted disk-only record");
     bool called = false;
     failures += check(responses.erase_for_session_durably("resp_child", session,
