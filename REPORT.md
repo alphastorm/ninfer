@@ -115,8 +115,9 @@ common/build.sh "$SOURCE" "$BUILD/native-sm89" \
   These now retain the same square-root expressions as `const` values and reuse
   the existing independent round-to-nearest-even binary16 fixture conversions.
   No oracle tolerance or supported case was removed. These corrections have not
-  been rebuilt. The separate missing `<array>` include in public `ninfer/types.h`
-  was reported to the integration owner; a test include-order workaround was not added.
+  been rebuilt. Integrator's isolated `252bb209d` correction for missing `<array>`
+  in public `ninfer/types.h` and `<span>` in the generation-service header was
+  imported; no test include-order workaround was added.
 
 ### Native host-pool translation
 
