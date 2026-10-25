@@ -304,7 +304,7 @@ int main() {
         require(result.generated_token_ids == reference && result.reused_prompt_tokens != 0 && engine.is_available(),
                 "reclaimed target failed exact cached continuation");
         std::cout << "PASS actual-engine-victim-preflight points=" << saved.stats.points
-                  << " resident_bytes=" << resident_bytes << " host_capacity=" << options.context_cache.host_capacity_bytes
+                  << " resident_bytes=" << resident_bytes << " host_capacity=" << *options.context_cache.host_capacity_bytes
                   << " verified_bytes=" << trace->bytes << " pins=" << oracle->pins
                   << " releases=" << guard->calls << " target_fresh_readers=" << target_trace->fresh_readers
                   << " reused_tokens=" << result.reused_prompt_tokens
