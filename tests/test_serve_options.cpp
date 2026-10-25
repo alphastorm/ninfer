@@ -233,6 +233,8 @@ int main() {
     }
     failures += check(defaults.speculative.backend == ninfer::SpeculativeBackend::None,
                       "speculative decoding is not disabled by default");
+    failures += check(defaults.speculative.ngram_draft_tokens == 0,
+                      "n-gram copying is not disabled by default");
     failures += check(defaults.response_store_max_records == kDefaultResponseStoreRecords &&
                           defaults.response_store_max_bytes == kDefaultResponseStoreBytes,
                       "Responses store defaults mismatch");
@@ -306,6 +308,29 @@ int main() {
                               options.speculative.draft_tokens == k &&
                               options.speculative.proposal_head == ninfer::ProposalHead::Optimized,
                           "serve options did not preserve DFlash2 configuration");
+    }
+    for (const auto lanes : {"1", "2", "3"}) {
+        const auto options = parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2",
+                                     "--draft-tokens", "7", "--ngram-draft-tokens", "15",
+                                     "--max-concurrency", lanes});
+        failures += check(options.speculative.ngram_draft_tokens == 15,
+                          "copy option rejected a configured concurrency");
+    }
+    for (const auto value : {"1", "7", "16", "-1"}) {
+        bool rejected = false;
+        try {
+            (void)parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2",
+                          "--draft-tokens", "7", "--ngram-draft-tokens", value});
+        } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "serve admitted unsupported n-gram window");
+    }
+    for (const auto backend : {"mtp", "dflash"}) {
+        bool rejected = false;
+        try {
+            (void)parse({"ninfer-serve", "model.ninfer", "--spec", backend,
+                          "--draft-tokens", "3", "--ngram-draft-tokens", "15"});
+        } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "serve copies admitted another backend");
     }
 
     const ServeOptions dflash_vision = parse(

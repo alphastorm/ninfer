@@ -22,6 +22,10 @@ set(ninfer_op_tests
   scatter_bf16_batch
   target_logprobs
   position)
+ninfer_add_op_test(ninfer_copy_proposals_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_copy_proposals.cpp"
+  LIBRARIES ninfer_ops)
+
 foreach(op IN LISTS ninfer_op_tests)
   ninfer_add_op_test(ninfer_${op}_test
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_${op}.cpp"

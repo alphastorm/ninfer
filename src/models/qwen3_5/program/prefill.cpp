@@ -284,6 +284,14 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     if (!replay_fold) {
         throw std::logic_error("speculative pending batch has no ReplaySSM records");
     }
+    const auto recorded_drafts = requests[lanes.front()].pending.verify_drafts;
+    const auto verify_drafts = recorded_drafts != 0 ? recorded_drafts : draft_window;
+    std::optional<qwen3_5::DFlashDecodeState> narrow_frame;
+    if (io.dflash_decode &&
+        verify_drafts != static_cast<std::uint32_t>(io.dflash_decode->draft_tokens.ne[0]))
+        narrow_frame.emplace(io.dflash_decode->narrowed(verify_drafts));
+    const auto* dflash_frame = narrow_frame ? &*narrow_frame
+                                           : io.dflash_decode ? &*io.dflash_decode : nullptr;
 
     std::array<ops::GdnReplayFoldRow, kMaximumConcurrency> fold_rows{};
     std::array<std::int32_t, kMaximumConcurrency> hidden_selectors{};
@@ -296,6 +304,8 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
         }
         const PendingCandidate& pending = requests[lane].pending;
         const SequenceState& sequence   = active_sequence(lane);
+        if (pending.verify_drafts != recorded_drafts)
+            throw std::logic_error("pending batch mixes speculative round widths");
         if (sequence.continuation.metadata.execution_frontier !=
                 pending.base.metadata.execution_frontier ||
             sequence.ledger_frontier != pending.base_S ||
@@ -333,8 +343,10 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
     const auto tail_started = context::Clock::now();
     try {
         timing.resume_submit();
-        replay_fold->execute(std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
-                             device.execution_view());
+        auto& fold = verify_drafts == draft_window ? replay_fold : copy_replay_fold;
+        if (!fold) throw std::logic_error("copy pending batch has no ReplaySSM fold plan");
+        fold->execute(std::span<const ops::GdnReplayFoldRow>(fold_rows.data(), lanes.size()),
+                       device.execution_view());
 
         // Sparse acceptance reads counts. Publish only the prefix licensed by the qwen::Frontend.
         if (speculative_backend == SpeculativeBackend::DFlash2) {
@@ -344,7 +356,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                 }
                 const auto count = static_cast<std::int32_t>(accepted_tokens[row]);
                 Tensor ids =
-                    io.dflash_decode->licensed_tokens.slice(1, static_cast<std::int32_t>(row), 1)
+                    dflash_frame->licensed_tokens.slice(1, static_cast<std::int32_t>(row), 1)
                         .slice(0, 0, count)
                         .view({count});
                 Tensor counts =
@@ -367,7 +379,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                 selected     = frame.target_continuation_hidden.slice(1, 0, batch);
                 destinations = frame.state_destination_slots.slice(0, 0, batch);
             } else if (is_masked_draft_backend(speculative_backend) && io.dflash_decode) {
-                qwen3_5::DFlashDecodeState& frame = *io.dflash_decode;
+                const auto& frame = *dflash_frame;
                 selector_tensor                   = frame.proposal_extents.slice(0, 0, batch);
                 hidden                            = frame.target_hidden.slice(2, 0, batch);
                 selected     = frame.target_continuation_hidden.slice(1, 0, batch);
@@ -421,7 +433,7 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
 
     const double tail_seconds =
         std::chrono::duration<double>(context::Clock::now() - tail_started).count();
-    const std::uint32_t width = draft_window + 1U;
+    const std::uint32_t width = verify_drafts + 1U;
     try {
         for (std::size_t row = 0; row < lanes.size(); ++row) {
             SequenceState& sequence = active_sequence(lanes[row]);

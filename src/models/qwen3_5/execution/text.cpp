@@ -178,7 +178,8 @@ void DFlashFeatureSink::capture_layer(int layer, const Tensor& value, CudaExecut
     if (batch_features != nullptr) {
         Tensor source = value.view({value.ne[0], batch_width, batch_size});
         Tensor target =
-            batch_features->slice(0, static_cast<std::int32_t>(index) * value.ne[0], value.ne[0]);
+            batch_features->slice(0, static_cast<std::int32_t>(index) * value.ne[0], value.ne[0])
+                .slice(1, 0, batch_width);
         ops::scatter_bf16_batch(source, *batch_lanes, *batch_valid_columns, target, execution);
         captured_mask |= 1U << index;
         return;

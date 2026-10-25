@@ -366,6 +366,9 @@ DFlashDecodeState::DFlashDecodeState(MemorySpan backing, const DFlashDecodeState
         ingress_tensor(offsetof(DFlashDecodeIngress, state_destination_slots), DType::I32, {batch});
     sampling = reinterpret_cast<const ops::SamplingConfig*>(
         static_cast<const unsigned char*>(ingress.data) + offsetof(DFlashDecodeIngress, sampling));
+    copy_rows = ingress_tensor(offsetof(DFlashDecodeIngress, copy_rows), DType::I32, {batch});
+    copy_tokens = ingress_tensor(offsetof(DFlashDecodeIngress, copy_tokens), DType::I32,
+                                  {drafts, batch});
     licensed_tokens =
         egress_tensor(offsetof(DFlashDecodeEgress, licensed_tokens), DType::I32, {width, batch});
     licensed_counts =
@@ -382,6 +385,35 @@ DFlashDecodeState::DFlashDecodeState(MemorySpan backing, const DFlashDecodeState
     target_logits              = layout.target_logits.bind(backing);
     target_hidden              = layout.target_hidden.bind(backing);
     target_continuation_hidden = layout.target_continuation_hidden.bind(backing);
+}
+
+DFlashDecodeState DFlashDecodeState::narrowed(std::uint32_t k) const {
+    if (k == 0 || k > static_cast<std::uint32_t>(draft_tokens.ne[0])) {
+        throw std::invalid_argument("DFlash round exceeds allocated frame");
+    }
+    if (k == static_cast<std::uint32_t>(draft_tokens.ne[0])) return *this;
+    auto result = *this;
+    const auto drafts = static_cast<std::int32_t>(k);
+    const auto width = drafts + 1;
+    const auto rows = draft_tokens.ne[1];
+    // Repack the leading storage densely, rather than retaining the allocated row stride.
+    for (Tensor* tensor : {&result.target_rope_positions, &result.licensed_tokens,
+                           &result.proposal_ids, &result.proposal_positions,
+                           &result.verify_positions, &result.verify_ids, &result.target_argmax,
+                           &result.append_positions}) {
+        *tensor = Tensor(tensor->data, tensor->device, tensor->dtype, {width, rows});
+    }
+    result.draft_tokens = Tensor(draft_tokens.data, draft_tokens.device, DType::I32, {drafts, rows});
+    result.copy_tokens = Tensor(copy_tokens.data, copy_tokens.device, DType::I32, {drafts, rows});
+    for (Tensor* tensor : {&result.target_hidden, &result.target_logits}) {
+        *tensor = Tensor(tensor->data, tensor->device, tensor->dtype, {tensor->ne[0], width, rows});
+    }
+    for (Tensor* tensor : {&result.candidate_ids, &result.proposal_q}) {
+        if (tensor->data)
+            *tensor = Tensor(tensor->data, tensor->device, tensor->dtype,
+                             {tensor->ne[0], drafts, rows});
+    }
+    return result;
 }
 
 RoundState::RoundState(MemorySpan backing, const RoundStateLayout& layout) {

@@ -143,7 +143,7 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
             GdnReplayRecordSpec{
                 .layers          = dimension(config.linear_attention_layers),
                 .record_capacity = static_cast<std::int32_t>(plan.max_concurrency),
-                .width           = static_cast<std::int32_t>(plan.draft_window + 1U),
+                .width           = static_cast<std::int32_t>(plan.round_window + 1U),
                 .conv_channels   = (config.gdn ? dimension(config.gdn->conv_channels()) : 0),
                 .qk_heads        = (config.gdn ? dimension(config.gdn->linear_num_key_heads) : 0),
                 .value_heads     = (config.gdn ? dimension(config.gdn->linear_num_value_heads) : 0),
@@ -200,7 +200,7 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
             dflash.pending_features  = add_tensor(
                 builder, DType::BF16,
                 {dimension(config.hidden_size * std::uint64_t(draft->target_layer_ids.size())),
-                  static_cast<std::int32_t>(plan.draft_window + 1U),
+                  static_cast<std::int32_t>(plan.round_window + 1U),
                   static_cast<std::int32_t>(plan.max_concurrency)},
                 "DFlash pending target features");
         }
@@ -210,7 +210,7 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
         builder, qwen3_5::RoundStateSpec{.hidden         = dimension(config.hidden_size),
                                          .output_rows    = dimension(config.vocab_size),
                                          .batch_capacity = plan.max_concurrency,
-                                         .draft_window   = plan.draft_window,
+                                         .draft_window   = plan.round_window,
                                          .backend        = plan.speculative_backend,
                                          .causal_scoring = plan.causal_scoring});
     out.prefill_hidden =
@@ -226,7 +226,7 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
     if (!plan.causal_scoring) {
         out.grammar_masks = add_tensor(builder, DType::I32,
                                        {dimension((profile.public_tokens + 31) / 32),
-                                        static_cast<std::int32_t>(plan.draft_window + 1),
+                                        static_cast<std::int32_t>(plan.round_window + 1),
                                         static_cast<std::int32_t>(plan.max_concurrency)},
                                        "grammar token masks");
         out.token_counts  = add_tensor(
@@ -256,7 +256,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         throw std::invalid_argument("sequence workspace dimensions are invalid");
     }
     const auto chunk  = static_cast<std::int32_t>(chunk_u32);
-    const auto drafts = static_cast<std::int32_t>(plan.draft_window);
+    const auto drafts = static_cast<std::int32_t>(plan.round_window);
     const auto verify = drafts + 1;
     const ops::CausalAttentionExecutionEnvelope text_envelope{1, plan.capacity};
 
@@ -768,6 +768,11 @@ void validate_target_options(const execution::ModelProfile& profile, DeviceConte
     default:
         throw std::invalid_argument("unknown kv_capacity policy");
     }
+    if (options.speculative.ngram_draft_tokens != 0 &&
+        (options.speculative.ngram_draft_tokens != 15 ||
+         options.speculative.backend != SpeculativeBackend::DFlash2)) {
+        throw std::invalid_argument("n-gram drafting requires DFlash2 and a window of 0 or 15");
+    }
     switch (options.speculative.backend) {
     case SpeculativeBackend::None:
         if (options.speculative.draft_tokens != 0 ||
@@ -818,6 +823,8 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->max_concurrency      = inputs.max_concurrency;
     impl->prefill_chunk        = inputs.prefill_chunk;
     impl->draft_window         = inputs.draft_window;
+    impl->ngram_window         = inputs.ngram_window;
+    impl->round_window         = std::max(inputs.draft_window, inputs.ngram_window);
     impl->speculative_backend  = inputs.speculative_backend;
     impl->proposal_head        = inputs.proposal_head;
     impl->features             = inputs.features;
@@ -860,6 +867,7 @@ make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profil
         .prefill_chunk =
             std::min(options.prefill_chunk ? options.prefill_chunk : 1024U, options.max_context),
         .draft_window         = options.speculative.draft_tokens,
+        .ngram_window         = options.speculative.ngram_draft_tokens,
         .speculative_backend  = options.speculative.backend,
         .kv_storage           = options.kv_cache,
         .proposal_head        = options.speculative.proposal_head,

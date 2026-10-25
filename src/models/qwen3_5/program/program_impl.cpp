@@ -29,7 +29,8 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     : parameters(parameters_in), device(device_in), capacity(plan.capacity),
       kv_capacity(plan.kv_capacity), max_concurrency(plan.max_concurrency),
       context_cache(plan.context_cache), prefill_chunk(plan.prefill_chunk),
-      draft_window(plan.draft_window), speculative_backend(plan.speculative_backend),
+      draft_window(plan.draft_window), ngram_window(plan.ngram_window),
+      round_window(plan.round_window), speculative_backend(plan.speculative_backend),
       kv_storage(plan.kv_storage), proposal_head(plan.proposal_head),
       vision_enabled(plan.features.vision), use_cuda_graph(plan.use_cuda_graph),
       causal_scoring(plan.causal_scoring), kv_payload_bytes(plan.persistent.kv_payload_bytes),
@@ -73,6 +74,21 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
     state_images = std::make_unique<StateImageViews>(backing, plan.persistent.state_images);
     if (plan.persistent.replay_records) {
         replay_records.emplace(backing, *plan.persistent.replay_records);
+        if (ngram_window != 0) {
+            copy_replay_records = replay_records;
+            copy_replay_fold.emplace(*copy_replay_records, state_images->linear().all_layers_view());
+            // Each graph family packs all layers densely at its own width. The fold plan
+            // must consume exactly the same view as that family's record-producing kernels.
+            auto& records = *replay_records;
+            const auto width = static_cast<std::int32_t>(draft_window + 1);
+            const auto rows = records.spec.layers * records.spec.record_capacity;
+            records.conv = Tensor(records.conv.data, records.conv.device, records.conv.dtype,
+                                   {records.conv.ne[0], width, rows});
+            for (Tensor* tensor : {&records.key, &records.value, &records.gate})
+                *tensor = Tensor(tensor->data, tensor->device, tensor->dtype,
+                                 {tensor->ne[0], tensor->ne[1], width, rows});
+            records.spec.width = width;
+        }
         replay_fold.emplace(*replay_records, state_images->linear().all_layers_view());
     }
     if (plan.persistent.dflash) {
@@ -183,7 +199,7 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
         grammar_masks_host.emplace(grammar_masks_device.bytes());
     }
     if (is_masked_draft_backend(speculative_backend)) {
-        dflash_draft_handoff.emplace(device, draft_window * max_concurrency);
+        dflash_draft_handoff.emplace(device, round_window * max_concurrency);
     }
     for (std::uint32_t lane = 0; lane < max_concurrency; ++lane) {
         lane_epochs[lane]    = 1;

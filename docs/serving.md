@@ -42,6 +42,15 @@ artifacts with DFlash2 companion weights also support `--spec dflash2 --draft-to
 concurrency, prefix reuse, and image/video request surfaces. It may remain combined with
 `--vision`.
 
+`--ngram-draft-tokens 15` enables experimental own-prefix copies beside DFlash2;
+`0` is the default. Copies never draw from another request. The target verifier and
+sampling distribution are unchanged; stochastic trajectories need not match a
+different proposal family. Copy graphs are used only for one or two active lanes.
+Request-log `speculative.ngram_rounds`, `ngram_drafted_tokens` and
+`ngram_accepted_tokens` count copy verification work, as subsets of the existing
+speculative totals; stop-truncated or cancelled output can publish fewer tokens.
+`accepted_per_position` continues to describe neural proposals only.
+
 When `--model-id` is omitted, the server advertises and accepts the artifact's `metadata.name`,
 falling back to its architecture name when no name is stored. An explicit `--model-id` is a public
 HTTP alias override and does not select or alter model execution.
@@ -921,6 +930,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
+| `--ngram-draft-tokens 0\|15` | experimental own-prefix copy window; DFlash2 only | `0` |
 | `--lm-head-draft` | optimized proposal head | off |
 | `--default-max-tokens N` | output limit when omitted by a request | `8192` |
 | `--default-thinking-budget N` | positive thinking cap inherited by thinking-enabled requests | unset |

@@ -78,6 +78,8 @@ struct SpeculativeOptions {
     // Startup-fixed K: MTP 1..5; DFlash and DFlash2 1..15 (query width K+1).
     std::uint32_t draft_tokens = 0;
     ProposalHead proposal_head = ProposalHead::Full;
+    // Optional own-prefix copies beside DFlash2: 0 (off) or 15, at at most two active lanes.
+    std::uint32_t ngram_draft_tokens = 0;
 };
 
 enum class StartupPhase : std::uint8_t {
@@ -871,6 +873,10 @@ struct SpeculativeStats {
     std::uint64_t drafted_tokens  = 0;
     std::uint64_t accepted_tokens = 0;
     std::uint64_t fallback_steps  = 0;
+    // Subsets of verification work above, not necessarily published output tokens.
+    std::uint64_t ngram_rounds          = 0;
+    std::uint64_t ngram_drafted_tokens  = 0;
+    std::uint64_t ngram_accepted_tokens = 0;
     std::vector<std::uint64_t> accepted_per_position;
 };
 

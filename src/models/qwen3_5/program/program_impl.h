@@ -16,6 +16,7 @@
 
 #include "models/qwen3_5/program/planning/startup.h"
 #include "models/qwen3_5/program/storage/draft_context.h"
+#include "models/qwen3_5/program/speculative/ngram_proposer.h"
 #include "models/common/context/host_kv_store.h"
 #include "models/common/context/kv_history.h"
 #include "models/common/context/snapshot.h"
@@ -83,6 +84,7 @@ struct PendingCandidate {
     std::uint32_t base_S        = 0;
     std::uint32_t prompt_tokens = 0;
     std::uint32_t produced      = 0;
+    std::uint32_t verify_drafts = 0;
 };
 enum class Lifecycle : std::uint8_t {
     Empty,
@@ -130,6 +132,7 @@ struct DecodeGraphProfile {
     std::uint32_t min_execution_frontier = 0;
     std::uint32_t max_execution_frontier = 0;
     std::uint32_t topology_class         = 0;
+    bool copy_round                     = false;
     DecodeGraphDefinition definition;
     std::unique_ptr<execution::TextGraphDefinition> text;
 };
@@ -144,7 +147,8 @@ struct DecodeGraphTopology {
 struct DecodeGraphFamily {
     std::vector<DecodeGraphProfile> profiles;
     std::vector<DecodeGraphTopology> topologies;
-    DecodeGraphProfile& select(std::uint32_t batch_size, std::uint32_t frontier);
+    DecodeGraphProfile& select(std::uint32_t batch_size, std::uint32_t frontier,
+                               bool copy_round = false);
     DecodeGraphTopology& install(DecodeGraphProfile& profile);
 };
 
@@ -195,6 +199,7 @@ struct RequestControl {
     ops::SamplingConfig sampling_host;
     GenerationTimings timings;
     SpeculativeStats speculative_stats;
+    std::optional<NgramProposer> ngram;
     std::shared_ptr<const RequestBasePlanImpl> base;
     std::optional<UnitDemand> permit;
     std::optional<RecoveryPermit> recovery;
@@ -360,6 +365,8 @@ public:
     const ContextCacheOptions context_cache;
     const std::uint32_t prefill_chunk;
     const std::uint32_t draft_window;
+    const std::uint32_t ngram_window;
+    const std::uint32_t round_window;
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
@@ -389,6 +396,8 @@ public:
     std::unique_ptr<StateImageStore> state_store;
     std::optional<GdnReplayRecords> replay_records;
     std::optional<ops::GdnReplayFoldPlan> replay_fold;
+    std::optional<GdnReplayRecords> copy_replay_records;
+    std::optional<ops::GdnReplayFoldPlan> copy_replay_fold;
     std::optional<DFlashPersistentState> dflash;
     qwen3_5::RoundState io;
     Tensor prefill_hidden;

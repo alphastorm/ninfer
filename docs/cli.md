@@ -285,6 +285,15 @@ concurrent requests, sampling penalties, and prefix reuse. An artifact without t
 weights reports a missing DFlash2 component when selected. Vision, MTP and DFlash follow the same
 rule: their weights are required only when that component is enabled at startup.
 
+Experimental own-prefix copy drafting is opt-in with `--ngram-draft-tokens 15`
+beside `--spec dflash2`; the default `0` leaves copying off. A request can propose
+up to fifteen tokens following an exact earlier match in its own committed prefix.
+Every proposal still passes the existing target verifier. One active lane skips
+the neural drafter on copy rounds; two lanes combine neural proposals with copies.
+Three or more active lanes always use neural drafting. Extra copy-width buffers and
+CUDA Graph classes are allocated at startup when enabled; this is not a profile
+recommendation or a claimed speedup.
+
 Only one speculative backend can be enabled per Engine. The published [performance results](performance.md)
 use MTP with three draft tokens and DFlash with seven draft tokens (block length eight), both with
 the optimized proposal head. DFlash accepts one to fifteen draft tokens; seven forms the measured

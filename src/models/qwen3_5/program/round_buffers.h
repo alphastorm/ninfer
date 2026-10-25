@@ -100,6 +100,9 @@ struct DFlashDecodeIngress {
     std::array<std::int32_t, kMaximumConcurrency> state_source_slots{};
     std::array<std::int32_t, kMaximumConcurrency> state_destination_slots{};
     std::array<ops::SamplingConfig, kMaximumConcurrency> sampling{};
+    // Copied only by the copy graph family; neural ingress retains its original byte extent.
+    std::array<std::int32_t, kMaximumConcurrency> copy_rows{};
+    std::array<TokenId, kMaximumConcurrency * kDFlashDecodeMaximumDrafts> copy_tokens{};
 };
 
 struct DFlashDecodeEgress {
@@ -304,10 +307,13 @@ struct DFlashDecodeState {
     Tensor target_logits;
     Tensor target_hidden;
     Tensor target_continuation_hidden;
+    Tensor copy_rows;
+    Tensor copy_tokens;
 
     DFlashDecodeState() = default;
     DFlashDecodeState(MemorySpan backing, const DFlashDecodeStateLayout& layout,
                       std::uint32_t batch_capacity, std::uint32_t draft_window);
+    [[nodiscard]] DFlashDecodeState narrowed(std::uint32_t drafts) const;
 };
 
 struct RoundState {

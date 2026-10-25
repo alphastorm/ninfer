@@ -239,10 +239,10 @@ UnitDemand ProgramImpl::next_unit(const SequenceState& sequence, const RequestCo
         const auto available    = std::min(tokens - 1U, capacity - frontier - 1U);
         const auto extent       = speculative_backend == SpeculativeBackend::None
                                       ? 0U
-                                      : std::min({available, draft_window,
+                                      : std::min({available, round_window,
                                             speculative_backend == SpeculativeBackend::Mtp
                                                       ? sequence.mtp_draft_count
-                                                      : draft_window});
+                                                      : round_window});
         demand.main_frontier    = frontier + extent + 1U;
         demand.backend_frontier = speculative_backend == SpeculativeBackend::Mtp
                                       ? std::min(capacity, frontier + extent + draft_window)

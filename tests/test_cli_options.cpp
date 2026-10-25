@@ -109,9 +109,28 @@ int main() {
         const auto dflash2 = parse({"ninfer-cli", "model.ninfer", "--prompt", "hello", "--spec",
                                     "dflash2", "--draft-tokens", std::to_string(k)});
         failures += check(dflash2.speculative.backend == ninfer::SpeculativeBackend::DFlash2 &&
-                              dflash2.speculative.draft_tokens == k,
+                              dflash2.speculative.draft_tokens == k &&
+                              dflash2.speculative.ngram_draft_tokens == 0,
                           "CLI did not preserve the DFlash2 draft count");
     }
+    failures += check(parse({"ninfer", "model.ninfer", "--prompt", "hello", "--spec",
+                              "dflash2", "--draft-tokens", "7", "--ngram-draft-tokens", "15"})
+                              .speculative.ngram_draft_tokens == 15,
+                      "CLI did not enable requested copy window");
+    for (const auto value : {"1", "7", "16", "-1"})
+        failures += check(rejects([&] {
+            (void)parse({"ninfer", "model.ninfer", "--prompt", "hello", "--spec",
+                          "dflash2", "--draft-tokens", "7", "--ngram-draft-tokens", value});
+        }), "CLI admitted unsupported copy window");
+    failures += check(rejects([] {
+        (void)parse({"ninfer", "model.ninfer", "--prompt", "hello",
+                      "--ngram-draft-tokens", "15"});
+    }), "CLI copies implicitly selected a backend");
+    for (const auto backend : {"mtp", "dflash"})
+        failures += check(rejects([&] {
+            (void)parse({"ninfer", "model.ninfer", "--prompt", "hello", "--spec",
+                          backend, "--draft-tokens", "3", "--ngram-draft-tokens", "15"});
+        }), "CLI copies admitted another speculative backend");
     for (const auto k : {0U, 16U}) {
         failures +=
             check(rejects([&] {
