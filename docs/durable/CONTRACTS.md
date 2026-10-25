@@ -638,11 +638,18 @@ and current-pointer moves, use `io::replace_path` under the same confinement pol
 This lead-approved extension adds no dependency and does not change which generations
 the store is authorized to reclaim. PortableCore owns the primitive; DurableStore
 owns caller migration and the symlink-swap regression.
+
+The generic native store writes `manifest.mac` when an origin key is configured.
+This conditional API behavior does not weaken K1: persistence-enabled production
+launches always configure a key and new production saves write the MAC.
+Responses-only survivor generations always require origin authentication.
+
 Publication order:
 
 1. Create unique unpublished staging generation; failed export leaves current intact.
-2. Complete/hash payloads, checksums and canonical manifest; flush every file. Write
-   and flush `manifest.mac`. Validate Writer.finish and final session/tag epoch.
+2. Complete/hash payloads, checksums and canonical manifest; flush every file. When
+   an origin key is configured, write and flush `manifest.mac`; the production and
+   responses-only policies above require it. Validate Writer.finish and final session/tag epoch.
 3. Sync staging directory under platform policy; atomically rename generation and
    sync its parent. Create/flush a temporary current pointer.
 4. Atomically replace current, sync session and newly-created session parents under
@@ -691,14 +698,23 @@ qualification must separately exercise the publication path. Successful
 Windows publication acknowledges `dir_sync: "ntfs-write-through"`; POSIX publication
 acknowledges `dir_sync: "fsync"`, including responses-only survivor saves.
 
+The legacy `make_direct_storage_checkpoint_backend` factory's pathname-based
+create/read/delete/lock methods are outside the production checkpoint-store path
+and therefore outside the K6 proof scope. Production uses
+`make_direct_storage_checkpoint_read_queue`; the legacy backend's
+`atomic_replace_durable` now routes to `io::replace_path` as noted above. Qualifying
+the production path does not qualify those other legacy factory methods.
+
 A reader pins each accepted read batch's file handles until its writes retire and
 verifies the exact bytes delivered to the consumer. Reopening between batches is
 permitted only through the same confined/no-follow traversal and complete delivered-byte
 hash accounting; changed bytes fail final verification before import commit. Hashing
 a separate reopened descriptor instead of delivered bytes is forbidden.
 Optional io_uring accelerates reads without changing verification, EOF/error semantics
-or lifetime; unavailable platform backends use the approved buffered/direct reader,
-never silently skip authentication. No new dependency is authorized by this contract.
+or lifetime. The store rejects a missing or unavailable selected native read queue
+as `Unavailable/IoUnavailable`: retryable, no quarantine and no fallback. It does
+not silently substitute a buffered/direct reader or skip authentication.
+No new dependency is authorized by this contract.
 
 ## K7 — result, error and receipt taxonomy
 
