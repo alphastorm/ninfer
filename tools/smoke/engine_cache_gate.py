@@ -193,7 +193,10 @@ def run_arm(args: argparse.Namespace, baseline: dict, grace_ms: int, root: Path)
                 time.sleep(0.25)
             else:
                 raise GateError("startup_deadline_exceeded")
-            startup = validate_startup(startup_record(events), baseline, args.gpu_uuid)
+            record = startup_record(events)
+            require(record["engine"].get("gpu_keep_warm_ms") == grace_ms,
+                    "keep_warm_configuration_not_attested")
+            startup = validate_startup(record, baseline, args.gpu_uuid)
             stream(base_url, key, "prime clocks")
             samples = []
             for sample in range(args.samples):
