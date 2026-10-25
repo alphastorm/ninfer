@@ -118,6 +118,26 @@ void publication_failure_is_not_acknowledged() {
     require(failed.state == DurableExportState::Refused && failed.reason == DurableReason::IoUnavailable,
             "failed final publication was acknowledged");
 }
+
+void queued_expiry_preserves_committed_tag() {
+    CheckpointControl control;
+    const auto state = control.session("session");
+    std::string tag = "stored";
+    require(control.commit_import(state, {}, tag, 1, [] {}), "fixture import failed");
+    const auto old_epoch = state->epoch;
+    // This is the same submission gate used before the request joins pending_.
+    // Queue expiry never promotes an endpoint and must not roll this epoch back.
+    state->submitted(2);
+    require(state->epoch != old_epoch, "submission failed to invalidate captured work");
+    require(control.publish("session", "stored", state->epoch, [] { return true; }).state ==
+                DurableExportState::Exported,
+            "queued expiry changed the prior savable endpoint");
+    state->stored("completed", 2);
+    const auto committed_epoch = state->epoch;
+    state->stored("older-http-completion", 1);
+    require(state->tag == "completed" && state->epoch == committed_epoch,
+            "out-of-order HTTP completion replaced a newer endpoint");
+}
 } // namespace
 
 int main() {
@@ -126,6 +146,7 @@ int main() {
         handler_removal_keeps_callback_alive();
         publication_and_restore_share_one_gate();
         publication_failure_is_not_acknowledged();
+        queued_expiry_preserves_committed_tag();
         std::cout << "ok: checkpoint coordination, handler lifetime, restore publication, stale epoch\n";
         return 0;
     } catch (const std::exception& error) {

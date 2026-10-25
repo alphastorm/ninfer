@@ -1243,9 +1243,11 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
     const SessionCheckpointStoreOptions& options, const SessionCheckpointStore::Impl& impl,
     const std::optional<std::filesystem::path>& protected_generation = std::nullopt,
     const std::optional<std::filesystem::path>& protected_session    = std::nullopt,
-    std::uint64_t tolerated_transient_bytes                          = 0) {
+    std::uint64_t tolerated_transient_bytes                          = 0,
+    std::uint64_t unpublished_bytes                                  = 0) {
     GenerationInventory inventory =
         inventory_generations(options, impl, protected_generation, protected_session);
+    std::uint64_t physical_used = inventory.used;
     // The transient tolerance below only applies while reclamation is fully healthy: if any
     // eviction this pass fails, the store falls back to the hard cap so a broken cleanup path
     // can never let disk usage creep past the quota one tolerated save at a time. A failed pass
@@ -1263,9 +1265,16 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
             options.disk_quota_bytes + (reclamation_healthy ? tolerated_transient_bytes : 0);
         if (inventory.used <= allowed && !unconditional) { continue; }
         if (!reclamation_healthy && candidate.kind == CandidateKind::CurrentSession) { continue; }
+        if (unpublished_bytes && candidate.kind == CandidateKind::CurrentSession) {
+            // Plan only. No current authority may disappear before the requester's
+            // durable publication. Re-plan under this lock in the final callback.
+            inventory.used -= std::min(inventory.used, candidate.bytes);
+            continue;
+        }
         if (candidate.kind == CandidateKind::Tombstone) {
             if (cleanup_tombstone(options, candidate.path)) {
                 inventory.used -= candidate.bytes;
+                physical_used -= candidate.bytes;
             } else {
                 reclamation_healthy = false;
             }
@@ -1288,7 +1297,14 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
             continue;
         }
         inventory.used -= std::min(inventory.used, reclaimed);
+        physical_used -= std::min(physical_used, reclaimed);
     }
+    // At most one incoming set (itself <= quota) is tolerated. Stuck cleanup or
+    // another publication's transient cannot accumulate unbounded excess.
+    if (unpublished_bytes &&
+        (!reclamation_healthy ||
+         (physical_used > options.disk_quota_bytes &&
+          physical_used - options.disk_quota_bytes > unpublished_bytes))) { return false; }
     if (inventory.used <= options.disk_quota_bytes) { return true; }
     return reclamation_healthy &&
            inventory.used <= options.disk_quota_bytes + tolerated_transient_bytes;
@@ -2043,7 +2059,8 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         } catch (...) { previous_bytes = 0; }
         const std::uint64_t total_bytes = directory_bytes(staging);
         if (total_bytes > options_.disk_quota_bytes ||
-            !enforce_disk_quota_locked(options_, *impl_, staging, session, previous_bytes)) {
+            !enforce_disk_quota_locked(options_, *impl_, staging, session, previous_bytes,
+                                      total_bytes)) {
             (void)remove_best_effort(staging);
             if (skip != nullptr) {
                 skip->export_state = runtime::DurableExportState::Refused;
@@ -2058,28 +2075,43 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         const std::filesystem::path current_staging = session / (".current-" + generation);
         write_synced(current_staging, generation + "\n");
         bool committed = false;
+        bool pointer_replaced = false;
         bool invoked = false;
+        bool quota_refused = false;
         lock.unlock();
         const auto publication = publish_export(exported.captured_epoch, [&] {
             std::lock_guard publication_lock(impl_->mutex);
             if (invoked) { return false; }
             invoked = true;
+            if (!enforce_disk_quota_locked(options_, *impl_, published, session, previous_bytes,
+                                          total_bytes)) {
+                quota_refused = true;
+                return false;
+            }
             replace_path(current_staging, session / "current");
+            pointer_replaced = true;
             sync_directory(session);
             // First save also publishes the session directory itself.
             sync_directory(options_.root / "sessions");
             committed = true;
+            // Still under the catalog lock: the successful publication makes planned
+            // current victims reclaimable; no intervening reader can change the plan.
+            try {
+                (void)enforce_disk_quota_locked(options_, *impl_, std::nullopt, session);
+            } catch (...) {}
             return true;
         });
         lock.lock();
         if (publication.state != runtime::DurableExportState::Exported ||
             publication.reason != runtime::DurableReason::None || !committed) {
             (void)remove_best_effort(current_staging);
+            if (!pointer_replaced) { (void)remove_best_effort(published); }
             if (skip != nullptr) {
                 skip->export_state = publication.state == runtime::DurableExportState::Stale
                                          ? runtime::DurableExportState::Stale
                                          : runtime::DurableExportState::Refused;
                 skip->durable_reason =
+                    quota_refused ? runtime::DurableReason::Quota :
                     publication.reason != runtime::DurableReason::None
                         ? publication.reason
                         : publication.state == runtime::DurableExportState::Stale
@@ -2088,17 +2120,6 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
             }
             return std::nullopt;
         }
-
-        // The superseded generation is now a stale candidate. Enforcement reclaims it only
-        // under quota pressure, so it keeps serving as the corruption-recovery fallback
-        // whenever the quota allows both generations. The fresh current stays protected.
-        // Reclamation is strictly best effort after the durable publish: the acknowledged
-        // generation must never be reported failed for cleanup trouble (council R1). While
-        // eviction keeps failing, the next save's own enforcement pass observes the failure
-        // and withdraws the transient tolerance, so usage still cannot creep past the cap.
-        try {
-            (void)enforce_disk_quota_locked(options_, *impl_, std::nullopt, session);
-        } catch (...) {}
 
         return SessionCheckpointSaveResult{
             .generation = std::move(generation), .engine = *engine, .bytes = total_bytes,

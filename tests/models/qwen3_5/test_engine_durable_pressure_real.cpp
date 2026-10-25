@@ -196,6 +196,7 @@ void exercise(const char* artifact) {
         CheckpointEngineAccess::set_checkpoint_tag(prepared, tag);
         require(source.generate(std::move(prepared), request(16)).generated_token_ids.size() == 16,
                 "source seed did not complete");
+        CheckpointEngineAccess::response_stored(source, a, tag);
         exported = CheckpointEngineAccess::export_session(source, a, tag, seed, {});
         require(exported.state == DurableExportState::Exported && seed.finish(), "source export failed");
         phase("source-exported");
