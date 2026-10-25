@@ -22,7 +22,7 @@ while (($#)); do
     shift
 done
 runner="$(dirname "$(realpath "$0")")/run-in-env.sh"
-"$runner" --mount "$src" --mount "$build" -- \
+"$runner" --mount "$src" --mount "$build" --env LD_LIBRARY_PATH=/opt/ninfer-driver-stub -- \
     cmake -S "$src" -B "$build" -G Ninja \
         -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=120a \
         -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=ON \
@@ -34,4 +34,4 @@ command=(cmake --build "$build" --parallel 16)
 if ((${#targets[@]})); then
     command+=(--target "${targets[@]}")
 fi
-exec "$runner" --mount "$src" --mount "$build" -- "${command[@]}"
+exec "$runner" --mount "$src" --mount "$build" --env LD_LIBRARY_PATH=/opt/ninfer-driver-stub -- "${command[@]}"
