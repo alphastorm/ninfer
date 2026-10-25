@@ -522,6 +522,12 @@ struct PromptCacheMarker {
 
 struct ContextCacheHints {
     std::optional<std::string> session_key;
+    // Private continuation ownership is immutable and independent of the mutable session index.
+    // Reads require an exact scope match; an absent scope matches only another absent scope.
+    std::optional<std::string> reuse_scope;
+    // Shared stable/tool prefixes use principal scope so one principal's sessions can fan out
+    // from the same base without exposing another principal's retained content.
+    std::optional<std::string> shared_reuse_scope;
     std::vector<PromptCacheMarker> markers;
     // Protocols with their own automatic/explicit write policy disable the Engine's structural
     // candidates. Exact reads from already-published shared prefixes remain enabled.

@@ -1425,6 +1425,52 @@ int test_image_resize_rejection_policy() {
     return failures;
 }
 
+int test_context_cache_scopes() {
+    const Frontend frontend = make_frontend(resources(), false);
+    ninfer::PromptInput input;
+    ninfer::ChatMessage user;
+    user.role = ninfer::ChatRole::User;
+    user.parts.push_back(ninfer::MessagePart{
+        .kind = ninfer::MessagePartKind::Text, .text = "question", .media = {}});
+    input.messages.push_back(std::move(user));
+    const auto anonymous = frontend.prepare(input);
+    const auto& plain = FrontendFactory::inspect(anonymous);
+    int failures = check(!plain.context_cache.session_key && !plain.context_cache.reuse_scope &&
+                             !plain.context_cache.shared_reuse_scope,
+                         "anonymous preparation invented a cache scope");
+
+    input.context_cache.session_key = "http:session-a";
+    input.context_cache.reuse_scope = "http:session-a";
+    input.context_cache.shared_reuse_scope = "principal:authenticated";
+    input.context_cache.update_session_index = false;
+    const auto scoped = frontend.prepare(input);
+    const auto& data = FrontendFactory::inspect(scoped);
+    const auto& cache = data.context_cache;
+    failures += check(cache.session_key && cache.session_key->view() == "http:session-a" &&
+                          cache.reuse_scope && cache.reuse_scope->view() == "http:session-a" &&
+                          cache.shared_reuse_scope &&
+                          cache.shared_reuse_scope->view() == "principal:authenticated" &&
+                          !cache.update_session_index,
+                      "preparation lost private/shared scopes when named publication is disabled");
+    failures += check(data.token_ids == plain.token_ids,
+                      "cache authority changed rendered prompt content");
+
+    for (auto field : {&ninfer::ContextCacheHints::reuse_scope,
+                       &ninfer::ContextCacheHints::shared_reuse_scope}) {
+        auto boundary = input;
+        boundary.context_cache.*field =
+            std::string(ninfer::kMaximumContextCacheSessionKeyBytes, 's');
+        (void)frontend.prepare(boundary);
+        for (std::size_t size : {std::size_t{0},
+                                ninfer::kMaximumContextCacheSessionKeyBytes + 1}) {
+            boundary.context_cache.*field = std::string(size, 's');
+            failures += check(throws_invalid_argument([&] { (void)frontend.prepare(boundary); }),
+                              "preparation accepted an empty or oversized cache scope");
+        }
+    }
+    return failures;
+}
+
 int test_explicit_leading_instruction_cache_boundary() {
     const Frontend frontend           = make_frontend(resources(), false);
     constexpr std::string_view stable = "stable cache section.";
@@ -2638,6 +2684,7 @@ int main() {
     failures += test_media_token_ids_come_from_tokenizer();
     failures += test_template_media_contract();
     failures += test_image_resize_rejection_policy();
+    failures += test_context_cache_scopes();
     failures += test_explicit_leading_instruction_cache_boundary();
     failures += test_trimmed_source_cache_boundaries();
     failures += test_source_part_recovery_boundary();
