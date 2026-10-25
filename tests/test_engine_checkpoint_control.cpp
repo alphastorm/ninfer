@@ -37,6 +37,8 @@ void save_coordination_does_not_block_pressure() {
     saving.unlock();
     require(ready && !pressure.get(), "save coordination blocked worker pressure instead of Pending");
     PressureCheckpointVictim victim{"session", "turn"};
+    require(!control.settle({&victim, 1}), "Pending pressure retried without checkpoint progress");
+    control.notify_progress();
     require(control.settle({&victim, 1}), "checkpoint progress did not settle the next pressure plan");
 }
 

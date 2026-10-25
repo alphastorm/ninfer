@@ -556,6 +556,7 @@ private:
     // Coalesces admission-visible queue/resource changes. Ordinary prefill/decode progress does not
     // re-arm a temporarily blocked inspection.
     void request_admission_check() noexcept {
+        checkpoints_.notify_progress();
         admission_check_pending_.store(true, std::memory_order_release);
     }
 
@@ -1327,6 +1328,7 @@ private:
                 resources_.reclaim(*instance_.program, capture->shortage, {}, decision->reclaim);
             if (progress == ReclaimProgress::Transferring) { return false; }
             if (progress == ReclaimProgress::Changed) { continue; }
+            if (checkpoints_.pending()) { return false; }
             instance_.program->skip_capture(*request->sequence);
             decision.reset();
         }
@@ -1603,6 +1605,7 @@ private:
             }
             return true;
         }
+        if (checkpoints_.pending()) { return false; }
         if (cursor && cursor->rights.purpose != ReclaimPurpose::Execution) { return false; }
         for (auto it = paused_.rbegin(); it != paused_.rend(); ++it) {
             auto& request = **it;
@@ -1800,6 +1803,10 @@ private:
                 if (!own_snapshot &&
                     !resources_.prepare_source(*instance_.program, *request->base_plan, choice,
                                                request->id)) {
+                    if (checkpoints_.pending()) {
+                        deferred = true;
+                        break;
+                    }
                     if (!restoring) {
                         request->admission.fallback_reason =
                             resources_.source_revocations(request->id) &&
@@ -1869,6 +1876,10 @@ private:
                                 restoring ? std::optional(request->id) : std::nullopt)) {
                         if (instance_.program->has_context_operation()) { return true; }
                         continue;
+                    }
+                    if (checkpoints_.pending()) {
+                        deferred = true;
+                        break;
                     }
                     // Another waiting reference may be the only obstacle to a Move.
                     // Grant its revocation only when the resulting complete bind succeeds.
@@ -2079,6 +2090,9 @@ private:
                     if (!instance_.program->has_context_operation()) { continue; }
                     break;
                 }
+                // A save can still complete. Pending is not Native impossibility and must
+                // neither fail the oldest resident nor consume another destructive plan.
+                if (checkpoints_.pending()) { break; }
                 if (recovering == lane) {
                     throw std::logic_error("protected recovery exceeded its Native reservation");
                 }
@@ -2342,7 +2356,7 @@ private:
                 if (paused_.empty() && !context_owner_ && !recovering) {
                     scheduler_.paused_queue_empty();
                 }
-                if (!recovering &&
+                if (!recovering && !checkpoints_.pending() &&
                     ((admission_decision_ && admission_decision_->restoring) ||
                      scheduler_.should_restore(!paused_.empty(), resident_empty()))) {
                     (void)try_admit_one(true);
@@ -2351,7 +2365,8 @@ private:
                 reserve_resident_units();
                 // A failed restore leaves spare resources available to fresh requests.
                 // An in-flight restoration/reclaim keeps its own candidate until settled.
-                if (!admission_decision_ || !admission_decision_->restoring) {
+                if (!checkpoints_.pending() &&
+                    (!admission_decision_ || !admission_decision_->restoring)) {
                     if (!admission_decision_ && consume_admission_check()) {
                         ++admission_generation_;
                         scheduler_.begin_admission_scan();

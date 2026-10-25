@@ -7,6 +7,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -69,22 +70,35 @@ public:
 
     void set_handler(std::shared_ptr<PressureCheckpointHandler> value) noexcept {
         handler_.store(std::move(value));
+        notify_progress();
     }
     void set_oracle(std::shared_ptr<const ReclaimableSessionOracle> value) noexcept {
         oracle_.store(std::move(value));
+        notify_progress();
     }
     [[nodiscard]] std::shared_ptr<const ReclaimableSessionOracle> oracle() const noexcept {
         return oracle_.load();
     }
     // Snapshot ownership before calling out: removing a provider from inside its callback is
     // legal and cannot destroy that callback's receiver while it is on the stack.
-    [[nodiscard]] bool settle(std::span<PressureCheckpointVictim> victims) const noexcept {
+    void notify_progress() noexcept { progress_.fetch_add(1); }
+    // The pending snapshot is worker-owned. Only progress_ is touched by provider threads.
+    [[nodiscard]] bool pending() const noexcept {
+        return pending_progress_ && *pending_progress_ == progress_.load();
+    }
+    [[nodiscard]] bool settle(std::span<PressureCheckpointVictim> victims) noexcept {
+        if (pending()) { return false; }
+        const auto progress = progress_.load();
         const auto handler = handler_.load();
         if (!handler || victims.empty()) { return true; }
         handler->save_before_eviction(victims);
         for (const auto& victim : victims) {
-            if (victim.outcome == PressureCheckpointOutcome::Pending) { return false; }
+            if (victim.outcome == PressureCheckpointOutcome::Pending) {
+                pending_progress_ = progress;
+                return false;
+            }
         }
+        pending_progress_.reset();
         return true;
     }
 
@@ -93,6 +107,8 @@ private:
     std::map<std::string, std::shared_ptr<Session>, std::less<>> sessions_;
     std::atomic<std::shared_ptr<PressureCheckpointHandler>> handler_;
     std::atomic<std::shared_ptr<const ReclaimableSessionOracle>> oracle_;
+    std::atomic<std::uint64_t> progress_{1};
+    std::optional<std::uint64_t> pending_progress_;
 };
 
 struct PreparedEngineCheckpoint {

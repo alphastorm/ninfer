@@ -29,11 +29,13 @@
         const bool enabled = bool(handler);
         checkpoints_.set_handler(std::move(handler));
         resources_.enable_release_guard(enabled);
-        notify_checkpoint_progress();
+        request_admission_check();
+        queue_cv_.notify_all();
     }
     void set_reclaimable_session_oracle(std::shared_ptr<const ReclaimableSessionOracle> oracle) {
         checkpoints_.set_oracle(std::move(oracle));
-        notify_checkpoint_progress();
+        request_admission_check();
+        queue_cv_.notify_all();
     }
     void notify_checkpoint_progress() noexcept {
         request_admission_check();
