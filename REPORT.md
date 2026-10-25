@@ -22,6 +22,12 @@ reduction order. sm_86/89 and neighboring extents retain their existing routes.
 Expanded FP64/graph coverage includes both verify widths; GPU results are not yet
 claimed for this candidate. Earlier results below remain the previous baseline.
 
+The following isolated candidate reuses the existing padded pairwise Q4 schedules
+for fused SwiGLU at T=8/16. All other widths and sm_86/89 remain unchanged. The
+public numerical matrix already covers both widths; graph replay now does too.
+Its separate bounded measurement and full fused-output fork comparison are
+required before accepting the route.
+
 ## Disposition
 
 - Tested runtime source: `9b391d513726b3ed7d60a80a95daa68cf9dacc97`, branch `rebase/kernel-routes`, upstream base `64d10fbf`.

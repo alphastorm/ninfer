@@ -19,6 +19,6 @@ int main() {
         return run_profile("LinearSwiGLU Q4_A16",
                            {QType::Q4_G64_FP16, 34816, 5120, 17408, 1401U, ActivationCompute::A16},
                            kTokenCases,
-                           std::array<std::int32_t, 7>{7, 25, 49, 128, 152, 168, 1024});
+                           std::array<std::int32_t, 10>{7, 8, 9, 16, 25, 49, 128, 152, 168, 1024});
     });
 }
