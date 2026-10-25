@@ -24,10 +24,37 @@ Read-only command for each candidate: `git merge-tree --write-tree --merge-base=
 
 | Checkpoint | Source / commit | Build | Host tests | Real-model tests | Slice report |
 |---|---|---|---|---|---|
-| Base | upstream `64d10fbf9` | Awaiting Infra baseline | Not run by integration | Not run by integration | Infra report pending |
+| Base | upstream `64d10fbf9` | Infra reports apps/tests ON, benches OFF, `120a`, 285.323 s | 42/45 passed; remaining three lacked the runtime driver library, not test assertions | Corrected `r2` image: seven passed, six failed, two skipped across all real labels; 189.272 s. Explicit dense v3 loading passed, 5.728 s | [Infra environment correction](https://github.com/alphastorm/ninfer/blob/8f3ab12e/REPORT.md) |
+| Shared prerequisites | `dc3140b23`: native-profile gate and scope carriers | Apps/tests `120a` build passed; lease job elapsed 289 s, exit 0 | `ninfer_qwen_frontend_test` passed, 0.71 s | Not run; no GPU-ready environment yet | Integration-owned prerequisite, not a slice checkpoint |
+| Contracts candidate | merge `a2fcef5c`, proof/prose `bc551eefb`; shared declarations through `42efad145`; K6 clarifications through `96585c84e` | Changed-source integrated proof pending; slice's three standalone C++20 header compiles passed | Slice: C++ five canonical vectors, Python six canonical/MAC tests passed; integrated selector contains 47 tests | Nine applicable real cases, KV regression and explicit loading selected; prefix golden remains blocked | [Contracts proof](https://github.com/alphastorm/ninfer/blob/cf9ba7db/REPORT.md) |
+| Baseline fixture correction | `1bcaffa4d`, cherry-pick of EngineCache `091c6a815` | Included in next integrated proof | No production-policy change | Five no-EOS cache helpers explicitly select non-strict Automatic tools; dedicated agent-continuation proof pending | [EngineCache source](https://github.com/alphastorm/ninfer/commit/091c6a815) |
+| Baseline reservation correction | Persistence `117a166a`, isolated from its later native-import changes | Included in next integrated proof | No host-only import APIs pulled into this boundary | Quotes replay growth after rewind; retained/unretained tail regression and grammar proof pending | [Persistence diagnosis](https://github.com/alphastorm/ninfer/blob/117a166a/REPORT.md) |
 
 Baseline inventory must distinguish failures, skips and missing prerequisites. `tests/models/qwen3_5/tests.cmake` registers 14 `gpu;real` cases. `loading_real` needs explicit `--artifact` (the environment variable alone skips); MoE/offload cases need a matching MoE artifact. The supplied dense v3 artifact does not by itself prove every registered model/component route.
 
+Observed prerequisite command sequence: `NINFER_BUILD_HOLDER=int` exported, then `build.sh <source> <build>`, then `run-in-env.sh --mount <source> --mount <build> -- ctest --test-dir <build> -R '^ninfer_qwen_frontend_test$' --output-on-failure --timeout 180`. The private absolute holder roots are intentionally omitted. This proves compilation and the scope-carrier host regression, not runtime isolation or GPU behavior. Infra's initial GPU baseline is environment-invalid: its driver stub overrode the real driver (`cudaErrorStubLibrary`); Python oracle dependencies were also absent. The corrected environment must pass Infra's device/oracle smoke before GPU work resumes.
+
+Infra reports corrected `ov-build-env:master-64d10fbf-r2`, image `e7f34ca2f41e`, passed the real device test (1.298 s) and three Python-backed template/schema oracles (2.709 s). Old integration job `20261025T013006Z-int-checkpoint-7c6ba673-250067` was cancelled while queued, before execution; it is neither proof nor a product failure. Replacement proof pins the changed source and corrected image, builds apps/tests, runs Infra's 45 host tests plus two contract tests, then nine applicable real cases, the targeted KV-history regression and explicit v3 loading with Vision/DFlash2/optimized proposal. Host tests mount the real driver with `--gpu --env CUDA_VISIBLE_DEVICES=`; model/server tests leave that variable absent. No green checkpoint is claimed.
+
+### Vanilla baseline disposition
+
+The three host loader failures were `ninfer_openai_schema_test`, `ninfer_request_log_test` and `ninfer_http_error_handler_test`: `libcuda.so.1` was unavailable after the build stub was correctly isolated. Infra owns their changed-environment follow-up; the integration host run uses the corrected driver mount. The separate 124-test non-real GPU scan completed only 94 cases before its deadline and is incomplete evidence, not a green suite.
+
+| Applicable release blocker | Observed failure / root cause | Owner and accepted action |
+|---|---|---|
+| `ninfer_qwen3_5_grammar_real_test` | `KV write exceeds its page reservation`; replay growth was quoted against pre-rewind membership | Persistence's isolated [#419](https://github.com/Neroued/ninfer/issues/419) fix preserves the reservation guard and adds a 65→8→65 retained/unretained regression. Changed-source GPU proof pending; related [#414](https://github.com/Neroued/ninfer/issues/414) is not claimed fixed. |
+| `ninfer_qwen3_5_prefix_real_test` | Thinking-prompt golden differs from the supplied artifact | Frontend must record the artifact/template epoch cause before correcting a golden, or fix rendering if wrong. Deferred, **not excluded**. |
+| `ninfer_qwen3_5_agent_continuation_real_test` | Basic constraints reject the fixture's intentional no-default-EOS policy | Main approved explicit Automatic constraints in five non-strict cache helpers. Production defaults/guard and token/frontier/role assertions are unchanged; changed-source proof pending. |
+
+Main explicitly approved these **v3-dense subset exclusions**, not blanket test suppression:
+
+| Excluded test | Artifact-specific reason |
+|---|---|
+| `ninfer_qwen3_5_moe_real_test` | Requires the 35B MoE fixture; the supplied 27B dense model has a different architecture/load summary. |
+| `ninfer_qwen3_5_moe_offload_real_test` | MoE/offload fixture's 16 GiB device budget cannot hold the supplied dense artifact's weights/resources. |
+| `ninfer_qwen3_5_dflash_real_test` | Requires the legacy `dflash` component absent from this artifact; applicable DFlash2 and DFlash-prefill tests remain selected. |
+
+The seven vanilla dense passes are native transactions, preemption, tools, score, vision workspace, DFlash2 and DFlash prefill. Bare Qwen3.5 loading skips without its explicit argument; the explicit invocation passed. Qwen4 loading is outside this subset. Infra also proved the published v3 artifact `81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da` preserves all 1,184 unique tensor payload hashes, geometry/reference sets and all six frontend resources from the production artifact's v3 upgrade; format/provenance differences are not evidence of a changed production template.
 ## Merge queue and conflict watchlist
 
 Queue: Contracts → DurableStore standalone backend/I/O → ServePort snapshot/identity → DurableStore snapshot-aware store → Frontend → KernelRoutes → EngineCache → Harness → PortableCore → ArchEnable → Persistence → dependent A3/B2/C3/E2 integration. Main approved provider-first ordering: every merged boundary must be independently green; a source-only merge is not a green checkpoint.
@@ -57,9 +84,9 @@ K3/K4 publication rule: Main approved a mandatory Engine-supplied live-service g
 
 | Requester | Requested surface | Ownership / current state |
 |---|---|---|
-| Contracts | New `runtime/contract/{durable_checkpoint_set,durable_engine_api,runtime_fingerprint}.h`; contract test registration | New headers reserved to Contracts; integration owns CMake; merge first. |
-| DurableStore | Store/backend sources and host-only test targets | Exact entries awaited; use existing test helpers, no duplicate convention. |
-| ServePort | Serving source/test registration; persistence and managed-stop CLI union | Integration owns shared CMake/options; ServePort owns request declarations and shutdown orchestration. |
+| Contracts | New `runtime/contract/{durable_checkpoint_set,durable_engine_api,runtime_fingerprint}.h`; contract test registration | Frozen provider `746b29d2` merged with standalone C++/Python CTest registration. Internal adapter friendship and typed identity getter declarations are present; no public persistence methods. |
+| DurableStore | Store/backend sources and host-only test targets | Authorized standalone SHA/backend registration consumed as `dc5ffcbb`; snapshot-aware store remains dependent on ServePort and K6. |
+| ServePort | Serving source/test registration; persistence and managed-stop CLI union | Authorized source/test registration supplied. Identity, bounded API-key-file input, K5 persistence budgets and managed-stop options ported with parser regressions. Actual restore/final-save/shutdown orchestration awaits providers and must reject enabled launches without them. |
 | Persistence | `program/storage/durable_tracer.cpp` adjacent to `checkpoints.cpp` in `program_sources.cmake` | Exact slice-local insertion permitted for G1 build; integration owns merge disposition. Prefix-identity hook remains slice-owned and must become typed for final K1. |
 | EngineCache | `gpu_keep_warm_ms`, `--gpu-keep-warm-ms`, core source and test registration | Integration owns public option/CLI/CMake; EngineCache supplies exact entries. |
 | PortableCore | Root/core portability wiring; exact `Uint128` migrations in shared resources and serve options | `src/core/uint128.h` is PortableCore-owned; EngineCache owns engine arithmetic callers; integration owns shared callers. |
@@ -68,9 +95,9 @@ K3/K4 publication rule: Main approved a mandatory Engine-supplied live-service g
 
 ## Open prerequisites
 
-- Infra build image/helper and vanilla baseline evidence.
-- Contracts freeze and mergeable branch/report.
-- Frontend starts when a worker slot becomes available; grammar-whitespace handoff is queued.
+- Valid vanilla model evidence is consumed above. The three host loader failures require the corrected driver mount; the first changed-source integration proof remains pending.
+- Contracts' first candidate includes frozen declarations, fixtures and host CTest registration. Integrated build/host/model proof must pass before a checkpoint tag or the next implementation merge.
+- Frontend is active on grammar whitespace, parser/custom-tool preservation and the approved loaded-identity provider; its source inspection found upstream already inserts stable leading/tool boundaries, with regression coverage being added.
 - Exact requested declarations/source lists before shared edits; do not register nonexistent sources on the integration branch.
 - PortableCore and ArchEnable must land before adding native Windows architecture builds to the routine.
 - GPU selection remains numeric `--device`; no new engine UUID flag/field. Controller sets child `CUDA_DEVICE_ORDER=PCI_BUS_ID`, requires absent `CUDA_VISIBLE_DEVICES`, and attests the request-log GPU UUID. Tooling UUID arguments remain unchanged.

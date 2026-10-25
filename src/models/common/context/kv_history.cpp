@@ -593,9 +593,12 @@ std::uint32_t KVHistoryStore::write_pages(KVHistoryHandle handle, std::uint32_t 
     const auto& history = require(handle);
     if (begin > history.frontier || begin > end || page_count(end) > page_capacity_)
         throw std::invalid_argument("KV write interval is invalid");
-    auto count = growth_pages_for_tokens(handle, end);
+    // prepare_write rewinds first. Pages beyond that prefix are no longer members of the
+    // writable history (including when a retained suffix makes trim fork the owner).
+    const auto mapped = begin < history.frontier ? page_count(begin) : history.page_count;
+    auto count = page_count(end) > mapped ? page_count(end) - mapped : 0;
     if (begin == end) return count;
-    for (auto i = begin / kPageTokens; i < std::min(page_count(end), history.page_count); ++i)
+    for (auto i = begin / kPageTokens; i < std::min(page_count(end), mapped); ++i)
         count += !pages_->can_write(membership(history, i), writer(handle),
                                     i == begin / kPageTokens ? begin % kPageTokens : 0,
                                     coverage(history.frontier, i));
