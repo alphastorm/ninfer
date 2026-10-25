@@ -1,0 +1,61 @@
+{
+  "artifact_type": "ninfer-engine-cache-proof-disposition/1",
+  "job": "20261025T065709Z-E1-engine-cache-final-overlap-restart-582334",
+  "source_commit": "d693c6c7ca805cdb5a6ab4d7688ce600aa58f6b4",
+  "upstream_base_sha": "64d10fbf9f8e6bfc79ab0570b94674c5b9997929",
+  "build_image": "ov-build-env:master-64d10fbf-r2",
+  "cuda_version": "13.1.2",
+  "build_targets": ["ninfer-serve", "ninfer_qwen3_5_durable_pressure_real_test"],
+  "build_passed": true,
+  "lease_exit_code": 0,
+  "lease_elapsed_seconds": 201,
+  "leftover_containers": 0,
+  "unowned_containers": 0,
+  "ctest": {
+    "test": "ninfer_qwen3_5_durable_pressure_real_test",
+    "backend": "dflash2",
+    "passed": true,
+    "failures": 0,
+    "skipped": 0,
+    "seconds": 46.6706,
+    "phase_elapsed_seconds": 48,
+    "host_capacity_bytes": 758120448,
+    "resident_bytes": 505040896,
+    "occupied_bytes": 505040896,
+    "prompt_tokens": 1658,
+    "cached_tokens": 1651,
+    "pending_callbacks": 2,
+    "settled_callbacks": 4,
+    "decode_rows": 1173,
+    "decode_rounds": 1170,
+    "phases_elapsed_ms": {
+      "source_load": 0,
+      "source_ready": 13288,
+      "source_exported": 15162,
+      "target_load": 15465,
+      "target_ready": 21523,
+      "victim_imported": 21753,
+      "sibling_decoding": 22342,
+      "pending_preserved": 22571,
+      "victim_exported": 23951,
+      "victim_save_published": 23951,
+      "target_imported": 24420,
+      "target_continued": 24558,
+      "sibling_finished": 45494
+    },
+    "assertions": {
+      "pending_preserves_victim": true,
+      "save_publication_allows_reclaim": true,
+      "restore_returns_before_sibling_finishes": true,
+      "restored_continuation_decodes_at_c2": true,
+      "restored_tokens_equal_fresh_deterministic_tokens": true,
+      "assertions_unchanged_from_prior_failed_input": true
+    }
+  },
+  "production_restart": {
+    "four_boot_passed": true,
+    "phase_elapsed_seconds": 130,
+    "receipt": "serve-restore-582334.json"
+  },
+  "acceptance_passed": true
+}

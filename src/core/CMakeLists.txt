@@ -32,6 +32,7 @@ add_library(ninfer_core STATIC
   transfer.cpp
   transfer.cu
   device.cu
+  gpu_keep_warm.cu
   dtype.cpp
   nf4.cpp
   io/file.cpp

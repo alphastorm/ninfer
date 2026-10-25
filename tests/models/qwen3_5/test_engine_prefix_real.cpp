@@ -498,7 +498,7 @@ int exercise_host_restore(const char* artifact) {
         engine.generate(engine.prepare_tokens(continuation), options(2, true));
     const ninfer::RuntimeStats after_restore = engine.runtime_stats();
     if (restored.generated_token_ids.size() != 2 ||
-        restored.prefix_reuse_path != ninfer::PrefixReusePath::Checkpoint ||
+        restored.prefix_reuse_path != ninfer::PrefixReusePath::PrivateInputReplay ||
         restored.reused_prompt_tokens == 0 ||
         after_restore.context_transfers.state[1].images <=
             after_pressure.context_transfers.state[1].images ||
@@ -575,7 +575,7 @@ int exercise_explicit_prefix(const char* artifact) {
         engine.generate(engine.prepare(input("Use lookup for bravo.", false)), request);
     if (source.generated_token_ids.size() != 3 || branch.generated_token_ids.size() != 3 ||
         cold.generated_token_ids.size() != 3 ||
-        branch.prefix_reuse_path != ninfer::PrefixReusePath::Checkpoint ||
+        branch.prefix_reuse_path != ninfer::PrefixReusePath::SharedStablePrefix ||
         branch.reused_prompt_tokens == 0 ||
         branch.reused_prompt_tokens >= branch.prompt.prompt_tokens ||
         cold.prefix_reuse_path != ninfer::PrefixReusePath::Root || cold.reused_prompt_tokens != 0) {
@@ -658,8 +658,8 @@ int exercise_nested_tool_markers(const char* artifact) {
     };
     if (!accounted(seed) || !accounted(deep) || !accounted(shallow) ||
         seed.prefix_reuse_path != ninfer::PrefixReusePath::Root || seed.reused_prompt_tokens != 0 ||
-        deep.prefix_reuse_path != ninfer::PrefixReusePath::Checkpoint ||
-        shallow.prefix_reuse_path != ninfer::PrefixReusePath::Checkpoint ||
+        deep.prefix_reuse_path != ninfer::PrefixReusePath::SharedStablePrefix ||
+        shallow.prefix_reuse_path != ninfer::PrefixReusePath::SharedStablePrefix ||
         shallow.reused_prompt_tokens == 0 ||
         deep.reused_prompt_tokens <= shallow.reused_prompt_tokens ||
         deep.reused_prompt_tokens >= deep.prompt.prompt_tokens ||
@@ -738,7 +738,7 @@ int exercise_anthropic_prefix_regression(const char* artifact) {
     const std::uint64_t followup_prefill =
         after_followup.computed_prefill_tokens - before_followup.computed_prefill_tokens;
     if (followup.generated_token_ids.size() != 1 ||
-        followup.prefix_reuse_path != ninfer::PrefixReusePath::Checkpoint ||
+        followup.prefix_reuse_path != ninfer::PrefixReusePath::PrivateEndpoint ||
         followup.reused_prompt_tokens == 0 ||
         followup_prefill != followup.prompt.prompt_tokens - followup.reused_prompt_tokens) {
         std::cerr << "model-output reasoning frontier did not resume from its checkpoint: path="
@@ -956,7 +956,7 @@ int exercise_shared_rewrite_materialization(const char* artifact) {
 
     if (first.prefix_reuse_path != ninfer::PrefixReusePath::Root ||
         second.reused_prompt_tokens == 0 ||
-        third.prefix_reuse_path != ninfer::PrefixReusePath::Checkpoint ||
+        third.prefix_reuse_path != ninfer::PrefixReusePath::PrivateInputReplay ||
         third.reused_prompt_tokens != expected_reuse ||
         third.reused_prompt_tokens <= second.reused_prompt_tokens ||
         third.computed_prefill_tokens != third.prompt.prompt_tokens - expected_reuse ||
@@ -1029,7 +1029,7 @@ int exercise_explicit_anchor_branch(const char* artifact) {
     const ninfer::GenerationResult replacement =
         engine.generate(engine.prepare(std::move(replacement_input)), request);
     if (replacement.generated_token_ids.size() != 1 ||
-        replacement.prefix_reuse_path != ninfer::PrefixReusePath::Checkpoint ||
+        replacement.prefix_reuse_path != ninfer::PrefixReusePath::PrivateLongAnchor ||
         replacement.reused_prompt_tokens == 0 ||
         replacement.reused_prompt_tokens >= replacement.prompt.prompt_tokens) {
         std::cerr << "explicit intermediate checkpoint was not selected for a changed branch: path="
@@ -1047,7 +1047,7 @@ int exercise_explicit_anchor_branch(const char* artifact) {
     const ninfer::GenerationResult replaced =
         engine.generate(engine.prepare(std::move(replaced_input)), request);
     if (replaced.generated_token_ids.size() != 1 ||
-        replaced.prefix_reuse_path != ninfer::PrefixReusePath::Checkpoint ||
+        replaced.prefix_reuse_path != ninfer::PrefixReusePath::PrivateLongAnchor ||
         replaced.reused_prompt_tokens <= replacement.reused_prompt_tokens ||
         replaced.reused_prompt_tokens >= replaced.prompt.prompt_tokens) {
         const ninfer::RuntimeStats stats = engine.runtime_stats();
@@ -1125,7 +1125,7 @@ int exercise_rewrite_checkpoints(ninfer::Engine& engine) {
     const ninfer::GenerationResult exact_replay =
         engine.generate(engine.prepare(input_with_history(0, false)), options(true));
     if (exact_replay.generated_token_ids.size() != 4 ||
-        exact_replay.prefix_reuse_path != ninfer::PrefixReusePath::Checkpoint ||
+        exact_replay.prefix_reuse_path != ninfer::PrefixReusePath::PrivateInputReplay ||
         exact_replay.reused_prompt_tokens == 0) {
         const ninfer::RuntimeStats stats = engine.runtime_stats();
         std::cerr << "pre-generation response checkpoint was not restored on an exact replay: "
@@ -1152,7 +1152,7 @@ int exercise_rewrite_checkpoints(ninfer::Engine& engine) {
     const ninfer::GenerationResult first_replay =
         engine.generate(engine.prepare(input_with_history(1, true)), options(true));
     if (first_replay.generated_token_ids.size() != 4 ||
-        first_replay.prefix_reuse_path != ninfer::PrefixReusePath::Checkpoint ||
+        first_replay.prefix_reuse_path != ninfer::PrefixReusePath::PrivateInputReplay ||
         first_replay.reused_prompt_tokens == 0) {
         std::cerr << "normalized tool response did not reuse a compatible checkpoint\n";
         return 1;
@@ -1161,7 +1161,7 @@ int exercise_rewrite_checkpoints(ninfer::Engine& engine) {
     const ninfer::GenerationResult second_replay =
         engine.generate(engine.prepare(input_with_history(2, true)), options(true));
     if (second_replay.generated_token_ids.size() != 4 ||
-        second_replay.prefix_reuse_path != ninfer::PrefixReusePath::Checkpoint ||
+        second_replay.prefix_reuse_path != ninfer::PrefixReusePath::PrivateInputReplay ||
         second_replay.reused_prompt_tokens <= first_replay.reused_prompt_tokens) {
         const ninfer::RuntimeStats stats = engine.runtime_stats();
         std::cerr << "rolling response checkpoint did not advance across the tool loop: first="
@@ -1175,7 +1175,7 @@ int exercise_rewrite_checkpoints(ninfer::Engine& engine) {
     const ninfer::GenerationResult mode_change =
         engine.generate(engine.prepare(input_with_history(2, false)), options(true));
     if (mode_change.generated_token_ids.size() != 4 ||
-        mode_change.prefix_reuse_path != ninfer::PrefixReusePath::Checkpoint ||
+        mode_change.prefix_reuse_path != ninfer::PrefixReusePath::PrivateInputReplay ||
         mode_change.reused_prompt_tokens == 0) {
         std::cerr << "preserve-thinking policy change discarded a compatible response checkpoint: "
                   << "path=" << static_cast<int>(mode_change.prefix_reuse_path)
@@ -1232,8 +1232,9 @@ int exercise_agent_continuation(const char* artifact) {
         const auto after  = engine.runtime_stats();
         if (result.generated_token_ids.size() != 4 ||
             result.finish_reason != ninfer::FinishReason::OutputLimit ||
-            result.prefix_reuse_path != (expected_frontier ? ninfer::PrefixReusePath::Checkpoint
-                                                                    : ninfer::PrefixReusePath::Root) ||
+            result.prefix_reuse_path != (expected_frontier
+                                            ? ninfer::PrefixReusePath::PrivateInputReplay
+                                            : ninfer::PrefixReusePath::Root) ||
             result.reused_prompt_tokens != expected_frontier ||
             result.reused_prompt_tokens >= result.prompt.prompt_tokens ||
             result.computed_prefill_tokens !=
@@ -1388,7 +1389,7 @@ int exercise_rewrite_branch(const char* artifact) {
         engine.generate(engine.prepare(input(true)), options(false));
     if (branch.generated_token_ids.size() != 4 || branch.reused_prompt_tokens == 0 ||
         branch.reused_prompt_tokens >= branch.prompt.prompt_tokens ||
-        branch.prefix_reuse_path != ninfer::PrefixReusePath::Checkpoint ||
+        branch.prefix_reuse_path != ninfer::PrefixReusePath::PrivateInputReplay ||
         branch_baseline.generated_token_ids.size() != 4 ||
         branch_baseline.reused_prompt_tokens != 0) {
         std::cerr << "replacement user suffix did not reuse the stable conversation prefix: path="
@@ -1456,7 +1457,8 @@ int exercise_late_instructions(const char* artifact) {
         const auto after             = engine.runtime_stats();
         if (next.generated_token_ids.size() != 16 || next.content.empty() ||
             next.finish_reason != ninfer::FinishReason::OutputLimit ||
-            next.prefix_reuse_path != ninfer::PrefixReusePath::Checkpoint ||
+            (next.prefix_reuse_path != ninfer::PrefixReusePath::PrivateInputReplay &&
+             next.prefix_reuse_path != ninfer::PrefixReusePath::PrivateEndpoint) ||
             next.reused_prompt_tokens < required_frontier ||
             next.reused_prompt_tokens <= previous.reused_prompt_tokens ||
             next.computed_prefill_tokens != next.prompt.prompt_tokens - next.reused_prompt_tokens ||

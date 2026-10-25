@@ -1,0 +1,30 @@
+{
+  "artifact_type": "ninfer-engine-victim-provider-proof/1",
+  "source_commit": "138939f385ba4ded5e6774effb7463d39048654f",
+  "provider_receipt_commit": "6563d439",
+  "provider_receipt": "persistence-canonical-r7.json",
+  "fixture_import_commit": "9608ec74",
+  "registration_commit": "a41b0ce2d1323c9c923f727bf3443a047d14c591",
+  "receipt_output_fix_commit": "9e2261f92b9cbca8b44933e5064cbdd2978a9400",
+  "host_class": "RTX PRO 6000 correctness lane",
+  "build_image": "sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
+  "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+  "test": "ninfer_qwen3_5_checkpoint_reclaim_real_test",
+  "exit_code": 0,
+  "elapsed_seconds": 96.004,
+  "log_sha256": "307305adb9f5d186965f57d589a82f8fef8c6bc47f9f9f0298e31abd3f8ac212",
+  "evidence": {
+    "points": 3,
+    "resident_bytes": 608663552,
+    "host_capacity_bytes": 913309696,
+    "verified_bytes": 608671719,
+    "pins": 2,
+    "releases": 1,
+    "target_fresh_readers": 1,
+    "reused_tokens": 278,
+    "native_invalid_victim_preserved": true,
+    "validation_before_release": true,
+    "exact_tokens": true
+  },
+  "production_restart_proven": false
+}

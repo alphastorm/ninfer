@@ -8,6 +8,12 @@
 #include "runtime/engine/causal_score_core.h"
 #include "runtime/engine/engine_core.h"
 #include "runtime/engine/model_construction.h"
+#include "models/common/qwen/frontend/prepared_prompt.h"
+#if defined(__linux__)
+#include "runtime/platform/linux/io_uring_checkpoint_backend.h"
+#elif defined(_WIN32)
+#include "runtime/windows/direct_storage_checkpoint_backend.h"
+#endif
 
 #include <algorithm>
 #include <limits>
@@ -50,6 +56,32 @@ std::string context_capacity_error(std::size_t prompt_tokens, std::uint32_t max_
            " tokens, exceeding Engine max_context " + std::to_string(max_context);
 }
 
+runtime::DurableEngineIdentity engine_identity(const EngineOptions& options,
+                                               const MemorySummary& memory) {
+    const char* kv;
+    switch (options.kv_cache) {
+    case KvCacheStorage::BFloat16: kv = "bf16"; break;
+    case KvCacheStorage::Int8Group64: kv = "int8"; break;
+    case KvCacheStorage::Fp8E4M3Row256: kv = "fp8"; break;
+    case KvCacheStorage::Fp8KeyNvfp4Value: kv = "k8v4"; break;
+    case KvCacheStorage::Nvfp4Group16: kv = "nvfp4"; break;
+    }
+    const char* backend;
+    switch (options.speculative.backend) {
+    case SpeculativeBackend::None: backend = "none"; break;
+    case SpeculativeBackend::Mtp: backend = "mtp"; break;
+    case SpeculativeBackend::DFlash: backend = "dflash"; break;
+    case SpeculativeBackend::DFlash2: backend = "dflash2"; break;
+    }
+    return {.max_context = options.max_context, .kv_capacity = memory.kv_capacity,
+            .kv_dtype = kv, .max_concurrency = options.max_concurrency,
+            .prefill_chunk = memory.prefill_chunk, .speculative_backend = backend,
+            .draft_window = options.speculative.draft_tokens,
+            .proposal_head = options.speculative.proposal_head == ProposalHead::Optimized
+                ? "optimized" : "full",
+            .enable_vision = options.enable_vision, .use_cuda_graph = options.use_cuda_graph};
+}
+
 } // namespace
 
 class PreparedPrompt::Impl {
@@ -63,6 +95,7 @@ public:
     PromptPreparationStats prepare;
     SamplingMode sampling_mode = SamplingMode::Thinking;
     models::qwen::PreparedPrompt value;
+    std::string checkpoint_tag;
 };
 
 PreparedPrompt::PreparedPrompt() noexcept                            = default;
@@ -90,6 +123,7 @@ public:
     public:
         virtual ~Concept() = default;
         virtual GenerationResult wait(OutputSink* sink, const CancellationView& cancellation) = 0;
+        virtual runtime::DurableSessionEpoch publication_epoch() const noexcept = 0;
     };
 
     template <class Submission>
@@ -100,6 +134,14 @@ public:
 
         GenerationResult wait(OutputSink* sink, const CancellationView& cancellation) override {
             return submission_.wait(sink, cancellation);
+        }
+
+        runtime::DurableSessionEpoch publication_epoch() const noexcept override {
+            if constexpr (requires { submission_.publication_epoch(); }) {
+                return submission_.publication_epoch();
+            } else {
+                return {};
+            }
         }
 
     private:
@@ -119,6 +161,10 @@ public:
 
     [[nodiscard]] const ResolvedSamplingParameters& resolved_sampling() const noexcept {
         return sampling_;
+    }
+
+    [[nodiscard]] runtime::DurableSessionEpoch publication_epoch() const noexcept {
+        return state_->publication_epoch();
     }
 
 private:
@@ -173,6 +219,9 @@ public:
                 if (options.purpose == EnginePurpose::CausalScoring) {
                     core = std::make_unique<runtime::CausalScoreCore<Instance>>(*instance, device);
                 } else {
+                    // Resolved identity is immutable. Capture it before the worker starts;
+                    // import must not contend for live execution just to compare K2 fields.
+                    checkpoint_identity = engine_identity(options, instance->program->memory_summary());
                     core = std::make_unique<runtime::EngineCore<Instance>>(
                         *instance, device, options, std::move(constructed.context_cost));
                 }
@@ -202,6 +251,7 @@ public:
     runtime::ActiveModel active;
     LoadSummary load;
     ModelSamplingDefaults sampling_defaults;
+    runtime::DurableEngineIdentity checkpoint_identity;
     Core core;
 };
 
@@ -358,10 +408,19 @@ GenerationHandle Engine::submit(PreparedPrompt prompt, RequestOptions options,
             } else if constexpr (CoreState::element_type::purpose == EnginePurpose::CausalScoring) {
                 throw std::logic_error("Engine generation core is unavailable");
             } else {
+                std::string checkpoint_session;
+                const auto& cache = models::qwen::PreparedPromptAccess::view(
+                    prompt.impl_->value).context_cache;
+                if (cache.update_session_index && cache.session_key && cache.reuse_scope &&
+                    cache.session_key == cache.reuse_scope &&
+                    cache.session_key->view().starts_with("http:")) {
+                    checkpoint_session = cache.session_key->view().substr(5);
+                }
                 auto submission =
                     core->submit(std::move(prompt.impl_->value), prompt_summary, prepare_seconds,
                                  std::move(resolved_options), consumer_mode, std::move(observation),
-                                 pending_deadline);
+                                 pending_deadline, std::move(checkpoint_session),
+                                 std::move(prompt.impl_->checkpoint_tag));
                 return GenerationHandle(std::make_unique<GenerationHandle::Impl>(
                     impl_, std::move(submission), resolved_sampling));
             }
@@ -445,5 +504,185 @@ void Engine::reset_memory_peaks() noexcept {
         },
         impl_->core);
 }
+
+namespace runtime {
+namespace {
+template <class Variant, class Function>
+auto generation_core(Variant& cores, Function&& function)
+    -> decltype(function(*std::get<1>(cores))) {
+    using Result = decltype(function(*std::get<1>(cores)));
+    return std::visit([&](auto& core) -> Result {
+        using State = std::remove_cvref_t<decltype(core)>;
+        if constexpr (std::is_same_v<State, std::monostate>) {
+            throw std::runtime_error("Engine core is unavailable");
+        } else if constexpr (State::element_type::purpose != EnginePurpose::Generation) {
+            throw std::invalid_argument("checkpoint access requires Generation Engine");
+        } else {
+            return function(*core);
+        }
+    }, cores);
+}
+
+} // namespace
+
+struct DurableEngineImport::Impl {
+    // Keep Program, its worker and the device alive until the native reservation is aborted.
+    std::shared_ptr<void> engine;
+    PreparedEngineCheckpoint operation;
+    ~Impl() { if (operation.abort) { operation.abort(); } }
+};
+
+DurableEngineImport::DurableEngineImport(std::unique_ptr<Impl> impl) noexcept
+    : impl_(std::move(impl)) {}
+DurableEngineImport::DurableEngineImport(DurableEngineImport&&) noexcept = default;
+DurableEngineImport& DurableEngineImport::operator=(DurableEngineImport&&) noexcept = default;
+DurableEngineImport::~DurableEngineImport() = default;
+
+void DurableEngineImport::abort() noexcept { impl_.reset(); }
+
+DurableImportResult DurableEngineImport::commit() noexcept {
+    if (!impl_) { return {.reason = DurableReason::Cancelled}; }
+    DurableImportResult result;
+    try {
+        result = impl_->operation.commit();
+    } catch (const std::bad_alloc&) {
+        result = {DurableImportState::CapacityRefused, DurableReason::Capacity};
+    } catch (...) {
+        result = {DurableImportState::Unavailable, DurableReason::IoUnavailable};
+    }
+    abort();
+    return result;
+}
+
+DurableNativeLayout CheckpointEngineAccess::checkpoint_layout(const Engine& engine) {
+    if (!engine.impl_) { throw std::logic_error("Engine is moved from"); }
+    return generation_core(engine.impl_->core, [](auto& core) { return core.checkpoint_layout(); });
+}
+
+DurableFrontendIdentity CheckpointEngineAccess::frontend_identity(const Engine& engine) {
+    if (!engine.impl_) { throw std::logic_error("Engine is moved from"); }
+    return engine.impl_->frontend().durable_identity();
+}
+
+void CheckpointEngineAccess::set_pressure_checkpoint_handler(
+    Engine& engine, std::shared_ptr<PressureCheckpointHandler> handler) {
+    if (!engine.impl_) { throw std::logic_error("Engine is moved from"); }
+    generation_core(engine.impl_->core,
+        [&](auto& core) { core.set_pressure_checkpoint_handler(std::move(handler)); });
+}
+
+void CheckpointEngineAccess::set_reclaimable_session_oracle(
+    Engine& engine, std::shared_ptr<const ReclaimableSessionOracle> oracle) {
+    if (!engine.impl_) { throw std::logic_error("Engine is moved from"); }
+    generation_core(engine.impl_->core,
+        [&](auto& core) { core.set_reclaimable_session_oracle(std::move(oracle)); });
+}
+
+void CheckpointEngineAccess::notify_checkpoint_progress(Engine& engine) noexcept {
+    if (!engine.impl_) { return; }
+    try {
+        generation_core(engine.impl_->core, [](auto& core) { core.notify_checkpoint_progress(); });
+    } catch (...) {}
+}
+
+void CheckpointEngineAccess::set_checkpoint_tag(PreparedPrompt& prompt, std::string_view tag) {
+    if (!prompt.impl_) { throw std::invalid_argument("PreparedPrompt is empty"); }
+    prompt.impl_->checkpoint_tag = tag;
+}
+
+DurableSessionEpoch CheckpointEngineAccess::session_epoch(
+    Engine& engine, std::string_view digest) {
+    if (!engine.impl_) { throw std::logic_error("Engine is moved from"); }
+    return generation_core(engine.impl_->core, [&](auto& core) { return core.session_epoch(digest); });
+}
+
+DurableSessionEpoch CheckpointEngineAccess::publication_epoch(const GenerationHandle& handle) {
+    return handle.impl_ ? handle.impl_->publication_epoch() : DurableSessionEpoch{};
+}
+
+std::shared_ptr<ContinuationCheckpointReadQueue> CheckpointEngineAccess::make_read_queue(
+    Engine& engine, const std::filesystem::path& root) {
+    if (!engine.impl_) { throw std::logic_error("Engine is moved from"); }
+#if defined(__linux__)
+    return make_io_uring_checkpoint_read_queue(root);
+#elif defined(_WIN32)
+    return generation_core(engine.impl_->core, [&](auto& core) {
+        return core.checkpoint_call([&] {
+            return windows::make_direct_storage_checkpoint_read_queue(root, 30'000);
+        });
+    });
+#else
+    throw std::runtime_error("checkpoint read queue is unavailable on this platform");
+#endif
+}
+
+DurableExportResult CheckpointEngineAccess::export_session(
+    Engine& engine, std::string_view digest, std::string_view tag,
+    ContinuationCheckpointWriter& writer, const DurableLimits& limits) {
+    if (!engine.impl_) { return {.reason = DurableReason::IoUnavailable}; }
+    const auto keep_alive = engine.impl_;
+    return generation_core(keep_alive->core, [&](auto& core) {
+        return core.export_session(digest, tag, writer, limits);
+    });
+}
+
+DurablePublicationResult CheckpointEngineAccess::publish_export(
+    Engine& engine, std::string_view digest, std::string_view tag,
+    DurableSessionEpoch epoch, const std::function<bool()>& callback) {
+    if (!engine.impl_) { return {.reason = DurableReason::IoUnavailable}; }
+    return generation_core(engine.impl_->core, [&](auto& core) {
+        return core.publish_export(digest, tag, epoch, callback);
+    });
+}
+
+DurablePrepareResult CheckpointEngineAccess::prepare_import(
+    Engine& engine, const DurableImportTarget& target, const ContinuationCheckpointReader& reader,
+    const RuntimeFingerprintV2& fingerprint, const DurableCheckpointStats& stats,
+    const DurableLimits& limits) {
+    if (!engine.impl_) {
+        return {.state = DurablePrepareState::Unavailable, .reason = DurableReason::IoUnavailable};
+    }
+    // Warmup/store:false/cache-disabled must refuse before inspecting Reader or reserving native
+    // capacity. The complete authenticated identity remains the serving store's responsibility.
+    const auto& options = engine.impl_->options;
+    if (!options.context_cache.enabled || !target.allow_prefix_reuse ||
+        !target.cache_participation || options.purpose != EnginePurpose::Generation) {
+        return {.state = DurablePrepareState::PolicyDisabled, .reason = DurableReason::CacheDisabled};
+    }
+    if (fingerprint.engine != engine.impl_->checkpoint_identity ||
+        fingerprint.frontend != frontend_identity(engine)) {
+        return {.state = DurablePrepareState::IdentityMismatch,
+                .reason = DurableReason::FingerprintMismatch};
+    }
+    auto impl = std::make_unique<DurableEngineImport::Impl>();
+    impl->engine = engine.impl_;
+    impl->operation = generation_core(engine.impl_->core, [&](auto& core) {
+        return core.prepare_import(target, reader, fingerprint, stats, limits);
+    });
+    DurablePrepareResult result{.state = impl->operation.state, .reason = impl->operation.reason};
+    if (result.state == DurablePrepareState::Prepared) {
+        result.prepared = DurableEngineImport(std::move(impl));
+    }
+    return result;
+}
+
+DurableImportResult CheckpointEngineAccess::import_session(
+    Engine& engine, const DurableImportTarget& target, const ContinuationCheckpointReader& reader,
+    const RuntimeFingerprintV2& fingerprint, const DurableCheckpointStats& stats,
+    const DurableLimits& limits) {
+    auto prepared = prepare_import(engine, target, reader, fingerprint, stats, limits);
+    if (prepared.prepared) { return prepared.prepared->commit(); }
+    DurableImportState state;
+    switch (prepared.state) {
+    case DurablePrepareState::CapacityRefused: state = DurableImportState::CapacityRefused; break;
+    case DurablePrepareState::Corrupt: state = DurableImportState::Corrupt; break;
+    case DurablePrepareState::IdentityMismatch: state = DurableImportState::IdentityMismatch; break;
+    case DurablePrepareState::Unavailable: state = DurableImportState::Unavailable; break;
+    case DurablePrepareState::PolicyDisabled: state = DurableImportState::PolicyDisabled; break;
+    case DurablePrepareState::Prepared: std::terminate();
+    }
+    return {state, prepared.reason};
+}
+} // namespace runtime
 
 } // namespace ninfer

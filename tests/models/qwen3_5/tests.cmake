@@ -33,6 +33,11 @@ add_test(NAME ninfer_qwen3_5_checkpoint_restart_test
 set_tests_properties(ninfer_qwen3_5_checkpoint_restart_test PROPERTIES
   LABELS "gpu;real" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 300)
 
+ninfer_add_test(ninfer_qwen3_5_checkpoint_reclaim_real_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_checkpoint_reclaim_real.cpp"
+  LIBRARIES ninfer_engine ninfer_model_runtime ninfer_sha256)
+set_tests_properties(ninfer_qwen3_5_checkpoint_reclaim_real_test PROPERTIES TIMEOUT 180)
+
 ninfer_add_test(ninfer_qwen3_5_prefix_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_prefix_real.cpp"
   LIBRARIES ninfer_engine)
@@ -65,6 +70,17 @@ ninfer_add_test(ninfer_qwen3_5_dflash2_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_dflash2_real.cpp"
   LIBRARIES ninfer_engine)
 
+ninfer_add_test(ninfer_qwen3_5_concurrency_real_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_concurrency_real.cpp"
+  LIBRARIES ninfer_engine)
+set_tests_properties(ninfer_qwen3_5_concurrency_real_test PROPERTIES TIMEOUT 300)
+
+ninfer_add_test(ninfer_qwen3_5_durable_pressure_real_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_durable_pressure_real.cpp"
+  LIBRARIES ninfer_engine ninfer_sha256)
+# Two cold model loads plus complete checkpoint byte proofs on the secondary lane.
+set_tests_properties(ninfer_qwen3_5_durable_pressure_real_test PROPERTIES TIMEOUT 600)
+
 ninfer_add_test(ninfer_qwen3_5_dflash_prefill_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_dflash_prefill_real.cpp"
   LIBRARIES ninfer_model_runtime ninfer_model_loading ninfer_core)
@@ -91,6 +107,7 @@ set_tests_properties(ninfer_qwen3_5_agent_continuation_real_test PROPERTIES
 set(ninfer_qwen3_5_real_tests
   ninfer_qwen3_5_loading_real_test
   ninfer_qwen3_5_native_transactions_test
+  ninfer_qwen3_5_checkpoint_reclaim_real_test
   ninfer_qwen3_5_prefix_real_test
   ninfer_qwen3_5_shared_prefix_real_test
   ninfer_qwen3_5_agent_continuation_real_test
@@ -100,6 +117,8 @@ set(ninfer_qwen3_5_real_tests
   ninfer_qwen3_5_score_real_test
   ninfer_qwen3_5_vision_workspace_test
   ninfer_qwen3_5_dflash2_real_test
+  ninfer_qwen3_5_concurrency_real_test
+  ninfer_qwen3_5_durable_pressure_real_test
   ninfer_qwen3_5_dflash_prefill_real_test
   ninfer_qwen3_5_moe_real_test
   ninfer_qwen3_5_moe_offload_real_test

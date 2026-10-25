@@ -437,25 +437,32 @@ void OpenAIResponsesStore::end_publication(const std::string& id) noexcept {
 }
 
 OpenAIResponsePublication::OpenAIResponsePublication(OpenAIResponsesStore& store, std::string id,
-                                                     std::optional<std::string> session)
-    : response_id_(std::move(id)) {
+                                                     std::optional<std::string> session,
+                                                     std::function<void()> on_end)
+    : response_id_(std::move(id)), on_end_(std::move(on_end)) {
     store.begin_publication(response_id_, session);
     store_ = &store;
 }
 OpenAIResponsePublication::OpenAIResponsePublication(OpenAIResponsePublication&& other) noexcept
-    : store_(std::exchange(other.store_, nullptr)), response_id_(std::move(other.response_id_)) {}
+    : store_(std::exchange(other.store_, nullptr)), response_id_(std::move(other.response_id_)),
+      on_end_(std::move(other.on_end_)) {}
 OpenAIResponsePublication&
 OpenAIResponsePublication::operator=(OpenAIResponsePublication&& other) noexcept {
     if (this != &other) {
         end();
         store_ = std::exchange(other.store_, nullptr);
         response_id_ = std::move(other.response_id_);
+        on_end_ = std::move(other.on_end_);
     }
     return *this;
 }
 OpenAIResponsePublication::~OpenAIResponsePublication() { end(); }
 void OpenAIResponsePublication::end() noexcept {
-    if (store_) { store_->end_publication(response_id_); }
+    if (store_) {
+        store_->end_publication(response_id_);
+        // Wake checkpoint pressure only after releasing the Responses mutex.
+        try { if (on_end_) { on_end_(); } } catch (...) {}
+    }
     store_ = nullptr;
 }
 
@@ -575,6 +582,31 @@ bool OpenAIResponsesStore::restore_session(OpenAIResponseStoreSnapshot snapshot,
         return true;
     } catch (const std::bad_alloc&) { return reject(Reason::Capacity); }
     catch (...) { return reject(Reason::InvalidManifest); }
+}
+
+runtime::DurableImportResult commit_openai_response_restore(
+    OpenAIResponsesStore& responses, OpenAIResponseStoreSnapshot snapshot,
+    const OpenAIResponseRestoreGuard& guard,
+    const std::function<runtime::DurableImportResult()>& commit_engine) {
+    using State = runtime::DurableImportState;
+    using Reason = runtime::DurableReason;
+    if (!commit_engine) { return {.state = State::PolicyDisabled, .reason = Reason::StoreDisabled}; }
+    runtime::DurableImportResult result{.state = State::IdentityMismatch,
+                                        .reason = Reason::StaleRevision};
+    Reason refusal = Reason::None;
+    const bool published = responses.restore_session(
+        std::move(snapshot), guard, [&] {
+            result = commit_engine();
+            return result.state == State::Imported && result.reason == Reason::None;
+        }, &refusal);
+    if (published || refusal == Reason::None) { return result; }
+    if (refusal == Reason::Capacity) {
+        return {.state = State::CapacityRefused, .reason = refusal};
+    }
+    if (refusal == Reason::InvalidManifest) {
+        return {.state = State::Corrupt, .reason = refusal};
+    }
+    return {.state = State::IdentityMismatch, .reason = refusal};
 }
 
 } // namespace ninfer::serve

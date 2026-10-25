@@ -2356,7 +2356,6 @@ int test_legacy_schema_bad_mac_is_refused_without_mutation() {
                       "remembered corruption cannot quarantine a subsequently observed legacy envelope");
     return failures;
 }
-
 int test_manifest_origin_transient_tag_failure_preserves_current() {
     // Council CR-20260831-originauth R2 (all three reviewers): a transient inability to
     // read manifest.mac is a filesystem fault, never forgery - load must report

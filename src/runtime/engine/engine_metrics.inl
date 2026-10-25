@@ -165,6 +165,9 @@ void EngineCore<Instance>::publish_runtime_stats() {
     auto& snapshot                       = stats_snapshot_;
     snapshot                             = cumulative_stats_;
     const auto physical                  = instance_.program->physical_usage();
+    const auto catalogs                  = resources_.catalog_occupancy(*instance_.program);
+    snapshot.private_catalog_occupied    = catalogs.private_entries;
+    snapshot.shared_catalog_occupied     = catalogs.shared_entries;
     snapshot.device_state_occupied_slots = physical.occupied.state_slots;
     for (auto& pool : snapshot.kv_pools) {
         pool.occupied_page_groups = physical.occupied.kv_page_groups[pool.id];

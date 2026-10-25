@@ -2148,6 +2148,7 @@ SessionCheckpointStore::load(std::string_view session_sha256,
                  .reason = runtime::DurableReason::NoSessionRecords};
     }
     const std::filesystem::path root = session / "generations" / *generation;
+
     try {
         const std::string manifest_text = read_text_bounded(root / "manifest.json", 16ULL << 20);
         if (legacy_schema_envelope(manifest_text)) {

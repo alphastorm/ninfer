@@ -25,6 +25,8 @@ namespace ninfer::serve {
 
 struct RequestLifetime;
 struct RequestCapacity;
+class OpenAIResponsesStore;
+class SessionCheckpointService;
 
 // Installed by the checkpoint service before HTTP work starts. Only the internal K3 adapter may
 // attach an owning response tag to a native prompt; the public Engine API stays persistence-free.
@@ -127,6 +129,7 @@ struct PreparedRequest {
 class GenerationService {
 public:
     explicit GenerationService(ServeOptions options, StartupObserver startup_observer = {});
+    ~GenerationService();
 
     [[nodiscard]] const ServeOptions& options() const noexcept { return options_; }
 
@@ -164,6 +167,8 @@ public:
                           std::function<bool()> is_cancelled = {});
 
     void warmup();
+    [[nodiscard]] std::shared_ptr<SessionCheckpointService>
+    bind_checkpoints(OpenAIResponsesStore& responses);
     void set_checkpoint_hooks(GenerationCheckpointHooks hooks) { checkpoint_hooks_ = std::move(hooks); }
     [[nodiscard]] bool has_checkpoint_hooks() const noexcept {
         return checkpoint_hooks_.set_checkpoint_tag && checkpoint_hooks_.publication_epoch;
@@ -194,6 +199,7 @@ private:
     std::unique_ptr<ninfer::Engine> engine_;
     std::shared_ptr<RequestCapacity> request_capacity_;
     GenerationCheckpointHooks checkpoint_hooks_;
+    std::shared_ptr<SessionCheckpointService> checkpoints_;
 };
 
 } // namespace ninfer::serve

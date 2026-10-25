@@ -107,6 +107,21 @@ int main() {
     }
 
     const ServeOptions defaults = parse({"ninfer-serve", "model.ninfer"});
+    failures += check(defaults.gpu_keep_warm_ms == 0, "GPU keep-warm must default to disabled");
+    for (const auto value : {0U, 60000U, std::numeric_limits<std::uint32_t>::max()}) {
+        failures += check(parse({"ninfer-serve", "model.ninfer", "--gpu-keep-warm-ms",
+                                 std::to_string(value)}).gpu_keep_warm_ms == value,
+                          "GPU keep-warm duration was not preserved");
+    }
+    for (const char* value : {"-1", "4294967296", "18446744073709551616", "", "warm"}) {
+        bool rejected = false;
+        try {
+            (void)parse({"ninfer-serve", "model.ninfer", "--gpu-keep-warm-ms", value});
+        } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "invalid GPU keep-warm duration was accepted");
+    }
+    failures += check(serve_usage_text("ninfer-serve").find("--gpu-keep-warm-ms") != std::string::npos,
+                      "serve help omits GPU keep-warm");
     failures += check(defaults.session_checkpoint_root.empty() &&
                           defaults.session_checkpoint_quota_bytes == (64ULL << 30) &&
                           defaults.session_checkpoint_staging_bytes == (256ULL << 20) &&

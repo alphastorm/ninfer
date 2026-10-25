@@ -46,4 +46,9 @@ target_link_libraries(ninfer_engine PRIVATE
   ninfer_ops
   ninfer_text
   ninfer_media_decode)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_link_libraries(ninfer_engine PRIVATE ninfer_checkpoint_io_uring_linux)
+elseif(WIN32)
+  target_link_libraries(ninfer_engine PRIVATE ninfer_checkpoint_directstorage_windows)
+endif()
 add_library(ninfer::engine ALIAS ninfer_engine)

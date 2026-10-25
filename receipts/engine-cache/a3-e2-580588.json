@@ -1,0 +1,42 @@
+{
+  "artifact_type": "ninfer-engine-cache-proof-disposition/1",
+  "job": "20261025T064141Z-E1-engine-cache-corrected-production-580588",
+  "source_commit": "fff4f17c79db65e253384a310fa8515e580180cb",
+  "upstream_base_sha": "64d10fbf9f8e6bfc79ab0570b94674c5b9997929",
+  "lease_exit_code": 1,
+  "lease_elapsed_seconds": 250,
+  "leftover_containers": 0,
+  "unowned_containers": 0,
+  "ctest": [
+    {"test": "concurrency_real", "backend": "dflash2", "passed": true, "seconds": 31.8469,
+     "decode_rows": 319, "decode_rounds": 312, "sibling_reused_tokens": 359},
+    {"test": "concurrency_real", "backend": "none", "passed": true, "seconds": 38.3002,
+     "decode_rows": 1052, "decode_rounds": 1024, "sibling_reused_tokens": 359},
+    {"test": "preemption_real", "backend": "none", "passed": true, "seconds": 42.4728,
+     "scenarios": ["replay", "snapshot", "cancel-paused", "cancel-replay"]},
+    {"test": "durable_pressure_real", "backend": "dflash2", "passed": false, "seconds": 42.8695,
+     "error": "restore waited for B decode to finish",
+     "phases_elapsed_ms": {"source_ready": 12418, "source_exported": 14446,
+       "target_ready": 20663, "victim_imported": 20889, "sibling_decoding": 21481,
+       "pending_preserved": 31450, "victim_exported": 32974,
+       "victim_save_published": 32974, "target_imported": 42406}}
+  ],
+  "direct_adapter_checks": {"warmup_and_request_policy_before_reader_or_reservation": true,
+    "stale_export_epoch_rejected_before_callback": true, "reader_failure_classification": true},
+  "production_restart": {
+    "four_boot_passed": false,
+    "completed_boots": 2,
+    "first_restart_imported_tokens": 20926,
+    "byte_identity_assertion_passed_before_policy_boot": true,
+    "explicit_save_committed": true,
+    "explicit_save_origin": "authenticated",
+    "explicit_save_dir_sync": "fsync",
+    "explicit_save_payload_bytes": 2164056150,
+    "explicit_save_points": 4,
+    "explicit_save_states": 4,
+    "failure_boot": 3,
+    "failure": "--session-checkpoint-dir requires enabled Host context capacity",
+    "failure_owner": "ServePort2"
+  },
+  "acceptance_passed": false
+}

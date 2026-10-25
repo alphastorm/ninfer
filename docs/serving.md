@@ -485,10 +485,12 @@ leave no extra slot for an automatic candidate. If more explicit markers appear 
 latest four remain write candidates. Exact reads of already-published prefixes do not require the
 request to repeat a marker.
 
-These fields are optimization hints. A legal boundary that cannot be represented as an exact
-rendered-token frontier is ignored without changing prompt content. `prompt_cache_key` is not an
-Engine session key or prefix identity. Valid TTL/retention values are accepted, but NInfer does not
-promise their wall-clock residency; physical retention follows the resource scheduler.
+Cache boundaries are optimization hints. A legal boundary that cannot be represented as an exact
+rendered-token frontier is ignored without changing prompt content. An authenticated
+`prompt_cache_key` selects a private session through its domain-separated digest; the raw key is
+not an Engine key and never proves token-prefix compatibility. An unauthenticated key does not
+establish private ownership. Valid TTL/retention values are accepted, but NInfer does not promise
+their wall-clock residency; physical retention follows the resource scheduler.
 
 ## OpenAI Responses Core
 
@@ -709,8 +711,11 @@ On the unconstrained route, malformed tool markup is flushed back as ordinary te
 
 ### Local response state and resources
 
-`store` defaults to `true`. Stored Responses live only in this server process and are bounded by an
-LRU store. They are lost on restart and are not OpenAI's durable cloud retention service.
+`store` defaults to `true`. The live Responses LRU is bounded by the record/byte budgets. Without
+`--session-checkpoint-dir`, it is process-local and lost on restart. With authenticated durable
+serving, named lineages and their native checkpoints can survive restart through the
+[durable restore handshake](#durable-responses-and-graceful-stop). This remains a local service,
+not OpenAI's cloud retention service.
 
 `previous_response_id` reconstructs the complete stored input/output Item history before the new
 input. The current `instructions` value is placed first but is not saved into the continuation
@@ -724,12 +729,14 @@ field inherits the parent value. An explicit different value creates a new seman
 rendering and identity still determine reuse. Changing the boolean alone never invalidates an exact
 checkpoint already proved compatible by the model runtime.
 
-For Engine-local reuse, a stored root Response receives one bounded session key derived from its
-response ID, and every `previous_response_id` child inherits that key. `store:false` roots remain
-anonymous; a `store:false` child may read its inherited session checkpoint but does not replace the
-stored chain's latest endpoint. Response-store eviction or deletion removes the HTTP object, not an
-independently retained Engine checkpoint; the latter remains bounded by the Engine's own retention
-and pressure policy. No session key or cache marker is added to the HTTP schema.
+Without a named authenticated session, a stored root Response receives one bounded Engine key
+derived from its response ID, and `previous_response_id` children inherit it. Named requests instead
+use their authenticated session namespace. `store:false` preserves applicable reuse scopes but does
+not advance the named endpoint or durable lineage; unnamed `store:false` roots remain anonymous.
+The Engine's physical checkpoint retention is independent of the live HTTP-object LRU. An
+authorized private deletion also invalidates the current disk generation so restore cannot
+resurrect the deleted object. Internal Engine keys and cache markers are not exposed in Responses
+objects.
 
 Resource behavior:
 
@@ -901,6 +908,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--max-concurrency N` | resident execution lanes; valid range `1..8` | `1` |
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
+| `--gpu-keep-warm-ms N` | bounded idle GPU warming window after real work; `0` disables it | `0` |
 | `--prefill-chunk N` | text-prefill chunk; positive multiple of 128 | `1024`; CPU expert offload: `4096` |
 | `--log-stats-interval-ms N` | aggregate throughput report interval; `0` disables it | `5000` |
 | `--log-level trace\|debug\|info\|warning\|error\|critical\|off` | pretty stderr verbosity | `info` |
@@ -965,6 +973,51 @@ limit on total process RAM. `--host-context-mib 0` disables Host context backing
 available, and the capacity flags may still be specified.
 
 Run `./build/apps/ninfer-serve --help` for the exact option contract.
+
+### Durable Responses and graceful stop
+
+`--session-checkpoint-dir` enables schema-3 durable generations in a new,
+release-isolated root. Persistence requires authenticated serving, complete clean
+build/model provenance and the real Engine export/import, publication-gate and
+final-save providers. An unavailable provider refuses startup; there is no
+production in-memory substitute. Older schema-2 roots are not migrated or discovered.
+The byte formats and failure taxonomy are defined by [K1–K7](durable/CONTRACTS.md).
+
+Authenticated `prompt_cache_key` requests name private sessions without persisting
+the raw key. Their session capability is
+`SHA256(UTF8("ninfer:prompt_cache_key:v1") || 0x00 || UTF8(prompt_cache_key))`;
+the API credential remains required. A prompt key cannot be combined with an explicit
+`ninfer_session` or `X-NInfer-Session` on the same creation request.
+A first stored keyed request can restore native state even without
+`previous_response_id`; a missing parent or scoped retrieve can restore the verified
+Responses lineage. Import prepares native resources and the complete replacement
+DAG before committing either visible side. A capacity, revision, epoch or identity
+refusal leaves existing live state intact. Cache-disabled requests cannot import.
+Private retrieve/delete/input-item routes require `X-NInfer-Session` with the
+matching session digest; absent and foreign capabilities receive the same 404.
+Deleting a private stored response first invalidates its disk generation, preventing
+a later restore from resurrecting it.
+
+Checkpoint management uses the same API authentication. `POST /v1/ninfer/checkpoints`
+accepts `{"session_sha256":"<64 lowercase hex>"}`; a supplied session header must
+agree. A successful response is a K7 `ninfer-durable-operation/1` save receipt with
+`state="exported"`, `reason="none"`, `committed=true`, authenticated origin,
+token/byte/point/state/page counts and the actual `dir_sync` mode. Staged export alone
+is not a successful save. `GET /v1/ninfer/checkpoints/status` takes the session header;
+the explicit `/<digest>/status` route is also supported. `DELETE /v1/ninfer/checkpoints`
+accepts the session capability in its body/header or explicit `/<digest>` route.
+Missing or conflicting capabilities cannot access another namespace.
+
+Automatic saves run on one bounded worker and honor
+`--session-checkpoint-min-tokens`. Pressure checkpoints and graceful final saves
+also save shorter sessions. The stop path drains HTTP workers and accepted automatic
+work, then synchronously saves every relevant live session. A queued write is never
+an acknowledgement. When `--shutdown-report` is set, the schema-1
+`ninfer_serve_shutdown_report` contains the managed launch ID and
+`saved`/`skipped`/`refused` counts; `complete=true` requires no refused final save.
+Publication or shutdown-report I/O failure makes the process exit unsuccessfully.
+Operation receipts contain symbolic outcomes and counts, never prompts, credentials,
+raw session names or checkpoint paths.
 
 Serve writes human-readable operational records to stderr using
 `YYYY-MM-DD HH:MM:SS.mmm  LEVEL  message`. Normal output covers material startup milestones,

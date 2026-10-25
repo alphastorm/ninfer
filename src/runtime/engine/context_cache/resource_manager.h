@@ -1,16 +1,21 @@
 #pragma once
 
+#include "core/uint128.h"
 #include "runtime/contract/resources.h"
+#include "runtime/contract/continuation_checkpoint.h"
 #include "runtime/engine/context_cache/context_cost.h"
 #include "runtime/engine/context_cache/prefix_index.h"
 #include "runtime/engine/context_cache/types.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -80,6 +85,107 @@ public:
     explicit ResourceManager(bool enabled, ContextMachineCostModel costs)
         : enabled_(enabled), costs_(std::move(costs)) {}
 
+    void set_release_guard(std::function<bool(std::span<PressureCheckpointVictim>)> guard) {
+        release_guard_ = std::move(guard);
+        release_guard_enabled_ = bool(release_guard_);
+    }
+
+    void enable_release_guard(bool enabled) noexcept { release_guard_enabled_ = enabled; }
+
+    [[nodiscard]] bool approve_release(std::span<const Handle> handles) const {
+        return allow_release(handles);
+    }
+
+    void set_checkpoint_identity(OwnerToken token, std::string_view digest,
+                                 std::string_view tag) {
+        if (auto* owner = find_owner(token)) {
+            owner->durable_session = digest;
+            owner->checkpoint_tag = tag;
+        }
+    }
+
+    [[nodiscard]] std::vector<Handle> session_points(
+        const Program& program, std::string_view digest, std::string_view tag,
+        bool& pending) const {
+        pending = false;
+        const Owner* newest = nullptr;
+        for (const auto& owner : owners_) {
+            if (owner.durable_session != digest || owner.checkpoint_tag != tag) { continue; }
+            if (owner.active) {
+                pending = true;
+                return {};
+            }
+            if (!newest || owner.publication_order > newest->publication_order) {
+                newest = &owner;
+            }
+        }
+        std::vector<Handle> result;
+        if (newest) {
+            result.reserve(newest->points.size());
+            for (const auto& point : newest->points) {
+                if (program.valid_checkpoint(point.handle)) { result.push_back(point.handle); }
+            }
+        }
+        return result;
+    }
+
+    struct DurableVictim {
+        OwnerToken token;
+        std::string session;
+        std::string tag;
+    };
+
+    [[nodiscard]] std::vector<DurableVictim> durable_victims(std::string_view excluded) const {
+        std::vector<DurableVictim> result;
+        for (const auto& owner : owners_) {
+            if (!owner.active && !owner.points.empty() && !owner.durable_session.empty() &&
+                !owner.checkpoint_tag.empty() && owner.durable_session != excluded) {
+                result.push_back({owner.token, owner.durable_session, owner.checkpoint_tag});
+            }
+        }
+        return result;
+    }
+
+    bool release_durable_victim(Program& program, const DurableVictim& victim) {
+        const auto* owner = find_owner(victim.token);
+        if (!owner || owner->active || owner->durable_session != victim.session ||
+            owner->checkpoint_tag != victim.tag) { return false; }
+        const auto handles = points(victim.token);
+        if (handles.empty() || !allow_release(handles)) { return false; }
+        for (auto handle : handles) {
+            if (!may_revoke({&handle, 1}, {}) ||
+                (program.valid_checkpoint(handle) && program.checkpoint_metadata(handle).leased)) {
+                return false;
+            }
+        }
+        bool released = false;
+        for (auto handle : handles) { released = erase_unchecked(program, handle, {}) || released; }
+        return released;
+    }
+
+    struct CatalogOccupancy {
+        std::uint32_t private_entries = 0;
+        std::uint32_t shared_entries = 0;
+    };
+
+    // The same live entries prune() retains, sampled without mutating policy or allocating in
+    // the per-boundary metrics path. Active owners count even before their first capture.
+    [[nodiscard]] CatalogOccupancy catalog_occupancy(const Program& program) const {
+        CatalogOccupancy out;
+        for (const auto& owner : owners_) {
+            if (owner.active || std::any_of(owner.points.begin(), owner.points.end(),
+                                            [&](const auto& point) {
+                                                return program.valid_checkpoint(point.handle);
+                                            })) {
+                ++out.private_entries;
+            }
+        }
+        for (const auto& shared : shared_) {
+            if (program.valid_checkpoint(shared.handle)) { ++out.shared_entries; }
+        }
+        return out;
+    }
+
     [[nodiscard]] std::vector<SourceChoice>
     candidates(Program& program, const Base& base, std::uint32_t maximum_frontier = UINT32_MAX,
                std::optional<OwnerToken> own_resume = std::nullopt, std::uint64_t request = 0,
@@ -90,6 +196,7 @@ public:
             for (const auto handle : index_.matches(program, base)) {
                 if (program.checkpoint_metadata(handle).frontier > maximum_frontier) { continue; }
                 for (const auto& owner : owners_) {
+                    if (owner.reuse_scope != base.context_cache().reuse_scope) { continue; }
                     const auto point =
                         std::find_if(owner.points.begin(), owner.points.end(),
                                      [&](const auto& p) { return p.handle == handle; });
@@ -99,6 +206,7 @@ public:
                         own_resume
                             ? *own_resume == owner.token
                             : !owner.active && owner.publication_order <= publication_order &&
+                                  (!owner.reuse_scope || advice.update_session_index) &&
                                   (!owner.session || (advice.update_session_index &&
                                                       advice.session_key == owner.session));
                     result.push_back(
@@ -111,7 +219,10 @@ public:
                          .ordinal           = owner.token});
                 }
                 for (const auto& shared : shared_) {
-                    if (shared.handle != handle) { continue; }
+                    if (shared.handle != handle ||
+                        shared.shared_reuse_scope != base.context_cache().shared_reuse_scope) {
+                        continue;
+                    }
                     result.push_back({.source       = Source{.checkpoint = handle},
                                       .shared_entry = shared.ordinal,
                                       .resume_owner = own_resume,
@@ -178,6 +289,11 @@ public:
         const auto selected = choice.source.checkpoint;
         if (selected && !program.valid_checkpoint(*selected)) { return false; }
         auto* owner = find_owner(choice.owner);
+        if (owner && owner->reuse_scope != base.context_cache().reuse_scope) { return false; }
+        if (const auto* shared = find_shared(choice.shared_entry);
+            shared && shared->shared_reuse_scope != base.context_cache().shared_reuse_scope) {
+            return false;
+        }
         if (choice.take_over && (!owner || owner->publication_order != choice.publication_order ||
                                  (owner->active && choice.resume_owner != choice.owner))) {
             choice.take_over = false;
@@ -205,6 +321,12 @@ public:
         const auto private_owner =
             choice.resume_owner.value_or(choice.take_over ? choice.owner : 0);
         const bool consume = selected && consumable(*selected, private_owner, request, revocation);
+        if (release_guard_enabled_ && (!retired.empty() || consume)) {
+            if (consume) { retired.push_back(*selected); }
+            const bool approved = allow_release(retired);
+            if (consume) { retired.pop_back(); }
+            if (!approved) { return false; }
+        }
         auto inspected     = program.inspect_source(base, selected, consume, carried, retired);
         if (!inspected) { return false; }
         inspected->take_private =
@@ -295,7 +417,11 @@ public:
         std::uint32_t proven_frontier = 0;
         if (choice.resume_owner) {
             token = *choice.resume_owner;
-            if (!find_owner(token)) { throw std::logic_error("resume lost continuation owner"); }
+            const auto* owner = find_owner(token);
+            if (!owner || owner->reuse_scope != base.context_cache().reuse_scope ||
+                owner->shared_reuse_scope != base.context_cache().shared_reuse_scope) {
+                throw std::logic_error("resume lost continuation owner or cache scope");
+            }
         } else {
             if (choice.source.reused_tokens) {
                 const auto used_at = ++clock_;
@@ -322,7 +448,9 @@ public:
                 owners_.push_back({.token           = token,
                                    .priority        = priority,
                                    .proven_frontier = proven_frontier,
-                                   .retained_at     = ++clock_});
+                                   .retained_at     = ++clock_,
+                                   .reuse_scope     = base.context_cache().reuse_scope,
+                                   .shared_reuse_scope = base.context_cache().shared_reuse_scope});
             }
         }
         auto* owner              = find_owner(token);
@@ -342,13 +470,16 @@ public:
             return;
         }
         if (summary.role == CheckpointRole::SharedPrefix) {
+            const auto* owner = find_owner(token);
+            if (!owner) { throw std::logic_error("shared publication lost continuation owner"); }
             if (std::none_of(shared_.begin(), shared_.end(),
                              [&](const auto& entry) { return entry.handle == handle; })) {
                 shared_.push_back(
                     {.handle   = handle,
                      .ordinal  = ++ordinal_,
                      .priority = demand_priority(program.checkpoint_key(handle, summary.frontier)),
-                     .retained_at = ++clock_});
+                     .retained_at = ++clock_,
+                     .shared_reuse_scope = owner->shared_reuse_scope});
                 index_.insert(program, handle, summary.frontier);
             }
         } else {
@@ -402,11 +533,15 @@ public:
         if (advice.update_session_index && advice.session_key) {
             const auto newer = std::any_of(owners_.begin(), owners_.end(), [&](const auto& other) {
                 return other.token != token && other.session == advice.session_key &&
+                       other.reuse_scope == owner->reuse_scope &&
                        other.publication_order > publication_order;
             });
             if (!newer) {
                 for (auto& other : owners_) {
-                    if (other.session == advice.session_key) { other.session.reset(); }
+                    if (other.session == advice.session_key &&
+                        other.reuse_scope == owner->reuse_scope) {
+                        other.session.reset();
+                    }
                 }
                 owner->session = advice.session_key;
             }
@@ -419,6 +554,10 @@ public:
         auto* owner = find_owner(token);
         if (!owner) { return; }
         const auto old = points(token);
+        if (!allow_release(old)) {
+            owner->active = false;
+            return;
+        }
         std::erase_if(owners_, [&](const auto& entry) { return entry.token == token; });
         for (const auto handle : old) { release_unreferenced(program, handle); }
     }
@@ -507,12 +646,24 @@ public:
                                      cursor, evaluation);
     }
 
-    void commit_host_victims(Program& program, std::span<const Handle> handles,
+    bool commit_host_victims(Program& program, std::span<const Handle> handles,
                              ReclaimCursor& cursor) {
-        commit_release(program, handles, cursor);
+        return commit_release(program, handles, cursor);
     }
 
     bool erase(Program& program, Handle handle, ReclaimRights rights = {}) {
+        if (!allow_release({&handle, 1})) { return false; }
+        return erase_unchecked(program, handle, rights);
+    }
+
+    // Mixed paused-snapshot/catalog plans perform one whole-plan pressure preflight. Repeating
+    // callbacks while committing that plan could otherwise permit a partial Pending release.
+    bool erase_approved(Program& program, Handle handle, ReclaimRights rights = {}) {
+        return erase_unchecked(program, handle, rights);
+    }
+
+private:
+    bool erase_unchecked(Program& program, Handle handle, ReclaimRights rights) {
         if (!references(handle)) { return false; }
         if (!may_revoke({&handle, 1}, rights)) { return false; }
         if (program.valid_checkpoint(handle) && !program.release_checkpoint(handle)) {
@@ -523,6 +674,7 @@ public:
         return true;
     }
 
+public:
     [[nodiscard]] ReclaimProgress reclaim(Program& program, ContextResources shortage,
                                           std::span<const Handle> excluded = {}) {
         if (program.has_context_operation()) { return ReclaimProgress::Transferring; }
@@ -550,7 +702,7 @@ public:
                 host_victims_in_order(program, shortage.host_bytes, std::nullopt, {}, excluded,
                                       cursor.admission, cursor, evaluation, true);
             if (!victims) { return ReclaimProgress::Blocked; }
-            commit_release(program, *victims, cursor);
+            if (!commit_release(program, *victims, cursor)) { return ReclaimProgress::Blocked; }
             return victims->empty() ? ReclaimProgress::Blocked : ReclaimProgress::Changed;
         }
         auto plans = program.plan_reclaim(allowed, excluded, shortage);
@@ -675,7 +827,9 @@ public:
                     program, plan.host_bytes, action.preservation->checkpoint, {},
                     protected_sources, action.preservation, cursor, evaluation);
                 if (!current || *current != action.host_victims) { continue; }
-                commit_release(program, action.host_victims, cursor, action.rank.loss);
+                if (!commit_release(program, action.host_victims, cursor, action.rank.loss)) {
+                    continue;
+                }
                 if (program.start_demote(plan)) {
                     return program.has_context_operation() ? ReclaimProgress::Transferring
                                                            : ReclaimProgress::Changed;
@@ -684,7 +838,9 @@ public:
                 continue;
             }
             // Native quoted every holder required for this actual physical release.
-            commit_release(program, action.release->sources, cursor, action.rank.loss);
+            if (!commit_release(program, action.release->sources, cursor, action.rank.loss)) {
+                continue;
+            }
             return ReclaimProgress::Changed;
         }
         return ReclaimProgress::Blocked;
@@ -821,14 +977,63 @@ private:
         std::uint64_t publication_order = 0;
         bool active                     = false;
         std::optional<SessionKey> session;
+        // The named binding can move; the original private and principal scopes cannot.
+        std::optional<SessionKey> reuse_scope;
+        std::optional<SessionKey> shared_reuse_scope;
+        std::string durable_session;
+        std::string checkpoint_tag;
         std::vector<Point> points;
     };
 
+public:
+    struct ImportPublication {
+        Owner owner;
+        typename PrefixIndex<Model>::InsertReservation index;
+    };
+
+    // Called on the worker immediately before native commit. The imported continuation is
+    // private to the caller-derived session; no authority or scopes come from disk.
+    [[nodiscard]] ImportPublication prepare_import_publication(
+        const SessionKey& session, std::optional<SessionKey> principal,
+        std::string digest, std::string tag, std::size_t count) {
+        ImportPublication prepared;
+        prepared.owner.session = session;
+        prepared.owner.reuse_scope = session;
+        prepared.owner.shared_reuse_scope = std::move(principal);
+        prepared.owner.durable_session = std::move(digest);
+        prepared.owner.checkpoint_tag = std::move(tag);
+        prepared.owner.points.reserve(count);
+        owners_.reserve(owners_.size() + 1);
+        prepared.index = index_.reserve_insert(count);
+        return prepared;
+    }
+
+    void publish_import(Program& program, ImportPublication&& prepared,
+                         std::span<const Handle> handles, std::uint64_t order) noexcept {
+        auto& owner = prepared.owner;
+        owner.token = ++ordinal_;
+        owner.retained_at = ++clock_;
+        owner.publication_order = order;
+        for (const auto handle : handles) {
+            const auto metadata = program.checkpoint_metadata(handle);
+            owner.points.push_back({handle, metadata.role});
+            index_.insert(program, handle, metadata.frontier, prepared.index);
+        }
+        for (auto& prior : owners_) {
+            if (prior.session == owner.session && prior.reuse_scope == owner.reuse_scope) {
+                prior.session.reset();
+            }
+        }
+        owners_.push_back(std::move(owner));
+    }
+
+private:
     struct Shared {
         Handle handle;
         std::uint64_t ordinal;
         CacheRetentionPriority priority;
         std::uint64_t retained_at;
+        std::optional<SessionKey> shared_reuse_scope;
     };
 
     static bool contains(std::span<const Handle> handles, Handle handle) {
@@ -873,6 +1078,7 @@ private:
     bool references(Handle handle) const { return reference_count(handle) != 0; }
 
     bool remove_point(Program& program, Owner& owner, Handle handle) {
+        if (!allow_release({&handle, 1})) { return false; }
         if (reference_count(handle) == 1 && program.valid_checkpoint(handle) &&
             !program.release_checkpoint(handle)) {
             return false;
@@ -904,6 +1110,24 @@ private:
     void replace_points(Program& program, Owner& owner, std::span<const Handle> carried) {
         std::vector<Handle> old;
         for (const auto& point : owner.points) { old.push_back(point.handle); }
+        // A Pending checkpoint retains all old points; carrying an already retained point
+        // does not destroy it. New points can be published after checkpoint progress.
+        if (release_guard_enabled_) {
+            std::vector<Handle> removed;
+            for (const auto handle : old) {
+                if (!contains(carried, handle)) { removed.push_back(handle); }
+            }
+            if (!allow_release(removed)) {
+                for (const auto handle : carried) {
+                    if (!contains(old, handle) && program.valid_checkpoint(handle)) {
+                        const auto summary = program.checkpoint_metadata(handle);
+                        owner.points.push_back({handle, summary.role});
+                        index_.insert(program, handle, summary.frontier);
+                    }
+                }
+                return;
+            }
+        }
         owner.points.clear();
         for (const auto handle : carried) {
             if (!program.valid_checkpoint(handle)) { continue; }
@@ -1182,9 +1406,9 @@ private:
             return left.priority.last_demand < right.priority.last_demand;
         }
         if (!left.priority.reused) {
-            const auto a = static_cast<unsigned __int128>(left.loss) * right.units;
-            const auto b = static_cast<unsigned __int128>(right.loss) * left.units;
-            if (a != b) { return a < b; }
+            const auto a = core::wide_multiply(left.loss, right.units);
+            const auto b = core::wide_multiply(right.loss, left.units);
+            if (a != b) { return core::wide_less(a, b); }
         }
         return left.order < right.order;
     }
@@ -1261,9 +1485,10 @@ private:
         return recovery_gain(program, *admission, kept, evaluation) > loss;
     }
 
-    void commit_release(Program& program, std::span<const Handle> handles, ReclaimCursor& cursor,
+    bool commit_release(Program& program, std::span<const Handle> handles, ReclaimCursor& cursor,
                         std::optional<std::uint64_t> quoted_loss = std::nullopt) {
-        if (handles.empty()) { return; }
+        if (handles.empty()) { return true; }
+        if (!allow_release(handles)) { return false; }
         if (!may_revoke(handles, cursor.rights)) {
             throw std::logic_error("cache release lacks waiting-source revocation rights");
         }
@@ -1274,12 +1499,30 @@ private:
                        : program.checkpoint_recovery_loss(handles, surviving(program, handles)))
                 : 0;
         for (const auto handle : handles) {
-            if (!erase(program, handle, cursor.rights)) {
+            if (!erase_unchecked(program, handle, cursor.rights)) {
                 throw std::logic_error("quoted cache release changed before commit");
             }
         }
         cursor.sacrificed =
             loss > UINT64_MAX - cursor.sacrificed ? UINT64_MAX : cursor.sacrificed + loss;
+        return true;
+    }
+
+    [[nodiscard]] bool allow_release(std::span<const Handle> handles) const {
+        if (!release_guard_enabled_ || handles.empty()) { return true; }
+        std::vector<PressureCheckpointVictim> victims;
+        for (const auto& owner : owners_) {
+            if (owner.durable_session.empty() || owner.checkpoint_tag.empty()) { continue; }
+            if (std::none_of(owner.points.begin(), owner.points.end(),
+                [&](const auto& point) { return contains(handles, point.handle); })) { continue; }
+            if (std::none_of(victims.begin(), victims.end(), [&](const auto& victim) {
+                return victim.session_sha256 == owner.durable_session &&
+                       victim.checkpoint_tag == owner.checkpoint_tag;
+            })) {
+                victims.push_back({owner.durable_session, owner.checkpoint_tag});
+            }
+        }
+        return release_guard_(victims);
     }
 
     [[nodiscard]] std::optional<std::vector<Handle>>
@@ -1439,6 +1682,8 @@ private:
     }
 
     bool enabled_;
+    std::atomic<bool> release_guard_enabled_{false};
+    std::function<bool(std::span<PressureCheckpointVictim>)> release_guard_;
     ContextMachineCostModel costs_;
     PrefixIndex<Model> index_;
     std::vector<Owner> owners_;
