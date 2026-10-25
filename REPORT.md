@@ -2,13 +2,14 @@
 
 ## Continuation qualification
 
-- Native restart fixture now reconstructs the continuation's exact token types, positions and execution splits from each exported point before comparing it with the live source. Raw token IDs alone discard Chat rewrite boundaries included in the native prefix digest. MTP uses its supported five-token draft window; DFlash2 remains seven. Runtime proof pending.
+- Native restart fixture reconstructs exact token types, positions and execution splits from each exported point before comparing it with the live source. Raw token IDs alone discard Chat rewrite boundaries included in the native prefix digest. MTP uses its supported five-token draft window; DFlash2 remains seven. Clean-source separate-process restart is **PASS in all three modes**.
 - Private accounting overlay traces admission quotes, reservation resizing and write mapping; it is not a production change. Initial job `20261025T040158Z-A2-persistence-accounting-r5-488462` refused a context-short patch before build/test execution, exit 1 in 2 seconds, zero leftover/unowned containers. Corrected overlay submitted as `20261025T040852Z-A2-persistence-accounting-r5b-491183`.
 - Accounting reproduced both failures: build 6.354 s, grammar 11.724 s, shared MTP/fp8 13.750 s; whole job 32 s, exit 0 because both expected reds were observed. Each interval was quoted and reserved at **zero** during admission, then quoted **one** at mapping with no intervening settlement. `persistence-accounting-r5.json` preserves exact counters and log hashes.
 - Pin/restart batch `20261025T041618Z-A2-persistence-pin-restart-r5c-496652` stopped at fixture compilation (3.845 s; job 6 s, exit 1, zero leftovers). Public `Program::plan_request` takes owning `PreparedPrompt`, unlike the internal native transaction fixture's `PreparedPromptData` overload. Corrected only the test-owned prompt construction; no Program interface change.
 - Pause-resume fixture explicitly admits the remaining Decode budget, matching the next unit it actually executes rather than the binding API's default one-token permit. This preserves the existing exact-permit contract.
 - Pin trace `20261025T041911Z-A2-persistence-pin-restart-r5d-499377` proves the third cause: a newly admitted binding pins the already-admitted resident's retained tail between its zero-page quote and mapping; the failing page has that resident's writer identity and one source pin. Build 8.009 s, grammar/shared reds 11.752/13.535 s. Separate-process restart **passes none/MTP**, 25.014/24.868 s, each three semantic points, three states and 146 byte-identical continuation bytes. DFlash2 reaches the partial-acceptance scenario but the fixture illegally accepts a strict prefix nonterminally (13.016 s); it now commits that partial prefix terminally, as required by the native contract.
-- EngineCache2 supplied isolated repair `c86d7872`; applied here as `fa92d9a9f` without A3 changes. Refresh resident eligibility and COW quotes after admission/context polling even while binding remains in flight; refresh only unexecuted Prefill/Replay permits after Control/Decode. Existing `context_blocks` prevents the pinned writer from executing. Native write guard and page allocation logic are unchanged; repaired real-scenario proof pending.
+- EngineCache2 repair `c86d7872`, applied as `fa92d9a9f` without A3 changes, is **red→green** on unchanged real grammar and two-client MTP/fp8 fixtures. Clean candidate `31333f3e2f0e73bb5e996475fbd5ecf2724c72a2`, job `20261025T042854Z-A2-persistence-green-31333f3e-r6-508285`: all ten build/test commands exit 0, job 201 s, zero leftovers. Grammar 21.750 s; shared MTP 16.636 s, 12 clients, 1,786 reused tokens, 202 decode rounds / 388 rows, six partial-tail clients, Engine available. Strict write guard unchanged.
+- `persistence-green-r6.json`: native transactions pass none/MTP/DFlash2 (17.212/17.687/17.960 s); KV suite 0.913 s. Restart none/MTP pass in 25.558/25.807 s (three points / three states / 146 exact bytes each). DFlash2 restart 38.609 s: terminal/partial/forced/pause each retains anchor/input/endpoint and settled ring frontiers; exact continuation bytes 146/146/139/146. All modes exercise native preflight at zero Host capacity with no native reservations, payload/identity/layout checks and retryable-I/O preservation. Joint A3 production restart and forced-victim preflight remain separate pending proofs.
 
 ## Previous handoff
 
@@ -54,18 +55,19 @@
 
 ## Upstream-ready draft: #414 / #419 reservation accounting
 
-**Title:** Reserve post-rewind KV growth and refresh admitted units when readers change.
+**Title:** Keep KV reservations and resident eligibility current across rewinds and new readers.
 
-The strict reservation check in `KVHistoryStore::prepare_write` is correct and remains intact. Two independent planning paths can underquote its real work:
+The strict reservation check in `KVHistoryStore::prepare_write` is correct and remains intact. Three independent admission paths can leave its real work uncovered:
 
 1. `write_pages(handle, begin, end)` previously counted all current history pages even when `begin < committed_frontier`. `prepare_write` first trims or forks the owner to `begin`, so later pages no longer belong to that writable history. The quote must use `page_count(begin)` for the post-rewind membership, then include tail COW. With native 64-token pages, rewind 65→8 and write through 65 needs one new page; retaining the old endpoint additionally requires one tail-COW page. This is the isolated `117a166a6` repair.
 2. `ProgramImpl::reserve_units` previously skipped page accounting for an already-admitted execution permit. The permit fixes execution bounds, not page writability: another checkpoint/read lease can pin a shared partial tail after admission. Refresh the reservation for the unchanged unit while preserving its permit and rollback ownership. `admitted_unit_acquires_tail_reader` binds a retained 65-token prefix, admits one decode unit, pins the tail, then requires a one-page COW reservation and executes that same unit. This is the isolated `d1f4832e1` repair.
+3. The Engine reserves resident units **before** admitting a new request. That request can start a binding which pins the resident writer's retained partial tail for a copy. If the binding remains in flight, the old loop did not refresh resident eligibility or quotes; its prefill row could execute using the stale runnable flag. Instrumented real grammar and synchronized MTP/fp8 shared-prefix tests show admission quote/reservation `0/0`, then the new binding's source pin on that same writer, then mapping quote/reservation `1/0` with one source pin. The respective intervals are `[8,17)` and `[280,289)`; neither rewinds or releases a reservation. Refresh after fresh admission/context polling even when the binding is still in flight. Existing `context_blocks` then excludes its pinned writer, and ordinary same-permit reservation handles remaining runnable rows. After Control/Decode, refresh only Prefill/Replay: the earlier permits have already been consumed. This is EngineCache2's isolated `c86d7872`, applied to the pre-A3 tree as `fa92d9a9f`.
 
-Patch summary: two production files (`kv_history.cpp`, `planning/request_plan.cpp`), no relaxed write-side assertion, no grammar bypass, no retry, and no change to token arithmetic or native page size. The minimal KV fixture is artifact-independent; the late-reader fixture uses real Program admission/execution. The separate Engine fixture launches two synchronized clients over identical Chat prompts with explicit shared-prefix markers, both cold and primed, and requires actual multi-row decode, partial-tail reuse on primed requests and continued Engine availability.
+Patch summary: three production files (`kv_history.cpp`, `planning/request_plan.cpp`, `engine_core.h`), no relaxed write-side assertion, no grammar bypass, no speculative extra-page allowance, and no change to token arithmetic or native page size. Resident reservation priority stays before fresh admission. The minimal KV fixture is artifact-independent; the late-reader fixture uses real Program admission/execution. The separate Engine fixture launches two synchronized clients over identical Chat prompts with explicit shared-prefix markers, both cold and primed, and requires actual multi-row decode, partial-tail reuse on primed requests and continued Engine availability.
 
-Evidence status: both isolated reservation regressions are GPU-proven red→green (`persistence-reservations.json`), but they are **not a complete repair**. The corrected two-client fixture reproduces #414 on both baseline and candidate MTP/fp8; the repaired real grammar scenario still reproduces #419's reservation guard. DFlash2/fp8 passes the same two-client fixture. The remaining cause is being isolated. This draft is for ProductOps; nothing has been posted upstream.
+Evidence status: all three repairs have real GPU red→green evidence. The first two isolated regressions are in `persistence-reservations.json`. The third cause is in `persistence-accounting-r5.json` and `persistence-pin-restart-r5.json`; `persistence-green-r6.json` proves the unchanged real grammar and two-client MTP/fp8 fixtures pass on the clean repair, 21.750 s and 16.636 s respectively. The latter completes 12 clients with 1,786 reused tokens, 202 decode rounds / 388 rows, six partial-tail clients and continued Engine availability. All three native transaction modes and separate-process restart regressions also pass. This draft is for ProductOps; nothing has been posted upstream.
 
-The final diagnostic narrows both genuine failures to prefill mapping with one required COW page and zero reserved pages, without a rewind. Preserve the write guard and investigate the interval between admission and `advance_prefill`; this is not evidence that either isolated repair should be reverted. Do not post this as a complete-fix PR until the real scenarios turn green.
+The diagnostic distinguishes a stale admission decision from a bad write guard: `prepare_write` correctly refuses a write while the new copy holds the source page. Refreshing the planning decision closes that gap without making native writes allocate unreserved pages.
 
 ## Commands
 
@@ -73,6 +75,27 @@ Host directory arguments below use the RUNBOOK variables `A2_SCRIPT_ROOT`, `A2_W
 `CPU_COMMON`, `CPU_SOURCE` and `CPU_BUILD` denote the approved CPU lane's shared wrappers and holder-A2 Git source/build directories. Its source was detached at `0e64cc77`; the build wrapper held one of the two CPU slots and used 12 workers. No GPU model test or production-service change was performed on that lane.
 
 ```sh
+gpu-lease submit --holder A2 --label persistence-accounting-r5b --priority 2 --minutes 15 -- \
+  python3 "$A2_SCRIPT_ROOT/proof-r5.py"
+gpu-lease wait 20261025T040852Z-A2-persistence-accounting-r5b-491183 30
+gpu-lease submit --holder A2 --label persistence-pin-restart-r5d --priority 2 --minutes 15 -- \
+  python3 "$A2_SCRIPT_ROOT/proof-r5.py"
+gpu-lease wait 20261025T041911Z-A2-persistence-pin-restart-r5d-499377 30
+gpu-lease submit --holder A2 --label persistence-green-31333f3e-r6 --priority 2 --minutes 15 -- \
+  python3 "$A2_SCRIPT_ROOT/proof-r6.py" 31333f3e
+gpu-lease wait 20261025T042854Z-A2-persistence-green-31333f3e-r6-508285 30
+cmake --build /build -j16 --target ninfer_qwen3_5_checkpoint_restart_test \
+  ninfer_qwen3_5_grammar_real_test ninfer_qwen3_5_shared_prefix_real_test \
+  ninfer_qwen3_5_native_transactions_test ninfer_kv_history_test
+/build/tests/ninfer_kv_history_test
+NINFER_TEST_ARTIFACT="$V3_MODEL" /build/tests/ninfer_qwen3_5_grammar_real_test
+NINFER_TEST_ARTIFACT="$NATIVE_V3_MODEL" NINFER_TEST_KV_DTYPE=fp8 \
+  /build/tests/ninfer_qwen3_5_shared_prefix_real_test mtp
+# The receipt records artifact identity per backend: native-upgraded v3 for none/MTP,
+# published v3 for DFlash2. Each restart launcher invokes separate export/import processes.
+NINFER_TEST_ARTIFACT="$MODE_MODEL" /build/tests/ninfer_qwen3_5_native_transactions_test "$BACKEND"
+NINFER_TEST_ARTIFACT="$MODE_MODEL" python3 /src/tests/models/qwen3_5/run_checkpoint_restart.py \
+  /build/tests/ninfer_qwen3_5_checkpoint_restart_test "$BACKEND"
 gpu-lease submit --holder A2 --label persistence-proof-de640b20-r3 --priority 2 --minutes 30 -- \
   python3 "$A2_SCRIPT_ROOT/proof-r3.py" de640b205b6c32bf42f3a56a60d32b2197e06dab
 gpu-lease wait 20261025T032946Z-A2-persistence-proof-de640b20-r3-477212 120
