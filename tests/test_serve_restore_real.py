@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from contextlib import contextmanager
 import hashlib
 import json
@@ -15,6 +16,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from typing import NoReturn
 import urllib.error
 import urllib.request
 
@@ -35,6 +37,23 @@ def semantic_text(response: dict) -> str:
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
+
+
+def build_provenance(version: str) -> tuple[str, str]:
+    source = re.search(r"(?:^| )patch_stack_sha=([0-9a-f]{40})(?: |$)", version)
+    require(source is not None and "source_dirty=false" in version, "clean binary source provenance missing")
+    upstream = re.search(r"(?:^| )upstream_base_sha=([0-9a-f]{40})(?: |$)", version)
+    require(upstream is not None, "valid upstream-base provenance missing; configure NINFER_UPSTREAM_BASE_SHA")
+    return source.group(1), upstream.group(1)
+
+
+def reraise_after_stop(error: BaseException, stop: Callable[[], object]) -> NoReturn:
+    try:
+        stop()
+    except BaseException as cleanup_error:
+        raise error from cleanup_error
+    raise error
+
 
 @contextmanager
 def proof_workdir():
@@ -66,10 +85,9 @@ def main() -> int:
     binary_sha = digest_file(args.server)
     version = subprocess.run([str(args.server), "--version"], check=True, capture_output=True,
                              text=True).stdout.strip()
-    source = re.search(r"(?:^| )patch_stack_sha=([0-9a-f]{40})(?: |$)", version)
-    require(source is not None and "source_dirty=false" in version, "clean binary source provenance missing")
+    source, upstream_base = build_provenance(version)
     receipt: dict = {"artifact_type": "ninfer-serve-restore-proof/1", "binary_sha256": binary_sha,
-                     "source": source.group(1), "artifact_sha256": artifact_sha,
+                     "source": source, "upstream_base_sha": upstream_base, "artifact_sha256": artifact_sha,
                      "production_path": True, "tracer": False}
     with proof_workdir() as root:
         checkpoint_root = root / "checkpoints"
@@ -127,9 +145,8 @@ def main() -> int:
                             pass
                         time.sleep(0.1)
                     raise RuntimeError("production readiness deadline exceeded")
-                except BaseException:
-                    self.terminate()
-                    raise
+                except BaseException as error:
+                    reraise_after_stop(error, self.terminate)
 
             def terminate(self) -> dict:
                 if self.child.poll() is None:
@@ -240,7 +257,11 @@ def main() -> int:
                                     "own_delete": 200, "deleted_after_restart": 404,
                                     "descendant_after_restart": 200}
             receipt["passed"] = True
-        finally:
+        except BaseException as error:
+            if active is not None:
+                reraise_after_stop(error, active.terminate)
+            raise
+        else:
             if active is not None:
                 active.terminate()
     if args.receipt is not None:
