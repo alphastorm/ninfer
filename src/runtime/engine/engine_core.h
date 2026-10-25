@@ -12,6 +12,7 @@
 #include "runtime/engine/context_cache/resource_manager.h"
 #include "runtime/engine/scheduler.h"
 #include "runtime/engine/generation_budget.h"
+#include "runtime/engine/prefix_reuse_path.h"
 
 #include <algorithm>
 #include <array>
@@ -1474,6 +1475,7 @@ private:
                 cumulative_stats_.prompt_tokens += control.summary.prompt_tokens;
                 cumulative_stats_.last_selected_frontier_tokens =
                     control.summary.reused_prompt_tokens;
+                cumulative_stats_.last_selected_reuse_path = control.summary.prefix_reuse_path;
                 // Generation start was published when the first binding obtained its resources.
             }
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
@@ -1763,6 +1765,14 @@ private:
                 if (resources_.has_source_record(request->id)) {
                     retain_admission_source(request, choice, restoring);
                 }
+                // Binding may consume the immutable handle. Capture its actual semantic role
+                // before Native accepts ownership, rather than guessing from a token frontier.
+                const auto selected_path =
+                    choice.source.reused_tokens && choice.source.checkpoint
+                        ? checkpoint_reuse_path(instance_.program->checkpoint_metadata(
+                                                    *choice.source.checkpoint).role)
+                        : choice.source.reused_tokens ? PrefixReusePath::Checkpoint
+                                                      : PrefixReusePath::Root;
                 auto binding_started = Clock::now();
                 const auto bind      = [&](const auto& source) {
                     return instance_.program->start_binding(
@@ -1849,8 +1859,7 @@ private:
                 const BeginSummary begin{
                     .prompt_tokens        = request->base_plan->summary().prompt_tokens,
                     .reused_prompt_tokens = source.reused_tokens,
-                    .prefix_reuse_path =
-                        source.reused_tokens ? PrefixReusePath::Checkpoint : PrefixReusePath::Root};
+                    .prefix_reuse_path     = selected_path};
                 if (restoring) {
                     std::erase(paused_, request);
                     observe_scheduling(request, GenerationSchedulingTransition::RestoreStarted,

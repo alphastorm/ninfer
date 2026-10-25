@@ -1,11 +1,24 @@
 #include "runtime/engine/model_construction.h"
+#include "runtime/engine/prefix_reuse_path.h"
 
 #include <array>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 
 int main() {
     try {
+        using Role = ninfer::runtime::CheckpointRole;
+        using Path = ninfer::PrefixReusePath;
+        for (const auto& [role, path] : std::array{
+                 std::pair{Role::Continuation, Path::PrivateEndpoint},
+                 std::pair{Role::InputReplay, Path::PrivateInputReplay},
+                 std::pair{Role::LongAnchor, Path::PrivateLongAnchor},
+                 std::pair{Role::SharedPrefix, Path::SharedStablePrefix}}) {
+            if (ninfer::runtime::checkpoint_reuse_path(role) != path) {
+                throw std::runtime_error("semantic checkpoint role was misclassified");
+            }
+        }
         for (const auto storage : std::array{
                  ninfer::KvCacheStorage::BFloat16, ninfer::KvCacheStorage::Int8Group64,
                  ninfer::KvCacheStorage::Fp8E4M3Row256, ninfer::KvCacheStorage::Nvfp4Group16,
