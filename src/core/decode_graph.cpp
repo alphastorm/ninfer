@@ -1,6 +1,7 @@
 #include "core/decode_graph.h"
 
 #include "core/device.h"
+#include "core/nvtx.h"
 
 #include <cstdio>
 #include <stdexcept>
@@ -8,6 +9,14 @@
 
 namespace ninfer {
 namespace {
+
+void check_graph(cudaError_t error, const char* operation) {
+    if (error == cudaErrorMemoryAllocation) {
+        (void)cudaGetLastError();
+        throw DeviceAllocationError(operation);
+    }
+    cuda_check(error, operation, __FILE__, __LINE__);
+}
 
 void log_cuda_error(const char* op, cudaError_t err) noexcept {
     if (err != cudaSuccess) {
@@ -56,26 +65,30 @@ DecodeGraphDefinition& DecodeGraphDefinition::operator=(DecodeGraphDefinition&& 
 }
 
 void DecodeGraphDefinition::capture(cudaStream_t stream, const std::function<void()>& body) {
+    nvtx::ScopedRange capture_range(nvtx::Name::CudaGraphCapture, nvtx::Category::Graph);
     reset();
 
-    CUDA_CHECK(cudaStreamBeginCapture(stream, cudaStreamCaptureModeThreadLocal));
+    DecodeGraphCapture capture(stream);
+    body();
+    *this = capture.finish();
+}
 
-    try {
-        body();
-    } catch (...) {
-        discard_capture(stream);
-        throw;
-    }
+DecodeGraphCapture::DecodeGraphCapture(cudaStream_t stream) : stream_(stream) {
+    check_graph(cudaStreamBeginCapture(stream_, cudaStreamCaptureModeThreadLocal),
+                "cudaStreamBeginCapture");
+}
 
-    cudaGraph_t graph = nullptr;
+DecodeGraphCapture::~DecodeGraphCapture() {
+    if (stream_) discard_capture(stream_);
+}
 
-    cudaError_t err = cudaStreamEndCapture(stream, &graph);
-    if (err != cudaSuccess) {
-        destroy_graph(graph);
-        CUDA_CHECK(err);
-    }
-
-    graph_ = graph;
+DecodeGraphDefinition DecodeGraphCapture::finish() {
+    if (!stream_) throw std::logic_error("CUDA Graph capture is already finished");
+    DecodeGraphDefinition definition;
+    const auto error = cudaStreamEndCapture(stream_, &definition.graph_);
+    stream_          = nullptr;
+    check_graph(error, "cudaStreamEndCapture");
+    return definition;
 }
 
 bool DecodeGraphDefinition::ready() const noexcept { return graph_ != nullptr; }
@@ -99,6 +112,7 @@ DecodeGraphExecutable& DecodeGraphExecutable::operator=(DecodeGraphExecutable&& 
 }
 
 void DecodeGraphExecutable::instantiate(const DecodeGraphDefinition& definition) {
+    nvtx::ScopedRange instantiate_range(nvtx::Name::CudaGraphInstantiate, nvtx::Category::Graph);
     if (!definition.ready()) {
         throw std::logic_error("cannot instantiate an empty CUDA Graph definition");
     }
@@ -108,18 +122,20 @@ void DecodeGraphExecutable::instantiate(const DecodeGraphDefinition& definition)
     const cudaError_t err = cudaGraphInstantiate(&exec, definition.graph_, 0);
     if (err != cudaSuccess) {
         destroy_graph_exec(exec);
-        CUDA_CHECK(err);
+        check_graph(err, "cudaGraphInstantiate");
     }
     exec_ = exec;
 }
 
 void DecodeGraphExecutable::update(const DecodeGraphDefinition& definition) {
+    nvtx::ScopedRange update_range(nvtx::Name::CudaGraphUpdate, nvtx::Category::Graph);
     if (!ready() || !definition.ready()) {
         throw std::logic_error("CUDA Graph update requires a definition and executable");
     }
 
     cudaGraphExecUpdateResultInfo result{};
     const cudaError_t err = cudaGraphExecUpdate(exec_, definition.graph_, &result);
+    if (err == cudaErrorMemoryAllocation) check_graph(err, "cudaGraphExecUpdate");
     if (err != cudaSuccess || result.result != cudaGraphExecUpdateSuccess) {
         throw std::runtime_error(
             "CUDA Graph executable update failed: " + std::string(cudaGetErrorName(err)) +
@@ -128,13 +144,16 @@ void DecodeGraphExecutable::update(const DecodeGraphDefinition& definition) {
 }
 
 void DecodeGraphExecutable::upload(cudaStream_t stream) {
+    nvtx::ScopedRange upload_range(nvtx::Name::CudaGraphUpload, nvtx::Category::Graph);
     if (!ready()) { throw std::logic_error("cannot upload an empty CUDA Graph executable"); }
-    CUDA_CHECK(cudaGraphUpload(exec_, stream));
+    check_graph(cudaGraphUpload(exec_, stream), "cudaGraphUpload");
 }
 
 void DecodeGraphExecutable::launch(cudaStream_t stream) {
+    // This range executes for every replay; ranges in the captured body execute only at capture.
+    nvtx::ScopedRange launch_range(nvtx::Name::CudaGraphLaunch, nvtx::Category::Graph);
     if (!ready()) { throw std::logic_error("cannot launch an empty CUDA Graph executable"); }
-    CUDA_CHECK(cudaGraphLaunch(exec_, stream));
+    check_graph(cudaGraphLaunch(exec_, stream), "cudaGraphLaunch");
 }
 
 bool DecodeGraphExecutable::ready() const noexcept { return exec_ != nullptr; }

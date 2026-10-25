@@ -18,10 +18,12 @@ if(NOT NINFER_SOURCE_DIRTY_MODE STREQUAL "auto" AND
   message(FATAL_ERROR "NINFER_SOURCE_DIRTY_MODE must be auto or ON")
 endif()
 
-# A source archive without Git metadata was already bound and checked by the lifecycle tool before
-# configuration. A live Git worktree must still match the identity baked at configure time whenever
-# the compiler runs; otherwise an incremental build could label edited source as clean.
+# A live Git worktree must match the configured identity whenever the compiler
+# runs. Unverifiable archives must never claim to be clean.
 if(NOT EXISTS "${NINFER_SOURCE_DIR}/.git")
+  if(NINFER_CONFIGURED_SOURCE_DIRTY STREQUAL "0")
+    message(FATAL_ERROR "Git metadata is required to verify a clean source archive")
+  endif()
   return()
 endif()
 if(NOT DEFINED NINFER_GIT_EXECUTABLE OR NINFER_GIT_EXECUTABLE STREQUAL "" OR

@@ -1,0 +1,33 @@
+{
+  "artifact_type": "ninfer-engine-cache-proof-disposition/1",
+  "source_commit": "9e2261f92b9cbca8b44933e5064cbdd2978a9400",
+  "host_class": "RTX PRO 6000 correctness lane",
+  "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+  "gpu_exclusion": "single shared no-fork flock",
+  "production_filesystem": "native container volume",
+  "batch_completed": true,
+  "batch_exit_code": 1,
+  "tests": [
+    {"name": "concurrency_real", "backend": "dflash2", "passed": false, "seconds": 59.73,
+     "error": "timeout fixture did not hold both execution lanes"},
+    {"name": "durable_pressure_real", "backend": "dflash2", "passed": false, "seconds": 180.34,
+     "error": "test deadline exceeded", "completed_phase": "unobserved"},
+    {"name": "preemption_real", "backend": "none", "passed": false, "seconds": 180.41,
+     "error": "test deadline exceeded", "completed_phase": "unobserved"},
+    {"name": "concurrency_real", "backend": "none", "passed": false, "seconds": 46.33,
+     "error": "second reader did not reuse the primed checkpoint"}
+  ],
+  "prefix_scenarios_passed": ["explicit-anchor", "nested-tool-markers", "rewrite-checkpoint",
+                               "anthropic-prefix-regression", "agent-continuation"],
+  "production_restart": {
+    "passed": false,
+    "completed_boots": 0,
+    "shutdown_reports": 0,
+    "driver_error": "production stop did not acknowledge final saves",
+    "actual_server_error": "server failed during startup | incomplete or invalid checkpoint runtime fingerprint v2",
+    "model_weight_load_seconds": 50.5,
+    "engine_ready_seconds": 57.5,
+    "owner": "ServePort2"
+  },
+  "acceptance_passed": false
+}

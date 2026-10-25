@@ -1,4 +1,5 @@
 #include "ninfer/ops/silu_mul.h"
+#include "cuda_fixture.h"
 #include "ops/op_tester.h"
 
 #include <algorithm>
@@ -49,10 +50,11 @@ int run_contiguous_case(const char* label, std::int32_t rows, std::int32_t colum
     device_gate.copy_from_host(gate_bits.data(), device_gate.bytes());
     device_up.copy_from_host(up_bits.data(), device_up.bytes());
 
-    Tensor gate_tensor(device_gate.data(), DType::BF16, {rows, columns});
-    Tensor up_tensor(device_up.data(), DType::BF16, {rows, columns});
-    Tensor out_tensor(device_out.data(), DType::BF16, {rows, columns});
-    ops::silu_mul(gate_tensor, up_tensor, out_tensor, nullptr);
+    Tensor gate_tensor(device_gate.span(), DType::BF16, {rows, columns});
+    Tensor up_tensor(device_up.span(), DType::BF16, {rows, columns});
+    Tensor out_tensor(device_out.span(), DType::BF16, {rows, columns});
+    ops::silu_mul(gate_tensor, up_tensor, out_tensor,
+                  ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
     int failures = verify_pointwise(label, from_device_bf16(device_out.data(), count), expected,
@@ -91,11 +93,12 @@ int run_strided_gate_up_case() {
     GuardedDeviceBuffer device_out(count * sizeof(std::uint16_t));
     device_gate_up.copy_from_host(gate_up_bits.data(), device_gate_up.bytes());
 
-    Tensor gate_up_tensor(device_gate_up.data(), DType::BF16, {2 * rows, columns});
+    Tensor gate_up_tensor(device_gate_up.span(), DType::BF16, {2 * rows, columns});
     Tensor gate_tensor = gate_up_tensor.slice(0, 0, rows);
     Tensor up_tensor   = gate_up_tensor.slice(0, rows, rows);
-    Tensor out_tensor(device_out.data(), DType::BF16, {rows, columns});
-    ops::silu_mul(gate_tensor, up_tensor, out_tensor, nullptr);
+    Tensor out_tensor(device_out.span(), DType::BF16, {rows, columns});
+    ops::silu_mul(gate_tensor, up_tensor, out_tensor,
+                  ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
     int failures =
@@ -124,10 +127,11 @@ int run_edge_case() {
     device_gate.copy_from_host(gate_bits.data(), device_gate.bytes());
     device_up.copy_from_host(up_bits.data(), device_up.bytes());
 
-    Tensor gate_tensor(device_gate.data(), DType::BF16, {static_cast<int>(gate.size())});
-    Tensor up_tensor(device_up.data(), DType::BF16, {static_cast<int>(up.size())});
-    Tensor out_tensor(device_out.data(), DType::BF16, {static_cast<int>(expected.size())});
-    ops::silu_mul(gate_tensor, up_tensor, out_tensor, nullptr);
+    Tensor gate_tensor(device_gate.span(), DType::BF16, {static_cast<int>(gate.size())});
+    Tensor up_tensor(device_up.span(), DType::BF16, {static_cast<int>(up.size())});
+    Tensor out_tensor(device_out.span(), DType::BF16, {static_cast<int>(expected.size())});
+    ops::silu_mul(gate_tensor, up_tensor, out_tensor,
+                  ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
     int failures = verify_pointwise("silu_mul edge values",

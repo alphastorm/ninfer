@@ -1,4 +1,5 @@
 #include "ninfer/ops/cast.h"
+#include "cuda_fixture.h"
 #include "ops/op_tester.h"
 
 #include <algorithm>
@@ -36,9 +37,10 @@ int run_case(const char* label, std::int32_t rows, std::int32_t columns, std::ui
     GuardedDeviceBuffer device_destination(count * sizeof(std::uint16_t));
     device_source.copy_from_host(source.data(), device_source.bytes());
 
-    Tensor source_tensor(device_source.data(), DType::FP32, {rows, columns});
-    Tensor destination_tensor(device_destination.data(), DType::BF16, {rows, columns});
-    ops::cast_fp32_to_bf16(source_tensor, destination_tensor, nullptr);
+    Tensor source_tensor(device_source.span(), DType::FP32, {rows, columns});
+    Tensor destination_tensor(device_destination.span(), DType::BF16, {rows, columns});
+    ops::cast_fp32_to_bf16(source_tensor, destination_tensor,
+                           ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
     int failures =

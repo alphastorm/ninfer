@@ -1,4 +1,5 @@
 #include "ninfer/ops/add_bias.h"
+#include "cuda_fixture.h"
 #include "ops/op_tester.h"
 
 #include <cstdint>
@@ -48,9 +49,9 @@ int run_case(const char* label, std::int32_t rows, std::int32_t columns, std::ui
     device_bias.copy_from_host(bias_bits.data(), device_bias.bytes());
     device_input.copy_from_host(input_bits.data(), device_input.bytes());
 
-    Tensor bias_tensor(device_bias.data(), DType::BF16, {rows});
-    Tensor input_tensor(device_input.data(), DType::BF16, {rows, columns});
-    ops::add_bias(bias_tensor, input_tensor, nullptr);
+    Tensor bias_tensor(device_bias.span(), DType::BF16, {rows});
+    Tensor input_tensor(device_input.span(), DType::BF16, {rows, columns});
+    ops::add_bias(bias_tensor, input_tensor, ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
     int failures = verify_pointwise(label, from_device_bf16(device_input.data(), count), expected,

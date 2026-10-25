@@ -1,0 +1,60 @@
+#include "models/qwen4_exp/state/state_image.h"
+
+namespace ninfer::models::qwen4_exp {
+StateLayout plan_state_image(LayoutBuilder& backing, const Config& config, std::int32_t slots) {
+    const auto& c = config.text;
+    StateImageBuilder b;
+    StateLayout out;
+    out.gdn = plan_linear_attention_state(
+        b, {c.gdn_layers, dimension(c.gdn.conv_channels()), dimension(c.gdn.conv_width - 1),
+            dimension(c.gdn.value_heads), dimension(c.gdn.value_dim), dimension(c.gdn.key_dim),
+            DType::BF16});
+    const auto qsa = [&](std::uint32_t layers) {
+        return QsaTailLayout{
+            b.add(DType::BF16,
+                  {dimension(c.qsa.index_key_width()), dimension(c.qsa.compression - 1)}, layers,
+                  "QSA raw tail"),
+            b.add(DType::I32, {3}, layers, "QSA block coordinates")};
+    };
+    out.main_qsa = qsa(c.qsa_layers);
+    out.ple_history =
+        b.add(DType::BF16, {dimension(c.residual_width()), dimension(c.ple.history_columns())}, 1,
+              "PLE history");
+    out.sample_hidden = b.add(DType::BF16, {dimension(c.hidden)}, 1, "Main sample hidden");
+    if (config.mtp) {
+        out.conditioning =
+            b.add(DType::BF16, {dimension(c.residual_width())}, 1, "Main MTP conditioning");
+        out.mtp_qsa = qsa(1);
+    }
+    out.images = b.finish(backing, slots);
+    return out;
+}
+
+StateViews::StateViews(MemorySpan backing, const StateLayout& layout)
+    : layout_(layout), storage_(backing, layout.images), gdn_(storage_, layout.gdn) {}
+
+ops::QsaTailStateView StateViews::main_tail(std::uint32_t layer, Tensor slots) const {
+    return {storage_.field(layout_.main_qsa.raw_keys, layer),
+            storage_.field(layout_.main_qsa.first_rope, layer), slots};
+}
+
+ops::QsaTailStateView StateViews::mtp_tail(Tensor slots) const {
+    const auto& tail = layout_.mtp_qsa.value();
+    return {storage_.field(tail.raw_keys), storage_.field(tail.first_rope), slots};
+}
+
+ops::PleConvStateView StateViews::ple(Tensor slots) const {
+    return {storage_.field(layout_.ple_history), slots};
+}
+
+Tensor StateViews::sample_hidden() const { return storage_.field(layout_.sample_hidden); }
+
+Tensor StateViews::conditioning() const { return storage_.field(layout_.conditioning.value()); }
+
+ContinuationMetadata StateViews::initialize(std::int32_t slot, std::int32_t eos,
+                                            CudaExecutionView execution) const {
+    if (eos < 0) throw std::invalid_argument("PLE EOS must be nonnegative");
+    storage_.clear(slot, execution);
+    return {0, 0, {eos, eos}, layout_.mtp_qsa ? std::optional<std::uint32_t>{0} : std::nullopt};
+}
+} // namespace ninfer::models::qwen4_exp

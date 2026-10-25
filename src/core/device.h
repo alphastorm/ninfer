@@ -1,21 +1,59 @@
 #pragma once
 
+#include "core/memory.h"
+
 #include <cuda_runtime.h>
 
 #include <cstddef>
+#include <cstdint>
+#include <stdexcept>
 
 namespace ninfer {
+
+// Only Device allocations use this error; pinned Host allocation failures are distinct.
+class DeviceAllocationError : public std::runtime_error {
+public:
+    DeviceAllocationError(const char* operation, std::size_t requested_bytes = 0);
+
+    [[nodiscard]] std::size_t requested_bytes() const noexcept { return requested_bytes_; }
+
+private:
+    std::size_t requested_bytes_;
+};
+
+struct DeviceMemorySnapshot {
+    std::size_t free_bytes = 0, total_bytes = 0;
+};
+
+[[nodiscard]] DeviceMemorySnapshot device_memory_snapshot(Device);
+[[nodiscard]] std::int64_t device_memory_growth(DeviceMemorySnapshot before,
+                                                DeviceMemorySnapshot after);
 
 void cuda_check(cudaError_t err, const char* expr, const char* file, int line);
 
 #define CUDA_CHECK(expr) ::ninfer::cuda_check((expr), #expr, __FILE__, __LINE__)
 
-struct DeviceContext {
-    int device                   = 0;
-    cudaStream_t stream          = nullptr;
-    cudaStream_t transfer_stream = nullptr;
-    cudaDeviceProp props{};
+// Borrowed execution context. Its stream and device facts have one owning source.
+class CudaExecutionView {
+public:
+    [[nodiscard]] Device device() const noexcept { return device_; }
 
+    [[nodiscard]] cudaStream_t stream() const noexcept { return stream_; }
+
+    [[nodiscard]] int multiprocessor_count() const noexcept { return multiprocessor_count_; }
+
+private:
+    friend struct DeviceContext;
+
+    CudaExecutionView(Device device, cudaStream_t stream, int multiprocessor_count) noexcept
+        : device_(device), stream_(stream), multiprocessor_count_(multiprocessor_count) {}
+
+    Device device_;
+    cudaStream_t stream_;
+    int multiprocessor_count_;
+};
+
+struct DeviceContext {
     explicit DeviceContext(int device_id = 0);
     ~DeviceContext();
 
@@ -26,9 +64,61 @@ struct DeviceContext {
 
     void bind_to_current_thread() const;
     void bind_to_current_thread_noexcept() const noexcept;
-    int sm() const noexcept;
+    int compute_capability() const noexcept;
+    int multiprocessor_count() const noexcept;
+
+    [[nodiscard]] Device device() const noexcept { return device_; }
+
+    [[nodiscard]] cudaStream_t stream() const noexcept { return stream_; }
+
+    [[nodiscard]] cudaStream_t transfer_stream() const noexcept { return transfer_stream_; }
+
+    [[nodiscard]] const cudaDeviceProp& properties() const noexcept { return props_; }
+
+    CudaExecutionView execution_view() const noexcept;
+    CudaExecutionView transfer_view() const noexcept;
+    // Admit borrowed streams at their owner, before entering the execution chain.
+    // nullptr denotes this device's legacy default stream; callers still bind the device.
+    CudaExecutionView execution_view(cudaStream_t borrowed_stream) const;
     std::size_t total_vram() const noexcept;
+    const char* sync_mode() const;
+    // Waits for the owned compute stream, not the transfer or borrowed streams.
     void synchronize() const;
+
+private:
+    Device device_;
+    cudaStream_t stream_          = nullptr;
+    cudaStream_t transfer_stream_ = nullptr;
+    cudaDeviceProp props_{};
+};
+
+// Allocation and transfer boundaries temporarily select their recorded device. Op launches
+// run on a thread already bound by DeviceContext, without a per-launch CUDA device query.
+class CudaDeviceScope {
+public:
+    explicit CudaDeviceScope(Device device);
+    ~CudaDeviceScope();
+    CudaDeviceScope(const CudaDeviceScope&)            = delete;
+    CudaDeviceScope& operator=(const CudaDeviceScope&) = delete;
+
+private:
+    int previous_ = -1;
+    bool changed_ = false;
+};
+
+// An additional nonblocking stream. Its owner orders and completes borrowed buffer uses.
+class CudaStream {
+public:
+    explicit CudaStream(const DeviceContext& device);
+    ~CudaStream();
+    CudaStream(const CudaStream&)            = delete;
+    CudaStream& operator=(const CudaStream&) = delete;
+
+    [[nodiscard]] cudaStream_t stream() const noexcept { return stream_; }
+
+private:
+    Device device_;
+    cudaStream_t stream_ = nullptr;
 };
 
 class CudaEventTimer {
@@ -66,12 +156,14 @@ public:
     CudaCompletionEvent& operator=(CudaCompletionEvent&& other) noexcept;
 
     void record(cudaStream_t stream);
+    // Capture a record node observable by the host while later graph nodes are still running.
+    // Only call during stream capture; this event must outlive every graph referencing it.
+    void record_external(cudaStream_t stream);
     void wait(cudaStream_t stream) const;
     [[nodiscard]] bool ready() const;
     void synchronize() const;
 
 private:
-    int device_        = 0;
     cudaEvent_t event_ = nullptr;
 };
 

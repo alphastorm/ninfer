@@ -9,11 +9,14 @@
 //   round_to_bf16(x);                       // what the kernel will read
 //   std::vector<double> ref(n);             // compute in double from x
 //   ... cpu_ref(x, ref) ...
-//   DeviceBuffer dx = to_device_bf16(x), dout(n*2);
+//   DeviceBuffer dx = to_device_bf16(x);
+//   DeviceBuffer dout(cuda_environment().context.device(), n*2);
 //   ... launch kernel on dx -> dout ...
 //   failures += verify_pointwise("op n=...", from_device_bf16(dout, n), ref,
 //                                op_bf16_criterion());
 
+#include "core/buffer.h"
+#include "cuda_fixture.h"
 #include "core/arena.h"
 #include "core/tensor.h" // ninfer::DType, ninfer::Tensor (for op call sites)
 #include "ops/op_check.h"
@@ -101,8 +104,8 @@ inline void fill_iota_i32(std::vector<int>& v, int start = 0) {
 template <typename T>
 inline DeviceBuffer to_device(const std::vector<T>& h) {
     static_assert(std::is_trivially_copyable_v<T>);
-    DeviceBuffer d(h.size() * sizeof(T));
-    d.copy_from_host(h.data(), d.bytes);
+    DeviceBuffer d(cuda_environment().context.device(), h.size() * sizeof(T));
+    d.copy_from_host(h.data(), d.size());
     return d;
 }
 
@@ -248,40 +251,45 @@ class GuardedDeviceBuffer {
 public:
     explicit GuardedDeviceBuffer(std::size_t payload_bytes, std::size_t guard_bytes = 256,
                                  std::uint8_t guard_byte = 0xa5)
-        : storage_(allocation_bytes(payload_bytes, guard_bytes)), payload_bytes_(payload_bytes),
-          guard_bytes_(guard_bytes), guard_byte_(guard_byte) {
+        : storage_(cuda_environment().context.device(),
+                   allocation_bytes(payload_bytes, guard_bytes)),
+          payload_bytes_(payload_bytes), guard_bytes_(guard_bytes), guard_byte_(guard_byte) {
         storage_.fill(guard_byte_);
     }
 
-    void* data() noexcept { return static_cast<std::uint8_t*>(storage_.p) + guard_bytes_; }
+    void* data() noexcept { return static_cast<std::uint8_t*>(storage_.data()) + guard_bytes_; }
 
     const void* data() const noexcept {
-        return static_cast<const std::uint8_t*>(storage_.p) + guard_bytes_;
+        return static_cast<const std::uint8_t*>(storage_.data()) + guard_bytes_;
     }
 
     std::size_t bytes() const noexcept { return payload_bytes_; }
 
+    Device device() const noexcept { return storage_.device(); }
+
+    MemorySpan span() noexcept { return storage_.span().subspan(guard_bytes_, payload_bytes_); }
+
+    ConstMemorySpan span() const noexcept {
+        return storage_.span().subspan(guard_bytes_, payload_bytes_);
+    }
+
     void fill(int byte_value = 0) {
         if (payload_bytes_ != 0) {
+            CudaDeviceScope scope(storage_.device());
             cuda_check(cudaMemset(data(), byte_value, payload_bytes_),
                        "cudaMemset guarded payload");
+            cuda_check(cudaStreamSynchronize(nullptr), "guarded payload initialization");
         }
     }
 
     void copy_from_host(const void* source, std::size_t count, std::size_t byte_offset = 0) {
         require_payload_range(byte_offset, count);
-        if (count == 0) return;
-        auto* destination = static_cast<std::uint8_t*>(data()) + byte_offset;
-        cuda_check(cudaMemcpy(destination, source, count, cudaMemcpyHostToDevice),
-                   "cudaMemcpy host-to-guarded-device");
+        storage_.copy_from_host(source, count, guard_bytes_ + byte_offset);
     }
 
     void copy_to_host(void* destination, std::size_t count, std::size_t byte_offset = 0) const {
         require_payload_range(byte_offset, count);
-        if (count == 0) return;
-        const auto* source = static_cast<const std::uint8_t*>(data()) + byte_offset;
-        cuda_check(cudaMemcpy(destination, source, count, cudaMemcpyDeviceToHost),
-                   "cudaMemcpy guarded-device-to-host");
+        storage_.copy_to_host(destination, count, guard_bytes_ + byte_offset);
     }
 
     int verify_guards(std::string_view label) const {

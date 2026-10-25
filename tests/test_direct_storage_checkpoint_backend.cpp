@@ -260,6 +260,8 @@ public:
 
     bool available() const noexcept override { return is_available; }
 
+    bool overlaps_batches() const noexcept override { return false; }
+
     std::string_view backend_name() const noexcept override { return "fake-directstorage"; }
 
     std::string_view unavailable_reason() const noexcept override { return reason; }

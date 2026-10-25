@@ -1,45 +1,38 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": {
-    "major": 3,
-    "minor": 28,
-    "patch": 0
-  },
+  "cmakeMinimumRequired": { "major": 3, "minor": 28, "patch": 0 },
   "configurePresets": [
     {
-      "name": "mainline-rtx-5090",
-      "displayName": "Mainline RTX 5090 (sm_120a)",
+      "name": "release",
+      "displayName": "Release product binaries",
       "generator": "Ninja",
-      "binaryDir": "${sourceDir}/build/mainline-rtx-5090",
+      "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CMAKE_CUDA_ARCHITECTURES": "120a",
         "NINFER_BUILD_APPS": "ON",
+        "BUILD_TESTING": "OFF",
+        "NINFER_BUILD_BENCHMARKS": "OFF"
+      }
+    },
+    {
+      "name": "dev",
+      "displayName": "Release products, tests and benchmarks",
+      "inherits": "release",
+      "cacheVariables": {
         "BUILD_TESTING": "ON",
-        "NINFER_BUILD_BENCHMARKS": "OFF",
-        "NINFER_BUILD_PROFILE": "qwen38-5090-mainline",
-        "NINFER_UPSTREAM_BASE_SHA": "6e8b2e2ad5d53597c3ba8e7989f9546d40b921fc",
-        "NINFER_PATCH_STACK_SHA": "auto",
-        "NINFER_SOURCE_DIRTY": "auto"
+        "NINFER_BUILD_BENCHMARKS": "ON"
       }
     }
   ],
   "buildPresets": [
-    {
-      "name": "mainline-rtx-5090",
-      "configurePreset": "mainline-rtx-5090",
-      "targets": ["ninfer", "ninfer-serve"]
-    },
-    {
-      "name": "test-rtx-5090",
-      "configurePreset": "mainline-rtx-5090"
-    }
+    { "name": "release", "configurePreset": "release" },
+    { "name": "dev", "configurePreset": "dev" }
   ],
   "testPresets": [
     {
-      "name": "mainline-rtx-5090",
-      "configurePreset": "mainline-rtx-5090",
-      "output": {"outputOnFailure": true}
+      "name": "dev",
+      "configurePreset": "dev",
+      "output": { "outputOnFailure": true }
     }
   ]
 }

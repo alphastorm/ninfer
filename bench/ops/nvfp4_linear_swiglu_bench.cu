@@ -1,7 +1,9 @@
+#include "core/weight.h"
+#include "core/buffer.h"
 #include "ninfer/ops/linear_swiglu.h"
 
 #include "core/device.h"
-#include "ninfer_bench_common.h"
+#include "op_measurement.cuh"
 #include "quantized_weight.cuh"
 
 #include <cuda_profiler_api.h>
@@ -44,25 +46,6 @@ struct Result {
     double useful_tflops;
 };
 
-std::vector<std::int32_t> parse_t_sweep(std::string_view raw) {
-    std::vector<std::int32_t> result;
-    std::size_t begin = 0;
-    while (begin < raw.size()) {
-        const std::size_t end = raw.find(',', begin);
-        const std::string token(
-            raw.substr(begin, end == std::string_view::npos ? raw.size() - begin : end - begin));
-        const long value = std::stol(token);
-        if (value <= 0 || value > std::numeric_limits<std::int32_t>::max()) {
-            throw std::invalid_argument("--t-sweep values must be positive int32");
-        }
-        result.push_back(static_cast<std::int32_t>(value));
-        if (end == std::string_view::npos) { break; }
-        begin = end + 1;
-    }
-    if (result.empty()) { throw std::invalid_argument("--t-sweep must not be empty"); }
-    return result;
-}
-
 Options parse_options(int argc, char** argv) {
     Options options;
     for (int index = 1; index < argc; ++index) {
@@ -78,16 +61,16 @@ Options parse_options(int argc, char** argv) {
                 options.t_sweep = {1, 4, 8, 16};
             } else if (value == "a4") {
                 options.policy  = ops::LinearPolicy::AllowA4;
-                options.t_sweep = {17, 128, 1024};
+                options.t_sweep = {5, 48, 49, 56, 64, 65, 96, 97, 128, 256, 1024};
             } else {
                 throw std::invalid_argument("--policy must be a16 or a4");
             }
         } else if (argument == "--t-sweep") {
-            options.t_sweep = parse_t_sweep(next("--t-sweep"));
+            options.t_sweep = bench::measurement::integers(next("--t-sweep"));
         } else if (argument == "--warmup") {
-            options.warmup = std::stoi(std::string(next("--warmup")));
+            options.warmup = bench::measurement::integer(next("--warmup"), 0);
         } else if (argument == "--repeat") {
-            options.repeat = std::stoi(std::string(next("--repeat")));
+            options.repeat = bench::measurement::integer(next("--repeat"));
         } else if (argument == "--profile") {
             options.profile = true;
         } else if (argument == "--csv-out") {
@@ -147,19 +130,23 @@ int main(int argc, char** argv) {
             *std::min_element(options.t_sweep.begin(), options.t_sweep.end());
         cudaStream_t stream = nullptr;
         CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-        DeviceBuffer flush(kFlushBytes);
-        DeviceBuffer input = bench::make_bf16(static_cast<std::size_t>(kHidden) * max_t);
-        DeviceBuffer output(static_cast<std::size_t>(kOutputRows) * max_t * sizeof(std::uint16_t));
+        const auto cuda = ninfer::bench::device_context().execution_view(stream);
+        bench::L2FlushBuffer flush(kFlushBytes);
+        DeviceBuffer input = bench::make_bf16(static_cast<std::size_t>(kHidden) * max_t, 101U);
+        DeviceBuffer output(ninfer::bench::device_context().device(),
+                            static_cast<std::size_t>(kOutputRows) * max_t * sizeof(std::uint16_t));
         bench::PackedQuantizedWeight packed  = bench::make_nvfp4_weight(kGateUpRows, kHidden);
         const std::size_t workspace_capacity = ops::linear_swiglu_workspace_capacity_bytes(
             QType::NVFP4, kGateUpRows, kHidden, options.policy, min_t, max_t);
-        WorkspaceArena workspace(std::max<std::size_t>(workspace_capacity, 256));
+        ninfer::DeviceBuffer workspace_storage(ninfer::bench::device_context().device(),
+                                               std::max<std::size_t>(workspace_capacity, 256));
+        MemoryArena workspace(workspace_storage.span());
 
         const auto make_launch = [&](std::int32_t tokens) {
-            return [&, tokens](cudaStream_t launch_stream) {
-                Tensor x(input.p, DType::BF16, {kHidden, tokens});
-                Tensor out(output.p, DType::BF16, {kOutputRows, tokens});
-                ops::linear_swiglu(x, packed.weight, out, options.policy, workspace, launch_stream);
+            return [&, tokens](CudaExecutionView cuda) {
+                Tensor x(input.span(), DType::BF16, {kHidden, tokens});
+                Tensor out(output.span(), DType::BF16, {kOutputRows, tokens});
+                ops::linear_swiglu(x, packed.weight, out, options.policy, workspace, cuda);
             };
         };
 
@@ -167,17 +154,17 @@ int main(int argc, char** argv) {
             const std::int32_t tokens = options.t_sweep.front();
             const auto launch         = make_launch(tokens);
             for (int iteration = 0; iteration < options.warmup; ++iteration) {
-                bench::flush_l2(flush, stream);
-                launch(stream);
+                bench::flush_l2(flush, cuda);
+                launch(cuda);
             }
             CUDA_CHECK(cudaStreamSynchronize(stream));
-            bench::flush_l2(flush, stream);
+            bench::flush_l2(flush, cuda);
             CUDA_CHECK(cudaStreamSynchronize(stream));
             std::printf("PROFILE linear_swiglu weight_type=NVFP4 policy=%s T=%d\n",
                         policy_name(options.policy), tokens);
             std::fflush(stdout);
             CUDA_CHECK(cudaProfilerStart());
-            launch(stream);
+            launch(cuda);
             CUDA_CHECK(cudaStreamSynchronize(stream));
             CUDA_CHECK(cudaProfilerStop());
             CUDA_CHECK(cudaStreamDestroy(stream));
@@ -191,7 +178,7 @@ int main(int argc, char** argv) {
         for (const std::int32_t tokens : options.t_sweep) {
             const auto launch = make_launch(tokens);
             const bench::ColdTiming timing =
-                bench::measure_cold_launch(launch, flush, stream, options.warmup, options.repeat);
+                bench::measure_cold_launch(launch, flush, cuda, options.warmup, options.repeat);
             const double seconds      = timing.median_us * 1.0e-6;
             const double useful_flops = 2.0 * static_cast<double>(kGateUpRows) * kHidden * tokens;
             const double model_bytes  = static_cast<double>(packed.model_weight_bytes()) +

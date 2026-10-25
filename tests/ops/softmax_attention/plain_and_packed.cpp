@@ -1,4 +1,6 @@
 #include "ninfer/ops/softmax_attention.h"
+#include "cuda_fixture.h"
+#include "core/buffer.h"
 
 #include "core/arena.h"
 #include "ops/op_tester.h"
@@ -146,9 +148,9 @@ int run_case(const std::vector<int>& cu_seqlens, std::uint32_t seed, StorageProf
         q_storage = to_device(q_expected);
         k_storage = to_device(k_expected);
         v_storage = to_device(v_expected);
-        q_tensor  = Tensor(q_storage.p, DType::BF16, {kDim, kHeads, tokens});
-        k_tensor  = Tensor(k_storage.p, DType::BF16, {kDim, kHeads, tokens});
-        v_tensor  = Tensor(v_storage.p, DType::BF16, {kDim, kHeads, tokens});
+        q_tensor  = Tensor(q_storage.span(), DType::BF16, {kDim, kHeads, tokens});
+        k_tensor  = Tensor(k_storage.span(), DType::BF16, {kDim, kHeads, tokens});
+        v_tensor  = Tensor(v_storage.span(), DType::BF16, {kDim, kHeads, tokens});
     } else {
         interleaved_expected.resize(value_count * 3);
         for (int token = 0; token < tokens; ++token) {
@@ -162,36 +164,40 @@ int run_case(const std::vector<int>& cu_seqlens, std::uint32_t seed, StorageProf
                         interleaved_expected.data() + target + token_plane * 2);
         }
         interleaved_storage = to_device(interleaved_expected);
-        q_tensor            = Tensor(interleaved_storage.p, DType::BF16, {kDim, kHeads, tokens});
+        q_tensor = Tensor(interleaved_storage.span(), DType::BF16, {kDim, kHeads, tokens});
         q_tensor.nb[2]      = static_cast<std::int64_t>(token_plane * 3 * sizeof(std::uint16_t));
         k_tensor            = q_tensor;
         v_tensor            = q_tensor;
-        k_tensor.data =
-            static_cast<std::uint8_t*>(interleaved_storage.p) + token_plane * sizeof(std::uint16_t);
-        v_tensor.data = static_cast<std::uint8_t*>(interleaved_storage.p) +
+        k_tensor.data       = static_cast<std::uint8_t*>(interleaved_storage.data()) +
+                        token_plane * sizeof(std::uint16_t);
+        v_tensor.data = static_cast<std::uint8_t*>(interleaved_storage.data()) +
                         token_plane * 2 * sizeof(std::uint16_t);
     }
 
     DeviceBuffer d_cu_seqlens = to_device_i32(cu_seqlens);
-    Tensor cu_tensor(d_cu_seqlens.p, DType::I32, {static_cast<std::int32_t>(cu_seqlens.size())});
+    Tensor cu_tensor(d_cu_seqlens.span(), DType::I32,
+                     {static_cast<std::int32_t>(cu_seqlens.size())});
     GuardedDeviceBuffer d_out(value_count * sizeof(std::uint16_t));
     d_out.fill(0x7f);
-    Tensor out_tensor(d_out.data(), DType::BF16, {kDim, kHeads, tokens});
+    Tensor out_tensor(d_out.span(), DType::BF16, {kDim, kHeads, tokens});
 
     const std::int32_t segments       = static_cast<std::int32_t>(cu_seqlens.size()) - 1;
     const std::size_t workspace_bytes = ops::packed_softmax_attention_workspace_capacity_bytes(
         kGeometry, tokens, tokens, segments, segments);
-    DeviceArena workspace(std::max<std::size_t>(256, workspace_bytes));
+    ninfer::DeviceBuffer workspace_storage(ninfer::test::cuda_environment().context.device(),
+                                           std::max<std::size_t>(256, workspace_bytes));
+    MemoryArena workspace(workspace_storage.span());
 
     if (entry == PublicEntry::Plain) {
         if (cu_seqlens.size() != 2) {
             throw std::logic_error("plain case requires exactly one segment");
         }
         ops::softmax_attention(q_tensor, k_tensor, v_tensor, kGeometry, kScale, workspace,
-                               out_tensor, nullptr);
+                               out_tensor, ninfer::test::cuda_environment().default_execution);
     } else if (entry == PublicEntry::CuSeqlensArena) {
         ops::packed_softmax_attention(q_tensor, k_tensor, v_tensor, kGeometry, kScale, cu_tensor,
-                                      workspace, out_tensor, nullptr);
+                                      workspace, out_tensor,
+                                      ninfer::test::cuda_environment().default_execution);
     } else {
         const int segment_length = cu_seqlens[1] - cu_seqlens[0];
         for (std::size_t segment = 1; segment + 1 < cu_seqlens.size(); ++segment) {
@@ -200,7 +206,8 @@ int run_case(const std::vector<int>& cu_seqlens, std::uint32_t seed, StorageProf
             }
         }
         ops::packed_softmax_attention(q_tensor, k_tensor, v_tensor, kGeometry, kScale,
-                                      segment_length, out_tensor, nullptr);
+                                      segment_length, out_tensor,
+                                      ninfer::test::cuda_environment().default_execution);
     }
     cuda_synchronize();
 

@@ -69,6 +69,9 @@ private:
 void io_uring_checkpoint_test_fail_next_submitted_batch() noexcept;
 void io_uring_checkpoint_test_fail_publication_and_rollback_fsync() noexcept;
 void io_uring_checkpoint_test_fail_publication_marker_fsync() noexcept;
+// Zero/zero models filesystems such as ZFS and WSL kernels that omit STATX_DIOALIGN.
+void io_uring_checkpoint_test_override_alignment(std::size_t memory, std::size_t offset) noexcept;
+void io_uring_checkpoint_test_reset_alignment() noexcept;
 #endif
 
 } // namespace ninfer::runtime

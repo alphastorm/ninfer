@@ -1,4 +1,5 @@
 #include "ninfer/ops/gelu.h"
+#include "cuda_fixture.h"
 #include "ops/op_tester.h"
 
 #include <cmath>
@@ -47,8 +48,8 @@ int run_case(const char* label, ops::GeluMode mode, std::int32_t rows, std::int3
     GuardedDeviceBuffer device_input(input_bits.size() * sizeof(std::uint16_t));
     device_input.copy_from_host(input_bits.data(), device_input.bytes());
 
-    Tensor input_tensor(device_input.data(), DType::BF16, {rows, columns});
-    ops::gelu(input_tensor, mode, nullptr);
+    Tensor input_tensor(device_input.span(), DType::BF16, {rows, columns});
+    ops::gelu(input_tensor, mode, ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
     int failures = verify_pointwise(label, from_device_bf16(device_input.data(), count), expected,
@@ -68,9 +69,9 @@ int run_edge_case(ops::GeluMode mode, const char* label) {
     const auto input_bits = encode_bf16(input);
     GuardedDeviceBuffer device_input(input_bits.size() * sizeof(std::uint16_t));
     device_input.copy_from_host(input_bits.data(), device_input.bytes());
-    Tensor input_tensor(device_input.data(), DType::BF16,
+    Tensor input_tensor(device_input.span(), DType::BF16,
                         {static_cast<std::int32_t>(input.size())});
-    ops::gelu(input_tensor, mode, nullptr);
+    ops::gelu(input_tensor, mode, ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
     int failures = verify_pointwise(label, from_device_bf16(device_input.data(), input.size()),

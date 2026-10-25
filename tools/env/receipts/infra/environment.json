@@ -1,0 +1,27 @@
+{
+  "source": "64d10fbf9",
+  "image": "ov-build-env:master-64d10fbf",
+  "image_build": {
+    "exit_code": 0,
+    "wall_seconds": 50.675
+  },
+  "image_id": "sha256:502ca8b3465cb29fef4523a29fbaae5cece976e32f5524caf19e7ab05af35265",
+  "vanilla_build": {
+    "exit_code": 0,
+    "wall_seconds": 285.323
+  },
+  "binaries": {
+    "apps/ninfer": {
+      "sha256": "9b07f7a06e718c3db69bb130f07fc4cb41bb12edcccdc4cbd533c0ea88a0a372",
+      "bytes": 302316680
+    },
+    "apps/ninfer-perplexity": {
+      "sha256": "aad246dc95761de9f90b5b79a4691f029b5c7a4476ebb918edcf3c59e54da631",
+      "bytes": 302303160
+    },
+    "apps/ninfer-serve": {
+      "sha256": "d7d90126c646b0d26517abedf17a05246a24af979b40f6bf6cf8eb905705f50d",
+      "bytes": 304492472
+    }
+  }
+}

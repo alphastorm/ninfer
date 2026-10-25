@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise NInfer's authenticated agent-protocol and private-session contract."""
+"""Exercise NInfer's public protocol or full authenticated private-session contract."""
 
 from __future__ import annotations
 
@@ -11,20 +11,22 @@ import sys
 import re
 from typing import Any, Mapping
 
-from serve_contract import (
-    ContractError,
-    json_response,
-    parse_openai_stream,
-    request,
-    wait_for_health,
-)
+if __package__:
+    from .serve_contract import (
+        ContractError, json_response, parse_openai_stream, request,
+        require_greedy_usage_parity, response_text, wait_for_health,
+    )
+else:
+    from serve_contract import (
+        ContractError, json_response, parse_openai_stream, request,
+        require_greedy_usage_parity, response_text, wait_for_health,
+    )
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PRIVATE_REUSE_PATHS = {
     "private_endpoint",
-    "private_turn_closure",
-    "private_response_replay",
+    "private_input_replay",
     "private_long_anchor",
 }
 _ISOLATED_REUSE_PATHS = {"root", "shared_stable_prefix"}
@@ -100,7 +102,7 @@ def expect_error(
 def validate_status_identity(status: dict[str, Any], args: argparse.Namespace) -> None:
     if (
         status.get("artifact_type") != "ninfer_server_status"
-        or status.get("schema_version") != 1
+        or status.get("schema_version") != 2
         or status.get("status") != "ok"
     ):
         raise ProtocolError("status endpoint returned the wrong envelope")
@@ -114,6 +116,29 @@ def validate_status_identity(status: dict[str, Any], args: argparse.Namespace) -
         or not isinstance(status.get("mtp"), dict)
     ):
         raise ProtocolError("status endpoint omitted a versioned contract group")
+    for field, length in (
+        ("binary_sha256", 64), ("model_artifact_sha256", 64), ("config_sha256", 64),
+        ("patch_stack_sha", 40), ("upstream_base_sha", 40),
+    ):
+        value = identity.get(field)
+        if not isinstance(value, str) or re.fullmatch(f"[0-9a-f]{{{length}}}", value) is None:
+            raise ProtocolError(f"status identity field {field} is not an immutable digest")
+    for field in ("deployment_profile", "model_id", "build_profile"):
+        if not isinstance(identity.get(field), str) or not identity[field]:
+            raise ProtocolError(f"status identity field {field} is missing")
+    if identity.get("source_dirty") is not False:
+        raise ProtocolError("status reports dirty or unverifiable source provenance")
+    scheduler = status["scheduler"]
+    for field in (
+        "max_concurrency", "running", "prefilling", "decode_ready", "waiting",
+        "materializing", "capture_pending", "committed_decode_tokens", "computed_prefill_tokens",
+    ):
+        if type(scheduler.get(field)) is not int or scheduler[field] < 0:
+            raise ProtocolError(f"status scheduler field {field} is not a real counter")
+    cache = status["cache"]
+    if type(cache.get("reused_prompt_tokens")) is not int or cache["reused_prompt_tokens"] < 0:
+        raise ProtocolError("status omitted the real reused_prompt_tokens counter")
+    cache_reuse_path(status)
     expected = {
         "binary_sha256": args.expect_binary_sha256,
         "model_artifact_sha256": args.expect_model_artifact_sha256,
@@ -136,6 +161,37 @@ def cache_reuse_path(status: dict[str, Any]) -> str:
     if not isinstance(path, str):
         raise ProtocolError("status omitted cache.last_selection.path")
     return path
+
+
+def cache_reuse_diagnostic(status: dict[str, Any]) -> dict[str, Any]:
+    """Retain cache/counter evidence without identity, credentials or request content."""
+    cache = status.get("cache") or {}
+    scheduler = status.get("scheduler") or {}
+    selection = cache.get("last_selection") or {}
+    cache_fields: dict[str, Any] = {
+        "last_selection": {field: selection.get(field) for field in ("path", "frontier_tokens")},
+        "reused_prompt_tokens": cache.get("reused_prompt_tokens"),
+    }
+    for group, fields in (
+        ("device_state", ("occupied", "capacity")),
+        ("host_state", ("occupied", "capacity")),
+        ("host_kv", ("occupied_bytes", "capacity_bytes")),
+        ("private_catalog", ("occupied", "capacity")),
+        ("shared_catalog", ("occupied", "capacity", "active_references")),
+    ):
+        values = cache.get(group) or {}
+        cache_fields[group] = {field: values.get(field) for field in fields}
+    return {
+        "cache": cache_fields,
+        "scheduler": {
+            field: scheduler.get(field)
+            for field in (
+                "max_concurrency", "running", "prefilling", "decode_ready", "waiting",
+                "materializing", "capture_pending", "computed_prefill_tokens",
+                "committed_decode_tokens",
+            )
+        },
+    }
 
 
 def parse_choice(response: dict[str, Any]) -> dict[str, Any]:
@@ -215,29 +271,73 @@ def authenticated_identity_checks(
 
 
 
-def structured_output_rejection(
+def structured_output_checks(
     base_url: str, model: str, headers: Mapping[str, str], identity: dict[str, str]
-) -> None:
-    expect_error(
-        base_url,
-        "/v1/chat/completions",
+) -> dict[str, bool]:
+    schema = {
+        "type": "object",
+        "properties": {
+            "city": {"type": "string", "enum": ["Paris"]},
+            "days": {"type": "integer", "enum": [2]},
+        },
+        "required": ["city", "days"],
+        "additionalProperties": False,
+    }
+    output_format = {
+        "type": "json_schema",
+        "json_schema": {"name": "weather", "strict": True, "schema": schema},
+    }
+    chat = json_response(
+        base_url, "POST", "/v1/chat/completions",
         {
             "model": model,
-            "messages": [{"role": "user", "content": "Return JSON."}],
-            "max_completion_tokens": 1,
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "answer",
-                    "schema": {"type": "object", "properties": {}},
-                },
-            },
+            "messages": [{"role": "user", "content": "Return Paris and 2 days as JSON."}],
+            "max_completion_tokens": 64,
+            "enable_thinking": False,
+            "temperature": 0,
+            "response_format": output_format,
             **identity,
         },
         headers=headers,
-        status=400,
-        code="response_format_not_supported",
     )
+    choice = parse_choice(chat)
+    message = choice.get("message")
+    text = message.get("content") if isinstance(message, dict) else None
+    require_schema_output(text, choice.get("finish_reason") == "stop", "Chat")
+    responses = json_response(
+        base_url, "POST", "/v1/responses",
+        {
+            "model": model,
+            "input": "Return Paris and 2 days as JSON.",
+            "max_output_tokens": 64,
+            "reasoning": {"effort": "none"},
+            "temperature": 0,
+            "store": False,
+            "text": {"format": {"type": "json_schema", **output_format["json_schema"]}},
+            **identity,
+        },
+        headers=headers,
+    )
+    text, _ = response_text(responses)
+    require_schema_output(text, responses.get("status") == "completed", "Responses")
+    return {"chat_json_schema": True, "responses_json_schema": True}
+
+
+def require_schema_output(text: Any, completed: bool, protocol: str) -> None:
+    if not completed or not isinstance(text, str):
+        raise ProtocolError(f"{protocol} schema output did not complete")
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ProtocolError(f"{protocol} schema output is not valid JSON") from error
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"city", "days"}
+        or value["city"] != "Paris"
+        or type(value["days"]) is not int
+        or value["days"] != 2
+    ):
+        raise ProtocolError(f"{protocol} output violates the requested JSON schema")
 
 
 def tool_round_trip(
@@ -272,6 +372,7 @@ def tool_round_trip(
         "tools": [tool],
         "tool_choice": {"type": "function", "function": {"name": "lookup_weather"}},
         "max_completion_tokens": 96,
+        "enable_thinking": False,
         "temperature": 0,
     }
     if session is not None:
@@ -319,6 +420,7 @@ def tool_round_trip(
         ],
         "tools": [tool],
         "max_completion_tokens": 16,
+        "enable_thinking": False,
         "temperature": 0,
     }
     if session is not None:
@@ -342,11 +444,18 @@ def streaming_and_session_checks(
     session_a: str | None,
     session_b: str | None,
 ) -> tuple[str, str, int, str | None, str | None]:
-    messages = [{"role": "user", "content": "Reply with one short word."}]
+    prompt = "Reply with one short word."
+    if session_a is not None and session_b is not None:
+        # Root prefill legitimately wins the cost comparison for a tiny prompt.
+        # Exercise private replay with meaningful user context, not public/system padding.
+        context = "Private user context:" + " durable" * 1600
+        prompt = f"{context}\n\n{prompt}"
+    messages = [{"role": "user", "content": prompt}]
     common: dict[str, Any] = {
         "model": model,
         "messages": messages,
         "max_completion_tokens": 8,
+        "enable_thinking": False,
         "temperature": 0,
     }
     first_payload = dict(common)
@@ -410,8 +519,7 @@ def streaming_and_session_checks(
         raise ProtocolError("streaming output differs from greedy non-streaming output")
     if finish_reason != first_choice.get("finish_reason"):
         raise ProtocolError("streaming finish_reason differs from non-streaming output")
-    if usage != first.get("usage"):
-        raise ProtocolError("streaming usage differs from non-streaming output")
+    require_greedy_usage_parity(usage, first["usage"])
 
     private_path: str | None = None
     isolated_path: str | None = None
@@ -447,7 +555,12 @@ def streaming_and_session_checks(
         private_path = cache_reuse_path(status_after_repeat)
         if private_path not in _PRIVATE_REUSE_PATHS:
             raise ProtocolError(
-                "same-session repeat did not select a private continuation"
+                "same-session repeat did not select a private continuation: "
+                + json.dumps({
+                    "actual_path": private_path,
+                    "after_first": cache_reuse_diagnostic(status_before_repeat),
+                    "after_repeat": cache_reuse_diagnostic(status_after_repeat),
+                }, sort_keys=True)
             )
 
         isolated_payload = dict(common)
@@ -505,8 +618,8 @@ def responses_session_lifecycle(
     base_url: str,
     model: str,
     headers: Mapping[str, str],
-    session_a: str,
-    session_b: str,
+    session_a: str | None,
+    session_b: str | None,
 ) -> dict[str, Any]:
     def create(
         label: str,
@@ -519,10 +632,12 @@ def responses_session_lifecycle(
             "model": model,
             "input": text,
             "max_output_tokens": 16,
+            "reasoning": {"effort": "none"},
             "temperature": 0,
             "store": True,
-            **identity_fields(session_a, f"responses/{label}"),
         }
+        if session_a is not None:
+            payload.update(identity_fields(session_a, f"responses/{label}"))
         if previous is not None:
             payload["previous_response_id"] = previous
         return json_response(
@@ -541,23 +656,20 @@ def responses_session_lifecycle(
     branch = create("branch", "Reply with a different short word.", first_id)
     branch_id = response_id(branch)
 
-    cross_tenant = {
-        "model": model,
-        "input": "This must be rejected.",
-        "previous_response_id": first_id,
-        "max_output_tokens": 16,
-        **identity_fields(session_b, "responses/cross-tenant"),
-    }
-    rejected = json_response(
-        base_url,
-        "POST",
-        "/v1/responses",
-        cross_tenant,
-        headers=headers,
-        expected_status=404,
-    )
-    if error_code(rejected) != "previous_response_not_found":
-        raise ProtocolError("cross-session previous_response_id used the wrong not-found contract")
+    if session_b is not None:
+        cross_tenant = {
+            "model": model,
+            "input": "This must be rejected.",
+            "previous_response_id": first_id,
+            "max_output_tokens": 16,
+            **identity_fields(session_b, "responses/cross-tenant"),
+        }
+        rejected = json_response(
+            base_url, "POST", "/v1/responses", cross_tenant,
+            headers=headers, expected_status=404,
+        )
+        if error_code(rejected) != "previous_response_not_found":
+            raise ProtocolError("cross-session previous_response_id used the wrong not-found contract")
 
     def expect_stored_not_found(
         method: str, path: str, session: str | None, label: str
@@ -572,8 +684,9 @@ def responses_session_lifecycle(
         if error_code(result) != "response_not_found":
             raise ProtocolError(f"{label} was not isolated")
 
-    for route, suffix in (("retrieve", ""), ("input-items", "/input_items"),
-                          ("cancel", "/cancel")):
+    for route, suffix in (() if session_a is None else (
+        ("retrieve", ""), ("input-items", "/input_items"), ("cancel", "/cancel")
+    )):
         expect_stored_not_found(
             "GET" if route != "cancel" else "POST",
             stored_response_path(first_id, suffix),
@@ -613,18 +726,15 @@ def responses_session_lifecycle(
     if error_code(scoped_cancel) != "background_not_supported":
         raise ProtocolError("same-session Responses cancel did not reach the retained record")
 
-    expect_stored_not_found(
-        "DELETE",
-        stored_response_path(first_id),
-        None,
-        "session omission on Responses delete",
-    )
-    expect_stored_not_found(
-        "DELETE",
-        stored_response_path(first_id),
-        session_b,
-        "cross-session Responses delete",
-    )
+    if session_a is not None:
+        expect_stored_not_found(
+            "DELETE", stored_response_path(first_id), None,
+            "session omission on Responses delete",
+        )
+        expect_stored_not_found(
+            "DELETE", stored_response_path(first_id), session_b,
+            "cross-session Responses delete",
+        )
     deleted = json_response(
         base_url,
         "DELETE",
@@ -648,7 +758,8 @@ def responses_session_lifecycle(
         first_id,
         expected_status=404,
     )
-    if error_code(deleted_parent) != "previous_response_not_found":
+    expected_parent_code = "previous_response_not_found" if session_a is not None else "response_not_found"
+    if error_code(deleted_parent) != expected_parent_code:
         raise ProtocolError("deleted parent used the wrong continuation not-found contract")
 
     surviving = create(
@@ -669,8 +780,8 @@ def responses_session_lifecycle(
         "first_turn_completed": True,
         "continuation_completed": True,
         "fork_count": 2,
-        "cross_session_status": 404,
-        "stored_route_isolation_status": 404,
+        "cross_session_status": 404 if session_a is not None else None,
+        "stored_route_isolation_status": 404 if session_a is not None else None,
         "parent_delete_status": 200,
         "parent_get_after_delete_status": 404,
         "surviving_descendants_retrieved": True,
@@ -684,32 +795,44 @@ def exercise(args: argparse.Namespace) -> dict[str, Any]:
     headers = auth_headers(api_key)
     wait_for_health(base_url, args.health_timeout)
 
-    unauthorized = json_response(
-        base_url,
-        "GET",
-        "/v1/ninfer/status",
-        expected_status=401,
-    )
-    if error_code(unauthorized) != "invalid_api_key":
-        raise ProtocolError("status route did not reject a missing API key")
-
-    status = json_response(base_url, "GET", "/v1/ninfer/status", headers=headers)
-    validate_status_identity(status, args)
-    session_a = digest("session/a")
-    session_b = digest("session/b")
+    product = args.contract == "product"
+    if product or api_key is not None:
+        unauthorized = json_response(
+            base_url, "GET", "/v1/ninfer/status" if product else "/v1/models",
+            expected_status=401,
+        )
+        if error_code(unauthorized) != "invalid_api_key":
+            raise ProtocolError("authenticated route did not reject a missing API key")
+    if product:
+        status = json_response(base_url, "GET", "/v1/ninfer/status", headers=headers)
+        validate_status_identity(status, args)
+    session_a = digest("session/a") if product else None
+    session_b = digest("session/b") if product else None
     responses = responses_session_lifecycle(
         base_url, args.model, headers, session_a, session_b
     )
 
     # The same digests drive Chat/Anthropic parity checks after the Responses DAG exercise.
-    anthropic_tokens = authenticated_identity_checks(
-        base_url, args.model, headers, session_a
-    )
+    if product:
+        anthropic_tokens = authenticated_identity_checks(
+            base_url, args.model, headers, session_a
+        )
+    else:
+        counted = json_response(
+            base_url, "POST", "/v1/messages/count_tokens",
+            {"model": args.model, "messages": [{"role": "user", "content": "Reply briefly."}]},
+            headers=headers,
+        )
+        anthropic_tokens = counted.get("input_tokens")
+        if type(anthropic_tokens) is not int or anthropic_tokens <= 0:
+            raise ProtocolError("Anthropic count_tokens returned invalid usage")
     active_session_a = session_a
     active_session_b = session_b
-    structured_identity = identity_fields(session_a, "structured-rejection")
+    structured_identity = identity_fields(session_a, "structured-output") if product else {}
 
-    structured_output_rejection(base_url, args.model, headers, structured_identity)
+    structured_output = structured_output_checks(
+        base_url, args.model, headers, structured_identity
+    )
     tool_finish = tool_round_trip(base_url, args.model, headers, active_session_a)
     stream_finish, nonstream_finish, completion_tokens, private_path, isolated_path = (
         streaming_and_session_checks(
@@ -723,11 +846,12 @@ def exercise(args: argparse.Namespace) -> dict[str, Any]:
     )
     return {
         "artifact_type": "ninfer_agent_protocol_smoke",
-        "schema_version": 1,
-        "status_identity_verified": True,
-        "authenticated_session_identity": True,
+        "schema_version": 2,
+        "contract": args.contract,
+        "status_identity_verified": product,
+        "authenticated_session_identity": product,
         "anthropic_count_tokens": anthropic_tokens,
-        "structured_output_rejected": True,
+        "structured_output": structured_output,
         "tool_result_array_finish_reason": tool_finish,
         "stream_finish_reason": stream_finish,
         "nonstream_finish_reason": nonstream_finish,
@@ -748,13 +872,22 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://127.0.0.1:18080")
     parser.add_argument("--model", required=True)
-    parser.add_argument("--api-key-file", type=Path, required=True)
+    parser.add_argument("--contract", choices=("product", "public"), default="product",
+                        help="product requires private identity/status; public is vanilla upstream only")
+    parser.add_argument("--api-key-file", type=Path)
     parser.add_argument("--health-timeout", type=float, default=300.0)
     parser.add_argument("--expect-binary-sha256", type=sha256_argument)
     parser.add_argument("--expect-model-artifact-sha256", type=sha256_argument)
     parser.add_argument("--expect-config-sha256", type=sha256_argument)
     parser.add_argument("--expect-deployment-profile")
     args = parser.parse_args()
+    if args.contract == "product" and args.api_key_file is None:
+        parser.error("--api-key-file is required for the product contract")
+    if args.contract == "public" and any((
+        args.expect_binary_sha256, args.expect_model_artifact_sha256,
+        args.expect_config_sha256, args.expect_deployment_profile,
+    )):
+        parser.error("--expect-* identity checks require the product contract")
     try:
         print(json.dumps(exercise(args), sort_keys=True))
     except (ContractError, ProtocolError) as error:

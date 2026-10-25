@@ -1,0 +1,310 @@
+{
+  "artifact_type": "ninfer_engine_cache_gate",
+  "schema_version": 1,
+  "source_commit": "9e2261f92b9cbca8b44933e5064cbdd2978a9400",
+  "baseline_sha256": "d39d3cd17dbe5155ca881c4636bbdabf5dd5ec86691b705c20a6e2bdc2ac1245",
+  "shape": {
+    "max_context": 131072,
+    "max_concurrency": 2,
+    "prefill_chunk": 1024,
+    "kv_cache": "bf16",
+    "speculative_backend": "dflash2",
+    "speculative_draft_window": 7,
+    "proposal_head": "optimized",
+    "cuda_graph": true,
+    "vision": true
+  },
+  "idle_seconds": 12,
+  "arms": [
+    {
+      "gpu_keep_warm_ms": 0,
+      "startup": {
+        "engine": {
+          "max_context": 131072,
+          "max_concurrency": 2,
+          "prefill_chunk": 1024,
+          "kv_cache": "bf16",
+          "speculative_backend": "dflash2",
+          "speculative_draft_window": 7,
+          "proposal_head": "optimized",
+          "cuda_graph": true,
+          "vision": true,
+          "kv_capacity_mode": "auto",
+          "kv_capacity": 146432
+        },
+        "memory": {
+          "device_budget_bytes": 32429309952,
+          "minimum_runtime_reservation_bytes": 10343649793,
+          "runtime_reservation_bytes": 11350282753,
+          "cuda_graph_rebuild_estimate_bytes": 0,
+          "cuda_graph_prepare_increment_bytes": 0,
+          "cuda_graph_calibration_increment_bytes": 31457280,
+          "cuda_graph_calibration_retained_bytes": 31457280,
+          "startup_retained_bytes": 31689728,
+          "available_after_startup_bytes": 1072693248,
+          "kv_capacity_headroom_bytes": 1073741824,
+          "kv_payload_bytes": 9596567552,
+          "host_context_capacity_bytes": 21881405440
+        },
+        "total_device_memory_bytes": 34162343936
+      },
+      "idle_ttft": [
+        {
+          "label": "idle sample 0",
+          "id": "resp_f06aa8aa88ced3863244daa6d3922909",
+          "submitted_s": 173409.788287982,
+          "first_output_s": 173410.519174391,
+          "completed_s": 173410.642630802,
+          "ttft_s": 0.7308864090009592,
+          "total_s": 0.8543428200064227,
+          "input_tokens": 1849,
+          "output_tokens": 32,
+          "cached_tokens": 0,
+          "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "reasoning_text_sha256": "7deaec8db3012714b6aaad83392789eec78b0ab1308cfa24367ded32aae6d421"
+        },
+        {
+          "label": "idle sample 1",
+          "id": "resp_57b110e2fa86588bd16a99b5f65eee8b",
+          "submitted_s": 173422.642944496,
+          "first_output_s": 173423.455416858,
+          "completed_s": 173423.57834342,
+          "ttft_s": 0.8124723619839642,
+          "total_s": 0.935398923989851,
+          "input_tokens": 1849,
+          "output_tokens": 32,
+          "cached_tokens": 0,
+          "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "reasoning_text_sha256": "e340513a8f00c02a1ce938dc2da458f128ca2c267fbf730f70370099e9d13d98"
+        },
+        {
+          "label": "idle sample 2",
+          "id": "resp_19ab6ad3d15ec05bef42454c95b68d2e",
+          "submitted_s": 173435.578571288,
+          "first_output_s": 173436.31425572,
+          "completed_s": 173436.437680384,
+          "ttft_s": 0.7356844320020173,
+          "total_s": 0.8591090959962457,
+          "input_tokens": 1849,
+          "output_tokens": 32,
+          "cached_tokens": 0,
+          "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "reasoning_text_sha256": "89fbf89bcdc63c92062d7b054360ad4787fbb1280dffe3ed06462f87468ce600"
+        }
+      ],
+      "median_idle_ttft_s": 0.7356844320020173,
+      "c2_siblings": {
+        "decode_row_rounds": 85,
+        "decode_rounds": 69,
+        "requests": [
+          {
+            "label": "fanout seed",
+            "id": "resp_f4f487a0c0264fdbaec5162dcb64f250",
+            "submitted_s": 173436.43775656,
+            "first_output_s": 173437.047999942,
+            "completed_s": 173437.152861359,
+            "ttft_s": 0.6102433820196893,
+            "total_s": 0.7151047990191728,
+            "input_tokens": 1848,
+            "output_tokens": 32,
+            "cached_tokens": 0,
+            "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "reasoning_text_sha256": "26d78447cc5c62b5b52b7f2577b56d8a70f5f4fa0f9fa99904de6c6df39f7a3d"
+          },
+          {
+            "label": "long sibling",
+            "id": "resp_67d77968fd0b24c35f33ff32482bd717",
+            "submitted_s": 173437.156639993,
+            "first_output_s": 173438.519334257,
+            "completed_s": 173440.453330289,
+            "ttft_s": 1.3626942640112247,
+            "total_s": 3.296690296003362,
+            "input_tokens": 3690,
+            "output_tokens": 192,
+            "cached_tokens": 1843,
+            "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "reasoning_text_sha256": "67b544b6c17d10f51e7aa0c7f8ffa46936209b57fd31618e2aac0ffa09ba0c62"
+          },
+          {
+            "label": "short sibling",
+            "id": "resp_02c75244b7fd4fb7ef680e78ac4cad0b",
+            "submitted_s": 173437.15653683,
+            "first_output_s": 173438.43974745,
+            "completed_s": 173438.772845726,
+            "ttft_s": 1.2832106199930422,
+            "total_s": 1.6163088959874585,
+            "input_tokens": 3690,
+            "output_tokens": 48,
+            "cached_tokens": 1879,
+            "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "reasoning_text_sha256": "d5a4754ef6db79fdf1407fd9af7ebc4ec2cff31387760af78cc9e272e952799e"
+          },
+          {
+            "label": "continue short sibling",
+            "id": "resp_ce379ba8851187819afc269196201ab9",
+            "submitted_s": 173438.773005537,
+            "first_output_s": 173439.527995102,
+            "completed_s": 173439.643470063,
+            "ttft_s": 0.7549895650008693,
+            "total_s": 0.8704645260004327,
+            "input_tokens": 5549,
+            "output_tokens": 16,
+            "cached_tokens": 3737,
+            "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "reasoning_text_sha256": "4cad5fafaa80116d9c1e3fa9a983832e9d9dbebb832dfb07e71de733cc099b91"
+          }
+        ]
+      }
+    },
+    {
+      "gpu_keep_warm_ms": 60000,
+      "startup": {
+        "engine": {
+          "max_context": 131072,
+          "max_concurrency": 2,
+          "prefill_chunk": 1024,
+          "kv_cache": "bf16",
+          "speculative_backend": "dflash2",
+          "speculative_draft_window": 7,
+          "proposal_head": "optimized",
+          "cuda_graph": true,
+          "vision": true,
+          "kv_capacity_mode": "auto",
+          "kv_capacity": 146432
+        },
+        "memory": {
+          "device_budget_bytes": 32429309952,
+          "minimum_runtime_reservation_bytes": 10343649793,
+          "runtime_reservation_bytes": 11350282753,
+          "cuda_graph_rebuild_estimate_bytes": 0,
+          "cuda_graph_prepare_increment_bytes": 0,
+          "cuda_graph_calibration_increment_bytes": 31457280,
+          "cuda_graph_calibration_retained_bytes": 31457280,
+          "startup_retained_bytes": 31689728,
+          "available_after_startup_bytes": 1072693248,
+          "kv_capacity_headroom_bytes": 1073741824,
+          "kv_payload_bytes": 9596567552,
+          "host_context_capacity_bytes": 21881405440
+        },
+        "total_device_memory_bytes": 34162343936
+      },
+      "idle_ttft": [
+        {
+          "label": "idle sample 0",
+          "id": "resp_79b3cbf45252ff220413bdee96389d3e",
+          "submitted_s": 173483.058989113,
+          "first_output_s": 173483.640053961,
+          "completed_s": 173483.763539549,
+          "ttft_s": 0.5810648479964584,
+          "total_s": 0.7045504359994084,
+          "input_tokens": 1849,
+          "output_tokens": 32,
+          "cached_tokens": 0,
+          "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "reasoning_text_sha256": "7deaec8db3012714b6aaad83392789eec78b0ab1308cfa24367ded32aae6d421"
+        },
+        {
+          "label": "idle sample 1",
+          "id": "resp_577e9e7c038703d5ed01b25d87980acd",
+          "submitted_s": 173495.763780333,
+          "first_output_s": 173496.352142157,
+          "completed_s": 173496.475034155,
+          "ttft_s": 0.5883618239895441,
+          "total_s": 0.7112538219953422,
+          "input_tokens": 1849,
+          "output_tokens": 32,
+          "cached_tokens": 0,
+          "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "reasoning_text_sha256": "e340513a8f00c02a1ce938dc2da458f128ca2c267fbf730f70370099e9d13d98"
+        },
+        {
+          "label": "idle sample 2",
+          "id": "resp_c6e81ebbbc447c4b69c617d8257c7f76",
+          "submitted_s": 173508.475428157,
+          "first_output_s": 173509.063491861,
+          "completed_s": 173509.186777578,
+          "ttft_s": 0.5880637039954308,
+          "total_s": 0.7113494210061617,
+          "input_tokens": 1849,
+          "output_tokens": 32,
+          "cached_tokens": 0,
+          "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "reasoning_text_sha256": "89fbf89bcdc63c92062d7b054360ad4787fbb1280dffe3ed06462f87468ce600"
+        }
+      ],
+      "median_idle_ttft_s": 0.5880637039954308,
+      "c2_siblings": {
+        "decode_row_rounds": 95,
+        "decode_rounds": 77,
+        "requests": [
+          {
+            "label": "fanout seed",
+            "id": "resp_41e7f048798ea842e150089492c0f798",
+            "submitted_s": 173509.186852234,
+            "first_output_s": 173509.797393372,
+            "completed_s": 173509.902756101,
+            "ttft_s": 0.6105411379830912,
+            "total_s": 0.7159038669778965,
+            "input_tokens": 1848,
+            "output_tokens": 32,
+            "cached_tokens": 0,
+            "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "reasoning_text_sha256": "26d78447cc5c62b5b52b7f2577b56d8a70f5f4fa0f9fa99904de6c6df39f7a3d"
+          },
+          {
+            "label": "long sibling",
+            "id": "resp_5356b2e99bea3d93ce9b5ef8c06cd773",
+            "submitted_s": 173509.90395163,
+            "first_output_s": 173511.187946996,
+            "completed_s": 173513.354903156,
+            "ttft_s": 1.2839953660150059,
+            "total_s": 3.450951525999699,
+            "input_tokens": 3690,
+            "output_tokens": 192,
+            "cached_tokens": 1879,
+            "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "reasoning_text_sha256": "2ce40d4f58a5208a9f6f30d1b775927f54b25c1a1a3543e1fa2bc0c7f034d69f"
+          },
+          {
+            "label": "short sibling",
+            "id": "resp_e8da9fbe7717312fe49eebc484c785b2",
+            "submitted_s": 173509.903839968,
+            "first_output_s": 173511.267233741,
+            "completed_s": 173511.566823939,
+            "ttft_s": 1.3633937730046455,
+            "total_s": 1.662983971007634,
+            "input_tokens": 3690,
+            "output_tokens": 48,
+            "cached_tokens": 1843,
+            "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "reasoning_text_sha256": "d5a4754ef6db79fdf1407fd9af7ebc4ec2cff31387760af78cc9e272e952799e"
+          },
+          {
+            "label": "continue short sibling",
+            "id": "resp_d0efe3b8af795b854264ba9618bb0c00",
+            "submitted_s": 173511.566950652,
+            "first_output_s": 173512.322710206,
+            "completed_s": 173512.438292905,
+            "ttft_s": 0.7557595540129114,
+            "total_s": 0.8713422529981472,
+            "input_tokens": 5549,
+            "output_tokens": 16,
+            "cached_tokens": 3737,
+            "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "reasoning_text_sha256": "4cad5fafaa80116d9c1e3fa9a983832e9d9dbebb832dfb07e71de733cc099b91"
+          }
+        ]
+      }
+    }
+  ],
+  "passed": true,
+  "binary_sha256": "e627f8454f925cdf86b78f5470257bcd317a70aee35e794e64f11b0bcc46c61b",
+  "median_idle_ttft_ratio_on_over_off": 0.7993423245278328,
+  "lease": {
+    "job": "20261025T053716Z-E1-engine-cache-32gb-idle-572719",
+    "exit_code": 0,
+    "elapsed_seconds": 153,
+    "leftover_containers": 0,
+    "unowned_containers": 0
+  }
+}

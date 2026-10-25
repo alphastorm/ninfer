@@ -26,6 +26,7 @@ from tools.lifecycle.ninfer_container import (
     prepare_private_bind_directory,
     verify_clean_source,
     verify_container_configuration,
+    verify_status,
     wait_for_health,
 )
 
@@ -64,6 +65,38 @@ def write_config(
 
 
 class LifecycleConfigTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Bind-path validation intentionally rejects shared writable ancestors,
+        # including the OS temp root. Exercise it in a private repository-owned
+        # sandbox instead of weakening the production check for test fixtures.
+        scratch = Path(__file__).resolve().parents[1] / ".agent-tmp"
+        scratch.mkdir(mode=0o700, exist_ok=True)
+        private = tempfile.TemporaryDirectory(prefix="lifecycle-tests-", dir=scratch)
+        self.addCleanup(private.cleanup)
+        temporary_root = mock.patch.object(tempfile, "tempdir", private.name)
+        temporary_root.start()
+        self.addCleanup(temporary_root.stop)
+
+    def test_status_schema_two_preserves_attestation_checks(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            config = load_config(write_config(Path(directory) / "config.json"))
+            identity = RuntimeIdentity("sha256:" + "a" * 64, "b" * 64, "c" * 64, "d" * 64)
+            status = {
+                "artifact_type": "ninfer_server_status", "schema_version": 2, "status": "ok",
+                "identity": {"binary_sha256": identity.binary_sha256,
+                             "model_artifact_sha256": identity.model_artifact_sha256,
+                             "config_sha256": identity.config_sha256,
+                             "deployment_profile": config.deployment_profile},
+                "runtime": {"public_model_id": config.model_id},
+            }
+            verify_status(config, identity, status)
+            status["identity"]["config_sha256"] = None
+            with self.assertRaisesRegex(LifecycleError, "config_sha256"):
+                verify_status(config, identity, status)
+            status["schema_version"] = 1
+            with self.assertRaisesRegex(LifecycleError, "envelope"):
+                verify_status(config, identity, status)
+
     def test_authorizing_commands_require_all_identity_pins(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()):
             with self.assertRaises(SystemExit):
@@ -137,7 +170,14 @@ class LifecycleConfigTests(unittest.TestCase):
             )
 
             self.assertIsNone(ordinary.checkpoint_dir)
+            self.assertIsNone(ordinary.canonical_identity()["checkpoint_mount_target"])
+            self.assertIsNone(checkpoint_seccomp_profile(ordinary))
             self.assertEqual(durable.checkpoint_dir, Path("/srv/ninfer/checkpoints"))
+            self.assertEqual(
+                durable.canonical_identity()["checkpoint_mount_target"], "/checkpoints-v013"
+            )
+            with self.assertRaisesRegex(LifecycleError, "absolute"):
+                load_config(write_config(root / "relative.json", checkpoint_dir="checkpoints-v013"))
             self.assertNotEqual(
                 canonical_config_sha256(ordinary), canonical_config_sha256(durable)
             )
@@ -235,7 +275,7 @@ class LifecycleConfigTests(unittest.TestCase):
                 command_start(args)
 
             command = docker_mock.call_args.args[0]
-            self.assertIn(f"{root / 'checkpoints'}:/checkpoints", command)
+            self.assertIn(f"{root / 'checkpoints'}:/checkpoints-v013", command)
             self.assertIn("no-new-privileges=true", command)
             self.assertEqual(command[command.index("--cap-drop") + 1], "ALL")
             self.assertEqual(
@@ -252,7 +292,7 @@ class LifecycleConfigTests(unittest.TestCase):
                 command,
             )
             option = command.index("--session-checkpoint-dir")
-            self.assertEqual(command[option + 1], "/checkpoints")
+            self.assertEqual(command[option + 1], "/checkpoints-v013")
             self.assertTrue((root / "checkpoints").is_dir())
             self.assertEqual((root / "checkpoints").stat().st_mode & 0o777, 0o700)
 
@@ -500,7 +540,7 @@ class LifecycleConfigTests(unittest.TestCase):
                     },
                     {"Destination": "/logs", "Source": str(logs), "RW": True},
                     {
-                        "Destination": "/checkpoints",
+                        "Destination": "/checkpoints-v013",
                         "Source": str(checkpoints),
                         "RW": True,
                     },
@@ -512,6 +552,10 @@ class LifecycleConfigTests(unittest.TestCase):
                 ],
             }
             verify_container_configuration(config, inspected)
+            inspected["Mounts"][2]["Destination"] = "/checkpoints"
+            with self.assertRaisesRegex(LifecycleError, "mount configuration drifted"):
+                verify_container_configuration(config, inspected)
+            inspected["Mounts"][2]["Destination"] = "/checkpoints-v013"
             inspected["HostConfig"]["SecurityOpt"] = ["seccomp=unconfined"]
             with self.assertRaisesRegex(LifecycleError, "no-new-privileges"):
                 verify_container_configuration(config, inspected)

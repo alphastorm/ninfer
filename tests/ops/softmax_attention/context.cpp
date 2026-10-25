@@ -1,14 +1,19 @@
 #include "ninfer/ops/softmax_attention.h"
+#include "cuda_fixture.h"
+#include "core/buffer.h"
 
 #include "core/arena.h"
 #include "ops/op_tester.h"
 #include "ops/softmax_attention/oracle.h"
+
+#include <cuda_fp16.h>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -131,6 +136,15 @@ std::vector<std::uint16_t> bf16_bits(const std::vector<float>& values) {
     return bits;
 }
 
+std::vector<std::uint16_t> fp16_bits(const std::vector<float>& values) {
+    std::vector<std::uint16_t> bits(values.size());
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        const __half value = __float2half_rn(values[i]);
+        std::memcpy(&bits[i], &value, sizeof(value));
+    }
+    return bits;
+}
+
 void context_attention_oracle(const std::vector<float>& q, const std::vector<float>& query_k,
                               const std::vector<float>& query_v,
                               const std::vector<float>& context_k,
@@ -161,13 +175,12 @@ PagedKVBatchLayerView make_context_view(DeviceBuffer& k, DeviceBuffer& v,
                                         DeviceBuffer& block_tables, int logical_pages,
                                         int physical_pages, int table_rows = 1) {
     return {
-        .k_pages      = Tensor(k.p, DType::BF16, {kD, kPage, physical_pages, kKVHeads}),
-        .v_pages      = Tensor(v.p, DType::BF16, {kD, kPage, physical_pages, kKVHeads}),
-        .block_tables = Tensor(block_tables.p, DType::I32, {logical_pages, table_rows}),
+        .k_pages      = Tensor(k.span(), DType::BF16, {kD, kPage, physical_pages, kKVHeads}),
+        .v_pages      = Tensor(v.span(), DType::FP16, {kD, kPage, physical_pages, kKVHeads}),
+        .block_tables = Tensor(block_tables.span(), DType::I32, {logical_pages, table_rows}),
         .head_dim     = kD,
         .num_kv_heads = kKVHeads,
-        .dtype        = DType::BF16,
-        .quant_group  = 0,
+        .storage      = KvCacheStorage::BFloat16,
     };
 }
 
@@ -253,7 +266,7 @@ int run_case(int tokens, int context_length, InputProfile profile = InputProfile
     const auto query_k_expected   = bf16_bits(query_k);
     const auto query_v_expected   = bf16_bits(query_v);
     const auto context_k_expected = bf16_bits(physical_k);
-    const auto context_v_expected = bf16_bits(physical_v);
+    const auto context_v_expected = fp16_bits(physical_v);
     const std::vector<int> length_expected{context_length};
     const std::vector<int> valid_expected{valid_columns};
     const std::vector<int> table_row_expected{0};
@@ -270,24 +283,27 @@ int run_case(int tokens, int context_length, InputProfile profile = InputProfile
     GuardedDeviceBuffer d_out(q_count * sizeof(std::uint16_t));
     d_out.fill(0x7f);
 
-    Tensor q_tensor(d_q.p, DType::BF16, {kD, kQHeads, tokens, 1});
-    Tensor query_k_tensor(d_query_k.p, DType::BF16, {kD, kKVHeads, tokens, 1});
-    Tensor query_v_tensor(d_query_v.p, DType::BF16, {kD, kKVHeads, tokens, 1});
-    Tensor length_tensor(d_length.p, DType::I32, {1});
-    Tensor valid_tensor(d_valid.p, DType::I32, {1});
-    Tensor table_row_tensor(d_table_row.p, DType::I32, {1});
-    Tensor out_tensor(d_out.data(), DType::BF16, {kD, kQHeads, tokens, 1});
+    Tensor q_tensor(d_q.span(), DType::BF16, {kD, kQHeads, tokens, 1});
+    Tensor query_k_tensor(d_query_k.span(), DType::BF16, {kD, kKVHeads, tokens, 1});
+    Tensor query_v_tensor(d_query_v.span(), DType::BF16, {kD, kKVHeads, tokens, 1});
+    Tensor length_tensor(d_length.span(), DType::I32, {1});
+    Tensor valid_tensor(d_valid.span(), DType::I32, {1});
+    Tensor table_row_tensor(d_table_row.span(), DType::I32, {1});
+    Tensor out_tensor(d_out.span(), DType::BF16, {kD, kQHeads, tokens, 1});
     PagedKVBatchLayerView context =
         make_context_view(d_context_k, d_context_v, d_table, logical_pages, physical_pages);
     const ops::ContextAttentionExecutionEnvelope envelope{0,
                                                           static_cast<std::uint32_t>(envelope_max)};
     const std::size_t workspace_bytes = ops::context_softmax_attention_workspace_capacity_bytes(
         kGeometry, envelope, tokens, tokens, 1);
-    DeviceArena workspace(workspace_bytes);
+    ninfer::DeviceBuffer workspace_storage(ninfer::test::cuda_environment().context.device(),
+                                           std::max<std::size_t>(workspace_bytes, 1));
+    MemoryArena workspace(workspace_storage.span());
 
     ops::context_softmax_attention(q_tensor, query_k_tensor, query_v_tensor, length_tensor,
                                    valid_tensor, table_row_tensor, kGeometry, kScale, context,
-                                   envelope, workspace, out_tensor, nullptr);
+                                   envelope, workspace, out_tensor,
+                                   ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
     std::string label = "context_softmax_attention T=" + std::to_string(tokens) +
@@ -388,34 +404,37 @@ int graph_mapping_replay_case() {
     DeviceBuffer d_query_k   = to_device(bf16_bits(query_k));
     DeviceBuffer d_query_v   = to_device(bf16_bits(query_v));
     DeviceBuffer d_context_k = to_device(bf16_bits(physical_k));
-    DeviceBuffer d_context_v = to_device(bf16_bits(physical_v));
+    DeviceBuffer d_context_v = to_device(fp16_bits(physical_v));
     DeviceBuffer d_table     = to_device<std::int32_t>({0, 1});
     DeviceBuffer d_length    = to_device_i32({context_length});
     DeviceBuffer d_valid     = to_device_i32({tokens});
     DeviceBuffer d_table_row = to_device_i32({0});
     GuardedDeviceBuffer d_out(q_count * sizeof(std::uint16_t));
-    Tensor q_tensor(d_q.p, DType::BF16, {kD, kQHeads, tokens, 1});
-    Tensor query_k_tensor(d_query_k.p, DType::BF16, {kD, kKVHeads, tokens, 1});
-    Tensor query_v_tensor(d_query_v.p, DType::BF16, {kD, kKVHeads, tokens, 1});
-    Tensor length_tensor(d_length.p, DType::I32, {1});
-    Tensor valid_tensor(d_valid.p, DType::I32, {1});
-    Tensor table_row_tensor(d_table_row.p, DType::I32, {1});
-    Tensor out_tensor(d_out.data(), DType::BF16, {kD, kQHeads, tokens, 1});
+    Tensor q_tensor(d_q.span(), DType::BF16, {kD, kQHeads, tokens, 1});
+    Tensor query_k_tensor(d_query_k.span(), DType::BF16, {kD, kKVHeads, tokens, 1});
+    Tensor query_v_tensor(d_query_v.span(), DType::BF16, {kD, kKVHeads, tokens, 1});
+    Tensor length_tensor(d_length.span(), DType::I32, {1});
+    Tensor valid_tensor(d_valid.span(), DType::I32, {1});
+    Tensor table_row_tensor(d_table_row.span(), DType::I32, {1});
+    Tensor out_tensor(d_out.span(), DType::BF16, {kD, kQHeads, tokens, 1});
     PagedKVBatchLayerView context =
         make_context_view(d_context_k, d_context_v, d_table, logical_pages, physical_pages);
     constexpr ops::ContextAttentionExecutionEnvelope envelope{0, context_length};
-    DeviceArena workspace(ops::context_softmax_attention_workspace_capacity_bytes(
-        kGeometry, envelope, tokens, tokens, 1));
+    ninfer::DeviceBuffer workspace_storage(ninfer::test::cuda_environment().context.device(),
+                                           ops::context_softmax_attention_workspace_capacity_bytes(
+                                               kGeometry, envelope, tokens, tokens, 1));
+    MemoryArena workspace(workspace_storage.span());
 
     cudaStream_t stream        = nullptr;
     cudaGraph_t graph          = nullptr;
     cudaGraphExec_t executable = nullptr;
     cuda_check(cudaStreamCreate(&stream), "create context-attention stream");
+    const auto stream_execution = ninfer::test::cuda_environment().context.execution_view(stream);
     cuda_check(cudaStreamBeginCapture(stream, cudaStreamCaptureModeGlobal),
                "begin context-attention capture");
     ops::context_softmax_attention(q_tensor, query_k_tensor, query_v_tensor, length_tensor,
                                    valid_tensor, table_row_tensor, kGeometry, kScale, context,
-                                   envelope, workspace, out_tensor, stream);
+                                   envelope, workspace, out_tensor, stream_execution);
     cuda_check(cudaStreamEndCapture(stream, &graph), "end context-attention capture");
     cuda_check(cudaGraphInstantiate(&executable, graph, nullptr, nullptr, 0),
                "instantiate context-attention graph");
@@ -500,7 +519,7 @@ int batch_table_case() {
     DeviceBuffer d_query_k    = to_device(bf16_bits(query_k));
     DeviceBuffer d_query_v    = to_device(bf16_bits(query_v));
     DeviceBuffer d_context_k  = to_device(bf16_bits(physical_k));
-    DeviceBuffer d_context_v  = to_device(bf16_bits(physical_v));
+    DeviceBuffer d_context_v  = to_device(fp16_bits(physical_v));
     DeviceBuffer d_tables     = to_device(block_tables);
     DeviceBuffer d_lengths    = to_device(lengths);
     DeviceBuffer d_valid      = to_device(valid);
@@ -508,13 +527,13 @@ int batch_table_case() {
     GuardedDeviceBuffer d_out(row_q_count * batch * sizeof(std::uint16_t));
     d_out.fill(0x7f);
 
-    Tensor q_tensor(d_q.p, DType::BF16, {kD, kQHeads, tokens, batch});
-    Tensor query_k_tensor(d_query_k.p, DType::BF16, {kD, kKVHeads, tokens, batch});
-    Tensor query_v_tensor(d_query_v.p, DType::BF16, {kD, kKVHeads, tokens, batch});
-    Tensor length_tensor(d_lengths.p, DType::I32, {batch});
-    Tensor valid_tensor(d_valid.p, DType::I32, {batch});
-    Tensor table_row_tensor(d_table_rows.p, DType::I32, {batch});
-    Tensor out_tensor(d_out.data(), DType::BF16, {kD, kQHeads, tokens, batch});
+    Tensor q_tensor(d_q.span(), DType::BF16, {kD, kQHeads, tokens, batch});
+    Tensor query_k_tensor(d_query_k.span(), DType::BF16, {kD, kKVHeads, tokens, batch});
+    Tensor query_v_tensor(d_query_v.span(), DType::BF16, {kD, kKVHeads, tokens, batch});
+    Tensor length_tensor(d_lengths.span(), DType::I32, {batch});
+    Tensor valid_tensor(d_valid.span(), DType::I32, {batch});
+    Tensor table_row_tensor(d_table_rows.span(), DType::I32, {batch});
+    Tensor out_tensor(d_out.span(), DType::BF16, {kD, kQHeads, tokens, batch});
     auto context =
         make_context_view(d_context_k, d_context_v, d_tables, logical_pages, physical_pages, batch);
     constexpr ops::ContextAttentionExecutionEnvelope envelope{0, 65};
@@ -543,11 +562,15 @@ int batch_table_case() {
                   expected.begin() + static_cast<std::ptrdiff_t>(b * row_q_count));
     }
 
-    DeviceArena workspace(ops::context_softmax_attention_workspace_capacity_bytes(
-        kGeometry, envelope, tokens, tokens, batch));
+    ninfer::DeviceBuffer workspace_storage(ninfer::test::cuda_environment().context.device(),
+                                           ops::context_softmax_attention_workspace_capacity_bytes(
+                                               kGeometry, envelope, tokens, tokens, batch));
+
+    MemoryArena workspace(workspace_storage.span());
     ops::context_softmax_attention(q_tensor, query_k_tensor, query_v_tensor, length_tensor,
                                    valid_tensor, table_row_tensor, kGeometry, kScale, context,
-                                   envelope, workspace, out_tensor, nullptr);
+                                   envelope, workspace, out_tensor,
+                                   ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
     int failures = verify_reduction("context_softmax_attention B=2 mixed lengths and table rows",

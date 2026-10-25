@@ -6,21 +6,23 @@
 
 // Internal, wire-format-independent representation of a generation request.
 //
-// OpenAI and Anthropic schemas both map into this wire-independent value.
+// OpenAI and Anthropic schemas map into this wire-independent value.
 // translate.cpp then produces the public PromptInput and RequestOptions consumed
 // by Engine; media sources remain unresolved until the product service acquires
 // owning bytes.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
 
 namespace ninfer::serve {
+
+inline constexpr std::size_t kMaxToolNameLength = 128;
 
 // A structured API error mapped onto an error object + HTTP status. Wire-format
 // independent: each protocol layer renders it into its own error body shape.
@@ -48,93 +50,88 @@ struct RequestLimits {
     int default_max_tokens = 8192;
 };
 
-struct CompletionUsage {
-    int prompt_tokens     = 0;
-    int completion_tokens = 0;
-};
-
 enum class ContentKind {
     Text,
     Image,
     Video,
-    InputAudio,
-    Unsupported,
+};
+
+struct CacheBoundary {
+    enum class Ttl : std::uint8_t {
+        Default,
+        FiveMinutes,
+        OneHour,
+    };
+
+    ninfer::PromptCacheMarkerKind kind       = ninfer::PromptCacheMarkerKind::SharedStablePrefix;
+    ninfer::SharedCandidateEvidence evidence = ninfer::SharedCandidateEvidence::ExplicitBoundary;
+    Ttl ttl                                  = Ttl::Default;
+
+    [[nodiscard]] friend constexpr bool operator==(CacheBoundary, CacheBoundary) noexcept = default;
 };
 
 struct ContentPart {
     ContentKind kind = ContentKind::Text;
     std::string text;     // populated for Text
-    std::string type_raw; // original OpenAI "type" string (diagnostics / future use)
+    std::string type_raw; // original wire "type" string for diagnostics
     ninfer::product::media_acquire::Source source;
+    ninfer::ImageResizePolicy image_resize_policy = ninfer::ImageResizePolicy::Downsize;
+    std::optional<CacheBoundary> cache_boundary_after;
 };
 
-enum class ToolKind : std::uint8_t {
-    Function,
-    Custom,
-};
+using ToolKind = ninfer::ToolKind;
 
 struct ToolDefinition {
     std::string name;
     std::string description;
-    std::string parameters_json;
-    std::string definition_json; // normalized OpenAI function-tool object for Qwen prompt rendering
-    bool strict               = false;
-    bool cache_boundary_after = false;
-    ToolKind kind             = ToolKind::Function;
+    std::string input_schema_json;
+    std::string schema_param; // Original protocol path; never included in the model prompt.
+    bool strict = false;
+    std::optional<std::string> input_examples_json;
+    std::optional<CacheBoundary> cache_boundary_after;
+    ToolKind kind = ToolKind::Function;
 };
 
 struct ToolCall {
     std::string id;
     std::string name;
-    // Function calls carry a serialized JSON object; custom calls carry their raw string input.
-    std::string arguments_json;
+    std::string arguments_json; // Function: JSON object; Custom: opaque raw input.
     ToolKind kind = ToolKind::Function;
 };
 
-enum class ToolChoiceMode {
-    Auto,
-    None,
-    Required,
-    Named,
-};
-
-struct ToolChoice {
-    ToolChoiceMode mode = ToolChoiceMode::Auto;
-    std::string name;
-};
+using ToolChoiceMode = ninfer::ToolChoiceMode;
+using ToolChoice     = ninfer::ToolChoice;
 
 struct ChatTurn {
     ChatRole role = ChatRole::User;
-    std::vector<ContentPart>
-        content; // one or more parts; assistant content may be empty with tool_calls
+    std::vector<ContentPart> content; // ordered parts; may be empty when wire content is empty
     std::vector<ToolCall> tool_calls;
-    std::string tool_call_id;      // populated for role=tool
-    ToolKind tool_kind = ToolKind::Function; // populated for role=tool
+    std::string tool_call_id; // populated for role=tool
+    ToolKind tool_kind = ToolKind::Function;
+    // Optional protocol assertion for a tool result. Call-graph normalization verifies it against
+    // the function identified by tool_call_id before the Engine sees the history.
+    std::optional<std::string> tool_result_name;
+    bool tool_result_is_error = false;
     std::string reasoning_content; // assistant thinking carried across turns (round-tripped to the
                                    // template)
-    std::vector<std::uint32_t> shared_cache_boundaries_after_text_bytes;
-    // Anthropic conversation cache_control on the terminal content block names the exact
-    // boundary after this normalized turn. It remains private to the continuation lineage.
+    std::optional<CacheBoundary> cache_boundary_after;
     bool private_cache_boundary_after = false;
 };
 
-// OpenAI sampling fields carried by the protocol adapter. `logit_bias` remains
-// parsed for wire compatibility; the current public engine sampler has no bias
-// input, so it does not affect generation.
+// Sampling overrides that have an executable Engine meaning. Protocol-only
+// fields are normalized or rejected before this value is constructed.
 struct SamplingParams {
     std::optional<double> temperature;
     std::optional<double> top_p;
+    std::optional<double> min_p;
     std::optional<int> top_k;
     std::optional<double> presence_penalty;
     std::optional<double> frequency_penalty;
     std::optional<std::uint64_t> seed;
-    std::unordered_map<int, double> logit_bias;
-    int n = 1;
 };
 
 // Protocol-level effort vocabulary. Each wire adapter accepts the values from
-// its external contract; translation then resolves them against the capabilities
-// advertised by the chat template embedded in the loaded artifact.
+// its external contract; translation passes explicit values to the selected template.
 enum class RequestedReasoningEffort : std::uint8_t {
     None,
     Minimal,
@@ -179,27 +176,41 @@ requested_reasoning_effort_name(RequestedReasoningEffort effort) noexcept {
 }
 
 struct GenerationRequest {
-    std::string model;
-    std::optional<std::string> client_session_sha256;
-    std::optional<std::string> client_request_id;
+    std::optional<OutputConstraint> constraint;
+    std::string constraint_param;
     std::vector<ChatTurn> messages;
     std::vector<ToolDefinition> tools;
-    std::size_t tool_name_max_length = 64;
+    std::size_t tool_name_max_length = kMaxToolNameLength;
     ToolChoice tool_choice;
     std::vector<std::string> stop_strings;
-    int max_tokens      = 0; // 0 => use server default
-    bool max_tokens_set = false;
-    bool stream         = false;
-    bool include_usage  = false;
-    std::optional<bool> enable_thinking; // non-standard extension; falls back to server default
+    bool stop_strings_apply_to_reasoning = false;
+    int max_tokens                       = 0; // resolved budget; zero means immediate output limit
+    std::optional<bool> enable_thinking;      // unset => use the server default
+    std::optional<std::uint32_t> thinking_budget;
     std::optional<RequestedReasoningEffort> reasoning_effort;
-    std::string reasoning_effort_param = "reasoning_effort";
     std::optional<bool> preserve_thinking;
-    bool preserve_thinking_semantic_change = false;
+    std::string chat_template_kwargs_json;
+    ninfer::PromptContinuationMode continuation = ninfer::PromptContinuationMode::NewAssistantTurn;
+    bool allow_engine_automatic_shared_prefixes = true;
     SamplingParams sampling;
+    std::optional<std::string> client_session_sha256;
+    std::optional<std::string> client_request_id;
+    // Domain-separated digest only; raw prompt_cache_key never enters the request.
+    std::optional<std::string> prompt_cache_session_sha256;
 
     [[nodiscard]] bool uses_tools() const noexcept {
-        return !tools.empty() && tool_choice.mode != ToolChoiceMode::None;
+        return !tools.empty() && tool_choice.mode != ToolChoiceMode::None &&
+               (!tool_choice.allowed_names || !tool_choice.allowed_names->empty());
+    }
+
+    [[nodiscard]] bool constrains_tools() const noexcept {
+        if (tools.empty() || constraint) return false;
+        if (!uses_tools()) return true;
+        if (tool_choice.mode == ToolChoiceMode::Required || !tool_choice.parallel ||
+            tool_choice.allowed_names || tool_choice.constraints == ToolConstraintMode::Basic)
+            return true;
+        return std::any_of(tools.begin(), tools.end(),
+                           [](const auto& tool) { return tool.strict; });
     }
 
     [[nodiscard]] std::size_t media_item_count() const noexcept {

@@ -1,7 +1,9 @@
+#include "core/weight.h"
+#include "core/buffer.h"
 #include "ninfer/ops/linear_add.h"
 
 #include "core/device.h"
-#include "ninfer_bench_common.h"
+#include "op_measurement.cuh"
 #include "quantized_weight.cuh"
 
 #include <cuda_profiler_api.h>
@@ -44,25 +46,6 @@ struct Result {
     double useful_tflops;
 };
 
-std::vector<std::int32_t> parse_t_sweep(std::string_view raw) {
-    std::vector<std::int32_t> result;
-    std::size_t begin = 0;
-    while (begin < raw.size()) {
-        const std::size_t end = raw.find(',', begin);
-        const std::string token(
-            raw.substr(begin, end == std::string_view::npos ? raw.size() - begin : end - begin));
-        const long value = std::stol(token);
-        if (value <= 0 || value > std::numeric_limits<std::int32_t>::max()) {
-            throw std::invalid_argument("--t-sweep values must be positive int32");
-        }
-        result.push_back(static_cast<std::int32_t>(value));
-        if (end == std::string_view::npos) { break; }
-        begin = end + 1;
-    }
-    if (result.empty()) { throw std::invalid_argument("--t-sweep must not be empty"); }
-    return result;
-}
-
 Options parse_options(int argc, char** argv) {
     Options options;
     for (int index = 1; index < argc; ++index) {
@@ -72,9 +55,9 @@ Options parse_options(int argc, char** argv) {
             return argv[index];
         };
         if (argument == "--n") {
-            options.n = std::stoi(std::string(next("--n")));
+            options.n = bench::measurement::integer(next("--n"));
         } else if (argument == "--k") {
-            options.k = std::stoi(std::string(next("--k")));
+            options.k = bench::measurement::integer(next("--k"));
         } else if (argument == "--policy") {
             const std::string_view value = next("--policy");
             if (value == "a16") {
@@ -85,11 +68,11 @@ Options parse_options(int argc, char** argv) {
                 throw std::invalid_argument("--policy must be a16 or a4");
             }
         } else if (argument == "--t-sweep") {
-            options.t_sweep = parse_t_sweep(next("--t-sweep"));
+            options.t_sweep = bench::measurement::integers(next("--t-sweep"));
         } else if (argument == "--warmup") {
-            options.warmup = std::stoi(std::string(next("--warmup")));
+            options.warmup = bench::measurement::integer(next("--warmup"), 0);
         } else if (argument == "--repeat") {
-            options.repeat = std::stoi(std::string(next("--repeat")));
+            options.repeat = bench::measurement::integer(next("--repeat"));
         } else if (argument == "--profile") {
             options.profile = true;
         } else if (argument == "--csv-out") {
@@ -149,19 +132,24 @@ int main(int argc, char** argv) {
             *std::min_element(options.t_sweep.begin(), options.t_sweep.end());
         cudaStream_t stream = nullptr;
         CUDA_CHECK(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking));
-        DeviceBuffer flush(kFlushBytes);
-        DeviceBuffer input    = bench::make_bf16(static_cast<std::size_t>(options.k) * max_t);
-        DeviceBuffer residual = bench::make_bf16(static_cast<std::size_t>(options.n) * max_t);
+        const auto cuda = ninfer::bench::device_context().execution_view(stream);
+        bench::L2FlushBuffer flush(kFlushBytes);
+        DeviceBuffer input    = bench::make_bf16(static_cast<std::size_t>(options.k) * max_t, 101U);
+        DeviceBuffer residual = bench::make_bf16(static_cast<std::size_t>(options.n) * max_t, 103U);
+        bench::SavedBuffer residual_initial(residual);
+        const auto restore = [&](CudaExecutionView cuda) { residual_initial.restore(cuda); };
         bench::PackedQuantizedWeight packed  = bench::make_nvfp4_weight(options.n, options.k);
         const std::size_t workspace_capacity = ops::linear_add_workspace_capacity_bytes(
             QType::NVFP4, options.n, options.k, options.policy, min_t, max_t);
-        WorkspaceArena workspace(std::max<std::size_t>(workspace_capacity, 256));
+        ninfer::DeviceBuffer workspace_storage(ninfer::bench::device_context().device(),
+                                               std::max<std::size_t>(workspace_capacity, 256));
+        MemoryArena workspace(workspace_storage.span());
 
         const auto make_launch = [&](std::int32_t tokens) {
-            return [&, tokens](cudaStream_t launch_stream) {
-                Tensor x(input.p, DType::BF16, {options.k, tokens});
-                Tensor out(residual.p, DType::BF16, {options.n, tokens});
-                ops::linear_add(x, packed.weight, out, options.policy, workspace, launch_stream);
+            return [&, tokens](CudaExecutionView cuda) {
+                Tensor x(input.span(), DType::BF16, {options.k, tokens});
+                Tensor out(residual.span(), DType::BF16, {options.n, tokens});
+                ops::linear_add(x, packed.weight, out, options.policy, workspace, cuda);
             };
         };
 
@@ -169,17 +157,19 @@ int main(int argc, char** argv) {
             const std::int32_t tokens = options.t_sweep.front();
             const auto launch         = make_launch(tokens);
             for (int iteration = 0; iteration < options.warmup; ++iteration) {
-                bench::flush_l2(flush, stream);
-                launch(stream);
+                restore(cuda);
+                bench::flush_l2(flush, cuda);
+                launch(cuda);
             }
             CUDA_CHECK(cudaStreamSynchronize(stream));
-            bench::flush_l2(flush, stream);
+            restore(cuda);
+            bench::flush_l2(flush, cuda);
             CUDA_CHECK(cudaStreamSynchronize(stream));
             std::printf("PROFILE linear_add weight_type=NVFP4 policy=%s N=%d K=%d T=%d\n",
                         policy_name(options.policy), options.n, options.k, tokens);
             std::fflush(stdout);
             CUDA_CHECK(cudaProfilerStart());
-            launch(stream);
+            launch(cuda);
             CUDA_CHECK(cudaStreamSynchronize(stream));
             CUDA_CHECK(cudaProfilerStop());
             CUDA_CHECK(cudaStreamDestroy(stream));
@@ -191,9 +181,9 @@ int main(int argc, char** argv) {
         std::printf("%-11s %3s %8s %8s %6s %11s %11s %11s %10s %10s\n", "op", "pol", "N", "K", "T",
                     "median_us", "min_us", "p95_us", "eff_GB/s", "TFLOP/s");
         for (const std::int32_t tokens : options.t_sweep) {
-            const auto launch = make_launch(tokens);
-            const bench::ColdTiming timing =
-                bench::measure_cold_launch(launch, flush, stream, options.warmup, options.repeat);
+            const auto launch              = make_launch(tokens);
+            const bench::ColdTiming timing = bench::measure_cold_launch_prepared(
+                restore, launch, flush, cuda, options.warmup, options.repeat);
             const double seconds      = timing.median_us * 1.0e-6;
             const double useful_flops = 2.0 * static_cast<double>(options.n) * options.k * tokens;
             const double model_bytes  = static_cast<double>(packed.model_weight_bytes()) +

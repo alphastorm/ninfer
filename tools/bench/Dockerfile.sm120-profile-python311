@@ -4,7 +4,7 @@ ARG BASE_IMAGE
 FROM ${BASE_IMAGE}
 
 ARG BASE_IMAGE_ID
-ARG PROFILE_IMAGE_REVISION=2
+ARG PROFILE_IMAGE_REVISION=3
 ARG PYTHON_VERSION=3.11.11
 ARG PYTHON_SOURCE_SHA256=2a9920c7a0cd236de33644ed980a13cbbc21058bfdc528febb6081575ed73be3
 ARG DEBIAN_FRONTEND=noninteractive
@@ -23,6 +23,8 @@ RUN apt-get update \
         libdw1t64 \
         libffi-dev \
         liblzma-dev \
+        libhwloc-dev \
+        liburing-dev \
         libncursesw5-dev \
         libreadline-dev \
         libsqlite3-dev \

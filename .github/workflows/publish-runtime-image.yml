@@ -20,6 +20,10 @@ on:
         description: Expected binary archive SHA-256
         required: true
         type: string
+      base_image:
+        description: Immutable image_reference from a publish-runtime-base.yml prerelease receipt
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -41,8 +45,7 @@ jobs:
       BINARY_ASSET: ${{ inputs.binary_asset }}
       BINARY_SHA256: ${{ inputs.binary_sha256 }}
       IMAGE_REPOSITORY: ghcr.io/alphastorm/ninfer-runtime
-      BASE_IMAGE: ghcr.io/alphastorm/ninfer@sha256:a19e00c5d7993d7c12341974bdc7e3d13e61d9deaf39e8ce00cf94abd6137712
-      BASE_IMAGE_DIGEST: sha256:a19e00c5d7993d7c12341974bdc7e3d13e61d9deaf39e8ce00cf94abd6137712
+      BASE_IMAGE: ${{ inputs.base_image }}
     steps:
       - name: Check out complete public source history
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -60,6 +63,8 @@ jobs:
           [[ "$GITHUB_REPOSITORY" == "alphastorm/ninfer" ]]
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
           [[ "$BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$BASE_IMAGE" =~ ^ghcr\.io/alphastorm/ninfer@sha256:[0-9a-f]{64}$ ]]
+          printf 'BASE_IMAGE_DIGEST=%s\n' "${BASE_IMAGE##*@}" >> "$GITHUB_ENV"
           [[ "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-qwen38-5090-beta\.([1-9][0-9]*)$ ]]
           release_version="${BASH_REMATCH[1]}"
           beta_number="${BASH_REMATCH[2]}"

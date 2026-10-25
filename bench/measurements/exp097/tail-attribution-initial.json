@@ -1,0 +1,577 @@
+{
+  "experiment": "EXP-097",
+  "scope": "previous failing C1-q4 versus shipped A1",
+  "definition": "nearest-rank p95 over per-case server decode milliseconds / completion token",
+  "worklog": [
+    {
+      "arm": "shipped",
+      "p95": {
+        "id": "worklog-020",
+        "msPerToken": 3.3172146985714255,
+        "msPerRound": 15.276646638157882,
+        "acceptance": 0.5165250236071766,
+        "rounds": 152,
+        "tokens": 700,
+        "output": "26121fb373c48bb4b7945098a9af62bd413db9315f43bcf5a93ae02ffb3ea388"
+      },
+      "sorted": [
+        {
+          "id": "worklog-001",
+          "msPerToken": 2.2438996700000002,
+          "msPerRound": 15.551779891089112,
+          "acceptance": 0.8444130127298444,
+          "rounds": 101,
+          "tokens": 700,
+          "output": "d3e6d9bbb826c3d3aa43b5a8d3229b7f482698c70d936537927ffedee9d9314d"
+        },
+        {
+          "id": "worklog-010",
+          "msPerToken": 2.4320521430769237,
+          "msPerRound": 15.347901873786412,
+          "acceptance": 0.7572815533980582,
+          "rounds": 103,
+          "tokens": 650,
+          "output": "39c3600165ea82eebfd1ecef98f874bb6799dac8854180d3bd98a3667d3f2e8c"
+        },
+        {
+          "id": "worklog-019",
+          "msPerToken": 2.452122984285715,
+          "msPerRound": 15.325768651785719,
+          "acceptance": 0.7487244897959183,
+          "rounds": 112,
+          "tokens": 700,
+          "output": "b7aac804f8304713dfb14b7bb08ab627affd9cc129e070be5d018dd20cdcbb53"
+        },
+        {
+          "id": "worklog-009",
+          "msPerToken": 2.4556944257142845,
+          "msPerRound": 15.348090160714278,
+          "acceptance": 0.7535301668806161,
+          "rounds": 112,
+          "tokens": 700,
+          "output": "26869e919aec850ea18188fbc8c3b5a0d64aef5c141d8a2ea5afef5602af25d2"
+        },
+        {
+          "id": "worklog-012",
+          "msPerToken": 2.459584812857143,
+          "msPerRound": 15.372405080357142,
+          "acceptance": 0.7516005121638925,
+          "rounds": 112,
+          "tokens": 700,
+          "output": "7f7ca7502f2e54d9edea1b167dce60667def6c75c15e7bc012a0368743ebc870"
+        },
+        {
+          "id": "worklog-015",
+          "msPerToken": 2.4603827730956223,
+          "msPerRound": 15.333900717171705,
+          "acceptance": 0.7474747474747475,
+          "rounds": 99,
+          "tokens": 617,
+          "output": "bea4a891765443da53a5ca3f2a127727e360a220b57f6b54ea5ad0d503b83603"
+        },
+        {
+          "id": "worklog-017",
+          "msPerToken": 2.502207046666667,
+          "msPerRound": 15.382420368852461,
+          "acceptance": 0.7393867924528302,
+          "rounds": 122,
+          "tokens": 750,
+          "output": "688bb4bc2bb0eb86812b67c4ca35ade90ab85cd8f048c5094705aaea1c50273b"
+        },
+        {
+          "id": "worklog-013",
+          "msPerToken": 2.639315693846155,
+          "msPerRound": 15.317457151785721,
+          "acceptance": 0.6875800256081946,
+          "rounds": 112,
+          "tokens": 650,
+          "output": "38f782e67569b640662222d44494f0b47de41f0dc3c08493a89cbdc64bf33a74"
+        },
+        {
+          "id": "worklog-016",
+          "msPerToken": 2.664091840000001,
+          "msPerRound": 15.32442208849558,
+          "acceptance": 0.6784810126582278,
+          "rounds": 113,
+          "tokens": 650,
+          "output": "b9fb83a5d21ec080095d65b8d6a293a1173b2fcb7a46d2ee6aab01f9b54f16af"
+        },
+        {
+          "id": "worklog-002",
+          "msPerToken": 2.669941201538462,
+          "msPerRound": 15.358068858407082,
+          "acceptance": 0.6776232616940582,
+          "rounds": 113,
+          "tokens": 650,
+          "output": "e8bc4b6cf256cc57d0c9e1e25f1ecddb01568825fc9bb14cf294d745eb89cc8d"
+        },
+        {
+          "id": "worklog-007",
+          "msPerToken": 2.728026195384616,
+          "msPerRound": 15.286353681034486,
+          "acceptance": 0.6580246913580247,
+          "rounds": 116,
+          "tokens": 650,
+          "output": "9040e6e0d969d2b83293660f0c28713baa863888ee143e6055ca90205909fb9c"
+        },
+        {
+          "id": "worklog-008",
+          "msPerToken": 2.7566920723076924,
+          "msPerRound": 15.314955957264958,
+          "acceptance": 0.6535626535626535,
+          "rounds": 117,
+          "tokens": 650,
+          "output": "0864211830ea3dd98bd71bb9386e364637681df6149e44fd2323d011b0b0a491"
+        },
+        {
+          "id": "worklog-003",
+          "msPerToken": 2.8483038117647066,
+          "msPerRound": 15.420753121019112,
+          "acceptance": 0.6313868613138686,
+          "rounds": 157,
+          "tokens": 850,
+          "output": "5e7e7da93007fd87ba5fa5eb078fe1ec59b14fc5be7b01fab447be4b48d60d29"
+        },
+        {
+          "id": "worklog-018",
+          "msPerToken": 2.864841545714286,
+          "msPerRound": 15.308313603053437,
+          "acceptance": 0.6200873362445415,
+          "rounds": 131,
+          "tokens": 700,
+          "output": "44eafc7313031dd4712aafc9249953b2d79d7bf633770ee0b3d27b1649605c76"
+        },
+        {
+          "id": "worklog-011",
+          "msPerToken": 2.896326822352942,
+          "msPerRound": 15.386736243750004,
+          "acceptance": 0.618491921005386,
+          "rounds": 160,
+          "tokens": 850,
+          "output": "ea14d922b40da7c25a8343a010e2a95055d0a7dbda79af42c992d0dd8ca54341"
+        },
+        {
+          "id": "worklog-006",
+          "msPerToken": 3.0008426157142862,
+          "msPerRound": 15.332772489051097,
+          "acceptance": 0.5884816753926702,
+          "rounds": 137,
+          "tokens": 700,
+          "output": "37a79643fba36b7ceefdaaf8b9947f6a453a20ed184f7156af61da1e3e0b6af5"
+        },
+        {
+          "id": "worklog-005",
+          "msPerToken": 3.310321632941179,
+          "msPerRound": 15.545709325966865,
+          "acceptance": 0.5276461295418642,
+          "rounds": 181,
+          "tokens": 850,
+          "output": "0366a35666e0a10378e913e0697c5f303ea73c254053c8590b230163d492d899"
+        },
+        {
+          "id": "worklog-014",
+          "msPerToken": 3.313672204285714,
+          "msPerRound": 15.463803619999998,
+          "acceptance": 0.5219047619047619,
+          "rounds": 150,
+          "tokens": 700,
+          "output": "805a8d5a21b16650109e356387f236d21ef684cb432553ad75fe622431ad1d3e"
+        },
+        {
+          "id": "worklog-020",
+          "msPerToken": 3.3172146985714255,
+          "msPerRound": 15.276646638157882,
+          "acceptance": 0.5165250236071766,
+          "rounds": 152,
+          "tokens": 700,
+          "output": "26121fb373c48bb4b7945098a9af62bd413db9315f43bcf5a93ae02ffb3ea388"
+        },
+        {
+          "id": "worklog-004",
+          "msPerToken": 4.092064780000001,
+          "msPerRound": 15.663405856459335,
+          "acceptance": 0.405777166437414,
+          "rounds": 209,
+          "tokens": 800,
+          "output": "05edfa3fe0e160f39bb30a93ce80ecccc16cf7b06424d7977c3d291f7ce2fd70"
+        }
+      ]
+    },
+    {
+      "arm": "q4-candidate",
+      "p95": {
+        "id": "worklog-005",
+        "msPerToken": 3.7093845305882356,
+        "msPerRound": 16.77115346276596,
+        "acceptance": 0.5034272658035034,
+        "rounds": 188,
+        "tokens": 850,
+        "output": "9f6a3fd3d9632cadd2d4c2d0fbedc63997dda350dfebb420e4696b38aed0fd9c"
+      },
+      "sorted": [
+        {
+          "id": "worklog-001",
+          "msPerToken": 2.376452171428572,
+          "msPerRound": 16.47046059405941,
+          "acceptance": 0.8458274398868458,
+          "rounds": 101,
+          "tokens": 700,
+          "output": "f5bf33cc02ed3e1962d0645aade6a45929fdfeea40259fb7baba7c456d2f9b9b"
+        },
+        {
+          "id": "worklog-015",
+          "msPerToken": 2.5924779343185542,
+          "msPerRound": 16.44603189583333,
+          "acceptance": 0.7633928571428571,
+          "rounds": 96,
+          "tokens": 609,
+          "output": "b11873413445de3cc06de5b1f7693fb025d0919e7395d8a91a175107be2c15b6"
+        },
+        {
+          "id": "worklog-010",
+          "msPerToken": 2.6100179815384625,
+          "msPerRound": 16.470987262135928,
+          "acceptance": 0.7572815533980582,
+          "rounds": 103,
+          "tokens": 650,
+          "output": "39c3600165ea82eebfd1ecef98f874bb6799dac8854180d3bd98a3667d3f2e8c"
+        },
+        {
+          "id": "worklog-012",
+          "msPerToken": 2.664653951428572,
+          "msPerRound": 16.506705893805314,
+          "acceptance": 0.7445997458703939,
+          "rounds": 113,
+          "tokens": 700,
+          "output": "0a4cf844e3f9ed849bd08ae0f12d97881278795c35c61281faf920ffa2e221ee"
+        },
+        {
+          "id": "worklog-017",
+          "msPerToken": 2.7229378026666673,
+          "msPerRound": 16.469381870967744,
+          "acceptance": 0.7250580046403712,
+          "rounds": 124,
+          "tokens": 750,
+          "output": "688bb4bc2bb0eb86812b67c4ca35ade90ab85cd8f048c5094705aaea1c50273b"
+        },
+        {
+          "id": "worklog-019",
+          "msPerToken": 2.7511359828571424,
+          "msPerRound": 16.45978793162393,
+          "acceptance": 0.714987714987715,
+          "rounds": 117,
+          "tokens": 700,
+          "output": "c09541ee1b34cc63286b006499d6d77dfc246a80fb796c64cb657c5c1fd0578b"
+        },
+        {
+          "id": "worklog-013",
+          "msPerToken": 2.7805631553846157,
+          "msPerRound": 16.430600463636367,
+          "acceptance": 0.7054973821989529,
+          "rounds": 110,
+          "tokens": 650,
+          "output": "6bde195a964e18c9c76f3620b48b2e16e144d73e1b8733f7f8aaa15fc25898c6"
+        },
+        {
+          "id": "worklog-009",
+          "msPerToken": 2.782711728571429,
+          "msPerRound": 16.507611949152544,
+          "acceptance": 0.7120098039215687,
+          "rounds": 118,
+          "tokens": 700,
+          "output": "18ad296aec236ee149deaf07f540bd0c7410031ae0dc54c8550eae345e713dc5"
+        },
+        {
+          "id": "worklog-016",
+          "msPerToken": 2.8603219215384623,
+          "msPerRound": 16.453179194690268,
+          "acceptance": 0.6819338422391857,
+          "rounds": 113,
+          "tokens": 650,
+          "output": "bdb58291bb739f0e3a83153cf7900f9c95577cbe86ae202a59aed3e0dd6081f8"
+        },
+        {
+          "id": "worklog-008",
+          "msPerToken": 2.888132075384618,
+          "msPerRound": 16.467419728070187,
+          "acceptance": 0.6746532156368222,
+          "rounds": 114,
+          "tokens": 650,
+          "output": "522e4c575b5b239388a68fddb40168cd3642a898650e910ff8c1b3402882210b"
+        },
+        {
+          "id": "worklog-002",
+          "msPerToken": 2.9141460138461555,
+          "msPerRound": 16.47126007826088,
+          "acceptance": 0.6650062266500623,
+          "rounds": 115,
+          "tokens": 650,
+          "output": "7bc33f7a88fb0899749b7be021560c539e22f2174ca66710be335ebcb418a5c6"
+        },
+        {
+          "id": "worklog-007",
+          "msPerToken": 2.987333069230769,
+          "msPerRound": 16.455648262711865,
+          "acceptance": 0.6475609756097561,
+          "rounds": 118,
+          "tokens": 650,
+          "output": "f1a5ec9e5b69057064057693420db65af6bf2d7767c98ff5e59e60dc56c3a4a7"
+        },
+        {
+          "id": "worklog-011",
+          "msPerToken": 2.99531198235294,
+          "msPerRound": 16.532566136363627,
+          "acceptance": 0.6477166821994408,
+          "rounds": 154,
+          "tokens": 850,
+          "output": "0f172b673ca438c4b29917a3697079319c5db47f259a270c2344417c8ad0c894"
+        },
+        {
+          "id": "worklog-003",
+          "msPerToken": 3.094395483529411,
+          "msPerRound": 16.542365792452827,
+          "acceptance": 0.6199460916442049,
+          "rounds": 159,
+          "tokens": 850,
+          "output": "762c8f8eb6baf70b01bc86eb3056d020e99e19423d7f1e311c6a5da92d2e5925"
+        },
+        {
+          "id": "worklog-018",
+          "msPerToken": 3.101141214285715,
+          "msPerRound": 16.445445833333338,
+          "acceptance": 0.6136363636363636,
+          "rounds": 132,
+          "tokens": 700,
+          "output": "727d5b82853028bde5a6199c49d52a1ef75a93863a8e388a90e93eb7bca76766"
+        },
+        {
+          "id": "worklog-006",
+          "msPerToken": 3.274161734285714,
+          "msPerRound": 16.488584273381292,
+          "acceptance": 0.5761316872427984,
+          "rounds": 139,
+          "tokens": 700,
+          "output": "642e679fe34b33155dbe4577f59997698ae36b863d72967e324103c9f1c74d3b"
+        },
+        {
+          "id": "worklog-014",
+          "msPerToken": 3.559408057142856,
+          "msPerRound": 16.500567152317878,
+          "acceptance": 0.5189393939393939,
+          "rounds": 151,
+          "tokens": 700,
+          "output": "0f980c6639063253432c4a035fd7fe7889565b486709afacbf6509fc51833bb0"
+        },
+        {
+          "id": "worklog-020",
+          "msPerToken": 3.637440161428567,
+          "msPerRound": 16.427149116129012,
+          "acceptance": 0.5013824884792627,
+          "rounds": 155,
+          "tokens": 700,
+          "output": "882354bc8e8a11c17ee2914a0ab0387d1e73c768ed71c967d98793331fd94f4c"
+        },
+        {
+          "id": "worklog-005",
+          "msPerToken": 3.7093845305882356,
+          "msPerRound": 16.77115346276596,
+          "acceptance": 0.5034272658035034,
+          "rounds": 188,
+          "tokens": 850,
+          "output": "9f6a3fd3d9632cadd2d4c2d0fbedc63997dda350dfebb420e4696b38aed0fd9c"
+        },
+        {
+          "id": "worklog-004",
+          "msPerToken": 4.2563329487500035,
+          "msPerRound": 16.85676415346536,
+          "acceptance": 0.42209631728045327,
+          "rounds": 202,
+          "tokens": 800,
+          "output": "b3328bc1982a34f5b684155e5d395a4bc2c2abb62a289b16050148f9423ebbb4"
+        }
+      ]
+    }
+  ],
+  "structured": [
+    {
+      "id": "struct-002",
+      "shipped": {
+        "id": "struct-002",
+        "workload": "structured-output",
+        "kind": "role",
+        "submitted_unix_ms": 1792894272823,
+        "case_sha256": "f6d34bc7f3b36b48406d389da2e52f4ff0daad7f7228a98f6b45ff8b9538a4ee",
+        "request_sha256": "ab80266da122ae15f83070b4147b3e757b0dd40858cea07bcdc2611c5dbc2a5a",
+        "attempts": 1,
+        "http_status": 200,
+        "prompt_tokens": 1114,
+        "completion_tokens": 110,
+        "client_verdict": "answered",
+        "wall_ms": 755.4081580019556,
+        "ttft_ms": 448.21568398037925,
+        "output_sha256": "b3165ccd66f373cb1414a0483ddb5be37b22398758087661609b1d27f83c4f6a",
+        "server": {
+          "prefill": 0.434587094,
+          "decode": 0.306346538,
+          "ttft": 0.446888377,
+          "total": 0.753869832,
+          "queue_wait": null,
+          "rounds": 20,
+          "drafted_tokens": 140,
+          "accepted_tokens": 90,
+          "computed_prefill_tokens": 1114,
+          "decode_tok_s": 359.0704850726924,
+          "ms_per_round": 15.317326900000001
+        }
+      },
+      "candidate": {
+        "id": "struct-002",
+        "workload": "structured-output",
+        "kind": "role",
+        "submitted_unix_ms": 1792899220447,
+        "case_sha256": "f6d34bc7f3b36b48406d389da2e52f4ff0daad7f7228a98f6b45ff8b9538a4ee",
+        "request_sha256": "ab80266da122ae15f83070b4147b3e757b0dd40858cea07bcdc2611c5dbc2a5a",
+        "attempts": 1,
+        "http_status": 200,
+        "prompt_tokens": 1115,
+        "completion_tokens": 111,
+        "client_verdict": "answered",
+        "wall_ms": 1674.76969800191,
+        "ttft_ms": 1278.8084039930254,
+        "output_sha256": "1fb040a299eb42cf136ac3ae46048b3cabc5b86668dbccc1ff26c2acd53c1357",
+        "server": {
+          "prefill": 0.365938081,
+          "decode": 0.39497427099999993,
+          "ttft": 1.277516444,
+          "total": 1.673196659,
+          "queue_wait": null,
+          "rounds": 24,
+          "drafted_tokens": 168,
+          "accepted_tokens": 87,
+          "computed_prefill_tokens": 1115,
+          "decode_tok_s": 281.03096365990893,
+          "ms_per_round": 16.457261291666665
+        }
+      },
+      "vanilla": {
+        "id": "struct-002",
+        "workload": "structured-output",
+        "kind": "role",
+        "submitted_unix_ms": 1792895284498,
+        "case_sha256": "f6d34bc7f3b36b48406d389da2e52f4ff0daad7f7228a98f6b45ff8b9538a4ee",
+        "request_sha256": "ab80266da122ae15f83070b4147b3e757b0dd40858cea07bcdc2611c5dbc2a5a",
+        "attempts": 1,
+        "http_status": 200,
+        "prompt_tokens": 1115,
+        "completion_tokens": 111,
+        "client_verdict": "answered",
+        "wall_ms": 1723.6109969962854,
+        "ttft_ms": 1284.0051900129765,
+        "output_sha256": "1fb040a299eb42cf136ac3ae46048b3cabc5b86668dbccc1ff26c2acd53c1357",
+        "server": {
+          "prefill": 0.366527737,
+          "decode": 0.43856600999999995,
+          "ttft": 1.2827267999999998,
+          "total": 1.722055001,
+          "queue_wait": null,
+          "rounds": 24,
+          "drafted_tokens": 168,
+          "accepted_tokens": 87,
+          "computed_prefill_tokens": 1115,
+          "decode_tok_s": 253.09758957380217,
+          "ms_per_round": 18.273583749999997
+        }
+      }
+    },
+    {
+      "id": "struct-005",
+      "shipped": {
+        "id": "struct-005",
+        "workload": "structured-output",
+        "kind": "role",
+        "submitted_unix_ms": 1792894273579,
+        "case_sha256": "5619aa76f95fce38cc1efe87e28077aabcc5d90bb21b7144f1573e1da16f9a20",
+        "request_sha256": "d05eba6751236a7b39c1a22d2e5b2e0d2b961edd3e80fb83299a517479bb4f0c",
+        "attempts": 1,
+        "http_status": 200,
+        "prompt_tokens": 1737,
+        "completion_tokens": 176,
+        "client_verdict": "answered",
+        "wall_ms": 1120.9165590116754,
+        "ttft_ms": 642.5478429882787,
+        "output_sha256": "6b10b21d9055a567e499a756d86db9ebe96a4fea989d46b37870638aae4e20c1",
+        "server": {
+          "prefill": 0.6274725520000001,
+          "decode": 0.47718875000000005,
+          "ttft": 0.641307538,
+          "total": 1.119474737,
+          "queue_wait": null,
+          "rounds": 31,
+          "drafted_tokens": 217,
+          "accepted_tokens": 145,
+          "computed_prefill_tokens": 1737,
+          "decode_tok_s": 368.8268007156497,
+          "ms_per_round": 15.393185483870969
+        }
+      },
+      "candidate": {
+        "id": "struct-005",
+        "workload": "structured-output",
+        "kind": "role",
+        "submitted_unix_ms": 1792899222122,
+        "case_sha256": "5619aa76f95fce38cc1efe87e28077aabcc5d90bb21b7144f1573e1da16f9a20",
+        "request_sha256": "d05eba6751236a7b39c1a22d2e5b2e0d2b961edd3e80fb83299a517479bb4f0c",
+        "attempts": 1,
+        "http_status": 200,
+        "prompt_tokens": 1738,
+        "completion_tokens": 157,
+        "client_verdict": "answered",
+        "wall_ms": 1872.7999360125978,
+        "ttft_ms": 1389.9233310075942,
+        "output_sha256": "2a78448a7419dc54ce400c26ebd85d5a92717fdcd05e42cbb6243814d907b88f",
+        "server": {
+          "prefill": 0.5591392989999999,
+          "decode": 0.4782091440000001,
+          "ttft": 1.388620312,
+          "total": 1.87109904,
+          "queue_wait": null,
+          "rounds": 29,
+          "drafted_tokens": 203,
+          "accepted_tokens": 128,
+          "computed_prefill_tokens": 1738,
+          "decode_tok_s": 328.308234942492,
+          "ms_per_round": 16.489970482758626
+        }
+      },
+      "vanilla": {
+        "id": "struct-005",
+        "workload": "structured-output",
+        "kind": "role",
+        "submitted_unix_ms": 1792895286222,
+        "case_sha256": "5619aa76f95fce38cc1efe87e28077aabcc5d90bb21b7144f1573e1da16f9a20",
+        "request_sha256": "d05eba6751236a7b39c1a22d2e5b2e0d2b961edd3e80fb83299a517479bb4f0c",
+        "attempts": 1,
+        "http_status": 200,
+        "prompt_tokens": 1738,
+        "completion_tokens": 157,
+        "client_verdict": "answered",
+        "wall_ms": 1876.003657002002,
+        "ttft_ms": 1344.7522459900938,
+        "output_sha256": "2a78448a7419dc54ce400c26ebd85d5a92717fdcd05e42cbb6243814d907b88f",
+        "server": {
+          "prefill": 0.563931232,
+          "decode": 0.529691836,
+          "ttft": 1.3434255259999999,
+          "total": 1.874340713,
+          "queue_wait": null,
+          "rounds": 29,
+          "drafted_tokens": 203,
+          "accepted_tokens": 128,
+          "computed_prefill_tokens": 1738,
+          "decode_tok_s": 296.39875363304634,
+          "ms_per_round": 18.265235724137934
+        }
+      }
+    }
+  ]
+}

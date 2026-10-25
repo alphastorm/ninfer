@@ -64,6 +64,22 @@ def write_manifest(path: Path, *, m4_schedule: str = "linear_swiglu.q4.mma.small
 
 
 class Sm120Q4ProfileTest(unittest.TestCase):
+    def test_summarizes_master_public_route_without_fork_describe_api(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest = root / "shape.jsonl"
+            base = dict(schema_version=2, kernel_family="linear_swiglu_q4", route="public",
+                        execution="eager", gate_up_n=34816, output_n=17408, k=5120, group_size=64)
+            manifest.write_text("".join(json.dumps({**base, "m": width}) + "\n"
+                                       for width in (1, 4)), encoding="utf-8")
+            for width, kernel in ((1, "q4_linear_swiglu_gemv_pair_kernel"),
+                                  (4, "q4_a16_sliced_k_mma_kernel")):
+                write_capture(root / f"m{width}.csv", launch_id=width, kernel=kernel,
+                              duration_us=100.0 * width, read_mbytes=100.0, write_mbytes=5.0)
+            result = summarize(root / "m1.csv", root / "m4.csv", manifest)
+            self.assertEqual(result["schema_version"], 2)
+            self.assertAlmostEqual(result["ratios"]["kernel_duration"], 4.0)
+
     def test_summarizes_exact_mtp3_width_ratios(self) -> None:
         with tempfile.TemporaryDirectory() as raw_tmp:
             tmp = Path(raw_tmp)

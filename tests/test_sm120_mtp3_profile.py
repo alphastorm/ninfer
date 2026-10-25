@@ -3,519 +3,225 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
-from pathlib import Path
 
 
 REPOSITORY = Path(__file__).resolve().parents[1]
-RUNNER = REPOSITORY / "tools" / "bench" / "run_sm120_mtp3_profile.sh"
-WORKFLOW = REPOSITORY / "tools" / "bench" / "run_sm120_mtp3_workflow.sh"
-SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
-UPSTREAM_SHA = "89abcdef0123456789abcdef0123456789abcdef"
-TOOLCHAIN_IMAGE_ID = "sha256:" + "a" * 64
 
 
-def write_executable(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(textwrap.dedent(content).lstrip(), encoding="utf-8")
-    path.chmod(0o755)
-
-
-def install_tool_mocks(root: Path) -> Path:
-    tools = root / "mock-bin"
-    tools.mkdir()
-    write_executable(
-        tools / "git",
-        rf"""
-        #!/usr/bin/env bash
-        set -euo pipefail
-        if [[ ${{1:-}} == -C ]]; then
-          shift 2
-        fi
-        case ${{1:-}} in
-          status)
-            if [[ ${{MOCK_SOURCE_DIRTY:-0}} == 1 ]]; then
-              printf ' M tools/bench/run_sm120_mtp3_profile.sh\n'
-            fi
-            ;;
-          rev-parse)
-            printf '{SOURCE_SHA}\n'
-            ;;
-          cat-file)
-            ;;
-          merge-base)
-            [[ $MOCK_ANCESTRY_FAIL != 1 ]]
-            ;;
-          *)
-            echo "unexpected git invocation: $*" >&2
-            exit 90
-            ;;
-        esac
-        """,
-    )
-    write_executable(
-        tools / "cmake",
-        r"""
-        #!/usr/bin/env bash
-        set -euo pipefail
-        printf 'cmake %s\n' "$*" >>"$MOCK_TOOL_LOG"
-        if [[ ${1:-} == -N ]]; then
-          printf 'MOCK_CMAKE_CACHE=1\n'
-          exit 0
-        fi
-        if [[ ${1:-} != --build ]]; then
-          build=
-          while (($#)); do
-            if [[ $1 == -B ]]; then
-              build=$2
-              break
-            fi
-            shift
-          done
-          [[ -n $build ]]
-          printf 'CMAKE_HOME_DIRECTORY:INTERNAL=%s\n' "$MOCK_SOURCE_ROOT" >"$build/CMakeCache.txt"
-          exit 0
-        fi
-        build=$2
-        mkdir -p "$build/bench" "$build/tests"
-        for name in ninfer_q4_linear_swiglu_bench ninfer_q5_linear_add_bench; do
-          cat >"$build/bench/$name" <<'SH'
-        #!/usr/bin/env bash
-        printf '%s %s\n' "$(basename "$0")" "$*" >>"$MOCK_TOOL_LOG"
-        printf 'mock timing\n'
-        SH
-          chmod +x "$build/bench/$name"
-        done
-        cat >"$build/bench/ninfer_qwen3_6_27b_post_mixer_bench" <<'SH'
-        #!/usr/bin/env bash
-        set -euo pipefail
-        printf 'post-mixer %s\n' "$*" >>"$MOCK_TOOL_LOG"
-        state=q4-produced
-        candidate=public
-        scope=q5
-        describe=0
-        profile=0
-        while (($#)); do
-          case $1 in
-            --activation-state) state=$2; shift 2 ;;
-            --candidate) candidate=$2; shift 2 ;;
-            --measure) scope=$2; shift 2 ;;
-            --describe) describe=1; shift ;;
-            --profile-q5) profile=1; shift ;;
-            --warmup|--repeat) shift 2 ;;
-            *) shift ;;
-          esac
-        done
-        if ((describe)); then
-          printf '{"schema_version":1,"workload":"qwen27-post-mixer-t4"}\n'
-          exit 0
-        fi
-        if ((profile)); then
-          printf 'PROFILE mock\n'
-          exit 0
-        fi
-        median=80
-        [[ $state == cold ]] && median=100
-        [[ $state == hot ]] && median=70
-        [[ $candidate == mma-r64-c16 ]] && median=104
-        [[ $scope == chain ]] && median=200
-        printf '{"schema_version":1,"workload":"qwen27-post-mixer-t4","activation_state":"%s","candidate":"%s","timed_scope":"%s","median_us":%s,"min_us":%s,"p95_us":%s}\n' \
-          "$state" "$candidate" "$scope" "$median" "$median" "$median"
-        SH
-        chmod +x "$build/bench/ninfer_qwen3_6_27b_post_mixer_bench"
-        cat >"$build/bench/ninfer_qwen3_6_27b_mtp_round_bench" <<'SH'
-        #!/usr/bin/env bash
-        printf 'mtp-round %s\n' "$*" >>"$MOCK_TOOL_LOG"
-        printf 'format,ninfer_qwen3_6_27b_mtp_round_bench_v1\nmtp_round_mean_ms,1.0\n'
-        SH
-        chmod +x "$build/bench/ninfer_qwen3_6_27b_mtp_round_bench"
-        for name in ninfer_linear_swiglu_q4_a16_test ninfer_linear_add_q5_a16_test; do
-          cat >"$build/tests/$name" <<'SH'
-        #!/usr/bin/env bash
-        printf '%s\n' "$(basename "$0")" >>"$MOCK_TOOL_LOG"
-        printf 'OK mock oracle\n'
-        SH
-          chmod +x "$build/tests/$name"
-        done
-        """,
-    )
-    write_executable(
-        tools / "cuobjdump",
-        r"""
-        #!/usr/bin/env bash
-        if [[ ${1:-} == --list-elf ]]; then
-          printf 'ELF file sm_120a\n'
-        else
-          printf 'mock resource usage\n'
-        fi
-        """,
-    )
-    write_executable(
-        tools / "ncu",
-        r"""
-        #!/usr/bin/env bash
-        set -euo pipefail
-        printf 'ncu %s\n' "$*" >>"$MOCK_TOOL_LOG"
-        if [[ ${1:-} == --version ]]; then
-          printf 'mock ncu\n'
-          exit 0
-        fi
-        if [[ ${1:-} == --list-sections ]]; then
-          printf '%s\n' LaunchStats Occupancy SpeedOfLight MemoryWorkloadAnalysis SchedulerStats WarpStateStats SourceCounters
-          exit 0
-        fi
-        if [[ ${1:-} == --import ]]; then
-          printf 'ID,Kernel Name,Metric Name,Metric Unit,Metric Value\n'
-          printf '1,mock,gpu__time_duration.sum,usecond,1\n'
-          exit 0
-        fi
-        if [[ ${MOCK_NCU_COUNTER_DENIED:-0} == 1 ]]; then
-          printf '==ERROR== ERR_NVGPUCTRPERM permission denied\n'
-          exit 1
-        fi
-        export_path=
-        while (($#)); do
-          if [[ $1 == --export ]]; then
-            export_path=$2
-            shift 2
-          else
-            shift
-          fi
-        done
-        [[ -n $export_path ]]
-        printf 'mock report\n' >"$export_path.ncu-rep"
-        printf 'mock ncu capture\n'
-        """,
-    )
-    write_executable(
-        tools / "nsys",
-        r"""
-        #!/usr/bin/env bash
-        set -euo pipefail
-        printf 'nsys %s\n' "$*" >>"$MOCK_TOOL_LOG"
-        if [[ ${1:-} == --version ]]; then
-          printf 'mock nsys\n'
-          exit 0
-        fi
-        if [[ ${1:-} == profile ]]; then
-          shift
-          if [[ " $* " == *" --help "* ]]; then
-            [[ ${MOCK_NSYS_PROFILE_HELP_FAIL:-0} != 1 ]] || exit 64
-            printf 'mock nsys profile help\n'
-            exit 0
-          fi
-          output=
-          while (($#)); do
-            if [[ $1 == -o ]]; then
-              output=$2
-              shift 2
-            else
-              shift
-            fi
-          done
-          [[ -n $output ]]
-          printf 'mock report\n' >"$output.nsys-rep"
-          printf 'mock nsys profile\n'
-          exit 0
-        fi
-        if [[ ${1:-} == stats ]]; then
-          printf 'Total Time (ns),Name\n'
-          if [[ ${MOCK_NSYS_GRAPH_SUMMARY_INVALID:-0} == 1 ]]; then
-            printf '167822,recurrent_fold_kernel\n'
-          else
-            printf '12000000,q5_rowsplit_gemm_simt_split2_kernel\n'
-            printf '3000000,recurrent_fold_kernel\n'
-          fi
-          exit 0
-        fi
-        exit 90
-        """,
-    )
-    write_executable(
-        tools / "nvidia-smi",
-        r"""
-        #!/usr/bin/env bash
-        printf 'nvidia-smi %s\n' "$*" >>"$MOCK_TOOL_LOG"
-        printf 'name, uuid, driver_version\nMock 5090, GPU-mock, 999.0\n'
-        """,
-    )
-    write_executable(
-        tools / "nvcc",
-        r"""
-        #!/usr/bin/env bash
-        printf 'mock nvcc 13.1\n'
-        """,
-    )
-    write_executable(
-        tools / "timeout",
-        r"""
-        #!/usr/bin/env bash
-        shift
-        exec "$@"
-        """,
-    )
-    return tools
-
-
-def create_fixture(root: Path) -> dict[str, Path]:
-    source = (root / "source").resolve()
-    source.mkdir(parents=True)
-    build = source / "build" / "profile"
-    prepare = source / "profiles" / "prepared"
-    artifact = source / "out" / "qwen3_6_27b.ninfer"
-    output = source / "profiles" / "sm120-mtp3" / "run"
-    build.mkdir(parents=True)
-    prepare.mkdir(parents=True)
-    artifact.parent.mkdir(parents=True)
-    artifact.write_bytes(b"mock artifact")
-    tools = source / "tools" / "bench"
-    tools.mkdir(parents=True)
-    for script in (RUNNER, WORKFLOW):
-        shutil.copy2(script, tools / script.name)
-        (tools / script.name).chmod(0o755)
-    write_executable(tools / "run_gpu_profile_lease.sh", "#!/usr/bin/env bash\nexit 99\n")
-    write_executable(
-        tools / "run_sm120_q4_mtp3_profile.sh",
-        r"""
-        #!/usr/bin/env bash
-        set -euo pipefail
-        printf 'q4-packet %s\n' "$*" >>"$MOCK_TOOL_LOG"
-        mkdir -p "$3"
-        printf '{"schema_version":1}\n' >"$3/summary.json"
-        """,
-    )
-    write_executable(
-        tools / "summarize_ncu_q4.py",
-        "#!/usr/bin/env python3\nraise SystemExit('not executed by mock')\n",
-    )
-    return {
-        "source": source,
-        "build": build,
-        "prepare": prepare,
-        "artifact": artifact,
-        "output": output,
-        "runner": tools / RUNNER.name,
-        "tool_log": root / "tools.log",
-    }
-
-
-class Sm120Mtp3ProfileRunnerTest(unittest.TestCase):
+class Sm120MasterProfileTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.temporary_directory = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary_directory.cleanup)
-        self.root = Path(self.temporary_directory.name)
-        self.paths = create_fixture(self.root)
-        self.mock_tools = install_tool_mocks(self.root)
-        self.environment = os.environ.copy()
-        self.environment.update(
-            {
-                "PATH": f"{self.mock_tools}:{self.environment['PATH']}",
-                "PYTHON": sys.executable,
-                "NINFER_CONTROLLER_ID": "stable-controller",
-                "NINFER_TARGET_ID": "mock-5090",
-                "NINFER_EXPECTED_SOURCE_SHA": SOURCE_SHA,
-                "NINFER_UPSTREAM_BASE_SHA": UPSTREAM_SHA,
-                "NINFER_ARTIFACT_EXPECTED_SHA256": hashlib.sha256(b"mock artifact").hexdigest(),
-                "NINFER_TOOLCHAIN_IMAGE_ID": TOOLCHAIN_IMAGE_ID,
-                "NINFER_NCU_TIMEOUT_SECONDS": "5",
-                "NINFER_NSYS_TIMEOUT_SECONDS": "5",
-                "MOCK_SOURCE_ROOT": str(self.paths["source"]),
-                "MOCK_TOOL_LOG": str(self.paths["tool_log"]),
-                "MOCK_ANCESTRY_FAIL": "0",
-            }
-        )
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.source = self.root / 'source'
+        self.source.mkdir()
+        tools = self.source / 'tools/bench'
+        tools.mkdir(parents=True)
+        for name in ('run_sm120_mtp3_profile.sh', 'run_sm120_mtp3_workflow.sh',
+                     'run_sm120_q4_mtp3_profile.sh', 'summarize_ncu_q4.py'):
+            shutil.copy2(REPOSITORY / 'tools/bench' / name, tools / name)
+            (tools / name).chmod(0o755)
+        corpus = self.source / 'bench/fixtures/bench_corpus.ids'
+        corpus.parent.mkdir(parents=True)
+        corpus.write_text('42 43 44\n', encoding='utf-8')
+        self.git('init', '--quiet')
+        self.git('config', 'user.name', 'NInfer Test')
+        self.git('config', 'user.email', 'ninfer-test@example.invalid')
+        self.git('add', '.')
+        self.git('commit', '--quiet', '-m', 'profile fixture')
+        head = self.git('rev-parse', 'HEAD')
+        self.build = self.root / 'build'
+        self.prepare = self.root / 'prepared'
+        self.output = self.root / 'result'
+        self.build.mkdir()
+        self.prepare.mkdir()
+        self.artifact = self.root / 'model.ninfer'
+        self.artifact.write_bytes(b'model fixture')
+        self.log = self.root / 'calls.jsonl'
+        self.bin = self.root / 'bin'
+        self.bin.mkdir()
+        self.stub = self.bin / 'stub.py'
+        self.stub.write_text(textwrap.dedent(r'''
+            import csv
+            import json
+            import os
+            from pathlib import Path
+            import sys
+            name = Path(sys.argv[0]).name
+            args = sys.argv[1:]
+            with Path(os.environ['MOCK_LOG']).open('a', encoding='utf-8') as stream:
+                stream.write(json.dumps([name, *args]) + '\n')
+            def value(flag):
+                return args[args.index(flag) + 1]
+            if name == 'cmake':
+                if args[0] == '-N':
+                    print('cache fixture')
+                elif args[0] != '--build':
+                    build = Path(value('-B'))
+                    (build / 'CMakeCache.txt').write_text('CMAKE_HOME_DIRECTORY:INTERNAL=' + value('-S') + '\n')
+                else:
+                    build = Path(args[1])
+                    for target in args[args.index('--target') + 1:]:
+                        folder = build / ('tests' if target.endswith('_test') else 'bench')
+                        folder.mkdir(exist_ok=True)
+                        executable = folder / target
+                        executable.write_bytes(Path(os.environ['MOCK_STUB']).read_bytes())
+                        executable.chmod(0o755)
+            elif name == 'cuobjdump':
+                print('ELF file sm_120a')
+            elif name == 'ncu':
+                if '--list-sections' in args:
+                    print('LaunchStats\nSpeedOfLight\nMemoryWorkloadAnalysis')
+                elif '--import' in args:
+                    kernel = ('q4_linear_swiglu_gemv_pair_kernel' if 'q4-m1' in value('--import') else
+                              'q4_a16_sliced_k_mma_kernel' if 'q4-m4' in value('--import') else 'q5_a16_kernel')
+                    writer = csv.writer(sys.stdout)
+                    writer.writerow(['ID', 'Kernel Name', 'gpu__time_duration.sum', 'dram__bytes.sum.per_second'])
+                    writer.writerow(['', '', 'us', 'Gbyte/s'])
+                    writer.writerow([1, kernel, 100, 1000])
+                elif os.environ.get('MOCK_COUNTER_DENIED') == '1':
+                    print('ERR_NVGPUCTRPERM')
+                    sys.exit(1)
+                else:
+                    Path(value('--export') + '.ncu-rep').write_text('fixture report')
+            elif name == 'nsys':
+                if '--help' in args:
+                    sys.exit(64 if os.environ.get('MOCK_HELP_FAIL') == '1' else 0)
+                if args[0] == 'stats':
+                    print('Total Time (ns),Name')
+                    print('12000000,q5_a16_kernel')
+                    if os.environ.get('MOCK_GRAPH_BAD') != '1':
+                        print('3000000,q4_a16_sliced_k_mma_kernel')
+                else:
+                    Path(value('-o') + '.nsys-rep').write_text('fixture graph report')
+            elif name.startswith('ninfer_'):
+                if any(flag in args for flag in ('--candidate', '--activation-state', '--route', '--describe')):
+                    raise SystemExit('obsolete fork-only flag')
+                if '--csv-out' in args:
+                    with Path(value('--csv-out')).open('w', newline='') as stream:
+                        writer = csv.writer(stream)
+                        writer.writerow(['t', 'execution', 'median_us'])
+                        for width in value('--t-sweep').split(','):
+                            writer.writerow([width, value('--execution'), 100])
+                print('fixture timing')
+            elif name in ('nvidia-smi', 'nvcc'):
+                print('fixture tool inventory')
+            else:
+                raise SystemExit('unknown fixture command ' + name)
+        ''').lstrip(), encoding='utf-8')
+        self.stub.write_text(f'#!{sys.executable}\n' + self.stub.read_text(encoding='utf-8'), encoding='utf-8')
+        for name in ('cmake', 'cuobjdump', 'ncu', 'nsys', 'nvidia-smi', 'nvcc'):
+            shutil.copy2(self.stub, self.bin / name)
+            (self.bin / name).chmod(0o755)
+        python = self.bin / 'python3.11'
+        python.write_text(f'#!/bin/sh\nif [ "$1" = -c ]; then printf "3.11\\n"; else exec "{sys.executable}" "$@"; fi\n', encoding='utf-8')
+        python.chmod(0o755)
+        timeout = self.bin / 'timeout'
+        timeout.write_text('#!/bin/sh\nshift\nexec "$@"\n', encoding='utf-8')
+        timeout.chmod(0o755)
+        self.environment = dict(os.environ, PATH=f'{self.bin}:{os.environ["PATH"]}',
+                                PYTHON=str(python), MOCK_LOG=str(self.log), MOCK_STUB=str(self.stub),
+                                NINFER_CONTROLLER_ID='fixture-controller', NINFER_TARGET_ID='fixture-target',
+                                NINFER_EXPECTED_SOURCE_SHA=head, NINFER_UPSTREAM_BASE_SHA=head,
+                                NINFER_ARTIFACT_EXPECTED_SHA256=hashlib.sha256(self.artifact.read_bytes()).hexdigest(),
+                                NINFER_TOOLCHAIN_IMAGE_ID='sha256:' + 'a' * 64)
+        self.runner = tools / 'run_sm120_mtp3_profile.sh'
 
-    def run_prepare(
-        self,
-        *,
-        source_dirty: bool = False,
-        ancestry_invalid: bool = False,
-        nsys_profile_unsupported: bool = False,
-    ) -> subprocess.CompletedProcess[str]:
-        environment = {
-            **self.environment,
-            "MOCK_SOURCE_DIRTY": "1" if source_dirty else "0",
-            "MOCK_ANCESTRY_FAIL": "1" if ancestry_invalid else "0",
-            "MOCK_NSYS_PROFILE_HELP_FAIL": "1" if nsys_profile_unsupported else "0",
-        }
-        return subprocess.run(
-            [
-                self.paths["runner"],
-                "prepare",
-                self.paths["source"],
-                self.paths["build"],
-                self.paths["artifact"],
-                self.paths["prepare"],
-            ],
-            text=True,
-            capture_output=True,
-            env=environment,
-            check=False,
-        )
+    def git(self, *args: str) -> str:
+        return subprocess.run(['git', '-C', str(self.source), *args], text=True, capture_output=True, check=True).stdout.strip()
 
-    def run_capture(
-        self, *, counter_denied: bool = False, graph_summary_invalid: bool = False
-    ) -> subprocess.CompletedProcess[str]:
-        environment = {
-            **self.environment,
-            "MOCK_SOURCE_DIRTY": "0",
-            "MOCK_NCU_COUNTER_DENIED": "1" if counter_denied else "0",
-            "MOCK_NSYS_GRAPH_SUMMARY_INVALID": "1" if graph_summary_invalid else "0",
-        }
-        return subprocess.run(
-            [
-                self.paths["runner"],
-                "capture",
-                self.paths["source"],
-                self.paths["build"],
-                self.paths["artifact"],
-                self.paths["prepare"],
-                self.paths["output"],
-            ],
-            text=True,
-            capture_output=True,
-            env=environment,
-            check=False,
-        )
+    def run_mode(self, mode: str, **environment: str) -> subprocess.CompletedProcess[str]:
+        args = [str(self.runner), mode, str(self.source), str(self.build), str(self.artifact), str(self.prepare)]
+        if mode == 'capture':
+            args.append(str(self.output))
+        return subprocess.run(args, text=True, capture_output=True, env={**self.environment, **environment})
 
-    def tool_log_lines(self) -> list[str]:
-        path = self.paths["tool_log"]
-        return path.read_text(encoding="utf-8").splitlines() if path.exists() else []
+    def calls(self) -> list[list[str]]:
+        return [json.loads(line) for line in self.log.read_text(encoding='utf-8').splitlines()] if self.log.exists() else []
 
-    def test_prepares_exact_build_after_profiler_cli_preflight(self) -> None:
-        completed = self.run_prepare()
+    def prepare_ok(self) -> None:
+        result = self.run_mode('prepare')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
-        self.assertTrue((self.paths["prepare"] / "prepare-complete.txt").is_file())
-        manifest = json.loads((self.paths["prepare"] / "manifest.json").read_text(encoding="utf-8"))
-        self.assertTrue(manifest["source_clean"])
-        self.assertEqual(manifest["source_sha"], SOURCE_SHA)
-        self.assertEqual(manifest["toolchain_image_id"], TOOLCHAIN_IMAGE_ID)
-        log = self.tool_log_lines()
-        self.assertTrue(any(line.startswith("cmake -S ") for line in log))
-        self.assertTrue(any(line.startswith("cmake --build ") for line in log))
-        self.assertIn(
-            "nsys profile --capture-range=cudaProfilerApi --capture-range-end=stop "
-            "--cuda-graph-trace=node --help",
-            log,
-        )
-        self.assertFalse(any(line.startswith(("ncu ", "nvidia-smi ")) for line in log))
+    def test_prepare_builds_current_targets_without_running_gpu(self) -> None:
+        self.prepare_ok()
+        calls = self.calls()
+        self.assertEqual(calls[0][0:2], ['nsys', 'profile'])
+        build = next(call for call in calls if '--build' in call)
+        self.assertIn('ninfer_qwen3_5_mtp_round_bench', build)
+        self.assertIn('ninfer_bench', build)
+        self.assertFalse(any('post_mixer' in arg or 'qwen3_6_27b_mtp' in arg for arg in build))
+        self.assertFalse(any(call[0] in ('ncu', 'nvidia-smi') for call in calls))
+        manifest = json.loads((self.prepare / 'manifest.json').read_text())
+        self.assertEqual(manifest['schema_version'], 2)
+        self.assertTrue(manifest['source_clean'])
 
-    def test_captures_complete_fixed_packet_after_counter_gate(self) -> None:
-        prepared = self.run_prepare()
-        self.assertEqual(prepared.returncode, 0, prepared.stderr + prepared.stdout)
-        self.paths["tool_log"].write_text("", encoding="utf-8")
+    def test_capture_uses_public_master_cli_and_completes_packet(self) -> None:
+        self.prepare_ok()
+        result = self.run_mode('capture')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.output / 'packet-complete.txt').is_file())
+        manifest = json.loads((self.output / 'manifest.json').read_text())
+        self.assertEqual(manifest['schema_version'], 3)
+        self.assertEqual(manifest['counter_access_gate'], 'q5-public')
+        self.assertEqual(json.loads((self.output / 'ncu/q4-packet/summary.json').read_text())['schema_version'], 2)
+        calls = self.calls()
+        capture = next(call for call in calls if call[:2] == ['nsys', 'profile'] and '-o' in call)
+        self.assertIn('--profile-measured', capture)
+        self.assertTrue(any(arg.endswith('/ninfer_bench') for arg in capture))
+        self.assertNotIn('--profile-measured', next(call for call in calls if call[0] == 'ninfer_qwen3_5_mtp_round_bench'))
+        self.assertTrue((self.output / 'timings/q5-graph.csv').is_file())
 
-        completed = self.run_capture()
+    def test_dirty_source_blocks_build(self) -> None:
+        (self.source / 'unexpected.txt').write_text('dirty')
+        result = self.run_mode('prepare')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('completely clean committed worktree', result.stderr)
+        self.assertEqual(self.calls(), [])
 
-        output = self.paths["output"]
-        self.assertEqual(completed.returncode, 0, completed.stderr + completed.stdout)
-        self.assertTrue((output / "packet-complete.txt").is_file())
-        self.assertTrue((output / "ncu" / "counter-access-verified.txt").is_file())
-        self.assertEqual(
-            (output / "preparation" / "artifacts-check.log").stat().st_mode & 0o777,
-            0o644,
-        )
-        self.assertTrue((output / "nsys" / "mtp3-round.nsys-rep").is_file())
-        self.assertTrue((output / "nsys" / "summary-verified.txt").is_file())
-        for name in (
-            "q5-split2-cold.ncu-rep",
-            "q5-split2-q4-produced.ncu-rep",
-            "q5-c16-q4-produced.ncu-rep",
-        ):
-            self.assertGreater((output / "ncu" / name).stat().st_size, 0, name)
-        self.assertTrue((output / "ncu" / "q4-packet" / "summary.json").is_file())
-        manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
-        self.assertTrue(manifest["source_clean"])
-        self.assertEqual(manifest["counter_access_gate"], "q5-split2-cold")
-        summary = json.loads((output / "timings" / "summary.json").read_text(encoding="utf-8"))
-        self.assertAlmostEqual(summary["ratios"]["cold_over_q4_produced"], 1.25)
-        self.assertAlmostEqual(summary["ratios"]["c16_over_public_q4_produced"], 1.3)
-        self.assertEqual(summary["c16_triage"], "20-to-50-percent-slower")
-        log = self.tool_log_lines()
-        q4_gate = log.index("ninfer_linear_swiglu_q4_a16_test")
-        q5_gate = log.index("ninfer_linear_add_q5_a16_test")
-        counter_gate = next(i for i, line in enumerate(log) if line.startswith("ncu --profile-from-start"))
-        mtp_round = next(i for i, line in enumerate(log) if line.startswith("mtp-round "))
-        first_timing = next(i for i, line in enumerate(log) if line.startswith("post-mixer --describe"))
-        self.assertLess(q4_gate, q5_gate)
-        self.assertLess(q5_gate, counter_gate)
-        self.assertLess(counter_gate, mtp_round)
-        self.assertLess(mtp_round, first_timing)
-        self.assertTrue(
-            any(
-                line.startswith("nsys profile ")
-                and "--capture-range-end=stop" in line
-                and "--cuda-graph-trace=node" in line
-                and "--stop-on-range-end" not in line
-                for line in log
-            )
-        )
-        self.assertFalse(any(line.startswith("cmake --build ") for line in log))
+    def test_wrong_artifact_blocks_build(self) -> None:
+        self.artifact.write_bytes(b'other artifact')
+        result = self.run_mode('prepare')
+        self.assertEqual(result.returncode, 2)
+        self.assertIn('artifact SHA-256 differs', result.stderr)
+        self.assertEqual(self.calls(), [])
 
-    def test_rejects_any_uncommitted_source_change_before_build(self) -> None:
-        completed = self.run_prepare(source_dirty=True)
+    def test_unsupported_nsys_blocks_configure(self) -> None:
+        result = self.run_mode('prepare', MOCK_HELP_FAIL='1')
+        self.assertEqual(result.returncode, 64)
+        self.assertFalse(any(call[0] == 'cmake' for call in self.calls()))
 
-        self.assertEqual(completed.returncode, 2)
-        self.assertIn("completely clean committed worktree", completed.stderr)
-        self.assertFalse((self.paths["prepare"] / "prepare-complete.txt").exists())
-        self.assertFalse(any(line.startswith("cmake ") for line in self.tool_log_lines()))
+    def test_counter_permission_failure_blocks_later_gpu_work(self) -> None:
+        self.prepare_ok()
+        result = self.run_mode('capture', MOCK_COUNTER_DENIED='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('performance-counter access is unavailable', result.stderr)
+        self.assertFalse((self.output / 'ncu/counter-access-verified.txt').exists())
+        self.assertFalse(any(call[0] == 'ninfer_qwen3_5_mtp_round_bench' for call in self.calls()))
+        self.assertFalse((self.output / 'packet-complete.txt').exists())
 
-    def test_rejects_non_ancestor_upstream_before_build(self) -> None:
-        completed = self.run_prepare(ancestry_invalid=True)
+    def test_changed_prepared_binary_blocks_capture(self) -> None:
+        self.prepare_ok()
+        with (self.build / 'bench/ninfer_q5_linear_add_bench').open('a') as stream:
+            stream.write('\n# changed\n')
+        result = self.run_mode('capture')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.output.exists())
 
-        self.assertEqual(completed.returncode, 2)
-        self.assertIn("not an ancestor of NINFER_EXPECTED_SOURCE_SHA", completed.stderr)
-        self.assertFalse((self.paths["prepare"] / "prepare-complete.txt").exists())
-        self.assertFalse(any(line.startswith("cmake ") for line in self.tool_log_lines()))
-
-    def test_rejects_missing_capture_tool_before_build(self) -> None:
-        (self.mock_tools / "nsys").unlink()
-
-        completed = self.run_prepare()
-
-        self.assertEqual(completed.returncode, 2)
-        self.assertIn("required preparation command is unavailable: nsys", completed.stderr)
-        self.assertFalse((self.paths["prepare"] / "prepare-complete.txt").exists())
-        self.assertFalse(any(line.startswith("cmake ") for line in self.tool_log_lines()))
-
-    def test_rejects_unsupported_nsys_profile_cli_before_build(self) -> None:
-        completed = self.run_prepare(nsys_profile_unsupported=True)
-
-        self.assertEqual(completed.returncode, 64)
-        self.assertFalse((self.paths["prepare"] / "prepare-complete.txt").exists())
-        self.assertFalse(any(line.startswith("cmake ") for line in self.tool_log_lines()))
-
-    def test_counter_permission_failure_blocks_later_profiling(self) -> None:
-        prepared = self.run_prepare()
-        self.assertEqual(prepared.returncode, 0, prepared.stderr + prepared.stdout)
-        self.paths["tool_log"].write_text("", encoding="utf-8")
-
-        completed = self.run_capture(counter_denied=True)
-
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("performance-counter access is unavailable", completed.stderr)
-        self.assertFalse((self.paths["output"] / "ncu" / "counter-access-verified.txt").exists())
-        self.assertFalse((self.paths["output"] / "timings" / "summary.json").exists())
-        self.assertFalse(any(line.startswith("nsys profile ") for line in self.tool_log_lines()))
-
-    def test_rejects_nsys_summary_without_graph_nodes(self) -> None:
-        prepared = self.run_prepare()
-        self.assertEqual(prepared.returncode, 0, prepared.stderr + prepared.stdout)
-        self.paths["tool_log"].write_text("", encoding="utf-8")
-
-        completed = self.run_capture(graph_summary_invalid=True)
-
-        self.assertNotEqual(completed.returncode, 0)
-        self.assertIn("did not expose the CUDA Graph node topology", completed.stderr)
-        self.assertFalse((self.paths["output"] / "nsys" / "summary-verified.txt").exists())
-        self.assertFalse((self.paths["output"] / "packet-complete.txt").exists())
+    def test_missing_graph_topology_blocks_packet_completion(self) -> None:
+        self.prepare_ok()
+        result = self.run_mode('capture', MOCK_GRAPH_BAD='1')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('did not expose the CUDA Graph node topology', result.stderr)
+        self.assertFalse((self.output / 'packet-complete.txt').exists())
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     unittest.main()

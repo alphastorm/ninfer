@@ -1,0 +1,197 @@
+{
+  "schema": "ninfer-persistence-proof/1",
+  "candidate": "31333f3e2f0e73bb5e996475fbd5ecf2724c72a2",
+  "image": "sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
+  "commands": [
+    {
+      "label": "build",
+      "command": [
+        "bash",
+        "-lc",
+        "cmake --build /build -j16 --target ninfer_qwen3_5_checkpoint_restart_test ninfer_qwen3_5_grammar_real_test ninfer_qwen3_5_shared_prefix_real_test ninfer_qwen3_5_native_transactions_test ninfer_kv_history_test"
+      ],
+      "environment": {
+        "LD_LIBRARY_PATH": "/opt/ninfer-driver-stub"
+      },
+      "exit": 0,
+      "seconds": 16.14,
+      "log_sha256": "6fae048ebdf1110419ad977ea4e7ce566c4e2aa22068c805179c5ee8bba5fb69",
+      "evidence": []
+    },
+    {
+      "label": "kv",
+      "command": [
+        "/build/tests/ninfer_kv_history_test"
+      ],
+      "environment": {},
+      "exit": 0,
+      "seconds": 0.913,
+      "log_sha256": "33236baa083b576fdfd15b85075c215e8d65016818a6815c2dd763812fb9c41b",
+      "evidence": []
+    },
+    {
+      "label": "grammar",
+      "command": [
+        "/build/tests/ninfer_qwen3_5_grammar_real_test"
+      ],
+      "environment": {
+        "NINFER_TEST_ARTIFACT": "/model.ninfer"
+      },
+      "exit": 0,
+      "seconds": 21.75,
+      "log_sha256": "c46518532093dce90df8bb8f6d0c30d0298f65d0ae2287232d144162b75303a4",
+      "evidence": [
+        "choice/regex: literals, fullmatch, thinking, continuation, EOS, truncation and mixed rows passed",
+        "constraints none graph: content, sampling, thinking, continuation, mixed batch, truncation, raw input, JSON/schema passed"
+      ],
+      "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da"
+    },
+    {
+      "label": "shared-mtp",
+      "command": [
+        "/build/tests/ninfer_qwen3_5_shared_prefix_real_test",
+        "mtp"
+      ],
+      "environment": {
+        "NINFER_TEST_KV_DTYPE": "fp8",
+        "NINFER_TEST_ARTIFACT": "/model.ninfer"
+      },
+      "exit": 0,
+      "seconds": 16.636,
+      "log_sha256": "1603c7d18b7b1b51c87d399edbf84302ac7a56248cf1c81517550b90fd84a53e",
+      "evidence": [
+        "PASS shared-prefix backend=mtp kv=fp8 clients=12 reused_tokens=1786 decode_rounds=202 decode_rows=388 partial_tail_clients=6 available=1"
+      ],
+      "artifact_sha256": "5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7"
+    },
+    {
+      "label": "native-none",
+      "command": [
+        "/build/tests/ninfer_qwen3_5_native_transactions_test",
+        "none"
+      ],
+      "environment": {
+        "NINFER_TEST_ARTIFACT": "/model.ninfer"
+      },
+      "exit": 0,
+      "seconds": 17.212,
+      "log_sha256": "2fa3d0a1cca4fdb5bcc7d6e0a688d44e89e6e7b5bad458e25136142e18215be3",
+      "evidence": [
+        "OK native transaction cancellation, paused ownership and replay recovery"
+      ],
+      "artifact_sha256": "5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7"
+    },
+    {
+      "label": "restart-none",
+      "command": [
+        "python3",
+        "/src/tests/models/qwen3_5/run_checkpoint_restart.py",
+        "/build/tests/ninfer_qwen3_5_checkpoint_restart_test",
+        "none"
+      ],
+      "environment": {
+        "NINFER_TEST_ARTIFACT": "/model.ninfer"
+      },
+      "exit": 0,
+      "seconds": 25.558,
+      "log_sha256": "cadd110c26b858d4756ab0d26f44abed8a36a9afee15adf0cc573a51c9f18fe9",
+      "evidence": [
+        "OK checkpoint restart export none",
+        "PASS native-validation backend=none host_capacity=0 native_reservations=0 identity_layout_payload=verified",
+        "PASS restart scenario=terminal backend=none points=3 states=3 continuation_bytes=146",
+        "OK checkpoint restart import none"
+      ],
+      "artifact_sha256": "5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7"
+    },
+    {
+      "label": "native-mtp",
+      "command": [
+        "/build/tests/ninfer_qwen3_5_native_transactions_test",
+        "mtp"
+      ],
+      "environment": {
+        "NINFER_TEST_ARTIFACT": "/model.ninfer"
+      },
+      "exit": 0,
+      "seconds": 17.687,
+      "log_sha256": "2fa3d0a1cca4fdb5bcc7d6e0a688d44e89e6e7b5bad458e25136142e18215be3",
+      "evidence": [
+        "OK native transaction cancellation, paused ownership and replay recovery"
+      ],
+      "artifact_sha256": "5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7"
+    },
+    {
+      "label": "restart-mtp",
+      "command": [
+        "python3",
+        "/src/tests/models/qwen3_5/run_checkpoint_restart.py",
+        "/build/tests/ninfer_qwen3_5_checkpoint_restart_test",
+        "mtp"
+      ],
+      "environment": {
+        "NINFER_TEST_ARTIFACT": "/model.ninfer"
+      },
+      "exit": 0,
+      "seconds": 25.807,
+      "log_sha256": "fc033e3049a1a110b73fd02208003b0907541753cca4bc393cae116d46378fac",
+      "evidence": [
+        "OK checkpoint restart export mtp",
+        "PASS native-validation backend=mtp host_capacity=0 native_reservations=0 identity_layout_payload=verified",
+        "PASS restart scenario=terminal backend=mtp points=3 states=3 continuation_bytes=146",
+        "OK checkpoint restart import mtp"
+      ],
+      "artifact_sha256": "5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7"
+    },
+    {
+      "label": "native-dflash2",
+      "command": [
+        "/build/tests/ninfer_qwen3_5_native_transactions_test",
+        "dflash2"
+      ],
+      "environment": {
+        "NINFER_TEST_ARTIFACT": "/model.ninfer"
+      },
+      "exit": 0,
+      "seconds": 17.96,
+      "log_sha256": "2fa3d0a1cca4fdb5bcc7d6e0a688d44e89e6e7b5bad458e25136142e18215be3",
+      "evidence": [
+        "OK native transaction cancellation, paused ownership and replay recovery"
+      ],
+      "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da"
+    },
+    {
+      "label": "restart-dflash2",
+      "command": [
+        "python3",
+        "/src/tests/models/qwen3_5/run_checkpoint_restart.py",
+        "/build/tests/ninfer_qwen3_5_checkpoint_restart_test",
+        "dflash2"
+      ],
+      "environment": {
+        "NINFER_TEST_ARTIFACT": "/model.ninfer"
+      },
+      "exit": 0,
+      "seconds": 38.609,
+      "log_sha256": "5daa4f09a53ae349d45af777a7fff2c80651bd955cfba514764784839e5496ff",
+      "evidence": [
+        "OK checkpoint restart export dflash2",
+        "PASS native-validation backend=dflash2 host_capacity=0 native_reservations=0 identity_layout_payload=verified",
+        "PASS restart scenario=terminal backend=dflash2 points=3 states=3 continuation_bytes=146",
+        "PASS restart scenario=partial backend=dflash2 points=3 states=3 continuation_bytes=146",
+        "PASS restart scenario=forced backend=dflash2 points=3 states=3 continuation_bytes=139",
+        "PASS restart scenario=pause backend=dflash2 points=3 states=3 continuation_bytes=146",
+        "OK checkpoint restart import dflash2"
+      ],
+      "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da"
+    }
+  ],
+  "passed": true,
+  "job": "20261025T042854Z-A2-persistence-green-31333f3e-r6-508285",
+  "job_seconds": 201,
+  "job_exit": 0,
+  "leftover_containers_stopped": 0,
+  "unowned_containers_left": 0,
+  "private_instrumentation": false,
+  "reservation_repair": "fa92d9a9fb67577dc9c91b917d6f8a4d20a8611e",
+  "unchanged_grammar_and_shared_prefix_fixtures": true
+}

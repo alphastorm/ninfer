@@ -2,91 +2,33 @@
 
 #include "ninfer/build_info.h"
 
-#include <nlohmann/json.hpp>
-
 #include <sstream>
-#include <string>
 
 namespace ninfer::serve {
-namespace {
+using Json = nlohmann::json;
 
-nlohmann::json optional_identity(const std::string& value) {
-    return value.empty() ? nlohmann::json(nullptr) : nlohmann::json(value);
+Json server_identity_json(const ServeOptions& options, const ninfer::LoadSummary& load) {
+    const auto build = ninfer::build_info();
+    return {{"upstream_base_sha", build.upstream_base_sha}, {"patch_stack_sha", build.patch_stack_sha},
+            {"source_dirty", build.source_dirty}, {"build_profile", build.build_profile},
+            {"build_type", build.build_type}, {"cxx_compiler", build.cxx_compiler},
+            {"cuda_compiler", build.cuda_compiler}, {"cuda_toolkit", build.cuda_toolkit},
+            {"cuda_architecture", build.cuda_architecture},
+            {"deployment_profile", options.deployment_profile}, {"binary_sha256", options.binary_sha256},
+            {"model_artifact_sha256", options.artifact_sha256}, {"config_sha256", options.config_sha256},
+            {"target", load.architecture}, {"model_id", resolve_public_model_id(options, load.model_name)},
+            {"weights_id", options.artifact_sha256}};
 }
-
-} // namespace
-
-nlohmann::json server_identity_json(const ServeOptions& options, const ninfer::LoadSummary& load) {
-    const ninfer::BuildInfo build = ninfer::build_info();
-    return nlohmann::json{
-        {"upstream_base_sha", std::string(build.upstream_base_sha)},
-        {"patch_stack_sha", std::string(build.patch_stack_sha)},
-        {"source_dirty", build.source_dirty},
-        {"build_profile", std::string(build.build_profile)},
-        {"build_type", std::string(build.build_type)},
-        {"cxx_compiler", std::string(build.cxx_compiler)},
-        {"cuda_compiler", std::string(build.cuda_compiler)},
-        {"cuda_toolkit", std::string(build.cuda_toolkit)},
-        {"deployment_profile", optional_identity(options.deployment_profile)},
-        {"binary_sha256", optional_identity(options.binary_sha256)},
-        {"model_artifact_sha256", optional_identity(options.artifact_sha256)},
-        {"config_sha256", optional_identity(options.config_sha256)},
-        {"target", load.target},
-        {"model_id", load.model_id},
-        {"weights_id", load.weights_id},
-    };
-}
-
-nlohmann::json session_checkpoint_runtime_fingerprint(const ServeOptions& options,
-                                                      const ninfer::EngineOptions& engine,
-                                                      const ninfer::LoadSummary& load) {
-    const auto& cache = engine.context_cache;
-    return nlohmann::json{
-        {"artifact_type", "ninfer_session_checkpoint_runtime"},
-        {"schema_version", 1},
-        {"server", server_identity_json(options, load)},
-        {"frontend", {{"artifact_sha256", options.artifact_sha256},
-                      {"config_sha256", options.config_sha256},
-                      {"target", load.target},
-                      {"model_id", load.model_id},
-                      {"weights_id", load.weights_id}}},
-        {"engine", {{"max_context", engine.max_context},
-                    {"kv_capacity_mode", static_cast<int>(engine.kv_capacity.mode)},
-                    {"kv_capacity_tokens", engine.kv_capacity.explicit_tokens},
-                    {"kv_capacity_headroom_bytes", engine.kv_capacity.automatic_headroom_bytes},
-                    {"max_concurrency", engine.max_concurrency},
-                    {"prefill_chunk", engine.prefill_chunk},
-                    {"kv_cache", static_cast<int>(engine.kv_cache)},
-                    {"speculative_backend", static_cast<int>(engine.speculative.backend)},
-                    {"speculative_draft_tokens", engine.speculative.draft_tokens},
-                    {"speculative_proposal_head", static_cast<int>(engine.speculative.proposal_head)},
-                    {"enable_vision", engine.enable_vision},
-                    {"use_cuda_graph", engine.use_cuda_graph},
-                    {"device_state_slots", *cache.device_state_slots},
-                    {"host_state_slots", cache.host_state_slots},
-                    {"host_kv_capacity_bytes", cache.host_kv_capacity_bytes},
-                    {"max_private_continuations", *cache.max_private_continuations},
-                    {"max_shared_prefixes", *cache.max_shared_prefixes},
-                    {"max_long_anchors_per_continuation", *cache.max_long_anchors_per_continuation},
-                    {"max_cache_markers_per_request", *cache.max_cache_markers_per_request}}},
-        {"responses", {{"max_records", options.response_store_max_records},
-                       {"max_bytes", options.response_store_max_bytes}}},
-    };
- }
 std::string format_server_identity(const ServeOptions& options, const ninfer::LoadSummary& load) {
-    const ninfer::BuildInfo build = ninfer::build_info();
-    const auto value_or_unknown   = [](const std::string& value) -> const std::string& {
-        static const std::string unknown = "unknown";
-        return value.empty() ? unknown : value;
-    };
+    const auto identity = server_identity_json(options, load);
     std::ostringstream out;
-    out << "identity upstream=" << build.upstream_base_sha << " patch=" << build.patch_stack_sha
-        << " dirty=" << (build.source_dirty ? "true" : "false") << " build=" << build.build_profile
-        << " deployment=" << value_or_unknown(options.deployment_profile)
-        << " binary_sha256=" << value_or_unknown(options.binary_sha256)
-        << " artifact_sha256=" << value_or_unknown(options.artifact_sha256)
-        << " config_sha256=" << value_or_unknown(options.config_sha256)
-        << " model=" << load.model_id << " weights=" << load.weights_id;
+    out << "identity upstream=" << identity.at("upstream_base_sha").get<std::string>()
+        << " patch=" << identity.at("patch_stack_sha").get<std::string>()
+        << " dirty=" << (identity.at("source_dirty").get<bool>() ? "true" : "false")
+        << " build=" << identity.at("build_profile").get<std::string>()
+        << " deployment=" << options.deployment_profile << " binary_sha256=" << options.binary_sha256
+        << " artifact_sha256=" << options.artifact_sha256 << " config_sha256=" << options.config_sha256
+        << " model=" << identity.at("model_id").get<std::string>();
     return out.str();
 }
 

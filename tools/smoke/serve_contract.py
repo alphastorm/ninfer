@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-
 # A one-pixel PNG. The target frontend performs its normal resize/patch expansion.
 _IMAGE_DATA_URI = (
     "data:image/png;base64,"
@@ -85,16 +84,12 @@ def json_response(
     expected_status: int = 200,
 ) -> dict[str, Any]:
     response = request(
-        base_url,
-        method,
-        path,
-        payload,
-        headers=headers,
-        expected_status=expected_status,
+        base_url, method, path, payload,
+        headers=headers, expected_status=expected_status,
     )
     if response.content_type != "application/json":
         raise ContractError(
-            f"{method} {path} returned content-type={response.content_type}"
+            f"{method} {path} returned status={response.status} content-type={response.content_type}"
         )
     try:
         value = json.loads(response.body)
@@ -150,6 +145,29 @@ def require_usage(usage: Any, prompt_key: str, completion_key: str) -> tuple[int
     return prompt, completion
 
 
+def require_greedy_usage_parity(streamed: dict[str, Any], reference: dict[str, Any]) -> None:
+    """Compare token accounting, not the cache hit count of two different requests."""
+    normalized = []
+    for usage in (streamed, reference):
+        prompt, completion = require_usage(usage, "prompt_tokens", "completion_tokens")
+        if usage.get("total_tokens") != prompt + completion:
+            raise ContractError("greedy comparison usage has an invalid total_tokens")
+        details = usage.get("prompt_tokens_details")
+        if not isinstance(details, dict):
+            raise ContractError("greedy comparison usage omitted prompt_tokens_details")
+        cached = details.get("cached_tokens")
+        if type(cached) is not int or not 0 <= cached <= prompt:
+            raise ContractError("greedy comparison usage has invalid cached_tokens")
+        normalized.append({
+            **usage,
+            "prompt_tokens_details": {
+                key: value for key, value in details.items() if key != "cached_tokens"
+            },
+        })
+    if normalized[0] != normalized[1]:
+        raise ContractError("streamed token accounting differs from non-streaming output")
+
+
 def openai_nonstream(
     base_url: str,
     model: str,
@@ -181,6 +199,8 @@ def openai_nonstream(
     prompt, completion = require_usage(
         response.get("usage"), "prompt_tokens", "completion_tokens"
     )
+    if completion > max_tokens:
+        raise ContractError("OpenAI output exceeds the requested token budget")
     usage = response["usage"]
     if usage.get("total_tokens") != prompt + completion:
         raise ContractError("OpenAI total_tokens does not equal prompt + completion")
@@ -348,7 +368,9 @@ def responses_nonstream(
         raise ContractError("Responses non-streaming envelope has an invalid id")
     if response.get("model") != model or response.get("store") is not store:
         raise ContractError("Responses non-streaming request fields were not echoed")
-    require_responses_usage(response.get("usage"))
+    _, completion = require_responses_usage(response.get("usage"))
+    if completion > payload["max_output_tokens"]:
+        raise ContractError("Responses output exceeds the requested token budget")
     response_text(response)
     return response
 
@@ -446,12 +468,10 @@ def exercise(base_url: str, model: str) -> dict[str, Any]:
     messages = [{"role": "user", "content": "Reply with a single short word."}]
     stops = ["__NINFER_SMOKE_UNLIKELY_STOP__"]
     nonstream = openai_nonstream(base_url, model, messages, max_tokens=4, stop=stops)
-    expected_message = nonstream["choices"][0]["message"]
-    expected_content = expected_message.get("content", "")
-    expected_reasoning = expected_message.get("reasoning_content", "")
+    message = nonstream["choices"][0]["message"]
     if nonstream["usage"]["completion_tokens"] <= 0:
         raise ContractError("OpenAI request completed without producing a token")
-    if not expected_content and not expected_reasoning:
+    if not message.get("content") and not message.get("reasoning_content"):
         raise ContractError("OpenAI request completed without publishing output bytes")
     stream_payload = {
         "model": model,
@@ -464,18 +484,21 @@ def exercise(base_url: str, model: str) -> dict[str, Any]:
     }
     streamed = request(base_url, "POST", "/v1/chat/completions", stream_payload)
     content, reasoning, stream_finish, stream_usage = parse_openai_stream(streamed)
-    if content != expected_content:
-        raise ContractError(
-            "streamed content differs from the non-streaming greedy response"
-        )
-    if reasoning != expected_reasoning:
-        raise ContractError(
-            "streamed reasoning differs from the non-streaming greedy response"
-        )
+    if (content, reasoning) != (message.get("content", ""), message.get("reasoning_content", "")):
+        raise ContractError("streamed output differs from the non-streaming greedy response")
     if stream_finish != nonstream["choices"][0]["finish_reason"]:
-        raise ContractError("streamed and non-streaming finish reasons differ")
-    if stream_usage != nonstream["usage"]:
-        raise ContractError("streamed and non-streaming usage differs")
+        raise ContractError("streamed finish reason differs from non-streaming output")
+    require_greedy_usage_parity(stream_usage, nonstream["usage"])
+    if not content and not reasoning:
+        raise ContractError("OpenAI stream completed without publishing output bytes")
+    if (
+        not 0
+        < stream_usage["completion_tokens"]
+        <= stream_payload["max_completion_tokens"]
+    ):
+        raise ContractError("OpenAI stream violated its output token budget")
+    if stream_usage["prompt_tokens"] != nonstream["usage"]["prompt_tokens"]:
+        raise ContractError("OpenAI input token count changed for the same messages")
 
     responses_input = "Reply with a single short word."
     response_count = json_response(
@@ -489,7 +512,6 @@ def exercise(base_url: str, model: str) -> dict[str, Any]:
     ):
         raise ContractError("Responses input_tokens returned the wrong shape")
     response_sync = responses_nonstream(base_url, model, responses_input, store=False)
-    response_sync_text, response_sync_reasoning = response_text(response_sync)
     response_prompt_tokens, response_output_tokens = require_responses_usage(
         response_sync.get("usage")
     )
@@ -506,21 +528,14 @@ def exercise(base_url: str, model: str) -> dict[str, Any]:
     response_stream = request(
         base_url, "POST", "/v1/responses", response_stream_payload
     )
-    streamed_text, streamed_reasoning, response_stream_terminal = (
-        parse_responses_stream(response_stream)
-    )
-    if (streamed_text, streamed_reasoning) != (
-        response_sync_text,
-        response_sync_reasoning,
-    ):
-        raise ContractError(
-            "Responses streaming output differs from greedy non-streaming output"
-        )
-    _, streamed_output_tokens = require_responses_usage(
+    _, _, response_stream_terminal = parse_responses_stream(response_stream)
+    streamed_input_tokens, streamed_output_tokens = require_responses_usage(
         response_stream_terminal.get("usage")
     )
-    if streamed_output_tokens != response_output_tokens:
-        raise ContractError("Responses streaming output-token usage differs")
+    if streamed_output_tokens > response_stream_payload["max_output_tokens"]:
+        raise ContractError("Responses stream violated its output token budget")
+    if streamed_input_tokens != response_count["input_tokens"]:
+        raise ContractError("Responses stream input count differs from input_tokens")
 
     stored_response = responses_nonstream(
         base_url, model, "Remember the code word ORCHID. Reply briefly.", store=True

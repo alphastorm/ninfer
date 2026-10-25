@@ -13,6 +13,7 @@ struct BuildInfo {
     std::string_view cxx_compiler;
     std::string_view cuda_compiler;
     std::string_view cuda_toolkit;
+    std::string_view cuda_architecture;
     bool source_dirty = false;
 };
 

@@ -1,0 +1,66 @@
+{
+  "schema": "ninfer-reservation-red-green/1",
+  "job": "20261025T031554Z-A2-persistence-proof-465bccf9-r2-469146",
+  "image_sha256": "e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
+  "pre_fix": "19043a4910513e59b188bf9a4a0e8623dc660200",
+  "test_fixture_source": "465bccf926bad64ed28091a80e4ed3d858ad6b6d",
+  "artifact_sha256": "5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7",
+  "pre_fix_build_seconds": 188.195,
+  "pre_fix_build_exit": 0,
+  "fixtures_unchanged_between_red_and_green": true,
+  "tests": [
+    {
+      "name": "replay_write_reservation",
+      "command": ["ninfer_kv_history_test"],
+      "red_exit": 1,
+      "red_seconds": 1.070,
+      "red_diagnostic": "replay quote omitted post-rewind growth or retained-tail COW",
+      "red_log_sha256": "ffbacbc4e3790adf19ebd780e6dcc378c85e055db94ccf05f716b6968a129234",
+      "isolated_repair": "117a166a6",
+      "production_file": "src/models/common/context/kv_history.cpp",
+      "repair_build_seconds": 3.828,
+      "green_exit": 0,
+      "green_seconds": 1.020,
+      "green_evidence": "KV history and snapshot ownership passed",
+      "green_log_sha256": "33236baa083b576fdfd15b85075c215e8d65016818a6815c2dd763812fb9c41b"
+    },
+    {
+      "name": "admitted_unit_acquires_tail_reader",
+      "command": ["ninfer_qwen3_5_native_transactions_test", "none"],
+      "environment": {"NINFER_NATIVE_TRANSACTION_SCENARIO": "admitted-tail-reader"},
+      "red_exit": 1,
+      "red_seconds": 10.895,
+      "red_diagnostic": "existing permit did not reserve newly required tail COW",
+      "red_log_sha256": "ef9f5a411ed1da637687730921002a1b88855b4d99bb508fafc29f10cf2c24a9",
+      "after_rewind_repair_exit": 1,
+      "after_rewind_repair_seconds": 10.541,
+      "after_rewind_repair_log_sha256": "ef9f5a411ed1da637687730921002a1b88855b4d99bb508fafc29f10cf2c24a9",
+      "isolated_repair": "d1f4832e1",
+      "production_file": "src/models/qwen3_5/program/planning/request_plan.cpp",
+      "repair_build_seconds": 5.181,
+      "green_exit": 0,
+      "green_seconds": 10.445,
+      "green_evidence": "OK admitted_unit_acquires_tail_reader",
+      "green_log_sha256": "4f68a94d43a07914c1ebaa9803a27a7e75944b010a708fa5f2548197a0080387"
+    }
+  ],
+  "shared_prefix_baseline": {
+    "exit": 1,
+    "seconds": 15.309,
+    "diagnostic": "FAIL shared-prefix: primed client did not share its retained prefix",
+    "log_sha256": "9e7fa9205bb671c4037980c351c0248bb2cf24cbfc7689f3fb04d7bd877affc1",
+    "reservation_crash_reproduced": false,
+    "valid_shared_prefix_proof": false
+  },
+  "later_candidate_build": {
+    "exit": 1,
+    "seconds": 7.389,
+    "diagnostic": "Stale engine.cpp.o retained tracer references after switching source-tree bind mounts on one Ninja build directory",
+    "log_sha256": "1b73abe478c9a9f4c1390af691c1f57fc326c8db92d9c76a64f79860e0e8c7e3",
+    "candidate_gpu_tests_executed": false
+  },
+  "job_seconds": 259,
+  "job_exit": 1,
+  "leftover_containers_stopped": 0,
+  "unowned_containers_left": 0
+}

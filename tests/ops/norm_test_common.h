@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/buffer.h"
 #include "ops/op_tester.h"
 
 #include <cstdint>
@@ -21,14 +22,14 @@ struct Shape {
     }
 };
 
-inline Tensor tensor_for(void* data, const Shape& shape) {
-    if (shape.tokens == 1) return Tensor(data, DType::BF16, {shape.d, shape.rows});
-    return Tensor(data, DType::BF16, {shape.d, shape.rows, shape.tokens});
+inline Tensor tensor_for(MemorySpan memory, const Shape& shape) {
+    if (shape.tokens == 1) return Tensor(memory, DType::BF16, {shape.d, shape.rows});
+    return Tensor(memory, DType::BF16, {shape.d, shape.rows, shape.tokens});
 }
 
 struct DeviceInput {
     DeviceBuffer storage;
-    void* data = nullptr;
+    MemorySpan memory;
     std::vector<std::uint16_t> expected;
 };
 
@@ -40,7 +41,7 @@ inline DeviceInput make_input(const std::vector<float>& values, bool bf16x2_unal
         input.expected[leading + index] = f32_to_bf16(values[index]);
     }
     input.storage = to_device(input.expected);
-    input.data    = static_cast<std::uint16_t*>(input.storage.p) + leading;
+    input.memory  = input.storage.span().subspan(leading * sizeof(std::uint16_t));
     return input;
 }
 

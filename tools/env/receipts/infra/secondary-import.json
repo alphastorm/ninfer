@@ -1,0 +1,21 @@
+{
+  "source": "64d10fbf9f8e6bfc79ab0570b94674c5b9997929",
+  "files": {
+    "build-env-master-64d10fbf-r2.tar": {
+      "bytes": 3725653504,
+      "sha256": "1cf2a05505a3ff91703bd811be75177a9f06b46e6ce540e285e2c4adc4900008"
+    },
+    "qwen3_8_27b.ninfer": {
+      "bytes": 20437521664,
+      "sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da"
+    },
+    "master-64d10fbf.tar": {
+      "bytes": 70103040,
+      "sha256": "141bddf0f7f7c0331796f09848b817dee66966ca06163f508ffefe88cb4d4006"
+    }
+  },
+  "load_exit_code": 0,
+  "image_id": "sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
+  "passed": true,
+  "wall_seconds": 375.825
+}

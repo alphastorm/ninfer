@@ -44,7 +44,8 @@ private:
     std::mutex mutex_;
     std::condition_variable_any cv_;
     std::deque<std::string> queue_;
-    // Includes both queued and currently executing sessions so repeated completed turns coalesce.
+    // Sessions queued but not yet running. A running save has released its key, so a turn that
+    // completes meanwhile - or a retry the save itself requests - queues a fresh save.
     std::unordered_set<std::string> pending_;
     bool accepting_ = true;
     std::jthread thread_;

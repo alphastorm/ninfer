@@ -1,6 +1,6 @@
 #include "ops/softmax_attention/dense/packed/launch.h"
 
-#include "ops/softmax_attention/dense/packed/kernel.cuh"
+#include "ops/softmax_attention/kernels/noncausal/kernel.cuh"
 #include "core/device.h"
 
 #include <cstdint>
@@ -9,49 +9,7 @@
 namespace ninfer::ops::detail {
 namespace {
 
-std::int64_t stride_elements(const Tensor& tensor, int dim) {
-    return tensor.nb[dim] / static_cast<std::int64_t>(sizeof(__nv_bfloat16));
-}
-
-template <int Br, int Bc>
-void launch_flash(const Tensor& q, const Tensor& k, const Tensor& v,
-                  const PackedAttentionTile* tiles, std::int32_t uniform_segment_length,
-                  std::int32_t query_tiles, Tensor& out, cudaStream_t stream) {
-    constexpr int kThreads = Br * 2;
-    constexpr int kSmemBytes =
-        (Br + 2 * Bc) * kPackedAttentionPaddedD * static_cast<int>(sizeof(__nv_bfloat16));
-    const dim3 grid(static_cast<unsigned>(query_tiles),
-                    static_cast<unsigned>(kPackedAttentionHeads), 1u);
-    packed_attention_flash_kernel<Br, Bc><<<grid, kThreads, kSmemBytes, stream>>>(
-        static_cast<const __nv_bfloat16*>(q.data), static_cast<const __nv_bfloat16*>(k.data),
-        static_cast<const __nv_bfloat16*>(v.data), tiles, q.ne[2], uniform_segment_length,
-        static_cast<__nv_bfloat16*>(out.data), stride_elements(q, 0), stride_elements(q, 1),
-        stride_elements(q, 2), stride_elements(k, 0), stride_elements(k, 1), stride_elements(k, 2),
-        stride_elements(v, 0), stride_elements(v, 1), stride_elements(v, 2));
-    CUDA_CHECK(cudaGetLastError());
-}
-
-} // namespace
-
-void packed_attention_launch(const Tensor& q, const Tensor& k, const Tensor& v,
-                             const Tensor& cu_seqlens, Tensor* tiles, Tensor& out,
-                             cudaStream_t stream) {
-    const bool packed_segments = tiles != nullptr;
-    const int max_tiles =
-        packed_segments ? tiles->ne[1] : (q.ne[2] + kPackedAttentionBr - 1) / kPackedAttentionBr;
-    if (packed_segments) {
-        packed_attention_prepare_tiles_kernel<<<1, 256, 0, stream>>>(
-            static_cast<const std::int32_t*>(cu_seqlens.data), cu_seqlens.ne[0] - 1,
-            static_cast<PackedAttentionTile*>(tiles->data), max_tiles, q.ne[2]);
-        CUDA_CHECK(cudaGetLastError());
-    }
-
-    launch_flash<kPackedAttentionBr, kPackedAttentionBc>(
-        q, k, v, packed_segments ? static_cast<const PackedAttentionTile*>(tiles->data) : nullptr,
-        0, max_tiles, out, stream);
-}
-
-std::int32_t packed_attention_uniform_tile(std::int32_t segment_length) {
+std::int32_t select_uniform_tile(std::int32_t segment_length) {
     // Measured issued-MMA rates are approximately 3:6:8 for the 16/32/64
     // tiles. Minimize padded tile area divided by that rate.
     constexpr std::int32_t tiles[] = {16, 32, 64};
@@ -72,9 +30,9 @@ std::int32_t packed_attention_uniform_tile(std::int32_t segment_length) {
     return best_tile;
 }
 
-void packed_attention_uniform_launch_with_tile(const Tensor& q, const Tensor& k, const Tensor& v,
-                                               std::int32_t segment_length, std::int32_t tile_size,
-                                               Tensor& out, cudaStream_t stream) {
+void launch_uniform_tile(const Tensor& q, const Tensor& k, const Tensor& v,
+                         std::int32_t segment_length, std::int32_t tile_size, Tensor& out,
+                         cudaStream_t stream) {
     const std::int32_t segments    = q.ne[2] / segment_length;
     const std::int32_t query_tiles = segments * ((segment_length + tile_size - 1) / tile_size);
     switch (tile_size) {
@@ -92,11 +50,32 @@ void packed_attention_uniform_launch_with_tile(const Tensor& q, const Tensor& k,
     }
 }
 
-void packed_attention_uniform_launch(const Tensor& q, const Tensor& k, const Tensor& v,
+} // namespace
+
+void launch_packed_attention(const Tensor& q, const Tensor& k, const Tensor& v,
+                             const Tensor& cu_seqlens, Tensor* tiles, Tensor& out,
+                             cudaStream_t stream) {
+    const bool packed_segments = tiles != nullptr;
+    const int max_tiles        = packed_segments
+                                     ? tiles->ne[1]
+                                     : (q.ne[2] + kPackedDescriptorRows - 1) / kPackedDescriptorRows;
+    if (packed_segments) {
+        packed_attention_prepare_tiles_kernel<kPackedDescriptorRows><<<1, 256, 0, stream>>>(
+            static_cast<const std::int32_t*>(cu_seqlens.data), cu_seqlens.ne[0] - 1,
+            static_cast<NoncausalAttentionTile*>(tiles->data), max_tiles, q.ne[2]);
+        CUDA_CHECK(cudaGetLastError());
+    }
+
+    launch_flash<kPackedDescriptorRows, kPackedDescriptorRows>(
+        q, k, v,
+        packed_segments ? static_cast<const NoncausalAttentionTile*>(tiles->data) : nullptr, 0,
+        max_tiles, out, stream);
+}
+
+void launch_packed_attention_uniform(const Tensor& q, const Tensor& k, const Tensor& v,
                                      std::int32_t segment_length, Tensor& out,
                                      cudaStream_t stream) {
-    packed_attention_uniform_launch_with_tile(
-        q, k, v, segment_length, packed_attention_uniform_tile(segment_length), out, stream);
+    launch_uniform_tile(q, k, v, segment_length, select_uniform_tile(segment_length), out, stream);
 }
 
 } // namespace ninfer::ops::detail

@@ -17,7 +17,7 @@ DOCKERFILE = REPOSITORY / "tools" / "bench" / "Dockerfile.sm120-profile-python31
 BASE_ID = "sha256:" + "a" * 64
 IMAGE_ID = "sha256:" + "b" * 64
 PYTHON_SOURCE_SHA256 = "2a9920c7a0cd236de33644ed980a13cbbc21058bfdc528febb6081575ed73be3"
-PROFILE_IMAGE_REVISION = "2"
+PROFILE_IMAGE_REVISION = "3"
 
 
 def write_executable(path: Path, content: str) -> None:

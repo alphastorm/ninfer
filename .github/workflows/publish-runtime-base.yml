@@ -1,0 +1,179 @@
+name: Publish NInfer runtime base
+run-name: Publish NInfer runtime base / ${{ inputs.source_commit }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact 40-hex commit of the selected branch or tag, reachable from an origin branch
+        required: true
+        type: string
+      base_tag_note:
+        description: Public, non-secret free-text note included in the receipt
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: ninfer-runtime-base-${{ inputs.source_commit }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish dependency-only runtime base and receipt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      SOURCE_COMMIT: ${{ inputs.source_commit }}
+      BASE_TAG_NOTE: ${{ inputs.base_tag_note }}
+      IMAGE_REPOSITORY: ghcr.io/alphastorm/ninfer
+      CUDA_RUNTIME_IMAGE: nvidia/cuda:13.1.2-runtime-ubuntu24.04
+      BUILDX_METADATA_PROVENANCE: max
+    steps:
+      - name: Check out selected ref and complete public source history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate immutable publication inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == "alphastorm/ninfer" ]]
+          [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]]
+          origin_branches="$(git for-each-ref --format='%(refname)' --contains="$SOURCE_COMMIT" refs/remotes/origin/)"
+          [[ -n "$origin_branches" ]]
+          runtime_base_release_tag="runtime-base-${SOURCE_COMMIT:0:8}-$(date -u +%Y%m%d)"
+          root="$RUNNER_TEMP/ninfer-runtime-base"
+          mkdir -p "$root"
+          printf 'RUNTIME_BASE_RELEASE_TAG=%s\n' "$runtime_base_release_tag" >> "$GITHUB_ENV"
+          printf 'RUNTIME_BASE_ROOT=%s\n' "$root" >> "$GITHUB_ENV"
+
+      - name: Set up isolated Docker Buildx builder
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Build and push untagged runtime base digest
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker buildx build \
+            --platform linux/amd64 \
+            --target runtime-base \
+            --pull \
+            --label "org.opencontainers.image.source=https://github.com/alphastorm/ninfer" \
+            --label "org.opencontainers.image.revision=$SOURCE_COMMIT" \
+            --provenance=mode=max \
+            --sbom=true \
+            --metadata-file "$RUNTIME_BASE_ROOT/build-metadata.json" \
+            --output "type=image,name=$IMAGE_REPOSITORY,push-by-digest=true,name-canonical=true,push=true" \
+            .
+          digest="$(jq -er '."containerimage.digest" | select(test("^sha256:[0-9a-f]{64}$"))' "$RUNTIME_BASE_ROOT/build-metadata.json")"
+          docker buildx imagetools inspect "$IMAGE_REPOSITORY@$digest" >/dev/null
+          # Use the build's actual material, not a second resolution of the mutable CUDA tag.
+          cuda_digest="$(jq -er \
+            --arg uri "pkg:docker/${CUDA_RUNTIME_IMAGE/:/@}?platform=linux%2Famd64" \
+            '."buildx.build.provenance".materials
+             | map(select(.uri == $uri))
+             | if length == 1 then .[0].digest.sha256 else error("expected one CUDA runtime material") end
+             | select(test("^[0-9a-f]{64}$"))
+             | "sha256:" + .' "$RUNTIME_BASE_ROOT/build-metadata.json")"
+          docker buildx imagetools inspect "$CUDA_RUNTIME_IMAGE@$cuda_digest" >/dev/null
+          printf 'IMAGE_DIGEST=%s\n' "$digest" >> "$GITHUB_ENV"
+          printf 'CUDA_RUNTIME_DIGEST=%s\n' "$cuda_digest" >> "$GITHUB_ENV"
+
+      - name: Measure installed package versions inside published image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="$IMAGE_REPOSITORY@$IMAGE_DIGEST"
+          docker pull --platform linux/amd64 "$image"
+          docker run --rm --platform linux/amd64 \
+            --name "ov-baseimage-packages-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" \
+            --entrypoint dpkg-query "$image" \
+            --show --showformat='${binary:Package}\t${Version}\t${Architecture}\t${db:Status-Status}\n' \
+            > "$RUNTIME_BASE_ROOT/packages.tsv"
+          jq -Rs 'split("\n")
+            | map(select(length > 0) | split("\t") | select(.[3] == "installed")
+              | {name: .[0], version: .[1], architecture: .[2]})
+            | sort_by(.name)' "$RUNTIME_BASE_ROOT/packages.tsv" > "$RUNTIME_BASE_ROOT/packages.json"
+          jq -e 'length > 0' "$RUNTIME_BASE_ROOT/packages.json" >/dev/null
+
+      - name: Create secret-free runtime base receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg source_commit "$SOURCE_COMMIT" \
+            --arg runtime_base_release_tag "$RUNTIME_BASE_RELEASE_TAG" \
+            --arg base_tag_note "$BASE_TAG_NOTE" \
+            --arg cuda_image "$CUDA_RUNTIME_IMAGE" \
+            --arg cuda_image_digest "$CUDA_RUNTIME_DIGEST" \
+            --arg image_reference "$IMAGE_REPOSITORY@$IMAGE_DIGEST" \
+            --arg image_digest "$IMAGE_DIGEST" \
+            --arg workflow_url "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --arg created_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --slurpfile packages "$RUNTIME_BASE_ROOT/packages.json" \
+            '{
+              artifact_type: "ninfer_runtime_base_publication_receipt",
+              schema_version: 1,
+              source_commit: $source_commit,
+              runtime_base_release_tag: $runtime_base_release_tag,
+              base_tag_note: $base_tag_note,
+              platform: "linux/amd64",
+              build_target: "runtime-base",
+              cuda_image: $cuda_image,
+              cuda_image_digest: $cuda_image_digest,
+              cuda_image_reference: ($cuda_image + "@" + $cuda_image_digest),
+              image_reference: $image_reference,
+              image_digest: $image_digest,
+              installed_packages: $packages[0],
+              provenance: "mode=max",
+              sbom: true,
+              workflow_url: $workflow_url,
+              created_at: $created_at,
+              secret_free: true
+            }' > "$RUNTIME_BASE_ROOT/ninfer-runtime-base.json"
+
+      - name: Upload publication receipt
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4
+        with:
+          name: ninfer-runtime-base-${{ inputs.source_commit }}
+          path: ${{ runner.temp }}/ninfer-runtime-base/ninfer-runtime-base.json
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish immutable runtime base attestation prerelease
+        shell: bash
+        run: |
+          set -euo pipefail
+          receipt="$RUNTIME_BASE_ROOT/ninfer-runtime-base.json"
+          gh release create "$RUNTIME_BASE_RELEASE_TAG" "$receipt" \
+            --target "$SOURCE_COMMIT" \
+            --draft \
+            --prerelease \
+            --title "NInfer runtime base ${SOURCE_COMMIT:0:8}" \
+            --notes "Dependency-only linux/amd64 CUDA 13.1.2 runtime base. No mutable image tag is published; use image_reference from ninfer-runtime-base.json as publish-runtime-image.yml's base_image. Package versions and the resolved NVIDIA base digest are recorded in that receipt."
+          release_json="$(gh release view "$RUNTIME_BASE_RELEASE_TAG" --json isDraft,isPrerelease,targetCommitish,assets)"
+          [[ "$(jq -r .isDraft <<<"$release_json")" == "true" ]]
+          [[ "$(jq -r .isPrerelease <<<"$release_json")" == "true" ]]
+          [[ "$(jq -r .targetCommitish <<<"$release_json")" == "$SOURCE_COMMIT" ]]
+          receipt_sha256="$(sha256sum "$receipt" | cut -d' ' -f1)"
+          asset_digest="$(jq -er --arg name "$(basename "$receipt")" '.assets[] | select(.name == $name) | .digest' <<<"$release_json")"
+          [[ "$asset_digest" == "sha256:$receipt_sha256" ]]
+          {
+            echo '## NInfer runtime base'
+            echo
+            echo "- Source: \`$SOURCE_COMMIT\`"
+            echo "- Image: \`$IMAGE_REPOSITORY@$IMAGE_DIGEST\`"
+            echo "- NVIDIA base: \`$CUDA_RUNTIME_IMAGE@$CUDA_RUNTIME_DIGEST\`"
+            echo "- Receipt release: \`$RUNTIME_BASE_RELEASE_TAG\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          gh release edit "$RUNTIME_BASE_RELEASE_TAG" --draft=false --prerelease

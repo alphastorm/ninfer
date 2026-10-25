@@ -1,0 +1,689 @@
+{
+  "schema": "ninfer-integration-rc/1",
+  "source": "12ff96e000db77a9f4b0c95942b38170d031e0eb",
+  "release_version": "v0.7.0",
+  "passed": false,
+  "job": "20261025T074546Z-int-rc-12ff96e0-590220",
+  "job_exit": 1,
+  "elapsed_seconds": 622,
+  "image": "sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
+  "build": {
+    "steps": 172,
+    "seconds": 111,
+    "exit": 0
+  },
+  "phases": [
+    {
+      "phase": "host",
+      "counts": {
+        "passed": 65,
+        "failed": 0,
+        "skipped": 0
+      },
+      "tests": [
+        {
+          "name": "ninfer_public_api_test",
+          "status": "passed",
+          "seconds": 0.00237012
+        },
+        {
+          "name": "ninfer_checkpoint_io_contract_test",
+          "status": "passed",
+          "seconds": 0.00323033
+        },
+        {
+          "name": "ninfer_direct_storage_checkpoint_backend_test",
+          "status": "passed",
+          "seconds": 0.00261858
+        },
+        {
+          "name": "ninfer_io_uring_checkpoint_backend_test",
+          "status": "passed",
+          "seconds": 1.3914
+        },
+        {
+          "name": "ninfer_uint128_test",
+          "status": "passed",
+          "seconds": 0.00233556
+        },
+        {
+          "name": "ninfer_uint128_exact_test",
+          "status": "passed",
+          "seconds": 0.0452161
+        },
+        {
+          "name": "ninfer_durable_file_test",
+          "status": "passed",
+          "seconds": 0.0780945
+        },
+        {
+          "name": "ninfer_file_test",
+          "status": "passed",
+          "seconds": 0.00334803
+        },
+        {
+          "name": "ninfer_cpu_system_test",
+          "status": "passed",
+          "seconds": 0.0163782
+        },
+        {
+          "name": "ninfer_cpu_task_pool_test",
+          "status": "passed",
+          "seconds": 0.0367646
+        },
+        {
+          "name": "ninfer_cpu_executor_test",
+          "status": "passed",
+          "seconds": 0.0636234
+        },
+        {
+          "name": "ninfer_read_queue_test",
+          "status": "passed",
+          "seconds": 0.00528975
+        },
+        {
+          "name": "ninfer_gdn_replay_records_test",
+          "status": "passed",
+          "seconds": 0.0022913
+        },
+        {
+          "name": "ninfer_host_timing_test",
+          "status": "passed",
+          "seconds": 0.00214454
+        },
+        {
+          "name": "ninfer_jinja_test",
+          "status": "passed",
+          "seconds": 0.00525406
+        },
+        {
+          "name": "ninfer_chat_templates_test",
+          "status": "passed",
+          "seconds": 0.171218
+        },
+        {
+          "name": "ninfer_weight_bank_test",
+          "status": "passed",
+          "seconds": 0.0022625
+        },
+        {
+          "name": "ninfer_artifact_reader_test",
+          "status": "passed",
+          "seconds": 0.00461039
+        },
+        {
+          "name": "ninfer_artifact_backing_test",
+          "status": "passed",
+          "seconds": 0.0045091
+        },
+        {
+          "name": "ninfer_artifact_cpu_materialization_test",
+          "status": "passed",
+          "seconds": 0.00443743
+        },
+        {
+          "name": "ninfer_scheduler_test",
+          "status": "passed",
+          "seconds": 0.00237096
+        },
+        {
+          "name": "ninfer_engine_cache_gate_test",
+          "status": "passed",
+          "seconds": 0.0637405
+        },
+        {
+          "name": "ninfer_engine_options_test",
+          "status": "passed",
+          "seconds": 0.0329758
+        },
+        {
+          "name": "ninfer_engine_checkpoint_control_test",
+          "status": "passed",
+          "seconds": 0.00282072
+        },
+        {
+          "name": "ninfer_durable_contract_headers_test",
+          "status": "passed",
+          "seconds": 0.00324262
+        },
+        {
+          "name": "ninfer_durable_contracts_test",
+          "status": "passed",
+          "seconds": 0.0407792
+        },
+        {
+          "name": "ninfer_context_cost_test",
+          "status": "passed",
+          "seconds": 0.00352426
+        },
+        {
+          "name": "ninfer_resource_manager_test",
+          "status": "passed",
+          "seconds": 0.00441718
+        },
+        {
+          "name": "ninfer_kv_capacity_test",
+          "status": "passed",
+          "seconds": 0.00217083
+        },
+        {
+          "name": "ninfer_sampling_defaults_test",
+          "status": "passed",
+          "seconds": 0.00254264
+        },
+        {
+          "name": "ninfer_grammar_test",
+          "status": "passed",
+          "seconds": 0.0138235
+        },
+        {
+          "name": "ninfer_regex_choice_test",
+          "status": "passed",
+          "seconds": 0.00662115
+        },
+        {
+          "name": "ninfer_regex_choice_oracle_test",
+          "status": "passed",
+          "seconds": 0.0719002
+        },
+        {
+          "name": "ninfer_json_schema_test",
+          "status": "passed",
+          "seconds": 0.0276649
+        },
+        {
+          "name": "ninfer_json_schema_oracle_test",
+          "status": "passed",
+          "seconds": 2.12762
+        },
+        {
+          "name": "ninfer_media_decode_test",
+          "status": "passed",
+          "seconds": 0.0227234
+        },
+        {
+          "name": "ninfer_prompt_input_test",
+          "status": "passed",
+          "seconds": 0.00562251
+        },
+        {
+          "name": "ninfer_pretty_logging_test",
+          "status": "passed",
+          "seconds": 0.00286028
+        },
+        {
+          "name": "ninfer_perplexity_evaluation_test",
+          "status": "passed",
+          "seconds": 0.00219946
+        },
+        {
+          "name": "ninfer_cli_options_test",
+          "status": "passed",
+          "seconds": 0.00239488
+        },
+        {
+          "name": "ninfer_openai_schema_test",
+          "status": "passed",
+          "seconds": 0.0318352
+        },
+        {
+          "name": "ninfer_openai_responses_test",
+          "status": "passed",
+          "seconds": 0.00480429
+        },
+        {
+          "name": "ninfer_openai_responses_store_test",
+          "status": "passed",
+          "seconds": 0.0235754
+        },
+        {
+          "name": "ninfer_session_checkpoint_service_test",
+          "status": "passed",
+          "seconds": 0.00272481
+        },
+        {
+          "name": "ninfer_serve_restore_runner_test",
+          "status": "passed",
+          "seconds": 0.0551843
+        },
+        {
+          "name": "ninfer_session_checkpoint_store_test",
+          "status": "passed",
+          "seconds": 5.16523
+        },
+        {
+          "name": "ninfer_automatic_checkpoint_queue_test",
+          "status": "passed",
+          "seconds": 0.00235932
+        },
+        {
+          "name": "ninfer_checkpoint_policy_test",
+          "status": "passed",
+          "seconds": 0.00187283
+        },
+        {
+          "name": "ninfer_anthropic_schema_test",
+          "status": "passed",
+          "seconds": 0.00340218
+        },
+        {
+          "name": "ninfer_serve_options_test",
+          "status": "passed",
+          "seconds": 0.00314745
+        },
+        {
+          "name": "ninfer_request_log_test",
+          "status": "passed",
+          "seconds": 0.0301839
+        },
+        {
+          "name": "ninfer_metrics_test",
+          "status": "passed",
+          "seconds": 0.00293297
+        },
+        {
+          "name": "ninfer_http_error_handler_test",
+          "status": "passed",
+          "seconds": 0.0322531
+        },
+        {
+          "name": "ninfer_http_server_stop_test",
+          "status": "passed",
+          "seconds": 0.0356107
+        },
+        {
+          "name": "ninfer_stop_event_test",
+          "status": "passed",
+          "seconds": 0.00196046
+        },
+        {
+          "name": "ninfer_http_transport_test",
+          "status": "passed",
+          "seconds": 0.00409247
+        },
+        {
+          "name": "ninfer_bench_support_test",
+          "status": "passed",
+          "seconds": 0.00275783
+        },
+        {
+          "name": "ninfer_context_cost_measure_test",
+          "status": "passed",
+          "seconds": 0.00258062
+        },
+        {
+          "name": "ninfer_qwen3_5_loading_test",
+          "status": "passed",
+          "seconds": 0.00774974
+        },
+        {
+          "name": "ninfer_qwen3_5_state_image_layout_test",
+          "status": "passed",
+          "seconds": 0.00232202
+        },
+        {
+          "name": "ninfer_qwen_frontend_test",
+          "status": "passed",
+          "seconds": 0.911922
+        },
+        {
+          "name": "ninfer_qwen_tool_constraints_test",
+          "status": "passed",
+          "seconds": 0.0373949
+        },
+        {
+          "name": "ninfer_qwen_tool_schema_oracle_test",
+          "status": "passed",
+          "seconds": 0.165593
+        },
+        {
+          "name": "ninfer_checkpoint_codec_test",
+          "status": "passed",
+          "seconds": 0.00356405
+        },
+        {
+          "name": "ninfer_tool_call_parser_test",
+          "status": "passed",
+          "seconds": 0.0103014
+        }
+      ]
+    },
+    {
+      "phase": "real",
+      "counts": {
+        "passed": 11,
+        "failed": 0,
+        "skipped": 0
+      },
+      "tests": [
+        {
+          "name": "ninfer_qwen3_5_native_transactions_test",
+          "status": "passed",
+          "seconds": 17.4684
+        },
+        {
+          "name": "ninfer_qwen3_5_prefix_real_test",
+          "status": "passed",
+          "seconds": 93.0291
+        },
+        {
+          "name": "ninfer_qwen3_5_preemption_real_test",
+          "status": "passed",
+          "seconds": 41.563
+        },
+        {
+          "name": "ninfer_qwen3_5_grammar_real_test",
+          "status": "passed",
+          "seconds": 22.6189
+        },
+        {
+          "name": "ninfer_qwen3_5_tools_real_test",
+          "status": "passed",
+          "seconds": 19.4014
+        },
+        {
+          "name": "ninfer_qwen3_5_score_real_test",
+          "status": "passed",
+          "seconds": 11.9363
+        },
+        {
+          "name": "ninfer_qwen3_5_vision_workspace_test",
+          "status": "passed",
+          "seconds": 10.3822
+        },
+        {
+          "name": "ninfer_qwen3_5_dflash2_real_test",
+          "status": "passed",
+          "seconds": 27.4137
+        },
+        {
+          "name": "ninfer_qwen3_5_dflash_prefill_real_test",
+          "status": "passed",
+          "seconds": 12.3189
+        },
+        {
+          "name": "ninfer_qwen3_5_agent_continuation_real_test",
+          "status": "passed",
+          "seconds": 13.1318
+        },
+        {
+          "name": "ninfer_kv_history_test",
+          "status": "passed",
+          "seconds": 0.223592
+        }
+      ]
+    },
+    {
+      "phase": "overlap",
+      "tests": [
+        {
+          "name": "ninfer_qwen3_5_durable_pressure_real_test",
+          "seconds": 36.3733,
+          "passed": true
+        }
+      ]
+    }
+  ],
+  "loader_exit": 0,
+  "shared_mtp_exit": 0,
+  "production_restart": {
+    "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+    "artifact_type": "ninfer-serve-restore-proof/1",
+    "binary_sha256": "d0b2ecc3827ca2fa5d6252b8b2d93f06e779a607b28259dfe0ddb08798d6bb15",
+    "first_stop": {
+      "complete": true,
+      "refused": 0,
+      "saved": 1,
+      "skipped": 0
+    },
+    "isolation": {
+      "deleted_after_restart": 404,
+      "descendant_after_restart": 200,
+      "foreign_delete": 404,
+      "foreign_retrieve": 404,
+      "missing_capability_retrieve": 404,
+      "own_delete": 200,
+      "own_retrieve": 200
+    },
+    "passed": true,
+    "policy_disabled": {
+      "cached_input_tokens": 0,
+      "current_unchanged": true,
+      "mode": "startup_warmup_and_unretained_request",
+      "unretained_retrieve_status": 404
+    },
+    "production_path": true,
+    "restart": {
+      "byte_identical": true,
+      "cached_input_tokens": 20926,
+      "continuation_bytes": 27,
+      "continuation_sha256": "5a2528e22c6a6603d5eeafd214223e57812a9da7174bc1a4445c8f9308f8344c",
+      "first_keyed_request_without_parent": true
+    },
+    "save": {
+      "committed": true,
+      "dir_sync": "fsync",
+      "frontier_tokens": 20993,
+      "origin": "authenticated",
+      "pages": 329,
+      "payload_bytes": 2164056150,
+      "points": 4,
+      "reason": "none",
+      "restored_tokens": 20993,
+      "state": "exported",
+      "states": 4
+    },
+    "source": "12ff96e000db77a9f4b0c95942b38170d031e0eb",
+    "tracer": false,
+    "upstream_base_sha": "64d10fbf9f8e6bfc79ab0570b94674c5b9997929"
+  },
+  "startup_failure": {
+    "reason": "cuda_graph_reservation_growth",
+    "comparisons": [
+      {
+        "field": "cuda_graph_rebuild_estimate_bytes",
+        "actual": 0,
+        "baseline": 0,
+        "delta": 0
+      },
+      {
+        "field": "cuda_graph_calibration_increment_bytes",
+        "actual": 33554432,
+        "baseline": 31457280,
+        "delta": 2097152
+      },
+      {
+        "field": "cuda_graph_calibration_retained_bytes",
+        "actual": 33554432,
+        "baseline": 31457280,
+        "delta": 2097152
+      },
+      {
+        "field": "startup_retained_bytes",
+        "actual": 33786880,
+        "baseline": 31689728,
+        "delta": 2097152
+      }
+    ],
+    "actual_memory": {
+      "available_after_startup_bytes": 1074790400,
+      "available_after_weights_bytes": 12456034304,
+      "cuda_graph_calibration_increment_bytes": 33554432,
+      "cuda_graph_calibration_retained_bytes": 33554432,
+      "cuda_graph_prepare_increment_bytes": 0,
+      "cuda_graph_rebuild_estimate_bytes": 0,
+      "device_budget_bytes": 32429309952,
+      "host_context_capacity_bytes": 21881405440,
+      "host_context_occupied_bytes": 0,
+      "host_context_reserved_bytes": 0,
+      "host_kv_occupied_bytes": 0,
+      "host_state_occupied_slots": 0,
+      "kv_capacity_headroom_bytes": 1073741824,
+      "kv_capacity_increment_bytes": 4194304,
+      "kv_payload_bytes": 9592373248,
+      "minimum_runtime_reservation_bytes": 10343649793,
+      "moe": null,
+      "planned_slack_bytes": 2649599,
+      "runtime_reservation_bytes": 11346088449,
+      "sequence": {
+        "capacity_bytes": 10479440384,
+        "peak_used_bytes": 10479440384,
+        "used_bytes": 10479440384
+      },
+      "startup_retained_bytes": 33786880,
+      "vision_workspace": {
+        "aggregate_prompt_tokens": 32768,
+        "encode_peak_bytes": 866648065,
+        "general_capacity_bytes": 121830240,
+        "handoff_active_bytes": 0,
+        "handoff_capacity_bytes": 167772160,
+        "handoff_offset_bytes": 150994944,
+        "handoff_peak_bytes": 0,
+        "max_item_tokens": 16384
+      },
+      "weights": {
+        "capacity_bytes": 19973043200,
+        "peak_used_bytes": 19973043200,
+        "used_bytes": 19973043200
+      },
+      "workspace": {
+        "capacity_bytes": 866648065,
+        "peak_used_bytes": 121830240,
+        "used_bytes": 0
+      }
+    },
+    "baseline_memory": {
+      "available_after_startup_bytes": 1072693248,
+      "available_after_weights_bytes": 12456034304,
+      "cuda_graph_calibration_increment_bytes": 31457280,
+      "cuda_graph_calibration_retained_bytes": 31457280,
+      "cuda_graph_prepare_increment_bytes": 0,
+      "cuda_graph_rebuild_estimate_bytes": 0,
+      "device_budget_bytes": 32429309952,
+      "host_context_capacity_bytes": 21881405440,
+      "host_context_occupied_bytes": 0,
+      "host_context_reserved_bytes": 0,
+      "host_kv_occupied_bytes": 0,
+      "host_state_occupied_slots": 0,
+      "kv_capacity_headroom_bytes": 1073741824,
+      "kv_capacity_increment_bytes": 4194304,
+      "kv_payload_bytes": 9596567552,
+      "minimum_runtime_reservation_bytes": 10343649793,
+      "moe": null,
+      "planned_slack_bytes": 552447,
+      "runtime_reservation_bytes": 11350282753,
+      "sequence": {
+        "capacity_bytes": 10483634688,
+        "peak_used_bytes": 10483634688,
+        "used_bytes": 10483634688
+      },
+      "startup_retained_bytes": 31689728,
+      "vision_workspace": {
+        "aggregate_prompt_tokens": 32768,
+        "encode_peak_bytes": 866648065,
+        "general_capacity_bytes": 121830240,
+        "handoff_active_bytes": 0,
+        "handoff_capacity_bytes": 167772160,
+        "handoff_offset_bytes": 150994944,
+        "handoff_peak_bytes": 0,
+        "max_item_tokens": 16384
+      },
+      "weights": {
+        "capacity_bytes": 19973043200,
+        "peak_used_bytes": 19973043200,
+        "used_bytes": 19973043200
+      },
+      "workspace": {
+        "capacity_bytes": 866648065,
+        "peak_used_bytes": 121830240,
+        "used_bytes": 0
+      }
+    }
+  },
+  "startup_disposition": {
+    "policy_amended_by": "Main",
+    "recorded_metrics_reevaluation": "integration-startup-policy.json",
+    "new_exact_source_batch_required": true
+  },
+  "independent_product_smokes": {
+    "job": "20261025T075746Z-int-inventory-12ff96e0-592335",
+    "job_exit": 1,
+    "elapsed_seconds": 26,
+    "serve_contract": {
+      "exit": 0,
+      "seconds": 0.767
+    },
+    "agent_product": {
+      "exit": 1,
+      "seconds": 3.326,
+      "error": "same-session repeat did not select a private continuation"
+    },
+    "server_exit": 0,
+    "leftover_containers": 0,
+    "unowned_containers": 0
+  },
+  "private_repeat_diagnostics": {
+    "client_source": "4f95d8577d41db5aaa8be81f14c1a3f8ee143e0d",
+    "runtime_unchanged": true,
+    "assertions_unchanged": true,
+    "isolated_request_sent": false,
+    "arms": [
+      {
+        "job": "20261025T080659Z-int-private-repeat-12ff96e0-593199",
+        "device_extra_slots": 1,
+        "device_state_capacity": 2,
+        "device_state_occupied": [2, 2],
+        "host_state_occupied": [31, 33],
+        "job_exit": 1,
+        "seconds": 26
+      },
+      {
+        "job": "20261025T080833Z-int-private-repeat-slots2-12ff96e0-593478",
+        "device_extra_slots": 2,
+        "device_state_capacity": 3,
+        "device_state_occupied": [3, 3],
+        "host_state_occupied": [30, 32],
+        "job_exit": 1,
+        "seconds": 26
+      }
+    ],
+    "common_observations": {
+      "selection_paths": ["root", "root"],
+      "selection_frontiers": [0, 0],
+      "reused_prompt_tokens": [463, 463],
+      "computed_prefill_tokens": [682, 700],
+      "committed_decode_tokens": [112, 113],
+      "private_catalog_occupied": [10, 11],
+      "shared_catalog_occupied": [13, 14],
+      "pending_work": false
+    },
+    "disposition": "Engine owner confirms ROOT is a legal cost-first choice; an 18-token prompt cannot guarantee private reuse. Product extra slots alone do not close the fixture. The meaningful repeated user-history fixture below passes unchanged private assertions without a runtime priority change.",
+    "changed_fixture_proof": {
+      "client_source": "eae2b74e4f31b79d2f71949bc78f4cf0b180443d",
+      "job": "20261025T081426Z-int-private-repeat-long-12ff96e0-594061",
+      "exit": 0,
+      "seconds": 27,
+      "device_extra_slots": 2,
+      "prompt_tokens": 1623,
+      "completion_tokens": 3,
+      "repeat_path": "private_input_replay",
+      "repeat_frontier_tokens": 1614,
+      "reused_prompt_tokens": [463, 2077],
+      "computed_prefill_tokens": [2287, 2296],
+      "committed_decode_tokens": [113, 115],
+      "host_state_occupied": [30, 30],
+      "isolated_request_sent": false,
+      "host_unit_tests": 16,
+      "host_unit_exit": 0,
+      "full_product_battery_required_on_final_source": true
+    }
+  },
+  "remaining": [
+    "new_amended_source_full_inventory",
+    "exact_profile_startup",
+    "product_smokes",
+    "package_inventory"
+  ],
+  "leftover_containers": 0,
+  "unowned_containers": 0
+}

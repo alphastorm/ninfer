@@ -1,4 +1,6 @@
-#include "ninfer/ops/mtp_round.h"
+#include "ninfer/ops/sequence.h"
+#include "cuda_fixture.h"
+#include "core/buffer.h"
 #include "ops/op_tester.h"
 
 #include <algorithm>
@@ -79,21 +81,22 @@ int run_case(int k, const std::vector<std::int32_t>& accepted) {
     d_rope_positions.fill(0xcd);
     d_valid.fill(0xcd);
 
-    Tensor t_verify(d_verify.p, DType::I32, {T, batch});
-    Tensor t_anchors(d_anchors.p, DType::I32, {batch});
-    Tensor t_accepted(d_accepted.p, DType::I32, {batch});
-    Tensor t_frontiers(d_frontiers.p, DType::I32, {batch});
-    Tensor t_budgets(d_budgets.p, DType::I32, {batch});
-    Tensor t_licensed(d_licensed.p, DType::I32, {batch});
-    Tensor t_rope_deltas(d_rope_deltas.p, DType::I32, {batch});
-    Tensor t_alignment(d_alignment.data(), DType::I32, {T, batch});
-    Tensor t_extents(d_extents.data(), DType::I32, {batch});
-    Tensor t_positions(d_positions.data(), DType::I32, {batch, steps});
-    Tensor t_rope_positions(d_rope_positions.data(), DType::I32, {batch, steps});
-    Tensor t_valid(d_valid.data(), DType::I32, {batch, steps});
-    ops::mtp_prepare_next_round(t_verify, t_anchors, t_accepted, t_frontiers, t_budgets, t_licensed,
-                                t_rope_deltas, t_alignment, t_extents, t_positions,
-                                t_rope_positions, t_valid, max_context, nullptr);
+    Tensor t_verify(d_verify.span(), DType::I32, {T, batch});
+    Tensor t_anchors(d_anchors.span(), DType::I32, {batch});
+    Tensor t_accepted(d_accepted.span(), DType::I32, {batch});
+    Tensor t_frontiers(d_frontiers.span(), DType::I32, {batch});
+    Tensor t_budgets(d_budgets.span(), DType::I32, {batch});
+    Tensor t_licensed(d_licensed.span(), DType::I32, {batch});
+    Tensor t_rope_deltas(d_rope_deltas.span(), DType::I32, {batch});
+    Tensor t_alignment(d_alignment.span(), DType::I32, {T, batch});
+    Tensor t_extents(d_extents.span(), DType::I32, {batch});
+    Tensor t_positions(d_positions.span(), DType::I32, {batch, steps});
+    Tensor t_rope_positions(d_rope_positions.span(), DType::I32, {batch, steps});
+    Tensor t_valid(d_valid.span(), DType::I32, {batch, steps});
+    ops::prepare_autoregressive_round(t_verify, t_anchors, t_accepted, t_frontiers, t_budgets,
+                                      t_licensed, t_rope_deltas, t_alignment, t_extents,
+                                      t_positions, t_rope_positions, t_valid, max_context,
+                                      ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
     const std::string label =

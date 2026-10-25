@@ -1,0 +1,62 @@
+{
+  "schema": "ninfer-persistence-cpu-proof/1",
+  "source_commit": "25571c063cf753e78cf39e3cbf88f56a040725a8",
+  "image_sha256": "62a4feee8f308cde61095355ff11977986ecce388ad4f057c23014950b681326",
+  "ninja_steps": 42,
+  "linked_targets": [
+    "ninfer_context_store_test",
+    "ninfer_kv_history_test",
+    "ninfer_checkpoint_codec_test",
+    "ninfer_qwen3_5_checkpoint_restart_test",
+    "ninfer_qwen3_5_native_transactions_test",
+    "ninfer_qwen3_5_shared_prefix_real_test",
+    "ninfer_qwen3_5_grammar_real_test"
+  ],
+  "host_test": {
+    "name": "ninfer_checkpoint_codec_test",
+    "passed": true,
+    "test_seconds": 0.00,
+    "ctest_seconds": 0.03
+  },
+  "detached_wait_seconds": 304.39,
+  "superseding_run": {
+    "source_commit": "465bccf926bad64ed28091a80e4ed3d858ad6b6d",
+    "ninja_steps": 42,
+    "linked_target_count": 7,
+    "host_test_passed": true,
+    "host_test_seconds": 0.01,
+    "ctest_seconds": 0.05,
+    "detached_wait_seconds": 134.02,
+    "completion_marker": "A2_CPU_PROOF_RESULT=PASS"
+  },
+  "validation_run": {
+    "source_commit": "e355e55afc0e373599f8a5f86edc834ef6fd47c5",
+    "ninja_steps": 40,
+    "linked_target_count": 7,
+    "host_test_passed": true,
+    "host_test_seconds": 0.01,
+    "ctest_seconds": 0.07,
+    "detached_wait_seconds": 314.25,
+    "completion_marker": "A2_CPU_PROOF_RESULT=PASS"
+  },
+  "shared_fixture_run": {
+    "source_commit": "de640b205b6c32bf42f3a56a60d32b2197e06dab",
+    "ninja_steps": 2,
+    "target": "ninfer_qwen3_5_shared_prefix_real_test",
+    "compiled": true,
+    "detached_wait_seconds": 464.78,
+    "completion_marker": "A2_SHARED_COMPILE=PASS"
+  },
+  "decoder_classification_run": {
+    "source_commit": "3a119f5fa02299331933236001512742bd6d1f79",
+    "ninja_steps": 4,
+    "command": "cmake --build BUILD --target ninfer_checkpoint_codec_test && ctest --test-dir BUILD --output-on-failure -R '^ninfer_checkpoint_codec_test$'",
+    "host_test_passed": true,
+    "host_test_seconds": 0.0,
+    "ctest_seconds": 0.04,
+    "detached_wait_seconds": 536.96,
+    "completion_marker": "A2_CODEC_CLASSIFICATION=PASS"
+  },
+  "gpu_tests_executed": false,
+  "completion_marker": "A2_CPU_PROOF_RESULT=PASS"
+}

@@ -1,28 +1,26 @@
 add_executable(ninfer
   cli/main.cpp
   cli/options.cpp)
-target_include_directories(ninfer PRIVATE
-  ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_SOURCE_DIR}/src
-  ${PROJECT_SOURCE_DIR}/third_party)
+ninfer_internal_includes(ninfer)
 target_link_libraries(ninfer PRIVATE
   ninfer_engine
-  ninfer_product_load_progress
+  ninfer_product_logging
   ninfer_product_prompt_input)
 
 add_executable(ninfer-serve serve/main.cpp)
-target_include_directories(ninfer-serve PRIVATE
-  ${PROJECT_SOURCE_DIR}/include
-  ${PROJECT_SOURCE_DIR}/src
-  ${PROJECT_SOURCE_DIR}/third_party
-  ${PROJECT_SOURCE_DIR}/third_party/cpp-httplib)
-target_link_libraries(ninfer-serve PRIVATE ninfer_serve ninfer_product_load_progress)
-
-if(WIN32 AND NINFER_DIRECTSTORAGE_DLLS)
-  add_custom_command(TARGET ninfer POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${NINFER_DIRECTSTORAGE_DLLS} $<TARGET_FILE_DIR:ninfer>)
+ninfer_internal_includes(ninfer-serve)
+target_link_libraries(ninfer-serve PRIVATE ninfer_serve ninfer_product_logging)
+if(WIN32)
   add_custom_command(TARGET ninfer-serve POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            ${NINFER_DIRECTSTORAGE_DLLS} $<TARGET_FILE_DIR:ninfer-serve>)
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NINFER_DIRECTSTORAGE_DLLS}
+            $<TARGET_FILE_DIR:ninfer-serve>
+    VERBATIM)
 endif()
+
+add_executable(ninfer-perplexity
+  perplexity/main.cpp
+  perplexity/corpus.cpp
+  perplexity/evaluation.cpp)
+ninfer_internal_includes(ninfer-perplexity)
+target_link_libraries(ninfer-perplexity PRIVATE
+  ninfer_engine ninfer_product_logging ninfer::json)

@@ -60,7 +60,29 @@ qb::BenchOptions parse_for_test(std::vector<std::string> arguments) {
 }
 
 int test_cli_contract() {
-    int failures                  = 0;
+    int failures = 0;
+    const auto choices =
+        parse_for_test({"bench", "--weights", "model.ninfer", "--choice", "", "--choice", "a|b",
+                        "--concurrency", "2", "--mixed-constraints"});
+    failures += expect(choices.constraint == ninfer::OutputConstraint::choice({"", "a|b"}) &&
+                           choices.mixed_constraints,
+                       "choice flags retain literal candidates in mixed batches");
+    failures +=
+        expect(parse_for_test({"bench", "--weights", "model.ninfer", "--regex", ""}).constraint ==
+                   ninfer::OutputConstraint::regex(""),
+               "empty regex remains an active constraint");
+    for (const auto& flags :
+         std::vector<std::vector<std::string>>{{"--choice", "yes", "--regex", "yes"},
+                                               {"--regex", "", "--choice", "yes"},
+                                               {"--json-object", "--choice", "yes"}}) {
+        failures += expect_throws<std::invalid_argument>(
+            [&] {
+                std::vector<std::string> arguments{"bench", "--weights", "model.ninfer"};
+                arguments.insert(arguments.end(), flags.begin(), flags.end());
+                (void)parse_for_test(std::move(arguments));
+            },
+            "conflicting benchmark constraints");
+    }
     const qb::BenchOptions parsed = parse_for_test({
         "ninfer_bench",
         "--weights",
@@ -81,7 +103,9 @@ int test_cli_contract() {
         "128",
         "--kv-dtype",
         "int8",
-        "--mtp-draft-tokens",
+        "--spec",
+        "mtp",
+        "--draft-tokens",
         "5",
         "--lm-head-draft",
         "--device",
@@ -103,15 +127,29 @@ int test_cli_contract() {
     failures += expect(parsed.max_context == std::optional<std::uint32_t>(4096), "max context");
     failures += expect(parsed.prefill_chunk == 128, "prefill chunk");
     failures += expect(parsed.kv_cache == ninfer::KvCacheStorage::Int8Group64, "INT8 KV");
-    failures += expect(parsed.mtp_draft_tokens == 5, "MTP window");
-    failures +=
-        expect(parsed.proposal_head == ninfer::ProposalHead::Optimized, "optimized proposal head");
+    failures += expect(parsed.speculative.draft_tokens == 5, "MTP window");
+    failures += expect(parsed.speculative.proposal_head == ninfer::ProposalHead::Optimized,
+                       "optimized proposal head");
     failures += expect(parsed.device == 1 && !parsed.use_cuda_graph, "device and graph settings");
     failures += expect(parsed.profile_measured, "profile-measured flag");
     failures +=
         expect(parsed.output == qb::OutputFormat::Json && parsed.output_file == "report.json",
                "output settings");
 
+    for (const auto k : {1U, 7U, 15U}) {
+        const auto dflash2 =
+            parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--spec", "dflash2",
+                            "--draft-tokens", std::to_string(k), "--lm-head-draft"});
+        failures += expect(dflash2.speculative.backend == ninfer::SpeculativeBackend::DFlash2 &&
+                               dflash2.speculative.draft_tokens == k,
+                           "DFlash2 benchmark window");
+    }
+    failures += expect_throws<std::invalid_argument>(
+        [] {
+            (void)parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--spec", "dflash2",
+                                  "--draft-tokens", "16"});
+        },
+        "unsupported DFlash2 window");
     const auto defaults = qb::expand_tests(qb::BenchOptions{});
     failures +=
         expect(defaults.size() == 2 && defaults[0].label == "pp512" && defaults[1].label == "tg128",
@@ -126,22 +164,36 @@ int test_cli_contract() {
         [] {
             (void)parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--lm-head-draft"});
         },
-        "optimized head without MTP");
+        "optimized head without a backend");
     failures += expect_throws<std::invalid_argument>(
         [] {
-            (void)parse_for_test(
-                {"ninfer_bench", "--weights", "model.ninfer", "--mtp-draft-tokens", "6"});
+            (void)parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--spec", "mtp",
+                                  "--draft-tokens", "6"});
         },
         "unsupported MTP window");
-    failures += expect_throws<std::invalid_argument>(
-        [] {
-            (void)parse_for_test(
-                {"ninfer_bench", "--weights", "model.ninfer", "--prefill-chunk", "129"});
-        },
-        "misaligned prefill chunk");
+    for (const auto* value : {"auto", "0", "129"}) {
+        failures += expect_throws<std::invalid_argument>(
+            [&] {
+                (void)parse_for_test(
+                    {"ninfer_bench", "--weights", "model.ninfer", "--prefill-chunk", value});
+            },
+            "invalid prefill chunk");
+    }
     const qb::BenchOptions fp8 =
         parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--kv-dtype", "fp8"});
     failures += expect(fp8.kv_cache == ninfer::KvCacheStorage::Fp8E4M3Row256, "FP8 KV");
+    const qb::BenchOptions nvfp4 =
+        parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--kv-dtype", "nvfp4"});
+    failures += expect(nvfp4.kv_cache == ninfer::KvCacheStorage::Nvfp4Group16, "NVFP4 KV");
+    const qb::BenchOptions k8v4 =
+        parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--kv-dtype", "k8v4"});
+    failures += expect(k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value, "K8V4 KV");
+    failures += expect(qb::usage_text("ninfer_bench").find("nvfp4|k8v4") != std::string::npos,
+                       "benchmark help omits new KV modes");
+    failures += expect_string(qb::kv_cache_name(ninfer::KvCacheStorage::Nvfp4Group16), "nvfp4",
+                              "NVFP4 report name");
+    failures += expect_string(qb::kv_cache_name(ninfer::KvCacheStorage::Fp8KeyNvfp4Value), "k8v4",
+                              "K8V4 report name");
     failures += expect_throws<std::invalid_argument>(
         [] {
             (void)parse_for_test(
@@ -153,6 +205,7 @@ int test_cli_contract() {
 
 int test_measurement_contract() {
     int failures = 0;
+    const ninfer::SpeculativeOptions mtp5{ninfer::SpeculativeBackend::Mtp, 5};
     const qb::BenchTest pp{qb::TestKind::Prefill, 512, 0, "pp512"};
     const qb::BenchTest tg{qb::TestKind::Decode, 0, 128, "tg128"};
     const qb::BenchTest combined{qb::TestKind::PrefillDecode, 2048, 128, "pp2048+tg128"};
@@ -161,24 +214,34 @@ int test_measurement_contract() {
     failures += expect_u32(tg.requested_output_tokens(), 129, "tg begin plus G outputs");
     failures +=
         expect_u32(combined.requested_output_tokens(), 129, "combined begin plus G outputs");
-    failures += expect_u32(pp.required_context(0), 512, "pp context");
-    failures += expect_u32(pp.required_context(5), 522, "MTP pp context");
-    failures += expect_u32(tg.required_context(0), 129, "tg context");
-    failures += expect_u32(tg.required_context(5), 139, "MTP tg context");
-    failures += expect_u32(combined.required_context(5), 2186, "MTP combined context");
-    failures += expect_u32(qb::decode_graph_prime_output_tokens(5), 13, "MTP graph-prime outputs");
+    failures += expect_u32(pp.required_context({}), 512, "pp context");
+    failures += expect_u32(pp.required_context(mtp5), 522, "MTP pp context");
+    failures += expect_u32(tg.required_context({}), 129, "tg context");
+    failures += expect_u32(tg.required_context(mtp5), 139, "MTP tg context");
+    failures += expect_u32(combined.required_context(mtp5), 2186, "MTP combined context");
     failures +=
-        expect_u32(qb::decode_graph_prime_required_context(5), 23, "MTP graph-prime context");
+        expect_u32(qb::decode_graph_prime_output_tokens(mtp5), 13, "MTP graph-prime outputs");
+    failures +=
+        expect_u32(qb::decode_graph_prime_required_context(mtp5), 23, "MTP graph-prime context");
 
     const std::vector<qb::BenchTest> matrix = {pp, tg, combined};
     failures +=
-        expect_u32(qb::resolve_max_context(matrix, std::nullopt, 5, true), 2186, "auto context");
+        expect_u32(qb::resolve_max_context(matrix, std::nullopt, mtp5, true), 2186, "auto context");
     failures +=
-        expect_u32(qb::resolve_max_context(matrix, std::optional<std::uint32_t>(4096), 5, true),
+        expect_u32(qb::resolve_max_context(matrix, std::optional<std::uint32_t>(4096), mtp5, true),
                    4096, "explicit context");
     failures += expect_throws<std::invalid_argument>(
-        [&] { (void)qb::resolve_max_context(matrix, std::optional<std::uint32_t>(2048), 5, true); },
+        [&] {
+            (void)qb::resolve_max_context(matrix, std::optional<std::uint32_t>(2048), mtp5, true);
+        },
         "undersized context");
+    const ninfer::SpeculativeOptions dflash2{ninfer::SpeculativeBackend::DFlash2, 15};
+    failures +=
+        expect_u32(combined.required_context(dflash2), 2176, "DFlash2 uses no MTP lookahead KV");
+    failures += expect_u32(qb::decode_graph_prime_required_context(dflash2), 33,
+                           "DFlash2 full rounds fit the prime context");
+    failures += expect_string(qb::decode_path_name(true, dflash2), "dflash2_cuda_graph",
+                              "DFlash2 report route");
     return failures;
 }
 
@@ -193,7 +256,8 @@ ninfer::GenerationTimings timings(double prepare, double prefill, double decode,
 ninfer::SpeculativeStats speculative(std::uint64_t rounds, std::uint64_t drafted,
                                      std::uint64_t accepted, std::uint64_t fallback,
                                      std::vector<std::uint64_t> per_position) {
-    return {.enabled               = true,
+    return {.backend               = ninfer::SpeculativeBackend::Mtp,
+            .enabled               = true,
             .draft_window          = 5,
             .rounds                = rounds,
             .drafted_tokens        = drafted,
@@ -221,52 +285,72 @@ std::vector<qb::TestResult> sample_results() {
 
 qb::BenchEnvironment sample_environment() {
     qb::BenchEnvironment env;
-    env.gpu_name                 = "RTX 5090";
-    env.cuda_runtime_version     = "13.1";
-    env.cuda_driver_version      = "590.1";
-    env.device_id                = 0;
-    env.artifact_path            = "model.ninfer";
-    env.artifact_file_size_bytes = 17500000000ULL;
-    env.load                     = {.target               = "qwen3_6_27b",
-                                    .weights_id           = "groupwise-int",
-                                    .load_seconds         = 2.5,
-                                    .upload_seconds       = 2.0,
-                                    .artifact_bytes_read  = 17500000000ULL,
-                                    .host_to_device_bytes = 17400000000ULL,
-                                    .peak_staging_bytes   = 134217728ULL,
-                                    .tensor_count         = 1118,
-                                    .resource_count       = 6};
-    env.memory.device            = 0;
-    env.memory.max_context       = 4096;
-    env.memory.kv_capacity       = 8192;
-    env.memory.kv_cache          = ninfer::KvCacheStorage::Int8Group64;
-    env.memory.weights           = {17400000000ULL, 17400000000ULL, 17400000000ULL};
-    env.memory.sequence          = {2000000000ULL, 1900000000ULL, 1900000000ULL};
-    env.memory.workspace         = {100000000ULL, 0, 0};
-    env.memory.vision_workspace  = ninfer::VisionWorkspaceMemorySummary{
-         .aggregate_prompt_tokens = 4096,
-         .max_item_tokens         = 4096,
-         .general_capacity_bytes  = 75000000ULL,
-         .encode_peak_bytes       = 90000000ULL,
-         .handoff_offset_bytes    = 75000000ULL,
-         .handoff_capacity_bytes  = 25000000ULL,
-         .handoff_active_bytes    = 0,
-         .handoff_peak_bytes      = 20000000ULL,
+    env.gpu_name                   = "RTX 5090";
+    env.cuda_runtime_version       = "13.1";
+    env.cuda_driver_version        = "590.1";
+    env.device_id                  = 0;
+    env.artifact_path              = "model.ninfer";
+    env.artifact_file_size_bytes   = 17500000000ULL;
+    env.load                       = {.architecture         = "Qwen3_5ForCausalLM",
+                                      .model_name           = "qwen3.6-27b",
+                                      .prefill_signature    = "groupwise-int",
+                                      .load_seconds         = 2.5,
+                                      .upload_seconds       = 2.0,
+                                      .artifact_bytes_read  = 17500000000ULL,
+                                      .host_to_device_bytes = 17400000000ULL,
+                                      .peak_staging_bytes   = 134217728ULL,
+                                      .device_object_count  = 1118,
+                                      .host_object_count    = 6};
+    env.memory.device              = 0;
+    env.memory.device_budget_bytes = 32ULL * 1024 * 1024 * 1024;
+    env.memory.max_context         = 4096;
+    env.memory.kv_capacity         = 8192;
+    env.memory.kv_cache            = ninfer::KvCacheStorage::Int8Group64;
+    env.memory.weights             = {17400000000ULL, 17400000000ULL, 17400000000ULL};
+    env.memory.sequence            = {2000000000ULL, 1900000000ULL, 1900000000ULL};
+    env.memory.workspace           = {100000000ULL, 0, 0};
+
+    env.memory.vision_workspace = ninfer::VisionWorkspaceMemorySummary{
+        .aggregate_prompt_tokens = 4096,
+        .max_item_tokens         = 4096,
+        .general_capacity_bytes  = 75000000ULL,
+        .encode_peak_bytes       = 90000000ULL,
+        .handoff_offset_bytes    = 75000000ULL,
+        .handoff_capacity_bytes  = 25000000ULL,
+        .handoff_active_bytes    = 0,
+        .handoff_peak_bytes      = 20000000ULL,
     };
-    env.memory.cuda_graph_allowance_bytes = 150000000ULL;
-    env.memory.kv_payload_bytes           = 123456ULL;
-    env.max_context                       = 4096;
-    env.prefill_chunk                     = 1024;
-    env.kv_cache                          = ninfer::KvCacheStorage::Int8Group64;
-    env.mtp_draft_tokens                  = 5;
-    env.proposal_head                     = ninfer::ProposalHead::Optimized;
-    env.use_cuda_graph                    = true;
-    env.decode_graph_primed               = true;
-    env.decode_graph_prime_output_tokens  = 13;
-    env.repetitions                       = 2;
-    env.warmup                            = 1;
-    env.corpus_path                       = "bench/fixtures/bench_corpus.ids";
-    env.corpus_tokens                     = 65536;
+    env.memory.cuda_graph = ninfer::GraphMemorySummary{150000000ULL, 170000000, 149999900, -100};
+    env.memory.startup_retained_bytes = -200;
+    env.memory.kv_payload_bytes       = 123456ULL;
+
+    env.memory.moe = ninfer::MoeMemorySummary{
+        .cache_bytes              = 4096,
+        .fixed_bytes              = 2048,
+        .window_bytes             = 2048,
+        .window_count             = 2,
+        .used_bytes               = 4096,
+        .target_bytes             = 4096,
+        .ready_bytes              = 3072,
+        .fixed_experts_per_layer  = {2, 2},
+        .target_experts_per_layer = {4, 4},
+        .ready_experts_per_layer  = {3, 3},
+        .uploaded_bytes           = 8192,
+        .prefetched_bytes         = 1024,
+    };
+    env.max_context                      = 4096;
+    env.prefill_chunk                    = 1024;
+    env.kv_cache                         = ninfer::KvCacheStorage::Int8Group64;
+    env.speculative.backend              = ninfer::SpeculativeBackend::Mtp;
+    env.speculative.draft_tokens         = 5;
+    env.speculative.proposal_head        = ninfer::ProposalHead::Optimized;
+    env.use_cuda_graph                   = true;
+    env.decode_graph_primed              = true;
+    env.decode_graph_prime_output_tokens = 13;
+    env.repetitions                      = 2;
+    env.warmup                           = 1;
+    env.corpus_path                      = "bench/fixtures/bench_corpus.ids";
+    env.corpus_tokens                    = 65536;
     return env;
 }
 
@@ -277,19 +361,33 @@ int test_report_contract() {
     Json report;
     try {
         report = Json::parse(qb::format_json(
-            env, "ninfer_bench --weights model.ninfer --mtp-draft-tokens 5", results));
+            env, "ninfer_bench --weights model.ninfer --spec mtp --draft-tokens 5", results));
     } catch (const nlohmann::json::exception& error) {
         return fail(std::string("invalid benchmark JSON: ") + error.what());
     }
 
-    failures += expect(report.at("schema_version") == 13, "report schema v13");
+    failures += expect(report.at("schema_version") == 24, "report schema v24");
+    const auto& moe = report.at("memory").at("moe");
+    failures += expect(moe.at("used_bytes") == 4096 && moe.at("target_bytes") == 4096 &&
+                           moe.at("ready_bytes") == 3072 && moe.at("prefetched_bytes") == 1024 &&
+                           moe.at("fixed_bytes") == 2048 && moe.at("window_bytes") == 2048 &&
+                           moe.at("window_count") == 2 &&
+                           moe.at("ready_experts_per_layer") == Json::array({3, 3}),
+                       "MoE cache targets and ready state have distinct report fields");
+    failures += expect(report.at("config").at("speculative_backend") == "mtp" &&
+                           report.at("config").at("draft_tokens") == 5,
+                       "report identifies its backend and window");
     failures += expect(report.at("artifact_type") == "ninfer_bench_report", "report identity");
     failures += expect(report.at("artifact").at("path") == "model.ninfer", "artifact path");
-    failures += expect(report.at("load").at("target") == "qwen3_6_27b", "load target");
-    failures += expect(report.at("load").at("weights_id") == "groupwise-int", "load weights id");
+    failures +=
+        expect(report.at("load").at("architecture") == "Qwen3_5ForCausalLM", "load architecture");
+    failures +=
+        expect(report.at("load").at("prefill_signature") == "groupwise-int", "load weights id");
     failures +=
         expect(report.at("load").at("host_to_device_bytes") == 17400000000ULL, "load H2D bytes");
     failures += expect(report.at("memory").at("kv_cache") == "int8-group64", "memory KV");
+    failures += expect(report.at("memory").at("device_budget_bytes") == 32ULL * 1024 * 1024 * 1024,
+                       "effective Device budget");
     failures += expect(report.at("memory").at("kv_capacity") == 8192, "memory KV capacity");
     failures += expect(report.at("memory").at("workspace").at("capacity_bytes") == 100000000ULL,
                        "workspace capacity");
@@ -297,8 +395,14 @@ int test_report_contract() {
         report.at("memory").at("vision_workspace").at("general_capacity_bytes") == 75000000ULL &&
             report.at("memory").at("vision_workspace").at("handoff_capacity_bytes") == 25000000ULL,
         "Vision workspace layout");
-    failures += expect(report.at("memory").at("cuda_graph_allowance_bytes") == 150000000ULL,
-                       "CUDA Graph allowance");
+    failures += expect(report.at("memory").at("cuda_graph_rebuild_estimate_bytes") == 150000000ULL,
+                       "CUDA Graph rebuild estimate");
+    failures +=
+        expect(report.at("memory").at("cuda_graph_prepare_increment_bytes") == 170000000 &&
+                   report.at("memory").at("cuda_graph_calibration_increment_bytes") == 149999900 &&
+                   report.at("memory").at("cuda_graph_calibration_retained_bytes") == -100 &&
+                   report.at("memory").at("startup_retained_bytes") == -200,
+               "signed Graph calibration and startup deltas");
     failures += expect(report.at("memory").at("kv_payload_bytes") == 123456ULL, "KV payload");
     failures += expect(report.at("config").at("proposal_head") == "optimized", "proposal head");
     failures += expect(report.at("config").at("decode_graph_prime").at("output_tokens") == 13,
@@ -342,8 +446,8 @@ int test_human_and_csv_reports() {
     const qb::BenchEnvironment env = sample_environment();
     const auto results             = sample_results();
     const std::string table        = qb::format_table(env, results);
-    failures += expect(table.find("qwen3_6_27b") != std::string::npos, "table target");
-    failures += expect(table.find("groupwise-int") != std::string::npos, "table weights id");
+    failures += expect(table.find("Qwen3_5ForCausalLM") != std::string::npos, "table target");
+    failures += expect(table.find("qwen3.6-27b") != std::string::npos, "table model name");
     failures += expect(table.find("model.ninfer") != std::string::npos, "table artifact");
     failures +=
         expect(table.find("proposal_head=optimized") != std::string::npos, "table proposal head");
@@ -351,15 +455,21 @@ int test_human_and_csv_reports() {
         expect(table.find("decode eng t/s") != std::string::npos, "table engine throughput");
     failures += expect(table.find("work peak") != std::string::npos, "table workspace peak");
 
-    const std::string csv = qb::format_csv(env, results);
-    failures += expect(csv.starts_with("label,kind,n_prompt,n_gen,target,weights_id"),
+    auto csv_env            = env;
+    csv_env.load.model_name = "trained, \"custom\"";
+    csv_env.artifact_path   = "/weights/user,model.ninfer";
+    const std::string csv   = qb::format_csv(csv_env, results);
+    failures += expect(csv.find("\"trained, \"\"custom\"\"\"") != std::string::npos &&
+                           csv.find("\"/weights/user,model.ninfer\"") != std::string::npos,
+                       "CSV preserves and escapes the actual training instance");
+    failures += expect(csv.starts_with("label,kind,n_prompt,n_gen,architecture,prefill_signature"),
                        "CSV identity columns");
     for (const std::string_view field :
-         {"proposal_head", "kv_payload_bytes", "load_host_to_device_bytes",
-          "workspace_general_capacity_bytes", "vision_handoff_capacity_bytes",
-          "cuda_graph_allowance_bytes", "workspace_peak_bytes", "workspace_allocator_peak_bytes",
-          "spec_acceptance_rate", "decode_output_tok_s_mean", "decode_engine_tok_s_mean",
-          "total_seconds_mean"}) {
+         {"model_name", "artifact_path", "proposal_head", "kv_payload_bytes",
+          "load_host_to_device_bytes", "workspace_general_capacity_bytes",
+          "vision_handoff_capacity_bytes", "cuda_graph_rebuild_estimate_bytes",
+          "workspace_peak_bytes", "workspace_allocator_peak_bytes", "spec_acceptance_rate",
+          "decode_output_tok_s_mean", "decode_engine_tok_s_mean", "total_seconds_mean"}) {
         failures += expect(csv.find(field) != std::string::npos,
                            std::string("CSV field ") + std::string(field));
     }
@@ -367,10 +477,45 @@ int test_human_and_csv_reports() {
     return failures;
 }
 
+int test_constrained_batch_metrics() {
+    qb::TestResult result;
+    result.test        = {qb::TestKind::Decode, 0, 128, "tg128"};
+    result.concurrency = 2;
+    result.reps        = {{timings(0, 0.1, 1.0, 1.1), {}, 11}, {timings(0, 0.1, 2.0, 2.1), {}, 21}};
+    result.repetition_wall_seconds = {2.5};
+    int failures                   = expect_near(qb::output_tok_s_series(result).at(0), 32.0 / 2.5,
+                                                 "concurrent throughput uses elapsed wall time and actual outputs");
+    const auto decode              = qb::decode_output_tok_s_series(result);
+    failures += expect_near(decode.at(0), 10.0, "grammar EOS counts actual decode outputs");
+    failures +=
+        expect_near(decode.at(1), 10.0, "per-request rate stays separate from batch throughput");
+    const auto report = Json::parse(qb::format_json(sample_environment(), "bench", {result}));
+    failures += expect(report["tests"][0]["reps"][1]["row"] == 1,
+                       "report retains concurrent request identity");
+    failures += expect_throws<std::invalid_argument>(
+        [] { (void)parse_for_test({"bench", "--weights", "model.ninfer", "--mixed-constraints"}); },
+        "mixed grammar needs a grammar and multiple requests");
+    auto env = sample_environment();
+    for (const auto& constraint :
+         {ninfer::OutputConstraint::choice({"", "a|b", "\"\\\n你好", std::string("a\0b", 3)}),
+          ninfer::OutputConstraint::regex(R"(a\d{2})")}) {
+        env.constraint    = constraint;
+        const auto config = Json::parse(qb::format_json(env, "bench", {result}))["config"];
+        failures += expect(
+            config["constraint_choices"] == constraint.choices &&
+                config["constraint_source"] == constraint.source &&
+                config["constraint_type"] ==
+                    (constraint.kind == ninfer::OutputConstraintKind::Choice ? "choice" : "regex"),
+            "report preserves the exact constraint language");
+    }
+    return failures;
+}
+
 } // namespace
 
 int main() {
     int failures = 0;
+    failures += test_constrained_batch_metrics();
     failures += test_cli_contract();
     failures += test_measurement_contract();
     failures += test_report_contract();

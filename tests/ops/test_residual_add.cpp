@@ -1,4 +1,5 @@
 #include "ninfer/ops/residual_add.h"
+#include "cuda_fixture.h"
 #include "ops/op_tester.h"
 
 #include <cstdint>
@@ -44,9 +45,9 @@ int run_case(const char* label, std::int32_t rows, std::int32_t columns, std::ui
     device_y.copy_from_host(y_bits.data(), device_y.bytes());
     device_x.copy_from_host(x_bits.data(), device_x.bytes());
 
-    Tensor y_tensor(device_y.data(), DType::BF16, {rows, columns});
-    Tensor x_tensor(device_x.data(), DType::BF16, {rows, columns});
-    ops::residual_add(y_tensor, x_tensor, nullptr);
+    Tensor y_tensor(device_y.span(), DType::BF16, {rows, columns});
+    Tensor x_tensor(device_x.span(), DType::BF16, {rows, columns});
+    ops::residual_add(y_tensor, x_tensor, ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
     int failures = verify_pointwise(label, from_device_bf16(device_x.data(), count), expected,
@@ -72,9 +73,9 @@ int run_cancellation_case() {
     device_y.copy_from_host(y_bits.data(), device_y.bytes());
     device_x.copy_from_host(x_bits.data(), device_x.bytes());
 
-    Tensor y_tensor(device_y.data(), DType::BF16, {static_cast<int>(y.size())});
-    Tensor x_tensor(device_x.data(), DType::BF16, {static_cast<int>(x.size())});
-    ops::residual_add(y_tensor, x_tensor, nullptr);
+    Tensor y_tensor(device_y.span(), DType::BF16, {static_cast<int>(y.size())});
+    Tensor x_tensor(device_x.span(), DType::BF16, {static_cast<int>(x.size())});
+    ops::residual_add(y_tensor, x_tensor, ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
     int failures = verify_pointwise("residual_add cancellation",

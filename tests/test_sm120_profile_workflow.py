@@ -397,7 +397,6 @@ class Sm120ProfileWorkflowTest(unittest.TestCase):
             check=False,
             timeout=10,
         )
-
         self.assertEqual(completed.returncode, 2)
         self.assertIn("production must be stopped by the active lease", completed.stderr)
         self.assertEqual(

@@ -1,38 +1,55 @@
 #pragma once
 
-// Product-side adapter between HTTP protocol requests and the public NInfer
-// engine. It owns one Engine and keeps protocol concerns (aliases, usage,
-// streaming callbacks, and tool-call parsing) outside the target package.
+// Product-side adapter from one protocol-neutral generation request to the public Engine. Wire
+// adapters normalize before this layer and render IDs, usage, and response events after it.
 
 #include "ninfer/engine.h"
+#include "runtime/contract/durable_engine_api.h"
 #include "serve/request.h"
 #include "serve/serve_options.h"
-#include "serve/tool_call_parser.h"
-#include "serve/session_checkpoint_store.h"
 
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
-#include <mutex>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace ninfer::serve {
 
 struct RequestLifetime;
 struct RequestCapacity;
+class OpenAIResponsesStore;
+class SessionCheckpointService;
+
+// Installed by the checkpoint service before HTTP work starts. Only the internal K3 adapter may
+// attach an owning response tag to a native prompt; the public Engine API stays persistence-free.
+struct GenerationCheckpointHooks {
+    std::function<void(ninfer::PreparedPrompt&, std::string_view)> set_checkpoint_tag;
+    std::function<runtime::DurableSessionEpoch(const ninfer::GenerationHandle&)> publication_epoch;
+};
 
 struct GenerationMetrics {
-    double prepare_seconds = 0.0;
-    double ttft_seconds    = 0.0;
-    double vision_seconds  = 0.0;
-    double prefill_seconds = 0.0;
-    double decode_seconds  = 0.0;
-    double total_seconds   = 0.0;
+    std::uint64_t engine_request_id       = 0;
+    std::uint32_t computed_prefill_tokens = 0;
+    double prepare_seconds                = 0.0;
+    double ttft_seconds                   = 0.0;
+    double vision_seconds                 = 0.0;
+    double prefill_seconds                = 0.0;
+    double decode_seconds                 = 0.0;
+    double prompt_wall_seconds            = 0.0;
+    double generation_wall_seconds        = 0.0;
+    double total_seconds                  = 0.0;
     ninfer::GenerationEngineTiming engine_timing;
+    std::optional<ninfer::GenerationFirstOutputTiming> first_output_timing;
+    ninfer::GenerationSchedulingStats scheduling;
+    ninfer::GenerationAdmissionStats admission;
 
     SpeculativeBackend speculative_backend    = SpeculativeBackend::None;
     std::uint32_t speculative_draft_window    = 0;
@@ -43,56 +60,76 @@ struct GenerationMetrics {
     std::vector<std::uint64_t> speculative_accepted_per_position;
     std::uint32_t prefix_cache_hit_tokens     = 0;
     ninfer::PrefixReusePath prefix_reuse_path = ninfer::PrefixReusePath::Root;
-    ninfer::MaterializationDiagnostics materialization;
 };
 
 struct GenerationOutcome {
     std::string text;
     std::string reasoning;
-    std::vector<ToolCall> tool_calls;
+    std::vector<ninfer::TokenId> generated_token_ids;
+    std::vector<ninfer::GeneratedToolCall> tool_calls;
+    ninfer::ToolCallParseDiagnostics tool_call_parse;
     int prompt_tokens     = 0;
     int completion_tokens = 0;
     int reasoning_tokens  = 0;
     ninfer::ThinkingBudgetStats thinking;
-    std::size_t streamed_content_bytes = 0;
+    std::optional<ninfer::ConstraintObservation> constraint;
     ninfer::FinishReason finish_reason = ninfer::FinishReason::OutputLimit;
+    std::optional<std::string> matched_stop_string;
     GenerationMetrics metrics;
 };
 
+// A transport may report an interrupted stream through a callback or is_cancelled().
+// Generation still settles through Engine cancellation and returns its actual work statistics.
+class ClientDisconnected final : public std::exception {
+public:
+    [[nodiscard]] const char* what() const noexcept override { return "client disconnected"; }
+};
+
 struct StreamSink {
+    std::function<void(const ninfer::GenerationStart& start)> on_start;
+    std::function<void(const ninfer::PromptProgress& progress)> on_progress;
+    std::function<void(const ninfer::GenerationTimingObservation& timing)> on_timing;
     std::function<void(const std::string& delta_text)> on_content;
     std::function<void(const std::string& delta_text)> on_reasoning;
     std::function<bool()> is_cancelled;
 };
 
+enum class GenerationConsumerMode : std::uint8_t {
+    Aggregate,
+    Streaming,
+};
+
 // Translate Engine request failures into the shared protocol-neutral HTTP error contract.
-ApiError request_error_to_api_error(const ninfer::RequestError& exception);
+ApiError
+request_error_to_api_error(const ninfer::RequestError& exception,
+                           std::string_view constraint_param = "structured_outputs.grammar",
+                           std::span<const std::string> tool_schema_params = {});
 
 // Preparation ends by synchronously submitting the owning prompt to the Engine FIFO. The returned
 // request keeps its ingress/response lifetime reservation until the HTTP response is released and
 // is consumed exactly once by run().
 struct PreparedRequest {
+    std::string constraint_param;
+    std::vector<std::string> tool_schema_params;
     ninfer::GenerationHandle generation;
+    std::uint64_t publication_order = 0;
     ninfer::ResolvedSamplingParameters sampling;
-    double prepare_seconds     = 0.0;
+    // Service input acquisition/bookkeeping; Engine timings own prompt and constraint preparation.
+    double service_prepare_seconds = 0.0;
     double acquisition_seconds = 0.0;
     PromptPreparationStats preparation;
-    int prompt_tokens                = 0;
-    bool include_usage               = false;
-    bool tool_capable                = false;
-    std::size_t tool_name_max_length = 64;
-    ToolArgumentTypeContracts tool_argument_types;
-
+    int prompt_tokens    = 0;
     bool enable_thinking = true;
     std::optional<std::uint32_t> thinking_budget;
-    bool preserve_thinking                 = false;
-    bool preserve_thinking_semantic_change = false;
+    std::optional<ninfer::ReasoningEffort> reasoning_effort;
+    std::optional<bool> preserve_thinking;
     std::shared_ptr<RequestLifetime> lifetime;
 };
 
 class GenerationService {
 public:
-    explicit GenerationService(ServeOptions options, LoadProgress load_progress = {});
+    explicit GenerationService(ServeOptions options, StartupObserver startup_observer = {});
+    ~GenerationService();
 
     [[nodiscard]] const ServeOptions& options() const noexcept { return options_; }
 
@@ -106,6 +143,8 @@ public:
 
     [[nodiscard]] ninfer::RuntimeStats runtime_stats() const { return engine_->runtime_stats(); }
 
+    [[nodiscard]] bool is_available() const { return engine_->is_available(); }
+
     [[nodiscard]] ninfer::MediaCacheSummary media_cache_summary() const {
         return engine_->media_cache_summary();
     }
@@ -115,9 +154,11 @@ public:
     }
 
     [[nodiscard]] PreparedRequest prepare(const GenerationRequest& req,
-                                          std::function<bool()> is_cancelled = {},
-                                          ContextCacheHints context_cache    = {},
-                                          std::string checkpoint_tag         = {}) const;
+                                          GenerationConsumerMode consumer_mode,
+                                          ninfer::GenerationObservationOptions observation = {},
+                                          std::function<bool()> is_cancelled               = {},
+                                          ContextCacheHints context_cache = {},
+                                          std::string_view checkpoint_tag = {}) const;
     [[nodiscard]] int count_prompt_tokens(const GenerationRequest& req,
                                           std::function<bool()> is_cancelled = {}) const;
 
@@ -125,17 +166,13 @@ public:
     GenerationOutcome run(PreparedRequest& prepared, const StreamSink* sink,
                           std::function<bool()> is_cancelled = {});
 
-    [[nodiscard]] bool checkpoint_enabled() const noexcept;
-    [[nodiscard]] std::optional<SessionCheckpointSaveResult>
-    save_checkpoint(std::string_view session_sha256, ResponseStore& responses,
-                    runtime::SessionCheckpointSkipDetail* skip = nullptr);
-    [[nodiscard]] bool restore_checkpoint(std::string_view session_sha256,
-                                          std::string_view required_response_id,
-                                          ResponseStore& responses);
-    [[nodiscard]] nlohmann::json checkpoint_status(std::string_view session_sha256) const;
-    [[nodiscard]] SessionCheckpointEraseResult erase_checkpoint(std::string_view session_sha256);
-
     void warmup();
+    [[nodiscard]] std::shared_ptr<SessionCheckpointService>
+    bind_checkpoints(OpenAIResponsesStore& responses);
+    void set_checkpoint_hooks(GenerationCheckpointHooks hooks) { checkpoint_hooks_ = std::move(hooks); }
+    [[nodiscard]] bool has_checkpoint_hooks() const noexcept {
+        return checkpoint_hooks_.set_checkpoint_tag && checkpoint_hooks_.publication_epoch;
+    }
 
 private:
     enum class CacheParticipation : std::uint8_t {
@@ -149,19 +186,20 @@ private:
     };
 
     [[nodiscard]] PreparedRequest
-    prepare_impl(const GenerationRequest& req, std::function<bool()> is_cancelled,
-                 ContextCacheHints context_cache, CacheParticipation cache_participation,
-                 DeadlinePolicy deadline_policy, std::string checkpoint_tag) const;
+    prepare_impl(const GenerationRequest& req, GenerationConsumerMode consumer_mode,
+                 ninfer::GenerationObservationOptions observation,
+                 std::function<bool()> is_cancelled, ContextCacheHints context_cache,
+                 CacheParticipation cache_participation, DeadlinePolicy deadline_policy,
+                 std::string_view checkpoint_tag = {}) const;
     [[nodiscard]] std::shared_ptr<RequestLifetime>
     acquire_request_lifetime(DeadlinePolicy deadline_policy) const;
 
     ServeOptions options_;
+    std::optional<std::string> principal_reuse_scope_;
     std::unique_ptr<ninfer::Engine> engine_;
-    ninfer::PromptCapabilities prompt_capabilities_;
     std::shared_ptr<RequestCapacity> request_capacity_;
-    std::unique_ptr<SessionCheckpointStore> checkpoint_store_;
-    nlohmann::json checkpoint_runtime_fingerprint_;
-    mutable std::mutex checkpoint_mutex_;
+    GenerationCheckpointHooks checkpoint_hooks_;
+    std::shared_ptr<SessionCheckpointService> checkpoints_;
 };
 
 } // namespace ninfer::serve

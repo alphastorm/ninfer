@@ -21,8 +21,24 @@ public:
     void reset() noexcept;
 
 private:
+    friend class DecodeGraphCapture;
     friend class DecodeGraphExecutable;
     cudaGraph_t graph_ = nullptr;
+};
+
+// An unfinished capture is discarded on scope exit. All participating streams must
+// rejoin the origin before finish(); the definition owns the resulting graph.
+class DecodeGraphCapture {
+public:
+    explicit DecodeGraphCapture(cudaStream_t stream);
+    ~DecodeGraphCapture();
+    DecodeGraphCapture(const DecodeGraphCapture&)            = delete;
+    DecodeGraphCapture& operator=(const DecodeGraphCapture&) = delete;
+
+    [[nodiscard]] DecodeGraphDefinition finish();
+
+private:
+    cudaStream_t stream_;
 };
 
 class DecodeGraphExecutable {

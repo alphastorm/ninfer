@@ -102,7 +102,7 @@ class RuntimeConfig:
             "request_log_configured": True,
             "checkpoint_configured": self.checkpoint_dir is not None,
             "checkpoint_mount_target": (
-                "/checkpoints" if self.checkpoint_dir is not None else None
+                "/checkpoints-v013" if self.checkpoint_dir is not None else None
             ),
             "checkpoint_seccomp_sha256": (
                 _CHECKPOINT_SECCOMP_PROFILE_SHA256
@@ -619,7 +619,7 @@ def verify_container_configuration(
         ("/logs", config.request_log_dir, True),
     ]
     if config.checkpoint_dir is not None:
-        expected_mounts.append(("/checkpoints", config.checkpoint_dir, True))
+        expected_mounts.append(("/checkpoints-v013", config.checkpoint_dir, True))
     if config.api_key_file is not None:
         expected_mounts.append(
             ("/run/secrets/ninfer_api_key", config.api_key_file, False)
@@ -826,7 +826,7 @@ def verify_status(
 ) -> None:
     if (
         status.get("artifact_type") != "ninfer_server_status"
-        or status.get("schema_version") != 1
+        or status.get("schema_version") != 2
         or status.get("status") != "ok"
     ):
         fail("status endpoint returned the wrong envelope")
@@ -991,7 +991,7 @@ def command_start(args: argparse.Namespace) -> None:
         )
     )
     if config.checkpoint_dir is not None:
-        command.extend(("--volume", f"{config.checkpoint_dir}:/checkpoints"))
+        command.extend(("--volume", f"{config.checkpoint_dir}:/checkpoints-v013"))
         seccomp_profile = checkpoint_seccomp_profile(config)
         if seccomp_profile is None:
             fail("checkpoint seccomp profile was not resolved")
@@ -1016,7 +1016,7 @@ def command_start(args: argparse.Namespace) -> None:
         f"/logs/{request_log_name}",
     ]
     if config.checkpoint_dir is not None:
-        server_args.extend(("--session-checkpoint-dir", "/checkpoints"))
+        server_args.extend(("--session-checkpoint-dir", "/checkpoints-v013"))
     if config.api_key_file is not None:
         command.extend(
             (

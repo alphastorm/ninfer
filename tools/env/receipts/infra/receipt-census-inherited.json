@@ -1,0 +1,19 @@
+{
+  "json_files": [
+    "artifacts-by-object-id.json",
+    "artifacts.json",
+    "baseline-env-invalid.json",
+    "baseline.json",
+    "environment-git.json",
+    "environment-r2.json",
+    "environment.json",
+    "manifest-field-diff.json",
+    "semantic-manifest-field-diff.json",
+    "startup-budget-transport-invalid.json",
+    "startup-budget.json",
+    "startup-transport-invalid.json",
+    "tensor-payloads.json",
+    "vanilla-server-start.json"
+  ],
+  "private_marker_violations": []
+}

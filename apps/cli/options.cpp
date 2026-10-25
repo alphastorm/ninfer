@@ -56,6 +56,8 @@ KvCacheStorage parse_kv_cache(std::string_view text) {
     if (text == "bf16") { return KvCacheStorage::BFloat16; }
     if (text == "int8") { return KvCacheStorage::Int8Group64; }
     if (text == "fp8") { return KvCacheStorage::Fp8E4M3Row256; }
+    if (text == "nvfp4") { return KvCacheStorage::Nvfp4Group16; }
+    if (text == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
     throw std::invalid_argument("invalid kv-dtype: " + std::string(text));
 }
 
@@ -65,6 +67,10 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
 }
 
 ReasoningEffort parse_reasoning_effort(std::string_view text) {
+    if (text == "none") { return ReasoningEffort::None; }
+    if (text == "minimal") { return ReasoningEffort::Minimal; }
+    if (text == "high") { return ReasoningEffort::High; }
+    if (text == "max") { return ReasoningEffort::Max; }
     if (text == "low") { return ReasoningEffort::Low; }
     if (text == "medium") { return ReasoningEffort::Medium; }
     if (text == "xhigh") { return ReasoningEffort::XHigh; }
@@ -74,28 +80,36 @@ ReasoningEffort parse_reasoning_effort(std::string_view text) {
 } // namespace
 
 std::string usage_text(const char* argv0) {
-    return std::string("usage: ") + argv0 + " --version\n" + "       " + argv0 +
+    return std::string("usage: ") + argv0 +
            " <model.ninfer> (--prompt <text>|--messages <messages.json>)\n"
-           "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new N]\n"
+           "       [--max-context N] [--kv-capacity N|auto] [--prefill-chunk N] [--max-new "
+           "N]\n"
            "       [--device N]\n"
-           "       [--kv-dtype bf16|int8|fp8] [--spec mtp|dflash --draft-tokens N]\n"
+           "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens "
+           "N]\n"
            "       [--lm-head-draft]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--stop-token-id N]... [--stop <text>]... [--reasoning-stop <text>]...\n"
+           "       [--chat-template FILE]\n"
+           "       [--grammar-file FILE | --json-object | --json-schema-file FILE |\n"
+           "        --regex PATTERN | --choice TEXT ...]\n"
            "       [--raw-output] [--print-token-ids] [--no-thinking] [--thinking-budget N]\n"
-           "       [--reasoning-effort low|medium|xhigh] [--vision]\n"
+           "       [--reasoning-effort none|minimal|low|medium|high|xhigh|max] [--vision]\n"
            "       [--no-cuda-graph]\n"
+           "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "\n"
            "Streams answer content to stdout and reasoning plus diagnostics to stderr.\n"
            "Structured message content accepts text, image/image_url, and video/video_url parts;\n"
            "media sources may be local paths, HTTP(S) URLs, or base64 data URIs.\n"
            "--vision enables image/video input and loads the fixed Vision GPU allocations.\n"
+           "--prefill-chunk requires a positive multiple of 128; defaults to 1024, or 4096 with "
+           "CPU expert offload.\n"
            "--thinking-budget caps model-origin thinking tokens; inserted control tokens count "
            "toward --max-new.\n"
-           "--kv-capacity auto leaves " +
+           "Startup uses " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
-           " MiB of sizing headroom.\n"
+           " MiB of planning headroom for both explicit and automatic KV capacity.\n"
            "Sampling defaults come from the loaded model and thinking mode; flags override "
            "individual fields.\n";
 }
@@ -104,10 +118,6 @@ Options parse_options(int argc, char** argv) {
     Options options;
     if (argc >= 2 && (std::string_view(argv[1]) == "--help" || std::string_view(argv[1]) == "-h")) {
         options.help_requested = true;
-        return options;
-    }
-    if (argc >= 2 && std::string_view(argv[1]) == "--version") {
-        options.version_requested = true;
         return options;
     }
     if (argc < 2) { throw std::invalid_argument(".ninfer model path is required"); }
@@ -123,6 +133,18 @@ Options parse_options(int argc, char** argv) {
 
         if (arg == "--prompt") {
             options.prompt = value(arg);
+        } else if (arg == "--chat-template") {
+            options.chat_template_path = value(arg);
+        } else if (arg == "--grammar-file") {
+            options.grammar_path = value(arg);
+        } else if (arg == "--json-object") {
+            options.json_object = true;
+        } else if (arg == "--json-schema-file") {
+            options.json_schema_path = value(arg);
+        } else if (arg == "--regex") {
+            options.regex = value(arg);
+        } else if (arg == "--choice") {
+            options.choices.emplace_back(value(arg));
         } else if (arg == "--messages") {
             options.messages_path = value(arg);
         } else if (arg == "--max-new") {
@@ -179,9 +201,7 @@ Options parse_options(int argc, char** argv) {
             options.sampling.top_p = parse_float(value(arg), "top-p", 0.0F, 1.0F);
         } else if (arg == "--top-k") {
             const std::uint32_t top_k = parse_u32(value(arg), "top-k", true);
-            if (top_k > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
-                throw std::invalid_argument("--top-k exceeds INT32_MAX");
-            }
+            if (top_k > 20) { throw std::invalid_argument("--top-k must be in [0,20]"); }
             options.sampling.top_k = static_cast<std::int32_t>(top_k);
         } else if (arg == "--min-p") {
             options.sampling.min_p = parse_float(value(arg), "min-p", 0.0F, 1.0F);
@@ -195,11 +215,19 @@ Options parse_options(int argc, char** argv) {
             options.sampling.seed = parse_u64(value(arg), "seed");
         } else if (arg == "--greedy") {
             options.greedy = true;
+        } else if (arg == "--log-level") {
+            options.log_level = product::parse_log_level(value(arg));
         } else {
             throw std::invalid_argument("unknown argument: " + std::string(arg));
         }
     }
 
+    if (int(!options.grammar_path.empty()) + int(!options.json_schema_path.empty()) +
+            int(options.json_object) + int(options.regex.has_value()) +
+            int(!options.choices.empty()) >
+        1)
+        throw std::invalid_argument("select only one of --grammar-file, --json-object, "
+                                    "--json-schema-file, --regex or --choice");
     if (!kv_capacity_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
     }
@@ -217,13 +245,12 @@ Options parse_options(int argc, char** argv) {
         throw std::invalid_argument("--kv-capacity must be at least --max-context");
     }
     product::validate_speculative_cli_options(options.speculative);
-    if (options.speculative.backend == SpeculativeBackend::DFlash && options.enable_vision) {
-        throw std::invalid_argument("--spec dflash cannot be combined with --vision");
-    }
-    if (!options.enable_thinking && options.reasoning_effort) {
+    if (options.enable_thinking == false && options.reasoning_effort &&
+        *options.reasoning_effort != ReasoningEffort::None) {
         throw std::invalid_argument("--reasoning-effort cannot be combined with --no-thinking");
     }
-    if (!options.enable_thinking && options.thinking_budget) {
+    if (options.reasoning_effort == ReasoningEffort::None) options.enable_thinking = false;
+    if (options.enable_thinking == false && options.thinking_budget) {
         throw std::invalid_argument("--thinking-budget cannot be combined with --no-thinking");
     }
     if (options.greedy) { options.sampling.temperature = 0.0F; }

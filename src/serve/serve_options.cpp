@@ -3,7 +3,6 @@
 
 #include <algorithm>
 #include <cerrno>
-#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <fstream>
@@ -35,6 +34,54 @@ std::string read_api_key_file(const char* path) {
     return value;
 }
 
+std::string parse_sha256(const char* text, const char* flag) {
+    const std::string value(text);
+    if (value.size() != 64 ||
+        !std::all_of(value.begin(), value.end(), [](unsigned char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        })) {
+        throw std::invalid_argument(std::string(flag) +
+                                    " must be a 64-character lowercase SHA-256");
+    }
+    return value;
+}
+
+std::string parse_profile_name(const char* text) {
+    const std::string value(text);
+    if (value.empty() || value.size() > 64 ||
+        !std::all_of(value.begin(), value.end(), [](unsigned char c) {
+            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                   (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        })) {
+        throw std::invalid_argument("--deployment-profile must match [A-Za-z0-9._-]{1,64}");
+    }
+    return value;
+}
+
+std::string parse_stop_event_name(const char* text) {
+    const std::string value(text);
+    std::string_view rest(value);
+    if (rest.starts_with("Global\\")) {
+        rest.remove_prefix(7);
+    } else if (rest.starts_with("Local\\")) {
+        rest.remove_prefix(6);
+    } else {
+        throw std::invalid_argument("--stop-event requires the Global or Local namespace");
+    }
+    constexpr std::string_view infix = "NInfer-Serve-Stop-";
+    if (!rest.starts_with(infix) || rest.size() != infix.size() + 32 ||
+        !std::all_of(rest.begin() + infix.size(), rest.end(), [](unsigned char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        })) {
+        throw std::invalid_argument(
+            "--stop-event must match (Global|Local)\\NInfer-Serve-Stop-<32 lowercase hex>");
+    }
+#if defined(_WIN32)
+    return value;
+#else
+    throw std::invalid_argument("--stop-event is only supported on Windows");
+#endif
+}
 int parse_nonnegative_int(const char* text, const char* label) {
     char* end        = nullptr;
     const long value = std::strtol(text, &end, 10);
@@ -68,11 +115,61 @@ std::uint64_t parse_u64(const char* text, const char* label) {
     return static_cast<std::uint64_t>(value);
 }
 
+std::size_t parse_host_context_mib(const char* text) {
+    constexpr std::size_t bytes_per_mib = 1ULL << 20;
+    constexpr std::size_t maximum       = std::numeric_limits<std::size_t>::max();
+    const std::string_view value(text);
+    const std::size_t point      = value.find('.');
+    const std::string_view whole = value.substr(0, point);
+    std::string_view fraction =
+        point == std::string_view::npos ? std::string_view{} : value.substr(point + 1);
+    if (whole.empty() || whole.find_first_not_of("0123456789") != std::string_view::npos ||
+        (point != std::string_view::npos &&
+         (fraction.empty() ||
+          fraction.find_first_not_of("0123456789") != std::string_view::npos))) {
+        throw std::invalid_argument("--host-context-mib requires a nonnegative decimal MiB value");
+    }
+
+    std::size_t whole_mib = 0;
+    for (const char character : whole) {
+        const std::size_t digit = static_cast<std::size_t>(character - '0');
+        if (whole_mib > (maximum / bytes_per_mib - digit) / 10) {
+            throw std::invalid_argument("--host-context-mib is out of range");
+        }
+        whole_mib = whole_mib * 10 + digit;
+    }
+
+    // A whole-byte MiB value has at most 20 fractional decimal digits (1 MiB = 2^20 bytes).
+    // Use exact integer arithmetic so decimal parsing cannot round the requested budget upward.
+    while (!fraction.empty() && fraction.back() == '0') { fraction.remove_suffix(1); }
+    if (fraction.size() > 20) {
+        throw std::invalid_argument("--host-context-mib must resolve to a whole number of bytes");
+    }
+    unsigned __int128 numerator = 0;
+    unsigned __int128 divisor   = 1;
+    for (const char character : fraction) {
+        numerator = numerator * 10 + static_cast<unsigned int>(character - '0');
+        divisor *= 10;
+    }
+    numerator *= bytes_per_mib;
+    if (numerator % divisor != 0) {
+        throw std::invalid_argument("--host-context-mib must resolve to a whole number of bytes");
+    }
+    const std::size_t fractional_bytes = static_cast<std::size_t>(numerator / divisor);
+    const std::size_t whole_bytes      = whole_mib * bytes_per_mib;
+    if (fractional_bytes > maximum - whole_bytes) {
+        throw std::invalid_argument("--host-context-mib is out of range");
+    }
+    return whole_bytes + fractional_bytes;
+}
+
 KvCacheStorage parse_kv_dtype(const char* text) {
     const std::string value(text);
     if (value == "bf16") { return KvCacheStorage::BFloat16; }
     if (value == "int8") { return KvCacheStorage::Int8Group64; }
     if (value == "fp8") { return KvCacheStorage::Fp8E4M3Row256; }
+    if (value == "nvfp4") { return KvCacheStorage::Nvfp4Group16; }
+    if (value == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
     throw std::invalid_argument("invalid kv-dtype: " + value);
 }
 
@@ -83,57 +180,34 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
     return KvCapacityPolicy::explicit_capacity(static_cast<std::uint32_t>(value));
 }
 
-std::string parse_sha256(const char* text, const char* label) {
-    const std::string value(text == nullptr ? "" : text);
-    const bool valid =
-        value.size() == 64 && std::all_of(value.begin(), value.end(), [](unsigned char c) {
-            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
-        });
-    if (!valid) {
-        throw std::invalid_argument(std::string(label) +
-                                    " must be a 64-character lowercase SHA-256");
-    }
-    return value;
-}
-
-std::string parse_profile_name(const char* text) {
-    const std::string value(text == nullptr ? "" : text);
-    const bool valid = !value.empty() && value.size() <= 64 &&
-                       std::all_of(value.begin(), value.end(), [](unsigned char c) {
-                           return std::isalnum(c) != 0 || c == '.' || c == '_' || c == '-';
-                       });
-    if (!valid) {
-        throw std::invalid_argument("--deployment-profile must match [A-Za-z0-9._-]{1,64}");
-    }
-    return value;
-}
-
 } // namespace
 
 std::string serve_usage_text(const char* argv0) {
-    return std::string("usage: ") + argv0 + " --version\n" + "       " + argv0 +
+    return std::string("usage: ") + argv0 +
            " <model.ninfer> [--host H] [--port N] [--api-key KEY|--api-key-file FILE] "
            "[--model-id ID] [--binary-sha256 SHA] [--artifact-sha256 SHA] "
            "[--config-sha256 SHA] [--deployment-profile NAME] "
            "[--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
+           "[--gpu-keep-warm-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
            "[--context-cost-presets FILE] "
            "[--max-request-mib N] [--media-cache-mib N] [--media-live-mib N] "
            "[--media-preprocess-threads N] "
-           "[--device-state-slots N] [--host-state-slots N] [--host-kv-mib N] "
-           "[--max-private-continuations N] [--max-shared-prefixes N] "
-           "[--max-long-anchors-per-continuation N] [--max-cache-markers-per-request N] "
-           "[--request-log-jsonl FILE] "
+           "[--device-state-slots N] [--host-context-mib N] "
+           "[--request-log-jsonl FILE] [--stop-event NAME] [--shutdown-report FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
            "[--session-checkpoint-dir DIR] [--session-checkpoint-quota-mib N] "
-           "[--session-checkpoint-staging-mib N] [--session-checkpoint-min-tokens N] "
-           "[--kv-dtype bf16|int8|fp8] [--spec mtp|dflash --draft-tokens N] "
+           "[--session-checkpoint-staging-mib N] [--session-checkpoint-write-buffer-mib N] "
+           "[--session-checkpoint-min-tokens N] [--session-checkpoint-require-origin-auth] "
+           "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
-           "[--lm-head-draft] [--no-thinking] [--preserve-thinking] [--cors] "
+           "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
+           "[--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
            "[--frequency-penalty F] [--seed N] [--greedy]\n"
+           "       [--log-level trace|debug|info|warning|error|critical|off]\n"
            "       serves OpenAI Responses/Chat Completions and Anthropic Messages endpoints\n"
            "       --default-max-tokens defaults to " +
            std::to_string(kDefaultMaxTokens) +
@@ -143,19 +217,24 @@ std::string serve_usage_text(const char* argv0) {
            "       --media-live-mib defaults to 2048 and bounds all live BF16 patch payloads\n"
            "       --media-preprocess-threads defaults to 0 (auto, at most 16 workers)\n"
            "       --request-log-jsonl appends full-precision server/request records\n"
-           "       --model-id overrides the artifact identity.model_id reported by the server\n"
-           "       Responses state is process-local and bounded to 1024 records / 256 MiB by "
-           "default\n"
+           "       --model-id overrides the artifact metadata.name reported by the server\n"
+           "       Responses live state defaults to 1024 records / 256 MiB; without "
+           "--session-checkpoint-dir it is process-local\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
+           "       --gpu-keep-warm-ms bounds idle GPU warming after work; 0 disables it (default)\n"
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
-           "       --kv-capacity auto leaves " +
+           "       --prefill-chunk requires a positive multiple of 128; defaults to 1024, or "
+           "4096 with CPU expert offload\n"
+           "       startup uses " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
-           " MiB of sizing headroom\n"
-           "       --no-prefix-reuse disables compatible-prefix caching (enabled by default)\n"
-           "       context cache defaults: device-state=max-concurrency, private=2x concurrency, "
-           "shared=concurrency, anchors=2, markers=4; Host state=8 slots, Host KV=8192 MiB\n"
-           "       --device-state-slots is extra checkpoint capacity beyond active lanes; "
-           "--host-kv-mib uses MiB\n"
+           " MiB of planning headroom for both explicit and automatic KV capacity\n"
+           "       --no-prefix-reuse disables cross-request history; request pause/replay "
+           "resources remain available\n"
+           "       context defaults: device-state=max-concurrency; Host budget is resolved from "
+           "8192 MiB plus eight native StateImages\n"
+           "       --device-state-slots is extra capacity beyond active lanes; "
+           "--host-context-mib bounds shared Host State/KV and in-flight storage in MiB\n"
+           "       --host-context-mib accepts decimal MiB values that resolve to whole bytes\n"
            "       --default-thinking-budget caps model-origin thinking for enabled requests; "
            "control tokens count toward the request output limit\n"
            "       --preserve-thinking retains closed-turn assistant reasoning in later prompts\n"
@@ -166,16 +245,23 @@ std::string serve_usage_text(const char* argv0) {
 
 ServeOptions parse_serve_options(int argc, char** argv) {
     ServeOptions options;
+    options.startup_argv.reserve(static_cast<std::size_t>(argc));
+    bool redact_next = false;
+    for (int i = 0; i < argc; ++i) {
+        if (redact_next) {
+            options.startup_argv.emplace_back("<redacted>");
+            redact_next = false;
+            continue;
+        }
+        options.startup_argv.emplace_back(argv[i] == nullptr ? "" : argv[i]);
+        redact_next = options.startup_argv.back() == "--api-key" ||
+                      options.startup_argv.back() == "--api-key-file";
+    }
+    bool api_key_source_explicit     = false;
     bool default_max_tokens_explicit = false;
     bool kv_capacity_explicit        = false;
-    bool context_capacity_explicit   = false;
-    bool api_key_source_explicit     = false;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
         options.help_requested = true;
-        return options;
-    }
-    if (argc >= 2 && std::string_view(argv[1]) == "--version") {
-        options.version_requested = true;
         return options;
     }
     if (argc < 2) { throw std::invalid_argument("artifact path is required"); }
@@ -194,13 +280,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             if (api_key_source_explicit) {
                 throw std::invalid_argument("API key source must be specified exactly once");
             }
-            options.api_key         = require_value("--api-key");
+            options.api_key = require_value("--api-key");
             api_key_source_explicit = true;
         } else if (arg == "--api-key-file") {
             if (api_key_source_explicit) {
                 throw std::invalid_argument("API key source must be specified exactly once");
             }
-            options.api_key         = read_api_key_file(require_value("--api-key-file"));
+            options.api_key = read_api_key_file(require_value("--api-key-file"));
             api_key_source_explicit = true;
         } else if (arg == "--model-id") {
             options.model_id_override = require_value("--model-id");
@@ -208,14 +294,12 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 throw std::invalid_argument("--model-id must not be empty");
             }
         } else if (arg == "--binary-sha256") {
-            options.binary_sha256 =
-                parse_sha256(require_value("--binary-sha256"), "--binary-sha256");
+            options.binary_sha256 = parse_sha256(require_value("--binary-sha256"), "--binary-sha256");
         } else if (arg == "--artifact-sha256") {
             options.artifact_sha256 =
                 parse_sha256(require_value("--artifact-sha256"), "--artifact-sha256");
         } else if (arg == "--config-sha256") {
-            options.config_sha256 =
-                parse_sha256(require_value("--config-sha256"), "--config-sha256");
+            options.config_sha256 = parse_sha256(require_value("--config-sha256"), "--config-sha256");
         } else if (arg == "--deployment-profile") {
             options.deployment_profile = parse_profile_name(require_value("--deployment-profile"));
         } else if (arg == "--max-context") {
@@ -236,6 +320,16 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--prefill-chunk") {
             options.prefill_chunk = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--prefill-chunk"), "prefill-chunk"));
+            if (options.prefill_chunk == 0) {
+                throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
+            }
+        } else if (arg == "--gpu-keep-warm-ms") {
+            const auto milliseconds =
+                parse_u64(require_value("--gpu-keep-warm-ms"), "gpu-keep-warm-ms");
+            if (milliseconds > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::invalid_argument("--gpu-keep-warm-ms is out of range");
+            }
+            options.gpu_keep_warm_ms = static_cast<std::uint32_t>(milliseconds);
         } else if (arg == "--context-cost-presets") {
             options.context_cost_presets = require_value("--context-cost-presets");
             if (options.context_cost_presets.empty()) {
@@ -275,43 +369,56 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--device-state-slots") {
             options.context_cache.device_state_slots = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--device-state-slots"), "device-state-slots"));
-            context_capacity_explicit = true;
-        } else if (arg == "--host-state-slots") {
-            options.context_cache.host_state_slots = static_cast<std::uint32_t>(
-                parse_nonnegative_int(require_value("--host-state-slots"), "host-state-slots"));
-            context_capacity_explicit = true;
-        } else if (arg == "--host-kv-mib") {
-            const std::uint64_t mib = parse_u64(require_value("--host-kv-mib"), "host-kv-mib");
-            if (mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
-                throw std::invalid_argument("--host-kv-mib is out of range");
-            }
-            options.context_cache.host_kv_capacity_bytes = static_cast<std::size_t>(mib << 20);
-            context_capacity_explicit                    = true;
-        } else if (arg == "--max-private-continuations") {
-            options.context_cache.max_private_continuations =
-                static_cast<std::uint32_t>(parse_nonnegative_int(
-                    require_value("--max-private-continuations"), "max-private-continuations"));
-            context_capacity_explicit = true;
-        } else if (arg == "--max-shared-prefixes") {
-            options.context_cache.max_shared_prefixes =
-                static_cast<std::uint32_t>(parse_nonnegative_int(
-                    require_value("--max-shared-prefixes"), "max-shared-prefixes"));
-            context_capacity_explicit = true;
-        } else if (arg == "--max-long-anchors-per-continuation") {
-            options.context_cache.max_long_anchors_per_continuation = static_cast<std::uint32_t>(
-                parse_nonnegative_int(require_value("--max-long-anchors-per-continuation"),
-                                      "max-long-anchors-per-continuation"));
-            context_capacity_explicit = true;
-        } else if (arg == "--max-cache-markers-per-request") {
-            options.context_cache.max_cache_markers_per_request = static_cast<std::uint32_t>(
-                parse_nonnegative_int(require_value("--max-cache-markers-per-request"),
-                                      "max-cache-markers-per-request"));
-            context_capacity_explicit = true;
+        } else if (arg == "--host-context-mib") {
+            options.context_cache.host_capacity_bytes =
+                parse_host_context_mib(require_value("--host-context-mib"));
         } else if (arg == "--request-log-jsonl") {
             options.request_log_jsonl = require_value("--request-log-jsonl");
             if (options.request_log_jsonl.empty()) {
                 throw std::invalid_argument("--request-log-jsonl must not be empty");
             }
+        } else if (arg == "--stop-event") {
+            options.stop_event = parse_stop_event_name(require_value("--stop-event"));
+        } else if (arg == "--shutdown-report") {
+            options.shutdown_report = require_value("--shutdown-report");
+            if (options.shutdown_report.empty()) {
+                throw std::invalid_argument("--shutdown-report must not be empty");
+            }
+        } else if (arg == "--session-checkpoint-dir") {
+            options.session_checkpoint_root = require_value("--session-checkpoint-dir");
+            if (options.session_checkpoint_root.empty()) {
+                throw std::invalid_argument("--session-checkpoint-dir must not be empty");
+            }
+        } else if (arg == "--session-checkpoint-quota-mib") {
+            const auto mib = parse_u64(require_value("--session-checkpoint-quota-mib"),
+                                       "session-checkpoint-quota-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::uint64_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--session-checkpoint-quota-mib is out of range");
+            }
+            options.session_checkpoint_quota_bytes = mib << 20;
+        } else if (arg == "--session-checkpoint-staging-mib") {
+            const auto mib = parse_u64(require_value("--session-checkpoint-staging-mib"),
+                                       "session-checkpoint-staging-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--session-checkpoint-staging-mib is out of range");
+            }
+            options.session_checkpoint_staging_bytes = static_cast<std::size_t>(mib << 20);
+        } else if (arg == "--session-checkpoint-write-buffer-mib") {
+            const auto mib = parse_u64(require_value("--session-checkpoint-write-buffer-mib"),
+                                       "session-checkpoint-write-buffer-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--session-checkpoint-write-buffer-mib is out of range");
+            }
+            options.session_checkpoint_write_buffer_bytes = static_cast<std::size_t>(mib << 20);
+        } else if (arg == "--session-checkpoint-min-tokens") {
+            const auto tokens = parse_u64(require_value("--session-checkpoint-min-tokens"),
+                                          "session-checkpoint-min-tokens");
+            if (tokens > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::invalid_argument("--session-checkpoint-min-tokens is out of range");
+            }
+            options.session_checkpoint_min_tokens = static_cast<std::uint32_t>(tokens);
+        } else if (arg == "--session-checkpoint-require-origin-auth") {
+            options.session_checkpoint_require_origin_auth = true;
         } else if (arg == "--response-store-max-records") {
             const int records = parse_nonnegative_int(require_value("--response-store-max-records"),
                                                       "response-store-max-records");
@@ -326,32 +433,6 @@ ServeOptions parse_serve_options(int argc, char** argv) {
                 throw std::invalid_argument("--response-store-max-mib is out of range");
             }
             options.response_store_max_bytes = static_cast<std::size_t>(mib << 20);
-        } else if (arg == "--session-checkpoint-dir") {
-            options.session_checkpoint_root = require_value("--session-checkpoint-dir");
-            if (options.session_checkpoint_root.empty()) {
-                throw std::invalid_argument("--session-checkpoint-dir must not be empty");
-            }
-        } else if (arg == "--session-checkpoint-quota-mib") {
-            const std::uint64_t mib = parse_u64(
-                require_value("--session-checkpoint-quota-mib"), "session-checkpoint-quota-mib");
-            if (mib == 0 || mib > std::numeric_limits<std::uint64_t>::max() / (1ULL << 20)) {
-                throw std::invalid_argument("--session-checkpoint-quota-mib is out of range");
-            }
-            options.session_checkpoint_quota_bytes = mib << 20;
-        } else if (arg == "--session-checkpoint-staging-mib") {
-            const std::uint64_t mib = parse_u64(require_value("--session-checkpoint-staging-mib"),
-                                                "session-checkpoint-staging-mib");
-            if (mib == 0 || mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
-                throw std::invalid_argument("--session-checkpoint-staging-mib is out of range");
-            }
-            options.session_checkpoint_staging_bytes = static_cast<std::size_t>(mib << 20);
-        } else if (arg == "--session-checkpoint-min-tokens") {
-            const std::uint64_t tokens = parse_u64(require_value("--session-checkpoint-min-tokens"),
-                                                   "session-checkpoint-min-tokens");
-            if (tokens > std::numeric_limits<std::uint32_t>::max()) {
-                throw std::invalid_argument("--session-checkpoint-min-tokens is out of range");
-            }
-            options.session_checkpoint_min_tokens = static_cast<std::uint32_t>(tokens);
         } else if (arg == "--device") {
             options.device = parse_nonnegative_int(require_value("--device"), "device");
         } else if (arg == "--kv-dtype") {
@@ -381,6 +462,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.allow_prefix_reuse = false;
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
+        } else if (arg == "--chat-template") {
+            options.chat_template_path = require_value("--chat-template");
         } else if (arg == "--no-thinking") {
             options.enable_thinking = false;
         } else if (arg == "--preserve-thinking") {
@@ -394,8 +477,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.sampling_overrides.top_p =
                 parse_float_in(require_value("--top-p"), "top-p", 0.0f, 1.0f);
         } else if (arg == "--top-k") {
-            options.sampling_overrides.top_k =
-                parse_nonnegative_int(require_value("--top-k"), "top-k");
+            const int top_k = parse_nonnegative_int(require_value("--top-k"), "top-k");
+            if (top_k > 20) { throw std::invalid_argument("top-k must be in [0,20]"); }
+            options.sampling_overrides.top_k = top_k;
         } else if (arg == "--min-p") {
             options.sampling_overrides.min_p =
                 parse_float_in(require_value("--min-p"), "min-p", 0.0f, 1.0f);
@@ -409,6 +493,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.sampling_overrides.seed = parse_u64(require_value("--seed"), "seed");
         } else if (arg == "--greedy") {
             options.greedy = true;
+        } else if (arg == "--log-level") {
+            options.log_level = product::parse_log_level(require_value("--log-level"));
         } else {
             throw std::invalid_argument("unknown argument: " + arg);
         }
@@ -416,15 +502,7 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (!kv_capacity_explicit) {
         options.kv_capacity = KvCapacityPolicy::explicit_capacity(options.max_context);
     }
-    if (!options.allow_prefix_reuse) {
-        if (context_capacity_explicit) {
-            throw std::invalid_argument(
-                "--no-prefix-reuse cannot be combined with context-cache capacity options");
-        }
-        options.context_cache.enabled                = false;
-        options.context_cache.host_state_slots       = 0;
-        options.context_cache.host_kv_capacity_bytes = 0;
-    }
+    options.context_cache.enabled = options.allow_prefix_reuse;
     if (options.port <= 0 || options.port > 65535) {
         throw std::invalid_argument("--port must be in [1,65535]");
     }
@@ -445,13 +523,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (options.max_request_bytes == 0) {
         throw std::invalid_argument("--max-request-mib must be positive");
     }
-    if (options.prefill_chunk == 0 || options.prefill_chunk % 128 != 0) {
+    if (options.prefill_chunk % 128 != 0) {
         throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
     }
     product::validate_speculative_cli_options(options.speculative);
-    if (options.speculative.backend == SpeculativeBackend::DFlash && options.enable_vision) {
-        throw std::invalid_argument("--spec dflash cannot be combined with --vision");
-    }
     if (default_max_tokens_explicit) {
         if (options.default_max_tokens <= 0) {
             throw std::invalid_argument("--default-max-tokens must be positive");
@@ -459,30 +534,39 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     }
     if (!options.session_checkpoint_root.empty()) {
         if (options.api_key.empty()) {
-            throw std::invalid_argument(
-                "--session-checkpoint-dir requires --api-key or --api-key-file");
+            throw std::invalid_argument("--session-checkpoint-dir requires --api-key or --api-key-file");
         }
         if (options.binary_sha256.empty() || options.artifact_sha256.empty() ||
             options.config_sha256.empty()) {
             throw std::invalid_argument(
                 "--session-checkpoint-dir requires --binary-sha256, --artifact-sha256, and --config-sha256");
         }
-        if (!options.context_cache.enabled || options.context_cache.host_state_slots == 0 ||
-            options.context_cache.host_kv_capacity_bytes == 0) {
+        if (!options.context_cache.enabled || options.context_cache.host_capacity_bytes == 0) {
             throw std::invalid_argument(
-                "--session-checkpoint-dir requires enabled Host StateImage and Host KV capacity");
+                "--session-checkpoint-dir requires enabled Host context capacity");
+        }
+    }
+    if (options.session_checkpoint_require_origin_auth) {
+        if (options.session_checkpoint_root.empty()) {
+            throw std::invalid_argument(
+                "--session-checkpoint-require-origin-auth requires --session-checkpoint-dir");
+        }
+        // A checkpoint-root reader can test credential guesses against the offline MAC.
+        if (options.api_key.size() < 32) {
+            throw std::invalid_argument(
+                "--session-checkpoint-require-origin-auth requires an API key of at least 32 characters");
         }
     }
     return options;
 }
 
 std::string resolve_public_model_id(const ServeOptions& options,
-                                    std::string_view artifact_model_id) {
+                                    std::string_view artifact_model_name) {
     if (options.model_id_override.has_value()) { return *options.model_id_override; }
-    if (artifact_model_id.empty()) {
-        throw std::logic_error("loaded artifact model_id must not be empty");
+    if (artifact_model_name.empty()) {
+        throw std::logic_error("loaded artifact model name must not be empty");
     }
-    return std::string(artifact_model_id);
+    return std::string(artifact_model_name);
 }
 
 } // namespace ninfer::serve

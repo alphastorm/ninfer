@@ -4,6 +4,7 @@
 //   ./ninfer_argmax_bench --shape full --cols 1
 //   ./ninfer_argmax_bench --shape shortlist --cols 120
 #include "ninfer/ops/argmax.h"
+#include "core/buffer.h"
 #include "ninfer_bench_common.h"
 
 #include <cuda_runtime.h>
@@ -82,20 +83,19 @@ Options parse_args(int argc, char** argv) {
 }
 
 void run_shape(std::int32_t physical_rows, std::int32_t valid_rows, int cols, const char* shape) {
-    DeviceBuffer logits = make_bf16(static_cast<std::size_t>(physical_rows) * kLogitSlots);
+    DeviceBuffer logits = make_bf16(static_cast<std::size_t>(physical_rows) * kLogitSlots, 101U);
     DeviceBuffer out    = make_zeros(static_cast<std::size_t>(cols) * sizeof(std::int32_t));
-    auto* logits_base   = static_cast<std::uint16_t*>(logits.p);
-    Tensor tout(out.p, DType::I32, {cols});
+    Tensor tout(out.span(), DType::I32, {cols});
 
     const double bytes     = static_cast<double>(valid_rows) * 2.0 * static_cast<double>(cols);
     int launch             = 0;
     const int window_count = kLogitSlots / cols;
     const Result result    = bench_loop(
-        [&](cudaStream_t stream) {
+        [&](CudaExecutionView cuda) {
             const int slot = (launch++ % window_count) * cols;
-            auto* window   = logits_base + static_cast<std::size_t>(slot) * physical_rows;
-            Tensor tlogits(window, DType::BF16, {physical_rows, cols});
-            ops::argmax(tlogits, tout, valid_rows, stream);
+            Tensor tlogits(logits.span().subspan(std::size_t(slot) * physical_rows * 2),
+                              DType::BF16, {physical_rows, cols});
+            ops::argmax(tlogits, tout, valid_rows, cuda);
         },
         bytes);
 

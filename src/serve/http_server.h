@@ -1,10 +1,12 @@
 #pragma once
 
-#include "serve/automatic_checkpoint_queue.h"
 #include "serve/generation_service.h"
-#include "serve/response_store.h"
+#include "serve/metrics.h"
+#include "serve/operational_log.h"
+#include "serve/openai_responses_store.h"
 #include "serve/request_log.h"
 #include "serve/serve_options.h"
+#include "serve/session_checkpoint_store.h"
 
 #include <httplib.h>
 
@@ -14,11 +16,15 @@
 #include <cstdint>
 #include <mutex>
 #include <memory>
-#include <optional>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace ninfer::serve {
+
+void write_openai_error(httplib::Response& response, const ApiError& error);
+void write_anthropic_error(httplib::Response& response, const ApiError& error,
+                           const std::string& request_id);
 
 // cpp-httplib invokes the error handler for every application response with status >= 400. Only
 // an empty 413 is its own pre-routing payload-limit rejection; application-authored errors must be
@@ -27,44 +33,70 @@ httplib::Server::HandlerResponse handle_unrendered_http_error(const ServeOptions
                                                               const httplib::Request& request,
                                                               httplib::Response& response);
 
-// Parses the exact authenticated checkpoint-save body. Throws ApiException on malformed, missing,
-// extra, non-string, or non-digest input.
-[[nodiscard]] std::string parse_checkpoint_save_request_body(std::string_view body);
-
-// Parses the optional session credential header shared by bodyless Responses routes. A duplicate,
-// malformed, or unauthenticated value is rejected without echoing it.
+[[nodiscard]] bool matches_bearer_credential(std::string_view authorization,
+                                             std::string_view api_key) noexcept;
+[[nodiscard]] bool has_client_session_header(const httplib::Request& request);
 [[nodiscard]] std::optional<std::string>
 parse_client_session_header(const httplib::Request& request, bool authentication_configured);
+void apply_client_session_header(const httplib::Request& request, bool authentication_configured,
+                                 GenerationRequest& generation);
 
-// Checkpoint status/delete resolve the session credential from the URL path parameter
-// (the released OMP client's addressing: /v1/ninfer/checkpoints/<sha256>...) or from
-// X-NInfer-Session on the collection routes; disagreement between the two is rejected.
-[[nodiscard]] std::optional<std::string>
-checkpoint_session_path_argument(const httplib::Request& request);
-[[nodiscard]] std::string
-require_checkpoint_session_identity(const std::optional<std::string>& path_value,
-                                    const httplib::Request& request,
-                                    bool authentication_configured);
-
-// Renders the authenticated DELETE result without echoing the session identity or stored content.
-void write_checkpoint_delete_response(httplib::Response& response,
-                                      SessionCheckpointEraseResult result);
+struct SessionCheckpointCallbacks {
+    OpenAIResponseRestoreCallback restore;
+    std::function<void()> publication_changed;
+    std::function<void(std::string_view, std::uint64_t)> response_stored;
+    std::function<nlohmann::json(std::string_view)> save;
+    std::function<nlohmann::json(std::string_view)> status;
+    std::function<SessionCheckpointEraseResult(std::string_view)> erase;
+    std::function<bool(const std::string&, const std::string&)> erase_response;
+    // Called after HTTP workers drain. True acknowledges complete synchronous final saves; the
+    // provider retains the detailed K7 receipts and must never equate queued work with durability.
+    std::function<bool()> final_save;
+};
 
 class HttpServer {
 public:
-    explicit HttpServer(ServeOptions options);
+    HttpServer(ServeOptions options, std::shared_ptr<spdlog::logger> logger = {});
 
     // Reserves the configured address before model loading. The service is attached only after its
     // Engine is ready, then listen() enters the blocking accept loop on the already-bound socket.
     bool bind();
+    // The default path binds only real Engine/disk providers. Explicit callbacks are the
+    // deterministic test seam and still must provide every enabled persistence boundary.
     void attach(GenerationService& service);
+    void attach(GenerationService& service, SessionCheckpointCallbacks checkpoints);
     bool listen();
-    void stop();
-    void save_all_checkpoints() noexcept;
+    bool stop() noexcept;
 
     [[nodiscard]] const std::string& public_model_id() const noexcept { return public_model_id_; }
 
 private:
+    class RequestLifecycle {
+    public:
+        RequestLifecycle(HttpServer& owner, RequestLogContext context);
+
+        void done(const GenerationOutcome& outcome);
+        void failure(const RequestFailure& failure);
+        void response_failure(const RequestFailure& failure);
+
+        [[nodiscard]] std::uint64_t request_id() const noexcept { return context_.id; }
+
+    private:
+        enum class State : std::uint8_t {
+            Pending,
+            Done,
+            Error,
+        };
+
+        [[nodiscard]] bool claim(State terminal) noexcept;
+
+        HttpServer* owner_ = nullptr;
+        RequestLogContext context_;
+        std::atomic<State> state_{State::Pending};
+    };
+
+    [[nodiscard]] std::shared_ptr<RequestLifecycle> begin_request(RequestLogContext context);
+
     void register_routes();
     void handle_chat_completions(const httplib::Request& req, httplib::Response& res);
     void handle_messages(const httplib::Request& req, httplib::Response& res);
@@ -76,44 +108,43 @@ private:
     void handle_response_input_items(const httplib::Request& req, httplib::Response& res);
     void handle_response_cancel(const httplib::Request& req, httplib::Response& res);
     void handle_response_compact(const httplib::Request& req, httplib::Response& res);
+    void handle_checkpoint_save(const httplib::Request& req, httplib::Response& res);
+    void handle_checkpoint_status(const httplib::Request& req, httplib::Response& res);
+    void handle_checkpoint_delete(const httplib::Request& req, httplib::Response& res);
+    [[nodiscard]] std::shared_ptr<const StoredOpenAIResponse>
+    find_stored_response(const std::string& id, const std::optional<std::string>& session);
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
-    void handle_status(const httplib::Request& req, httplib::Response& res) const;
-    void handle_checkpoint_get(const httplib::Request& req, httplib::Response& res) const;
-    void handle_checkpoint_save(const httplib::Request& req, httplib::Response& res);
-    void handle_checkpoint_delete(const httplib::Request& req, httplib::Response& res);
-    void maybe_checkpoint_completed_turn(const std::optional<std::string>& session_sha256,
-                                         const GenerationOutcome& outcome) noexcept;
-    void save_automatic_checkpoint(std::string_view session_sha256) noexcept;
 
-    // The process-wide console logger serializes lines from request and reporter threads.
-    void log_line(const std::string& line);
-    void log_request_start(const RequestLogContext& context);
-    void log_request_rejected(const RequestRejectionLogContext& context);
-    void log_request_done(const RequestLogContext& context, const GenerationOutcome& outcome);
-    void log_request_error(const RequestLogContext& context, const std::string& message);
-    void log_throughput(const ThroughputReport& report);
+    void record_request_start(const RequestLogContext& context);
+    [[nodiscard]] ninfer::GenerationSchedulingObserver
+    scheduling_observer(std::uint64_t request_id, std::string http_request_id);
+    [[nodiscard]] ninfer::GenerationFirstTokenObserver first_token_observer();
+    void record_request_rejected(const RequestRejectionLogContext& context);
+    void record_request_done(const RequestLogContext& context, const GenerationOutcome& outcome);
+    void record_request_failure(const RequestLogContext& context, const RequestFailure& failure);
+    void record_response_failure(std::uint64_t request_id, const RequestFailure& failure);
+    void record_throughput(const ThroughputReport& report);
     void run_stats_reporter();
     void stop_stats_reporter();
 
     GenerationService* service_ = nullptr;
     ServeOptions options_;
     std::string public_model_id_;
-    ResponseStore response_store_;
-    // Immutable startup values are captured once so status polling only snapshots published
-    // counters and never contends with execution for a live memory summary.
-    ninfer::EngineOptions status_engine_options_;
     ninfer::LoadSummary status_load_;
     ninfer::MemorySummary status_memory_;
+    OpenAIResponsesStore openai_responses_store_;
+    SessionCheckpointCallbacks checkpoints_;
+    OperationalLog operational_log_;
     JsonlRequestLog request_jsonl_;
+    Metrics metrics_;
     httplib::Server server_;
     std::atomic<std::uint64_t> request_seq_{0};
+    std::atomic<bool> stop_requested_{false};
     std::mutex stats_mutex_;
     std::condition_variable stats_cv_;
     std::thread stats_thread_;
     bool stats_stopping_ = false;
-    // Declared last so it drains and joins before the service pointer and ResponseStore disappear.
-    std::unique_ptr<AutomaticCheckpointQueue> automatic_checkpoints_;
 };
 
 } // namespace ninfer::serve

@@ -1,0 +1,31 @@
+{
+  "artifact_type": "ninfer-engine-cache-proof-disposition/1",
+  "job": "20261025T042729Z-E1-engine-cache-a3-e1-production-507065",
+  "source_commit": "6a6bfa3db3ebfa9a63a4475dbc4f033e8e97f896",
+  "build_image": "ov-build-env:master-64d10fbf-r2",
+  "lease_exit_code": 8,
+  "lease_elapsed_seconds": 77,
+  "leftover_containers": 0,
+  "unowned_containers": 0,
+  "host": {"passed": 12, "failed": 0, "skipped": 0},
+  "gpu": [
+    {"test": "ninfer_gpu_keep_warm_test", "passed": true, "seconds": 0.269866,
+     "one_spin_ms": 3.5446, "two_launches_ms": 3.53305},
+    {"test": "ninfer_qwen3_5_native_transactions_test", "passed": true, "seconds": 16.1476},
+    {"test": "ninfer_qwen3_5_concurrency_real_test", "passed": false, "seconds": 0.65208,
+     "error": "kv_capacity is outside the usable range for max_context and max_concurrency",
+     "classification": "fixture_geometry_before_engine_construction",
+     "configured": {"max_context": 4096, "max_concurrency": 2, "kv_capacity": 16384},
+     "legal_maximum_kv_capacity": 8192},
+    {"test": "ninfer_kv_history_test", "passed": true, "seconds": 0.197673}
+  ],
+  "not_executed": [
+    "direct_adapter_policy_and_stale_epoch_assertions",
+    "ordinary_C2_and_preemption",
+    "prefix_regressions",
+    "product_shape_startup_gate",
+    "keep_warm_off_on_idle_TTFT",
+    "production_four_boot_restart"
+  ],
+  "acceptance_passed": false
+}

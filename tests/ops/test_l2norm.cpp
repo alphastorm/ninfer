@@ -1,4 +1,5 @@
 #include "ninfer/ops/l2norm.h"
+#include "cuda_fixture.h"
 #include "ops/norm_test_common.h"
 
 #include <algorithm>
@@ -64,9 +65,9 @@ int run_case(const char* label, const Shape& shape, std::uint32_t seed, float sc
     output.fill(0xff);
     void* output_data = static_cast<std::uint8_t*>(output.data()) + leading;
 
-    Tensor tx(device_x.data, DType::BF16, {shape.d, shape.heads, shape.tokens});
-    Tensor tout(output_data, DType::BF16, {shape.d, shape.heads, shape.tokens});
-    ops::l2norm(tx, kEps, tout, nullptr);
+    Tensor tx(device_x.memory, DType::BF16, {shape.d, shape.heads, shape.tokens});
+    Tensor tout(output.span().subspan(leading), DType::BF16, {shape.d, shape.heads, shape.tokens});
+    ops::l2norm(tx, kEps, tout, ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
     int failures = verify_reduction(label, from_device_bf16(output_data, n), reference,

@@ -1,4 +1,5 @@
 #include "core/gdn_replay_records.h"
+#include "core/buffer.h"
 #include "core/linear_attention_state.h"
 
 #include <cstddef>
@@ -10,14 +11,6 @@
 #include <utility>
 
 namespace {
-
-using AlignedBacking = std::unique_ptr<void, decltype(&std::free)>;
-
-AlignedBacking make_backing(std::size_t bytes) {
-    void* data = std::aligned_alloc(256, bytes);
-    if (data == nullptr) { throw std::bad_alloc(); }
-    return AlignedBacking(data, &std::free);
-}
 
 int fail(const char* label) {
     std::cerr << label << '\n';
@@ -78,8 +71,8 @@ int main() {
     ninfer::LayoutBuilder builder;
     const auto layout       = ninfer::plan_gdn_replay_records(builder, spec);
     const std::size_t bytes = builder.finish(256);
-    auto backing            = make_backing(bytes);
-    const ninfer::GdnReplayRecords records({backing.get(), bytes}, layout);
+    ninfer::HostBuffer backing(bytes);
+    const ninfer::GdnReplayRecords records(backing.span(), layout);
 
     failures += expect_shape(records.conv, 256, 4, 15, 1, "conv plane");
     failures += expect_shape(records.key, 128, 2, 4, 15, "key plane");
@@ -162,19 +155,21 @@ int main() {
         },
         "record capacity above eight");
 
-    ninfer::LayoutBuilder state_builder;
-    const auto state_layout = ninfer::plan_linear_attention_state_pool(
-        state_builder, {.layers         = 3,
-                        .conv_channels  = 256,
-                        .conv_width     = 3,
-                        .value_heads    = 6,
-                        .value_head_dim = 128,
-                        .key_head_dim   = 128,
-                        .slot_count     = 7,
-                        .conv_dtype     = ninfer::DType::BF16});
-    const std::size_t state_bytes = state_builder.finish(256);
-    auto state_backing            = make_backing(state_bytes);
-    ninfer::LinearAttentionStatePool state({state_backing.get(), state_bytes}, state_layout);
+    ninfer::LayoutBuilder state_backing_builder;
+    ninfer::StateImageBuilder state_builder;
+    const auto state_layout =
+        ninfer::plan_linear_attention_state(state_builder, {.layers         = 3,
+                                                            .conv_channels  = 256,
+                                                            .conv_width     = 3,
+                                                            .value_heads    = 6,
+                                                            .value_head_dim = 128,
+                                                            .key_head_dim   = 128,
+                                                            .conv_dtype     = ninfer::DType::BF16});
+    const auto images             = state_builder.finish(state_backing_builder, 7);
+    const std::size_t state_bytes = state_backing_builder.finish(256);
+    ninfer::HostBuffer state_backing(state_bytes);
+    ninfer::StateImageStorage storage(state_backing.span(), images);
+    ninfer::LinearAttentionStateView state(storage, state_layout);
     const auto all = state.all_layers_view();
     failures +=
         expect(all.conv_layer0.data == state.layer_view(0).conv.data, "conv layer-0 base differs");
@@ -189,7 +184,7 @@ int main() {
                                 static_cast<std::byte*>(state.layer_view(0).recurrent.data),
                             "recurrent layer stride");
     failures +=
-        expect_size(static_cast<std::size_t>(all.spec.slot_count), 7, "all-layer slot count");
+        expect_size(static_cast<std::size_t>(all.conv_layer0.ne[2]), 7, "all-layer slot count");
     failures += expect_size(static_cast<std::size_t>(records.spec.record_capacity), 5,
                             "independent record capacity");
 

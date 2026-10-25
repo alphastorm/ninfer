@@ -3,6 +3,7 @@
 // Test-owned packed-weight fixtures for every registered quantized Weight format. Physical
 // row-split and block-scale codecs remain format-specific beneath one logical fixture interface.
 
+#include "core/weight.h"
 #include "core/tensor.h"
 
 #include <algorithm>
@@ -150,13 +151,13 @@ struct QuantSpec {
 
 inline QuantSpec quant_spec(QType qtype) {
     switch (qtype) {
-    case QType::Q4G64_F16S:
+    case QType::Q4_G64_FP16:
         return {4, 64, 7, -8};
-    case QType::Q5G64_F16S:
+    case QType::Q5_G64_FP16:
         return {5, 64, 15, -16};
-    case QType::Q6G64_F16S:
+    case QType::Q6_G64_FP16:
         return {6, 64, 31, -32};
-    case QType::W8G32_F16S:
+    case QType::Q8_G32_FP16:
         return {8, 32, 127, -127};
     default:
         throw std::invalid_argument("row-split test packer: unsupported qtype");
@@ -236,16 +237,21 @@ struct PackedWeight {
     std::uint64_t scale_plane_bytes     = 0;
     std::uint64_t weight_divisor_offset = 0;
 
-    Weight device_weight(void* device_payload) const {
+    Weight device_weight(ConstMemorySpan storage) const {
+        const auto* device_payload = static_cast<const std::uint8_t*>(storage.data);
+        if (storage.bytes < payload.size()) throw std::out_of_range("weight backing is too small");
         Weight w           = weight;
+        w.device           = storage.device;
         w.payload          = device_payload;
         w.high_plane_bytes = high_plane_bytes;
         if (device_payload != nullptr) {
             w.qdata  = device_payload;
             w.qhigh  = high_plane_bytes == 0
                            ? nullptr
-                           : static_cast<std::uint8_t*>(device_payload) + high_plane_offset;
-            w.scales = static_cast<std::uint8_t*>(device_payload) + scale_plane_offset;
+                           : static_cast<const std::uint8_t*>(device_payload) + high_plane_offset;
+            w.scales = w.qtype == QType::BF16
+                           ? nullptr
+                           : static_cast<const std::uint8_t*>(device_payload) + scale_plane_offset;
         } else {
             w.qdata  = nullptr;
             w.qhigh  = nullptr;
@@ -254,9 +260,9 @@ struct PackedWeight {
         return w;
     }
 
-    Weight device_row_view(void* device_payload, std::int32_t row_begin,
+    Weight device_row_view(ConstMemorySpan storage, std::int32_t row_begin,
                            std::int32_t row_count) const {
-        Weight w = device_weight(device_payload);
+        Weight w = device_weight(storage);
         if (row_begin < 0 || row_count <= 0 || row_begin + row_count > w.n) {
             throw std::invalid_argument("quantized-weight fixture: invalid row view");
         }
@@ -321,7 +327,7 @@ inline PackedWeight make_patterned_weight(QType qtype, std::int32_t n, std::int3
     if (n <= 0 || k <= 0) {
         throw std::invalid_argument("quantized-weight fixture: shape must be positive");
     }
-    if (qtype == QType::FP8_E4M3FN_ROW_BF16S) {
+    if (qtype == QType::FP8_E4M3FN_ROW_BF16) {
         if (options.weight_scale_divisor != 0.0F || options.input_scale_divisor != 0.0F) {
             throw std::invalid_argument(
                 "quantized-weight fixture: divisors do not belong to FP8 weights");
@@ -355,9 +361,10 @@ inline PackedWeight make_patterned_weight(QType qtype, std::int32_t n, std::int3
                                  kScales[(static_cast<std::uint32_t>(row) + seed) & 3U]);
         }
 
-        packed.weight.qtype            = QType::FP8_E4M3FN_ROW_BF16S;
+        packed.weight.qtype            = QType::FP8_E4M3FN_ROW_BF16;
         packed.weight.layout           = QuantLayout::RowScale;
         packed.weight.scale_dtype      = DType::BF16;
+        packed.weight.device           = Device::cpu();
         packed.weight.payload          = packed.payload.data();
         packed.weight.payload_bytes    = packed.payload.size();
         packed.weight.high_plane_bytes = 0;
@@ -461,6 +468,7 @@ inline PackedWeight make_patterned_weight(QType qtype, std::int32_t n, std::int3
         packed.weight.qtype                = QType::NVFP4;
         packed.weight.layout               = QuantLayout::BlockScaleK16M128x4;
         packed.weight.scale_dtype          = DType::FP8_E4M3FN;
+        packed.weight.device               = Device::cpu();
         packed.weight.payload              = packed.payload.data();
         packed.weight.payload_bytes        = packed.payload.size();
         packed.weight.high_plane_bytes     = 0;
@@ -520,7 +528,7 @@ inline PackedWeight make_patterned_weight(QType qtype, std::int32_t n, std::int3
             for (std::uint64_t byte = 0; byte < code_bytes_per_group; ++byte) {
                 std::uint8_t code = static_cast<std::uint8_t>(
                     (row_mix * 37u + group * 29u + byte * 17u + seed) & 0xffu);
-                if (qtype == QType::W8G32_F16S && code == 0x80u) { code = 0x81u; }
+                if (qtype == QType::Q8_G32_FP16 && code == 0x80u) { code = 0x81u; }
                 packed
                     .payload[static_cast<std::size_t>(group_index * code_bytes_per_group + byte)] =
                     code;
@@ -540,7 +548,7 @@ inline PackedWeight make_patterned_weight(QType qtype, std::int32_t n, std::int3
             for (std::size_t byte = 0; byte < code_bytes_per_group; ++byte) {
                 state              = detail::mix64(state + byte);
                 std::uint8_t value = static_cast<std::uint8_t>(state >> 56);
-                if (qtype == QType::W8G32_F16S && value == 0x80U) { value = 0x81U; }
+                if (qtype == QType::Q8_G32_FP16 && value == 0x80U) { value = 0x81U; }
                 code_patterns[pattern][byte] = value;
             }
             for (std::size_t byte = 0; byte < high_bytes_per_group; ++byte) {
@@ -614,6 +622,7 @@ inline PackedWeight make_patterned_weight(QType qtype, std::int32_t n, std::int3
     packed.weight.qtype            = qtype;
     packed.weight.layout           = QuantLayout::RowSplit;
     packed.weight.scale_dtype      = DType::FP16;
+    packed.weight.device           = Device::cpu();
     packed.weight.payload          = packed.payload.data();
     packed.weight.payload_bytes    = packed.payload.size();
     packed.weight.high_plane_bytes = packed.high_plane_bytes;
@@ -646,7 +655,16 @@ inline double logical_weight_fp64(const PackedWeight& packed, std::int32_t row,
         throw std::out_of_range("quantized-weight fixture: logical index out of range");
     }
 
-    if (weight.qtype == QType::FP8_E4M3FN_ROW_BF16S) {
+    if (weight.qtype == QType::BF16) {
+        if (weight.layout != QuantLayout::Contiguous || weight.padded_shape[0] != weight.n ||
+            weight.padded_shape[1] != weight.k)
+            throw std::invalid_argument("linear-weight fixture: invalid contiguous BF16 metadata");
+        const auto offset = (static_cast<std::size_t>(row) * weight.k + column) * 2;
+        return static_cast<double>(
+            detail::bf16_to_f32(detail::load_u16_le(packed.payload, offset)));
+    }
+
+    if (weight.qtype == QType::FP8_E4M3FN_ROW_BF16) {
         if (weight.layout != QuantLayout::RowScale || weight.scale_dtype != DType::BF16 ||
             weight.group != weight.k || weight.group_size != static_cast<std::uint32_t>(weight.k)) {
             throw std::invalid_argument("quantized-weight fixture: invalid FP8 metadata");
@@ -841,6 +859,7 @@ inline PackedWeight pack_row_split_lowbit(const std::vector<float>& source, std:
     out.weight.qtype            = qtype;
     out.weight.layout           = QuantLayout::RowSplit;
     out.weight.scale_dtype      = DType::FP16;
+    out.weight.device           = Device::cpu();
     out.weight.payload          = out.payload.data();
     out.weight.payload_bytes    = out.payload.size();
     out.weight.high_plane_bytes = out.high_plane_bytes;
@@ -866,22 +885,22 @@ inline PackedWeight pack_row_split_lowbit(const std::vector<float>& source, std:
 
 inline PackedWeight pack_q4_row_split(const std::vector<float>& source, std::int32_t n,
                                       std::int32_t k) {
-    return pack_row_split_lowbit(source, n, k, QType::Q4G64_F16S);
+    return pack_row_split_lowbit(source, n, k, QType::Q4_G64_FP16);
 }
 
 inline PackedWeight pack_q5_row_split(const std::vector<float>& source, std::int32_t n,
                                       std::int32_t k) {
-    return pack_row_split_lowbit(source, n, k, QType::Q5G64_F16S);
+    return pack_row_split_lowbit(source, n, k, QType::Q5_G64_FP16);
 }
 
 inline PackedWeight pack_q6_row_split(const std::vector<float>& source, std::int32_t n,
                                       std::int32_t k) {
-    return pack_row_split_lowbit(source, n, k, QType::Q6G64_F16S);
+    return pack_row_split_lowbit(source, n, k, QType::Q6_G64_FP16);
 }
 
-inline PackedWeight pack_w8g32_row_split(const std::vector<float>& source, std::int32_t n,
-                                         std::int32_t k) {
-    return pack_row_split_lowbit(source, n, k, QType::W8G32_F16S);
+inline PackedWeight pack_q8_g32_row_split(const std::vector<float>& source, std::int32_t n,
+                                          std::int32_t k) {
+    return pack_row_split_lowbit(source, n, k, QType::Q8_G32_FP16);
 }
 
 } // namespace ninfer::test::quantized_weight

@@ -16,14 +16,14 @@ namespace ninfer::serve {
 using MediaAcquirer = std::function<ninfer::OwnedMedia(const ContentPart&)>;
 
 struct ResolvedPromptSemantics {
-    bool enable_thinking = true;
+    std::optional<bool> enable_thinking;
     std::optional<ninfer::ReasoningEffort> reasoning_effort;
-    bool preserve_thinking = false;
+    std::optional<bool> preserve_thinking;
+    std::string chat_template_kwargs_json;
 };
 
 ResolvedPromptSemantics resolve_prompt_semantics(const GenerationRequest& req,
-                                                 const ServeOptions& server,
-                                                 const ninfer::PromptCapabilities& capabilities);
+                                                 const ServeOptions& server);
 
 ninfer::PromptInput to_prompt_input(const GenerationRequest& req,
                                     const ResolvedPromptSemantics& semantics,
@@ -37,9 +37,5 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& req,
 ninfer::RequestOptions to_request_options(const GenerationRequest& req, const ServeOptions& server,
                                           const ResolvedPromptSemantics& semantics,
                                           bool allow_prefix_reuse);
-
-// Map an internal finish reason onto the OpenAI wire value. Cancelled maps to
-// "stop" (a disconnected client is not an error state on the wire).
-const char* finish_reason_wire(ninfer::FinishReason reason);
 
 } // namespace ninfer::serve

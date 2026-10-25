@@ -1,7 +1,153 @@
 # tools/bench
 
-Maintainer orchestration for the public `ninfer_bench` throughput tool and the external Serve TTFT
-client. Correctness/parity tooling lives separately under [`tools/parity`](../parity).
+Maintainer orchestration for the public `ninfer_bench` throughput tool, serving corpus/concurrency
+runners, and the external Serve TTFT client. Correctness is owned by the affected suites under
+[`tests/`](../../tests/README.md).
+
+## Fork harness on upstream master
+
+The fork's runtime source base is upstream master `64d10fbf`. Keep the upstream
+TTFT, corpus, concurrency, and public `ninfer_bench` implementations; their
+diagnostics and scheduling coverage supersede the older fork versions.
+
+The port adds the SM120 profiling/controller scripts, `run_profile_request.py`,
+the fixed A/B campaign summarizer, and `summarize_ncu_q4.py`. A profile packet
+binds a clean source commit, artifact SHA-256, prepared binary/script/corpus
+checksums, native `sm_120a` cubins, and the selected toolchain image. Preparation
+does not execute GPU workloads. Capture runs the independent Q4/Q5 correctness
+tests before the performance-counter permission gate, then collects public
+Q5 cold-cache eager/Graph timings, Q4 T=1/T=4 NCU captures, an MTP3 native round
+timing, and a measured public-Engine MTP3 Nsight Systems capture.
+
+Master has no fork-only post-mixer candidate API. The scripts do not pass
+`--candidate`, `--activation-state`, `--route`, or `--describe` to its Q4/Q5
+benchmarks. The native round target is `ninfer_qwen3_5_mtp_round_bench`; only
+`ninfer_bench` accepts `--profile-measured`. The old private C16 versus split2,
+Q4-produced activation, and chain-cost conclusions are not inferred from the
+new public measurements.
+
+Use the selected Python 3.11 profiling environment and an explicitly authorized
+GPU lease. The standalone controller wrappers have their own production
+stop/restore contract; do not run them inside a separately managed overnight
+window or use them to bypass its holder/container/port ownership rules.
+
+```bash
+python3 -m unittest discover -s tests -p 'test_sm120_*.py'
+python3 -m unittest discover -s tests -p 'test_release_package.py'
+python3 -m unittest discover -s tests -p 'test_lifecycle_container.py'
+python3 -m unittest discover -s tests -p 'test_agent_protocol.py'
+```
+
+`tools/smoke/serve_contract.py` accepts an optional `--api-key-file` and retains
+upstream's output-budget checks alongside exact greedy stream/non-stream output,
+finish-reason, and token-accounting parity. Cache-hit counts are validated for each
+request but need not match: the repeat can reuse a prefix that the cold request
+computed.
+`tools/smoke/agent_protocol.py` defaults to the authenticated **product** battery:
+status identity, request-correlated private reuse, cross-session Responses
+isolation, tool arguments/results, JSON-schema output, and streaming parity.
+Its explicit `--contract public` mode exercises vanilla upstream's public
+protocols, tool round trip, Responses lineage/delete behavior, JSON schemas on
+Chat and Responses, and streaming. A public receipt never claims product
+identity or session-isolation coverage. Product status failures never trigger a
+fallback to the public battery.
+The product replay check uses a deterministic long **user** context: master's
+cost-first cache may legitimately prefer fresh prefill for a tiny prompt. The
+repeat must still select a private path, and the same prompt in another session
+must select only root or a public shared-prefix path. Both retain request-correlated
+decode counters and greedy streaming parity. Public mode retains its tiny prompt.
+Thinking controls follow each wire contract: Chat uses `enable_thinking: false`;
+Responses uses `reasoning: {"effort": "none"}`, not the Chat-only top-level flag.
+Public missing-parent continuation checks require master's `response_not_found`;
+the product battery retains the shipped `previous_response_not_found` contract.
+
+```bash
+python3 tools/smoke/agent_protocol.py --contract public \
+  --base-url http://127.0.0.1:18160 --model q38-ninfer
+python3 tools/smoke/agent_protocol.py --contract product \
+  --base-url http://127.0.0.1:18160 --model q38-ninfer --api-key-file /run/secrets/ninfer-key
+```
+
+Release packaging remains fail-closed on clean, matching build provenance.
+The v0.13 lifecycle mounts an explicitly configured absolute `checkpoint_dir`
+at `/checkpoints-v013`; that target participates in container identity and drift
+checks. Omitting the setting leaves persistence disabled. Product launchers use
+a separate host `checkpoints-v013` root, preserving earlier releases' roots for
+rollback. The Docker image supplies neither a checkpoint ENV default nor an
+anonymous VOLUME; never reuse `/checkpoints` as an implicit compatibility alias.
+`ninfer`, `ninfer-serve`, and `ninfer_bench` support `--version` without loading
+an artifact or creating a GPU context. CMake verifies the configured Git commit
+and clean/dirty state before compilation. A source archive without Git metadata
+cannot claim to be clean; the lifecycle builder materializes a detached Git
+repository. The Docker context must include that metadata, not a private
+linked-worktree `.git` pointer.
+
+The branch build workflow uses the NVIDIA apt CUDA 13 toolkit, cached ccache,
+host-only CTest selections, and bounded `sm_120a` core/Q4 object compilation.
+Complete runtime builds are separate weekly/manual jobs. Windows MSVC
+configure-only activates when the PortableCore `vcpkg.json` manifest is present;
+it is not a Windows build or native-GPU qualification. No CI job runs GPU
+inference. The runtime publication workflow requires an explicit immutable,
+qualified master-compatible `base_image`; it does not reuse the shipped old
+runtime base digest automatically.
+
+Publish that dependency-only base with
+[`publish-runtime-base.yml`](../../.github/workflows/publish-runtime-base.yml).
+The Dockerfile's `runtime-base` target installs the Ubuntu 24.04/CUDA 13.1.2
+runtime dependencies without compiling or copying NInfer binaries. The default
+final stage still adds both binaries and the existing runtime configuration.
+Dispatch against the exact branch/tag commit supplied as `source_commit` (40
+lowercase hex characters); it must be reachable from an origin branch.
+`base_tag_note` is public free text: never include secrets or private paths.
+
+The workflow pushes only an immutable
+`ghcr.io/alphastorm/ninfer@sha256:<64hex>` reference, with maximum provenance
+and an SBOM. Its public prerelease
+`runtime-base-<sha8>-<yyyymmdd>` (UTC date) contains
+`ninfer-runtime-base.json`, artifact type
+`ninfer_runtime_base_publication_receipt`, schema **1**. Read `image_reference`
+from that receipt for the runtime image workflow's `base_image` input; the
+receipt also records the resolved NVIDIA runtime digest and the installed
+package versions measured inside the published image. Discovering the digest
+through this GitHub release asset does not require `read:packages`.
+Each receipt release is created once, never overwritten.
+
+```bash
+gh workflow run publish-runtime-base.yml --repo alphastorm/ninfer \
+  --ref <branch-or-tag> -f source_commit=<sha40> \
+  -f base_tag_note='Qualified master-compatible runtime dependencies'
+gh release download runtime-base-<sha8>-<yyyymmdd> --repo alphastorm/ninfer \
+  --pattern ninfer-runtime-base.json --dir runtime-base-receipt
+jq -r .image_reference runtime-base-receipt/ninfer-runtime-base.json
+```
+
+Before the first dispatch, merge the frozen release source, including this
+workflow, onto the default branch (`main`), then dispatch against the frozen
+tag with its matching `source_commit`. A copy only on a release/integration
+branch is not sufficient for initial registration of a dispatch-only workflow.
+
+### Receipt and consumer changelog
+
+- Product private-replay input now has meaningful private user context, without
+  changing schema **2** or weakening the private/foreign path assertions. Failed
+  repeats include whitelisted cache/counter evidence, never identity or request
+  content.
+- `ninfer_agent_protocol_smoke` schema **2** replaces schema **1**'s
+  structured-output-rejection expectation with Chat/Responses JSON-schema
+  success. It adds `contract`; product identity flags remain false in public
+  mode, and unexercised isolation paths/statuses are null.
+- Status consumers pin `ninfer_server_status` schema **2**, preserving fork
+  field names and required identity/counter assertions.
+- Serving corpus and TTFT diagnostics consume request-log schema **30**.
+  Benchmark result schemas and TTFT diagnostic calculations are unchanged.
+- SM120 preparation manifests use schema **2**, capture manifests schema **3**,
+  and newly produced public Q4 shape/capture summaries schema **2**.
+  Historical Q4 schema **1** input remains readable with its original strict
+  kernel/route checks; it is never relabeled as a master capture.
+- Profile toolchain image revision **3** adds the master hwloc/liburing build
+  dependencies and invalidates older cached profile images.
+- Linux release/package identity schema **1**, Windows schema **2**, lifecycle
+  receipts, and runtime-image publication receipt schema **3** remain unchanged.
 
 ## External Serve TTFT
 
@@ -125,22 +271,40 @@ Use `--resume` to skip completed JSON reports in an existing `--output-dir`, and
 for a minimal script/runner check. `--no-build` uses the binary supplied by `--bench` without
 building it.
 
-Each raw report must be `ninfer_bench_report` schema v13. The flattened summary and schema-v3 matrix
-manifest carry native names from the report: selected target, canonical `weights_id`, artifact,
+Each raw report must satisfy the current [`ninfer_bench_report` contract](../../bench/README.md#reports).
+The flattened summary and schema-v4 matrix manifest carry native facts from the report:
+architecture, public name, actual formats, prefill signature, artifact,
 load/read/upload/staging values, Engine memory arenas including the non-additive Vision layout
-inside the unified workspace and CUDA Graph allowance, per-test planned logical and
+inside the unified workspace and measured CUDA Graph memory deltas, per-test planned logical and
 allocator-observed workspace peaks, KV capacity and
 payload, configured proposal head and graph mode, phase timings and throughput, and speculative
 rounds/drafts/acceptance/fallbacks. The matrix manifest is descriptive and records the commands and
 selected local inputs; it does not make repository state part of report validity.
 
-`run_serve_corpus.py` runs both registered targets and both published MTP0/MTP3 suites when both
-artifacts are supplied. Pass one `--artifact` to select a single target and `--mode mtp0` or
-`--mode mtp3` to run only that suite. The 35B-A3B-only `--mode dflash7` route runs the same
-decode corpus with DFlash block=8 (`k=7`) and the optimized proposal head. Add
-`--sampling greedy` to force exact argmax while retaining the same fixtures and repetition count.
-Its schema-v6 result and flattened summaries retain the canonical `weights_id`, request Host
-exposure, and decode Host/Device-wait time per round received from the schema-v17 serving records.
+## Serving corpus benchmark
+
+[Published coverage and model results](../../docs/performance.md) identify the recorded runs.
+The [serving methodology](../../docs/performance/methodology.md) owns workload definitions,
+metric boundaries, aggregation, comparison rules, and publication format. This section describes
+runner usage and output files.
+
+`run_serve_corpus.py` accepts explicit `--artifact LABEL=PATH` entries. Labels identify report groups;
+the selected artifact supplies the architecture, public name and weight bindings.
+Omitting `--mode` selects MTP0 and MTP3; repeat `--mode` to select a subset. Use `dflash7` for
+Qwen3.6-35B-A3B DFlash K=7 and `dflash2_7` for Qwen3.8-27B DFlash2 K=7, with companion weights
+in the selected artifact. `--sampling greedy` selects exact argmax; the default is stochastic.
+Run commands with a selected Python 3.11 interpreter, as in the model-page reproduction entries.
+Both serving runners accept `--kv-dtype bf16|int8|fp8|nvfp4|k8v4` (default: `int8`).
+Specify it explicitly when recording a new campaign; the Qwen3.8 performance profile uses
+`--kv-dtype fp8`. The runner verifies the loaded KV representation and records the selection in
+its results. A serial run cannot resume records collected with a different KV dtype.
+
+The serial runner writes `run.jsonl`, `summary.csv`, `summary.md`, and per-server logs under
+`server/`. JSONL contains the completed requests and responses; CSV/Markdown contain fixture and
+category summaries. The output directory is supplied explicitly with `--output`.
+
+Its schema-v8 result and flattened summaries retain the KV dtype, actual `prefill_signature`, request Host
+exposure, and decode Host/Device-wait time per round received from the schema-v30 serving records.
 Request exposure is a latency distribution value and is never summed across concurrent requests;
 worker aggregation uses the serving `throughput.host_work` interval deltas. The stochastic route pins its complete
 temperature/top-p/top-k/min-p/presence/frequency profile explicitly, so model-default changes do
@@ -148,27 +312,23 @@ not alter the measurement method.
 
 ## Concurrent serving benchmark
 
-`run_serve_concurrency.py` measures two separate concurrency properties through real loopback
-Chat Completions requests:
+`run_serve_concurrency.py` selects `--suite decode-saturation` or `--suite corpus-makespan`.
+Their distinct time boundaries and workload dispatch are defined in the
+[serving methodology](../../docs/performance/methodology.md#workloads-and-measurement-boundaries).
+Repeat `--concurrency` to select C points; each point starts a fresh server. The point report
+records the actual Engine configuration, automatic KV capacity, shuffle seed where applicable,
+dispatch method, and per-request positions.
+Both serving runners disable prefix reuse and set extra Device state and Host context capacity to zero.
 
-- `decode-saturation` submits one long-decode wave and uses only complete one-second intervals in
-  which every decode round has exactly the configured batch size. Ramp-up, prefill, and drain
-  intervals are excluded.
-- `corpus-makespan` shuffles the existing mode-specific corpus once with the fixed seed `20260811`,
-  then runs that same order with exactly `N` persistent client workers. A worker submits the next
-  request only after its current response completes, and makespan ends when the final response has
-  been read. Request bodies are sent in shuffled-order sequence while response waits remain fully
-  concurrent, removing client-thread arrival races without serializing inference.
-
-Each concurrency point starts a fresh server because its execution graphs and memory plan are
-startup-fixed. Prefix reuse is disabled, startup and warmup are outside both measurements, and the
-runner writes per-point JSON, raw serving JSONL, and combined JSON/CSV/Markdown summaries.
-The point report records the shuffle seed, dispatch method, shuffled position, and canonical corpus
-position for every request.
+Schema-v4 outputs include `points/*.json`, `server/*.jsonl`, and combined `summary.json`, `summary.csv`, and
+`summary.md`. C=1 corpus runs also write complete responses in `corpus/<point>/results.jsonl` and
+per-request phase summaries in that directory; older campaigns may have only point reports and
+server logs. Historical model pages identify the report directory associated with each table.
 
 ```bash
 python3 tools/bench/run_serve_concurrency.py \
   --artifact qwen3_6_27b=out/qwen3_6_27b_nvfp4.ninfer \
+  --kv-dtype int8 \
   --mode mtp3 --suite decode-saturation \
   --concurrency 1 --concurrency 2 --concurrency 4 \
   --decode-tokens 8192 \
@@ -176,6 +336,7 @@ python3 tools/bench/run_serve_concurrency.py \
 
 python3 tools/bench/run_serve_concurrency.py \
   --artifact qwen3_6_27b=out/qwen3_6_27b_nvfp4.ninfer \
+  --kv-dtype int8 \
   --mode mtp3 --suite corpus-makespan \
   --concurrency 1 --concurrency 2 \
   --output profiles/bench/concurrent-corpus
@@ -184,84 +345,3 @@ python3 tools/bench/run_serve_concurrency.py \
 Use `--kv-capacity auto` when the fixed corpus needs more shared KV than the default 262,144-token
 pool. A point is intentionally not resumable: combining fragments from separate server processes
 would not preserve either a steady interval or one continuous makespan.
-
-## Guarded remote GPU profiling
-
-`run_remote_sm120_mtp3_workflow.sh` is the sole operator entry point for the deferred RTX 5090
-packet. It stages and invokes `run_sm120_mtp3_workflow.sh` as the target-side implementation. The
-controller entry point runs one fixed, versioned sequence; it accepts no payload command or shell
-fragment:
-
-1. Require a completely clean `PROFILE_SOURCE_SHA` worktree descended from
-   `PROFILE_UPSTREAM_BASE_SHA`, exact artifact SHA-256, a profiling image distinct from the runtime
-   candidate, `/usr/bin/docker`, the configured `default` Unix-socket context and Docker Desktop
-   Linux daemon ID,
-   the Docker `nvidia` runtime, host `nvidia-smi`, and the executable maintained controller.
-2. Create an operation-owned Docker config containing only `{}`. This prevents inherited
-   `credsStore=desktop.exe` routing. The workflow preserves the already-configured Docker Desktop
-   WSL integration; it never toggles the integration, changes a Docker context, starts a daemon, or
-   attempts daemon recovery.
-3. Reuse or build the operation's profiling image from the exact configured CUDA/Nsight base and
-   checksum-pinned CPython 3.11.11 source. Then configure and build the Q4, Q5, post-mixer,
-   MTP-round, and numerical-gate targets in that pinned container with no GPU and no network.
-   `prepare` records exact source, upstream base, artifact, toolchain, binary, CMake, CUDA, and
-   native `sm_120a` identities.
-4. Enter `run_gpu_profile_lease.sh` synchronously. The lease revalidates the exact Docker route,
-   host GPU tools, candidate names/port, and incumbent/rollback restoration route before stopping
-   production. Immediately before the outage it also runs `nvidia-smi` in a no-network container
-   from the exact profiling image ID, while production is still healthy. Its fixed payload requires
-   the lease's transient live-process marker and independently verifies that the exact incumbent is
-   stopped. The lease isolates the payload process group,
-   confirms every profiling candidate is gone before restart, and restores production on success,
-   failure, HUP, INT, or TERM.
-5. Run `capture` from the read-only prepared build. The Q4/Q5 numerical gates run first. The cold Q5
-   NCU launch is then the counter-access gate: the packet must contain a nonempty `.ncu-rep` and CSV
-   without `ERR_NVGPUCTRPERM` before timings, Nsight Systems, remaining Q5 captures, or the nested Q4
-   packet can run. Every NCU/NSYS capture is bounded by the configured timeout.
-
-`run_sm120_mtp3_profile.sh prepare` and `capture` are internal workflow phases, not operator
-commands. Preparation occurs before the production stop; the GPU lease contains no compilation.
-`run_sm120_q4_mtp3_profile.sh`, `run_long_prefill_mtp3_cycle.sh`, and `run_profile_ab.sh` remain
-versioned payloads for their own explicitly selected experiments.
-Do not construct another launcher, heredoc, inline Python shim, or remote shell script around any
-payload or target workflow.
-
-Copy `profile_lease.conf.example` to the controller once and replace every `REPLACE_ME` with
-identities from maintained-controller receipts and current target state. Do not put the populated
-file in Git. The controller workflow requires a clean committed source, creates a unique remote
-operation, transfers and verifies a complete Git bundle and generated target config, runs target
-preflight, executes the synchronous target workflow, then retrieves receipts. Every
-`PROFILE_BUILD_DIR`, `PROFILE_PREPARE_DIR`, `PROFILE_RESULT_DIR`, and `PROFILE_DOCKER_CONFIG` is
-generated fresh. `PROFILE_TOOLCHAIN_IMAGE_ID`, `MODEL_SHA256`, `PROFILE_SOURCE_SHA`, Docker endpoint,
-and Docker daemon ID are equality gates, not descriptive metadata. The configured profiling base
-and `TOOLCHAIN_IMAGE` runtime candidate must exist locally. The controller builds the final
-profiling image only when its tag is absent, pins its resulting image ID into the operation config,
-and requires it to differ from the runtime image. The profiling image must contain CMake, Ninja,
-CUDA 13.1, NCU, NSYS, and Python 3.11; bootstrap and `prepare` check those commands before
-compiling and before any production stop.
-
-After Docker-route recovery, prove the route without an outage by running the controller's
-`check` mode. It stages a fresh exact source/config operation, pins or builds the profiling image,
-and exercises target preflight plus the GPU-container admission while production remains running.
-It writes a controller receipt but creates no profiling result directory and never requests a
-production stop:
-
-```bash
-tools/bench/run_remote_sm120_mtp3_workflow.sh check /absolute/path/profile.conf
-```
-
-The scheduled capture is exactly one synchronous controller command. It performs source staging,
-target preflight, preparation, lease, payload, restoration, and receipt retrieval; do not detach it
-or invoke its target phases separately:
-
-```bash
-tools/bench/run_remote_sm120_mtp3_workflow.sh run /absolute/path/profile.conf
-```
-
-Completion requires lease `exit-status.txt` equal to `0`, `production-restored-at.txt`, final
-production inspect/status receipts, `sm120-mtp3/ncu/counter-access-verified.txt`, and
-`sm120-mtp3/packet-complete.txt`. `SIGKILL` and host power loss cannot execute a shell trap; use the
-already-maintained production controller for recovery. After a Windows reboot, first sign in to the
-operator's interactive Windows session and start Docker Desktop; wait for the pinned Linux daemon
-and existing WSL integration, then use the maintained controller. Never toggle the integration,
-context, or daemon as a recovery action.

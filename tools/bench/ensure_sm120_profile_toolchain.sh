@@ -37,7 +37,7 @@ dockerfile=$source_root/tools/bench/Dockerfile.sm120-profile-python311
 
 python_version=3.11.11
 python_source_sha256=2a9920c7a0cd236de33644ed980a13cbbc21058bfdc528febb6081575ed73be3
-profile_image_revision=2
+profile_image_revision=3
 temporary_docker_config=$(mktemp -d)
 trap 'rm -rf -- "$temporary_docker_config"' EXIT
 printf '{}\n' >"$temporary_docker_config/config.json"

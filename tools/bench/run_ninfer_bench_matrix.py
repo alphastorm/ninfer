@@ -40,7 +40,7 @@ CONTEXT_CORE = ((512, 512), (2048, 512), (8192, 512))
 CONTEXT_FULL_EXTRA = ((32768, 256), (65536, 128))
 PRIMARY_KS = (0, 3, 5)
 SWEEP_KS = (0, 1, 2, 3, 4, 5)
-REPORT_SCHEMA_VERSION = 13
+REPORT_SCHEMA_VERSION = 24
 REPORT_ARTIFACT_TYPE = "ninfer_bench_report"
 REPORT_TOOL = "ninfer_bench"
 
@@ -64,8 +64,7 @@ def pair_list(values: Iterable[tuple[int, int]]) -> str:
 
 
 def mtp_args(k: int) -> tuple[str, ...]:
-    args = ("--mtp-draft-tokens", str(k))
-    return (*args, "--lm-head-draft") if k > 0 else args
+    return ("--spec", "mtp", "--draft-tokens", str(k), "--lm-head-draft") if k > 0 else ()
 
 
 def shell_join(command: Sequence[str]) -> str:
@@ -282,14 +281,21 @@ def report_rows(report_path: Path, case: BenchCase) -> list[dict[str, Any]]:
             "n_prompt": test.get("n_prompt"),
             "n_gen": test.get("n_gen"),
             "requested_output_tokens": test.get("requested_output_tokens"),
-            "target": load.get("target"),
-            "weights_id": load.get("weights_id"),
+            "architecture": load.get("architecture"),
+            "model_name": load.get("name"),
+            "weight_formats": load.get("formats"),
+            "prefill_signature": load.get("prefill_signature"),
             "artifact_path": report.get("artifact", {}).get("path"),
             "max_context": config.get("max_context"),
+            "concurrency": config.get("concurrency"),
+            "constraint_type": config.get("constraint_type"),
+            "constraint_file": config.get("constraint_file"),
+            "mixed_constraints": config.get("mixed_constraints"),
             "kv_capacity": memory.get("kv_capacity"),
             "prefill_chunk": config.get("prefill_chunk"),
             "kv_cache": config.get("kv_cache"),
-            "mtp_draft_tokens": config.get("mtp_draft_tokens"),
+            "speculative_backend": config.get("speculative_backend"),
+            "draft_tokens": config.get("draft_tokens"),
             "proposal_head": config.get("proposal_head"),
             "decode_path": config.get("decode_path"),
             "decode_graph_primed": config.get("decode_graph_prime", {}).get("primed"),
@@ -311,11 +317,21 @@ def report_rows(report_path: Path, case: BenchCase) -> list[dict[str, Any]]:
                 "general_capacity_bytes", workspace_memory.get("capacity_bytes")
             ),
             "vision_handoff_capacity_bytes": vision_workspace.get("handoff_capacity_bytes"),
-            "cuda_graph_allowance_bytes": memory.get("cuda_graph_allowance_bytes"),
+            "cuda_graph_rebuild_estimate_bytes": memory.get("cuda_graph_rebuild_estimate_bytes"),
+            "cuda_graph_prepare_increment_bytes": memory.get("cuda_graph_prepare_increment_bytes"),
+            "cuda_graph_calibration_increment_bytes": memory.get(
+                "cuda_graph_calibration_increment_bytes"
+            ),
+            "cuda_graph_calibration_retained_bytes": memory.get(
+                "cuda_graph_calibration_retained_bytes"
+            ),
+            "startup_retained_bytes": memory.get("startup_retained_bytes"),
             "workspace_peak_bytes": test.get("workspace_peak_bytes"),
             "workspace_allocator_peak_bytes": test.get("workspace_allocator_peak_bytes"),
             "prefill_tok_s_mean": test.get("prefill_tok_s_mean"),
             "prefill_tok_s_stddev": test.get("prefill_tok_s_stddev"),
+            "output_tok_s_mean": test.get("output_tok_s_mean"),
+            "output_tok_s_stddev": test.get("output_tok_s_stddev"),
             "decode_output_tok_s_mean": test.get("decode_output_tok_s_mean"),
             "decode_output_tok_s_stddev": test.get("decode_output_tok_s_stddev"),
             "decode_engine_tok_s_mean": test.get("decode_engine_tok_s_mean"),
@@ -375,7 +391,7 @@ def write_manifest(
 ) -> None:
     manifest = {
         "artifact_type": "ninfer_bench_matrix_run",
-        "schema_version": 3,
+        "schema_version": 4,
         "created_at_utc": dt.datetime.now(dt.UTC).isoformat(),
         "preset": args.preset,
         "primary_mtp_draft_tokens": 3,

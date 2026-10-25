@@ -39,7 +39,7 @@ a linked, confirmed Issue may be closed without detailed review.
 A bug report must contain enough information for the maintainer to locate and reason about the
 failure. Include, as applicable:
 
-- the exact NInfer commit or release and registered artifact identity;
+- the exact NInfer commit or release, artifact source, and recipe when using custom weights;
 - the GPU, driver, CUDA toolchain, build configuration, and relevant runtime options;
 - the complete command, request, or smallest practical reproduction;
 - the expected behavior and the observed behavior;
@@ -72,10 +72,8 @@ maintainer has accepted both the product direction and the proposed ownership mo
 
 ## Pull request scope
 
-A pull request is appropriate only after its linked Issue has established the problem and the
-maintainer has agreed to its scope and implementation direction. Target pull requests at the
-`master` branch. Before implementation, also review the current `dev` branch to avoid duplicating
-or conflicting with maintainer work that has not yet reached `master`.
+Target pull requests at the `master` branch. Before implementation, also review the current `dev`
+branch to avoid duplicating or conflicting with maintainer work that has not yet reached `master`.
 
 Each pull request must represent one coherent engineering decision:
 
@@ -88,9 +86,7 @@ Each pull request must represent one coherent engineering decision:
 
 There is no mechanical line-count or file-count limit. A necessary solution may cross several
 files, but every changed part must belong to the same contract and be reviewable and verifiable as
-one unit. A large change that combines independent decisions, crosses ownership boundaries without
-prior agreement, or requires the maintainer to reconstruct its design is not maintainable and will
-not be accepted. Use the Issue, not a draft implementation, to resolve architecture and scope.
+one unit.
 
 ## Engineering and verification
 
@@ -128,6 +124,9 @@ review is not a substitute for contributor debugging or engineering supervision.
 
 ## Pull request description
 
+Use the [PR template](.github/pull_request_template.md) to describe the problem and scope,
+implementation, and verification.
+
 A pull request description must include:
 
 - the linked Issue and the agreed scope;
@@ -136,6 +135,17 @@ A pull request description must include:
 - the exact verification commands and summarized results;
 - the workload, hardware, toolchain, and methodology for any performance claim; and
 - every relevant check that was not run and the resulting limitation.
+
+Choose the verification details relevant to your change:
+
+| Change | Evidence to include |
+|---|---|
+| Bug fix | The trigger, expected behavior, and verification of the fix. |
+| Recipe or conversion method | The source, target representation, conversion command, and which stages were actually verified: conversion, loading, or execution. |
+| New Op or shape | Supported inputs, independent numerical verification, and relevant boundaries. Follow [Op development](docs/maintainer/op-development.md). |
+| Performance tuning | Correctness evidence and a final performance report. Linear tuning follows the [existing report format](docs/maintainer/linear-tuning.md#4-report-format) and [Q4 example](docs/maintainer/examples/q4-linear.md). |
+| Runtime or interface change | Reproduction and verification of the affected behavior. |
+| Documentation, build, or tooling | Checks relevant to the change, such as links, affected build targets, or tool invocations. |
 
 ## Review policy
 

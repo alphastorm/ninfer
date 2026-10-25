@@ -1,10 +1,19 @@
 #include "product/media_acquire/acquire.h"
 
-#include <curl/curl.h>
-
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <sys/socket.h>
+#endif
+
+#include <curl/curl.h>
 
 #include <algorithm>
 #include <array>
@@ -20,6 +29,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 namespace ninfer::product::media_acquire {
@@ -88,7 +98,7 @@ bool private_ipv4(std::uint32_t address) {
     const std::uint32_t a = ntohl(address);
     return (a >> 24U) == 0 || (a >> 24U) == 10 || (a >> 24U) == 127 || (a >> 16U) == 0xa9fe ||
            (a >> 20U) == 0xac1 || (a >> 16U) == 0xc0a8 || (a >> 22U) == 0x0191 ||
-           (a >> 17U) == 0x633f || (a >> 24U) >= 224;
+           (a >> 17U) == 0x6309 || (a >> 24U) >= 224;
 }
 
 bool private_address(const sockaddr* address) {
@@ -143,14 +153,27 @@ UrlParts parse_url(std::string_view value) {
 }
 
 std::string resolve_public(const UrlParts& url, bool allow_private) {
+#ifdef _WIN32
+    static std::once_flag winsock_init;
+    std::call_once(winsock_init, [] {
+        WSADATA data{};
+        const int error = WSAStartup(MAKEWORD(2, 2), &data);
+        if (error) throw std::system_error(error, std::system_category(), "initialize Winsock");
+    });
+#endif
     addrinfo hints{};
     hints.ai_family   = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* raw     = nullptr;
     const int rc      = getaddrinfo(url.host.c_str(), url.port.c_str(), &hints, &raw);
     if (rc != 0) {
+#ifdef _WIN32
+        throw Error(ErrorKind::RemoteUnavailable,
+                    "failed to resolve media URL host: Windows error " + std::to_string(rc));
+#else
         throw Error(ErrorKind::RemoteUnavailable,
                     "failed to resolve media URL host: " + std::string(gai_strerror(rc)));
+#endif
     }
     std::unique_ptr<addrinfo, decltype(&freeaddrinfo)> addresses(raw, freeaddrinfo);
     std::string selected;
@@ -287,7 +310,7 @@ std::vector<std::uint8_t> read_path(const Source& source, const Policy& policy) 
     if (!policy.media_root.empty()) {
         const std::filesystem::path root = std::filesystem::weakly_canonical(policy.media_root, ec);
         const auto relative              = std::filesystem::relative(path, root, ec);
-        if (ec || relative.empty() || relative.native().starts_with("..")) {
+        if (ec || relative.empty() || relative.generic_string().starts_with("..")) {
             throw std::invalid_argument("media path is outside configured media root");
         }
     }

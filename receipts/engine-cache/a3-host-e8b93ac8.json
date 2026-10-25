@@ -1,0 +1,30 @@
+{
+  "artifact_type": "ninfer-engine-adapter-host-proof/1",
+  "source_commit": "e8b93ac8d660a68ef820e2b3e536bb5b4da42539",
+  "build_image": "ov-build-env:master-64d10fbf-r2-cpu-local",
+  "cuda_toolkit": "13.1.2",
+  "production_server_linked": true,
+  "gpu_tests_compiled": true,
+  "gpu_tests_executed": false,
+  "production_restart_proven": false,
+  "ctest": {
+    "passed": 11,
+    "failed": 0,
+    "skipped": 0,
+    "elapsed_seconds": 0.68,
+    "tests": [
+      "ninfer_scheduler_test",
+      "ninfer_engine_cache_gate_test",
+      "ninfer_engine_options_test",
+      "ninfer_engine_checkpoint_control_test",
+      "ninfer_context_cost_test",
+      "ninfer_resource_manager_test",
+      "ninfer_openai_responses_store_test",
+      "ninfer_session_checkpoint_service_test",
+      "ninfer_serve_options_test",
+      "ninfer_request_log_test",
+      "ninfer_metrics_test"
+    ]
+  },
+  "completion_marker": "A3_CPU_PROOF_COMPLETE"
+}

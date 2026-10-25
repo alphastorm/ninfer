@@ -1,12 +1,14 @@
 #pragma once
 
 #include "ninfer/types.h"
+#include "product/logging/logging.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace ninfer::serve {
 
@@ -18,27 +20,31 @@ inline constexpr std::size_t kDefaultResponseStoreRecords = 1024;
 inline constexpr std::size_t kDefaultResponseStoreBytes   = 256ULL << 20;
 inline constexpr std::uint64_t kDefaultSessionCheckpointQuotaBytes = 64ULL << 30;
 inline constexpr std::size_t kDefaultSessionCheckpointStagingBytes = 256ULL << 20;
-inline constexpr std::uint32_t kDefaultSessionCheckpointMinTokens  = 32768;
+inline constexpr std::size_t kDefaultSessionCheckpointWriteBufferBytes = 6ULL << 30;
+inline constexpr std::uint32_t kDefaultSessionCheckpointMinTokens = 32768;
 
 struct ServeOptions {
-    bool help_requested    = false;
-    bool version_requested = false;
+    bool help_requested = false;
     std::string artifact_path;
+    std::filesystem::path chat_template_path;
     std::string host = "127.0.0.1";
     int port         = 8080;
     std::string api_key;                          // empty => no auth
-    std::optional<std::string> model_id_override; // unset => artifact identity.model_id
+    std::optional<std::string> model_id_override; // unset => artifact metadata.name
     std::string request_log_jsonl;                // empty => structured request logging disabled
     std::string binary_sha256;                    // lifecycle-computed executable identity
     std::string artifact_sha256;                  // lifecycle-computed artifact identity
-    std::string config_sha256;                    // lifecycle-computed canonical config identity
-    std::string deployment_profile;               // generic operator-selected profile name
+    std::string config_sha256;                    // lifecycle-computed full config identity
+    std::string deployment_profile;               // public deployment profile name
+    std::string stop_event;                       // Windows manager-minted stop event
+    std::string shutdown_report;                  // final durable-save receipt destination
     std::uint32_t max_context          = 8192;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(8192);
     std::uint32_t max_concurrency      = 1;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;
-    std::uint32_t prefill_chunk        = 1024;
+    std::uint32_t gpu_keep_warm_ms     = 0;
+    std::uint32_t prefill_chunk        = 0;
     std::filesystem::path context_cost_presets;
     std::uint32_t log_stats_interval_ms    = 5000; // 0 disables periodic Engine throughput logs
     std::size_t max_request_bytes          = kDefaultMaxRequestBytes;
@@ -50,7 +56,9 @@ struct ServeOptions {
     std::filesystem::path session_checkpoint_root;
     std::uint64_t session_checkpoint_quota_bytes = kDefaultSessionCheckpointQuotaBytes;
     std::size_t session_checkpoint_staging_bytes = kDefaultSessionCheckpointStagingBytes;
-    std::uint32_t session_checkpoint_min_tokens  = kDefaultSessionCheckpointMinTokens;
+    std::size_t session_checkpoint_write_buffer_bytes = kDefaultSessionCheckpointWriteBufferBytes;
+    std::uint32_t session_checkpoint_min_tokens = kDefaultSessionCheckpointMinTokens;
+    bool session_checkpoint_require_origin_auth = false;
     int device                             = 0;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
@@ -58,21 +66,25 @@ struct ServeOptions {
     bool enable_vision      = false;
     bool use_cuda_graph     = true;
     bool allow_prefix_reuse = true;
-    bool enable_thinking =
-        true; // default thinking mode for the generation prompt (--no-thinking opts out)
-    bool preserve_thinking = false;
+    std::optional<bool> enable_thinking;
+    std::optional<bool> preserve_thinking;
     std::optional<std::uint32_t> default_thinking_budget;
     int default_max_tokens = kDefaultMaxTokens;
     bool enable_cors       = false; // send permissive CORS headers for browser UIs
     // Process-level explicit overrides layered between registered model/mode defaults and request
     // fields. An omitted seed is replaced per request with a fresh random seed.
     SamplingOverrides sampling_overrides;
-    bool greedy = false; // --greedy: force temperature 0 (exact argmax)
+    bool greedy                 = false; // --greedy: force temperature 0 (exact argmax)
+    product::LogLevel log_level = product::LogLevel::Info;
+
+    // Exact process argv for the server-start record. Secret-bearing option values are redacted
+    // while parsing; this is provenance only and never affects execution.
+    std::vector<std::string> startup_argv;
 };
 
 ServeOptions parse_serve_options(int argc, char** argv);
 std::string resolve_public_model_id(const ServeOptions& options,
-                                    std::string_view artifact_model_id);
+                                    std::string_view artifact_model_name);
 std::string serve_usage_text(const char* argv0);
 
 } // namespace ninfer::serve

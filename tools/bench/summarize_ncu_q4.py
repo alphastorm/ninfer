@@ -161,14 +161,16 @@ def read_shape_manifest(path: Path) -> dict[int, dict[str, object]]:
         except json.JSONDecodeError as error:
             raise SummaryError(f"{path}:{line_number}: invalid JSON") from error
         if (
-            record.get("schema_version") != 1
+            record.get("schema_version") not in {1, 2}
             or record.get("kernel_family") != "linear_swiglu_q4"
             or record.get("route") != "public"
         ):
             raise SummaryError(f"{path}:{line_number}: manifest is not the public Q4 LinearSwiGLU route")
         if any(record.get(name) != value for name, value in expected_geometry.items()):
             raise SummaryError(f"{path}:{line_number}: manifest has the wrong Q4 LinearSwiGLU geometry")
-        if record.get("gate_up_paired") is not True or record.get("silu_epilogue_fused") is not True:
+        if record["schema_version"] == 1 and (
+            record.get("gate_up_paired") is not True or record.get("silu_epilogue_fused") is not True
+        ):
             raise SummaryError(f"{path}:{line_number}: manifest is not the paired fused route")
         m = record.get("m")
         if not isinstance(m, int) or m in records:
@@ -177,6 +179,12 @@ def read_shape_manifest(path: Path) -> dict[int, dict[str, object]]:
 
     if set(records) != {1, 4}:
         raise SummaryError(f"{path}: manifest must contain exactly m=1 and m=4")
+    if records[1]["schema_version"] != records[4]["schema_version"]:
+        raise SummaryError(f"{path}: manifest mixes schema versions")
+    if records[1]["schema_version"] == 2:
+        if any(record.get("execution") != "eager" for record in records.values()):
+            raise SummaryError(f"{path}: master public Q4 captures require eager execution")
+        return records
     if records[1].get("schedule") != "linear_swiglu.q4.gemv.paired_rows":
         raise SummaryError(f"{path}: m=1 does not resolve to the paired-row GEMV route")
     m4 = records[4]
@@ -192,7 +200,8 @@ def summarize(m1_csv: Path, m4_csv: Path, manifest_path: Path) -> dict[str, obje
     captures = {1: read_capture(m1_csv), 4: read_capture(m4_csv)}
     expected_kernels = {
         1: "q4_linear_swiglu_gemv_pair_kernel",
-        4: "q4_small_t_mma_kernel",
+        4: ("q4_a16_sliced_k_mma_kernel" if manifest[4]["schema_version"] == 2
+            else "q4_small_t_mma_kernel"),
     }
     for m, expected in expected_kernels.items():
         if expected not in str(captures[m]["kernel"]):
@@ -200,7 +209,7 @@ def summarize(m1_csv: Path, m4_csv: Path, manifest_path: Path) -> dict[str, obje
     duration_ratio = float(captures[4]["duration_us"]) / float(captures[1]["duration_us"])
     dram_ratio = float(captures[4]["dram_bytes"]) / float(captures[1]["dram_bytes"])
     return {
-        "schema_version": 1,
+        "schema_version": manifest[1]["schema_version"],
         "contract": {
             "draft_tokens": 3,
             "target_verify_m": 4,

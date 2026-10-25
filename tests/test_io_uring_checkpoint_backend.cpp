@@ -3,6 +3,7 @@
 #include <sys/file.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/statfs.h>
 
 #include <fcntl.h>
 #include <signal.h>
@@ -652,6 +653,55 @@ int test_continuation_read_queue() {
                                               std::span(&request, 1));
                       }),
                       "io_uring continuation queue accepted a path outside its configured root");
+    const auto actual = payload_path(root, checkpoint);
+    const auto alias = root.path() / "payload-alias";
+    std::filesystem::create_directory_symlink(actual.parent_path(), alias);
+    failures += check(throws_checkpoint([&] {
+                          (void)queue->submit(alias / actual.filename(), std::span(&request, 1));
+                      }),
+                      "io_uring continuation queue followed an intermediate symlink");
+    TempDirectory outside;
+    const auto root_alias = root.path() / "root-alias";
+    std::filesystem::create_directory_symlink(outside.path(), root_alias);
+    failures += check(throws_checkpoint([&] {
+                          (void)make_io_uring_checkpoint_read_queue(root_alias / "not-created");
+                      }) &&
+                          !std::filesystem::exists(outside.path() / "not-created"),
+                      "queue factory must not create directories through a root ancestor symlink");
+    return failures;
+}
+
+int test_zfs_wsl_missing_and_large_dio_alignment() {
+    struct ResetAlignment {
+        ~ResetAlignment() { io_uring_checkpoint_test_reset_alignment(); }
+    } reset;
+    int failures = 0;
+    for (const auto& [memory, offset] :
+         {std::pair<std::size_t, std::size_t>{0, 0}, {8192, 16384}}) {
+        io_uring_checkpoint_test_override_alignment(memory, offset);
+        TempDirectory root;
+        const auto capability = probe_io_uring_checkpoint_capability(root.path());
+        failures += check(capability.available &&
+                              capability.memory_alignment == (memory == 0 ? 4096 : memory) &&
+                              capability.offset_alignment == (offset == 0 ? 4096 : offset),
+                          "missing DIOALIGN uses a proven 4 KiB fallback; reported alignments "
+                          "above 4 KiB are preserved");
+        if (!capability.available) { continue; }
+        IoUringCheckpointBackend backend(root.path());
+        const Fixture checkpoint = fixture(1, {{CheckpointPayloadKind::StateImage, 32773}});
+        save(backend, checkpoint);
+        failures += check(images_equal(backend.load(checkpoint.expectation), checkpoint),
+                          "direct checkpoint payload round-trips with missing/large alignment");
+        auto queue = make_io_uring_checkpoint_read_queue(root.path());
+        std::vector<std::byte> bytes(17003);
+        const ContinuationCheckpointReadRequest request{.file_offset = 8191,
+                                                         .destination = bytes};
+        auto completion = queue->submit(payload_path(root, checkpoint), std::span(&request, 1));
+        completion->wait();
+        failures += check(std::equal(bytes.begin(), bytes.end(),
+                                     checkpoint.payloads.front().bytes.begin() + 8191),
+                          "unaligned continuation read honors the resolved direct-I/O alignment");
+    }
     return failures;
 }
 
@@ -669,12 +719,26 @@ int main() {
                       << capability.reason << '\n';
             return failures == 0 ? 77 : 1;
         }
-        if (capability.environment == LinuxCheckpointEnvironment::Wsl &&
-            std::filesystem::is_directory("/mnt/c")) {
-            const IoUringCheckpointCapability drvfs =
-                probe_io_uring_checkpoint_capability("/mnt/c");
-            failures += check(!drvfs.available && drvfs.reason.find("WSL") != std::string::npos,
-                              "WSL DrvFS must fail explicitly while WSL ext4 remains eligible");
+        if (capability.environment == LinuxCheckpointEnvironment::Wsl) {
+            const char* configured = std::getenv("NINFER_CHECKPOINT_TEST_DRVFS_ROOT");
+            const std::filesystem::path windows_root = configured == nullptr ? "/mnt/c" : configured;
+            struct statfs filesystem{};
+            const bool inspected = ::statfs(windows_root.c_str(), &filesystem) == 0;
+            const bool windows_filesystem =
+                inspected && (filesystem.f_type == 0x53464846L ||
+                              filesystem.f_type == 0x01021997L ||
+                              filesystem.f_type == 0x65735546L);
+            if (configured != nullptr) {
+                failures += check(windows_filesystem,
+                                  "configured WSL Windows-drive fixture must be DrvFS/9p/FUSE");
+            }
+            // A container can have an overlay directory named /mnt/c while only a deeper
+            // Windows-drive subtree is mounted. Test the observed filesystem, not its name.
+            if (windows_filesystem) {
+                const auto drvfs = probe_io_uring_checkpoint_capability(windows_root);
+                failures += check(!drvfs.available && drvfs.reason.find("WSL") != std::string::npos,
+                                  "WSL DrvFS must fail explicitly while WSL ext4 remains eligible");
+            }
         }
 
         failures += test_transaction_and_trusted_abort();
@@ -689,6 +753,7 @@ int main() {
         failures += test_truncation_and_oversize_rejection();
         failures += test_expected_allocation_bound();
         failures += test_continuation_read_queue();
+        failures += test_zfs_wsl_missing_and_large_dio_alignment();
         if (failures == 0) {
             const char* environment =
                 capability.environment == LinuxCheckpointEnvironment::Wsl ? "WSL" : "Linux";

@@ -1,14 +1,9 @@
+#include <charconv>
 #include "serve/generation_service.h"
 
-#include "core/sha256.h"
-
-#include <fstream>
-
 #include "product/media_acquire/acquire.h"
-#include "runtime/engine/checkpoint_engine_access.h"
 #include "serve/client_identity.h"
-#include "serve/tool_call_parser.h"
-#include "serve/server_identity.h"
+#include "serve/session_checkpoint_service.h"
 #include "serve/translate.h"
 
 #include <algorithm>
@@ -46,11 +41,59 @@ struct RequestLifetime {
     std::chrono::steady_clock::time_point deadline;
 };
 
-ApiError request_error_to_api_error(const ninfer::RequestError& exception) {
+ApiError request_error_to_api_error(const ninfer::RequestError& exception,
+                                    std::string_view constraint_param,
+                                    std::span<const std::string> tool_schema_params) {
     ApiError error;
     error.param   = "messages";
     error.message = exception.what();
+    const auto tool_param = [&] {
+        const std::string_view pointer = exception.pointer();
+        const auto split               = pointer.find('/', 1);
+        std::size_t index              = 0;
+        if (pointer.starts_with('/') && split != std::string_view::npos) {
+            const auto number = pointer.substr(1, split - 1);
+            const auto parsed =
+                std::from_chars(number.data(), number.data() + number.size(), index);
+            if (parsed.ec == std::errc{} && parsed.ptr == number.data() + number.size() &&
+                index < tool_schema_params.size() && !tool_schema_params[index].empty() &&
+                (pointer.substr(split) == "/parameters" ||
+                 pointer.substr(split).starts_with("/parameters/")))
+                return tool_schema_params[index] + std::string(pointer.substr(split + 11));
+        }
+        return "tools" + exception.pointer();
+    };
     switch (exception.kind()) {
+    case ninfer::RequestErrorKind::InvalidToolConstraint:
+        error.status = 400;
+        error.code   = "invalid_tool_constraint";
+        error.param  = tool_param();
+        break;
+    case ninfer::RequestErrorKind::InvalidGrammar:
+    case ninfer::RequestErrorKind::InvalidChoice:
+    case ninfer::RequestErrorKind::InvalidRegex:
+    case ninfer::RequestErrorKind::ConstraintDeadEnd:
+        error.status = 400;
+        error.param  = constraint_param;
+        error.code =
+            exception.kind() == ninfer::RequestErrorKind::InvalidGrammar  ? "invalid_grammar"
+            : exception.kind() == ninfer::RequestErrorKind::InvalidChoice ? "invalid_choice"
+            : exception.kind() == ninfer::RequestErrorKind::InvalidRegex  ? "invalid_regex"
+                                                                          : "constraint_dead_end";
+        break;
+    case ninfer::RequestErrorKind::InvalidJsonSchema:
+    case ninfer::RequestErrorKind::UnsupportedJsonSchema:
+    case ninfer::RequestErrorKind::UnsatisfiableJsonSchema:
+        error.status = 400;
+        error.param  = exception.source() == RequestErrorSource::Tools
+                           ? tool_param()
+                           : std::string(constraint_param) + exception.pointer();
+        error.code = exception.kind() == ninfer::RequestErrorKind::InvalidJsonSchema
+                         ? "invalid_json_schema"
+                     : exception.kind() == ninfer::RequestErrorKind::UnsupportedJsonSchema
+                         ? "unsupported_json_schema"
+                         : "unsatisfiable_json_schema";
+        break;
     case ninfer::RequestErrorKind::ContextLengthExceeded:
         error.status = 400;
         error.code   = "context_length_exceeded";
@@ -63,6 +106,10 @@ ApiError request_error_to_api_error(const ninfer::RequestError& exception) {
     case ninfer::RequestErrorKind::MediaBudgetExceeded:
         error.status = 400;
         error.code   = "media_budget_exceeded";
+        break;
+    case ninfer::RequestErrorKind::InvalidMedia:
+        error.status = 400;
+        error.code   = "invalid_media";
         break;
     case ninfer::RequestErrorKind::Overloaded:
         error.param.clear();
@@ -77,6 +124,7 @@ ApiError request_error_to_api_error(const ninfer::RequestError& exception) {
         error.code   = "request_queue_timeout";
         break;
     case ninfer::RequestErrorKind::Cancelled:
+        error.param.clear();
         error.status = 499;
         error.type   = "request_cancelled";
         error.code   = "client_disconnected";
@@ -117,6 +165,7 @@ using Clock = std::chrono::steady_clock;
         error.code   = "media_fetch_timeout";
         break;
     case ninfer::product::media_acquire::ErrorKind::DeadlineExceeded:
+        error.param.clear();
         error.status = 503;
         error.type   = "server_error";
         error.code   = "request_queue_timeout";
@@ -127,8 +176,7 @@ using Clock = std::chrono::steady_clock;
     throw ApiException(std::move(error));
 }
 
-[[noreturn]] void throw_invalid_input(const std::exception& exception,
-                                      const char* code = "invalid_media") {
+[[noreturn]] void throw_invalid_input(const std::exception& exception, const char* code) {
     ApiError error;
     error.status  = 400;
     error.param   = "messages";
@@ -163,7 +211,9 @@ ninfer::OwnedMedia acquire_media(const ContentPart& part, Clock::time_point dead
         source_bytes = ninfer::product::media_acquire::acquire_bytes(part.source, policy);
     } catch (const ninfer::product::media_acquire::Error& exception) {
         throw_media_error(exception);
-    } catch (const std::invalid_argument& exception) { throw_invalid_input(exception); }
+    } catch (const std::invalid_argument& exception) {
+        throw_invalid_input(exception, "invalid_media");
+    }
 
     remaining_bytes -= source_bytes.size();
     ninfer::OwnedMedia media;
@@ -182,12 +232,16 @@ ninfer::OwnedMedia acquire_media(const ContentPart& part, Clock::time_point dead
         media.source_name = "inline-bytes";
         break;
     }
-    media.bytes = std::move(source_bytes);
+    media.bytes               = std::move(source_bytes);
+    media.image_resize_policy = part.image_resize_policy;
     return media;
 }
 
-[[noreturn]] void throw_request_error(const ninfer::RequestError& exception) {
-    throw ApiException(request_error_to_api_error(exception));
+[[noreturn]] void
+throw_request_error(const ninfer::RequestError& exception,
+                    std::string_view constraint_param               = "structured_outputs.grammar",
+                    std::span<const std::string> tool_schema_params = {}) {
+    throw ApiException(request_error_to_api_error(exception, constraint_param, tool_schema_params));
 }
 
 void check_preparation_control(Clock::time_point deadline,
@@ -201,125 +255,110 @@ void check_preparation_control(Clock::time_point deadline,
 
 class ServiceOutputSink final : public ninfer::OutputSink {
 public:
-    ServiceOutputSink(const StreamSink& sink, bool filter_tool_calls)
-        : sink_(&sink), filter_tool_calls_(filter_tool_calls) {}
+    explicit ServiceOutputSink(const StreamSink& sink) : sink_(&sink) {}
+
+    void start(ninfer::GenerationStart start) override {
+        deliver([&] {
+            if (sink_->on_start) { sink_->on_start(start); }
+        });
+    }
+
+    void progress(ninfer::PromptProgress progress) override {
+        deliver([&] {
+            if (sink_->on_progress) { sink_->on_progress(progress); }
+        });
+    }
+
+    void timing(ninfer::GenerationTimingObservation timing) override {
+        deliver([&] {
+            if (sink_->on_timing) { sink_->on_timing(timing); }
+        });
+    }
 
     void publish(ninfer::OutputDelta delta) override {
         if (delta.text.empty()) { return; }
-        if (delta.channel == ninfer::OutputChannel::Reasoning) {
-            if (sink_->on_reasoning) { sink_->on_reasoning(delta.text); }
-        } else {
-            std::string visible =
-                filter_tool_calls_ ? tool_filter_.feed(delta.text) : std::move(delta.text);
-            publish_content(visible);
-        }
+        deliver([&] {
+            if (delta.channel == ninfer::OutputChannel::Reasoning) {
+                if (sink_->on_reasoning) { sink_->on_reasoning(delta.text); }
+            } else {
+                if (sink_->on_content) { sink_->on_content(delta.text); }
+            }
+        });
     }
 
-    std::size_t finish(bool is_tool_call_response) {
-        if (filter_tool_calls_) { publish_content(tool_filter_.finish(is_tool_call_response)); }
-        return content_bytes_;
-    }
+    [[nodiscard]] bool disconnected() const noexcept { return disconnected_; }
 
 private:
-    void publish_content(const std::string& text) {
-        if (text.empty() || !sink_->on_content) { return; }
-        sink_->on_content(text);
-        content_bytes_ += text.size();
+    template <class Callback>
+    void deliver(Callback&& callback) {
+        if (disconnected_) { return; }
+        try {
+            callback();
+        } catch (const ClientDisconnected&) { disconnected_ = true; }
     }
 
     const StreamSink* sink_ = nullptr;
-    bool filter_tool_calls_ = false;
-    ToolCallStreamFilter tool_filter_;
-    std::size_t content_bytes_ = 0;
+    bool disconnected_      = false;
 };
 
 } // namespace
 
-namespace {
-
-// The lifecycle passes the artifact digest it hashed at deployment time. The serve
-// re-hashes the bytes it will actually load and refuses a mismatch, so a mutated
-// bind-mount source cannot restart under a stale identity and accept checkpoints
-// fingerprinted for a different model (review CR-20260830 R3).
-void verify_declared_artifact_digest(const std::string& artifact_path,
-                                     const std::string& declared_sha256) {
-    if (declared_sha256.empty()) { return; }
-    std::ifstream input(artifact_path, std::ios::binary);
-    if (!input) {
-        throw std::invalid_argument("model artifact is unreadable for identity verification: " +
-                                    artifact_path);
-    }
-    ninfer::crypto::Sha256 hasher;
-    std::vector<std::byte> buffer(1 << 20);
-    while (input) {
-        input.read(reinterpret_cast<char*>(buffer.data()),
-                   static_cast<std::streamsize>(buffer.size()));
-        const std::streamsize got = input.gcount();
-        if (got > 0) {
-            hasher.update(std::span<const std::byte>(buffer.data(),
-                                                     static_cast<std::size_t>(got)));
-        }
-    }
-    if (input.bad()) {
-        throw std::invalid_argument("model artifact read failed during identity verification: " +
-                                    artifact_path);
-    }
-    const std::string actual = ninfer::crypto::sha256_hex(hasher.finish());
-    if (actual != declared_sha256) {
-        throw std::invalid_argument(
-            "model artifact bytes do not match the declared model_artifact_sha256 identity");
-    }
-}
-
-} // namespace
-
-GenerationService::GenerationService(ServeOptions options, LoadProgress load_progress)
-    : options_(std::move(options)) {
-    verify_declared_artifact_digest(options_.artifact_path, options_.artifact_sha256);
+GenerationService::GenerationService(ServeOptions options, StartupObserver startup_observer)
+    : options_(std::move(options)),
+      principal_reuse_scope_(authenticated_principal_scope(options_.api_key)) {
     ninfer::EngineOptions engine_options;
     engine_options.artifact_path            = options_.artifact_path;
+    engine_options.chat_template_path       = options_.chat_template_path;
     engine_options.device                   = options_.device;
     engine_options.max_context              = options_.max_context;
     engine_options.kv_capacity              = options_.kv_capacity;
     engine_options.max_concurrency          = options_.max_concurrency;
     engine_options.max_pending_requests     = options_.max_pending_requests;
     engine_options.pending_timeout_ms       = options_.pending_timeout_ms;
+    engine_options.gpu_keep_warm_ms         = options_.gpu_keep_warm_ms;
     engine_options.prefill_chunk            = options_.prefill_chunk;
     engine_options.kv_cache                 = options_.kv_cache;
     engine_options.enable_vision            = options_.enable_vision;
     engine_options.use_cuda_graph           = options_.use_cuda_graph;
     engine_options.speculative              = options_.speculative;
     engine_options.context_cache            = options_.context_cache;
+    engine_options.gpu_keep_warm_ms         = options_.gpu_keep_warm_ms;
     engine_options.context_cost.preset_path = options_.context_cost_presets;
     engine_options.media_cache_bytes        = options_.media_cache_bytes;
     engine_options.media_live_bytes         = options_.media_live_bytes;
     engine_options.media_preprocess_threads = options_.media_preprocess_threads;
-    engine_options.load_progress            = std::move(load_progress);
-    engine_              = std::make_unique<ninfer::Engine>(std::move(engine_options));
-    prompt_capabilities_ = engine_->prompt_capabilities();
-    request_capacity_    = std::make_shared<RequestCapacity>(
+    engine_options.startup_observer         = std::move(startup_observer);
+    engine_           = std::make_unique<ninfer::Engine>(std::move(engine_options));
+    request_capacity_ = std::make_shared<RequestCapacity>(
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
-    if (!options_.session_checkpoint_root.empty()) {
-        std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue =
-            runtime::CheckpointEngineAccess::make_read_queue(*engine_,
-                                                             options_.session_checkpoint_root);
-        if (!read_queue) {
-            throw std::invalid_argument(
-                "session checkpoints require native Windows DirectStorage or Linux io_uring");
-        }
-        if (!read_queue->available()) {
-            throw std::invalid_argument("session checkpoint read backend is unavailable: " +
-                                        std::string(read_queue->unavailable_reason()));
-        }
-        checkpoint_runtime_fingerprint_ = session_checkpoint_runtime_fingerprint(
-            options_, engine_->options(), engine_->load_summary());
-        checkpoint_store_ = std::make_unique<SessionCheckpointStore>(SessionCheckpointStoreOptions{
-            .root             = options_.session_checkpoint_root,
-            .disk_quota_bytes = options_.session_checkpoint_quota_bytes,
-            .staging_bytes    = options_.session_checkpoint_staging_bytes,
-            .read_queue       = std::move(read_queue),
-        });
+}
+
+GenerationService::~GenerationService() {
+    if (checkpoints_) {
+        (void)checkpoints_->final_save();
+        runtime::CheckpointEngineAccess::set_pressure_checkpoint_handler(*engine_, {});
+        runtime::CheckpointEngineAccess::set_reclaimable_session_oracle(*engine_, {});
+        checkpoints_.reset();
     }
+}
+
+std::shared_ptr<SessionCheckpointService>
+GenerationService::bind_checkpoints(OpenAIResponsesStore& responses) {
+    if (options_.session_checkpoint_root.empty()) { return {}; }
+    if (checkpoints_) { throw std::logic_error("checkpoint service is already bound"); }
+    auto service = std::make_shared<SessionCheckpointService>(
+        *engine_, options_, responses, principal_reuse_scope_);
+    runtime::CheckpointEngineAccess::set_pressure_checkpoint_handler(*engine_, service);
+    runtime::CheckpointEngineAccess::set_reclaimable_session_oracle(*engine_, service);
+    checkpoint_hooks_ = {
+        .set_checkpoint_tag = [](PreparedPrompt& prompt, std::string_view tag) {
+            runtime::CheckpointEngineAccess::set_checkpoint_tag(prompt, tag);
+        },
+        .publication_epoch = [](const GenerationHandle& generation) {
+            return runtime::CheckpointEngineAccess::publication_epoch(generation);
+        }};
+    checkpoints_ = std::move(service);
+    return checkpoints_;
 }
 
 std::shared_ptr<RequestLifetime>
@@ -347,37 +386,38 @@ GenerationService::acquire_request_lifetime(DeadlinePolicy deadline_policy) cons
 }
 
 PreparedRequest GenerationService::prepare(const GenerationRequest& request,
+                                           GenerationConsumerMode consumer_mode,
+                                           ninfer::GenerationObservationOptions observation,
                                            std::function<bool()> is_cancelled,
                                            ContextCacheHints context_cache,
-                                           std::string checkpoint_tag) const {
-    return prepare_impl(request, std::move(is_cancelled), std::move(context_cache),
+                                           std::string_view checkpoint_tag) const {
+    apply_client_identity_cache_hints(request, !options_.api_key.empty(), context_cache);
+    context_cache.shared_reuse_scope = principal_reuse_scope_;
+    return prepare_impl(request, consumer_mode, std::move(observation), std::move(is_cancelled),
+                        std::move(context_cache),
                         options_.allow_prefix_reuse ? CacheParticipation::ReadWrite
                                                     : CacheParticipation::Disabled,
-                        DeadlinePolicy::ClientPendingTimeout, std::move(checkpoint_tag));
+                        DeadlinePolicy::ClientPendingTimeout, checkpoint_tag);
 }
 
 PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request,
+                                                GenerationConsumerMode consumer_mode,
+                                                ninfer::GenerationObservationOptions observation,
                                                 std::function<bool()> is_cancelled,
                                                 ContextCacheHints context_cache,
                                                 CacheParticipation cache_participation,
                                                 DeadlinePolicy deadline_policy,
-                                                std::string checkpoint_tag) const {
-    apply_client_identity_cache_hints(request, !options_.api_key.empty(), context_cache);
-
+                                                std::string_view checkpoint_tag) const {
     PreparedRequest prepared;
-    prepared.include_usage        = request.include_usage;
-    prepared.tool_capable         = request.uses_tools() || request.has_tool_history();
-    prepared.tool_name_max_length = request.tool_name_max_length;
-    prepared.tool_argument_types  = build_tool_argument_type_contracts(request);
-    const ResolvedPromptSemantics semantics =
-        resolve_prompt_semantics(request, options_, prompt_capabilities_);
-    ninfer::RequestOptions request_options = to_request_options(
+    prepared.constraint_param               = request.constraint_param;
+    for (const auto& tool : request.tools) prepared.tool_schema_params.push_back(tool.schema_param);
+    const ResolvedPromptSemantics semantics = resolve_prompt_semantics(request, options_);
+    ninfer::RequestOptions request_options  = to_request_options(
         request, options_, semantics, cache_participation == CacheParticipation::ReadWrite);
-    prepared.enable_thinking                   = semantics.enable_thinking;
-    prepared.thinking_budget                   = request_options.execution.thinking.budget;
-    prepared.preserve_thinking                 = semantics.preserve_thinking;
-    prepared.preserve_thinking_semantic_change = request.preserve_thinking_semantic_change;
-    const bool request_has_media               = request.media_item_count() != 0;
+    prepared.thinking_budget     = request_options.execution.thinking.budget;
+    prepared.reasoning_effort    = semantics.reasoning_effort;
+    prepared.preserve_thinking   = semantics.preserve_thinking;
+    const bool request_has_media = request.media_item_count() != 0;
     if (request_has_media && !options_.enable_vision) {
         const std::invalid_argument error("Vision is disabled for this server");
         throw_invalid_input(error, "vision_disabled");
@@ -394,10 +434,15 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
                                      remaining_media_bytes);
             });
         std::vector<PromptCacheMarker> protocol_markers = std::move(input.context_cache.markers);
-        input.context_cache                             = std::move(context_cache);
+        const bool protocol_allows_engine_automatic =
+            input.context_cache.allow_engine_automatic_shared_prefixes;
+        input.context_cache = std::move(context_cache);
         input.context_cache.markers.insert(input.context_cache.markers.end(),
                                            std::make_move_iterator(protocol_markers.begin()),
                                            std::make_move_iterator(protocol_markers.end()));
+        input.context_cache.allow_engine_automatic_shared_prefixes =
+            input.context_cache.allow_engine_automatic_shared_prefixes &&
+            protocol_allows_engine_automatic;
         prepared.acquisition_seconds =
             std::chrono::duration<double>(Clock::now() - acquisition_started).count();
         check_preparation_control(prepared.lifetime->deadline, is_cancelled);
@@ -406,23 +451,45 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
             .cancellation = CancellationView(is_cancelled),
         };
         ninfer::PreparedPrompt prompt = engine_->prepare(std::move(input), control);
-        if (!checkpoint_tag.empty()) {
-            runtime::CheckpointEngineAccess::set_checkpoint_tag(prompt, std::move(checkpoint_tag));
+        if (!checkpoint_tag.empty() && checkpoint_hooks_.set_checkpoint_tag) {
+            checkpoint_hooks_.set_checkpoint_tag(prompt, checkpoint_tag);
         }
         check_preparation_control(prepared.lifetime->deadline, is_cancelled);
-        prepared.prompt_tokens = static_cast<int>(prompt.summary().prompt_tokens);
-        prepared.preparation   = prompt.preparation_stats();
-        prepared.prepare_seconds =
-            std::chrono::duration<double>(Clock::now() - prepared.lifetime->started).count();
-        prepared.generation =
-            engine_->submit(std::move(prompt), std::move(request_options),
-                            request.stream ? ninfer::OutputConsumerMode::Streaming
-                                           : ninfer::OutputConsumerMode::Aggregate,
-                            prepared.lifetime->deadline);
-        prepared.sampling = prepared.generation.resolved_sampling();
+        prepared.enable_thinking = prompt.summary().starts_in_reasoning;
+        if (!prepared.enable_thinking) {
+            request_options.execution.thinking.budget.reset();
+            prepared.thinking_budget.reset();
+        }
+        prepared.prompt_tokens           = static_cast<int>(prompt.summary().prompt_tokens);
+        prepared.preparation             = prompt.preparation_stats();
+        prepared.service_prepare_seconds = std::max(
+            0.0, std::chrono::duration<double>(Clock::now() - prepared.lifetime->started).count() -
+                     prepared.preparation.seconds);
+        if (observation.first_token) {
+            observation.first_token = [callback = std::move(observation.first_token),
+                                       seconds  = prepared.service_prepare_seconds](
+                                          ninfer::GenerationFirstTokenObservation first) {
+                first.prepare_seconds += seconds;
+                callback(first);
+            };
+        }
+        prepared.generation = engine_->submit(std::move(prompt), std::move(request_options),
+                                              consumer_mode == GenerationConsumerMode::Streaming
+                                                  ? ninfer::OutputConsumerMode::Streaming
+                                                  : ninfer::OutputConsumerMode::Aggregate,
+                                              std::move(observation), prepared.lifetime->deadline);
+        if (!checkpoint_tag.empty() && checkpoint_hooks_.publication_epoch) {
+            prepared.publication_order = checkpoint_hooks_.publication_epoch(prepared.generation).value;
+            if (prepared.publication_order == 0) {
+                throw std::logic_error("checkpointed request has no publication epoch");
+            }
+        }
+        prepared.sampling   = prepared.generation.resolved_sampling();
     } catch (const ApiException&) { throw; } catch (const ninfer::RequestError& exception) {
-        throw_request_error(exception);
-    } catch (const std::invalid_argument& exception) { throw_invalid_input(exception); }
+        throw_request_error(exception, request.constraint_param, prepared.tool_schema_params);
+    } catch (const std::invalid_argument& exception) {
+        throw_invalid_input(exception, "invalid_prompt");
+    }
     return prepared;
 }
 
@@ -436,8 +503,7 @@ int GenerationService::count_prompt_tokens(const GenerationRequest& request,
     }
     const Clock::time_point deadline =
         Clock::now() + std::chrono::milliseconds(options_.pending_timeout_ms);
-    const ResolvedPromptSemantics semantics =
-        resolve_prompt_semantics(request, options_, prompt_capabilities_);
+    const ResolvedPromptSemantics semantics = resolve_prompt_semantics(request, options_);
     try {
         std::size_t remaining_media_bytes =
             std::min(options_.max_request_bytes, ninfer::kMaximumPromptMediaBytes);
@@ -456,51 +522,62 @@ int GenerationService::count_prompt_tokens(const GenerationRequest& request,
         return prompt_tokens;
     } catch (const ApiException&) { throw; } catch (const ninfer::RequestError& exception) {
         throw_request_error(exception);
-    } catch (const std::invalid_argument& exception) { throw_invalid_input(exception); }
+    } catch (const std::invalid_argument& exception) {
+        throw_invalid_input(exception, "invalid_prompt");
+    }
 }
 
 GenerationOutcome GenerationService::run(PreparedRequest& prepared, const StreamSink* sink,
                                          std::function<bool()> is_cancelled) {
     std::unique_ptr<ServiceOutputSink> output_sink;
-    if (sink != nullptr) {
-        output_sink = std::make_unique<ServiceOutputSink>(*sink, prepared.tool_capable);
-    }
+    if (sink != nullptr) { output_sink = std::make_unique<ServiceOutputSink>(*sink); }
     ninfer::OutputSink* public_sink = output_sink.get();
     ninfer::CancellationView cancellation;
-    if (is_cancelled || (sink != nullptr && sink->is_cancelled)) {
-        cancellation = ninfer::CancellationView([external = std::move(is_cancelled), sink]() {
-            return (external && external()) ||
-                   (sink != nullptr && sink->is_cancelled && sink->is_cancelled());
-        });
+    if (is_cancelled || sink != nullptr) {
+        cancellation = ninfer::CancellationView(
+            [external = std::move(is_cancelled), sink, observed = output_sink.get()]() {
+                return (observed && observed->disconnected()) || (external && external()) ||
+                       (sink != nullptr && sink->is_cancelled && sink->is_cancelled());
+            });
     }
 
     ninfer::GenerationResult result;
     try {
         result = prepared.generation.wait(public_sink, cancellation);
-    } catch (const ninfer::RequestError& exception) { throw_request_error(exception); }
+    } catch (const ninfer::RequestError& exception) {
+        throw_request_error(exception, prepared.constraint_param, prepared.tool_schema_params);
+    }
     GenerationOutcome outcome;
-    outcome.text              = std::move(result.content);
-    outcome.reasoning         = std::move(result.reasoning);
-    outcome.prompt_tokens     = static_cast<int>(result.prompt.prompt_tokens);
-    outcome.completion_tokens = static_cast<int>(result.generated_token_ids.size());
-    outcome.reasoning_tokens  = static_cast<int>(result.reasoning_tokens);
-    outcome.thinking          = result.thinking;
-    outcome.finish_reason     = result.finish_reason;
+    outcome.text                = std::move(result.content);
+    outcome.reasoning           = std::move(result.reasoning);
+    outcome.prompt_tokens       = static_cast<int>(result.prompt.prompt_tokens);
+    outcome.completion_tokens   = static_cast<int>(result.generated_token_ids.size());
+    outcome.generated_token_ids = std::move(result.generated_token_ids);
+    outcome.reasoning_tokens    = static_cast<int>(result.reasoning_tokens);
+    outcome.thinking            = result.thinking;
+    outcome.constraint          = result.constraint;
+    outcome.finish_reason       = result.finish_reason;
+    outcome.matched_stop_string = std::move(result.matched_stop_string);
 
-    outcome.metrics.prepare_seconds = prepared.prepare_seconds;
+    outcome.metrics.prepare_seconds =
+        prepared.service_prepare_seconds + result.timings.prepare_seconds;
     outcome.metrics.ttft_seconds =
-        prepared.prepare_seconds +
+        outcome.metrics.prepare_seconds +
         std::max(0.0, result.timings.first_token_seconds - result.timings.prepare_seconds);
-    outcome.metrics.vision_seconds  = result.timings.vision_seconds;
-    outcome.metrics.prefill_seconds = result.timings.prefill_seconds;
-    outcome.metrics.decode_seconds  = result.timings.decode_seconds;
-    outcome.metrics.total_seconds =
-        prepared.prepare_seconds +
-        std::max(0.0, result.timings.total_seconds - result.timings.prepare_seconds);
-    outcome.metrics.engine_timing               = result.engine_timing;
+    outcome.metrics.vision_seconds          = result.timings.vision_seconds;
+    outcome.metrics.prefill_seconds         = result.timings.prefill_seconds;
+    outcome.metrics.decode_seconds          = result.timings.decode_seconds;
+    outcome.metrics.prompt_wall_seconds     = result.timings.prompt_wall_seconds;
+    outcome.metrics.generation_wall_seconds = result.timings.generation_wall_seconds;
+    outcome.metrics.total_seconds = prepared.service_prepare_seconds + result.timings.total_seconds;
+    outcome.metrics.engine_timing = result.engine_timing;
+    outcome.metrics.first_output_timing         = std::move(result.first_output_timing);
+    outcome.metrics.scheduling                  = result.scheduling;
+    outcome.metrics.admission                   = result.admission;
+    outcome.metrics.engine_request_id           = result.engine_request_id;
+    outcome.metrics.computed_prefill_tokens     = result.computed_prefill_tokens;
     outcome.metrics.prefix_cache_hit_tokens     = result.reused_prompt_tokens;
     outcome.metrics.prefix_reuse_path           = result.prefix_reuse_path;
-    outcome.metrics.materialization             = result.materialization;
     outcome.metrics.speculative_backend         = result.speculative.backend;
     outcome.metrics.speculative_draft_window    = result.speculative.draft_window;
     outcome.metrics.speculative_rounds          = result.speculative.rounds;
@@ -510,86 +587,9 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.metrics.speculative_accepted_per_position =
         std::move(result.speculative.accepted_per_position);
 
-    bool is_tool_call_response = false;
-    if (prepared.tool_capable) {
-        ParsedToolCallOutput parsed = parse_qwen_tool_call_output(
-            outcome.text, prepared.tool_name_max_length, prepared.tool_argument_types);
-        outcome.text          = std::move(parsed.content);
-        is_tool_call_response = parsed.is_tool_call_response;
-        if (is_tool_call_response) { outcome.tool_calls = std::move(parsed.tool_calls); }
-    }
-    if (output_sink) {
-        outcome.streamed_content_bytes = output_sink->finish(is_tool_call_response);
-    }
+    outcome.tool_calls      = std::move(result.tool_calls);
+    outcome.tool_call_parse = result.tool_call_parse;
     return outcome;
-}
-
-bool GenerationService::checkpoint_enabled() const noexcept { return checkpoint_store_ != nullptr; }
-
-std::optional<SessionCheckpointSaveResult>
-GenerationService::save_checkpoint(std::string_view session_sha256, ResponseStore& responses,
-                                   runtime::SessionCheckpointSkipDetail* skip) {
-    if (!checkpoint_store_) {
-        if (skip != nullptr) {
-            skip->reason = runtime::SessionCheckpointSkipReason::StoreDisabled;
-        }
-        return std::nullopt;
-    }
-    std::lock_guard lock(checkpoint_mutex_);
-    std::optional<ResponseStoreSnapshot> snapshot = responses.snapshot_session(session_sha256);
-    if (!snapshot) {
-        if (skip != nullptr) {
-            skip->reason = runtime::SessionCheckpointSkipReason::NoSessionRecords;
-        }
-        return std::nullopt;
-    }
-    const std::string checkpoint_tag = snapshot->latest_response_id;
-    if (skip != nullptr) {
-        runtime::SessionCheckpointSkipDetail::assign_tag(skip->attempted_tag, checkpoint_tag);
-    }
-    return checkpoint_store_->save(*snapshot, checkpoint_runtime_fingerprint_,
-                                   [&](runtime::ContinuationCheckpointWriter& writer) {
-                                       return runtime::CheckpointEngineAccess::checkpoint_session(
-                                           *engine_, session_sha256, checkpoint_tag, writer,
-                                           checkpoint_store_->options().staging_bytes, skip);
-                                   },
-                                   skip);
-}
-
-bool GenerationService::restore_checkpoint(std::string_view session_sha256,
-                                           std::string_view required_response_id,
-                                           ResponseStore& responses) {
-    if (!checkpoint_store_) { return false; }
-    std::lock_guard lock(checkpoint_mutex_);
-    try {
-        SessionCheckpointLoadResult loaded = checkpoint_store_->load(
-            session_sha256, checkpoint_runtime_fingerprint_, required_response_id);
-        if (!loaded.checkpoint) { return false; }
-        VerifiedSessionCheckpoint checkpoint = std::move(*loaded.checkpoint);
-        const std::string checkpoint_tag     = checkpoint.responses.latest_response_id;
-        return responses.restore_session(std::move(checkpoint.responses), [&] {
-            return runtime::CheckpointEngineAccess::restore_session(
-                       *engine_, session_sha256, checkpoint_tag, *checkpoint.engine,
-                       checkpoint.expected_engine, checkpoint_store_->options().staging_bytes)
-                .has_value();
-        });
-    } catch (...) { return false; }
-}
-
-nlohmann::json GenerationService::checkpoint_status(std::string_view session_sha256) const {
-    if (!checkpoint_store_) {
-        return nlohmann::json{{"artifact_type", "ninfer_session_checkpoint_status"},
-                              {"session_sha256", session_sha256},
-                              {"state", "disabled"}};
-    }
-    std::lock_guard lock(checkpoint_mutex_);
-    return checkpoint_store_->status(session_sha256, checkpoint_runtime_fingerprint_);
-}
-
-SessionCheckpointEraseResult GenerationService::erase_checkpoint(std::string_view session_sha256) {
-    if (!checkpoint_store_) { return SessionCheckpointEraseResult::Missing; }
-    std::lock_guard lock(checkpoint_mutex_);
-    return checkpoint_store_->erase(session_sha256);
 }
 
 void GenerationService::warmup() {
@@ -602,10 +602,10 @@ void GenerationService::warmup() {
     content.type_raw = "text";
     turn.content.push_back(std::move(content));
     request.messages.push_back(std::move(turn));
-    request.max_tokens       = 4;
-    request.max_tokens_set   = true;
-    PreparedRequest prepared = prepare_impl(request, {}, {}, CacheParticipation::Disabled,
-                                            DeadlinePolicy::UnboundedStartup, {});
+    request.max_tokens = 4;
+    PreparedRequest prepared =
+        prepare_impl(request, GenerationConsumerMode::Aggregate, {}, {}, {},
+                     CacheParticipation::Disabled, DeadlinePolicy::UnboundedStartup);
     run(prepared, nullptr);
 }
 

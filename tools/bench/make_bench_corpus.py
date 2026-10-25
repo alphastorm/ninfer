@@ -160,7 +160,7 @@ def load_tokenizer(tokenizer_path: Path) -> Any:
     return AutoTokenizer.from_pretrained(
         str(tokenizer_path),
         local_files_only=True,
-        trust_remote_code=False,
+        trust_remote_code=True,
         use_fast=True,
     )
 
