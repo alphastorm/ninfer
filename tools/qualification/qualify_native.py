@@ -1213,6 +1213,7 @@ $serverArguments=@(
   '--config-sha256',[string]$r.config_sha256,'--deployment-profile',[string]$r.deployment_profile,
   '--device',[string]$gpuIndex,'--max-context',[string]$c.engine.max_context,
   '--kv-capacity',[string]$c.engine.kv_capacity,'--prefill-chunk',[string]$c.engine.prefill_chunk,
+  '--admission-headroom-mib',[string]$c.engine.admission_headroom_mib,
   '--kv-dtype',[string]$c.engine.kv_dtype,'--max-concurrency',[string]$c.engine.max_concurrency,
   '--max-pending-requests',[string]$c.engine.max_pending_requests,
   '--pending-timeout-ms',[string]$c.engine.pending_timeout_ms,
@@ -1223,6 +1224,7 @@ $serverArguments=@(
   '--session-checkpoint-dir',$checkpoints,
   '--session-checkpoint-quota-mib',[string]$c.session_checkpoint.quota_mib,
   '--session-checkpoint-staging-mib',[string]$c.session_checkpoint.staging_mib,
+  '--session-checkpoint-require-origin-auth',
   '--request-log-jsonl',$requestLog,'--log-stats-interval-ms','0','--preserve-thinking',
   '--spec','mtp','--draft-tokens',[string]$c.speculative.draft_tokens,'--lm-head-draft')
 $keepWarm=$c.engine.PSObject.Properties['gpu_keep_warm_ms']

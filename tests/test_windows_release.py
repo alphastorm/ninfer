@@ -540,6 +540,7 @@ class SharedLifecycleTreeTests(unittest.TestCase):
             "--api-key-file", "--binary-sha256", "--artifact-sha256", "--config-sha256",
             "--deployment-profile", "--device-state-slots", "--host-context-mib",
             "--spec", "--draft-tokens", "--lm-head-draft",
+            "--admission-headroom-mib", "--session-checkpoint-require-origin-auth",
             "--session-checkpoint-dir",
             "--session-checkpoint-quota-mib", "--session-checkpoint-staging-mib",
         }.issubset(controller_flags))
@@ -893,7 +894,9 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertTrue(0 <= keep_warm <= 2**31 - 1)
                 self.assertEqual(config["speculative"]["backend"], "mtp")
                 self.assertEqual(config["speculative"]["draft_tokens"], 3)
+                self.assertEqual(config["engine"]["admission_headroom_mib"], 640 if lane == "rtx4090" else 768)
                 self.assertTrue(config["session_checkpoint"]["enabled"])
+                self.assertIs(config["session_checkpoint"]["require_origin_auth"], True)
                 self.assertGreaterEqual(config["context_cache"]["device_state_slots"], 1)
                 translation = spec["host_context_translation"]
                 full_bytes = ((translation["predecessor_host_kv_mib"] << 20) +
@@ -1012,7 +1015,7 @@ ConvertTo-Json -InputObject @($failures) -Compress
         result = self.invoke(function + """
 $new=[Collections.Generic.List[string]]::new()
 $old=[Collections.Generic.List[string]]::new()
-$current='{"schema_version":4,"context_cache":{"host_context_mib":"14787.734375"}}'|ConvertFrom-Json
+$current='{"schema_version":4,"context_cache":{"host_context_mib":"14787.734375"},"engine":{"admission_headroom_mib":640},"session_checkpoint":{"require_origin_auth":true}}'|ConvertFrom-Json
 $legacy='{"schema_version":3,"context_cache":{"host_state_slots":24,"host_kv_mib":11264,"max_private_continuations":8}}'|ConvertFrom-Json
 Add-ContextArguments $new $current
 Add-ContextArguments $old $legacy
@@ -1021,11 +1024,31 @@ $refused=$false
 try{Add-ContextArguments ([Collections.Generic.List[string]]::new()) $current}catch{$refused=$true}
 @{current=@($new);legacy=@($old);mixed_schema_refused=$refused}|ConvertTo-Json -Compress
 """)
-        self.assertEqual(result["current"], ["--host-context-mib", "14787.734375"])
+        self.assertEqual(result["current"], ["--host-context-mib", "14787.734375",
+                                             "--admission-headroom-mib", "640",
+                                             "--session-checkpoint-require-origin-auth"])
         self.assertEqual(result["legacy"], [
             "--host-state-slots", "24", "--max-private-continuations", "8", "--host-kv-mib", "11264",
         ])
         self.assertTrue(result["mixed_schema_refused"])
+
+    def test_strict_origin_key_floor_counts_valid_utf8_bytes(self) -> None:
+        function = ps_function((WINDOWS / "Install-Release.ps1").read_text(), "Assert-OneLineSecret")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            fixtures = (b"a" * 32, b"a" * 31, ("é" * 16).encode(), b"a" * 32 + b"\nb",
+                        b"a" * 32 + b"\xff")
+            for index, content in enumerate(fixtures):
+                (root / str(index)).write_bytes(content)
+            result = self.invoke(function + f"""
+$accepted=@()
+foreach($index in 0..4){{
+  try{{Assert-OneLineSecret (Join-Path {qualify_native.ps_quote(str(root))} ([string]$index));$accepted+=$true}}
+  catch{{$accepted+=$false}}
+}}
+ConvertTo-Json -InputObject @($accepted) -Compress
+""")
+        self.assertEqual(result, [True, False, True, False, False])
 
     def test_scratch_task_suffix_executes_without_product_task_mutation(self) -> None:
         installer = (WINDOWS / "Install-Release.ps1").read_text()

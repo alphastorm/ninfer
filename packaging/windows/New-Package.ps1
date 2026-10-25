@@ -130,9 +130,12 @@ if ($config.artifact_type -cne 'ninfer_windows_server_config' -or
     [string]$config.release_id -cne $releaseId -or
     [string]$config.deployment_profile -cne $deploymentProfile -or
     [int]$config.engine.max_concurrency -ne 1 -or
+    [int]$config.engine.admission_headroom_mib -lt 256 -or
     [string]$config.speculative.backend -cne 'mtp' -or
     [int]$config.speculative.draft_tokens -lt 1 -or
     -not [bool]$config.session_checkpoint.enabled -or
+    $config.session_checkpoint.require_origin_auth -isnot [bool] -or
+    -not $config.session_checkpoint.require_origin_auth -or
     [int]$config.session_checkpoint.staging_mib -le 0 -or
     [int]$config.context_cache.device_state_slots -lt 1 -or
     [string]$config.context_cache.host_context_mib -cnotmatch '^[0-9]+(?:\.[0-9]+)?$' -or

@@ -51,6 +51,17 @@ function Add-ContextArguments([Collections.Generic.List[string]]$Arguments, [obj
             throw 'schema-4 configuration requires a positive exact host_context_mib'
         }
         foreach ($argument in @('--host-context-mib', $hostMib)) { $Arguments.Add($argument) }
+        $headroom = $Config.engine.admission_headroom_mib
+        if (-not ($headroom -is [int] -or $headroom -is [long]) -or
+            $headroom -lt 256 -or $headroom -gt [int]::MaxValue) {
+            throw 'schema-4 configuration requires admission_headroom_mib >= 256'
+        }
+        foreach ($argument in @('--admission-headroom-mib', [string]$headroom)) { $Arguments.Add($argument) }
+        if ($Config.session_checkpoint.require_origin_auth -isnot [bool] -or
+            -not $Config.session_checkpoint.require_origin_auth) {
+            throw 'schema-4 configuration requires strict checkpoint origin authentication'
+        }
+        $Arguments.Add('--session-checkpoint-require-origin-auth')
     }
     elseif ([int]$Config.schema_version -eq 3) {
         # Rollback launches an older release's own binary and isolated cache. These flags
