@@ -19,14 +19,15 @@ void write_exact(std::FILE* file, std::span<const std::byte> bytes);
 // Flushes stdio and fsync/FlushFileBuffers. No durability acknowledgement precedes this.
 void flush_file(std::FILE* file);
 // Source and destination parents are pinned, with no symlink/reparse traversal. Cross-volume
-// moves fail rather than copy. Windows uses REPLACE_EXISTING | WRITE_THROUGH.
+// moves fail rather than copy. Windows flushes the staged file, renames relative to the
+// pinned destination with FileRenameInfoEx, then flushes that directory handle.
 void replace_path(const std::filesystem::path& source, const std::filesystem::path& destination);
 // Removes a regular file, final link, or complete directory tree through anchored handles.
 // Ancestor links are rejected; final links are unlinked, never traversed. Returns false if
 // missing, otherwise true after deletion (and POSIX parent fsync). Other failures throw.
 [[nodiscard]] bool remove_tree(const std::filesystem::path& path);
-// POSIX fsync(directory). On Windows this is deliberately a no-op: the supported native
-// durability policy is flushed files plus write-through replacement, not directory fsync.
+// POSIX fsync(directory). On Windows this is deliberately a no-op: replace_path owns the
+// native staged-file/anchored-rename/parent-handle flush sequence.
 void sync_directory(const std::filesystem::path& path);
 [[nodiscard]] std::string_view directory_sync_mode() noexcept;
 

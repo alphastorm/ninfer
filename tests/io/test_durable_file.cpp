@@ -178,6 +178,26 @@ void run() {
         io::read_exact(stream.get(), bytes);
         require(bytes[0] == std::byte{9}, "atomic replace did not publish new bytes");
     }
+#ifdef _WIN32
+    // Publication must keep strict parent pins, support a source below its destination
+    // parent, and leave an existing reader on its original generation (POSIX rename).
+    io::create_directories(directory / "stage-child");
+    write(directory / "stage-child" / "next", std::byte{13});
+    {
+        Stream previous(io::open_binary_read(current), &std::fclose);
+        io::replace_path(directory / "stage-child" / "next", current);
+        std::array<std::byte, 3> bytes{};
+        io::read_exact(previous.get(), bytes);
+        require(bytes[0] == std::byte{9}, "replacement changed an existing reader's generation");
+        Stream published(io::open_binary_read(current), &std::fclose);
+        io::read_exact(published.get(), bytes);
+        require(bytes[0] == std::byte{13}, "anchored replacement did not publish new generation");
+    }
+    io::create_directories(directory / "destination-child");
+    write(staging, std::byte{15});
+    io::replace_path(staging, directory / "destination-child" / "current");
+    require(!std::filesystem::exists(staging), "cross-parent replacement retained source");
+#endif
     rejects([&] { Stream bad(io::open_binary_read(directory), &std::fclose); });
     rejects([&] { io::create_directories(directory / ".." / "escape"); });
     rejects([&] { Stream bad(io::open_binary_write(directory / ".." / "escape"), &std::fclose); });
