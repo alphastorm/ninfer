@@ -219,7 +219,7 @@ oneOf 在合并共同断言后，以类型域、有限值集合或共同必填 d
 
 纯字符串长度约束使用 JSON 标量的计数重复，结束引号与重复体在同一规则中。编译器将可确定单元边界的重复体规整为字节 DFA，按 token 所需的重复额度预计算稠密位图或稀疏集合，包含 UTF-8 和转义的中间状态；动态计数仍由 parser 历史拥有，参与同一套回退。不同长度上限共享重复体，规则数和位图桶数不按上限展开。跨出字符串并消费后续语法的 token 保留精确匹配。Pattern、长度和工具结束标记排除的组合继续使用约束交集自动机。
 
-JSON 使用紧凑的 `,` / `:` 分隔符及声明字段顺序。字符串长度与 pattern grammar 使用规范的 JSON 转义；continuation 须属于这一生成语言的前缀。`pattern` 按字符串值做搜索，支持字符类、分组、分支、重复以及顶层分支两端的 `^` / `$`。点号和空白类遵循 ECMAScript 字符集合；反向引用、零宽断言、Unicode 属性类、surrogate escape 和未识别转义返回不支持，Unicode 字符可以直接书写。
+JSON 保持声明字段顺序，同时允许根值前后和结构分隔符周围出现标准 JSON 空白（空格、`\t`、`\r`、`\n`）。const/enum 的对象与数组同样允许结构空白；空白处理不改写字符串与数值字面量。Qwen XML 工具参数继续使用自身的 framing 合同。字符串长度与 pattern grammar 使用规范的 JSON 转义；continuation 须属于这一生成语言的前缀。`pattern` 按字符串值做搜索，支持字符类、分组、分支、重复以及顶层分支两端的 `^` / `$`。点号和空白类遵循 ECMAScript 字符集合；反向引用、零宽断言、Unicode 属性类、surrogate escape 和未识别转义返回不支持，Unicode 字符可以直接书写。
 
 组合编译有明确上限：一次归约最多 16384 次交集合并；有限值递归检查深度最多 256；字符串自动机交集的显式长度界限最多 8192 个 Unicode 字符，交集结果最多 65536 个状态。超限返回不支持。有限枚举直接筛选、单纯长度约束沿用各自路径，不为它们构造字符串交集自动机。
 
@@ -231,7 +231,7 @@ JSON 使用紧凑的 `,` / `:` 分隔符及声明字段顺序。字符串长度�
 
 默认 Basic 对有工具的请求启用结构约束，包括普通 Auto + 非 strict。模型自行选择正文或工具调用；一旦进入调用，函数名和封装受约束。显式 Automatic 只执行请求提出的 strict、allowed_names、Required、None 或 parallel=false 等要求，普通 Auto + 非 strict 可以自由生成。
 
-非 strict 的基础参数语言允许任意顺序及可表示的参数名；不根据 properties 封闭参数集合，不强制 required 或参数值断言。复杂根 schema 与开放对象不会触发 strict 编译器。参数值沿用原有归一化提示；重复参数取最后一个值并保持第一次出现的字段位置，发布对象中每个 key 仅出现一次。严格参数继续按声明顺序生成并禁止重复。
+非 strict 的基础参数语言允许任意顺序及可表示的参数名；grammar 不根据 properties 封闭参数集合，不强制 required 或参数值断言。复杂根 schema 与开放对象不会触发 strict 编译器。解码沿用已声明类型的归一化合同；声明类型不匹配或重复参数时，整个工具区域原子回落为普通 content，不发布其中之前已完成的调用，分别记录 `schema_mismatch` 或 `duplicate_parameter`。自由生成使用同一规则。严格参数继续按声明顺序生成并禁止重复。
 
 Auto 允许零到多次调用；Required 至少一次；parallel=false 将上限设为一次。OpenAI named 映射为 Required + 单名称 + parallel=false；Anthropic named 使用单名称并遵守 disable_parallel_tool_use。None 保留 prompt 声明并禁止生成 `<tool_call>`；与正文约束组合时由正文约束拥有输出语言。所有选择都保留完整声明与缓存标记位置，不通过删改 prompt 工具列表实现。
 
@@ -259,9 +259,9 @@ Raw string 的参数结束分隔符是 `\n</parameter>`，这段文本不能出�
 
 受约束工具的结构化事件来自完整解析并提交的调用。工具结果在终态解析与发布；截断时保留已经完成的调用和实际中断原因，未完成调用不产生 `arguments_json`。
 
-对受约束路线，grammar 已确认完整调用但 parser 无法按同一合同解释，属于实现不一致，不能回落成普通 content 掩盖。自由生成路线保留既有的畸形文本处理行为。
+对受约束路线，grammar 已确认的结构或 strict 参数编码无法按同一合同解释，属于实现不一致，不能回落成普通 content 掩盖。非 strict 的基础 grammar 故意不限制声明类型或参数重复；解码时的上述语义回落是明确合同，不是 grammar/parser 不一致。自由生成路线保留既有的畸形文本处理行为。
 
-实现所有权：`tool_contract` 解析声明并选择当前合同；`tool_grammar` 将合同编译为模型语言；`tool_call_parser` 按相同参数编码规则解码已提交文本。Compiled grammar 沿用 Frontend 的共享预算与冷编译限制。非 strict grammar 的身份只使用名称和封装/调用策略；schema 归一化提示仍由每请求合同持有，不进入共享 grammar 的语义。Continuation 可以推进到第一个未完成调用；包含已完成调用的 raw assistant 前缀被拒绝，避免重新发布历史调用。
+实现所有权：`tool_contract` 解析声明并选择当前合同；`tool_grammar` 将合同编译为模型语言；`tool_call_parser` 按相同参数编码规则解码已提交文本。Compiled grammar 沿用 Frontend 的共享预算与冷编译限制。非 strict grammar 的身份包含名称、Function/Custom kind 和封装/调用策略；schema 归一化提示仍由每请求合同持有，不进入共享 grammar 的语义。Custom 的唯一 `input` 保持原始文本，不进行 JSON 参数推断；历史仅在模板渲染时包成单个 input 字段，kind 不丢失。Continuation 可以推进到第一个未完成调用；包含已完成调用的 raw assistant 前缀被拒绝，避免重新发布历史调用。
 
 ## 5. Thinking、正文与 continuation
 
