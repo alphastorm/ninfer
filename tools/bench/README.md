@@ -51,6 +51,8 @@ protocols, tool round trip, Responses lineage/delete behavior, JSON schemas on
 Chat and Responses, and streaming. A public receipt never claims product
 identity or session-isolation coverage. Product status failures never trigger a
 fallback to the public battery.
+Thinking controls follow each wire contract: Chat uses `enable_thinking: false`;
+Responses uses `reasoning: {"effort": "none"}`, not the Chat-only top-level flag.
 
 ```bash
 python3 tools/smoke/agent_protocol.py --contract public \

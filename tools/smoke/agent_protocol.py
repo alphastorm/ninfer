@@ -279,7 +279,7 @@ def structured_output_checks(
             "model": model,
             "input": "Return Paris and 2 days as JSON.",
             "max_output_tokens": 64,
-            "enable_thinking": False,
+            "reasoning": {"effort": "none"},
             "temperature": 0,
             "store": False,
             "text": {"format": {"type": "json_schema", **output_format["json_schema"]}},
@@ -590,7 +590,7 @@ def responses_session_lifecycle(
             "model": model,
             "input": text,
             "max_output_tokens": 16,
-            "enable_thinking": False,
+            "reasoning": {"effort": "none"},
             "temperature": 0,
             "store": True,
         }

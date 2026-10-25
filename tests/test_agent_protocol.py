@@ -42,8 +42,29 @@ class SchemaOutputTests(unittest.TestCase):
         chat, responses = [call.args[3] for call in request.call_args_list]
         self.assertEqual(chat['response_format']['json_schema']['schema'], responses['text']['format']['schema'])
         self.assertFalse(chat['enable_thinking'])
-        self.assertFalse(responses['enable_thinking'])
+        self.assertEqual(responses['reasoning'], {'effort': 'none'})
+        self.assertNotIn('enable_thinking', responses)
         self.assertEqual(chat['ninfer_session'], responses['ninfer_session'])
+
+    def test_responses_lineage_uses_responses_reasoning_not_chat_extension(self) -> None:
+        first, continuation, branch = ({'id': f'resp_{index}'} for index in (1, 2, 3))
+        replies = [
+            first, continuation, branch, first, {'object': 'list'},
+            {'error': {'code': 'background_not_supported'}},
+            {'id': 'resp_1', 'deleted': True},
+            {'error': {'code': 'response_not_found'}},
+            {'error': {'code': 'previous_response_not_found'}},
+            {'id': 'resp_4'}, branch,
+        ]
+        with patch.object(protocol, 'json_response', side_effect=replies) as request:
+            result = protocol.responses_session_lifecycle('http://fixture', 'model', {}, None, None)
+        self.assertTrue(result['surviving_descendant_continued'])
+        payloads = [call.args[3] for call in request.call_args_list
+                    if call.args[1:3] == ('POST', '/v1/responses')]
+        self.assertEqual(len(payloads), 5)
+        for payload in payloads:
+            self.assertEqual(payload['reasoning'], {'effort': 'none'})
+            self.assertNotIn('enable_thinking', payload)
 
 
 class BatterySelectionTests(unittest.TestCase):
