@@ -1,0 +1,269 @@
+# NInfer native Windows lanes
+
+## 2026-10-24 — Upstream-master native packages (qualification pending)
+
+The native component candidates are `v0.7.0-qwen38-4090-beta.1` and
+`v0.7.0-qwen38-3090-beta.1`. They use upstream master `64d10fbf`, the published
+model-format-v3 artifact `81f924d4`, and schema-4 release specifications/server configurations.
+Package-build receipts remain `hardware-pending`; only a completed qualification
+and restoration chain can establish a hardware pass.
+
+Both native lanes pin the same published file as the container lane: revision
+`1cbd84e7221e51186bd7f093a149912d2489625b`, 20,437,521,664 bytes. They do not pin a
+native-specific upgrade. MTP3/INT8 KV remain explicit; the artifact's inactive
+DFlash2 component must not be materialized by the native MTP configuration, which
+is a separate native runtime qualification assertion.
+The controller and pressure launcher retain `--lm-head-draft` for the optimized
+MTP proposal head; the upstream default full head is not the native profile.
+
+Master's `--host-context-mib` replaces the fork's separate Host KV/State pools.
+The layout-aware translation preserves the old Host KV budget plus 24 MTP
+StateImages of 153,954,304 bytes each: 15,506,063,360 bytes (14,787.734375 MiB) on
+the RTX 4090, and 12,284,837,888 bytes (11,715.734375 MiB) on the RTX 3090.
+These are exact byte translations, not new smaller-host qualifications. Device
+state slots remain extra capacity beyond the active lane (2/4 respectively).
+Master owns its catalog/retention policy; obsolete private-slot limits are not
+passed to the new binary. INT8 KV, MTP3, context 131,072 and the existing power,
+prefill and keep-warm settings are unchanged.
+
+The shared-CUDA and `/MD` build ships its app-local CUDA/MSVC runtime DLLs, not
+just vcpkg and DirectStorage. The qualification collector follows transitive
+imports through the selected CUDA compiler's bin directories, VS 2022 CRT
+redistributable and vcpkg tree. Both DirectStorage DLLs enter that graph,
+including the dynamically loaded core. Missing selected CUDA/CRT imports or a
+failed import inspection refuse packaging rather than relying on a development
+toolkit or an unrelated DLL on the target's `PATH`.
+
+The shared installer/controller/owner-lease shape, protected ACLs and bearer-file
+handling are retained. Readiness consumes status schema 2 and requires this
+process's request-log schema-30 startup to attest the selected UUID, CUDA ordinal
+and GPU name within 600 seconds. Only the server child receives
+`CUDA_DEVICE_ORDER=PCI_BUS_ID`; `CUDA_VISIBLE_DEVICES` must be absent. Packaged
+protocol checks now exercise supported Chat/Responses JSON schemas and
+128-character tool names rather than expecting structured output to be rejected.
+Authenticated shared-prefix reuse is valid across sessions; private continuation
+selection is not.
+
+Each new release instance writes only its own `session-checkpoints-v3` root
+(outer schema 3/native checkpoint-set format 1). Earlier roots are preserved for
+rollback and are never discovered or imported by the new runtime. The
+DirectStorage queue creates its root through the common K6 no-follow directory
+primitive before constructing GPU/DXGI resources, preserving the existing
+checkpoint-root failure context.
+An older release's own schema-3 configuration remains capability-gated to its own binary,
+status schema and isolated checkpoint root. Managed stop signals the per-launch
+event, waits for synchronous final saves, and accepts only a launch-bound
+schema-1 shutdown report with `complete=true` and no refused sessions. Skipped
+sessions are counted, not treated as failed saves. Restart qualification checks
+the real scheduler/reuse counters reset before continuing either saved session.
+Explicit saves must acknowledge `schema: "ninfer-durable-operation/1"` with
+authenticated, committed native publication and real coverage/counts; checkpoint
+status separately requires schema 3. Neither accepts the predecessor's envelope.
+Public qualification phase receipts hash host-route and incumbent-root bindings;
+restoration summaries expose a bounded failure reason and diagnostic digest, not
+raw operator errors. The local orchestration state retains its private write-ahead
+recovery information and is not a public release asset.
+
+Disposable qualification installs may supply `-ScratchTaskSuffix C3`, creating
+the specification's task name plus `-Scratch-C3` without changing the production
+task. The canonical product root refuses that option. Use the existing
+`New-Package.ps1 -ServerConfig` override to bind a scratch port into the package's
+exact configuration hash; the native-operations rehearsal uses port 18210 and a
+separate protected state root. This option grants no production-route mutation.
+
+## Historical predecessor notes
+
+The sections below describe the fork-based releases and their qualification
+history, not additional capabilities or acceptance evidence for this candidate.
+
+## 2026-10-11 — Native lane versions for multi-GPU hosts (qualification pending)
+
+RTX 3090 advances from `v0.6.2-beta.1` to `v0.6.3-beta.1`; RTX 4090 advances from
+`v0.6.10-beta.1` to `v0.6.11-beta.1`. These are new packages for the UUID-bound
+multi-GPU-host lifecycle scripts. Runtime source is unchanged. Hardware qualification
+of both new packages is pending.
+
+## 2026-10-10 — UUID-bound multi-GPU hosts (qualification pending)
+
+Native RTX 3090 and RTX 4090 packaging can select its own card on a host with several
+NVIDIA GPUs. Install with optional `-GpuUuid` (the full NVIDIA UUID); without it, exactly
+one card must match the lane's GPU name and compute capability. The release records that
+UUID, name, installation-time index, and canonical PCI address. Start resolves the UUID's
+current index, so adding another card does not retarget an older release. Older records
+without a PCI address retain UUID-and-name binding. Packaged config bytes and hash identities
+are unchanged; `engine.device` is not the hardware selector.
+
+Only the server child receives `CUDA_DEVICE_ORDER=PCI_BUS_ID`. The operator must still leave
+`CUDA_VISIBLE_DEVICES` absent: hiding cards is not supported. Readiness requires this launch's
+`server_start.environment.gpu_uuid` to match the release binding within 600 seconds; mismatch
+or missing evidence stops the child. Request logs stay append-only: the wrapper captures the
+pre-launch byte offset and file creation identity, reads only complete new JSONL records,
+and requires `server_instance_id` to contain this child's PID. Truncation, replacement,
+wrong-process startup records, and a 1 MiB search without evidence fail closed.
+
+Every owner-controller power query/set is UUID-indexed. Interactive workload accounting maps
+GPUAdapterMemory LUIDs through D3DKMT to the selected PCI bus/device/function, then counts
+only GPUProcessMemory instances on those LUIDs. An idle selected adapter with no process
+instances is valid; another card's desktop workload does not block it. Missing or unmappable
+selected-adapter counters, unmappable active process LUIDs, malformed active counters, and
+nonzero PCI domains refuse observation rather than
+assuming an idle GPU. Software adapters with no PCI device are excluded. A controller invoked
+without `-GpuUuid` refuses a multi-GPU host.
+
+Install defaults to the bundled UUID-aware owner controller on both clean installs and
+upgrades; explicit adapters must declare `-GpuUuid` and attest UUID/PCI in status. Inner
+leases bind both UUID and PCI and validate policy before any restore. Old unbound active
+owner leases must be restored safely with their original controller before upgrading; they
+are never guessed onto a card. A stopped, lease-free predecessor remains rollback-capable,
+including when its recorded GPU index is stale. A running legacy unscoped wrapper blocks
+upgrade/qualification; it is never stopped through its unscoped owner on the multi-GPU host.
+No lane version or release spec is changed.
+
+Pre-UUID packages are unsupported on multi-GPU hosts: their owner restore uses an unindexed
+`nvidia-smi -pl`, which sets every visible card. This also applies when recovering an old
+lease; do not run that legacy restore on a multi-GPU host. Binary predecessor rollback under
+the current UUID-aware shared controller is distinct from running a pre-UUID package's scripts.
+
+Both managed Start and scheduled Run validate release layout/hashes, the selected GPU identity
+and absence of `CUDA_VISIBLE_DEVICES`, and port availability before acquiring a power-changing
+GPU-owner lease. Repeated owner stop preserves the caller's explicit or implicit UUID selection,
+including the legacy lease behavior on a single-visible-GPU host.
+
+Both lanes still listen on port 18082 and retain separate task names and state roots.
+**Only one lane may run at a time.** Start (including direct scheduled Run) refuses an occupied
+port before acquiring a GPU-owner lease. Simultaneous lane operation is not supported.
+The native qualification harness accepts `--gpu-uuid`, applies the same unique-qualified-card
+selection rule, and binds clean/upgrade installs, direct pressure launches, security checks,
+power restoration probes, and benchmark GPU metrics to that card. Fresh real-host acceptance
+is still required; this packaging change is not a release or a hardware qualification claim.
+
+Qualification preflight runs again on every resume. It records the incumbent's root and running
+state durably before stopping anything, and cleanup uses that record even when preflight fails.
+An interrupted window retains an outstanding incumbent restart obligation until restoration passes.
+The qualification summary remains `restore-pending` until restoration passes; failed restoration
+cannot leave a passed summary. A resumed window invalidates any prior passed summary before stopping
+the incumbent, and successful cleanup does not hide a failed qualification phase.
+
+One runtime for the RTX 4090 (`sm_89`) and RTX 3090 (`sm_86`) lanes, built from mainline
+`port/native-lanes-on-mainline` rather than the two divergent lane branches. The package carries
+the same context cache, warm arrival across a restart, and streamed verified-or-refused restore
+that ship on the RTX 5090 container lane, with Windows platform support, the DirectStorage read
+queue, and the MSVC build of the host tree.
+
+Each lane installs into its own isolated state root through `Install-Release.ps1`, runs one
+authenticated request at a time on a loopback or Tailscale address under a scheduled task owned by
+SYSTEM, and keeps durable session checkpoints under its per-release cache. The lane's exact
+engine configuration is bound by hash into the build identity; the lane specification names the
+GPU, architecture, power policy, and task identity the installer enforces.
+
+The lane configuration sizes the pinned host pools (`context_cache.host_state_slots`,
+`context_cache.host_kv_mib`) for the host that runs the lane. The RTX 4090 keeps the qualified
+11,264 MiB Host KV pool, 24 host state slots, and 32,768 MiB runtime-host floor. A 4 GiB pool
+could serve a ceiling-sized session but could not restore its checkpoint; startup now discloses
+the restorable token bound and export refuses a session larger than that bound. The RTX 3090
+profile is unchanged. No smaller-host deployment profile is qualified by this change.
+
+When shared capacity blocks restore, the engine may reclaim another inactive resident session
+whose checkpoint is current. The verified generation stays pinned against quota eviction for
+the entire restore, including saves of later victims. A resident session ahead of its checkpoint
+is saved and pinned first; a refused save leaves that resident intact. Every retry reads from a
+fresh checkpoint reader. The retry bound allows two progress steps per catalog slot plus the final
+import, so new arrivals cannot extend one restore indefinitely. State image slots, KV capacity,
+and continuation slots all participate in guarded reclaim. Normal disk
+quota retention still applies after the restore finishes.
+
+Live sessions survive a graceful stop. An automatic checkpoint refused at a transient gate - the
+newest turn not yet catalogued, or another request's transaction in progress - retries up to six
+times per completed turn once the engine quiesces. Before admission evicts a session whose newest
+turn is not on disk, the engine saves it, waiting while that turn's reply is still being stored;
+the admitting request waits, bounded by its own queue deadline. Re-saving a session under the
+disk quota no longer deletes other sessions' only checkpoints, including when a cleanup fails. A
+graceful stop counts a session whose newest response is already on disk as nothing to save.
+Automatic checkpointing remains best effort under live traffic; explicit checkpoint requests and
+graceful managed shutdown provide the observable save outcome.
+
+Unmodified OpenAI clients get durable sessions. A Responses or chat request's `prompt_cache_key`
+becomes the session identity when API authentication is configured: the key is hashed under its
+own domain and never stored raw, and a request that also sends `ninfer_session` or
+`X-NInfer-Session` is refused on both endpoints. Without authentication the key names nothing and
+the request stays in the anonymous pool; a null key is the same as no key. A client that resumes
+after both it and the server restarted, and so replays its transcript without
+`previous_response_id`, has its session's checkpoint restored on that session's first request
+since the start; the engine's exact prefix match decides how much it reuses. This applies to every
+session name, so a `ninfer_session` or `X-NInfer-Session` client that opens a new conversation
+under a saved session name also imports that checkpoint first. Requests without a session identity
+behave exactly as before. The endpoint still rejects reasoning summaries, encrypted reasoning
+requests, and the other cache options it does not implement.
+
+A tool result may be content parts instead of a string: a Responses `function_call_output` or
+`custom_tool_call_output` whose `output` is an array of `input_text` and `input_image` parts - what
+stock OMP sends after its read tool opens an image file - becomes one tool turn with its image.
+This lane is text-only, so it refuses that image as `vision_disabled` rather than as a malformed
+request; `input_file` parts and empty arrays are refused.
+
+The shared-prefix catalog defaults to one owner per active request or per cache marker a request
+may place, whichever is larger (four at one active request), so each agent type's system and tool
+prefix keeps its own owner instead of evicting the previous type's.
+
+A start could fail when the driver refused to pin the 11 GiB host-KV pool
+(alphastorm/omp-ninfer#48): the lane's task exited before the release was ready. On a 32 GiB host
+the running server commits about 39 GiB, so a start extends the system-managed pagefile, and the
+pool is its largest charge. A pin charges its size and then a page-lock remainder of 11-20 MiB;
+when free commit covered the size but not the remainder, the pin raced the pagefile extension, and
+a start that lost was refused with 10 MiB of commit free. Before every pinned host allocation the
+server now commits and releases its size plus 1/64 through an ordinary allocation, which waits for
+the pagefile to extend, so the pin itself never waits on an extension. A refusal that still occurs
+reports the commit limit, available commit and available memory.
+
+Decode rounds are shorter. The MTP verify pass's small-extent Q4 and Q5 input projections share
+each activation load across weight rows, and the Q4 MLP gate/up kernel pads its staged weight rows
+so its shared-memory reads no longer conflict. Each row keeps its arithmetic order. On the RTX 5090,
+where the routes were tuned, outputs are bit-identical to the previous kernels and MTP3 decode is
+about 10% faster from 1K to 31K tokens of context. The native lanes build these routes for their
+architecture, except that the MLP down and mixer output projections keep one row per warp: sharing
+loads across two rows made them 2-22% slower on the RTX 4090.
+
+New sessions after idle start at back-to-back speed on the RTX 4090. After its last work the card
+steps P2 -> P3 -> P5 -> P8 (210 MHz SM, 405 MHz memory) within about 6 s, and a new session's
+prefill after 12-58 s idle took 0.29-0.47 s against 0.146 s back to back. The RTX 4090 lane sets
+`engine.gpu_keep_warm_ms` to 60000: for 60 s after the engine goes idle, a single-warp kernel on
+its own stream spins 50 ms of every 100 ms, which holds P2 at about 72 W above idle, until a
+request is pending. The RTX 5090's pattern of 3.5 ms every 10 ms does not hold this card. With it,
+sessions after 12-58 s idle prefilled in 0.146 s and every output was unchanged (omp-ninfer EXP-064,
+EXP-066). The spin reads and writes no memory. The controller passes `--gpu-keep-warm-ms` only when
+a release's own configuration declares a positive value, so a rollback to an earlier release never
+receives it. The RTX 3090 lane declares 0.
+
+Long sessions keep their cache. OMP's compaction handoff resends the whole session with
+`tool_choice: none`, and the runtime rendered that turn without the declared tools, which Qwen
+places before the leading instruction: every handoff re-prefilled the session from root (63.8-66.3 s
+to first token for 97.4-97.5K tokens on the RTX 4090). The tools now render for `none` as for
+`auto`, and the template's tool-call opening token ends the turn instead. Handoffs of 78.4-80.4K
+tokens reused 78.0-79.9K cached tokens and started in 0.58-0.70 s, and their summaries ran
+3,235-5,241 bytes.
+
+Near capacity the materialization planner's 5 ms search can stop before it reaches a target that
+keeps the session's own continuation. It then fell back to evicting that continuation and
+prefilling the whole turn again from root (about 102,600 tokens and 68 s on the RTX 4090,
+omp-ninfer EXP-072). The fallback now starts from the cheapest feasible target that keeps it: in
+three such stops during a long session, each turn reused 79.2-101.6K cached tokens.
+
+A crash after a compaction restored the pre-compaction checkpoint. The compacted session's turns
+stayed under the 32,768-token automatic-save minimum, and an unstored handoff under the session's
+key could move its indexed lineage. A session that has a checkpoint on disk now keeps it current at
+any size, and an unstored Responses turn leaves the lineage alone. After a hard kill, the next turn
+reused 32,167 cached tokens in 2.9 s; the previous runtime prefilled 32,173 tokens from root
+(29.2 s).
+
+Long sessions keep their checkpoints when short sessions fill the store. Quota reclamation took the
+oldest checkpoint first, so a run of short sessions could delete every long session's checkpoint:
+about 26 short OMP sessions of about 930 MiB each filled the RTX 5090's 24 GiB store. Checkpoints
+below `--session-checkpoint-min-tokens` now go first. On the RTX 4090, a 60,026-token session
+(2.30 GiB checkpoint), then 11.9K-token sessions (702-704 MiB each) past the 24 GiB quota, then a
+crash: the long session's next turn reused 60,057 cached tokens in 3.1 s. The previous runtime had
+reclaimed its checkpoint first, and the same turn failed with `previous_response_not_found`.
+
+A controller action no longer fails when the server is writing a checkpoint. Every action walks
+the lane's state tree, and the walk could reach a checkpoint staging directory the server had just
+renamed into its generation (`Cannot find path ...\.staging-...`). An entry that disappears during
+the walk is now skipped; any other failure still stops the action.
