@@ -179,7 +179,6 @@ def main() -> int:
             receipt["first_stop"] = {key: stopped[key] for key in ("saved", "skipped", "refused", "complete")}
             current = checkpoint_root / "sessions" / session / "current"
             require(current.is_file(), "acknowledged generation has no current pointer")
-            prior_pointer_sha = digest_file(current)
 
             # First keyed request has no previous_response_id and no retrieve before it.
             active = Server(2)
@@ -240,7 +239,6 @@ def main() -> int:
                                     "missing_capability_retrieve": 404, "own_retrieve": 200,
                                     "own_delete": 200, "deleted_after_restart": 404,
                                     "descendant_after_restart": 200}
-            receipt["prior_generation_published"] = bool(prior_pointer_sha)
             receipt["passed"] = True
         finally:
             if active is not None:
