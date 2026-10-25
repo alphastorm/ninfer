@@ -130,9 +130,11 @@ AutomaticCheckpointCoordinator::AutomaticCheckpointCoordinator(
 AutomaticCheckpointCoordinator::~AutomaticCheckpointCoordinator() { drain(); }
 void AutomaticCheckpointCoordinator::drain() noexcept { queue_.drain(); }
 
-AutomaticCheckpointEnqueueResult AutomaticCheckpointCoordinator::enqueue(std::string session) noexcept {
+AutomaticCheckpointEnqueueResult AutomaticCheckpointCoordinator::enqueue(
+    std::string session, bool only_if_pending) noexcept {
     try {
         std::lock_guard lock(mutex_);
+        if (only_if_pending && !entries_.contains(session)) { return AutomaticCheckpointEnqueueResult::Dropped; }
         if (!entries_.contains(session) && entries_.size() >= 64) {
             return AutomaticCheckpointEnqueueResult::Dropped;
         }
@@ -209,10 +211,11 @@ void AutomaticCheckpointCoordinator::run(std::string_view session) noexcept {
                                    result.reason == runtime::DurableReason::Capacity;
             entry.settled = !retryable;
             bool deferred = false;
-            if (retryable && retries_.retry(key)) {
+            if (retryable && (result.awaiting_publication || retries_.retry(key))) {
                 const auto reason = result.reason;
-                deferred = queue_.defer(key, [this, before, reason] {
+                deferred = queue_.defer(key, [this, before, reason, publication = result.awaiting_publication] {
                     const auto now = progress_();
+                    if (publication) { return now.publication != before.publication; }
                     if (reason == runtime::DurableReason::IoUnavailable) {
                         return now.storage != before.storage;
                     }

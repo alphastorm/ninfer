@@ -127,6 +127,7 @@ struct ProgressFixture {
     CheckpointSaveProgress progress;
     unsigned calls = 0, completed = 0, probes = 0;
     Reason refusal = Reason::TransactionBusy;
+    bool publishing = false;
 
     bool wait(const std::function<bool()>& predicate) {
         std::unique_lock lock(mutex);
@@ -141,7 +142,7 @@ struct ProgressFixture {
     AutomaticCheckpointResult save(std::optional<std::string_view> tag) {
         std::lock_guard lock(mutex);
         ++calls;
-        return {tag ? std::string(*tag) : "resp_retry", refusal};
+        return {tag ? std::string(*tag) : "resp_retry", refusal, publishing};
     }
     void notify() {
         std::lock_guard lock(mutex);
@@ -210,7 +211,9 @@ int automatic_retry_budget_and_terminal_refusal() {
                       "retry exhaustion permitted destructive release");
     // A new completed turn resets the bounded attempt state.
     { std::lock_guard lock(f.mutex); f.refusal = Reason::UnsupportedCodec; }
-    (void)coordinator.enqueue(victim.session_sha256);
+    failures += check(coordinator.enqueue(victim.session_sha256, true) !=
+                          AutomaticCheckpointEnqueueResult::Dropped,
+                      "short completed turn did not rearm outstanding pressure work");
     failures += check(f.wait([&] { return f.completed == kTransientCheckpointRetries + 2; }),
                       "new completed turn did not restart checkpoint work");
     coordinator.save_before_eviction(std::span(&victim, 1));
@@ -219,6 +222,43 @@ int automatic_retry_budget_and_terminal_refusal() {
     coordinator.save_before_eviction(std::span(&victim, 1));
     failures += check(victim.outcome == Outcome::Settled && victim.reason == Reason::UnsupportedCodec,
                       "reported nonretryable pressure refusal did not settle with its reason");
+    coordinator.drain();
+    return failures;
+}
+
+int publication_abandonment_completes_pressure() {
+    ProgressFixture f;
+    f.publishing = true;
+    AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view, std::optional<std::string_view> tag) { return f.save(tag); },
+        [&] { return f.observe(); }, [&] { f.notify(); });
+    Victim victim{std::string(64, 'a'), "resp_retry"};
+    int failures = check(coordinator.enqueue("short-unpressured", true) ==
+                             AutomaticCheckpointEnqueueResult::Dropped,
+                         "unpressured short turn ignored the automatic threshold");
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    failures += check(f.wait([&] { return f.completed == 1 && f.probes >= 3; }),
+                      "publishing task did not complete into an explicit waiting state");
+    unsigned probes;
+    {
+        std::lock_guard lock(f.mutex);
+        probes = f.probes;
+        f.progress.engine += kTransientCheckpointRetries + 10;
+    }
+    failures += check(f.wait([&] { return f.probes >= probes + 2; }),
+                      "publication progress observer stopped");
+    {
+        std::lock_guard lock(f.mutex);
+        failures += check(f.calls == 1, "native progress spent a publication wait's retry budget");
+        f.publishing = false;
+        f.refusal = Reason::RequiredResponseMissing;
+        ++f.progress.publication;
+    }
+    failures += check(f.wait([&] { return f.completed == 2; }),
+                      "publication abandonment left the pressure latch pending");
+    coordinator.save_before_eviction(std::span(&victim, 1));
+    failures += check(victim.outcome == Outcome::Settled && victim.reason == Reason::RequiredResponseMissing,
+                      "abandoned publication did not settle with its reported reason");
     coordinator.drain();
     return failures;
 }
@@ -363,6 +403,7 @@ int main() {
     failures += pressure_callback_does_not_wait_for_restore_commit();
     failures += automatic_retry_requires_matching_progress();
     failures += automatic_retry_budget_and_terminal_refusal();
+    failures += publication_abandonment_completes_pressure();
     failures += durable_record_delete_preserves_survivors();
     failures += durable_delete_retains_disk_only_records();
     if (!failures) { std::cout << "automatic checkpoint remediation tests passed\n"; }

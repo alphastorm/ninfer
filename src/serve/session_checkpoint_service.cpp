@@ -410,10 +410,11 @@ void SessionCheckpointService::response_stored(std::string_view session, std::ui
     publication_changed();
     if (stopping_.load(std::memory_order_acquire)) { return; }
     try {
-        if (checkpoint_worth_saving(frontier_tokens, options_.session_checkpoint_min_tokens,
-                                    store_.may_hold(session))) {
-            (void)automatic_.enqueue(std::string(session));
-        }
+        const bool worthwhile = checkpoint_worth_saving(frontier_tokens, options_.session_checkpoint_min_tokens,
+                                                        store_.may_hold(session));
+        // A completed short turn still rearms an outstanding pressure save, including one
+        // whose previous turn exhausted its bounded race budget.
+        (void)automatic_.enqueue(std::string(session), !worthwhile);
     } catch (...) {}
 }
 
@@ -434,7 +435,8 @@ AutomaticCheckpointResult SessionCheckpointService::automatic_save(
             const auto reason = publication == ResponsePublicationState::Publishing
                 ? Reason::TransactionBusy : Reason::RequiredResponseMissing;
             receipt("save", "refused", reason, false);
-            return {std::string(*expected_tag), reason};
+            return {std::string(*expected_tag), reason,
+                    publication == ResponsePublicationState::Publishing};
         }
     }
     const auto outcome = save_session(session, expected_tag);

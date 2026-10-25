@@ -68,6 +68,7 @@ struct CheckpointSaveProgress {
 struct AutomaticCheckpointResult {
     std::string tag;
     runtime::DurableReason reason = runtime::DurableReason::None;
+    bool awaiting_publication = false;
 };
 
 // The production pressure callback only consults bounded bookkeeping and queues work. In
@@ -79,7 +80,8 @@ public:
     using Progress = std::function<CheckpointSaveProgress()>;
     AutomaticCheckpointCoordinator(Save save, Progress progress, std::function<void()> notify);
     ~AutomaticCheckpointCoordinator();
-    [[nodiscard]] AutomaticCheckpointEnqueueResult enqueue(std::string session) noexcept;
+    [[nodiscard]] AutomaticCheckpointEnqueueResult enqueue(
+        std::string session, bool only_if_pending = false) noexcept;
     void save_before_eviction(std::span<runtime::PressureCheckpointVictim> victims) noexcept override;
     void drain() noexcept;
 
