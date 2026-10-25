@@ -21,6 +21,10 @@ void flush_file(std::FILE* file);
 // Source and destination parents are pinned, with no symlink/reparse traversal. Cross-volume
 // moves fail rather than copy. Windows uses REPLACE_EXISTING | WRITE_THROUGH.
 void replace_path(const std::filesystem::path& source, const std::filesystem::path& destination);
+// Removes a regular file, final link, or complete directory tree through anchored handles.
+// Ancestor links are rejected; final links are unlinked, never traversed. Returns false if
+// missing, otherwise true after deletion (and POSIX parent fsync). Other failures throw.
+[[nodiscard]] bool remove_tree(const std::filesystem::path& path);
 // POSIX fsync(directory). On Windows this is deliberately a no-op: the supported native
 // durability policy is flushed files plus write-through replacement, not directory fsync.
 void sync_directory(const std::filesystem::path& path);
