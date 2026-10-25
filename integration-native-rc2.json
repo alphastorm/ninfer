@@ -1,0 +1,395 @@
+{
+  "schema": "ninfer-integration-native-rc2/1",
+  "source": "fc3208dbb9fe166f1dff1341a0a099057ae8a878",
+  "council_source": "6d4d0a05aded2a1b353b8998e7b08b0f2fb34bff",
+  "predecessor_checkpoint": {
+    "tag": "rebase/ckpt-native",
+    "source": "f9611dc2b5f34e4d67b82f509cea317dc3476ff9",
+    "receipt": "integration-native.json",
+    "unchanged": true
+  },
+  "passed": true,
+  "scope": "Post-council exact-source Linux sm86/sm89 and MSVC three-binary compilation, Windows version provenance and executable/DLL hashes. No native GPU, host suite, package/controller acceptance or publication.",
+  "build_targets": [
+    "ninfer",
+    "ninfer-serve",
+    "ninfer_bench"
+  ],
+  "linux": [
+    {
+      "schema": "ninfer-integrated-linux-compile/1",
+      "source": "fc3208dbb9fe166f1dff1341a0a099057ae8a878",
+      "architecture": "86",
+      "seconds": 179,
+      "exit": 0,
+      "build_targets": [
+        "ninfer",
+        "ninfer-serve",
+        "ninfer_bench"
+      ],
+      "tests_executed": false,
+      "gpu_executed": false,
+      "binaries": [
+        {
+          "name": "apps/ninfer",
+          "bytes": 344194776,
+          "sha256": "3a42441e90ddeca6986c69a50fef40ee03a1b983c835b02e97c360939630d2be"
+        },
+        {
+          "name": "apps/ninfer-serve",
+          "bytes": 347191296,
+          "sha256": "92730dc2e4b55c8edda80710a5519ab6001bd9e3fba727ea8ca1b9d70f7fc894"
+        },
+        {
+          "name": "bench/ninfer_bench",
+          "bytes": 343586488,
+          "sha256": "82a450ca9d94781f1e957f48216ce669bde67702404ab0f09d8f894f606751ae"
+        }
+      ]
+    },
+    {
+      "schema": "ninfer-integrated-linux-compile/1",
+      "source": "fc3208dbb9fe166f1dff1341a0a099057ae8a878",
+      "architecture": "89",
+      "seconds": 179,
+      "exit": 0,
+      "build_targets": [
+        "ninfer",
+        "ninfer-serve",
+        "ninfer_bench"
+      ],
+      "tests_executed": false,
+      "gpu_executed": false,
+      "binaries": [
+        {
+          "name": "apps/ninfer",
+          "bytes": 340072640,
+          "sha256": "86cb8083cf317c685a8921b0aa8cd0ef8ecbe2b799fa3f3ac6c77cf36414f0eb"
+        },
+        {
+          "name": "apps/ninfer-serve",
+          "bytes": 343065064,
+          "sha256": "1558fb2b5cedaff0889348fffbf923ad2bd8156a5f6d09cec720a58013638b6e"
+        },
+        {
+          "name": "bench/ninfer_bench",
+          "bytes": 339464352,
+          "sha256": "c2186577c4b719d8b5d0d472315aabf82d4eaf201f24d193916759bfcd69ea0e"
+        }
+      ]
+    }
+  ],
+  "windows": [
+    {
+      "schema": "ninfer-integrated-native-build/1",
+      "source": "fc3208dbb9fe166f1dff1341a0a099057ae8a878",
+      "architecture": "86",
+      "profile": "native-v0.7.0-beta.1-rtx3090",
+      "exit": 0,
+      "seconds": 86.8496638,
+      "tests_executed": false,
+      "gpu_executed": false,
+      "binaries": {
+        "ninfer": "ninfer upstream_base_sha=64d10fbf9f8e6bfc79ab0570b94674c5b9997929 patch_stack_sha=fc3208dbb9fe166f1dff1341a0a099057ae8a878 build_profile=native-v0.7.0-beta.1-rtx3090 build_type=Release cxx_compiler=MSVC-19.44.35228.0 cuda_compiler=NVIDIA-13.3.73 cuda_toolkit=13.3.73 cuda_architecture=86 source_dirty=false",
+        "ninfer-serve": "ninfer-serve upstream_base_sha=64d10fbf9f8e6bfc79ab0570b94674c5b9997929 patch_stack_sha=fc3208dbb9fe166f1dff1341a0a099057ae8a878 build_profile=native-v0.7.0-beta.1-rtx3090 build_type=Release cxx_compiler=MSVC-19.44.35228.0 cuda_compiler=NVIDIA-13.3.73 cuda_toolkit=13.3.73 cuda_architecture=86 source_dirty=false",
+        "ninfer_bench": "ninfer_bench upstream_base_sha=64d10fbf9f8e6bfc79ab0570b94674c5b9997929 patch_stack_sha=fc3208dbb9fe166f1dff1341a0a099057ae8a878 build_profile=native-v0.7.0-beta.1-rtx3090 build_type=Release cxx_compiler=MSVC-19.44.35228.0 cuda_compiler=NVIDIA-13.3.73 cuda_toolkit=13.3.73 cuda_architecture=86 source_dirty=false"
+      },
+      "files": [
+        {
+          "name": "avcodec-62.dll",
+          "bytes": 13771776,
+          "sha256": "e960b3bb6ad25740e19e648c76cd9cf72ed3df4e3773cbf1e7a6d5aa264599e2"
+        },
+        {
+          "name": "avdevice-62.dll",
+          "bytes": 75776,
+          "sha256": "0867edf9e5b213a513fc721c3b889f8dbd350e6bc147e7cf6cc3bdb7f98d176b"
+        },
+        {
+          "name": "avfilter-11.dll",
+          "bytes": 3977728,
+          "sha256": "d08677e515c57b95bde30ce53f8a6e3f09de293ffadbd1a1932825adf2a509fa"
+        },
+        {
+          "name": "avformat-62.dll",
+          "bytes": 2533376,
+          "sha256": "e1ef336e20a8263950100ee73b39797e9e2f681fcdae9cdfe709cda795edab2c"
+        },
+        {
+          "name": "avutil-60.dll",
+          "bytes": 879104,
+          "sha256": "0070893fc1eeb412f16a39f80e2b8b42c9e90c69d763131a377660a86fba5070"
+        },
+        {
+          "name": "concrt140.dll",
+          "bytes": 324208,
+          "sha256": "2405355f0a58067b258f8df33c327e3a3d716eaac5a3a5aebb757842d85bd376"
+        },
+        {
+          "name": "cudart64_13.dll",
+          "bytes": 551024,
+          "sha256": "b00ca6f53699120da815bf3e06e2e4285fae2f201235b883dcbb50eec51e2a2a"
+        },
+        {
+          "name": "dstorage.dll",
+          "bytes": 206904,
+          "sha256": "cae65787f61514bec6f012f44546e68b19e39d8854a9ab52af813370d44b272a"
+        },
+        {
+          "name": "dstoragecore.dll",
+          "bytes": 1482784,
+          "sha256": "cf85b19a92a8276f8baca0db9bbcd60735bad50768deb303d310e84d5f4fdd11"
+        },
+        {
+          "name": "hwloc-15.dll",
+          "bytes": 239616,
+          "sha256": "bbcf4fb8625331f01bf280364128aa0303fdbb86512b4fc6c55b76e87b57f644"
+        },
+        {
+          "name": "libcurl.dll",
+          "bytes": 711680,
+          "sha256": "a95534fd4a18049d8c06e48eccb35516aedd488e1e11854333d750fe1a7aac93"
+        },
+        {
+          "name": "msvcp140.dll",
+          "bytes": 557728,
+          "sha256": "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9"
+        },
+        {
+          "name": "msvcp140_1.dll",
+          "bytes": 35952,
+          "sha256": "bfad5aef4c63a669e3c140655cdfdf395b6c979b400a447bd5dcb65ed8826c3d"
+        },
+        {
+          "name": "msvcp140_2.dll",
+          "bytes": 280200,
+          "sha256": "3ea06f0ee098b4823cb79599df3780e7f23cce52c19aac31d2a0d47efe33a5e9"
+        },
+        {
+          "name": "msvcp140_atomic_wait.dll",
+          "bytes": 50304,
+          "sha256": "640b2aefced484d0368eea5bdd06addd0658a3a70a49256e560d6923b404a479"
+        },
+        {
+          "name": "msvcp140_codecvt_ids.dll",
+          "bytes": 31872,
+          "sha256": "f2069a52880ec885ee7f0511186100eb7fada0411a2b4948fafea7735b878a18"
+        },
+        {
+          "name": "ninfer.exe",
+          "bytes": 326905856,
+          "sha256": "def5feb43352420aa599b348572de9ce60cb898df47983da2c78ed74cbe52a3e"
+        },
+        {
+          "name": "ninfer_bench.exe",
+          "bytes": 326522880,
+          "sha256": "4e182793ca25b8ad11e9c307e9688ca9408dffea5aadeab3c9250eb4273faaaf"
+        },
+        {
+          "name": "ninfer-serve.exe",
+          "bytes": 328645632,
+          "sha256": "ff7fa685b5bc5b568ff0df0840c9f13db9625104ce3535eec6df0b23427794a7"
+        },
+        {
+          "name": "pkgconf-8.dll",
+          "bytes": 90112,
+          "sha256": "1f98a9c4b03123d3f8e3b7f0a7880623cb2031d3a5dd9026270f8f66d40d6983"
+        },
+        {
+          "name": "swresample-6.dll",
+          "bytes": 124416,
+          "sha256": "5acdb3dfd90dcb187e4c862585aa89fbc24981ef7aae9e463f9530a2095f517c"
+        },
+        {
+          "name": "swscale-9.dll",
+          "bytes": 1003520,
+          "sha256": "907c4fc7e14be87d140c2da77f4e7113aa0bb7bf4ef6f269da2c8749c5003fda"
+        },
+        {
+          "name": "vccorlib140.dll",
+          "bytes": 352384,
+          "sha256": "19839407c3fdbc824e5bce189bf68ddf8097f12ec28b757797ffa0415c144ddd"
+        },
+        {
+          "name": "vcruntime140.dll",
+          "bytes": 124544,
+          "sha256": "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066"
+        },
+        {
+          "name": "vcruntime140_1.dll",
+          "bytes": 49792,
+          "sha256": "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f"
+        },
+        {
+          "name": "vcruntime140_threads.dll",
+          "bytes": 38528,
+          "sha256": "219915cf20822f34d5e7c1fdd4e21ae7f3396881096c51036225fb8f84b47afa"
+        },
+        {
+          "name": "z.dll",
+          "bytes": 91136,
+          "sha256": "c52c71b8b76f7aa23e336da0c2bc51ac2588a074d103685cf64f6e4db42b1a52"
+        }
+      ]
+    },
+    {
+      "schema": "ninfer-integrated-native-build/1",
+      "source": "fc3208dbb9fe166f1dff1341a0a099057ae8a878",
+      "architecture": "89",
+      "profile": "native-v0.7.0-beta.1-rtx4090",
+      "exit": 0,
+      "seconds": 91.6015901,
+      "tests_executed": false,
+      "gpu_executed": false,
+      "binaries": {
+        "ninfer": "ninfer upstream_base_sha=64d10fbf9f8e6bfc79ab0570b94674c5b9997929 patch_stack_sha=fc3208dbb9fe166f1dff1341a0a099057ae8a878 build_profile=native-v0.7.0-beta.1-rtx4090 build_type=Release cxx_compiler=MSVC-19.44.35228.0 cuda_compiler=NVIDIA-13.3.73 cuda_toolkit=13.3.73 cuda_architecture=89 source_dirty=false",
+        "ninfer-serve": "ninfer-serve upstream_base_sha=64d10fbf9f8e6bfc79ab0570b94674c5b9997929 patch_stack_sha=fc3208dbb9fe166f1dff1341a0a099057ae8a878 build_profile=native-v0.7.0-beta.1-rtx4090 build_type=Release cxx_compiler=MSVC-19.44.35228.0 cuda_compiler=NVIDIA-13.3.73 cuda_toolkit=13.3.73 cuda_architecture=89 source_dirty=false",
+        "ninfer_bench": "ninfer_bench upstream_base_sha=64d10fbf9f8e6bfc79ab0570b94674c5b9997929 patch_stack_sha=fc3208dbb9fe166f1dff1341a0a099057ae8a878 build_profile=native-v0.7.0-beta.1-rtx4090 build_type=Release cxx_compiler=MSVC-19.44.35228.0 cuda_compiler=NVIDIA-13.3.73 cuda_toolkit=13.3.73 cuda_architecture=89 source_dirty=false"
+      },
+      "files": [
+        {
+          "name": "avcodec-62.dll",
+          "bytes": 13771776,
+          "sha256": "e960b3bb6ad25740e19e648c76cd9cf72ed3df4e3773cbf1e7a6d5aa264599e2"
+        },
+        {
+          "name": "avdevice-62.dll",
+          "bytes": 75776,
+          "sha256": "0867edf9e5b213a513fc721c3b889f8dbd350e6bc147e7cf6cc3bdb7f98d176b"
+        },
+        {
+          "name": "avfilter-11.dll",
+          "bytes": 3977728,
+          "sha256": "d08677e515c57b95bde30ce53f8a6e3f09de293ffadbd1a1932825adf2a509fa"
+        },
+        {
+          "name": "avformat-62.dll",
+          "bytes": 2533376,
+          "sha256": "e1ef336e20a8263950100ee73b39797e9e2f681fcdae9cdfe709cda795edab2c"
+        },
+        {
+          "name": "avutil-60.dll",
+          "bytes": 879104,
+          "sha256": "0070893fc1eeb412f16a39f80e2b8b42c9e90c69d763131a377660a86fba5070"
+        },
+        {
+          "name": "concrt140.dll",
+          "bytes": 324208,
+          "sha256": "2405355f0a58067b258f8df33c327e3a3d716eaac5a3a5aebb757842d85bd376"
+        },
+        {
+          "name": "cudart64_13.dll",
+          "bytes": 551024,
+          "sha256": "b00ca6f53699120da815bf3e06e2e4285fae2f201235b883dcbb50eec51e2a2a"
+        },
+        {
+          "name": "dstorage.dll",
+          "bytes": 206904,
+          "sha256": "cae65787f61514bec6f012f44546e68b19e39d8854a9ab52af813370d44b272a"
+        },
+        {
+          "name": "dstoragecore.dll",
+          "bytes": 1482784,
+          "sha256": "cf85b19a92a8276f8baca0db9bbcd60735bad50768deb303d310e84d5f4fdd11"
+        },
+        {
+          "name": "hwloc-15.dll",
+          "bytes": 239616,
+          "sha256": "bbcf4fb8625331f01bf280364128aa0303fdbb86512b4fc6c55b76e87b57f644"
+        },
+        {
+          "name": "libcurl.dll",
+          "bytes": 711680,
+          "sha256": "a95534fd4a18049d8c06e48eccb35516aedd488e1e11854333d750fe1a7aac93"
+        },
+        {
+          "name": "msvcp140.dll",
+          "bytes": 557728,
+          "sha256": "0f885b509a685d2bbfa652fed26b5fb31d88fbdab0a978c641d1c7b8aa460aa9"
+        },
+        {
+          "name": "msvcp140_1.dll",
+          "bytes": 35952,
+          "sha256": "bfad5aef4c63a669e3c140655cdfdf395b6c979b400a447bd5dcb65ed8826c3d"
+        },
+        {
+          "name": "msvcp140_2.dll",
+          "bytes": 280200,
+          "sha256": "3ea06f0ee098b4823cb79599df3780e7f23cce52c19aac31d2a0d47efe33a5e9"
+        },
+        {
+          "name": "msvcp140_atomic_wait.dll",
+          "bytes": 50304,
+          "sha256": "640b2aefced484d0368eea5bdd06addd0658a3a70a49256e560d6923b404a479"
+        },
+        {
+          "name": "msvcp140_codecvt_ids.dll",
+          "bytes": 31872,
+          "sha256": "f2069a52880ec885ee7f0511186100eb7fada0411a2b4948fafea7735b878a18"
+        },
+        {
+          "name": "ninfer.exe",
+          "bytes": 321798144,
+          "sha256": "dcf939b3ea639814da371339da995b392b345723ad70d866b6e7e925e1622936"
+        },
+        {
+          "name": "ninfer_bench.exe",
+          "bytes": 321415168,
+          "sha256": "ad035c324c481acfb264ebd4fce816d33ea8599543d747fe990de273c7338bba"
+        },
+        {
+          "name": "ninfer-serve.exe",
+          "bytes": 323536896,
+          "sha256": "f0da3ca65650562db0d4b6c26120accb1adae6faf29163719c302ac785dd306f"
+        },
+        {
+          "name": "pkgconf-8.dll",
+          "bytes": 90112,
+          "sha256": "1f98a9c4b03123d3f8e3b7f0a7880623cb2031d3a5dd9026270f8f66d40d6983"
+        },
+        {
+          "name": "swresample-6.dll",
+          "bytes": 124416,
+          "sha256": "5acdb3dfd90dcb187e4c862585aa89fbc24981ef7aae9e463f9530a2095f517c"
+        },
+        {
+          "name": "swscale-9.dll",
+          "bytes": 1003520,
+          "sha256": "907c4fc7e14be87d140c2da77f4e7113aa0bb7bf4ef6f269da2c8749c5003fda"
+        },
+        {
+          "name": "vccorlib140.dll",
+          "bytes": 352384,
+          "sha256": "19839407c3fdbc824e5bce189bf68ddf8097f12ec28b757797ffa0415c144ddd"
+        },
+        {
+          "name": "vcruntime140.dll",
+          "bytes": 124544,
+          "sha256": "d5e4d9a3e835fa679450145d6a7d94e36573a509317111904d9b3712c30d9066"
+        },
+        {
+          "name": "vcruntime140_1.dll",
+          "bytes": 49792,
+          "sha256": "1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f"
+        },
+        {
+          "name": "vcruntime140_threads.dll",
+          "bytes": 38528,
+          "sha256": "219915cf20822f34d5e7c1fdd4e21ae7f3396881096c51036225fb8f84b47afa"
+        },
+        {
+          "name": "z.dll",
+          "bytes": 91136,
+          "sha256": "c52c71b8b76f7aa23e336da0c2bc51ac2588a074d103685cf64f6e4db42b1a52"
+        }
+      ]
+    }
+  ],
+  "source_dirty": false,
+  "tests_executed": false,
+  "gpu_executed": false,
+  "published": false,
+  "merge_resolution": "Retain complete authenticated replay-only origin-key refusal, prior fingerprint validation and allocation-free typed codec comparison; retain native integration records and reference both qualified council reports.",
+  "directstorage_root_fix_included": true,
+  "workflow_repoint_included": false
+}
