@@ -27,14 +27,16 @@ Read-only command for each candidate: `git merge-tree --write-tree --merge-base=
 | Base | upstream `64d10fbf9` | Infra reports apps/tests ON, benches OFF, `120a`, 285.323 s | 42/45 passed; remaining three lacked the runtime driver library, not test assertions | Corrected `r2` image: seven passed, six failed, two skipped across all real labels; 189.272 s. Explicit dense v3 loading passed, 5.728 s | [Infra environment correction](https://github.com/alphastorm/ninfer/blob/8f3ab12e/REPORT.md) |
 | Shared prerequisites | `dc3140b23`: native-profile gate and scope carriers | Apps/tests `120a` build passed; lease job elapsed 289 s, exit 0 | `ninfer_qwen_frontend_test` passed, 0.71 s | Not run; no GPU-ready environment yet | Integration-owned prerequisite, not a slice checkpoint |
 | Contracts candidate | merge `a2fcef5c`, proof/prose `bc551eefb`; shared declarations through `42efad145`; K6 clarifications through `96585c84e` | Changed-source integrated proof pending; slice's three standalone C++20 header compiles passed | Slice: C++ five canonical vectors, Python six canonical/MAC tests passed; integrated selector contains 47 tests | Nine applicable real cases, KV regression and explicit loading selected; prefix golden remains blocked | [Contracts proof](https://github.com/alphastorm/ninfer/blob/cf9ba7db/REPORT.md) |
-| Baseline fixture correction | `1bcaffa4d`, cherry-pick of EngineCache `091c6a815` | Included in next integrated proof | No production-policy change | Five no-EOS cache helpers explicitly select non-strict Automatic tools; dedicated agent-continuation proof pending | [EngineCache source](https://github.com/alphastorm/ninfer/commit/091c6a815) |
-| Baseline reservation correction | Persistence `117a166a`, isolated from its later native-import changes | Included in next integrated proof | No host-only import APIs pulled into this boundary | Quotes replay growth after rewind; retained/unretained tail regression and grammar proof pending | [Persistence diagnosis](https://github.com/alphastorm/ninfer/blob/117a166a/REPORT.md) |
+| Baseline fixture correction | `1bcaffa4d`, cherry-pick of EngineCache `091c6a815` | Included in next integrated proof | No production-policy change | Five no-EOS cache helpers explicitly select non-strict Automatic tools; dedicated agent-continuation proof pending | [EngineCache report](https://github.com/alphastorm/ninfer/blob/091c6a815/REPORT.md) |
+| Baseline reservation correction | `36a42facf`, cherry-pick of Persistence `117a166a`, isolated from its later native-import changes | Included in next integrated proof | No host-only import APIs pulled into this boundary | Quotes replay growth after rewind; retained/unretained tail regression and grammar proof pending | [Persistence diagnosis](https://github.com/alphastorm/ninfer/blob/117a166a/REPORT.md) |
 
 Baseline inventory must distinguish failures, skips and missing prerequisites. `tests/models/qwen3_5/tests.cmake` registers 14 `gpu;real` cases. `loading_real` needs explicit `--artifact` (the environment variable alone skips); MoE/offload cases need a matching MoE artifact. The supplied dense v3 artifact does not by itself prove every registered model/component route.
 
 Observed prerequisite command sequence: `NINFER_BUILD_HOLDER=int` exported, then `build.sh <source> <build>`, then `run-in-env.sh --mount <source> --mount <build> -- ctest --test-dir <build> -R '^ninfer_qwen_frontend_test$' --output-on-failure --timeout 180`. The private absolute holder roots are intentionally omitted. This proves compilation and the scope-carrier host regression, not runtime isolation or GPU behavior. Infra's initial GPU baseline is environment-invalid: its driver stub overrode the real driver (`cudaErrorStubLibrary`); Python oracle dependencies were also absent. The corrected environment must pass Infra's device/oracle smoke before GPU work resumes.
 
 Infra reports corrected `ov-build-env:master-64d10fbf-r2`, image `e7f34ca2f41e`, passed the real device test (1.298 s) and three Python-backed template/schema oracles (2.709 s). Old integration job `20261025T013006Z-int-checkpoint-7c6ba673-250067` was cancelled while queued, before execution; it is neither proof nor a product failure. Replacement proof pins the changed source and corrected image, builds apps/tests, runs Infra's 45 host tests plus two contract tests, then nine applicable real cases, the targeted KV-history regression and explicit v3 loading with Vision/DFlash2/optimized proposal. Host tests mount the real driver with `--gpu --env CUDA_VISIBLE_DEVICES=`; model/server tests leave that variable absent. No green checkpoint is claimed.
+
+Replacement lease job: `20261025T015729Z-int-checkpoint-36a42fac-336877`, exact source `36a42facfec7280265fa929fa78044136797d70d`, priority 2, 15-minute cap, one batched incremental build/test iteration. It is the blocked integration proof, not a lead G1/G2 priority-1 gate.
 
 ### Vanilla baseline disposition
 
@@ -62,7 +64,20 @@ Queue is provider-first, not a fixed file-owner list. Contracts precedes every d
 
 Preflight after a pushed slice is announced: `git fetch origin`, then `git merge-tree --write-tree rebase/upstream-64d10fbf origin/rebase/<slice>`. Preflight writes Git objects only, never the integration working tree. The first fetch found no current-program slice branches beyond the integration base; `rebase/durable-4090-v041` is unrelated and excluded. DurableStore standalone `0789709d` preflight against `7fccec947` was clean (exit 0); not yet merged or built.
 
-Latest read-only preflights against `7c6ba673a`: PortableCore `5ba2cc8b` conflicts only in the copied integration log; EngineCache `34f2a3e1` additionally conflicts in root reports and two test insertion sites (`RuntimeTests.cmake`, `test_serve_options.cpp`); ServePort `06f5842b` conflicts only in logs/reports and the older copied contracts prose. Production sources auto-merged in these preflights. Preserve both independently added test blocks, the lead-approved contract text and immutable report links. Recheck newer source boundaries rather than treating these earlier trees as final proof.
+Latest read-only preflights use `36a42facf`; these are conflict inventories, not merge qualification:
+
+| Candidate | Observed conflicts / resolution boundary |
+|---|---|
+| PortableCore `b0f184124` | Copied `INTEGRATION.md` only; production sources auto-merge. |
+| Frontend `5104b523` and ServePort `8233bd95` | Logs/reports plus older K0 contract prose, adapter header and header test. Header/test differences are exactly the two approved startup identity getters and their signature assertions; keep the integration declarations. Production implementations auto-merge. |
+| EngineCache `091c6a815` | Logs/reports plus `RuntimeTests.cmake` and `test_serve_options.cpp` insertion collisions; keep both test groups. Production implementations auto-merge. |
+| DurableStore `5d0350a5` | Logs/reports, older K0 surfaces, and `serve_options.{cpp,h}`. Its transitive older serving provider lacks the current K5 durable/stop union; retain the integration options, not those deletions. Provider-first order remains necessary. |
+| Harness `abdb7d115` and Infra `0d754712` | Root `REPORT.md` only; preserve immutable source report links. |
+| ArchEnable `940b000c` | Copied integration log and root report only. |
+| KernelRoutes `7bd48e11` | Clean read-only merge tree, exit 0; source readiness/performance proof is separate. |
+| Persistence `0130b930` | Report, older K0 surfaces and KV-history test insertion. Preserve the isolated replay regression and, only with Phase 2 providers, its host-only import regression. Production sources auto-merge. |
+
+Recheck newer source boundaries before merging. No native-import APIs or tests were pulled into the isolated `36a42facf` correction.
 
 | Boundary | Expected overlap / dependency | Disposition rule |
 |---|---|---|
