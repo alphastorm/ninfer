@@ -24,6 +24,7 @@ add_library(ninfer_sha256 STATIC sha256.cpp sha256_x86.cpp)
 ninfer_internal_includes(ninfer_sha256)
 
 add_library(ninfer_core STATIC
+  build_info.cpp
   arena.cpp
   buffer.cpp
   buffer.cu
@@ -51,6 +52,7 @@ add_library(ninfer_core STATIC
   decode_graph.cpp
 )
 ninfer_internal_includes(ninfer_core)
+target_include_directories(ninfer_core PRIVATE ${PROJECT_BINARY_DIR}/generated)
 ninfer_cuda_archive(ninfer_core)
 target_link_libraries(ninfer_core PUBLIC ninfer_cpu ${NINFER_CUDART_TARGET} CUDA::nvtx3 Threads::Threads)
 target_link_libraries(ninfer_core PRIVATE ${NINFER_URING_TARGET})

@@ -213,9 +213,11 @@ int test_atomic_restore_and_revision_guard() {
     auto stale = store.begin_restore(b);
     failures += check(store.erase_for_session("resp_after_restart", b), "delete before load failed");
     engine_committed = false;
+    ninfer::runtime::DurableReason refusal = ninfer::runtime::DurableReason::None;
     failures += check(!store.restore_session(snapshot, stale, [&] {
                           engine_committed = true; return true;
-                      }) && !engine_committed,
+                      }, &refusal) && !engine_committed &&
+                          refusal == ninfer::runtime::DurableReason::StaleRevision,
                       "stale disk load resurrected explicitly deleted lineage");
     OpenAIResponsesStore deleted(8, 1ULL << 20);
     deleted.put(scoped_record("resp_last", b));
@@ -228,6 +230,10 @@ int test_atomic_restore_and_revision_guard() {
     OpenAIResponsePublication pending(store, "resp_pending", b);
     failures += check(!store.restore_session(snapshot, pending_guard, [] { return true; }),
                       "disk restore replaced a publishing live response");
+    auto in_flight_guard = store.begin_restore(b);
+    failures += check(!store.restore_session(snapshot, in_flight_guard, [] { return true; }, &refusal) &&
+                          refusal == ninfer::runtime::DurableReason::TransactionBusy,
+                      "in-flight publication was not classified separately from stale loading");
     pending.end();
     failures += check(!store.restore_session(snapshot, pending_guard, [] { return true; }),
                       "abandoned new publication did not invalidate an earlier load");
@@ -235,14 +241,16 @@ int test_atomic_restore_and_revision_guard() {
     OpenAIResponsesStore capacity(2, 1ULL << 20);
     capacity.put(scoped_record("resp_resident", a));
     auto capacity_guard = capacity.begin_restore(b);
-    failures += check(!capacity.restore_session(snapshot, capacity_guard, [] { return true; }) &&
+    failures += check(!capacity.restore_session(snapshot, capacity_guard, [] { return true; }, &refusal) &&
+                          refusal == ninfer::runtime::DurableReason::Capacity &&
                           capacity.get_for_session("resp_resident", a) &&
                           !capacity.get_for_session("resp_first", b),
                       "restore capacity refusal evicted unrelated state or published a prefix");
     OpenAIResponsesStore collision(8, 1ULL << 20);
     collision.put(scoped_record("resp_first", a));
     auto collision_guard = collision.begin_restore(b);
-    failures += check(!collision.restore_session(snapshot, collision_guard, [] { return true; }) &&
+    failures += check(!collision.restore_session(snapshot, collision_guard, [] { return true; }, &refusal) &&
+                          refusal == ninfer::runtime::DurableReason::ForeignSessionCollision &&
                           collision.get_for_session("resp_first", a),
                       "foreign response-ID collision overwrote another capability");
     auto malformed = snapshot;
@@ -254,6 +262,18 @@ int test_atomic_restore_and_revision_guard() {
     malformed.records[1].publication_order = malformed.records[0].publication_order;
     failures += check(!store.restore_session(malformed, fresh, [] { return true; }),
                       "ambiguous publication ordering was accepted");
+    OpenAIResponsesStore rejected_epoch(8, 1ULL << 20);
+    rejected_epoch.put(scoped_record("resp_live", b, 10));
+    auto epoch_guard = rejected_epoch.begin_restore(b);
+    bool commit_attempted = false;
+    failures += check(!rejected_epoch.restore_session(snapshot, epoch_guard, [&] {
+                          commit_attempted = true; // Engine's captured epoch has gone stale.
+                          return false;
+                      }, &refusal) && commit_attempted &&
+                          refusal == ninfer::runtime::DurableReason::None &&
+                          rejected_epoch.latest_response_id(b) == "resp_live" &&
+                          !rejected_epoch.get_for_session("resp_first", b),
+                      "Engine epoch refusal replaced newer live Responses or lost its K3 reason");
     return failures;
 }
 

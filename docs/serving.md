@@ -231,16 +231,19 @@ Reasoning is returned separately as `reasoning_content`; answer text remains in 
 
 For non-strict tools, a direct top-level tool-parameter
 `type`, or an `anyOf`/`oneOf` composed entirely of explicit primitive types, guides conversion of
-Qwen's untyped parameter text. It does not decide whether structurally complete markup is a tool
-call. String-admitting values remain strings, including the empty string. An empty block for a
-declared non-string parameter is omitted. Admitted JSON values retain their JSON type;
-case-insensitive boolean text is normalized to `true` or `false`. A nonempty schema mismatch remains
-a structured call: valid JSON retains its represented type and other text becomes a JSON string so
-the tool consumer can report the validation error and continue the agent loop. Schemas without a
-supported explicit type retain untyped inference. NInfer does not apply defaults, enforce required
-properties, or perform recursive JSON Schema validation on this route.
+Qwen's untyped parameter text. String-admitting values remain strings, including the empty string.
+An empty block for a declared non-string parameter is omitted. Admitted JSON values retain their
+JSON type; case-insensitive boolean text is normalized to `true` or `false`, and numeric lexemes retain their
+precision. A nonempty declared-type mismatch or a duplicate parameter causes the entire tool-call
+region to fall back atomically to ordinary content, without publishing preceding calls. This
+normalization rule applies to both free output and the non-strict basic envelope grammar; strict
+schema-aware decoding remains authoritative. Schemas without a supported explicit type and
+undeclared parameters retain untyped inference. NInfer does not apply defaults, enforce required
+properties, or perform recursive JSON Schema validation on this route. A custom tool's sole `input`
+is opaque text, including JSON-looking text; its kind and raw bytes survive output and retained
+history, with the history wrapper added only for template rendering.
 
-On the unconstrained route, string parameters preserve function/tool-call markers and balanced nested
+On the unconstrained route, function string parameters preserve function/tool-call markers and balanced nested
 `<parameter=...>...</parameter>` text as value bytes. The Qwen wire format has no delimiter escape,
 so an unmatched nested parameter opener or a standalone `</parameter>` cannot be represented
 unambiguously; either causes the complete tool-call region to fall back to ordinary content.
@@ -964,6 +967,47 @@ available, and the capacity flags may still be specified.
 
 Run `./build/apps/ninfer-serve --help` for the exact option contract.
 
+### Durable Responses and graceful stop
+
+`--session-checkpoint-dir` enables schema-3 durable generations in a new,
+release-isolated root. Persistence requires authenticated serving, complete clean
+build/model provenance and the real Engine export/import, publication-gate and
+final-save providers. An unavailable provider refuses startup; there is no
+production in-memory substitute. Older schema-2 roots are not migrated or discovered.
+The byte formats and failure taxonomy are defined by [K1–K7](durable/CONTRACTS.md).
+
+Authenticated `prompt_cache_key` requests name private sessions without persisting
+the raw key. A first stored keyed request can restore native state even without
+`previous_response_id`; a missing parent or scoped retrieve can restore the verified
+Responses lineage. Import prepares native resources and the complete replacement
+DAG before committing either visible side. A capacity, revision, epoch or identity
+refusal leaves existing live state intact. Cache-disabled requests cannot import.
+Private retrieve/delete/input-item routes require `X-NInfer-Session` with the
+matching session digest; absent and foreign capabilities receive the same 404.
+Deleting a private stored response first invalidates its disk generation, preventing
+a later restore from resurrecting it.
+
+Checkpoint management uses the same API authentication. `POST /v1/ninfer/checkpoints`
+accepts `{"session_sha256":"<64 lowercase hex>"}`; a supplied session header must
+agree. A successful response is a K7 `ninfer-durable-operation/1` save receipt with
+`state="exported"`, `reason="none"`, `committed=true`, authenticated origin,
+token/byte/point/state/page counts and the actual `dir_sync` mode. Staged export alone
+is not a successful save. `GET /v1/ninfer/checkpoints/status` takes the session header;
+the explicit `/<digest>/status` route is also supported. `DELETE /v1/ninfer/checkpoints`
+accepts the session capability in its body/header or explicit `/<digest>` route.
+Missing or conflicting capabilities cannot access another namespace.
+
+Automatic saves run on one bounded worker and honor
+`--session-checkpoint-min-tokens`. Pressure checkpoints and graceful final saves
+also save shorter sessions. The stop path drains HTTP workers and accepted automatic
+work, then synchronously saves every relevant live session. A queued write is never
+an acknowledgement. When `--shutdown-report` is set, the schema-1
+`ninfer_serve_shutdown_report` contains the managed launch ID and
+`saved`/`skipped`/`refused` counts; `complete=true` requires no refused final save.
+Publication or shutdown-report I/O failure makes the process exit unsuccessfully.
+Operation receipts contain symbolic outcomes and counts, never prompts, credentials,
+raw session names or checkpoint paths.
+
 Serve writes human-readable operational records to stderr using
 `YYYY-MM-DD HH:MM:SS.mmm  LEVEL  message`. Normal output covers material startup milestones,
 readiness, request lifecycle, fixed-interval throughput, and shutdown; `--log-level debug` exposes
@@ -1048,9 +1092,10 @@ unspecified. `enable_thinking` records whether the response starts in thinking m
 
 `request_done.result.tool_call_parse` records whether a complete marker was seen, the structured
 call count, empty non-string arguments omitted during normalization, schema-mismatched arguments
-preserved for consumer validation, and a stable text-fallback reason. Fallback reasons are `none`,
-`malformed_structure`, `duplicate_parameter`, `invalid_tool_name`, `undeclared_tool`, and
-`trailing_content`. These counters contain no tool arguments or generated text.
+encountered during normalization, and a stable text-fallback reason. Fallback reasons are `none`,
+`malformed_structure`, `duplicate_parameter`, `invalid_tool_name`, `undeclared_tool`,
+`trailing_content`, and `schema_mismatch`. The latter identifies declared-type atomic fallback.
+These counters contain no tool arguments or generated text.
 
 `request_done.constraint` carries the same constraint observation as the HTTP terminal result,
 or `null` for unconstrained requests. Preparation failures and execution errors use the existing

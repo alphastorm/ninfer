@@ -6,6 +6,7 @@
 #include "product/speculative_options.h"
 
 #include "ninfer/engine.h"
+#include "ninfer/build_info.h"
 
 #include <cstdint>
 #include <exception>
@@ -256,6 +257,10 @@ void print_generation_summary(const ninfer::GenerationResult& result,
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--version") {
+        std::cout << ninfer::format_build_info("ninfer") << '\n';
+        return 0;
+    }
     ninfer::cli::Options cli;
     try {
         cli = ninfer::cli::parse_options(argc, argv);

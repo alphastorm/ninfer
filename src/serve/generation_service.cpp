@@ -3,6 +3,7 @@
 
 #include "product/media_acquire/acquire.h"
 #include "serve/client_identity.h"
+#include "serve/session_checkpoint_service.h"
 #include "serve/translate.h"
 
 #include <algorithm>
@@ -321,6 +322,7 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     engine_options.use_cuda_graph           = options_.use_cuda_graph;
     engine_options.speculative              = options_.speculative;
     engine_options.context_cache            = options_.context_cache;
+    engine_options.gpu_keep_warm_ms         = options_.gpu_keep_warm_ms;
     engine_options.context_cost.preset_path = options_.context_cost_presets;
     engine_options.media_cache_bytes        = options_.media_cache_bytes;
     engine_options.media_live_bytes         = options_.media_live_bytes;
@@ -329,6 +331,34 @@ GenerationService::GenerationService(ServeOptions options, StartupObserver start
     engine_           = std::make_unique<ninfer::Engine>(std::move(engine_options));
     request_capacity_ = std::make_shared<RequestCapacity>(
         static_cast<std::size_t>(options_.max_concurrency) + options_.max_pending_requests);
+}
+
+GenerationService::~GenerationService() {
+    if (checkpoints_) {
+        (void)checkpoints_->final_save();
+        runtime::CheckpointEngineAccess::set_pressure_checkpoint_handler(*engine_, {});
+        runtime::CheckpointEngineAccess::set_reclaimable_session_oracle(*engine_, {});
+        checkpoints_.reset();
+    }
+}
+
+std::shared_ptr<SessionCheckpointService>
+GenerationService::bind_checkpoints(OpenAIResponsesStore& responses) {
+    if (options_.session_checkpoint_root.empty()) { return {}; }
+    if (checkpoints_) { throw std::logic_error("checkpoint service is already bound"); }
+    auto service = std::make_shared<SessionCheckpointService>(
+        *engine_, options_, responses, principal_reuse_scope_);
+    runtime::CheckpointEngineAccess::set_pressure_checkpoint_handler(*engine_, service);
+    runtime::CheckpointEngineAccess::set_reclaimable_session_oracle(*engine_, service);
+    checkpoint_hooks_ = {
+        .set_checkpoint_tag = [](PreparedPrompt& prompt, std::string_view tag) {
+            runtime::CheckpointEngineAccess::set_checkpoint_tag(prompt, tag);
+        },
+        .publication_epoch = [](const GenerationHandle& generation) {
+            return runtime::CheckpointEngineAccess::publication_epoch(generation);
+        }};
+    checkpoints_ = std::move(service);
+    return checkpoints_;
 }
 
 std::shared_ptr<RequestLifetime>
@@ -448,6 +478,12 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
                                                   ? ninfer::OutputConsumerMode::Streaming
                                                   : ninfer::OutputConsumerMode::Aggregate,
                                               std::move(observation), prepared.lifetime->deadline);
+        if (!checkpoint_tag.empty() && checkpoint_hooks_.publication_epoch) {
+            prepared.publication_order = checkpoint_hooks_.publication_epoch(prepared.generation).value;
+            if (prepared.publication_order == 0) {
+                throw std::logic_error("checkpointed request has no publication epoch");
+            }
+        }
         prepared.sampling   = prepared.generation.resolved_sampling();
     } catch (const ApiException&) { throw; } catch (const ninfer::RequestError& exception) {
         throw_request_error(exception, request.constraint_param, prepared.tool_schema_params);

@@ -11,7 +11,6 @@ add_library(ninfer_session_checkpoint_store STATIC
 ninfer_internal_includes(ninfer_session_checkpoint_store)
 target_link_libraries(ninfer_session_checkpoint_store
   PUBLIC ninfer_serve_state ninfer_checkpoint_contract ninfer_durable_io Threads::Threads)
-
 add_library(ninfer_serve STATIC
   opaque_id.cpp
   stop_event.cpp
@@ -30,6 +29,7 @@ add_library(ninfer_serve STATIC
   anthropic_messages_http.cpp
   translate.cpp
   generation_service.cpp
+  session_checkpoint_service.cpp
   request_events.cpp
   operational_log.cpp
   request_log.cpp

@@ -37,6 +37,19 @@ ninfer_add_test(ninfer_openai_responses_store_test
   LIBRARIES ninfer_serve_state)
 set_tests_properties(ninfer_openai_responses_store_test PROPERTIES LABELS "host")
 
+ninfer_add_test(ninfer_session_checkpoint_service_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_session_checkpoint_service.cpp"
+  LIBRARIES ninfer_serve_state)
+set_tests_properties(ninfer_session_checkpoint_service_test PROPERTIES LABELS "host" TIMEOUT 30)
+
+if(TARGET ninfer-serve)
+  add_test(NAME ninfer_serve_restore_real_test
+    COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/../test_serve_restore_real.py"
+            --server $<TARGET_FILE:ninfer-serve>)
+  set_tests_properties(ninfer_serve_restore_real_test PROPERTIES
+    LABELS "gpu;real;durable" SKIP_RETURN_CODE 77 TIMEOUT 900 RUN_SERIAL TRUE)
+endif()
+
 ninfer_add_test(ninfer_session_checkpoint_store_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_session_checkpoint_store.cpp"
   LIBRARIES ninfer_session_checkpoint_store)

@@ -64,6 +64,7 @@ public:
     fresh_reader() const = 0;
 };
 
+
 // Names the first failed gate when a session checkpoint export is refused. The engine and the
 // serve layer surface this so a skipped save is diagnosable from one log line instead of a
 // precondition audit across layers.

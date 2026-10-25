@@ -64,7 +64,8 @@ class OpenAIResponsePublication {
 public:
     OpenAIResponsePublication() noexcept = default;
     OpenAIResponsePublication(OpenAIResponsesStore& store, std::string response_id,
-                              std::optional<std::string> session_sha256);
+                              std::optional<std::string> session_sha256,
+                              std::function<void()> on_end = {});
     OpenAIResponsePublication(OpenAIResponsePublication&& other) noexcept;
     OpenAIResponsePublication& operator=(OpenAIResponsePublication&& other) noexcept;
     OpenAIResponsePublication(const OpenAIResponsePublication&) = delete;
@@ -74,6 +75,7 @@ public:
 private:
     OpenAIResponsesStore* store_ = nullptr;
     std::string response_id_;
+    std::function<void()> on_end_;
 };
 
 // Capture before disk loading. The guard pins only a revision entry, not the store mutex. A
@@ -170,5 +172,13 @@ using OpenAIResponseRestoreCallback =
     std::function<runtime::DurableImportResult(
         std::string_view session_sha256, std::optional<std::string_view> required_response_id,
         OpenAIResponsesStore& responses)>;
+
+// The prepared Engine commit is invoked only after the complete replacement has been built.
+// Store-local admission/race failures retain their own K7 reason; a native refusal is not
+// reclassified as corruption. The caller still owns/aborts its prepared transaction.
+[[nodiscard]] runtime::DurableImportResult commit_openai_response_restore(
+    OpenAIResponsesStore& responses, OpenAIResponseStoreSnapshot snapshot,
+    const OpenAIResponseRestoreGuard& guard,
+    const std::function<runtime::DurableImportResult()>& commit_engine);
 
 } // namespace ninfer::serve

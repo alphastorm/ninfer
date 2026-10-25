@@ -4,6 +4,7 @@
 // adapters normalize before this layer and render IDs, usage, and response events after it.
 
 #include "ninfer/engine.h"
+#include "runtime/contract/durable_engine_api.h"
 #include "serve/request.h"
 #include "serve/serve_options.h"
 
@@ -23,11 +24,14 @@ namespace ninfer::serve {
 
 struct RequestLifetime;
 struct RequestCapacity;
+class OpenAIResponsesStore;
+class SessionCheckpointService;
 
 // Installed by the checkpoint service before HTTP work starts. Only the internal K3 adapter may
 // attach an owning response tag to a native prompt; the public Engine API stays persistence-free.
 struct GenerationCheckpointHooks {
     std::function<void(ninfer::PreparedPrompt&, std::string_view)> set_checkpoint_tag;
+    std::function<runtime::DurableSessionEpoch(const ninfer::GenerationHandle&)> publication_epoch;
 };
 
 struct GenerationMetrics {
@@ -107,6 +111,7 @@ struct PreparedRequest {
     std::string constraint_param;
     std::vector<std::string> tool_schema_params;
     ninfer::GenerationHandle generation;
+    std::uint64_t publication_order = 0;
     ninfer::ResolvedSamplingParameters sampling;
     // Service input acquisition/bookkeeping; Engine timings own prompt and constraint preparation.
     double service_prepare_seconds = 0.0;
@@ -123,6 +128,7 @@ struct PreparedRequest {
 class GenerationService {
 public:
     explicit GenerationService(ServeOptions options, StartupObserver startup_observer = {});
+    ~GenerationService();
 
     [[nodiscard]] const ServeOptions& options() const noexcept { return options_; }
 
@@ -160,9 +166,11 @@ public:
                           std::function<bool()> is_cancelled = {});
 
     void warmup();
+    [[nodiscard]] std::shared_ptr<SessionCheckpointService>
+    bind_checkpoints(OpenAIResponsesStore& responses);
     void set_checkpoint_hooks(GenerationCheckpointHooks hooks) { checkpoint_hooks_ = std::move(hooks); }
     [[nodiscard]] bool has_checkpoint_hooks() const noexcept {
-        return static_cast<bool>(checkpoint_hooks_.set_checkpoint_tag);
+        return checkpoint_hooks_.set_checkpoint_tag && checkpoint_hooks_.publication_epoch;
     }
 
 private:
@@ -190,6 +198,7 @@ private:
     std::unique_ptr<ninfer::Engine> engine_;
     std::shared_ptr<RequestCapacity> request_capacity_;
     GenerationCheckpointHooks checkpoint_hooks_;
+    std::shared_ptr<SessionCheckpointService> checkpoints_;
 };
 
 } // namespace ninfer::serve

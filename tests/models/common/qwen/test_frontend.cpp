@@ -1545,8 +1545,8 @@ int test_automatic_instruction_frontier_parity() {
                               automatic.shared_reuse_scope->view() == "principal:shared",
                           "automatic leading system/developer frontier was not preserved");
         input.context_cache.markers.push_back(
-            {.kind = ninfer::PromptCacheMarkerKind::SharedStablePrefix,
-             .after_message_count = static_cast<std::uint32_t>(roles.size())});
+            {.after_message_count = static_cast<std::uint32_t>(roles.size()),
+             .kind = ninfer::PromptCacheMarkerKind::SharedStablePrefix});
         const auto deduplicated = frontend.prepare(input);
         const auto& merged = FrontendFactory::inspect(deduplicated).context_cache;
         failures += check(merged.opportunities.size() == 1 &&
@@ -2190,7 +2190,7 @@ int test_tool_output_atomic_fallback() {
 }
 
 int test_custom_tool_template_and_output() {
-    using Json = nlohmann::json;
+    using Json = nlohmann::ordered_json;
     const Frontend frontend = make_frontend(resources(), false);
     ninfer::PromptInput input;
     input.options.enable_thinking = false;
@@ -2298,7 +2298,8 @@ int test_loaded_durable_frontend_identity() {
     struct TemporaryTemplate {
         std::filesystem::path path = std::filesystem::temp_directory_path() /
                                      ("ninfer-frontend-identity-" +
-                                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                                      std::to_string(
+                                          std::chrono::steady_clock::now().time_since_epoch().count()) +
                                       ".jinja");
         ~TemporaryTemplate() {
             std::error_code error;
@@ -2902,9 +2903,50 @@ int test_media_auto_threads_respect_affinity() {
     return check(!error && threads == 1, "automatic media pool ignored the allowed CPU affinity");
 }
 
+int probe_resource_frontend(const std::filesystem::path& directory,
+                            const std::filesystem::path& selected_template) {
+    FrontendResources source;
+    source.tokenizer_json = read_file((directory / "tokenizer.json").string().c_str());
+    source.tokenizer_config_json = read_file((directory / "tokenizer_config.json").string().c_str());
+    source.generation_config_json = read_file((directory / "generation_config.json").string().c_str());
+    source.chat_template_jinja = read_file(
+        (selected_template.empty() ? directory / "chat_template.jinja" : selected_template)
+            .string().c_str());
+    const auto frontend = make_frontend(source, false);
+    const fi::Tokenizer tokenizer(
+        {source.tokenizer_json, source.tokenizer_config_json, source.generation_config_json});
+    for (const bool thinking : {true, false}) {
+        ninfer::PromptInput input;
+        ninfer::ChatMessage user;
+        user.role = ninfer::ChatRole::User;
+        user.parts.push_back({.text = "你好，简单介绍一下你自己。"});
+        input.messages.push_back(std::move(user));
+        input.options.enable_thinking = thinking;
+        const auto count = frontend.count_tokens(input);
+        const auto prompt = frontend.prepare(input);
+        const auto& data = FrontendFactory::inspect(prompt);
+        if (count != data.token_ids.size()) {
+            throw std::runtime_error("resource probe count/prepare disagree");
+        }
+        std::cout << nlohmann::json{
+            {"enable_thinking", thinking}, {"prompt_tokens", count},
+            {"template_sha256", frontend.durable_identity().template_sha256},
+            {"tokenizer_sha256", frontend.durable_identity().tokenizer_sha256},
+            {"rendered", tokenizer.decode(data.token_ids)},
+            {"token_ids", data.token_ids}}.dump() << '\n';
+    }
+    return 0;
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if ((argc == 3 || argc == 4) && std::string_view(argv[1]) == "--resource-probe")
+        return probe_resource_frontend(argv[2], argc == 4 ? argv[3] : "");
+    if (argc != 1) {
+        std::cerr << "usage: ninfer_qwen_frontend_test [--resource-probe DIR [TEMPLATE]]\n";
+        return 1;
+    }
     const FrontendResources owned = resources();
     const Frontend frontend       = make_frontend(owned);
     int failures                  = 0;
