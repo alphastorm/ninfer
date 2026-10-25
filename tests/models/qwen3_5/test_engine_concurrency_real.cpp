@@ -136,8 +136,10 @@ void checkpoint_epoch_refusal(ninfer::Engine& engine) {
     require(stale.state == DurableExportState::Stale && !called,
             "production adapter published a stale captured epoch");
     (void)handle.wait();
+    CheckpointEngineAccess::response_stored(engine, digest, "epoch-turn");
+    const auto stored = CheckpointEngineAccess::session_epoch(engine, digest);
     const auto current = CheckpointEngineAccess::publish_export(
-        engine, digest, "epoch-turn", submitted, [&] { called = true; return true; });
+        engine, digest, "epoch-turn", stored, [&] { called = true; return true; });
     require(current.state == DurableExportState::Exported && called,
             "settled production epoch was not publishable");
 }
