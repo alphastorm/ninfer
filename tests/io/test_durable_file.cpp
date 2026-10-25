@@ -16,6 +16,7 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #ifdef _WIN32
@@ -255,8 +256,8 @@ void directory_publication(const std::filesystem::path& root) {
 }
 
 #ifdef _WIN32
-void native_publication_guards(const std::filesystem::path& root,
-                               const std::filesystem::path& outside) {
+void native_reparse_guard(const std::filesystem::path& root,
+                          const std::filesystem::path& outside) {
     const auto parent = root / "swap-parent", staging = root / "swap-staging";
     io::create_directories(parent);
     write(staging, std::byte{21});
@@ -271,24 +272,95 @@ void native_publication_guards(const std::filesystem::path& root,
             "refused reparse swap consumed staging or escaped its parent");
     require(io::remove_tree(parent) && std::filesystem::exists(outside / "sentinel"),
             "removing swapped parent followed the junction");
+    require(io::remove_tree(staging), "reparse-test staging cleanup failed");
+}
+
+void native_identity_guards(const std::filesystem::path& root) {
+    const auto parent = root / "identity-parent", source = root / "identity-source";
     io::create_directories(parent);
+    io::create_directories(source / "nested");
+    const auto staging = source / "nested" / "staging";
+    write(staging, std::byte{21});
     const auto current = parent / "current";
     write(current, std::byte{41});
-    for (const auto mutation : {Mutation::FileIndex, Mutation::Volume}) {
-        {
-            PublicationScope scope(parent, mutation);
-            rejects([&] { publish(staging, current, "identity-change publication"); });
-            require(publication_trace.mutated && publication_trace.file_flushes == 1 &&
-                        publication_trace.parent_flushes == 0 && std::filesystem::exists(staging),
-                    "publication did not re-check the pinned parent's file index and volume");
+    // Cover destination, unshared source ancestors and the borrowed common prefix.
+    for (const auto& pinned : {parent, source, source / "nested", root}) {
+        for (const auto mutation : {Mutation::FileIndex, Mutation::Volume}) {
+            {
+                PublicationScope scope(pinned, mutation);
+                rejects([&] { publish(staging, current, "identity-change publication"); });
+                require(publication_trace.mutated && publication_trace.delete_denied &&
+                            publication_trace.file_flushes == 1 &&
+                            publication_trace.parent_flushes == 0 &&
+                            std::filesystem::exists(staging),
+                        "publication did not re-check every pinned parent's identity");
+            }
+            Stream previous(io::open_binary_read(current), &std::fclose);
+            std::array<std::byte, 3> bytes{};
+            io::read_exact(previous.get(), bytes);
+            require(bytes == std::array{std::byte{41}, std::byte{41}, std::byte{41}},
+                    "refused publication changed the old current generation");
         }
-        Stream previous(io::open_binary_read(current), &std::fclose);
-        std::array<std::byte, 3> bytes{};
-        io::read_exact(previous.get(), bytes);
-        require(bytes == std::array{std::byte{41}, std::byte{41}, std::byte{41}},
-                "refused publication changed the old current generation");
     }
     require(io::remove_tree(staging), "identity-test staging cleanup failed");
+}
+
+void native_pinned_destination(const std::filesystem::path& root) {
+    const auto source = root / "source", destination = root / "destination";
+    io::create_directories(source);
+    io::create_directories(destination);
+    const auto staging = source / "next", current = destination / "current";
+    write(staging, std::byte{53});
+    write(current, std::byte{47});
+    const HANDLE pin = CreateFileW(destination.c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    require(pin != INVALID_HANDLE_VALUE, "independent destination pin failed");
+    try {
+        Stream previous(io::open_binary_read(current), &std::fclose);
+        {
+            PublicationScope scope(destination);
+            publish(staging, current, "replace into independently pinned destination");
+            require(publication_trace.delete_denied && publication_trace.file_flushes == 1 &&
+                        publication_trace.parent_flushes == 1,
+                    "pinned replacement did not retain deny-DELETE and flush ordering");
+        }
+        std::array<std::byte, 3> bytes{};
+        io::read_exact(previous.get(), bytes);
+        require(bytes == std::array{std::byte{47}, std::byte{47}, std::byte{47}},
+                "pinned replacement changed the old reader");
+        Stream published(io::open_binary_read(current), &std::fclose);
+        io::read_exact(published.get(), bytes);
+        require(bytes == std::array{std::byte{53}, std::byte{53}, std::byte{53}} &&
+                    !std::filesystem::exists(staging),
+                "pinned cross-parent replacement did not publish staging bytes");
+    } catch (...) {
+        CloseHandle(pin);
+        throw;
+    }
+    CloseHandle(pin);
+}
+
+void native_case(std::string_view name) {
+    Fixture fixture;
+    if (name == "pinned-destination") {
+        native_pinned_destination(fixture.root);
+    } else if (name == "reparse-guard") {
+        const auto outside = fixture.root / "outside";
+        io::create_directories(outside);
+        write(outside / "sentinel", std::byte{42});
+        native_reparse_guard(fixture.root, outside);
+    } else if (name == "identity-guards") {
+        native_identity_guards(fixture.root);
+    } else if (name == "directory-publication") {
+        directory_publication(fixture.root);
+    } else {
+        throw std::invalid_argument("unknown native durable test case");
+    }
+    require(io::directory_sync_mode() == "ntfs-write-through", "wrong native directory policy");
+    // Standalone sync is deliberately a no-op, even for a missing or unsafe path.
+    io::sync_directory(fixture.root / "missing" / ".." / "not-opened");
+    std::cout << "OK durable file: " << name << " dir_sync=ntfs-write-through\n";
 }
 #endif
 
@@ -462,7 +534,9 @@ void run() {
                 !std::filesystem::exists(directory / "escaped"),
             "unsafe cross-parent publication consumed staging or escaped confinement");
 #ifdef _WIN32
-    native_publication_guards(fixture.root, outside);
+    native_reparse_guard(fixture.root, outside);
+    native_identity_guards(fixture.root);
+    native_pinned_destination(fixture.root);
 #endif
     const auto garbage = fixture.root / "garbage";
     io::create_directories(garbage / "nested");
@@ -506,8 +580,17 @@ void run() {
 }
 } // namespace
 
-int main() {
-    try { run(); }
+int main(int argc, char** argv) {
+    try {
+#ifdef _WIN32
+        if (argc == 2) native_case(argv[1]);
+        else
+#endif
+        {
+            if (argc != 1) throw std::invalid_argument("unexpected durable test arguments");
+            run();
+        }
+    }
     catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;
