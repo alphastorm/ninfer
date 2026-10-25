@@ -33,6 +33,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -87,6 +88,7 @@ public:
                            options.max_pending_requests),
           pending_timeout_(std::chrono::milliseconds(options.pending_timeout_ms)),
           keep_warm_grace_(std::chrono::milliseconds(options.gpu_keep_warm_ms)),
+          checkpoint_cache_enabled_(options.context_cache.enabled),
           resources_(options.context_cache.enabled, std::move(context_cost)) {
         if (max_concurrency_ == 0 || max_concurrency_ > kMaximumConcurrency ||
             options.max_pending_requests == 0 || pending_timeout_.count() <= 0) {
@@ -100,6 +102,9 @@ public:
         stats_snapshot_  = cumulative_stats_;
         published_stats_ = cumulative_stats_;
         paused_.reserve(max_outstanding_);
+        resources_.set_release_guard([this](std::span<PressureCheckpointVictim> victims) {
+            return checkpoint_pressure(victims);
+        });
         std::promise<void> startup;
         std::future<void> started = startup.get_future();
         worker_                   = std::thread([this, startup = std::move(startup)]() mutable {
@@ -140,9 +145,15 @@ public:
     EngineCore(const EngineCore&)            = delete;
     EngineCore& operator=(const EngineCore&) = delete;
 
+#include "runtime/engine/engine_checkpoint.inl"
+
     class Submission {
     public:
         Submission() noexcept = default;
+
+        [[nodiscard]] DurableSessionEpoch publication_epoch() const noexcept {
+            return {request_ ? request_->publication_order : 0};
+        }
 
         ~Submission() { reset(); }
 
@@ -194,7 +205,8 @@ public:
     Submission submit(PreparedPrompt prompt, PromptSummary prompt_summary, double prepare_seconds,
                       ResolvedRequestOptions options, OutputConsumerMode consumer_mode,
                       GenerationObservationOptions observation,
-                      Clock::time_point pending_deadline = {}) {
+                      Clock::time_point pending_deadline = {},
+                      std::string checkpoint_session = {}, std::string checkpoint_tag = {}) {
         const Clock::time_point submitted = Clock::now();
         if (pending_deadline == Clock::time_point{}) {
             pending_deadline = submitted + pending_timeout_;
@@ -224,6 +236,7 @@ public:
         }
 
         std::shared_ptr<Request> request;
+        std::string publication_tag;
         try {
             const auto constraint_started = observation.phase_timings ? Clock::now() : submitted;
             auto output                   = instance_.frontend.make_output_session(
@@ -251,12 +264,23 @@ public:
                                                 std::move(output), prompt_summary, prepare_seconds,
                                                 std::move(options), consumer_mode,
                                                 std::move(observation), pending_deadline, ready);
+            if (checkpoint_cache_enabled_ && request->options.execution.allow_prefix_reuse &&
+                !checkpoint_session.empty() && !checkpoint_tag.empty()) {
+                request->checkpoint_session = std::move(checkpoint_session);
+                request->checkpoint_tag = std::move(checkpoint_tag);
+                request->checkpoint_gate = checkpoints_.session(request->checkpoint_session);
+                publication_tag = request->checkpoint_tag;
+            }
         } catch (...) {
             release_reserved_capacity();
             throw;
         }
 
         {
+            std::unique_lock<std::mutex> publication;
+            if (request->checkpoint_gate) {
+                publication = std::unique_lock(request->checkpoint_gate->mutex);
+            }
             std::lock_guard lock(queue_mutex_);
             if (stopping_ || failed_) {
                 --outstanding_;
@@ -264,6 +288,11 @@ public:
                                    "inference engine is unavailable");
             }
             pending_.push_back(request);
+            if (request->checkpoint_gate &&
+                request->checkpoint_gate->epoch.value < publication_order) {
+                request->checkpoint_gate->tag.swap(publication_tag);
+                request->checkpoint_gate->epoch = {publication_order};
+            }
         }
         request_admission_check();
         queue_cv_.notify_one();
@@ -899,8 +928,14 @@ private:
                 resources_.publish(*instance_.program, request->continuation_owner,
                                    *finished.checkpoint);
             }
-            resources_.finish(*instance_.program, request->continuation_owner, *request->base_plan,
-                              request->publication_order);
+            {
+                std::unique_lock<std::mutex> publication;
+                if (request->checkpoint_gate) {
+                    publication = std::unique_lock(request->checkpoint_gate->mutex);
+                }
+                resources_.finish(*instance_.program, request->continuation_owner,
+                                  *request->base_plan, request->publication_order);
+            }
             request->continuation_owner = 0;
             request->generation_timings = finished.timings;
             request->speculative_stats  = std::move(finished.speculative);
@@ -1277,7 +1312,8 @@ private:
                 if (const auto victims = resources_.host_victims(
                         *instance_.program, capture->host_bytes, std::nullopt, {}, {}, admission,
                         &decision->reclaim)) {
-                    resources_.commit_host_victims(*instance_.program, *victims, decision->reclaim);
+                    if (!resources_.commit_host_victims(
+                            *instance_.program, *victims, decision->reclaim)) { return false; }
                     if (!victims->empty()) { scheduler_.capacity_released(); }
                     if (const auto retry = instance_.program->prepare_capture(*request->sequence);
                         retry && retry->reserved) {
@@ -1451,6 +1487,8 @@ private:
             request->continuation_owner =
                 resources_.adopt(*instance_.program, control.source, *request->base_plan,
                                  request->publication_order, carried, progress.retired_checkpoints);
+            resources_.set_checkpoint_identity(request->continuation_owner,
+                request->checkpoint_session, request->checkpoint_tag);
             resources_.release_source(*instance_.program, request->id);
             request->lane     = control.destination;
             request->sequence = progress.sequence;
@@ -1571,7 +1609,7 @@ private:
             const auto handle = *request.suspended->snapshot_handle();
             if (std::find(excluded.begin(), excluded.end(), handle) != excluded.end()) { continue; }
             const auto resources = instance_.program->snapshot_resources(*request.suspended);
-            if (resources.useful(shortage) &&
+            if (resources.useful(shortage) && checkpoint_request_settled(request) &&
                 instance_.program->revoke_snapshot(*request.suspended)) {
                 request.recovery_route = GenerationRecoveryRoute::Replay;
                 observe_scheduling(*it, GenerationSchedulingTransition::SnapshotRevoked);
@@ -1610,10 +1648,18 @@ private:
             }
             if (const auto victims =
                     resources_.host_victims(*instance_.program, *bytes, std::nullopt, later)) {
+                // Preflight the complete mixed catalog/snapshot plan before dropping anything.
+                if (!resources_.approve_release(*victims)) { return false; }
+                for (const auto& other : paused_) {
+                    if (other->suspended && other->suspended->has_snapshot() &&
+                        std::find(victims->begin(), victims->end(),
+                                  *other->suspended->snapshot_handle()) != victims->end() &&
+                        !checkpoint_request_settled(*other)) { return false; }
+                }
                 for (const auto handle : *victims) {
                     const auto usage = instance_.program->physical_usage();
                     if (usage.capacity.host_bytes - usage.occupied.host_bytes >= *bytes) { break; }
-                    if (resources_.erase(*instance_.program, handle)) { continue; }
+                    if (resources_.erase_approved(*instance_.program, handle)) { continue; }
                     const auto owner =
                         std::find_if(paused_.begin(), paused_.end(), [&](const auto& other) {
                             return other->suspended &&
@@ -2216,7 +2262,9 @@ private:
     }
 
     void idle_wait(std::unique_lock<std::mutex>& lock) {
-        const auto wake = [&] { return stopping_ || !pending_.empty(); };
+        const auto wake = [&] {
+            return stopping_ || !pending_.empty() || !checkpoint_commands_.empty();
+        };
         if (keep_warm_ && std::exchange(keep_warm_armed_, false)) {
             const auto until = Clock::now() + keep_warm_grace_;
             while (!wake() && Clock::now() < until) {
@@ -2236,7 +2284,8 @@ private:
         for (;;) {
             {
                 std::unique_lock lock(queue_mutex_);
-                if (!stopping_ && pending_.empty() && resident_empty() && paused_.empty() &&
+                if (!stopping_ && checkpoint_commands_.empty() && pending_.empty() &&
+                    resident_empty() && paused_.empty() &&
                     !instance_.program->has_context_operation()) {
                     idle_wait(lock);
                 }
@@ -2249,6 +2298,14 @@ private:
                 }
             }
             std::unique_lock execution_lock(execution_mutex_);
+            checkpoint_execution_lock_ = &execution_lock;
+            run_checkpoint_commands();
+            if (failed_) {
+                execution_lock.unlock();
+                std::unique_lock lock(queue_mutex_);
+                queue_cv_.wait(lock, [&] { return stopping_ || !checkpoint_commands_.empty(); });
+                continue;
+            }
             bool executed = false;
             try {
                 set_host_work_class(HostWorkClass::Control);
@@ -2405,7 +2462,7 @@ private:
             } catch (...) {
                 auto error = std::current_exception();
                 fail_all_locked(error);
-                return;
+                continue;
             }
             // Arm only after an execution/context unit, not after a failed admission scan.
             keep_warm_armed_ = keep_warm_armed_ || executed;
@@ -2424,7 +2481,11 @@ private:
     const std::size_t max_outstanding_;
     const std::chrono::milliseconds pending_timeout_;
     const std::chrono::milliseconds keep_warm_grace_;
+    const bool checkpoint_cache_enabled_;
     ResourceManagement resources_;
+    CheckpointControl checkpoints_;
+    std::deque<std::function<void()>> checkpoint_commands_;
+    std::unique_lock<std::mutex>* checkpoint_execution_lock_ = nullptr;
 
     mutable std::mutex execution_mutex_;
     mutable std::mutex queue_mutex_;

@@ -2007,10 +2007,82 @@ void test_consuming_rewind_resets_proven_progress_to_the_adopted_prefix() {
             "an abandoned deep branch remained the proof after a consuming rewind");
 }
 
+void test_pending_checkpoint_blocks_complete_destructive_plan() {
+    using namespace ninfer::runtime;
+    Fixture f(128);
+    const auto first = f.program.add({1, 2}, {f.program.host_block(32)}, Role::Continuation);
+    const auto second = f.program.add({3, 4}, {f.program.host_block(32)}, Role::InputReplay);
+    const auto a = f.publish(first, 1);
+    const auto b = f.publish(second, 2);
+    f.cache.set_checkpoint_identity(a, "first", "turn-a");
+    f.cache.set_checkpoint_identity(b, "second", "turn-b");
+    bool pending = true;
+    f.cache.set_release_guard([&](std::span<PressureCheckpointVictim> victims) {
+        bool settled = true;
+        for (auto& victim : victims) {
+            victim.outcome = pending && victim.session_sha256 == "second"
+                ? PressureCheckpointOutcome::Pending : PressureCheckpointOutcome::Settled;
+            settled &= victim.outcome == PressureCheckpointOutcome::Settled;
+        }
+        return settled;
+    });
+    auto cursor = f.cache.begin_reclaim(f.program);
+    const std::array plan{first, second};
+    require(!f.cache.commit_host_victims(f.program, plan, cursor) &&
+                f.program.valid_checkpoint(first) && f.program.valid_checkpoint(second) &&
+                f.program.released.empty(),
+            "Pending second victim allowed a partial Host release");
+    require(!f.cache.recycle_input(f.program, b), "Pending input checkpoint was recycled");
+    f.cache.abandon(f.program, b);
+    require(f.program.valid_checkpoint(second) && !f.cache.points(b).empty(),
+            "Pending owner abandonment destroyed its checkpoint");
+    const auto replacement = f.program.add({3, 4, 5}, {}, Role::InputReplay);
+    f.cache.publish(f.program, b, replacement);
+    require(f.program.valid_checkpoint(second) && !f.program.valid_checkpoint(replacement),
+            "Pending anchor replacement dropped a durable point");
+    pending = false;
+    require(f.cache.commit_host_victims(f.program, plan, cursor) &&
+                !f.program.valid_checkpoint(first) && !f.program.valid_checkpoint(second),
+            "checkpoint progress did not unblock the complete release");
+}
+
+void test_import_publication_is_private_and_freshly_ordered() {
+    Fixture f(128);
+    const Base original{.tokens = {1, 2}, .advice = {.session_key = 11, .reuse_scope = 11,
+                                                  .shared_reuse_scope = 9}};
+    const auto old = f.begin(original);
+    const auto predecessor = f.program.add({1, 2}, {}, Role::Continuation);
+    f.cache.publish(f.program, old, predecessor);
+    f.cache.finish(f.program, old, original, 1);
+    auto prepared = f.cache.prepare_import_publication(11, 9, "session", "restored", 2);
+    // Native commits in index.points order; endpoint is not assumed to be the last handle.
+    const auto endpoint = f.program.add({1, 2, 3}, {}, Role::Continuation);
+    const auto replay = f.program.add({1}, {}, Role::InputReplay);
+    const std::array imported{endpoint, replay};
+    f.cache.publish_import(f.program, std::move(prepared), imported, 10);
+    const Base query{.tokens = {1, 2, 3, 4}, .advice = original.advice};
+    const auto choices = f.cache.candidates(f.program, query);
+    require(std::any_of(choices.begin(), choices.end(), [&](const auto& choice) {
+                return choice.source.checkpoint == endpoint && choice.session_hint &&
+                       choice.publication_order == 10;
+            }), "import did not publish its complete set with a fresh session order");
+    auto foreign = query;
+    foreign.advice.session_key = foreign.advice.reuse_scope = 12;
+    const auto denied = f.cache.candidates(f.program, foreign);
+    require(std::none_of(denied.begin(), denied.end(), [&](const auto& choice) {
+                return choice.source.checkpoint == endpoint || choice.source.checkpoint == replay;
+            }), "imported private points escaped their caller-derived session scope");
+    f.cache.finish(f.program, old, original, 1);
+    require(f.source(query, endpoint).session_hint,
+            "older request finish replaced the restored session hint");
+}
+
 } // namespace
 
 int main() {
     try {
+        test_pending_checkpoint_blocks_complete_destructive_plan();
+        test_import_publication_is_private_and_freshly_ordered();
         test_demotion_competes_with_its_actual_host_recovery_loss();
         test_adjacent_kv_demotions_share_one_submission();
         test_kv_demotion_batch_stops_at_an_intervening_delete();

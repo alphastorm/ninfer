@@ -1,4 +1,5 @@
 #include "ninfer/engine.h"
+#include "runtime/contract/continuation_checkpoint.h"
 
 #include <array>
 #include <atomic>
@@ -64,6 +65,81 @@ void inflight_bound(ninfer::Engine& engine) {
     for (auto it = handles.rbegin(); it != handles.rend(); ++it) { complete(it->wait(), 2); }
     complete(engine.generate(engine.prepare_tokens({198, 1002, 198}), request(2, false)), 2);
     settled(engine);
+}
+
+// An actual production Engine, not a serving-policy fake. Any attempted read means the
+// adapter crossed the policy gate before refusing a warmup/cache-disabled request.
+void checkpoint_policy_refusal(ninfer::Engine& engine) {
+    using namespace ninfer::runtime;
+    class Unreadable final : public ContinuationCheckpointReader {
+    public:
+        mutable std::size_t calls = 0;
+        std::optional<std::uint64_t> file_size(std::string_view) const override {
+            ++calls; return std::nullopt;
+        }
+        std::optional<DurablePayload> file_descriptor(std::string_view) const override {
+            ++calls; return std::nullopt;
+        }
+        bool read_file(std::string_view, std::uint64_t, std::span<std::byte>) const override {
+            ++calls; return false;
+        }
+        bool verify_complete() const override { ++calls; return false; }
+        DurableReason failure_reason() const noexcept override {
+            ++calls; return DurableReason::IoUnavailable;
+        }
+        std::shared_ptr<const ContinuationCheckpointReader> fresh_reader() const override {
+            ++calls; return {};
+        }
+    } reader;
+    const auto before = engine.memory_summary();
+    for (bool warmup : {true, false}) {
+        const DurableImportTarget target{
+            .session_sha256 = std::string(64, 'a'), .expected_tag = "policy-refusal",
+            .allow_prefix_reuse = warmup, .cache_participation = !warmup};
+        auto prepared = CheckpointEngineAccess::prepare_import(engine, target, reader, {}, {}, {});
+        require(prepared.state == DurablePrepareState::PolicyDisabled && !prepared.prepared &&
+                    prepared.reason == DurableReason::CacheDisabled,
+                "direct adapter prepared a warmup/cache-disabled import");
+        const auto imported = CheckpointEngineAccess::import_session(engine, target, reader, {}, {}, {});
+        require(imported.state == DurableImportState::PolicyDisabled &&
+                    imported.reason == DurableReason::CacheDisabled && reader.calls == 0,
+                "direct adapter inspected checkpoint bytes before request policy");
+    }
+    const auto after = engine.memory_summary();
+    require(before.host_context_occupied_bytes == after.host_context_occupied_bytes &&
+                before.host_context_reserved_bytes == after.host_context_reserved_bytes &&
+                before.host_state_occupied_slots == after.host_state_occupied_slots &&
+                before.host_kv_occupied_bytes == after.host_kv_occupied_bytes,
+            "policy refusal changed native reservation accounting");
+}
+
+void checkpoint_epoch_refusal(ninfer::Engine& engine) {
+    using namespace ninfer::runtime;
+    const std::string digest(64, 'b');
+    const auto old = CheckpointEngineAccess::session_epoch(engine, digest);
+    ninfer::PromptInput input;
+    input.messages = {{.role = ninfer::ChatRole::User,
+                       .parts = {{.text = "Count from one to three."}}}};
+    input.context_cache.session_key = "http:" + digest;
+    input.context_cache.reuse_scope = "http:" + digest;
+    input.context_cache.shared_reuse_scope = "principal:test";
+    auto prompt = engine.prepare(std::move(input));
+    CheckpointEngineAccess::set_checkpoint_tag(prompt, "epoch-turn");
+    auto options = request(8);
+    options.tool_choice.constraints = ninfer::ToolConstraintMode::Automatic;
+    auto handle = engine.submit(std::move(prompt), options);
+    const auto submitted = CheckpointEngineAccess::publication_epoch(handle);
+    require(submitted.value > old.value, "submission failed to advance the publication epoch");
+    bool called = false;
+    const auto stale = CheckpointEngineAccess::publish_export(
+        engine, digest, "epoch-turn", old, [&] { called = true; return true; });
+    require(stale.state == DurableExportState::Stale && !called,
+            "production adapter published a stale captured epoch");
+    (void)handle.wait();
+    const auto current = CheckpointEngineAccess::publish_export(
+        engine, digest, "epoch-turn", submitted, [&] { called = true; return true; });
+    require(current.state == DurableExportState::Exported && called,
+            "settled production epoch was not publishable");
 }
 
 void pending_timeout(ninfer::Engine& engine) {
@@ -218,6 +294,8 @@ int main() {
             require(std::string_view(backend) == "none", "NINFER_TEST_BACKEND must be none or dflash2");
         }
         ninfer::Engine engine(options);
+        checkpoint_policy_refusal(engine);
+        checkpoint_epoch_refusal(engine);
         inflight_bound(engine);
         pending_timeout(engine);
         shared_readers_and_live_sibling(engine);

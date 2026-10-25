@@ -5,6 +5,7 @@
 #include "runtime/contract/execution.h"
 #include "runtime/engine/generation_budget.h"
 #include "runtime/engine/context_cache/types.h"
+#include "runtime/engine/checkpoint_control.h"
 
 #include <atomic>
 #include <chrono>
@@ -164,6 +165,9 @@ struct RequestRecord {
     nvtx::ScopedAsyncRange generation_range;
     const std::uint64_t id;
     const std::uint64_t publication_order;
+    std::string checkpoint_session;
+    std::string checkpoint_tag;
+    std::shared_ptr<CheckpointControl::Session> checkpoint_gate;
     PreparedPrompt prompt;
     OutputSession output;
     PromptSummary prompt_summary;
