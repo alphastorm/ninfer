@@ -1095,6 +1095,10 @@ struct RuntimeStats {
     std::uint64_t replay_restores           = 0;
     std::uint64_t replayed_tokens           = 0;
 
+    // Post-prune catalog entries, not residency or active-reader counts.
+    std::uint32_t private_catalog_occupied = 0;
+    std::uint32_t shared_catalog_occupied  = 0;
+
     std::uint64_t root_selections               = 0;
     std::uint64_t checkpoint_selections         = 0;
     std::uint64_t reused_prompt_tokens          = 0;
