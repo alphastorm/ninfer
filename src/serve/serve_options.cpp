@@ -1,9 +1,11 @@
 #include "serve/serve_options.h"
 #include "product/speculative_options.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -11,6 +13,50 @@
 
 namespace ninfer::serve {
 namespace {
+
+std::string read_api_key_file(const char* path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) { throw std::invalid_argument("--api-key-file is not readable"); }
+    input.seekg(0, std::ios::end);
+    const std::streamoff size = input.tellg();
+    if (size < 0 || size > 4096) {
+        throw std::invalid_argument("--api-key-file exceeds 4096 bytes");
+    }
+    input.seekg(0, std::ios::beg);
+    std::string value(static_cast<std::size_t>(size), '\0');
+    input.read(value.data(), static_cast<std::streamsize>(size));
+    if (!input) { throw std::invalid_argument("--api-key-file could not be read completely"); }
+    if (!value.empty() && value.back() == '\n') { value.pop_back(); }
+    if (!value.empty() && value.back() == '\r') { value.pop_back(); }
+    if (value.empty() || value.find_first_of("\r\n") != std::string::npos) {
+        throw std::invalid_argument("--api-key-file must contain exactly one non-empty line");
+    }
+    return value;
+}
+
+std::string parse_sha256(const char* text, const char* flag) {
+    const std::string value(text);
+    if (value.size() != 64 ||
+        !std::all_of(value.begin(), value.end(), [](unsigned char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        })) {
+        throw std::invalid_argument(std::string(flag) +
+                                    " must be a 64-character lowercase SHA-256");
+    }
+    return value;
+}
+
+std::string parse_profile_name(const char* text) {
+    const std::string value(text);
+    if (value.empty() || value.size() > 64 ||
+        !std::all_of(value.begin(), value.end(), [](unsigned char c) {
+            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                   (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        })) {
+        throw std::invalid_argument("--deployment-profile must match [A-Za-z0-9._-]{1,64}");
+    }
+    return value;
+}
 
 int parse_nonnegative_int(const char* text, const char* label) {
     char* end        = nullptr;
@@ -114,8 +160,10 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
 
 std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
-           " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
-           "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
+           " <model.ninfer> [--host H] [--port N] [--api-key KEY|--api-key-file FILE] "
+           "[--model-id ID] [--binary-sha256 SHA] [--artifact-sha256 SHA] "
+           "[--config-sha256 SHA] [--deployment-profile NAME] "
+           "[--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
            "[--context-cost-presets FILE] "
@@ -177,8 +225,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             continue;
         }
         options.startup_argv.emplace_back(argv[i] == nullptr ? "" : argv[i]);
-        redact_next = options.startup_argv.back() == "--api-key";
+        redact_next = options.startup_argv.back() == "--api-key" ||
+                      options.startup_argv.back() == "--api-key-file";
     }
+    bool api_key_source_explicit     = false;
     bool default_max_tokens_explicit = false;
     bool kv_capacity_explicit        = false;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
@@ -198,12 +248,31 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--port") {
             options.port = parse_nonnegative_int(require_value("--port"), "port");
         } else if (arg == "--api-key") {
+            if (api_key_source_explicit) {
+                throw std::invalid_argument("API key source must be specified exactly once");
+            }
             options.api_key = require_value("--api-key");
+            api_key_source_explicit = true;
+        } else if (arg == "--api-key-file") {
+            if (api_key_source_explicit) {
+                throw std::invalid_argument("API key source must be specified exactly once");
+            }
+            options.api_key = read_api_key_file(require_value("--api-key-file"));
+            api_key_source_explicit = true;
         } else if (arg == "--model-id") {
             options.model_id_override = require_value("--model-id");
             if (options.model_id_override->empty()) {
                 throw std::invalid_argument("--model-id must not be empty");
             }
+        } else if (arg == "--binary-sha256") {
+            options.binary_sha256 = parse_sha256(require_value("--binary-sha256"), "--binary-sha256");
+        } else if (arg == "--artifact-sha256") {
+            options.artifact_sha256 =
+                parse_sha256(require_value("--artifact-sha256"), "--artifact-sha256");
+        } else if (arg == "--config-sha256") {
+            options.config_sha256 = parse_sha256(require_value("--config-sha256"), "--config-sha256");
+        } else if (arg == "--deployment-profile") {
+            options.deployment_profile = parse_profile_name(require_value("--deployment-profile"));
         } else if (arg == "--max-context") {
             options.max_context = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--max-context"), "max-context"));
