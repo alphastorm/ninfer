@@ -342,7 +342,7 @@ struct RowReader::Impl {
             stats.read_bytes += c.bytes;
             finish_page(id, static_cast<const std::byte*>(buffers[c.buffer_index].data), c.bytes,
                         c.error ? std::make_exception_ptr(std::system_error(
-                                      c.error, std::generic_category(), "PLE page read"))
+                                      c.error, io::read_error_category(), "PLE page read"))
                                 : std::exception_ptr{});
             inflight[c.buffer_index] = none;
         }

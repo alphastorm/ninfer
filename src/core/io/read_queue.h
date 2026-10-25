@@ -19,17 +19,18 @@ struct ReadCompletion {
     std::uint64_t tag;
     std::uint32_t buffer_index;
     std::uint32_t bytes;
-    int error; // Positive errno, or zero. A successful read may be short, including zero bytes.
+    int error; // Positive native OS error, or zero; use read_error_category(). Reads may be short.
 };
 
 enum class ReadAdmission { Accepted, Full, Closed };
 enum class ReadWake { Completion, Signalled };
 
 // Single-owner-thread queue; only wake() may be called concurrently. Files and nonoverlapping
-// CPU buffers are borrowed through destruction. Construction registers them once with io_uring.
+// CPU buffers are borrowed through destruction. Linux registers them once with io_uring;
+// Windows associates the files with an IO completion port and uses stable overlapped records.
 // No worker or CUDA resource is created. Each Accepted request reserves its buffer until poll
 // returns its one completion. The caller finishes consuming those bytes before reusing it.
-// Accepted prepares an SQE; submit issues it. Invalid requests throw; Full/Closed are flow control.
+// Accepted reserves a request; submit issues it. Invalid requests throw; Full/Closed are flow control.
 class DirectReadQueue {
 public:
     DirectReadQueue(std::span<const FileView> files, std::span<const MemorySpan> buffers,

@@ -19,7 +19,11 @@
 #include <system_error>
 #include <utility>
 
+#if defined(_WIN32)
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace ninfer::serve {
 namespace {
@@ -40,7 +44,12 @@ std::uint64_t unix_time_ms() {
 std::string new_server_instance_id() {
     const auto now    = std::chrono::system_clock::now().time_since_epoch();
     const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
-    return "serve-" + std::to_string(static_cast<long long>(::getpid())) + '-' +
+#if defined(_WIN32)
+    const auto pid = ::_getpid();
+#else
+    const auto pid = ::getpid();
+#endif
+    return "serve-" + std::to_string(static_cast<long long>(pid)) + '-' +
            std::to_string(micros);
 }
 

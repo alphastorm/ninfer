@@ -4,13 +4,14 @@
 #include <cstdint>
 #include <filesystem>
 #include <span>
+#include <system_error>
 
 namespace ninfer::io {
 
 enum class ReadMode { Buffered, Direct };
 
 struct FileView {
-    int descriptor               = -1;
+    std::intptr_t native_handle   = -1;
     std::uint64_t bytes          = 0;
     ReadMode mode                = ReadMode::Buffered;
     std::size_t memory_alignment = 1;
@@ -38,7 +39,9 @@ public:
                                           std::span<std::byte> destination) const;
 
 private:
+#ifndef _WIN32
     std::filesystem::path path_;
+#endif
     FileView view_;
 };
 
@@ -53,5 +56,8 @@ struct DirectReadWindow {
 [[nodiscard]] DirectReadWindow direct_read_window(FileView file, std::uint64_t offset,
                                                   std::size_t bytes);
 void validate_direct_read(FileView file, std::uint64_t offset, std::span<std::byte> destination);
+
+// Completion errors are positive errno values on Linux and Win32 errors on Windows.
+[[nodiscard]] const std::error_category& read_error_category() noexcept;
 
 } // namespace ninfer::io

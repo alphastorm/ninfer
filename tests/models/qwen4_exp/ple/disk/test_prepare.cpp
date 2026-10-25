@@ -4,6 +4,12 @@
 #include "core/buffer.h"
 #include "core/decode_graph.h"
 #include "core/transfer.h"
+#include "cuda_interpose.h"
+
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -377,18 +383,22 @@ void gpu(const disk::Table& source, const Input& input) {
 }
 } // namespace
 
-extern "C" cudaError_t __real_cudaEventRecord(cudaEvent_t, cudaStream_t);
-
-extern "C" cudaError_t __wrap_cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
+extern "C" {
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaEventRecord)(cudaEvent_t event, cudaStream_t stream) {
     if (fail_event_record) {
         fail_event_record = false;
         return cudaErrorInvalidResourceHandle;
     }
-    return __real_cudaEventRecord(event, stream);
+    return NINFER_TEST_CUDA_REAL(cudaEventRecord)(event, stream);
+}
 }
 
 int main(int argc, char** argv) {
     try {
+#ifdef _WIN32
+        if (_setmode(_fileno(stdin), _O_BINARY) == -1 || _setmode(_fileno(stdout), _O_BINARY) == -1)
+            throw std::runtime_error("set binary PLE test transport failed");
+#endif
         if (argc != 3) throw std::invalid_argument("expected ARTIFACT --host|--gpu|--failure");
         const std::string_view mode = argv[2];
         if (mode == "--gpu") {
