@@ -867,6 +867,10 @@ curl http://127.0.0.1:8080/v1/messages/count_tokens \
 Pass `--api-key VALUE` to require the same value as an OpenAI bearer token or Anthropic
 `x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated.
 
+Alternatively, `--api-key-file FILE` reads one non-empty line from a file of at most
+4096 bytes. A trailing LF or CRLF is removed. Specify exactly one API-key source;
+the startup argument record redacts both inline credentials and the key-file path.
+
 ```bash
 curl http://127.0.0.1:8080/v1/models \
   -H 'Authorization: Bearer local-secret'
@@ -883,7 +887,12 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--host H` | listen address | `127.0.0.1` |
 | `--port N` | listen port | `8080` |
 | `--api-key KEY` | required bearer or `x-api-key` value | unset |
+| `--api-key-file FILE` | read the required API key from a bounded single-line file; exclusive with `--api-key` | unset |
 | `--model-id ID` | override the public OpenAI model alias | artifact `metadata.name`, or architecture name |
+| `--binary-sha256 SHA` | lifecycle-computed executable digest, 64 lowercase hex characters | unset |
+| `--artifact-sha256 SHA` | lifecycle-computed artifact digest, 64 lowercase hex characters | unset |
+| `--config-sha256 SHA` | lifecycle-computed full configuration digest; distinct from the resolved durable fingerprint | unset |
+| `--deployment-profile NAME` | public deployment profile, `[A-Za-z0-9._-]{1,64}` | unset |
 | `--max-context N` | logical context ceiling of each sequence | `8192` |
 | `--kv-capacity N\|auto` | shared Main Text KV capacity; `auto` maximizes resident-model KV, or reserves one context with CPU expert offload; omitted means `--max-context` | `8192` |
 | `--max-concurrency N` | resident execution lanes; valid range `1..8` | `1` |

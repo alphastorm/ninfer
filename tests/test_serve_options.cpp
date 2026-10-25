@@ -1,6 +1,10 @@
 #include "serve/serve_options.h"
 #include "serve/translate.h"
 
+#include <algorithm>
+#include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <string>
@@ -28,6 +32,79 @@ ServeOptions parse(std::vector<std::string> arguments) {
 
 int main() {
     int failures = 0;
+
+    const std::string binary_sha(64, '1');
+    const std::string artifact_sha(64, '2');
+    const std::string config_sha(64, '3');
+    const ServeOptions identity = parse(
+        {"ninfer-serve", "model.ninfer", "--binary-sha256", binary_sha, "--artifact-sha256",
+         artifact_sha, "--config-sha256", config_sha, "--deployment-profile", "release-profile"});
+    failures += check(identity.binary_sha256 == binary_sha &&
+                          identity.artifact_sha256 == artifact_sha &&
+                          identity.config_sha256 == config_sha &&
+                          identity.deployment_profile == "release-profile",
+                      "lifecycle identity options were not preserved");
+    for (const auto* flag : {"--binary-sha256", "--artifact-sha256", "--config-sha256"}) {
+        for (const auto& value : {std::string{}, std::string(63, 'a'), std::string(65, 'a'),
+                                  std::string(64, 'A'), std::string(64, 'g')}) {
+            bool rejected = false;
+            try {
+                (void)parse({"ninfer-serve", "model.ninfer", flag, value});
+            } catch (const std::invalid_argument&) { rejected = true; }
+            failures += check(rejected, "invalid lifecycle SHA-256 was accepted");
+        }
+    }
+    for (const auto& value : {std::string{}, std::string(65, 'a'), std::string("private/location"),
+                              std::string("has space")}) {
+        bool rejected = false;
+        try {
+            (void)parse({"ninfer-serve", "model.ninfer", "--deployment-profile", value});
+        } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "invalid deployment profile was accepted");
+    }
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--deployment-profile",
+                              std::string(64, 'A')}).deployment_profile.size() == 64,
+                      "maximum-length deployment profile was rejected");
+
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto key_path = std::filesystem::temp_directory_path() /
+                          ("ninfer-api-key-" + std::to_string(stamp));
+    std::ofstream(key_path, std::ios::binary) << "file-secret\r\n";
+    const auto file_key = parse({"ninfer-serve", "model.ninfer", "--api-key-file", key_path.string()});
+    failures += check(file_key.api_key == "file-secret", "API key file CRLF was not removed");
+    failures += check(std::find(file_key.startup_argv.begin(), file_key.startup_argv.end(),
+                               key_path.string()) == file_key.startup_argv.end(),
+                      "startup argv retained the API key file path");
+    for (const auto& arguments : {
+             std::vector<std::string>{"ninfer-serve", "model.ninfer", "--api-key", "inline",
+                                       "--api-key-file", key_path.string()},
+             std::vector<std::string>{"ninfer-serve", "model.ninfer", "--api-key-file",
+                                       key_path.string(), "--api-key", "inline"},
+             std::vector<std::string>{"ninfer-serve", "model.ninfer", "--api-key", "first",
+                                       "--api-key", "second"}}) {
+        bool rejected = false;
+        try { (void)parse(arguments); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "multiple API key sources were accepted");
+    }
+    for (const auto& contents : {std::string{}, std::string("first\nsecond\n"),
+                                 std::string(4097, 'x')}) {
+        std::ofstream(key_path, std::ios::binary | std::ios::trunc) << contents;
+        bool rejected = false;
+        try { (void)parse({"ninfer-serve", "model.ninfer", "--api-key-file", key_path.string()}); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "invalid API key file was accepted");
+    }
+    std::filesystem::remove(key_path);
+    bool missing_key_rejected = false;
+    try { (void)parse({"ninfer-serve", "model.ninfer", "--api-key-file", key_path.string()}); }
+    catch (const std::invalid_argument&) { missing_key_rejected = true; }
+    failures += check(missing_key_rejected, "missing API key file was accepted");
+    for (const auto* flag : {"--api-key-file", "--binary-sha256", "--artifact-sha256",
+                             "--config-sha256", "--deployment-profile"}) {
+        failures += check(serve_usage_text("ninfer-serve").find(flag) != std::string::npos,
+                          "serve help omitted a lifecycle identity option");
+    }
 
     const ServeOptions defaults = parse({"ninfer-serve", "model.ninfer"});
     failures += check(defaults.allow_prefix_reuse, "prefix reuse is not enabled by default");
