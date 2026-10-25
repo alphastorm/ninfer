@@ -26,6 +26,14 @@ Master owns its catalog/retention policy; obsolete private-slot limits are not
 passed to the new binary. INT8 KV, MTP3, context 131,072 and the existing power,
 prefill and keep-warm settings are unchanged.
 
+The shared-CUDA and `/MD` build ships its app-local CUDA/MSVC runtime DLLs, not
+just vcpkg and DirectStorage. The qualification collector follows transitive
+imports through the selected CUDA compiler's bin directories, VS 2022 CRT
+redistributable and vcpkg tree. Both DirectStorage DLLs enter that graph,
+including the dynamically loaded core. Missing selected CUDA/CRT imports or a
+failed import inspection refuse packaging rather than relying on a development
+toolkit or an unrelated DLL on the target's `PATH`.
+
 The shared installer/controller/owner-lease shape, protected ACLs and bearer-file
 handling are retained. Readiness consumes status schema 2 and requires this
 process's request-log schema-30 startup to attest the selected UUID, CUDA ordinal

@@ -63,9 +63,52 @@ FLUSH_MARKER = "MANAGED-STOP-FLUSH-408137"
 # This is pressure on the shared pool, not a claim that only StateImages can consume it.
 PRESSURE_STATE_IMAGES = 8
 PRESSURE_PORT_OFFSET = 1
-# The app-local DLLs a native package carries are the binaries' own imports resolved from the
-# builder's vcpkg tree plus the DirectStorage redistributables the build stages beside the apps.
+# App-local imports come from the selected CUDA/MSVC/vcpkg toolchains. DirectStorage's two
+# redistributables are also staged explicitly because its core DLL is loaded dynamically.
 DIRECTSTORAGE_DLLS = ("dstorage.dll", "dstoragecore.dll")
+
+NATIVE_RUNTIME_DEPENDENCIES_PS = r"""
+function Copy-NativeRuntimeDependencies(
+    [string]$Build, [string]$Bin, [string]$CudaCompiler, [string]$MsvcRedist,
+    [string]$Dumpbin, [string[]]$DirectStorageDlls
+) {
+    $vcpkgBin=Join-Path $Build 'vcpkg_installed\x64-windows\bin'
+    $appsBin=Join-Path $Build 'apps'
+    $cudaBin=Split-Path -Parent $CudaCompiler
+    if([string]::IsNullOrWhiteSpace($MsvcRedist)){throw 'selected MSVC redistributable root is unavailable'}
+    $crtBin=Join-Path $MsvcRedist 'x64\Microsoft.VC143.CRT'
+    if(-not(Test-Path -LiteralPath $crtBin -PathType Container)){throw 'selected MSVC x64 CRT directory is unavailable'}
+    $runtimeRoots=@($crtBin,$cudaBin,(Join-Path $cudaBin 'x64'),$vcpkgBin,$appsBin)
+    $pending=[Collections.Generic.Queue[string]]::new()
+    foreach($exe in @('ninfer.exe','ninfer-serve.exe','ninfer_bench.exe')){$pending.Enqueue((Join-Path $Bin $exe))}
+    $copied=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach($name in $DirectStorageDlls){
+        Copy-Item -LiteralPath (Join-Path $appsBin $name) -Destination (Join-Path $Bin $name)
+        [void]$copied.Add($name);$pending.Enqueue((Join-Path $Bin $name))
+    }
+    while($pending.Count -gt 0){
+        $file=$pending.Dequeue()
+        $imports=@(&$Dumpbin /nologo /dependents $file|Where-Object{$_ -match '^\s+([A-Za-z0-9_.-]+\.dll)\s*$'}|ForEach-Object{$Matches[1]})
+        if($LASTEXITCODE -ne 0){throw 'runtime DLL import inspection failed'}
+        foreach($import in $imports){
+            if($copied.Contains($import)){continue}
+            $candidate=$null
+            foreach($runtimeRoot in $runtimeRoots){
+                $path=Join-Path $runtimeRoot $import
+                if(Test-Path -LiteralPath $path -PathType Leaf){$candidate=$path;break}
+            }
+            if($null -eq $candidate){
+                if($import -match '^(cudart64_|vcruntime|msvcp|concrt)'){throw ('selected app-local runtime DLL is unavailable: '+$import)}
+                continue
+            }
+            [void]$copied.Add($import)
+            Copy-Item -LiteralPath $candidate -Destination (Join-Path $Bin $import)
+            $pending.Enqueue((Join-Path $Bin $import))
+        }
+    }
+    return @($copied|Sort-Object)
+}
+"""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -860,24 +903,13 @@ if($LASTEXITCODE -ne 0){{throw 'focused tests failed'}}
 $bin={ps_quote(self.builder_bin)}
 New-Item -ItemType Directory -Path $bin|Out-Null
 Copy-Item (Join-Path $build 'apps\\ninfer.exe'),(Join-Path $build 'apps\\ninfer-serve.exe'),(Join-Path $build 'bench\\ninfer_bench.exe') -Destination $bin
-# App-local runtime: the binaries' DLL imports resolved transitively from the build's vcpkg tree,
-# plus the DirectStorage redistributables the build stages beside the apps.
-$vcpkgBin=Join-Path $build 'vcpkg_installed\\x64-windows\\bin'
+# App-local runtime: shared CUDA, /MD CRT and vcpkg imports use their selected toolchain roots,
+# never the target's development-toolkit/PATH installation.
+{NATIVE_RUNTIME_DEPENDENCIES_PS}
 $dumpbin=(Get-Command dumpbin.exe).Source
-$pending=[Collections.Generic.Queue[string]]::new()
-foreach($exe in @('ninfer.exe','ninfer-serve.exe','ninfer_bench.exe')){{$pending.Enqueue((Join-Path $bin $exe))}}
-$copied=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-while($pending.Count -gt 0){{
-  $file=$pending.Dequeue()
-  $imports=@(&$dumpbin /nologo /dependents $file|Where-Object{{$_ -match '^\\s+([A-Za-z0-9_.-]+\\.dll)\\s*$'}}|ForEach-Object{{$Matches[1]}})
-  foreach($import in $imports){{
-    $candidate=Join-Path $vcpkgBin $import
-    if((Test-Path -LiteralPath $candidate -PathType Leaf) -and $copied.Add($import)){{Copy-Item -LiteralPath $candidate -Destination (Join-Path $bin $import);$pending.Enqueue((Join-Path $bin $import))}}
-  }}
-}}
-foreach($name in @({", ".join(ps_quote(name) for name in DIRECTSTORAGE_DLLS)})){{Copy-Item -LiteralPath (Join-Path $build ('apps\\'+$name)) -Destination (Join-Path $bin $name) -Force}}
+$runtimeDlls=@(Copy-NativeRuntimeDependencies -Build $build -Bin $bin -CudaCompiler {ps_quote(self.config.builder_cuda_compiler)} -MsvcRedist ([string]$env:VCToolsRedistDir) -Dumpbin $dumpbin -DirectStorageDlls @({", ".join(ps_quote(name) for name in DIRECTSTORAGE_DLLS)}))
 $items=Get-ChildItem $bin -File|Sort-Object Name|ForEach-Object{{[ordered]@{{name=$_.Name;bytes=$_.Length;sha256=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}}}}
-[Console]::Out.WriteLine(([ordered]@{{status='passed';source_commit=(git -C $source rev-parse HEAD);bundle_sha256={ps_quote(bundle_sha)};cuda_architecture={ps_quote(self.lane.cuda_architecture)};build_profile={ps_quote(self.lane.build_profile)};runtime_dlls=@($copied);files=$items}}|ConvertTo-Json -Depth 6 -Compress))
+[Console]::Out.WriteLine(([ordered]@{{status='passed';source_commit=(git -C $source rev-parse HEAD);bundle_sha256={ps_quote(bundle_sha)};cuda_architecture={ps_quote(self.lane.cuda_architecture)};build_profile={ps_quote(self.lane.build_profile)};runtime_dlls=$runtimeDlls;files=$items}}|ConvertTo-Json -Depth 6 -Compress))
 """
         receipt = self.remote_json(self.config.builder, build_script, timeout=5400)
         return receipt

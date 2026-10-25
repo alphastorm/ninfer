@@ -1095,6 +1095,75 @@ $checks|ConvertTo-Json -Compress
         self.assertEqual(len(result), 10)
         self.assertTrue(all(value is True for value in result.values()), result)
 
+    def test_runtime_collector_copies_selected_cuda_crt_and_transitive_dlls(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            build = root / "build"
+            apps = build / "apps"
+            vcpkg = build / "vcpkg_installed/x64-windows/bin"
+            redist = root / "redist"
+            crt = redist / "x64/Microsoft.VC143.CRT"
+            cuda = root / "cuda/bin"
+            bin_dir = root / "bin"
+            rogue = root / "unselected-path"
+            for path in (apps, vcpkg, crt, cuda / "x64", bin_dir, rogue):
+                path.mkdir(parents=True)
+            for name in ("ninfer.exe", "ninfer-serve.exe", "ninfer_bench.exe"):
+                (bin_dir / name).write_bytes(b"synthetic-import-graph-not-a-native-binary")
+            for name in qualify_native.DIRECTSTORAGE_DLLS:
+                (apps / name).write_bytes(name.encode())
+            (cuda / "x64/cudart64_13.dll").write_bytes(b"selected-cuda")
+            (crt / "vcruntime140.dll").write_bytes(b"selected-crt")
+            (crt / "msvcp140.dll").write_bytes(b"selected-cxx")
+            (vcpkg / "vcruntime140.dll").write_bytes(b"wrong-toolchain-crt")
+            (vcpkg / "libfixture.dll").write_bytes(b"vcpkg-dependency")
+            (vcpkg / "libtransitive.dll").write_bytes(b"transitive-dependency")
+            (rogue / "cudart64_13.dll").write_bytes(b"unselected-path-cuda")
+            dumpbin = root / "synthetic-imports.ps1"
+            dumpbin.write_text("""
+$global:LASTEXITCODE=0
+switch([IO.Path]::GetFileName([string]$args[-1])){
+  'ninfer.exe' {'  cudart64_13.dll';'  vcruntime140.dll';'  libfixture.dll';'  kernel32.dll'}
+  'dstoragecore.dll' {'  msvcp140.dll'}
+  'libfixture.dll' {'  libtransitive.dll'}
+}
+""", encoding="utf-8")
+            failed_dumpbin = root / "failed-import-inspection.ps1"
+            failed_dumpbin.write_text("$global:LASTEXITCODE=9\n", encoding="utf-8")
+            def quote(path: Path) -> str:
+                return qualify_native.ps_quote(str(path))
+
+            result = self.invoke(qualify_native.NATIVE_RUNTIME_DEPENDENCIES_PS + f"""
+$build={quote(build)};$bin={quote(bin_dir)};$cuda={quote(cuda / 'nvcc.exe')};$redist={quote(redist)}
+$names=@(Copy-NativeRuntimeDependencies $build $bin $cuda $redist {quote(dumpbin)} @('dstorage.dll','dstoragecore.dll'))
+Remove-Item -LiteralPath {quote(cuda / 'x64/cudart64_13.dll')}
+$env:PATH={quote(rogue)}+[IO.Path]::PathSeparator+$env:PATH
+$missingRefused=$false;$inspectionRefused=$false
+foreach($suffix in @('missing','inspection')){{
+  $out=Join-Path {quote(root)} $suffix
+  New-Item -ItemType Directory -Path $out|Out-Null
+  foreach($exe in @('ninfer.exe','ninfer-serve.exe','ninfer_bench.exe')){{Copy-Item -LiteralPath (Join-Path $bin $exe) -Destination $out}}
+  try{{
+    $tool=if($suffix -eq 'missing'){{{quote(dumpbin)}}}else{{{quote(failed_dumpbin)}}}
+    Copy-NativeRuntimeDependencies $build $out $cuda $redist $tool @('dstorage.dll','dstoragecore.dll')|Out-Null
+  }}catch{{
+    if($suffix -eq 'missing'){{$missingRefused=$_.Exception.Message -like '*app-local runtime DLL is unavailable: cudart64_13.dll*'}}
+    else{{$inspectionRefused=$_.Exception.Message -like '*import inspection failed*'}}
+  }}
+}}
+@{{names=$names;missing_selected_cuda_refused=$missingRefused;inspection_failure_refused=$inspectionRefused;system_dll_copied=(Test-Path (Join-Path $bin 'kernel32.dll'))}}|ConvertTo-Json -Compress
+""")
+            self.assertEqual(result["names"], sorted([
+                "dstorage.dll", "dstoragecore.dll", "cudart64_13.dll", "vcruntime140.dll",
+                "msvcp140.dll", "libfixture.dll", "libtransitive.dll",
+            ]))
+            self.assertTrue(result["missing_selected_cuda_refused"])
+            self.assertTrue(result["inspection_failure_refused"])
+            self.assertFalse(result["system_dll_copied"])
+            self.assertEqual((bin_dir / "cudart64_13.dll").read_bytes(), b"selected-cuda")
+            self.assertEqual((bin_dir / "vcruntime140.dll").read_bytes(), b"selected-crt")
+            self.assertEqual((bin_dir / "libtransitive.dll").read_bytes(), b"transitive-dependency")
+
 
 if __name__ == "__main__":
     unittest.main()
