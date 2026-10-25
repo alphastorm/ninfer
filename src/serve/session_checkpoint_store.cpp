@@ -546,8 +546,10 @@ private:
             return false;
         }
         try {
-            const std::string key(path);
-            auto [position, inserted] = states_.try_emplace(key);
+            auto position = states_.find(path);
+            const bool inserted = position == states_.end();
+            if (inserted) { position = states_.try_emplace(std::string(path)).first; }
+            const std::string& key = position->first;
             State& state              = position->second;
             if (inserted) {
                 if (offset != 0 || states_.size() > 4096) {
@@ -610,7 +612,7 @@ private:
 
     std::filesystem::path root_;
     std::size_t staging_limit_ = 0;
-    std::map<std::string, State> states_;
+    std::map<std::string, State, std::less<>> states_;
 #ifndef _WIN32
     std::set<std::filesystem::path> dirty_directories_;
 #endif
@@ -1150,6 +1152,7 @@ struct VerifiedFile {
     std::string sha256;
     std::uint32_t alignment = 1;
 };
+using VerifiedFiles = std::map<std::string, VerifiedFile, std::less<>>;
 
 // Serves published payloads to the engine and verifies them as they stream: every payload is
 // consumed exactly once, front to back, and the digest of the bytes handed to the engine must
@@ -1162,7 +1165,7 @@ struct VerifiedFile {
 class DirectoryCheckpointReader final : public ContinuationCheckpointReader {
 public:
     DirectoryCheckpointReader(std::filesystem::path root,
-                              std::map<std::string, VerifiedFile> files,
+                              VerifiedFiles files,
                               std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue,
                               std::shared_ptr<SessionCheckpointStore::Impl> owner,
                               std::string active_key)
@@ -1189,14 +1192,14 @@ public:
     }
 
     std::optional<std::uint64_t> file_size(std::string_view path) const override {
-        const auto found = files_.find(std::string(path));
+        const auto found = files_.find(path);
         return found == files_.end() ? std::nullopt
                                      : std::optional<std::uint64_t>(found->second.bytes);
     }
 
     std::optional<runtime::DurablePayload>
     file_descriptor(std::string_view path) const override {
-        const auto found = files_.find(std::string(path));
+        const auto found = files_.find(path);
         if (found == files_.end()) { return std::nullopt; }
         return runtime::DurablePayload{.path = found->first, .bytes = found->second.bytes,
                                        .sha256 = found->second.sha256,
@@ -1206,7 +1209,7 @@ public:
     bool read_file(std::string_view path, std::uint64_t offset,
                    std::span<std::byte> destination) const override {
         std::lock_guard verify_lock(verify_mutex_);
-        const auto found = files_.find(std::string(path));
+        const auto found = files_.find(path);
         if (found == files_.end() || offset > found->second.bytes ||
             destination.size() > found->second.bytes - offset) {
             verification_failed_ = true;
@@ -1317,7 +1320,7 @@ private:
     };
 
     std::filesystem::path root_;
-    std::map<std::string, VerifiedFile> files_;
+    VerifiedFiles files_;
     std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue_;
     std::shared_ptr<SessionCheckpointStore::Impl> owner_;
     std::string active_key_;
@@ -1517,9 +1520,20 @@ SessionCheckpointSkipMessage format_session_checkpoint_skip(
     const auto& detail = skip.export_detail;
     const bool store_gate = detail.reason == ExportReason::StoreInputInvalid ||
                             detail.reason == ExportReason::StoreStatsInvalid;
-    message.append(skip.reason == Reason::None && store_gate
-                       ? "checkpoint store refused export"
-                       : runtime::session_checkpoint_skip_reason_name(skip.reason));
+    const bool canonical_primary = skip.reason == Reason::None && !store_gate &&
+                                   skip.durable_reason != runtime::DurableReason::None;
+    if (canonical_primary) {
+        message.append(runtime::durable_reason_name(skip.durable_reason));
+    } else {
+        message.append(skip.reason == Reason::None && store_gate
+                           ? "checkpoint store refused export"
+                           : runtime::session_checkpoint_skip_reason_name(skip.reason));
+        if (skip.durable_reason != runtime::DurableReason::None) {
+            message.append(" (reason=");
+            message.append(runtime::durable_reason_name(skip.durable_reason));
+            message.append(")");
+        }
+    }
     if (skip.first_reason != Reason::None && skip.first_reason != Reason::ProgramRejected &&
         skip.first_reason != skip.reason) {
         message.append(" (engine gate: ");
@@ -1954,7 +1968,7 @@ SessionCheckpointStore::load(std::string_view session_sha256,
             manifest.at("files").size() > 4096) {
             throw CheckpointCorruption("checkpoint manifest file set is corrupt");
         }
-        std::map<std::string, VerifiedFile> allowed;
+        VerifiedFiles allowed;
         std::uint64_t verified_bytes        = 0;
         std::uint64_t verified_engine_bytes = 0;
         for (const nlohmann::json& encoded : manifest.at("files")) {

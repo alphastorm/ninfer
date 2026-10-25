@@ -1972,6 +1972,10 @@ int test_v3_manifest_validation_and_publication_guard() {
                           store.status(responses.client_session_sha256, fingerprint())
                                   .at("generation") == saved->generation,
                       "final epoch refusal preserves prior current and exact stale reason");
+    const auto message = format_session_checkpoint_skip(
+        "checkpoint save refused: ", responses.client_session_sha256, skip);
+    failures += check(message.view().find("stale_publication") != std::string_view::npos,
+                      "bounded save diagnostics render the authoritative K7 refusal");
     const auto root = stored_generation_root(temporary.path, responses, saved->generation);
     auto checksum_text = read_file_bytes(root / "checksums.json");
     checksum_text.front() ^= 1;
