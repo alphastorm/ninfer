@@ -145,6 +145,9 @@ public:
     KVHistoryStore& operator=(const KVHistoryStore&) = delete;
 
     [[nodiscard]] KVPrefixRef retain_prefix(KVHistoryHandle history, std::uint32_t frontier);
+    // Retains already initialized pages without a Device row or growth reservation.
+    [[nodiscard]] std::optional<KVHistory>
+    import_history(std::span<const LogicalKVPageHandle> pages, std::uint32_t frontier);
     [[nodiscard]] bool valid(KVHistoryHandle history) const noexcept;
     [[nodiscard]] std::uint32_t capacity() const noexcept;
     [[nodiscard]] std::uint32_t occupied() const noexcept;

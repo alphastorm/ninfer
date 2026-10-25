@@ -643,6 +643,13 @@ void DeviceKVPagePool::release_reservation(std::uint32_t pages) noexcept {
     reserved_pages_ -= pages;
 }
 
+Tensor DeviceKVPagePool::page_plane(DeviceKVPageHandle page, std::size_t plane_index) const {
+    const auto index = physical_index(page);
+    const auto& source = planes_.at(plane_index);
+    return source.slice(geometry().device_plane_order == PagedKVPlaneOrder::PageMajor ? 3 : 2,
+                        index, 1);
+}
+
 void DeviceKVPagePool::zero_pages(std::span<const DeviceKVPageHandle> pages,
                                   cudaStream_t stream) const {
     validate_distinct_pages(pages, "Paged KV zero destination contains duplicate pages");

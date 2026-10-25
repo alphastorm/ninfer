@@ -215,6 +215,9 @@ public:
     [[nodiscard]] std::uint32_t available_pages() const noexcept;
     [[nodiscard]] std::size_t plane_count() const noexcept;
     [[nodiscard]] const Tensor& plane(std::size_t index) const;
+    // Resolve under store serialization. A native page read lease must retain the backing
+    // through every asynchronous consumer of this borrowed single-page plane.
+    [[nodiscard]] Tensor page_plane(DeviceKVPageHandle page, std::size_t plane) const;
 
     [[nodiscard]] std::optional<DeviceKVPageReservation> reserve(std::uint32_t pages) noexcept;
 

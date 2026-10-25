@@ -35,6 +35,14 @@ std::int32_t StateImageStore::ReadLease::device_slot() const {
     return store_->physical_slot(image_);
 }
 
+ConstMemorySpan StateImageStore::ReadLease::host_view() const {
+    if (!store_ || store_->content_epoch(image_) != epoch_)
+        throw std::logic_error("StateImage reader has no current content");
+    const auto& image = store_->require(image_);
+    if (!image.host_slot) throw std::logic_error("StateImage reader has no Host replica");
+    return image.host_slot->span().subspan(0, store_->device_->image_bytes());
+}
+
 StateImageStore::ReadLease StateImageStore::read(Handle handle) {
     auto& object = require(handle);
     if (object.role != StateImageRole::CheckpointImmutable ||
@@ -157,6 +165,33 @@ std::optional<StateImageStore::Handle> StateImageStore::reserve_destination() no
 
 std::optional<StateImageStore::Handle> StateImageStore::reserve_logical_destination() noexcept {
     return allocate(StateImageRole::ReservedDestination, false);
+}
+
+std::optional<StateImageStore::Handle> StateImageStore::reserve_host_destination() noexcept {
+    if (!host_ || !free_object_count_) return std::nullopt;
+    auto allocation = host_->allocate(device_->image_bytes());
+    if (!allocation) return std::nullopt;
+    auto image = allocate(StateImageRole::ReservedDestination, false);
+    if (!image) return std::nullopt;
+    objects_[image->index_].host_slot.emplace(std::move(*allocation));
+    return image;
+}
+
+MemorySpan StateImageStore::writable_host_view(Handle handle) {
+    auto& image = require(handle);
+    if (image.role != StateImageRole::ReservedDestination || !image.host_slot ||
+        image.device_slot || image.source_pins || image.destination_pinned ||
+        has_pending_replica(image))
+        throw std::logic_error("Host StateImage initialization has no exclusive reservation");
+    return image.host_slot->span().subspan(0, device_->image_bytes());
+}
+
+void StateImageStore::complete_host_initialization(Handle handle) {
+    (void)writable_host_view(handle);
+    auto& image = require(handle);
+    image.content_epoch = next_epoch();
+    image.host_slot->publish();
+    image.role = StateImageRole::CheckpointImmutable;
 }
 
 void StateImageStore::complete_initialization(Handle handle) {
