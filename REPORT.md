@@ -1,30 +1,106 @@
 # Harness port — upstream master `64d10fbf`
 
-- Branch: `rebase/harness`; base: upstream `64d10fbf`. Reference: shipped RTX 5090 source `1302d639`; build identity/native packaging API matches the native reference. No community code copied.
-- Build provenance: modular `cmake/BuildIdentity.cmake`, public `BuildInfo`, generated header, per-compile Git source verification, and artifact/GPU-free `--version` for CLI/server/benchmark. Shared registration patch was supplied and authorized by Integrator. No-Git archives cannot claim clean provenance; the lifecycle builder materializes detached real Git.
-- Container environment prerequisites: Infra commits `1422cb510`, `ee39c4626`, `8f3ab12e6`, and supervised helper checkpoint `8700b2b21` are consumed. The two helper files include that checkpoint's complete prerequisite Windows-path/Docker-routing/slot interface rather than a partial cherry-pick. They preserve real Git, forward provenance build arguments, isolate the driver stub to link-only use, supply host Python oracles, and hold leases through owned-container signal cleanup. GPU image: `ov-build-env:master-64d10fbf-r2`, ID `sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1`; superseded images are not valid GPU proof.
-- Harness: new profile/controller/A-B/NCU tools, smoke battery, release packager, container lifecycle and pinned io_uring seccomp policy, plus their host-only regression tests. Upstream TTFT/corpus/concurrency implementations remain authoritative rather than replacing them with the older fork versions.
-- Master adaptation: current Q4/Q5 public flags and `ninfer_qwen3_5_mtp_round_bench`; public `ninfer_bench --profile-measured` supplies the measured Nsight Systems boundary. Removed dead private post-mixer/candidate/activation-state calls and historical C16/split2 conclusions; these are obsolete benchmark internals, not removed runtime product behavior. New packets collect real public measurements instead.
-- Receipt changelog: agent smoke schema 2 now proves Chat/Responses JSON-schema success and explicitly distinguishes default product coverage from `--contract public` vanilla coverage. Status consumers pin schema 2 and retain required real attestation/reuse/scheduler counters, including `private_input_replay`. Corpus/TTFT request-log consumers and fixtures move to schema 30 without changing diagnostic calculations. Preparation schema 2, capture schema 3, current public Q4 manifest/summary schema 2; historical Q4 schema 1 remains strictly readable. Profile image revision 3 includes hwloc/liburing. Package/lifecycle/publication receipt schemas remain unchanged. Details: `tools/bench/README.md`.
-- CI: `.github/workflows/build.yml` installs NVIDIA apt CUDA 13.1 on `ubuntu-latest`, caches ccache, builds host targets plus bounded native 120a core/Q4 objects, runs selected host CTest/tooling contracts, and separates weekly/manual full builds. Windows MSVC configure-only activates with PortableCore's manifest; no native/GPU qualification is claimed. Publication workflow now requires a validated immutable master-compatible base image rather than the shipped old base digest. No workflow dispatch, publication, tag, issue, or PR operation performed.
-- Host evidence: `test_sm120_*.py` **30 passed** (13.078 s); release packaging **5 passed, 1 built-binary test skipped** (2.359 s); lifecycle **15 passed** (0.428 s); agent protocol **12 passed** (0.003 s), including cache-parity and protocol-specific thinking-wire regressions. The initial lifecycle fixture run exposed writable OS-temp ancestors; fixtures now use private repository-owned temporary directories without weakening production path validation.
-- TTFT/corpus evidence: initial targeted pytest run **56 passed, 2 failed**; both failures were the remaining runtime-interval fixture default pinned to schema 29. Migrated that default to schema 30; both exact failing tests then **passed** (0.05 s). No diagnostic assertion was removed. System Python lacked pytest; an isolated ignored test environment supplied it.
-- K7 audit deliverable: `local://K7-status-consumers.md` inventories every observed status/JSONL environment/counter reader across product scripts, native controllers/packaged smoke/qualification, and engine smoke. Sent to ServePort, EngineCache, Integrator, Contracts, and ProductOps. UUID/device/name, exact runtime identity, actual scheduler/reuse counters, and perf accounting remain mandatory; null diagnostics are not replacement proofs. The distinct native packaged battery and strict product startup-key classifier need atomic owner updates.
-- CI proof at tooling commit `83401266722b7a03e88214eae73e019f2053b506`: [run 40150211739](https://github.com/alphastorm/ninfer/actions/runs/40150211739) **success**. Linux CUDA/host/bounded-compile job ran 4 min 15 s. Windows job completed its explicit manifest-detection boundary only (PortableCore absent on that checkpoint); full weekly job skipped. This receipt is not a claim that the later environment correction was exercised by that run.
-- Leased compiled proof at `abdb7d1151abf5b7d64af5f8eee439fb22a8e66e`: all **636** build steps completed; all **6** release tests passed (0.344 s) with real driver ABI and zero visible devices, including all three artifact-free version commands. `package.py` produced the Linux tar, checksums and SPDX: tar SHA-256 `1cec9a577f6831d18206cfc3cb5a88fd17f9cb9071ff820bf3121145a3246a33`, SBOM `a6cc13427dbbc4925f12b0d8d6629266c8dda751709c9a5fc8bf227f3c615d97`. Lease `20261025T015655Z-F1-harness-acceptance-335471` ran 239 s, then failed at a newly ported smoke assertion; no leftover containers.
-- That live run observed vanilla master startup healthy in 15.6 s and exact greedy output/finish accounting (prompt 19, output 2, stop token) for both stream modes, but cache-hit counts legitimately changed **0 → 10** on the repeat. The fork's full usage-dictionary equality was therefore an invalid harness assumption. Both smoke clients now compare exact output/finish/token accounting while separately validating, not equating, each request's cached-token count. The host regression also rejects changed completion/reasoning/total counts and invalid cache counts; no budget/assertion suppression or server change.
-- After that correction, leased `aec88cf38` proof completed all **7** incremental build steps, all **6** release tests (0.377 s), and the full `serve_contract.py` battery: count 15, Chat output 2/stop, Responses input 19/output 2, image prompt 85, Anthropic end_turn. Package tar SHA-256 `6deb4e4059cbb5f6a53e964aec8dd66bc819e82f45d74586b9bd3c13bb3e12f9`. The 45 s batch then caught a second client-port error: Responses rejects Chat's top-level `enable_thinking`. Both Responses call sites now use its documented `reasoning.effort=none`; schema and lineage fixtures enforce the protocol-specific body. Source audit additionally found master's missing-parent code `response_not_found`, distinct from the shipped product's `previous_response_not_found` (ServePort confirmed the latter remains); explicit public/product profiles require their own code rather than accepting either.
-- Complete corrected vanilla smoke remains to be recorded before hand-off. Full G1/G2/G3 and native-lane qualification remain lead/integration gates. GPU-less full CI compiles the complete apps but does not try to execute driver-linked binaries without the real driver ABI.
+## Delivery state
 
-## Host commands exercised
+- Branch: `rebase/harness`. Accepted executable/tooling source: `3faeff4427e306549c13c01048ce882b3e13fcb3`; upstream base: `64d10fbf9f8e6bfc79ab0570b94674c5b9997929`. A report-only successor does not change the exercised code.
+- Sources: shipped RTX 5090 fork `1302d639` and its native-compatible packaging/provenance API. No community code copied. Upstream TTFT, corpus, concurrency, scheduler, grammar and public benchmark implementations remain authoritative.
+- All four assigned acceptance boundaries passed: vanilla-master/v3 `serve_contract.py`, vanilla-master/v3 explicit-public `agent_protocol.py`, real compiled Linux package creation, and branch CI. This is not G1/G2/G3, native Windows, or full product/private-session qualification.
+- Shared CMake/app provenance registration was supplied and authorized by Integrator. Infra prerequisites `1422cb510`, `ee39c4626`, `8f3ab12e6`, and supervised-helper checkpoint `8700b2b21` are consumed. The two helper files include the complete prerequisite Windows-path/Docker-routing/slot interface, not undefined partial cherry-pick hunks.
 
-```text
+## Changed surfaces
+
+| Surface | Files / anchors | Result |
+|---|---|---|
+| Verified build identity | `cmake/BuildIdentity.cmake:1`, `cmake/verify_build_source.cmake:21`, `include/ninfer/build_info.h:1`, `src/core/build_info.cpp:1` | Same nine build identity fields as shipped; clean Git commit/state rechecked before product compilation; no-Git archives cannot claim clean provenance. |
+| Artifact-free version entry points | `apps/cli/main.cpp:259`, `apps/serve/main.cpp:32`, `bench/inference/ninfer_bench.cpp:162`; shared root/core CMake | `--version` returns before artifact parsing or GPU-context construction. Binaries still need the driver ABI at dynamic-load time. |
+| Public/product smoke clients | `tools/smoke/serve_contract.py:35,148`, `tools/smoke/agent_protocol.py:104,282,719`, `tests/test_agent_protocol.py:1` | Auth helpers, strict stream/output/budget accounting, schema-success tests, typed tools/results, Responses lineage; explicit public versus default product coverage. |
+| Profiling/controller tools | `tools/bench/run_sm120_mtp3_profile.sh:1`, `run_sm120_q4_mtp3_profile.sh:1`, `summarize_ncu_q4.py:163`; other added controller/A-B tools; `tests/test_sm120_*.py` | Current public Q4/Q5 CLI, native round timing, measured Engine Nsight capture, immutable preparation/counter gates, and host regression coverage. |
+| Current log consumers | `tools/bench/run_serve_corpus.py:89`, `tools/bench/ttft/diagnostics.py:12`, `tests/bench/ttft/test_measurements.py:299` | Request-log schema 30; TTFT diagnostic calculations unchanged. |
+| Packaging/lifecycle | `tools/release/package.py:1`, `tools/lifecycle/ninfer_container.py:824`, pinned io_uring seccomp JSON; release/lifecycle tests | Full Linux and native-layout APIs carried; deterministic archives, checksums, SPDX, measured identity and confined container operations preserved. |
+| CI/publication tooling | `.github/workflows/build.yml:1`, `.github/workflows/publish-runtime-image.yml:23,66` | CUDA 13 apt toolkit, ccache, bounded 120a compilation and host tests; separate full builds; manifest-gated MSVC configure; explicit immutable runtime base input. |
+| Documentation | `tools/bench/README.md:7` | Invocation/coverage authority and complete receipt/consumer changelog. |
+
+## Exercised evidence
+
+Lease: `20261025T030535Z-F1-harness-public-contract-460272`, holder `F1`, priority 2, 15-minute cap. The self-contained configure/build/package/smoke batch exited **0 after 46 seconds**, with **0 owned leftovers and 0 unowned containers left running**. Persistent incremental build: **7 completed steps**. The preceding clean build completed **636 steps**.
+
+Environment: `ov-build-env:master-64d10fbf-r2`, immutable image ID `sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1`; external common helpers at source checkpoint `8700b2b21cef2e76ed7a3270ffaa9b4a30f80af8`. The smoke server was the unpatched vanilla-master baseline, with the read-only published v3 artifact, BF16 KV, 8,192 context/KV tokens, one lane, Vision, greedy decoding and thinking disabled. Server and observers ran inside the same container on loopback port **18160**; no invalid external WSL HTTP observer. Server tests left `CUDA_VISIBLE_DEVICES` absent. Artifact-free binary/package tests used the real driver ABI with zero visible CUDA devices, not a runtime driver stub.
+
+| Check | Observed result |
+|---|---|
+| `serve_contract.py` | PASS: count_tokens **15**; Chat output **2**, stop; Responses input **19**, output **2**; image prompt **85**; Anthropic `end_turn`. Responses stream/store/get/input-items/continue/delete and exact greedy stream reconstruction completed. |
+| `agent_protocol.py --contract public` | PASS, schema **2**: Chat and Responses JSON-schema decoding both true; typed forced tool/result-array round trip; stream/non-stream stop with **2** completion tokens; first turn, continuation, **2** forks, parent delete **200**, subsequent get **404**, surviving descendants retrieved and continued. Tool-result continuation legitimately ended at its output budget (`length`). |
+| Product/private coverage labeling | Public receipt explicitly reports status/session identity false and private/isolation paths/statuses null. Default product battery remains fail-closed on schema-2 identity, real scheduler/reuse counters and session isolation; it never auto-falls back to public. |
+| Compiled release identity/package tests | **6 passed in 0.337 s**, including all three selected app `--version` commands without a model or visible GPU. |
+| Actual `package.py` output | Linux tar, checksum list and SPDX created from clean source with build profile `harness`, Release, architecture `120a`; receipt schema **1**, dirty false. |
+| GitHub branch CI | [Run 40156691541](https://github.com/alphastorm/ninfer/actions/runs/40156691541) **success** at the accepted source SHA. Linux CUDA/host/bounded-120a job: **2 min 43 s**. Windows job exercised manifest detection only because PortableCore was absent on this isolated branch; weekly/manual full build skipped. |
+| Host profiling tests | **30 passed**, 13.078 s. |
+| Host lifecycle tests | **15 passed**, 0.428 s. Private repository-owned temporary fixtures preserve, rather than bypass, writable-ancestor validation. |
+| Host protocol tests | **12 passed**, 0.003 s; additionally the explicit public-parent error regression passed in isolation after its final change. |
+| TTFT/corpus Python tests | Initial local run: 56 passed, two schema-29 fixture defaults failed; both exact failures passed after migration to 30. Full targeted tests then succeeded in branch CI. No diagnostic assertion was removed. |
+
+Actual package files:
+
+| Asset | SHA-256 |
+|---|---|
+| `ninfer-qwen38-rtx5090-v0.13.0-linux-x86_64-cuda13.1.tar.gz` | `921b5be125e8998de2c39d671d6730e65fede4f5f18428e284a20e2b6b92a9d2` |
+| `ninfer-qwen38-rtx5090-v0.13.0-linux-x86_64-cuda13.1.spdx.json` | `a3497d59021a42de4c0cae876613edc7e90387e7e2bc6cae175fa72fad310b4c` |
+
+Complete sanitized primary outputs and subject/image/helper/lease bindings: `local://HarnessAcceptance.json`. Private raw logs and packages remain in the holder's evidence workspace, not Git. No credentials, model text, checkpoint payloads or private host paths are committed.
+
+## Commands exercised
+
+`SRC` is a real detached checkout of the accepted source SHA; `BUILD` is the holder's persistent build directory; `ROOT` is its workspace; `COMMON` is the operator-provided helper directory; `V3_MODEL` is the read-only v3 `qwen3_8_27b.ninfer`. Private absolute paths are intentionally not recorded.
+
+```bash
 python3.13 -m unittest discover -s tests -p 'test_sm120_*.py'
 python3.13 -m unittest discover -s tests -p test_release_package.py
 python3.13 -m unittest discover -s tests -p test_lifecycle_container.py
 python3.13 -m unittest discover -s tests -p test_agent_protocol.py
-<isolated-python> -m pytest -q tests/bench/ttft/test_measurements.py tests/test_serve_corpus.py
-<isolated-python> -m pytest -q tests/bench/ttft/test_measurements.py::test_global_intervals_include_unowned_demotion_and_shutdown_tail tests/bench/ttft/test_measurements.py::test_missing_runtime_fields_remain_explicit
+python3.13 -m unittest discover -s tests -p test_agent_protocol.py -k responses_lineage
+# pytest ran in an isolated ignored environment; the host interpreter lacked it.
+python -m pytest -q tests/bench/ttft/test_measurements.py tests/test_serve_corpus.py
+python -m pytest -q \
+  tests/bench/ttft/test_measurements.py::test_global_intervals_include_unowned_demotion_and_shutdown_tail \
+  tests/bench/ttft/test_measurements.py::test_missing_runtime_fields_remain_explicit
+
+NINFER_BUILD_HOLDER=F1 NINFER_BUILD_ENV_IMAGE="$R2_IMAGE_ID" \
+  "$COMMON/build.sh" "$SRC" "$BUILD" \
+    -DNINFER_BUILD_BENCHMARKS=ON -DNINFER_BUILD_PROFILE=harness \
+    -DNINFER_UPSTREAM_BASE_SHA=64d10fbf9f8e6bfc79ab0570b94674c5b9997929 \
+    -- ninfer ninfer-serve ninfer_bench
+# In a real-driver container with CUDA_VISIBLE_DEVICES empty:
+NINFER_TEST_BINARY="$BUILD/apps/ninfer" \
+NINFER_TEST_SERVE_BINARY="$BUILD/apps/ninfer-serve" \
+NINFER_TEST_BENCH_BINARY="$BUILD/bench/ninfer_bench" \
+  python3 -m unittest discover -s tests -p test_release_package.py
+python3 "$SRC/tools/release/package.py" --source "$SRC" \
+  --ninfer "$BUILD/apps/ninfer" --ninfer-serve "$BUILD/apps/ninfer-serve" \
+  --output-dir "$ROOT/package-$SOURCE_SHA" --release-version v0.13.0 \
+  --platform linux-x86_64-cuda13.1 \
+  --upstream-base-sha 64d10fbf9f8e6bfc79ab0570b94674c5b9997929 \
+  --release-head-sha "$SOURCE_SHA" --build-profile harness
+# The following server and clients ran together inside the GPU container:
+"$VANILLA_BUILD/apps/ninfer-serve" "$V3_MODEL" \
+  --host 127.0.0.1 --port 18160 --model-id q38-ninfer \
+  --max-context 8192 --kv-capacity 8192 --max-concurrency 1 \
+  --prefill-chunk 1024 --kv-dtype bf16 --vision --greedy --no-thinking \
+  --log-stats-interval-ms 0
+python3 "$SRC/tools/smoke/serve_contract.py" \
+  --base-url http://127.0.0.1:18160 --model q38-ninfer --health-timeout 180
+python3 "$SRC/tools/smoke/agent_protocol.py" --contract public \
+  --base-url http://127.0.0.1:18160 --model q38-ninfer --health-timeout 30
 ```
 
-The built-app test is enabled only by explicit `NINFER_TEST_BINARY`, `NINFER_TEST_SERVE_BINARY`, and `NINFER_TEST_BENCH_BINARY` selections. Host fixtures prove tool control flow/contracts, not GPU inference, restart durability, or native packaging qualification.
+## Compatibility decisions and closed failures
+
+- Preserve exact greedy output, finish reason, generated/reasoning/total token accounting and output budgets. Validate each cached-token count, but do not equate cold and hot request cache telemetry: the live failure showed identical prompt 19/output 2/stop with cache **0 → 10**. Both clients and a negative regression cover this class.
+- Use each protocol's real thinking wire: Chat `enable_thinking=false`, Responses `reasoning.effort=none`. Responses schema and lineage fixtures reject the Chat-only flag. Public missing-parent continuation requires master's `response_not_found`; product requires shipped `previous_response_not_found`, confirmed by ServePort. Neither profile accepts both codes as a fallback.
+- Keep receipt version changes explicit: agent smoke 2 (schema success and coverage labeling), status consumers 2, request log 30, profile preparation 2/capture 3/public Q4 manifest+summary 2, profile image revision 3. Historical Q4 schema-1 input remains strictly readable. Linux package/identity schema 1, Windows schema 2, lifecycle and image-publication receipt schemas are unchanged.
+- Drop only obsolete fork-private benchmark APIs/conclusions (post-mixer candidate/C16/activation-state chains); use master's public Q4/Q5 and Engine routes instead. No runtime product family was removed. No real NCU/Nsight performance or kernel-parity result is claimed by these host profiling tests.
+
+## Integration ownership / remaining program gates
+
+- K7 audit delivered at `local://K7-status-consumers.md` to ServePort, EngineCache, Integrator, Contracts, ProductOps and NativeOps: field-to-consumer table, mandatory non-null attestation/UUID/restart/reuse/performance fields, optional diagnostic fields, and atomic schema migration points.
+- NativeOps owns subsequent Windows-specific `package.py` changes and native controllers/packaged smoke. ProductOps owns strict product startup-key and save-receipt consumers. The default product battery still needs the integrated status-2/private/durable server proof; the vanilla public receipt intentionally cannot claim it.
+- Actual MSVC configure/build/native qualification, G1 restart, G2 decode parity, G3 interaction/failure matrix and G4 review remain their owners' gates. The Windows CI job is implemented but its configure phase was not exercised on this isolated pre-PortableCore branch. No tags, releases, GHCR pushes, workflow dispatches, upstream posts or production-controller operations were performed.
