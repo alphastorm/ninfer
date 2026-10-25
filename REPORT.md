@@ -1,68 +1,138 @@
-# Native architecture enablement
+# Portable host core (C1)
 
-## Scope and invariants
+**Acceptance is not established.** The real builds exposed architecture-owned compiler blockers before the full host-suite/server-link gates. The implementation and exact exercised results are separated below.
 
-- Base: upstream master `64d10fbf`; branch `rebase/arch-enable`. Single-profile builds: `86`, `89`, or `120a`; the default remains `120a`. Shared root profile wiring is Integrator commit `15a4f2a78` (applied here as `83b1b683`).
-- Native qualification target: dense Qwen3.8 27B text, INT8 KV, 131,072-token capacity, MTP with three draft tokens, one request. DFlash2 must link; fitting its weights is not claimed by this slice.
-- Program, scheduler, context ownership, and native packaging are unchanged by this slice. Windows host portability is supplied by PortableCore. Release review is the lead-owned G4 gate.
+## Scope and ownership
 
-## Gating table
+- Base: upstream master `64d10fbf`; branch `rebase/portable-core`. Architecture dependency: `rebase/arch-enable` code through `b5bd4926ff595cefc12f6bae786727dfc017214b`. Its independent report remains available with `git show b5bd4926:REPORT.md`.
+- Owns core I/O/CPU, platform/dependency CMake, logging and media acquisition. Shared CMake/arithmetic, request-log process identity, artifact alignment, native test interposition and Python artifact I/O edits were explicitly coordinated with the integration/owning slices.
+- Additional authorized MSVC operator fix: `ed99ff3fb`, six files under `src/ops/common/cpu` and `src/ops/moe`. No kernel routes, numerical tolerances, CPU admission feature checks or global ISA baseline were changed.
+- No component publication, production installation, model mutation or build-host GPU use was performed. This is a slice qualification, not the integrated release gate.
 
-| Execution family | sm_120a | sm_89 | sm_86 |
-|---|---|---|---|
-| BF16/F16/INT8 MMA and Q4/Q5/Q6/Q8 A16 | Existing routes | Retained | Retained |
-| Programmatic dependent launch | Existing behavior | Ordinary stream ordering | Ordinary stream ordering |
-| Dense BF16 TMA-selected tiles | Existing TMA | cp.async staging of the same MMA tiles | cp.async staging of the same MMA tiles |
-| FP8 activation MMA | Block-scaled unit-scale opcode | Plain Ada E4M3 MMA | Explicit refusal |
-| FP8 TMA-selected tiles | Existing TMA/split-K | Ordinary full-K MMA; no split-K partial allocation | Explicit refusal |
-| FP8 and NVFP4 A16 weight dequantization | Existing routes | Retained; portable widening | Retained; portable widening |
-| NVFP4 A4 | Existing non-RDC/TMA and MMA | Explicit refusal | Explicit refusal |
-| Dense BF16/INT8 KV attention | Existing routes | Retained | Retained |
-| Dense FP8 KV attention | Existing routes | Retained | Explicit refusal |
-| Dense NVFP4/K8V4 KV attention | Existing routes | Explicit refusal | Explicit refusal |
-| Block-scaled FP8/NVFP4 MoE | Existing non-RDC routes | Explicit refusal | Explicit refusal |
-| Groupwise-integer MoE and CPU experts | Existing routes | Retained | Retained |
-| Striped gated-residual projection | Existing TMA selection | Existing folded cp.async route | Existing folded cp.async route |
+## Native blocker table (§7)
 
-The shared non-RDC archive exists only for `120a`. Each excluded family supplies current-signature throwing entrypoints. Unsupported activation plans never silently substitute A16 arithmetic. The public Engine-options rejection of unsupported native KV formats is EngineCache-owned.
+| Original blocker | Resolution | Evidence boundary |
+|---|---|---|
+| `O_CLOEXEC` / `pread` / `O_DIRECT`, `statx`, `aligned_alloc` | Common range/alignment API; POSIX implementation preserved in `file_posix.cpp`; Windows `CreateFileW`, overlapped reads, optional unbuffered mode and per-handle storage/alignment queries in `file_windows.cpp`. Native handle is pointer-width, not a truncated descriptor. | File tests cover Unicode, sparse offsets above 4 GiB, ownership/move, short EOF, empty files and direct alignment. |
+| Linux-only liburing queue | Linux source selected only on Linux. Windows has a real IOCP backend, queue-owned `ReOpenFile` handles, stable preallocated OVERLAPPED slots, exact completion/error delivery, wake and shutdown draining. No stub or disabled PLE route. | Shared queue suite plus real native byte-range-lock error fixture. Linux submission fault interposition retained. |
+| Four `unsigned __int128` consumers | Exact two-limb `core/uint128.h`; migrated attention resource accounting, context cost, resource-manager cross-products and fractional MiB parsing. Saturation remains explicit; triangular factors are halved before multiplying. | Compile-time assertions, deterministic Python big-integer oracle, existing context/resource/options suites. |
+| `ioctl(TIOCGWINSZ)` | Native console width via `GetConsoleScreenBufferInfo`; original 120-column fallback. Also native TTY and `localtime_s` handling. | Real native pipe/standard-handle logging capture, not a disabled test. |
+| pkg-config-only dependencies | Linux pkg-config unchanged. Windows manifest/vcpkg FFmpeg, CURL and hwloc; no Windows liburing. One shared CUDA runtime selected before all targets; `/MD` CRT; pinned DirectStorage SDK. Host-only switches are passed to nvcc through `-Xcompiler`. | Real vcpkg install and native configure; link proof is recorded below, separately from configure. |
+| `<cpuid.h>` | MSVC `<intrin.h>` / `__cpuidex` / `_xgetbv`; original feature mask and hwloc topology/strict binding retained. | CPU system, task-pool and executor suites; Windows processor-group-aware current-CPU observation. |
+| POSIX media sockets | Winsock initialization and native DNS error handling; `ws2_32` linkage. Native-character root-prefix comparison avoids a lossy Unicode conversion. | Compiled/link coverage; no external-network behavior is asserted by this slice. |
+| Platform / architecture gate | Linux or Windows x86-64; exactly one explicit CUDA architecture profile (`120a`, `89`, `86`), default `120a`. Architecture/device gates remain ArchEnable-owned. | Native profile `89`; Linux profile `120a`. This report does not substitute configure success for numerical GPU qualification. |
 
-The upstream Q8 family already selects dynamic shared memory above 48 KiB and calls `cudaFuncSetAttribute`; it is retained rather than transplanting the fork-local W8 kernels. Dense BF16/INT8 attention also already has explicit dynamic-shared-memory launch support.
+## Additional contracts
 
-## Test coverage and exclusions
+- `src/core/io/durable_file.{h,cpp}` is the K6 host-only primitive library: exclusive binary creation, no-follow binary reading, exact stdio transfer with EINTR retry, flush, replace, directory creation/sync and anchored removal. Paths reject traversal and unsafe platform forms; a normal `.` root remains supported.
+- POSIX directory walks use relative `openat` with `O_NOFOLLOW`; successful `mkdirat` fences the pinned parent. `remove_tree` handles regular files and final links without following them, walks directories relative to open descriptors and fences the outer parent after removal.
+- Windows ancestors are pinned with sharing that prevents rename and reparse conversion. Recursive removal opens single counted child names relative to those handles with `NtCreateFile`, enumerates with `NtQueryDirectoryFile`, and deletes by handle; reparse points are removed themselves, never followed.
+- Binding Windows durability policy was corrected after the real sharing diagnostic: `FlushFileBuffers` on the staged file, handle-anchored `SetFileInformationByHandle(FileRenameInfoEx)` with replacement/POSIX flags and a single leaf relative to the pinned destination, then `FlushFileBuffers` on that parent handle. This Ex policy requires Windows 10 1709 or newer and NTFS; the program targets Windows 11. Deny-WRITE/DELETE pins and reparse checks remain intact. Common parent file objects are borrowed, not reopened with incompatible sharing. Standalone `sync_directory` remains a non-throwing no-op and reports `dir_sync: "ntfs-write-through"`; Linux reports `"fsync"`. Authoritative K6 correction: Contracts `23c65039`. No power-loss experiment is claimed.
+- Re-expressed dev `4ec903a0` in `src/artifact/materializer.cpp`: each file's actual offset/memory alignment drives read planning; aligned host interiors remain in-place, boundaries are staged; pinned staging retains the original owner plus alignment slack, and peak staging accounting includes that requested slack. A synthetic geometry test forwards real Linux statx / Windows handle-info calls, and GPU interposition calls the real runtime.
+- Native CUDA failure counterparts keep artifact materialization, expert-cache and PLE tests registered. GNU `--wrap` stays Linux-only; Windows wrappers resolve real CUDA functions. No fake success, weakened assertion, numerical tolerance change or blanket skip was introduced.
+- Python artifact I/O keeps Linux `pread`/`pwrite`/`fdatasync` behavior and uses explicit-offset Win32 I/O on real CRT handles. The real-file test covers binary control bytes, concurrent disjoint offsets, sparse files beyond 4 GiB and writeback. Windows cache-discard is explicitly advisory/no-op; file flush is not omitted.
+- Additional MSVC blockers discovered by the real build: per-object `/arch:AVX2` or `/arch:AVX512` replaces ignored GCC ISA switches; BF16 instructions remain explicit and feature-gated. `NINFER_UNREACHABLE()` selects compiler semantics, and scalar half conversion uses the same F16C instruction through compiler-portable vector intrinsics.
 
-- `tests/ops/excluded_paths.h` lists exact permitted architecture refusal messages; arbitrary CUDA/runtime errors are not exclusions.
-- `ninfer_architecture_contract_test` exercises the native activation, attention, and block-scaled MoE refusal entrypoints. It must fail if an excluded entrypoint returns normally.
-- Linear, LinearAdd, SwiGLU, segmented projection, GDN record/snapshot, and dense attention retain supported numerical cases. Unsupported A4/A8 arms are named explicitly. Existing accumulated failures are preserved. A16 cases cannot be accepted as architecture refusals.
-- Native GDN snapshot coverage includes large-T A16 cases instead of asserting an unsupported activation mode executes. Block-scaled MoE is reported as excluded, not numerically qualified.
-- No numerical tolerance was relaxed. No GPU correctness or performance pass is claimed until the native binaries are exercised.
+## Observed toolchain and dependencies
 
-## Commands and observed evidence
+| Item | Observed value |
+|---|---|
+| Native compiler | VS 2022 BuildTools; toolset `14.44.35207`; MSVC `19.44.35228.0` |
+| Native CUDA | Toolkit `13.3.73` |
+| Native build tools | CMake `4.4.2`; Ninja `1.13.2`; Python `3.13` |
+| vcpkg baseline | `4bca8fd8654e5ba76f92661db7bfe954768ad8ef` |
+| Runtime ports installed | CURL `8.21.0#1`; FFmpeg `8.1.2#3` with zlib; hwloc `2.11.2`; zlib `1.3.2#1` |
+| Native CRT redistributable | MSVC redist directory `14.44.35112` |
+| DirectStorage | SDK `1.3.0`, archive SHA-256 `8ab6c1082537565388b79050d94fdd7f5f437cd0f1d909e7b19f786042b97177` |
+| Linux compiler / CUDA | GNU `13.3.0`; CUDA `13.1.115` in the lease build environment |
+| Linux qualification image | `ov-build-env:master-64d10fbf-r2`, ID `sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1` |
 
-Working-directory prefixes are omitted for privacy; `common/build.sh` is the program-provided build helper. Initial builds used holder `C2`, priority 2, a 20-minute lease, and persistent architecture-specific build directories. After the lead restricted the primary lane to critical work, the next queued compile was cancelled and moved to the secondary CPU-only lane.
+Build-host toolchain facts and realized vcpkg dependency versions were sent to ArchEnable and ProductOps. Native builds use an isolated installed-dependency tree and 12 workers under the shared CPU-slot lock. Physical machine names, absolute machine paths and raw build receipts remain private.
 
-```sh
-common/build.sh "$SOURCE" "$BUILD/native-sm86" \
-  -DCMAKE_CUDA_ARCHITECTURES=86 -DBUILD_TESTING=ON -- \
-  ninfer-serve ninfer_architecture_contract_test
-common/build.sh "$SOURCE" "$BUILD/native-sm89" \
-  -DCMAKE_CUDA_ARCHITECTURES=89 -DBUILD_TESTING=ON -- \
-  ninfer-serve ninfer_architecture_contract_test
+## Commands and proof boundaries
+
+`SOURCE`, `BUILD`, `VCPKG_ROOT`, `VCPKG_INSTALLED`, `PYTHON`, `COMMON` and `VSINSTALLDIR` below denote private operator-provided locations. The argument lists are preserved without publishing those locations.
+
+Native environment and configure:
+
+```powershell
+$vs = "$env:VSINSTALLDIR\Common7\Tools\VsDevCmd.bat"
+$lines = & cmd.exe /d /s /c ('"' + $vs + '" -arch=x64 -host_arch=x64 >nul && set')
+if ($LASTEXITCODE -ne 0) { throw 'VS environment failed' }
+foreach ($line in $lines) {
+  $i = $line.IndexOf('=')
+  if ($i -gt 0) {
+    [Environment]::SetEnvironmentVariable($line.Substring(0, $i), $line.Substring($i + 1), 'Process')
+  }
+}
+cmake -S $SOURCE -B $BUILD -G Ninja -DCMAKE_BUILD_TYPE=Release `
+  -DCMAKE_CUDA_ARCHITECTURES=89 -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=ON `
+  -DNINFER_BUILD_BENCHMARKS=OFF `
+  "-DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+  "-DVCPKG_INSTALLED_DIR=$VCPKG_INSTALLED" -DVCPKG_TARGET_TRIPLET=x64-windows `
+  "-DPython3_EXECUTABLE=$PYTHON"
 ```
 
-- Initial compile attempt (`20261025T010734Z-C2-arch-86-89-compile-212431`) failed during CMake configuration after 4 seconds: split projection and GDN input-convolution still registered sources against the omitted non-RDC archive. Both family manifests and their current-signature rejection entrypoints were corrected in `980b4966`.
-- The next lease (`20261025T011530Z-C2-arch-86-89-compile2-223772`) ended after 1 second before configuration: a shallow branch clone did not contain the pinned parent revision. The driver now explicitly fetches the full 40-character commit before detaching; this was a source-staging failure, not compiler evidence.
-- Compile lease `20261025T012416Z-C2-arch-86-89-compile3-239028` used candidate `980b4966ff0b002632c1f74857fa510be23ecc64`. **sm_86 compiled and linked `ninfer-serve` and `ninfer_architecture_contract_test`**, completing all 619 build steps. The build compiled the upstream DFlash2 loader and linked the server with its model libraries. No GPU execution was performed.
-- The same lease then failed the sm_89 build: the native FP8 forward declaration did not carry the default row policy, and NVCC's host compilation rejected four-argument callers. The first correction placed defaults on the first declaration. Combined lease runtime was 259 seconds.
-- Windows links, sm_89 completion, and native GPU qualification are not yet proven.
-- Native v3 artifact supplied by Infra: SHA-256 `5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7`, 18,210,749,936 bytes, 1,118 tensors. Infra reports v3 framing/directory validation; this is not a model-decode proof.
-- The secondary CPU build uses source `940b000c365887a8f4c3ad03a4a039e92039f396`, image `ov-build-env:master-64d10fbf-r2-cpu-local`, 12 workers, and the shared two-slot lock. Its driver builds `ninfer-serve` and the architecture-contract target, obtains the exact ops target names with `ctest -L ops --show-only=json-v1`, and builds those targets for `89`, then `86`. It does not execute GPU tests in that CPU-only image.
-- That secondary attempt **failed** during sm_89 compilation: NVCC host emission reported a repeated `Rows` default despite the source definition having none. The final correction removes both launcher defaults entirely and explicitly passes the unchanged `Fp8IdentityRows{}` policy at every formerly four-argument caller (projection, residual add, both split projections, and GDN). Custom-row callers were already explicit. This correction has **not been rebuilt**; the user requested handoff after the current step. No ops target batch or sm_86 rebuild ran after this failure.
+The native target list is `ninfer-serve`, the host targets below, artifact/expert-cache/PLE helpers, and every target named by `ctest --test-dir $BUILD -L ops --show-only=json-v1`. The manifest must be nonempty and is exported with relative executable names, labels and skip codes, without private source/backtrace paths.
 
-## Provenance and remaining gates
+```powershell
+cmake --build $BUILD --parallel 12 --target @targets
+ctest --test-dir $BUILD -C Release --output-on-failure -R `
+  '^ninfer_(cpu_.*|file|durable_file|read_queue|uint128.*|artifact_cpu_materialization|artifact_file_io|ple_disk_prepare_host|context_cost|resource_manager|pretty_logging|serve_options)_test$'
+```
 
-- Behavioral references: shipped native fork and the upstream architecture/kernel contracts. Community ports were design references; no community source file was copied.
-- Required remaining proof: final-revision Linux compilation for both native profiles, MSVC link for both profiles, ops suites on their respective physical GPUs with the explicit exclusions, and one server-path model decode on each GPU with tokens/second and configured/measured context recorded. The assignment is not acceptance-complete.
-- Native runs use isolated work directories and loopback ports `18200–18209`, never installed release roots or the shipped port.
-- The lead additionally authorized `ninfer_artifact_materialization_test`, `ninfer_expert_cache_test`, and the PLE prepare GPU Python harness on each native GPU. PortableCore supplies the executables, DLLs, stdlib-only Python inputs, and the ops manifest. Python 3.13.15 was observed on the native runtime host.
-- Test-only full-UUID `CUDA_VISIBLE_DEVICES` masking is explicitly authorized because upstream tests use CUDA ordinal zero. Receipts record the mask; skip 77 is accepted only for the named block-scaled MoE test with its exact exclusion message. Server probes instead leave that variable absent, use `CUDA_DEVICE_ORDER=PCI_BUS_ID` plus numeric `--device`, and require the server-start GPU UUID to match.
-- No native ops execution, real-model decode, throughput measurement, or native release qualification is claimed in this report.
+Focused native core build/test, while the independent operator graph is blocked:
+
+```powershell
+$env:CUDA_VISIBLE_DEVICES = ''
+cmake --build $BUILD --parallel 12 --target ninfer_cpu_system_test ninfer_cpu_task_pool_test `
+  ninfer_cpu_executor_test ninfer_file_test ninfer_durable_file_test `
+  ninfer_read_queue_test ninfer_uint128_test
+ctest --test-dir $BUILD -C Release --output-on-failure `
+  -R '^ninfer_(cpu_.*|file|durable_file|read_queue|uint128.*|artifact_file_io)_test$'
+```
+
+Linux build and tests are one lease batch, persistent build directory and 15-minute cap:
+
+```sh
+export NINFER_BUILD_HOLDER=C1
+export NINFER_BUILD_ENV_IMAGE=ov-build-env:master-64d10fbf-r2
+"$COMMON/build.sh" "$SOURCE" "$BUILD" \
+  -DCMAKE_CUDA_ARCHITECTURES=120a -DBUILD_TESTING=ON -DNINFER_BUILD_BENCHMARKS=OFF -- \
+  ninfer-serve ninfer_cpu_system_test ninfer_cpu_task_pool_test ninfer_cpu_executor_test \
+  ninfer_file_test ninfer_durable_file_test ninfer_read_queue_test ninfer_uint128_test \
+  ninfer_artifact_materialization_test ninfer_expert_cache_test ninfer_ple_disk_prepare_test \
+  ninfer_context_cost_test ninfer_resource_manager_test ninfer_pretty_logging_test ninfer_serve_options_test
+"$COMMON/run-in-env.sh" --gpu --env CUDA_VISIBLE_DEVICES= \
+  --mount "$SOURCE" --mount "$BUILD" --seccomp "$COMMON/ninfer_io_uring_seccomp.json" \
+  --name host-tests -- ctest --test-dir "$BUILD" --output-on-failure \
+  -R '^ninfer_(cpu_.*|file|durable_file|read_queue|uint128.*|artifact_cpu_materialization|artifact_file_io|ple_disk_prepare_host|context_cost|resource_manager|pretty_logging|serve_options)_test$'
+"$COMMON/run-in-env.sh" --gpu --mount "$SOURCE" --mount "$BUILD" \
+  --seccomp "$COMMON/ninfer_io_uring_seccomp.json" --name gpu-io-tests -- \
+  ctest --test-dir "$BUILD" --output-on-failure \
+  -R '^ninfer_(artifact_materialization|expert_cache|ple_disk_prepare_gpu)_test$'
+```
+
+The first Linux test container exposes the real driver library with zero visible devices. GPU I/O checks run without that mask. The older stub-driver image is not GPU qualification evidence.
+
+### Results established so far
+
+| Source / batch | Observed outcome |
+|---|---|
+| `c6b5d5ada`, first Linux iteration | Configure succeeded; build stopped after 506/648 steps, wall `153.70 s`, because LP64 `auto` deduction mixed `uint64_t` and `ULL`. Fixed with explicit limb types in `46dd34def`; no tests ran in that failed iteration. |
+| `2237f6467`, first native host iteration | Configure and all 11 vcpkg package installs succeeded; build stopped around 103/173 at Linux-only `sched.h` in the executor test. Replaced with group-aware Windows processor observation in `b0f18412`; no tests ran in that failed iteration. |
+| `3594a1377`, native full operator iteration | Native core library linked; build failed at 203/1471 on `_cvtsh_ss`, `__builtin_unreachable` and ignored GCC ISA switches in MoE CPU sources. Exact operator fixes are in `ed99ff3fb`. No host-test or server-link pass is claimed for this iteration. |
+| `ed99ff3fb`, source transport | Stopped before configure/build (`1.336 s`): the newly created bundle exported the branch, not a `HEAD` ref. Operator transport now fetches `refs/heads/rebase/portable-core`; source behavior was not changed to mask this failure. |
+| `ed99ff3fb`, corrected native transport/full build | Source import and configure succeeded; build reached 98/1289, `101.566 s`, then MSVC `C2719` rejected a 128-aligned by-value `descriptors` parameter in `src/ops/linear/kernels/bf16/bf16_a16_tma_mma.cuh:116`. The earlier CPU ISA/intrinsic diagnostics were passed. No full host-suite or server-link pass is claimed. ArchEnable2 supplied its native-only TMA gate fix as `ca85f2573`; that fix is not qualified by this failed build. |
+| `3594a1377`, Linux lease job `20261025T020633Z-C1-portable-core-final-360834` | Exit 1 after 36 lease seconds; build wall `32.87 s`, stopped after 71/367 steps. NVCC host emission repeated the FP8 `Rows` default (`fp8_template_launch.cuh:94`, first declaration `fp8_a8_tma_mma.cuh:22`). The imported `b5bd4926` removes the defaults, but this older-source failure is not evidence that the correction passes. No tests ran; cleanup reported zero leftover/unowned containers. |
+| `ed99ff3fb`, focused native core batch | All seven executables built/linked (29 tasks); 8/9 cases passed, `2.42 s`. Only durable replacement failed with sharing violation. CPU system/task pool/executor, wide arithmetic plus exact oracle, file I/O, IOCP queue and Python artifact real-file tests passed. No skip was reported. |
+| Native sharing diagnosis | New temporary-file experiments: parent-chain share mask `3` (READ/WRITE, deny DELETE) allowed `MoveFileExW(...,9)`; mask `5` (READ/DELETE, deny WRITE) failed with error 32; mask `7` allowed it. The lead rejected weakening the pins and selected the anchored-rename implementation in `5a5885513`. No sleep/retry or broad error suppression was added. |
+| `5a5885513`, first anchored native replacement | Configure succeeded and the changed library/test linked (16 tasks); 8/9 cases passed, `2.38 s`. Durable replacement reached `SetFileInformationByHandle(FileRenameInfoEx)` but returned error 87 before the parent flush. The variable-length buffer was corrected to include the full structure, trailing array element/padding and a zero-terminated leaf in `26bfbd582`, with a one-character target-name regression. |
+
+The full native link/host-suite and Linux shim gates remain incomplete; these rows are not an acceptance claim. The focused native core batch builds seven CPU/I/O/math executables and selects nine core/Python cases with zero visible CUDA devices. It is not a substitute for the blocked full suite. The architecture dependency's separate corrections and future native numerical/decode checks must not be mistaken for C1 test results.
+
+## Preserved behavior and remaining gates
+
+- Linux keeps POSIX direct I/O, liburing, pkg-config and directory fsync. Windows receives real platform implementations rather than omitted execution paths. No shipped family is intentionally dropped by this slice.
+- The only explicitly different durability primitive is the lead-approved Windows directory-sync policy above. Native GPU arithmetic, integrated durable restart, concurrency/keep-warm, package/controller and release gates remain their owning slices' responsibilities.
+- Final acceptance requires successful native host suites and `ninfer-serve` link, the Linux shim batch, and coordinated Windows GPU execution of artifact/expert-cache/PLE counterparts. Compilation or a registered test is never reported as an exercised pass.
