@@ -1223,6 +1223,11 @@ runtime::DurableReason pressure_reason(const Victim& victim) {
     return runtime::DurableReason::None;
 }
 
+template <class Control>
+void retire_pressure_pins(Control& control) {
+    if constexpr (requires { control.retire_release_pins(); }) { control.retire_release_pins(); }
+}
+
 int test_ordinary_pressure_preserves_same_size_corrupt_victim() {
     using namespace runtime;
     TemporaryDirectory temporary;
@@ -1280,6 +1285,23 @@ int test_ordinary_pressure_preserves_same_size_corrupt_victim() {
                       victim.outcome == PressureCheckpointOutcome::Pending &&
                       pressure_reason(victim) == DurableReason::PayloadDigestMismatch,
                       "ordinary pressure released the last resident copy on metadata-only coverage");
+    if (failures) { return failures; }
+    const auto replacement = store.save(responses, fingerprint(), [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) {
+            return DurableExportResult{.state = DurableExportState::Refused};
+        }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                 .payload_bytes = payload.size()});
+    }, publish_fixture);
+    if (!replacement) { return check(false, "replacement save after corruption failed"); }
+    control.notify_progress();
+    PressureCheckpointVictim repaired{responses.client_session_sha256, responses.latest_response_id};
+    failures += check(control.settle({&repaired, 1}) && validations == 2 &&
+                      store.erase(responses.client_session_sha256) == SessionCheckpointEraseResult::Conflict,
+                      "validated ordinary release failed to pin its generation through native release");
+    retire_pressure_pins(control);
+    failures += check(store.erase(responses.client_session_sha256) == SessionCheckpointEraseResult::Erased,
+                      "ordinary release pin outlived its worker turn");
     return failures;
 }
 
