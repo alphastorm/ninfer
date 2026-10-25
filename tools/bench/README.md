@@ -51,6 +51,11 @@ protocols, tool round trip, Responses lineage/delete behavior, JSON schemas on
 Chat and Responses, and streaming. A public receipt never claims product
 identity or session-isolation coverage. Product status failures never trigger a
 fallback to the public battery.
+The product replay check uses a deterministic long **user** context: master's
+cost-first cache may legitimately prefer fresh prefill for a tiny prompt. The
+repeat must still select a private path, and the same prompt in another session
+must select only root or a public shared-prefix path. Both retain request-correlated
+decode counters and greedy streaming parity. Public mode retains its tiny prompt.
 Thinking controls follow each wire contract: Chat uses `enable_thinking: false`;
 Responses uses `reasoning: {"effort": "none"}`, not the Chat-only top-level flag.
 Public missing-parent continuation checks require master's `response_not_found`;
@@ -123,6 +128,10 @@ branch is not sufficient for initial registration of a dispatch-only workflow.
 
 ### Receipt and consumer changelog
 
+- Product private-replay input now has meaningful private user context, without
+  changing schema **2** or weakening the private/foreign path assertions. Failed
+  repeats include whitelisted cache/counter evidence, never identity or request
+  content.
 - `ninfer_agent_protocol_smoke` schema **2** replaces schema **1**'s
   structured-output-rejection expectation with Chat/Responses JSON-schema
   success. It adds `contract`; product identity flags remain false in public
