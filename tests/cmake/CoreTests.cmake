@@ -20,7 +20,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   ninfer_add_test(ninfer_io_uring_checkpoint_backend_test
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_io_uring_checkpoint_backend.cpp"
             ${PROJECT_SOURCE_DIR}/src/runtime/platform/linux/io_uring_checkpoint_backend.cpp
-    LIBRARIES ninfer_checkpoint_contract)
+    LIBRARIES ninfer_checkpoint_contract ninfer_durable_io)
   target_compile_definitions(ninfer_io_uring_checkpoint_backend_test
     PRIVATE NINFER_IO_URING_TESTING=1)
   set_tests_properties(ninfer_io_uring_checkpoint_backend_test
