@@ -341,6 +341,36 @@ void native_pinned_destination(const std::filesystem::path& root) {
     CloseHandle(pin);
 }
 
+void native_extended_paths(const std::filesystem::path& fixture) {
+    const auto root = io::extended_local_path(fixture / std::wstring(180, L'x') /
+                                               std::wstring(80, L'y'));
+    require(root.native().starts_with(L"\\\\?\\") && root.native().size() - 4 > MAX_PATH &&
+                io::extended_local_path(root) == root,
+            "extended local-drive spelling is not stable beyond MAX_PATH");
+    for (const auto* unsafe : {L"\\\\?\\UNC\\server\\share\\entry",
+                              L"\\\\.\\C:\\entry",
+                              L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\entry",
+                              L"\\\\?\\C:relative"}) {
+        rejects([&] { (void)io::extended_local_path(unsafe); });
+        rejects([&] { io::create_directories(unsafe); });
+    }
+    for (const auto* unsafe : {L"..\\outside", L"payload:stream", L"trailing.", L"trailing "}) {
+        rejects([&] { (void)io::extended_local_path(root / unsafe); });
+        rejects([&] { io::create_directories(root / unsafe); });
+    }
+    auto nul = (root / L"nul").native();
+    nul.push_back(L'\0');
+    rejects([&] { (void)io::extended_local_path(nul); });
+    io::create_directories(root);
+    native_pinned_destination(root);
+    native_identity_guards(root);
+    const auto outside = fixture / "extended-outside";
+    io::create_directories(outside);
+    write(outside / "sentinel", std::byte{42});
+    native_reparse_guard(root, outside);
+    require(io::remove_tree(root), "extended anchored cleanup failed");
+}
+
 void native_case(std::string_view name) {
     Fixture fixture;
     if (name == "pinned-destination") {
@@ -354,6 +384,8 @@ void native_case(std::string_view name) {
         native_identity_guards(fixture.root);
     } else if (name == "directory-publication") {
         directory_publication(fixture.root);
+    } else if (name == "extended-paths") {
+        native_extended_paths(fixture.root);
     } else {
         throw std::invalid_argument("unknown native durable test case");
     }
@@ -537,6 +569,7 @@ void run() {
     native_reparse_guard(fixture.root, outside);
     native_identity_guards(fixture.root);
     native_pinned_destination(fixture.root);
+    native_extended_paths(fixture.root);
 #endif
     const auto garbage = fixture.root / "garbage";
     io::create_directories(garbage / "nested");

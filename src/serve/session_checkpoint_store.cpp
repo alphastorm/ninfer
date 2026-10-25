@@ -1916,6 +1916,11 @@ SessionCheckpointStore::SessionCheckpointStore(SessionCheckpointStoreOptions opt
         throw std::invalid_argument("checkpoint read queue is unavailable: " +
                                     std::string(options_.read_queue->unavailable_reason()));
     }
+#ifdef _WIN32
+    // Native anchored writes already support long names. Metadata scans must use the
+    // same names without depending on executable manifests or machine-wide Win32 policy.
+    options_.root = io::extended_local_path(options_.root);
+#endif
     io::create_directories(options_.root / "sessions");
     io::create_directories(options_.root / ".tombstones");
     sync_directory(options_.root / "sessions");

@@ -38,7 +38,7 @@ ninfer_add_test(ninfer_durable_file_test
   LIBRARIES ninfer_durable_io)
 set_tests_properties(ninfer_durable_file_test PROPERTIES LABELS "host")
 if(WIN32)
-  foreach(case IN ITEMS pinned-destination reparse-guard identity-guards directory-publication)
+  foreach(case IN ITEMS pinned-destination reparse-guard identity-guards directory-publication extended-paths)
     add_test(NAME ninfer_durable_file_${case}_test COMMAND ninfer_durable_file_test ${case})
     set_tests_properties(ninfer_durable_file_${case}_test PROPERTIES LABELS "host;durable")
   endforeach()
