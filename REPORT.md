@@ -147,6 +147,8 @@ Docker Desktop **4.96.3**, Linux engine **29.9.2**, WSL kernel **6.18.33.2** and
 
 The local CPU-only recipe image is **`ov-build-env:master-64d10fbf-r2-cpu-local`**, ID **`sha256:62a4feee8f308cde61095355ff11977986ecce388ad4f057c23014950b681326`**. Its build took **222.544 seconds**. Two simultaneous real CMake builds acquired different locks (`slot-0` and `slot-1`) and passed: `ninfer_public_api_test` target in **24.590 seconds**, `ninfer_cpu_system_test` target in **25.573 seconds**. Their CTest executions passed in **0.493 / 0.397 seconds**. This proves the two CPU slots and path/config bridge, not a full GPU application build or GPU qualification. `cpu-lane.json` records the image, timings, slot markers and exit codes.
 
+**Cancellation limitation:** the two-slot proof covers normal process lifetime only. The current helpers have no TERM cleanup trap for the Windows Docker client; an externally timed-out wrapper can release its flock while the owned container keeps compiling. `--rm` is not a cancellation guarantee. An interrupted operator must inspect and stop only its exact owned container before starting a replacement build; an EXIT trap printing zero after TERM is not a successful build/test result. This boundary was reported by the first long consumer and escalated to the lead without repeating its failed run.
+
 The CPU-ready announcement and exact detached invocation were broadcast to every live peer. The invocation inside the existing Windows detached launcher is:
 
 ```sh
