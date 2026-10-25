@@ -208,6 +208,46 @@ void settled(const DurablePoint& point, const ProgramImpl& p) {
     else check(point.dflash_context_frontier <= point.frontier);
 }
 
+struct ImportMetadata {
+    DurableCheckpointStats stats;
+    std::uint64_t resident_bytes = 0;
+    std::vector<std::shared_ptr<const detail::PreparedCaptureBacking>> identities;
+};
+ImportMetadata validate_import_metadata(ProgramImpl& p, const DurableCheckpointSet& set,
+    const ContinuationCheckpointReader& reader, const DurableLimits& limits) {
+    codec::validate(set, limits);
+    const auto& native = layout(p);
+    if (set.architecture != "qwen3_5" || set.native_codec != native.continuation_codec ||
+        set.state_layout_sha256 != native.state_layout_sha256 || set.pools.size() != native.pools.size())
+        throw Refusal{DurablePrepareState::IdentityMismatch, DurableReason::FingerprintMismatch};
+    for (std::size_t i = 0; i < set.pools.size(); ++i)
+        if (set.pools[i].layout != native.pools[i])
+            throw Refusal{DurablePrepareState::IdentityMismatch, DurableReason::FingerprintMismatch};
+    for (const auto& point : set.points) settled(point, p);
+    for (const auto& state : set.states) check(state.bytes == native.state_bytes);
+    ImportMetadata metadata;
+    for (const auto& file : set.payloads) {
+        const auto descriptor = reader.file_descriptor(file.path);
+        check(descriptor && descriptor->path == file.path && descriptor->bytes == file.bytes &&
+            descriptor->sha256 == file.sha256 && descriptor->alignment == file.alignment,
+            DurableReason::PayloadDigestMismatch);
+        check(file.bytes <= UINT64_MAX - metadata.resident_bytes);
+        metadata.resident_bytes += file.bytes;
+    }
+    const auto index_file = reader.file_descriptor("engine/index.cbor");
+    check(index_file && index_file->alignment == 1 &&
+          index_file->bytes == codec::encode(set).size(), DurableReason::PayloadSizeMismatch);
+    check(index_file->bytes <= UINT64_MAX - metadata.resident_bytes);
+    metadata.stats.payload_bytes = metadata.resident_bytes + index_file->bytes;
+    metadata.stats.frontier_tokens = metadata.stats.restored_tokens = set.points[set.endpoint].frontier;
+    metadata.stats.points = set.points.size();
+    metadata.stats.states = set.states.size();
+    for (const auto& pool : set.pools) metadata.stats.pages += pool.pages.size();
+    metadata.identities.reserve(set.identities.size());
+    for (const auto& saved : set.identities) metadata.identities.push_back(restore_identity(saved, p));
+    return metadata;
+}
+
 struct CopyRows {
     const std::byte* source = nullptr;
     std::size_t destination = 0, source_pitch = 0, destination_pitch = 0, width = 0, rows = 0;
@@ -528,6 +568,39 @@ DurableReason ImportReservation::reason() const noexcept { return impl_ ? impl_-
 DurableCheckpointStats ImportReservation::stats() const noexcept { return impl_ ? impl_->stats : DurableCheckpointStats{}; }
 bool ImportReservation::valid() const noexcept { return impl_ && impl_->owner && impl_->state == DurablePrepareState::Prepared; }
 
+CheckpointValidation Program::validate_checkpoint_import(const DurableCheckpointSet& set,
+    const ContinuationCheckpointReader& reader, const DurableLimits& limits) const {
+    CheckpointValidation result;
+    try {
+        const auto metadata = validate_import_metadata(*impl_, set, reader, limits);
+        result.stats = metadata.stats;
+        const auto bytes = static_cast<std::size_t>(std::min({limits.staging_bytes,
+            metadata.resident_bytes, std::uint64_t{4U << 20}}));
+        check(bytes != 0);
+        auto scratch = std::make_unique_for_overwrite<std::byte[]>(bytes);
+        for (const auto& file : set.payloads) {
+            for (std::uint64_t offset = 0; offset < file.bytes;) {
+                const auto count = static_cast<std::size_t>(std::min<std::uint64_t>(bytes, file.bytes - offset));
+                check_read(reader.read_file(file.path, offset, {scratch.get(), count}), reader);
+                offset += count;
+            }
+        }
+        check_read(reader.verify_complete(), reader);
+        result.state = CheckpointValidationState::Validated;
+        result.reason = DurableReason::None;
+    } catch (const Refusal& failure) {
+        result.state = failure.state == DurablePrepareState::Unavailable ? CheckpointValidationState::Unavailable :
+            failure.state == DurablePrepareState::IdentityMismatch || failure.state == DurablePrepareState::PolicyDisabled
+                ? CheckpointValidationState::IdentityMismatch : CheckpointValidationState::Corrupt;
+        result.reason = failure.reason;
+    } catch (const std::invalid_argument&) {
+        result.reason = DurableReason::InvalidIndex;
+    } catch (const std::overflow_error&) {
+        result.reason = DurableReason::InvalidIndex;
+    }
+    return result;
+}
+
 ImportReservation Program::prepare_checkpoint_import(const DurableCheckpointSet& set,
     const ContinuationCheckpointReader& reader, const DurableLimits& limits) {
     auto out = std::make_unique<ImportReservation::Impl>();
@@ -537,35 +610,11 @@ ImportReservation Program::prepare_checkpoint_import(const DurableCheckpointSet&
         if (!p.context_cache.enabled) throw Refusal{DurablePrepareState::PolicyDisabled, DurableReason::CacheDisabled};
         if (p.has_context_operation() || p.pending_transaction_)
             throw Refusal{DurablePrepareState::CapacityRefused, DurableReason::TransactionBusy};
-        codec::validate(set, limits);
-        const auto& native = layout(p);
-        if (set.architecture != "qwen3_5" || set.native_codec != native.continuation_codec ||
-            set.state_layout_sha256 != native.state_layout_sha256 || set.pools.size() != native.pools.size())
-            throw Refusal{DurablePrepareState::IdentityMismatch, DurableReason::FingerprintMismatch};
-        for (std::size_t i = 0; i < set.pools.size(); ++i)
-            if (set.pools[i].layout != native.pools[i])
-                throw Refusal{DurablePrepareState::IdentityMismatch, DurableReason::FingerprintMismatch};
-        for (const auto& point : set.points) settled(point, p);
-        for (const auto& state : set.states) check(state.bytes == native.state_bytes);
-        for (const auto& file : set.payloads) {
-            const auto descriptor = reader.file_descriptor(file.path);
-            check(descriptor && descriptor->path == file.path && descriptor->bytes == file.bytes &&
-                descriptor->sha256 == file.sha256 && descriptor->alignment == file.alignment,
-                DurableReason::PayloadDigestMismatch);
-            check(file.bytes <= UINT64_MAX - out->stats.payload_bytes);
-            out->stats.payload_bytes += file.bytes;
-        }
-        out->stats.frontier_tokens = out->stats.restored_tokens = set.points[set.endpoint].frontier;
-        out->stats.points = set.points.size(); out->stats.states = set.states.size();
-        for (const auto& pool : set.pools) out->stats.pages += pool.pages.size();
+        auto metadata = validate_import_metadata(p, set, reader, limits);
+        out->stats = metadata.stats;
         capacity(p.host_context_arena && p.host_kv_extents &&
-                 out->stats.payload_bytes <= p.host_context_arena->free_bytes());
-        const auto index_file = reader.file_descriptor("engine/index.cbor");
-        check(index_file && index_file->alignment == 1 &&
-              index_file->bytes == codec::encode(set).size(), DurableReason::PayloadSizeMismatch);
-        out->stats.payload_bytes += index_file->bytes;
-        std::vector<std::shared_ptr<const detail::PreparedCaptureBacking>> identities;
-        for (const auto& saved : set.identities) identities.push_back(restore_identity(saved, p));
+                 metadata.resident_bytes <= p.host_context_arena->free_bytes());
+        auto& identities = metadata.identities;
         out->slots.reserve(set.points.size()); out->records.reserve(set.points.size());
         out->images.reserve(set.states.size()); out->pages.reserve(set.pools.size());
         out->histories.reserve(set.histories.size());

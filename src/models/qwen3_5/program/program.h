@@ -442,6 +442,16 @@ private:
     friend class Program;
 };
 
+enum class CheckpointValidationState : std::uint8_t {
+    Validated, Unavailable, Corrupt, IdentityMismatch
+};
+
+struct CheckpointValidation {
+    CheckpointValidationState state = CheckpointValidationState::Corrupt;
+    runtime::DurableReason reason = runtime::DurableReason::InvalidIndex;
+    runtime::DurableCheckpointStats stats;
+};
+
 class Program {
 public:
     using ContextResources = qwen3_5::ContextResources;
@@ -471,6 +481,10 @@ public:
     [[nodiscard]] ImportReservation prepare_checkpoint_import(
         const runtime::DurableCheckpointSet&, const runtime::ContinuationCheckpointReader&,
         const runtime::DurableLimits&);
+    // Reader has consumed index.cbor; verify all remaining bytes without native reservations.
+    [[nodiscard]] CheckpointValidation validate_checkpoint_import(
+        const runtime::DurableCheckpointSet&, const runtime::ContinuationCheckpointReader&,
+        const runtime::DurableLimits&) const;
     [[nodiscard]] std::vector<CheckpointHandle> commit_import(ImportReservation&&);
     [[nodiscard]] static runtime::DurableCheckpointSet decode_checkpoint_index(
         std::span<const std::byte>, const runtime::DurableLimits&);
