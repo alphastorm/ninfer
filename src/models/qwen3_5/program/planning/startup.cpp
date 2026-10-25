@@ -797,8 +797,18 @@ void validate_target_options(const execution::ModelProfile& profile, DeviceConte
         }
         break;
     }
-    if (device.compute_capability() != 120) {
-        throw std::invalid_argument("Qwen3.5 family runtime requires compute capability 12.0");
+#if defined(NINFER_SM86)
+    constexpr int required_capability = 86;
+#elif defined(NINFER_SM89)
+    constexpr int required_capability = 89;
+#else
+    constexpr int required_capability = 120;
+#endif
+    if (device.compute_capability() != required_capability) {
+        throw std::invalid_argument(
+            "Qwen3.5 family runtime requires compute capability " +
+            std::to_string(required_capability / 10) + "." +
+            std::to_string(required_capability % 10));
     }
 }
 

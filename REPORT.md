@@ -79,6 +79,14 @@ common/build.sh "$SOURCE" "$BUILD/native-sm89" \
 
 ## Continued final-candidate qualification
 
+- The first sm_86 server start reached runtime planning, then rejected the GPU
+  with the upstream hard-coded compute-capability-12.0 requirement. Admission now
+  requires the capability of the compiled single-profile target (8.6, 8.9 or 12.0);
+  mismatched devices still fail before runtime preparation. The initial sm_86 ops
+  batch passed 91 targets with the one authorized block-scaled-MoE exclusion;
+  architecture contract, artifact materialization, expert cache and selected-MTP
+  loading passed. Server rebuild/decode and the corrected PLE invocation remain
+  required before that lane is accepted.
 - The first sm_89 GPU batch exposed an illegal access in the existing FP8 SwiGLU
   negative-gate oracle. The ordinary-MMA adapter inherited the TMA schedule's
   32 producer threads, although its launch contains only consumer warps. The
