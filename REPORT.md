@@ -44,7 +44,7 @@ The fork's no-declarations parser fixtures are expressed with explicit untyped t
 
 ## Verification
 
-Not run yet. Required bounded lease build and corpus commands are staged next. No CUDA compilation or tests run on the workstation.
+First bounded secondary-lane build reached 507 of 591 steps and exposed a public/internal `ChatMessage` name-lookup collision in the new history-contract signature. Fixed both declaration and definition to explicitly name `ninfer::ChatMessage`; the changed-source incremental build and corpus run are next. No CUDA compilation or tests ran on the workstation. Superseded queued primary-lane jobs were cancelled before execution when the lead opened the two-slot CPU lane.
 
 Planned targeted build/test targets: `ninfer_tool_call_parser_test`, `ninfer_qwen_frontend_test`, `ninfer_qwen_tool_constraints_test`, `ninfer_json_schema_test`, and the existing JSON/tool independent-schema oracles. No formatter, linter, project-wide suite, live server, port binding, or model run is part of this slice.
 
