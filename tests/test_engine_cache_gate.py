@@ -25,6 +25,9 @@ def startup() -> dict:
             "memory": {"device_budget_bytes": 32000 * GATE.MIB,
                        "runtime_reservation_bytes": 12000 * GATE.MIB,
                        "cuda_graph_rebuild_estimate_bytes": 1024 * GATE.MIB,
+                       "cuda_graph_calibration_increment_bytes": 30 * GATE.MIB,
+                       "cuda_graph_calibration_retained_bytes": 30 * GATE.MIB,
+                       "startup_retained_bytes": 30 * GATE.MIB + 4096,
                        "available_after_startup_bytes": 256 * GATE.MIB}}
 
 
@@ -39,10 +42,20 @@ class StartupGateTests(unittest.TestCase):
 
     def test_graph_reservation_growth_fails_even_if_the_server_is_healthy(self) -> None:
         baseline = startup()
-        current = copy.deepcopy(baseline)
-        current["memory"]["cuda_graph_rebuild_estimate_bytes"] += 1
-        with self.assertRaisesRegex(GATE.GateError, "cuda_graph_reservation_growth"):
-            GATE.validate_startup(current, baseline, UUID)
+        for field in GATE.GRAPH_FIELDS:
+            with self.subTest(field=field):
+                current = copy.deepcopy(baseline)
+                current["memory"][field] += 1
+                with self.assertRaisesRegex(GATE.GateError, "cuda_graph_reservation_growth"):
+                    GATE.validate_startup(current, baseline, UUID)
+
+    def test_zero_legacy_estimate_uses_real_retained_calibration(self) -> None:
+        baseline = startup()
+        baseline["memory"]["cuda_graph_rebuild_estimate_bytes"] = 0
+        summary = GATE.validate_startup(baseline, baseline, UUID)
+        self.assertEqual(summary["memory"]["cuda_graph_rebuild_estimate_bytes"], 0)
+        self.assertEqual(summary["memory"]["cuda_graph_calibration_retained_bytes"],
+                         30 * GATE.MIB)
 
     def test_refused_context_or_wrong_shape_does_not_pass(self) -> None:
         baseline = startup()

@@ -27,6 +27,8 @@ MIB = 1 << 20
 SHAPE = {"max_context": 131072, "max_concurrency": 2, "prefill_chunk": 1024,
          "kv_cache": "bf16", "speculative_backend": "dflash2", "speculative_draft_window": 7,
          "proposal_head": "optimized", "cuda_graph": True, "vision": True}
+GRAPH_FIELDS = ("cuda_graph_rebuild_estimate_bytes", "cuda_graph_calibration_increment_bytes",
+                "cuda_graph_calibration_retained_bytes", "startup_retained_bytes")
 MEMORY_FIELDS = ("device_budget_bytes", "minimum_runtime_reservation_bytes",
                  "runtime_reservation_bytes", "cuda_graph_rebuild_estimate_bytes",
                  "cuda_graph_prepare_increment_bytes", "cuda_graph_calibration_increment_bytes",
@@ -61,9 +63,14 @@ def validate_startup(record: dict, baseline: dict, gpu_uuid: str) -> dict:
     require(environment.get("gpu_uuid", "").lower() == gpu_uuid.lower(), "selected_gpu_mismatch")
     total = environment.get("total_device_memory_bytes", 0)
     require(31 * 1024 * MIB <= total <= 32 * 1024 * MIB, "not_a_32_gib_device")
-    graph = memory.get("cuda_graph_rebuild_estimate_bytes", 0)
-    ceiling = baseline["memory"]["cuda_graph_rebuild_estimate_bytes"]
-    require(isinstance(graph, int) and 0 < graph <= ceiling, "cuda_graph_reservation_growth")
+    # Master reports a legitimate zero in the legacy rebuild-estimate field. Its calibration
+    # and retained backing, not an invented positive allowance, define the measured ceiling.
+    for field in GRAPH_FIELDS:
+        value, ceiling = memory.get(field), baseline["memory"].get(field)
+        require(isinstance(value, int) and isinstance(ceiling, int),
+                "graph_calibration_metrics_missing")
+        require(value <= ceiling and (field != GRAPH_FIELDS[0] or value >= 0),
+                "cuda_graph_reservation_growth")
     budget = memory.get("device_budget_bytes", 0)
     require(0 < budget <= total and 0 < memory.get("runtime_reservation_bytes", 0) <= budget,
             "runtime_reservation_exceeds_device_budget")
@@ -175,6 +182,7 @@ def run_arm(args: argparse.Namespace, baseline: dict, grace_ms: int, root: Path)
     command = [str(args.binary), str(args.artifact), "--host", "127.0.0.1", "--port", str(args.port),
                "--api-key", key, "--model-id", "engine-cache-gate", "--device", str(args.device),
                "--max-context", "131072", "--kv-capacity", "auto", "--max-concurrency", "2",
+               "--pending-timeout-ms", str(baseline["engine"]["pending_timeout_ms"]),
                "--prefill-chunk", "1024", "--kv-dtype", "bf16", "--spec", "dflash2",
                "--draft-tokens", "7", "--lm-head-draft", "--vision", "--preserve-thinking",
                "--device-state-slots", "2", "--host-context-mib", args.host_context_mib,
@@ -247,8 +255,9 @@ def main() -> int:
     baseline = document.get("startup", document)
     require(all(baseline["engine"].get(key) == value for key, value in SHAPE.items()),
             "baseline_product_shape_changed")
-    require(baseline["memory"].get("cuda_graph_rebuild_estimate_bytes", 0) > 0,
-            "baseline_graph_reservation_missing")
+    require(all(isinstance(baseline["memory"].get(field), int) for field in GRAPH_FIELDS) and
+            any(baseline["memory"][field] > 0 for field in GRAPH_FIELDS),
+            "baseline_graph_calibration_missing")
     receipt = {"artifact_type": "ninfer_engine_cache_gate", "schema_version": 1,
                "source_commit": args.source_commit, "baseline_sha256": hashlib.sha256(baseline_bytes).hexdigest(),
                "shape": SHAPE, "idle_seconds": args.idle_seconds, "arms": [], "passed": False}
