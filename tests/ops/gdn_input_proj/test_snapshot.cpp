@@ -591,13 +591,13 @@ int run_q4_q5() {
     // band, and 10 the top of it now. These are compared against the complete FP64 formula for
     // every output row and every state channel, so a mechanism that is wrong away from the sampled
     // rows cannot pass.
-    for (const std::int32_t tokens : {7, 8, 9, 10}) {
+    for (const std::int32_t tokens : {7, 8, 9, 10, 16}) {
         failures += run_q4_q5_case(query_key, value_z_weight, tokens, tokens + 1, true);
     }
     // The rest of the admitted range keeps the sampled comparison: the same formula, a smaller
     // comparison set. 32/33 and 64 are the group-band boundaries either side of the neighbouring
     // routes.
-    for (const std::int32_t tokens : {32, 33, 64}) {
+    for (const std::int32_t tokens : {15, 17, 32, 33, 64}) {
         failures += run_q4_q5_case(query_key, value_z_weight, tokens, tokens + 1);
     }
     constexpr std::int32_t kValueRows    = 6144;

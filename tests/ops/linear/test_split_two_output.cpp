@@ -44,10 +44,13 @@ int verify_output_range(std::string_view label, const GuardedBf16Tensor& output,
                         std::int32_t weight_row_offset, const std::vector<float>& activation,
                         std::int32_t hidden, std::int32_t tokens,
                         const ReductionCriterion& criterion = kGdnInputProjA16Tolerance) {
+    const std::int32_t sample_count = tokens == 8 || tokens == 16 ? output_rows : 7;
     const std::vector<double> actual =
-        gather_rows(output.values(), full_rows, output_row_offset, output_rows, tokens);
+        gather_rows(output.values(), full_rows, output_row_offset, output_rows, tokens,
+                    sample_count);
     const std::vector<double> expected =
-        projection_oracle(weight, weight_row_offset, output_rows, activation, hidden, tokens);
+        projection_oracle(weight, weight_row_offset, output_rows, activation, hidden, tokens,
+                          sample_count);
     return compare(label, actual, expected, criterion);
 }
 
@@ -190,7 +193,7 @@ int run_q4_q5() {
     }
     // One captured replay per route, including both ends of the split4 band and a 128-column tail
     // slice (129 = 128 + 1).
-    for (const std::int32_t tokens : {7, 8, 9, 10, 12, 13, 33, 65, 129}) {
+    for (const std::int32_t tokens : {7, 8, 9, 10, 12, 13, 15, 16, 17, 33, 65, 129}) {
         failures += run_q4_q5_graph_case(query_key, value_z_weight, tokens);
     }
     return failures;
