@@ -288,6 +288,9 @@ public:
     [[nodiscard]] CheckpointSummary checkpoint_summary(CheckpointHandle) const;
     [[nodiscard]] CheckpointMetadata checkpoint_metadata(CheckpointHandle) const;
     [[nodiscard]] bool checkpoint_matches(CheckpointHandle, const RequestBasePlan&) const;
+    void trace_export_checkpoint(CheckpointHandle);
+    [[nodiscard]] std::optional<CheckpointHandle> trace_import_checkpoint(const RequestBasePlan&);
+    bool trace_import_attempted = false;
     [[nodiscard]] std::uint32_t checkpoint_recovery_frontier(CheckpointHandle,
                                                              const RequestBasePlan&,
                                                              std::uint32_t target) const;

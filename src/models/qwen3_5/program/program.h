@@ -427,6 +427,9 @@ public:
     [[nodiscard]] CheckpointMetadata checkpoint_metadata(CheckpointHandle checkpoint) const;
     [[nodiscard]] bool checkpoint_matches(CheckpointHandle checkpoint,
                                           const RequestBasePlan& base) const;
+    // Explicitly enabled restart feasibility probe; not a serving persistence contract.
+    void trace_export_checkpoint(CheckpointHandle checkpoint);
+    [[nodiscard]] std::optional<CheckpointHandle> trace_import_checkpoint(const RequestBasePlan&);
     [[nodiscard]] std::uint32_t checkpoint_recovery_frontier(CheckpointHandle retained,
                                                              const RequestBasePlan& base,
                                                              std::uint32_t target) const;

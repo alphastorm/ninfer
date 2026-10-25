@@ -1371,6 +1371,18 @@ private:
             request->budget.emplace(summary.effective_output_tokens,
                                     summary.effective_limit_reason);
             request->generated.reserve(summary.effective_output_tokens);
+            if constexpr (requires { instance_.program->trace_import_checkpoint(*request->base_plan); }) {
+                if (request->options.execution.allow_prefix_reuse && resident_empty()) {
+                    if (const auto restored = instance_.program->trace_import_checkpoint(*request->base_plan)) {
+                        const auto owner = resources_.adopt(*instance_.program,
+                            typename ResourceManagement::SourceChoice{}, *request->base_plan,
+                            request->publication_order);
+                        resources_.publish(*instance_.program, owner, *restored);
+                        resources_.finish(*instance_.program, owner, *request->base_plan,
+                                          request->publication_order);
+                    }
+                }
+            }
         }
     }
 
@@ -1513,6 +1525,9 @@ private:
                 request->model_state     = request->post_capture_state;
                 for (const auto point : progress.captured_checkpoints) {
                     resources_.publish(*instance_.program, request->continuation_owner, point);
+                    if constexpr (requires { instance_.program->trace_export_checkpoint(point); }) {
+                        instance_.program->trace_export_checkpoint(point);
+                    }
                 }
             }
             context_owner_.reset();

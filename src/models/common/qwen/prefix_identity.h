@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <string>
 #include <vector>
 
 namespace ninfer::models::qwen {
@@ -32,6 +33,7 @@ public:
     [[nodiscard]] bool matches(const PreparedPromptData& prompt, std::size_t count) const;
     [[nodiscard]] bool equals(const ResidentPrefixIdentity& other) const;
     [[nodiscard]] bool prefix_equals(const ResidentPrefixIdentity& other, std::size_t count) const;
+    [[nodiscard]] std::string trace_text_identity() const;
 
 private:
     std::vector<std::uint8_t> token_types_;
