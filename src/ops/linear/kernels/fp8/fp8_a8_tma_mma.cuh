@@ -19,8 +19,8 @@
 
 namespace ninfer::ops::detail {
 
-template <class Schedule, class Output, class Epilogue, class Rows = Fp8IdentityRows>
-void launch_fp8_a8_mma(const Fp8A8Operands&, Output, Epilogue, cudaStream_t, Rows = {});
+template <class Schedule, class Output, class Epilogue, class Rows>
+void launch_fp8_a8_mma(const Fp8A8Operands&, Output, Epilogue, cudaStream_t, Rows);
 
 #if defined(NINFER_SM89)
 template <class Schedule>
