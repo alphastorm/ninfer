@@ -24,6 +24,8 @@ namespace ninfer::runtime {
 class ContinuationCheckpointWriter;
 class ContinuationCheckpointReader;
 class ContinuationCheckpointReadQueue;
+class PressureCheckpointHandler;
+class ReclaimableSessionOracle;
 
 enum class DurableExportState : std::uint8_t { Exported, Refused, Stale };
 enum class DurableImportState : std::uint8_t {
@@ -185,6 +187,14 @@ public:
     // Never reconstruct it from paths or re-hash resources for individual saves.
     [[nodiscard]] static DurableNativeLayout checkpoint_layout(const Engine&);
     [[nodiscard]] static DurableFrontendIdentity frontend_identity(const Engine&);
+
+    // Live serving installs trusted store-backed providers, never authority from disk metadata.
+    // With no oracle, import cannot reclaim an unrelated session.
+    static void set_pressure_checkpoint_handler(
+        Engine&, std::shared_ptr<PressureCheckpointHandler>);
+    static void set_reclaimable_session_oracle(
+        Engine&, std::shared_ptr<const ReclaimableSessionOracle>);
+    static void notify_checkpoint_progress(Engine&) noexcept;
     static void set_checkpoint_tag(PreparedPrompt&, std::string_view tag);
     [[nodiscard]] static DurableSessionEpoch session_epoch(Engine&, std::string_view session_sha256);
     [[nodiscard]] static DurableSessionEpoch publication_epoch(const GenerationHandle&);

@@ -25,6 +25,12 @@ static_assert(std::is_same_v<decltype(&CheckpointEngineAccess::checkpoint_layout
                              DurableNativeLayout (*)(const ninfer::Engine&)>);
 static_assert(std::is_same_v<decltype(&CheckpointEngineAccess::frontend_identity),
                              DurableFrontendIdentity (*)(const ninfer::Engine&)>);
+static_assert(std::is_same_v<decltype(&CheckpointEngineAccess::set_pressure_checkpoint_handler),
+                             void (*)(ninfer::Engine&, std::shared_ptr<PressureCheckpointHandler>)>);
+static_assert(std::is_same_v<decltype(&CheckpointEngineAccess::set_reclaimable_session_oracle),
+                             void (*)(ninfer::Engine&, std::shared_ptr<const ReclaimableSessionOracle>)>);
+static_assert(std::is_same_v<decltype(&CheckpointEngineAccess::notify_checkpoint_progress),
+                             void (*)(ninfer::Engine&) noexcept>);
 
 static_assert(durable_reason_name(DurableReason::None) == "none");
 static_assert(durable_reason_name(DurableReason::StoreDisabled) == "store_disabled");
