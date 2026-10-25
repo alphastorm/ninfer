@@ -186,19 +186,32 @@ def main() -> int:
                     "explicit save did not acknowledge all production durability gates")
             receipt["save"] = {key: saved[key] for key in ("state", "reason", "committed", "origin", "dir_sync",
                 "frontier_tokens", "restored_tokens", "payload_bytes", "points", "states", "pages")}
+            code, _ = request("DELETE", "/v1/responses/" + seed["id"], capability=session)
+            require(code == 200, "authorized response deletion failed")
+            code, _ = request("GET", "/v1/responses/" + seed["id"], capability=session)
+            require(code == 404, "deleted response remained addressable")
             active.terminate()
             active = None
             disabled_pointer_sha = digest_file(current)
 
             active = Server(3, ("--no-prefix-reuse",))
-            code, _ = request("GET", "/v1/responses/" + seed["id"], capability=session)
+            code, _ = request("GET", "/v1/responses/" + restored["id"], capability=session)
             require(code == 404, "cache-disabled request imported native state")
             require(digest_file(current) == disabled_pointer_sha, "policy refusal mutated the disk generation")
             active.terminate()
             active = None
             receipt["policy_disabled"] = {"retrieve_status": 404, "current_unchanged": True}
+            active = Server(4)
+            code, _ = request("GET", "/v1/responses/" + seed["id"], capability=session)
+            require(code == 404, "restart resurrected an explicitly deleted response")
+            code, _ = request("GET", "/v1/responses/" + restored["id"], capability=session)
+            require(code == 200, "deleting an ancestor lost the retained descendant")
+            active.terminate()
+            active = None
             receipt["isolation"] = {"foreign_retrieve": 404, "foreign_delete": 404,
-                                    "missing_capability_retrieve": 404, "own_retrieve": 200}
+                                    "missing_capability_retrieve": 404, "own_retrieve": 200,
+                                    "own_delete": 200, "deleted_after_restart": 404,
+                                    "descendant_after_restart": 200}
             receipt["prior_generation_published"] = bool(prior_pointer_sha)
             receipt["passed"] = True
         finally:
