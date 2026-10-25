@@ -9,4 +9,112 @@
 - **Council5090RC2 declared by Integrator5: `6d4d0a05aded2a1b353b8998e7b08b0f2fb34bff`.** Lease617648 exit0/794s,270-step/122s build,host66,dense11,loader/canonicalMTP,E2/fourboots,32GB/C2/strict authenticated profile,both PRODUCT smokes and package/25-flag inventory pass; separate exact CPU66/66 pass. [Complete RC2 receipt](integration-rc2.json). Archived server `9790a00467c4351929ab9a3e68347ab0436357a956f845efc5b4475f75718c55`; archive `52dd3be726a1ea05f81e142a11e75ac984359ecafdf42aeeb8c192356214b43d`. Pre-councilF04b proof/assets remain unchanged in integration-rc.json. Publication is Main-owned.
 - **Post-F2 native source `fc3208dbb9fe166f1dff1341a0a099057ae8a878` is compile/inventory green:** declared F2 merged with both portability fixes and its full authenticated replay-only guard. Linux86/89 pass64steps/179s each; MSVC86/89 pass149steps/86.90s and91.63s, all six exact-clean-source version checks and27 payload hashes per lane. [Post-F2 receipt](integration-native-rc2.json). Pre-F2 `rebase/ckpt-native` remains immutable atf9611dc2b with its original receipt; no native GPU, package/controller acceptance or publication claimed. Historical workflow repoint never enters natives.
 
+## K6 Windows contract mapping
+
+The native starting source `e2ba490ae5a0acc5e1d7fe60582e99f095c61980`
+already contains PortableCore's handle-anchored publication. The council's
+pathname finding describes the earlier 5090 subject, not this native source.
+This slice preserves the existing primitive, routes the remaining legacy rename
+helper through it, and closes uncertain-current cleanup.
+
+Anchors below cover each K6 normative sentence in `docs/durable/CONTRACTS.md`
+at that starting source. They are source evidence, not a power-loss or GPU claim.
+`io` means `src/core/io/durable_file.cpp`; `store` means
+`src/serve/session_checkpoint_store.cpp`; `native` means
+`src/runtime/windows/direct_storage_checkpoint_windows.cpp`.
+
+| K6 clause | Implementation / executable invariant |
+|---|---|
+| Primitive versus transaction ownership | `io` owns handles/transfers/rename/removal; `store:1952-2189` owns the generation/current transaction. |
+| Exclusive staging, complete transfers, file flush, atomic same-volume replacement, explicit sync policy, bounded regular reads | `io:235-265,359-377,446-510,512-563`; `store:289-315`; `ninfer_durable_file_test`, `ninfer_session_checkpoint_store_test`. |
+| Validate every component; no-follow ancestry; no prevalidated-path substitution | `io:41-64,80-88,93-230` uses counted `NtCreateFile` children, deny-DELETE ancestor pins and rechecks; `reparse-guard` and `identity-guards` cases cover a real in-place junction conversion and changed returned identities. |
+| `remove_tree` returns true/false or throws, with POSIX parent fence | `io:562-586` and `remove_entry:284-342,391-433`; durable-file missing-entry/removal cases. |
+| Final removal links are removed, never followed; ancestor links are refused | `io:284-342,562-586`; durable-file final-link/external sentinel checks; Windows-enabled `test_quota_and_erase_refuse_ancestor_symlink_swaps`. |
+| All store cleanup and rename paths use those primitives | `store:282-286,1230-1249,1299,1555-1564,1969,2115-2160,2559`; cleanup injection hooks are test-only. |
+| Removal race must not escape; generation/quarantine/current renames share confinement | Anchored enumeration/removal and pinned rename above; cross-parent directory tombstone and store ancestor-swap regressions. |
+| No new reclamation authority/dependency | Reclamation selection and provider APIs unchanged; no dependency added. |
+| Publication 1: unique unpublished staging; failed export preserves current | `store:1954-1970,1983-2010`; deferred writer/failed-export/stale-publication tests. |
+| Publication 2: complete/hash/flush all payloads, checksums, canonical manifest/MAC; finish and epoch gates | `store:585-599,665-674,1991-1998,2034-2088,2151-2155`; `checkpoint_control.h:58-74`; manifest authentication, stream-completion and stale-epoch tests. |
+| Publication 3: sync staging, publish generation, sync parent, flush temporary current | `store:2089,2115-2118`; directory-publication case exercises a nonempty nested generation and cross-parent tombstone. |
+| Publication 4: replace current, sync session/new parents, then acknowledge; retain old generations until safe quota cleanup | `store:2137-2179`; quota, active-reader and `dir_sync` acknowledgement regressions. |
+| Publication 5: post-ack cleanup is best effort, never revokes success | `store:2142-2147`; `test_post_publish_reclaim_failure_keeps_save_acknowledged`. |
+| Before publication retain old current; after replace/before flush report unavailable, reconcile actual current without fictitious rollback | `store:2120,2133-2138,2157-2172` now marks the attempt possibly visible before the fallible primitive; `current_flush` injects failure only on the real current-parent flush and uses the real epoch gate. No acknowledgement is returned; the generation remains loadable. |
+| POSIX file/parent fsync, same-filesystem atomic rename, `dir_sync=fsync` | `io:354-379,479-509,554-560`; no POSIX implementation change. POSIX rename returns before the separately fallible session sync, so its prior flag ordering already covered post-rename fsync failure. No new Linux execution claimed. |
+| Windows native class 65, REPLACE_IF_EXISTS/POSIX_SEMANTICS, pinned destination and leaf-only name | `io:536-556`; no Win32 rename fallback. `native:333-340` now delegates its legacy rename helper to this primitive. |
+| Flush staged source before rename and pinned parent after | `io:535,557`; durable-file flush trace reaches the real OS; `current_flush` covers the failed final fence. |
+| Parent READ/WRITE sharing, deny DELETE; FILE_ADD_FILE must remain usable | `io:203-222`; `pinned-destination` holds an independent READ/WRITE/no-DELETE destination pin and an old reader while replacing from a sibling parent. |
+| Recheck every pinned reparse attribute, file index and volume immediately before rename; no weakened pin/retry | `io:80-88,146-162,225-230,551-553`; identity faults cover destination, both unshared source ancestors and the common borrowed prefix. |
+| Ancestor and leaf checks; no SetFileInformationByHandle/MoveFileEx fallback | `io:80-88,267-277,518-535,554-557`; raw disposition calls are deletion, not rename. |
+| Standalone Windows directory sync is a nonthrowing NTFS no-op distinct from publication fence | `io:495-500`; all four named native cases call sync on an intentionally nonexistent/unsafe path. |
+| Ack exactly `ntfs-write-through`, not POSIX fsync or arbitrary-filesystem equivalence | `io:504-510`, `store:2177-2179`; `test_schema_v3_and_stream_completion`; native scope is Windows 10 1709+/NTFS. |
+| Required flush/rename faults prevent success; no masking retries | Throwing boundaries in `io:535,556-557`; `checkpoint_control.h:69-74`; `current_flush` asserts `IoUnavailable` and absent save result. |
+| Per-batch handle lifetime through write retirement; verify delivered bytes | `native:404-477,582-647` retains `IDStorageFile` in completion and drains the real fence; `store:1405-1499` hashes landed destination bytes, not a reopened verification descriptor. |
+| Reopen only confined/no-follow, complete hash before import; changed bytes refuse commit | `native:582-611`; `store:1465-1499`; `checkpoint_api.cpp:588,659-660`; streamed replacement/corruption/verify-complete tests. |
+| io_uring preserves verification, EOF/error/lifetime; no authentication bypass | Linux queue `io_uring_checkpoint_backend.cpp:1732-1768,1809-1845` retains the confined duplicate FD; shared reader verification above. No new Linux backend or execution claim. |
+| Unavailable-backend fallback wording | **Stale contract sentence**, not an implemented fallback: `store:1866-1872` rejects missing/unavailable queues. Main approved Contracts `0781175bb` to state fail-closed unavailability/retry, without quarantine or an invented fallback. |
+| MAC emission wording / scope | Production strict-origin and replay-only saves require authentication; the generic compatibility API conditionally emits MAC when configured (`store:2085-2088`). Contracts `0781175bb` records the distinction. |
+| Legacy filesystem scope | Main explicitly excludes the remaining pathname create/read/delete/lock methods of `make_direct_storage_checkpoint_backend` from this production-store/K6 proof. Production `engine.cpp:626` uses only `make_direct_storage_checkpoint_read_queue`. The legacy rename helper nevertheless now uses K6. |
+
+The current-pointer fix conservatively retains an unpublished generation if a
+replace attempt fails before visibility as well as after it; later ordinary
+garbage collection can reclaim that unreferenced generation. Stale epoch/quota
+refusals that never attempt replacement keep their existing cleanup behavior.
+This avoids guessing whether a failed compound Windows rename-and-flush already
+changed `current`; no persistent schema, retry or fallback was added.
+
+## K6 native qualification
+
+- **Qualified runtime/test source:** `00d28edb6206e77d20eab71c12aea46e498bcaf2`; MSVC toolset `14.44.35207`, Release, CUDA architecture `89`, 12 workers, CUDA devices hidden. Final incremental build completed **49/49**, followed by **19/19 host tests, zero failures/skips, 30.36 s**. The native DirectStorage library compiled; the GPU-dependent DirectStorage test was not selected.
+- **Post-rename regression red→green:** test-only source `4074ee392a419f091baa25d3a4749cdc33ba3b6b` produced the expected CTest exit **8**, failure `uncertain publication must retain the generation named by actual current` in **0.16 s**. The real rename completed; the injected current-parent flush failed; the real checkpoint epoch gate converted it to `IoUnavailable`. Source `00d28edb6` passes the same named case in **0.08 s**, with unacknowledged save, retained visible generation, and verified payload after a new store instance reconciles actual current.
+- **Historical pathname red:** the unmodified `900b8977d:src/core/io/durable_file.cpp`, compiled with the new durable-file test, returns assertion exit **1** for all four native cases. Pinned-destination and directory-publication fail with sharing violation. Reparse/identity cases fail their explicit guard-exercised assertions because that implementation lacks the staged-file flush/recheck boundary; this is not a claim that the historical deny-WRITE pin allowed an actual junction swap. Current-source reparse coverage performs the real junction conversion, and current identity coverage injects changed returned volume/index values.
+- **Fable U3 resolved on the native source:** replacement from a sibling parent succeeds while an independent destination pin denies DELETE and an old reader retains its old bytes. A destination converted in place to a junction is refused, leaves staging intact and creates no outside file. File-index and volume faults on the destination, source ancestors and shared ancestor are refused before rename.
+- **Execution IDs:** holder `K6`, canonical CPU `slot-0.lock`; no GPU lease. WMI PID `26304` / agent job `bg_796`: initial 18/18 batch at `d295fc8b4`, 369.756 s including clean 1,030-step build. PID `28852` / `bg_804`: focused expected-red batch, 31.051 s. PID `24932` / `bg_805`: final 19/19 batch, exit 0, 60.883 s. Earlier PID `26724` / `bg_791` exited before configure because the canonical lock directory was absent; the integration owner approved normal `mkdir -p` plus nontruncating flock creation in the same namespace. No lock was deleted or replaced.
+- **Scope boundary:** no GPU inference, sm_86 build, power-loss test, release package, installed-root operation or publication was performed. Integrator6 owns the final integrated native two-architecture build and runtime acceptance.
+
+Exact build/test shape (operator paths are variables; no private paths in receipts):
+
+```powershell
+$env:CUDA_VISIBLE_DEVICES = ''
+cmake -S $SOURCE -B $BUILD -G Ninja -DCMAKE_BUILD_TYPE=Release `
+  -DCMAKE_CUDA_ARCHITECTURES=89 -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=ON `
+  -DNINFER_BUILD_BENCHMARKS=OFF "-DCMAKE_TOOLCHAIN_FILE=$TOOLCHAIN" `
+  "-DVCPKG_INSTALLED_DIR=$VCPKG_INSTALLED" -DVCPKG_TARGET_TRIPLET=x64-windows `
+  "-DPython3_EXECUTABLE=$PYTHON"
+cmake --build $BUILD --parallel 12 --target ninfer_checkpoint_io_contract_test `
+  ninfer_direct_storage_checkpoint_backend_test ninfer_durable_file_test ninfer_file_test `
+  ninfer_engine_checkpoint_control_test ninfer_engine_checkpoint_adapter_test `
+  ninfer_durable_contract_headers_test ninfer_openai_responses_store_test `
+  ninfer_session_checkpoint_service_test ninfer_session_checkpoint_store_test `
+  ninfer_automatic_checkpoint_queue_test ninfer_checkpoint_policy_test `
+  ninfer_checkpoint_codec_test ninfer_checkpoint_directstorage_windows
+$pattern='^ninfer_(durable_.*|checkpoint_.*|direct_storage_checkpoint_backend|session_checkpoint_.*|automatic_checkpoint_queue|engine_checkpoint_.*|openai_responses_store|file)_test$'
+ctest --test-dir $BUILD -C Release -L host -R $pattern --output-on-failure `
+  --timeout 180 --output-junit "$EVIDENCE/k6-host-00d28edb.xml"
+# Expected-red source 4074ee392; same native environment and build directory:
+ctest --test-dir $BUILD -C Release `
+  -R '^ninfer_session_checkpoint_store_current_flush_test$' --output-on-failure `
+  --timeout 180 --output-junit "$EVIDENCE/k6-current-red.xml"
+# Historical durable_file.cpp is git-show output from 900b8977d, not modified:
+cl.exe /nologo /std:c++20 /EHsc /MD /O2 "/I$SOURCE/src" /Fe:historical-durable.exe `
+  "$HISTORICAL/durable_file.cpp" "$SOURCE/tests/io/test_durable_file.cpp"
+# Each historical invocation returns assertion exit 1:
+historical-durable.exe pinned-destination
+historical-durable.exe reparse-guard
+historical-durable.exe identity-guards
+historical-durable.exe directory-publication
+```
+
+The four `ninfer_durable_file_<case>_test` CTest aliases use the single
+`ninfer_durable_file_test` executable; `ninfer_session_checkpoint_store_current_flush_test`
+uses `ninfer_session_checkpoint_store_test current_flush`. They are host-labeled
+CTest cases, not independent Ninja targets.
+
+| Retained evidence filename | SHA-256 |
+|---|---|
+| `k6-proof-00d28edb.json` | `3ee937301805e4d6bea27e633966659e246d8ab1507dceb1d92fadeacc0f2cfb` |
+| `k6-host-00d28edb.xml` | `f3257fd4cc6d0ec8387a4d63d6bffda56a5fe6ed8001b6558caea6014ab26ba7` |
+| `k6-current-red.xml` | `638cba19f9da964b1b4ff3e472bd27dca2c3aa7d876670487f71c2ef89f19914` |
+| `k6-final.log` (private raw operator log) | `67268b9dca9a8137bfaec172a3a72ca2589223246220e2c6e255771c46e217a2` |
+| `k6-current-red.log` (private raw operator log) | `7535f868d3772c85d482aeb7d62038553e299713c29fffd2e24795a778c987fa` |
+
 
