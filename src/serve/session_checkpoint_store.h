@@ -139,6 +139,13 @@ public:
          const ExportCheckpoint& exporter, const PublishExport& publish_export,
          runtime::SessionCheckpointSkipDetail* skip = nullptr);
 
+    // Authenticated post-delete survivors, explicitly without a native continuation.
+    // Caller holds its per-session mutation guard through the subsequent no-throw RAM change.
+    [[nodiscard]] std::optional<SessionCheckpointSaveResult>
+    save_responses(const OpenAIResponseStoreSnapshot& responses,
+                   const nlohmann::json& runtime_fingerprint,
+                   runtime::SessionCheckpointSkipDetail* skip = nullptr);
+
     // Verifies identity, manifest schema, origin, every payload's presence and size, the response
     // snapshot's checksum, and the requested response id before exposing either ResponseStore
     // state or an Engine reader. Engine payload checksums are verified by the reader as the
@@ -169,6 +176,10 @@ public:
     void collect_garbage();
 
 private:
+    [[nodiscard]] std::optional<SessionCheckpointSaveResult>
+    save_impl(const OpenAIResponseStoreSnapshot&, const nlohmann::json&,
+              const ExportCheckpoint&, const PublishExport&, bool replay_only,
+              runtime::SessionCheckpointSkipDetail*);
     [[nodiscard]] std::filesystem::path session_path(std::string_view digest) const;
     [[nodiscard]] static bool valid_digest(std::string_view digest) noexcept;
 

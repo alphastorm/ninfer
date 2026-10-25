@@ -856,10 +856,17 @@ private:
 }
 
 void require_manifest_shape(const nlohmann::json& manifest) {
-    if (!exact_keys(manifest, {"artifact_type", "schema_version", "session_sha256", "generation",
+    const bool replay_only = manifest.contains("mode");
+    const bool keys = replay_only
+        ? exact_keys(manifest, {"artifact_type", "schema_version", "session_sha256", "generation",
                                "created_at_unix_ms", "runtime_fingerprint", "latest_response_id",
                                "response_records", "frontier_tokens", "restored_tokens",
-                               "engine_payload_bytes", "payload_bytes", "files"}) ||
+                               "engine_payload_bytes", "payload_bytes", "files", "mode"})
+        : exact_keys(manifest, {"artifact_type", "schema_version", "session_sha256", "generation",
+                               "created_at_unix_ms", "runtime_fingerprint", "latest_response_id",
+                               "response_records", "frontier_tokens", "restored_tokens",
+                               "engine_payload_bytes", "payload_bytes", "files"});
+    if (!keys || (replay_only && manifest.at("mode") != "responses_only") ||
         manifest.at("artifact_type") != "ninfer_session_checkpoint" ||
         !unsigned_field(manifest, "schema_version") ||
         manifest.at("schema_version") != kSessionCheckpointSchemaVersion ||
@@ -907,10 +914,13 @@ void require_manifest_shape(const nlohmann::json& manifest) {
         .frontier_tokens = manifest.at("frontier_tokens").get<std::uint32_t>(),
         .restored_tokens = manifest.at("restored_tokens").get<std::uint32_t>(),
         .payload_bytes = engine_bytes};
-    if (!responses || !index || !state || !checksums ||
+    const bool native_shape = replay_only
+        ? manifest.at("files").size() == 2 && !index && !state &&
+          stats.frontier_tokens == 0 && stats.restored_tokens == 0 && engine_bytes == 0
+        : index && state && valid_checkpoint_stats(stats);
+    if (!responses || !checksums || !native_shape ||
         manifest.at("payload_bytes").get<std::uint64_t>() != payload_bytes ||
-        manifest.at("engine_payload_bytes").get<std::uint64_t>() != engine_bytes ||
-        !valid_checkpoint_stats(stats)) {
+        manifest.at("engine_payload_bytes").get<std::uint64_t>() != engine_bytes) {
         throw CheckpointCorruption("checkpoint manifest required payload is missing");
     }
 }
@@ -1243,9 +1253,11 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
     const SessionCheckpointStoreOptions& options, const SessionCheckpointStore::Impl& impl,
     const std::optional<std::filesystem::path>& protected_generation = std::nullopt,
     const std::optional<std::filesystem::path>& protected_session    = std::nullopt,
-    std::uint64_t tolerated_transient_bytes                          = 0) {
+    std::uint64_t tolerated_transient_bytes                          = 0,
+    std::uint64_t unpublished_bytes                                  = 0) {
     GenerationInventory inventory =
         inventory_generations(options, impl, protected_generation, protected_session);
+    std::uint64_t physical_used = inventory.used;
     // The transient tolerance below only applies while reclamation is fully healthy: if any
     // eviction this pass fails, the store falls back to the hard cap so a broken cleanup path
     // can never let disk usage creep past the quota one tolerated save at a time. A failed pass
@@ -1263,9 +1275,16 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
             options.disk_quota_bytes + (reclamation_healthy ? tolerated_transient_bytes : 0);
         if (inventory.used <= allowed && !unconditional) { continue; }
         if (!reclamation_healthy && candidate.kind == CandidateKind::CurrentSession) { continue; }
+        if (unpublished_bytes && candidate.kind == CandidateKind::CurrentSession) {
+            // Plan only. No current authority may disappear before the requester's
+            // durable publication. Re-plan under this lock in the final callback.
+            inventory.used -= std::min(inventory.used, session_generation_bytes(candidate.path));
+            continue;
+        }
         if (candidate.kind == CandidateKind::Tombstone) {
             if (cleanup_tombstone(options, candidate.path)) {
                 inventory.used -= candidate.bytes;
+                physical_used -= candidate.bytes;
             } else {
                 reclamation_healthy = false;
             }
@@ -1288,7 +1307,14 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
             continue;
         }
         inventory.used -= std::min(inventory.used, reclaimed);
+        physical_used -= std::min(physical_used, reclaimed);
     }
+    // At most one incoming set (itself <= quota) is tolerated. Stuck cleanup or
+    // another publication's transient cannot accumulate unbounded excess.
+    if (unpublished_bytes &&
+        ((!reclamation_healthy && physical_used > options.disk_quota_bytes) ||
+         (physical_used > options.disk_quota_bytes &&
+          physical_used - options.disk_quota_bytes > unpublished_bytes))) { return false; }
     if (inventory.used <= options.disk_quota_bytes) { return true; }
     return reclamation_healthy &&
            inventory.used <= options.disk_quota_bytes + tolerated_transient_bytes;
@@ -1618,11 +1644,12 @@ std::vector<std::byte> encode_response_store_snapshot(const OpenAIResponseStoreS
                                        ? nlohmann::json(*response.preserve_thinking)
                                        : nlohmann::json(nullptr)}});
     }
-    const nlohmann::json root      = {{"schema_version", kSessionCheckpointSchemaVersion},
+    nlohmann::json root            = {{"schema_version", kSessionCheckpointSchemaVersion},
                                       {"client_session_sha256", snapshot.client_session_sha256},
                                       {"latest_response_id", snapshot.latest_response_id},
                                       {"contexts", std::move(encoded_contexts)},
                                       {"records", std::move(records)}};
+    if (snapshot.replay_only) { root["replay_only"] = true; }
     std::vector<std::uint8_t> cbor = nlohmann::json::to_cbor(root);
     if (cbor.size() > byte_limit) {
         throw std::length_error("response checkpoint exceeds staging limit");
@@ -1645,6 +1672,12 @@ decode_response_store_snapshot(std::span<const std::byte> bytes, std::size_t byt
             return std::nullopt;
         }
         OpenAIResponseStoreSnapshot snapshot;
+        if (root.contains("replay_only")) {
+            if (!root.at("replay_only").is_boolean() || !root.at("replay_only").get<bool>()) {
+                return std::nullopt;
+            }
+            snapshot.replay_only = true;
+        }
         snapshot.client_session_sha256 =
             std::move(root.at("client_session_sha256").get_ref<std::string&>());
         snapshot.latest_response_id =
@@ -1877,13 +1910,29 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
                              const ExportCheckpoint& exporter,
                              const PublishExport& publish_export,
                              runtime::SessionCheckpointSkipDetail* skip) {
+    return save_impl(responses, runtime_fingerprint, exporter, publish_export, false, skip);
+}
+
+std::optional<SessionCheckpointSaveResult>
+SessionCheckpointStore::save_responses(const OpenAIResponseStoreSnapshot& responses,
+                                       const nlohmann::json& runtime_fingerprint,
+                                       runtime::SessionCheckpointSkipDetail* skip) {
+    return save_impl(responses, runtime_fingerprint, {}, {}, true, skip);
+}
+
+std::optional<SessionCheckpointSaveResult>
+SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
+                                  const nlohmann::json& runtime_fingerprint,
+                                  const ExportCheckpoint& exporter,
+                                  const PublishExport& publish_export, bool replay_only,
+                                  runtime::SessionCheckpointSkipDetail* skip) {
     if (skip != nullptr) {
         skip->export_state = runtime::DurableExportState::Refused;
         skip->durable_reason = runtime::DurableReason::None;
     }
     if (!valid_digest(responses.client_session_sha256) ||
         !validate_session_checkpoint_runtime_fingerprint(runtime_fingerprint) ||
-        !exporter || !publish_export) {
+        responses.replay_only != replay_only || (!replay_only && (!exporter || !publish_export))) {
         if (skip != nullptr) {
             skip->durable_reason = runtime::DurableReason::InvalidManifest;
             runtime::ContinuationExportSkipDetail::record(
@@ -1891,7 +1940,12 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         }
         return std::nullopt;
     }
-    if (runtime_fingerprint.at("responses").at("codec") != kResponseStoreSnapshotCodec) {
+    if (replay_only && options_.origin_mac_key.empty()) {
+        if (skip) { skip->durable_reason = runtime::DurableReason::OriginKeyUnavailable; }
+        return std::nullopt;
+    }
+    if (runtime_fingerprint.at("responses").at("codec").get_ref<const std::string&>() !=
+        kResponseStoreSnapshotCodec) {
         if (skip != nullptr) { skip->durable_reason = runtime::DurableReason::UnsupportedCodec; }
         return std::nullopt;
     }
@@ -1926,7 +1980,10 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         // neither backpressure nor finish may run under the Engine execution lock (ninfer#34).
         BufferedCheckpointWriter buffered(writer, options_.write_buffer_bytes);
         lock.unlock();
-        const runtime::DurableExportResult exported = exporter(buffered);
+        const runtime::DurableExportResult exported = replay_only
+            ? runtime::DurableExportResult{.state = runtime::DurableExportState::Exported,
+                                          .reason = runtime::DurableReason::None}
+            : exporter(buffered);
         if (skip != nullptr) {
             skip->export_state = exported.state;
             skip->durable_reason = exported.reason;
@@ -1941,7 +1998,7 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         lock.lock();
         if (exported.state != runtime::DurableExportState::Exported ||
             exported.reason != runtime::DurableReason::None ||
-            !valid_checkpoint_stats(exported.stats)) {
+            (!replay_only && !valid_checkpoint_stats(exported.stats))) {
             (void)remove_best_effort(staging);
             if (skip != nullptr) {
                 if (exported.state == runtime::DurableExportState::Exported) {
@@ -2003,7 +2060,7 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         if (engine_payload_bytes != engine->payload_bytes) {
             throw std::runtime_error("checkpoint engine payload summary is inconsistent");
         }
-        const nlohmann::json manifest = {
+        nlohmann::json manifest = {
             {"artifact_type", "ninfer_session_checkpoint"},
             {"schema_version", kSessionCheckpointSchemaVersion},
             {"session_sha256", responses.client_session_sha256},
@@ -2018,6 +2075,7 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
             {"payload_bytes", payload_bytes},
             {"files", std::move(manifest_files)},
         };
+        if (replay_only) { manifest["mode"] = "responses_only"; }
         require_manifest_shape(manifest);
         const std::string manifest_text = manifest.dump();
         if (manifest_text.size() > runtime::kDurableManifestMaxBytes) {
@@ -2043,7 +2101,8 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         } catch (...) { previous_bytes = 0; }
         const std::uint64_t total_bytes = directory_bytes(staging);
         if (total_bytes > options_.disk_quota_bytes ||
-            !enforce_disk_quota_locked(options_, *impl_, staging, session, previous_bytes)) {
+            !enforce_disk_quota_locked(options_, *impl_, staging, session, previous_bytes,
+                                      total_bytes)) {
             (void)remove_best_effort(staging);
             if (skip != nullptr) {
                 skip->export_state = runtime::DurableExportState::Refused;
@@ -2058,28 +2117,49 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         const std::filesystem::path current_staging = session / (".current-" + generation);
         write_synced(current_staging, generation + "\n");
         bool committed = false;
+        bool pointer_replaced = false;
         bool invoked = false;
+        bool quota_refused = false;
         lock.unlock();
-        const auto publication = publish_export(exported.captured_epoch, [&] {
+        const auto publish_current = [&] {
             std::lock_guard publication_lock(impl_->mutex);
             if (invoked) { return false; }
             invoked = true;
+            if (!enforce_disk_quota_locked(options_, *impl_, published, session, previous_bytes,
+                                          total_bytes)) {
+                quota_refused = true;
+                return false;
+            }
             replace_path(current_staging, session / "current");
+            pointer_replaced = true;
             sync_directory(session);
             // First save also publishes the session directory itself.
             sync_directory(options_.root / "sessions");
             committed = true;
+            // Still under the catalog lock: the successful publication makes planned
+            // current victims reclaimable; no intervening reader can change the plan.
+            try {
+                (void)enforce_disk_quota_locked(options_, *impl_, std::nullopt, session);
+            } catch (...) {}
             return true;
-        });
+        };
+        const auto publication = replay_only
+            ? runtime::DurablePublicationResult{
+                publish_current() ? runtime::DurableExportState::Exported
+                                  : runtime::DurableExportState::Refused,
+                quota_refused ? runtime::DurableReason::Quota : runtime::DurableReason::None}
+            : publish_export(exported.captured_epoch, publish_current);
         lock.lock();
         if (publication.state != runtime::DurableExportState::Exported ||
             publication.reason != runtime::DurableReason::None || !committed) {
             (void)remove_best_effort(current_staging);
+            if (!pointer_replaced) { (void)remove_best_effort(published); }
             if (skip != nullptr) {
                 skip->export_state = publication.state == runtime::DurableExportState::Stale
                                          ? runtime::DurableExportState::Stale
                                          : runtime::DurableExportState::Refused;
                 skip->durable_reason =
+                    quota_refused ? runtime::DurableReason::Quota :
                     publication.reason != runtime::DurableReason::None
                         ? publication.reason
                         : publication.state == runtime::DurableExportState::Stale
@@ -2088,17 +2168,6 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
             }
             return std::nullopt;
         }
-
-        // The superseded generation is now a stale candidate. Enforcement reclaims it only
-        // under quota pressure, so it keeps serving as the corruption-recovery fallback
-        // whenever the quota allows both generations. The fresh current stays protected.
-        // Reclamation is strictly best effort after the durable publish: the acknowledged
-        // generation must never be reported failed for cleanup trouble (council R1). While
-        // eviction keeps failing, the next save's own enforcement pass observes the failure
-        // and withdraws the transient tolerance, so usage still cannot creep past the cap.
-        try {
-            (void)enforce_disk_quota_locked(options_, *impl_, std::nullopt, session);
-        } catch (...) {}
 
         return SessionCheckpointSaveResult{
             .generation = std::move(generation), .engine = *engine, .bytes = total_bytes,
@@ -2127,7 +2196,8 @@ SessionCheckpointStore::load(std::string_view session_sha256,
         return {.state = SessionCheckpointLoadState::Incompatible,
                  .reason = runtime::DurableReason::FingerprintMismatch};
     }
-    if (runtime_fingerprint.at("responses").at("codec") != kResponseStoreSnapshotCodec) {
+    if (runtime_fingerprint.at("responses").at("codec").get_ref<const std::string&>() !=
+        kResponseStoreSnapshotCodec) {
         return {.state = SessionCheckpointLoadState::Incompatible,
                  .reason = runtime::DurableReason::UnsupportedCodec};
     }
@@ -2190,6 +2260,11 @@ SessionCheckpointStore::load(std::string_view session_sha256,
             return {.state = SessionCheckpointLoadState::Corrupt, .reason = reason};
         }
         require_manifest_shape(manifest);
+        const bool replay_only = manifest.contains("mode");
+        if (replay_only && origin != ManifestOriginState::Authentic) {
+            return {.state = SessionCheckpointLoadState::Incompatible,
+                    .reason = runtime::DurableReason::OriginRequired};
+        }
         if (!manifest.is_object() ||
             manifest.at("artifact_type").get<std::string>() != "ninfer_session_checkpoint" ||
             manifest.at("schema_version").get<std::uint32_t>() != kSessionCheckpointSchemaVersion ||
@@ -2284,6 +2359,7 @@ SessionCheckpointStore::load(std::string_view session_sha256,
         std::optional<OpenAIResponseStoreSnapshot> responses =
             decode_response_store_snapshot(response_bytes, options_.staging_bytes);
         if (!responses || responses->client_session_sha256 != session_sha256 ||
+            responses->replay_only != replay_only ||
             responses->latest_response_id != manifest.at("latest_response_id").get<std::string>() ||
             responses->records.size() != manifest.at("response_records").get<std::size_t>()) {
             throw CheckpointCorruption("checkpoint response state is corrupt");
@@ -2301,7 +2377,7 @@ SessionCheckpointStore::load(std::string_view session_sha256,
             .restored_tokens = manifest.at("restored_tokens").get<std::uint32_t>(),
             .payload_bytes   = manifest.at("engine_payload_bytes").get<std::uint64_t>(),
         };
-        if (!valid_checkpoint_stats(expected)) {
+        if (!replay_only && !valid_checkpoint_stats(expected)) {
             throw CheckpointCorruption("checkpoint engine summary is corrupt");
         }
         const std::uint64_t generation_bytes =
@@ -2313,10 +2389,11 @@ SessionCheckpointStore::load(std::string_view session_sha256,
         verified.generation      = *generation;
         verified.bytes           = generation_bytes;
         verified.origin_authenticated = origin == ManifestOriginState::Authentic;
-        auto reader              = std::make_shared<DirectoryCheckpointReader>(
-            root, std::make_shared<const VerifiedFiles>(std::move(allowed)),
-            options_.read_queue, impl_, active_key);
-        verified.engine = std::move(reader);
+        if (!replay_only) {
+            verified.engine = std::make_shared<DirectoryCheckpointReader>(
+                root, std::make_shared<const VerifiedFiles>(std::move(allowed)),
+                options_.read_queue, impl_, active_key);
+        }
         return {.state = SessionCheckpointLoadState::Available, .checkpoint = std::move(verified)};
     } catch (const CheckpointCorruption& error) {
         (void)quarantine_generation_locked(*impl_, session, *generation, error.reason);
@@ -2339,7 +2416,8 @@ bool SessionCheckpointStore::covers(std::string_view session_sha256,
                                     std::string_view response_id) const {
     if (!valid_digest(session_sha256) ||
         !validate_session_checkpoint_runtime_fingerprint(runtime_fingerprint) ||
-        runtime_fingerprint.at("responses").at("codec") != kResponseStoreSnapshotCodec ||
+        runtime_fingerprint.at("responses").at("codec").get_ref<const std::string&>() !=
+            kResponseStoreSnapshotCodec ||
         response_id.empty()) {
         return false;
     }
@@ -2361,7 +2439,7 @@ bool SessionCheckpointStore::covers(std::string_view session_sha256,
         }
         const nlohmann::json manifest = parse_canonical_json(manifest_text);
         require_manifest_shape(manifest);
-        return manifest.is_object() &&
+        return !manifest.contains("mode") && manifest.is_object() &&
                manifest.at("artifact_type").get<std::string>() == "ninfer_session_checkpoint" &&
                manifest.at("schema_version").get<std::uint32_t>() ==
                    kSessionCheckpointSchemaVersion &&
@@ -2381,7 +2459,8 @@ nlohmann::json SessionCheckpointStore::status(std::string_view session_sha256,
                              {"state", "missing"}};
     if (!valid_digest(session_sha256)) { return result; }
     if (!validate_session_checkpoint_runtime_fingerprint(runtime_fingerprint) ||
-        runtime_fingerprint.at("responses").at("codec") != kResponseStoreSnapshotCodec) {
+        runtime_fingerprint.at("responses").at("codec").get_ref<const std::string&>() !=
+            kResponseStoreSnapshotCodec) {
         result["state"] = "incompatible";
         return result;
     }
@@ -2396,7 +2475,8 @@ nlohmann::json SessionCheckpointStore::status(std::string_view session_sha256,
             result["state"] = "incompatible";
             return result;
         }
-        switch (manifest_origin_state(root, manifest_text, options_.origin_mac_key)) {
+        const auto origin = manifest_origin_state(root, manifest_text, options_.origin_mac_key);
+        switch (origin) {
         case ManifestOriginState::Authentic: break;
         case ManifestOriginState::Forged:
             throw CheckpointCorruption("checkpoint manifest origin authentication failed");
@@ -2416,6 +2496,10 @@ nlohmann::json SessionCheckpointStore::status(std::string_view session_sha256,
             return result;
         }
         require_manifest_shape(manifest);
+        if (manifest.contains("mode") && origin != ManifestOriginState::Authentic) {
+            result["state"] = "incompatible";
+            return result;
+        }
         if (impl_->is_corrupt(std::string(session_sha256) + "/" + *generation)) {
             result["state"] = "corrupt";
             return result;

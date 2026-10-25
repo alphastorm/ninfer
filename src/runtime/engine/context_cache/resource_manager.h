@@ -104,6 +104,18 @@ public:
         }
     }
 
+    [[nodiscard]] std::uint64_t completed_checkpoint_order(
+        std::string_view digest, std::string_view tag) const noexcept {
+        std::uint64_t order = 0;
+        for (const auto& owner : owners_) {
+            if (!owner.active && owner.durable_session == digest && owner.checkpoint_tag == tag &&
+                !owner.points.empty()) {
+                order = std::max(order, owner.publication_order);
+            }
+        }
+        return order;
+    }
+
     [[nodiscard]] std::vector<Handle> session_points(
         const Program& program, std::string_view digest, std::string_view tag,
         bool& pending) const {
@@ -205,7 +217,8 @@ public:
                     const bool take =
                         own_resume
                             ? *own_resume == owner.token
-                            : !owner.active && owner.publication_order <= publication_order &&
+                            : !owner.active && owner.durable_session.empty() &&
+                                  owner.publication_order <= publication_order &&
                                   (!owner.reuse_scope || advice.update_session_index) &&
                                   (!owner.session || (advice.update_session_index &&
                                                       advice.session_key == owner.session));
@@ -294,7 +307,9 @@ public:
             shared && shared->shared_reuse_scope != base.context_cache().shared_reuse_scope) {
             return false;
         }
-        if (choice.take_over && (!owner || owner->publication_order != choice.publication_order ||
+        if (choice.take_over && (!owner ||
+                                 (!owner->durable_session.empty() && choice.resume_owner != choice.owner) ||
+                                 owner->publication_order != choice.publication_order ||
                                  (owner->active && choice.resume_owner != choice.owner))) {
             choice.take_over = false;
         }

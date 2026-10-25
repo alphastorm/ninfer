@@ -223,6 +223,7 @@ int main() {
             CheckpointEngineAccess::set_checkpoint_tag(prepared, tag);
             reference = engine.generate(std::move(prepared), request()).generated_token_ids;
             require(reference.size() == 8, "real source did not complete its output budget");
+            CheckpointEngineAccess::response_stored(engine, victim, tag);
             (void)engine.memory_summary();
             saved = CheckpointEngineAccess::export_session(engine, victim, tag, exported, {});
             require(saved.state == DurableExportState::Exported && saved.stats.points == 3,
