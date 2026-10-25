@@ -1,0 +1,16 @@
+{
+  "scope": "One sleep-only termination rehearsal; no GPU/model/build",
+  "timeout_exit_code": 143,
+  "container_started": true,
+  "termination_handler_observed": true,
+  "lock_attempt_during_container_cleanup_exit_code": null,
+  "wall_seconds": 8.128,
+  "initial_observer_passed": false,
+  "lock_attempt_immediately_after_timeout_exit_code": 1,
+  "owned_container_absent_immediately_after_timeout": false,
+  "lock_attempt_after_cleanup_exit_code": 0,
+  "owned_container_absent": true,
+  "completion_observer_seconds": 0.045,
+  "observer_boundary": "The outer timeout terminated flock before the runner finished its 3s stop handler; its inherited lock remained held. This consumes the same single rehearsal, not a second timeout.",
+  "passed": true
+}
