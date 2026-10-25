@@ -47,6 +47,8 @@ Preflight after a pushed slice is announced: `git fetch origin`, then `git merge
 | Harness ↔ Infra | Build provenance, archive manifest and Docker CMake inputs | Preserve clean-source attestation; no `.git` means neither clean nor dirty by inference. |
 | All sources/tests | Shared CMake manifests and CLI/config union | Integrator owns final wiring; never register missing files or advertise unsupported consumers. |
 
+Scope-carrier prerequisite: public `ContextCacheHints` and internal fixed-capacity `PreparedContextCache` now carry separate private `reuse_scope` and principal `shared_reuse_scope`. Frontend preparation preserves both, including `update_session_index=false`, and rejects empty/oversized values. Existing whole-struct forwarding already carries them through Qwen3.5 (`planning/request_plan.cpp`) and Qwen4 (`program/request.cpp`); no duplicate native copying was added. Runtime filtering and fanout regressions remain EngineCache-owned; the carrier alone is not isolation proof.
+
 ## Shared-file requests
 
 | Requester | Requested surface | Ownership / current state |

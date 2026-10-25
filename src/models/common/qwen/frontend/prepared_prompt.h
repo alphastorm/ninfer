@@ -115,6 +115,8 @@ struct PreparedCacheOpportunity {
 
 struct PreparedContextCache {
     std::optional<PreparedSessionKey> session_key;
+    std::optional<PreparedSessionKey> reuse_scope;
+    std::optional<PreparedSessionKey> shared_reuse_scope;
     std::vector<PreparedCacheOpportunity> opportunities;
     // Controls replacement of a named SessionIndex entry, not anonymous source ownership.
     bool update_session_index = true;
