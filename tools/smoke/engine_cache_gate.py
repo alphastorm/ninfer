@@ -180,8 +180,12 @@ def run_arm(args: argparse.Namespace, baseline: dict, grace_ms: int, root: Path)
                "--device-state-slots", "2", "--host-context-mib", args.host_context_mib,
                "--gpu-keep-warm-ms", str(grace_ms), "--request-log-jsonl", str(events)]
     base_url = "http://127.0.0.1:" + str(args.port)
+    require("CUDA_VISIBLE_DEVICES" not in os.environ, "unexpected_cuda_device_mask")
+    child_environment = dict(os.environ)
+    child_environment["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     with (root / "server.log").open("wb") as log:
-        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT,
+                                   start_new_session=True, env=child_environment)
         try:
             deadline = time.monotonic() + args.startup_timeout
             while time.monotonic() < deadline:
