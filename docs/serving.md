@@ -485,10 +485,12 @@ leave no extra slot for an automatic candidate. If more explicit markers appear 
 latest four remain write candidates. Exact reads of already-published prefixes do not require the
 request to repeat a marker.
 
-These fields are optimization hints. A legal boundary that cannot be represented as an exact
-rendered-token frontier is ignored without changing prompt content. `prompt_cache_key` is not an
-Engine session key or prefix identity. Valid TTL/retention values are accepted, but NInfer does not
-promise their wall-clock residency; physical retention follows the resource scheduler.
+Cache boundaries are optimization hints. A legal boundary that cannot be represented as an exact
+rendered-token frontier is ignored without changing prompt content. An authenticated
+`prompt_cache_key` selects a private session through its domain-separated digest; the raw key is
+not an Engine key and never proves token-prefix compatibility. An unauthenticated key does not
+establish private ownership. Valid TTL/retention values are accepted, but NInfer does not promise
+their wall-clock residency; physical retention follows the resource scheduler.
 
 ## OpenAI Responses Core
 
@@ -709,8 +711,11 @@ On the unconstrained route, malformed tool markup is flushed back as ordinary te
 
 ### Local response state and resources
 
-`store` defaults to `true`. Stored Responses live only in this server process and are bounded by an
-LRU store. They are lost on restart and are not OpenAI's durable cloud retention service.
+`store` defaults to `true`. The live Responses LRU is bounded by the record/byte budgets. Without
+`--session-checkpoint-dir`, it is process-local and lost on restart. With authenticated durable
+serving, named lineages and their native checkpoints can survive restart through the
+[durable restore handshake](#durable-responses-and-graceful-stop). This remains a local service,
+not OpenAI's cloud retention service.
 
 `previous_response_id` reconstructs the complete stored input/output Item history before the new
 input. The current `instructions` value is placed first but is not saved into the continuation
@@ -724,12 +729,14 @@ field inherits the parent value. An explicit different value creates a new seman
 rendering and identity still determine reuse. Changing the boolean alone never invalidates an exact
 checkpoint already proved compatible by the model runtime.
 
-For Engine-local reuse, a stored root Response receives one bounded session key derived from its
-response ID, and every `previous_response_id` child inherits that key. `store:false` roots remain
-anonymous; a `store:false` child may read its inherited session checkpoint but does not replace the
-stored chain's latest endpoint. Response-store eviction or deletion removes the HTTP object, not an
-independently retained Engine checkpoint; the latter remains bounded by the Engine's own retention
-and pressure policy. No session key or cache marker is added to the HTTP schema.
+Without a named authenticated session, a stored root Response receives one bounded Engine key
+derived from its response ID, and `previous_response_id` children inherit it. Named requests instead
+use their authenticated session namespace. `store:false` preserves applicable reuse scopes but does
+not advance the named endpoint or durable lineage; unnamed `store:false` roots remain anonymous.
+The Engine's physical checkpoint retention is independent of the live HTTP-object LRU. An
+authorized private deletion also invalidates the current disk generation so restore cannot
+resurrect the deleted object. Internal Engine keys and cache markers are not exposed in Responses
+objects.
 
 Resource behavior:
 
@@ -976,7 +983,11 @@ production in-memory substitute. Older schema-2 roots are not migrated or discov
 The byte formats and failure taxonomy are defined by [K1–K7](durable/CONTRACTS.md).
 
 Authenticated `prompt_cache_key` requests name private sessions without persisting
-the raw key. A first stored keyed request can restore native state even without
+the raw key. Their session capability is
+`SHA256(UTF8("ninfer:prompt_cache_key:v1") || 0x00 || UTF8(prompt_cache_key))`;
+the API credential remains required. A prompt key cannot be combined with an explicit
+`ninfer_session` or `X-NInfer-Session` on the same creation request.
+A first stored keyed request can restore native state even without
 `previous_response_id`; a missing parent or scoped retrieve can restore the verified
 Responses lineage. Import prepares native resources and the complete replacement
 DAG before committing either visible side. A capacity, revision, epoch or identity
