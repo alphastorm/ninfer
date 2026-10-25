@@ -404,6 +404,16 @@ reject symlinks/reparse points throughout traversal, not only the final basename
 Use anchored directory handles or equivalent race-resistant root confinement.
 Never accept a path validated before an attacker-controlled replacement.
 
+`io::remove_tree(path)` is the required removal primitive for both files and
+directory trees. Every tombstone, quota-reclamation, quarantine and staging-cleanup
+removal uses its anchored no-follow traversal; no raw filesystem removal may bypass
+that boundary. A concurrent symlink/reparse-point substitution must never redirect
+removal outside the intended tree. All renames, including generation, quarantine
+and current-pointer moves, use `io::replace_path` under the same confinement policy.
+This lead-approved extension adds no dependency and does not change which generations
+the store is authorized to reclaim. PortableCore owns the primitive; DurableStore
+owns caller migration and the symlink-swap regression.
+
 Publication order:
 
 1. Create unique unpublished staging generation; failed export leaves current intact.
