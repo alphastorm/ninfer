@@ -43,6 +43,18 @@ ninfer_add_test(ninfer_file_test
   LIBRARIES ninfer_core)
 set_tests_properties(ninfer_file_test PROPERTIES LABELS "host" TIMEOUT 30)
 
+if(WIN32)
+  ninfer_add_test(ninfer_direct_storage_checkpoint_windows_test
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_direct_storage_checkpoint_windows.cpp"
+    LIBRARIES ninfer_checkpoint_directstorage_windows)
+  add_custom_command(TARGET ninfer_direct_storage_checkpoint_windows_test POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NINFER_DIRECTSTORAGE_DLLS}
+            $<TARGET_FILE_DIR:ninfer_direct_storage_checkpoint_windows_test>
+    VERBATIM)
+  set_tests_properties(ninfer_direct_storage_checkpoint_windows_test PROPERTIES
+    LABELS "windows;directstorage" SKIP_RETURN_CODE 77 TIMEOUT 180)
+endif()
+
 foreach(part IN ITEMS system task_pool executor)
   ninfer_add_test(ninfer_cpu_${part}_test
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../cpu/test_${part}.cpp"

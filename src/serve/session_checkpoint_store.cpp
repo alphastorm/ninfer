@@ -1644,7 +1644,7 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
                         .reason = runtime::ContinuationExportSkipReason::StoreStatsInvalid};
                     skip->durable_reason = runtime::DurableReason::InvalidIndex;
                 }
-                // Preserve the released shutdown category; only diagnostics retain the gate.
+                // Retain fork log detail; durable_reason remains the policy authority.
                 skip->reason = runtime::SessionCheckpointSkipReason::ProgramRejected;
             }
             return std::nullopt;

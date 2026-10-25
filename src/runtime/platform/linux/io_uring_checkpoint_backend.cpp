@@ -1775,6 +1775,7 @@ class IoUringContinuationReadQueue final : public ContinuationCheckpointReadQueu
 public:
     explicit IoUringContinuationReadQueue(const std::filesystem::path& root)
         : root_(std::filesystem::absolute(root).lexically_normal()) {
+        if (root_.filename().empty()) { root_ = root_.parent_path(); }
         const LinuxCheckpointEnvironment environment = detect_environment();
         UniqueFd root_fd                             = open_root(root_);
         require_local_filesystem(root_fd.get(), environment);

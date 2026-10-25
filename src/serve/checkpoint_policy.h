@@ -12,34 +12,17 @@
 
 namespace ninfer::serve {
 
-// The gate a refused save actually stopped at. The store keeps ProgramRejected as its coarse
-// reason for accounting but records the first engine-side gate it replaced.
-[[nodiscard]] inline runtime::SessionCheckpointSkipReason
-effective_checkpoint_skip_reason(const runtime::SessionCheckpointSkipDetail& skip) noexcept {
-    using Reason = runtime::SessionCheckpointSkipReason;
-    if (skip.reason == Reason::ProgramRejected && skip.first_reason != Reason::None) {
-        return skip.first_reason;
-    }
-    return skip.reason;
-}
-
-// A refusal that means "not yet" rather than "cannot": the save ran while a request's
-// transaction held the continuation, or before the newest turn's continuation was catalogued.
-// The same save succeeds once the engine quiesces, so an automatic save retries it instead of
-// dropping the session's newest state.
+// K7 is authoritative for retry policy. Legacy engine/Program diagnostics are log
+// detail only: a coarse ProgramRejected must not erase or reinterpret the actual outcome.
 [[nodiscard]] inline bool
 checkpoint_refusal_is_transient(const runtime::SessionCheckpointSkipDetail& skip) noexcept {
-    using Reason = runtime::SessionCheckpointSkipReason;
-    using Export = runtime::ContinuationExportSkipReason;
-    switch (effective_checkpoint_skip_reason(skip)) {
+    using Reason = runtime::DurableReason;
+    switch (skip.durable_reason) {
     case Reason::TransactionBusy:
     case Reason::TagMismatch:
-    case Reason::CatalogIdentityDrift:
+    case Reason::StalePublication:
+    case Reason::StaleRevision:
         return true;
-    case Reason::ProgramRejected:
-        return skip.export_detail.reason == Export::ContextTransactionBusy ||
-               skip.export_detail.reason == Export::ExecutionBatchPending ||
-               skip.export_detail.reason == Export::MaterializationPinned;
     default:
         return false;
     }
@@ -117,10 +100,10 @@ enum class ShutdownCheckpointOutcome { Saved, NothingToSave, Refused };
 [[nodiscard]] inline ShutdownCheckpointOutcome
 classify_shutdown_checkpoint(bool newest_response_on_disk, bool saved,
                              const runtime::SessionCheckpointSkipDetail& skip) noexcept {
-    using Reason = runtime::SessionCheckpointSkipReason;
+    using Reason = runtime::DurableReason;
     if (saved) { return ShutdownCheckpointOutcome::Saved; }
     if (newest_response_on_disk) { return ShutdownCheckpointOutcome::NothingToSave; }
-    switch (effective_checkpoint_skip_reason(skip)) {
+    switch (skip.durable_reason) {
     case Reason::None:
     case Reason::StoreDisabled:
     case Reason::NoSessionRecords:

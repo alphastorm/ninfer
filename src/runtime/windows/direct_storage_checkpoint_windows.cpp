@@ -480,6 +480,7 @@ public:
     WindowsDirectStorageReadQueue(std::filesystem::path root, std::uint32_t timeout_ms)
         : root_(std::filesystem::absolute(std::move(root)).lexically_normal()),
           state_(std::make_shared<DirectStorageState>()), timeout_ms_(timeout_ms) {
+        if (root_.filename().empty()) { root_ = root_.parent_path(); }
         int cuda_device = 0;
         require_cuda(cudaGetDevice(&cuda_device), "failed to query the active CUDA device");
         cudaDeviceProp cuda_properties{};
