@@ -24,6 +24,10 @@ on:
         description: Immutable image_reference from a publish-runtime-base.yml prerelease receipt
         required: true
         type: string
+      runtime_base_receipt_release:
+        description: Published runtime-base-<sha8>-<yyyymmdd> prerelease containing ninfer-runtime-base.json
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -46,6 +50,7 @@ jobs:
       BINARY_SHA256: ${{ inputs.binary_sha256 }}
       IMAGE_REPOSITORY: ghcr.io/alphastorm/ninfer-runtime
       BASE_IMAGE: ${{ inputs.base_image }}
+      RUNTIME_BASE_RECEIPT_RELEASE: ${{ inputs.runtime_base_receipt_release }}
     steps:
       - name: Check out complete public source history
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -62,8 +67,10 @@ jobs:
           set -euo pipefail
           [[ "$GITHUB_REPOSITORY" == "alphastorm/ninfer" ]]
           [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$(git rev-parse HEAD)" == "$SOURCE_COMMIT" ]]
           [[ "$BINARY_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$BASE_IMAGE" =~ ^ghcr\.io/alphastorm/ninfer@sha256:[0-9a-f]{64}$ ]]
+          [[ "$RUNTIME_BASE_RECEIPT_RELEASE" =~ ^runtime-base-[0-9a-f]{8}-[0-9]{8}$ ]]
           printf 'BASE_IMAGE_DIGEST=%s\n' "${BASE_IMAGE##*@}" >> "$GITHUB_ENV"
           [[ "$RELEASE_TAG" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-qwen38-5090-beta\.([1-9][0-9]*)$ ]]
           release_version="${BASH_REMATCH[1]}"
@@ -79,6 +86,36 @@ jobs:
           runtime_release_tag="v$release_version-qwen38-5090-runtime-beta.$beta_number"
           printf 'RELEASE_VERSION=%s\n' "$release_version" >> "$GITHUB_ENV"
           printf 'RUNTIME_RELEASE_TAG=%s\n' "$runtime_release_tag" >> "$GITHUB_ENV"
+
+      - name: Bind runtime base to its published receipt and source history
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_json="$(gh release view "$RUNTIME_BASE_RECEIPT_RELEASE" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,isPrerelease,isDraft,targetCommitish)"
+          [[ "$(jq -r .tagName <<<"$release_json")" == "$RUNTIME_BASE_RECEIPT_RELEASE" ]]
+          [[ "$(jq -r .isPrerelease <<<"$release_json")" == "true" ]]
+          [[ "$(jq -r .isDraft <<<"$release_json")" == "false" ]]
+          root="$RUNNER_TEMP/ninfer-runtime-base-receipt"
+          mkdir -p "$root"
+          gh release download "$RUNTIME_BASE_RECEIPT_RELEASE" --repo "$GITHUB_REPOSITORY" \
+            --pattern ninfer-runtime-base.json --dir "$root"
+          receipt="$root/ninfer-runtime-base.json"
+          jq -e --arg base_image "$BASE_IMAGE" --arg release "$RUNTIME_BASE_RECEIPT_RELEASE" '
+            .artifact_type == "ninfer_runtime_base_publication_receipt"
+            and .schema_version == 1
+            and .runtime_base_release_tag == $release
+            and .image_reference == $base_image
+            and .platform == "linux/amd64"
+            and .build_target == "runtime-base"
+          ' "$receipt" >/dev/null
+          base_source_commit="$(jq -er '.source_commit | select(test("^[0-9a-f]{40}$"))' "$receipt")"
+          [[ "$RUNTIME_BASE_RECEIPT_RELEASE" == "runtime-base-${base_source_commit:0:8}-"* ]]
+          [[ "$(jq -r .targetCommitish <<<"$release_json")" == "$base_source_commit" ]]
+          git merge-base --is-ancestor "$base_source_commit" HEAD
+          receipt_sha256="$(sha256sum "$receipt" | cut -d' ' -f1)"
+          printf 'RUNTIME_BASE_SOURCE_COMMIT=%s\n' "$base_source_commit" >> "$GITHUB_ENV"
+          printf 'RUNTIME_BASE_RECEIPT_SHA256=%s\n' "$receipt_sha256" >> "$GITHUB_ENV"
 
       - name: Download and verify binary release
         shell: bash
@@ -183,12 +220,15 @@ jobs:
             --arg binary_sha256 "$BINARY_SHA256" \
             --arg base_image "$BASE_IMAGE" \
             --arg base_image_digest "$BASE_IMAGE_DIGEST" \
+            --arg runtime_base_receipt_release "$RUNTIME_BASE_RECEIPT_RELEASE" \
+            --arg runtime_base_source_commit "$RUNTIME_BASE_SOURCE_COMMIT" \
+            --arg runtime_base_receipt_sha256 "$RUNTIME_BASE_RECEIPT_SHA256" \
             --arg image_reference "$IMAGE_REPOSITORY@$IMAGE_DIGEST" \
             --arg image_digest "$IMAGE_DIGEST" \
             --arg workflow_url "https://github.com/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
             '{
               artifact_type: "ninfer_runtime_image_publication_receipt",
-              schema_version: 3,
+              schema_version: 4,
               source_commit: $source_commit,
               release_tag: $release_tag,
               runtime_release_tag: $runtime_release_tag,
@@ -196,6 +236,9 @@ jobs:
               binary_sha256: $binary_sha256,
               base_image: $base_image,
               base_image_digest: $base_image_digest,
+              runtime_base_receipt_release: $runtime_base_receipt_release,
+              runtime_base_source_commit: $runtime_base_source_commit,
+              runtime_base_receipt_sha256: $runtime_base_receipt_sha256,
               image_reference: $image_reference,
               image_digest: $image_digest,
               workflow_url: $workflow_url,
@@ -234,6 +277,7 @@ jobs:
             echo "- Source: \`$SOURCE_COMMIT\`"
             echo "- Image: \`$IMAGE_REPOSITORY@$IMAGE_DIGEST\`"
             echo "- Binary release: \`$RELEASE_TAG\`"
+            echo "- Runtime base receipt: \`$RUNTIME_BASE_RECEIPT_RELEASE\` (source \`$RUNTIME_BASE_SOURCE_COMMIT\`)"
             echo "- Runtime release: \`$RUNTIME_RELEASE_TAG\`"
           } >> "$GITHUB_STEP_SUMMARY"
           gh release edit "$RUNTIME_RELEASE_TAG" --draft=false --prerelease
