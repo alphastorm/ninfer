@@ -24,7 +24,7 @@ GPU/build results and measured idle TTFT are recorded only after the approved bo
 
 ## Startup gate
 
-`tools/smoke/engine_cache_gate.py` starts and stops two independent servers, with keep-warm off and 60,000 ms. It requires Infra's measured startup baseline rather than guessing a CUDA-graph ceiling. It attests C2, 131,072 logical context, automatic KV, BF16, DFlash2 K=7, prefill 1,024, Vision, full LM-head draft and two extra Device StateImages. The host-pool argument is explicit because upstream replaces separate Host state/KV pools with one physical pool.
+`tools/smoke/engine_cache_gate.py` starts and stops two independent servers, with keep-warm off and 60,000 ms. It requires Infra's measured startup baseline rather than guessing a CUDA-graph ceiling. It attests C2, 131,072 logical context, automatic KV, BF16, DFlash2 K=7, prefill 1,024, Vision, LM-head draft (`proposal_head=optimized`) and two extra Device StateImages. The host-pool argument is explicit because upstream replaces separate Host state/KV pools with one physical pool.
 
 Each arm primes real work, takes three first-nonempty-text-or-reasoning SSE latency samples after 12 s idle, then exercises HTTP C2 sibling fanout/continuation and requires real multirow decode counters. Startup refusal, logical-context reduction, graph reservation above the measured baseline, wrong UUID, memory-budget overflow or an unavailable Engine fails the gate. Private server logs stay in caller-selected scratch; the public receipt contains only allowlisted measurements, hashes and identifiers, not paths, prompts, outputs or credentials.
 

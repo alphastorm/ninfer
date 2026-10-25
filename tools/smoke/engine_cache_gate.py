@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+from decimal import Decimal
 import hashlib
 import json
 import os
@@ -25,12 +26,13 @@ import urllib.request
 MIB = 1 << 20
 SHAPE = {"max_context": 131072, "max_concurrency": 2, "prefill_chunk": 1024,
          "kv_cache": "bf16", "speculative_backend": "dflash2", "speculative_draft_window": 7,
-         "cuda_graph": True, "vision": True}
+         "proposal_head": "optimized", "cuda_graph": True, "vision": True}
 MEMORY_FIELDS = ("device_budget_bytes", "minimum_runtime_reservation_bytes",
                  "runtime_reservation_bytes", "cuda_graph_rebuild_estimate_bytes",
                  "cuda_graph_prepare_increment_bytes", "cuda_graph_calibration_increment_bytes",
                  "cuda_graph_calibration_retained_bytes", "startup_retained_bytes",
-                 "available_after_startup_bytes", "kv_capacity_headroom_bytes", "kv_payload_bytes")
+                 "available_after_startup_bytes", "kv_capacity_headroom_bytes", "kv_payload_bytes",
+                 "host_context_capacity_bytes")
 
 
 class GateError(RuntimeError):
@@ -196,6 +198,10 @@ def run_arm(args: argparse.Namespace, baseline: dict, grace_ms: int, root: Path)
             record = startup_record(events)
             require(record["engine"].get("gpu_keep_warm_ms") == grace_ms,
                     "keep_warm_configuration_not_attested")
+            require(record["server"].get("default_preserve_thinking") is True,
+                    "thinking_preservation_not_attested")
+            require(record["engine"]["context_cache"].get("host_capacity_bytes") ==
+                    int(Decimal(args.host_context_mib) * MIB), "host_pool_budget_changed")
             startup = validate_startup(record, baseline, args.gpu_uuid)
             stream(base_url, key, "prime clocks")
             samples = []
@@ -235,7 +241,10 @@ def main() -> int:
     baseline_bytes = args.baseline.read_bytes()
     document = json.loads(baseline_bytes)
     baseline = document.get("startup", document)
-    validate_startup(baseline, baseline, args.gpu_uuid)
+    require(all(baseline["engine"].get(key) == value for key, value in SHAPE.items()),
+            "baseline_product_shape_changed")
+    require(baseline["memory"].get("cuda_graph_rebuild_estimate_bytes", 0) > 0,
+            "baseline_graph_reservation_missing")
     receipt = {"artifact_type": "ninfer_engine_cache_gate", "schema_version": 1,
                "source_commit": args.source_commit, "baseline_sha256": hashlib.sha256(baseline_bytes).hexdigest(),
                "shape": SHAPE, "idle_seconds": args.idle_seconds, "arms": [], "passed": False}
@@ -246,6 +255,11 @@ def main() -> int:
         for grace in (0, 60000):
             receipt["arms"].append(run_arm(args, baseline, grace, args.work_dir / str(grace)))
         off, on = receipt["arms"]
+        for cold, warm in zip(off["idle_ttft"], on["idle_ttft"], strict=True):
+            require(all(cold[field] == warm[field] for field in
+                        ("label", "input_tokens", "output_tokens",
+                         "output_text_sha256", "reasoning_text_sha256")),
+                    "keep_warm_changed_deterministic_outputs")
         receipt["median_idle_ttft_ratio_on_over_off"] = on["median_idle_ttft_s"] / off["median_idle_ttft_s"]
         receipt["passed"] = True
     except Exception as error:

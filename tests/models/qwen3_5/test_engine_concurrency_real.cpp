@@ -205,6 +205,7 @@ int main() {
         if (!backend || std::string_view(backend) == "dflash2") {
             options.speculative.backend = ninfer::SpeculativeBackend::DFlash2;
             options.speculative.draft_tokens = 7;
+            options.speculative.proposal_head = ninfer::ProposalHead::Optimized;
         } else {
             require(std::string_view(backend) == "none", "NINFER_TEST_BACKEND must be none or dflash2");
         }
