@@ -53,6 +53,8 @@ identity or session-isolation coverage. Product status failures never trigger a
 fallback to the public battery.
 Thinking controls follow each wire contract: Chat uses `enable_thinking: false`;
 Responses uses `reasoning: {"effort": "none"}`, not the Chat-only top-level flag.
+Public missing-parent continuation checks require master's `response_not_found`;
+the product battery retains the shipped `previous_response_not_found` contract.
 
 ```bash
 python3 tools/smoke/agent_protocol.py --contract public \

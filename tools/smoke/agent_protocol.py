@@ -716,7 +716,8 @@ def responses_session_lifecycle(
         first_id,
         expected_status=404,
     )
-    if error_code(deleted_parent) != "previous_response_not_found":
+    expected_parent_code = "previous_response_not_found" if session_a is not None else "response_not_found"
+    if error_code(deleted_parent) != expected_parent_code:
         raise ProtocolError("deleted parent used the wrong continuation not-found contract")
 
     surviving = create(

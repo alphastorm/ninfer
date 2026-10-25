@@ -53,7 +53,7 @@ class SchemaOutputTests(unittest.TestCase):
             {'error': {'code': 'background_not_supported'}},
             {'id': 'resp_1', 'deleted': True},
             {'error': {'code': 'response_not_found'}},
-            {'error': {'code': 'previous_response_not_found'}},
+            {'error': {'code': 'response_not_found'}},
             {'id': 'resp_4'}, branch,
         ]
         with patch.object(protocol, 'json_response', side_effect=replies) as request:
@@ -65,6 +65,11 @@ class SchemaOutputTests(unittest.TestCase):
         for payload in payloads:
             self.assertEqual(payload['reasoning'], {'effort': 'none'})
             self.assertNotIn('enable_thinking', payload)
+        wrong_contract = [*replies]
+        wrong_contract[8] = {'error': {'code': 'previous_response_not_found'}}
+        with patch.object(protocol, 'json_response', side_effect=wrong_contract):
+            with self.assertRaisesRegex(protocol.ProtocolError, 'wrong continuation not-found'):
+                protocol.responses_session_lifecycle('http://fixture', 'model', {}, None, None)
 
 
 class BatterySelectionTests(unittest.TestCase):
