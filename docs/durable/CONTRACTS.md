@@ -482,14 +482,22 @@ Publication order:
 **POSIX:** fsync each file, same-filesystem rename for atomic replace, fsync relevant
 directories. Acknowledgement `dir_sync: "fsync"`.
 
-**Windows (binding lead decision):** FlushFileBuffers on each file handle;
-MoveFileExW with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH` for atomic
-replacement. Directory sync is an intentional documented NTFS no-op, never throws,
-and never claims a directory fsync occurred. Acknowledgement
-`dir_sync: "ntfs-write-through"`. This is the approved native publication policy,
-not an equivalence claim to POSIX directory-fsync guarantees on arbitrary filesystems.
-A file flush or replacement failure still fails publication normally. Do not invoke
-unsupported directory FlushFileBuffers and use its failure to disable native saves.
+**Windows (binding lead decision):** atomic replacement uses handle-anchored
+`SetFileInformationByHandle` with `FileRenameInfoEx`,
+`REPLACE_IF_EXISTS | POSIX_SEMANTICS`, `RootDirectory` set to the pinned destination
+directory, and a leaf-only destination name. FlushFileBuffers flushes the staged
+file before replacement and the pinned parent handle after replacement. Parent
+pins deny WRITE and DELETE sharing; ancestor and leaf reparse checks remain
+mandatory. No retry weakens those pins or substitutes a pathname-based rename.
+This supersedes the earlier MoveFileExW binding.
+
+The standalone Windows `sync_directory` primitive remains an intentional documented
+NTFS no-op and never throws; it is distinct from the parent-handle flush within
+replacement. Acknowledgement remains `dir_sync: "ntfs-write-through"` and never
+claims a POSIX directory fsync occurred. This is the approved native publication
+policy, not an equivalence claim to POSIX directory-fsync guarantees on arbitrary
+filesystems. Required file/parent flush or replacement failure still prevents a
+successful publication acknowledgement; no retries mask it.
 
 A reader pins each accepted read batch's file handles until its writes retire and
 verifies the exact bytes delivered to the consumer. Reopening between batches is
