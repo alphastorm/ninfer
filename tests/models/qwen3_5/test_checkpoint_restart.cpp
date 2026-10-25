@@ -240,7 +240,8 @@ Generated generate(DeviceContext& device, q35::Program& program,
         const bool partial = scenario == "partial" && !exercised && count > 1;
         if (partial) count = 1;
         result.tokens.insert(result.tokens.end(), pending.tokens().begin(), pending.tokens().begin() + count);
-        const bool terminal = result.tokens.size() == target;
+        // A consumer may accept a strict speculative prefix only when ending the request.
+        const bool terminal = partial || result.tokens.size() == target;
         const std::array<CommitDecision, 1> accept{{{.accepted_tokens = count, .terminal = terminal}}};
         (void)program.commit(std::move(pending), accept);
         if (partial) exercised = true;
@@ -273,6 +274,7 @@ Generated generate(DeviceContext& device, q35::Program& program,
             sequence = *resumed.sequence;
             exercised = true;
         }
+        if (terminal) break;
     }
     require(exercised, "requested draft regression transition was not exercised");
     const auto finish = program.finish(sequence);
@@ -499,6 +501,8 @@ int main(int argc, char** argv) {
                 require(program->physical_usage().occupied == before.occupied &&
                         program->physical_usage().host_reserved_bytes == before.host_reserved_bytes,
                         "recoverability validation reserved or published native state");
+                std::cout << "PASS native-validation backend=" << backend_name
+                          << " host_capacity=0 native_reservations=0 identity_layout_payload=verified\n";
             }
             program.reset(); options.context_cache.host_capacity_bytes = 1ULL << 30; program = make_program();
             std::shared_ptr<const Reader> fresh;
