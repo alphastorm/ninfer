@@ -112,3 +112,8 @@ Context 131072, INT8 KV, MTP3 and C1 are not tuned.
 - PortableCore reports its native candidate (including architecture source `940b000c`) failed compilation in CPU expert code on GNU-only unreachable/F16C intrinsics and ISA flags. The lead assigned those minimal `src/ops/moe` MSVC fixes to PortableCore; this slice leaves those files unchanged. The immutable native artifact's Windows export is also still awaiting its queued job receipt.
 - Test-only full-UUID `CUDA_VISIBLE_DEVICES` masking is explicitly authorized because upstream tests use CUDA ordinal zero. Receipts record the mask; skip 77 is accepted only for the named block-scaled MoE test with its exact exclusion message. Server probes instead leave that variable absent, use `CUDA_DEVICE_ORDER=PCI_BUS_ID` plus numeric `--device`, and require the server-start GPU UUID to match.
 - No native ops execution, real-model decode, throughput measurement, or native release qualification is claimed in this report.
+
+## Portable-core prerequisite evidence
+
+- Full C1 history is merged. Its independent immutable report is [`REPORT.md` at `c796fcb762e1b6aaeb438d1ee9ad3f400379a304`](https://github.com/alphastorm/ninfer/blob/c796fcb762e1b6aaeb438d1ee9ad3f400379a304/REPORT.md); the C2 report before this import is commit `7b4d3088`.
+- C1 final native core result at `f689e6bde` is **8/9, not green**: the first same-parent durable publication still fails with sharing violation. This is a separate native K6 blocker, not a passed C2 numerical or server gate. C2 continues the assigned operator/server/loading builds without claiming durability qualification.
