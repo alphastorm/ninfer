@@ -19,12 +19,17 @@ RUN apt-get update \
         ninja-build \
         pkg-config \
         python3 \
+        python3-jinja2 \
+        python3-jsonschema \
     && rm -rf /var/lib/apt/lists/*
 
-# Build-only driver stub, as in upstream dev 1e902680.
-RUN ln -s /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/libcuda.so.1
+# Keep the build-only stub out of every default/runtime loader search path.
+RUN mkdir -p /opt/ninfer-driver-stub \
+    && ln -s /usr/local/cuda/lib64/stubs/libcuda.so /opt/ninfer-driver-stub/libcuda.so.1
 
 FROM build-env AS build
+
+ENV LD_LIBRARY_PATH=/opt/ninfer-driver-stub:${LD_LIBRARY_PATH}
 
 ARG NINFER_BUILD_PROFILE=rtx5090
 ARG NINFER_UPSTREAM_BASE_SHA

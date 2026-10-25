@@ -32,7 +32,7 @@ Receipts contain relative file identities, counts, hashes and metrics only. Priv
 
 ## Environment proof
 
-Upstream commit: `64d10fbf9f8e6bfc79ab0570b94674c5b9997929`. The build-env image is `sha256:502ca8b3465cb29fef4523a29fbaae5cece976e32f5524caf19e7ab05af35265`; its successful anonymous image build took **50.675 seconds**. The helper built all vanilla apps and tests with benchmarks off, `120a`, and `-j16` in **285.323 seconds**, exit zero. Lease job: `20261025T010304Z-infra-env-master-anonymous-210198` (338 seconds total, no leftover containers).
+Upstream commit: `64d10fbf9f8e6bfc79ab0570b94674c5b9997929`. The initial build-env image was `sha256:502ca8b3465cb29fef4523a29fbaae5cece976e32f5524caf19e7ab05af35265`; its successful anonymous image build took **50.675 seconds**. The helper built all vanilla apps and tests with benchmarks off, `120a`, and `-j16` in **285.323 seconds**, exit zero. Lease job: `20261025T010304Z-infra-env-master-anonymous-210198` (338 seconds total, no leftover containers). This proves compilation, not GPU runtime validity of that initial image.
 
 | Binary | Bytes | SHA-256 |
 |---|---:|---|
@@ -41,3 +41,9 @@ Upstream commit: `64d10fbf9f8e6bfc79ab0570b94674c5b9997929`. The build-env image
 | `apps/ninfer-serve` | 304492472 | `d7d90126c646b0d26517abedf17a05246a24af979b40f6bf6cf8eb905705f50d` |
 
 The shared helper/environment announcement was delivered to all twelve peers after this proof succeeded. Exact measured build command was `NINFER_BUILD_HOLDER=infra "$COMMON/build.sh" "$SRC" "$BUILD"` against the vanilla source and persistent `infra/build-master` directory. `environment.json` records image/build exit codes, monotonic wall times and the binary hashes.
+
+## Initial baseline: environment-invalid, not a product verdict
+
+Lease `20261025T010906Z-infra-vanilla-ctest-214054` exposed two environment defects: the development-stage driver stub at a default CUDA library path displaced the real GPU driver (`cudaErrorStubLibrary`), and the Python template/schema oracles lacked Jinja2/jsonschema. Initial inventory was host **42 passed / 3 failed**, real-model **0 passed / 13 failed / 2 skipped**, other GPU **16 passed / 103 failed / 5 skipped**, explicit real loading exit **1**. None of the GPU failures is attributed to upstream or the product. Both missing-oracle packages and the isolated link-only stub fix were approved by the lead; all peers received a GPU-proof hold before the refresh.
+
+The corrected Dockerfile puts the stub only at `/opt/ninfer-driver-stub/libcuda.so.1`, outside default/runtime search paths. Only `build.sh` configure/build invocations and the isolated Docker `build` stage expose that directory through `LD_LIBRARY_PATH`; `run-in-env.sh` does not expose it to GPU workloads. The development image explicitly includes `git`, `python3-jinja2` and `python3-jsonschema`; the runtime image does not.
