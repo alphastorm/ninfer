@@ -5,10 +5,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <future>
 #include <iostream>
 #include <mutex>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -69,7 +71,7 @@ void pending_timeout(ninfer::Engine& engine) {
     std::mutex mutex;
     std::condition_variable ready;
     std::array<bool, 2> started{};
-    std::array<ninfer::GenerationHandle, 2> active;
+    std::array<std::future<ninfer::GenerationResult>, 2> active;
     for (std::size_t row = 0; row < active.size(); ++row) {
         ninfer::GenerationObservationOptions observation;
         observation.first_token = [&, row](const auto&) {
@@ -79,9 +81,14 @@ void pending_timeout(ninfer::Engine& engine) {
             }
             ready.notify_one();
         };
-        active[row] = engine.submit(
+        auto handle = engine.submit(
             engine.prepare_tokens({198, static_cast<ninfer::TokenId>(1000 + row), 198}),
             request(256, false), ninfer::OutputConsumerMode::Aggregate, observation);
+        // Observers are delivered by wait()'s consumer, not by the GPU worker. Keep both
+        // consumers running while the main thread exercises a third queued request.
+        active[row] = std::async(std::launch::async, [handle = std::move(handle)]() mutable {
+            return handle.wait();
+        });
     }
     {
         std::unique_lock lock(mutex);
@@ -89,6 +96,7 @@ void pending_timeout(ninfer::Engine& engine) {
                                [&] { return started[0] && started[1]; }),
                 "two requests never started before the pending-timeout fixture");
     }
+    (void)engine.memory_summary();
     require(engine.runtime_stats().running_requests == 2,
             "timeout fixture did not hold both execution lanes");
     auto waiting = engine.submit(engine.prepare_tokens({198, 1002, 198}), request(2, false),
@@ -101,7 +109,7 @@ void pending_timeout(ninfer::Engine& engine) {
         timed_out = error.kind() == ninfer::RequestErrorKind::QueueTimeout;
     }
     require(timed_out, "queued deadline was ignored while both lanes decoded");
-    for (auto& handle : active) { complete(handle.wait(), 256); }
+    for (auto& result : active) { complete(result.get(), 256); }
     settled(engine);
 }
 
