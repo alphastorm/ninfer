@@ -563,6 +563,35 @@ int test_typed_items_and_tools() {
     const Json nested = Json::parse(request.generation.tools[0].definition_json);
     failures += check(nested.at("function").at("name") == "weather",
                       "Qwen prompt receives normalized nested function definition");
+    for (const std::size_t length : {64, 65, 71, 128}) {
+        const std::string name(length, 'a');
+        Json long_name = body;
+        long_name["tools"][0]["name"] = name;
+        long_name["input"][1]["name"] = name;
+        long_name["input"][2]["name"] = name;
+        const auto parsed = parse_responses_request(long_name, limits());
+        failures += check(parsed.generation.tools[0].name == name &&
+                              parsed.input_turns[0].tool_calls[0].name == name &&
+                              parsed.generation.tool_name_max_length == kMaxToolNameLength,
+                          "Responses long function declaration and history preserved");
+        long_name["tools"][0] = Json{{"type", "custom"}, {"name", name}};
+        long_name["input"] = Json::array({
+            Json{{"type", "custom_tool_call"}, {"call_id", "call_long"},
+                 {"name", name}, {"input", "raw input"}},
+            Json{{"type", "custom_tool_call_output"}, {"call_id", "call_long"},
+                 {"output", "ok"}}});
+        const auto custom = parse_responses_request(long_name, limits());
+        failures += check(custom.generation.tools[0].name == name &&
+                              custom.input_turns[0].tool_calls[0].name == name,
+                          "Responses long custom declaration and history preserved");
+    }
+    for (const std::string& name :
+         {std::string(), std::string(129, 'a'), std::string("invalid.name")}) {
+        Json invalid = body;
+        invalid["tools"][0]["name"] = name;
+        failures += check(throws_api([&] { (void)parse_responses_request(invalid, limits()); }),
+                          "Responses invalid tool name rejected");
+    }
     return failures;
 }
 

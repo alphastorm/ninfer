@@ -475,6 +475,34 @@ int test_parse_function_tools_and_choices() {
     failures +=
         check(throws_api([&] { (void)parse_chat_completion_request(dup, default_limits()); }),
               "duplicate function tool names rejected");
+
+    for (const std::size_t length : {64, 65, 71, 128}) {
+        const std::string name(length, 'a');
+        Json long_name = base;
+        long_name["tools"][0]["function"]["name"] = name;
+        long_name["tool_choice"] =
+            Json{{"type", "function"}, {"function", Json{{"name", name}}}};
+        long_name["messages"].push_back(
+            Json{{"role", "assistant"}, {"content", nullptr},
+                 {"tool_calls", Json::array({Json{{"id", "call_long"}, {"type", "function"},
+                     {"function", Json{{"name", name}, {"arguments", "{}"}}}}})}});
+        long_name["messages"].push_back(
+            Json{{"role", "tool"}, {"tool_call_id", "call_long"}, {"content", "ok"}});
+        const auto parsed = parse_chat_completion_request(long_name, default_limits());
+        failures += check(parsed.tools[0].name == name &&
+                              parsed.messages[1].tool_calls[0].name == name &&
+                              parsed.tool_choice.name == name &&
+                              parsed.tool_name_max_length == kMaxToolNameLength,
+                          "Chat long tool declaration, choice and history preserved");
+    }
+    for (const std::string& name :
+         {std::string(), std::string(129, 'a'), std::string("invalid.name")}) {
+        Json invalid = base;
+        invalid["tools"][0]["function"]["name"] = name;
+        failures += check(throws_api([&] {
+                              (void)parse_chat_completion_request(invalid, default_limits());
+                          }), "Chat invalid tool name rejected");
+    }
     return failures;
 }
 

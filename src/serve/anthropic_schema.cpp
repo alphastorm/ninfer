@@ -19,8 +19,6 @@ namespace {
 
 using Json = nlohmann::json;
 
-constexpr std::size_t kMaxToolNameLength = 128;
-
 [[noreturn]] void bad_request(std::string message, std::string param = {}, std::string code = {}) {
     ApiError error;
     error.status  = 400;
