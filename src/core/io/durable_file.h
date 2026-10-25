@@ -8,6 +8,13 @@
 
 namespace ninfer::io {
 
+#ifdef _WIN32
+// Absolute extended local-drive spelling for Win32/std::filesystem metadata consumers.
+// Independent of MAX_PATH opt-in policy. Rejects UNC/device namespaces, traversal and
+// alternate streams; this is lexical validation only, not a substitute for anchored I/O.
+[[nodiscard]] std::filesystem::path extended_local_path(const std::filesystem::path& path);
+#endif
+
 // Every existing directory component is opened without following symlinks/reparse points.
 // Staging creation is exclusive, with owner-only POSIX permissions. Open failures throw;
 // the caller owns the returned stream and must close it. Only regular files are accepted.

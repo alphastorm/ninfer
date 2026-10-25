@@ -40,15 +40,31 @@ namespace {
 
 std::filesystem::path checked_path(const std::filesystem::path& path) {
     if (path.empty()) throw std::invalid_argument("empty durable path");
-    for (const auto& component : path.relative_path())
+    const std::filesystem::path* input = &path;
+#ifdef _WIN32
+    std::filesystem::path local;
+    const auto& text = path.native();
+    if (text.starts_with(L"\\\\?\\")) {
+        // Only the extended spelling of an absolute local drive is accepted. Strip it
+        // before component checks and the anchored NT walk; never admit UNC or devices.
+        if (text.size() < 7 || text[5] != L':' || text[6] != L'\\' ||
+            !((text[4] >= L'A' && text[4] <= L'Z') ||
+              (text[4] >= L'a' && text[4] <= L'z')))
+            throw std::invalid_argument("durable path requires a local drive");
+        local = std::filesystem::path(text.substr(4));
+        input = &local;
+    }
+#endif
+    for (const auto& component : input->relative_path())
         if (component == "..")
             throw std::invalid_argument("durable path contains traversal components");
-    const auto absolute = std::filesystem::absolute(path).lexically_normal();
+    const auto absolute = std::filesystem::absolute(*input).lexically_normal();
 #ifdef _WIN32
     // The native store is local and same-volume. Device/UNC namespaces and alternate streams
     // are not part of its path contract.
     const auto root = absolute.root_name().native();
-    if (root.size() != 2 || root[1] != L':')
+    if (root.size() != 2 || root[1] != L':' ||
+        !((root[0] >= L'A' && root[0] <= L'Z') || (root[0] >= L'a' && root[0] <= L'z')))
         throw std::invalid_argument("durable path requires a local drive");
     for (const auto& component : absolute.relative_path()) {
         const auto text = component.native();
@@ -442,6 +458,14 @@ bool remove_entry(int parent, const char* name) {
 }
 #endif
 } // namespace
+
+#ifdef _WIN32
+std::filesystem::path extended_local_path(const std::filesystem::path& path) {
+    auto absolute = checked_path(path);
+    absolute.make_preferred();
+    return std::filesystem::path(L"\\\\?\\" + absolute.native());
+}
+#endif
 
 std::FILE* open_binary_write(const std::filesystem::path& path) { return open_stream(path, true); }
 std::FILE* open_binary_read(const std::filesystem::path& path) { return open_stream(path, false); }

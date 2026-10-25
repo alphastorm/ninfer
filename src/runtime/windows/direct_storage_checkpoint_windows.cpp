@@ -480,7 +480,7 @@ private:
 class WindowsDirectStorageReadQueue final : public ContinuationCheckpointReadQueue {
 public:
     WindowsDirectStorageReadQueue(std::filesystem::path root, std::uint32_t timeout_ms)
-        : root_(std::filesystem::absolute(std::move(root)).lexically_normal()),
+        : root_(io::extended_local_path(root)),
           state_(std::make_shared<DirectStorageState>()), timeout_ms_(timeout_ms) {
         if (root_.filename().empty()) { root_ = root_.parent_path(); }
         int cuda_device = 0;
@@ -566,13 +566,13 @@ public:
             throw CheckpointContractError("DirectStorage checkpoint request batch is invalid");
         }
 
-        const DWORD source_attributes = GetFileAttributesW(path.c_str());
+        const std::filesystem::path canonical = io::extended_local_path(path);
+        const DWORD source_attributes = GetFileAttributesW(canonical.c_str());
         if (source_attributes == INVALID_FILE_ATTRIBUTES ||
             (source_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
             throw CheckpointContractError(
                 "DirectStorage checkpoint payload is not a regular non-reparse file");
         }
-        const std::filesystem::path canonical = std::filesystem::absolute(path).lexically_normal();
         if (!contains(canonical)) {
             throw CheckpointContractError(
                 "DirectStorage checkpoint read escaped its configured root");
