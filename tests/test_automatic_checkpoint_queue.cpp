@@ -8,7 +8,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -263,6 +265,42 @@ int publication_abandonment_completes_pressure() {
     return failures;
 }
 
+class FileReadQueue final : public ninfer::runtime::ContinuationCheckpointReadQueue {
+    class Completion final : public ninfer::runtime::ContinuationCheckpointReadCompletion {
+    public:
+        Completion(std::filesystem::path path,
+                   std::span<const ninfer::runtime::ContinuationCheckpointReadRequest> requests)
+            : path_(std::move(path)), requests_(requests.begin(), requests.end()) {}
+        void wait() override {
+            if (done_) { return; }
+            done_ = true;
+            std::ifstream input(path_, std::ios::binary);
+            for (const auto& request : requests_) {
+                input.seekg(static_cast<std::streamoff>(request.file_offset));
+                input.read(reinterpret_cast<char*>(request.destination.data()),
+                           static_cast<std::streamsize>(request.destination.size()));
+                if (!input || input.gcount() != static_cast<std::streamsize>(request.destination.size())) {
+                    throw std::runtime_error("checkpoint fixture read failed");
+                }
+            }
+        }
+    private:
+        std::filesystem::path path_;
+        std::vector<ninfer::runtime::ContinuationCheckpointReadRequest> requests_;
+        bool done_ = false;
+    };
+public:
+    bool available() const noexcept override { return true; }
+    bool overlaps_batches() const noexcept override { return false; }
+    std::string_view backend_name() const noexcept override { return "host-file-test"; }
+    std::string_view unavailable_reason() const noexcept override { return {}; }
+    std::unique_ptr<ninfer::runtime::ContinuationCheckpointReadCompletion> submit(
+        const std::filesystem::path& path,
+        std::span<const ninfer::runtime::ContinuationCheckpointReadRequest> requests) override {
+        return std::make_unique<Completion>(path, requests);
+    }
+};
+
 int durable_record_delete_preserves_survivors() {
     const auto root = std::filesystem::temp_directory_path() /
         ("ninfer-delete-test-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -276,7 +314,8 @@ int durable_record_delete_preserves_survivors() {
         >> manifest;
     const auto fingerprint = manifest.at("runtime_fingerprint");
     SessionCheckpointStoreOptions options{.root = root, .origin_mac_key = std::string(32, 'k'),
-                                          .require_origin_auth = true};
+                                          .require_origin_auth = true,
+                                          .read_queue = std::make_shared<FileReadQueue>()};
     SessionCheckpointStore disk(options);
     OpenAIResponsesStore responses(8, 1ULL << 20);
     responses.put(record("resp_parent", session, 1));
