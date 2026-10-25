@@ -1,0 +1,194 @@
+name: Build and host contracts
+
+on:
+  push:
+    branches: [main, 'rebase/**']
+    paths-ignore: [REPORT.md]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      full_build:
+        description: Build the complete runtime instead of only bounded compile targets
+        type: boolean
+        default: false
+  schedule:
+    - cron: '17 6 * * 0'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
+
+jobs:
+  linux:
+    name: Linux CUDA 13 / host tests / bounded sm_120a compile
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 2G
+      CUDA_PATH: /usr/local/cuda-13.1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install CUDA toolkit from NVIDIA apt repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/cuda-keyring.deb" \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i "$RUNNER_TEMP/cuda-keyring.deb"
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cuda-toolkit-13-1 \
+            cmake ninja-build ccache pkg-config libhwloc-dev liburing-dev \
+            libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libjpeg-dev libcurl4-openssl-dev \
+            python3-jinja2 python3-jsonschema python3-pytest
+          echo "$CUDA_PATH/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/ccache
+          key: ccache-${{ runner.os }}-cuda13.1-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-cuda13.1-
+      - name: Configure current source with verified provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=120a -DCMAKE_CUDA_COMPILER="$CUDA_PATH/bin/nvcc" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+            -DPython3_EXECUTABLE=/usr/bin/python3 \
+            -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=ON -DNINFER_BUILD_BENCHMARKS=OFF \
+            -DNINFER_BUILD_PROFILE=ci-sm120a -DNINFER_UPSTREAM_BASE_SHA="$(git rev-parse 64d10fbf)"
+      - name: Build host targets and bounded native CUDA objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build --parallel 2 --target ninfer_core \
+            ninfer_public_api_test ninfer_cpu_system_test ninfer_cpu_task_pool_test \
+            ninfer_cpu_executor_test ninfer_context_cost_measure_test ninfer_jinja_test \
+            ninfer_grammar_test ninfer_json_schema_test ninfer_regex_choice_test \
+            src/ops/CMakeFiles/ninfer_ops.dir/linear/kernels/q4/q4_a16_sliced_k_mma.cu.o \
+            src/ops/CMakeFiles/ninfer_ops.dir/linear/swiglu/q4/shapes/n34816_k5120/small.cu.o
+      - name: Run only GPU-free CTest contracts
+        shell: bash
+        run: |
+          ctest --test-dir build --output-on-failure \
+            -R '^ninfer_(public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?)_test$'
+      - name: Run ported host-only tooling tests
+        shell: bash
+        run: |
+          python3 -m unittest discover -s tests -p 'test_sm120_*.py'
+          python3 -m unittest discover -s tests -p 'test_release_package.py'
+          python3 -m unittest discover -s tests -p 'test_lifecycle_container.py'
+          python3 -m unittest discover -s tests -p 'test_agent_protocol.py'
+          /usr/bin/python3 -m pytest -q tests/bench/ttft/test_measurements.py tests/test_serve_corpus.py
+      - name: Cache statistics
+        if: always()
+        run: ccache --show-stats
+
+  full-runtime:
+    name: Weekly or manual full Linux runtime compile
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full_build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 4G
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install NVIDIA CUDA 13 toolkit and host dependencies
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/cuda-keyring.deb" \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i "$RUNNER_TEMP/cuda-keyring.deb"
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cuda-toolkit-13-1 cmake ninja-build ccache pkg-config \
+            libhwloc-dev liburing-dev libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libjpeg-dev libcurl4-openssl-dev \
+            python3-jinja2 python3-jsonschema
+          echo /usr/local/cuda-13.1/bin >> "$GITHUB_PATH"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: .cache/ccache
+          key: ccache-full-${{ runner.os }}-cuda13.1-${{ github.sha }}
+          restore-keys: ccache-full-${{ runner.os }}-cuda13.1-
+      - name: Configure and build complete app and test targets
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=120a \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+            -DPython3_EXECUTABLE=/usr/bin/python3 \
+            -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=ON -DNINFER_BUILD_BENCHMARKS=ON \
+            -DNINFER_BUILD_PROFILE=ci-full-sm120a -DNINFER_UPSTREAM_BASE_SHA="$(git rev-parse 64d10fbf)"
+          cmake --build build --parallel 2
+      # The complete apps link the NVIDIA driver ABI. Their artifact-free version
+      # test runs on the leased host with the real driver and no visible devices,
+      # not against a runtime driver stub on this GPU-less runner.
+
+  windows-configure:
+    name: Windows MSVC configure-only (PortableCore manifest required)
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Detect portable dependency contract
+        id: portable
+        shell: pwsh
+        run: |
+          if (Test-Path vcpkg.json) {
+            'ready=true' >> $env:GITHUB_OUTPUT
+          } else {
+            'ready=false' >> $env:GITHUB_OUTPUT
+            Write-Output '::notice::Windows configure waits for the PortableCore vcpkg manifest to land.'
+          }
+      - name: Cache Windows dependency binaries
+        if: steps.portable.outputs.ready == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/AppData/Local/vcpkg/archives
+          key: vcpkg-windows-${{ hashFiles('vcpkg.json') }}
+      - name: Install official CUDA 13.1 compiler components
+        if: steps.portable.outputs.ready == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installer = Join-Path $env:RUNNER_TEMP cuda-installer.exe
+          Invoke-WebRequest -Uri 'https://developer.download.nvidia.com/compute/cuda/13.1.1/network_installers/cuda_13.1.1_windows_network.exe' -OutFile $installer
+          $process = Start-Process $installer -Wait -PassThru -ArgumentList '-s nvcc_13.1 cudart_13.1 crt_13.1 nvvm_13.1 nvtx_13.1 thrust_13.1 cuda_profiler_api_13.1'
+          if ($process.ExitCode -ne 0) { throw "CUDA installer failed: $($process.ExitCode)" }
+      - name: Configure MSVC and pinned vcpkg (no GPU execution)
+        if: steps.portable.outputs.ready == 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $vs = & "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          & "$vs/Common7/Tools/Launch-VsDevShell.ps1" -Arch amd64 -HostArch amd64 -SkipAutomaticLocation
+          $env:CUDA_PATH = 'C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.1'
+          $env:PATH = "$env:CUDA_PATH/bin;$env:PATH"
+          $manifest = Get-Content vcpkg.json -Raw | ConvertFrom-Json
+          $vcpkg = Join-Path $env:RUNNER_TEMP vcpkg
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git $vcpkg
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg clone failed' }
+          git -C $vcpkg checkout --detach $manifest.'builtin-baseline'
+          if ($LASTEXITCODE -ne 0) { throw 'pinned vcpkg checkout failed' }
+          & "$vcpkg/bootstrap-vcpkg.bat" -disableMetrics
+          if ($LASTEXITCODE -ne 0) { throw 'vcpkg bootstrap failed' }
+          $base = git rev-parse 64d10fbf
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=120a `
+            "-DCMAKE_TOOLCHAIN_FILE=$vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=ON -DNINFER_BUILD_BENCHMARKS=OFF `
+            -DNINFER_BUILD_PROFILE=ci-windows-configure "-DNINFER_UPSTREAM_BASE_SHA=$base"
+          if ($LASTEXITCODE -ne 0) { throw 'Windows MSVC configure failed' }

@@ -4,6 +4,107 @@ Maintainer orchestration for the public `ninfer_bench` throughput tool, serving 
 runners, and the external Serve TTFT client. Correctness is owned by the affected suites under
 [`tests/`](../../tests/README.md).
 
+## Fork harness on upstream master
+
+The fork's runtime source base is upstream master `64d10fbf`. Keep the upstream
+TTFT, corpus, concurrency, and public `ninfer_bench` implementations; their
+diagnostics and scheduling coverage supersede the older fork versions.
+
+The port adds the SM120 profiling/controller scripts, `run_profile_request.py`,
+the fixed A/B campaign summarizer, and `summarize_ncu_q4.py`. A profile packet
+binds a clean source commit, artifact SHA-256, prepared binary/script/corpus
+checksums, native `sm_120a` cubins, and the selected toolchain image. Preparation
+does not execute GPU workloads. Capture runs the independent Q4/Q5 correctness
+tests before the performance-counter permission gate, then collects public
+Q5 cold-cache eager/Graph timings, Q4 T=1/T=4 NCU captures, an MTP3 native round
+timing, and a measured public-Engine MTP3 Nsight Systems capture.
+
+Master has no fork-only post-mixer candidate API. The scripts do not pass
+`--candidate`, `--activation-state`, `--route`, or `--describe` to its Q4/Q5
+benchmarks. The native round target is `ninfer_qwen3_5_mtp_round_bench`; only
+`ninfer_bench` accepts `--profile-measured`. The old private C16 versus split2,
+Q4-produced activation, and chain-cost conclusions are not inferred from the
+new public measurements.
+
+Use the selected Python 3.11 profiling environment and an explicitly authorized
+GPU lease. The standalone controller wrappers have their own production
+stop/restore contract; do not run them inside a separately managed overnight
+window or use them to bypass its holder/container/port ownership rules.
+
+```bash
+python3 -m unittest discover -s tests -p 'test_sm120_*.py'
+python3 -m unittest discover -s tests -p 'test_release_package.py'
+python3 -m unittest discover -s tests -p 'test_lifecycle_container.py'
+python3 -m unittest discover -s tests -p 'test_agent_protocol.py'
+```
+
+`tools/smoke/serve_contract.py` accepts an optional `--api-key-file` and retains
+upstream's output-budget checks alongside exact greedy stream/non-stream output,
+finish-reason, and token-accounting parity. Cache-hit counts are validated for each
+request but need not match: the repeat can reuse a prefix that the cold request
+computed.
+`tools/smoke/agent_protocol.py` defaults to the authenticated **product** battery:
+status identity, request-correlated private reuse, cross-session Responses
+isolation, tool arguments/results, JSON-schema output, and streaming parity.
+Its explicit `--contract public` mode exercises vanilla upstream's public
+protocols, tool round trip, Responses lineage/delete behavior, JSON schemas on
+Chat and Responses, and streaming. A public receipt never claims product
+identity or session-isolation coverage. Product status failures never trigger a
+fallback to the public battery.
+Thinking controls follow each wire contract: Chat uses `enable_thinking: false`;
+Responses uses `reasoning: {"effort": "none"}`, not the Chat-only top-level flag.
+Public missing-parent continuation checks require master's `response_not_found`;
+the product battery retains the shipped `previous_response_not_found` contract.
+
+```bash
+python3 tools/smoke/agent_protocol.py --contract public \
+  --base-url http://127.0.0.1:18160 --model q38-ninfer
+python3 tools/smoke/agent_protocol.py --contract product \
+  --base-url http://127.0.0.1:18160 --model q38-ninfer --api-key-file /run/secrets/ninfer-key
+```
+
+Release packaging remains fail-closed on clean, matching build provenance.
+The v0.13 lifecycle mounts an explicitly configured absolute `checkpoint_dir`
+at `/checkpoints-v013`; that target participates in container identity and drift
+checks. Omitting the setting leaves persistence disabled. Product launchers use
+a separate host `checkpoints-v013` root, preserving earlier releases' roots for
+rollback. The Docker image supplies neither a checkpoint ENV default nor an
+anonymous VOLUME; never reuse `/checkpoints` as an implicit compatibility alias.
+`ninfer`, `ninfer-serve`, and `ninfer_bench` support `--version` without loading
+an artifact or creating a GPU context. CMake verifies the configured Git commit
+and clean/dirty state before compilation. A source archive without Git metadata
+cannot claim to be clean; the lifecycle builder materializes a detached Git
+repository. The Docker context must include that metadata, not a private
+linked-worktree `.git` pointer.
+
+The branch build workflow uses the NVIDIA apt CUDA 13 toolkit, cached ccache,
+host-only CTest selections, and bounded `sm_120a` core/Q4 object compilation.
+Complete runtime builds are separate weekly/manual jobs. Windows MSVC
+configure-only activates when the PortableCore `vcpkg.json` manifest is present;
+it is not a Windows build or native-GPU qualification. No CI job runs GPU
+inference. The runtime publication workflow requires an explicit immutable,
+qualified master-compatible `base_image`; it does not reuse the shipped old
+runtime base digest automatically.
+
+### Receipt and consumer changelog
+
+- `ninfer_agent_protocol_smoke` schema **2** replaces schema **1**'s
+  structured-output-rejection expectation with Chat/Responses JSON-schema
+  success. It adds `contract`; product identity flags remain false in public
+  mode, and unexercised isolation paths/statuses are null.
+- Status consumers pin `ninfer_server_status` schema **2**, preserving fork
+  field names and required identity/counter assertions.
+- Serving corpus and TTFT diagnostics consume request-log schema **30**.
+  Benchmark result schemas and TTFT diagnostic calculations are unchanged.
+- SM120 preparation manifests use schema **2**, capture manifests schema **3**,
+  and newly produced public Q4 shape/capture summaries schema **2**.
+  Historical Q4 schema **1** input remains readable with its original strict
+  kernel/route checks; it is never relabeled as a master capture.
+- Profile toolchain image revision **3** adds the master hwloc/liburing build
+  dependencies and invalidates older cached profile images.
+- Linux release/package identity schema **1**, Windows schema **2**, lifecycle
+  receipts, and runtime-image publication receipt schema **3** remain unchanged.
+
 ## External Serve TTFT
 
 [`ttft/README.md`](ttft/README.md) defines the black-box latency benchmark. The measurement runner
@@ -159,7 +260,7 @@ The serial runner writes `run.jsonl`, `summary.csv`, `summary.md`, and per-serve
 category summaries. The output directory is supplied explicitly with `--output`.
 
 Its schema-v8 result and flattened summaries retain the KV dtype, actual `prefill_signature`, request Host
-exposure, and decode Host/Device-wait time per round received from the schema-v29 serving records.
+exposure, and decode Host/Device-wait time per round received from the schema-v30 serving records.
 Request exposure is a latency distribution value and is never summed across concurrent requests;
 worker aggregation uses the serving `throughput.host_work` interval deltas. The stochastic route pins its complete
 temperature/top-p/top-k/min-p/presence/frequency profile explicitly, so model-default changes do
