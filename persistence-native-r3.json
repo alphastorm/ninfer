@@ -1,0 +1,69 @@
+{
+  "schema": "ninfer-persistence-gpu/1",
+  "source_commit": "de640b205b6c32bf42f3a56a60d32b2197e06dab",
+  "pre_fix_commit": "19043a4910513e59b188bf9a4a0e8623dc660200",
+  "job": "20261025T032946Z-A2-persistence-proof-de640b20-r3-477212",
+  "priority": 2,
+  "deadline_minutes": 30,
+  "job_seconds": 331,
+  "job_exit": 1,
+  "leftover_containers": 0,
+  "unowned_containers": 0,
+  "image_sha256": "e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
+  "artifacts": {
+    "native_v3": "5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7",
+    "published_v3": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da"
+  },
+  "build_seconds": 196.372,
+  "context_codec_kv": {
+    "command": "ctest --test-dir /build --output-on-failure -R '^(ninfer_context_store_test|ninfer_kv_history_test|ninfer_checkpoint_codec_test)$'",
+    "exit": 0,
+    "seconds": 1.17,
+    "log_sha256": "9336363b3e50fa610a6da422b5ffaadf1fc25b5f538df38abb5dadd8371f7fae"
+  },
+  "native_transactions": {
+    "command": "NINFER_TEST_ARTIFACT=/model.ninfer /build/tests/ninfer_qwen3_5_native_transactions_test BACKEND",
+    "none": {"exit": 0, "seconds": 17.061, "artifact": "native_v3"},
+    "mtp": {"exit": 0, "seconds": 17.658, "artifact": "native_v3"},
+    "dflash2": {"exit": 0, "seconds": 17.714, "artifact": "published_v3"},
+    "log_sha256_all_modes": "2fa3d0a1cca4fdb5bcc7d6e0a688d44e89e6e7b5bad458e25136142e18215be3",
+    "evidence": "OK native transaction cancellation, paused ownership and replay recovery"
+  },
+  "restart": {
+    "command": "NINFER_TEST_ARTIFACT=/model.ninfer python3 /src/tests/models/qwen3_5/run_checkpoint_restart.py /build/tests/ninfer_qwen3_5_checkpoint_restart_test BACKEND",
+    "none": {"exit": 1, "seconds": 4.831},
+    "mtp": {"exit": 1, "seconds": 5.081},
+    "dflash2": {"exit": 1, "seconds": 5.532},
+    "log_sha256_all_modes": "d4fce86b5f84568a1440bf01b198fd5c452ae3ca6f4aff1d59ff08ce8d23c839",
+    "evidence": "FAIL checkpoint restart: kv_capacity is outside the usable range for max_context and max_concurrency",
+    "classification": "invalid test setup: explicit KV 2048 exceeds context 1024 times concurrency 1; no restart proof"
+  },
+  "grammar": {
+    "command": "NINFER_TEST_ARTIFACT=/model.ninfer /build/tests/ninfer_qwen3_5_grammar_real_test",
+    "exit": 1,
+    "seconds": 11.65,
+    "artifact": "published_v3",
+    "log_sha256": "cdd117d9c330985acff81fbf2afc73a8bb54c3742dc304af8af509953a469195",
+    "evidence": "GBNF integration: KV write exceeds its page reservation",
+    "status": "419 remains failing after both isolated reservation repairs"
+  },
+  "shared_prefix": {
+    "command": "NINFER_TEST_ARTIFACT=/model.ninfer NINFER_TEST_KV_DTYPE=fp8 /build/tests/ninfer_qwen3_5_shared_prefix_real_test BACKEND",
+    "baseline_mtp": {"exit": 1, "seconds": 14.303},
+    "candidate_mtp": {"exit": 1, "seconds": 13.75},
+    "mtp_log_sha256_both_sources": "a44a4dbb97612445b6b85fefc1eaaaed75f258df5bf918ad3dde81fdea4e61eb",
+    "mtp_evidence": "FAIL shared-prefix: KV write exceeds its page reservation",
+    "mtp_status": "414 reproduced by two synchronized clients and remains failing",
+    "candidate_dflash2": {
+      "exit": 0,
+      "seconds": 17.514,
+      "clients": 12,
+      "reused_tokens": 1766,
+      "decode_rounds": 220,
+      "decode_rows": 423,
+      "partial_tail_clients": 6,
+      "available": true,
+      "log_sha256": "1044031af43a5f67297f6202d5f12c060f6433c1fb55259c4e3d28c325290132"
+    }
+  }
+}

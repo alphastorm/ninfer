@@ -315,7 +315,7 @@ int main(int argc, char** argv) {
         auto frontend = models::qwen::make_frontend(model->resources(), {.vision_enabled = false, .max_context = 1024},
             q35::default_sampling(model->config().text.architecture));
         EngineOptions options;
-        options.max_context = 1024; options.kv_capacity = KvCapacityPolicy::explicit_capacity(2048);
+        options.max_context = 1024; options.kv_capacity = KvCapacityPolicy::explicit_capacity(1024);
         options.prefill_chunk = 128; options.max_concurrency = 1; options.kv_cache = KvCacheStorage::BFloat16;
         options.use_cuda_graph = false; options.speculative.backend = backend;
         options.speculative.draft_tokens = backend == SpeculativeBackend::None ? 0 : 7;
