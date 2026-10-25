@@ -117,6 +117,7 @@ std::string serve_usage_text(const char* argv0) {
            " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
            "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
+           "[--gpu-keep-warm-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
            "[--context-cost-presets FILE] "
            "[--max-request-mib N] [--media-cache-mib N] [--media-live-mib N] "
@@ -145,6 +146,7 @@ std::string serve_usage_text(const char* argv0) {
            "       Responses state is process-local and bounded to 1024 records / 256 MiB by "
            "default\n"
            "       --log-stats-interval-ms defaults to 5000; 0 disables periodic throughput logs\n"
+           "       --gpu-keep-warm-ms bounds idle GPU warming after work; 0 disables it (default)\n"
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
            "       --prefill-chunk requires a positive multiple of 128; defaults to 1024, or "
            "4096 with CPU expert offload\n"
@@ -225,6 +227,13 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             if (options.prefill_chunk == 0) {
                 throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
             }
+        } else if (arg == "--gpu-keep-warm-ms") {
+            const auto milliseconds =
+                parse_u64(require_value("--gpu-keep-warm-ms"), "gpu-keep-warm-ms");
+            if (milliseconds > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::invalid_argument("--gpu-keep-warm-ms is out of range");
+            }
+            options.gpu_keep_warm_ms = static_cast<std::uint32_t>(milliseconds);
         } else if (arg == "--context-cost-presets") {
             options.context_cost_presets = require_value("--context-cost-presets");
             if (options.context_cost_presets.empty()) {

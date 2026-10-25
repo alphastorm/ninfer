@@ -73,6 +73,17 @@ std::size_t device_budget(std::size_t available) {
 } // namespace
 
 EngineOptions normalize_engine_options(EngineOptions options) {
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+    if (options.kv_cache == KvCacheStorage::Nvfp4Group16 ||
+        options.kv_cache == KvCacheStorage::Fp8KeyNvfp4Value) {
+        throw std::invalid_argument("NVFP4 KV storage requires the Blackwell build profile");
+    }
+#endif
+#if defined(NINFER_SM86)
+    if (options.kv_cache == KvCacheStorage::Fp8E4M3Row256) {
+        throw std::invalid_argument("FP8 KV storage is unavailable in the sm_86 build profile");
+    }
+#endif
     switch (options.purpose) {
     case EnginePurpose::Generation:
         break;

@@ -2,6 +2,14 @@ ninfer_add_test(ninfer_scheduler_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_scheduler.cpp"
   LIBRARIES ninfer_runtime_support)
 
+add_test(NAME ninfer_engine_cache_gate_test
+  COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/../test_engine_cache_gate.py")
+
+ninfer_add_test(ninfer_engine_options_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_engine_options.cpp"
+  LIBRARIES ninfer_engine)
+set_tests_properties(ninfer_engine_options_test PROPERTIES LABELS "host")
+
 ninfer_add_test(ninfer_context_cost_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_context_cost.cpp"
   LIBRARIES ninfer_runtime_support ninfer::json)
