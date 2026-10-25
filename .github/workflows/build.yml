@@ -131,12 +131,9 @@ jobs:
             -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=ON -DNINFER_BUILD_BENCHMARKS=ON \
             -DNINFER_BUILD_PROFILE=ci-full-sm120a -DNINFER_UPSTREAM_BASE_SHA="$(git rev-parse 64d10fbf)"
           cmake --build build --parallel 2
-      - name: Verify artifact-free app provenance
-        run: |
-          NINFER_TEST_BINARY="$PWD/build/apps/ninfer" \
-          NINFER_TEST_SERVE_BINARY="$PWD/build/apps/ninfer-serve" \
-          NINFER_TEST_BENCH_BINARY="$PWD/build/bench/ninfer_bench" \
-            python3 -m unittest discover -s tests -p test_release_package.py
+      # The complete apps link the NVIDIA driver ABI. Their artifact-free version
+      # test runs on the leased host with the real driver and no visible devices,
+      # not against a runtime driver stub on this GPU-less runner.
 
   windows-configure:
     name: Windows MSVC configure-only (PortableCore manifest required)
