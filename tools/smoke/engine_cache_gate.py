@@ -1,8 +1,8 @@
 """Bounded 32 GiB product-shape startup, C2 and idle-TTFT gate (stdlib only).
 
 Run inside the build/runtime container under the GPU lease. The baseline is Infra's sanitized
-server_start record, or {"startup": <that record>}. It is a measured reservation ceiling, not an
-estimate chosen by this runner. The server is started twice and always stopped by this runner.
+server_start record, or {"startup": <that record>}. The gate preserves measured headroom and
+bounds graph growth well below the upstream #385 failure. The server is started twice and stopped.
 Only numeric measurements, hashes and allowlisted startup fields enter the public receipt.
 """
 from __future__ import annotations
@@ -29,6 +29,9 @@ SHAPE = {"max_context": 131072, "max_concurrency": 2, "prefill_chunk": 1024,
          "proposal_head": "optimized", "cuda_graph": True, "vision": True}
 GRAPH_FIELDS = ("cuda_graph_rebuild_estimate_bytes", "cuda_graph_calibration_increment_bytes",
                 "cuda_graph_calibration_retained_bytes", "startup_retained_bytes")
+MINIMUM_HEADROOM_BYTES = 768 * MIB
+MAXIMUM_HEADROOM_LOSS_BYTES = 32 * MIB
+MAXIMUM_GRAPH_GROWTH_BYTES = 64 * MIB
 MEMORY_FIELDS = ("device_budget_bytes", "minimum_runtime_reservation_bytes",
                  "runtime_reservation_bytes", "cuda_graph_rebuild_estimate_bytes",
                  "cuda_graph_prepare_increment_bytes", "cuda_graph_calibration_increment_bytes",
@@ -63,20 +66,34 @@ def validate_startup(record: dict, baseline: dict, gpu_uuid: str) -> dict:
     require(environment.get("gpu_uuid", "").lower() == gpu_uuid.lower(), "selected_gpu_mismatch")
     total = environment.get("total_device_memory_bytes", 0)
     require(31 * 1024 * MIB <= total <= 32 * 1024 * MIB, "not_a_32_gib_device")
-    # Master reports a legitimate zero in the legacy rebuild-estimate field. Its calibration
-    # and retained backing, not an invented positive allowance, define the measured ceiling.
+    # #385 consumes roughly 1.16 GiB per batch. A bounded 64 MiB margin admits the
+    # ported routes' small retained footprint without admitting that failure class.
     for field in GRAPH_FIELDS:
         value, ceiling = memory.get(field), baseline["memory"].get(field)
         require(isinstance(value, int) and isinstance(ceiling, int),
                 "graph_calibration_metrics_missing")
-        require(value <= ceiling and (field != GRAPH_FIELDS[0] or value >= 0),
+        require(0 <= value <= ceiling + MAXIMUM_GRAPH_GROWTH_BYTES,
                 "cuda_graph_reservation_growth")
     budget = memory.get("device_budget_bytes", 0)
     require(0 < budget <= total and 0 < memory.get("runtime_reservation_bytes", 0) <= budget,
             "runtime_reservation_exceeds_device_budget")
-    require(memory.get("available_after_startup_bytes", -1) >= 0, "negative_startup_headroom")
+    headroom = memory.get("available_after_startup_bytes")
+    baseline_headroom = baseline["memory"].get("available_after_startup_bytes")
+    require(isinstance(headroom, int) and isinstance(baseline_headroom, int),
+            "startup_headroom_metrics_missing")
+    require(headroom >= MINIMUM_HEADROOM_BYTES and
+            headroom >= baseline_headroom - MAXIMUM_HEADROOM_LOSS_BYTES,
+            "insufficient_startup_headroom")
     return {"engine": {key: engine[key] for key in (*SHAPE, "kv_capacity_mode", "kv_capacity")},
             "memory": {key: memory[key] for key in MEMORY_FIELDS if key in memory},
+            "startup_gate": {
+                "minimum_headroom_bytes": MINIMUM_HEADROOM_BYTES,
+                "maximum_headroom_loss_bytes": MAXIMUM_HEADROOM_LOSS_BYTES,
+                "maximum_graph_growth_bytes": MAXIMUM_GRAPH_GROWTH_BYTES,
+                "baseline_headroom_bytes": baseline_headroom,
+                "baseline_graph_bytes": {key: baseline["memory"][key] for key in GRAPH_FIELDS},
+                "graph_deltas_bytes": {key: memory[key] - baseline["memory"][key]
+                                      for key in GRAPH_FIELDS}},
             "total_device_memory_bytes": total}
 
 

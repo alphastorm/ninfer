@@ -28,7 +28,7 @@ def startup() -> dict:
                        "cuda_graph_calibration_increment_bytes": 30 * GATE.MIB,
                        "cuda_graph_calibration_retained_bytes": 30 * GATE.MIB,
                        "startup_retained_bytes": 30 * GATE.MIB + 4096,
-                       "available_after_startup_bytes": 256 * GATE.MIB}}
+                       "available_after_startup_bytes": 1024 * GATE.MIB}}
 
 
 class StartupGateTests(unittest.TestCase):
@@ -40,14 +40,41 @@ class StartupGateTests(unittest.TestCase):
         self.assertNotIn("gpu_uuid", summary)
         self.assertNotIn("/private/", json.dumps(summary))
 
-    def test_graph_reservation_growth_fails_even_if_the_server_is_healthy(self) -> None:
+    def test_small_graph_growth_with_improved_headroom_passes(self) -> None:
+        baseline = startup()
+        current = copy.deepcopy(baseline)
+        for field in GATE.GRAPH_FIELDS[1:]:
+            current["memory"][field] += 2 * GATE.MIB
+        current["memory"]["available_after_startup_bytes"] += 2 * GATE.MIB
+        summary = GATE.validate_startup(current, baseline, UUID)
+        self.assertEqual(summary["memory"]["cuda_graph_calibration_retained_bytes"],
+                         32 * GATE.MIB)
+        self.assertEqual(summary["startup_gate"]["graph_deltas_bytes"]
+                         ["cuda_graph_calibration_retained_bytes"], 2 * GATE.MIB)
+
+    def test_gib_graph_growth_fails_even_if_the_server_is_healthy(self) -> None:
         baseline = startup()
         for field in GATE.GRAPH_FIELDS:
             with self.subTest(field=field):
                 current = copy.deepcopy(baseline)
-                current["memory"][field] += 1
+                current["memory"][field] += 1024 * GATE.MIB
                 with self.assertRaisesRegex(GATE.GateError, "cuda_graph_reservation_growth"):
                     GATE.validate_startup(current, baseline, UUID)
+
+    def test_absolute_and_baseline_headroom_floors(self) -> None:
+        baseline = startup()
+        for headroom in (767 * GATE.MIB, baseline["memory"]["available_after_startup_bytes"]
+                        - 33 * GATE.MIB):
+            current = copy.deepcopy(baseline)
+            current["memory"]["available_after_startup_bytes"] = headroom
+            with self.subTest(headroom=headroom), self.assertRaisesRegex(
+                    GATE.GateError, "insufficient_startup_headroom"):
+                GATE.validate_startup(current, baseline, UUID)
+        current["memory"]["available_after_startup_bytes"] = 992 * GATE.MIB
+        GATE.validate_startup(current, baseline, UUID)
+        baseline["memory"]["available_after_startup_bytes"] = 800 * GATE.MIB
+        current["memory"]["available_after_startup_bytes"] = 768 * GATE.MIB
+        GATE.validate_startup(current, baseline, UUID)
 
     def test_zero_legacy_estimate_uses_real_retained_calibration(self) -> None:
         baseline = startup()

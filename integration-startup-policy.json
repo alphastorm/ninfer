@@ -1,0 +1,61 @@
+{
+  "schema": "ninfer-startup-metric-reevaluation/1",
+  "runtime_source": "12ff96e000db77a9f4b0c95942b38170d031e0eb",
+  "job": "20261025T074546Z-int-rc-12ff96e0-590220",
+  "policy": "Main-approved #385 envelope: 768MiB absolute headroom, <=32MiB baseline headroom loss, <=64MiB graph growth",
+  "unit_tests": {
+    "count": 8,
+    "exit": 0
+  },
+  "original_failure": "cuda_graph_reservation_growth under superseded zero-growth policy",
+  "reevaluated_without_runtime_rerun": true,
+  "passed": true,
+  "startup": {
+    "engine": {
+      "max_context": 131072,
+      "max_concurrency": 2,
+      "prefill_chunk": 1024,
+      "kv_cache": "bf16",
+      "speculative_backend": "dflash2",
+      "speculative_draft_window": 7,
+      "proposal_head": "optimized",
+      "cuda_graph": true,
+      "vision": true,
+      "kv_capacity_mode": "auto",
+      "kv_capacity": 146368
+    },
+    "memory": {
+      "device_budget_bytes": 32429309952,
+      "minimum_runtime_reservation_bytes": 10343649793,
+      "runtime_reservation_bytes": 11346088449,
+      "cuda_graph_rebuild_estimate_bytes": 0,
+      "cuda_graph_prepare_increment_bytes": 0,
+      "cuda_graph_calibration_increment_bytes": 33554432,
+      "cuda_graph_calibration_retained_bytes": 33554432,
+      "startup_retained_bytes": 33786880,
+      "available_after_startup_bytes": 1074790400,
+      "kv_capacity_headroom_bytes": 1073741824,
+      "kv_payload_bytes": 9592373248,
+      "host_context_capacity_bytes": 21881405440
+    },
+    "startup_gate": {
+      "minimum_headroom_bytes": 805306368,
+      "maximum_headroom_loss_bytes": 33554432,
+      "maximum_graph_growth_bytes": 67108864,
+      "baseline_headroom_bytes": 1072693248,
+      "baseline_graph_bytes": {
+        "cuda_graph_rebuild_estimate_bytes": 0,
+        "cuda_graph_calibration_increment_bytes": 31457280,
+        "cuda_graph_calibration_retained_bytes": 31457280,
+        "startup_retained_bytes": 31689728
+      },
+      "graph_deltas_bytes": {
+        "cuda_graph_rebuild_estimate_bytes": 0,
+        "cuda_graph_calibration_increment_bytes": 2097152,
+        "cuda_graph_calibration_retained_bytes": 2097152,
+        "startup_retained_bytes": 2097152
+      }
+    },
+    "total_device_memory_bytes": 34162343936
+  }
+}
