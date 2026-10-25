@@ -964,6 +964,30 @@ void host_only_import(DeviceContext& device) {
     expect(invalid, "invalid coverage was mistaken for capacity pressure");
     f.empty();
 }
+
+void replay_write_reservation(DeviceContext& device) {
+    // Artifact-independent reproduction of upstream #419: quote before a replay rewind,
+    // then cross the real native page boundary. The old quote counted discarded pages.
+    for (const bool retained_suffix : {false, true}) {
+        Fixture f(device, 8, 4);
+        auto history = f.create(65);
+        std::optional<context::KVPrefixRef> endpoint;
+        if (retained_suffix) endpoint.emplace(f.histories->retain_prefix(history.handle(), 65));
+        const auto required = f.histories->write_pages(history.handle(), 8, 65);
+        expect(required == (retained_suffix ? 2U : 1U),
+               "replay quote omitted post-rewind growth or retained-tail COW");
+        f.histories->reserve_growth(history.handle(), required);
+        f.histories->prepare_write(history, 8, 65, device.stream());
+        f.histories->commit_frontier(history.handle(), 65);
+        expect(f.histories->committed_frontier(history.handle()) == 65 &&
+               f.histories->reserved_growth_pages(history.handle()) == 0,
+               "replay did not consume its exact reservation");
+        device.synchronize();
+        history.reset();
+        endpoint.reset();
+        f.empty();
+    }
+}
 } // namespace
 
 int main() {
@@ -988,6 +1012,7 @@ int main() {
         migration_restore_chain(device, PagedKVPlaneOrder::HeadMajor);
         mixed_snapshot(device);
         host_only_import(device);
+        replay_write_reservation(device);
         std::cout << "KV history and snapshot ownership passed\n";
         return 0;
     } catch (const std::exception& error) {
