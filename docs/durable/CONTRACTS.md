@@ -220,6 +220,14 @@ The public `Engine` API stays unchanged except integration-owned friendship.
 - `checkpoint_layout(const Engine&)` and `frontend_identity(const Engine&)` expose
   the immutable K2 startup identity described above; neither introduces a public
   Engine persistence method or derives identity from admission capacities.
+- `set_pressure_checkpoint_handler(Engine&, shared_ptr<PressureCheckpointHandler>)`
+  installs the live store-backed save-before-eviction provider.
+  `notify_checkpoint_progress(Engine&) noexcept` wakes work after observed checkpoint
+  progress; it does not authorize eviction or a speculative retry loop.
+- `set_reclaimable_session_oracle(Engine&, shared_ptr<const ReclaimableSessionOracle>)`
+  installs the trusted store-backed recoverability provider separately from Reader.
+  An absent oracle permits no unrelated-session reclaim. Disk metadata, manifest
+  flags and a Reader's mere existence never supply this authority.
 - `export_session(engine, digest, expected_tag, Writer&, limits)` returns
   `Exported`, `Refused(reason)`, or `Stale`, with `captured_epoch` on success.
   No silent retry against a different tag.
@@ -306,6 +314,11 @@ digest, explicit latest response ID, parent-before-child DAG and exact records.
 Encode `optional<bool> preserve_thinking` as distinct null/false/true values.
 Validate IDs, parents, cycles, media/tool types and byte/count bounds before publish.
 A required response ID must exist in the authenticated target lineage.
+
+Live serving installs the real store-backed pressure handler and reclaimability
+oracle through the internal K3 adapter. These are process-owned providers, not
+serialized restore inputs; no public Engine API is added. Restore without a proven
+oracle must preserve unrelated sessions rather than infer their recoverability.
 
 State machine:
 
