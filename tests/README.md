@@ -464,3 +464,9 @@ about 64 GiB of available Host memory plus system headroom. These are loading/re
 Text/Vision/MTP generation, eager or CUDA Graph decode, and text causal scoring use the public Engine,
 with current support described in the [execution reference](../docs/maintainer/qwen4_exp-execution.md)
 and commands in the [CLI guide](../docs/cli.md).
+
+## EXP-097 accounting
+
+`python3 -m unittest discover -s tests -p test_exp097.py` checks weighted decode and round-cost
+aggregation, empirical p95, distinct consumption of same-token-shape request logs, and refusal of
+missing log evidence. It needs no GPU or private corpus and does not qualify any numerical route.

@@ -1490,3 +1490,33 @@ For a timeline, capture this executable with `nsys --trace=cuda,nvtx`; the model
 wait and CPU computation separately. `--profile` brackets measured calls with CUDA profiler API
 calls when capture by that API is appropriate. Profiled durations do not replace ordinary wall
 measurements.
+
+## EXP-097 upstream route comparison
+
+`tools/bench/run_exp097.py` measures one already-running, isolated server arm. Supply the frozen
+qualification directory, product `speculative_decode_probe.py`, the exact 84 common case IDs from
+EXP-095, the explicit long-context fixture, an identity JSON and that arm's exclusive request log.
+The private corpus stays external; receipts contain hashes, counts and timings, not prompt/output
+text. Role requests reuse the qualification runner at low reasoning, temperature zero and zero
+additional reasoning headroom; reasoning-only completions remain in the decode measurement.
+
+```bash
+python3 tools/bench/run_exp097.py --arm A1-shipped --base-url http://127.0.0.1:18140 \
+  --api-key-file api-key --request-log requests.jsonl --qualification qualification \
+  --probe speculative_decode_probe.py --case-ids case-ids.json \
+  --long-fixture examples/cli/messages/long_niah_128k.json \
+  --identity identity.json --receipt receipt.json
+```
+
+Run shipped/upstream/upstream/shipped in that order, restarting the isolated server between arms.
+The common shape is DFlash2 K=7, BF16 KV, context and explicit global KV capacity 131,072,
+prefill chunk 1,024 and two resident lanes. This fixed-KV experiment is not automatic-capacity
+acceptance. Context probes use stable workload-specific nonces at approximately 0/32K/64K/120K,
+2,048 completion tokens for singles and 1,024 each for pairs. Two submissions do not promise a
+constant GPU batch of two. `--skip-roles` permits the second context-only repetition.
+
+Weighted decode is total completion tokens divided by total server decode seconds; round cost is
+total server decode milliseconds divided by total speculative rounds. Role medians and empirical
+nearest-rank p95 decode milliseconds/token are also reported per workload class. A single corpus
+pass does not estimate a per-case tail distribution or establish quality equivalence. Missing log
+matches fail instead of silently dropping observations.
