@@ -20,6 +20,7 @@
 #include "core/arena.h"
 #include "core/tensor.h" // ninfer::DType, ninfer::Tensor (for op call sites)
 #include "ops/op_check.h"
+#include "ops/excluded_paths.h"
 
 #include <cuda_runtime.h>
 

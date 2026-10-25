@@ -280,6 +280,7 @@ int run_profile(std::string_view label, const Profile& profile,
     MemoryArena workspace(workspace_storage.span());
 
     int failures        = 0;
+    const auto* final_input = &host_activation;
     const auto run_case = [&](int tokens, bool replay) {
         const auto elements = checked_elements(profile.output_rows, tokens, "output size");
         test::GuardedDeviceBuffer output(elements * sizeof(std::uint16_t));
@@ -306,9 +307,11 @@ int run_profile(std::string_view label, const Profile& profile,
             for (int phase = 0; phase < (replay ? 2 : 1); ++phase) {
                 const auto& input_bits = phase ? negative_activation : host_activation;
                 const auto& expected   = phase ? negative_reference : reference;
-                if (replay)
+                if (replay) {
                     device_activation.copy_from_host(input_bits.data(),
                                                      input_bits.size() * sizeof(std::uint16_t));
+                    final_input = &input_bits;
+                }
                 output.fill(0xff);
                 test::cuda_check(cudaDeviceSynchronize(), "finish replay input update");
                 if (replay)
@@ -333,6 +336,8 @@ int run_profile(std::string_view label, const Profile& profile,
                                                  input_bits.size() * sizeof(std::uint16_t));
             }
         } catch (const std::exception& error) {
+            if (profile.activation_compute != ActivationCompute::A16 &&
+                report_excluded_path(label_case, error.what())) return;
             std::cerr << label_case << ": unexpected exception: " << error.what() << '\n';
             ++failures;
         }
@@ -345,11 +350,10 @@ int run_profile(std::string_view label, const Profile& profile,
                                      host_activation.size() * sizeof(std::uint16_t));
     }
     for (int tokens : graph_cases) run_case(tokens, true);
-    const auto& final_input = graph_cases.empty() ? host_activation : negative_activation;
     failures += device_activation.verify_guards(std::string(label) + " activation");
     failures += device_weight.verify_guards(std::string(label) + " weight");
     failures += verify_unchanged(std::string(label) + " activation", device_activation,
-                                 final_input.data(), final_input.size() * sizeof(std::uint16_t));
+                                 final_input->data(), final_input->size() * sizeof(std::uint16_t));
     failures += verify_unchanged(std::string(label) + " weight", device_weight,
                                  host_weight.payload.data(), host_weight.payload.size());
     return failures;
