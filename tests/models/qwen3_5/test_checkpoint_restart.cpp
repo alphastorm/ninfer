@@ -188,7 +188,7 @@ struct Generated {
     std::uint32_t reused = 0;
 };
 Generated generate(DeviceContext& device, q35::Program& program,
-                   models::qwen::PreparedPromptData prompt, std::optional<q35::CheckpointHandle> source,
+                   models::qwen::PreparedPrompt prompt, std::optional<q35::CheckpointHandle> source,
                    bool capture, std::string_view scenario = "terminal") {
     ResolvedExecutionOptions options;
     options.requested_output_tokens = scenario == "terminal" ? 8 : 24;
@@ -278,7 +278,7 @@ Generated generate(DeviceContext& device, q35::Program& program,
     result.points.push_back(*finish.checkpoint);
     return result;
 }
-models::qwen::PreparedPromptData seed_prompt(models::qwen::Frontend& frontend) {
+models::qwen::PreparedPrompt seed_prompt(models::qwen::Frontend& frontend) {
     PromptInput input;
     input.options.enable_thinking = false;
     std::string prefix, suffix;
@@ -292,9 +292,9 @@ models::qwen::PreparedPromptData seed_prompt(models::qwen::Frontend& frontend) {
     input.context_cache.markers.push_back({.after_message_count = 1,
         .kind = PromptCacheMarkerKind::PrivateLongAnchor,
         .location = PromptCacheMarkerLocation::MessageBoundary});
-    return models::qwen::PreparedPromptAccess::take(frontend.prepare(std::move(input)));
+    return frontend.prepare(std::move(input));
 }
-models::qwen::PreparedPromptData continuation_prompt(models::qwen::Frontend& frontend,
+models::qwen::PreparedPrompt continuation_prompt(models::qwen::Frontend& frontend,
                                                      const DurableCheckpointSet& index,
                                                      std::size_t point_index) {
     const auto& point = index.points.at(point_index);
@@ -303,7 +303,10 @@ models::qwen::PreparedPromptData continuation_prompt(models::qwen::Frontend& fro
     auto tokens = identity.ledger;
     tokens.resize(point.frontier);
     tokens.insert(tokens.end(), 8, 198);
-    auto prompt = models::qwen::PreparedPromptAccess::take(frontend.prepare_tokens(std::move(tokens)));
+    auto prepared = frontend.prepare_tokens(std::move(tokens));
+    // Fixture-owned, non-const storage; do not add a production mutation API for test input.
+    auto& prompt = const_cast<models::qwen::PreparedPromptData&>(
+        models::qwen::PreparedPromptAccess::view(prepared));
     // A Chat checkpoint includes execution splits as well as token IDs. Preserve its
     // exact native prefix rather than asking a raw-token prompt to match a different identity.
     std::copy_n(identity.token_types.begin(), point.frontier, prompt.token_types.begin());
@@ -316,7 +319,7 @@ models::qwen::PreparedPromptData continuation_prompt(models::qwen::Frontend& fro
     prompt.rope_delta = point.rope_delta;
     for (const auto frontier : identity.execution_frontiers)
         if (frontier <= point.frontier) prompt.identity.rewrite_execution_frontiers.push_back(frontier);
-    return prompt;
+    return prepared;
 }
 void release(q35::Program& program, const std::vector<q35::CheckpointHandle>& points) {
     for (auto point : points) require(program.release_checkpoint(point), "checkpoint ownership leaked");
@@ -392,7 +395,7 @@ int main(int argc, char** argv) {
             for (std::size_t i = 0; i < index.points.size(); ++i) {
                 const auto& point = index.points[i];
                 auto prompt = continuation_prompt(frontend, index, i);
-                const auto input = prompt.token_ids;
+                const auto input = models::qwen::PreparedPromptAccess::view(prompt).token_ids;
                 auto expected = generate(device, *program, std::move(prompt), seed.points[i], false);
                 require(expected.reused == point.frontier, "live baseline did not hit selected point");
                 const auto bytes = decoded(expected.tokens);
@@ -512,7 +515,8 @@ int main(int argc, char** argv) {
             for (std::size_t i = 0; i < points.size(); ++i) {
                 const auto& expected = oracle.at("continuations").at(i);
                 auto prompt = continuation_prompt(frontend, index, i);
-                require(prompt.token_ids == expected.at("input").get<std::vector<TokenId>>(),
+                require(models::qwen::PreparedPromptAccess::view(prompt).token_ids ==
+                            expected.at("input").get<std::vector<TokenId>>(),
                         "restart changed continuation input");
                 const auto observed = generate(device, *program, std::move(prompt), points[i], false);
                 const auto bytes = decoded(observed.tokens);

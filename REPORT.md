@@ -4,6 +4,8 @@
 
 - Native restart fixture now reconstructs the continuation's exact token types, positions and execution splits from each exported point before comparing it with the live source. Raw token IDs alone discard Chat rewrite boundaries included in the native prefix digest. MTP uses its supported five-token draft window; DFlash2 remains seven. Runtime proof pending.
 - Private accounting overlay traces admission quotes, reservation resizing and write mapping; it is not a production change. Initial job `20261025T040158Z-A2-persistence-accounting-r5-488462` refused a context-short patch before build/test execution, exit 1 in 2 seconds, zero leftover/unowned containers. Corrected overlay submitted as `20261025T040852Z-A2-persistence-accounting-r5b-491183`.
+- Accounting reproduced both failures: build 6.354 s, grammar 11.724 s, shared MTP/fp8 13.750 s; whole job 32 s, exit 0 because both expected reds were observed. Each interval was quoted and reserved at **zero** during admission, then quoted **one** at mapping with no intervening settlement. `persistence-accounting-r5.json` preserves exact counters and log hashes.
+- Pin/restart batch `20261025T041618Z-A2-persistence-pin-restart-r5c-496652` stopped at fixture compilation (3.845 s; job 6 s, exit 1, zero leftovers). Public `Program::plan_request` takes owning `PreparedPrompt`, unlike the internal native transaction fixture's `PreparedPromptData` overload. Corrected only the test-owned prompt construction; no Program interface change.
 
 ## Current handoff
 

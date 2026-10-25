@@ -1,0 +1,53 @@
+{
+  "schema": "ninfer-persistence-accounting/1",
+  "candidate": "6af4a47ac",
+  "job": "20261025T040852Z-A2-persistence-accounting-r5b-491183",
+  "image_sha256": "e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
+  "private_instrumentation": true,
+  "production_write_guard_unchanged": true,
+  "build": {
+    "command": ["cmake", "--build", "/build", "-j16", "--target", "ninfer_qwen3_5_grammar_real_test", "ninfer_qwen3_5_shared_prefix_real_test"],
+    "exit": 0,
+    "seconds": 6.354,
+    "log_sha256": "64ddbf6998e957da6db8274c97e1d3e7b443000a431a3284e79ed3c413bb1cd3"
+  },
+  "tests": [
+    {
+      "name": "grammar-real",
+      "command": ["/build/tests/ninfer_qwen3_5_grammar_real_test"],
+      "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+      "exit": 1,
+      "seconds": 11.724,
+      "log_sha256": "0e8c2414bbf32d45e39e179f8a5d8309a94296769c0161ff1c86fdc070922260",
+      "interval": [8, 17],
+      "admission_quote": 0,
+      "admission_reservation": 0,
+      "mapping_quote": 1,
+      "mapping_reservation": 0,
+      "retained_frontier": 8,
+      "mapped_pages": 1,
+      "intervening_settlement": false
+    },
+    {
+      "name": "two-client-shared-prefix-mtp-fp8",
+      "command": ["/build/tests/ninfer_qwen3_5_shared_prefix_real_test", "mtp"],
+      "environment": {"NINFER_TEST_KV_DTYPE": "fp8"},
+      "artifact_sha256": "5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7",
+      "exit": 1,
+      "seconds": 13.750,
+      "log_sha256": "4caa03b24e5e3d591666da885c297fa33851cbe179392cae065b4f9df7dae522",
+      "interval": [280, 289],
+      "admission_quote": 0,
+      "admission_reservation": 0,
+      "mapping_quote": 1,
+      "mapping_reservation": 0,
+      "retained_frontier": 280,
+      "mapped_pages": 5,
+      "intervening_settlement": false
+    }
+  ],
+  "job_seconds": 32,
+  "job_exit": 0,
+  "leftover_containers_stopped": 0,
+  "unowned_containers_left": 0
+}
