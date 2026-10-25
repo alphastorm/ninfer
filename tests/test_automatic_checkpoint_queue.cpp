@@ -292,7 +292,8 @@ int durable_record_delete_preserves_survivors() {
                 return ninfer::runtime::DurableExportResult{
                     .state = written ? ninfer::runtime::DurableExportState::Exported
                                      : ninfer::runtime::DurableExportState::Refused,
-                    .stats = {.frontier_tokens = 1, .payload_bytes = 1, .points = 1, .states = 1}};
+                    .stats = {.frontier_tokens = 1, .restored_tokens = 1,
+                              .payload_bytes = 1, .points = 1, .states = 1}};
             }, [](ninfer::runtime::DurableSessionEpoch, const std::function<bool()>& commit) {
                 return ninfer::runtime::DurablePublicationResult{
                     .state = commit() ? ninfer::runtime::DurableExportState::Exported
