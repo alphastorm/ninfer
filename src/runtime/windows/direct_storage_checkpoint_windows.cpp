@@ -672,10 +672,11 @@ private:
 std::shared_ptr<ContinuationCheckpointReadQueue>
 make_direct_storage_checkpoint_read_queue(const std::filesystem::path& root,
                                           std::uint32_t timeout_ms) {
-    std::error_code error;
-    std::filesystem::create_directories(root, error);
-    if (error) {
-        throw CheckpointContractError("create DirectStorage checkpoint root: " + error.message());
+    try {
+        io::create_directories(root);
+    } catch (const std::exception& error) {
+        throw CheckpointContractError(std::string("create DirectStorage checkpoint root: ") +
+                                      error.what());
     }
     return std::make_shared<WindowsDirectStorageReadQueue>(root, timeout_ms);
 }

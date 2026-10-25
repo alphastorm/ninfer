@@ -36,8 +36,11 @@ selection is not.
 
 Each new release instance writes only its own `session-checkpoints-v3` root
 (outer schema 3/native checkpoint-set format 1). Earlier roots are preserved for
-rollback and are never discovered or imported by the new runtime. An older
-release's own schema-3 configuration remains capability-gated to its own binary,
+rollback and are never discovered or imported by the new runtime. The
+DirectStorage queue creates its root through the common K6 no-follow directory
+primitive before constructing GPU/DXGI resources, preserving the existing
+checkpoint-root failure context.
+An older release's own schema-3 configuration remains capability-gated to its own binary,
 status schema and isolated checkpoint root. Managed stop signals the per-launch
 event, waits for synchronous final saves, and accepts only a launch-bound
 schema-1 shutdown report with `complete=true` and no refused sessions. Skipped
