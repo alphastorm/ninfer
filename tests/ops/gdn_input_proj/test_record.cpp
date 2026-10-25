@@ -421,6 +421,13 @@ int run_nvfp4() {
             seed);
     };
     for (auto policy : {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA4}) {
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+        if (policy == ops::LinearPolicy::AllowA4) {
+            std::cout << "EXCLUDED GDN record NVFP4 A4"
+                         " (refusal checked by architecture_contract)\n";
+            continue;
+        }
+#endif
         for (int width = 2; width <= 16; ++width) {
             failures += run(width, 1, {}, policy, 1600U + width);
             failures += run(width, 8, ragged(width, 8), policy, 1650U + width);
@@ -464,6 +471,13 @@ int run_fp8() {
         quantized_weight::make_patterned_weight(QType::FP8_E4M3FN_ROW_BF16, kRows, kHidden, 1701U));
     int failures = 0;
     for (auto policy : {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8}) {
+#if defined(NINFER_SM86)
+        if (policy == ops::LinearPolicy::AllowA8) {
+            std::cout << "EXCLUDED GDN record FP8 A8"
+                         " (refusal checked by architecture_contract)\n";
+            continue;
+        }
+#endif
         for (int width = 2; width <= 16; ++width) {
             failures += run_fp8_case(parent, width, 1, {}, policy, 1700U + width);
             failures += run_fp8_case(parent, width, 8, ragged(width, 8), policy, 1750U + width);
