@@ -266,6 +266,12 @@ std::string read_file_bytes(const std::filesystem::path& path) {
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 
+[[nodiscard]] std::filesystem::path
+stored_generation_root(const std::filesystem::path& root, const OpenAIResponseStoreSnapshot& responses,
+                       const std::string& generation) {
+    return root / "sessions" / responses.client_session_sha256 / "generations" / generation;
+}
+
 bool write_chunked(ContinuationCheckpointWriter& writer, std::string_view path,
                    std::span<const std::byte> bytes) {
     std::uint64_t offset = 0;
@@ -1854,12 +1860,6 @@ int test_buffered_deferred_failure_fails_before_publication() {
     return failures;
 }
 
-
-[[nodiscard]] std::filesystem::path
-stored_generation_root(const std::filesystem::path& root, const OpenAIResponseStoreSnapshot& responses,
-                       const std::string& generation) {
-    return root / "sessions" / responses.client_session_sha256 / "generations" / generation;
-}
 
 int test_hmac_sha256_rfc4231_vectors() {
     int failures = 0;
