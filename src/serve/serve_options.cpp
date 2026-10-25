@@ -1,9 +1,11 @@
 #include "serve/serve_options.h"
 #include "product/speculative_options.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -11,6 +13,75 @@
 
 namespace ninfer::serve {
 namespace {
+
+std::string read_api_key_file(const char* path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) { throw std::invalid_argument("--api-key-file is not readable"); }
+    input.seekg(0, std::ios::end);
+    const std::streamoff size = input.tellg();
+    if (size < 0 || size > 4096) {
+        throw std::invalid_argument("--api-key-file exceeds 4096 bytes");
+    }
+    input.seekg(0, std::ios::beg);
+    std::string value(static_cast<std::size_t>(size), '\0');
+    input.read(value.data(), static_cast<std::streamsize>(size));
+    if (!input) { throw std::invalid_argument("--api-key-file could not be read completely"); }
+    if (!value.empty() && value.back() == '\n') { value.pop_back(); }
+    if (!value.empty() && value.back() == '\r') { value.pop_back(); }
+    if (value.empty() || value.find_first_of("\r\n") != std::string::npos) {
+        throw std::invalid_argument("--api-key-file must contain exactly one non-empty line");
+    }
+    return value;
+}
+
+std::string parse_sha256(const char* text, const char* flag) {
+    const std::string value(text);
+    if (value.size() != 64 ||
+        !std::all_of(value.begin(), value.end(), [](unsigned char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        })) {
+        throw std::invalid_argument(std::string(flag) +
+                                    " must be a 64-character lowercase SHA-256");
+    }
+    return value;
+}
+
+std::string parse_profile_name(const char* text) {
+    const std::string value(text);
+    if (value.empty() || value.size() > 64 ||
+        !std::all_of(value.begin(), value.end(), [](unsigned char c) {
+            return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                   (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+        })) {
+        throw std::invalid_argument("--deployment-profile must match [A-Za-z0-9._-]{1,64}");
+    }
+    return value;
+}
+
+std::string parse_stop_event_name(const char* text) {
+    const std::string value(text);
+    std::string_view rest(value);
+    if (rest.starts_with("Global\\")) {
+        rest.remove_prefix(7);
+    } else if (rest.starts_with("Local\\")) {
+        rest.remove_prefix(6);
+    } else {
+        throw std::invalid_argument("--stop-event requires the Global or Local namespace");
+    }
+    constexpr std::string_view infix = "NInfer-Serve-Stop-";
+    if (!rest.starts_with(infix) || rest.size() != infix.size() + 32 ||
+        !std::all_of(rest.begin() + infix.size(), rest.end(), [](unsigned char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        })) {
+        throw std::invalid_argument(
+            "--stop-event must match (Global|Local)\\NInfer-Serve-Stop-<32 lowercase hex>");
+    }
+#if defined(_WIN32)
+    return value;
+#else
+    throw std::invalid_argument("--stop-event is only supported on Windows");
+#endif
+}
 
 int parse_nonnegative_int(const char* text, const char* label) {
     char* end        = nullptr;
@@ -114,8 +185,10 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
 
 std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
-           " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
-           "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
+           " <model.ninfer> [--host H] [--port N] [--api-key KEY|--api-key-file FILE] "
+           "[--model-id ID] [--binary-sha256 SHA] [--artifact-sha256 SHA] "
+           "[--config-sha256 SHA] [--deployment-profile NAME] "
+           "[--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--gpu-keep-warm-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
@@ -123,8 +196,11 @@ std::string serve_usage_text(const char* argv0) {
            "[--max-request-mib N] [--media-cache-mib N] [--media-live-mib N] "
            "[--media-preprocess-threads N] "
            "[--device-state-slots N] [--host-context-mib N] "
-           "[--request-log-jsonl FILE] "
+           "[--request-log-jsonl FILE] [--stop-event NAME] [--shutdown-report FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
+           "[--session-checkpoint-dir DIR] [--session-checkpoint-quota-mib N] "
+           "[--session-checkpoint-staging-mib N] [--session-checkpoint-write-buffer-mib N] "
+           "[--session-checkpoint-min-tokens N] [--session-checkpoint-require-origin-auth] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
@@ -179,8 +255,10 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             continue;
         }
         options.startup_argv.emplace_back(argv[i] == nullptr ? "" : argv[i]);
-        redact_next = options.startup_argv.back() == "--api-key";
+        redact_next = options.startup_argv.back() == "--api-key" ||
+                      options.startup_argv.back() == "--api-key-file";
     }
+    bool api_key_source_explicit     = false;
     bool default_max_tokens_explicit = false;
     bool kv_capacity_explicit        = false;
     if (argc >= 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
@@ -200,12 +278,31 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--port") {
             options.port = parse_nonnegative_int(require_value("--port"), "port");
         } else if (arg == "--api-key") {
+            if (api_key_source_explicit) {
+                throw std::invalid_argument("API key source must be specified exactly once");
+            }
             options.api_key = require_value("--api-key");
+            api_key_source_explicit = true;
+        } else if (arg == "--api-key-file") {
+            if (api_key_source_explicit) {
+                throw std::invalid_argument("API key source must be specified exactly once");
+            }
+            options.api_key = read_api_key_file(require_value("--api-key-file"));
+            api_key_source_explicit = true;
         } else if (arg == "--model-id") {
             options.model_id_override = require_value("--model-id");
             if (options.model_id_override->empty()) {
                 throw std::invalid_argument("--model-id must not be empty");
             }
+        } else if (arg == "--binary-sha256") {
+            options.binary_sha256 = parse_sha256(require_value("--binary-sha256"), "--binary-sha256");
+        } else if (arg == "--artifact-sha256") {
+            options.artifact_sha256 =
+                parse_sha256(require_value("--artifact-sha256"), "--artifact-sha256");
+        } else if (arg == "--config-sha256") {
+            options.config_sha256 = parse_sha256(require_value("--config-sha256"), "--config-sha256");
+        } else if (arg == "--deployment-profile") {
+            options.deployment_profile = parse_profile_name(require_value("--deployment-profile"));
         } else if (arg == "--max-context") {
             options.max_context = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--max-context"), "max-context"));
@@ -281,6 +378,48 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             if (options.request_log_jsonl.empty()) {
                 throw std::invalid_argument("--request-log-jsonl must not be empty");
             }
+        } else if (arg == "--stop-event") {
+            options.stop_event = parse_stop_event_name(require_value("--stop-event"));
+        } else if (arg == "--shutdown-report") {
+            options.shutdown_report = require_value("--shutdown-report");
+            if (options.shutdown_report.empty()) {
+                throw std::invalid_argument("--shutdown-report must not be empty");
+            }
+        } else if (arg == "--session-checkpoint-dir") {
+            options.session_checkpoint_root = require_value("--session-checkpoint-dir");
+            if (options.session_checkpoint_root.empty()) {
+                throw std::invalid_argument("--session-checkpoint-dir must not be empty");
+            }
+        } else if (arg == "--session-checkpoint-quota-mib") {
+            const auto mib = parse_u64(require_value("--session-checkpoint-quota-mib"),
+                                       "session-checkpoint-quota-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::uint64_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--session-checkpoint-quota-mib is out of range");
+            }
+            options.session_checkpoint_quota_bytes = mib << 20;
+        } else if (arg == "--session-checkpoint-staging-mib") {
+            const auto mib = parse_u64(require_value("--session-checkpoint-staging-mib"),
+                                       "session-checkpoint-staging-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--session-checkpoint-staging-mib is out of range");
+            }
+            options.session_checkpoint_staging_bytes = static_cast<std::size_t>(mib << 20);
+        } else if (arg == "--session-checkpoint-write-buffer-mib") {
+            const auto mib = parse_u64(require_value("--session-checkpoint-write-buffer-mib"),
+                                       "session-checkpoint-write-buffer-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--session-checkpoint-write-buffer-mib is out of range");
+            }
+            options.session_checkpoint_write_buffer_bytes = static_cast<std::size_t>(mib << 20);
+        } else if (arg == "--session-checkpoint-min-tokens") {
+            const auto tokens = parse_u64(require_value("--session-checkpoint-min-tokens"),
+                                          "session-checkpoint-min-tokens");
+            if (tokens > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::invalid_argument("--session-checkpoint-min-tokens is out of range");
+            }
+            options.session_checkpoint_min_tokens = static_cast<std::uint32_t>(tokens);
+        } else if (arg == "--session-checkpoint-require-origin-auth") {
+            options.session_checkpoint_require_origin_auth = true;
         } else if (arg == "--response-store-max-records") {
             const int records = parse_nonnegative_int(require_value("--response-store-max-records"),
                                                       "response-store-max-records");
@@ -392,6 +531,31 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (default_max_tokens_explicit) {
         if (options.default_max_tokens <= 0) {
             throw std::invalid_argument("--default-max-tokens must be positive");
+        }
+    }
+    if (!options.session_checkpoint_root.empty()) {
+        if (options.api_key.empty()) {
+            throw std::invalid_argument("--session-checkpoint-dir requires --api-key or --api-key-file");
+        }
+        if (options.binary_sha256.empty() || options.artifact_sha256.empty() ||
+            options.config_sha256.empty()) {
+            throw std::invalid_argument(
+                "--session-checkpoint-dir requires --binary-sha256, --artifact-sha256, and --config-sha256");
+        }
+        if (!options.context_cache.enabled || options.context_cache.host_capacity_bytes == 0) {
+            throw std::invalid_argument(
+                "--session-checkpoint-dir requires enabled Host context capacity");
+        }
+    }
+    if (options.session_checkpoint_require_origin_auth) {
+        if (options.session_checkpoint_root.empty()) {
+            throw std::invalid_argument(
+                "--session-checkpoint-require-origin-auth requires --session-checkpoint-dir");
+        }
+        // A checkpoint-root reader can test credential guesses against the offline MAC.
+        if (options.api_key.size() < 32) {
+            throw std::invalid_argument(
+                "--session-checkpoint-require-origin-auth requires an API key of at least 32 characters");
         }
     }
     return options;

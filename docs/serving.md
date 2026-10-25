@@ -867,6 +867,10 @@ curl http://127.0.0.1:8080/v1/messages/count_tokens \
 Pass `--api-key VALUE` to require the same value as an OpenAI bearer token or Anthropic
 `x-api-key` header. `GET /health` and CORS preflight requests remain unauthenticated.
 
+Alternatively, `--api-key-file FILE` reads one non-empty line from a file of at most
+4096 bytes. A trailing LF or CRLF is removed. Specify exactly one API-key source;
+the startup argument record redacts both inline credentials and the key-file path.
+
 ```bash
 curl http://127.0.0.1:8080/v1/models \
   -H 'Authorization: Bearer local-secret'
@@ -883,7 +887,12 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--host H` | listen address | `127.0.0.1` |
 | `--port N` | listen port | `8080` |
 | `--api-key KEY` | required bearer or `x-api-key` value | unset |
+| `--api-key-file FILE` | read the required API key from a bounded single-line file; exclusive with `--api-key` | unset |
 | `--model-id ID` | override the public OpenAI model alias | artifact `metadata.name`, or architecture name |
+| `--binary-sha256 SHA` | lifecycle-computed executable digest, 64 lowercase hex characters | unset |
+| `--artifact-sha256 SHA` | lifecycle-computed artifact digest, 64 lowercase hex characters | unset |
+| `--config-sha256 SHA` | lifecycle-computed full configuration digest; distinct from the resolved durable fingerprint | unset |
+| `--deployment-profile NAME` | public deployment profile, `[A-Za-z0-9._-]{1,64}` | unset |
 | `--max-context N` | logical context ceiling of each sequence | `8192` |
 | `--kv-capacity N\|auto` | shared Main Text KV capacity; `auto` maximizes resident-model KV, or reserves one context with CPU expert offload; omitted means `--max-context` | `8192` |
 | `--max-concurrency N` | resident execution lanes; valid range `1..8` | `1` |
@@ -902,6 +911,14 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--request-log-jsonl FILE` | append full-precision server/request records | disabled |
 | `--response-store-max-records N` | maximum locally retained Responses objects | `1024` |
 | `--response-store-max-mib N` | total local Response envelope/Item/context budget | `256` |
+| `--session-checkpoint-dir DIR` | release-isolated durable session root; requires API authentication, lifecycle digests and enabled Host context capacity | disabled |
+| `--session-checkpoint-quota-mib N` | positive disk quota | `65536` |
+| `--session-checkpoint-staging-mib N` | positive bounded staging budget | `256` |
+| `--session-checkpoint-write-buffer-mib N` | positive asynchronous write-buffer budget | `6144` |
+| `--session-checkpoint-min-tokens N` | minimum automatic-save frontier and short-before-long quota threshold | `32768` |
+| `--session-checkpoint-require-origin-auth` | reject imports without a valid origin MAC; requires a configured root and an API key of at least 32 characters | disabled; new saves still authenticated |
+| `--stop-event NAME` | Windows manager-minted `Global\NInfer-Serve-Stop-<32 lowercase hex>` or `Local\NInfer-Serve-Stop-<32 lowercase hex>` event; rejected off Windows | disabled |
+| `--shutdown-report FILE` | final durable-save acknowledgement destination | unset |
 | `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |

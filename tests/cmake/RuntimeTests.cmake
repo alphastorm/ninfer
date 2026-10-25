@@ -9,6 +9,17 @@ ninfer_add_test(ninfer_engine_options_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_engine_options.cpp"
   LIBRARIES ninfer_engine)
 set_tests_properties(ninfer_engine_options_test PROPERTIES LABELS "host")
+add_executable(ninfer_durable_contract_headers_test
+  "${CMAKE_CURRENT_LIST_DIR}/../test_durable_contract_headers.cpp")
+ninfer_test_includes(ninfer_durable_contract_headers_test)
+target_link_libraries(ninfer_durable_contract_headers_test PRIVATE ninfer::json)
+add_test(NAME ninfer_durable_contract_headers_test
+  COMMAND ninfer_durable_contract_headers_test ${PROJECT_SOURCE_DIR}/tests/fixtures/durable)
+set_tests_properties(ninfer_durable_contract_headers_test PROPERTIES LABELS "host")
+
+add_test(NAME ninfer_durable_contracts_test
+  COMMAND ${Python3_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/test_durable_contracts.py)
+set_tests_properties(ninfer_durable_contracts_test PROPERTIES LABELS "host")
 
 ninfer_add_test(ninfer_context_cost_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_context_cost.cpp"

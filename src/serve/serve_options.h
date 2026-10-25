@@ -18,6 +18,10 @@ inline constexpr int kDefaultMaxTokens                    = 8192;
 inline constexpr std::size_t kDefaultMaxRequestBytes      = 384ULL << 20;
 inline constexpr std::size_t kDefaultResponseStoreRecords = 1024;
 inline constexpr std::size_t kDefaultResponseStoreBytes   = 256ULL << 20;
+inline constexpr std::uint64_t kDefaultSessionCheckpointQuotaBytes = 64ULL << 30;
+inline constexpr std::size_t kDefaultSessionCheckpointStagingBytes = 256ULL << 20;
+inline constexpr std::size_t kDefaultSessionCheckpointWriteBufferBytes = 6ULL << 30;
+inline constexpr std::uint32_t kDefaultSessionCheckpointMinTokens = 32768;
 
 struct ServeOptions {
     bool help_requested = false;
@@ -28,6 +32,12 @@ struct ServeOptions {
     std::string api_key;                          // empty => no auth
     std::optional<std::string> model_id_override; // unset => artifact metadata.name
     std::string request_log_jsonl;                // empty => structured request logging disabled
+    std::string binary_sha256;                    // lifecycle-computed executable identity
+    std::string artifact_sha256;                  // lifecycle-computed artifact identity
+    std::string config_sha256;                    // lifecycle-computed full config identity
+    std::string deployment_profile;               // public deployment profile name
+    std::string stop_event;                       // Windows manager-minted stop event
+    std::string shutdown_report;                  // final durable-save receipt destination
     std::uint32_t max_context          = 8192;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(8192);
     std::uint32_t max_concurrency      = 1;
@@ -43,6 +53,12 @@ struct ServeOptions {
     std::uint32_t media_preprocess_threads = 0;
     std::size_t response_store_max_records = kDefaultResponseStoreRecords;
     std::size_t response_store_max_bytes   = kDefaultResponseStoreBytes;
+    std::filesystem::path session_checkpoint_root;
+    std::uint64_t session_checkpoint_quota_bytes = kDefaultSessionCheckpointQuotaBytes;
+    std::size_t session_checkpoint_staging_bytes = kDefaultSessionCheckpointStagingBytes;
+    std::size_t session_checkpoint_write_buffer_bytes = kDefaultSessionCheckpointWriteBufferBytes;
+    std::uint32_t session_checkpoint_min_tokens = kDefaultSessionCheckpointMinTokens;
+    bool session_checkpoint_require_origin_auth = false;
     int device                             = 0;
     KvCacheStorage kv_cache                = KvCacheStorage::BFloat16;
     SpeculativeOptions speculative;
