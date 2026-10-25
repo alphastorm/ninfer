@@ -2,6 +2,11 @@
 #include "core/buffer.h"
 #include "core/io/read_queue.h"
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #include <cstring>
 #include <iostream>
 #include <memory>
@@ -95,6 +100,10 @@ void run(const char* path) {
 int main(int argc, char** argv) {
     if (argc != 2) return 1;
     try {
+#ifdef _WIN32
+        if (_setmode(_fileno(stdin), _O_BINARY) == -1 || _setmode(_fileno(stdout), _O_BINARY) == -1)
+            throw std::runtime_error("set binary PLE table test transport failed");
+#endif
         run(argv[1]);
     } catch (const std::exception& e) {
         std::cerr << e.what() << '\n';
