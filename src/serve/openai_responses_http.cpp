@@ -69,6 +69,15 @@ OpenAIResponseContext terminal_context(OpenAIResponseContext previous,
     return append_openai_response_context(std::move(input), std::move(output_history));
 }
 
+std::uint64_t stored_response_order(const PreparedRequest& prepared,
+                                     const GenerationOutcome& outcome, bool persistence_enabled) {
+    if (prepared.publication_order != 0) { return prepared.publication_order; }
+    if (!persistence_enabled) { return outcome.metrics.engine_request_id; }
+    // Anonymous records may use the store's process-local insertion order. Named durable records
+    // reject zero below; a request ticket must never stand in for a native publication epoch.
+    return 0;
+}
+
 void commit_stored_response(OpenAIResponsesStore& store, PendingResponseStorage pending,
                             std::string id, const Json& response,
                             std::vector<ChatTurn> output_history,
@@ -78,7 +87,7 @@ void commit_stored_response(OpenAIResponsesStore& store, PendingResponseStorage 
     if (pending.session_key.empty()) {
         throw std::logic_error("stored Response has no Engine session key");
     }
-    if (publication_order == 0) {
+    if (publication_order == 0 && pending.client_session_sha256) {
         throw std::logic_error("stored Response has no Engine submission order");
     }
     StoredOpenAIResponse stored;
@@ -355,8 +364,8 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         try {
             commit_stored_response(openai_responses_store_, std::move(storage), id, response->body,
                                    std::move(response->output_history), prepared.preserve_thinking,
-                                   prepared.publication_order != 0 ? prepared.publication_order
-                                                                    : outcome.metrics.engine_request_id);
+                                   stored_response_order(prepared, outcome,
+                                                          !options_.session_checkpoint_root.empty()));
         } catch (const ApiException& exception) {
             const ApiError error = responses_error(exception.error());
             lifecycle->response_failure(
@@ -494,9 +503,8 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                                            finished->response.body,
                                            std::move(finished->response.output_history),
                                            stream->prepared.preserve_thinking,
-                                           stream->prepared.publication_order != 0
-                                               ? stream->prepared.publication_order
-                                               : outcome.metrics.engine_request_id);
+                                           stored_response_order(stream->prepared, outcome,
+                                                                  !options_.session_checkpoint_root.empty()));
                 } catch (const ApiException& exception) {
                     const ApiError error = responses_error(exception.error());
                     lifecycle->response_failure(
