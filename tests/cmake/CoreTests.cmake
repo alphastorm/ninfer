@@ -120,6 +120,7 @@ ninfer_add_test(ninfer_expert_cache_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_expert_cache.cu"
           "${CMAKE_CURRENT_LIST_DIR}/../expert_cache_cuda_errors.cpp"
   LIBRARIES ninfer_core)
+ninfer_cuda_test_interposition(ninfer_expert_cache_test)
 set_tests_properties(ninfer_expert_cache_test PROPERTIES TIMEOUT 60)
 
 if(NOT WIN32)

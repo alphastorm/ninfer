@@ -14,6 +14,7 @@ set_tests_properties(ninfer_artifact_backing_test PROPERTIES TIMEOUT 30)
 ninfer_add_test(ninfer_artifact_materialization_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_materialization.cpp" "${CMAKE_CURRENT_LIST_DIR}/materialization_io.cpp"
   LIBRARIES ninfer_artifact)
+ninfer_cuda_test_interposition(ninfer_artifact_materialization_test)
 
 if(NOT WIN32)
 target_link_options(ninfer_artifact_materialization_test PRIVATE
