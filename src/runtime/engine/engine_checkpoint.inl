@@ -38,6 +38,21 @@
         queue_cv_.notify_all();
     }
     void notify_checkpoint_progress() noexcept {
+        checkpoints_.notify_progress(false);
+        admission_check_pending_.store(true, std::memory_order_release);
+        queue_cv_.notify_all();
+    }
+    [[nodiscard]] std::uint64_t checkpoint_progress() const noexcept {
+        return checkpoints_.observed_progress();
+    }
+    void response_stored(std::string_view digest, std::string_view tag) {
+        checkpoint_call([&] {
+            const auto order = resources_.completed_checkpoint_order(digest, tag);
+            if (!order) { return; }
+            const auto state = checkpoints_.session(digest);
+            std::lock_guard lock(state->mutex);
+            state->stored(std::string(tag), order);
+        });
         request_admission_check();
         queue_cv_.notify_all();
     }
@@ -300,6 +315,23 @@
     }
 
 private:
+    DurableReason validate_pressure_checkpoint(const ContinuationCheckpointReader& reader) {
+        using Program = typename ModelContract::Program;
+        const DurableLimits limits;
+        if constexpr (requires(Program& program, const DurableCheckpointSet& set) {
+            program.validate_checkpoint_import(set, reader, limits);
+        }) {
+            DurableCheckpointSet set;
+            const auto reason = read_checkpoint_index(reader, limits, set);
+            if (reason != DurableReason::None) { return reason; }
+            const auto result = instance_.program->validate_checkpoint_import(set, reader, limits);
+            return result.state == decltype(result.state)::Validated
+                ? DurableReason::None
+                : result.reason == DurableReason::None ? DurableReason::InvalidIndex : result.reason;
+        } else {
+            return DurableReason::UnsupportedCodec;
+        }
+    }
     void run_checkpoint_commands() {
         std::deque<std::function<void()>> commands;
         {
@@ -316,6 +348,9 @@ private:
         return settled;
     }
     bool checkpoint_request_settled(const Request& request) {
+        // A paused request has not acknowledged a final response. Native owns its
+        // retained prompt/progress and may revoke the snapshot in favour of replay.
+        if (!request.is_model_finished()) { return true; }
         if (request.checkpoint_session.empty() || request.checkpoint_tag.empty()) { return true; }
         PressureCheckpointVictim victim{request.checkpoint_session, request.checkpoint_tag};
         return checkpoint_pressure({&victim, 1});

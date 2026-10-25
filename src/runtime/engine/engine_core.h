@@ -106,6 +106,11 @@ public:
             return checkpoint_pressure(victims);
         });
         resources_.enable_release_guard(false);
+        checkpoints_.set_validator([this](const ContinuationCheckpointReader& reader) {
+            return checkpoint_call([&] {
+                return validate_pressure_checkpoint(reader);
+            });
+        });
         std::promise<void> startup;
         std::future<void> started = startup.get_future();
         worker_                   = std::thread([this, startup = std::move(startup)]() mutable {
@@ -237,7 +242,6 @@ public:
         }
 
         std::shared_ptr<Request> request;
-        std::string publication_tag;
         try {
             const auto constraint_started = observation.phase_timings ? Clock::now() : submitted;
             auto output                   = instance_.frontend.make_output_session(
@@ -270,7 +274,6 @@ public:
                 request->checkpoint_session = std::move(checkpoint_session);
                 request->checkpoint_tag = std::move(checkpoint_tag);
                 request->checkpoint_gate = checkpoints_.session(request->checkpoint_session);
-                publication_tag = request->checkpoint_tag;
             }
         } catch (...) {
             release_reserved_capacity();
@@ -289,10 +292,8 @@ public:
                                    "inference engine is unavailable");
             }
             pending_.push_back(request);
-            if (request->checkpoint_gate &&
-                request->checkpoint_gate->epoch.value < publication_order) {
-                request->checkpoint_gate->tag.swap(publication_tag);
-                request->checkpoint_gate->epoch = {publication_order};
+            if (request->checkpoint_gate) {
+                request->checkpoint_gate->submitted(publication_order);
             }
         }
         request_admission_check();
@@ -935,6 +936,8 @@ private:
                 if (request->checkpoint_gate) {
                     publication = std::unique_lock(request->checkpoint_gate->mutex);
                 }
+                resources_.set_checkpoint_identity(request->continuation_owner,
+                    request->checkpoint_session, request->checkpoint_tag);
                 resources_.finish(*instance_.program, request->continuation_owner,
                                   *request->base_plan, request->publication_order);
             }
@@ -1490,8 +1493,6 @@ private:
             request->continuation_owner =
                 resources_.adopt(*instance_.program, control.source, *request->base_plan,
                                  request->publication_order, carried, progress.retired_checkpoints);
-            resources_.set_checkpoint_identity(request->continuation_owner,
-                request->checkpoint_session, request->checkpoint_tag);
             resources_.release_source(*instance_.program, request->id);
             request->lane     = control.destination;
             request->sequence = progress.sequence;
@@ -2314,6 +2315,7 @@ private:
             }
             std::unique_lock execution_lock(execution_mutex_);
             checkpoint_execution_lock_ = &execution_lock;
+            checkpoints_.retire_release_pins();
             checkpoints_.begin_turn();
             run_checkpoint_commands();
             if (failed_) {
