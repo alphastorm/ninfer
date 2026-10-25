@@ -660,6 +660,14 @@ int test_continuation_read_queue() {
                           (void)queue->submit(alias / actual.filename(), std::span(&request, 1));
                       }),
                       "io_uring continuation queue followed an intermediate symlink");
+    TempDirectory outside;
+    const auto root_alias = root.path() / "root-alias";
+    std::filesystem::create_directory_symlink(outside.path(), root_alias);
+    failures += check(throws_checkpoint([&] {
+                          (void)make_io_uring_checkpoint_read_queue(root_alias / "not-created");
+                      }) &&
+                          !std::filesystem::exists(outside.path() / "not-created"),
+                      "queue factory must not create directories through a root ancestor symlink");
     return failures;
 }
 

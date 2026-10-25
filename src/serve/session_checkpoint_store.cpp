@@ -105,6 +105,87 @@ struct FileDescriptor {
                        [&](std::string_view key) { return value.contains(key); });
 }
 
+[[nodiscard]] bool schema_key(std::string_view token) noexcept {
+    std::size_t position = 0;
+    for (const unsigned char expected : std::string_view("schema_version")) {
+        if (position == token.size()) { return false; }
+        unsigned value = static_cast<unsigned char>(token[position++]);
+        if (value == '\\') {
+            // Only \u escapes can encode the ASCII letters/underscore in this key.
+            if (token.size() - position < 5 || token[position++] != 'u') { return false; }
+            value = 0;
+            for (unsigned digit = 0; digit != 4; ++digit) {
+                const auto byte = static_cast<unsigned char>(token[position++]);
+                unsigned hex;
+                if (byte >= '0' && byte <= '9') { hex = byte - '0'; }
+                else if (byte >= 'a' && byte <= 'f') { hex = byte - 'a' + 10; }
+                else if (byte >= 'A' && byte <= 'F') { hex = byte - 'A' + 10; }
+                else { return false; }
+                value = value * 16 + hex;
+            }
+        }
+        if (value != expected) { return false; }
+    }
+    return position == token.size();
+}
+
+// Refusal-only envelope probe over the already bounded bytes. Skip strings/nesting lexically,
+// without a JSON DOM, interpreting no field except a top-level schema_version integer. Forgery
+// can only refuse an import here; >=3 and unrecognized envelopes still require MAC verification.
+[[nodiscard]] bool legacy_schema_envelope(std::string_view text) noexcept {
+    if (text.starts_with("\xef\xbb\xbf")) { text.remove_prefix(3); }
+    const auto whitespace = [](char byte) {
+        return byte == ' ' || byte == '\t' || byte == '\r' || byte == '\n';
+    };
+    const auto skip_space = [&](std::size_t& position) {
+        while (position != text.size() && whitespace(text[position])) { ++position; }
+    };
+    std::size_t position = 0;
+    skip_space(position);
+    if (position == text.size() || text[position++] != '{') { return false; }
+    std::size_t depth = 1;
+    while (position != text.size()) {
+        const char byte = text[position++];
+        if (byte == '"') {
+            const std::size_t begin = position;
+            while (position != text.size() && text[position] != '"') {
+                if (text[position] == '\\') {
+                    if (++position == text.size()) { return false; }
+                }
+                ++position;
+            }
+            if (position == text.size()) { return false; }
+            const auto token = text.substr(begin, position - begin);
+            ++position;
+            if (depth != 1) { continue; }
+            std::size_t scalar = position;
+            skip_space(scalar);
+            if (scalar == text.size() || text[scalar++] != ':' || !schema_key(token)) {
+                continue;
+            }
+            skip_space(scalar);
+            const bool negative = scalar != text.size() && text[scalar] == '-';
+            if (negative) { ++scalar; }
+            const std::size_t digits = scalar;
+            while (scalar != text.size() && text[scalar] >= '0' && text[scalar] <= '9') {
+                ++scalar;
+            }
+            const std::size_t count = scalar - digits;
+            if (count == 0 || (count > 1 && text[digits] == '0')) { return false; }
+            skip_space(scalar);
+            if (scalar == text.size() || (text[scalar] != ',' && text[scalar] != '}')) {
+                return false;
+            }
+            return negative || (count == 1 && text[digits] <= '2');
+        }
+        if (byte == '{' || byte == '[') { ++depth; }
+        else if (byte == '}' || byte == ']') {
+            if (--depth == 0) { return false; }
+        }
+    }
+    return false;
+}
+
 [[nodiscard]] nlohmann::json parse_canonical_json(std::string_view text) {
     std::vector<std::set<std::string>> object_keys;
     const auto check = [&](int depth, nlohmann::json::parse_event_t event,
@@ -2067,16 +2148,12 @@ SessionCheckpointStore::load(std::string_view session_sha256,
                  .reason = runtime::DurableReason::NoSessionRecords};
     }
     const std::filesystem::path root = session / "generations" / *generation;
-    if (const auto corrupt = impl_->corrupt_generations.find(
-            std::string(session_sha256) + "/" + *generation);
-        corrupt != impl_->corrupt_generations.end()) {
-        const auto reason = corrupt->second.reason;
-        (void)quarantine_generation_locked(*impl_, session, *generation, reason);
-        return {.state = SessionCheckpointLoadState::Corrupt,
-                 .reason = reason};
-    }
     try {
         const std::string manifest_text = read_text_bounded(root / "manifest.json", 16ULL << 20);
+        if (legacy_schema_envelope(manifest_text)) {
+            return {.state = SessionCheckpointLoadState::Incompatible,
+                     .reason = runtime::DurableReason::IncompatibleSchema};
+        }
         // Verify origin before trusting any manifest content (alphastorm/ninfer#32). A
         // present-but-wrong MAC is tamper evidence and quarantines like corruption. An
         // absent MAC under the strict import posture is a REVERSIBLE policy refusal, not
@@ -2103,6 +2180,13 @@ SessionCheckpointStore::load(std::string_view session_sha256,
                 kSessionCheckpointSchemaVersion) {
             return {.state = SessionCheckpointLoadState::Incompatible,
                      .reason = runtime::DurableReason::IncompatibleSchema};
+        }
+        if (const auto corrupt = impl_->corrupt_generations.find(
+                std::string(session_sha256) + "/" + *generation);
+            corrupt != impl_->corrupt_generations.end()) {
+            const auto reason = corrupt->second.reason;
+            (void)quarantine_generation_locked(*impl_, session, *generation, reason);
+            return {.state = SessionCheckpointLoadState::Corrupt, .reason = reason};
         }
         require_manifest_shape(manifest);
         if (!manifest.is_object() ||
@@ -2305,12 +2389,12 @@ nlohmann::json SessionCheckpointStore::status(std::string_view session_sha256,
         const std::filesystem::path session         = session_path(session_sha256);
         const std::optional<std::string> generation = current_generation(session);
         if (!generation) { return result; }
-        if (impl_->is_corrupt(std::string(session_sha256) + "/" + *generation)) {
-            result["state"] = "corrupt";
-            return result;
-        }
         const std::filesystem::path root = session / "generations" / *generation;
         const std::string manifest_text = read_text_bounded(root / "manifest.json", 16ULL << 20);
+        if (legacy_schema_envelope(manifest_text)) {
+            result["state"] = "incompatible";
+            return result;
+        }
         switch (manifest_origin_state(root, manifest_text, options_.origin_mac_key)) {
         case ManifestOriginState::Authentic: break;
         case ManifestOriginState::Forged:
@@ -2331,6 +2415,10 @@ nlohmann::json SessionCheckpointStore::status(std::string_view session_sha256,
             return result;
         }
         require_manifest_shape(manifest);
+        if (impl_->is_corrupt(std::string(session_sha256) + "/" + *generation)) {
+            result["state"] = "corrupt";
+            return result;
+        }
         if (!manifest.is_object() ||
             manifest.at("artifact_type").get<std::string>() != "ninfer_session_checkpoint" ||
             manifest.at("schema_version").get<std::uint32_t>() != kSessionCheckpointSchemaVersion ||
