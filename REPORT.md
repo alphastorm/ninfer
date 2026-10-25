@@ -8,21 +8,21 @@
 
 ## Gating table
 
-| Execution family | sm_120a | sm_89 | sm_86 |
-|---|---|---|---|
-| BF16/F16/INT8 MMA and Q4/Q5/Q6/Q8 A16 | Existing routes | Retained | Retained |
-| Programmatic dependent launch | Existing behavior | Ordinary stream ordering | Ordinary stream ordering |
-| Dense BF16 TMA-selected tiles | Existing TMA | cp.async staging of the same MMA tiles | cp.async staging of the same MMA tiles |
-| FP8 activation MMA | Block-scaled unit-scale opcode | Plain Ada E4M3 MMA | Explicit refusal |
-| FP8 TMA-selected tiles | Existing TMA/split-K | Ordinary full-K MMA; no split-K partial allocation | Explicit refusal |
-| FP8 and NVFP4 A16 weight dequantization | Existing routes | Retained; portable widening | Retained; portable widening |
-| NVFP4 A4 | Existing non-RDC/TMA and MMA | Explicit refusal | Explicit refusal |
-| Dense BF16/INT8 KV attention | Existing routes | Retained | Retained |
-| Dense FP8 KV attention | Existing routes | Retained | Explicit refusal |
-| Dense NVFP4/K8V4 KV attention | Existing routes | Explicit refusal | Explicit refusal |
-| Block-scaled FP8/NVFP4 MoE | Existing non-RDC routes | Explicit refusal | Explicit refusal |
-| Groupwise-integer MoE and CPU experts | Existing routes | Retained | Retained |
-| Striped gated-residual projection | Existing TMA selection | Existing folded cp.async route | Existing folded cp.async route |
+| Execution family | sm_120a | sm_89 route / exclusion | sm_86 route / exclusion | Native proof status / evidence |
+|---|---|---|---|---|
+| BF16/F16/INT8 MMA and Q4/Q5/Q6/Q8 A16 | Existing routes | Retained | Retained | sm_86 server link `980b4966`; final ops numerical proof pending |
+| Programmatic dependent launch | Existing behavior | Ordinary stream ordering | Ordinary stream ordering | sm_86 server link `980b4966`; GPU ordering coverage pending |
+| Dense BF16 TMA-selected tiles | Existing TMA | cp.async staging of the same MMA tiles | cp.async staging of the same MMA tiles | MSVC unused-definition failure; `ca85f257` gate awaiting rebuild |
+| FP8 activation MMA | Block-scaled unit-scale opcode | Plain Ada E4M3 MMA | Explicit refusal | `b5bd4926` explicit-row-policy rebuild in flight; refusal test pending |
+| FP8 TMA-selected tiles | Existing TMA/split-K | Ordinary full-K MMA; no split-K partial allocation | Explicit refusal | `b5bd4926` rebuild in flight; numerical/refusal proof pending |
+| FP8 and NVFP4 A16 weight dequantization | Existing routes | Retained; portable widening | Retained; portable widening | sm_86 server link `980b4966`; A16 mathematical-oracle runs pending |
+| NVFP4 A4 | Existing non-RDC/TMA and MMA | Explicit refusal | Explicit refusal | `architecture_contract` and explicit A4 suite exclusions; execution pending |
+| Dense BF16/INT8 KV attention | Existing routes | Retained | Retained | sm_86 server link `980b4966`; softmax-attention numerical runs pending |
+| Dense FP8 KV attention | Existing routes | Retained | Explicit refusal | sm_89 numerical and sm_86 `architecture_contract` runs pending |
+| Dense NVFP4/K8V4 KV attention | Existing routes | Explicit refusal | Explicit refusal | `architecture_contract` and exact attention refusal messages; execution pending |
+| Block-scaled FP8/NVFP4 MoE | Existing non-RDC routes | Explicit refusal | Explicit refusal | `architecture_contract`; only named block-scaled test exit 77 permitted |
+| Groupwise-integer MoE and CPU experts | Existing routes | Retained | Retained | PortableCore `ed99ff3f` passed former MSVC compilation blockers; numerical proof pending |
+| Striped gated-residual projection | Existing TMA selection | Existing folded cp.async route | Existing folded cp.async route | sm_86 server link `980b4966`; gated-residual numerical runs pending |
 
 Statuses above describe route admission, not numerical qualification. Current evidence
 for every retained family is the sm_86 server/contract link at `980b4966`; final-tip
