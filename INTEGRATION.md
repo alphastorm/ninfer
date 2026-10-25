@@ -2,7 +2,7 @@
 
 ## Invariants and decisions
 
-- Branch: `rebase/upstream-64d10fbf`; sole integration owner: Integrator. Frozen upstream base: `64d10fbf9`. All three release lanes target this base; older scout recommendations to retain native fork binaries are superseded.
+- Branch: `rebase/upstream-64d10fbf`; sole integration owner: Integrator2 (successor to Integrator). Frozen upstream base: `64d10fbf9`. All three release lanes target this base; older scout recommendations to retain native fork binaries are superseded.
 - Preserve upstream scheduler, DFlash2, grammar and context ownership. No NVFP4 KV port, standby-pinning retries, old monolithic Program, or unshipped `3a2fadbd` route.
 - Contracts K1–K7 require lead approval before changes. Contracts merges first; dependent implementations consume its frozen declarations.
 - Preparation: RepoPrompt chat `prep-v0-13-0-upstream-re-DF08C8`, export `oracle-plan-2026-10-24-174946-prep-v0-13-0-upstrea-1d64.md` (private, not committed).
@@ -103,6 +103,7 @@ K7 telemetry prerequisite: Main approved `PrivateEndpoint`, `PrivateInputReplay`
 
 K3/K4 publication rule: Main approved a mandatory Engine-supplied live-service guard around final epoch recheck, atomic `current` replacement and sync. Payload export, hashing and bulk writes remain outside the Engine lock; only tests may inject a fake publication guard. Contracts owns the exact interface freeze.
 
+
 K2 identity accessors: Main approved internal `checkpoint_layout(const Engine&)` and `frontend_identity(const Engine&)`, returning the existing typed identity structures. Shared declarations and compile-time signature assertions are present. Persistence owns actual native geometry; Frontend owns one-time hashing of loaded resource bytes and exact selected template source. Serving queries once at startup and caches its fingerprint; provider implementation and integration proof remain separate from these declarations.
 
 Custom-tool boundary: Main confirmed shipped raw custom calls and Responses replay remain in scope. Shared `ToolKind { Function, Custom }` defaults to Function on history/output tool calls; Custom input remains opaque text. Master carries tool declarations as JSON, so Frontend owns kind propagation into its internal definition contract, templates and parser; ServePort owns wire objects/replay. Main also approved `SchemaMismatch` / `schema_mismatch` for declared-type atomic fallback, without changing inference for unknown parameters. Declaration → Frontend → ServePort custom-tool commit is distinct from the identity/publication merge.
@@ -110,6 +111,7 @@ Custom-tool boundary: Main confirmed shipped raw custom calls and Responses repl
 
 | Requester | Requested surface | Ownership / current state |
 |---|---|---|
+
 | Contracts | New `runtime/contract/{durable_checkpoint_set,durable_engine_api,runtime_fingerprint}.h`; contract test registration | Frozen provider `746b29d2` merged with standalone C++/Python CTest registration. Internal adapter friendship and typed identity getter declarations are present; no public persistence methods. |
 | DurableStore | Store/backend sources and host-only test targets | Authorized standalone SHA/backend registration consumed as `dc5ffcbb`; snapshot-aware store remains dependent on ServePort and K6. |
 | ServePort | Serving source/test registration; persistence and managed-stop CLI union | Authorized source/test registration supplied. Identity, bounded API-key-file input, K5 persistence budgets and managed-stop options ported with parser regressions. Actual restore/final-save/shutdown orchestration awaits providers and must reject enabled launches without them. |

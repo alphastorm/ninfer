@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -198,7 +199,8 @@ public:
     static void set_checkpoint_tag(PreparedPrompt&, std::string_view tag);
     [[nodiscard]] static DurableSessionEpoch session_epoch(Engine&, std::string_view session_sha256);
     [[nodiscard]] static DurableSessionEpoch publication_epoch(const GenerationHandle&);
-    [[nodiscard]] static std::shared_ptr<ContinuationCheckpointReadQueue> make_read_queue(Engine&);
+    [[nodiscard]] static std::shared_ptr<ContinuationCheckpointReadQueue> make_read_queue(
+        Engine&, const std::filesystem::path& root);
 
     // Stage immutable native content under Engine serialization; hash/write off-lock. Retain
     // leases until copies retire. Recheck expected tag/epoch before caller publishes current.
