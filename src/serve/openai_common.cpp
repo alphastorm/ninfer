@@ -1,40 +1,15 @@
 #include "serve/openai_common.h"
+#include "serve/opaque_id.h"
 #include "serve/request_validation.h"
 
 #include <nlohmann/json.hpp>
 
-#include <array>
 #include <chrono>
-#include <cstdio>
-#include <random>
 #include <vector>
 #include <string_view>
 #include <utility>
 
 namespace ninfer::serve {
-
-namespace {
-
-std::string chat_identifier(std::string_view prefix) {
-    static thread_local std::mt19937_64 random{std::random_device{}()};
-    std::uniform_int_distribution<std::uint64_t> distribution;
-    std::array<char, 32> buffer{};
-    std::snprintf(buffer.data(), buffer.size(), "%016llx",
-                  static_cast<unsigned long long>(distribution(random)));
-    return std::string(prefix) + buffer.data();
-}
-
-std::string responses_identifier(std::string_view prefix) {
-    static thread_local std::mt19937_64 random{std::random_device{}()};
-    std::uniform_int_distribution<std::uint64_t> distribution;
-    std::array<char, 48> buffer{};
-    std::snprintf(buffer.data(), buffer.size(), "%016llx%016llx",
-                  static_cast<unsigned long long>(distribution(random)),
-                  static_cast<unsigned long long>(distribution(random)));
-    return std::string(prefix) + "_" + buffer.data();
-}
-
-} // namespace
 
 using Json = nlohmann::json;
 
@@ -65,7 +40,6 @@ OpenAIPromptCachePolicy parse_openai_prompt_cache_policy(const RequestJson& body
                         field);
         }
     };
-    require_string_hint("prompt_cache_key", 64U);
     require_string_hint("safety_identifier", 64U);
     require_string_hint("user");
 
@@ -226,16 +200,16 @@ void validate_openai_model(std::string_view requested, std::string_view availabl
     throw ApiException(std::move(error));
 }
 
-std::string new_openai_chat_completion_id() { return chat_identifier("chatcmpl-"); }
+std::string new_openai_chat_completion_id() { return new_opaque_id("chatcmpl-"); }
 
-std::string new_openai_chat_tool_call_id() { return chat_identifier("call_"); }
+std::string new_openai_chat_tool_call_id() { return new_opaque_id("call_"); }
 
-std::string new_openai_request_id() { return responses_identifier("req"); }
+std::string new_openai_request_id() { return new_opaque_id("req_"); }
 
-std::string new_openai_response_id() { return responses_identifier("resp"); }
+std::string new_openai_response_id() { return new_opaque_id("resp_"); }
 
 std::string new_openai_response_item_id(std::string_view prefix) {
-    return responses_identifier(prefix);
+    return new_opaque_id(std::string(prefix) + "_");
 }
 
 } // namespace ninfer::serve

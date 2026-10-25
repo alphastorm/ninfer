@@ -1,6 +1,7 @@
 #include "serve/http_server.h"
 
 #include "serve/http_transport.h"
+#include "serve/client_identity.h"
 #include "serve/openai_chat.h"
 #include "serve/openai_common.h"
 
@@ -28,6 +29,8 @@ void HttpServer::handle_chat_completions(const httplib::Request& req, httplib::R
         RequestLimits limits;
         limits.default_max_tokens = options_.default_max_tokens;
         request                   = parse_chat_completion_request(parse_json_body(req), limits);
+        resolve_client_session(request.generation, !options_.api_key.empty(),
+                                has_client_session_header(req));
         validate_openai_model(request.model, public_model_id_);
     } catch (const ApiException& exception) {
         write_openai_error(res, exception.error());

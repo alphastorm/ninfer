@@ -4,6 +4,29 @@ add_executable(ninfer_public_api_test "${CMAKE_CURRENT_LIST_DIR}/../test_public_
 target_include_directories(ninfer_public_api_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
 add_test(NAME ninfer_public_api_test COMMAND ninfer_public_api_test)
 
+ninfer_add_test(ninfer_checkpoint_io_contract_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_checkpoint_io_contract.cpp"
+  LIBRARIES ninfer_checkpoint_contract)
+
+ninfer_add_test(ninfer_direct_storage_checkpoint_backend_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_direct_storage_checkpoint_backend.cpp"
+          ${PROJECT_SOURCE_DIR}/src/runtime/windows/direct_storage_checkpoint_backend.cpp
+  LIBRARIES ninfer_checkpoint_contract)
+
+set_tests_properties(ninfer_checkpoint_io_contract_test
+  ninfer_direct_storage_checkpoint_backend_test PROPERTIES LABELS "host")
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  ninfer_add_test(ninfer_io_uring_checkpoint_backend_test
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_io_uring_checkpoint_backend.cpp"
+            ${PROJECT_SOURCE_DIR}/src/runtime/platform/linux/io_uring_checkpoint_backend.cpp
+    LIBRARIES ninfer_checkpoint_contract)
+  target_compile_definitions(ninfer_io_uring_checkpoint_backend_test
+    PRIVATE NINFER_IO_URING_TESTING=1)
+  set_tests_properties(ninfer_io_uring_checkpoint_backend_test
+    PROPERTIES LABELS "host" SKIP_RETURN_CODE 77)
+endif()
+
 foreach(part IN ITEMS system task_pool executor)
   ninfer_add_test(ninfer_cpu_${part}_test
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../cpu/test_${part}.cpp"

@@ -1,12 +1,23 @@
 #include "serve/openai_responses_store.h"
 
+#include "serve/client_identity.h"
+#include "serve/credential_compare.h"
+
 #include <algorithm>
 #include <limits>
 #include <stdexcept>
+#include <tuple>
+#include <unordered_set>
 #include <utility>
 
 namespace ninfer::serve {
 namespace {
+
+bool session_matches(const std::optional<std::string>& stored,
+                     const std::optional<std::string>& presented) noexcept {
+    return stored.has_value() == presented.has_value() &&
+           (!stored || credential_equal(*stored, *presented));
+}
 
 std::size_t estimate_turn_bytes(const ChatTurn& turn) {
     std::size_t bytes = sizeof(ChatTurn) + turn.tool_call_id.size() + turn.reasoning_content.size();
@@ -25,6 +36,8 @@ std::size_t estimate_turn_bytes(const ChatTurn& turn) {
 std::size_t record_envelope_bytes(const StoredOpenAIResponse& record) {
     std::size_t bytes = sizeof(StoredOpenAIResponse) + record.id.size() +
                         record.session_key.size() + record.response.dump().size();
+    if (record.client_session_sha256) { bytes += record.client_session_sha256->size(); }
+    if (record.previous_response_id) { bytes += record.previous_response_id->size(); }
     for (const nlohmann::json& item : record.input_items) {
         bytes += sizeof(nlohmann::json) + item.dump().size();
     }
@@ -85,10 +98,15 @@ OpenAIResponsesStore::OpenAIResponsesStore(std::size_t max_records, std::size_t 
     }
 }
 
-std::shared_ptr<const StoredOpenAIResponse> OpenAIResponsesStore::get(const std::string& id) {
+std::shared_ptr<const StoredOpenAIResponse>
+OpenAIResponsesStore::get_for_session(const std::string& id,
+                                      const std::optional<std::string>& session_sha256) {
     std::lock_guard lock(mutex_);
     const auto found = records_.find(id);
-    if (found == records_.end()) { return {}; }
+    if (found == records_.end() ||
+        !session_matches(found->second.response->client_session_sha256, session_sha256)) {
+        return {};
+    }
     lru_.splice(lru_.begin(), lru_, found->second.lru);
     return found->second.response;
 }
@@ -99,6 +117,9 @@ void OpenAIResponsesStore::put(StoredOpenAIResponse response) {
         !response.response.is_object()) {
         throw std::invalid_argument(
             "stored response must have an id, bounded session key and object body");
+    }
+    if (response.client_session_sha256) {
+        (void)parse_client_identity_sha256(*response.client_session_sha256, "ninfer_session");
     }
     const std::size_t envelope_bytes = record_envelope_bytes(response);
     const std::size_t context_bytes  = response.context ? response.context->cumulative_bytes : 0;
@@ -111,25 +132,29 @@ void OpenAIResponsesStore::put(StoredOpenAIResponse response) {
     if (records_.contains(owned->id)) {
         throw std::logic_error("duplicate response id in response store");
     }
-    lru_.push_front(owned->id);
+    const std::uint64_t order = owned->publication_order != 0 ? owned->publication_order
+                                                              : next_order_;
+    if (order == std::numeric_limits<std::uint64_t>::max()) {
+        throw std::overflow_error("response publication order exhausted");
+    }
+    auto session = sessions_.end();
+    if (owned->client_session_sha256) {
+        session = sessions_.try_emplace(*owned->client_session_sha256).first;
+    }
     try {
-        records_.emplace(owned->id, Entry{owned, lru_.begin(), envelope_bytes});
+        insert_locked(owned, envelope_bytes, order, true);
     } catch (...) {
-        lru_.pop_front();
+        if (session != sessions_.end()) { prune_revision_locked(session->first); }
         throw;
     }
-    bool envelope_accounted = false;
-    try {
-        current_bytes_     = checked_add(current_bytes_, envelope_bytes,
-                                         "response store byte accounting overflowed");
-        envelope_accounted = true;
-        retain_context_locked(owned->context);
-    } catch (...) {
-        if (envelope_accounted) { current_bytes_ -= envelope_bytes; }
-        records_.erase(owned->id);
-        lru_.pop_front();
-        throw;
+    next_order_ = std::max(next_order_, order + 1);
+    if (session != sessions_.end()) {
+        ++session->second.records;
+        ++session->second.revision;
     }
+    // Publication ends atomically with insertion; a waiter cannot observe an intermediate miss.
+    end_publication_locked(owned->id);
+    publication_changed_.notify_all();
 
     while (records_.size() > max_records_ || current_bytes_ > max_bytes_) {
         if (lru_.empty()) { throw std::logic_error("response store LRU is empty"); }
@@ -143,9 +168,38 @@ void OpenAIResponsesStore::put(StoredOpenAIResponse response) {
     }
 }
 
-bool OpenAIResponsesStore::erase(const std::string& id) {
+void OpenAIResponsesStore::insert_locked(std::shared_ptr<const StoredOpenAIResponse> response,
+                                         std::size_t envelope_bytes, std::uint64_t order,
+                                         bool live) {
+    lru_.push_front(response->id);
+    try {
+        records_.emplace(response->id, Entry{response, lru_.begin(), envelope_bytes, order, live});
+    } catch (...) {
+        lru_.pop_front();
+        throw;
+    }
+    bool accounted = false;
+    try {
+        current_bytes_ = checked_add(current_bytes_, envelope_bytes,
+                                     "response store byte accounting overflowed");
+        accounted = true;
+        retain_context_locked(response->context);
+    } catch (...) {
+        if (accounted) { current_bytes_ -= envelope_bytes; }
+        records_.erase(response->id);
+        lru_.pop_front();
+        throw;
+    }
+}
+
+bool OpenAIResponsesStore::erase_for_session(const std::string& id,
+                                             const std::optional<std::string>& session_sha256) {
     std::lock_guard lock(mutex_);
-    if (!records_.contains(id)) { return false; }
+    const auto found = records_.find(id);
+    if (found == records_.end() ||
+        !session_matches(found->second.response->client_session_sha256, session_sha256)) {
+        return false;
+    }
     erase_locked(id);
     return true;
 }
@@ -236,6 +290,10 @@ void OpenAIResponsesStore::release_context_locked(const OpenAIResponseContext& c
 void OpenAIResponsesStore::erase_locked(const std::string& id) {
     const auto found = records_.find(id);
     if (found == records_.end()) { return; }
+    auto session = sessions_.end();
+    if (found->second.response->client_session_sha256) {
+        session = sessions_.find(*found->second.response->client_session_sha256);
+    }
     if (current_bytes_ < found->second.envelope_bytes) {
         throw std::logic_error("response envelope byte accounting underflowed");
     }
@@ -243,6 +301,280 @@ void OpenAIResponsesStore::erase_locked(const std::string& id) {
     release_context_locked(found->second.response->context);
     lru_.erase(found->second.lru);
     records_.erase(found);
+    if (session != sessions_.end()) {
+        --session->second.records;
+        ++session->second.revision;
+        prune_revision_locked(session->first);
+    }
+    publication_changed_.notify_all();
+}
+
+const OpenAIResponsesStore::Entry*
+OpenAIResponsesStore::newest_locked(std::string_view session) const noexcept {
+    const Entry* newest = nullptr;
+    for (const auto& [id, entry] : records_) {
+        (void)id;
+        if (entry.response->client_session_sha256 &&
+            credential_equal(*entry.response->client_session_sha256, session) &&
+            (!newest || std::tie(entry.live, entry.order) >
+                            std::tie(newest->live, newest->order))) {
+            newest = &entry;
+        }
+    }
+    return newest;
+}
+
+std::optional<OpenAIResponseStoreSnapshot>
+OpenAIResponsesStore::snapshot_session(std::string_view session) const {
+    std::lock_guard lock(mutex_);
+    std::vector<const Entry*> ordered;
+    for (const auto& [id, entry] : records_) {
+        (void)id;
+        if (entry.response->client_session_sha256 &&
+            credential_equal(*entry.response->client_session_sha256, session)) {
+            ordered.push_back(&entry);
+        }
+    }
+    if (ordered.empty()) { return std::nullopt; }
+    std::sort(ordered.begin(), ordered.end(), [](const Entry* a, const Entry* b) {
+        return std::tie(a->live, a->order) < std::tie(b->live, b->order);
+    });
+    OpenAIResponseStoreSnapshot snapshot;
+    snapshot.client_session_sha256.assign(session);
+    snapshot.latest_response_id = ordered.back()->response->id;
+    snapshot.records.reserve(ordered.size());
+    for (const Entry* entry : ordered) {
+        snapshot.records.push_back(*entry->response);
+        snapshot.records.back().publication_order = snapshot.records.size();
+    }
+    return snapshot;
+}
+
+std::optional<std::string>
+OpenAIResponsesStore::latest_response_id(std::string_view session) const {
+    std::lock_guard lock(mutex_);
+    const Entry* newest = newest_locked(session);
+    return newest ? std::optional(newest->response->id) : std::nullopt;
+}
+
+std::vector<std::string> OpenAIResponsesStore::session_digests() const {
+    std::lock_guard lock(mutex_);
+    std::vector<std::string> result;
+    result.reserve(sessions_.size());
+    for (const auto& [session, state] : sessions_) {
+        if (state.records != 0) { result.push_back(session); }
+    }
+    std::sort(result.begin(), result.end());
+    return result;
+}
+
+ResponsePublicationState
+OpenAIResponsesStore::await_publication(std::string_view session, const std::string& id,
+                                        std::chrono::milliseconds timeout) const {
+    std::unique_lock lock(mutex_);
+    const auto state = [&] {
+        const Entry* newest = newest_locked(session);
+        if (newest && newest->response->id == id) { return ResponsePublicationState::Stored; }
+        const auto pending = publishing_.find(id);
+        if (pending != publishing_.end() && pending->second &&
+            credential_equal(*pending->second, session)) {
+            return ResponsePublicationState::Publishing;
+        }
+        return ResponsePublicationState::Absent;
+    };
+    (void)publication_changed_.wait_for(lock, timeout, [&] {
+        return state() != ResponsePublicationState::Publishing;
+    });
+    return state();
+}
+
+void OpenAIResponsesStore::prune_revision_locked(const std::string& session) noexcept {
+    const auto found = sessions_.find(session);
+    if (found != sessions_.end() && found->second.records == 0 &&
+        found->second.publications == 0 && found->second.guards == 0) {
+        sessions_.erase(found);
+    }
+}
+
+void OpenAIResponsesStore::begin_publication(const std::string& id,
+                                             const std::optional<std::string>& session) {
+    std::lock_guard lock(mutex_);
+    auto revision = sessions_.end();
+    if (session) { revision = sessions_.try_emplace(*session).first; }
+    try {
+        if (!publishing_.emplace(id, session).second) {
+            throw std::logic_error("duplicate response publication");
+        }
+    } catch (...) {
+        if (session) { prune_revision_locked(*session); }
+        throw;
+    }
+    if (revision != sessions_.end()) {
+        ++revision->second.publications;
+        ++revision->second.revision;
+    }
+    publication_changed_.notify_all();
+}
+
+void OpenAIResponsesStore::end_publication_locked(const std::string& id) noexcept {
+    const auto pending = publishing_.find(id);
+    if (pending == publishing_.end()) { return; }
+    if (pending->second) {
+        const auto revision = sessions_.find(*pending->second);
+        if (revision != sessions_.end()) {
+            --revision->second.publications;
+            ++revision->second.revision;
+            prune_revision_locked(revision->first);
+        }
+    }
+    publishing_.erase(pending);
+    publication_changed_.notify_all();
+}
+
+void OpenAIResponsesStore::end_publication(const std::string& id) noexcept {
+    std::lock_guard lock(mutex_);
+    end_publication_locked(id);
+}
+
+OpenAIResponsePublication::OpenAIResponsePublication(OpenAIResponsesStore& store, std::string id,
+                                                     std::optional<std::string> session)
+    : response_id_(std::move(id)) {
+    store.begin_publication(response_id_, session);
+    store_ = &store;
+}
+OpenAIResponsePublication::OpenAIResponsePublication(OpenAIResponsePublication&& other) noexcept
+    : store_(std::exchange(other.store_, nullptr)), response_id_(std::move(other.response_id_)) {}
+OpenAIResponsePublication&
+OpenAIResponsePublication::operator=(OpenAIResponsePublication&& other) noexcept {
+    if (this != &other) {
+        end();
+        store_ = std::exchange(other.store_, nullptr);
+        response_id_ = std::move(other.response_id_);
+    }
+    return *this;
+}
+OpenAIResponsePublication::~OpenAIResponsePublication() { end(); }
+void OpenAIResponsePublication::end() noexcept {
+    if (store_) { store_->end_publication(response_id_); }
+    store_ = nullptr;
+}
+
+OpenAIResponseRestoreGuard OpenAIResponsesStore::begin_restore(std::string session) {
+    (void)parse_client_identity_sha256(session, "ninfer_session");
+    OpenAIResponseRestoreGuard guard;
+    guard.session_ = std::move(session);
+    std::lock_guard lock(mutex_);
+    auto& revision = sessions_[guard.session_];
+    ++revision.guards;
+    guard.revision_ = revision.revision;
+    guard.store_ = this;
+    return guard;
+}
+void OpenAIResponsesStore::end_restore(const std::string& session) noexcept {
+    std::lock_guard lock(mutex_);
+    const auto revision = sessions_.find(session);
+    if (revision != sessions_.end()) {
+        --revision->second.guards;
+        prune_revision_locked(revision->first);
+    }
+}
+OpenAIResponseRestoreGuard::OpenAIResponseRestoreGuard(OpenAIResponseRestoreGuard&& other) noexcept
+    : store_(std::exchange(other.store_, nullptr)), session_(std::move(other.session_)),
+      revision_(other.revision_) {}
+OpenAIResponseRestoreGuard&
+OpenAIResponseRestoreGuard::operator=(OpenAIResponseRestoreGuard&& other) noexcept {
+    if (this != &other) {
+        end();
+        store_ = std::exchange(other.store_, nullptr);
+        session_ = std::move(other.session_);
+        revision_ = other.revision_;
+    }
+    return *this;
+}
+OpenAIResponseRestoreGuard::~OpenAIResponseRestoreGuard() { end(); }
+void OpenAIResponseRestoreGuard::end() noexcept {
+    if (store_) { store_->end_restore(session_); }
+    store_ = nullptr;
+}
+
+bool OpenAIResponsesStore::restore_session(OpenAIResponseStoreSnapshot snapshot,
+                                           const OpenAIResponseRestoreGuard& guard,
+                                           const std::function<bool()>& commit_external,
+                                           runtime::DurableReason* refusal) {
+    using Reason = runtime::DurableReason;
+    if (refusal) { *refusal = Reason::None; }
+    const auto reject = [&](Reason reason) {
+        if (refusal) { *refusal = reason; }
+        return false;
+    };
+    if (guard.store_ != this || !credential_equal(guard.session_, snapshot.client_session_sha256) ||
+        snapshot.records.empty() || !commit_external) {
+        return reject(Reason::InvalidManifest);
+    }
+    if (snapshot.records.size() > max_records_) { return reject(Reason::Capacity); }
+    std::unordered_set<std::string> ids;
+    std::uint64_t previous_order = 0;
+    for (const auto& record : snapshot.records) {
+        if (!record.client_session_sha256 ||
+            !credential_equal(*record.client_session_sha256, snapshot.client_session_sha256) ||
+            record.id.empty() || record.session_key.empty() ||
+            record.session_key.size() > kMaximumContextCacheSessionKeyBytes ||
+            !record.response.is_object() || !ids.insert(record.id).second ||
+            record.publication_order <= previous_order) {
+            return reject(Reason::InvalidManifest);
+        }
+        previous_order = record.publication_order;
+    }
+    if (snapshot.latest_response_id != snapshot.records.back().id) {
+        return reject(Reason::InvalidManifest);
+    }
+
+    std::lock_guard lock(mutex_);
+    const auto revision = sessions_.find(guard.session_);
+    if (revision == sessions_.end() || revision->second.revision != guard.revision_) {
+        return reject(Reason::StaleRevision);
+    }
+    if (revision->second.publications != 0) { return reject(Reason::TransactionBusy); }
+    const auto target = [&](const StoredOpenAIResponse& response) {
+        return response.client_session_sha256 &&
+               credential_equal(*response.client_session_sha256, snapshot.client_session_sha256);
+    };
+    for (const auto& record : snapshot.records) {
+        const auto collision = records_.find(record.id);
+        if (collision != records_.end() && !target(*collision->second.response)) {
+            return reject(Reason::ForeignSessionCollision);
+        }
+    }
+    try {
+        OpenAIResponsesStore replacement(max_records_, max_bytes_);
+        for (auto position = lru_.rbegin(); position != lru_.rend(); ++position) {
+            const Entry& entry = records_.at(*position);
+            if (!target(*entry.response)) {
+                replacement.insert_locked(entry.response, entry.envelope_bytes,
+                                            entry.order, entry.live);
+            }
+        }
+        for (auto& record : snapshot.records) {
+            const std::size_t envelope = record_envelope_bytes(record);
+            const auto order = record.publication_order;
+            replacement.insert_locked(std::make_shared<const StoredOpenAIResponse>(std::move(record)),
+                                        envelope, order, false);
+        }
+        if (replacement.records_.size() > max_records_ ||
+            replacement.current_bytes_ > max_bytes_) { return reject(Reason::Capacity); }
+        // The caller retains its full K3 result. A false external commit must not be relabelled
+        // as a store failure; refusal remains None and the K3 reason is authoritative.
+        if (!commit_external()) { return false; }
+        records_.swap(replacement.records_);
+        lru_.swap(replacement.lru_);
+        live_context_references_.swap(replacement.live_context_references_);
+        std::swap(current_bytes_, replacement.current_bytes_);
+        revision->second.records = snapshot.records.size();
+        ++revision->second.revision;
+        publication_changed_.notify_all();
+        return true;
+    } catch (const std::bad_alloc&) { return reject(Reason::Capacity); }
+    catch (...) { return reject(Reason::InvalidManifest); }
 }
 
 } // namespace ninfer::serve
