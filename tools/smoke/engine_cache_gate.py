@@ -17,7 +17,6 @@ import secrets
 import signal
 import statistics
 import subprocess
-import tempfile
 import threading
 import time
 import urllib.error
@@ -222,6 +221,8 @@ def main() -> int:
     parser.add_argument("--idle-seconds", type=float, default=12)
     parser.add_argument("--samples", type=int, default=3)
     parser.add_argument("--startup-timeout", type=float, default=300)
+    parser.add_argument("--work-dir", type=Path, required=True,
+                        help="private scratch directory retaining server logs for diagnosis")
     parser.add_argument("--receipt", type=Path, required=True)
     args = parser.parse_args()
     require(18150 <= args.port <= 18159, "port_outside_E1_block")
@@ -238,9 +239,9 @@ def main() -> int:
     with args.binary.open("rb") as binary:
         receipt["binary_sha256"] = hashlib.file_digest(binary, "sha256").hexdigest()
     try:
-        with tempfile.TemporaryDirectory(prefix="ninfer-engine-cache-") as temporary:
-            for grace in (0, 60000):
-                receipt["arms"].append(run_arm(args, baseline, grace, Path(temporary) / str(grace)))
+        args.work_dir.mkdir(parents=True, exist_ok=True)
+        for grace in (0, 60000):
+            receipt["arms"].append(run_arm(args, baseline, grace, args.work_dir / str(grace)))
         off, on = receipt["arms"]
         receipt["median_idle_ttft_ratio_on_over_off"] = on["median_idle_ttft_s"] / off["median_idle_ttft_s"]
         receipt["passed"] = True

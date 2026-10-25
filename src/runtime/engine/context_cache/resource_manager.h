@@ -81,6 +81,29 @@ public:
     explicit ResourceManager(bool enabled, ContextMachineCostModel costs)
         : enabled_(enabled), costs_(std::move(costs)) {}
 
+    struct CatalogOccupancy {
+        std::uint32_t private_entries = 0;
+        std::uint32_t shared_entries = 0;
+    };
+
+    // The same live entries prune() retains, sampled without mutating policy or allocating in
+    // the per-boundary metrics path. Active owners count even before their first capture.
+    [[nodiscard]] CatalogOccupancy catalog_occupancy(const Program& program) const {
+        CatalogOccupancy out;
+        for (const auto& owner : owners_) {
+            if (owner.active || std::any_of(owner.points.begin(), owner.points.end(),
+                                            [&](const auto& point) {
+                                                return program.valid_checkpoint(point.handle);
+                                            })) {
+                ++out.private_entries;
+            }
+        }
+        for (const auto& shared : shared_) {
+            if (program.valid_checkpoint(shared.handle)) { ++out.shared_entries; }
+        }
+        return out;
+    }
+
     [[nodiscard]] std::vector<SourceChoice>
     candidates(Program& program, const Base& base, std::uint32_t maximum_frontier = UINT32_MAX,
                std::optional<OwnerToken> own_resume = std::nullopt, std::uint64_t request = 0,

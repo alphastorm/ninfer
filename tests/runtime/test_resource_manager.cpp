@@ -1010,6 +1010,28 @@ void test_private_scope_survives_named_binding_replacement() {
             "revalidating a source bypassed private scope isolation");
 }
 
+void test_catalog_occupancy_counts_live_entries_not_stale_handles() {
+    Fixture f(256);
+    const Base base{.tokens = {1, 2}};
+    const auto active = f.begin(base);
+    auto count = f.cache.catalog_occupancy(f.program);
+    require(count.private_entries == 1 && count.shared_entries == 0,
+            "active uncaptured owner was omitted from catalog occupancy");
+    const auto shared = f.program.add(base.tokens);
+    f.cache.publish(f.program, active, shared);
+    count = f.cache.catalog_occupancy(f.program);
+    require(count.private_entries == 1 && count.shared_entries == 1,
+            "catalog occupancy did not distinguish private ownership and a shared record");
+    f.cache.finish(f.program, active, base, 1);
+    count = f.cache.catalog_occupancy(f.program);
+    require(count.private_entries == 0 && count.shared_entries == 1,
+            "finished empty private owner remained occupied");
+    require(f.program.release_checkpoint(shared), "stale shared fixture did not retire");
+    count = f.cache.catalog_occupancy(f.program);
+    require(count.private_entries == 0 && count.shared_entries == 0,
+            "stale physical handle inflated catalog occupancy");
+}
+
 void test_principal_shared_fanout_and_warm_arrival() {
     Fixture f(512);
     const Base parent{.tokens = {1, 2, 3, 4},
@@ -2030,6 +2052,7 @@ int main() {
         test_older_waiter_does_not_take_over_a_newer_catalog_version();
         test_session_submission_order_controls_only_the_named_hint();
         test_private_scope_survives_named_binding_replacement();
+        test_catalog_occupancy_counts_live_entries_not_stale_handles();
         test_principal_shared_fanout_and_warm_arrival();
         test_reclaim_respects_native_lease_and_stops_host_eviction_at_capacity();
         test_explicit_anchor_updates_remain_bounded_across_requests();
