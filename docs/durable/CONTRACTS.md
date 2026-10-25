@@ -91,7 +91,10 @@ manifest_mac = HMAC-SHA256(origin_key, exact_manifest_bytes)
 There is no NUL terminator in that origin domain. `manifest.mac` is exactly 64
 lowercase hex digits, no LF. Compare MACs in constant time. Persistence-enabled
 production launches require a nonempty configured API key; derived key bytes stay
-outside the checkpoint root. New saves MUST write the MAC. For explicitly
+outside the checkpoint root. The shipped strict-origin flag additionally requires
+a configured checkpoint root and an API key of at least 32 bytes (offline manifest
+MAC dictionary-guess resistance; council CR-20260831-originauth R1). This is the
+existing CLI floor, not a new security mode. New saves MUST write the MAC. For explicitly
 unauthenticated input, strict origin policy returns `Incompatible/origin_required`
 without mutation; non-strict policy permits the input but records unauthenticated
 origin. A present MAC without a verification key is `Unavailable/origin_key_unavailable`,
@@ -377,7 +380,7 @@ specifications move to schema 4; older releases keep their own capability gates.
 | `--session-checkpoint-staging-mib` | carry, 256 MiB default | no upstream dev equivalent |
 | `--session-checkpoint-write-buffer-mib` | carry, 6144 MiB default | no upstream dev equivalent |
 | `--session-checkpoint-min-tokens` | carry, 32768 default; also short-before-long quota threshold | no upstream dev equivalent |
-| `--session-checkpoint-require-origin-auth` | carry, false default; new saves still MAC authenticated | no upstream dev equivalent |
+| `--session-checkpoint-require-origin-auth` | carry, false default; requires configured root and API key ≥32 bytes; new saves still MAC authenticated | no upstream dev equivalent |
 | `--gpu-keep-warm-ms` | carry, 0/off default | no upstream dev equivalent |
 | `--artifact-sha256`, `--binary-sha256`, `--config-sha256`, `--deployment-profile` | carry product provenance; K2 computes resolved identity separately | no upstream dev equivalent |
 | `--stop-event`, `--shutdown-report` | carry Windows lifecycle controls; stop event rejected off Windows | no upstream dev equivalent |
