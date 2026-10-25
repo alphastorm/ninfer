@@ -142,6 +142,55 @@ void checkpoint_epoch_refusal(ninfer::Engine& engine) {
             "settled production epoch was not publishable");
 }
 
+void checkpoint_failure_classification(ninfer::Engine& engine) {
+    using namespace ninfer::runtime;
+    const auto& options = engine.options();
+    const auto memory = engine.memory_summary();
+    RuntimeFingerprintV2 fingerprint;
+    fingerprint.frontend = CheckpointEngineAccess::frontend_identity(engine);
+    fingerprint.native_layout = CheckpointEngineAccess::checkpoint_layout(engine);
+    fingerprint.engine = {
+        .max_context = options.max_context, .kv_capacity = memory.kv_capacity,
+        .kv_dtype = "bf16", .max_concurrency = options.max_concurrency,
+        .prefill_chunk = memory.prefill_chunk,
+        .speculative_backend = options.speculative.backend == ninfer::SpeculativeBackend::None
+            ? "none" : "dflash2",
+        .draft_window = options.speculative.draft_tokens,
+        .proposal_head = options.speculative.proposal_head == ninfer::ProposalHead::Optimized
+            ? "optimized" : "full",
+        .enable_vision = options.enable_vision, .use_cuda_graph = options.use_cuda_graph};
+    class BrokenIndex final : public ContinuationCheckpointReader {
+    public:
+        bool unavailable = true;
+        std::optional<std::uint64_t> file_size(std::string_view) const override { return 1; }
+        std::optional<DurablePayload> file_descriptor(std::string_view) const override {
+            return std::nullopt;
+        }
+        bool read_file(std::string_view, std::uint64_t, std::span<std::byte> bytes) const override {
+            if (unavailable) { return false; }
+            bytes[0] = std::byte{0xff}; // Invalid standalone CBOR break byte.
+            return true;
+        }
+        bool verify_complete() const override { return false; }
+        DurableReason failure_reason() const noexcept override {
+            return unavailable ? DurableReason::IoUnavailable : DurableReason::None;
+        }
+        std::shared_ptr<const ContinuationCheckpointReader> fresh_reader() const override { return {}; }
+    } reader;
+    const DurableImportTarget target{.session_sha256 = std::string(64, 'c'),
+        .expected_tag = "broken-index", .allow_prefix_reuse = true, .cache_participation = true};
+    const auto unavailable = CheckpointEngineAccess::import_session(
+        engine, target, reader, fingerprint, {}, {});
+    require(unavailable.state == DurableImportState::Unavailable &&
+                unavailable.reason == DurableReason::IoUnavailable,
+            "adapter quarantinable corruption replaced retryable Reader I/O failure");
+    reader.unavailable = false;
+    const auto corrupt = CheckpointEngineAccess::import_session(
+        engine, target, reader, fingerprint, {}, {});
+    require(corrupt.state == DurableImportState::Corrupt && corrupt.reason == DurableReason::InvalidIndex,
+            "adapter failed to classify invalid native CBOR as Corrupt");
+}
+
 void pending_timeout(ninfer::Engine& engine) {
     require(engine.options().pending_timeout_ms == 30000, "shipped 30 s pending default changed");
     std::mutex mutex;
@@ -295,6 +344,7 @@ int main() {
         }
         ninfer::Engine engine(options);
         checkpoint_policy_refusal(engine);
+        checkpoint_failure_classification(engine);
         checkpoint_epoch_refusal(engine);
         inflight_bound(engine);
         pending_timeout(engine);
