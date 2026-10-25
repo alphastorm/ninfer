@@ -4,6 +4,7 @@
 
 #include <cuda_runtime.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>

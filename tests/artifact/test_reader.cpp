@@ -219,13 +219,21 @@ void invalid_directories() {
         file.seekp(16);
         file.put(0);
     }
-    Reader wrong_part(fixture.entry);
-    rejects([&] { (void)wrong_part.read_object(wrong_part.find("q5")); },
-            "foreign continuation accepted");
+    {
+        Reader wrong_part(fixture.entry);
+        rejects([&] { (void)wrong_part.read_object(wrong_part.find("q5")); },
+                "foreign continuation accepted");
+    }
     fixture.write();
     Reader shortened(fixture.entry);
+#ifdef _WIN32
+    rejects([&] {
+        std::filesystem::resize_file(fixture.entry, std::filesystem::file_size(fixture.entry) - 1);
+    }, "immutable artifact allowed truncation while pinned");
+#else
     std::filesystem::resize_file(fixture.entry, std::filesystem::file_size(fixture.entry) - 1);
     rejects([&] { (void)shortened.read_range(499, 1); }, "premature EOF accepted");
+#endif
 }
 
 } // namespace
