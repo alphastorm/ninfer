@@ -267,6 +267,7 @@ Program owns concrete move-only types, implemented beside native context ownersh
 
 ```
 prepare_checkpoint_export(span<const CheckpointHandle>, DurableLimits) -> ExportLease
+validate_checkpoint_import(const DurableCheckpointSet&, const Reader&, DurableLimits) -> CheckpointValidation
 prepare_checkpoint_import(const DurableCheckpointSet&, const Reader&, DurableLimits) -> ImportReservation
 commit_import(ImportReservation&&) -> vector<CheckpointHandle>
 ```
@@ -277,6 +278,13 @@ Prepared owns a reservation. Normal capacity refusal is not a corruption excepti
 Program receives no HTTP session name. It returns handles only to the Engine, never
 to the disk codec. A preallocated commit returns all handles atomically; misuse of a
 foreign/stale Program is a programming error before publication, not partial success.
+
+`Program::validate_checkpoint_import(set, reader, limits)` returns
+`CheckpointValidation{state, reason, stats}` with state `Validated`, `Unavailable`,
+`Corrupt`, or `IdentityMismatch`. It performs bounded streamed verification and the
+same identity, frontier and layout checks as import, without reservation or
+publication. `Validated` means the pinned checkpoint passed validation, not that
+native state was imported or any victim is unconditionally safe to evict.
 
 Export pins `CheckpointStore::Lease`, `StateImageStore::ReadLease`, page read leases
 and immutable identity. Resolve immutable copy views under Engine serialization;
@@ -341,7 +349,13 @@ over the same immutable verified descriptors and pinned generation, with fresh
 single-pass read/hash state. It does not reuse a partially consumed verifier.
 Destructive reclaim re-validates the pinned reader's generation/tag against the
 current publication state per attempt (fresh lookup); stale or missing evidence
-makes the session not reclaimable. `publish_export` still compares the captured
+makes the session not reclaimable. Before destructive eviction, A3 MUST also call
+`Program::validate_checkpoint_import` on the **victim's** pinned checkpoint set and
+Reader, proving that victim's recoverable disk copy rather than merely checking
+the incoming restore image. Only `Validated` permits proceeding to the still-required
+per-attempt victim generation/tag check; any refusal preserves the live victim.
+Validation is single-pass, so actual import after validation uses `fresh_reader()`.
+`publish_export` still compares the captured
 epoch under the gate. This pinned-reader shape supersedes the earlier optional
 generation/epoch value return; runtime epochs remain absent from the manifest.
 
@@ -537,6 +551,9 @@ prepare is `prepared`, `capacity_refused`, `corrupt`, `identity_mismatch`,
 Prepare/import `unavailable` with `io_unavailable` is retryable, preserves the generation,
 never quarantines it and cannot publish partial state; Reader `failure_reason()`
 is the source of that distinction from verified payload corruption.
+The non-reserving native validation states are `validated`, `unavailable`, `corrupt`,
+`identity_mismatch`; `validated` is neither an import acknowledgement nor authority
+to skip eviction-time victim generation/tag revalidation.
 
 | Reason class | Stable reasons | Mutation / retry posture |
 |---|---|---|
