@@ -489,11 +489,11 @@ void replace_path(const std::filesystem::path& source, const std::filesystem::pa
         fail_windows("durable replacement source is not regular", ERROR_CANT_ACCESS_FILE);
     if (!FlushFileBuffers(file.value)) fail_windows("flush durable replacement file");
     const auto leaf = to.filename();
-    constexpr auto header = offsetof(FILE_RENAME_INFO, FileName);
-    if (leaf.native().size() > (MAXDWORD - header) / sizeof(wchar_t))
+    if (leaf.native().size() > (MAXDWORD - sizeof(FILE_RENAME_INFO)) / sizeof(wchar_t))
         throw std::invalid_argument("durable replacement name is too long");
     const auto name_bytes = leaf.native().size() * sizeof(wchar_t);
-    std::vector<std::byte> buffer(header + name_bytes);
+    // Include the trailing array element/structure padding and a zero terminator.
+    std::vector<std::byte> buffer(sizeof(FILE_RENAME_INFO) + name_bytes);
     auto* rename = reinterpret_cast<FILE_RENAME_INFO*>(buffer.data());
     rename->Flags = FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS;
     rename->RootDirectory = to_parent.handle();

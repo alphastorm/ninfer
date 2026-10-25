@@ -195,8 +195,14 @@ void run() {
     }
     io::create_directories(directory / "destination-child");
     write(staging, std::byte{15});
-    io::replace_path(staging, directory / "destination-child" / "current");
+    io::replace_path(staging, directory / "destination-child" / "x");
     require(!std::filesystem::exists(staging), "cross-parent replacement retained source");
+    {
+        Stream published(io::open_binary_read(directory / "destination-child" / "x"), &std::fclose);
+        std::array<std::byte, 3> bytes{};
+        io::read_exact(published.get(), bytes);
+        require(bytes[0] == std::byte{15}, "single-character replacement name was not published");
+    }
 #endif
     rejects([&] { Stream bad(io::open_binary_read(directory), &std::fclose); });
     rejects([&] { io::create_directories(directory / ".." / "escape"); });
