@@ -201,7 +201,7 @@ void prepare_strict_parameters(Contract::Tool& tool) {
 
 std::shared_ptr<const ToolCallOutputContract>
 build_tool_call_output_contract(std::span<const std::string> tool_jsons,
-                                std::span<const ChatMessage> messages) {
+                                std::span<const ninfer::ChatMessage> messages) {
     if (tool_jsons.empty() &&
         std::none_of(messages.begin(), messages.end(),
                      [](const auto& message) { return !message.tool_calls.empty(); }))

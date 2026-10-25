@@ -63,7 +63,7 @@ struct ToolCallOutputContract {
 
 [[nodiscard]] std::shared_ptr<const ToolCallOutputContract>
 build_tool_call_output_contract(std::span<const std::string> tool_jsons,
-                                std::span<const ChatMessage> messages = {});
+                                std::span<const ninfer::ChatMessage> messages = {});
 
 [[nodiscard]] std::shared_ptr<const ToolCallOutputContract>
 select_tool_call_contract(const std::shared_ptr<const ToolCallOutputContract>& declarations,
