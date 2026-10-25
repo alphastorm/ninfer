@@ -107,12 +107,12 @@ copy hashes and each executable's clean, matching source/profile/architecture
 identity. Public and port-only scratch packages are each built twice, including
 the complete outer checksum set; the emitted equivalence binds both package and
 configuration hashes plus identical executable/controller bytes.
-For a tooling-only descendant, packaging support files and source archives come
-from the packaging commit while `RuntimeSourceSha` remains the exact qualified
-binary identity. Both commits are recorded independently. Staging directories
-are keyed by the packaging commit so a fresh install cannot reuse a predecessor's
-prepared root. Binary identity reuse still requires the integrator's actual
-content-addressed payload comparison, not an assumed source equivalence.
+This release binds the binary patch-stack identity, `RuntimeSourceSha` and
+packaging/source-archive commit to the same cut commit. Older executable hashes
+are not relabelled. Staging directories are keyed by that commit so a fresh
+install cannot reuse a predecessor's prepared root. The integrator rebuilds and
+compares actual payload hashes before deciding which prior test evidence is
+content-address equivalent.
 
 `New-Package.ps1` requires the product P4 generator and genuine resolved vcpkg,
 CUDA, vendored-source and CRT/DirectStorage inventories. The outer distribution
