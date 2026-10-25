@@ -388,22 +388,22 @@ int test_codec_round_trip() {
     const auto live_guard = live.begin_restore(original.client_session_sha256);
     bool repaired_external_commit = false;
     failures += check(
-        live.restore_session(original, live_guard,
+        !live.restore_session(original, live_guard,
                              [&] {
                                  repaired_external_commit = true;
                                  return true;
                              }) &&
-            repaired_external_commit && live.size() == 2 &&
+            !repaired_external_commit && live.size() == 2 &&
             live.get_for_session("resp_private_first",
                                  std::optional<std::string>{original.client_session_sha256}) !=
                 nullptr &&
             live.get_for_session("resp_private_second",
-                                 std::optional<std::string>{original.client_session_sha256}) !=
+                                 std::optional<std::string>{original.client_session_sha256}) ==
                 nullptr &&
             live.get_for_session("resp_private_stale",
-                                 std::optional<std::string>{original.client_session_sha256}) ==
+                                 std::optional<std::string>{original.client_session_sha256}) !=
                 nullptr,
-        "partial same-session store repairs to the complete verified lineage");
+        "restore preserves live records absent from the older disk lineage");
 
     OpenAIResponsesStore foreign(4, 1ULL << 20);
     StoredOpenAIResponse foreign_owner        = original.records.front();
@@ -420,7 +420,7 @@ int test_codec_round_trip() {
                       "incoming id owned by another session stays a fail-closed collision");
 
     OpenAIResponsesStore partial(4, 1ULL << 20);
-    partial.put(original.records.front());
+    partial.put(original.records.back());
     const auto partial_guard = partial.begin_restore(original.client_session_sha256);
     bool partial_commit = false;
     failures += check(!partial.restore_session(original, partial_guard,
@@ -430,7 +430,7 @@ int test_codec_round_trip() {
                                                }) &&
                           partial_commit && partial.size() == 1 &&
                           partial.get_for_session(
-                              "resp_private_first",
+                              "resp_private_second",
                               std::optional<std::string>{original.client_session_sha256}) !=
                               nullptr,
                       "failed external commit preserves the partial session exactly");

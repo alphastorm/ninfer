@@ -119,6 +119,17 @@ void publication_failure_is_not_acknowledged() {
             "failed final publication was acknowledged");
 }
 
+template <class Session>
+void stored_completion_order(Session& state) {
+    if constexpr (requires { state.stored("completed", 2); }) {
+        state.stored("completed", 2);
+        const auto committed_epoch = state.epoch;
+        state.stored("older-http-completion", 1);
+        require(state.tag == "completed" && state.epoch == committed_epoch,
+                "out-of-order HTTP completion replaced a newer endpoint");
+    }
+}
+
 void queued_expiry_preserves_committed_tag() {
     CheckpointControl control;
     const auto state = control.session("session");
@@ -132,11 +143,7 @@ void queued_expiry_preserves_committed_tag() {
     require(control.publish("session", "stored", state->epoch, [] { return true; }).state ==
                 DurableExportState::Exported,
             "queued expiry changed the prior savable endpoint");
-    state->stored("completed", 2);
-    const auto committed_epoch = state->epoch;
-    state->stored("older-http-completion", 1);
-    require(state->tag == "completed" && state->epoch == committed_epoch,
-            "out-of-order HTTP completion replaced a newer endpoint");
+    stored_completion_order(*state);
 }
 } // namespace
 
