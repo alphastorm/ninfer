@@ -51,12 +51,14 @@ private:
         runtime::SessionCheckpointSkipDetail skip;
         std::string tag;
         bool covered = false;
+        bool replay_only = false;
     };
     [[nodiscard]] SaveOutcome save_session(std::string_view session,
                                            std::optional<std::string_view> expected_tag = {},
                                            bool allow_covered = true);
     [[nodiscard]] std::shared_ptr<std::mutex> session_operation(std::string_view session);
-    void automatic_save(std::string_view session) noexcept;
+    [[nodiscard]] AutomaticCheckpointResult automatic_save(
+        std::string_view session, std::optional<std::string_view> expected_tag);
     void receipt(const nlohmann::json& value) const noexcept;
     void receipt(std::string_view operation, std::string_view state, runtime::DurableReason reason,
                  bool committed, const runtime::DurableCheckpointStats& stats = {},
@@ -71,18 +73,14 @@ private:
     const nlohmann::json fingerprint_json_;
     const runtime::DurableLimits limits_;
     mutable SessionCheckpointStore store_;
-    AutomaticCheckpointQueue automatic_;
     std::atomic<bool> stopping_{false};
+    std::atomic<std::uint64_t> publication_progress_{0};
+    std::atomic<std::uint64_t> storage_progress_{0};
     std::mutex operations_mutex_;
     std::unordered_map<std::string, std::weak_ptr<std::mutex>> operations_;
-    struct PressureSave {
-        std::string tag;
-        bool settled = false;
-    };
-    std::mutex pressure_mutex_;
-    std::unordered_map<std::string, PressureSave> pressure_saves_;
     std::mutex final_mutex_;
     std::optional<bool> final_result_;
+    AutomaticCheckpointCoordinator automatic_;
 };
 
 } // namespace ninfer::serve

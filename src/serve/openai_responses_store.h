@@ -112,7 +112,7 @@ public:
     // native endpoint marks survivors replay-only, never relabels a different continuation.
     [[nodiscard]] bool erase_for_session_durably(
         const std::string& id, const std::string& session_sha256,
-        const std::function<bool(const std::optional<OpenAIResponseStoreSnapshot>&)>& publish,
+        const std::function<bool(std::optional<OpenAIResponseStoreSnapshot>&)>& publish,
         runtime::DurableReason* refusal = nullptr,
         const OpenAIResponseStoreSnapshot* persisted = nullptr);
 
