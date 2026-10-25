@@ -90,8 +90,7 @@ std::string require_function_name(const Json& object, const char* param) {
     }
     std::string name = object.at("name").get<std::string>();
     if (!valid_function_name(name)) {
-        bad_request("function name must match [A-Za-z0-9_-]{1," +
-                        std::to_string(kMaxToolNameLength) + "}", param);
+        bad_request("function name must match [A-Za-z0-9_-]{1,128}", param);
     }
     return name;
 }
