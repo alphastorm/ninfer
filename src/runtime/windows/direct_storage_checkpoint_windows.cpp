@@ -5,11 +5,13 @@
 #    endif
 
 #    include "runtime/windows/direct_storage_checkpoint_backend.h"
+#    include "core/io/durable_file.h"
 
 #    include <d3d12.h>
 #    include <dxgi1_6.h>
 #    include <dstorage.h>
 #    include <windows.h>
+#    include <io.h>
 #    include <wrl/client.h>
 
 #    include <cuda_runtime.h>
@@ -18,6 +20,7 @@
 #    include <array>
 #    include <cstddef>
 #    include <cstdint>
+#    include <cstdio>
 #    include <cstring>
 #    include <cwchar>
 #    include <exception>
@@ -475,7 +478,7 @@ private:
 class WindowsDirectStorageReadQueue final : public ContinuationCheckpointReadQueue {
 public:
     WindowsDirectStorageReadQueue(std::filesystem::path root, std::uint32_t timeout_ms)
-        : root_(std::filesystem::weakly_canonical(std::move(root))),
+        : root_(std::filesystem::absolute(std::move(root)).lexically_normal()),
           state_(std::make_shared<DirectStorageState>()), timeout_ms_(timeout_ms) {
         int cuda_device = 0;
         require_cuda(cudaGetDevice(&cuda_device), "failed to query the active CUDA device");
@@ -566,12 +569,26 @@ public:
             throw CheckpointContractError(
                 "DirectStorage checkpoint payload is not a regular non-reparse file");
         }
-        const std::filesystem::path canonical = std::filesystem::weakly_canonical(path);
+        const std::filesystem::path canonical = std::filesystem::absolute(path).lexically_normal();
         if (!contains(canonical)) {
             throw CheckpointContractError(
                 "DirectStorage checkpoint read escaped its configured root");
         }
 
+        // Resolve all parents without reparse traversal and hold the resulting file
+        // against replacement while DirectStorage opens its native source object.
+        std::unique_ptr<std::FILE, decltype(&std::fclose)> pinned(nullptr, &std::fclose);
+        try {
+            pinned.reset(io::open_binary_read(path));
+        } catch (const std::exception& error) {
+            throw CheckpointContractError(std::string("open checkpoint payload: ") + error.what());
+        }
+        const HANDLE pinned_handle =
+            reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(pinned.get())));
+        BY_HANDLE_FILE_INFORMATION expected{};
+        if (!GetFileInformationByHandle(pinned_handle, &expected)) {
+            fail_windows("inspect pinned checkpoint payload", GetLastError());
+        }
         std::unique_lock queue_lock(state_->mutex);
         ComPtr<IDStorageFile> file;
         require_hresult(state_->factory->OpenFile(canonical.c_str(), IID_PPV_ARGS(&file)),
@@ -579,6 +596,11 @@ public:
         BY_HANDLE_FILE_INFORMATION information{};
         require_hresult(file->GetFileInformation(&information),
                         "DirectStorage could not inspect the committed checkpoint payload");
+        if (information.dwVolumeSerialNumber != expected.dwVolumeSerialNumber ||
+            information.nFileIndexHigh != expected.nFileIndexHigh ||
+            information.nFileIndexLow != expected.nFileIndexLow) {
+            throw CheckpointContractError("DirectStorage checkpoint payload changed while opening");
+        }
         const std::uint64_t file_bytes =
             (static_cast<std::uint64_t>(information.nFileSizeHigh) << 32U) |
             information.nFileSizeLow;

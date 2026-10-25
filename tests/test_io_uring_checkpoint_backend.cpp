@@ -652,6 +652,13 @@ int test_continuation_read_queue() {
                                               std::span(&request, 1));
                       }),
                       "io_uring continuation queue accepted a path outside its configured root");
+    const auto actual = payload_path(root, checkpoint);
+    const auto alias = root.path() / "payload-alias";
+    std::filesystem::create_directory_symlink(actual.parent_path(), alias);
+    failures += check(throws_checkpoint([&] {
+                          (void)queue->submit(alias / actual.filename(), std::span(&request, 1));
+                      }),
+                      "io_uring continuation queue followed an intermediate symlink");
     return failures;
 }
 
