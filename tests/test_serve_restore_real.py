@@ -180,7 +180,8 @@ def main() -> int:
             code, _ = request("GET", "/v1/responses/" + seed["id"], capability=session)
             require(code == 200, "own capability could not retrieve restored lineage")
             code, saved = request("POST", "/v1/ninfer/checkpoints", {"session_sha256": session})
-            require(code == 200 and saved.get("operation") == "save" and saved.get("state") == "exported" and
+            require(code == 200 and saved.get("schema") == "ninfer-durable-operation/1" and
+                    saved.get("operation") == "save" and saved.get("state") == "exported" and
                     saved.get("committed") is True and saved.get("reason") == "none" and
                     saved.get("origin") == "authenticated" and saved.get("dir_sync") == "fsync",
                     "explicit save did not acknowledge all production durability gates")

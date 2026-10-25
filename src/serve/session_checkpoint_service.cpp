@@ -105,7 +105,7 @@ const char* import_name(ImportState state) noexcept {
 
 Json operation(std::string_view kind, std::string_view state, Reason reason, bool committed,
                const runtime::DurableCheckpointStats& stats = {}, std::string_view origin = "not_checked") {
-    return {{"artifact_type", "ninfer-durable-operation/1"}, {"operation", kind}, {"state", state},
+    return {{"schema", "ninfer-durable-operation/1"}, {"operation", kind}, {"state", state},
         {"reason", runtime::durable_reason_name(reason)}, {"committed", committed}, {"origin", origin},
         {"frontier_tokens", stats.frontier_tokens}, {"restored_tokens", stats.restored_tokens},
         {"payload_bytes", stats.payload_bytes}, {"points", stats.points},
@@ -125,9 +125,10 @@ runtime::DurableImportResult prepared_refusal(const runtime::DurablePrepareResul
     case runtime::DurablePrepareState::Unavailable:
         return {.state = ImportState::Unavailable, .reason = prepared.reason};
     case runtime::DurablePrepareState::Prepared:
-        return {.state = ImportState::Corrupt, .reason = Reason::InvalidIndex};
+        // A missing provider transaction is not evidence against authenticated disk bytes.
+        return {.state = ImportState::Unavailable, .reason = Reason::IoUnavailable};
     }
-    return {.state = ImportState::Corrupt, .reason = Reason::InvalidIndex};
+    return {.state = ImportState::Unavailable, .reason = Reason::IoUnavailable};
 }
 } // namespace
 
@@ -247,6 +248,10 @@ Json SessionCheckpointService::save(std::string_view session) {
                                       ? "stale" : "refused", outcome.skip.durable_reason, false);
     }
     receipt(result);
+    if (outcome.saved) {
+        progress_.fetch_add(1, std::memory_order_release);
+        Access::notify_checkpoint_progress(engine_);
+    }
     return result;
 }
 
