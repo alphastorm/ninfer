@@ -79,6 +79,13 @@ common/build.sh "$SOURCE" "$BUILD/native-sm89" \
 
 ## Continued final-candidate qualification
 
+- The first sm_89 GPU batch exposed an illegal access in the existing FP8 SwiGLU
+  negative-gate oracle. The ordinary-MMA adapter inherited the TMA schedule's
+  32 producer threads, although its launch contains only consumer warps. The
+  collective epilogue consequently subtracted a nonexistent producer warp from
+  thread indices. The native adapter now explicitly sets producer threads to
+  zero; the existing oracle's T=65/257/513 cases cover the affected TMA-selected
+  route. Rebuild and corrected-runner qualification are required before a pass.
 - Imported PortableCore's `ed99ff3f` compiler-neutral CPU expert changes as
   `53e847dd`: unreachable intrinsic, F16C scalar conversion and isolated MSVC ISA flags.
   At this revision, Linux sm_89 linked the server and architecture contract
