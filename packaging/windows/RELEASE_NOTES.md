@@ -103,6 +103,21 @@ shared-pool pressure, context, restart, rollback, security, client and benchmark
 fields are adapted from actual phase receipts; failed/missing evidence cannot
 become passing flags. A first-lineage rollback remains `not_applicable`, not passed.
 
+Privacy qualification has two explicit domains. Shipped executable/DLL directories
+and both public/scratch payload archives reject every Windows user-profile spelling,
+macOS user-directory or Linux home-directory path, plus the known private host names
+and credential shapes. Forward separators and escaped Windows separators are covered;
+a zero result for only the original spelling is not sufficient.
+
+Source trees and source archives reject actual operator homes/hosts and credential
+shapes. Public upstream paths, placeholder examples and HTTP route examples are
+reported separately as public/generic references, using structured path components
+rather than raw absolute paths in receipts. Scanner definitions and fixtures construct
+their marker strings at runtime, so the scanner does not match its own definitions.
+The private host/home scope stays in the operator checkpoint; public receipts retain
+only its digest and the generic reference list. The source-archive hash/size is bound
+in the immutable package-build receipt and all three archive privacy scans must pass.
+
 ## Historical predecessor notes
 
 The sections below describe the fork-based releases and their qualification

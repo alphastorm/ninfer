@@ -351,6 +351,11 @@ try {
         }
         config_sha256 = [string]$identity.configuration_sha256
         model_sha256 = [string]$spec.model.sha256
+        source_archive = [ordered]@{
+            name = [string]$packageReceipt.source_archive.name
+            sha256 = Get-LowerSha256 (Join-Path $packageOutput ([string]$packageReceipt.source_archive.name))
+            bytes = [Int64](Get-Item -LiteralPath (Join-Path $packageOutput ([string]$packageReceipt.source_archive.name))).Length
+        }
         sbom = [ordered]@{
             name = [string]$packageReceipt.sbom.name
             sha256 = [string]$packageReceipt.sbom.sha256

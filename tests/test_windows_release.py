@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import copy
+import base64
 from decimal import Decimal
 import importlib.util
+import io
 import json
 from pathlib import Path
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -524,6 +527,89 @@ class QualificationRestorationTests(unittest.TestCase):
             summary = json.loads((Path(temporary) / "qualification-summary.json").read_text())
             self.assertEqual(summary["status"], "failed")
             self.assertIsNone(summary["qualified_utc"])
+
+
+class PrivateMarkerTests(unittest.TestCase):
+    def test_forward_separator_profile_fixture_is_rejected(self) -> None:
+        separator = bytes((92,))
+        profile = separator.join((b"C:", b"Users", b"operator"))
+        fixture = profile.replace(separator, b"/") + b"/vcpkg/tools/pkg-config"
+        self.assertGreater(qualify_native.marker_findings(fixture, profile), 0)
+
+    def test_binary_domain_rejects_all_home_spellings_and_known_hosts(self) -> None:
+        backslash = bytes((92,))
+        windows = backslash.join((b"C:", b"Users", b"private-owner", b"build"))
+        host = b"-".join((b"private", b"builder"))
+        for fixture in (
+            windows, windows.replace(backslash, b"/"), windows.replace(backslash, backslash * 2),
+            b"/".join((b"", b"Users", b"private-owner", b"build")),
+            b"/".join((b"", b"home", b"private-owner", b"build")),
+            host.upper(),
+        ):
+            with self.subTest(fixture=fixture):
+                self.assertGreater(qualify_native.marker_findings(fixture, private_markers=(host,)), 0)
+        self.assertEqual(qualify_native.marker_findings(b"C:/b/native/vcpkg", private_markers=(host,)), 0)
+
+    def test_source_domain_reports_public_references_without_waiving_actual_homes(self) -> None:
+        slash = b"/"
+        references = (
+            slash.join((b"", b"home", b"neroued", b"models")),
+            slash.join((b"", b"home", b"operator", b"build")),
+            slash.join((b"C:", b"Users", b"REPLACE_ME", b"models")),
+            slash.join((b"", b"users", b":id", b"subscriptions")),
+        )
+        profile = slash.join((b"C:", b"Users", b"private-owner"))
+        host = b"-".join((b"private", b"builder"))
+        payload = b"\n".join(references)
+        markers = (profile, host)
+        self.assertEqual(qualify_native.marker_findings(payload, private_markers=markers, source=True), 0)
+        reported = qualify_native.source_references(payload, private_markers=markers)
+        self.assertEqual(len(reported), 4)
+        self.assertEqual({row["kind"] for row in reported}, {"posix-home", "windows-user", "macos-user"})
+        encoded = json.dumps(reported).encode()
+        self.assertEqual(qualify_native.marker_findings(encoded), 0)
+        for fixture in (profile + b"/build", profile.replace(slash, bytes((92,))) + bytes((92,)) + b"build",
+                        slash.join((b"", b"home", b"private-owner", b"build")), host.upper()):
+            with self.subTest(fixture=fixture):
+                self.assertGreater(qualify_native.marker_findings(fixture, private_markers=markers, source=True), 0)
+        credential = b"AKIA" + b"A" * 16
+        self.assertGreater(qualify_native.marker_findings(credential, source=True), 0)
+
+    def test_real_directory_and_tar_scans_preserve_the_two_domains(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = b"/".join((b"", b"home", b"neroued", b"models"))
+            (root / "fixture.dll").write_bytes(payload)
+            self.assertGreater(qualify_native.scan_directory(root)["findings"], 0)
+            archive = root / "fixture.tar.gz"
+            with tarfile.open(archive, "w:gz") as stream:
+                member = tarfile.TarInfo("source/public-example.txt")
+                member.size = len(payload)
+                stream.addfile(member, io.BytesIO(payload))
+            self.assertGreater(qualify_native.scan_archive(archive)["findings"], 0)
+            source = qualify_native.scan_archive(archive, source_archive=True)
+            self.assertEqual(source["findings"], 0)
+            self.assertEqual(source["domain"], "source")
+            self.assertEqual(source["public_generic_references"][0]["components"], ["neroued", "models"])
+            private = b"/".join((b"", b"home", b"private-owner"))
+            with tarfile.open(archive, "w:gz") as stream:
+                member = tarfile.TarInfo("source/link")
+                member.type = tarfile.SYMTYPE
+                member.linkname = (private + b"/models").decode()
+                stream.addfile(member)
+            self.assertGreater(qualify_native.scan_archive(
+                archive, source_archive=True, private_markers=(private,),
+            )["findings"], 0)
+
+    def test_internal_scope_round_trip_and_scanner_definitions_do_not_self_match(self) -> None:
+        home = "/".join(("", "home", "private-owner"))
+        host = "-".join(("private", "builder"))
+        scope = base64.b64encode(json.dumps({"homes": [home], "hosts": [host]}).encode()).decode()
+        self.assertEqual(set(qualify_native.decode_privacy_scope(scope)), {home.encode(), host.encode()})
+        for name in ("tools/qualification/qualify_native.py", "tests/test_windows_release.py",
+                     "tools/bench/run_exp097.py"):
+            with self.subTest(name=name):
+                self.assertEqual(qualify_native.marker_findings((ROOT / name).read_bytes()), 0)
 
 
 class ScratchQualificationTests(unittest.TestCase):

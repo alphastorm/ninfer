@@ -24,6 +24,7 @@ import json
 import os
 from pathlib import Path, PureWindowsPath
 import re
+import socket
 import subprocess
 import sys
 import tarfile
@@ -468,22 +469,80 @@ def digest(label: str) -> str:
     return hashlib.sha256(f"ninfer-native-orchestrated-v1/{label}".encode()).hexdigest()
 
 
+HOME_PATH_PATTERN = re.compile(
+    rb"(?:(?P<drive>[A-Za-z]:)[\\/]+Users[\\/]+|[\\/](?P<unix>Users|home)[\\/]+)"
+    rb"(?P<owner><[^>\x00\r\n]+>|[^\\/\x00\s\"'`<>]+)"
+    rb"(?P<tail>(?:[\\/]+[^\x00\s\"'`<>]+)*)",
+    re.IGNORECASE,
+)
+
+
+def _literal_marker_pattern(marker: bytes) -> re.Pattern[bytes]:
+    # Repeated separators also cover the escaped representation in source/JSON strings.
+    parts = re.split(rb"[\\/]+", marker.rstrip(b"\\/"))
+    return re.compile(rb"[\\/]+".join(re.escape(part) for part in parts), re.IGNORECASE)
+
+
 def marker_findings(
     data: bytes,
     dynamic_home: bytes | None = None,
     private_markers: tuple[bytes, ...] = (),
+    *,
+    source: bool = False,
 ) -> int:
-    lowered = data.lower()
-    markers: list[bytes] = list(private_markers)
+    markers = set(private_markers)
     if dynamic_home:
-        markers.append(dynamic_home.lower().rstrip(b"\\/") + b"\\")
-    return sum(lowered.count(marker) for marker in markers) + sum(
+        markers.add(dynamic_home)
+    findings = sum(len(_literal_marker_pattern(marker).findall(data)) for marker in markers if marker)
+    operators = {
+        re.split(rb"[\\/]+", marker.rstrip(b"\\/"))[-1].lower()
+        for marker in markers if b"/" in marker or b"\\" in marker
+    }
+    findings += sum(
+        not source or match["owner"].lower() in operators
+        for match in HOME_PATH_PATTERN.finditer(data)
+    )
+    return findings + sum(
         len(pattern.findall(data)) for pattern in CREDENTIAL_PATTERNS
     )
 
 
-def scan_directory(path: Path) -> dict[str, Any]:
+def source_references(
+    data: bytes, dynamic_home: bytes | None = None, private_markers: tuple[bytes, ...] = (),
+) -> list[dict[str, Any]]:
+    references: dict[tuple[str, tuple[str, ...]], int] = {}
+    for match in HOME_PATH_PATTERN.finditer(data):
+        if marker_findings(match.group(), dynamic_home, private_markers, source=True):
+            continue
+        kind = ("windows-user" if match["drive"] else
+                "posix-home" if match["unix"].lower() == b"home" else "macos-user")
+        components = tuple(
+            part.decode("utf-8", errors="replace")
+            for part in re.split(rb"[\\/]+", match["owner"] + match["tail"])
+            if part
+        )
+        key = (kind, components)
+        references[key] = references.get(key, 0) + 1
+    # Components, not raw absolute paths, keep even generic-reference reports safe to publish.
+    return [{"kind": kind, "components": list(parts), "occurrences": count}
+            for (kind, parts), count in sorted(references.items())]
+
+
+def decode_privacy_scope(value: str) -> tuple[bytes, ...]:
+    if not value:
+        return ()
+    scope = json.loads(base64.b64decode(value, validate=True).decode("utf-8"))
+    if (not isinstance(scope, dict) or set(scope) != {"homes", "hosts"} or
+            any(not isinstance(scope[key], list) or
+                any(not isinstance(item, str) or not item for item in scope[key])
+                for key in ("homes", "hosts"))):
+        raise LaneError("invalid private scope")
+    return tuple(item.encode("utf-8") for key in ("homes", "hosts") for item in scope[key])
+
+
+def scan_directory(path: Path, private_markers: tuple[bytes, ...] = ()) -> dict[str, Any]:
     dynamic_home = os.environ.get("USERPROFILE", "").encode()
+    private_markers = (*private_markers, socket.gethostname().encode())
     files = 0
     size = 0
     findings = 0
@@ -492,22 +551,28 @@ def scan_directory(path: Path) -> dict[str, Any]:
             continue
         files += 1
         size += candidate.stat().st_size
-        findings += marker_findings(candidate.read_bytes(), dynamic_home)
+        findings += marker_findings(candidate.read_bytes(), dynamic_home, private_markers)
     return {"files": files, "bytes": size, "findings": findings}
 
 
-def scan_archive(path: Path, source_archive: bool = False) -> dict[str, Any]:
+def scan_archive(
+    path: Path, source_archive: bool = False, private_markers: tuple[bytes, ...] = (),
+) -> dict[str, Any]:
     dynamic_home = os.environ.get("USERPROFILE", "").encode()
+    private_markers = (*private_markers, socket.gethostname().encode())
     files = 0
     size = 0
     findings = 0
-    generic_paths = 0
-    generic = re.compile(
-        rb"(?:[A-Za-z]:\\Users\\(?:<[^>]+>|USER|username)|/Users/(?:<[^>]+>|USER|username))",
-        re.IGNORECASE,
-    )
+    generic_references = []
     with tarfile.open(path, "r:*") as archive:
         for member in archive:
+            metadata = (member.name + "\n" + member.linkname).encode("utf-8")
+            findings += marker_findings(metadata, dynamic_home, private_markers, source=source_archive)
+            if source_archive:
+                generic_references.extend(
+                    {"file": member.name, **reference}
+                    for reference in source_references(metadata, dynamic_home, private_markers)
+                )
             if not member.isfile():
                 continue
             stream = archive.extractfile(member)
@@ -516,14 +581,18 @@ def scan_archive(path: Path, source_archive: bool = False) -> dict[str, Any]:
             data = stream.read()
             files += 1
             size += len(data)
-            findings += marker_findings(data, dynamic_home)
+            findings += marker_findings(data, dynamic_home, private_markers, source=source_archive)
             if source_archive:
-                generic_paths += len(generic.findall(data))
+                generic_references.extend(
+                    {"file": member.name, **reference}
+                    for reference in source_references(data, dynamic_home, private_markers)
+                )
     return {
         "files": files,
         "bytes": size,
         "findings": findings,
-        "generic_home_references": generic_paths,
+        "domain": "source" if source_archive else "binary-payload",
+        "public_generic_references": generic_references,
     }
 
 
@@ -1188,7 +1257,25 @@ foreach($file in $files){{
 if($LASTEXITCODE -ne 0){{throw 'qualified native identity verification failed'}}
 """, timeout=900)
 
+    def privacy_scope_argument(self) -> str:
+        scope = self.state.get("privacy_scope")
+        if scope is None:
+            homes = {str(Path.home())}
+            hosts = {self.config.builder, self.config.target, socket.gethostname()}
+            for host in sorted({self.config.builder, self.config.target}):
+                metadata = self.remote_json(host, """
+[Console]::Out.WriteLine((@{home=[Environment]::GetFolderPath('UserProfile');host=[Environment]::MachineName}|ConvertTo-Json -Compress))
+""")
+                homes.add(metadata["home"])
+                hosts.add(metadata["host"])
+            scope = {"homes": sorted(home for home in homes if home),
+                     "hosts": sorted(host for host in hosts if host)}
+            self.state["privacy_scope"] = scope  # Private checkpoint only, never a public receipt.
+            self._save()
+        return base64.b64encode(json.dumps(scope, sort_keys=True).encode("utf-8")).decode("ascii")
+
     def private_scan(self) -> dict[str, Any]:
+        privacy_scope = self.privacy_scope_argument()
         output = run(
             [
                 "ssh",
@@ -1199,6 +1286,8 @@ if($LASTEXITCODE -ne 0){{throw 'qualified native identity verification failed'}}
                 "_scan-dir",
                 "--path",
                 self.builder_bin,
+                "--privacy-scope",
+                privacy_scope,
             ],
             timeout=600,
         ).stdout
@@ -1208,25 +1297,25 @@ if($LASTEXITCODE -ne 0){{throw 'qualified native identity verification failed'}}
         tracked = 0
         tracked_findings = 0
         names = subprocess.check_output(["git", "ls-files", "-z"], cwd=self.config.source_root)
-        private_markers = tuple(
-            value.lower().encode()
-            for value in (
-                self.config.builder,
-                self.config.target,
-                str(Path.home()) + os.sep,
-            )
-            if value
-        )
+        private_markers = decode_privacy_scope(privacy_scope)
+        generic_references = []
         for raw in names.split(b"\0"):
-            if not raw or raw == b"AGENTS.md":
+            if not raw:
                 continue
             path = self.config.source_root / raw.decode()
             if path.is_file():
                 tracked += 1
-                tracked_findings += marker_findings(path.read_bytes(), private_markers=private_markers)
+                data = path.read_bytes()
+                tracked_findings += marker_findings(data, private_markers=private_markers, source=True)
+                generic_references.extend(
+                    {"file": raw.decode(), **reference}
+                    for reference in source_references(data, private_markers=private_markers)
+                )
         if tracked_findings:
             raise LaneError("tracked source contains a private marker or credential-shaped value")
-        return {"status": "passed", "neutral_bin": remote, "tracked_files": tracked, "tracked_findings": 0}
+        return {"status": "passed", "neutral_bin": remote, "tracked_files": tracked, "tracked_findings": 0,
+                "privacy_scope_sha256": hashlib.sha256(privacy_scope.encode()).hexdigest(),
+                "public_generic_references": generic_references}
 
     def package(self) -> dict[str, Any]:
         epoch = run(["git", "show", "-s", "--format=%ct", self.head], cwd=self.config.source_root).stdout.strip()
@@ -1297,23 +1386,22 @@ if([string]$sa.package.sha256 -cne [string]$sb.package.sha256 -or $scratchOuterA
             "public_package_executed": False,
             "production_route_activation_performed": False,
         }
-        scan_output = run(
-            [
-                "ssh",
-                "-T",
-                self.config.builder,
-                "python",
-                self.builder_script,
-                "_scan-archive",
-                "--path",
-                f"{self.builder_out_a}/{self.lane.package_name}",
-            ],
-            timeout=900,
-        ).stdout
-        scan = compact_json_from_output(scan_output)
-        if scan["findings"]:
-            raise LaneError(f"packaged binary contains {scan['findings']} private markers")
-        receipt["public_scan"] = scan
+        privacy_scope = self.privacy_scope_argument()
+        scans = {}
+        for name, path, source_archive in (
+            ("public_binary", f"{self.builder_out_a}/{self.lane.package_name}", False),
+            ("scratch_binary", f"{self.builder_scratch_a}/{self.lane.package_name}", False),
+            ("source_archive", f"{self.builder_out_a}/{receipt['source_archive']['name']}", True),
+        ):
+            command = ["ssh", "-T", self.config.builder, "python", self.builder_script,
+                       "_scan-archive", "--path", path, "--privacy-scope", privacy_scope]
+            if source_archive:
+                command.append("--source-archive")
+            scan = compact_json_from_output(run(command, timeout=900).stdout)
+            if scan["findings"]:
+                raise LaneError(f"{name} contains {scan['findings']} private markers")
+            scans[name] = scan
+        receipt["privacy_scans"] = scans
         return receipt
 
     def transfer_package(self) -> dict[str, Any]:
@@ -2214,6 +2302,8 @@ def internal_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cuda-architecture")
     parser.add_argument("--build-profile")
     parser.add_argument("--upstream-base-sha")
+    parser.add_argument("--privacy-scope", default="")
+    parser.add_argument("--source-archive", action="store_true")
     return parser
 
 
@@ -2221,8 +2311,9 @@ def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1].startswith("_"):
         phase = sys.argv[1]
         args = internal_parser().parse_args(sys.argv[2:])
-        if phase == "_scan-dir": result = scan_directory(args.path)
-        elif phase == "_scan-archive": result = scan_archive(args.path)
+        if phase == "_scan-dir": result = scan_directory(args.path, decode_privacy_scope(args.privacy_scope))
+        elif phase == "_scan-archive":
+            result = scan_archive(args.path, args.source_archive, decode_privacy_scope(args.privacy_scope))
         elif phase == "_long": result = internal_long(args)
         elif phase == "_restart": result = internal_restart(args)
         elif phase == "_benchmark": result = internal_benchmark(args)

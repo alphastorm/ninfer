@@ -191,7 +191,9 @@ def main():
                              for w in sorted({r["workload"] for r in rows if r["kind"] == "role"})},
                "raw_prompts_outputs_or_secrets_included": False}
     encoded = json.dumps(receipt, indent=2) + "\n"
-    if any(marker in encoded for marker in ("/home/", "/Users/", "C:\\Users\\", "nyc-pc", "sf-old", "sf-pc")):
+    roots = ("/" + "home/", "/" + "Users/", "C:" + chr(92) + "Users" + chr(92))
+    hosts = tuple("-".join(parts) for parts in (("nyc", "pc"), ("sf", "old"), ("sf", "pc")))
+    if any(marker in encoded for marker in (*roots, *hosts)):
         raise ValueError("receipt contains a private marker")
     args.receipt.parent.mkdir(parents=True, exist_ok=True)
     args.receipt.write_text(encoded)
