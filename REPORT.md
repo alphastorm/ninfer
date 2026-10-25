@@ -76,6 +76,10 @@ common/build.sh "$SOURCE" "$BUILD/native-sm89" \
   descriptor/kernel definitions are now gated like the existing FP8 TMA definitions;
   the cp.async launcher and Blackwell implementation are unchanged. This correction
   still requires Linux and MSVC rebuild evidence.
+- The real Qwen loader retains its complete artifact/resident-byte/input checks.
+  Its peak-RSS observation now uses the native Windows process working-set query
+  on Windows and the unchanged `getrusage` path on Linux, allowing the direct
+  DFlash2 loading check to compile without a POSIX-only header.
 
 ### Native host-pool translation
 

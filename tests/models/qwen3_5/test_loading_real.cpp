@@ -18,7 +18,12 @@
 #include <set>
 #include <string>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <psapi.h>
+#else
 #include <sys/resource.h>
+#endif
 
 namespace {
 
@@ -356,15 +361,24 @@ int main(int argc, char** argv) {
                 "tokenizer did not survive Reader destruction");
         require(!model->resources().chat_template_jinja.empty(),
                 "template bytes were lost after loading");
+#ifdef _WIN32
+        PROCESS_MEMORY_COUNTERS usage{};
+        if (!K32GetProcessMemoryInfo(GetCurrentProcess(), &usage, sizeof(usage))) {
+            throw std::runtime_error("cannot query peak process working set");
+        }
+        const auto peak_rss_kib = usage.PeakWorkingSetSize / 1024;
+#else
         rusage usage{};
         getrusage(RUSAGE_SELF, &usage);
+        const auto peak_rss_kib = usage.ru_maxrss;
+#endif
         std::cout << path.filename().string()
                   << ": loading and native inputs passed, parents=" << visited.size()
                   << " device_bytes=" << model->storage_stats().device_capacity_bytes
                   << " host_bytes=" << model->storage_stats().host_capacity_bytes
                   << " h2d_bytes=" << model->storage_stats().h2d_bytes
                   << " materialization_seconds=" << model->storage_stats().upload_seconds
-                  << " peak_rss_kib=" << usage.ru_maxrss
+                  << " peak_rss_kib=" << peak_rss_kib
                   << " V=" << model->resources().public_token_count << '\n';
         model.reset();
         device->synchronize();
