@@ -24,6 +24,12 @@
 | Groupwise-integer MoE and CPU experts | Existing routes | Retained | Retained |
 | Striped gated-residual projection | Existing TMA selection | Existing folded cp.async route | Existing folded cp.async route |
 
+Statuses above describe route admission, not numerical qualification. Current evidence
+for every retained family is the sm_86 server/contract link at `980b4966`; final-tip
+Linux ops links, native MSVC links and per-GPU mathematical-oracle runs remain pending.
+The explicit exclusion authority is `tests/ops/excluded_paths.h`; its refusal messages,
+not arbitrary failures or skips, determine unsupported cases.
+
 The shared non-RDC archive exists only for `120a`. Each excluded family supplies current-signature throwing entrypoints. Unsupported activation plans never silently substitute A16 arithmetic. The public Engine-options rejection of unsupported native KV formats is EngineCache-owned.
 
 The upstream Q8 family already selects dynamic shared memory above 48 KiB and calls `cudaFuncSetAttribute`; it is retained rather than transplanting the fork-local W8 kernels. Dense BF16/INT8 attention also already has explicit dynamic-shared-memory launch support.
@@ -57,6 +63,41 @@ common/build.sh "$SOURCE" "$BUILD/native-sm89" \
 - Native v3 artifact supplied by Infra: SHA-256 `5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7`, 18,210,749,936 bytes, 1,118 tensors. Infra reports v3 framing/directory validation; this is not a model-decode proof.
 - The secondary CPU build uses source `940b000c365887a8f4c3ad03a4a039e92039f396`, image `ov-build-env:master-64d10fbf-r2-cpu-local`, 12 workers, and the shared two-slot lock. Its driver builds `ninfer-serve` and the architecture-contract target, obtains the exact ops target names with `ctest -L ops --show-only=json-v1`, and builds those targets for `89`, then `86`. It does not execute GPU tests in that CPU-only image.
 - That secondary attempt **failed** during sm_89 compilation: NVCC host emission reported a repeated `Rows` default despite the source definition having none. The final correction removes both launcher defaults entirely and explicitly passes the unchanged `Fp8IdentityRows{}` policy at every formerly four-argument caller (projection, residual add, both split projections, and GDN). Custom-row callers were already explicit. This correction has **not been rebuilt**; the user requested handoff after the current step. No ops target batch or sm_86 rebuild ran after this failure.
+
+## Continued final-candidate qualification
+
+- Imported PortableCore's `ed99ff3f` compiler-neutral CPU expert changes as
+  `53e847dd`: unreachable intrinsic, F16C scalar conversion and isolated MSVC ISA flags.
+  The two-profile Linux server/contract/ops build at this revision is in flight.
+- PortableCore's combined MSVC sm_89 build at `ed99ff3f` passed the former CPU
+  compiler blockers, then failed at step 98/1289 after 101.566 seconds:
+  `bf16_a16_tma_mma.cuh:116`, C2719 on the 128-byte-aligned descriptor parameter.
+  No native executable bundle was produced. The unused native-profile TMA
+  descriptor/kernel definitions are now gated like the existing FP8 TMA definitions;
+  the cp.async launcher and Blackwell implementation are unchanged. This correction
+  still requires Linux and MSVC rebuild evidence.
+
+### Native host-pool translation
+
+The shipped `cad19767` MTP StateImage layout contains 48 BF16 convolution histories,
+48 FP32 recurrent states and one BF16 continuation-hidden vector, with no DFlash
+local ring. Its size is
+`48 * (10240 * 3 * 2 + 128 * 128 * 48 * 4) + 5120 * 2 = 153954304` bytes;
+each region is already 256-byte aligned. Source authorities are
+`qwen3_6_27b/impl/config.h`, `qwen3_6/impl/runtime/layouts_impl.h` and
+`qwen3_6/impl/state/state_image.cpp` under the shipped native target tree.
+The inspected copies have no differences from those paths at `cad19767`.
+
+| Native profile | Former Host KV MiB | Host StateImages | Unified host bytes | Exact `--host-context-mib` | Extra / total device StateImages at C1 | Prefill chunk |
+|---|---:|---:|---:|---:|---:|---:|
+| sm_89 | 11264 | 24 | 15506063360 | 14787.734375 | 2 / 3 | 2048 |
+| sm_86 | 8192 | 24 | 12284837888 | 11715.734375 | 4 / 5 | 1024 |
+
+Both the shipped and upstream implementations add active concurrency to the
+configured device-state slots; the values above preserve that behavior. These are
+source-derived byte-equivalent budgets, not yet measured startup receipts. The
+decode driver accepts exact decimal MiB and checks the observed startup fields.
+Context 131072, INT8 KV, MTP3 and C1 are not tuned.
 
 ## Provenance and remaining gates
 

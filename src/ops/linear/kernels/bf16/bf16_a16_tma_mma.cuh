@@ -27,6 +27,9 @@ template <class Schedule, int Splits, class Output, class Epilogue>
 void launch_bf16_mma_partitions(const Bf16A16Operands&, Output, Epilogue, cudaStream_t);
 #endif
 
+struct Bf16ContiguousTmaWeightAccess;
+
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
 struct alignas(128) Bf16TmaDescriptors {
     CUtensorMap weight;
     CUtensorMap activation;
@@ -65,8 +68,6 @@ inline CUtensorMap bf16_tma_map(const __nv_bfloat16* pointer, int rows, int k, i
     }
     return result;
 }
-
-struct Bf16ContiguousTmaWeightAccess;
 
 template <class Schedule, class WeightAccess = Bf16ContiguousTmaWeightAccess>
 Bf16TmaDescriptors make_bf16_tma_descriptors(const Bf16A16Operands& p) {
@@ -178,6 +179,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void bf16_a16_t
     bf16_finish_mma_tile<Schedule, FullTokens>(output, epilogue, storage, accum, row_begin,
                                                token_begin, rows, token_offset + count, warp, lane);
 }
+#endif
 
 template <class Schedule, int Splits = 1, class Output, class Epilogue,
           class WeightAccess = Bf16ContiguousTmaWeightAccess>
