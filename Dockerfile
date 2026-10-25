@@ -7,6 +7,7 @@ RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
         ccache \
         cmake \
+        git \
         libavcodec-dev \
         libavformat-dev \
         libavutil-dev \
