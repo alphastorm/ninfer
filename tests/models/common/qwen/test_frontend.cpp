@@ -1545,8 +1545,8 @@ int test_automatic_instruction_frontier_parity() {
                               automatic.shared_reuse_scope->view() == "principal:shared",
                           "automatic leading system/developer frontier was not preserved");
         input.context_cache.markers.push_back(
-            {.kind = ninfer::PromptCacheMarkerKind::SharedStablePrefix,
-             .after_message_count = static_cast<std::uint32_t>(roles.size())});
+            {.after_message_count = static_cast<std::uint32_t>(roles.size()),
+             .kind = ninfer::PromptCacheMarkerKind::SharedStablePrefix});
         const auto deduplicated = frontend.prepare(input);
         const auto& merged = FrontendFactory::inspect(deduplicated).context_cache;
         failures += check(merged.opportunities.size() == 1 &&
