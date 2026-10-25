@@ -150,12 +150,22 @@ void SessionCheckpointService::receipt(const Json& value) const noexcept {
     try { std::osyncstream(std::clog) << value.dump() << '\n'; } catch (...) {}
 }
 
+void SessionCheckpointService::receipt(std::string_view kind, std::string_view state, Reason reason,
+                                      bool committed, const runtime::DurableCheckpointStats& stats,
+                                      std::string_view origin, std::string_view dir_sync) const noexcept {
+    try {
+        auto value = operation(kind, state, reason, committed, stats, origin);
+        if (!dir_sync.empty()) { value["dir_sync"] = dir_sync; }
+        receipt(value);
+    } catch (...) {}
+}
+
 runtime::DurableImportResult SessionCheckpointService::restore(
     std::string_view session, std::optional<std::string_view> required_response) {
     const auto finish = [&](runtime::DurableImportResult result, std::string_view origin = "not_checked") {
-        receipt(operation("restore", import_name(result.state), result.reason,
-                          result.state == ImportState::Imported && result.reason == Reason::None,
-                          result.stats, origin));
+        receipt("restore", import_name(result.state), result.reason,
+                result.state == ImportState::Imported && result.reason == Reason::None,
+                result.stats, origin);
         return result;
     };
     if (!options_.allow_prefix_reuse || !engine_.options().context_cache.enabled ||
@@ -338,13 +348,12 @@ void SessionCheckpointService::automatic_save(std::string_view session) noexcept
         const bool settled = outcome.saved || outcome.covered ||
             (!checkpoint_refusal_is_transient(outcome.skip) && outcome.skip.durable_reason != Reason::IoUnavailable);
         if (outcome.saved) {
-            auto value = operation("save", "exported", Reason::None, true, outcome.saved->engine,
-                                   outcome.saved->origin_authenticated ? "authenticated" : "unauthenticated");
-            value["dir_sync"] = outcome.saved->dir_sync;
-            receipt(value);
+            receipt("save", "exported", Reason::None, true, outcome.saved->engine,
+                    outcome.saved->origin_authenticated ? "authenticated" : "unauthenticated",
+                    outcome.saved->dir_sync);
         } else if (!outcome.covered) {
-            receipt(operation("save", outcome.skip.export_state == runtime::DurableExportState::Stale
-                                          ? "stale" : "refused", outcome.skip.durable_reason, false));
+            receipt("save", outcome.skip.export_state == runtime::DurableExportState::Stale
+                                ? "stale" : "refused", outcome.skip.durable_reason, false);
         }
         { std::lock_guard lock(pressure_mutex_);
           const auto found = pressure_saves_.find(std::string(session));
@@ -434,15 +443,14 @@ bool SessionCheckpointService::final_save() noexcept {
             const auto outcome = save_session(session);
             if (outcome.saved) {
                 ++summary.saved;
-                auto value = operation("save", "exported", Reason::None, true, outcome.saved->engine,
-                                       outcome.saved->origin_authenticated ? "authenticated" : "unauthenticated");
-                value["dir_sync"] = outcome.saved->dir_sync;
-                receipt(value);
+                receipt("save", "exported", Reason::None, true, outcome.saved->engine,
+                        outcome.saved->origin_authenticated ? "authenticated" : "unauthenticated",
+                        outcome.saved->dir_sync);
             } else if (outcome.covered || outcome.skip.durable_reason == Reason::NoSessionRecords) {
                 ++summary.skipped;
             } else {
                 ++summary.refused;
-                receipt(operation("save", "refused", outcome.skip.durable_reason, false));
+                receipt("save", "refused", outcome.skip.durable_reason, false);
             }
         }
     } catch (...) { ++summary.refused; }

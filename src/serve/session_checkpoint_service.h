@@ -58,6 +58,9 @@ private:
     [[nodiscard]] std::shared_ptr<std::mutex> session_operation(std::string_view session);
     void automatic_save(std::string_view session) noexcept;
     void receipt(const nlohmann::json& value) const noexcept;
+    void receipt(std::string_view operation, std::string_view state, runtime::DurableReason reason,
+                 bool committed, const runtime::DurableCheckpointStats& stats = {},
+                 std::string_view origin = "not_checked", std::string_view dir_sync = {}) const noexcept;
     [[nodiscard]] bool write_shutdown_report(const ShutdownCheckpointSummary& summary) const noexcept;
 
     Engine& engine_;
