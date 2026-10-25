@@ -626,6 +626,8 @@ int exercise_nested_tool_markers(const char* artifact) {
     request.execution.requested_output_tokens = 1;
     request.execution.sampling.temperature    = 0.0F;
     request.execution.allow_prefix_reuse      = true;
+    // Fixed-budget cache probes use non-strict tools, not the Basic constrained-output policy.
+    request.tool_choice.constraints           = ninfer::ToolConstraintMode::Automatic;
     request.stop.include_model_defaults       = false;
 
     // A single source creates both markers. Each probe changes the user suffix so the
@@ -709,6 +711,7 @@ int exercise_anthropic_prefix_regression(const char* artifact) {
         options.execution.requested_output_tokens = outputs;
         options.execution.sampling.temperature    = 0.0F;
         options.execution.allow_prefix_reuse      = true;
+        options.tool_choice.constraints           = ninfer::ToolConstraintMode::Automatic;
         options.stop.include_model_defaults       = model_stops;
         return options;
     };
@@ -1100,6 +1103,7 @@ int exercise_rewrite_checkpoints(ninfer::Engine& engine) {
         result.execution.requested_output_tokens = 4;
         result.execution.sampling.temperature    = 0.0F;
         result.execution.allow_prefix_reuse      = reuse;
+        result.tool_choice.constraints           = ninfer::ToolConstraintMode::Automatic;
         result.stop.include_model_defaults       = false;
         return result;
     };
@@ -1205,6 +1209,7 @@ int exercise_agent_continuation(const char* artifact) {
     request.execution.requested_output_tokens = 4;
     request.execution.sampling.temperature    = 0.0F;
     request.execution.allow_prefix_reuse      = true;
+    request.tool_choice.constraints           = ninfer::ToolConstraintMode::Automatic;
     request.stop.include_model_defaults       = false;
     const auto opener_tokens =
         static_cast<std::uint32_t>(engine.tokenize_text("<|im_start|>assistant\n<think>\n").size());
@@ -1356,6 +1361,7 @@ int exercise_rewrite_branch(const char* artifact) {
         value.execution.requested_output_tokens = 4;
         value.execution.sampling.temperature    = 0.0F;
         value.execution.allow_prefix_reuse      = reuse;
+        value.tool_choice.constraints           = ninfer::ToolConstraintMode::Automatic;
         value.stop.include_model_defaults       = false;
         return value;
     };
