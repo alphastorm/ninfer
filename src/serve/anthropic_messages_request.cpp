@@ -1,4 +1,5 @@
 #include "serve/anthropic_messages.h"
+#include "serve/client_identity.h"
 #include "serve/request_validation.h"
 
 #include <algorithm>
@@ -18,8 +19,6 @@ namespace ninfer::serve {
 namespace {
 
 using Json = RequestJson;
-
-constexpr std::size_t kMaxToolNameLength = 128;
 
 enum class ParsePurpose {
     Messages,
@@ -1006,6 +1005,7 @@ void apply_anthropic_prompt_cache_policy(const Json& body, GenerationRequest& re
 
 void parse_common_prompt(const Json& body, GenerationRequest& request, ParsePurpose purpose,
                          int effective_max_tokens) {
+    parse_client_identity(body, request);
     lower_tools(body, request);
     parse_system(body, request);
     parse_messages(body, request);

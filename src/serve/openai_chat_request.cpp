@@ -1,4 +1,5 @@
 #include "serve/openai_chat.h"
+#include "serve/client_identity.h"
 #include "serve/openai_common.h"
 #include "serve/request_validation.h"
 
@@ -55,8 +56,8 @@ std::string require_function_name(const Json& object, const char* param) {
         bad_request("function name must be a string", param);
     }
     std::string name = object.at("name").get<std::string>();
-    if (!valid_tool_name(name, 64)) {
-        bad_request("function name must match [A-Za-z0-9_-]{1,64}", param);
+    if (!valid_tool_name(name, kMaxToolNameLength)) {
+        bad_request("function name must match [A-Za-z0-9_-]{1,128}", param);
     }
     return name;
 }
@@ -824,6 +825,8 @@ OpenAIChatRequest parse_chat_completion_request(const Json& body, const RequestL
     validate_compatibility_hints(body);
 
     OpenAIChatRequest output;
+    parse_client_identity(body, output.generation);
+    parse_prompt_cache_key(body, output.generation);
     if (!body.contains("model") || !body.at("model").is_string() ||
         body.at("model").get<std::string>().empty()) {
         bad_request("missing required field: model", "model");

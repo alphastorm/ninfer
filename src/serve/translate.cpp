@@ -263,6 +263,16 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
             }
         }
         input.messages.push_back(std::move(message));
+        if (turn.private_cache_boundary_after) {
+            if (input.messages.size() > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::overflow_error("conversation cache boundary exceeds uint32");
+            }
+            input.context_cache.markers.push_back(ninfer::PromptCacheMarker{
+                .after_message_count = static_cast<std::uint32_t>(input.messages.size()),
+                .kind = ninfer::PromptCacheMarkerKind::PrivateLongAnchor,
+                .location = ninfer::PromptCacheMarkerLocation::MessageBoundary,
+            });
+        }
         if (turn.cache_boundary_after) {
             if (input.messages.size() > std::numeric_limits<std::uint32_t>::max()) {
                 throw std::overflow_error("conversation cache boundary exceeds uint32");

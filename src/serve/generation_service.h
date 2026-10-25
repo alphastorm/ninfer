@@ -15,12 +15,20 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace ninfer::serve {
 
 struct RequestLifetime;
 struct RequestCapacity;
+
+// Installed by the checkpoint service before HTTP work starts. Only the internal K3 adapter may
+// attach an owning response tag to a native prompt; the public Engine API stays persistence-free.
+struct GenerationCheckpointHooks {
+    std::function<void(ninfer::PreparedPrompt&, std::string_view)> set_checkpoint_tag;
+};
 
 struct GenerationMetrics {
     std::uint64_t engine_request_id       = 0;
@@ -142,7 +150,8 @@ public:
                                           GenerationConsumerMode consumer_mode,
                                           ninfer::GenerationObservationOptions observation = {},
                                           std::function<bool()> is_cancelled               = {},
-                                          ContextCacheHints context_cache = {}) const;
+                                          ContextCacheHints context_cache = {},
+                                          std::string_view checkpoint_tag = {}) const;
     [[nodiscard]] int count_prompt_tokens(const GenerationRequest& req,
                                           std::function<bool()> is_cancelled = {}) const;
 
@@ -151,6 +160,10 @@ public:
                           std::function<bool()> is_cancelled = {});
 
     void warmup();
+    void set_checkpoint_hooks(GenerationCheckpointHooks hooks) { checkpoint_hooks_ = std::move(hooks); }
+    [[nodiscard]] bool has_checkpoint_hooks() const noexcept {
+        return static_cast<bool>(checkpoint_hooks_.set_checkpoint_tag);
+    }
 
 private:
     enum class CacheParticipation : std::uint8_t {
@@ -167,13 +180,16 @@ private:
     prepare_impl(const GenerationRequest& req, GenerationConsumerMode consumer_mode,
                  ninfer::GenerationObservationOptions observation,
                  std::function<bool()> is_cancelled, ContextCacheHints context_cache,
-                 CacheParticipation cache_participation, DeadlinePolicy deadline_policy) const;
+                 CacheParticipation cache_participation, DeadlinePolicy deadline_policy,
+                 std::string_view checkpoint_tag = {}) const;
     [[nodiscard]] std::shared_ptr<RequestLifetime>
     acquire_request_lifetime(DeadlinePolicy deadline_policy) const;
 
     ServeOptions options_;
+    std::optional<std::string> principal_reuse_scope_;
     std::unique_ptr<ninfer::Engine> engine_;
     std::shared_ptr<RequestCapacity> request_capacity_;
+    GenerationCheckpointHooks checkpoint_hooks_;
 };
 
 } // namespace ninfer::serve

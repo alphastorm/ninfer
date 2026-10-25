@@ -969,10 +969,37 @@ int test_common_objects() {
     return failures;
 }
 
+int test_tool_name_limits() {
+    int failures = 0;
+    const std::string prefix = "mcp__github__";
+    for (const auto& name : {prefix + std::string(71 - prefix.size(), 'x'), std::string(128, 'n')}) {
+        Json body = base_request();
+        body["tools"] = Json::array({Json{{"type", "function"},
+            {"function", Json{{"name", name}, {"parameters", Json{{"type", "object"}}}}}}});
+        body["tool_choice"] = Json{{"type", "function"}, {"function", Json{{"name", name}}}};
+        const auto request = parse(body);
+        failures += check(request.generation.tools[0].name == name &&
+                              request.generation.tool_choice.allowed_names ==
+                                  std::vector<std::string>{name} &&
+                              request.generation.tool_name_max_length == kMaxToolNameLength,
+                          "Chat rejected a 71-character MCP or maximum-length tool name");
+    }
+    for (const auto& name : {std::string(), std::string(129, 'n'), std::string("not.ascii"),
+                             std::string("caf\xc3\xa9")}) {
+        Json body = base_request();
+        body["tools"] = Json::array({Json{{"type", "function"},
+            {"function", Json{{"name", name}}}}});
+        failures += check(api_error([&] { (void)parse(body); }).status == 400,
+                          "Chat accepted a name outside the 1..128 ASCII contract");
+    }
+    return failures;
+}
+
 } // namespace
 
 int main() {
     int failures = 0;
+    failures += test_tool_name_limits();
     failures += test_request_envelope_and_sampling();
     failures += test_standard_field_policy();
     failures += test_prompt_cache_boundaries();

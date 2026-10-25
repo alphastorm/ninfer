@@ -34,17 +34,29 @@ httplib::Server::HandlerResponse handle_unrendered_http_error(const ServeOptions
 
 [[nodiscard]] bool matches_bearer_credential(std::string_view authorization,
                                              std::string_view api_key) noexcept;
+[[nodiscard]] bool has_client_session_header(const httplib::Request& request);
+[[nodiscard]] std::optional<std::string>
+parse_client_session_header(const httplib::Request& request, bool authentication_configured);
+void apply_client_session_header(const httplib::Request& request, bool authentication_configured,
+                                 GenerationRequest& generation);
+
+struct SessionCheckpointCallbacks {
+    OpenAIResponseRestoreCallback restore;
+    // Called after HTTP workers drain. True acknowledges complete synchronous final saves; the
+    // provider retains the detailed K7 receipts and must never equate queued work with durability.
+    std::function<bool()> final_save;
+};
 
 class HttpServer {
 public:
-    HttpServer(ServeOptions options, std::shared_ptr<spdlog::logger> logger);
+    HttpServer(ServeOptions options, std::shared_ptr<spdlog::logger> logger = {});
 
     // Reserves the configured address before model loading. The service is attached only after its
     // Engine is ready, then listen() enters the blocking accept loop on the already-bound socket.
     bool bind();
-    void attach(GenerationService& service);
+    void attach(GenerationService& service, SessionCheckpointCallbacks checkpoints = {});
     bool listen();
-    void stop();
+    bool stop() noexcept;
 
     [[nodiscard]] const std::string& public_model_id() const noexcept { return public_model_id_; }
 
@@ -104,12 +116,16 @@ private:
     GenerationService* service_ = nullptr;
     ServeOptions options_;
     std::string public_model_id_;
+    ninfer::LoadSummary status_load_;
+    ninfer::MemorySummary status_memory_;
     OpenAIResponsesStore openai_responses_store_;
+    SessionCheckpointCallbacks checkpoints_;
     OperationalLog operational_log_;
     JsonlRequestLog request_jsonl_;
     Metrics metrics_;
     httplib::Server server_;
     std::atomic<std::uint64_t> request_seq_{0};
+    std::atomic<bool> stop_requested_{false};
     std::mutex stats_mutex_;
     std::condition_variable stats_cv_;
     std::thread stats_thread_;

@@ -1,6 +1,8 @@
 #include "serve/http_server.h"
 
 #include "serve/anthropic_messages.h"
+#include "serve/client_identity.h"
+#include "serve/credential_compare.h"
 #include "serve/http_transport.h"
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
@@ -186,7 +188,38 @@ bool matches_bearer_credential(std::string_view authorization, std::string_view 
     }
     std::size_t end = authorization.size();
     while (end > position && is_whitespace(authorization[end - 1])) { --end; }
-    return authorization.substr(position, end - position) == api_key;
+    return credential_equal(authorization.substr(position, end - position), api_key);
+}
+
+bool has_client_session_header(const httplib::Request& request) {
+    return request.get_header_value_count("X-NInfer-Session") != 0;
+}
+
+std::optional<std::string> parse_client_session_header(const httplib::Request& request,
+                                                       bool authentication_configured) {
+    const auto count = request.get_header_value_count("X-NInfer-Session");
+    if (count == 0) { return std::nullopt; }
+    if (count != 1) {
+        throw ApiException({.message = "X-NInfer-Session must occur exactly once",
+                            .param = "ninfer_session", .code = "invalid_ninfer_identity"});
+    }
+    GenerationRequest identity;
+    identity.client_session_sha256 = parse_client_identity_sha256(
+        request.get_header_value("X-NInfer-Session"), "ninfer_session");
+    require_authenticated_client_identity(identity, authentication_configured);
+    return identity.client_session_sha256;
+}
+
+void apply_client_session_header(const httplib::Request& request, bool authentication_configured,
+                                 GenerationRequest& generation) {
+    auto session = parse_client_session_header(request, authentication_configured);
+    if (!session) { return; }
+    if (generation.client_session_sha256 &&
+        !credential_equal(*generation.client_session_sha256, *session)) {
+        throw ApiException({.message = "X-NInfer-Session and ninfer_session must identify the same session",
+                            .param = "ninfer_session", .code = "invalid_ninfer_identity"});
+    }
+    generation.client_session_sha256 = std::move(session);
 }
 
 HttpServer::HttpServer(ServeOptions options, std::shared_ptr<spdlog::logger> logger)
@@ -338,7 +371,7 @@ void HttpServer::register_routes() {
              {"Access-Control-Expose-Headers", "x-request-id, request-id"},
              {"Access-Control-Allow-Headers",
               "Authorization, Content-Type, X-API-Key, anthropic-version, anthropic-beta, "
-              "anthropic-user-profile-id"},
+              "anthropic-user-profile-id, X-NInfer-Session"},
              {"Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS"}});
         // CORS preflight: browsers send OPTIONS with no credentials before the real
         // request; answer it without auth so the actual GET/POST can carry the key.
@@ -356,7 +389,8 @@ void HttpServer::register_routes() {
         // -> x-api-key, ANTHROPIC_AUTH_TOKEN -> Authorization: Bearer) both work.
         const bool bearer_ok =
             matches_bearer_credential(req.get_header_value("Authorization"), options_.api_key);
-        const bool x_api_key_ok = req.get_header_value("x-api-key") == options_.api_key;
+        const bool x_api_key_ok =
+            credential_equal(req.get_header_value("x-api-key"), options_.api_key);
         if (!bearer_ok && !x_api_key_ok) {
             ApiError error;
             error.status  = 401;
@@ -426,6 +460,14 @@ void HttpServer::register_routes() {
         res.status           = available ? 200 : 503;
         res.set_content(nlohmann::json{{"status", available ? "ok" : "unavailable"}}.dump(),
                         "application/json");
+    });
+    server_.Get("/v1/ninfer/status", [this](const httplib::Request&, httplib::Response& res) {
+        const bool available = service_->is_available();
+        res.status = available ? 200 : 503;
+        res.set_header("Cache-Control", "no-store");
+        res.set_content(format_status_json(options_, service_->engine_options(), public_model_id_,
+                                            status_load_, status_memory_, service_->runtime_stats(),
+                                            available), "application/json");
     });
     server_.Get("/v1/models", [this](const httplib::Request& req, httplib::Response& res) {
         handle_models(req, res);
@@ -501,22 +543,30 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
 
 bool HttpServer::bind() { return server_.bind_to_port(options_.host, options_.port); }
 
-void HttpServer::attach(GenerationService& service) {
+void HttpServer::attach(GenerationService& service, SessionCheckpointCallbacks checkpoints) {
     if (service_ != nullptr) {
         throw std::logic_error("HTTP generation service is already attached");
     }
-    const ninfer::LoadSummary load = service.load_summary();
+    if (!options_.session_checkpoint_root.empty() &&
+        (!checkpoints.restore || !checkpoints.final_save || !service.has_checkpoint_hooks())) {
+        throw std::logic_error("session persistence requires restore, tag and final-save providers");
+    }
+    status_load_ = service.load_summary();
     // memory_summary waits for the completed worker boundary, including warmup publication.
-    const ninfer::MemorySummary memory  = service.memory_summary();
+    status_memory_ = service.memory_summary();
     const ninfer::RuntimeStats baseline = service.runtime_stats();
-    public_model_id_                    = resolve_public_model_id(options_, load.model_name);
+    public_model_id_                    = resolve_public_model_id(options_, status_load_.model_name);
+    checkpoints_                       = std::move(checkpoints);
     service_                            = &service;
-    metrics_.configure(public_model_id_, service.engine_options(), memory, baseline);
+    metrics_.configure(public_model_id_, service.engine_options(), status_memory_, baseline);
     request_jsonl_.write_server_start(options_, service.engine_options(),
-                                      service.sampling_defaults(), public_model_id_, load, memory);
+                                      service.sampling_defaults(), public_model_id_, status_load_, status_memory_);
 }
 
 bool HttpServer::listen() {
+    if (stop_requested_.load(std::memory_order_acquire)) {
+        return !checkpoints_.final_save || checkpoints_.final_save();
+    }
     if (service_ == nullptr) { throw std::logic_error("HTTP generation service is not attached"); }
     if (public_model_id_.empty()) {
         throw std::logic_error("HTTP public model id is not resolved");
@@ -525,16 +575,24 @@ bool HttpServer::listen() {
         stats_stopping_ = false;
         stats_thread_   = std::thread([this] { run_stats_reporter(); });
     }
+    bool result = false;
     try {
-        const bool result = server_.listen_after_bind();
-        stop_stats_reporter();
-        return result;
+        result = server_.listen_after_bind();
     } catch (...) {
         stop_stats_reporter();
+        if (checkpoints_.final_save) { (void)checkpoints_.final_save(); }
         throw;
     }
+    stop_stats_reporter();
+    const bool saved = !checkpoints_.final_save || checkpoints_.final_save();
+    return result && saved;
 }
 
-void HttpServer::stop() { server_.stop(); }
+bool HttpServer::stop() noexcept {
+    stop_requested_.store(true, std::memory_order_release);
+    const bool running = server_.is_running();
+    server_.stop();
+    return running;
+}
 
 } // namespace ninfer::serve

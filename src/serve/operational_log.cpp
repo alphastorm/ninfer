@@ -92,6 +92,14 @@ const char* prefix_reuse_path_name(ninfer::PrefixReusePath path) noexcept {
         return "root";
     case ninfer::PrefixReusePath::Checkpoint:
         return "checkpoint";
+    case ninfer::PrefixReusePath::PrivateEndpoint:
+        return "private_endpoint";
+    case ninfer::PrefixReusePath::PrivateInputReplay:
+        return "private_input_replay";
+    case ninfer::PrefixReusePath::PrivateLongAnchor:
+        return "private_long_anchor";
+    case ninfer::PrefixReusePath::SharedStablePrefix:
+        return "shared_stable_prefix";
     }
     return "unknown";
 }

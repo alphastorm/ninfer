@@ -1,4 +1,5 @@
 #include "serve/openai_responses.h"
+#include "serve/client_identity.h"
 #include "serve/openai_common.h"
 #include "serve/request_validation.h"
 
@@ -26,8 +27,8 @@ std::string require_function_name(const Json& object, const char* param) {
         bad_request("function name must be a string", param);
     }
     const std::string name = object.at("name").get<std::string>();
-    if (!valid_tool_name(name, 64)) {
-        bad_request("function name must match [A-Za-z0-9_-]{1,64}", param);
+    if (!valid_tool_name(name, kMaxToolNameLength)) {
+        bad_request("function name must match [A-Za-z0-9_-]{1,128}", param);
     }
     return name;
 }
@@ -38,8 +39,8 @@ std::optional<std::string> optional_namespace_name(const Json& object, const cha
         bad_request("function namespace must be a string or null", param);
     }
     const std::string name = object.at("namespace").get<std::string>();
-    if (!valid_tool_name(name, 64)) {
-        bad_request("function namespace must match [A-Za-z0-9_-]{1,64}", param,
+    if (!valid_tool_name(name, kMaxToolNameLength)) {
+        bad_request("function namespace must match [A-Za-z0-9_-]{1,128}", param,
                     "invalid_tool_name");
     }
     return name;
@@ -50,8 +51,8 @@ std::string require_namespace_tool_name(const Json& object) {
         bad_request("namespace name must be a string", "tools");
     }
     const std::string name = object.at("name").get<std::string>();
-    if (!valid_tool_name(name, 64)) {
-        bad_request("namespace name must match [A-Za-z0-9_-]{1,64}", "tools", "invalid_tool_name");
+    if (!valid_tool_name(name, kMaxToolNameLength)) {
+        bad_request("namespace name must match [A-Za-z0-9_-]{1,128}", "tools", "invalid_tool_name");
     }
     return name;
 }
@@ -68,9 +69,9 @@ std::string lower_function_identity(
     const char* param) {
     const std::string engine_name =
         identity.wire_namespace ? *identity.wire_namespace + "__" + identity.name : identity.name;
-    if (!valid_tool_name(engine_name, 64)) {
+    if (!valid_tool_name(engine_name, kMaxToolNameLength)) {
         bad_request("flattened function identity '" + engine_name +
-                        "' exceeds the Engine tool-name contract [A-Za-z0-9_-]{1,64}",
+                        "' exceeds the Engine tool-name contract [A-Za-z0-9_-]{1,128}",
                     param, "invalid_tool_name");
     }
     const auto [position, inserted] = identities.emplace(engine_name, identity);
@@ -1013,6 +1014,8 @@ void parse_truncation(const Json& body) {
 
 ParsedPromptFields parse_prompt_fields(const Json& body, const RequestLimits& limits) {
     ParsedPromptFields out;
+    parse_client_identity(body, out.prompt.generation);
+    parse_prompt_cache_key(body, out.prompt.generation);
     if (!body.contains("model") || !body.at("model").is_string() ||
         body.at("model").get_ref<const std::string&>().empty()) {
         bad_request("missing required field: model", "model");
@@ -1102,6 +1105,8 @@ void validate_common_top_level(const Json& body, bool create) {
                                                                   "max_tool_calls",
                                                                   "metadata",
                                                                   "model",
+                                                                  "ninfer_session",
+                                                                  "ninfer_request_id",
                                                                   "moderation",
                                                                   "parallel_tool_calls",
                                                                   "previous_response_id",
@@ -1129,6 +1134,9 @@ void validate_common_top_level(const Json& body, bool create) {
                                                                   "input",
                                                                   "instructions",
                                                                   "model",
+                                                                  "ninfer_session",
+                                                                  "ninfer_request_id",
+                                                                  "prompt_cache_key",
                                                                   "parallel_tool_calls",
                                                                   "personality",
                                                                   "previous_response_id",

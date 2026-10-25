@@ -1,5 +1,6 @@
 #include "serve/operational_log.h"
 #include "serve/request_log.h"
+#include "serve/server_identity.h"
 
 #include <nlohmann/json.hpp>
 
@@ -13,7 +14,11 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace {
 
@@ -26,10 +31,82 @@ int check(bool condition, const char* message) {
     return 1;
 }
 
+int test_fingerprint_v2() {
+    ninfer::runtime::RuntimeFingerprintV2 f;
+    const std::string digest(64, 'a'), commit(40, 'b');
+    f.build = {.upstream_base_sha = commit, .patch_stack_sha = commit,
+               .build_profile = "rtx5090", .build_type = "Release", .binary_sha256 = digest,
+               .platform = "linux-x86_64", .cxx_compiler = "gcc-13", .cuda_compiler = "nvcc-13",
+               .cuda_toolkit = "13.0", .cuda_architecture = "120a"};
+    f.model = {.artifact_sha256 = digest, .architecture = "Qwen3_5ForCausalLM",
+               .model_id = "fixture", .weights_id = digest};
+    f.frontend = {.template_sha256 = digest, .tokenizer_sha256 = digest, .resources_sha256 = digest,
+                  .vision_preprocessing = "disabled", .parser_codec = "qwen-tools/1",
+                  .identity_codec = "qwen-prefix/1"};
+    f.native_layout = {.continuation_codec = "qwen3_5/1", .state_layout_sha256 = digest,
+                       .state_bytes = 4096,
+                       .pools = {{.pool_id = 0, .name = "main", .layout_sha256 = digest,
+                                  .storage_type = "bf16", .layers = 16, .tokens_per_page = 64,
+                                  .kv_heads = 4, .head_dim = 256, .page_bytes = 8192,
+                                  .host_serialization_stride = 8192}}};
+    f.engine = {.max_context = 131072, .kv_capacity = 131072, .kv_dtype = "bf16",
+                .max_concurrency = 2, .prefill_chunk = 1024, .speculative_backend = "dflash2",
+                .draft_window = 7, .proposal_head = "full", .use_cuda_graph = true};
+    f.responses.codec = "openai-responses/3";
+    f.deployment.profile = "fixture";
+    f.deployment.effective_config_sha256 = session_checkpoint_effective_config_sha256(f);
+    const auto valid = session_checkpoint_runtime_fingerprint(f);
+    int failures = check(validate_session_checkpoint_runtime_fingerprint(valid),
+                         "complete typed v2 fingerprint rejected");
+    for (const auto& key : {"build", "model", "frontend", "native_layout", "engine", "responses", "deployment"}) {
+        for (const auto& [field, unused] : valid.at(key).items()) {
+            (void)unused;
+            auto changed = valid;
+            changed[key].erase(field);
+            failures += check(!validate_session_checkpoint_runtime_fingerprint(changed),
+                              "missing K2 identity field accepted");
+        }
+        auto extra = valid;
+        extra[key]["unrecognized"] = 1;
+        failures += check(!validate_session_checkpoint_runtime_fingerprint(extra),
+                          "extra K2 identity field accepted");
+    }
+    auto changed = valid;
+    changed["schema_version"] = 1;
+    failures += check(!validate_session_checkpoint_runtime_fingerprint(changed), "v1 accepted as v2");
+    changed = valid;
+    changed["engine"]["kv_capacity"] = 131072.0;
+    failures += check(!validate_session_checkpoint_runtime_fingerprint(changed), "float capacity accepted");
+    changed = valid;
+    changed["build"]["source_dirty"] = true;
+    failures += check(!validate_session_checkpoint_runtime_fingerprint(changed), "dirty provenance accepted");
+    changed = valid;
+    changed["build"]["patch_stack_sha"] = "unknown";
+    failures += check(!validate_session_checkpoint_runtime_fingerprint(changed), "unknown provenance accepted");
+    changed = valid;
+    changed["responses"]["max_records"] = 99;
+    failures += check(!validate_session_checkpoint_runtime_fingerprint(changed),
+                      "admission budget entered K2 identity");
+    changed = valid;
+    changed["engine"]["max_context"] = 65536;
+    failures += check(!validate_session_checkpoint_runtime_fingerprint(changed),
+                      "effective config digest did not bind identity projection");
+    changed = valid;
+    changed["native_layout"]["pools"].push_back(changed["native_layout"]["pools"][0]);
+    failures += check(!validate_session_checkpoint_runtime_fingerprint(changed),
+                      "duplicate pool IDs accepted");
+    f.engine.prefill_chunk = 512;
+    f.deployment.effective_config_sha256 = session_checkpoint_effective_config_sha256(f);
+    failures += check(session_checkpoint_runtime_fingerprint(f) != valid,
+                      "resolved engine identity did not affect fingerprint");
+    return failures;
+}
+
 } // namespace
 
 int main() {
     int failures = 0;
+    failures += test_fingerprint_v2();
 
     bool protected_artifact_rejected = false;
     try {
@@ -43,6 +120,10 @@ int main() {
     options.host                           = "127.0.0.1";
     options.port                           = 8123;
     options.api_key                        = "must-not-appear";
+    options.binary_sha256                  = std::string(64, 'c');
+    options.artifact_sha256                = std::string(64, 'd');
+    options.config_sha256                  = std::string(64, 'e');
+    options.deployment_profile             = "fixture";
     options.model_id_override              = "deployment-alias";
     options.request_log_jsonl              = "requests.jsonl";
     options.max_context                    = 262144;
@@ -148,6 +229,54 @@ int main() {
     const Json server = Json::parse(format_server_start_json(
         "serve-test", 1000, options, engine_options, sampling_defaults, "deployment-alias", load,
         memory, environment, std::uint64_t{123456}));
+    failures += check(server.at("identity").at("binary_sha256") == options.binary_sha256 &&
+                          server.at("identity").at("model_artifact_sha256") == options.artifact_sha256 &&
+                          server.at("identity").at("config_sha256") == options.config_sha256 &&
+                          server.at("identity").at("deployment_profile") == "fixture" &&
+                          server.at("identity").at("target") == load.architecture &&
+                          server.at("identity").at("model_id") == "deployment-alias",
+                      "startup lifecycle identity lost actual build/deployment/model values");
+    ninfer::RuntimeStats status_runtime;
+    status_runtime.private_catalog_occupied = 3;
+    status_runtime.shared_catalog_occupied = 4;
+    status_runtime.computed_prefill_tokens = 1234;
+    status_runtime.committed_decode_tokens = 5678;
+    status_runtime.host_work.prefill_host_ns = 10;
+    status_runtime.host_work.prefill_device_wait_ns = 20;
+    status_runtime.host_work.decode_host_ns = 30;
+    status_runtime.host_work.decode_device_wait_ns = 40;
+    status_runtime.reused_prompt_tokens = 900;
+    status_runtime.last_selected_reuse_path = ninfer::PrefixReusePath::PrivateLongAnchor;
+    status_runtime.last_selected_frontier_tokens = 128;
+    const auto status = Json::parse(format_status_json(options, engine_options, "deployment-alias",
+                                                       load, memory, status_runtime));
+    failures += check(status.at("artifact_type") == "ninfer_server_status" &&
+                          status.at("schema_version") == 2 && status.at("status") == "ok" &&
+                          status.at("runtime").at("public_model_id") == "deployment-alias" &&
+                          status.at("scheduler").at("max_concurrency") == 2 &&
+                          status.at("scheduler").at("computed_prefill_tokens") == 1234 &&
+                          status.at("scheduler").at("committed_decode_tokens") == 5678 &&
+                          status.at("scheduler").at("prefill_host_nanoseconds") == 10 &&
+                          status.at("scheduler").at("prefill_device_wait_nanoseconds") == 20 &&
+                          status.at("scheduler").at("decode_host_nanoseconds") == 30 &&
+                          status.at("scheduler").at("decode_device_wait_nanoseconds") == 40,
+                      "status schema, required scheduler fields or nanosecond counters changed");
+    failures += check(status.at("cache").at("private_catalog").at("occupied") == 3 &&
+                          status.at("cache").at("shared_catalog").at("occupied") == 4 &&
+                          status.at("cache").at("reused_prompt_tokens") == 900 &&
+                          status.at("cache").at("last_selection").at("path") == "private_long_anchor" &&
+                          status.at("cache").at("last_selection").at("frontier_tokens") == 128 &&
+                          status.at("cache").at("private_catalog").at("capacity").is_null() &&
+                          status.at("cache").at("host_state").at("capacity").is_null() &&
+                          status.at("cache").at("host_kv").at("capacity_bytes").is_null() &&
+                          status.at("cache").at("shared_catalog").at("active_references").is_null() &&
+                          status.at("unavailable_fields").size() == 8 &&
+                          status.at("mtp").at("acceptance_ratio").is_null() &&
+                          status.at("mtp").at("tokens_per_round").is_null(),
+                      "status fabricated unavailable telemetry or lost required reuse evidence");
+    failures += check(Json::parse(format_status_json(options, engine_options, "deployment-alias",
+                                                      load, memory, status_runtime, false)).at("status") ==
+                          "unavailable", "unavailable Engine was reported healthy");
     failures += check(server.at("artifact_type") == kRequestLogArtifactType,
                       "server record artifact type mismatch");
     failures += check(server.at("schema_version") == kRequestLogSchemaVersion,
@@ -253,6 +382,8 @@ int main() {
 
     GenerationRequest request;
     request.max_tokens = 4096;
+    request.client_session_sha256 = std::string(64, 'a');
+    request.client_request_id = std::string(64, 'b');
     request.messages.resize(2);
     request.messages.front().content.push_back(ContentPart{.kind = ContentKind::Image});
 
@@ -302,6 +433,11 @@ int main() {
                   default_thinking_start.find("unresolved") == std::string::npos,
               "default thinking state leaks an internal resolution detail");
     const Json started = Json::parse(format_request_start_json("serve-test", 2000, context));
+    failures += check(started.at("request").at("client_identity").at("session_sha256") ==
+                          *request.client_session_sha256 &&
+                          started.at("request").at("client_identity").at("request_sha256") ==
+                          *request.client_request_id,
+                      "JSONL request correlation lost client digest identities");
     failures +=
         check(started.at("request").at("request_id") == 7, "request id missing from start record");
     failures += check(started.at("request").at("http_request_id") == "req_wire_923" &&
@@ -867,9 +1003,14 @@ int main() {
             throughput_json.at("context_cache").at("selections").at("checkpoint") == 2,
         "context-cache throughput statistics missing or not interval-scoped");
 
+#if defined(_WIN32)
+    const auto pid = ::_getpid();
+#else
+    const auto pid = ::getpid();
+#endif
     const std::filesystem::path log_path =
         std::filesystem::temp_directory_path() /
-        ("ninfer-request-log-test-" + std::to_string(static_cast<long long>(::getpid())) +
+        ("ninfer-request-log-test-" + std::to_string(static_cast<long long>(pid)) +
          ".jsonl");
     std::filesystem::remove(log_path);
     {

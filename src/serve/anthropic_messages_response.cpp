@@ -2,15 +2,13 @@
 #include "product/constraint_observation.h"
 
 #include "serve/generation_service.h"
+#include "serve/opaque_id.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
-#include <array>
 #include <cstdint>
-#include <cstdio>
 #include <iterator>
-#include <random>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -21,15 +19,6 @@ namespace {
 using Json        = nlohmann::json;
 using OrderedJson = nlohmann::ordered_json;
 
-std::string random_identifier(const char* prefix) {
-    static thread_local std::mt19937_64 random{std::random_device{}()};
-    std::uniform_int_distribution<std::uint64_t> distribution;
-    std::array<char, 32> buffer{};
-    std::snprintf(buffer.data(), buffer.size(), "%016llx",
-                  static_cast<unsigned long long>(distribution(random)));
-    return std::string(prefix) + buffer.data();
-}
-
 std::string event(const char* type, Json payload) {
     return std::string("event: ") + type + "\ndata: " + payload.dump() + "\n\n";
 }
@@ -38,7 +27,7 @@ std::vector<ToolCall> materialize_tool_calls(const GenerationOutcome& outcome) {
     std::vector<ToolCall> result;
     result.reserve(outcome.tool_calls.size());
     for (const ninfer::GeneratedToolCall& call : outcome.tool_calls) {
-        result.push_back(ToolCall{.id             = random_identifier("toolu_"),
+        result.push_back(ToolCall{.id             = new_opaque_id("toolu_"),
                                   .name           = call.name,
                                   .arguments_json = call.arguments_json});
     }
@@ -126,12 +115,12 @@ void require_prefix(std::string_view complete, std::string_view streamed, const 
 
 } // namespace
 
-std::string new_anthropic_request_id() { return random_identifier("req_"); }
+std::string new_anthropic_request_id() { return new_opaque_id("req_"); }
 
 AnthropicResponseIdentity make_anthropic_response_identity(std::string request_id,
                                                            std::string model) {
     return AnthropicResponseIdentity{.request_id = std::move(request_id),
-                                     .message_id = random_identifier("msg_"),
+                                     .message_id = new_opaque_id("msg_"),
                                      .model      = std::move(model)};
 }
 
