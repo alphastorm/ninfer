@@ -574,6 +574,9 @@ struct PressureCheckpointVictim {
     std::string session_sha256;
     std::string checkpoint_tag;
     PressureCheckpointOutcome outcome = PressureCheckpointOutcome::Pending;
+    // None means durable coverage and requires Engine's pinned native byte proof.
+    // A reported terminal refusal/absent turn keeps the frozen Settled policy.
+    DurableReason reason = DurableReason::None;
 };
 
 // Admission can make room by evicting another session's continuation, or by dropping checkpoints

@@ -3,6 +3,7 @@
 #include "runtime/contract/continuation_checkpoint.h"
 
 #include <atomic>
+#include <algorithm>
 #include <functional>
 #include <map>
 #include <memory>
@@ -10,6 +11,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace ninfer::runtime {
 
@@ -21,6 +23,18 @@ public:
         std::mutex mutex;
         DurableSessionEpoch epoch;
         std::string tag;
+        std::uint64_t committed_order = 0;
+
+        // Submission invalidates captured work, but is not an acknowledged endpoint.
+        void submitted(std::uint64_t order) noexcept {
+            epoch.value = std::max(epoch.value + 1, order);
+        }
+        void stored(std::string value, std::uint64_t order) {
+            if (order <= committed_order) { return; }
+            tag = std::move(value);
+            committed_order = order;
+            ++epoch.value;
+        }
     };
 
     [[nodiscard]] std::shared_ptr<Session> session(std::string_view digest) {
@@ -64,7 +78,8 @@ public:
         // The native/policy commit callback has no fallible work after native ownership.
         std::forward<Commit>(commit)();
         state->tag.swap(tag);
-        state->epoch = {fresh_order};
+        state->committed_order = fresh_order;
+        state->submitted(fresh_order);
         return true;
     }
 
@@ -81,7 +96,18 @@ public:
     }
     // Snapshot ownership before calling out: removing a provider from inside its callback is
     // legal and cannot destroy that callback's receiver while it is on the stack.
-    void notify_progress() noexcept { progress_.fetch_add(1); }
+    void notify_progress(bool observed = true) noexcept {
+        progress_.fetch_add(1);
+        if (observed) { observed_progress_.fetch_add(1); }
+    }
+    [[nodiscard]] std::uint64_t observed_progress() const noexcept {
+        return observed_progress_.load();
+    }
+    // Installed once by Engine. Invocation and pin retirement are worker-affine.
+    void set_validator(std::function<DurableReason(const ContinuationCheckpointReader&)> validate) {
+        validate_ = std::move(validate);
+    }
+    void retire_release_pins() { release_pins_.clear(); }
     // The pending snapshot is worker-owned. Only progress_ is touched by provider threads.
     void begin_turn() noexcept {
         if (pending_progress_ && *pending_progress_ != progress_.load()) {
@@ -96,7 +122,14 @@ public:
         const auto handler = handler_.load();
         if (!handler || victims.empty()) { return true; }
         handler->save_before_eviction(victims);
-        for (const auto& victim : victims) {
+        for (auto& victim : victims) {
+            if (victim.outcome == PressureCheckpointOutcome::Settled &&
+                victim.reason == DurableReason::None && validate_) {
+                victim.reason = prove_recoverable(victim);
+                if (victim.reason != DurableReason::None) {
+                    victim.outcome = PressureCheckpointOutcome::Pending;
+                }
+            }
             if (victim.outcome == PressureCheckpointOutcome::Pending) {
                 // Preserve this attempt's classification even when its callback itself signals
                 // progress. The next attempt/worker turn may retry; this one must not fail as
@@ -110,12 +143,39 @@ public:
     }
 
 private:
+    DurableReason prove_recoverable(const PressureCheckpointVictim& victim) noexcept {
+        try {
+            const auto provider = oracle();
+            if (!provider) { return DurableReason::SessionNotIndexed; }
+            auto pin = provider->pin_recoverable(victim.session_sha256, victim.checkpoint_tag);
+            if (!pin) { return DurableReason::SessionNotIndexed; }
+            auto verification = pin->fresh_reader();
+            if (!verification) { return DurableReason::IoUnavailable; }
+            const auto reason = validate_(*verification);
+            if (reason != DurableReason::None) { return reason; }
+            auto current = provider->pin_recoverable(victim.session_sha256, victim.checkpoint_tag);
+            if (!current) { return DurableReason::StalePublication; }
+            const auto verified_index = pin->file_descriptor("engine/index.cbor");
+            const auto current_index = current->file_descriptor("engine/index.cbor");
+            if (!verified_index || !current_index ||
+                verified_index->bytes != current_index->bytes ||
+                verified_index->sha256 != current_index->sha256) {
+                return DurableReason::StalePublication;
+            }
+            release_pins_.push_back(std::move(pin));
+            release_pins_.push_back(std::move(current));
+            return DurableReason::None;
+        } catch (...) { return DurableReason::IoUnavailable; }
+    }
     std::mutex mutex_;
     std::map<std::string, std::shared_ptr<Session>, std::less<>> sessions_;
     std::atomic<std::shared_ptr<PressureCheckpointHandler>> handler_;
     std::atomic<std::shared_ptr<const ReclaimableSessionOracle>> oracle_;
     std::atomic<std::uint64_t> progress_{1};
+    std::atomic<std::uint64_t> observed_progress_{1};
     std::optional<std::uint64_t> pending_progress_;
+    std::function<DurableReason(const ContinuationCheckpointReader&)> validate_;
+    std::vector<std::shared_ptr<const ContinuationCheckpointReader>> release_pins_;
 };
 
 struct PreparedEngineCheckpoint {

@@ -585,6 +585,21 @@ void CheckpointEngineAccess::notify_checkpoint_progress(Engine& engine) noexcept
     } catch (...) {}
 }
 
+void CheckpointEngineAccess::response_stored(
+    Engine& engine, std::string_view digest, std::string_view tag) noexcept {
+    if (!engine.impl_) { return; }
+    try {
+        generation_core(engine.impl_->core, [&](auto& core) { core.response_stored(digest, tag); });
+    } catch (...) {}
+}
+
+std::uint64_t CheckpointEngineAccess::checkpoint_progress(const Engine& engine) noexcept {
+    if (!engine.impl_) { return 0; }
+    try {
+        return generation_core(engine.impl_->core, [](auto& core) { return core.checkpoint_progress(); });
+    } catch (...) { return 0; }
+}
+
 void CheckpointEngineAccess::set_checkpoint_tag(PreparedPrompt& prompt, std::string_view tag) {
     if (!prompt.impl_) { throw std::invalid_argument("PreparedPrompt is empty"); }
     prompt.impl_->checkpoint_tag = tag;
