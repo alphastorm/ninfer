@@ -51,7 +51,7 @@ int native_refusal_matrix() {
     int failures = 0;
     for (const auto& native : refusals) {
         OpenAIResponsesStore responses(8, 1ULL << 20);
-        responses.put(record("resp_live", session, 10));
+        responses.put(record("resp_endpoint", session, 10));
         const auto original_bytes = responses.bytes();
         auto guard = responses.begin_restore(session);
         bool called = false;
@@ -60,9 +60,9 @@ int native_refusal_matrix() {
         failures += check(called && result.state == native.state && result.reason == native.reason,
                            "native refusal lost its exact state/reason");
         failures += check(responses.size() == 1 && responses.bytes() == original_bytes &&
-                               responses.latest_response_id(session) == "resp_live" &&
+                               responses.latest_response_id(session) == "resp_endpoint" &&
                                !responses.get_for_session("resp_first", session) &&
-                               !responses.get_for_session("resp_endpoint", session),
+                               responses.get_for_session("resp_endpoint", session),
                            "precommit native refusal changed live Responses state");
     }
     return failures;
@@ -113,7 +113,7 @@ int store_refusal_matrix() {
 int successful_commit_and_namespace() {
     const std::string session(64, 'd'), foreign(64, 'e');
     OpenAIResponsesStore responses(8, 1ULL << 20);
-    responses.put(record("resp_old", session, 99));
+    responses.put(record("resp_endpoint", session, 99));
     responses.put(record("resp_foreign", foreign, 1));
     auto guard = responses.begin_restore(session);
     bool committed = false;
@@ -127,7 +127,7 @@ int successful_commit_and_namespace() {
     int failures = check(committed && result.state == State::Imported && result.reason == Reason::None &&
                               result.stats.restored_tokens == 128 && responses.size() == 3 &&
                               responses.latest_response_id(session) == "resp_endpoint" &&
-                              !responses.get_for_session("resp_old", session) &&
+                              responses.get_for_session("resp_endpoint", session) &&
                               responses.get_for_session("resp_foreign", foreign),
                           "successful native commit did not publish exactly the prepared replacement");
     failures += check(!responses.get_for_session("resp_endpoint", foreign) &&

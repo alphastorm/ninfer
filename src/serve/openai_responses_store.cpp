@@ -204,6 +204,29 @@ bool OpenAIResponsesStore::erase_for_session(const std::string& id,
     return true;
 }
 
+bool OpenAIResponsesStore::erase_for_session_durably(
+    const std::string& id, const std::string& session,
+    const std::function<bool(const std::optional<OpenAIResponseStoreSnapshot>&)>& publish,
+    runtime::DurableReason* refusal) {
+    using Reason = runtime::DurableReason;
+    if (refusal) { *refusal = Reason::None; }
+    std::lock_guard lock(mutex_);
+    const auto found = records_.find(id);
+    if (found == records_.end() || !session_matches(found->second.response->client_session_sha256, session)) {
+        return false;
+    }
+    const auto snapshot = snapshot_locked(session, id);
+    if (snapshot && newest_locked(session)->response->id == id) {
+        if (refusal) { *refusal = Reason::TagMismatch; }
+        return false;
+    }
+    if (!publish || !publish(snapshot)) { return false; }
+    // Publication may wait for the Engine worker. Its pressure callback never takes this mutex.
+    // All allocating work and durable acknowledgement precede the invariant-preserving erase.
+    erase_locked(id);
+    return true;
+}
+
 std::size_t OpenAIResponsesStore::size() const {
     std::lock_guard lock(mutex_);
     return records_.size();
@@ -327,10 +350,14 @@ OpenAIResponsesStore::newest_locked(std::string_view session) const noexcept {
 std::optional<OpenAIResponseStoreSnapshot>
 OpenAIResponsesStore::snapshot_session(std::string_view session) const {
     std::lock_guard lock(mutex_);
+    return snapshot_locked(session);
+}
+
+std::optional<OpenAIResponseStoreSnapshot>
+OpenAIResponsesStore::snapshot_locked(std::string_view session, std::string_view excluded) const {
     std::vector<const Entry*> ordered;
     for (const auto& [id, entry] : records_) {
-        (void)id;
-        if (entry.response->client_session_sha256 &&
+        if (id != excluded && entry.response->client_session_sha256 &&
             credential_equal(*entry.response->client_session_sha256, session)) {
             ordered.push_back(&entry);
         }
@@ -546,6 +573,15 @@ bool OpenAIResponsesStore::restore_session(OpenAIResponseStoreSnapshot snapshot,
         return response.client_session_sha256 &&
                credential_equal(*response.client_session_sha256, snapshot.client_session_sha256);
     };
+    // Revision equality only proves that nothing changed since capture. Capture itself may
+    // follow a newer unsaved turn. Never use persisted numeric orders as a runtime clock.
+    const auto* newest = newest_locked(snapshot.client_session_sha256);
+    if (newest && newest->response->id != snapshot.latest_response_id) {
+        return reject(Reason::StaleRevision);
+    }
+    for (const auto& [id, entry] : records_) {
+        if (target(*entry.response) && !ids.contains(id)) { return reject(Reason::StaleRevision); }
+    }
     for (const auto& record : snapshot.records) {
         const auto collision = records_.find(record.id);
         if (collision != records_.end() && !target(*collision->second.response)) {
