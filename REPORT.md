@@ -2,7 +2,7 @@
 
 ## Qualification state
 
-- Branch `rebase/serve-restore`; serving source through `687a31d06`, production runner `37a2824a`. This is the Main-approved **source union, not an integration-qualified checkpoint**: integration `ec18847bf`, Serve `141839f8`, Frontend `8c3102905`, Store `550fe006`, corrected Store `202b17064` plus legacy/root closure `148384bda`, and the approved shared declarations.
+- Branch `rebase/serve-restore`; serving source through `687a31d06` plus the direct-header closure documented below, production runner `37a2824a`. This is the Main-approved **source union, not an integration-qualified checkpoint**: integration `ec18847bf`, Serve `141839f8`, Frontend `8c3102905`, Store `550fe006`, corrected Store `202b17064` plus legacy/root closure `148384bda`, and the approved shared declarations.
 - B2 host result at `5f8b2ac8bda4bd9eb91c65b2e7c2e06eafea314c`: **2/2 passed, zero failures/skips**, CTest **0.09 s**. `B2-HOST.json` records the exact evidence scope.
 - Static `ninfer_serve` archive compiled at `fd4a7e58f78094b480d79fd1a76d126aa015d3c0`: **637 Ninja edges, exit 0**. This precedes the rooted-queue signature change and is not a linked-server or GPU proof.
 - Corrected A1 source `148384bda50c0eac475ee6c77b245244df4934c1` separately passed **6/6 host targets**, zero failures/skips, **2.53 s** CTest. Its immutable [report](https://github.com/alphastorm/ninfer/blob/a20fcf74e/REPORT.md) remains standalone provider evidence, not a combined integration verdict.
@@ -10,6 +10,11 @@
 - Frozen contract changes were approved by Main: typed Reader failure/fresh-reader access, pinned-reader reclaim oracle, `Unavailable` prepare/import states, explicit configured root for read-queue construction, refusal-only legacy-schema identification, and native victim validation before destructive reclaim. Shared declarations/docs remain integration/Contracts-owned.
 - RepoPrompt preservation baseline: `prep-v0-13-0-upstream-re-DF08C8`; final G4 review remains Main-owned. No release/tag/image publication or production service change was performed.
 - Latest closure commits beyond the frozen `37a2824a` input are `9f9f83ab4` (state docs/help), `1bab66130` (early-stop missing-provider refusal), `0dddecc83` (native progress owns pressure retry cadence), and `687a31d06` (Capacity remains Pending). They are source-complete but not covered by the recorded final-union CPU/model evidence. No claim of completed B2 acceptance is made.
+
+### Post-handoff qualification updates
+
+- EngineCache2 reports a real `ninfer-serve` link and **11/11 scoped hosts passed, 0.68 s**, at joint source `e8b93ac8d660a68ef820e2b3e536bb5b4da42539`, including both B2 targets. This is peer-reported evidence, not a B2 rerun; the four later closure commits' 12-host candidate and GPU batch remain outstanding.
+- PortableCore2 reports the combined MSVC source `2a4266e30` fails because `generation_service.h` uses `std::span` without its direct header. B2 adds `<span>` explicitly; no compile rerun is claimed. Its reported incomplete `std::array` in public `types.h` and POSIX-only request-log test are outside this slice and remain integration-owned.
 
 ## Provider bindings
 
