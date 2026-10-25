@@ -48,6 +48,21 @@ protocol checks now exercise supported Chat/Responses JSON schemas and
 Authenticated shared-prefix reuse is valid across sessions; private continuation
 selection is not.
 
+The selected-card interactive ceiling remains 1 GiB. Its measurement is now the
+UUID-indexed `nvidia-smi --query-gpu=memory.used` value, converted from MiB to bytes,
+matching native acceptance. WDDM per-process `DedicatedUsage` is commit/budget
+diagnostic data, not resident usage, and cannot refuse a start or replace a failed
+NVML observation. Status keeps the WDDM process table separately, including an
+explicit unavailable diagnostic when that provider fails.
+
+Packages carry the repository's canonical `tools/smoke/agent_protocol.py` and
+`serve_contract.py`; the older Windows-only protocol copy is removed. C1 and
+pressure invoke the explicit product contract. Its private-user-context reuse
+probe preserves the strict private/foreign path, quiescence, greedy parity and
+decode-correlation gates; a tiny prompt that legitimately selects cost-first
+root prefill is not used as the reuse oracle. Qualification retains the real
+schema-2 result beneath each phase receipt, not invented legacy checks/status.
+
 Each new release instance writes only its own `session-checkpoints-v3` root
 (outer schema 3/native checkpoint-set format 1). Earlier roots are preserved for
 rollback and are never discovered or imported by the new runtime. The
@@ -92,6 +107,12 @@ copy hashes and each executable's clean, matching source/profile/architecture
 identity. Public and port-only scratch packages are each built twice, including
 the complete outer checksum set; the emitted equivalence binds both package and
 configuration hashes plus identical executable/controller bytes.
+This release binds the binary patch-stack identity, `RuntimeSourceSha` and
+packaging/source-archive commit to the same cut commit. Older executable hashes
+are not relabelled. Staging directories are keyed by that commit so a fresh
+install cannot reuse a predecessor's prepared root. The integrator rebuilds and
+compares actual payload hashes before deciding which prior test evidence is
+content-address equivalent.
 
 `New-Package.ps1` requires the product P4 generator and genuine resolved vcpkg,
 CUDA, vendored-source and CRT/DirectStorage inventories. The outer distribution
