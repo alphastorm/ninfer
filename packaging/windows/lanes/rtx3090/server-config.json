@@ -19,6 +19,7 @@
     "device": 0,
     "max_context": 131072,
     "kv_capacity": 131072,
+    "admission_headroom_mib": 768,
     "prefill_chunk": 1024,
     "kv_dtype": "int8",
     "max_concurrency": 1,
@@ -44,7 +45,8 @@
   "session_checkpoint": {
     "enabled": true,
     "quota_mib": 24576,
-    "staging_mib": 256
+    "staging_mib": 256,
+    "require_origin_auth": true
   },
   "response_store": {
     "max_records": 1024,

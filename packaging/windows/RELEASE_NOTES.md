@@ -15,6 +15,10 @@ DFlash2 component must not be materialized by the native MTP configuration, whic
 is a separate native runtime qualification assertion.
 The controller and pressure launcher retain `--lm-head-draft` for the optimized
 MTP proposal head; the upstream default full head is not the native profile.
+The v0.13.1 qualification profiles explicitly require checkpoint origin
+authentication and admission headroom of 640 MiB (RTX 4090) / 768 MiB (RTX 3090).
+Public profiles retain port 18082; port-only scratch rehearsals have their own
+config bytes, hashes and provenance and do not replace the public identity.
 
 Master's `--host-context-mib` replaces the fork's separate Host KV/State pools.
 The layout-aware translation preserves the old Host KV budget plus 24 MTP

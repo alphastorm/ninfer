@@ -347,6 +347,7 @@ function Assert-OneLineSecret([string]$Path) {
         $length--
     }
     if ($length -eq 0) { throw 'API-key file is empty' }
+    if ($length -lt 32) { throw 'strict checkpoint origin authentication requires at least 32 API-key bytes' }
     for ($index = 0; $index -lt $length; $index++) {
         if ($bytes[$index] -eq 0 -or $bytes[$index] -eq 10 -or $bytes[$index] -eq 13) {
             throw 'API-key file must contain exactly one non-empty line'
@@ -684,9 +685,12 @@ function Assert-InstallerArchitectureContract([object]$Spec, [object]$Config) {
     # every native lane ships is asserted here.
     if ([string]$Config.deployment_profile -cne [string]$Spec.deployment_profile -or
         [int]$Config.engine.max_concurrency -ne 1 -or
+        [int]$Config.engine.admission_headroom_mib -lt 256 -or
         [string]$Config.speculative.backend -cne 'mtp' -or
         [int]$Config.speculative.draft_tokens -lt 1 -or
         -not [bool]$Config.session_checkpoint.enabled -or
+        $Config.session_checkpoint.require_origin_auth -isnot [bool] -or
+        -not $Config.session_checkpoint.require_origin_auth -or
         [int]$Config.session_checkpoint.staging_mib -le 0 -or
         [int]$Config.context_cache.device_state_slots -lt 1 -or
         [string]$Config.context_cache.host_context_mib -cnotmatch '^[0-9]+(?:\.[0-9]+)?$' -or
