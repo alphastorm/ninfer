@@ -47,3 +47,70 @@ The shared helper/environment announcement was delivered to all twelve peers aft
 Lease `20261025T010906Z-infra-vanilla-ctest-214054` exposed two environment defects: the development-stage driver stub at a default CUDA library path displaced the real GPU driver (`cudaErrorStubLibrary`), and the Python template/schema oracles lacked Jinja2/jsonschema. Initial inventory was host **42 passed / 3 failed**, real-model **0 passed / 13 failed / 2 skipped**, other GPU **16 passed / 103 failed / 5 skipped**, explicit real loading exit **1**. None of the GPU failures is attributed to upstream or the product. Both missing-oracle packages and the isolated link-only stub fix were approved by the lead; all peers received a GPU-proof hold before the refresh.
 
 The corrected Dockerfile puts the stub only at `/opt/ninfer-driver-stub/libcuda.so.1`, outside default/runtime search paths. Only `build.sh` configure/build invocations and the isolated Docker `build` stage expose that directory through `LD_LIBRARY_PATH`; `run-in-env.sh` does not expose it to GPU workloads. The development image explicitly includes `git`, `python3-jinja2` and `python3-jsonschema`; the runtime image does not.
+
+## Corrected GPU-ready environment
+
+`ov-build-env:master-64d10fbf-r2` is **`sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1`**. The required `ov-build-env:master-64d10fbf` tag now aliases that same image. Its build took **49.582 seconds**; real `ninfer_device_test` passed in **1.298 seconds**, and the three previously missing-dependency CPU oracles passed in **2.709 seconds**. Lease: `20261025T011636Z-infra-env-r2-gpu-safe-225942`, exit zero, **54 seconds**, no leftover containers. All thirteen peers received the GPU-ready image and immutable ID immediately after proof. Pin `NINFER_BUILD_ENV_IMAGE=ov-build-env:master-64d10fbf-r2` when producing receipts.
+
+Exact corrective proof used `ctest --test-dir "$BUILD" -R '^ninfer_device_test$' --output-on-failure --timeout 60` with `--gpu`, then the three host oracles selected by `^ninfer_(chat_templates|json_schema_oracle|qwen_tool_schema_oracle)_test$` without `--gpu`. Receipt: `environment-r2.json`. Neither the source nor the compiled baseline binaries changed between the environment-invalid and corrected-image runs.
+
+## Vanilla CTest command contract
+
+The host-only selection is explicit because upstream does not label every CPU/GPU test. The following equivalent compact regex selects the same 45 tests as the receipt producer:
+
+```sh
+HOST_REGEX='^ninfer_(public_api|cpu_(system|task_pool|executor)|read_queue|host_timing|jinja|chat_templates|weight_bank|gdn_replay_records|artifact_(reader|backing|cpu_materialization)|scheduler|context_cost|resource_manager|kv_capacity|sampling_defaults|grammar|regex_choice|regex_choice_oracle|json_schema|json_schema_oracle|media_decode|prompt_input|pretty_logging|perplexity_evaluation|cli_options|openai_schema|openai_responses|openai_responses_store|anthropic_schema|serve_options|request_log|metrics|http_error_handler|http_transport|qwen_frontend|qwen_tool_constraints|qwen_tool_schema_oracle|tool_call_parser|qwen3_5_loading|qwen3_5_state_image_layout|bench_support|context_cost_measure)_test$'
+ctest --test-dir "$BUILD" -R "$HOST_REGEX" --output-on-failure --timeout 90
+ctest --test-dir "$BUILD" -L real --output-on-failure --timeout 180
+ctest --test-dir "$BUILD" -LE real -E "$HOST_REGEX" --output-on-failure --timeout 90
+"$BUILD/tests/ninfer_qwen3_5_loading_real_test" \
+  --artifact "$MODEL" --vision --speculative dflash2 --proposal optimized
+```
+
+Each command runs in `run-in-env.sh` with source/build/model-parent mounts and the approved io_uring seccomp policy. The first phase has no GPU and sets `CUDA_VISIBLE_DEVICES=`; later phases use `--gpu` and `NINFER_TEST_ARTIFACT="$MODEL"`. The direct loading command is necessary because that upstream CTest entry does not pass `--artifact` and otherwise skips. Per-test status/timing is extracted from CTest JUnit into `baseline.json`; skipped or incompatible-artifact cases are not successful coverage.
+
+## Corrected vanilla real-model baseline
+
+Lease `20261025T011826Z-infra-vanilla-ctest-r2-228794` used the immutable r2 environment and unchanged upstream binaries. The real-model CTest phase took **189.272 seconds**: **7 passed, 6 failed, 2 skipped**. Direct explicit loading with Vision + DFlash2 + optimized proposal head passed in **5.728 seconds**.
+
+| Real-model test suffix | Result | Observation / classification |
+|---|---|---|
+| `native_transactions_test` | Pass | 16.4513 s |
+| `preemption_real_test` | Pass | 39.8965 s |
+| `tools_real_test` | Pass | 18.6609 s |
+| `score_real_test` | Pass | 10.8232 s |
+| `vision_workspace_test` | Pass | 9.61869 s |
+| `dflash2_real_test` | Pass | 26.7466 s; upstream defaults include batch 8 / draft window 15 |
+| `dflash_prefill_real_test` | Pass | 12.6333 s |
+| `prefix_real_test` | Fail | `artifact tokenizer/chat template changed the thinking prompt golden` |
+| `grammar_real_test` | Fail | `KV write exceeds its page reservation` — genuine vanilla red, not a driver-stub failure |
+| `agent_continuation_real_test` | Abort | `constraints require default EOS, text output, no custom stops, and one output language` |
+| `moe_real_test` | Fail | Dense artifact supplied to the 35B MoE fixture; invalid load summary |
+| `moe_offload_real_test` | Fail | Fixture's 16 GiB device budget cannot hold this dense artifact/resources; no MoE-offload coverage |
+| `dflash_real_test` | Fail | Artifact has no old `dflash` component |
+| `qwen3_5_loading_real_test` | Skip | CTest omits the required explicit artifact; separate direct loader passed |
+| `qwen4_exp_loading_real_test` | Skip | No Qwen4/Flash-Next artifact/argument supplied; no coverage claim |
+
+The first thirteen suffixes above belong to `ninfer_qwen3_5_`. All baseline reds/skips and their raw excerpts were shared with the integrator; the three substantive prefix/grammar/continuation boundaries were escalated to the lead. No failing golden or assertion was edited.
+
+The corrected no-GPU host run passed **42/45**. Its remaining three failures (`openai_schema`, `request_log`, `http_error_handler`) were ELF linkage to `libcuda.so.1`, not failed assertions; the three Python oracles now passed. Their narrow follow-up injects the real driver but sets `CUDA_VISIBLE_DEVICES=` so the host tests cannot select a CUDA device. The runtime stub remains excluded.
+
+The supplementary nonreal-GPU sweep reached **94 of 124** completed tests before its **900-second** overall cap; several broad operator tests hit their individual 90-second limits. This extra sweep is explicitly incomplete, not a full-suite pass and not substituted for the requested real-model inventory.
+
+## Artifact upgrade evidence
+
+The standard-library upgrader at the frozen upstream commit ran through the lease with separate output directories; no input artifact was modified. Production conversion took **19.566 seconds**, native conversion **17.531 seconds**, both exit zero. Artifact upgrade/hash job: `20261025T010442Z-infra-artifact-v3-identity-210593`, **86.675 seconds** measured work.
+
+| Artifact | Bytes | SHA-256 |
+|---|---:|---|
+| Production v2 input | 20437336576 | `0634abb07024221de141456cf04a42ab74b18bc38e1b781c6eb2e062a467eec3` |
+| Published v3 | 20437521664 | `81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da` |
+| Production v2 upgraded locally to v3 | 20437571568 | `facba3bd318139c50899d4a0d74576837f73f0f498a461961467d56df10f4944` |
+| Native v2 input | 18210531328 | `eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e` |
+| Native v2 upgraded locally to v3 | 18210749936 | `5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7` |
+
+The native output is `models/v3/native-eec39564-upgraded/qwen3_8_27b.ninfer` relative to the operator's model root. The v3 reader validated its directory/framing: **1,118 tensors**, one file. The two production v3 artifacts each contain **1,184 tensors**; their dedicated chat templates are byte-identical, **9,712 bytes**, SHA-256 `a497db9e663941e6f7a05307c2bafa8374c12e142ad1fbea6229888d41f1ab16` (empty template diff).
+
+Physical object IDs are intentionally different (`weight/000000`-style published IDs versus named upgrader IDs), and fused `parts` bindings plus Use auxiliaries can share one physical tensor. Comparing IDs directly is not payload evidence. The raw manifest comparison records **6,588 field differences**, including object/reference naming and Use ordering; payload comparison must canonicalize the complete semantic reference set of each unique tensor, not assume every binding has an `object` member.
+
+Exact upgrade command shape: `python3 "$SRC/tools/upgrade_ninfer_v2_to_v3.py" "$V2_INPUT" "$V3_OUTPUT"`; SHA-256 was computed with bounded 8 MiB reads. `artifacts.json`, `tensor-payloads.json`, `manifest-field-diff.json` and `chat-template.diff` are the scrubbed receipt family.
