@@ -22,7 +22,7 @@ export NINFER_BUILD_HOLDER=infra
 ```
 
 - Defaults: `ov-build-env:master-64d10fbf`, Release/Ninja, `120a`, apps/tests on, benches off, `--parallel 16`, ccache launchers for C/C++/CUDA. Later CMake arguments override defaults; names after `--` select build targets. Use a distinct persistent build directory per holder and architecture. Source and build paths remain identical inside/outside the container.
-- `run-in-env.sh` accepts `--gpu`, repeatable `--mount` / `--read-only-mount`, `--env KEY=value`, `--seccomp FILE`, and `--name SUFFIX`. It uses host networking; servers must bind loopback and their holder's assigned port. Containers are always `ov-<holder>-<suffix>`, auto-removed, run as the caller's UID/GID, and use a persistent 20 GB ccache under the caller's cache directory. Image/cache overrides are `NINFER_BUILD_ENV_IMAGE` and `NINFER_CCACHE_DIR`.
+- `run-in-env.sh` accepts `--gpu`, `--publish PORT`, `--volume NAME TARGET`, repeatable `--mount` / `--read-only-mount`, `--env KEY=value`, `--seccomp FILE`, and `--name SUFFIX`. It uses Docker's bridge by default; `--publish` maps only `127.0.0.1:PORT:PORT`, and published servers bind `0.0.0.0` inside the container on their holder's assigned port. Named volumes must belong to the caller (`ov-<holder>-...`). Containers are always `ov-<holder>-<suffix>`, auto-removed, run as the caller's UID/GID, and use a persistent 20 GB ccache. Image/cache overrides are `NINFER_BUILD_ENV_IMAGE` and `NINFER_CCACHE_DIR`.
 - Integrated source transfer must retain real Git identity: clone/fetch the pushed slice or integration branch, then detach at its full commit SHA (or import a full Git bundle). Use a real detached repository, not a linked-worktree `.git` file pointing outside the Docker context; never copy unrelated repository metadata. A plain archive is valid only for this explicitly vanilla baseline. The Docker context retains `.git` for identity verification. `NINFER_SOURCE_DIRTY=auto` is not a clean-source override; Harness owns its absent-Git refusal.
 - Docker Desktop's credential helper failed when resolving the Dockerfile frontend from a noninteractive WSL session. The image build uses a new, empty `DOCKER_CONFIG` directory for anonymous public-image resolution; no credentials are read, copied or changed. The failed attempt lasted 10.799 seconds and made no runtime changes.
 
@@ -95,7 +95,9 @@ The first thirteen suffixes above belong to `ninfer_qwen3_5_`. All baseline reds
 
 The corrected no-GPU host run passed **42/45**. Its remaining three failures (`openai_schema`, `request_log`, `http_error_handler`) were ELF linkage to `libcuda.so.1`, not failed assertions; the three Python oracles now passed. Their narrow follow-up injects the real driver but sets `CUDA_VISIBLE_DEVICES=` so the host tests cannot select a CUDA device. The runtime stub remains excluded.
 
-The supplementary nonreal-GPU sweep reached **94 of 124** completed tests before its **900-second** overall cap; several broad operator tests hit their individual 90-second limits. This extra sweep is explicitly incomplete, not a full-suite pass and not substituted for the requested real-model inventory.
+That narrow follow-up passed, giving **45 passed / 0 failed / 0 skipped** aggregate host coverage. It is recorded separately in `baseline.json` so the initial missing-driver-library boundary is not erased. The closeout lease `20261025T014632Z-infra-host-baseline-closeout-304281` exited zero.
+
+The supplementary nonreal-GPU sweep reached **94 of 124** completed tests before its **900-second** overall cap: **90 passed, 4 timed out, 0 assertion failures**, with 30 not completed (one interrupted at `ninfer_qsa_sparse_gqa_test`). This extra sweep is explicitly incomplete, not a full-suite pass and not substituted for the requested real-model inventory.
 
 ## Artifact upgrade evidence
 
@@ -113,4 +115,71 @@ The native output is `models/v3/native-eec39564-upgraded/qwen3_8_27b.ninfer` rel
 
 Physical object IDs are intentionally different (`weight/000000`-style published IDs versus named upgrader IDs), and fused `parts` bindings plus Use auxiliaries can share one physical tensor. Comparing IDs directly is not payload evidence. The raw manifest comparison records **6,588 field differences**, including object/reference naming and Use ordering; payload comparison must canonicalize the complete semantic reference set of each unique tensor, not assume every binding has an `object` member.
 
+**5090 binding recommendation: use published v3 `81f924d4`.** The completed comparison matched **1,184 / 1,184 unique tensor payload SHA-256 digests**, with no geometry differences and no unmatched semantic references. It also matched all **six frontend resources byte-for-byte**. Canonicalization includes every fused binding part and every Use auxiliary, hashes each physical tensor once, and keys Uses by parameter/input rather than array position. This is full coverage, not a hash sample.
+
+Only **six semantic manifest fields** differ: `/files/0/payload_bytes` (**20,437,148,928** published versus **20,437,157,872** upgraded), plus provenance `converter`, `ranking`, `recipe`, `sources`, and `upgraded_from`. Published provenance records the converter/recipe/source locations; the upgrade records its v2 origin. No component, binding, Use policy, tensor geometry, tokenizer, template or preprocessing-resource difference remains. Absolute upstream provenance source paths in the two diff receipts were replaced by SHA-256 redaction markers (**three paths per receipt**), preserving field identity without committing private paths.
+
+Complete comparison lease: `20261025T012435Z-infra-artifact-reference-sha256-239425`, **28.502 seconds** measured work, exit zero. Native upgrade component inventory is **`mtp`, `text`, `vision`**, with binding prefixes `mtp`, `proposal`, `text`, `vision`; it has no DFlash/DFlash2 component. These identities and the published-v3 recommendation were sent to the lead, integrator and kernel-routes owner.
+
 Exact upgrade command shape: `python3 "$SRC/tools/upgrade_ninfer_v2_to_v3.py" "$V2_INPUT" "$V3_OUTPUT"`; SHA-256 was computed with bounded 8 MiB reads. `artifacts.json`, `tensor-payloads.json`, `manifest-field-diff.json` and `chat-template.diff` are the scrubbed receipt family.
+
+## Secondary lane: owner state and restore recipe
+
+Before pausing any owner workload, the bounded inventory found Strata running from **`E:\omp-strata-0.2.3-omp18.12.6-pro-262k`**, profile **`win11-rtxpro6000-iq3s-262k-slots4-parking-strata0.2.3-omp18.12.6`**. Both OCR containers (`alpha-diligence-ocr-paddle`, `alpha-diligence-ocr-mineru`) were **exited**. Preserve that exact state: do not invoke the generic window `take`/`release` pair, which expects running OCR and would start them on release. No other owner's engine/root or GPU power policy is changed.
+
+The recorded owner restore command is this PowerShell, executed on the secondary Windows host through its existing SSH alias:
+
+```powershell
+$root = 'E:\omp-strata-0.2.3-omp18.12.6-pro-262k'
+$profile = 'win11-rtxpro6000-iq3s-262k-slots4-parking-strata0.2.3-omp18.12.6'
+& "$env:LOCALAPPDATA\Programs\Python\Python313\python.exe" `
+  "$root\tooling\scripts\omp_strata.py" start --root $root `
+  --profile "$root\tooling\profiles\$profile.json"
+```
+
+Use the same controller/root/profile with `stop` to pause, and `status` to verify restoration; leave both OCR containers exited. Notify the lead with the exact restore command before the pause, and restore Strata when the program is no longer using the correctness lane. The native process is not stopped by an ad-hoc kill.
+
+Docker Desktop **4.96.3**, Linux engine **29.9.2**, WSL kernel **6.18.33.2** and a registered **`nvidia`** runtime already exist. The `tensorfold` WSL2 distro has Git/flock and 808 GiB free; its Docker Desktop integration is disabled. An ext4 UNC mount refused the missing distro mount service; the Windows-drive bind alternative passed (`WSL_BIND_OK`). CPU setup therefore uses Windows-drive source/build paths through the existing Windows Docker client, without restarting global Docker Desktop, changing host networking, installing a second daemon, or altering another product's distro/toolchain. The two-hour setup bound begins at **01:57:27 UTC**.
+
+`build-wsl.sh` / `run-in-env-wsl.sh` configure that bridge. Use `/mnt/<drive>/...` paths, not an unintegrated distro's ext4 paths. The build wrapper selects **12 workers** and acquires one of **two native-WSL `flock` slots** for the complete configure/build lifetime. The generic helper translates only bind-source/config paths to Windows syntax; container paths stay identical to the WSL paths. An isolated Docker CLI config is passed explicitly as `--config` (a WSL environment variable alone did not cross Windows interop). The committed anonymous Docker Hub entry contains no credentials and prevents Docker CLI's automatic native credential-store discovery, which otherwise refused the noninteractive Windows logon session. [Docker CLI's predicate](https://github.com/docker/cli/blob/master/cli/config/config.go) is `!configFile.ContainsAuth()` before native-store detection. No credential values are copied, logged or modified.
+
+### Proven two-slot CPU service
+
+The local CPU-only recipe image is **`ov-build-env:master-64d10fbf-r2-cpu-local`**, ID **`sha256:62a4feee8f308cde61095355ff11977986ecce388ad4f057c23014950b681326`**. Its build took **222.544 seconds**. Two simultaneous real CMake builds acquired different locks (`slot-0` and `slot-1`) and passed: `ninfer_public_api_test` target in **24.590 seconds**, `ninfer_cpu_system_test` target in **25.573 seconds**. Their CTest executions passed in **0.493 / 0.397 seconds**. This proves the two CPU slots and path/config bridge, not a full GPU application build or GPU qualification. `cpu-lane.json` records the image, timings, slot markers and exit codes.
+
+The CPU-ready announcement and exact detached invocation were broadcast to every live peer. The invocation inside the existing Windows detached launcher is:
+
+```sh
+wsl.exe -d tensorfold -u root --exec env \
+  NINFER_BUILD_HOLDER=YOUR_HOLDER \
+  NINFER_BUILD_ENV_IMAGE=ov-build-env:master-64d10fbf-r2-cpu-local \
+  bash "$COMMON/build-wsl.sh" "$SRC" "$BUILD" -- ninfer-serve
+```
+
+The outer operator uses `omp-strata-remote.py launch "$SECONDARY_HOST" "$WINDOWS_WORK" "$COMMAND" "$WINDOWS_LOG"`; do not launch a long WSL build as an SSH-owned foreground child. The source must be a real detached Git checkout under a Windows-drive path. The shared helper directory also contains `run-in-env-wsl.sh` and the io_uring policy. GPU tests remain **unauthorized by this CPU-ready announcement**.
+
+For native filesystem tests, `--volume ov-YOUR_HOLDER-native-root /nativeio --env TMPDIR=/nativeio` provides a caller-owned Docker volume in the Linux VM, independent of DrvFS source/build mounts. The actual probe returned filesystem magic **`0xef53`** (native ext family, not DrvFS/9p) and passed write/unlink. The owning backend suite still decides its supported-I/O contract; no test is skipped or suppressed. The durable-store owner received this recipe without changing its lead-approved current qualification batch.
+
+At the requested wrap-up boundary, **Strata is still running and both OCR containers remain exited as found**. No pause/restore, host reboot, power change, Docker Desktop restart, or GPU computation on the secondary card was performed. Exact-image/model export remains a separately queued lease job; the local CPU image is deliberately not presented as the exact exported r2 image. The secondary full build/model copy/GPU test are not proven.
+
+## Startup-budget observations and validity boundary
+
+The full product engine shape **does construct on the 32 GB card**: 131,072 context, two active lanes plus two extra StateImages, DFlash2 draft window 7, optimized proposal head, BF16 KV, prefill 1,024, Vision and the exact shared-host equivalent **21,881,405,440 bytes** (`--host-context-mib 20867.734375`). The translation is 16 GiB of former host KV plus 24 native StateImages of **195,897,344 bytes** each; upstream's shared pool does not recreate separate fork slot quotas.
+
+| Measured automatic-startup field | Bytes / value |
+|---|---:|
+| Resolved KV capacity | 146432 tokens; 2288 pages of 64 tokens |
+| Device budget | 32429309952 |
+| Weights | 19973043200 |
+| Runtime reservation | 11350282753 |
+| Available after startup | 1072693248 |
+| CUDA graph rebuild estimate (legacy field) | 0 |
+| Actual graph calibration retained | 31457280 |
+| Startup retained | 31689728 |
+| Total device memory | 34162343936 |
+
+Explicit `--kv-capacity 131072` also constructed. Explicit **262144** refused before serving with exit **1**, `Device budget cannot hold model weights and required execution resources`. These observations come from actual `server_start` records and the actual fatal process exit, not from readiness polling. `vanilla-server-start.json` contains the sanitized measured baseline supplied to EngineCache; the zero legacy graph estimate must not substitute for the nonzero calibration/startup-retained measurements.
+
+The original external WSL observer used Docker host networking and could not reach the container's network namespace, even though a diagnostic internal `/health` returned **HTTP 200**. Its 240-second observer timeouts are **not capacity refusals**. That job was terminated after **947 seconds**; the lease stopped its one owned leftover container. Its receipt is explicitly archived as transport-invalid. The current `startup-budget.json` states the actual engine outcomes and leaves **the one-request/two-in-flight HTTP proof and maximum-explicit-capacity search unproven**. The corrected same-container observer implementation is retained outside Git for the lead to run; no success is fabricated.
+
+The final receipt census parsed **14 JSON receipts** and found **zero** forbidden private-path/host/GPU-UUID markers. Upstream absolute provenance paths had already been replaced with digest-only markers. `receipt-census.json` records the exact inventory.
