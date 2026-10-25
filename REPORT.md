@@ -147,5 +147,12 @@ CTest cases, not independent Ninja targets.
 - Both aborted N3 runs restored their selected card: recorded process count zero, task `Ready`, GPU-owner lease false, incumbent untouched, power 450 W / 370 W. These are not complete hardware qualification passes. Main binds N4's patch-stack, runtime-source and packaging-source identities to the same cut commit, with rebuilt N4 inputs and fresh roots; historical N3 executables are not carried or relabelled. Integrator6 owns actual payload comparison, content-addressed test-evidence reuse and the final candidate release.
 - Host-free verification after the cutover: **63 Windows release tests in 0.207 s, 55 passed/eight PowerShell-runtime skips**, zero failures. The unchanged canonical protocol suite's 16 tests passed in the preceding combined 79-test run; that run exposed four legacy adapter-fixture errors, which were migrated to canonical metadata before the green Windows run. Its existing Python HTTP-error fixture emitted a non-fatal resource warning; no warning suppression or runtime behavior change was added.
 
+## Native checkpoint failure diagnostics
+
+- The N4 production-shaped scratch DELETE/final-save failures exposed lossy catch boundaries: callers retained K7 `io_unavailable` but discarded the underlying system error. The server log now emits `ninfer-checkpoint-io-error/1` with fixed operation context, actual durable reason, bounded `system`/`generic`/`other` category and numeric code; unavailable numeric codes are JSON null, never invented.
+- No exception message, pathname, session/response identifier, payload, origin key or error-category name is logged. Public API status/reason behavior is unchanged. Deferred payload writes, metadata reads, native batch reads and current-pointer publication log before converting exceptions; the service logs save/delete/erase catch boundaries.
+- The store host regression exercises system/generic exceptions carrying synthetic private text and asserts the diagnostic contains exactly the five permitted fields. The Windows current-parent-flush regression additionally checks that the emitted record preserves `ERROR_WRITE_FAULT` after the real rename while retaining the unacknowledged visible generation.
+- This logging change does not claim to resolve or attribute the N4 I/O failure. Integrator6 owns the agreed successor build/test driver; no mid-flight verification was run by this slice.
+
 
 

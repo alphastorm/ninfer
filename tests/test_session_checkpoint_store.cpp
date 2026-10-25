@@ -17,6 +17,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -66,10 +67,49 @@ using ninfer::runtime::DurableCheckpointStats;
 using ninfer::runtime::DurableExportResult;
 using ninfer::runtime::ContinuationCheckpointWriter;
 
+struct CheckpointLogCapture {
+    std::ostringstream output;
+    std::streambuf* previous = std::clog.rdbuf(output.rdbuf());
+    ~CheckpointLogCapture() { std::clog.rdbuf(previous); }
+};
+
 int check(bool condition, const std::string& message) {
     if (condition) { return 0; }
     std::cerr << "FAIL: " << message << '\n';
     return 1;
+}
+
+int test_checkpoint_failure_diagnostics_are_content_safe() {
+    constexpr std::string_view private_text = "private-path origin-secret response-content";
+    const auto capture = [&](const std::function<void()>& fail) {
+        CheckpointLogCapture log;
+        try { fail(); }
+        catch (...) {
+            log_checkpoint_failure("test_operation", runtime::DurableReason::IoUnavailable);
+        }
+        return log.output.str();
+    };
+    int failures = 0;
+    for (const auto* category : {&std::system_category(), &std::generic_category()}) {
+        const auto text = capture([&] {
+            throw std::system_error(5, *category, std::string(private_text));
+        });
+        const auto value = nlohmann::json::parse(text);
+        failures += check(value.size() == 5 && value.at("schema") == "ninfer-checkpoint-io-error/1" &&
+                              value.at("operation") == "test_operation" &&
+                              value.at("reason") == "io_unavailable" && value.at("error_code") == 5 &&
+                              value.at("error_category") ==
+                                  (category == &std::system_category() ? "system" : "generic") &&
+                              text.find(private_text) == std::string::npos,
+                          "checkpoint diagnostic lost OS code or exposed exception content");
+    }
+    const auto unknown = nlohmann::json::parse(capture([&] {
+        throw std::runtime_error(std::string(private_text));
+    }));
+    failures += check(unknown.at("error_category") == "unavailable" &&
+                          unknown.at("error_code").is_null() && unknown.size() == 5,
+                      "non-system checkpoint failure invented an OS error code");
+    return failures;
 }
 
 class TemporaryDirectory {
@@ -2341,17 +2381,29 @@ int test_current_parent_flush_failure_retains_visible_generation() {
     runtime::CheckpointControl control;
     control.session(responses.client_session_sha256)->tag = responses.latest_response_id;
     runtime::SessionCheckpointSkipDetail skip;
-    const auto uncertain = store.save(responses, fingerprint(), exporter,
-        [&](runtime::DurableSessionEpoch epoch, const std::function<bool()>& commit) {
-            parent_flush_fault.armed = true;
-            const auto result = control.publish(responses.client_session_sha256,
-                                                responses.latest_response_id, epoch, commit);
-            parent_flush_fault.armed = false;
-            return result;
-        }, &skip);
+    std::optional<SessionCheckpointSaveResult> uncertain;
+    std::string diagnostic;
+    {
+        CheckpointLogCapture log;
+        uncertain = store.save(responses, fingerprint(), exporter,
+            [&](runtime::DurableSessionEpoch epoch, const std::function<bool()>& commit) {
+                parent_flush_fault.armed = true;
+                const auto result = control.publish(responses.client_session_sha256,
+                                                    responses.latest_response_id, epoch, commit);
+                parent_flush_fault.armed = false;
+                return result;
+            }, &skip);
+        diagnostic = log.output.str();
+    }
     int failures = check(parent_flush_fault.fired && !uncertain &&
                              skip.durable_reason == runtime::DurableReason::IoUnavailable,
                          "post-rename parent-flush failure must be unacknowledged I/O unavailability");
+    const auto failure = nlohmann::json::parse(diagnostic);
+    failures += check(failure.at("operation") == "publish_current" &&
+                          failure.at("reason") == "io_unavailable" &&
+                          failure.at("error_category") == "system" &&
+                          failure.at("error_code") == ERROR_WRITE_FAULT && failure.size() == 5,
+                      "current-publication diagnostic lost the underlying Win32 flush error");
     const auto visible = read_file_bytes(session_path / "current");
     failures += check(!visible.empty() && visible != first->generation + "\n",
                       "flush fault must occur after the real current replacement");
@@ -2709,6 +2761,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     int failures = 0;
+    failures += test_checkpoint_failure_diagnostics_are_content_safe();
     failures += test_quota_stale_publication_preserves_unrelated_currents();
     failures += test_ordinary_pressure_preserves_same_size_corrupt_victim();
     failures += test_replay_only_survivors_are_durable_without_native_authority();

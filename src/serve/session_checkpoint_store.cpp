@@ -15,13 +15,16 @@
 #include <cstring>
 #include <condition_variable>
 #include <deque>
+#include <exception>
 #include <fstream>
 #include <initializer_list>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <set>
 #include <stdexcept>
+#include <syncstream>
 #include <system_error>
 #include <thread>
 #include <type_traits>
@@ -30,6 +33,26 @@
 #include <utility>
 
 namespace ninfer::serve {
+void log_checkpoint_failure(std::string_view operation, runtime::DurableReason reason,
+                            std::error_code code) noexcept {
+    try {
+        if (!code) {
+            try {
+                if (const auto error = std::current_exception()) { std::rethrow_exception(error); }
+            } catch (const std::system_error& error) { code = error.code(); }
+            catch (...) {}
+        }
+        const char* category = !code ? "unavailable"
+            : code.category() == std::system_category() ? "system"
+            : code.category() == std::generic_category() ? "generic" : "other";
+        const nlohmann::json diagnostic{
+            {"schema", "ninfer-checkpoint-io-error/1"}, {"operation", operation},
+            {"reason", runtime::durable_reason_name(reason)}, {"error_category", category},
+            {"error_code", code ? nlohmann::json(code.value()) : nlohmann::json(nullptr)}};
+        std::osyncstream(std::clog) << diagnostic.dump() << '\n';
+    } catch (...) {}
+}
+
 namespace {
 
 using Clock = std::chrono::system_clock;
@@ -290,7 +313,10 @@ void write_synced(const std::filesystem::path& path, std::string_view bytes) {
                                                   std::size_t limit) {
     std::error_code error;
     const std::uintmax_t size = std::filesystem::file_size(path, error);
-    if (error) { throw CheckpointUnavailable("checkpoint file size is unavailable"); }
+    if (error) {
+        log_checkpoint_failure("metadata_size", runtime::DurableReason::IoUnavailable, error);
+        throw CheckpointUnavailable("checkpoint file size is unavailable");
+    }
     if (size > limit || size > std::numeric_limits<std::size_t>::max()) {
         throw CheckpointCorruption("checkpoint file size exceeds its bound");
     }
@@ -299,15 +325,21 @@ void write_synced(const std::filesystem::path& path, std::string_view bytes) {
     try {
         file = open_binary_read(path);
     } catch (const std::system_error&) {
+        log_checkpoint_failure("metadata_open", runtime::DurableReason::IoUnavailable);
         throw CheckpointUnavailable("checkpoint file open failed");
     }
     try {
         io::read_exact(file, bytes);
     } catch (...) {
+        log_checkpoint_failure("metadata_read", runtime::DurableReason::IoUnavailable);
         std::fclose(file);
         throw CheckpointUnavailable("checkpoint file read failed");
     }
-    if (std::fclose(file) != 0) { throw CheckpointUnavailable("checkpoint file close failed"); }
+    if (std::fclose(file) != 0) {
+        log_checkpoint_failure("metadata_close", runtime::DurableReason::IoUnavailable,
+                               {errno, std::generic_category()});
+        throw CheckpointUnavailable("checkpoint file close failed");
+    }
     return bytes;
 }
 
@@ -404,11 +436,18 @@ void require_payload_shape(const std::filesystem::path& root, const std::string&
         if (!iterator->is_regular_file(error) || error) { continue; }
         const std::uintmax_t size = iterator->file_size(error);
         if (error || size > std::numeric_limits<std::uint64_t>::max() - total) {
+            if (error) {
+                log_checkpoint_failure("directory_entry_size", runtime::DurableReason::IoUnavailable,
+                                       error);
+            }
             throw std::overflow_error("checkpoint directory byte count overflowed");
         }
         total += static_cast<std::uint64_t>(size);
     }
-    if (error) { throw std::runtime_error("checkpoint directory scan failed"); }
+    if (error) {
+        log_checkpoint_failure("directory_scan", runtime::DurableReason::IoUnavailable, error);
+        throw std::runtime_error("checkpoint directory scan failed");
+    }
     return total;
 }
 
@@ -665,6 +704,8 @@ private:
             if (state.written == state.total) {
                 flush_file(state.file);
                 if (std::fclose(state.file) != 0) {
+                    log_checkpoint_failure("payload_close", runtime::DurableReason::IoUnavailable,
+                                           {errno, std::generic_category()});
                     state.file = nullptr;
                     failed_    = true;
                     return false;
@@ -675,6 +716,7 @@ private:
             }
             return true;
         } catch (...) {
+            log_checkpoint_failure("payload_write", runtime::DurableReason::IoUnavailable);
             failed_ = true;
             return false;
         }
@@ -930,7 +972,10 @@ void require_manifest_shape(const nlohmann::json& manifest) {
     const std::filesystem::path path          = session / "current";
     const std::filesystem::file_status status = std::filesystem::status(path, error);
     if (error == std::errc::no_such_file_or_directory) { return std::nullopt; }
-    if (error) { throw CheckpointUnavailable("checkpoint current pointer is unavailable"); }
+    if (error) {
+        log_checkpoint_failure("current_status", runtime::DurableReason::IoUnavailable, error);
+        throw CheckpointUnavailable("checkpoint current pointer is unavailable");
+    }
     if (!std::filesystem::exists(status)) { return std::nullopt; }
     if (!std::filesystem::is_regular_file(status)) {
         throw CheckpointCorruption("checkpoint current pointer is not a regular file");
@@ -1476,6 +1521,7 @@ public:
             }
             return true;
         } catch (...) {
+            log_checkpoint_failure("native_payload_read", runtime::DurableReason::IoUnavailable);
             settle();
             state.failed = true;
             record_failure(runtime::DurableReason::IoUnavailable);
@@ -2135,10 +2181,16 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
             // failed attempt must retain this generation for reconciliation by load().
             // Before the attempt, stale/epoch/quota refusals still clean up normally.
             pointer_may_be_visible = true;
-            replace_path(current_staging, session / "current");
-            sync_directory(session);
-            // First save also publishes the session directory itself.
-            sync_directory(options_.root / "sessions");
+            try {
+                replace_path(current_staging, session / "current");
+                sync_directory(session);
+                // First save also publishes the session directory itself.
+                sync_directory(options_.root / "sessions");
+            } catch (...) {
+                // The epoch gate converts exceptions to IoUnavailable; retain the code first.
+                log_checkpoint_failure("publish_current", runtime::DurableReason::IoUnavailable);
+                throw;
+            }
             committed = true;
             // Still under the catalog lock: the successful publication makes planned
             // current victims reclaimable; no intervening reader can change the plan.
