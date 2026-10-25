@@ -622,6 +622,62 @@
     "leftover_containers": 0,
     "unowned_containers": 0
   },
+  "private_repeat_diagnostics": {
+    "client_source": "4f95d8577d41db5aaa8be81f14c1a3f8ee143e0d",
+    "runtime_unchanged": true,
+    "assertions_unchanged": true,
+    "isolated_request_sent": false,
+    "arms": [
+      {
+        "job": "20261025T080659Z-int-private-repeat-12ff96e0-593199",
+        "device_extra_slots": 1,
+        "device_state_capacity": 2,
+        "device_state_occupied": [2, 2],
+        "host_state_occupied": [31, 33],
+        "job_exit": 1,
+        "seconds": 26
+      },
+      {
+        "job": "20261025T080833Z-int-private-repeat-slots2-12ff96e0-593478",
+        "device_extra_slots": 2,
+        "device_state_capacity": 3,
+        "device_state_occupied": [3, 3],
+        "host_state_occupied": [30, 32],
+        "job_exit": 1,
+        "seconds": 26
+      }
+    ],
+    "common_observations": {
+      "selection_paths": ["root", "root"],
+      "selection_frontiers": [0, 0],
+      "reused_prompt_tokens": [463, 463],
+      "computed_prefill_tokens": [682, 700],
+      "committed_decode_tokens": [112, 113],
+      "private_catalog_occupied": [10, 11],
+      "shared_catalog_occupied": [13, 14],
+      "pending_work": false
+    },
+    "disposition": "Engine owner confirms ROOT is a legal cost-first choice; an 18-token prompt cannot guarantee private reuse. Product extra slots alone do not close the fixture. The meaningful repeated user-history fixture below passes unchanged private assertions without a runtime priority change.",
+    "changed_fixture_proof": {
+      "client_source": "eae2b74e4f31b79d2f71949bc78f4cf0b180443d",
+      "job": "20261025T081426Z-int-private-repeat-long-12ff96e0-594061",
+      "exit": 0,
+      "seconds": 27,
+      "device_extra_slots": 2,
+      "prompt_tokens": 1623,
+      "completion_tokens": 3,
+      "repeat_path": "private_input_replay",
+      "repeat_frontier_tokens": 1614,
+      "reused_prompt_tokens": [463, 2077],
+      "computed_prefill_tokens": [2287, 2296],
+      "committed_decode_tokens": [113, 115],
+      "host_state_occupied": [30, 30],
+      "isolated_request_sent": false,
+      "host_unit_tests": 16,
+      "host_unit_exit": 0,
+      "full_product_battery_required_on_final_source": true
+    }
+  },
   "remaining": [
     "new_amended_source_full_inventory",
     "exact_profile_startup",
