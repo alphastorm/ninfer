@@ -2121,12 +2121,40 @@ def checkpoint_state(base: str, key: str, session: str) -> str:
         return f"http_{error.code}"
 
 
+def restart_counters(status: dict[str, Any]) -> dict[str, int]:
+    if status.get("schema_version") != 2:
+        raise LaneError("restart status requires schema 2")
+    counters = {}
+    for section, field in (
+        ("scheduler", "computed_prefill_tokens"),
+        ("scheduler", "committed_decode_tokens"),
+        ("cache", "reused_prompt_tokens"),
+    ):
+        group = status.get(section)
+        value = group.get(field) if isinstance(group, dict) else None
+        if type(value) is not int or value < 0:
+            raise LaneError(f"restart status omitted its real {field} counter")
+        counters[field] = value
+    return counters
+
+
 def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
     evidence = Path(args.evidence_root)
     state_root = Path(args.state_root)
     state = json.loads((state_root / "state.json").read_text(encoding="utf-8"))
     release = state["releases"][state["active_release"]]
     controller = state_root / "Control-Release.ps1"
+
+    def restart_server() -> dict[str, Any]:
+        status = controller_status(controller, state_root, "Restart")
+        stop = status.get("last_stop") or {}
+        if stop.get("mode") != "stop-event" or stop.get("outcome") != "graceful" or stop.get("forced"):
+            raise LaneError(f"the managed stop was not a graceful signal: {json.dumps(stop)}")
+        return status
+
+    # The server's cache-disabled startup warmup is real scheduler work. Measure a
+    # fresh process before seeding; this phase may inherit earlier qualification traffic.
+    # Start is idempotent and preserves stopped-entry recovery before the strict restart.
     run(
         [
             "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
@@ -2134,13 +2162,21 @@ def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
         ],
         timeout=900,
     )
+    restart_server()
     key = read_key(Path(release["api_key_file"]))
     base = f"http://{release['host']}:{release['port']}"
+    baseline = restart_counters(request_json(base, key, "GET", "/v1/ninfer/status"))
+    if baseline["reused_prompt_tokens"] != 0:
+        raise LaneError("cold cache-disabled warmup unexpectedly reused prompt tokens")
     listener = ["powershell", "-NoProfile", "-Command",
                 f"(Get-NetTCPConnection -State Listen -LocalPort {release['port']}).OwningProcess"]
 
     def seed(session: str, marker: str, label: str) -> dict[str, Any]:
-        return request_json(base, key, "POST", "/v1/responses", {"model": args.model_id, "input": f"Memorize this exact marker for the next turn: {marker}. Reply only SAVED.", "max_output_tokens": 32, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "ninfer_request_id": digest(label)})
+        # Match the canonical product smoke's meaningful private user context:
+        # tiny marker prompts legitimately prefer cost-first root prefill.
+        context = "Private user context:" + " durable" * 1600
+        prompt = f"{context}\n\nMemorize this exact marker for the next turn: {marker}. Reply only SAVED."
+        return request_json(base, key, "POST", "/v1/responses", {"model": args.model_id, "input": prompt, "max_output_tokens": 32, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "ninfer_request_id": digest(label)})
 
     def resume(session: str, previous: str, label: str) -> tuple[str, int]:
         value = request_json(base, key, "POST", "/v1/responses", {"model": args.model_id, "input": "Return only the exact marker from the previous turn.", "max_output_tokens": 64, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "previous_response_id": previous, "ninfer_request_id": digest(label)})
@@ -2171,23 +2207,19 @@ def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
 
     old_pid = int(run(listener).stdout.strip())
     restart_started = time.perf_counter()
-    status = controller_status(controller, state_root, "Restart")
+    status = restart_server()
     restart_seconds = time.perf_counter() - restart_started
     new_pid = int(run(listener).stdout.strip())
     stop = status.get("last_stop") or {}
-    if stop.get("mode") != "stop-event" or stop.get("outcome") != "graceful" or stop.get("forced"):
-        raise LaneError(f"the managed stop was not a graceful signal: {json.dumps(stop)}")
-    restarted = request_json(base, key, "GET", "/v1/ninfer/status")
-    if (restarted.get("schema_version") != 2 or
-            restarted.get("scheduler", {}).get("committed_decode_tokens") != 0 or
-            restarted.get("scheduler", {}).get("computed_prefill_tokens") != 0 or
-            restarted.get("cache", {}).get("reused_prompt_tokens") != 0):
-        raise LaneError("restart did not reset the real scheduler and cache counters")
+    after_restart = restart_counters(request_json(base, key, "GET", "/v1/ninfer/status"))
+    if old_pid == new_pid:
+        raise LaneError("the managed restart did not replace the server process")
+    if after_restart != baseline:
+        raise LaneError("restart counters did not reset to the measured warmup baseline: " +
+                        json.dumps({"baseline": baseline, "after_restart": after_restart}, sort_keys=True))
 
     control_answer, control_cached = resume(control_session, control_seed["id"], "continue")
     flush_answer, flush_cached = resume(flush_session, flush_seed["id"], "flush-continue")
-    if old_pid == new_pid:
-        raise LaneError("the managed restart did not replace the server process")
     if control_answer != CHECKPOINT_MARKER or control_cached <= 0:
         raise LaneError("explicitly published session did not resume across the restart")
     if flush_answer != FLUSH_MARKER or flush_cached <= 0:
@@ -2203,6 +2235,8 @@ def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
         "restart_seconds": restart_seconds,
         "status_schema_version": 2,
         "restart_counters_reset": True,
+        "counter_baseline": baseline,
+        "counters_after_restart": after_restart,
         "managed_stop": {
             "mode": stop.get("mode"),
             "outcome": stop.get("outcome"),

@@ -74,7 +74,16 @@ status schema and isolated checkpoint root. Managed stop signals the per-launch
 event, waits for synchronous final saves, and accepts only a launch-bound
 schema-1 shutdown report with `complete=true` and no refused sessions. Skipped
 sessions are counted, not treated as failed saves. Restart qualification checks
-the real scheduler/reuse counters reset before continuing either saved session.
+the real scheduler/reuse counters reset to a measured cold-process baseline before
+continuing either saved session. The server's cache-disabled startup warmup is real
+prefill/decode work, so absolute zero is not its baseline. The proof cold-starts
+before seeding, requires a new PID and exact equality with all three measured
+counters after restart, and records both snapshots without hard-coded token counts.
+An idempotent Start preserves stopped-entry recovery before the strictly graceful
+cold setup; the tested restart's graceful-stop requirements are unchanged.
+Both marker seeds use the canonical approximately 1.6K-token private user context;
+exact marker recall and positive cached-input tokens remain mandatory for both
+explicit publication and managed-stop-only persistence.
 Explicit saves must acknowledge `schema: "ninfer-durable-operation/1"` with
 authenticated, committed native publication and real coverage/counts; checkpoint
 status separately requires schema 3. Neither accepts the predecessor's envelope.
