@@ -14,7 +14,9 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <fcntl.h>
 #include <io.h>
@@ -115,8 +117,9 @@ std::FILE* open_stream(const std::filesystem::path& input, bool write) {
                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
     if (file.value == INVALID_HANDLE_VALUE) fail_windows("open durable file");
     FILE_ATTRIBUTE_TAG_INFO info{};
-    if (GetFileType(file.value) != FILE_TYPE_DISK ||
-        !GetFileInformationByHandleEx(file.value, FileAttributeTagInfo, &info, sizeof(info)))
+    if (GetFileType(file.value) != FILE_TYPE_DISK)
+        fail_windows("durable file is not regular", ERROR_INVALID_DATA);
+    if (!GetFileInformationByHandleEx(file.value, FileAttributeTagInfo, &info, sizeof(info)))
         fail_windows("inspect durable file");
     if (info.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
         fail_windows("durable file is not a regular file", ERROR_CANT_ACCESS_FILE);
