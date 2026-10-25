@@ -24,7 +24,7 @@ Read-only command for each candidate: `git merge-tree --write-tree --merge-base=
 
 | Checkpoint | Source / commit | Build | Host tests | Real-model tests | Slice report |
 |---|---|---|---|---|---|
-| Base | upstream `64d10fbf9` | Infra reports apps/tests ON, benches OFF, `120a`, 285.323 s | 42/45 passed; remaining three lacked the runtime driver library, not test assertions | Corrected `r2` image: seven passed, six failed, two skipped across all real labels; 189.272 s. Explicit dense v3 loading passed, 5.728 s | [Infra environment correction](https://github.com/alphastorm/ninfer/blob/8f3ab12e/REPORT.md) |
+| Base | upstream `64d10fbf9` | Infra reports apps/tests ON, benches OFF, `120a`, 285.323 s | 45/45 aggregate passed after the three missing-driver cases passed their changed-environment follow-up | Corrected `r2` image: seven passed, six failed, two skipped across all real labels; 189.272 s. Explicit dense v3 loading passed, 5.728 s | [Final Infra baseline](https://github.com/alphastorm/ninfer/blob/8526f23ad/REPORT.md) |
 | Shared prerequisites | `dc3140b23`: native-profile gate and scope carriers | Apps/tests `120a` build passed; lease job elapsed 289 s, exit 0 | `ninfer_qwen_frontend_test` passed, 0.71 s | Not run; no GPU-ready environment yet | Integration-owned prerequisite, not a slice checkpoint |
 | Contracts candidate | merge `a2fcef5c`, proof/prose `bc551eefb`; shared declarations through `42efad145`; K6 clarifications through `96585c84e` | Changed-source integrated proof pending; slice's three standalone C++20 header compiles passed | Slice: C++ five canonical vectors, Python six canonical/MAC tests passed; integrated selector contains 47 tests | Nine applicable real cases, KV regression and explicit loading selected; prefix golden remains blocked | [Contracts proof](https://github.com/alphastorm/ninfer/blob/cf9ba7db/REPORT.md) |
 | Baseline fixture correction | `1bcaffa4d`, cherry-pick of EngineCache `091c6a815` | Included in next integrated proof | No production-policy change | Five no-EOS cache helpers explicitly select non-strict Automatic tools; dedicated agent-continuation proof pending | [EngineCache report](https://github.com/alphastorm/ninfer/blob/091c6a815/REPORT.md) |
@@ -40,7 +40,7 @@ Replacement lease job: `20261025T015729Z-int-checkpoint-36a42fac-336877`, exact 
 
 ### Vanilla baseline disposition
 
-The three host loader failures were `ninfer_openai_schema_test`, `ninfer_request_log_test` and `ninfer_http_error_handler_test`: `libcuda.so.1` was unavailable after the build stub was correctly isolated. Infra owns their changed-environment follow-up; the integration host run uses the corrected driver mount. The separate 124-test non-real GPU scan completed only 94 cases before its deadline and is incomplete evidence, not a green suite.
+The three host loader failures were `ninfer_openai_schema_test`, `ninfer_request_log_test` and `ninfer_http_error_handler_test`: `libcuda.so.1` was unavailable after the build stub was correctly isolated. Their changed-environment follow-up passed in lease `20261025T014632Z-infra-host-baseline-closeout-304281`, giving 45/45 aggregate host coverage; the integration host run uses the corrected driver mount. The separate 124-test non-real GPU scan completed only 94 cases before its 900-second deadline: 90 passed, four timed out, 30 uncompleted. The four 90-second timeouts were `ninfer_softmax_attention_test`, `ninfer_context_kv_materialize_test`, `ninfer_linear_bf16_a16_test` and `ninfer_linear_split_multi_output_test`; no assertion failure is claimed. This is incomplete evidence, not a green suite; KernelRoutes has the exact inventory for the later full-suite gate.
 
 | Applicable release blocker | Observed failure / root cause | Owner and accepted action |
 |---|---|---|
@@ -57,6 +57,10 @@ Main explicitly approved these **v3-dense subset exclusions**, not blanket test 
 | `ninfer_qwen3_5_dflash_real_test` | Requires the legacy `dflash` component absent from this artifact; applicable DFlash2 and DFlash-prefill tests remain selected. |
 
 The seven vanilla dense passes are native transactions, preemption, tools, score, vision workspace, DFlash2 and DFlash prefill. Bare Qwen3.5 loading skips without its explicit argument; the explicit invocation passed. Qwen4 loading is outside this subset. Infra also proved the published v3 artifact `81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da` preserves all 1,184 unique tensor payload hashes, geometry/reference sets and all six frontend resources from the production artifact's v3 upgrade; format/provenance differences are not evidence of a changed production template.
+
+### Mechanical G1 receipt
+
+Persistence's [G1 receipt](https://github.com/alphastorm/ninfer/blob/0e64cc77/G1.json) records a real restart on tracer source `e442df4d`, published v3 and the corrected image: 22,010 checkpoint-hit tokens, 93 byte-identical continuation bytes, 10 completion tokens, lease `20261025T015558Z-A2-tracer-restart-e442df4d-r2-332480`, exit 0 in 64 s, no leftover/unowned containers. Native export/import measured 6.67914/4.2713 s for 1,638,737,920 payload bytes. Scope is C1, 32,768 context, BF16/DFlash2 K7, text Chat feasibility; this is not integrated production checkpoint-set, Responses, C2 or Windows qualification. The tracer branch is not merged by this receipt.
 
 ## Merge queue and conflict watchlist
 
@@ -78,6 +82,8 @@ Latest read-only preflights use `36a42facf`; these are conflict inventories, not
 | Persistence `0130b930` | Report, older K0 surfaces and KV-history test insertion. Preserve the isolated replay regression and, only with Phase 2 providers, its host-only import regression. Production sources auto-merge. |
 
 Recheck newer source boundaries before merging. No native-import APIs or tests were pulled into the isolated `36a42facf` correction.
+
+Main approved the next isolated checkpoint additions: Persistence `d1f4832e` refreshes an already-admitted unit's reservation when a new reader requires tail COW; Contracts `c30e5746` centralizes frozen K7 reason spellings with compile-time assertions. Read-only cherry-pick preflights against `b54b56a43` found only the root report conflict for `d1f4832e`, and no conflict for `c30e5746`. Neither changes the currently queued `36a42facf` proof input, and neither establishes that upstream #414 is resolved.
 
 | Boundary | Expected overlap / dependency | Disposition rule |
 |---|---|---|
@@ -117,7 +123,7 @@ Custom-tool boundary: Main confirmed shipped raw custom calls and Responses repl
 
 ## Open prerequisites
 
-- Valid vanilla model evidence is consumed above. The three host loader failures require the corrected driver mount; the first changed-source integration proof remains pending.
+- Valid vanilla model and 45/45 aggregate host evidence is consumed above. The first changed-source integration proof remains pending.
 - Contracts' first candidate includes frozen declarations, fixtures and host CTest registration. Integrated build/host/model proof must pass before a checkpoint tag or the next implementation merge.
 - Frontend is active on grammar whitespace, parser/custom-tool preservation and the approved loaded-identity provider; its source inspection found upstream already inserts stable leading/tool boundaries, with regression coverage being added.
 - Exact requested declarations/source lists before shared edits; do not register nonexistent sources on the integration branch.
