@@ -15,9 +15,6 @@ function(ninfer_cuda_archive target)
   set_target_properties(${target} PROPERTIES
     CUDA_SEPARABLE_COMPILATION ON
     CUDA_RESOLVE_DEVICE_SYMBOLS ON)
-  if(WIN32)
-    set_target_properties(${target} PROPERTIES CUDA_RUNTIME_LIBRARY Shared)
-  endif()
   target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
 endfunction()
 
@@ -25,8 +22,5 @@ function(ninfer_cuda_non_rdc_archive target)
   set_target_properties(${target} PROPERTIES
     CUDA_SEPARABLE_COMPILATION OFF
     CUDA_RESOLVE_DEVICE_SYMBOLS OFF)
-  if(WIN32)
-    set_target_properties(${target} PROPERTIES CUDA_RUNTIME_LIBRARY Shared)
-  endif()
   target_compile_options(${target} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>)
 endfunction()
