@@ -30,7 +30,7 @@ They do not implement the store, native codec or Engine adapter.
 
 ### Publication envelope
 
-One generation contains `manifest.json`, `manifest.mac`, `responses.cbor`,
+One native generation contains `manifest.json`, `manifest.mac`, `responses.cbor`,
 `engine/index.cbor`, `checksums.json`, `engine/state/<id>.bin`, and one
 `engine/kv/<pool-id>.bin` for each present KV pool. State IDs and pool IDs are
 unsigned decimal without leading zeroes. Paths are relative ASCII components;
@@ -38,19 +38,21 @@ no empty component, `.`, `..`, slash-at-start, backslash, drive colon, NUL or
 platform alias. Generation names match `[a-z0-9][a-z0-9_-]{0,127}`. `current`
 contains the generation name followed by one LF and is the only publication pointer.
 
-Every manifest field is mandatory; unrecognized fields are rejected in version 3:
+Every manifest field below is mandatory except the explicitly optional `mode`;
+unrecognized fields are rejected in version 3:
 
 | Field | Type and invariant |
 |---|---|
 | `artifact_type` | `"ninfer_session_checkpoint"` |
 | `schema_version` | integer `3` |
+| `mode` | optional; absent means native, the only encoded value is `"responses_only"` |
 | `session_sha256` | 64 lowercase hex digits; exact authenticated target session |
 | `generation` | validated single component; equals directory and current pointer |
 | `created_at_unix_ms` | uint64; ordering is not inferred from wall clock |
 | `runtime_fingerprint` | complete K2 object, exact match |
-| `latest_response_id` | exact endpoint tag, nonempty bounded UTF-8 |
+| `latest_response_id` | exact native endpoint tag, or latest surviving Responses ID in responses-only mode; nonempty bounded UTF-8 |
 | `response_records` | uint64, equals decoded DAG record count |
-| `frontier_tokens`, `restored_tokens` | uint32; `0 < restored_tokens <= frontier_tokens` |
+| `frontier_tokens`, `restored_tokens` | uint32; native: `0 < restored_tokens <= frontier_tokens`; responses-only: both zero |
 | `engine_payload_bytes` | checked uint64 sum of all `engine/` files including index |
 | `payload_bytes` | checked uint64 sum of all `files` entries |
 | `files` | path-sorted unique descriptors `{alignment,bytes,path,sha256}` |
@@ -63,6 +65,35 @@ file count is 4096; configured staging bounds also constrain the index and Respo
 codec. Never truncate a set to satisfy bounds. `manifest.json` and `manifest.mac`
 are excluded from `files`. `checksums.json` is the canonical array of all other file
 descriptors, excluding itself; its descriptor is included in the manifest.
+
+### Authenticated responses-only survivor generations
+
+Schema 3 also supports `mode: "responses_only"` for the surviving Responses DAG
+after a single-record deletion removes its native endpoint or when that endpoint
+cannot be exported. This is a deliberate replay representation, not an empty
+native checkpoint and not a new native codec.
+
+- The generation's payload inventory is exactly `responses.cbor` and `checksums.json`,
+  plus the usual `manifest.json` and `manifest.mac` publication metadata. It contains
+  no `engine/index.cbor`, StateImage or KV file and exposes no Engine Reader.
+- `frontier_tokens`, `restored_tokens` and `engine_payload_bytes` are zero;
+  `payload_bytes` still counts the actual response/checksum files. All native
+  checkpoint statistics are zero, never fabricated continuation evidence.
+- The authenticated snapshot encodes `replay_only: true`. Absent manifest mode and
+  absent snapshot flag retain the existing native representation and false default.
+  The loader cross-checks mode and flag; disagreement is corruption.
+- Origin authentication is mandatory for responses-only save and load even when
+  the generic native import policy is non-strict. Missing key/MAC cannot become
+  an unauthenticated survivor publication.
+- `SessionCheckpointStore::save_responses(snapshot, fingerprint, skip)` requires
+  `snapshot.replay_only`, uses normal staged writes, flushes, atomic publication and
+  quota handling, and does not call Engine export. The complete K2 identity still
+  applies. `covers()` is always false for this mode, and the reclaimability oracle
+  must not return it as a native generation pin.
+
+K4 governs the guarded Responses-only restore and DELETE acknowledgement. A
+subsequent parent request replays the retained transcript; a new completed, stored
+turn can establish a normal native endpoint again.
 
 ### Canonical JSON and MAC
 
@@ -109,7 +140,9 @@ MAC dictionary-guess resistance; council CR-20260831-originauth R1). This is the
 existing CLI floor, not a new security mode. New saves MUST write the MAC. For explicitly
 unauthenticated input, strict origin policy returns `Incompatible/origin_required`
 without mutation; non-strict policy permits the input but records unauthenticated
-origin. A present MAC without a verification key is `Unavailable/origin_key_unavailable`,
+origin. This generic compatibility allowance does not apply to responses-only
+survivor generations, which always require authentic origin. A present MAC without
+a verification key is `Unavailable/origin_key_unavailable`,
 not proof of corruption. A verified mismatch is `Corrupt/origin_mac_mismatch`.
 Production release launch tooling must not exploit the non-strict import allowance
 to omit authentication on newly generated checkpoints.
@@ -233,8 +266,16 @@ The public `Engine` API stays unchanged except integration-owned friendship.
   Engine persistence method or derives identity from admission capacities.
 - `set_pressure_checkpoint_handler(Engine&, shared_ptr<PressureCheckpointHandler>)`
   installs the live store-backed save-before-eviction provider.
-  `notify_checkpoint_progress(Engine&) noexcept` wakes work after observed checkpoint
-  progress; it does not authorize eviction or a speculative retry loop.
+  `notify_checkpoint_progress(Engine&) noexcept` wakes admission/reclamation after
+  checkpoint work completes; the wakeup is not itself observed progress and does
+  not authorize eviction or a retry.
+- `response_stored(Engine&, std::string_view session_sha256, std::string_view tag)
+  noexcept` acknowledges HTTP Responses storage after publication and outside the
+  Responses mutex. It promotes only an actually completed native owner's endpoint
+  in monotonic publication order.
+- `checkpoint_progress(const Engine&) noexcept -> std::uint64_t` reports observed
+  Engine/admission/publication progress separately from the service's completion
+  wakeup. K7 retries must not manufacture a cause change by notifying themselves.
 - `set_reclaimable_session_oracle(Engine&, shared_ptr<const ReclaimableSessionOracle>)`
   installs the trusted store-backed recoverability provider separately from Reader.
   An absent oracle permits no unrelated-session reclaim. Disk metadata, manifest
@@ -295,6 +336,37 @@ Prepared owns a reservation. Normal capacity refusal is not a corruption excepti
 Program receives no HTTP session name. It returns handles only to the Engine, never
 to the disk codec. A preallocated commit returns all handles atomically; misuse of a
 foreign/stale Program is a programming error before publication, not partial success.
+
+### Committed endpoints and pressure outcomes
+
+Submission advances the session's capture epoch, invalidating in-flight export,
+but does not replace the committed checkpoint tag. Native completion associates
+the completed owner's identity; only the subsequent `response_stored` acknowledgement
+promotes that endpoint after HTTP storage. A late handler cannot roll the committed
+tag backward. Named durable owners cannot be consumed by a new unacknowledged
+turn, and cancellation, expiry or abandonment preserves the prior committed
+native endpoint.
+
+`PressureCheckpointVictim::reason` is runtime-only `DurableReason`, default `None`;
+it is not a manifest field or a new serialized enum ordinal. Existing
+`PressureCheckpointOutcome` semantics remain unchanged:
+
+- `Settled` with `reason == None` reports coverage, not a finished proof. Engine
+  must pin and stream-validate the native copy, recheck current authenticated
+  generation/tag evidence, and retain the pins through the destructive worker turn.
+  Failed proof changes the outcome to `Pending` with its typed reason.
+- `Settled` with a reported non-`None` terminal/absent-turn reason retains the
+  existing nonretryable settlement policy; it does not claim byte-validated native
+  recoverability. Responses-only survivors therefore never masquerade as coverage.
+- Retryable failure or still-publishing state remains `Pending`. An unfinished
+  paused request may settle through native replay; a completed native turn still
+  waits for its HTTP publication.
+
+The production pressure callback performs only bounded coordinator bookkeeping
+and enqueuing. Responses/catalog inspection and save work execute on the checkpoint
+thread, not synchronously on the Engine worker. This avoids the worker-to-Responses
+mutex cycle while a K4 commit is queued; it does not claim all native import or
+victim-validation I/O has been moved off the worker.
 
 `Program::validate_checkpoint_import(set, reader, limits)` returns
 `CheckpointValidation{state, reason, stats}` with state `Validated`, `Unavailable`,
@@ -390,7 +462,7 @@ Any Engine pressure reclamation used to make room for this restore obeys K3's
 fresh pinned-reader generation/tag validation at destructive eviction. A stale or missing pin
 preserves the candidate's live state; it cannot be converted into a successful
 restore or a claim that the candidate remains durably recoverable.
-State machine:
+Native-mode state machine:
 
 ```
 Absent/Live -> Guarded -> Verified -> EnginePrepared -> ReplacementBuilt
@@ -407,7 +479,10 @@ any precommit failure -> Aborted (old Engine and Responses state unchanged)
 3. Prepare Engine import outside the Responses mutex. No native/session visibility.
 4. Under Responses mutex recheck guard and no active publication; fully preallocate
    replacement DAG/index/LRU/accounting. Reject foreign-session ID collisions and
-   insufficient capacity without evicting unrelated sessions.
+   insufficient capacity without evicting unrelated sessions. Also reject a loaded
+   generation incompatible with the live endpoint or missing any live target-session
+   record: unchanged post-capture revisions alone do not prove disk is current.
+   Do not compare numeric publication orders across process restarts.
 5. Invoke prepared Engine commit under that mutex. It rechecks epoch and refuses if
    newer live or waiting bindings exist. Engine MUST NOT call back into Responses
    while holding its execution lock (no lock-order inversion).
@@ -416,6 +491,40 @@ any precommit failure -> Aborted (old Engine and Responses state unchanged)
    state, while Responses observers remain blocked until the matching DAG swap.
 7. On failure abort the reservation and replacement; old state remains authoritative.
    A save waiting for a handler uses publication tracking, never sleep-based guesses.
+
+After a newly completed HTTP response has been stored, serving calls
+`CheckpointEngineAccess::response_stored` outside the Responses mutex, then signals
+publication progress. Engine completion alone is not the committed-endpoint
+acknowledgement; this distinction preserves the last savable endpoint when a later
+request never becomes a stored response.
+
+### Survivor restore and durable single-record deletion
+
+For authenticated `mode: "responses_only"` / `replay_only: true`, restore uses the
+same namespace, required-ID, revision, publication, live-lineage freshness and
+capacity guards, but skips native prepare/import entirely. It preallocates and
+atomically publishes only the Responses replacement under the store lock. Successful
+restore retains the replay marker and reports `replay_only: true`; it is not a native
+checkpoint hit. The next parent request reconstructs the transcript through replay.
+
+```
+Absent/Live -> Guarded -> Verified -> ReplacementBuilt -> StorePublished
+any prepublication failure -> Aborted (old Engine and Responses state unchanged)
+```
+
+Single-record DELETE preallocates the survivor lineage and durably publishes its
+replacement generation before erasing the selected RAM record or acknowledging
+success. It preserves undeleted disk-only records as well as RAM survivors; the
+last RAM record is not necessarily the last durable record. Whole-session erase
+is permitted only when neither RAM nor disk has a survivor.
+
+If the deleted record was the native endpoint, or that endpoint is unavailable or
+racing, publish authenticated replay-only survivors rather than inventing native
+state or returning a special leaf-delete conflict. Authorized leaf DELETE retains
+HTTP 200 success semantics; parent/ancestor deletion also preserves undeleted
+addressable survivors. Publication failure preserves previous authority. A new
+completed stored turn establishes the normal endpoint and retires the replay-only
+marker for that lineage; a save/restore of the same survivor endpoint retains it.
 
 Public get/delete/snapshot/export/restore stay in the authenticated session namespace;
 a foreign-session ID is indistinguishable from missing. Raw `prompt_cache_key` is
@@ -456,6 +565,7 @@ specifications move to schema 4; older releases keep their own capability gates.
 |---|---|---|
 | `--max-context N` | same | `engine.max_context` |
 | `--kv-capacity N\|auto` | same (resolved tokens) | `--context-capacity`, `engine.context_capacity`: shared Device KV+State **bytes**, not a numeric rename |
+| no fork equivalent | `--admission-headroom-mib N` (v0.13.1 amendment): explicit admission floor, minimum 256 MiB; omitted retains 1024 MiB | product admission policy, not an alias for Device context capacity |
 | `--device-state-slots N` | same: extra checkpoints beyond active lanes | part of shared `engine.context_capacity`; no independent dev slot knob |
 | `--host-state-slots N` + `--host-kv-mib N` | `--host-context-mib N`, shared Host State/KV/in-flight bytes | `--host-cache-capacity SIZE`, `context_cache.host_capacity` |
 | `--max-private-continuations`, `--max-shared-prefixes`, `--max-long-anchors-per-continuation`, `--max-cache-markers-per-request` | not aliases: upstream resource policy is authoritative; reject obsolete flags | no matching dev fields; admission/retention policy is not identity |
@@ -486,6 +596,24 @@ required in-flight headroom, not an invented constant image size. Dev Device con
 requires native geometry/startup accounting; `auto` remains auto. Preserve effective
 shipped profiles via measured admission, not unsupported aliases. GPU UUID is stable
 controller selection, not cross-GPU inference or checkpoint layout identity.
+
+### v0.13.1 native admission-headroom amendment
+
+`--admission-headroom-mib N` replaces the default 1 GiB admission-headroom floor
+when explicitly supplied. Values below 256 MiB are refused. The calibrated automatic
+headroom remains a lower bound: effective admission headroom is
+`max(configured_floor_bytes, calibrated_headroom_bytes)`, with a 1024 MiB configured
+floor when the option is omitted. Explicit KV capacity does not bypass this policy.
+
+The v0.13.1 native lane specifications set the floor to **640 MiB for RTX 4090**
+and **768 MiB for RTX 3090**. The RTX 5090 profile keeps the default.
+
+Upstream `64d10fbf` applies `max(1 GiB, calibrated_headroom)` even in explicit-capacity
+mode, refusing the shipped 24 GB native shapes by 224,618,240 bytes on RTX 4090 and
+108,762,880 bytes on RTX 3090. The fork's explicit mode subtracted no headroom.
+The explicit floor restores bounded native admission without removing calibration's
+lower bound or reinstating zero-headroom behavior. The floor itself is admission
+policy, excluded from K2; the actual resolved KV capacity remains bound by K2.
 
 ## K6 — durable file I/O and publication acknowledgement
 
@@ -550,6 +678,19 @@ policy, not an equivalence claim to POSIX directory-fsync guarantees on arbitrar
 filesystems. Required file/parent flush or replacement failure still prevents a
 successful publication acknowledgement; no retries mask it.
 
+**v0.13.1 implementation binding:** the native source at `e2ba490ae`, including
+`656a80da1c847d79cf68512c6fef21321a4c7e44`, already implements this class-65,
+handle-anchored core replacement and its post-replacement parent flush. The council's
+pathname-rename finding applies to the frozen v0.13.0 Linux candidate, not that
+native core. K6Windows follow-up `4c8ee39ac5bfa8077ece12c4b8856130d5f2497c`
+routes `WindowsCheckpointFileSystem::atomic_replace_durable` through the same
+`io::replace_path` primitive, retaining its `CheckpointContractError` boundary
+instead of the remaining pathname-based `MoveFileExW` helper.
+Source presence is not Windows execution or crash-durability evidence; native
+qualification must separately exercise the publication path. Successful
+Windows publication acknowledges `dir_sync: "ntfs-write-through"`; POSIX publication
+acknowledges `dir_sync: "fsync"`, including responses-only survivor saves.
+
 A reader pins each accepted read batch's file handles until its writes retire and
 verifies the exact bytes delivered to the consumer. Reopening between batches is
 permitted only through the same confined/no-follow traversal and complete delivered-byte
@@ -587,6 +728,32 @@ to skip eviction-time victim generation/tag revalidation.
 | Admission | `metadata_limit`, `staging_limit`, `capacity`, `quota`, `foreign_session_collision` | old state intact; no unrelated eviction for DAG restore |
 | Availability | `origin_key_unavailable`, `io_unavailable`, `durability_unsupported`, `cancelled` | preserve generation; retry only after cause/progress changes |
 
+### Wired cause-sensitive retries
+
+`AutomaticCheckpointCoordinator` uses `TransientRetryBudget` in the production
+automatic-save/pressure path: at most six retry rearms per completed turn, not an
+unconditional retry loop. Each retry waits for observed progress matching its cause:
+
+| Refusal or wait | Progress that may rearm it |
+|---|---|
+| `transaction_busy`, `tag_mismatch`, `stale_publication`, `stale_revision` | actual Engine or HTTP-publication progress |
+| `capacity` | actual Engine/admission progress |
+| `io_unavailable` | successful storage progress |
+| HTTP response still publishing | HTTP-publication progress only; waiting consumes no save-attempt retry budget |
+
+Every completed coordinator task notifies the Engine, including retryable refusal.
+That completion wakeup is excluded from `checkpoint_progress` and cannot trigger
+its own retry. Unrelated or unchanged progress does not rearm the attempt. A new
+completed turn resets the bounded per-session retry budget; entries are retained
+only while their save/retry bookkeeping needs them.
+
+Exhausted retryable pressure remains `Pending` and does not authorize discarding a
+live continuation. Reported nonretryable refusal or an absent/abandoned publication
+retains the existing `Settled` policy with its non-`None` reason. `None`-reason
+coverage still requires K3's Engine-owned native byte proof. A successful replay-only
+save is not coverage: pressure reports the absence of a native endpoint, rather
+than relabelling replay as a checkpoint hit.
+
 K1's bounded top-level schema probe is the sole pre-origin refusal exception:
 integer `schema_version < 3` yields `incompatible/incompatible_schema` with no
 quarantine, mutation or import even if the MAC is present and invalid. At or above
@@ -606,6 +773,10 @@ or `ntfs-write-through`; absent on failed save or restore (not a fake empty succ
 applicable byte/visibility/durability gates satisfied. Save success means durable
 publication, not merely Engine export. Engine export stats are not a publication ack.
 Receipts may add bounded elapsed durations/counts, never optional identity bypasses.
+An acknowledged responses-only restore adds `replay_only: true` and has zero native
+statistics; `imported` in that receipt denotes guarded Responses publication, not
+native import or reclaimability. Its save still requires authenticated origin and
+the same platform-specific `dir_sync` acknowledgement.
 
 `/v1/ninfer/status` separately uses schema version 2 and preserves the shipped fork's
 field names. Real master counterparts report real sampled values. Fields with no
@@ -657,3 +828,28 @@ The matching `.mac` files and `mac-vectors.json` bind exact bytes and public tes
 key material; RFC 4231 cases independently check HMAC. `ack-{posix,windows}.json`
 demonstrate the two acknowledged durability modes. The C++ test checks nlohmann
 encoding against these same bytes and Unicode/control/integer boundary vectors.
+
+## Deferred findings
+
+Council `CR-20261025T085950Z-04b603aa` deferred the following P2 findings from the
+v0.13.0 runtime cut to the next runtime release. These are ledger dispositions,
+not new exceptions to K1–K7 or claims that the follow-up work has been qualified.
+The overlapping Windows findings describe frozen candidate `04b603aa`, not the
+current native core; their shared v0.13.1 implementation/qualification follow-up
+is recorded in K6.
+
+| Council finding | Deferred scope |
+|---|---|
+| `claude-R2` | Move bounded restore reads, hashing and victim verification off the Engine execution path without violating native ownership/thread affinity; current finite I/O may stall decode. |
+| `claude-R3` | Complete and qualify Windows handle-anchored replacement with the required file/parent flushes rather than the frozen Linux candidate's pathname implementation. |
+| `claude-U3` | Supply Windows execution evidence for pin-sharing, durable replacement and restore; Linux receipts do not establish native operation success. |
+| `claude-mythos-R4` | Close the frozen Windows source/K6 mismatch with anchored rename, reparse/identity checks and native regression evidence. |
+| `daybreak-blue-R4` | Bind runtime-image workflow base-image selection to the selected source's runtime-base receipt, not only repository/digest syntax. |
+| `gemini-argon-R3` | Qualify the native pin-sharing and replacement policy instead of carrying the frozen candidate's deny-WRITE/pathname behavior. |
+| `gemini-argon-R4` | Retire superseded `durable_session`/`checkpoint_tag` owner metadata so stale tags do not unnecessarily refuse Host-memory reclamation. |
+| `gpt-astra-R2` | Bound Engine per-session publication-gate retention through lifecycle-safe retirement; source shows retention under session churn, not an executed memory-exhaustion proof. |
+| `gpt-astra-R3` | Prove the native handle-anchored replacement's post-rename parent flush and truthful `ntfs-write-through` acknowledgement; standalone directory no-op is not that flush. |
+
+Closed live-lineage rollback findings, rejected publication-permission claims and
+the accepted release-isolated-root boundary are not deferred P2 work. P3 residuals
+are outside this appendix's requested scope.
