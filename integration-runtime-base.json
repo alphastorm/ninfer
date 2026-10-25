@@ -1,0 +1,90 @@
+{
+  "schema": "ninfer-integration-runtime-base/1",
+  "source": "12ff96e000db77a9f4b0c95942b38170d031e0eb",
+  "provider": "35720754d5d604e032799b8a73877850a942774b",
+  "image": "sha256:6e2e60f39adaa2fb1724570db31eaddc84fa868b151b0efbdc4607799502b380",
+  "nvidia_material": "sha256:bff001d3257971cc4752e15ac2d354befa70995ded8e141741ade50569fc192e",
+  "build": {
+    "exit": 0,
+    "seconds": 38,
+    "target": "runtime-base"
+  },
+  "inventory": {
+    "exit": 0,
+    "packages": [
+      {
+        "name": "ca-certificates",
+        "version": "20260816ubuntu0.24.04.1",
+        "architecture": "all"
+      },
+      {
+        "name": "libavcodec60:amd64",
+        "version": "7:6.1.1-3ubuntu5",
+        "architecture": "amd64"
+      },
+      {
+        "name": "libavformat60:amd64",
+        "version": "7:6.1.1-3ubuntu5",
+        "architecture": "amd64"
+      },
+      {
+        "name": "libavutil58:amd64",
+        "version": "7:6.1.1-3ubuntu5",
+        "architecture": "amd64"
+      },
+      {
+        "name": "libcurl4t64:amd64",
+        "version": "8.5.0-2ubuntu10.16",
+        "architecture": "amd64"
+      },
+      {
+        "name": "libhwloc15:amd64",
+        "version": "2.10.0-1build1",
+        "architecture": "amd64"
+      },
+      {
+        "name": "libjpeg-turbo8:amd64",
+        "version": "2.1.5-2ubuntu2",
+        "architecture": "amd64"
+      },
+      {
+        "name": "libswscale7:amd64",
+        "version": "7:6.1.1-3ubuntu5",
+        "architecture": "amd64"
+      },
+      {
+        "name": "liburing2:amd64",
+        "version": "2.5-1build1",
+        "architecture": "amd64"
+      }
+    ]
+  },
+  "jobs": [
+    {
+      "id": "20261025T074158Z-int-runtime-base-12ff96e0-589619",
+      "exit": 1,
+      "seconds": 12,
+      "failure": "Docker credential helper WSL vsock timeout before build",
+      "resolution": "isolated empty holder-owned DOCKER_CONFIG"
+    },
+    {
+      "id": "20261025T074343Z-int-runtime-base-clean-config-12ff96e0-589896",
+      "exit": 1,
+      "seconds": 39,
+      "build_exit": 0,
+      "inventory_exit": 0,
+      "failure": "receipt parser treated NVIDIA entrypoint banner as tab-separated package row",
+      "resolution": "recovered all nine successful dpkg rows from preserved stdout without rebuilding or rerunning inventory",
+      "cache_warning": "optional registry cache importer could not pull local-only build image; stage built successfully"
+    }
+  ],
+  "leftover_containers": 0,
+  "unowned_containers": 0,
+  "passed": true,
+  "default_target": {
+    "executed": false,
+    "disposition": "Main-authorized deferral to cut workflows; runtime-base build plus actual package inventory and static stage equivalence accepted",
+    "reason": "no external prebuilt-binary override in Dockerfile"
+  },
+  "published": false
+}
