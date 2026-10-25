@@ -1,0 +1,385 @@
+{
+  "schema": "ninfer-linux-architecture-build/1",
+  "source_commit": "caa110f7456c2f0d28de6e5ed3f9068c0e3c5706",
+  "architecture": "sm_86",
+  "exit_code": 0,
+  "ops_tests": 92,
+  "binaries": [
+    {
+      "name": "apps/ninfer-serve",
+      "bytes": 345527952
+    },
+    {
+      "name": "tests/ninfer_qwen3_5_loading_real_test",
+      "bytes": 332983304
+    },
+    {
+      "name": "tests/ninfer_bench_fixtures_test",
+      "bytes": 270696
+    },
+    {
+      "name": "tests/ninfer_architecture_contract_test",
+      "bytes": 131800
+    },
+    {
+      "name": "tests/ninfer_add_bias_test",
+      "bytes": 331705640
+    },
+    {
+      "name": "tests/ninfer_gelu_test",
+      "bytes": 331705848
+    },
+    {
+      "name": "tests/ninfer_silu_mul_test",
+      "bytes": 331710480
+    },
+    {
+      "name": "tests/ninfer_residual_add_test",
+      "bytes": 331710320
+    },
+    {
+      "name": "tests/ninfer_sum_contributions_test",
+      "bytes": 331708984
+    },
+    {
+      "name": "tests/ninfer_sigmoid_mul_test",
+      "bytes": 331714456
+    },
+    {
+      "name": "tests/ninfer_rmsnorm_pack_tail_test",
+      "bytes": 331752432
+    },
+    {
+      "name": "tests/ninfer_l2norm_test",
+      "bytes": 331709784
+    },
+    {
+      "name": "tests/ninfer_kimi_delta_attention_test",
+      "bytes": 331843792
+    },
+    {
+      "name": "tests/ninfer_causal_conv1d_silu_test",
+      "bytes": 331843136
+    },
+    {
+      "name": "tests/ninfer_layer_norm_test",
+      "bytes": 331709880
+    },
+    {
+      "name": "tests/ninfer_embedding_test",
+      "bytes": 331794416
+    },
+    {
+      "name": "tests/ninfer_argmax_test",
+      "bytes": 331709672
+    },
+    {
+      "name": "tests/ninfer_rope_test",
+      "bytes": 331758880
+    },
+    {
+      "name": "tests/ninfer_embedding_interpolate_add_test",
+      "bytes": 331714600
+    },
+    {
+      "name": "tests/ninfer_sampling_test",
+      "bytes": 331767816
+    },
+    {
+      "name": "tests/ninfer_scalar_test",
+      "bytes": 331705312
+    },
+    {
+      "name": "tests/ninfer_cast_test",
+      "bytes": 331700824
+    },
+    {
+      "name": "tests/ninfer_prepare_ragged_prefix_test",
+      "bytes": 331755528
+    },
+    {
+      "name": "tests/ninfer_scatter_test",
+      "bytes": 331763808
+    },
+    {
+      "name": "tests/ninfer_scatter_bf16_batch_test",
+      "bytes": 331759488
+    },
+    {
+      "name": "tests/ninfer_target_logprobs_test",
+      "bytes": 331723000
+    },
+    {
+      "name": "tests/ninfer_position_test",
+      "bytes": 331718320
+    },
+    {
+      "name": "tests/ninfer_linear_topk_test",
+      "bytes": 331784600
+    },
+    {
+      "name": "tests/ninfer_candidate_selector_test",
+      "bytes": 331797760
+    },
+    {
+      "name": "tests/ninfer_softmax_attention_test",
+      "bytes": 332683272
+    },
+    {
+      "name": "tests/ninfer_sliding_window_attention_test",
+      "bytes": 331898152
+    },
+    {
+      "name": "tests/ninfer_kv_cache_append_test",
+      "bytes": 331884320
+    },
+    {
+      "name": "tests/ninfer_rmsnorm_rope_test",
+      "bytes": 331754000
+    },
+    {
+      "name": "tests/ninfer_context_kv_materialize_test",
+      "bytes": 331829648
+    },
+    {
+      "name": "tests/ninfer_prepare_masked_block_test",
+      "bytes": 331725672
+    },
+    {
+      "name": "tests/ninfer_moe_test",
+      "bytes": 332251448
+    },
+    {
+      "name": "tests/ninfer_moe_cpu_groupwise_int_test",
+      "bytes": 469584
+    },
+    {
+      "name": "tests/ninfer_moe_cpu_nvfp4_test",
+      "bytes": 448976
+    },
+    {
+      "name": "tests/ninfer_moe_cpu_groupwise_int_avx2_test",
+      "bytes": 469584
+    },
+    {
+      "name": "tests/ninfer_moe_cpu_nvfp4_avx2_test",
+      "bytes": 448976
+    },
+    {
+      "name": "tests/ninfer_moe_cpu_groupwise_int_fma_test",
+      "bytes": 469584
+    },
+    {
+      "name": "tests/ninfer_moe_cpu_nvfp4_fma_test",
+      "bytes": 448976
+    },
+    {
+      "name": "tests/ninfer_moe_block_scaled_test",
+      "bytes": 18072
+    },
+    {
+      "name": "tests/ninfer_mtp_pack_test",
+      "bytes": 331709656
+    },
+    {
+      "name": "tests/ninfer_mtp_round_test",
+      "bytes": 331709624
+    },
+    {
+      "name": "tests/ninfer_speculative_round_test",
+      "bytes": 331859192
+    },
+    {
+      "name": "tests/ninfer_dynamic_grouped_conv_prepare_test",
+      "bytes": 331778136
+    },
+    {
+      "name": "tests/ninfer_linear_dynamic_grouped_conv_add_test",
+      "bytes": 331775296
+    },
+    {
+      "name": "tests/ninfer_linear_q4_a16_test",
+      "bytes": 331835416
+    },
+    {
+      "name": "tests/ninfer_linear_q5_a16_test",
+      "bytes": 331835416
+    },
+    {
+      "name": "tests/ninfer_linear_q6_a16_test",
+      "bytes": 331827224
+    },
+    {
+      "name": "tests/ninfer_linear_q8_a16_test",
+      "bytes": 331840176
+    },
+    {
+      "name": "tests/ninfer_linear_nvfp4_a16_test",
+      "bytes": 331827576
+    },
+    {
+      "name": "tests/ninfer_linear_nvfp4_a4_test",
+      "bytes": 331831552
+    },
+    {
+      "name": "tests/ninfer_linear_nvfp4_bank_test",
+      "bytes": 331827032
+    },
+    {
+      "name": "tests/ninfer_linear_fp8_a16_test",
+      "bytes": 331836144
+    },
+    {
+      "name": "tests/ninfer_linear_fp8_a8_test",
+      "bytes": 331831312
+    },
+    {
+      "name": "tests/ninfer_linear_bf16_a16_test",
+      "bytes": 331859432
+    },
+    {
+      "name": "tests/ninfer_linear_split_test",
+      "bytes": 331894656
+    },
+    {
+      "name": "tests/ninfer_linear_split_multi_output_test",
+      "bytes": 331917048
+    },
+    {
+      "name": "tests/ninfer_linear_split_two_output_test",
+      "bytes": 331881664
+    },
+    {
+      "name": "tests/ninfer_qsa_tail_extract_test",
+      "bytes": 331806560
+    },
+    {
+      "name": "tests/ninfer_qsa_prepare_test",
+      "bytes": 331849072
+    },
+    {
+      "name": "tests/ninfer_qsa_indexer_test",
+      "bytes": 331810576
+    },
+    {
+      "name": "tests/ninfer_qsa_sparse_gqa_test",
+      "bytes": 331880768
+    },
+    {
+      "name": "tests/ninfer_linear_add_q4_a16_test",
+      "bytes": 331802952
+    },
+    {
+      "name": "tests/ninfer_linear_add_q5_a16_test",
+      "bytes": 331803048
+    },
+    {
+      "name": "tests/ninfer_linear_add_bf16_a16_test",
+      "bytes": 331803208
+    },
+    {
+      "name": "tests/ninfer_linear_add_q8_a16_test",
+      "bytes": 331811584
+    },
+    {
+      "name": "tests/ninfer_linear_add_nvfp4_test",
+      "bytes": 331803040
+    },
+    {
+      "name": "tests/ninfer_linear_add_fp8_test",
+      "bytes": 331803344
+    },
+    {
+      "name": "tests/ninfer_linear_pair_q8_a16_test",
+      "bytes": 331788096
+    },
+    {
+      "name": "tests/ninfer_linear_swiglu_q4_a16_test",
+      "bytes": 331797336
+    },
+    {
+      "name": "tests/ninfer_linear_swiglu_q8_a16_test",
+      "bytes": 331797336
+    },
+    {
+      "name": "tests/ninfer_linear_swiglu_nvfp4_test",
+      "bytes": 331797336
+    },
+    {
+      "name": "tests/ninfer_linear_swiglu_fp8_test",
+      "bytes": 331797440
+    },
+    {
+      "name": "tests/ninfer_gdn_input_proj_conv_snapshot_test",
+      "bytes": 332057568
+    },
+    {
+      "name": "tests/ninfer_gdn_input_proj_conv_record_test",
+      "bytes": 331908648
+    },
+    {
+      "name": "tests/ninfer_ple_gate_test",
+      "bytes": 331803680
+    },
+    {
+      "name": "tests/ninfer_ple_conv_test",
+      "bytes": 331799464
+    },
+    {
+      "name": "tests/ninfer_ple_state_extract_test",
+      "bytes": 331772744
+    },
+    {
+      "name": "tests/ninfer_gated_delta_net_test",
+      "bytes": 331855560
+    },
+    {
+      "name": "tests/ninfer_gated_delta_net_replay_record_test",
+      "bytes": 331750096
+    },
+    {
+      "name": "tests/ninfer_gdn_replay_fold_test",
+      "bytes": 331927520
+    },
+    {
+      "name": "tests/ninfer_rmsnorm_test",
+      "bytes": 331786040
+    },
+    {
+      "name": "tests/ninfer_gated_rmsnorm_test",
+      "bytes": 331773976
+    },
+    {
+      "name": "tests/ninfer_gdn_control_test",
+      "bytes": 331875160
+    },
+    {
+      "name": "tests/ninfer_gdn_control_proj_test",
+      "bytes": 331880488
+    },
+    {
+      "name": "tests/ninfer_gdn_norm_control_proj_test",
+      "bytes": 331880496
+    },
+    {
+      "name": "tests/ninfer_hc_expand_norm_test",
+      "bytes": 331795680
+    },
+    {
+      "name": "tests/ninfer_hc_grouped_rmsnorm_test",
+      "bytes": 331795688
+    },
+    {
+      "name": "tests/ninfer_hc_combine_test",
+      "bytes": 331795680
+    },
+    {
+      "name": "tests/ninfer_hc_combine_norm_test",
+      "bytes": 331795680
+    },
+    {
+      "name": "tests/ninfer_hc_mix_test",
+      "bytes": 331815104
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "schema": "ninfer-native-architecture-diagnostic/1",
+  "source_commit": "47ebc3824b8c32112458eb013e5d4bb20c8b98f6",
+  "architecture": "sm_89",
+  "gpu": "RTX 4090",
+  "acceptance_pass": false,
+  "checks_executed": 96,
+  "exit_statuses_captured": false,
+  "harness_defect": "Windows PowerShell Start-Process returned null ExitCode after WaitForExit; all 96 checks remain unqualified, regardless of their stdout.",
+  "harness_correction": "Construct System.Diagnostics.Process directly and retain it through WaitForExit. Bounded host-only probes captured the expected exit codes 0 and 77.",
+  "kernel_failure": {
+    "test": "ninfer_linear_swiglu_fp8_test",
+    "stderr": "LinearSwiGLU FP8 correctness: cudaDeviceSynchronize: an illegal memory access was encountered",
+    "owner": "C2",
+    "correction_commit": "a709f895db658c86b210efff3a56af31bfb28ef1",
+    "cause": "The ordinary-MMA schedule inherited 32 TMA producer threads; the collective SwiGLU epilogue subtracted the nonexistent producer warp from thread indices. The native adapter now explicitly uses zero producer threads."
+  },
+  "selected_mtp_loader_stdout_observation": {
+    "device_bytes": 17901798400,
+    "host_bytes": 0,
+    "h2d_bytes": 17901792256,
+    "mtp_selected": 1,
+    "draft_selected": 0,
+    "draft_weights": 0,
+    "formal_pass": false
+  },
+  "server_decode_attempted": false,
+  "gpu_released": true
+}

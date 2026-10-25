@@ -91,7 +91,8 @@ void launch_nvfp4_a16_sliced_k_mma(const Nvfp4A16Operands& p, Output output, Epi
     const int bytes       = common::prepare_shared<Schedule::kSharedBytes, kernel>();
     common::for_each_token_slice(p.tokens, capacity, [&](int offset, int count) {
         const dim3 grid(p.rows / Schedule::kBlockRows, common::div_up(count, capacity));
-        kernel<<<grid, Schedule::kThreads, bytes, stream>>>(p, output, epilogue, rows, offset);
+        nvfp4_a16_sliced_k_mma_kernel<Schedule, Output, Epilogue, Rows>
+            <<<grid, Schedule::kThreads, bytes, stream>>>(p, output, epilogue, rows, offset);
         CUDA_CHECK(cudaGetLastError());
     });
 }

@@ -1,0 +1,19 @@
+{
+  "schema": "ninfer-native-build/1",
+  "source_commit": "5e2210ae65213149a79a4a3039eabbc8f1133c8c",
+  "architecture": "sm_86",
+  "build_scope": "server-only",
+  "exit_code": 0,
+  "wall_seconds": 98.8162215,
+  "ops_tests": 0,
+  "tests_executed": 0,
+  "prior_ops_source": "47ebc3824b8c32112458eb013e5d4bb20c8b98f6",
+  "prior_ops_receipts_unchanged": true,
+  "binaries": [
+    {
+      "name": "ninfer-serve.exe",
+      "bytes": 327495168,
+      "sha256": "a23871878fb74a459ae5fabe38e7afd38c9be22ab4bc8a1ed12b7e32548c30e7"
+    }
+  ]
+}

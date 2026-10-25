@@ -26,6 +26,8 @@ void launch_fp8_a8_mma(const Fp8A8Operands&, Output, Epilogue, cudaStream_t, Row
 template <class Schedule>
 struct Fp8Sm89MmaSchedule : Schedule {
     static constexpr bool kTmaSwizzle = false;
+    // Ordinary MMA has no dedicated TMA producer warp, including in collective epilogues.
+    static constexpr int kProducerThreads = 0;
     static constexpr int kThreads = Schedule::kWarps * 32;
     static constexpr int kSharedBytes = Schedule::kStorageBytes;
 };

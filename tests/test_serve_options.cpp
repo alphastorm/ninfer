@@ -234,6 +234,42 @@ int main() {
     failures += check(defaults.kv_capacity.mode == ninfer::KvCapacityMode::Explicit &&
                           defaults.kv_capacity.explicit_tokens == defaults.max_context,
                       "default KV capacity does not follow max context");
+    failures += check(!defaults.admission_headroom_bytes,
+                      "default admission headroom was unexpectedly overridden");
+    for (const std::size_t mib : {256U, 640U, 768U, 1024U}) {
+        const auto configured_headroom = parse({"ninfer-serve", "model.ninfer",
+                                                "--admission-headroom-mib", std::to_string(mib)});
+        failures += check(configured_headroom.admission_headroom_bytes == mib * (1ULL << 20),
+                          "admission headroom was not preserved in bytes");
+        failures += check(configured_headroom.kv_capacity.automatic_headroom_bytes == 0,
+                          "admission headroom changed explicit KV policy");
+    }
+    for (const auto* value : {"0", "255", "-1", "256.5", "invalid", "18446744073709551616"}) {
+        bool rejected = false;
+        try {
+            (void)parse({"ninfer-serve", "model.ninfer", "--admission-headroom-mib", value});
+        } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "invalid admission headroom was accepted");
+    }
+    for (const auto& arguments : std::vector<std::vector<std::string>>{
+             {"ninfer-serve", "model.ninfer", "--admission-headroom-mib"},
+             {"ninfer-serve", "model.ninfer", "--admission-headroom-mib",
+              std::to_string(std::numeric_limits<std::size_t>::max() / (1ULL << 20) + 1)}}) {
+        bool rejected = false;
+        try {
+            (void)parse(arguments);
+        } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "missing or overflowing admission headroom was accepted");
+    }
+    const auto automatic_headroom = parse({"ninfer-serve", "model.ninfer", "--kv-capacity", "auto",
+                                           "--admission-headroom-mib", "640"});
+    failures += check(automatic_headroom.admission_headroom_bytes == 640ULL * 1024 * 1024 &&
+                          automatic_headroom.kv_capacity.automatic_headroom_bytes ==
+                              ninfer::kDefaultKvCapacityHeadroomBytes,
+                      "admission headroom weakened the independent automatic KV lower bound");
+    failures += check(serve_usage_text("ninfer-serve").find("--admission-headroom-mib") !=
+                          std::string::npos,
+                      "serve help omits the admission headroom floor");
     failures += check(!defaults.context_cache.host_capacity_bytes.has_value(),
                       "default Host context capacity was resolved before Engine startup");
     failures += check(
