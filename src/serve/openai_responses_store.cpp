@@ -207,7 +207,7 @@ bool OpenAIResponsesStore::erase_for_session(const std::string& id,
 bool OpenAIResponsesStore::erase_for_session_durably(
     const std::string& id, const std::string& session,
     const std::function<bool(const std::optional<OpenAIResponseStoreSnapshot>&)>& publish,
-    runtime::DurableReason* refusal) {
+    runtime::DurableReason* refusal, const OpenAIResponseStoreSnapshot* persisted) {
     using Reason = runtime::DurableReason;
     if (refusal) { *refusal = Reason::None; }
     std::lock_guard lock(mutex_);
@@ -215,15 +215,52 @@ bool OpenAIResponsesStore::erase_for_session_durably(
     if (found == records_.end() || !session_matches(found->second.response->client_session_sha256, session)) {
         return false;
     }
-    const auto snapshot = snapshot_locked(session, id);
+    auto snapshot = snapshot_locked(session, id);
     if (snapshot && newest_locked(session)->response->id == id) {
-        if (refusal) { *refusal = Reason::TagMismatch; }
-        return false;
+        snapshot->replay_only = true;
     }
+    // LRU eviction is not DELETE. Retain disk-only survivors too, so deleting the last
+    // addressable RAM record cannot accidentally erase an otherwise durable session.
+    if (persisted) {
+        if (!credential_equal(persisted->client_session_sha256, session)) {
+            if (refusal) { *refusal = Reason::InvalidManifest; }
+            return false;
+        }
+        std::vector<StoredOpenAIResponse> retained;
+        for (const auto& record : persisted->records) {
+            if (record.id == id) { continue; }
+            if (!snapshot || std::none_of(snapshot->records.begin(), snapshot->records.end(),
+                [&](const auto& live) { return live.id == record.id; })) { retained.push_back(record); }
+        }
+        if (!retained.empty()) {
+            if (retained.size() + (snapshot ? snapshot->records.size() : 0) > max_records_) {
+                if (refusal) { *refusal = Reason::Capacity; }
+                return false;
+            }
+            if (!snapshot) {
+                snapshot.emplace();
+                snapshot->client_session_sha256 = session;
+                snapshot->latest_response_id = retained.back().id;
+                snapshot->replay_only = true;
+            } else {
+                for (auto& record : snapshot->records) { retained.push_back(std::move(record)); }
+            }
+            snapshot->records = std::move(retained);
+            for (std::size_t i = 0; i < snapshot->records.size(); ++i) {
+                snapshot->records[i].publication_order = i + 1;
+            }
+        }
+        if (snapshot && persisted->replay_only &&
+            snapshot->latest_response_id == persisted->latest_response_id) { snapshot->replay_only = true; }
+    }
+    std::string replay_endpoint = snapshot && snapshot->replay_only ? snapshot->latest_response_id : "";
     if (!publish || !publish(snapshot)) { return false; }
     // Publication may wait for the Engine worker. Its pressure callback never takes this mutex.
     // All allocating work and durable acknowledgement precede the invariant-preserving erase.
     erase_locked(id);
+    if (const auto revision = sessions_.find(session); revision != sessions_.end()) {
+        revision->second.replay_endpoint.swap(replay_endpoint);
+    }
     return true;
 }
 
@@ -369,6 +406,9 @@ OpenAIResponsesStore::snapshot_locked(std::string_view session, std::string_view
     OpenAIResponseStoreSnapshot snapshot;
     snapshot.client_session_sha256.assign(session);
     snapshot.latest_response_id = ordered.back()->response->id;
+    const auto revision = sessions_.find(snapshot.client_session_sha256);
+    snapshot.replay_only = revision != sessions_.end() &&
+                           revision->second.replay_endpoint == snapshot.latest_response_id;
     snapshot.records.reserve(ordered.size());
     for (const Entry* entry : ordered) {
         snapshot.records.push_back(*entry->response);
@@ -605,6 +645,7 @@ bool OpenAIResponsesStore::restore_session(OpenAIResponseStoreSnapshot snapshot,
         }
         if (replacement.records_.size() > max_records_ ||
             replacement.current_bytes_ > max_bytes_) { return reject(Reason::Capacity); }
+        std::string replay_endpoint = snapshot.replay_only ? snapshot.latest_response_id : "";
         // The caller retains its full K3 result. A false external commit must not be relabelled
         // as a store failure; refusal remains None and the K3 reason is authoritative.
         if (!commit_external()) { return false; }
@@ -613,6 +654,7 @@ bool OpenAIResponsesStore::restore_session(OpenAIResponseStoreSnapshot snapshot,
         live_context_references_.swap(replacement.live_context_references_);
         std::swap(current_bytes_, replacement.current_bytes_);
         revision->second.records = snapshot.records.size();
+        revision->second.replay_endpoint.swap(replay_endpoint);
         ++revision->second.revision;
         publication_changed_.notify_all();
         return true;
