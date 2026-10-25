@@ -22,6 +22,38 @@ static_assert(std::is_nothrow_move_constructible_v<DurableEngineImport>);
 static_assert(std::is_nothrow_move_assignable_v<DurableEngineImport>);
 static_assert(std::is_same_v<DurableLocalId, std::uint32_t>);
 
+static_assert(durable_reason_name(DurableReason::None) == "none");
+static_assert(durable_reason_name(DurableReason::StoreDisabled) == "store_disabled");
+static_assert(durable_reason_name(DurableReason::CacheDisabled) == "cache_disabled");
+static_assert(durable_reason_name(DurableReason::NoSessionRecords) == "no_session_records");
+static_assert(durable_reason_name(DurableReason::EmptyTag) == "empty_tag");
+static_assert(durable_reason_name(DurableReason::SessionNotIndexed) == "session_not_indexed");
+static_assert(durable_reason_name(DurableReason::TransactionBusy) == "transaction_busy");
+static_assert(durable_reason_name(DurableReason::TagMismatch) == "tag_mismatch");
+static_assert(durable_reason_name(DurableReason::StalePublication) == "stale_publication");
+static_assert(durable_reason_name(DurableReason::StaleRevision) == "stale_revision");
+static_assert(durable_reason_name(DurableReason::UnsupportedCodec) == "unsupported_codec");
+static_assert(durable_reason_name(DurableReason::IncompatibleSchema) == "incompatible_schema");
+static_assert(durable_reason_name(DurableReason::FingerprintMismatch) == "fingerprint_mismatch");
+static_assert(durable_reason_name(DurableReason::OriginRequired) == "origin_required");
+static_assert(durable_reason_name(DurableReason::OriginKeyUnavailable) == "origin_key_unavailable");
+static_assert(durable_reason_name(DurableReason::OriginMacMismatch) == "origin_mac_mismatch");
+static_assert(durable_reason_name(DurableReason::InvalidManifest) == "invalid_manifest");
+static_assert(durable_reason_name(DurableReason::InvalidIndex) == "invalid_index");
+static_assert(durable_reason_name(DurableReason::PayloadSizeMismatch) == "payload_size_mismatch");
+static_assert(durable_reason_name(DurableReason::PayloadDigestMismatch) == "payload_digest_mismatch");
+static_assert(durable_reason_name(DurableReason::MetadataLimit) == "metadata_limit");
+static_assert(durable_reason_name(DurableReason::StagingLimit) == "staging_limit");
+static_assert(durable_reason_name(DurableReason::Capacity) == "capacity");
+static_assert(durable_reason_name(DurableReason::Quota) == "quota");
+static_assert(durable_reason_name(DurableReason::ForeignSessionCollision) == "foreign_session_collision");
+static_assert(durable_reason_name(DurableReason::RequiredResponseMissing) == "required_response_missing");
+static_assert(durable_reason_name(DurableReason::IoUnavailable) == "io_unavailable");
+static_assert(durable_reason_name(DurableReason::DurabilityUnsupported) == "durability_unsupported");
+static_assert(durable_reason_name(DurableReason::Cancelled) == "cancelled");
+static_assert(durable_reason_name(static_cast<DurableReason>(255)) == "unknown");
+static_assert(noexcept(durable_reason_name(DurableReason::StalePublication)));
+
 int main(int argc, char** argv) {
     try {
         if (argc != 2) throw std::runtime_error("expected durable fixture directory");

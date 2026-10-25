@@ -457,7 +457,10 @@ never silently skip authentication. No new dependency is authorized by this cont
 ## K7 — result, error and receipt taxonomy
 
 Enums in `durable_engine_api.h` use the stable snake_case form of their names on the
-wire. `none` appears only with success. Store load states are `available`, `missing`,
+wire. The constexpr `durable_reason_name(DurableReason)` helper beside the enum is
+the single spelling authority for reasons in diagnostics and receipts. Its `unknown`
+fallback diagnoses an invalid enum value and is not a valid wire reason.
+`none` appears only with success. Store load states are `available`, `missing`,
 `incompatible`, `corrupt`, `unavailable`; export is `exported`, `refused`, `stale`;
 prepare is `prepared`; import is `imported`, `capacity_refused`, `corrupt`,
 `identity_mismatch`, `policy_disabled`. A prepared reservation is never an import ack.
