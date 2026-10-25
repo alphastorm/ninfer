@@ -1,0 +1,39 @@
+{
+  "schema_version": 1,
+  "experiment": "S1",
+  "status": "completed",
+  "source_commit": "60a95b0e91e4eee32b6982ccd9c6b27161659b5d",
+  "gpu": "NVIDIA GeForce RTX 5090, 621.01",
+  "checks": [
+    {
+      "test": "ninfer_cli_options_test",
+      "exit_code": 0,
+      "seconds": 0.002
+    },
+    {
+      "test": "ninfer_serve_options_test",
+      "exit_code": 0,
+      "seconds": 0.003
+    },
+    {
+      "test": "ninfer_request_log_test",
+      "exit_code": 0,
+      "seconds": 0.026
+    },
+    {
+      "test": "ninfer_copy_proposals_test",
+      "exit_code": 0,
+      "seconds": 5.621
+    },
+    {
+      "test": "ninfer_qwen3_5_native_transactions_test dflash2",
+      "exit_code": 0,
+      "seconds": 17.462
+    }
+  ],
+  "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+  "runtime_image_id": "sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
+  "elapsed_seconds": 895.063,
+  "error_class": null,
+  "raw_content_included": false
+}

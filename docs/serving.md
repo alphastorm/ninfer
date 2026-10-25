@@ -1067,8 +1067,10 @@ rejection/error records rather than successful constraint outcomes.
 
 `request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
 as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,
-`drafted_tokens`, `accepted_tokens`, `fallback_steps`, and `accepted_per_position`. Rates can be
-derived downstream from raw token counts and seconds instead of rounded stderr strings.
+`drafted_tokens`, `accepted_tokens`, `fallback_steps`, `ngram_rounds`, `ngram_drafted_tokens`,
+`ngram_accepted_tokens`, and the neural-only `accepted_per_position`. Copy counters are subsets of
+the corresponding verification totals and remain zero when copy drafting is disabled. Rates can
+be derived downstream from raw token counts and seconds instead of rounded stderr strings.
 `generation.scheduling` records preemptions, snapshot/replay restores, replayed tokens, paused time
 and request-owned transfer bytes. Replay rebuilds committed state without adding new output usage.
 
