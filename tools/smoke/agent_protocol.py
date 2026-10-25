@@ -444,7 +444,13 @@ def streaming_and_session_checks(
     session_a: str | None,
     session_b: str | None,
 ) -> tuple[str, str, int, str | None, str | None]:
-    messages = [{"role": "user", "content": "Reply with one short word."}]
+    prompt = "Reply with one short word."
+    if session_a is not None and session_b is not None:
+        # Root prefill legitimately wins the cost comparison for a tiny prompt.
+        # Exercise private replay with meaningful user context, not public/system padding.
+        context = "Private user context:" + " durable" * 1600
+        prompt = f"{context}\n\n{prompt}"
+    messages = [{"role": "user", "content": prompt}]
     common: dict[str, Any] = {
         "model": model,
         "messages": messages,

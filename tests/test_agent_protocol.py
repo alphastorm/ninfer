@@ -149,6 +149,78 @@ class BatterySelectionTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
 
 
+class SessionReplayTests(unittest.TestCase):
+    @staticmethod
+    def status(path: str, decode: int) -> dict:
+        return {
+            'identity': {'fixture_secret': 'do-not-log'},
+            'scheduler': dict(max_concurrency=1, running=0, prefilling=0, decode_ready=0,
+                              waiting=0, materializing=0, capture_pending=0,
+                              committed_decode_tokens=decode, computed_prefill_tokens=1600),
+            'cache': {
+                'last_selection': {'path': path, 'frontier_tokens': 1590,
+                                   'fixture_secret': 'do-not-log'},
+                'reused_prompt_tokens': 1590,
+                'device_state': {'occupied': 3, 'capacity': 3},
+                'fixture_secret': 'do-not-log',
+            },
+        }
+
+    def replay(self, repeat_path: str, isolated_path: str = 'root') -> tuple:
+        usage = {
+            'prompt_tokens': 1600, 'completion_tokens': 2, 'total_tokens': 1602,
+            'prompt_tokens_details': {'cached_tokens': 0},
+            'completion_tokens_details': {'reasoning_tokens': 0},
+        }
+        response = {
+            'choices': [{'message': {'content': 'Yes'}, 'finish_reason': 'stop'}],
+            'usage': usage,
+        }
+        replies = [
+            response, self.status('root', 10), self.status(repeat_path, 11),
+            response, self.status(isolated_path, 12),
+        ]
+        streamed_usage = {**usage, 'prompt_tokens_details': {'cached_tokens': 1590}}
+        with patch.object(protocol, 'json_response', side_effect=replies), \
+             patch.object(protocol, 'request'), \
+             patch.object(protocol, 'parse_openai_stream',
+                          return_value=('Yes', '', 'stop', streamed_usage)):
+            return protocol.streaming_and_session_checks(
+                'http://fixture', 'model', {}, {}, 'a' * 64, 'b' * 64)
+
+    def test_public_keeps_tiny_prompt_and_product_uses_private_user_context(self) -> None:
+        prompts = []
+        for session_a, session_b in ((None, None), ('a' * 64, 'b' * 64)):
+            with patch.object(protocol, 'json_response', side_effect=RuntimeError('fixture')) as request:
+                with self.assertRaisesRegex(RuntimeError, 'fixture'):
+                    protocol.streaming_and_session_checks(
+                        'http://fixture', 'model', {}, {}, session_a, session_b)
+            messages = request.call_args.args[3]['messages']
+            self.assertEqual(len(messages), 1)
+            self.assertEqual(messages[0]['role'], 'user')
+            prompts.append(messages[0]['content'])
+        self.assertEqual(prompts[0], 'Reply with one short word.')
+        self.assertTrue(prompts[1].endswith('\n\n' + prompts[0]))
+        self.assertGreater(len(prompts[1].split()), 1000)
+
+    def test_private_repeat_and_public_foreign_path_pass(self) -> None:
+        result = self.replay('private_input_replay')
+        self.assertEqual(result[-2:], ('private_input_replay', 'root'))
+
+    def test_root_repeat_still_fails_with_content_safe_cache_evidence(self) -> None:
+        with self.assertRaises(protocol.ProtocolError) as raised:
+            self.replay('root')
+        evidence = json.loads(str(raised.exception).split(': ', 1)[1])
+        self.assertEqual(evidence['actual_path'], 'root')
+        self.assertEqual(evidence['after_repeat']['cache']['device_state']['capacity'], 3)
+        self.assertEqual(evidence['after_repeat']['scheduler']['committed_decode_tokens'], 11)
+        self.assertNotIn('do-not-log', str(raised.exception))
+
+    def test_foreign_session_still_rejects_private_continuation(self) -> None:
+        with self.assertRaisesRegex(protocol.ProtocolError, 'non-public continuation'):
+            self.replay('private_input_replay', 'private_endpoint')
+
+
 class HttpHelperTests(unittest.TestCase):
     def test_greedy_parity_keeps_token_accounting_but_allows_real_cache_hit_change(self) -> None:
         first = {
