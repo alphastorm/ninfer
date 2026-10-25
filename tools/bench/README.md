@@ -86,6 +86,41 @@ inference. The runtime publication workflow requires an explicit immutable,
 qualified master-compatible `base_image`; it does not reuse the shipped old
 runtime base digest automatically.
 
+Publish that dependency-only base with
+[`publish-runtime-base.yml`](../../.github/workflows/publish-runtime-base.yml).
+The Dockerfile's `runtime-base` target installs the Ubuntu 24.04/CUDA 13.1.2
+runtime dependencies without compiling or copying NInfer binaries. The default
+final stage still adds both binaries and the existing runtime configuration.
+Dispatch against the exact branch/tag commit supplied as `source_commit` (40
+lowercase hex characters); it must be reachable from an origin branch.
+`base_tag_note` is public free text: never include secrets or private paths.
+
+The workflow pushes only an immutable
+`ghcr.io/alphastorm/ninfer@sha256:<64hex>` reference, with maximum provenance
+and an SBOM. Its public prerelease
+`runtime-base-<sha8>-<yyyymmdd>` (UTC date) contains
+`ninfer-runtime-base.json`, artifact type
+`ninfer_runtime_base_publication_receipt`, schema **1**. Read `image_reference`
+from that receipt for the runtime image workflow's `base_image` input; the
+receipt also records the resolved NVIDIA runtime digest and the installed
+package versions measured inside the published image. Discovering the digest
+through this GitHub release asset does not require `read:packages`.
+Each receipt release is created once, never overwritten.
+
+```bash
+gh workflow run publish-runtime-base.yml --repo alphastorm/ninfer \
+  --ref <branch-or-tag> -f source_commit=<sha40> \
+  -f base_tag_note='Qualified master-compatible runtime dependencies'
+gh release download runtime-base-<sha8>-<yyyymmdd> --repo alphastorm/ninfer \
+  --pattern ninfer-runtime-base.json --dir runtime-base-receipt
+jq -r .image_reference runtime-base-receipt/ninfer-runtime-base.json
+```
+
+Before the first dispatch, merge the frozen release source, including this
+workflow, onto the default branch (`main`), then dispatch against the frozen
+tag with its matching `source_commit`. A copy only on a release/integration
+branch is not sufficient for initial registration of a dispatch-only workflow.
+
 ### Receipt and consumer changelog
 
 - `ninfer_agent_protocol_smoke` schema **2** replaces schema **1**'s

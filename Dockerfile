@@ -49,7 +49,7 @@ RUN cmake -S . -B /build -G Ninja \
         -DNINFER_SOURCE_DIRTY=auto \
     && cmake --build /build --parallel --target ninfer ninfer-serve
 
-FROM nvidia/cuda:13.1.2-runtime-ubuntu24.04
+FROM nvidia/cuda:13.1.2-runtime-ubuntu24.04 AS runtime-base
 
 ARG DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
@@ -64,6 +64,8 @@ RUN apt-get update \
         libswscale7 \
         liburing2 \
     && rm -rf /var/lib/apt/lists/*
+
+FROM runtime-base
 
 COPY --from=build /build/apps/ninfer /usr/local/bin/ninfer
 COPY --from=build /build/apps/ninfer-serve /usr/local/bin/ninfer-serve
