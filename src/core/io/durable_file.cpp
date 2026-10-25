@@ -528,8 +528,8 @@ void replace_path(const std::filesystem::path& source, const std::filesystem::pa
                                       sizeof(attributes)))
         fail_windows("inspect durable replacement file");
     if (GetFileType(file.value) != FILE_TYPE_DISK ||
-        (attributes.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)))
-        fail_windows("durable replacement source is not regular", ERROR_CANT_ACCESS_FILE);
+        (attributes.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+        fail_windows("durable replacement source is not a real disk entry", ERROR_CANT_ACCESS_FILE);
     if (!FlushFileBuffers(file.value)) fail_windows("flush durable replacement file");
     const auto leaf = to.filename();
     if (leaf.native().size() > (MAXDWORD - sizeof(FILE_RENAME_INFO)) / sizeof(wchar_t))

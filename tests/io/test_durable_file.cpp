@@ -225,6 +225,35 @@ void publish(const std::filesystem::path& from, const std::filesystem::path& to,
     catch (const std::system_error& error) { throw std::system_error(error.code(), phase); }
 }
 
+void directory_publication(const std::filesystem::path& root) {
+    const auto generations = root / "generations", tombstones = root / ".tombstones";
+    const auto staging = generations / ".staging-generation", published = generations / "generation";
+    io::create_directories(staging / "nested");
+    io::create_directories(tombstones);
+    write(staging / "manifest", std::byte{31});
+    write(staging / "nested" / "payload", std::byte{37});
+    io::sync_directory(staging);
+    publish(staging, published, "same-parent directory publication");
+    require(!std::filesystem::exists(staging) && std::filesystem::is_directory(published),
+            "generation directory was not published");
+    const auto tombstone = tombstones / "generation";
+    publish(published, tombstone, "cross-parent directory tombstone");
+    require(!std::filesystem::exists(published) && std::filesystem::is_directory(tombstone),
+            "generation directory was not moved to its tombstone");
+    {
+        Stream manifest(io::open_binary_read(tombstone / "manifest"), &std::fclose);
+        Stream payload(io::open_binary_read(tombstone / "nested" / "payload"), &std::fclose);
+        std::array<std::byte, 3> bytes{};
+        io::read_exact(manifest.get(), bytes);
+        require(bytes == std::array{std::byte{31}, std::byte{31}, std::byte{31}},
+                "directory publication changed its manifest");
+        io::read_exact(payload.get(), bytes);
+        require(bytes == std::array{std::byte{37}, std::byte{37}, std::byte{37}},
+                "directory tombstone changed its nested payload");
+    }
+    require(io::remove_tree(tombstone), "generation tombstone cleanup failed");
+}
+
 #ifdef _WIN32
 void native_publication_guards(const std::filesystem::path& root,
                                const std::filesystem::path& outside) {
@@ -343,6 +372,7 @@ void run() {
     }
     require(!std::filesystem::exists(first_staging) && std::filesystem::exists(first),
             "first same-parent publication did not move staging");
+    directory_publication(fixture.root);
     const auto current = directory / "current";
     write(current, std::byte{7});
     rejects([&] { Stream forbidden(io::open_binary_write(current), &std::fclose); });
@@ -417,6 +447,7 @@ void run() {
     // or source link is not a valid cross-parent publication and must leave staging intact.
     rejects([&] { io::replace_path(staging, link / "escaped"); });
     rejects([&] { io::replace_path(link / "sentinel", directory / "escaped"); });
+    rejects([&] { io::replace_path(link, directory / "escaped"); });
     rejects([&] { io::replace_path(file_link, directory / "escaped"); });
     require(std::filesystem::exists(staging) && !std::filesystem::exists(outside / "escaped") &&
                 !std::filesystem::exists(directory / "escaped"),
