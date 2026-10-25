@@ -13,12 +13,13 @@
 - Phase 2 uses frozen Contracts `746b29d2`, streaming/crypto prerequisites `0789709d` and `cb89c89a`. Native CBOR is field-wise and bounded; typed canonical round-trip rejects unknown fields, narrowing, duplicates and noncanonical containers.
 - Native set export retains checkpoint, state and page leases, resolves views while serialized, then copies/hashes/writes through a dedicated stream and bounded pinned staging outside Engine serialization. Padding and uncommitted KV columns are zeroed. K2 layout derives from immutable geometry, not allocation capacity.
 - Host-only import reserves StateImages, logical pages, extents, inactive histories and checkpoint slots; payload descriptors and delivered-byte verification precede native publication. Prepared reservations abort through RAII; capacity refusal is separate from corruption. Endpoint/input/anchor records preserve exact text/media identity and DFlash2 ring/frontier metadata.
-- Added synthetic backing ownership/rollback tests, canonical codec failure tests and an actual separate-process real-model export/import test. Phase 2 candidate `19043a49` is queued as `20261025T015606Z-A2-native-19043a49-333221` (15 minutes, replacing canceled `...287234`); results are not yet available, so this branch is not merge-qualified. That job does not contain the later isolated reservation fixes.
+- Phase 2 source `0e64cc77` built successfully on the approved CPU-only lane: **642 Ninja steps**, serving binary plus all five native/codec test targets linked; `ninfer_checkpoint_codec_test` **PASS**, 0.01 seconds (CTest total 0.04 seconds). CPU image SHA-256 `62a4feee8f308cde61095355ff11977986ecce388ad4f057c23014950b681326`. The queued NYC native job `...333221` was canceled before execution to move compilation off the GPU queue. GPU ownership/restart/regression tests were compiled but not executed; this is not native runtime qualification.
 - Release-blocking upstream [#419](https://github.com/Neroued/ninfer/issues/419): `write_pages` quoted growth against pre-rewind membership, while `prepare_write` first trims/forks to `begin`. The fix quotes post-trim membership and retains the strict write-side reservation guard. Regression: rewind a 65-token history to 8, then write through 65; one new page is required, plus one tail-COW page when the old endpoint remains retained. A separate fix refreshes page reservations for unchanged execution permits: readers acquired after admission can add COW demand. Its real-model regression pins the shared tail after admission, then re-reserves and executes the same unit. Both source-derived regressions await execution; resolution of [#414](https://github.com/Neroued/ninfer/issues/414) is not yet established.
 
 ## Commands
 
 Host directory arguments below use the RUNBOOK variables `A2_SCRIPT_ROOT`, `A2_WORK_ROOT` and `V3_MODEL`; this keeps host paths out of committed evidence.
+`CPU_COMMON`, `CPU_SOURCE` and `CPU_BUILD` denote the approved CPU lane's shared wrappers and holder-A2 Git source/build directories. Its source was detached at `0e64cc77`; the build wrapper held one of the two CPU slots and used 12 workers. No GPU model test or production-service change was performed on that lane.
 
 ```sh
 gpu-lease submit --holder A2 --label tracer-build-e442df4d --priority 2 --minutes 20 -- bash "$A2_SCRIPT_ROOT/build-e442df4d.sh"
@@ -42,4 +43,13 @@ gpu-lease wait 20261025T015558Z-A2-tracer-restart-e442df4d-r2-332480 50
 gpu-lease cancel 20261025T014145Z-A2-native-19043a49-287234
 gpu-lease submit --holder A2 --label native-19043a49 --priority 2 --minutes 15 -- bash "$A2_SCRIPT_ROOT/native-19043a49.sh"
 gpu-lease wait 20261025T015606Z-A2-native-19043a49-333221 50
+gpu-lease cancel 20261025T015606Z-A2-native-19043a49-333221
+NINFER_BUILD_HOLDER=A2 NINFER_BUILD_ENV_IMAGE=ov-build-env:master-64d10fbf-r2-cpu-local \
+  "$CPU_COMMON/build-wsl.sh" "$CPU_SOURCE" "$CPU_BUILD" -- \
+  ninfer-serve ninfer_context_store_test ninfer_kv_history_test ninfer_checkpoint_codec_test \
+  ninfer_qwen3_5_checkpoint_restart_test ninfer_qwen3_5_native_transactions_test
+NINFER_BUILD_HOLDER=A2 NINFER_BUILD_ENV_IMAGE=ov-build-env:master-64d10fbf-r2-cpu-local \
+  "$CPU_COMMON/run-in-env-wsl.sh" --gpu --env CUDA_VISIBLE_DEVICES= \
+  --mount "$CPU_SOURCE" --mount "$CPU_BUILD" -- \
+  ctest --test-dir "$CPU_BUILD" --output-on-failure -R '^ninfer_checkpoint_codec_test$'
 ```
