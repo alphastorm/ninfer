@@ -45,6 +45,7 @@ enum class KvCapacityMode : std::uint8_t {
 };
 
 inline constexpr std::size_t kDefaultKvCapacityHeadroomBytes = 1024ULL * 1024ULL * 1024ULL;
+inline constexpr std::size_t kMinimumAdmissionHeadroomBytes = 256ULL * 1024ULL * 1024ULL;
 
 struct KvCapacityPolicy {
     KvCapacityMode mode                  = KvCapacityMode::Explicit;
@@ -161,6 +162,8 @@ struct EngineOptions {
     int device                         = 0;
     std::uint32_t max_context          = 2048; // Logical ceiling of one request or score window.
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(2048);
+    // Overrides the default startup floor, not automatic headroom or calibrated reservations.
+    std::optional<std::size_t> admission_headroom_bytes;
     std::uint32_t max_concurrency      = 1;
     std::uint32_t max_pending_requests = 16;
     std::uint32_t pending_timeout_ms   = 30000;

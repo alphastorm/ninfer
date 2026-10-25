@@ -119,7 +119,8 @@ KvCapacityPolicy parse_kv_capacity(const char* text) {
 std::string serve_usage_text(const char* argv0) {
     return std::string("usage: ") + argv0 +
            " <model.ninfer> [--host H] [--port N] [--api-key KEY] "
-           "[--model-id ID] [--max-context N] [--kv-capacity N|auto] [--max-concurrency N] "
+           "[--model-id ID] [--max-context N] [--kv-capacity N|auto] "
+           "[--admission-headroom-mib N] [--max-concurrency N] "
            "[--max-pending-requests N] [--pending-timeout-ms N] "
            "[--prefill-chunk N] [--log-stats-interval-ms N] [--device N] "
            "[--context-cost-presets FILE] "
@@ -152,9 +153,11 @@ std::string serve_usage_text(const char* argv0) {
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
            "       --prefill-chunk requires a positive multiple of 128; defaults to 1024, or "
            "4096 with CPU expert offload\n"
-           "       startup uses " +
+           "       startup defaults to " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of planning headroom for both explicit and automatic KV capacity\n"
+           "       --admission-headroom-mib overrides that floor (integer >=256); larger "
+           "automatic headroom and calibrated reservations still apply\n"
            "       --no-prefix-reuse disables cross-request history; request pause/replay "
            "resources remain available\n"
            "       context defaults: device-state=max-concurrency; Host budget is resolved from "
@@ -214,6 +217,16 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--kv-capacity") {
             options.kv_capacity  = parse_kv_capacity(require_value("--kv-capacity"));
             kv_capacity_explicit = true;
+        } else if (arg == "--admission-headroom-mib") {
+            constexpr std::size_t bytes_per_mib = 1024ULL * 1024ULL;
+            const auto mib = parse_u64(require_value("--admission-headroom-mib"),
+                                       "admission-headroom-mib");
+            if (mib < kMinimumAdmissionHeadroomBytes / bytes_per_mib ||
+                mib > std::numeric_limits<std::size_t>::max() / bytes_per_mib) {
+                throw std::invalid_argument(
+                    "--admission-headroom-mib must be at least 256 and fit in bytes");
+            }
+            options.admission_headroom_bytes = static_cast<std::size_t>(mib) * bytes_per_mib;
         } else if (arg == "--max-concurrency") {
             options.max_concurrency = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--max-concurrency"), "max-concurrency"));

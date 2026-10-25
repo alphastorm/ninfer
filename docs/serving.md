@@ -886,6 +886,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--model-id ID` | override the public OpenAI model alias | artifact `metadata.name`, or architecture name |
 | `--max-context N` | logical context ceiling of each sequence | `8192` |
 | `--kv-capacity N\|auto` | shared Main Text KV capacity; `auto` maximizes resident-model KV, or reserves one context with CPU expert offload; omitted means `--max-context` | `8192` |
+| `--admission-headroom-mib N` | startup admission floor in integer MiB, minimum `256`; larger automatic headroom and calibrated reservations still apply | `1024` |
 | `--max-concurrency N` | resident execution lanes; valid range `1..8` | `1` |
 | `--max-pending-requests N` | additional requests allowed to wait for admission | `16` |
 | `--pending-timeout-ms N` | maximum preparation-plus-admission wait | `30000` |
@@ -1170,7 +1171,12 @@ outside the GPU executor and do not delay formation of the next batch.
 `--max-context` is each sequence's logical ceiling. `--kv-capacity` fixes the shared Main Text KV
 pool used by active requests and retained prefixes. `auto` accounts for the complete enabled runtime
 when sizing the pool; omitting the option makes it follow `--max-context`. Both explicit and automatic
-capacity use 1 GiB of startup planning headroom. Capacity resolves once at startup.
+capacity default to 1 GiB of startup planning headroom. `--admission-headroom-mib N` replaces that
+default floor with an integer value of at least 256 MiB. A larger automatic-capacity headroom remains
+a lower bound, and runtime calibration and allocation-fit checks are unchanged. The native 24 GB
+profiles use 640 MiB on sm_89 and 768 MiB on sm_86; the sm_120a profile leaves the option unset.
+This floor is resource admission policy, not model/checkpoint identity. Capacity resolves once at
+startup; an automatic policy that resolves to a different KV capacity still changes that capacity.
 
 Before each prefill, decode or replay unit, the runtime reserves the additional pages and temporary
 storage required by that unit. It first reclaims inactive cache resources when capacity is short.
