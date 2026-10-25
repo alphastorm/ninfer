@@ -1312,7 +1312,7 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
     // At most one incoming set (itself <= quota) is tolerated. Stuck cleanup or
     // another publication's transient cannot accumulate unbounded excess.
     if (unpublished_bytes &&
-        (!reclamation_healthy ||
+        ((!reclamation_healthy && physical_used > options.disk_quota_bytes) ||
          (physical_used > options.disk_quota_bytes &&
           physical_used - options.disk_quota_bytes > unpublished_bytes))) { return false; }
     if (inventory.used <= options.disk_quota_bytes) { return true; }
