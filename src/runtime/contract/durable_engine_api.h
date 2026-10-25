@@ -29,10 +29,10 @@ class ReclaimableSessionOracle;
 
 enum class DurableExportState : std::uint8_t { Exported, Refused, Stale };
 enum class DurableImportState : std::uint8_t {
-    Imported, CapacityRefused, Corrupt, IdentityMismatch, PolicyDisabled
+    Imported, CapacityRefused, Corrupt, IdentityMismatch, PolicyDisabled, Unavailable
 };
 enum class DurablePrepareState : std::uint8_t {
-    Prepared, CapacityRefused, Corrupt, IdentityMismatch, PolicyDisabled
+    Prepared, CapacityRefused, Corrupt, IdentityMismatch, PolicyDisabled, Unavailable
 };
 
 // Stable snake_case spellings in K7, never ordinal serialization. No raw session/tag/path detail.
