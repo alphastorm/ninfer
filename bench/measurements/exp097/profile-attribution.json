@@ -6,6 +6,13 @@
   "case": "log-009 with frozen background prefix",
   "prompt_tokens": 32047,
   "profiler": "Nsight Systems 2026.1.3, cuda/nvtx/osrt, CUDA Graph node trace",
+  "raw_evidence_sha256": {
+    "shipped_nsys": "4ef42006053335ce8f1173e20d0fbd13ba728ad2eef826823905cd09a3a1f5c4",
+    "shipped_sqlite": "9fdcbe94db62fc563b818bd7775fcd390bed758f441c66c595c054d8c380ebd8",
+    "candidate_nsys": "3fdddd86a070093cbe91ab372585414dadd3efb676f07e3e5a6052d3d710818b",
+    "candidate_sqlite": "137bd5587736f443e6ddd0f2f77702eeb33525139e49a47a0a4b95fa47649e2a"
+  },
+  "raw_evidence_publication": "Private captures retained separately; command-line credentials and host metadata are excluded from this receipt.",
   "method": [
     "One isolated shipped/candidate pair; 128-token prefix warmup then identical 1536-token request.",
     "Only graph-correlated GPU kernels are included; all launch correlations are bijective, shipped340 graphs and candidate674 graphs/337 rounds.",

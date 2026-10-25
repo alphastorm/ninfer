@@ -1,0 +1,55 @@
+{
+  "experiment": "EXP-097",
+  "phase": "continued G2 final protocol",
+  "registered_before_final_measurement": true,
+  "control_source": "1302d639",
+  "control_image": "sha256:6a02feba4163d992cc6a46baf28e0ece2ffe6a2ead91939e566c1b3080f5bc02",
+  "case_ids_sha256": "62a35145affbfce4b86aed94f7c3f3b8ad7ad6c372bba71af67c379ad34024b9",
+  "qualification_runner_sha256": "913234bb0563dd44ca0e3df911f7329aa01e698b1a8ed1d73fe235290a5ac234",
+  "probe_sha256": "a16600f9bc018e7d1854b60f6408058f8db624bd871b50d698f187b4debf0e2f",
+  "runner_sha256": "7c46707be51af342c0a405e63fdced09addf3dba64eaf11e23cf9649eef290f4",
+  "long_fixture_sha256": "8dcece5215805293490baa0d8204d59a899d8bc3f9d010b0c142ed6624260a9a",
+  "shape": {
+    "spec": "dflash2",
+    "draft_tokens": 7,
+    "kv_dtype": "bf16",
+    "max_context": 131072,
+    "kv_capacity": 131072,
+    "prefill_chunk": 1024,
+    "max_concurrency": 2
+  },
+  "sequence": [
+    "shipped",
+    "candidate",
+    "candidate",
+    "shipped"
+  ],
+  "roles_per_arm": 84,
+  "scope": "Every arm runs all 84 original wire requests plus the unchanged context/paired-context protocol; no tool-order counterfactual enters this gate.",
+  "aggregation": [
+    "Within each runtime, take the median per-case decode token/s across that runtime's repeated arms; the gate median is the median of these 84 per-case medians.",
+    "For each workload, take nearest-rank p95 of its per-case median decode milliseconds/token across repeated arms.",
+    "Report every arm independently alongside the aggregate; all four arms must complete all 84 role cases.",
+    "Acceptance ratios are reported per case/workload and for the depth probes, not assumed equal."
+  ],
+  "acceptance": {
+    "minimum_median_ratio": 0.98,
+    "maximum_workload_p95_ms_per_token_ratio": 1.1
+  },
+  "founder_amendment_during_final_measurement": {
+    "authority": "Main relaying the founder decision",
+    "minimum_ship_median_ratio": 0.96,
+    "reference_shipped_median_tok_s": 338.573,
+    "stated_minimum_candidate_tok_s": 325.0,
+    "workload_p95_over_1_10": "Must be attributed; does not block shipment.",
+    "reporting": "Retain the original 98%/p95 verdict separately; report the exact measured ratio and all workload tails.",
+    "optimization_stop": "No further lease time chasing the last two percentage points once at least 96% is proven, except a change already in hand."
+  },
+  "near_boundary": {
+    "condition": "absolute(first-pass median ratio - 0.98) <= 0.02",
+    "action": "Run a second complete ABBA pass with the identical candidate binary; aggregate all four samples/runtime and report both passes separately."
+  },
+  "priority": 1,
+  "maximum_lease_minutes": 120,
+  "final_driver_sha256": "926399602f89900876988872f71cb402d7d4366f04de51ab000aa838c6c9f666"
+}

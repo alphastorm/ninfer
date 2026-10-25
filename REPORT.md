@@ -1,181 +1,274 @@
-# EXP-097: upstream kernel-route handoff
+# EXP-097: final KernelRoutes G2 result
 
-## Continued G2 attribution
+## Verdict and frozen identity
 
-`profile-attribution.json` records the shipped/candidate Nsight Systems 2026.1.3
-capture at 32,047 prompt tokens (log-009 plus the frozen depth fixture). The
-candidate's acceptance is slightly higher, 1,198/2,353 versus 1,195/2,376; unequal
-draft arithmetic exists even on the byte-identical 128-token warmup output.
-Acceptance is therefore not assumed equal or blamed for this measured slowdown.
+**G2 PASS under the founder's amended shipping criterion.** Final candidate
+`c2dbcbae4bbdd07f73c8aad299fa0552ba17dbf3` decodes the 84-case role corpus at
+**342.150 tok/s**, versus contemporaneous shipped **338.448 tok/s**:
+**101.0939% of shipped**. It also clears the original 98% median requirement.
+The original combined median-plus-p95 gate would still fail: structured-output
+p95 is **12.56% higher**. The founder explicitly made attributed p95 regressions
+non-blocking and lowered the shipping median floor to 96%; both criteria and the
+amendment are preserved in `bench/measurements/exp097/g2-protocol.json`.
 
-The dominant GPU deltas per round are Q5 residual projections **+0.924 ms**,
-Q4 SwiGLU **+0.584 ms**, and Q5 input projections **+0.270 ms**. BF16 attention
-including merge is **0.191 ms faster** upstream. Draft attention, Q8 projection,
-selector, fused RoPE and dynamic convolution are essentially unchanged; shortlist
-projection is 0.028 ms slower. Between-round idle is 0.358/0.371 ms, with only
-0.019/0.021 ms overlapping host commit. The second upstream graph does not explain
-the gap. No attention, Program-round or Engine change is justified by this capture.
+The full priority-1 A/B/B/A completed in 2,514 lease seconds: **336/336 role
+requests and 48/48 supplementary depth requests returned HTTP 200**. No second
+pass is required: 1.01093856 is outside the original near-boundary interval
+[0.96, 1.00]. No additional optimization was pursued after the amended gate passed.
 
-The eight-warp/two-stage Q5 residual candidate passed the public FP64/graph test
-and matched all 983,040 BF16 values against the fork, but was slower:
-K=17,408/T=8 rose from 52.48 to 59.55 microseconds. It is not accepted as a
-performance result. The re-derived candidate additionally restores 16-byte
-padding in both code/high planes, three stages at T=8, and a rolled K loop;
-T=16 keeps two stages. sm_86/89, neighboring extents, and all existing schedule
-defaults remain unchanged. The revised schedule requires fresh GPU evidence.
+- Candidate binary SHA256: `2f8498d9afa8b2d447a05b610cf3a9a50973c3436c18d20190224946c22f1c5b`.
+- Shipped source: `1302d639`; image: `sha256:6a02feba4163d992cc6a46baf28e0ece2ffe6a2ead91939e566c1b3080f5bc02`.
+- Build/runtime environment: `ov-build-env:master-64d10fbf-r2`, image `sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1`.
+- V2 model: `0634abb07024221de141456cf04a42ab74b18bc38e1b781c6eb2e062a467eec3`; byte-preserving v3 upgrade: `facba3bd318139c50899d4a0d74576837f73f0f498a461961467d56df10f4944`.
+- This is **not** the published `81f924d4` v3 model. The matched-artifact proof preserves all 1,184 tensor payloads / 20,424,296,864 tensor bytes and the complete original payload range. This does not imply identical frontend rendering or full-model arithmetic.
 
-The following isolated candidate reuses the existing padded pairwise Q4 schedules
-for fused SwiGLU at T=8/16. All other widths and sm_86/89 remain unchanged. The
-public numerical matrix already covers both widths; graph replay now does too.
-Its separate bounded measurement and full fused-output fork comparison are
-required before accepting the route.
+No production container, release tag, published image, native schedule, Program
+round structure or engine scheduler was changed. This result is a performance
+gate, not integrated durability, quality/leak, native-Windows or release acceptance.
 
-Equal-output controls still have unequal draft acceptance (repo-002: 52 versus
-54 rounds for the same 333 tokens). The shortlist uses upstream's linear K-warp
-reduction versus the fork's pairwise reduction. A separate candidate restores
-the padded pairwise schedule only for physical U=7/14 draft extents; native
-dispatch remains unchanged. This numerical hypothesis needs its own controlled
-acceptance comparison, FP64/top-k test, and raw FP32 projection identity proof.
+## Full A/B/B/A measurements
 
-After the revised residual schedule, Q5 input projections are the remaining
-measured projection delta (+0.270 ms/round). The same padded, rolled schedule is
-being measured at K=5,120 in the attention split, GDN split, and separate
-materialized GDN path. Only their existing guarded T=8/16 routes change.
+DFlash2 K=7; BF16 KV; max context and fixed KV capacity 131,072; prefill chunk
+1,024; max concurrency two. The original 84 wire requests, frozen corpus and
+EXP-097 runner were unchanged. Roles run serially; the supplementary protocol
+also issues concurrent pairs. Low reasoning, temperature zero, no added
+reasoning headroom; reasoning-only completions remain included.
 
-## Disposition
-
-- Tested runtime source: `9b391d513726b3ed7d60a80a95daa68cf9dacc97`, branch `rebase/kernel-routes`, upstream base `64d10fbf`.
-- The guarded Q4/Q5 input-projection routes improve the role-corpus median by **10.55% over vanilla master**, but reach only **91.46% of shipped**. **G2 FAILS**: the required ratio is 98%, and two workload p95 ratios also exceed 1.10.
-- Six scoped GPU Op executables passed. The source-to-source fork comparison found **zero differing BF16 output words across 2,949,120 values / 32 cases**. This is not a full-model quality proof.
-- This handoff follows the request to finish the current iteration. No BF16 fixed-width candidate or Nsight attribution iteration was started. The original broader G2 assignment is not claimed complete.
-- No production container, release tag, published image, or native dispatch schedule was changed. The branch is suitable for integration of the tested route changes, **not release acceptance**.
-
-## End-to-end role results
-
-One serial pass over the same 84 common EXP-095 cases per engine; all 252 role requests completed with HTTP 200. Low reasoning, temperature zero, no added reasoning headroom; reasoning-only completions remain included. Configuration: DFlash2 K=7, BF16 KV, 131,072 context and explicit global KV capacity, prefill chunk 1,024, two resident lanes.
-
-| Engine | Median decode tok/s | Weighted decode tok/s | Decode ms/round |
+| Arm | Role cases | Median decode tok/s | Decode ms/round |
 |---|---:|---:|---:|
-| Shipped `1302d639` | 338.573 | 291.848 | 15.524 |
-| Vanilla `64d10fbf` | 280.102 | 248.003 | 18.428 |
-| Q4/Q5 candidate | 309.651 | 274.994 | 16.645 |
+| A1 shipped | 84 | 338.366 | 15.5133 |
+| B1 candidate | 84 | 342.260 | 15.4093 |
+| B2 candidate | 84 | 342.040 | 15.4094 |
+| A2 shipped | 84 | 338.530 | 15.5354 |
 
-Vanilla/shipped median ratio: **0.82730**. Candidate/vanilla: **1.10550**; candidate/shipped: **0.91458**. Candidate weighted decode improves 10.88% over vanilla and remains 5.77% below shipped. Candidate round cost falls 9.67% from vanilla and remains 7.23% above shipped. The median is not within two percentage points of the 0.98 boundary, so the agreed near-boundary repeat rule does not trigger.
+The aggregate takes each case's median across its two runtime repetitions,
+then the median across **84 role cases only**. The 12 depth requests per arm
+are excluded. Workload p95 is nearest-rank p95 of per-case median server decode
+milliseconds/completion token, not a distribution of repeated individual-token
+latencies. The four raw content-safe arm receipts and `G2-final-summary.json`
+retain every case, acceptance count, request/output hash and identity.
 
-Empirical nearest-rank p95 is computed over each workload's per-case decode milliseconds/token, not a replicated per-case latency distribution:
+| Workload | Cases | Shipped p95 ms/token | Candidate p95 ms/token | Ratio | Original 1.10 bound |
+|---|---:|---:|---:|---:|---|
+| Log triage | 24 | 4.51013 | 4.38985 | 0.97333 | pass |
+| Regression contract | 8 | 4.14088 | 4.46495 | 1.07826 | pass |
+| Repository evidence | 30 | 3.37177 | 3.33715 | 0.98973 | pass |
+| Structured output | 2 | 2.78123 | 3.13055 | 1.12560 | attributed, non-blocking |
+| Work-log extraction | 20 | 3.31892 | 3.44222 | 1.03715 | pass |
 
-| Workload | Cases | Vanilla/shipped p95 | Candidate/shipped p95 | Candidate tail gate |
-|---|---:|---:|---:|---|
-| log-triage | 24 | 1.15434 | 1.04761 | pass |
-| regression-contract | 8 | 1.17225 | 1.07303 | pass |
-| repository-evidence | 30 | 1.18953 | 1.07392 | pass |
-| structured-output | 2 | 1.41870 | 1.27769 | **fail** |
-| work-log-extraction | 20 | 1.25413 | 1.11822 | **fail** |
+The previous `9b391d51` candidate achieved 309.651 tok/s / 91.46% of the earlier
+338.573 shipped baseline. Its historical receipts remain separate; they are not
+mixed into the final interleaved aggregate.
 
-Every individual case ratio, including regressions, is retained in `bench/measurements/exp097/{baseline-comparison,q4-comparison}.json`.
+## Attribution first: one valid Nsight capture
 
-## Depth sweep and two-client pairs
+`profile-attribution.json` contains the per-round timeline, every kernel name,
+component sums, host-gap accounting, request receipts and hashes of the private
+Nsight artifacts. Nsight Systems 2026.1.3 traced CUDA/NVTX/OSRT and graph nodes
+for shipped versus the previous `9b391d51` candidate at **32,047 prompt tokens**
+(log-009 plus the frozen depth fixture), after a 128-token warmup. The measured
+request requested 1,536 tokens. A preliminary setup failed before capture
+because shipped lacks `/tokenize`; it is not a measured arm.
 
-Baseline order was shipped/upstream/upstream/shipped, with fresh isolated servers between arms. Baseline cells are arithmetic means of two observations; the candidate has one observation. Singles requested 2,048 completion tokens; each pair member requested 1,024. All 60 context requests completed with HTTP 200.
+GPU kernel milliseconds per speculative round:
 
-| Approximate context | Shipped single tok/s | Vanilla single tok/s | Candidate single tok/s | Shipped pair wall tok/s | Vanilla pair wall tok/s | Candidate pair wall tok/s |
-|---|---:|---:|---:|---:|---:|---:|
-| 0 | 354.89 | 301.87 | 326.09 | 442.97 | 456.42 | 496.42 |
-| 32K | 342.52 | 273.66 | 297.68 | 75.06 | 76.68 | 77.32 |
-| 64K | 335.38 | 214.40 | 271.36 | 37.23 | 38.26 | 39.00 |
-| 120K | 274.07 | 225.77 | 253.25 | 17.56 | 15.02 | 15.06 |
+| Component | Shipped | Previous candidate | Delta |
+|---|---:|---:|---:|
+| Q5 residual projections | 3.60997 | 4.53384 | +0.92387 |
+| Q4 fused SwiGLU | 4.03831 | 4.62189 | +0.58358 |
+| Q5 input projections | 1.75456 | 2.02420 | +0.26963 |
+| Draft shortlist/top-k | 0.25345 | 0.28149 | +0.02804 |
+| Target output head | 0.80215 | 0.80330 | +0.00115 |
+| Sampling | 0.01639 | 0.01680 | +0.00041 |
+| Draft selector | 0.00564 | 0.00587 | +0.00023 |
+| Draft Q8 projections | 1.16182 | 1.16202 | +0.00020 |
+| Draft attention context | 0.15939 | 0.15945 | +0.00006 |
+| Draft fused norm/RoPE | 0.01147 | 0.01129 | -0.00019 |
+| Draft dynamic convolution | 0.13055 | 0.12990 | -0.00064 |
+| Target RoPE | 0.05144 | 0.05050 | -0.00095 |
+| Other kernels | 0.09538 | 0.09430 | -0.00108 |
+| Q4 input projections | 0.83577 | 0.79539 | -0.04038 |
+| GDN | 0.98212 | 0.91851 | -0.06360 |
+| BF16 attention verify plus merge | 1.82869 | 1.63772 | -0.19097 |
+| Other normalization | 0.50920 | 0.28938 | -0.21982 |
+| **Total GPU kernel time** | **16.24630** | **17.53585** | **+1.28955** |
 
-Pair wall throughput includes prefill, queueing, decode and delivery; it is **not** constant-B2 decode throughput. At long contexts, the explicit global capacity can serialize or preempt requests. Shape-based matching makes individual member attribution ambiguous when both members have identical token counts; pair aggregates, not member identity assignments, are authoritative. Full timing and round-cost values are in `context-comparison.json` and the five arm receipts.
+Between-round idle was **0.35756/0.37113 ms**, of which only
+**0.01929/0.02075 ms** overlapped `engine.commit_output`. Within-round non-kernel
+gaps were 0.19448/0.18099 ms. Graph-launch API duration was 0.16387/0.20150 ms
+per round, with one/two launches respectively. API time overlaps GPU execution
+and must not be added to kernel time. The second graph's four tiny finish kernels
+do not explain the gap. Profiler overhead makes these diagnostic timings, not
+the release throughput measurement.
 
-## Route decisions
+Attention was already faster; a BF16 h24 fixed-width transplant was therefore
+not justified. Upstream already had the relevant draft operations and fp16 draft
+V. No Program/Engine changes were requested from Persistence or EngineCache.
+The measured projection contributors, not attention or host idle, drove this port.
 
-All Op microtimings use the public dispatch, cold CUDA Graph execution, 10 warmups and 61 samples. Each arm contains 56 measured Op rows, including neighboring widths. The following are median microseconds for the changed extents:
+## Retained route table and bounded experiments
 
-| Route / public Op | Physical extent | Vanilla | Candidate | Latency change | Disposition |
-|---|---|---:|---:|---:|---|
-| Attention Q4/Q5 split | aggregate T=8 | 48.416 | 38.112 | -21.28% | keep |
-| Attention Q4/Q5 split | aggregate T=16 | 85.632 | 48.352 | -43.54% | keep |
-| GDN Q4/Q5 split | aggregate T=8 | 62.752 | 46.304 | -26.21% | keep |
-| GDN Q4/Q5 split | aggregate T=16 | 105.696 | 60.640 | -42.63% | keep |
-| GDN snapshot | B=1, W=8 | 68.448 | 50.400 | -26.37% | keep |
-| GDN snapshot | B=2, W=8 | 109.760 | 64.736 | -41.02% | keep |
-| GDN record | B=1, W=8 | 66.848 | 50.432 | -24.56% | keep |
-| GDN record | B=2, W=8 | 109.120 | 64.736 | -40.67% | keep |
-| h24 BF16 verify | W=7/8 | measured in 32-row attention matrix | unchanged implementation | not attributed | retain upstream Grouped64; no fork kernel copied |
-| Verify-round host-commit idle | end-to-end ms/round measured above | no phase attribution | no phase attribution | unproven | no scheduler/Program edits |
+All new dispatches exclude `NINFER_SM86` and `NINFER_SM89`. Neighboring extents
+retain their previous selectors. Q5's new shared-row padding and rolled-loop
+parameters default to the previous behavior for every other instantiation.
+The separate materialized GDN path is included; it does not go through the
+ordinary split dispatcher.
 
-The Q4 route uses the existing sliced-K kernel with 16-byte shared code-row padding, pairwise K reduction, two staging buffers at T=8 and one at T=16. Q5 companions reuse upstream's existing two-stage sliced-K implementation. Both choices remain behind the existing shape dispatchers and `!NINFER_SM86 && !NINFER_SM89`; all other token extents retain their selectors. The materialized GDN snapshot/record path required its own dispatch change because it bypasses `linear_split`.
+The table uses CUDA Graph operator medians in microseconds, 10 warmups and
+61 samples. Each family has its own bounded before/after role comparison and
+numerical receipt; these are not substituted for the final ABBA measurement.
 
-Upstream h24 Grouped64 already fits W=7 and W=8 in one query tile (42 and 48 packed rows). Vanilla B=1/context=128 measured 13.536 microseconds at both widths. A proposed constant-width specialization was **not** implemented or measured; this report does not claim that it would recover the remaining gap. The old fork BF16 implementation and unshipped `3a2fadbd` were not carried. No NVFP4 KV or scheduler transplant was introduced.
+| Route | Extent | Before | Retained candidate |
+|---|---|---:|---:|
+| Q5 residual K=6,144 | T=8 / 16 | 21.792 / 25.824 | 19.680 / 25.792 |
+| Q5 residual K=17,408 | T=8 / 16 | 52.480 / 58.624 | 42.240 / 56.576 |
+| Q4 fused SwiGLU | T=8 / 16 | 70.912 / 93.408 | 62.720 / 91.488 |
+| Q4 shortlist | U=7 / 14 | 277.728 / 357.664 | 249.056 / 333.088 |
+| Attention Q4/Q5 input split | T=8 / 16 | 38.080 / 48.352 | 36.064 / 44.288 |
+| GDN Q4/Q5 input split | T=8 / 16 | 46.336 / 60.640 | 40.224 / 54.528 |
+| GDN snapshot | B1/W8 / B2/W8 | 50.432 / 64.800 | 46.304 / 58.656 |
+| GDN record | B1/W8 / B2/W8 | 50.400 / 64.736 | 44.320 / 58.592 |
 
-## Correctness evidence
+Q5 residual and input projections use eight K warps, the shipped linear
+reduction order, 16-byte padding in both shared code/high planes, three stages
+at T=8 and two at T=16, with a rolled K loop. Q4 SwiGLU and U=7/14 shortlist
+reuse the existing padded pairwise schedules, two stages at tile eight and one
+at tile sixteen. The prior Q4 input routes remain unchanged.
 
-| Executable / selector | Result | Wall seconds |
-|---|---|---:|
-| `ninfer_linear_split_multi_output_test` | pass | 126.937 |
-| `ninfer_linear_split_two_output_test` | pass | 46.688 |
-| `ninfer_linear_split_test` | pass | 14.198 |
-| `ninfer_gdn_input_proj_conv_snapshot_test` | pass | 34.150 |
-| `ninfer_gdn_input_proj_conv_record_test` | pass | 8.588 |
-| `ninfer_softmax_attention_test --causal-only --kv-dtype bf16` | pass | 67.749 |
+The first Q5 residual experiment (`9242f521`) restored eight-warps arithmetic
+without the padding/rolled pipeline: it passed numerics but regressed K=17,408/T8
+from 52.480 to 59.552 microseconds. It was superseded by `740329be`, not retained
+as a standalone performance improvement. `q5-iteration1.json` preserves this
+negative result. Subsequent receipts are `swiglu-iteration.json`,
+`q5-padded-iteration.json`, `topk-iteration.json` and `input-iteration.json`.
 
-The tests now use complete decoded-input FP64 projection references at T=8/16, graph boundaries around T=16, full GDN T=16 references, dense/masked B2/W8 record cases, and B2/W7,W8 BF16 graph replay. No tolerance was relaxed. A 600-second per-executable limit was used; the multi-output test exceeds the earlier infrastructure sweep's 90-second limit.
+## Acceptance and the two originally failing tails
 
-`python3 -m unittest discover -s tests -p test_exp097.py` passed four accounting tests locally before route edits and returned success again inside the completed candidate iteration. No project-wide suite, formatter, or linter was run.
+**Acceptance is not exactly equal between runtimes.** In the profiled request,
+shipped accepted 1,195/2,376 drafts versus candidate 1,198/2,353: the candidate's
+slightly better acceptance did not cause its slower round. Even the identical
+128-token warmup output used different round counts. Restoring shortlist FP32
+identity did not change the eight original bounded cases' acceptance, rejecting
+that specific numerical hypothesis. Restoring Q5 residual arithmetic changed
+some outputs; padding-only refinements did not change outputs or acceptance.
 
-The temporary bit-comparison program compiled unmodified Apache-2.0 fork headers archived from `1302d639` beside the current kernel, under the same CUDA toolchain. It compared all BF16 output bits for Q4 row counts 4,096/7,168 and Q5 7,168/12,288, K=5,120, T=8/16, four seeds. Q5 T=8/16 arithmetic matches the fork on those vectors despite using upstream's staging implementation. `fork-bit-identity.json` preserves the complete replay source, reference paths/archive hash, command and all 32 results; no private reference implementation was added to the production source tree. This establishes the tested source schedules, not cross-toolchain identity of every possible input or full-model output identity.
+Final weighted accepted/drafted rates by workload:
 
-## Artifact and environment identity
+| Workload | Shipped | Candidate |
+|---|---:|---:|
+| Log triage | 0.43903 | 0.44598 |
+| Regression contract | 0.49979 | 0.49284 |
+| Repository evidence | 0.68032 | 0.68027 |
+| Structured output | 0.65826 | 0.59714 |
+| Work-log extraction | 0.63633 | 0.63416 |
 
-- Shipped runtime image: `sha256:6a02feba4163d992cc6a46baf28e0ece2ffe6a2ead91939e566c1b3080f5bc02`.
-- GPU-ready build/runtime environment: `sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1` (`ov-build-env:master-64d10fbf-r2`).
-- Shipped v2 artifact: `0634abb07024221de141456cf04a42ab74b18bc38e1b781c6eb2e062a467eec3`; master-upgraded v3: `facba3bd318139c50899d4a0d74576837f73f0f498a461961467d56df10f4944`.
-- Direct proof: all 1,184 tensor payloads / 20,424,296,864 tensor bytes identical; the complete original 20,437,148,160-byte payload range is preserved, SHA256 `ac0db89fef9efbadf38cc6bfd97b763714ed55b1ab6d31e28b59325f85e87ffd`. Proof took 44.439 seconds. Payload equality does not assert identical frontend rendering or all generated answers.
-- The first vanilla Op attempt used the prior environment and failed with `cudaErrorStubLibrary`. It is environment-invalid, not a product correctness failure. Only that invalid GPU step was repeated after the r2 fix.
-- Nsight Systems and Compute 2025.4.1.0 were located with CPU-only metadata commands. **No GPU profiler capture was executed.**
+### Structured output: frontend serialization, not slow verify kernels
 
-## Reproduction commands
+Both cases use function tools. In the final gate, struct-002 sets the p95:
+shipped has 1,114 prompt tokens, 110 completion tokens, 20 rounds and acceptance
+90/140; candidate has 1,115 prompt tokens, 102 completion tokens, 21 rounds and
+acceptance 81/147. Candidate round cost is actually lower, **15.2055 versus
+15.2968 ms**, but fewer tokens per round produce the 1.12560 ms/token ratio.
+Struct-005 is 2.81729 versus 2.70732 ms/token (1.04062).
 
-Paths below are symbolic roots for the leased source, persistent build, external frozen corpus, model and helper directory; private host paths and credentials are deliberately excluded. All builds/GPU executions occurred under holder D2. The validated source commit is the one named above, not an evolving branch tip.
+The Main-approved one-line diagnostic changed only the local JSON type inside
+`src/serve/translate.cpp:90` from ordered `RequestJson` to `nlohmann::json`.
+It canonically sorts the complete rendered tool definition, including outer,
+function and nested schema keys, reproducing the shipped serialization policy.
+This removes the extra prompt token in both cases. Struct-002 becomes 110 output
+tokens / 19 rounds; struct-005 becomes 176 / 31. On the bounded diagnostic,
+structured p95 falls from **3.08911 to 2.65130 ms/token**, versus shipped control
+**2.74480** (ratio **0.96594**). Request-only function reordering did nothing;
+recursive schema ordering alone changed behavior but did not remove the prompt
+count discrepancy. Those incomplete counterfactuals are preserved, not treated
+as proof that serialization is irrelevant.
 
-```bash
-export NINFER_BUILD_HOLDER=D2
-export NINFER_BUILD_ENV_IMAGE=ov-build-env:master-64d10fbf-r2
-"$COMMON/build.sh" "$SOURCE" "$BUILD" -DNINFER_BUILD_BENCHMARKS=ON -- \
- ninfer-serve ninfer_linear_split_multi_output_bench ninfer_linear_split_two_output_bench \
- ninfer_causal_softmax_attention_bench ninfer_gdn_input_proj_bench \
- ninfer_linear_split_multi_output_test ninfer_linear_split_two_output_test ninfer_linear_split_test \
- ninfer_gdn_input_proj_conv_snapshot_test ninfer_gdn_input_proj_conv_record_test \
- ninfer_softmax_attention_test ninfer_qwen3_5_dflash_round_bench ninfer_bench
-```
+`canonical-tools-diagnostic.json` binds the patch, both binary hashes and all
+observations. **The diagnostic was reverted locally and remotely, and the frozen
+G2 binary restored. It is not in the mergeable route set or the final gate.**
+Whether to canonicalize tool serialization is a frontend behavior decision for
+Main and the Frontend/ServePort owners via the integration owner, not a kernel fix.
+This bounded result is not a full-corpus qualification of canonical serialization.
 
-Each test in the correctness table was run through `run-in-env.sh --gpu --mount "$ROOT" -- "$BUILD/tests/<executable>"` with its displayed selectors. The bit-comparison compile command is embedded in its receipt. The DFlash round benchmark's new `--spec dflash2` selector was built but no standalone round benchmark measurement was executed.
+### Work-log extraction: recovered projection latency, residual acceptance cost
 
-```bash
-"$BUILD/bench/ninfer_linear_split_multi_output_bench" --format q4q5 \
- --tokens 7,8,9,15,16,17 --execution graph --cache cold --warmup 10 --repeat 61 --csv-out attn-input.csv
-"$BUILD/bench/ninfer_linear_split_two_output_bench" --format q4q5 --n 16384 --k 5120 \
- --tokens 7,8,9,15,16,17 --execution graph --cache cold --warmup 10 --repeat 61 --csv-out gdn-split.csv
-# Each combination of OP=snapshot,record and B=1,2:
-"$BUILD/bench/ninfer_gdn_input_proj_bench" --op "$OP" --format q4q5 --n 16384 --k 5120 \
- --tokens 7,8,9 --batch "$B" --execution graph --cache cold --warmup 10 --repeat 61 --csv-out gdn.csv
-"$BUILD/bench/ninfer_causal_softmax_attention_bench" --entry append --geometry d256-h24-kv4 \
- --kv-dtype bf16 --batch 1,2 --tokens 6,7,8,9 --context 128,32000,64000,120000 \
- --mapping fragmented --execution graph --cache cold --warmup 10 --repeat 61 --csv-out attention.csv
-```
+The earlier workload p95 ratio was 1.11822. It is now **1.03715**, within the
+original 10% limit. Shipped p95 is worklog-020; candidate p95 is worklog-005.
+For worklog-005 itself, both produce 850 tokens: shipped uses 181 rounds and
+accepts 668/1,266; candidate uses 189 rounds and accepts 660/1,318. Candidate
+round cost is **15.4809 versus 15.5584 ms**, while ms/token is **3.44222 versus
+3.31301**. Thus the remaining case-level 3.90% gap comes from extra speculative
+rounds, not slower round execution. The original failure combined the measured
+projection latency deficit with an acceptance penalty and a changed p95 rank.
+`tail-attribution-initial.json` and the final summary retain all per-case numbers.
 
-Server common arguments were `--host 0.0.0.0 --port 8080 --model-id q38-ninfer --request-log-jsonl /logs/requests.jsonl --max-context 131072 --kv-capacity 131072 --prefill-chunk 1024 --kv-dtype bf16 --max-concurrency 2 --pending-timeout-ms 180000 --spec dflash2 --draft-tokens 7 --lm-head-draft --vision --preserve-thinking`, with a separately supplied private key. Docker bridge publishing was loopback-only `127.0.0.1:18140:8080`, with the io_uring seccomp policy. Shipped extras: `--device-state-slots 2 --host-state-slots 24 --host-kv-mib 16384 --gpu-keep-warm-ms 60000`; master extras: `--device-state-slots 4 --host-context-mib 16384`. These slot flags have different historical semantics; both represent the intended two resident lanes plus spare state.
+Full-model numerical/acceptance identity remains unproven. For example, repo-002
+has identical output hashes but 52/54 rounds. Op identity proofs do not localize
+all prefill/draft hidden-state differences; no exact global equality is claimed.
 
-```bash
-python3 tools/bench/run_exp097.py --arm "$ARM" --base-url http://127.0.0.1:18140 \
- --api-key-file "$KEY_FILE" --request-log "$REQUEST_LOG" --qualification "$QUALIFICATION" \
- --probe "$PROBE" --case-ids "$CASE_IDS" --long-fixture "$LONG_FIXTURE" \
- --identity "$IDENTITY" --receipt "$RECEIPT"
-# B2 and A2 additionally used --skip-roles.
-```
+## Supplementary depth protocol: do not hide acceptance regressions
 
-The arm receipts bind runner/probe/corpus-selection/fixture hashes and binary/image/model identities. The shipped binary hash is explicitly labelled expected, not independently measured. Receipts contain only hashes, case identifiers, counts and timings; prompts, generated text, keys and private host paths are excluded.
+These fixed-continuation probes are outside the 84-case role statistic. Each
+single emits 2,048 tokens; each pair emits two 1,024-token responses. Paired
+requests overlap prefill/decode and are not a constant-B2 kernel measurement.
 
-## Unclosed acceptance boundaries
+| Nominal depth | Single shipped/candidate tok/s | Single shipped/candidate rounds | Single shipped/candidate ms/round | Paired-request shipped/candidate decode tok/s |
+|---|---:|---:|---:|---:|
+| 0 | 353.617 / 385.371 | 379 / 350 | 15.2812 / 15.1839 | 236.568 / 279.078 |
+| 32K | 342.017 / 319.766 | 357 / 384 | 16.7731 / 16.6789 | 213.649 / 222.137 |
+| 64K | 335.332 / 290.781 | 338 / 392 | 18.0692 / 17.9671 | 228.760 / 199.417 |
+| 120K | 274.260 / 259.585 | 368 / 391 | 20.2917 / 20.1778 | 263.857 / 256.118 |
 
-G2 remains failed; no release/fallback decision is made by this slice. The remaining gap has not been attributed to host commit idle, attention, shortlist projection, or other schedules. Full-model quality/leak screening and native Windows numerical qualification remain required by the program. BF16 fixed-width experimentation, GPU profiler attribution and any additional kernel family changes require continued work beyond this requested handoff; none are silently represented as completed here.
+Deep fixed-continuation throughput does regress despite slightly faster rounds:
+at 64K, acceptance is 0.72262/0.60379 and the candidate needs 54 extra rounds.
+These observations are retained explicitly; the amended shipping decision is
+about the role-corpus median, not a claim of universal workload parity. No
+further lease time was spent optimizing after the founder's stopping criterion.
+
+## Correctness, integration and reproduction
+
+Eight affected scoped GPU executables passed with a 600-second per-test cap:
+`ninfer_linear_add_q5_a16_test`, `ninfer_linear_swiglu_q4_a16_test`,
+`ninfer_linear_topk_test`, `ninfer_linear_split_test`,
+`ninfer_linear_split_multi_output_test`, `ninfer_linear_split_two_output_test`,
+`ninfer_gdn_input_proj_conv_record_test`, and
+`ninfer_gdn_input_proj_conv_snapshot_test`. The tests use represented-input FP64
+oracles, graph replay, guard/immutability checks, mapped top-k IDs and tie cases.
+T=8/16 and U=7/14 replay coverage was added. No tolerance was relaxed.
+
+| Source-to-source proof | Cases | Compared words | Bit mismatches |
+|---|---:|---:|---:|
+| Final Q5 residual, K=6,144/17,408, T=8/16 | 16 | 983,040 BF16 | 0 |
+| Fused Q4 SwiGLU, T=8/16 | 8 | 1,671,168 BF16 | 0 |
+| Q4 shortlist projection, U=7/14 | 8 | 11,010,048 FP32 | 0 |
+| Final Q5 input, N=7,168/12,288, T=8/16 | 16 | 1,867,776 BF16 | 0 |
+
+Each proof uses four fixed seeds and unmodified Apache-2.0 `1302d639` reference
+headers, archive SHA256 `ba4b5a389887ed592d4799600ee802ec1a751a8374430590afe2e49b8f9e7c67`.
+Complete replay source is embedded in each receipt. The earlier Q4 input proof
+in `fork-bit-identity.json` remains applicable to its unchanged schedule.
+These are tested-vector source-schedule proofs, not every-input/cross-toolchain
+or complete-model identity. No formatter, linter or project-wide suite was run.
+
+After `9bee163e`, the route commits are `9242f521`, `24c93a36`, `740329be`,
+`db007825`, and **`c2dbcbae`**. Integrate them as a set; do not stop at the
+rejected intermediate Q5 schedule. The diagnostic serving alias is excluded.
+The evidence-only handoff commit adds this report and the sanitized receipts.
+
+All builds and GPU runs used the D2 lease. Reproduction uses the existing
+supervised `build.sh` / `run-in-env.sh` with the frozen environment above, and
+`tools/bench/run_exp097.py` with the identity, frozen corpus, case IDs, probe and
+long fixture hashes in `g2-protocol.json`. **All four final arms run all 84 roles**;
+the earlier baseline's `--skip-roles` optimization was not used. The standard
+server flags were `--max-context 131072 --kv-capacity 131072 --prefill-chunk 1024
+--kv-dtype bf16 --max-concurrency 2 --spec dflash2 --draft-tokens 7
+--lm-head-draft --vision --preserve-thinking --pending-timeout-ms 180000`.
+Shipped uses device states2, host states24, host KV16,384MiB and keep-warm60,000ms;
+master uses device states4 and host context16,384MiB. These different historical
+slot APIs express the same intended two resident lanes plus spare state.
+
+The public receipts contain no prompts, generated text, credentials, host paths
+or device UUIDs. Private raw captures/logs remain separately retained; their
+public hashes bind the primary profiler evidence without exposing command-line
+credentials. Integrated build/durability and product release gates remain the
+integration owner's responsibility.
