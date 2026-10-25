@@ -56,8 +56,8 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void q5_a16_sli
 
     union SharedStorage {
         struct {
-            alignas(16) std::uint8_t codes[S][R][W][32];
-            alignas(16) std::uint8_t high[S][R][W][8];
+            alignas(16) std::uint8_t codes[S][R][W * 32 + Schedule::kRowPadding];
+            alignas(16) std::uint8_t high[S][R][W * 8 + Schedule::kRowPadding];
             alignas(16) std::uint16_t scales[S][R][W];
             alignas(16) __nv_bfloat16 x[S][W][T][64];
         } staging;
@@ -92,7 +92,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void q5_a16_sli
                             first_group + group
                       : 0;
             common::cp_async_zfill<16, Schedule::kWeightCache>(
-                &shared.staging.codes[slot][row][group][half * 16], codes + index * 32 + half * 16,
+                &shared.staging.codes[slot][row][group * 32 + half * 16], codes + index * 32 + half * 16,
                 valid ? 16 : 0);
         }
         for (int item = tid; item < R * (W / 2); item += Schedule::kThreads) {
@@ -105,7 +105,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void q5_a16_sli
                             first_group + pair
                       : 0;
             common::cp_async_zfill<16, Schedule::kWeightCache>(
-                &shared.staging.high[slot][row][pair][0], high + index * 8, valid ? 16 : 0);
+                &shared.staging.high[slot][row][pair * 8], high + index * 8, valid ? 16 : 0);
         }
         if constexpr (Full) {
             for (int row = tid; row < R; row += Schedule::kThreads) {
@@ -151,7 +151,9 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void q5_a16_sli
         else
             common::cp_commit();
     }
-    constexpr int kUnroll = Schedule::kStaticK ? (Schedule::kStaticK / 64 + W - 1) / W : 1;
+    constexpr int kUnroll = Schedule::kStaticK && Schedule::kUnrollTiles
+                               ? (Schedule::kStaticK / 64 + W - 1) / W
+                               : 1;
 #pragma unroll kUnroll
     for (int tile = 0; tile < tiles; ++tile) {
         const int slot = tile % S;
@@ -165,8 +167,8 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void q5_a16_sli
                 const int r0      = mi * 16 + gid;
                 const int byte0   = ks * 8 + lid;
                 const auto decode = [&](int row, int byte) {
-                    return q5_sliced_k_integer_pair(shared.staging.codes[slot][row][warp][byte],
-                                                    shared.staging.high[slot][row][warp][byte / 4],
+                    return q5_sliced_k_integer_pair(shared.staging.codes[slot][row][warp * 32 + byte],
+                                                    shared.staging.high[slot][row][warp * 8 + byte / 4],
                                                     byte % 4);
                 };
                 const unsigned a0 = decode(r0, byte0);

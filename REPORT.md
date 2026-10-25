@@ -16,11 +16,13 @@ projection is 0.028 ms slower. Between-round idle is 0.358/0.371 ms, with only
 0.019/0.021 ms overlapping host commit. The second upstream graph does not explain
 the gap. No attention, Program-round or Engine change is justified by this capture.
 
-The next measured candidate uses eight K warps for Q5 residual T=8/16 at K=6,144
-and 17,408, retaining upstream's two-stage loading and the shipped linear
-reduction order. sm_86/89 and neighboring extents retain their existing routes.
-Expanded FP64/graph coverage includes both verify widths; GPU results are not yet
-claimed for this candidate. Earlier results below remain the previous baseline.
+The eight-warp/two-stage Q5 residual candidate passed the public FP64/graph test
+and matched all 983,040 BF16 values against the fork, but was slower:
+K=17,408/T=8 rose from 52.48 to 59.55 microseconds. It is not accepted as a
+performance result. The re-derived candidate additionally restores 16-byte
+padding in both code/high planes, three stages at T=8, and a rolled K loop;
+T=16 keeps two stages. sm_86/89, neighboring extents, and all existing schedule
+defaults remain unchanged. The revised schedule requires fresh GPU evidence.
 
 The following isolated candidate reuses the existing padded pairwise Q4 schedules
 for fused SwiGLU at T=8/16. All other widths and sm_86/89 remain unchanged. The

@@ -27,10 +27,12 @@ LinearAddLaunch select_q5_linear_add_n5120_k6144(std::int32_t tokens) {
     // EXP-097: eight K warps preserve the shipped verify reduction order.
     if (tokens == 8)
         return launch_q5_add_sliced<
-            Q5A16SlicedKMmaSchedule<16, 8, 8, 2, Cache::cg, Cache::ca, 1, 6144>>;
+            Q5A16SlicedKMmaSchedule<16, 8, 8, 3, Cache::cg, Cache::ca, 1, 6144, 8,
+                                    Q5SlicedKReduction::Linear, 16, false>>;
     if (tokens == 16)
         return launch_q5_add_sliced<
-            Q5A16SlicedKMmaSchedule<16, 16, 8, 2, Cache::cg, Cache::ca, 1, 6144>>;
+            Q5A16SlicedKMmaSchedule<16, 16, 8, 2, Cache::cg, Cache::ca, 1, 6144, 16,
+                                    Q5SlicedKReduction::Linear, 16, false>>;
 #endif
     if (tokens <= 8) return launch_q5_add_sliced<q5_instances::SlicedR16T8W4S2>;
     if (tokens <= 16) return launch_q5_add_sliced<q5_instances::SlicedR16T16W4S2>;
