@@ -3,6 +3,7 @@
 // Small fixed-capacity request execution for every backend.
 
 #include "core/device.h"
+#include "core/gpu_keep_warm.h"
 #include "core/nvtx.h"
 #include "ninfer/types.h"
 #include "runtime/contract/execution.h"
@@ -19,6 +20,7 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <deque>
 #include <exception>
 #include <future>
@@ -83,6 +85,7 @@ public:
           max_outstanding_(static_cast<std::size_t>(options.max_concurrency) +
                            options.max_pending_requests),
           pending_timeout_(std::chrono::milliseconds(options.pending_timeout_ms)),
+          keep_warm_grace_(std::chrono::milliseconds(options.gpu_keep_warm_ms)),
           resources_(options.context_cache.enabled, std::move(context_cost)) {
         if (max_concurrency_ == 0 || max_concurrency_ > kMaximumConcurrency ||
             options.max_pending_requests == 0 || pending_timeout_.count() <= 0) {
@@ -101,12 +104,20 @@ public:
         worker_                   = std::thread([this, startup = std::move(startup)]() mutable {
             try {
                 device_.bind_to_current_thread();
+                if (keep_warm_grace_.count() > 0) {
+                    try {
+                        keep_warm_.emplace(device_);
+                    } catch (const std::exception& error) {
+                        std::fprintf(stderr, "warning: GPU keep-warm disabled: %s\n", error.what());
+                    }
+                }
                 startup.set_value();
             } catch (...) {
                 startup.set_exception(std::current_exception());
                 return;
             }
             worker_loop();
+            keep_warm_.reset();
         });
         try {
             started.get();
@@ -2187,13 +2198,30 @@ private:
         publish_runtime_stats();
     }
 
+    void idle_wait(std::unique_lock<std::mutex>& lock) {
+        const auto wake = [&] { return stopping_ || !pending_.empty(); };
+        if (keep_warm_ && std::exchange(keep_warm_armed_, false)) {
+            const auto until = Clock::now() + keep_warm_grace_;
+            while (!wake() && Clock::now() < until) {
+                if (!keep_warm_->launch()) {
+                    std::fprintf(stderr, "warning: GPU keep-warm disabled after CUDA failure\n");
+                    keep_warm_.reset();
+                    break;
+                }
+                queue_cv_.wait_until(lock, std::min(until, Clock::now() + keep_warm_->period()),
+                                     wake);
+            }
+        }
+        queue_cv_.wait(lock, wake);
+    }
+
     void worker_loop() noexcept {
         for (;;) {
             {
                 std::unique_lock lock(queue_mutex_);
                 if (!stopping_ && pending_.empty() && resident_empty() && paused_.empty() &&
                     !instance_.program->has_context_operation()) {
-                    queue_cv_.wait(lock, [&] { return stopping_ || !pending_.empty(); });
+                    idle_wait(lock);
                 }
                 if (stopping_) {
                     lock.unlock();
@@ -2362,6 +2390,8 @@ private:
                 fail_all_locked(error);
                 return;
             }
+            // Arm only after an execution/context unit, not after a failed admission scan.
+            keep_warm_armed_ = keep_warm_armed_ || executed;
             execution_lock.unlock();
             if (!executed) {
                 std::unique_lock lock(queue_mutex_);
@@ -2376,6 +2406,7 @@ private:
     const std::uint32_t max_concurrency_;
     const std::size_t max_outstanding_;
     const std::chrono::milliseconds pending_timeout_;
+    const std::chrono::milliseconds keep_warm_grace_;
     ResourceManagement resources_;
 
     mutable std::mutex execution_mutex_;
@@ -2405,6 +2436,9 @@ private:
     RuntimeStats published_stats_;
     bool stopping_ = false;
     bool failed_   = false;
+    // Owned entirely by the device-bound worker, including destruction.
+    std::optional<GpuKeepWarm> keep_warm_;
+    bool keep_warm_armed_ = false;
     std::thread worker_;
 };
 

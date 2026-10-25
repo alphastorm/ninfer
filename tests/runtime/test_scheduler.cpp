@@ -334,6 +334,39 @@ void test_decode_and_control_membership() {
             "compact control membership changed committed control spans or request order");
 }
 
+void test_two_request_compaction_after_cancellation() {
+    Scheduler scheduler;
+    Slots slots{};
+    slots[0] = request(10, Request::Phase::Decode);
+    slots[1] = request(20, Request::Phase::Decode);
+    auto round = scheduler.build_round_membership(slots, 2);
+    require(round.size == 2 && round.sequences[0] == 10 && round.sequences[1] == 20,
+            "C2 decode did not keep independent sequence rows");
+
+    // Engine removes a cancelled resident at a boundary. The surviving lane is not lane zero,
+    // but Native still receives a dense one-row batch with its own sequence and budget.
+    slots[0].reset();
+    slots[1]->output.model_tokens = 5;
+    round = scheduler.build_round_membership(slots, 2);
+    require(round.size == 1 && round.lanes[0] == 1 && round.sequences[0] == 20 &&
+                round.budgets[0].generated_tokens_remaining == 5,
+            "cancelling row zero corrupted the live sibling's compact decode row");
+    slots[1]->phase = Request::Phase::Control;
+    slots[1]->output.control = {11, 12};
+    const auto control = scheduler.build_control_membership(slots, 2);
+    require(control.size == 1 && control.lanes[0] == 1 && control.sequences[0] == 20 &&
+                control.row_stride == 2 && control.tokens == std::vector<ninfer::TokenId>({11, 12}),
+            "live sibling lost its exact control span after cancellation");
+
+    slots[0] = request(30, Request::Phase::Prefill);
+    require(scheduler.next_prefill(slots, 2) == 0,
+            "reusing the cancelled lane blocked a short request's prefill");
+    slots[1]->phase = Request::Phase::Decode;
+    round = scheduler.build_round_membership(slots, 2);
+    require(round.size == 1 && round.sequences[0] == 20,
+            "short-request prefill displaced an unrelated sibling's decode");
+}
+
 } // namespace
 
 int main() {
@@ -345,6 +378,7 @@ int main() {
         test_restore_events();
         test_prefill_replay_round_robin();
         test_decode_and_control_membership();
+        test_two_request_compaction_after_cancellation();
         std::cout << "ok\n";
         return 0;
     } catch (const std::exception& error) {
