@@ -5,6 +5,7 @@ ninfer_add_test(ninfer_scheduler_test
 add_executable(ninfer_durable_contract_headers_test
   "${CMAKE_CURRENT_LIST_DIR}/../test_durable_contract_headers.cpp")
 ninfer_test_includes(ninfer_durable_contract_headers_test)
+target_link_libraries(ninfer_durable_contract_headers_test PRIVATE ninfer::json)
 add_test(NAME ninfer_durable_contract_headers_test
   COMMAND ninfer_durable_contract_headers_test ${PROJECT_SOURCE_DIR}/tests/fixtures/durable)
 set_tests_properties(ninfer_durable_contract_headers_test PROPERTIES LABELS "host")
