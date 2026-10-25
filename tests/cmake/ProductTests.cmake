@@ -34,7 +34,19 @@ ninfer_add_test(ninfer_openai_responses_test
 
 ninfer_add_test(ninfer_openai_responses_store_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_openai_responses_store.cpp"
-  LIBRARIES ninfer_serve)
+  LIBRARIES ninfer_serve_state)
+set_tests_properties(ninfer_openai_responses_store_test PROPERTIES LABELS "host")
+
+ninfer_add_test(ninfer_session_checkpoint_store_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_session_checkpoint_store.cpp"
+  LIBRARIES ninfer_session_checkpoint_store)
+ninfer_add_test(ninfer_automatic_checkpoint_queue_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_automatic_checkpoint_queue.cpp"
+  LIBRARIES ninfer_session_checkpoint_store)
+ninfer_add_test(ninfer_checkpoint_policy_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_checkpoint_policy.cpp")
+set_tests_properties(ninfer_session_checkpoint_store_test ninfer_automatic_checkpoint_queue_test
+  ninfer_checkpoint_policy_test PROPERTIES LABELS "host" TIMEOUT 180)
 
 ninfer_add_test(ninfer_anthropic_schema_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_anthropic_schema.cpp"
@@ -55,6 +67,15 @@ ninfer_add_test(ninfer_metrics_test
 ninfer_add_test(ninfer_http_error_handler_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_http_error_handler.cpp"
   LIBRARIES ninfer_serve)
+
+ninfer_add_test(ninfer_http_server_stop_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_http_server_stop.cpp"
+  LIBRARIES ninfer_serve)
+
+ninfer_add_test(ninfer_stop_event_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_stop_event.cpp"
+  LIBRARIES ninfer_serve)
+set_tests_properties(ninfer_stop_event_test PROPERTIES SKIP_RETURN_CODE 77)
 
 ninfer_add_test(ninfer_http_transport_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_http_transport.cpp"

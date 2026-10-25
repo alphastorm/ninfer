@@ -14,8 +14,11 @@ They do not implement the store, native codec or Engine adapter.
 
 - Use new release-isolated roots. Preserve the previous release's roots for rollback.
   Never discover, rewrite, quarantine or import fork-v2 generations as v3.
-- Unknown/older outer or native schemas return `Incompatible` without mutation. A v1
-  fingerprint fails closed. Native StateImages are not portable across builds,
+- Older outer schemas (`schema_version < 3`) return `Incompatible` before origin
+  verification, without mutation even when a MAC is present and invalid. Unknown
+  outer schemas at or above 3 and unknown native schemas are refused after their
+  applicable authentication gates; schema incompatibility itself never quarantines.
+  A v1 fingerprint fails closed. Native StateImages are not portable across builds,
   platforms or compiled GPU architectures. Same format does not imply same layout.
 - Upstream owns scheduling, DFlash2 execution, context caches, grammar and frontend.
   Persistence transfers their committed state; it does not install a second scheduler.
@@ -75,8 +78,17 @@ Floating-point literals, NaN, Infinity, duplicate keys, invalid UTF-8 and surrog
 code points are rejected. Typed schemas reject null except explicitly nullable
 Responses fields. This is a restricted encoding, not unrestricted RFC 8785/JCS.
 
-Verify the MAC over the exact bounded bytes read from `manifest.json`, then parse
-with duplicate-key detection and require re-encoding to equal those exact bytes.
+Before origin verification, the loader may inspect only the top-level
+`schema_version` integer from the bounded manifest read; nothing else is trusted.
+If it is less than 3, return `Incompatible/incompatible_schema` with no quarantine,
+mutation or import, regardless of whether the MAC is missing, valid or invalid.
+A forged schema value can therefore cause only a refusal, never grant authority.
+For a value at or above 3, verify the MAC before any further parsing. This narrow
+schema-refusal probe does not permit pre-authentication trust of payload paths,
+statistics, fingerprint fields or other manifest content.
+
+Verify the MAC over the exact bounded bytes read from `manifest.json`, then perform
+normal parsing with duplicate-key detection and require re-encoding to equal those exact bytes.
 Do not authenticate a parsed-and-reserialized replacement for the received bytes.
 The Python fixture test is the independent canonical/MAC reference; production
 uses nlohmann's compact sorted-object encoding only after these validation gates.
@@ -208,7 +220,6 @@ fingerprint. The native query returns `DurableNativeLayout` from the loaded Prog
 actual geometry. The frontend query returns `DurableFrontendIdentity` computed once
 from loaded tokenizer/resource bytes and the exact selected template source at
 compilation. Never reopen the template filename after load or hash resources per save.
-
 ## K3 — Engine/Program ownership and transaction API
 
 Only the internal `runtime::CheckpointEngineAccess` adapter exposes persistence.
@@ -220,6 +231,14 @@ The public `Engine` API stays unchanged except integration-owned friendship.
 - `checkpoint_layout(const Engine&)` and `frontend_identity(const Engine&)` expose
   the immutable K2 startup identity described above; neither introduces a public
   Engine persistence method or derives identity from admission capacities.
+- `set_pressure_checkpoint_handler(Engine&, shared_ptr<PressureCheckpointHandler>)`
+  installs the live store-backed save-before-eviction provider.
+  `notify_checkpoint_progress(Engine&) noexcept` wakes work after observed checkpoint
+  progress; it does not authorize eviction or a speculative retry loop.
+- `set_reclaimable_session_oracle(Engine&, shared_ptr<const ReclaimableSessionOracle>)`
+  installs the trusted store-backed recoverability provider separately from Reader.
+  An absent oracle permits no unrelated-session reclaim. Disk metadata, manifest
+  flags and a Reader's mere existence never supply this authority.
 - `export_session(engine, digest, expected_tag, Writer&, limits)` returns
   `Exported`, `Refused(reason)`, or `Stale`, with `captured_epoch` on success.
   No silent retry against a different tag.
@@ -233,21 +252,39 @@ The public `Engine` API stays unchanged except integration-owned friendship.
   Engine worker work while holding it. Bulk hashing/writing precedes the gate.
 - `prepare_import(engine, target, Reader&, fingerprint, expected_stats, limits)`
   returns `Prepared` plus an owning transaction, or `CapacityRefused`, `Corrupt`,
-  `IdentityMismatch`, `PolicyDisabled`. Prepared is not visible success.
+  `IdentityMismatch`, `PolicyDisabled`, `Unavailable`. `Unavailable/IoUnavailable`
+  is a retryable read failure, never corruption: abort unpublished reservations,
+  preserve the generation, and publish no partial state. Prepared is not visible success.
 - `DurableEngineImport::commit()` returns `Imported`, `CapacityRefused`, `Corrupt`,
   `IdentityMismatch`, or `PolicyDisabled`. Commit rechecks the captured epoch/policy;
   stale publication maps to `IdentityMismatch/stale_publication`, never corruption.
   After native publication, no operation may fail. `abort()` is idempotent; destruction
   aborts uncommitted work after all outstanding writers retire.
 - `import_session(...)` is prepare→commit/abort convenience for non-Responses callers.
-  Responses MUST use K4, not the convenience path.
+  Responses MUST use K4, not the convenience path. `DurableImportState::Unavailable`
+  preserves a prepare-time `Unavailable/IoUnavailable` unchanged through this
+  convenience API and service restore callbacks; never coerce it to corruption.
 - Capture `session_epoch` before disk loading. Capture publication epoch from the
   submitted handle, not handler completion time. Tokens are runtime-only.
+- `make_read_queue(Engine&, const std::filesystem::path& root)` receives the
+  configured checkpoint root from serving. The factory preserves no-follow
+  anchoring; an untrusted manifest never supplies or substitutes this root.
+
+The `fingerprint` argument is the trusted cached active `RuntimeFingerprintV2`
+collected by serving, never the untrusted parsed manifest object. Before producing
+import input, the store authenticates the manifest and exact-compares its complete
+v2 fingerprint against that active identity. Engine validates only the supplied
+engine/native-layout/frontend subset against its actual loaded state. Build,
+artifact and deployment identity remain the store/serving validation responsibility:
+do not fabricate missing hashes or rehash the model artifact on every restore.
+Non-Responses convenience callers must use the same authenticated complete-fingerprint
+store gate; they do not gain a bypass by calling the internal adapter directly.
 
 Program owns concrete move-only types, implemented beside native context ownership:
 
 ```
 prepare_checkpoint_export(span<const CheckpointHandle>, DurableLimits) -> ExportLease
+validate_checkpoint_import(const DurableCheckpointSet&, const Reader&, DurableLimits) -> CheckpointValidation
 prepare_checkpoint_import(const DurableCheckpointSet&, const Reader&, DurableLimits) -> ImportReservation
 commit_import(ImportReservation&&) -> vector<CheckpointHandle>
 ```
@@ -259,6 +296,12 @@ Program receives no HTTP session name. It returns handles only to the Engine, ne
 to the disk codec. A preallocated commit returns all handles atomically; misuse of a
 foreign/stale Program is a programming error before publication, not partial success.
 
+`Program::validate_checkpoint_import(set, reader, limits)` returns
+`CheckpointValidation{state, reason, stats}` with state `Validated`, `Unavailable`,
+`Corrupt`, or `IdentityMismatch`. It performs bounded streamed verification and the
+same identity, frontier and layout checks as import, without reservation or
+publication. `Validated` means the pinned checkpoint passed validation, not that
+native state was imported or any victim is unconditionally safe to evict.
 Export pins `CheckpointStore::Lease`, `StateImageStore::ReadLease`, page read leases
 and immutable identity. Resolve immutable copy views under Engine serialization;
 then perform dedicated transfer-stream copies with bounded pinned staging, hashing
@@ -293,12 +336,43 @@ lengths/digests, no holes/overlaps and no in-flight writes. Failed verification
 prevents commit. A fresh attempt needs a fresh single-pass Reader. Store verification
 of responses/index bytes obeys the same rule. Bounds apply before allocation.
 
+Reader also exposes `virtual DurableReason failure_reason() const noexcept`.
+After a failed read or completion check, callers preserve that typed cause rather
+than treating every false result as corruption. `IoUnavailable` maps to
+`DurablePrepareState::Unavailable`: retryable, no quarantine, no partial publication.
+Verified size/digest mismatches report `PayloadSizeMismatch`/`PayloadDigestMismatch`
+and map to `Corrupt`, permitting quarantine of that generation. `None` denotes no
+recorded failure, not a substitute for an observed I/O error. A1 implements the
+accessor in concrete readers/fakes; native and Engine import layers propagate it.
 Import never bypasses `allow_prefix_reuse` or serving `CacheParticipation`:
 `Disabled`, startup warmup, or disabled cache gives `PolicyDisabled/cache_disabled`
 without native reservation. Disk cannot enable reuse, add authority or force eviction.
 Capacity/reclamation attempts are bounded and require observed progress; no standby
 pinning retry policy from the old fork is reinstated by these interfaces.
 
+`ReclaimableSessionOracle::pin_recoverable(session_sha256, tag) const noexcept`
+returns `shared_ptr<const ContinuationCheckpointReader>`: a generation-pinned reader,
+or null when the session is not provably reclaimable. The live oracle calls
+`store.load(session, active_fingerprint, tag)`, requires the loaded snapshot's
+`latest_response_id == tag`, and retains its engine Reader. A cached `covers` boolean
+is not an authority substitute. A3 captures the installed oracle for each restore
+and retains the reader leases across that restore's bounded retries; no new
+`prepare_import` parameter or global mutable per-request state is introduced.
+
+`Reader::fresh_reader() const` returns `shared_ptr<const ContinuationCheckpointReader>`
+over the same immutable verified descriptors and pinned generation, with fresh
+single-pass read/hash state. It does not reuse a partially consumed verifier.
+Destructive reclaim re-validates the pinned reader's generation/tag against the
+current publication state per attempt (fresh lookup); stale or missing evidence
+makes the session not reclaimable. Before destructive eviction, A3 MUST also call
+`Program::validate_checkpoint_import` on the **victim's** pinned checkpoint set and
+Reader, proving that victim's recoverable disk copy rather than merely checking
+the incoming restore image. Only `Validated` permits proceeding to the still-required
+per-attempt victim generation/tag check; any refusal preserves the live victim.
+Validation is single-pass, so actual import after validation uses `fresh_reader()`.
+`publish_export` still compares the captured
+epoch under the gate. This pinned-reader shape supersedes the earlier optional
+generation/epoch value return; runtime epochs remain absent from the manifest.
 ## K4 — Responses restore and session isolation
 
 Extend `OpenAIResponsesStore`, not a parallel store. The snapshot owns a session
@@ -307,6 +381,15 @@ Encode `optional<bool> preserve_thinking` as distinct null/false/true values.
 Validate IDs, parents, cycles, media/tool types and byte/count bounds before publish.
 A required response ID must exist in the authenticated target lineage.
 
+Live serving installs the real store-backed pressure handler and reclaimability
+oracle through the internal K3 adapter. These are process-owned providers, not
+serialized restore inputs; no public Engine API is added. Restore without a proven
+oracle must preserve unrelated sessions rather than infer their recoverability.
+
+Any Engine pressure reclamation used to make room for this restore obeys K3's
+fresh pinned-reader generation/tag validation at destructive eviction. A stale or missing pin
+preserves the candidate's live state; it cannot be converted into a successful
+restore or a claim that the candidate remains durably recoverable.
 State machine:
 
 ```
@@ -446,14 +529,27 @@ Publication order:
 **POSIX:** fsync each file, same-filesystem rename for atomic replace, fsync relevant
 directories. Acknowledgement `dir_sync: "fsync"`.
 
-**Windows (binding lead decision):** FlushFileBuffers on each file handle;
-MoveFileExW with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH` for atomic
-replacement. Directory sync is an intentional documented NTFS no-op, never throws,
-and never claims a directory fsync occurred. Acknowledgement
-`dir_sync: "ntfs-write-through"`. This is the approved native publication policy,
-not an equivalence claim to POSIX directory-fsync guarantees on arbitrary filesystems.
-A file flush or replacement failure still fails publication normally. Do not invoke
-unsupported directory FlushFileBuffers and use its failure to disable native saves.
+**Windows (binding lead decision):** atomic replacement uses handle-anchored
+`NtSetInformationFile` with `FileRenameInformationEx = 65`,
+`REPLACE_IF_EXISTS | POSIX_SEMANTICS`, `RootDirectory` set to the pinned destination
+directory, and a leaf-only destination name. FlushFileBuffers flushes the staged
+file before replacement and the pinned parent handle after replacement. Parent
+directory pins permit `FILE_SHARE_WRITE` but still deny DELETE sharing: a rename
+into the directory requires `FILE_ADD_FILE` access, which conflicts with a deny-WRITE
+pin. Every operation remains handle-anchored. Immediately before each rename,
+re-check the pinned handle's attributes: it must not be a reparse point, and its
+file index and volume serial must equal those captured at pin time. Ancestor and
+leaf reparse checks remain mandatory. No retry weakens the DELETE pin or substitutes
+a pathname-based rename.
+There is no Win32 `SetFileInformationByHandle` or MoveFileExW fallback.
+
+The standalone Windows `sync_directory` primitive remains an intentional documented
+NTFS no-op and never throws; it is distinct from the parent-handle flush within
+replacement. Acknowledgement remains `dir_sync: "ntfs-write-through"` and never
+claims a POSIX directory fsync occurred. This is the approved native publication
+policy, not an equivalence claim to POSIX directory-fsync guarantees on arbitrary
+filesystems. Required file/parent flush or replacement failure still prevents a
+successful publication acknowledgement; no retries mask it.
 
 A reader pins each accepted read batch's file handles until its writes retire and
 verifies the exact bytes delivered to the consumer. Reopening between batches is
@@ -467,10 +563,20 @@ never silently skip authentication. No new dependency is authorized by this cont
 ## K7 — result, error and receipt taxonomy
 
 Enums in `durable_engine_api.h` use the stable snake_case form of their names on the
-wire. `none` appears only with success. Store load states are `available`, `missing`,
+wire. The constexpr `durable_reason_name(DurableReason)` helper beside the enum is
+the single spelling authority for reasons in diagnostics and receipts. Its `unknown`
+fallback diagnoses an invalid enum value and is not a valid wire reason.
+`none` appears only with success. Store load states are `available`, `missing`,
 `incompatible`, `corrupt`, `unavailable`; export is `exported`, `refused`, `stale`;
-prepare is `prepared`; import is `imported`, `capacity_refused`, `corrupt`,
-`identity_mismatch`, `policy_disabled`. A prepared reservation is never an import ack.
+prepare is `prepared`, `capacity_refused`, `corrupt`, `identity_mismatch`,
+`policy_disabled`, `unavailable`; import is `imported`, `capacity_refused`, `corrupt`,
+`identity_mismatch`, `policy_disabled`, `unavailable`. A prepared reservation is never an import ack.
+Prepare/import `unavailable` with `io_unavailable` is retryable, preserves the generation,
+never quarantines it and cannot publish partial state; Reader `failure_reason()`
+is the source of that distinction from verified payload corruption.
+The non-reserving native validation states are `validated`, `unavailable`, `corrupt`,
+`identity_mismatch`; `validated` is neither an import acknowledgement nor authority
+to skip eviction-time victim generation/tag revalidation.
 
 | Reason class | Stable reasons | Mutation / retry posture |
 |---|---|---|
@@ -482,6 +588,11 @@ prepare is `prepared`; import is `imported`, `capacity_refused`, `corrupt`,
 | Admission | `metadata_limit`, `staging_limit`, `capacity`, `quota`, `foreign_session_collision` | old state intact; no unrelated eviction for DAG restore |
 | Availability | `origin_key_unavailable`, `io_unavailable`, `durability_unsupported`, `cancelled` | preserve generation; retry only after cause/progress changes |
 
+K1's bounded top-level schema probe is the sole pre-origin refusal exception:
+integer `schema_version < 3` yields `incompatible/incompatible_schema` with no
+quarantine, mutation or import even if the MAC is present and invalid. At or above
+3, MAC verification precedes further parsing. Do not report `origin_mac_mismatch`
+or quarantine a legacy generation that has already met the schema-refusal rule.
 Public Responses routes do not reveal foreign-session existence or low-level paths.
 Detailed receipt reasons are bounded symbolic names, not raw exceptions. Reports must
 not include keys, payloads, raw IDs, prompts, checkpoint root paths or machine names.

@@ -59,9 +59,9 @@ DirectReadQueue::DirectReadQueue(std::span<const FileView> files,
     p.slots.resize(buffers.size());
     std::vector<int> descriptors;
     for (const auto file : files) {
-        if (file.mode != ReadMode::Direct || file.descriptor < 0)
+        if (file.mode != ReadMode::Direct || file.native_handle < 0)
             throw std::invalid_argument("read queue requires direct files");
-        descriptors.push_back(file.descriptor);
+        descriptors.push_back(static_cast<int>(file.native_handle));
     }
     std::vector<iovec> vectors;
     for (std::size_t i = 0; i < buffers.size(); ++i) {

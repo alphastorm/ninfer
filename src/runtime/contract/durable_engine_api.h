@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -24,13 +25,15 @@ namespace ninfer::runtime {
 class ContinuationCheckpointWriter;
 class ContinuationCheckpointReader;
 class ContinuationCheckpointReadQueue;
+class PressureCheckpointHandler;
+class ReclaimableSessionOracle;
 
 enum class DurableExportState : std::uint8_t { Exported, Refused, Stale };
 enum class DurableImportState : std::uint8_t {
-    Imported, CapacityRefused, Corrupt, IdentityMismatch, PolicyDisabled
+    Imported, CapacityRefused, Corrupt, IdentityMismatch, PolicyDisabled, Unavailable
 };
 enum class DurablePrepareState : std::uint8_t {
-    Prepared, CapacityRefused, Corrupt, IdentityMismatch, PolicyDisabled
+    Prepared, CapacityRefused, Corrupt, IdentityMismatch, PolicyDisabled, Unavailable
 };
 
 // Stable snake_case spellings in K7, never ordinal serialization. No raw session/tag/path detail.
@@ -65,6 +68,43 @@ enum class DurableReason : std::uint8_t {
     DurabilityUnsupported,
     Cancelled
 };
+
+// Single spelling authority for bounded diagnostics and K7 receipts. "unknown" diagnoses an
+// invalid enum value; it is not an additional wire reason and MUST NOT enter a valid receipt.
+[[nodiscard]] constexpr std::string_view durable_reason_name(DurableReason reason) noexcept {
+    switch (reason) {
+    case DurableReason::None: return "none";
+    case DurableReason::StoreDisabled: return "store_disabled";
+    case DurableReason::CacheDisabled: return "cache_disabled";
+    case DurableReason::NoSessionRecords: return "no_session_records";
+    case DurableReason::EmptyTag: return "empty_tag";
+    case DurableReason::SessionNotIndexed: return "session_not_indexed";
+    case DurableReason::TransactionBusy: return "transaction_busy";
+    case DurableReason::TagMismatch: return "tag_mismatch";
+    case DurableReason::StalePublication: return "stale_publication";
+    case DurableReason::StaleRevision: return "stale_revision";
+    case DurableReason::UnsupportedCodec: return "unsupported_codec";
+    case DurableReason::IncompatibleSchema: return "incompatible_schema";
+    case DurableReason::FingerprintMismatch: return "fingerprint_mismatch";
+    case DurableReason::OriginRequired: return "origin_required";
+    case DurableReason::OriginKeyUnavailable: return "origin_key_unavailable";
+    case DurableReason::OriginMacMismatch: return "origin_mac_mismatch";
+    case DurableReason::InvalidManifest: return "invalid_manifest";
+    case DurableReason::InvalidIndex: return "invalid_index";
+    case DurableReason::PayloadSizeMismatch: return "payload_size_mismatch";
+    case DurableReason::PayloadDigestMismatch: return "payload_digest_mismatch";
+    case DurableReason::MetadataLimit: return "metadata_limit";
+    case DurableReason::StagingLimit: return "staging_limit";
+    case DurableReason::Capacity: return "capacity";
+    case DurableReason::Quota: return "quota";
+    case DurableReason::ForeignSessionCollision: return "foreign_session_collision";
+    case DurableReason::RequiredResponseMissing: return "required_response_missing";
+    case DurableReason::IoUnavailable: return "io_unavailable";
+    case DurableReason::DurabilityUnsupported: return "durability_unsupported";
+    case DurableReason::Cancelled: return "cancelled";
+    }
+    return "unknown";
+}
 
 struct DurableLimits {
     std::uint64_t staging_bytes = 256ULL << 20;
@@ -150,10 +190,19 @@ public:
     [[nodiscard]] static DurableNativeLayout checkpoint_layout(const Engine&);
     [[nodiscard]] static DurableFrontendIdentity frontend_identity(const Engine&);
 
+    // Live serving installs trusted store-backed providers, never authority from disk metadata.
+    // With no oracle, import cannot reclaim an unrelated session.
+    static void set_pressure_checkpoint_handler(
+        Engine&, std::shared_ptr<PressureCheckpointHandler>);
+    static void set_reclaimable_session_oracle(
+        Engine&, std::shared_ptr<const ReclaimableSessionOracle>);
+    static void notify_checkpoint_progress(Engine&) noexcept;
+
     static void set_checkpoint_tag(PreparedPrompt&, std::string_view tag);
     [[nodiscard]] static DurableSessionEpoch session_epoch(Engine&, std::string_view session_sha256);
     [[nodiscard]] static DurableSessionEpoch publication_epoch(const GenerationHandle&);
-    [[nodiscard]] static std::shared_ptr<ContinuationCheckpointReadQueue> make_read_queue(Engine&);
+    [[nodiscard]] static std::shared_ptr<ContinuationCheckpointReadQueue> make_read_queue(
+        Engine&, const std::filesystem::path& root);
 
     // Stage immutable native content under Engine serialization; hash/write off-lock. Retain
     // leases until copies retire. Recheck expected tag/epoch before caller publishes current.

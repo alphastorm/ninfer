@@ -74,28 +74,37 @@ bool compile_direct_types(const Json& type_definition, TypeSet& types) {
 }
 
 bool compile_schema_types(const Json& schema, TypeSet& types) {
-    if (!schema.is_object()) { return false; }
-    const auto direct = schema.find("type");
-    if (direct != schema.end()) { return compile_direct_types(*direct, types); }
-
-    const auto any_of     = schema.find("anyOf");
-    const auto one_of     = schema.find("oneOf");
-    const bool has_any_of = any_of != schema.end();
-    const bool has_one_of = one_of != schema.end();
-    if (has_any_of == has_one_of) { return false; }
-
-    const Json& alternatives = has_any_of ? *any_of : *one_of;
-    if (!alternatives.is_array() || alternatives.empty()) { return false; }
-
     TypeSet combined;
-    for (const Json& alternative : alternatives) {
-        TypeSet branch;
-        if (!compile_schema_types(alternative, branch)) { return false; }
-        combined.bits |= branch.bits;
+    const Json* current = &schema;
+    std::vector<const Json*> pending;
+    for (;;) {
+        if (!current->is_object()) { return false; }
+        const auto direct = current->find("type");
+        if (direct != current->end()) {
+            TypeSet branch;
+            if (!compile_direct_types(*direct, branch)) { return false; }
+            combined.bits |= branch.bits;
+        } else {
+            const auto any_of     = current->find("anyOf");
+            const auto one_of     = current->find("oneOf");
+            const bool has_any_of = any_of != current->end();
+            const bool has_one_of = one_of != current->end();
+            if (has_any_of == has_one_of) { return false; }
+            const Json& alternatives = has_any_of ? *any_of : *one_of;
+            if (!alternatives.is_array() || alternatives.empty()) { return false; }
+            for (std::size_t i = 1; i < alternatives.size(); ++i) {
+                pending.push_back(&alternatives[i]);
+            }
+            current = &alternatives.front();
+            continue;
+        }
+        if (pending.empty()) {
+            types = combined;
+            return types.bits != 0;
+        }
+        current = pending.back();
+        pending.pop_back();
     }
-    if (combined.bits == 0) { return false; }
-    types = combined;
-    return true;
 }
 
 const Json& resolve(const Json& node, const Json& document, std::set<std::string>& seen) {
@@ -191,8 +200,12 @@ void prepare_strict_parameters(Contract::Tool& tool) {
 } // namespace
 
 std::shared_ptr<const ToolCallOutputContract>
-build_tool_call_output_contract(std::span<const std::string> tool_jsons) {
-    if (tool_jsons.empty()) return {};
+build_tool_call_output_contract(std::span<const std::string> tool_jsons,
+                                std::span<const ninfer::ChatMessage> messages) {
+    if (tool_jsons.empty() &&
+        std::none_of(messages.begin(), messages.end(),
+                     [](const auto& message) { return !message.tool_calls.empty(); }))
+        return {};
     auto result = std::make_shared<Contract>();
     std::set<std::string> names;
     for (std::size_t i = 0; i < tool_jsons.size(); ++i) {
@@ -205,6 +218,12 @@ build_tool_call_output_contract(std::span<const std::string> tool_jsons) {
             if (tool.name.empty() || !names.insert(tool.name).second)
                 fail("tool names must be nonempty and unique", "/" + std::to_string(i));
             tool.strict = function.value("strict", false);
+            if (declaration.contains("x-ninfer-tool-kind")) {
+                if (declaration.at("x-ninfer-tool-kind") != "custom" || tool.strict)
+                    fail("custom tool metadata requires a non-strict custom tool",
+                         "/" + std::to_string(i));
+                tool.kind = ToolKind::Custom;
+            }
             if (tool.strict) {
                 if (const auto pointer =
                         text::inexact_schema_number(parsed, "/function/parameters"))
@@ -216,9 +235,10 @@ build_tool_call_output_contract(std::span<const std::string> tool_jsons) {
                             pointer->substr(std::string_view("/function/parameters").size()),
                         RequestErrorSource::Tools);
             }
-            const Json schema = function.value(
-                "parameters", Json{{"type", "object"}, {"properties", Json::object()}});
-            tool.schema_json       = schema.dump();
+            static const Json empty_schema{{"type", "object"}, {"properties", Json::object()}};
+            const auto parameters = function.find("parameters");
+            const Json& schema = parameters == function.end() ? empty_schema : *parameters;
+            if (tool.strict) tool.schema_json = schema.dump();
             tool.declaration_index = i;
             // Non-strict output keeps the established best-effort normalization contract.
             if (schema.is_object() && schema.contains("properties") &&
@@ -236,6 +256,23 @@ build_tool_call_output_contract(std::span<const std::string> tool_jsons) {
             fail(std::string("invalid tool declaration: ") + error.what(), "/" + std::to_string(i));
         }
     }
+    for (const auto& message : messages) {
+        for (const auto& call : message.tool_calls) {
+            const auto existing =
+                std::find_if(result->tools.begin(), result->tools.end(),
+                             [&](const auto& tool) { return tool.name == call.name; });
+            if (existing == result->tools.end()) {
+                Contract::Tool history;
+                history.name     = call.name;
+                history.kind     = call.kind;
+                history.declared = false;
+                result->tools.push_back(std::move(history));
+            } else if (existing->kind != call.kind) {
+                existing->unambiguous = false;
+            }
+        }
+    }
+    if (result->tools.empty()) return {};
     return result;
 }
 
@@ -246,10 +283,16 @@ select_tool_call_contract(const std::shared_ptr<const ToolCallOutputContract>& d
         for (const auto& name : *choice.allowed_names) {
             if (!declarations ||
                 std::none_of(declarations->tools.begin(), declarations->tools.end(),
-                             [&](const auto& tool) { return tool.name == name; }))
+                             [&](const auto& tool) {
+                                 return tool.declared && tool.unambiguous && tool.name == name;
+                             }))
                 fail("tool choice refers to undeclared tool: " + name);
         }
     }
+    if (declarations && choice.mode == ToolChoiceMode::Auto && !choice.allowed_names &&
+        std::none_of(declarations->tools.begin(), declarations->tools.end(),
+                     [](const auto& tool) { return tool.declared; }))
+        return declarations;
     if (declarations && choice.mode == ToolChoiceMode::Auto && choice.parallel &&
         !choice.allowed_names && choice.constraints == ToolConstraintMode::Automatic &&
         std::none_of(declarations->tools.begin(), declarations->tools.end(),
@@ -260,6 +303,7 @@ select_tool_call_contract(const std::shared_ptr<const ToolCallOutputContract>& d
     selected->parallel = choice.parallel;
     if (declarations && choice.mode != ToolChoiceMode::None) {
         for (const auto& tool : declarations->tools) {
+            if (!tool.declared || !tool.unambiguous) continue;
             if (!choice.allowed_names ||
                 std::find(choice.allowed_names->begin(), choice.allowed_names->end(), tool.name) !=
                     choice.allowed_names->end())

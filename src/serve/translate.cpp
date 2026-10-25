@@ -95,7 +95,9 @@ std::string render_tool_definition(const ToolDefinition& tool) {
     if (tool.input_examples_json) {
         function["input_examples"] = Json::parse(*tool.input_examples_json);
     }
-    return Json{{"type", "function"}, {"function", std::move(function)}}.dump();
+    Json definition{{"type", "function"}, {"function", std::move(function)}};
+    if (tool.kind == ToolKind::Custom) { definition["x-ninfer-tool-kind"] = "custom"; }
+    return definition.dump();
 }
 
 } // namespace
@@ -199,7 +201,8 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
         message.tool_call_id      = turn.tool_call_id;
         message.tool_calls.reserve(turn.tool_calls.size());
         for (const ToolCall& call : turn.tool_calls) {
-            message.tool_calls.push_back(ninfer::ToolCall{call.id, call.name, call.arguments_json});
+            message.tool_calls.push_back(ninfer::ToolCall{call.id, call.name, call.arguments_json,
+                                                          call.kind});
         }
 
         if (turn.role == ChatRole::Tool && turn.tool_result_is_error) {
@@ -263,6 +266,16 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
             }
         }
         input.messages.push_back(std::move(message));
+        if (turn.private_cache_boundary_after) {
+            if (input.messages.size() > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::overflow_error("conversation cache boundary exceeds uint32");
+            }
+            input.context_cache.markers.push_back(ninfer::PromptCacheMarker{
+                .after_message_count = static_cast<std::uint32_t>(input.messages.size()),
+                .kind = ninfer::PromptCacheMarkerKind::PrivateLongAnchor,
+                .location = ninfer::PromptCacheMarkerLocation::MessageBoundary,
+            });
+        }
         if (turn.cache_boundary_after) {
             if (input.messages.size() > std::numeric_limits<std::uint32_t>::max()) {
                 throw std::overflow_error("conversation cache boundary exceeds uint32");

@@ -2,13 +2,22 @@
 #include "core/io/read_queue.h"
 #include "core/buffer.h"
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
 #include <liburing.h>
+#endif
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <fstream>
 #include <iostream>
+#include <random>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -40,10 +49,13 @@ struct Files {
     static constexpr std::size_t bytes = 4096 + 123;
 
     Files() {
-        std::string name = (std::filesystem::temp_directory_path() / "ninfer-io-XXXXXX").string();
-        auto* path       = ::mkdtemp(name.data());
-        if (!path) throw std::runtime_error("mkdtemp failed");
-        directory = path;
+        std::random_device random;
+        for (;;) {
+            directory = std::filesystem::temp_directory_path() /
+                        (std::filesystem::path(u8"ninfer-io-\u03bb-").native() +
+                         std::filesystem::path(std::to_string(random())).native());
+            if (std::filesystem::create_directory(directory)) break;
+        }
         std::vector<std::byte> data(bytes);
         for (std::size_t file = 0; file < 2; ++file) {
             for (std::size_t i = 0; i < data.size(); ++i) data[i] = pattern(file, i);
@@ -146,6 +158,17 @@ void run() {
 
     require(queue.try_enqueue({0, 0, 0, 4096, 1234}) == ReadAdmission::Accepted,
             "error probe rejected");
+#ifdef _WIN32
+    const auto locked_file = reinterpret_cast<HANDLE>(files[0].native_handle);
+    OVERLAPPED lock{};
+    require(LockFileEx(locked_file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
+                       0, 4096, 0, &lock), "lock failure probe failed");
+    queue.submit();
+    while (!queue.poll(output)) (void)queue.wait();
+    require(UnlockFileEx(locked_file, 0, 4096, 0, &lock), "unlock failure probe failed");
+    require(output[0].tag == 1234 && output[0].error == ERROR_LOCK_VIOLATION && !output[0].bytes,
+            "native I/O failure was not delivered");
+#else
     fail_submit = true;
     rejects<std::system_error>([&] { queue.submit(); });
     fail_read = true;
@@ -153,6 +176,7 @@ void run() {
     while (!queue.poll(output)) (void)queue.wait();
     require(output[0].tag == 1234 && output[0].error == EBADF && !output[0].bytes,
             "kernel I/O failure was not delivered");
+#endif
 
     require(queue.try_enqueue({0, 0, 4096, 4096, 9999}) == ReadAdmission::Accepted,
             "close probe rejected");
@@ -175,6 +199,7 @@ void run() {
 }
 } // namespace
 
+#ifndef _WIN32
 extern "C" int __real_io_uring_submit(io_uring* ring);
 
 extern "C" int __wrap_io_uring_submit(io_uring* ring) {
@@ -202,6 +227,7 @@ extern "C" int __wrap_io_uring_submit(io_uring* ring) {
     }
     return __real_io_uring_submit(ring);
 }
+#endif
 
 int main() {
     try {

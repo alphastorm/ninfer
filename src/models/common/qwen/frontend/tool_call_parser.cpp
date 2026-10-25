@@ -3,6 +3,7 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -104,7 +105,7 @@ const Contract::Tool* find_tool_contract(const Contract& contract, std::string_v
     const auto tool =
         std::find_if(contract.tools.begin(), contract.tools.end(),
                      [&](const auto& candidate) { return candidate.name == tool_name; });
-    return tool == contract.tools.end() ? nullptr : &*tool;
+    return tool == contract.tools.end() || !tool->unambiguous ? nullptr : &*tool;
 }
 
 const Contract::Parameter* find_parameter_contract(const Contract::Tool& tool,
@@ -340,10 +341,10 @@ private:
         if (!valid_function_name(call.name, max_name_length_)) {
             return FallbackReason::InvalidToolName;
         }
-        if (find_tool_contract(contract_, call.name) == nullptr) {
-            return FallbackReason::UndeclaredTool;
-        }
+        const auto* tool = find_tool_contract(contract_, call.name);
+        if (tool == nullptr) { return FallbackReason::UndeclaredTool; }
         pos = name_end + 1;
+        if (tool->kind == ToolKind::Custom) { return parse_custom_input(pos, call); }
 
         for (;;) {
             skip_format_whitespace(text_, pos);
@@ -351,6 +352,37 @@ private:
             const FallbackReason failure = parse_parameter(pos, call);
             if (failure != FallbackReason::None) { return failure; }
         }
+    }
+
+    bool consume_suffix(std::size_t& end, std::string_view suffix) const {
+        while (end != 0 && is_format_whitespace(text_[end - 1])) { --end; }
+        if (end < suffix.size() || text_.substr(end - suffix.size(), suffix.size()) != suffix) {
+            return false;
+        }
+        end -= suffix.size();
+        return true;
+    }
+
+    FallbackReason parse_custom_input(std::size_t& pos, RawToolCall& call) const {
+        skip_format_whitespace(text_, pos);
+        constexpr std::string_view input_open = "<parameter=input>";
+        if (!consume(pos, input_open)) { return FallbackReason::MalformedStructure; }
+        const std::size_t begin = pos;
+        for (auto close = text_.find(kToolClose, begin); close != std::string_view::npos;
+             close = text_.find(kToolClose, close + kToolClose.size())) {
+            auto after = close + kToolClose.size();
+            skip_format_whitespace(text_, after);
+            if (after != text_.size() && !starts_with_at(text_, after, kToolOpen)) { continue; }
+            auto end = close;
+            if (!consume_suffix(end, kFunctionClose) || !consume_suffix(end, kParamClose) ||
+                end < begin) {
+                continue;
+            }
+            call.parameters.push_back({.name = "input", .value = text_.substr(begin, end - begin)});
+            pos = close;
+            return FallbackReason::None;
+        }
+        return FallbackReason::MalformedStructure;
     }
 
     FallbackReason parse_parameter(std::size_t& pos, RawToolCall& call) const {
@@ -379,15 +411,18 @@ private:
 
     bool find_parameter_open_before(std::size_t scan, std::size_t limit,
                                     std::size_t& open_end) const {
-        std::size_t candidate = text_.find(kParamOpen, scan);
-        while (candidate != std::string_view::npos && candidate < limit) {
+        const std::string_view prefix = text_.substr(0, limit);
+        std::size_t candidate = prefix.find(kParamOpen, scan);
+        while (candidate != std::string_view::npos) {
             const std::size_t name_begin = candidate + kParamOpen.size();
-            const std::size_t name_end   = text_.find('>', name_begin);
-            if (name_end != std::string_view::npos && name_end < limit && name_end != name_begin) {
+            const std::size_t name_end   = prefix.find('>', name_begin);
+            // No later opening can end before this close; do not rescan the malformed suffix.
+            if (name_end == std::string_view::npos) { return false; }
+            if (name_end != name_begin) {
                 open_end = name_end + 1;
                 return true;
             }
-            candidate = text_.find(kParamOpen, candidate + 1);
+            candidate = prefix.find(kParamOpen, name_end + 1);
         }
         return false;
     }
@@ -395,8 +430,8 @@ private:
     bool find_parameter_close(std::size_t value_begin, std::size_t& value_end) const {
         std::size_t depth = 1;
         std::size_t scan  = value_begin;
+        std::size_t close = text_.find(kParamClose, scan);
         for (;;) {
-            const std::size_t close = text_.find(kParamClose, scan);
             if (close == std::string_view::npos) { return false; }
 
             std::size_t nested_open_end = 0;
@@ -412,6 +447,7 @@ private:
                 return true;
             }
             scan = close + kParamClose.size();
+            close = text_.find(kParamClose, scan);
         }
     }
 
@@ -420,9 +456,16 @@ private:
     const Contract& contract_;
 };
 
-GeneratedToolCall normalize_raw_tool_call(const RawToolCall& raw, const Contract& contract,
-                                          ToolCallParseDiagnostics& diagnostics) {
+std::optional<GeneratedToolCall>
+normalize_raw_tool_call(const RawToolCall& raw, const Contract& contract,
+                        ToolCallParseDiagnostics& diagnostics) {
     const Contract::Tool* tool = find_tool_contract(contract, raw.name);
+    if (tool != nullptr && tool->kind == ToolKind::Custom) {
+        return GeneratedToolCall{
+            .name           = std::string(raw.name),
+            .arguments_json = std::string(remove_parameter_framing_newlines(raw.parameters[0].value)),
+            .kind           = ToolKind::Custom};
+    }
 
     std::string arguments = "{";
     bool first            = true;
@@ -430,16 +473,16 @@ GeneratedToolCall normalize_raw_tool_call(const RawToolCall& raw, const Contract
         const Contract::Parameter* parameter =
             tool == nullptr ? nullptr : find_parameter_contract(*tool, raw_parameter.name);
         NormalizedParameter normalized = normalize_parameter(raw_parameter.value, parameter);
-        if (tool != nullptr && parameter == nullptr) {
-            normalized.disposition = ParameterNormalization::SchemaMismatch;
-        }
         if (normalized.disposition == ParameterNormalization::Omitted) {
             ++diagnostics.empty_arguments_omitted;
             continue;
         }
         if (normalized.disposition == ParameterNormalization::SchemaMismatch) {
             ++diagnostics.schema_mismatch_arguments;
+            diagnostics.fallback_reason = FallbackReason::SchemaMismatch;
+            return std::nullopt;
         }
+        if (tool != nullptr && parameter == nullptr) { ++diagnostics.schema_mismatch_arguments; }
 
         if (!first) { arguments.push_back(','); }
         first = false;
@@ -457,7 +500,7 @@ GeneratedToolCall normalize_raw_tool_call(const RawToolCall& raw, const Contract
 // marker inside a quoted value never becomes a parameter boundary.
 class ConstrainedToolRegionParser {
 public:
-    enum class Status { Complete, Incomplete, Invalid };
+    enum class Status { Complete, Incomplete, Invalid, Fallback };
 
     ConstrainedToolRegionParser(std::string_view input, const Contract& contract)
         : input_(input), contract_(contract) {}
@@ -490,6 +533,10 @@ public:
                     const auto index = parameter - tool->parameters.data();
                     if (index <= previous) return Status::Invalid;
                     previous = index;
+                } else if (std::any_of(raw.parameters.begin(), raw.parameters.end(),
+                                       [&](const auto& item) { return item.name == name; })) {
+                    diagnostics.fallback_reason = FallbackReason::DuplicateParameter;
+                    return Status::Fallback;
                 }
                 position_ = name_end + 1;
                 if (!take("\n")) return status_;
@@ -503,20 +550,18 @@ public:
                 }
                 const auto value = input_.substr(value_begin, position_ - value_begin);
                 if (!take("\n</parameter>\n")) return status_;
-                // Non-strict arguments use the last value for a repeated name, as JSON object
-                // consumers do. Keep the first key position and publish each key only once.
-                const auto existing =
-                    tool->strict
-                        ? raw.parameters.end()
-                        : std::find_if(raw.parameters.begin(), raw.parameters.end(),
-                                       [&](const auto& item) { return item.name == name; });
-                if (existing == raw.parameters.end())
-                    raw.parameters.push_back({name, value});
-                else
-                    existing->value = value;
+                raw.parameters.push_back({name, value});
             }
             if (!take("</function>\n</tool_call>")) return status_;
             if (!contract_.parallel && !calls.empty()) return Status::Invalid;
+            if (tool->kind == ToolKind::Custom) {
+                if (raw.parameters.size() != 1 || raw.parameters[0].name != "input")
+                    return Status::Invalid;
+                calls.push_back({.name = std::string(raw.name),
+                                 .arguments_json = std::string(raw.parameters[0].value),
+                                 .kind = ToolKind::Custom});
+                continue;
+            }
             std::string arguments = "{";
             bool first            = true;
             for (const auto& value : raw.parameters) {
@@ -536,8 +581,11 @@ public:
                     ++diagnostics.empty_arguments_omitted;
                     continue;
                 }
-                if (normalized.disposition == ParameterNormalization::SchemaMismatch)
+                if (normalized.disposition == ParameterNormalization::SchemaMismatch) {
                     ++diagnostics.schema_mismatch_arguments;
+                    diagnostics.fallback_reason = FallbackReason::SchemaMismatch;
+                    return Status::Fallback;
+                }
                 if (!first) arguments += ',';
                 first = false;
                 arguments += encode_json_string(value.name) + ":" + normalized.json_value;
@@ -624,7 +672,9 @@ ParsedToolCallOutput parse_qwen_tool_call_output(const std::string& text,
 
     out.tool_calls.reserve(raw_calls.size());
     for (const RawToolCall& raw : raw_calls) {
-        out.tool_calls.push_back(normalize_raw_tool_call(raw, contract, out.diagnostics));
+        auto call = normalize_raw_tool_call(raw, contract, out.diagnostics);
+        if (!call) { return fallback(text, out.diagnostics); }
+        out.tool_calls.push_back(std::move(*call));
     }
 
     out.diagnostics.structured_call_count = static_cast<std::uint32_t>(out.tool_calls.size());
@@ -693,7 +743,8 @@ void ToolCallOutputDecoder::initialize_continuation(std::string_view prefix) {
         region.remove_prefix(region.find(kToolOpen));
         const auto status =
             ConstrainedToolRegionParser(region, *contract_).parse(calls, diagnostics);
-        if (!calls.empty() || status == ConstrainedToolRegionParser::Status::Invalid)
+        if (!calls.empty() || status == ConstrainedToolRegionParser::Status::Invalid ||
+            status == ConstrainedToolRegionParser::Status::Fallback)
             throw RequestError(RequestErrorKind::InvalidToolConstraint,
                                "tool continuation must contain no completed or malformed calls");
     } else if (saw_tool_marker_) {
@@ -719,6 +770,13 @@ ToolCallOutputDecoder::Terminal ToolCallOutputDecoder::finish(FinishReason reaso
         region.remove_prefix(region.find(kToolOpen));
         const auto status = ConstrainedToolRegionParser(region, *contract_)
                                 .parse(result.tool_calls, result.diagnostics);
+        if (status == ConstrainedToolRegionParser::Status::Fallback) {
+            result.tool_calls.clear();
+            result.content = std::move(tool_region_);
+            result.content.erase(0, std::min(continuation_withheld_bytes_, result.content.size()));
+            continuation_withheld_bytes_ = 0;
+            return result;
+        }
         const bool interrupted = reason == FinishReason::OutputLimit ||
                                  reason == FinishReason::ContextCapacity ||
                                  reason == FinishReason::Cancelled;

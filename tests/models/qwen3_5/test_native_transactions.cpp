@@ -219,6 +219,42 @@ public:
                 "history-disabled request did not release its execution resources");
     }
 
+    void admitted_unit_acquires_tail_reader() {
+        auto base = request(65, true);
+        const auto seed = checkpoint(base);
+        const auto candidate = program_.inspect_source(base, seed);
+        require(candidate.has_value() &&
+                    static_cast<bool>(program_.start_binding(base, {0}, *candidate)),
+                "late-reader fixture could not bind its retained prefix");
+        auto bound = settle();
+        require(bound.sequence.has_value(), "late-reader fixture has no sequence");
+        const auto sequence = *bound.sequence;
+        finish_prefill(sequence, 0, false);
+        reserve(sequence, q35::ExecutionUnitKind::Decode, 1);
+        const auto* native = static_cast<const q35::detail::ProgramImpl*>(
+            q35::detail::ContractAccess::owner(sequence));
+        const auto lane = q35::detail::ContractAccess::lane(sequence).value;
+        const auto history = native->sequences[lane].kv->text.handle();
+        const auto tail = native->text_kv_histories->logical_page(history, 1);
+        require(native->text_kv_histories->reserved_growth_pages(history) == 0,
+                "late-reader fixture unexpectedly needed page growth");
+        auto reader = native->text_kv_pages->read_device(tail, 1);
+        reserve(sequence, q35::ExecutionUnitKind::Decode, 1);
+        require(native->text_kv_histories->reserved_growth_pages(history) == 1,
+                "existing permit did not reserve newly required tail COW");
+        const std::array members{sequence};
+        const std::array<runtime::RoundBudget, 1> budgets{{{.generated_tokens_remaining = 1}}};
+        auto pending = program_.decode(members, budgets);
+        const std::array<runtime::CommitDecision, 1> decision{{{.accepted_tokens = 1, .terminal = true}}};
+        (void)program_.commit(std::move(pending), decision);
+        const auto finished = program_.finish(sequence);
+        require(finished.checkpoint.has_value(), "late-reader fixture lost its endpoint");
+        reader = {};
+        require(program_.release_checkpoint(*finished.checkpoint) && program_.release_checkpoint(seed),
+                "late-reader fixture retained checkpoints");
+        expect_empty("late-reader permit refresh leaked resources");
+    }
+
     void consecutive_decode_terminal() {
         auto base           = request(64);
         const auto sequence = bind(base);
@@ -2061,6 +2097,7 @@ int main(int argc, char** argv) {
             fixture.input_replay_lifecycle();
             fixture.active_input_zero_growth_binding();
             fixture.consecutive_decode_terminal();
+            fixture.admitted_unit_acquires_tail_reader();
             fixture.replay_carries_independent_input();
             fixture.retained_input_host_suffix();
             fixture.retired_host_image_preserves_input();

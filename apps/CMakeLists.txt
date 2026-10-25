@@ -10,6 +10,12 @@ target_link_libraries(ninfer PRIVATE
 add_executable(ninfer-serve serve/main.cpp)
 ninfer_internal_includes(ninfer-serve)
 target_link_libraries(ninfer-serve PRIVATE ninfer_serve ninfer_product_logging)
+if(WIN32)
+  add_custom_command(TARGET ninfer-serve POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NINFER_DIRECTSTORAGE_DLLS}
+            $<TARGET_FILE_DIR:ninfer-serve>
+    VERBATIM)
+endif()
 
 add_executable(ninfer-perplexity
   perplexity/main.cpp
