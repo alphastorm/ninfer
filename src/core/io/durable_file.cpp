@@ -146,8 +146,10 @@ struct Parent {
 std::FILE* open_stream(const std::filesystem::path& input, bool write) {
     const auto path = checked_path(input);
     Parent parent(path.parent_path(), false);
+    // Readers keep an immutable file object, not its name, across POSIX-style replacement.
     Handle file(CreateFileW(path.c_str(), write ? GENERIC_WRITE : GENERIC_READ,
-                            write ? 0 : FILE_SHARE_READ, nullptr, write ? CREATE_NEW : OPEN_EXISTING,
+                            write ? 0 : (FILE_SHARE_READ | FILE_SHARE_DELETE), nullptr,
+                            write ? CREATE_NEW : OPEN_EXISTING,
                             FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
     if (file.value == INVALID_HANDLE_VALUE) fail_windows("open durable file");
     FILE_ATTRIBUTE_TAG_INFO info{};

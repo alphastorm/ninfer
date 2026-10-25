@@ -81,6 +81,11 @@ void write(const std::filesystem::path& path, std::byte value) {
     require(std::fclose(stream.release()) == 0, "durable close failed");
 }
 
+void publish(const std::filesystem::path& from, const std::filesystem::path& to, const char* phase) {
+    try { io::replace_path(from, to); }
+    catch (const std::system_error& error) { throw std::system_error(error.code(), phase); }
+}
+
 #ifndef _WIN32
 void interrupted_stdio() {
     struct Cookie {
@@ -169,7 +174,7 @@ void run() {
     const auto staging = directory / "staging";
     write(staging, std::byte{9});
     io::sync_directory(directory);
-    io::replace_path(staging, current);
+    publish(staging, current, "same-parent publication");
     io::sync_directory(directory);
     require(!std::filesystem::exists(staging), "atomic replace retained source");
     {
@@ -185,7 +190,7 @@ void run() {
     write(directory / "stage-child" / "next", std::byte{13});
     {
         Stream previous(io::open_binary_read(current), &std::fclose);
-        io::replace_path(directory / "stage-child" / "next", current);
+        publish(directory / "stage-child" / "next", current, "reader-preserving publication");
         std::array<std::byte, 3> bytes{};
         io::read_exact(previous.get(), bytes);
         require(bytes[0] == std::byte{9}, "replacement changed an existing reader's generation");
@@ -195,7 +200,7 @@ void run() {
     }
     io::create_directories(directory / "destination-child");
     write(staging, std::byte{15});
-    io::replace_path(staging, directory / "destination-child" / "x");
+    publish(staging, directory / "destination-child" / "x", "single-character cross-parent publication");
     require(!std::filesystem::exists(staging), "cross-parent replacement retained source");
     {
         Stream published(io::open_binary_read(directory / "destination-child" / "x"), &std::fclose);
