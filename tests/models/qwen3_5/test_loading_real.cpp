@@ -334,7 +334,15 @@ int main(int argc, char** argv) {
         require(model->storage_stats().h2d_bytes == expected_h2d,
                 "H2D did not cover all selected parent bytes");
         std::set<const WeightParent*> visited;
+        std::size_t draft_weights = 0;
         for (const auto& weight : model->weight_data()) {
+            const bool draft_weight =
+                weight.name.starts_with("dflash/") || weight.name.starts_with("dflash2/");
+            if (options.speculative != SpeculativeBackend::DFlash &&
+                options.speculative != SpeculativeBackend::DFlash2) {
+                require(!draft_weight, "unselected draft weight was materialized");
+            }
+            draft_weights += draft_weight;
             require(weight.view.parts.size() == weight.source_objects.size(),
                     "diagnostic parent association lost");
             for (std::size_t i = 0; i < weight.view.parts.size(); ++i) {
@@ -379,6 +387,9 @@ int main(int argc, char** argv) {
                   << " h2d_bytes=" << model->storage_stats().h2d_bytes
                   << " materialization_seconds=" << model->storage_stats().upload_seconds
                   << " peak_rss_kib=" << peak_rss_kib
+                  << " mtp_selected=" << model->weights().mtp.has_value()
+                  << " draft_selected=" << model->weights().draft.has_value()
+                  << " draft_weights=" << draft_weights
                   << " V=" << model->resources().public_token_count << '\n';
         model.reset();
         device->synchronize();

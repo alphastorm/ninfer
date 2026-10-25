@@ -3,7 +3,13 @@
 ## Scope and invariants
 
 - Base: upstream master `64d10fbf`; branch `rebase/arch-enable`. Single-profile builds: `86`, `89`, or `120a`; the default remains `120a`. Shared root profile wiring is Integrator commit `15a4f2a78` (applied here as `83b1b683`).
-- Native qualification target: dense Qwen3.8 27B text, INT8 KV, 131,072-token capacity, MTP with three draft tokens, one request. DFlash2 must link; fitting its weights is not claimed by this slice.
+- Native qualification target: dense Qwen3.8 27B text, INT8 KV, 131,072-token capacity, MTP with three draft tokens, one request. The lead clarified that DFlash2 acceptance is **link-only** on both native profiles; fitting its weights belongs to S2. A load-only check using the public v3 artifact is optional and cannot block C2.
+- The lead's final artifact decision binds **all three lanes** to public v3
+  `81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da`
+  (20,437,521,664 bytes), repository `neroued/Qwen3.8-27B-NInfer`,
+  revision `1cbd84e7221e51186bd7f093a149912d2489625b`.
+  The older native `5476dfd6` conversion is no longer the qualification input.
+  Native MTP selection must not materialize unused DFlash2 weights.
 - Program, scheduler, context ownership, and native packaging are unchanged by this slice. Windows host portability is supplied by PortableCore. Release review is the lead-owned G4 gate.
 
 ## Gating table
@@ -87,6 +93,11 @@ common/build.sh "$SOURCE" "$BUILD/native-sm89" \
   Its peak-RSS observation now uses the native Windows process working-set query
   on Windows and the unchanged `getrusage` path on Linux, allowing the direct
   DFlash2 loading check to compile without a POSIX-only header.
+  Its MTP loading arm also rejects materialized draft-named weights, reports
+  selected MTP/draft components and draft-weight count, and retains the assertion
+  that every resident parent is reachable from selected model weights. This
+  covers both device and host parent placements; the decode receipt separately
+  records actual startup weight, transfer, VRAM and host-capacity observations.
 - Combined MSVC sm_89 candidate `3d2a3df4` passed the unused-TMA declaration
   boundary, then failed at 26/1161 tasks after 47.261 seconds: C2326 rejected
   outer `constexpr` kernel aliases referenced inside token-slicing lambdas.
