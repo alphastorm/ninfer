@@ -1265,11 +1265,12 @@ cmake --build build --parallel --target ninfer_qwen3_5_mtp_round_bench
   --artifact out/qwen3_6_27b.ninfer
 ```
 
-## 35B complete DFlash round benchmark
+## Complete DFlash and DFlash2 round benchmark
 
 `ninfer_qwen3_5_dflash_round_bench` drives the production Program through consecutive
-steady DFlash rounds. A measured round includes the previous confirmed feature-to-context append,
-the six-layer proposal, target verify/accept, and host publication. It reports GPU and wall latency,
+steady rounds of `--spec dflash` (the default) or `--spec dflash2`. A measured round includes the
+previous confirmed feature-to-context append, draft proposal, target verify/accept, and host
+publication. It reports the selected backend, GPU and wall latency,
 real acceptance, per-position acceptance, mean licensed length, and published tokens/s:
 
 ```bash
@@ -1280,9 +1281,12 @@ cmake --build build --parallel \
   --context 4096 --draft-tokens 15 --proposal-head optimized
 ```
 
+For a DFlash2 artifact, use `--spec dflash2 --draft-tokens 7 --batch 1` or `--batch 2`.
 Run separate invocations for `K=1..15`, `full|optimized`, representative contexts, and
-`--no-cuda-graph`. This complete-round benchmark measures the DFlash model's actual greedy
-acceptance. Transaction correctness is covered by the state and Engine tests.
+`--no-cuda-graph`. This complete-round benchmark measures the selected draft model's actual
+greedy acceptance. Resource scheduling is outside the timed interval; CUDA-event time can
+include host-induced GPU idle and must not be treated as the sum of active kernel times.
+Transaction correctness is covered by the state and Engine tests.
 
 ## Token-decision Op benchmarks
 

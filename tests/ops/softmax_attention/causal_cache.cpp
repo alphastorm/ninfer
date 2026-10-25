@@ -2293,6 +2293,8 @@ int run_verify_width_cases(CudaExecutionView execution, KvCacheStorage storage) 
         for (int batch = 2; batch <= 7; ++batch) failures += run(width, batch, 0, false);
     for (int width : {7, 8, 9, 16})
         for (int batch : {1, 8}) failures += run(width, batch, 127, true);
+    if (storage == KvCacheStorage::BFloat16)
+        for (int width : {7, 8}) failures += run(width, 2, 127, true);
     failures += run(16, 8, 2048, true);
     for (int width : {8, 9, 16}) {
         failures +=
