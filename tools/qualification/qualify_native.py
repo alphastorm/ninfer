@@ -1480,11 +1480,11 @@ if([string]$sa.package.sha256 -cne [string]$sb.package.sha256 -or $scratchOuterA
         # and the installer refuses to create protected state beneath such an ancestor. The
         # candidate's own protection library creates or checks it before anything is staged.
         protect = self.config.source_root / "packaging" / "windows" / "Protect-StateRoot.ps1"
-        helper = f"C:/Windows/Temp/ninfer-protect-{self.head8}.ps1"
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".ps1", delete=False) as stream:
             stream.write(run(["git", "show", f"{self.head}:{protect.relative_to(self.config.source_root).as_posix()}"],
                              cwd=self.config.source_root).stdout)
             local_helper = Path(stream.name)
+        helper = f"C:/Windows/Temp/ninfer-protect-{self.head8}-{self.lane.name}-{local_helper.stem}.ps1"
         try:
             scp(str(local_helper), remote_spec(self.config.target, helper))
         finally:
@@ -1496,7 +1496,8 @@ $ErrorActionPreference='Stop'
 . {ps_quote(helper)}
 $p={ps_quote(target_root)}
 Initialize-NInferProtectedStateRoot (Split-Path -Parent $p)|Out-Null
-New-Item -ItemType Directory -Path $p,(Join-Path $p 'evidence') -Force|Out-Null
+Initialize-NInferProtectedStateRoot $p|Out-Null
+New-Item -ItemType Directory -Path (Join-Path $p 'evidence') -Force|Out-Null
 Remove-Item -LiteralPath {ps_quote(helper)} -Force
 """,
         )

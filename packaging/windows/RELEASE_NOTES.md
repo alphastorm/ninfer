@@ -81,6 +81,10 @@ shipped roots nor unregisters a canonical task for a clean-install test. Suffix
 `I6` uses C1 ports 18210/18211 and pressure ports 18200/18201 for the two lanes.
 The clean-install task has a separate `-Clean` suffix. Restoration checks only
 scratch-owned processes and the selected card's lease/power state.
+Each staging root is itself atomically created with the protected administrator/
+SYSTEM DACL, not merely inherited from a protected parent. Temporary protection
+helpers include the lane and a per-invocation nonce so simultaneous lane installs
+cannot replace or remove one another's helper.
 
 `--qualified-runtime-bin` and `--qualified-build-receipt` consume the integrator's
 exact three-executable/MSVC runtime set without rebuilding it. Staging verifies
