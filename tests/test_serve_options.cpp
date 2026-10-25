@@ -107,6 +107,101 @@ int main() {
     }
 
     const ServeOptions defaults = parse({"ninfer-serve", "model.ninfer"});
+    failures += check(defaults.session_checkpoint_root.empty() &&
+                          defaults.session_checkpoint_quota_bytes == (64ULL << 30) &&
+                          defaults.session_checkpoint_staging_bytes == (256ULL << 20) &&
+                          defaults.session_checkpoint_write_buffer_bytes == (6ULL << 30) &&
+                          defaults.session_checkpoint_min_tokens == 32768 &&
+                          !defaults.session_checkpoint_require_origin_auth &&
+                          defaults.stop_event.empty() && defaults.shutdown_report.empty(),
+                      "durable and managed-stop defaults changed");
+    const std::vector<std::string> durable_args = {
+        "ninfer-serve", "model.ninfer", "--api-key", std::string(32, 's'),
+        "--binary-sha256", binary_sha, "--artifact-sha256", artifact_sha,
+        "--config-sha256", config_sha, "--session-checkpoint-dir", "checkpoints"};
+    const auto with_durable = [&](std::vector<std::string> extra) {
+        auto arguments = durable_args;
+        arguments.insert(arguments.end(), extra.begin(), extra.end());
+        return arguments;
+    };
+    const auto rejects = [](std::vector<std::string> arguments) {
+        try { (void)parse(std::move(arguments)); }
+        catch (const std::invalid_argument&) { return true; }
+        return false;
+    };
+    const auto durable = parse(with_durable({
+        "--session-checkpoint-quota-mib", "2048", "--session-checkpoint-staging-mib", "64",
+        "--session-checkpoint-write-buffer-mib", "128", "--session-checkpoint-min-tokens", "4096",
+        "--session-checkpoint-require-origin-auth", "--shutdown-report", "shutdown.json",
+        "--spec", "dflash2", "--draft-tokens", "7"}));
+    failures += check(durable.session_checkpoint_root == "checkpoints" &&
+                          durable.session_checkpoint_quota_bytes == (2048ULL << 20) &&
+                          durable.session_checkpoint_staging_bytes == (64ULL << 20) &&
+                          durable.session_checkpoint_write_buffer_bytes == (128ULL << 20) &&
+                          durable.session_checkpoint_min_tokens == 4096 &&
+                          durable.session_checkpoint_require_origin_auth &&
+                          durable.shutdown_report == "shutdown.json" &&
+                          durable.speculative.backend == ninfer::SpeculativeBackend::DFlash2,
+                      "durable configuration was not preserved");
+    for (const auto* flag : {"--session-checkpoint-quota-mib", "--session-checkpoint-staging-mib",
+                             "--session-checkpoint-write-buffer-mib"}) {
+        for (const auto* value : {"0", "-1", "", "18446744073709551615"}) {
+            failures += check(rejects(with_durable({flag, value})),
+                              "invalid durable byte budget was accepted");
+        }
+    }
+    failures += check(parse(with_durable({"--session-checkpoint-min-tokens", "0"}))
+                              .session_checkpoint_min_tokens == 0 &&
+                          parse(with_durable({"--session-checkpoint-min-tokens", "4294967295"}))
+                              .session_checkpoint_min_tokens == UINT32_MAX,
+                      "durable token threshold boundaries changed");
+    failures += check(rejects(with_durable({"--session-checkpoint-min-tokens", "4294967296"})),
+                      "overflowing durable token threshold was accepted");
+    failures += check(rejects(with_durable({"--session-checkpoint-dir", ""})),
+                      "empty durable root was accepted");
+    failures += check(rejects(with_durable({"--no-prefix-reuse"})) &&
+                          rejects(with_durable({"--host-context-mib", "0"})),
+                      "durability was accepted without enabled Host context capacity");
+    failures += check(rejects({"ninfer-serve", "model.ninfer", "--session-checkpoint-dir",
+                               "checkpoints", "--binary-sha256", binary_sha,
+                               "--artifact-sha256", artifact_sha, "--config-sha256", config_sha}) &&
+                          rejects({"ninfer-serve", "model.ninfer", "--session-checkpoint-dir",
+                                   "checkpoints", "--api-key", "secret"}),
+                      "durability was accepted without authentication or lifecycle digests");
+    failures += check(rejects({"ninfer-serve", "model.ninfer",
+                               "--session-checkpoint-require-origin-auth"}),
+                      "strict origin authentication was accepted without a durable root");
+    auto short_key_args = durable_args;
+    short_key_args[3] = std::string(31, 's');
+    short_key_args.emplace_back("--session-checkpoint-require-origin-auth");
+    failures += check(rejects(std::move(short_key_args)),
+                      "strict origin authentication accepted a short credential");
+    for (const auto* flag : {"--session-checkpoint-dir", "--session-checkpoint-quota-mib",
+                             "--session-checkpoint-staging-mib",
+                             "--session-checkpoint-write-buffer-mib",
+                             "--session-checkpoint-min-tokens",
+                             "--session-checkpoint-require-origin-auth", "--stop-event",
+                             "--shutdown-report"}) {
+        failures += check(serve_usage_text("ninfer-serve").find(flag) != std::string::npos,
+                          "serve help omitted a durable or managed-stop option");
+    }
+    const std::string event_name = "Global\\NInfer-Serve-Stop-" + std::string(32, 'a');
+#if defined(_WIN32)
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--stop-event", event_name}).stop_event ==
+                          event_name,
+                      "Windows stop-event name was not preserved");
+#else
+    failures += check(rejects({"ninfer-serve", "model.ninfer", "--stop-event", event_name}),
+                      "Windows stop event was accepted off Windows");
+#endif
+    for (const auto& value : {std::string{}, std::string("Global\\unrelated"),
+                              std::string("Local\\NInfer-Serve-Stop-") + std::string(32, 'A'),
+                              std::string("NInfer-Serve-Stop-") + std::string(32, 'a')}) {
+        failures += check(rejects({"ninfer-serve", "model.ninfer", "--stop-event", value}),
+                          "invalid manager stop-event name was accepted");
+    }
+    failures += check(rejects({"ninfer-serve", "model.ninfer", "--shutdown-report", ""}),
+                      "empty shutdown-report path was accepted");
     failures += check(defaults.allow_prefix_reuse, "prefix reuse is not enabled by default");
     failures +=
         check(!defaults.preserve_thinking, "thinking history is unexpectedly preserved by default");

@@ -58,6 +58,31 @@ std::string parse_profile_name(const char* text) {
     return value;
 }
 
+std::string parse_stop_event_name(const char* text) {
+    const std::string value(text);
+    std::string_view rest(value);
+    if (rest.starts_with("Global\\")) {
+        rest.remove_prefix(7);
+    } else if (rest.starts_with("Local\\")) {
+        rest.remove_prefix(6);
+    } else {
+        throw std::invalid_argument("--stop-event requires the Global or Local namespace");
+    }
+    constexpr std::string_view infix = "NInfer-Serve-Stop-";
+    if (!rest.starts_with(infix) || rest.size() != infix.size() + 32 ||
+        !std::all_of(rest.begin() + infix.size(), rest.end(), [](unsigned char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        })) {
+        throw std::invalid_argument(
+            "--stop-event must match (Global|Local)\\NInfer-Serve-Stop-<32 lowercase hex>");
+    }
+#if defined(_WIN32)
+    return value;
+#else
+    throw std::invalid_argument("--stop-event is only supported on Windows");
+#endif
+}
+
 int parse_nonnegative_int(const char* text, const char* label) {
     char* end        = nullptr;
     const long value = std::strtol(text, &end, 10);
@@ -170,8 +195,11 @@ std::string serve_usage_text(const char* argv0) {
            "[--max-request-mib N] [--media-cache-mib N] [--media-live-mib N] "
            "[--media-preprocess-threads N] "
            "[--device-state-slots N] [--host-context-mib N] "
-           "[--request-log-jsonl FILE] "
+           "[--request-log-jsonl FILE] [--stop-event NAME] [--shutdown-report FILE] "
            "[--response-store-max-records N] [--response-store-max-mib N] "
+           "[--session-checkpoint-dir DIR] [--session-checkpoint-quota-mib N] "
+           "[--session-checkpoint-staging-mib N] [--session-checkpoint-write-buffer-mib N] "
+           "[--session-checkpoint-min-tokens N] [--session-checkpoint-require-origin-auth] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
@@ -341,6 +369,48 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             if (options.request_log_jsonl.empty()) {
                 throw std::invalid_argument("--request-log-jsonl must not be empty");
             }
+        } else if (arg == "--stop-event") {
+            options.stop_event = parse_stop_event_name(require_value("--stop-event"));
+        } else if (arg == "--shutdown-report") {
+            options.shutdown_report = require_value("--shutdown-report");
+            if (options.shutdown_report.empty()) {
+                throw std::invalid_argument("--shutdown-report must not be empty");
+            }
+        } else if (arg == "--session-checkpoint-dir") {
+            options.session_checkpoint_root = require_value("--session-checkpoint-dir");
+            if (options.session_checkpoint_root.empty()) {
+                throw std::invalid_argument("--session-checkpoint-dir must not be empty");
+            }
+        } else if (arg == "--session-checkpoint-quota-mib") {
+            const auto mib = parse_u64(require_value("--session-checkpoint-quota-mib"),
+                                       "session-checkpoint-quota-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::uint64_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--session-checkpoint-quota-mib is out of range");
+            }
+            options.session_checkpoint_quota_bytes = mib << 20;
+        } else if (arg == "--session-checkpoint-staging-mib") {
+            const auto mib = parse_u64(require_value("--session-checkpoint-staging-mib"),
+                                       "session-checkpoint-staging-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--session-checkpoint-staging-mib is out of range");
+            }
+            options.session_checkpoint_staging_bytes = static_cast<std::size_t>(mib << 20);
+        } else if (arg == "--session-checkpoint-write-buffer-mib") {
+            const auto mib = parse_u64(require_value("--session-checkpoint-write-buffer-mib"),
+                                       "session-checkpoint-write-buffer-mib");
+            if (mib == 0 || mib > std::numeric_limits<std::size_t>::max() / (1ULL << 20)) {
+                throw std::invalid_argument("--session-checkpoint-write-buffer-mib is out of range");
+            }
+            options.session_checkpoint_write_buffer_bytes = static_cast<std::size_t>(mib << 20);
+        } else if (arg == "--session-checkpoint-min-tokens") {
+            const auto tokens = parse_u64(require_value("--session-checkpoint-min-tokens"),
+                                          "session-checkpoint-min-tokens");
+            if (tokens > std::numeric_limits<std::uint32_t>::max()) {
+                throw std::invalid_argument("--session-checkpoint-min-tokens is out of range");
+            }
+            options.session_checkpoint_min_tokens = static_cast<std::uint32_t>(tokens);
+        } else if (arg == "--session-checkpoint-require-origin-auth") {
+            options.session_checkpoint_require_origin_auth = true;
         } else if (arg == "--response-store-max-records") {
             const int records = parse_nonnegative_int(require_value("--response-store-max-records"),
                                                       "response-store-max-records");
@@ -452,6 +522,31 @@ ServeOptions parse_serve_options(int argc, char** argv) {
     if (default_max_tokens_explicit) {
         if (options.default_max_tokens <= 0) {
             throw std::invalid_argument("--default-max-tokens must be positive");
+        }
+    }
+    if (!options.session_checkpoint_root.empty()) {
+        if (options.api_key.empty()) {
+            throw std::invalid_argument("--session-checkpoint-dir requires --api-key or --api-key-file");
+        }
+        if (options.binary_sha256.empty() || options.artifact_sha256.empty() ||
+            options.config_sha256.empty()) {
+            throw std::invalid_argument(
+                "--session-checkpoint-dir requires --binary-sha256, --artifact-sha256, and --config-sha256");
+        }
+        if (!options.context_cache.enabled || options.context_cache.host_capacity_bytes == 0) {
+            throw std::invalid_argument(
+                "--session-checkpoint-dir requires enabled Host context capacity");
+        }
+    }
+    if (options.session_checkpoint_require_origin_auth) {
+        if (options.session_checkpoint_root.empty()) {
+            throw std::invalid_argument(
+                "--session-checkpoint-require-origin-auth requires --session-checkpoint-dir");
+        }
+        // A checkpoint-root reader can test credential guesses against the offline MAC.
+        if (options.api_key.size() < 32) {
+            throw std::invalid_argument(
+                "--session-checkpoint-require-origin-auth requires an API key of at least 32 characters");
         }
     }
     return options;
