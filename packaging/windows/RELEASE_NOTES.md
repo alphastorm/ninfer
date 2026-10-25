@@ -75,6 +75,34 @@ task. The canonical product root refuses that option. Use the existing
 exact configuration hash; the native-operations rehearsal uses port 18210 and a
 separate protected state root. This option grants no production-route mutation.
 
+The v0.13.1 orchestrator requires an explicit scratch root, task suffix, protected
+operator-key path, C1 port and pressure port. It neither discovers bearer files in
+shipped roots nor unregisters a canonical task for a clean-install test. Suffix
+`I6` uses C1 ports 18210/18211 and pressure ports 18200/18201 for the two lanes.
+The clean-install task has a separate `-Clean` suffix. Restoration checks only
+scratch-owned processes and the selected card's lease/power state.
+
+`--qualified-runtime-bin` and `--qualified-build-receipt` consume the integrator's
+exact three-executable/MSVC runtime set without rebuilding it. Staging verifies
+copy hashes and each executable's clean, matching source/profile/architecture
+identity. Public and port-only scratch packages are each built twice, including
+the complete outer checksum set; the emitted equivalence binds both package and
+configuration hashes plus identical executable/controller bytes.
+
+`New-Package.ps1` requires the product P4 generator and genuine resolved vcpkg,
+CUDA, vendored-source and CRT/DirectStorage inventories. The outer distribution
+adds `<package-stem>.cdx.json` (CycloneDX 1.5) without replacing the file-level SPDX
+or inner checksum asset. `SHA256SUMS` closes exactly ten files (eleven including
+itself); the package-build receipt binds the dependency SBOM, generator and input
+digests. Hardware status remains pending in that immutable build receipt.
+
+A completed and restored orchestration also emits `<lane>.json` in the product's
+native-qualification shape. Its public package/configuration binding is separate
+from the unmodified observed scratch identity and launch attestation. Protocol,
+shared-pool pressure, context, restart, rollback, security, client and benchmark
+fields are adapted from actual phase receipts; failed/missing evidence cannot
+become passing flags. A first-lineage rollback remains `not_applicable`, not passed.
+
 ## Historical predecessor notes
 
 The sections below describe the fork-based releases and their qualification

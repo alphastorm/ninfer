@@ -28,6 +28,26 @@ param(
     [string[]]$RuntimeFile,
 
     [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$DependencySbomTool,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$VcpkgResolved,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$CudaInventory,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$ThirdPartyInventory,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$RuntimeInventory,
+
+    [Parameter(Mandatory = $true)]
     [ValidatePattern('^rtx[0-9]{4}$')]
     [string]$Lane,
 
@@ -279,6 +299,31 @@ try {
         }
     }
 
+    $dependencyName = "$assetStem.cdx.json"
+    $dependencyPath = Join-Path $packageOutput $dependencyName
+    $dependencyArguments = @(
+        $DependencySbomTool, '--package-dir', $payload, '--source-dir', $source,
+        '--source-commit', $RuntimeSourceSha, '--vcpkg-lock', $VcpkgResolved,
+        '--cuda-inventory', $CudaInventory, '--third-party-inventory', $ThirdPartyInventory,
+        '--runtime-inventory', $RuntimeInventory,
+        '--output', $dependencyPath
+    )
+    $dependencyLines = @(& $PythonExecutable @dependencyArguments 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "dependency SBOM generation failed: $([string]::Join([Environment]::NewLine, @($dependencyLines | ForEach-Object { [string]$_ })))"
+    }
+    $dependencyBom = Read-JsonFile $dependencyPath
+    if ([string]$dependencyBom.bomFormat -cne 'CycloneDX' -or
+        [string]$dependencyBom.specVersion -cne '1.5' -or
+        [string]$dependencyBom.metadata.component.version -cne $RuntimeSourceSha) {
+        throw 'dependency SBOM does not bind the exact native runtime'
+    }
+    $runtimeHashes = @($dependencyBom.metadata.component.hashes | Where-Object { [string]$_.alg -ceq 'SHA-256' })
+    if ($runtimeHashes.Count -ne 1 -or
+        [string]$runtimeHashes[0].content -cne [string]$identity.binaries.'ninfer-serve') {
+        throw 'dependency SBOM runtime binary hash mismatch'
+    }
+
     foreach ($name in @('Install-Release.ps1', 'Control-Release.ps1', 'Control-GpuOwner.ps1', 'Protect-StateRoot.ps1')) {
         Copy-Item -LiteralPath (Join-Path $payload $name) -Destination (Join-Path $packageOutput $name)
     }
@@ -306,6 +351,25 @@ try {
         }
         config_sha256 = [string]$identity.configuration_sha256
         model_sha256 = [string]$spec.model.sha256
+        sbom = [ordered]@{
+            name = [string]$packageReceipt.sbom.name
+            sha256 = [string]$packageReceipt.sbom.sha256
+            format = 'SPDX-2.3'
+        }
+        dependency_sbom = [ordered]@{
+            name = $dependencyName
+            sha256 = Get-LowerSha256 $dependencyPath
+            format = 'CycloneDX-1.5'
+            runtime_source_sha = $RuntimeSourceSha
+            generator_sha256 = Get-LowerSha256 $DependencySbomTool
+            inputs = [ordered]@{
+                vcpkg_manifest_sha256 = Get-LowerSha256 (Join-Path $source 'vcpkg.json')
+                vcpkg_resolved_sha256 = Get-LowerSha256 $VcpkgResolved
+                cuda_inventory_sha256 = Get-LowerSha256 $CudaInventory
+                third_party_inventory_sha256 = Get-LowerSha256 $ThirdPartyInventory
+                runtime_inventory_sha256 = Get-LowerSha256 $RuntimeInventory
+            }
+        }
         package = [ordered]@{
             filename = [IO.Path]::GetFileName($packagePath)
             sha256 = Get-LowerSha256 $packagePath
@@ -314,7 +378,7 @@ try {
         checksums = [ordered]@{
             filename = 'SHA256SUMS'
             role = 'closed-outer-distribution-set'
-            entries = 9
+            entries = 10
             line_ending = 'LF'
         }
         support_assets = [ordered]@{
@@ -342,6 +406,7 @@ try {
         [IO.Path]::GetFileName($packagePath),
         [string]$packageReceipt.source_archive.name,
         [string]$packageReceipt.sbom.name,
+        $dependencyName,
         [string]$packageReceipt.checksums,
         'package-build-receipt.json'
     )

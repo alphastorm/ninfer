@@ -22,7 +22,7 @@ from decimal import Decimal
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import subprocess
 import sys
@@ -62,7 +62,6 @@ FLUSH_MARKER = "MANAGED-STOP-FLUSH-408137"
 # budget equivalent to the predecessor's KV budget plus eight actual native StateImages.
 # This is pressure on the shared pool, not a claim that only StateImages can consume it.
 PRESSURE_STATE_IMAGES = 8
-PRESSURE_PORT_OFFSET = 1
 # App-local imports come from the selected CUDA/MSVC/vcpkg toolchains. DirectStorage's two
 # redistributables are also staged explicitly because its core DLL is loaded dynamically.
 DIRECTSTORAGE_DLLS = ("dstorage.dll", "dstoragecore.dll")
@@ -528,6 +527,191 @@ def scan_archive(path: Path, source_archive: bool = False) -> dict[str, Any]:
     }
 
 
+def validate_scratch_configuration(config: Config, spec: dict[str, Any]) -> None:
+    root = PureWindowsPath(config.scratch_state_root)
+    if (not root.is_absolute() or ".." in root.parts or
+            root.name.casefold() != spec["lifecycle"]["state_root_name"].casefold()):
+        raise LaneError("scratch state root must be absolute with the lane's state-root leaf")
+    protected = PureWindowsPath("C:/ProgramData/NInfer")
+    if root == protected or protected in root.parents:
+        raise LaneError("scratch qualification refuses the canonical product state tree")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]{0,25}", config.scratch_task_suffix):
+        raise LaneError("invalid scratch task suffix (reserve six characters for the clean-install task)")
+    if (config.scratch_port == config.pressure_port or
+            any(type(port) is not int or not 18200 <= port <= 18219
+                for port in (config.scratch_port, config.pressure_port))):
+        raise LaneError("scratch and pressure ports must be distinct in the approved 18200-18219 range")
+    if not config.api_key_file:
+        raise LaneError("scratch qualification requires an explicit protected operator API-key file")
+    if bool(config.qualified_runtime_bin) != bool(config.qualified_build_receipt):
+        raise LaneError("qualified runtime-bin and build-receipt inputs must be supplied together")
+
+
+def require_port_only_equivalence(
+    public_config: dict[str, Any], scratch_config: dict[str, Any], scratch_port: int,
+) -> None:
+    restored = json.loads(json.dumps(scratch_config))
+    if public_config.get("listen", {}).get("port") != 18082 or restored.get("listen", {}).get("port") != scratch_port:
+        raise LaneError("public and scratch package ports do not match their declared bindings")
+    restored["listen"]["port"] = 18082
+    if restored != public_config:
+        raise LaneError("scratch configuration differs from the public package beyond /listen/port")
+
+
+def stage_lane_qualification(state: dict[str, Any], summary: dict[str, Any], lane: Lane) -> dict[str, Any]:
+    """Adapt completed receipts, not asserted flags, to the product's native lane shape."""
+    if (state.get("status") != "passed" or summary.get("status") != "passed" or
+            summary.get("restoration", {}).get("status") != "passed"):
+        raise LaneError("cannot stage an incomplete or unrestored native qualification")
+    phases = state["phases"]
+    if any(phases.get(name, {}).get("status") != "passed" for name in PHASES):
+        raise LaneError("cannot stage a lane with a missing or non-passing phase")
+    receipts = {name: phases[name]["receipt"] for name in PHASES}
+    if any(
+        receipt.get("status") not in (None, "passed") and
+        not (name == "rollback" and receipt.get("status") == "not_applicable")
+        for name, receipt in receipts.items()
+    ):
+        raise LaneError("cannot stage a lane containing a non-passing inner receipt")
+    package = receipts["package"]
+    scratch = package["scratch_package"]
+    equivalence = package["scratch_equivalence"]
+    if (equivalence.get("status") != "passed" or equivalence.get("public_package_executed") is not False or
+            equivalence.get("configuration_delta", {}).get("path") != "/listen/port"):
+        raise LaneError("native lane lacks explicit public/scratch package equivalence")
+    for key, expected in {
+        "public_package_sha256": package["package"]["sha256"],
+        "scratch_package_sha256": scratch["package"]["sha256"],
+        "public_configuration_sha256": package["config_sha256"],
+        "scratch_configuration_sha256": scratch["config_sha256"],
+    }.items():
+        if equivalence.get(key) != expected:
+            raise LaneError(f"scratch equivalence binding mismatch: {key}")
+    if (package["binaries"] != scratch["binaries"] or
+            package["support_assets"] != scratch["support_assets"] or
+            receipts["transfer_install"]["package_sha256"] != scratch["package"]["sha256"]):
+        raise LaneError("installed rehearsal is not the byte-equivalent scratch package")
+    protocol = receipts["protocol"]
+    identity = dict(protocol["identity"])
+    expected_identity = {
+        "patch_stack_sha": state["source_commit"], "source_dirty": False,
+        "upstream_base_sha": package["upstream_base_sha"], "build_profile": package["build_profile"],
+        "deployment_profile": lane.spec["deployment_profile"], "model_id": lane.model_id,
+        "binary_sha256": package["binaries"]["server_sha256"],
+        "model_artifact_sha256": package["model_sha256"], "config_sha256": scratch["config_sha256"],
+    }
+    if any(identity.get(key) != value for key, value in expected_identity.items()):
+        raise LaneError("actual status identity does not match the qualified scratch package")
+    startup = protocol["startup_attestation"]
+    if (startup.get("request_log_schema") != 30 or startup.get("gpu_uuid_verified") is not True or
+            startup.get("gpu_name") != lane.spec["gpu"]["name"] or type(startup.get("gpu_index")) is not int):
+        raise LaneError("lane lacks the controller's completed launch-scoped GPU attestation")
+    for name in ("protocol", "pressure_protocol"):
+        observed = receipts[name]["protocol"]
+        checks = observed.get("checks")
+        if (observed.get("status") != "passed" or not isinstance(checks, dict) or
+                not checks or any(value is not True for value in checks.values())):
+            raise LaneError(f"{name} lacks passing real protocol checks")
+    context = receipts["context_128k"]
+    restart = receipts["restart"]
+    stop = restart["managed_stop"]
+    if context["prompt_tokens"] != LONG_PROMPT_TOKENS or context["exact_output"] != EXPECTED_LONG:
+        raise LaneError("lane does not prove the advertised context oracle")
+    if (restart["old_pid"] == restart["new_pid"] or stop["mode"] != "stop-event" or
+            stop["outcome"] != "graceful" or stop["forced"] or restart["cached_input_tokens"] <= 0 or
+            restart["managed_stop_flush"]["exact_output"] != FLUSH_MARKER):
+        raise LaneError("lane does not prove process replacement and managed final-save continuation")
+    security = receipts["security"]["security"]
+    omp = receipts["omp"]
+    benchmark = dict(receipts["benchmark_c1"])
+    if (security.get("status") != "passed" or security.get("root_dacl_protected") is not True or
+            security.get("low_privilege_effective_read_denials", 0) <= 0 or
+            omp.get("exact_final_answer") is not True or omp.get("typed_tool_name") != "read" or
+            omp.get("tool_results", 0) < 1 or not omp.get("client_version") or
+            benchmark.get("completion_tokens") != 1024 or benchmark.get("decode_tokens_per_second", 0) <= 0):
+        raise LaneError("lane lacks passing security, client, or bounded benchmark evidence")
+    benchmark.pop("gpu_uuid", None)
+    persistence = {key: value for key, value in restart.items() if key not in {"old_pid", "new_pid"}}
+    persistence["process_replaced"] = True
+    configuration = lane.config
+    identity.update({
+        "source_commit": identity["patch_stack_sha"], "server_binary_sha256": identity["binary_sha256"],
+        "lineage_base_sha": package["lineage_base_sha"], "gpu_index": startup["gpu_index"],
+        "gpu_name": startup["gpu_name"], "qualified_configuration_sha256": identity["config_sha256"],
+        "config_sha256": package["config_sha256"], "configuration_sha256": package["config_sha256"],
+        "configuration_binding": "public-package-with-port-only-scratch-equivalence",
+    })
+    gate_names = {
+        "protocol": "protocol", "protocol_under_pool_pressure": "pressure_protocol",
+        "long_session": "context_128k", "persistence": "restart", "rollback": "rollback",
+        "state_security": "security", "golden_equivalent": "omp", "benchmark_c1": "benchmark_c1",
+    }
+    return {
+        "artifact_type": "ninfer_windows_release_qualification", "schema_version": 1, "status": "passed",
+        "qualified_utc": summary["qualified_utc"], "release_id": lane.release_id, "profile": "MTP3",
+        "identity": identity,
+        "configuration": {
+            "public_model_id": lane.model_id,
+            **{key: configuration["engine"][key] for key in (
+                "max_context", "kv_capacity", "kv_dtype", "prefill_chunk", "admission_headroom_mib",
+            )},
+            "concurrency": configuration["engine"]["max_concurrency"],
+            "gpu_keep_warm_ms": configuration["engine"].get("gpu_keep_warm_ms", 0),
+            "device_state_slots": configuration["context_cache"]["device_state_slots"],
+            "host_context_mib": configuration["context_cache"]["host_context_mib"],
+            "host_context_bytes": lane.spec["host_context_translation"]["host_context_bytes"],
+            "speculative_backend": configuration["speculative"]["backend"],
+            "speculative_draft_tokens": configuration["speculative"]["draft_tokens"],
+            "checkpoint_require_origin_auth": configuration["session_checkpoint"]["require_origin_auth"],
+            "managed_stop": lane.spec["lifecycle"]["managed_stop"],
+            "graceful_stop_timeout_seconds": lane.spec["lifecycle"]["graceful_stop_timeout_seconds"],
+        },
+        "protocol": protocol["protocol"],
+        "protocol_under_pool_pressure": {
+            "artifact_type": receipts["pressure_protocol"]["protocol"]["artifact_type"],
+            "status": receipts["pressure_protocol"]["protocol"]["status"],
+            "host_context_mib": receipts["pressure_protocol"]["host_context_mib"],
+            "device_state_slots": receipts["pressure_protocol"]["device_state_slots"],
+            "checks_passed": len(receipts["pressure_protocol"]["protocol"]["checks"]),
+            "checks": receipts["pressure_protocol"]["protocol"]["checks"],
+        },
+        "long_session": context, "persistence": persistence, "rollback": receipts["rollback"],
+        "state_security": security,
+        "golden_equivalent": {
+            "artifact_type": "ninfer_omp_golden_equivalent_receipt", "schema_version": 1,
+            "status": omp["status"], "omp": {key: omp[key] for key in (
+                "client_version", "events", "typed_tool_name", "tool_results",
+            )},
+            "oracles": {"exact_visible_final_answer": "passed", "typed_tool_invocation": "passed",
+                        "tool_result_continuation": "passed"},
+            "raw_transcript_included": False,
+        },
+        "benchmark_c1": benchmark,
+        "deterministic_gates": {
+            output: receipts[source].get("status", phases[source]["status"])
+            for output, source in gate_names.items()
+        },
+        "restoration": summary["restoration"],
+        "scratch_equivalence": {**equivalence, "startup_attestation": startup, "observed_identity": protocol["identity"]},
+        "orchestration_evidence": {
+            name: {"status": phase["status"], "receipt_sha256": phase["receipt_sha256"]}
+            for name, phase in phases.items()
+        },
+        "limitations": [
+            "Public packages retain port 18082 and were not executed. The isolated installed rehearsals differ only in listen.port.",
+            "C1 and the recorded shared-Host pressure budget are the qualified profiles; no multi-GPU inference or smaller-host claim.",
+            "Restart proves the two recorded short sessions, not loss-free shutdown of every live session.",
+        ],
+        "beta_qualified": True,
+        "package": {
+            **package["package"], **package["support_assets"],
+            "sbom_sha256": package["sbom"]["sha256"],
+            "dependency_sbom_sha256": package["dependency_sbom"]["sha256"],
+            "outer_checksums_sha256": package["outer_sha256"],
+        },
+    }
+
+
 @dataclasses.dataclass
 class Config:
     source_root: Path
@@ -548,6 +732,18 @@ class Config:
     through_phase: str | None
     candidate_source: str | None
     upgrade_orchestrator_state: bool
+    dependency_sbom_tool: str
+    vcpkg_resolved: str
+    cuda_inventory: str
+    third_party_inventory: str
+    runtime_inventory: str
+    scratch_state_root: str
+    scratch_task_suffix: str
+    scratch_port: int
+    pressure_port: int
+    api_key_file: str
+    qualified_runtime_bin: str | None
+    qualified_build_receipt: str | None
     gpu_uuid: str | None = None
 
 
@@ -559,24 +755,33 @@ class Orchestrator:
         run(["git", "cat-file", "-e", f"{self.head}^{{commit}}"], cwd=config.source_root)
         self.head8 = self.head[:8]
         self.lane = Lane.load(config.source_root, config.lane, self.head)
+        validate_scratch_configuration(config, self.lane.spec)
         self.script = Path(__file__).resolve()
         self.script_sha = sha256_file(self.script)
         self.state_path = config.state_dir / "state.json"
         self.receipt_dir = config.state_dir / "receipts"
         self.local_stage = config.state_dir / "stage"
-        self.builder_root = f"C:/b/ninfer-{self.lane.name}-{self.head8}"
+        self.builder_root = f"D:/overnight/C3/native-{self.lane.name}-{self.head8}"
         self.builder_source = f"{self.builder_root}/source"
         self.builder_build = f"{self.builder_root}/build"
         self.builder_bin = f"{self.builder_root}/neutral-bin"
         self.builder_out_a = f"{self.builder_root}/package-a"
         self.builder_out_b = f"{self.builder_root}/package-b"
+        self.builder_scratch_a = f"{self.builder_root}/scratch-package-a"
+        self.builder_scratch_b = f"{self.builder_root}/scratch-package-b"
         self.builder_script = f"{self.builder_root}/qualify_native.py"
-        self.target_root = f"C:/ProgramData/NInferQualification/orchestrated-{self.lane.name}-{self.head8}"
+        self.target_root = (
+            f"C:/ProgramData/NInferQualification/C3-{config.scratch_task_suffix}-{self.lane.name}-{self.head8}"
+        )
         self.state = self._load_state()
 
     @property
     def state_root(self) -> str:
-        return self.lane.state_root
+        return self.config.scratch_state_root
+
+    @property
+    def task_name(self) -> str:
+        return self.lane.task_name + "-Scratch-" + self.config.scratch_task_suffix
 
     @property
     def gpu_uuid(self) -> str:
@@ -599,12 +804,20 @@ if($LASTEXITCODE -ne 0){throw 'target GPU selection failed'}
         return selected["uuid"]
 
     def _load_state(self) -> dict[str, Any]:
+        scratch_binding = {
+            "state_root_sha256": hashlib.sha256(str(PureWindowsPath(self.state_root)).casefold().encode()).hexdigest(),
+            "task_suffix": self.config.scratch_task_suffix,
+            "port": self.config.scratch_port,
+            "pressure_port": self.config.pressure_port,
+        }
         if self.state_path.exists():
             state = json.loads(self.state_path.read_text(encoding="utf-8"))
             if state.get("phases") and not state.get("gpu_uuid"):
                 raise LaneError("unscoped qualification checkpoints cannot be reused; use a fresh state directory")
             if state.get("source_commit") != self.head or state.get("lane") != self.lane.name:
                 raise LaneError("checkpoint belongs to another source, lane, or orchestrator revision")
+            if state.get("scratch_binding") != scratch_binding:
+                raise LaneError("checkpoint belongs to another scratch root, task, or port binding")
             if state.get("orchestrator_sha256") != self.script_sha:
                 if not self.config.upgrade_orchestrator_state:
                     raise LaneError("checkpoint belongs to another source or orchestrator revision")
@@ -631,6 +844,7 @@ if($LASTEXITCODE -ne 0){throw 'target GPU selection failed'}
             "source_commit": self.head,
             "orchestrator_sha256": self.script_sha,
             "qualification_tool_commit": self.tool_head,
+            "scratch_binding": scratch_binding,
             "status": "not_started",
             "current_phase": None,
             "phases": {},
@@ -658,10 +872,18 @@ foreach($item in @($items)){{
 """
                 return bool(self.remote_json(self.config.builder, script)["ok"])
             if name == "package":
-                expected = receipt["package"]["sha256"]
                 script = f"""
-$path=Join-Path {ps_quote(self.builder_out_a)} {ps_quote(self.lane.package_name)}
-$ok=(Test-Path $path -PathType Leaf) -and ((Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant() -eq {ps_quote(expected)})
+$ok=$true
+$arms=@(
+  @{{root={ps_quote(self.builder_out_a)};package={ps_quote(receipt["package"]["sha256"])};outer={ps_quote(receipt["outer_sha256"])}}},
+  @{{root={ps_quote(self.builder_scratch_a)};package={ps_quote(receipt["scratch_package"]["package"]["sha256"])};outer={ps_quote(receipt["scratch_package"]["outer_sha256"])}}}
+)
+foreach($arm in $arms){{
+  foreach($entry in @(@{{name={ps_quote(self.lane.package_name)};sha=$arm.package}},@{{name='SHA256SUMS';sha=$arm.outer}})){{
+    $path=Join-Path $arm.root $entry.name
+    if(-not(Test-Path $path -PathType Leaf) -or (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.sha){{$ok=$false}}
+  }}
+}}
 [Console]::Out.WriteLine(([ordered]@{{ok=$ok}}|ConvertTo-Json -Compress))
 """
                 return bool(self.remote_json(self.config.builder, script)["ok"])
@@ -716,6 +938,10 @@ $limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=pow
         self._save()
         try:
             receipt = action()
+            pending_summary = name == "receipt" and receipt.get("status") == "restore-pending"
+            no_predecessor = name == "rollback" and receipt.get("status") == "not_applicable"
+            if receipt.get("status") not in (None, "passed") and not (pending_summary or no_predecessor):
+                raise LaneError(f"{name} returned a non-passing receipt")
         except Exception as error:
             self.state["status"] = "failed"
             self.state["phases"][name] = {
@@ -812,6 +1038,10 @@ if($incumbentRoot -and (Test-Path (Join-Path $incumbentRoot 'Control-Release.ps1
   &(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Stop -StateRoot $incumbentRoot|Out-Null
 }}
 $controller=Join-Path $root 'Control-Release.ps1'
+if(Test-Path (Join-Path $root 'state.json')){{
+  $bound=Get-Content (Join-Path $root 'state.json') -Raw|ConvertFrom-Json
+  if([string]$bound.task_name -cne {ps_quote(self.task_name)}){{throw 'scratch root belongs to a different lifecycle task'}}
+}}
 if((Test-Path $controller) -and (Test-ScopedControllerOrQuiescent $root)){{&$controller -Action Stop -StateRoot $root|Out-Null}}
 $active='';$previous='';$modelSha=''
 if(Test-Path (Join-Path $root 'state.json')){{
@@ -819,7 +1049,10 @@ if(Test-Path (Join-Path $root 'state.json')){{
   $r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
   $active=[string]$s.active_release;$previous=[string]$s.previous_release;$modelSha=[string]$r.model_artifact_sha256
 }}
-if((Get-Process ninfer-serve -ErrorAction SilentlyContinue).Count -ne 0){{throw 'a ninfer-serve process is still running on the target'}}
+$owned=@(Get-CimInstance Win32_Process -Filter "Name='ninfer-serve.exe'"|Where-Object{{
+  $_.ExecutablePath -and ([string]$_.ExecutablePath).StartsWith(([IO.Path]::GetFullPath($root).TrimEnd('\\')+'\\'),[StringComparison]::OrdinalIgnoreCase)
+}})
+if($owned.Count -ne 0){{throw 'a scratch-owned ninfer-serve process is still running'}}
 $limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=power.limit --format=csv,noheader,nounits)
 $gpu=nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits
 $modelPath={ps_quote(self.config.model_path)}
@@ -848,6 +1081,8 @@ if(-not (Test-Path -LiteralPath $modelPath -PathType Leaf)){{throw 'pinned model
         }
 
     def neutral_build(self) -> dict[str, Any]:
+        if self.config.qualified_runtime_bin:
+            return self.consume_qualified_build()
         self.local_stage.mkdir(parents=True, exist_ok=True)
         bundle = self.local_stage / "source.bundle"
         run(["git", "bundle", "create", str(bundle), "HEAD"], cwd=self.config.source_root)
@@ -882,7 +1117,7 @@ $source={ps_quote(self.builder_source)}
 $build={ps_quote(self.builder_build)}
 $bundle=Join-Path $root 'source.bundle'
 if((Get-FileHash $bundle -Algorithm SHA256).Hash.ToLowerInvariant()-ne{ps_quote(bundle_sha)}){{throw 'bundle hash mismatch'}}
-git clone --quiet $bundle $source
+git clone --quiet --config core.autocrlf=false $bundle $source
 git -C $source checkout --quiet --detach {self.head}
 $env:_CL_="/experimental:deterministic /pathmap:$env:USERPROFILE=C:\\build"
 # The app-local DLLs are built by vcpkg from the manifest under short neutral roots, so the
@@ -913,6 +1148,45 @@ $items=Get-ChildItem $bin -File|Sort-Object Name|ForEach-Object{{[ordered]@{{nam
 """
         receipt = self.remote_json(self.config.builder, build_script, timeout=5400)
         return receipt
+
+    def consume_qualified_build(self) -> dict[str, Any]:
+        """Snapshot an integrator-qualified flat runtime; never rebuild or mutate its inputs."""
+        self.local_stage.mkdir(parents=True, exist_ok=True)
+        bundle = self.local_stage / "source.bundle"
+        run(["git", "bundle", "create", str(bundle), "HEAD"], cwd=self.config.source_root)
+        bundle_sha = sha256_file(bundle)
+        remote_ps(self.config.builder, f"""
+$root={ps_quote(self.builder_root)}
+New-Item -ItemType Directory -Path $root -Force|Out-Null
+""")
+        scp(str(bundle), remote_spec(self.config.builder, f"{self.builder_root}/source.bundle"))
+        self.stage_script(self.config.builder, self.builder_script)
+        return self.remote_json(self.config.builder, f"""
+$ErrorActionPreference='Stop'
+$root={ps_quote(self.builder_root)}
+$source={ps_quote(self.builder_source)}
+$bundle=Join-Path $root 'source.bundle'
+if((Get-FileHash $bundle -Algorithm SHA256).Hash.ToLowerInvariant() -cne {ps_quote(bundle_sha)}){{throw 'source bundle hash mismatch'}}
+if(-not(Test-Path $source)){{
+  git clone --quiet --config core.autocrlf=false $bundle $source
+  if($LASTEXITCODE -ne 0){{throw 'qualified source clone failed'}}
+  git -C $source checkout --quiet --detach {self.head}
+  if($LASTEXITCODE -ne 0){{throw 'qualified source checkout failed'}}
+}}
+if([string](&git -C $source rev-parse HEAD) -cne {ps_quote(self.head)} -or [string](&git -C $source status --porcelain)){{throw 'qualified source staging is not the exact clean candidate'}}
+$inputBin={ps_quote(self.config.qualified_runtime_bin)}
+$bin={ps_quote(self.builder_bin)}
+New-Item -ItemType Directory -Path $bin|Out-Null
+$files=@(Get-ChildItem -LiteralPath $inputBin -File|Where-Object{{$_.Extension -ieq '.dll' -or $_.Name -in @('ninfer.exe','ninfer-serve.exe','ninfer_bench.exe')}})
+foreach($file in $files){{
+  $hash=(Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+  $destination=Join-Path $bin $file.Name
+  Copy-Item -LiteralPath $file.FullName -Destination $destination
+  if((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant() -cne $hash){{throw 'qualified runtime copy hash mismatch'}}
+}}
+&python -B {ps_quote(self.builder_script)} _verify-native-build --source-root $source --runtime-bin $bin --build-receipt {ps_quote(self.config.qualified_build_receipt)} --source-commit {self.head} --cuda-architecture {self.lane.cuda_architecture} --build-profile {ps_quote(self.lane.build_profile)} --upstream-base-sha {self.lane.upstream_sha}
+if($LASTEXITCODE -ne 0){{throw 'qualified native identity verification failed'}}
+""", timeout=900)
 
     def private_scan(self) -> dict[str, Any]:
         output = run(
@@ -956,20 +1230,73 @@ $items=Get-ChildItem $bin -File|Sort-Object Name|ForEach-Object{{[ordered]@{{nam
 
     def package(self) -> dict[str, Any]:
         epoch = run(["git", "show", "-s", "--format=%ct", self.head], cwd=self.config.source_root).stdout.strip()
+        config_bytes = subprocess.check_output(
+            ["git", "show", f"{self.head}:packaging/windows/lanes/{self.lane.name}/server-config.json"],
+            cwd=self.config.source_root,
+        )
+        config_sha = hashlib.sha256(config_bytes).hexdigest()
         package_script = f"""
 $ErrorActionPreference='Stop'
 $source={ps_quote(self.builder_source)}
 $bin={ps_quote(self.builder_bin)}
+if((Get-FileHash (Join-Path $source 'packaging/windows/lanes/{self.lane.name}/server-config.json') -Algorithm SHA256).Hash.ToLowerInvariant() -cne {ps_quote(config_sha)}){{throw 'public config checkout bytes differ from the committed source'}}
 $runtime=@(Get-ChildItem $bin -Filter '*.dll' -File|Sort-Object Name|ForEach-Object FullName)
-function Build-One([string]$Out){{if(Test-Path $Out){{Remove-Item $Out -Recurse -Force}};&(Join-Path $source 'packaging\\windows\\New-Package.ps1') -Lane {ps_quote(self.lane.name)} -SourceRoot $source -NInferExecutable (Join-Path $bin 'ninfer.exe') -ServerExecutable (Join-Path $bin 'ninfer-serve.exe') -BenchmarkExecutable (Join-Path $bin 'ninfer_bench.exe') -ReleaseHeadSha {ps_quote(self.head)} -RuntimeSourceSha {ps_quote(self.head)} -RuntimeFile $runtime -PythonExecutable python -SourceDateEpoch {epoch} -OutputDirectory $Out|Out-Null}}
-Build-One {ps_quote(self.builder_out_a)}
-Build-One {ps_quote(self.builder_out_b)}
+function Build-One([string]$Out,[string]$Config){{
+  if(Test-Path $Out){{Remove-Item $Out -Recurse -Force}}
+  $parameters=@{{
+    Lane={ps_quote(self.lane.name)};SourceRoot=$source;
+    NInferExecutable=(Join-Path $bin 'ninfer.exe');ServerExecutable=(Join-Path $bin 'ninfer-serve.exe');
+    BenchmarkExecutable=(Join-Path $bin 'ninfer_bench.exe');ReleaseHeadSha={ps_quote(self.head)};RuntimeSourceSha={ps_quote(self.head)};
+    RuntimeFile=$runtime;DependencySbomTool={ps_quote(self.config.dependency_sbom_tool)};
+    VcpkgResolved={ps_quote(self.config.vcpkg_resolved)};CudaInventory={ps_quote(self.config.cuda_inventory)};
+    ThirdPartyInventory={ps_quote(self.config.third_party_inventory)};RuntimeInventory={ps_quote(self.config.runtime_inventory)};
+    PythonExecutable='python';SourceDateEpoch={epoch};OutputDirectory=$Out
+  }}
+  if($Config){{$parameters['ServerConfig']=$Config}}
+  &(Join-Path $source 'packaging\\windows\\New-Package.ps1') @parameters|Out-Null
+}}
+Build-One {ps_quote(self.builder_out_a)} ''
+Build-One {ps_quote(self.builder_out_b)} ''
 $a=Get-Content (Join-Path {ps_quote(self.builder_out_a)} 'package-build-receipt.json') -Raw | ConvertFrom-Json
 $b=Get-Content (Join-Path {ps_quote(self.builder_out_b)} 'package-build-receipt.json') -Raw | ConvertFrom-Json
-if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw 'package is not deterministic'}}
-[Console]::Out.WriteLine(($a|ConvertTo-Json -Depth 8 -Compress))
+$outerA=(Get-FileHash (Join-Path {ps_quote(self.builder_out_a)} 'SHA256SUMS') -Algorithm SHA256).Hash.ToLowerInvariant()
+$outerB=(Get-FileHash (Join-Path {ps_quote(self.builder_out_b)} 'SHA256SUMS') -Algorithm SHA256).Hash.ToLowerInvariant()
+if([string]$a.package.sha256 -cne [string]$b.package.sha256 -or $outerA -cne $outerB){{throw 'public distribution is not deterministic'}}
+$publicConfig=Get-Content (Join-Path $source 'packaging/windows/lanes/{self.lane.name}/server-config.json') -Raw|ConvertFrom-Json
+$scratchConfig=Get-Content (Join-Path $source 'packaging/windows/lanes/{self.lane.name}/server-config.json') -Raw|ConvertFrom-Json
+$scratchConfig.listen.port={self.config.scratch_port}
+$scratchConfigPath=Join-Path {ps_quote(self.builder_root)} 'scratch-server-config.json'
+[IO.File]::WriteAllText($scratchConfigPath,(($scratchConfig|ConvertTo-Json -Depth 32)+[char]10),[Text.UTF8Encoding]::new($false))
+Build-One {ps_quote(self.builder_scratch_a)} $scratchConfigPath
+Build-One {ps_quote(self.builder_scratch_b)} $scratchConfigPath
+$sa=Get-Content (Join-Path {ps_quote(self.builder_scratch_a)} 'package-build-receipt.json') -Raw|ConvertFrom-Json
+$sb=Get-Content (Join-Path {ps_quote(self.builder_scratch_b)} 'package-build-receipt.json') -Raw|ConvertFrom-Json
+$scratchOuterA=(Get-FileHash (Join-Path {ps_quote(self.builder_scratch_a)} 'SHA256SUMS') -Algorithm SHA256).Hash.ToLowerInvariant()
+$scratchOuterB=(Get-FileHash (Join-Path {ps_quote(self.builder_scratch_b)} 'SHA256SUMS') -Algorithm SHA256).Hash.ToLowerInvariant()
+if([string]$sa.package.sha256 -cne [string]$sb.package.sha256 -or $scratchOuterA -cne $scratchOuterB){{throw 'scratch distribution is not deterministic'}}
+[Console]::Out.WriteLine((@{{public=$a;scratch=$sa;outer_sha256=$outerA;scratch_outer_sha256=$scratchOuterA;public_config=$publicConfig;scratch_config=$scratchConfig}}|ConvertTo-Json -Depth 24 -Compress))
 """
-        receipt = self.remote_json(self.config.builder, package_script, timeout=1800)
+        result = self.remote_json(self.config.builder, package_script, timeout=3600)
+        receipt = result["public"]
+        scratch = result["scratch"]
+        require_port_only_equivalence(result["public_config"], result["scratch_config"], self.config.scratch_port)
+        if receipt["binaries"] != scratch["binaries"] or receipt["support_assets"] != scratch["support_assets"]:
+            raise LaneError("scratch package changed executable or lifecycle bytes")
+        receipt["outer_sha256"] = result["outer_sha256"]
+        scratch["outer_sha256"] = result["scratch_outer_sha256"]
+        receipt["scratch_package"] = scratch
+        receipt["scratch_equivalence"] = {
+            "status": "passed",
+            "configuration_delta": {"path": "/listen/port", "public": 18082, "scratch": self.config.scratch_port},
+            "public_package_sha256": receipt["package"]["sha256"],
+            "scratch_package_sha256": scratch["package"]["sha256"],
+            "public_configuration_sha256": receipt["config_sha256"],
+            "scratch_configuration_sha256": scratch["config_sha256"],
+            "identical_binaries": receipt["binaries"],
+            "identical_support_assets": receipt["support_assets"],
+            "public_package_executed": False,
+            "production_route_activation_performed": False,
+        }
         scan_output = run(
             [
                 "ssh",
@@ -990,7 +1317,7 @@ if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw 'package is 
         return receipt
 
     def transfer_package(self) -> dict[str, Any]:
-        """Move the package and its lifecycle scripts from the builder's package-a to the target.
+        """Move only the scratch rehearsal package and its lifecycle scripts to the target.
 
         The same host copies locally. Two Windows hosts cannot carry bulk over ssh in either
         direction, and relaying through the operator's machine (``scp -3``) moves a 0.6 GB
@@ -1006,7 +1333,7 @@ if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw 'package is 
             "package-build-receipt.json",
         )
         if self.config.builder == self.config.target:
-            items = ",".join(ps_quote(f"{self.builder_out_a}/{name}") for name in (self.lane.package_name, *names))
+            items = ",".join(ps_quote(f"{self.builder_scratch_a}/{name}") for name in (self.lane.package_name, *names))
             remote_ps(
                 self.config.target,
                 f"Copy-Item -LiteralPath @({items}) -Destination {ps_quote(self.target_root)} -Force",
@@ -1014,14 +1341,14 @@ if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw 'package is 
             return {"transport": "local_copy"}
         for name in names:
             scp(
-                remote_spec(self.config.builder, f"{self.builder_out_a}/{name}"),
+                remote_spec(self.config.builder, f"{self.builder_scratch_a}/{name}"),
                 remote_spec(self.config.target, f"{self.target_root}/{name}"),
                 through_local=True,
             )
         tool = self.config.transfer_tool
         if tool is None:
             raise LaneError("--transfer-tool is required when the builder and target are different hosts")
-        source = f"{self.builder_out_a}/{self.lane.package_name}"
+        source = f"{self.builder_scratch_a}/{self.lane.package_name}"
         destination = f"{self.target_root}/{self.lane.package_name}"
         scp(str(tool), remote_spec(self.config.builder, f"{self.builder_root}/transfer.py"))
         scp(str(tool), remote_spec(self.config.target, f"{self.target_root}/transfer.py"))
@@ -1054,7 +1381,7 @@ if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw 'package is 
                 "mb_per_s": fetched.get("mb_per_s"), "bytes": fetched.get("bytes")}
 
     def transfer_install(self) -> dict[str, Any]:
-        package = self.state["phases"]["package"]["receipt"]["package"]
+        package = self.state["phases"]["package"]["receipt"]["scratch_package"]["package"]
         target_root = self.target_root
         # The staging root and the clean-install root live under the qualification parent, so
         # the parent must be a protected root (SYSTEM and Administrators only, no inherited
@@ -1089,47 +1416,45 @@ Remove-Item -LiteralPath {ps_quote(helper)} -Force
             str(self.config.source_root / "tests" / "test_release_security.ps1"),
             remote_spec(self.config.target, f"{target_root}/test_release_security.ps1"),
         )
-        # The lane's API key: reused from the lineage when it exists, otherwise from the
-        # incumbent lineage on the same host (the same operator secret keeps the OMP client
-        # configuration valid), and never printed.
+        # The operator explicitly supplies the protected key. No shipped state root is
+        # searched for credentials, and clean-install rehearsal has its own task name.
         install_script = f"""
 $ErrorActionPreference='Stop'
 $root={ps_quote(self.state_root)}
 $stage={ps_quote(target_root)}
-$incumbentRoot={ps_quote(self.config.incumbent_state_root or "")}
-$taskName={ps_quote(self.lane.task_name)}
+$taskName={ps_quote(self.task_name)}
 $before=''
-$apiKeyFile=$null
+$apiKeyFile={ps_quote(self.config.api_key_file)}
 if(Test-Path (Join-Path $root 'state.json')){{
-  if(Test-ScopedControllerOrQuiescent $root){{&(Join-Path $root 'Control-Release.ps1') -Action Stop -StateRoot $root|Out-Null}}
   $s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
+  if([string]$s.task_name -cne $taskName){{throw 'scratch state has a different lifecycle task binding'}}
+  if(Test-ScopedControllerOrQuiescent $root){{&(Join-Path $root 'Control-Release.ps1') -Action Stop -StateRoot $root|Out-Null}}
   $before=[string]$s.active_release
-  $apiKeyFile=[string]$s.releases.PSObject.Properties[$before].Value.api_key_file
-}}elseif($incumbentRoot -and (Test-Path (Join-Path $incumbentRoot 'state.json'))){{
-  $i=Get-Content (Join-Path $incumbentRoot 'state.json') -Raw | ConvertFrom-Json
-  $apiKeyFile=[string]$i.releases.PSObject.Properties[[string]$i.active_release].Value.api_key_file
 }}
 if(-not $apiKeyFile -or -not (Test-Path -LiteralPath $apiKeyFile -PathType Leaf)){{throw 'no operator API-key file is available for the lane'}}
 $package=Join-Path $stage {ps_quote(self.lane.package_name)}
 if((Get-FileHash $package -Algorithm SHA256).Hash.ToLowerInvariant() -ne {ps_quote(package['sha256'])}){{throw 'package transfer hash mismatch'}}
-$cleanRoot='C:\\ProgramData\\NInferQualification\\orchestrated-clean-{self.lane.name}-{self.head8}\\{self.lane.spec['lifecycle']['state_root_name']}'
+. (Join-Path $stage 'Protect-StateRoot.ps1')
+$cleanParent=Join-Path $stage 'clean-install'
+Initialize-NInferProtectedStateRoot $cleanParent|Out-Null
+$cleanRoot=Join-Path $cleanParent {ps_quote(self.lane.spec['lifecycle']['state_root_name'])}
 if(Test-Path $cleanRoot){{throw 'clean-install root already exists'}}
-$existingTask=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-$taskXml=$null
-if($null -ne $existingTask){{$taskXml=Export-ScheduledTask -TaskName $taskName;Unregister-ScheduledTask -TaskName $taskName -Confirm:$false}}
+$cleanTaskName=$taskName+'-Clean'
+if($null -ne (Get-ScheduledTask -TaskName $cleanTaskName -ErrorAction SilentlyContinue)){{throw 'clean-install task already exists'}}
 try{{
-  $cleanLines=@(&(Join-Path $stage 'Install-Release.ps1') -PackagePath $package -PackageSha256 {ps_quote(package['sha256'])} -ModelArtifactPath {ps_quote(self.config.model_path)} -ApiKeyFile $apiKeyFile -GpuUuid {ps_quote(self.gpu_uuid)} -GpuOwnerControllerPath (Join-Path $stage 'Control-GpuOwner.ps1') -StateRoot $cleanRoot -NoStart)
+  $cleanLines=@(&(Join-Path $stage 'Install-Release.ps1') -PackagePath $package -PackageSha256 {ps_quote(package['sha256'])} -ModelArtifactPath {ps_quote(self.config.model_path)} -ApiKeyFile $apiKeyFile -GpuUuid {ps_quote(self.gpu_uuid)} -GpuOwnerControllerPath (Join-Path $stage 'Control-GpuOwner.ps1') -StateRoot $cleanRoot -ScratchTaskSuffix {ps_quote(self.config.scratch_task_suffix + '-Clean')} -NoStart)
   $clean=[string]$cleanLines[-1]|ConvertFrom-Json
   if([string]$clean.status -cne 'passed'){{throw 'clean install did not pass'}}
-  &(Join-Path $cleanRoot 'Control-Release.ps1') -Action Uninstall -StateRoot $cleanRoot|Out-Null
 }}finally{{
-  if($null -ne $taskXml -and $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)){{Register-ScheduledTask -TaskName $taskName -Xml $taskXml -Force|Out-Null}}
+  $cleanController=Join-Path $cleanRoot 'Control-Release.ps1'
+  if(Test-Path $cleanController){{&$cleanController -Action Uninstall -StateRoot $cleanRoot|Out-Null}}
 }}
-$managedArguments=@{{PackagePath=$package;PackageSha256={ps_quote(package['sha256'])};ModelArtifactPath={ps_quote(self.config.model_path)};ApiKeyFile=$apiKeyFile;StateRoot=$root;NoStart=$true;GpuUuid={ps_quote(self.gpu_uuid)};GpuOwnerControllerPath=(Join-Path $stage 'Control-GpuOwner.ps1')}}
+$managedArguments=@{{PackagePath=$package;PackageSha256={ps_quote(package['sha256'])};ModelArtifactPath={ps_quote(self.config.model_path)};ApiKeyFile=$apiKeyFile;StateRoot=$root;ScratchTaskSuffix={ps_quote(self.config.scratch_task_suffix)};NoStart=$true;GpuUuid={ps_quote(self.gpu_uuid)};GpuOwnerControllerPath=(Join-Path $stage 'Control-GpuOwner.ps1')}}
 $upgradeLines=@(&(Join-Path $stage 'Install-Release.ps1') @managedArguments)
 $upgrade=[string]$upgradeLines[-1]|ConvertFrom-Json
 if([string]$upgrade.status -cnotin @('passed','already_installed')){{throw 'managed install did not pass'}}
 $after=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
+if([string]$after.task_name -cne $taskName){{throw 'installed scratch task binding mismatch'}}
 [Console]::Out.WriteLine(([ordered]@{{status='passed';before=$before;active_release=[string]$after.active_release;previous_release=[string]$after.previous_release;package_sha256={ps_quote(package['sha256'])};clean_installs=1;managed_installs=1;first_release_of_lineage=(-not $before)}}|ConvertTo-Json -Compress))
 """
         receipt = self.remote_json(self.config.target, install_script, timeout=1800)
@@ -1167,12 +1492,18 @@ $controller=Join-Path $root 'Control-Release.ps1'
 &$controller -Action Start -StateRoot $root|Out-Null
 $s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
 $r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
+$key=(Get-Content ([string]$r.api_key_file) -Raw).Trim()
+$status=Invoke-RestMethod -Method Get -Uri ('http://'+[string]$r.host+':'+[string]$r.port+'/v1/ninfer/status') -Headers @{{Authorization=('Bearer '+$key)}} -TimeoutSec 10
+if([string]$status.artifact_type -cne 'ninfer_server_status' -or [int]$status.schema_version -ne 2){{throw 'protocol did not read status schema 2'}}
+$launch=Get-Content (Join-Path $root 'runtime.json') -Raw|ConvertFrom-Json
+if(-not [bool]$launch.gpu_uuid_verified -or [string]$launch.gpu_uuid -cne [string]$r.gpu_uuid -or
+   [string]$launch.gpu_name -cne [string]$r.gpu_name){{throw 'protocol launch lacks completed GPU attestation'}}
 $path=Join-Path ([string]$r.release_root) 'bin\\qualification\\agent_protocol.py'
 $out=Join-Path $stage 'evidence\\agent-protocol.json'
 &python $path --base-url ('http://'+[string]$r.host+':'+[string]$r.port) --model {ps_quote(self.lane.model_id)} --api-key-file ([string]$r.api_key_file) --expect-binary-sha256 ([string]$r.binary_sha256) --expect-model-artifact-sha256 ([string]$r.model_artifact_sha256) --expect-config-sha256 ([string]$r.config_sha256) --expect-deployment-profile ([string]$r.deployment_profile) 1>$out
 if($LASTEXITCODE -ne 0){{throw 'protocol failed'}}
 $v=Get-Content $out -Raw | ConvertFrom-Json
-[Console]::Out.WriteLine(([ordered]@{{status=[string]$v.status;checks=@($v.checks.PSObject.Properties).Count;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant()}}|ConvertTo-Json -Compress))
+[Console]::Out.WriteLine(([ordered]@{{status=[string]$v.status;checks=@($v.checks.PSObject.Properties).Count;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant();protocol=$v;identity=$status.identity;runtime=$status.runtime;startup_attestation=@{{request_log_schema=30;gpu_uuid_verified=$true;gpu_index=[int]$launch.gpu_device;gpu_name=[string]$launch.gpu_name}}}}|ConvertTo-Json -Depth 16 -Compress))
 """
         return self.remote_json(self.config.target, script, timeout=1200)
 
@@ -1195,7 +1526,7 @@ $scratch=Join-Path $stage 'pressure'
 if(Test-Path $scratch){{Remove-Item $scratch -Recurse -Force}}
 $checkpoints=Join-Path $scratch 'checkpoints'
 New-Item -ItemType Directory -Force -Path $checkpoints|Out-Null
-$port=[int]$r.port + {PRESSURE_PORT_OFFSET}
+$port={self.config.pressure_port}
 if(Test-Path Env:CUDA_VISIBLE_DEVICES){{throw 'CUDA_VISIBLE_DEVICES must be absent'}}
 if([string]$r.gpu_uuid -cne {ps_quote(self.gpu_uuid)}){{throw 'pressure release GPU differs from qualification target'}}
 $gpuRows=@(nvidia-smi.exe -i ([string]$r.gpu_uuid) --query-gpu=index,uuid --format=csv,noheader,nounits)
@@ -1267,7 +1598,7 @@ try{{
   &python $path --base-url ('http://'+[string]$r.host+':'+[string]$port) --model {ps_quote(self.lane.model_id)} --api-key-file ([string]$r.api_key_file) --expect-binary-sha256 ([string]$r.binary_sha256) --expect-model-artifact-sha256 ([string]$r.model_artifact_sha256) --expect-config-sha256 ([string]$r.config_sha256) --expect-deployment-profile ([string]$r.deployment_profile) 1>$out
   if($LASTEXITCODE -ne 0){{throw ('protocol under shared Host pressure failed: '+((Get-Content $stderr -Tail 2) -join ' | '))}}
   $v=Get-Content $out -Raw | ConvertFrom-Json
-  [Console]::Out.WriteLine(([ordered]@{{status=[string]$v.status;host_context_mib='{pressure_mib}';device_state_slots=[int]$c.context_cache.device_state_slots;checks=@($v.checks.PSObject.Properties).Count;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant()}}|ConvertTo-Json -Compress))
+  [Console]::Out.WriteLine(([ordered]@{{status=[string]$v.status;host_context_mib='{pressure_mib}';device_state_slots=[int]$c.context_cache.device_state_slots;checks=@($v.checks.PSObject.Properties).Count;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant();protocol=$v}}|ConvertTo-Json -Depth 16 -Compress))
 }}
 finally{{
   try{{
@@ -1355,7 +1686,7 @@ $v=[string]$lines[-1] | ConvertFrom-Json
 if([string]$v.status -cne 'passed'){{throw 'security failed'}}
 $out=Join-Path $stage 'evidence\\state-security.json'
 [IO.File]::WriteAllText($out,($v|ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false))
-[Console]::Out.WriteLine(([ordered]@{{status='passed';root_dacl_protected=[bool]$v.root_dacl_protected;low_privilege_read_denials=[int]$v.low_privilege_effective_read_denials;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant()}}|ConvertTo-Json -Compress))
+[Console]::Out.WriteLine(([ordered]@{{status='passed';root_dacl_protected=[bool]$v.root_dacl_protected;low_privilege_read_denials=[int]$v.low_privilege_effective_read_denials;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant();security=$v}}|ConvertTo-Json -Depth 16 -Compress))
 """
         return self.remote_json(self.config.target, script, timeout=1200)
 
@@ -1374,6 +1705,8 @@ $env:PI_CODING_AGENT_DIR=Join-Path $ompRoot 'agent'
 $env:NINFER_ACCEPTANCE_API_KEY=(Get-Content ([string]$r.api_key_file) -Raw).Trim()
 $env:NO_COLOR='1'
 $events=Join-Path $stage 'evidence\\omp-events.jsonl'
+$clientVersion=(&(Join-Path $env:LOCALAPPDATA 'OMP\\omp.cmd') --version|Out-String).Trim()
+if($LASTEXITCODE -ne 0 -or -not $clientVersion){{throw 'OMP version evidence is missing'}}
 $args=@('--mode','json','--print','--no-session','--no-title','--no-extensions','--no-skills','--no-rules','--no-lsp','--no-pty','--no-tools','--tools','read','--auto-approve','--approval-mode','yolo','--model',('ninfer-client-acceptance/'+{ps_quote(self.lane.model_id)}),'--thinking','off','--system-prompt','Use the read tool exactly once on marker.txt, then return exactly its single line with no other text.','--cwd',(Join-Path $ompRoot 'workspace'),'--max-time','300','Read marker.txt with the read tool and return its exact single line.')
 &(Join-Path $env:LOCALAPPDATA 'OMP\\omp.cmd') @args 1>$events
 if($LASTEXITCODE -ne 0){{throw 'OMP failed'}}
@@ -1383,7 +1716,7 @@ $assistants=@($ended|Where-Object{{$_.role -eq 'assistant'}});$results=@($ended|
 $calls=@($assistants|ForEach-Object{{@($_.content|Where-Object{{$_.type -eq 'toolCall'}})}})
 $text=[string]::Join('',@($assistants[-1].content|Where-Object{{$_.type -eq 'text'}}|ForEach-Object{{[string]$_.text}}))
 if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -or $text -cne 'OMP_NINFER_WINDOWS_C12_OK'){{throw 'OMP exact oracle failed'}}
-[Console]::Out.WriteLine(([ordered]@{{status='passed';events=$parsed.Count;typed_tool_name='read';tool_results=$results.Count;exact_final_answer=$true}}|ConvertTo-Json -Compress))
+[Console]::Out.WriteLine(([ordered]@{{status='passed';client_version=$clientVersion;events=$parsed.Count;typed_tool_name='read';tool_results=$results.Count;exact_final_answer=$true}}|ConvertTo-Json -Compress))
 """
         return self.remote_json(self.config.target, script, timeout=900)
 
@@ -1503,8 +1836,12 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
             f"""
 $ErrorActionPreference='Stop'
 $root={ps_quote(self.state_root)}
-$taskName={ps_quote(self.lane.task_name)}
+$taskName={ps_quote(self.task_name)}
 $controller=Join-Path $root 'Control-Release.ps1'
+if(Test-Path (Join-Path $root 'state.json')){{
+  $bound=Get-Content (Join-Path $root 'state.json') -Raw|ConvertFrom-Json
+  if([string]$bound.task_name -cne $taskName){{throw 'refusing restoration through a foreign lifecycle task'}}
+}}
 $scoped=(Test-Path $controller) -and (Test-ScopedControllerOrQuiescent $root)
 if($scoped){{&$controller -Action Stop -StateRoot $root|Out-Null}}
 $task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
@@ -1518,13 +1855,15 @@ $incumbentRoot={ps_quote(incumbent)}
 $incumbentState='untouched'
 if({'$true' if restart_incumbent else '$false'}){{if(-not (Test-ScopedControllerOrQuiescent $incumbentRoot)){{throw 'refusing to restart legacy unscoped incumbent'}};&(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Start -StateRoot $incumbentRoot|Out-Null;$incumbentState='running'}}
 $taskState=if($null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)){{'absent'}}else{{[string](Get-ScheduledTask -TaskName $taskName).State}}
-[Console]::Out.WriteLine(([ordered]@{{status='passed';task_state=$taskState;power_limit_w=$limit;gpu_lease_active=$leaseActive;incumbent_state=$incumbentState;process_count=@(Get-Process ninfer-serve -ErrorAction SilentlyContinue).Count}}|ConvertTo-Json -Compress))
+$owned=@(Get-CimInstance Win32_Process -Filter "Name='ninfer-serve.exe'"|Where-Object{{
+  $_.ExecutablePath -and ([string]$_.ExecutablePath).StartsWith(([IO.Path]::GetFullPath($root).TrimEnd('\\')+'\\'),[StringComparison]::OrdinalIgnoreCase)
+}})
+[Console]::Out.WriteLine(([ordered]@{{status='passed';task_state=$taskState;power_limit_w=$limit;gpu_lease_active=$leaseActive;incumbent_state=$incumbentState;process_count=$owned.Count}}|ConvertTo-Json -Compress))
 """,
             timeout=900,
         )
-        expected_processes = 1 if restart_incumbent else 0
-        if status["process_count"] != expected_processes:
-            raise LaneError("target process count after restoration does not match its found state")
+        if status["process_count"] != 0:
+            raise LaneError("scratch-owned process remained after restoration")
         self.state["restoration"] = status
         self._record_summary_restoration(status)
         return status
@@ -1581,8 +1920,55 @@ $taskState=if($null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction Sile
             if not restored:
                 self.cleanup()
         self.state["status"] = "passed" if completed_all else "paused"
+        if completed_all:
+            try:
+                lane_receipt = stage_lane_qualification(
+                    self.state, json.loads((self.config.state_dir / "qualification-summary.json").read_text(encoding="utf-8")),
+                    self.lane,
+                )
+                atomic_json(self.config.state_dir / f"{self.lane.name}.json", lane_receipt)
+            except Exception:
+                self.state["status"] = "failed"
+                self._save()
+                raise
         self._save()
         return self.state
+
+
+def internal_verify_native_build(args: argparse.Namespace) -> dict[str, Any]:
+    sys.path.insert(0, str(Path(args.source_root)))
+    from tools.release import package as release_package
+
+    root = Path(args.runtime_bin)
+    programs = ("ninfer", "ninfer-serve", "ninfer_bench")
+    identities = [release_package.parse_build_info(root / f"{name}.exe", name) for name in programs]
+    if any(identity != identities[0] for identity in identities[1:]):
+        raise LaneError("qualified native executables carry different build identities")
+    identity = identities[0]
+    for key, expected in {
+        "patch_stack_sha": args.source_commit, "upstream_base_sha": args.upstream_base_sha,
+        "build_profile": args.build_profile, "cuda_architecture": args.cuda_architecture,
+        "source_dirty": "false", "build_type": "Release",
+    }.items():
+        if identity[key] != expected:
+            raise LaneError(f"qualified native build identity mismatch: {key}")
+    build_receipt = Path(args.build_receipt)
+    if not isinstance(json.loads(build_receipt.read_text(encoding="utf-8-sig")), dict):
+        raise LaneError("integrator build receipt is not a JSON object")
+    files = [
+        {"name": path.name, "bytes": path.stat().st_size, "sha256": sha256_file(path)}
+        for path in sorted(root.iterdir(), key=lambda path: path.name)
+        if path.is_file() and (path.suffix.lower() == ".dll" or path.name in {f"{name}.exe" for name in programs})
+    ]
+    runtime = [item for item in files if item["name"].lower().endswith(".dll")]
+    if not set(DIRECTSTORAGE_DLLS).issubset({item["name"].lower() for item in runtime}):
+        raise LaneError("qualified native runtime omitted DirectStorage redistributables")
+    return {
+        "status": "passed", "evidence_class": "integrator-qualified-native-input-copy",
+        "build_tests_rerun": False, "qualified_build_receipt_sha256": sha256_file(build_receipt),
+        "source_commit": args.source_commit, "cuda_architecture": args.cuda_architecture,
+        "build_profile": args.build_profile, "identity": identity, "runtime_dlls": runtime, "files": files,
+    }
 
 
 def internal_long(args: argparse.Namespace) -> dict[str, Any]:
@@ -1821,6 +2207,13 @@ def internal_parser() -> argparse.ArgumentParser:
     parser.add_argument("--model-id", default="q38-ninfer")
     parser.add_argument("--power-envelope-w", type=float)
     parser.add_argument("--gpu-uuid", type=gpu_uuid_argument)
+    parser.add_argument("--source-root")
+    parser.add_argument("--runtime-bin")
+    parser.add_argument("--build-receipt")
+    parser.add_argument("--source-commit")
+    parser.add_argument("--cuda-architecture")
+    parser.add_argument("--build-profile")
+    parser.add_argument("--upstream-base-sha")
     return parser
 
 
@@ -1833,6 +2226,7 @@ def main() -> int:
         elif phase == "_long": result = internal_long(args)
         elif phase == "_restart": result = internal_restart(args)
         elif phase == "_benchmark": result = internal_benchmark(args)
+        elif phase == "_verify-native-build": result = internal_verify_native_build(args)
         else: raise LaneError(f"unknown internal phase: {phase}")
         print(json.dumps(result, sort_keys=True))
         return 0
@@ -1849,6 +2243,18 @@ def main() -> int:
     parser.add_argument("--builder-cuda-compiler", required=True, help="nvcc.exe on the builder")
     parser.add_argument("--builder-cxx-compiler", required=True, help="cl.exe on the builder")
     parser.add_argument("--model-path", required=True)
+    parser.add_argument("--dependency-sbom-tool", required=True, help="P4 generator path on the builder")
+    parser.add_argument("--vcpkg-resolved", required=True, help="resolved vcpkg inventory on the builder")
+    parser.add_argument("--cuda-inventory", required=True, help="packaged CUDA DLL inventory on the builder")
+    parser.add_argument("--third-party-inventory", required=True, help="vendored source inventory on the builder")
+    parser.add_argument("--runtime-inventory", required=True, help="genuine CRT/DirectStorage inventory on the builder")
+    parser.add_argument("--scratch-state-root", required=True, help="protected non-product root, with the lane's root leaf")
+    parser.add_argument("--scratch-task-suffix", required=True, help="isolated task suffix, e.g. I6 (at most 26 safe characters)")
+    parser.add_argument("--scratch-port", required=True, type=int)
+    parser.add_argument("--pressure-port", required=True, type=int)
+    parser.add_argument("--api-key-file", required=True, help="protected target-side operator key; never discovered in shipped roots")
+    parser.add_argument("--qualified-runtime-bin", help="consume this exact integrator-qualified builder-side flat runtime; do not rebuild")
+    parser.add_argument("--qualified-build-receipt", help="builder-side integrator receipt binding the qualified runtime input")
     parser.add_argument("--long-fixture", type=Path, required=True)
     parser.add_argument("--omp-root", required=True)
     parser.add_argument("--transfer-tool", type=Path,
@@ -1873,6 +2279,18 @@ def main() -> int:
         through_phase=args.through_phase,
         candidate_source=args.candidate_source,
         upgrade_orchestrator_state=args.upgrade_orchestrator_state,
+        dependency_sbom_tool=args.dependency_sbom_tool,
+        vcpkg_resolved=args.vcpkg_resolved,
+        cuda_inventory=args.cuda_inventory,
+        third_party_inventory=args.third_party_inventory,
+        runtime_inventory=args.runtime_inventory,
+        scratch_state_root=args.scratch_state_root,
+        scratch_task_suffix=args.scratch_task_suffix,
+        scratch_port=args.scratch_port,
+        pressure_port=args.pressure_port,
+        api_key_file=args.api_key_file,
+        qualified_runtime_bin=args.qualified_runtime_bin,
+        qualified_build_receipt=args.qualified_build_receipt,
         gpu_uuid=args.gpu_uuid,
     )
     result = Orchestrator(config).execute()
