@@ -859,18 +859,24 @@ void require_manifest_shape(const nlohmann::json& manifest) {
 
 class SessionCheckpointStore::Impl : public std::enable_shared_from_this<Impl> {
 public:
+    struct CorruptGeneration {
+        runtime::DurableReason reason;
+        bool quarantine_requested = false;
+    };
     mutable std::mutex mutex;
     std::unordered_map<std::string, std::uint32_t> active_generations;
     // Generations whose streamed import re-hash observed bytes diverging from the
     // load-time digests. load() and status() consult this and quarantine instead of
     // advertising the generation as available (council CR-20260831-fanout43 R3).
-    std::set<std::string> corrupt_generations;
+    std::map<std::string, CorruptGeneration> corrupt_generations;
     std::atomic<std::uint64_t> sequence{0};
+    bool save_in_progress = false;
 
     void mark_corrupt(const std::string& active_key) {
         std::lock_guard lock(mutex);
         try {
-            corrupt_generations.insert(active_key);
+            corrupt_generations.try_emplace(
+                active_key, CorruptGeneration{runtime::DurableReason::PayloadDigestMismatch});
         } catch (...) {}
     }
 
@@ -878,15 +884,76 @@ public:
     [[nodiscard]] bool is_corrupt(const std::string& active_key) const {
         return corrupt_generations.contains(active_key);
     }
-    [[nodiscard]] bool consume_corrupt(const std::string& active_key) {
-        const auto found = corrupt_generations.find(active_key);
-        if (found == corrupt_generations.end()) { return false; }
-        corrupt_generations.erase(found);
-        return true;
-    }
 };
 
 namespace {
+
+[[nodiscard]] bool quarantine_generation(const std::filesystem::path& session,
+                                         const std::string& generation, bool pinned) noexcept;
+
+// Preserve the store's single-flight save/quota semantics without making an Engine worker wait
+// for a save which may itself need that worker. Catalog ownership is never held across callbacks.
+class CheckpointSaveLease {
+public:
+    CheckpointSaveLease(SessionCheckpointStore::Impl& owner,
+                        const std::filesystem::path& session, std::string_view digest,
+                        const std::string& generation)
+        : owner_(owner), session_(session), generation_(generation) {
+        std::lock_guard lock(owner_.mutex);
+        if (owner_.save_in_progress) { return; }
+        std::string staging_key;
+        staging_key.reserve(digest.size() + 10 + generation.size());
+        staging_key.append(digest).append("/.staging-").append(generation);
+        std::string published_key;
+        published_key.reserve(digest.size() + 1 + generation.size());
+        published_key.append(digest).append("/").append(generation);
+        const auto staging = owner_.active_generations.emplace(std::move(staging_key), 1).first;
+        const std::string* staging_reference = &staging->first;
+        try {
+            const auto published =
+                owner_.active_generations.emplace(std::move(published_key), 1).first;
+            // References to unordered_map elements survive rehashes by concurrent reader loads.
+            staging_key_ = staging_reference;
+            published_key_ = &published->first;
+        } catch (...) {
+            owner_.active_generations.erase(*staging_reference);
+            throw;
+        }
+        owner_.save_in_progress = true;
+    }
+
+    ~CheckpointSaveLease() {
+        if (staging_key_ == nullptr) { return; }
+        std::lock_guard lock(owner_.mutex);
+        for (const std::string* key : {staging_key_, published_key_}) {
+            const auto found = owner_.active_generations.find(*key);
+            if (found == owner_.active_generations.end() || found->second == 0) {
+                std::terminate();
+            }
+            if (--found->second == 0) {
+                const auto corrupt = owner_.corrupt_generations.find(*key);
+                owner_.active_generations.erase(found);
+                if (corrupt != owner_.corrupt_generations.end() &&
+                    corrupt->second.quarantine_requested &&
+                    quarantine_generation(session_, generation_, false)) {
+                    owner_.corrupt_generations.erase(corrupt);
+                }
+            }
+        }
+        owner_.save_in_progress = false;
+    }
+
+    CheckpointSaveLease(const CheckpointSaveLease&) = delete;
+    CheckpointSaveLease& operator=(const CheckpointSaveLease&) = delete;
+    [[nodiscard]] bool admitted() const noexcept { return staging_key_ != nullptr; }
+
+private:
+    SessionCheckpointStore::Impl& owner_;
+    const std::filesystem::path& session_;
+    const std::string& generation_;
+    const std::string* staging_key_ = nullptr;
+    const std::string* published_key_ = nullptr;
+};
 
 enum class CandidateKind : std::uint8_t {
     Tombstone,
@@ -1165,14 +1232,14 @@ using VerifiedFiles = std::map<std::string, VerifiedFile, std::less<>>;
 class DirectoryCheckpointReader final : public ContinuationCheckpointReader {
 public:
     DirectoryCheckpointReader(std::filesystem::path root,
-                              VerifiedFiles files,
+                              std::shared_ptr<const VerifiedFiles> files,
                               std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue,
                               std::shared_ptr<SessionCheckpointStore::Impl> owner,
                               std::string active_key)
         : root_(std::move(root)), files_(std::move(files)), read_queue_(std::move(read_queue)),
           owner_(std::move(owner)), active_key_(std::move(active_key)) {
         // Constructed by SessionCheckpointStore::load while Impl::mutex is held.
-        for (const auto& [path, file] : files_) {
+        for (const auto& [path, file] : *files_) {
             if (path.starts_with("engine/") && file.bytes == 0) {
                 if (crypto::sha256_hex(crypto::sha256({})) != file.sha256) {
                     throw CheckpointCorruption(runtime::DurableReason::PayloadDigestMismatch,
@@ -1188,19 +1255,31 @@ public:
         std::lock_guard lock(owner_->mutex);
         const auto found = owner_->active_generations.find(active_key_);
         if (found == owner_->active_generations.end() || found->second == 0) { std::terminate(); }
-        if (--found->second == 0) { owner_->active_generations.erase(found); }
+        if (--found->second == 0) {
+            owner_->active_generations.erase(found);
+            const auto corrupt = owner_->corrupt_generations.find(active_key_);
+            if (corrupt != owner_->corrupt_generations.end() &&
+                corrupt->second.quarantine_requested) {
+                try {
+                    if (quarantine_generation(root_.parent_path().parent_path(),
+                                              root_.filename().string(), false)) {
+                        owner_->corrupt_generations.erase(active_key_);
+                    }
+                } catch (...) {}
+            }
+        }
     }
 
     std::optional<std::uint64_t> file_size(std::string_view path) const override {
-        const auto found = files_.find(path);
-        return found == files_.end() ? std::nullopt
+        const auto found = files_->find(path);
+        return found == files_->end() ? std::nullopt
                                      : std::optional<std::uint64_t>(found->second.bytes);
     }
 
     std::optional<runtime::DurablePayload>
     file_descriptor(std::string_view path) const override {
-        const auto found = files_.find(path);
-        if (found == files_.end()) { return std::nullopt; }
+        const auto found = files_->find(path);
+        if (found == files_->end()) { return std::nullopt; }
         return runtime::DurablePayload{.path = found->first, .bytes = found->second.bytes,
                                        .sha256 = found->second.sha256,
                                        .alignment = found->second.alignment};
@@ -1209,19 +1288,23 @@ public:
     bool read_file(std::string_view path, std::uint64_t offset,
                    std::span<std::byte> destination) const override {
         std::lock_guard verify_lock(verify_mutex_);
-        const auto found = files_.find(path);
-        if (found == files_.end() || offset > found->second.bytes ||
+        const auto found = files_->find(path);
+        if (found == files_->end() || offset > found->second.bytes ||
             destination.size() > found->second.bytes - offset) {
             verification_failed_ = true;
+            record_failure(found == files_->end() ? runtime::DurableReason::InvalidIndex
+                                                 : runtime::DurableReason::PayloadSizeMismatch);
             return false;
         }
         if (!read_queue_->available()) {
             verification_failed_ = true;
+            record_failure(runtime::DurableReason::IoUnavailable);
             return false;
         }
         ReadVerifyState& state = verify_[found->first];
         if (state.failed || state.verified || offset != state.next_offset) {
             verification_failed_ = true;
+            record_failure(runtime::DurableReason::InvalidIndex);
             return false;
         }
 
@@ -1275,6 +1358,7 @@ public:
             if (state.next_offset == found->second.bytes) {
                 if (crypto::sha256_hex(state.hasher.finish()) != found->second.sha256) {
                     state.failed = true;
+                    record_failure(runtime::DurableReason::PayloadDigestMismatch);
                     // Divergence from the manifest digest is corruption evidence, not a
                     // transient read error: surface it so the next load or status call
                     // quarantines this generation instead of advertising it available.
@@ -1287,15 +1371,19 @@ public:
         } catch (...) {
             settle();
             state.failed = true;
+            record_failure(runtime::DurableReason::IoUnavailable);
             return false;
         }
     }
 
     [[nodiscard]] bool verify_complete() const override {
         std::lock_guard verify_lock(verify_mutex_);
-        if (verification_failed_) { return false; }
+        if (verification_failed_ ||
+            failure_reason_.load(std::memory_order_relaxed) != runtime::DurableReason::None) {
+            return false;
+        }
         bool has_engine_payload = false;
-        for (const auto& [path, file] : files_) {
+        for (const auto& [path, file] : *files_) {
             if (!path.starts_with("engine/")) { continue; }
             has_engine_payload = true;
             const auto state = verify_.find(path);
@@ -1307,7 +1395,29 @@ public:
         return has_engine_payload;
     }
 
+    [[nodiscard]] runtime::DurableReason failure_reason() const noexcept override {
+        return failure_reason_.load(std::memory_order_relaxed);
+    }
+
+    [[nodiscard]] std::shared_ptr<const ContinuationCheckpointReader>
+    fresh_reader() const override {
+        std::lock_guard lock(owner_->mutex);
+        const auto corrupt = owner_->corrupt_generations.find(active_key_);
+        if (corrupt != owner_->corrupt_generations.end()) {
+            record_failure(corrupt->second.reason);
+            return {};
+        }
+        return std::make_shared<DirectoryCheckpointReader>(
+            root_, files_, read_queue_, owner_, active_key_);
+    }
+
 private:
+    void record_failure(runtime::DurableReason reason) const noexcept {
+        auto expected = runtime::DurableReason::None;
+        (void)failure_reason_.compare_exchange_strong(expected, reason,
+                                                      std::memory_order_relaxed);
+    }
+
     // Sized so the io_uring backend keeps its whole queue depth busy per batch while the
     // previous batch is being hashed.
     static constexpr std::size_t kReadBatchBytes = 32ULL << 20;
@@ -1320,26 +1430,52 @@ private:
     };
 
     std::filesystem::path root_;
-    VerifiedFiles files_;
+    std::shared_ptr<const VerifiedFiles> files_;
     std::shared_ptr<runtime::ContinuationCheckpointReadQueue> read_queue_;
     std::shared_ptr<SessionCheckpointStore::Impl> owner_;
     std::string active_key_;
     mutable std::mutex verify_mutex_;
     mutable std::map<std::string, ReadVerifyState> verify_;
     mutable bool verification_failed_ = false;
+    mutable std::atomic<runtime::DurableReason> failure_reason_{runtime::DurableReason::None};
 };
 
-void quarantine_generation(const std::filesystem::path& session,
-                             const std::string& generation) noexcept {
+bool quarantine_generation(const std::filesystem::path& session,
+                             const std::string& generation, bool pinned) noexcept {
     try {
+        const auto current = current_generation(session);
+        if (current && *current == generation) {
+            (void)io::remove_tree(session / "current");
+            sync_directory(session);
+        }
+        if (pinned) { return true; }
         const std::filesystem::path source = session / "generations" / generation;
         const std::filesystem::path target =
             session / "generations" /
             (generation + ".corrupt-" + std::to_string(unix_milliseconds()));
         replace_path(source, target);
-        (void)remove_best_effort(session / "current");
-        sync_directory(session);
-    } catch (...) {}
+        sync_directory(source.parent_path());
+        return true;
+    } catch (...) { return false; }
+}
+
+// Caller owns the catalog lock. The mark survives an unavailable rename; a pinned generation
+// loses only its current pointer, keeping paths usable until the last reader retires.
+[[nodiscard]] bool quarantine_generation_locked(SessionCheckpointStore::Impl& impl,
+                                                 const std::filesystem::path& session,
+                                                 const std::string& generation,
+                                                 runtime::DurableReason reason) noexcept {
+    try {
+        const std::string key = session.filename().string() + "/" + generation;
+        const auto corrupt =
+            impl.corrupt_generations.try_emplace(
+                key, SessionCheckpointStore::Impl::CorruptGeneration{reason, true}).first;
+        corrupt->second.quarantine_requested = true;
+        const bool pinned = impl.active_generations.contains(key);
+        if (!quarantine_generation(session, generation, pinned)) { return false; }
+        if (!pinned) { impl.corrupt_generations.erase(key); }
+        return true;
+    } catch (...) { return false; }
 }
 
 } // namespace
@@ -1678,13 +1814,21 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         if (skip != nullptr) { skip->durable_reason = runtime::DurableReason::UnsupportedCodec; }
         return std::nullopt;
     }
-    std::lock_guard lock(impl_->mutex);
     const std::filesystem::path session     = session_path(responses.client_session_sha256);
     const std::filesystem::path generations = session / "generations";
-    io::create_directories(generations);
     const std::uint64_t ordinal = impl_->sequence.fetch_add(1, std::memory_order_relaxed);
     std::string generation =
         std::to_string(unix_milliseconds()) + "-" + std::to_string(ordinal);
+    CheckpointSaveLease save_lease(*impl_, session, responses.client_session_sha256, generation);
+    if (!save_lease.admitted()) {
+        if (skip != nullptr) {
+            skip->reason = runtime::SessionCheckpointSkipReason::TransactionBusy;
+            skip->durable_reason = runtime::DurableReason::TransactionBusy;
+        }
+        return std::nullopt;
+    }
+    std::unique_lock lock(impl_->mutex);
+    io::create_directories(generations);
     const std::filesystem::path staging   = generations / (".staging-" + generation);
     const std::filesystem::path published = generations / generation;
     (void)io::remove_tree(staging);
@@ -1700,6 +1844,7 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         // K3 streams the leased native set off-lock. Drain all accepted copies before publishing;
         // neither backpressure nor finish may run under the Engine execution lock (ninfer#34).
         BufferedCheckpointWriter buffered(writer, options_.write_buffer_bytes);
+        lock.unlock();
         const runtime::DurableExportResult exported = exporter(buffered);
         if (skip != nullptr) {
             skip->export_state = exported.state;
@@ -1712,6 +1857,7 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
             }
             throw std::runtime_error("checkpoint payload write failed");
         }
+        lock.lock();
         if (exported.state != runtime::DurableExportState::Exported ||
             exported.reason != runtime::DurableReason::None ||
             !valid_checkpoint_stats(exported.stats)) {
@@ -1832,7 +1978,9 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         write_synced(current_staging, generation + "\n");
         bool committed = false;
         bool invoked = false;
+        lock.unlock();
         const auto publication = publish_export(exported.captured_epoch, [&] {
+            std::lock_guard publication_lock(impl_->mutex);
             if (invoked) { return false; }
             invoked = true;
             replace_path(current_staging, session / "current");
@@ -1842,6 +1990,7 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
             committed = true;
             return true;
         });
+        lock.lock();
         if (publication.state != runtime::DurableExportState::Exported ||
             publication.reason != runtime::DurableReason::None || !committed) {
             (void)remove_best_effort(current_staging);
@@ -1875,6 +2024,7 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
             .dir_sync = io::directory_sync_mode(),
             .origin_authenticated = !options_.origin_mac_key.empty()};
     } catch (...) {
+        if (!lock.owns_lock()) { lock.lock(); }
         (void)remove_best_effort(staging);
         if (skip != nullptr && skip->durable_reason == runtime::DurableReason::None) {
             skip->export_state = runtime::DurableExportState::Refused;
@@ -1917,10 +2067,13 @@ SessionCheckpointStore::load(std::string_view session_sha256,
                  .reason = runtime::DurableReason::NoSessionRecords};
     }
     const std::filesystem::path root = session / "generations" / *generation;
-    if (impl_->consume_corrupt(std::string(session_sha256) + "/" + *generation)) {
-        quarantine_generation(session, *generation);
+    if (const auto corrupt = impl_->corrupt_generations.find(
+            std::string(session_sha256) + "/" + *generation);
+        corrupt != impl_->corrupt_generations.end()) {
+        const auto reason = corrupt->second.reason;
+        (void)quarantine_generation_locked(*impl_, session, *generation, reason);
         return {.state = SessionCheckpointLoadState::Corrupt,
-                 .reason = runtime::DurableReason::PayloadDigestMismatch};
+                 .reason = reason};
     }
     try {
         const std::string manifest_text = read_text_bounded(root / "manifest.json", 16ULL << 20);
@@ -2076,16 +2229,18 @@ SessionCheckpointStore::load(std::string_view session_sha256,
         verified.bytes           = generation_bytes;
         verified.origin_authenticated = origin == ManifestOriginState::Authentic;
         auto reader              = std::make_shared<DirectoryCheckpointReader>(
-            root, std::move(allowed), options_.read_queue, impl_, active_key);
+            root, std::make_shared<const VerifiedFiles>(std::move(allowed)),
+            options_.read_queue, impl_, active_key);
         verified.engine = std::move(reader);
         return {.state = SessionCheckpointLoadState::Available, .checkpoint = std::move(verified)};
     } catch (const CheckpointCorruption& error) {
-        quarantine_generation(session, *generation);
+        (void)quarantine_generation_locked(*impl_, session, *generation, error.reason);
         return {.state = SessionCheckpointLoadState::Corrupt, .reason = error.reason};
     } catch (const CheckpointUnavailable& error) {
         return {.state = SessionCheckpointLoadState::Unavailable, .reason = error.reason};
     } catch (const nlohmann::json::exception&) {
-        quarantine_generation(session, *generation);
+        (void)quarantine_generation_locked(*impl_, session, *generation,
+                                            runtime::DurableReason::InvalidManifest);
         return {.state = SessionCheckpointLoadState::Corrupt,
                  .reason = runtime::DurableReason::InvalidManifest};
     } catch (...) {
@@ -2239,6 +2394,31 @@ SessionCheckpointEraseResult SessionCheckpointStore::erase(std::string_view sess
     }
     (void)cleanup_tombstone(options_, tombstone);
     return SessionCheckpointEraseResult::Erased;
+}
+
+bool SessionCheckpointStore::quarantine(std::string_view session_sha256,
+                                        std::string_view generation,
+                                        runtime::DurableReason reason) noexcept {
+    if (!valid_digest(session_sha256) || !valid_generation_name(generation)) { return false; }
+    switch (reason) {
+    case runtime::DurableReason::OriginMacMismatch:
+    case runtime::DurableReason::InvalidManifest:
+    case runtime::DurableReason::InvalidIndex:
+    case runtime::DurableReason::PayloadSizeMismatch:
+    case runtime::DurableReason::PayloadDigestMismatch: break;
+    default: return false;
+    }
+    try {
+        std::lock_guard lock(impl_->mutex);
+        const auto session = session_path(session_sha256);
+        const std::string name(generation);
+        const std::string key = std::string(session_sha256) + "/" + name;
+        if (!impl_->active_generations.contains(key) &&
+            !std::filesystem::is_directory(session / "generations" / name)) {
+            return false;
+        }
+        return quarantine_generation_locked(*impl_, session, name, reason);
+    } catch (...) { return false; }
 }
 
 void SessionCheckpointStore::collect_garbage() {
