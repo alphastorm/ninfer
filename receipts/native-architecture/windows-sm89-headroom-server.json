@@ -1,0 +1,30 @@
+{
+  "schema": "ninfer-native-build/1",
+  "source_commit": "caa110f7456c2f0d28de6e5ed3f9068c0e3c5706",
+  "architecture": "sm_89",
+  "build_scope": "serve-and-options-host-test",
+  "exit_code": 0,
+  "wall_seconds": 170.7592091,
+  "ops_tests": 0,
+  "gpu_executed": false,
+  "host_test": "ninfer_serve_options_test",
+  "host_test_exit_code": 0,
+  "host_tests_executed": 1,
+  "prior_ops_source": "a709f895db658c86b210efff3a56af31bfb28ef1",
+  "prior_ops_server_evidence_unchanged": true,
+  "binaries": [
+    {
+      "name": "ninfer-serve.exe",
+      "bytes": 322385408,
+      "sha256": "074a0850704b4a7a3a86f2a45c39d64b93f493fd09fcfe4a4b0224f5bc529496"
+    },
+    {
+      "name": "ninfer_serve_options_test.exe",
+      "bytes": 211968,
+      "sha256": "26b3816720868ecefaf18158c6bf8df4858fe403251917a9492a9f37e3a1654d"
+    }
+  ],
+  "error": null,
+  "destination_payloads_verified": 26,
+  "destination_verification": "SHA-256 and byte length for every executable and DLL before GPU execution"
+}

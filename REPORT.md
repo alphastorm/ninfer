@@ -1,191 +1,179 @@
-# Native architecture enablement
+# Native architecture enablement: C2 final report
 
-## Scope and invariants
+## Outcome and source boundary
 
-- Base: upstream master `64d10fbf`; branch `rebase/arch-enable`. Single-profile builds: `86`, `89`, or `120a`; the default remains `120a`. Shared root profile wiring is Integrator commit `15a4f2a78` (applied here as `83b1b683`).
-- Native qualification target: dense Qwen3.8 27B text, INT8 KV, 131,072-token capacity, MTP with three draft tokens, one request. The lead clarified that DFlash2 acceptance is **link-only** on both native profiles; fitting its weights belongs to S2. A load-only check using the public v3 artifact is optional and cannot block C2.
-- The lead's final artifact decision binds **all three lanes** to public v3
-  `81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da`
-  (20,437,521,664 bytes), repository `neroued/Qwen3.8-27B-NInfer`,
-  revision `1cbd84e7221e51186bd7f093a149912d2489625b`.
-  The older native `5476dfd6` conversion is no longer the qualification input.
-  Native MTP selection must not materialize unused DFlash2 weights.
-- Program, scheduler, context ownership, and native packaging are unchanged by this slice. Windows host portability is supplied by PortableCore. Release review is the lead-owned G4 gate.
+**All requested C2 technical gates pass on both native profiles, including real-model server decode at 131,072 context/KV, INT8, MTP3 and C1. The approved admission-headroom amendment resolves the measured startup refusal: 640 MiB on the 4090 and 768 MiB on the 3090, with calibration checks preserved. Decode measured 137.3510 / 78.3319 tokens/s respectively. These are C2 diagnostic proofs, not integrated native release qualification.**
 
-## Gating table
+- Branch: `rebase/arch-enable`, continued from `6063e9d9`; final implementation revision: `caa110f7456c2f0d28de6e5ed3f9068c0e3c5706`. Subsequent report/receipt commits do not change compiled source.
+- Linux sm_86 and sm_89 both link the final implementation: server, real-model loader, architecture contract and all 92 ops-inventory targets. No GPU execution occurred on the Linux CPU build lane.
+- Windows ops evidence is bound separately: sm_86 `47ebc3824b8c32112458eb013e5d4bb20c8b98f6`; sm_89 `a709f895db658c86b210efff3a56af31bfb28ef1`. Final Windows servers are both `caa110f7456c2f0d28de6e5ed3f9068c0e3c5706`. The last change affects startup admission and its serve option, not kernel arithmetic or selected-weight loading. Old manifests have not been relabeled.
+- Both GPU windows are released. Final observation found no owned server or probe listener. No installed native root, shipped model, console session, firewall or production port was changed.
 
-| Execution family | sm_120a | sm_89 route / exclusion | sm_86 route / exclusion | Native proof status / evidence |
-|---|---|---|---|---|
-| BF16/F16/INT8 MMA and Q4/Q5/Q6/Q8 A16 | Existing routes | Retained | Retained | L1 linked both profiles; numerical proof pending |
-| Programmatic dependent launch | Existing behavior | Ordinary stream ordering | Ordinary stream ordering | L1 linked both; GPU ordering coverage pending |
-| Dense BF16 TMA-selected tiles | Existing TMA | cp.async staging of the same MMA tiles | cp.async staging of the same MMA tiles | W1 passed corrected TMA/launcher boundary; numerical proof pending |
-| FP8 activation MMA | Block-scaled unit-scale opcode | Plain Ada E4M3 MMA | Explicit refusal | L1 linked both with explicit row policy; numerical/refusal proof pending |
-| FP8 TMA-selected tiles | Existing TMA/split-K | Ordinary full-K MMA; no split-K partial allocation | Explicit refusal | L1 linked both; numerical/refusal proof pending |
-| FP8 and NVFP4 A16 weight dequantization | Existing routes | Retained; portable widening | Retained; portable widening | L1 linked both; A16 oracle runs pending |
-| NVFP4 A4 | Existing non-RDC/TMA and MMA | Explicit refusal | Explicit refusal | L1 linked contract/exclusions; execution pending |
-| Dense BF16/INT8 KV attention | Existing routes | Retained | Retained | L1 linked both; W1 linked corrected sm_89 tests; numerical proof pending |
-| Dense FP8 KV attention | Existing routes | Retained | Explicit refusal | L1 linked both; sm_89 numerical / sm_86 refusal execution pending |
-| Dense NVFP4/K8V4 KV attention | Existing routes | Explicit refusal | Explicit refusal | L1 linked contract/exclusions; execution pending |
-| Block-scaled FP8/NVFP4 MoE | Existing non-RDC routes | Explicit refusal | Explicit refusal | L1 linked contract; only exact named block-scaled exit 77 permitted |
-| Groupwise-integer MoE and CPU experts | Existing routes | Retained | Retained | L1 linked both; W1 passed former MSVC CPU blockers; numerical proof pending |
-| Striped gated-residual projection | Existing TMA selection | Existing folded cp.async route | Existing folded cp.async route | W1 passed corrected launcher boundary; numerical proof pending |
+## Final gating table
 
-Statuses above describe route admission, not numerical qualification.
-**L1:** Linux `9ee8a29cb87524410238b3d964dd84af546d8f2b` linked `ninfer-serve`,
-loading-real, architecture contract and all 92 ops-inventory targets for both
-profiles; combined driver and per-profile receipts exited 0. This supersedes the
-earlier successful `53e847dd` links but predates the later launcher/test corrections.
-**W1:** PortableCore2 reports successful combined MSVC sm_89
-`47ebc3824b8c32112458eb013e5d4bb20c8b98f6` (C1 `6661b7d03` plus C2 `363ccccc`):
-97 binary targets, including all 92 ops-inventory targets and `ninfer-serve`.
-Its earlier `2a4266e30` attempt failed in the now-corrected ops test sources.
-Final-tip Linux links, Windows sm_86 links and all per-GPU oracle runs remain pending.
-The explicit exclusion authority is `tests/ops/excluded_paths.h`; its refusal messages,
-not arbitrary failures or skips, determine unsupported cases.
+| Gate | RTX 4090 / sm_89 | RTX 3090 / sm_86 | Evidence |
+|---|---|---|---|
+| Final-source Linux links | PASS | PASS | `linux-sm89-build.json`, `linux-sm86-build.json` |
+| MSVC ops/test binary set | PASS: 97 binaries, 92 ops targets | PASS: 97 binaries, 92 ops targets | `windows-sm89-a709-build.json`, `windows-sm86-build.json` |
+| Final-source MSVC server link | PASS | PASS | `windows-sm89-headroom-server.json`, `windows-sm86-headroom-server.json` |
+| Admission-headroom option unit test | PASS: 1/1 | PASS: 1/1 | Final Windows build receipts; only `ninfer_serve_options_test` executed |
+| DFlash2 link, included in server model libraries | PASS | PASS | Final Linux and MSVC server links; no DFlash2 execution claim |
+| Ops inventory execution | 91 PASS + 1 authorized exclusion | 91 PASS + 1 authorized exclusion | `sm89-tests.json`, `sm86-tests.json` |
+| Architecture contract | PASS, included in the 92-target inventory | PASS, included in the 92-target inventory | Exact refusal checks in test receipts |
+| Artifact materialization | PASS | PASS | Per-GPU test receipts |
+| Expert cache | PASS | PASS | Per-GPU test receipts |
+| PLE prepare GPU harness | PASS | PASS after correcting the operator's Python launcher quoting | `sm89-tests.json`, `sm86-ple-r3.json` |
+| Selected-MTP materialization / no DFlash2 residency | PASS | PASS | 17,901,798,400 device bytes; draft selected 0, draft weights 0 |
+| Required real-model server decode | **PASS**, 640 MiB admission floor | **PASS**, 768 MiB admission floor | `sm89-decode.json`, `sm86-decode.json` |
+| Metadata-only budget diagnosis | PASS: exact admission inequality reproduced | PASS: exact admission inequality reproduced | `planner-sm89.json`, `planner-sm86.json`; no model upload or kernels |
+| Server UUID / effective startup profile / residency equality | PASS | PASS | Startup attestation matched each requested physical GPU; server weight bytes equal selected-MTP loader |
+| Decode tokens/second / actual prompt and completion tokens | 137.3510 tok/s; 86 / 256 tokens | 78.3319 tok/s; 86 / 256 tokens | One bounded real-model decode per card; not a 131,072-token prompt |
+| Optional DFlash2 load-only check | Not run | Not run | Not a C2 acceptance requirement |
 
-The shared non-RDC archive exists only for `120a`. Each excluded family supplies current-signature throwing entrypoints. Unsupported activation plans never silently substitute A16 arithmetic. The public Engine-options rejection of unsupported native KV formats is EngineCache-owned.
+All receipt filenames above are under [`receipts/native-architecture/`](receipts/native-architecture/).
 
-The upstream Q8 family already selects dynamic shared memory above 48 KiB and calls `cudaFuncSetAttribute`; it is retained rather than transplanting the fork-local W8 kernels. Dense BF16/INT8 attention also already has explicit dynamic-shared-memory launch support.
+## Execution families and explicit exclusions
 
-## Test coverage and exclusions
+| Execution family | sm_89 | sm_86 |
+|---|---|---|
+| BF16/F16/INT8 MMA; Q4/Q5/Q6/Q8 A16 | Numerical suites PASS | Numerical suites PASS |
+| Dense BF16 TMA-selected tiles | Native cp.async route PASS | Native cp.async route PASS |
+| FP8 activation MMA and TMA-selected tiles | Ada ordinary/full-K MMA PASS, including corrected FP8 SwiGLU | Explicit unsupported A8 refusal PASS |
+| FP8 and NVFP4 A16 weight dequantization | Numerical suites PASS | Numerical suites PASS |
+| Dense BF16/INT8 KV attention | Numerical suites PASS | Numerical suites PASS |
+| Dense FP8 KV attention | Numerical suites PASS | Explicit unsupported refusal PASS |
+| NVFP4 A4 / NVFP4 KV / K8V4 attention | Explicit unsupported refusals PASS | Explicit unsupported refusals PASS |
+| Block-scaled FP8/NVFP4 MoE | Explicit exclusion | Explicit exclusion |
+| Groupwise-integer MoE and CPU experts | Numerical suites PASS | Numerical suites PASS |
+| Striped gated-residual projection | Folded cp.async route PASS | Folded cp.async route PASS |
+| Programmatic dependent launch | Native ordinary-stream route exercised by supported suites | Native ordinary-stream route exercised by supported suites |
 
-- `tests/ops/excluded_paths.h` lists exact permitted architecture refusal messages; arbitrary CUDA/runtime errors are not exclusions.
-- `ninfer_architecture_contract_test` exercises the native activation, attention, and block-scaled MoE refusal entrypoints. It must fail if an excluded entrypoint returns normally.
-- Linear, LinearAdd, SwiGLU, segmented projection, GDN record/snapshot, and dense attention retain supported numerical cases. Unsupported A4/A8 arms are named explicitly. Existing accumulated failures are preserved. A16 cases cannot be accepted as architecture refusals.
-- Native GDN snapshot coverage includes large-T A16 cases instead of asserting an unsupported activation mode executes. Block-scaled MoE is reported as excluded, not numerically qualified.
-- No numerical tolerance was relaxed. No GPU correctness or performance pass is claimed until the native binaries are exercised.
+The only whole-test exclusion is `ninfer_moe_block_scaled_test`, exit 77 with the exact message `EXCLUDED block-scaled MoE (requires sm_120a; refusal checked by architecture_contract)`. No arbitrary skip, nonzero exit or CUDA failure is accepted. Supported cases within mixed-format tests still run. Both profiles exclude NVFP4 A4, NVFP4 KV, K8V4 KV and block-scaled MoE paths; sm_86 additionally excludes FP8 A8 and FP8 KV. Every observed case-level exclusion is retained in the per-test JSON. `tests/ops/excluded_paths.h` remains the exact-message authority. No oracle tolerance or supported case was removed.
 
-## Commands and observed evidence
+## Artifact and selected-component residency
 
-Working-directory prefixes are omitted for privacy; `common/build.sh` is the program-provided build helper. Initial builds used holder `C2`, priority 2, a 20-minute lease, and persistent architecture-specific build directories. After the lead restricted the primary lane to critical work, the next queued compile was cancelled and moved to the secondary CPU-only lane.
+The only qualification artifact is published v3 `81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da`, **20,437,521,664 bytes**, from `neroued/Qwen3.8-27B-NInfer` revision `1cbd84e7221e51186bd7f093a149912d2489625b`. The failed partial download was removed. A complete verified source was copied over the local network; the destination's full SHA-256 and length matched before promotion. See `artifact-copy.json`.
 
-```sh
-common/build.sh "$SOURCE" "$BUILD/native-sm86" \
-  -DCMAKE_CUDA_ARCHITECTURES=86 -DBUILD_TESTING=ON -- \
-  ninfer-serve ninfer_architecture_contract_test
-common/build.sh "$SOURCE" "$BUILD/native-sm89" \
-  -DCMAKE_CUDA_ARCHITECTURES=89 -DBUILD_TESTING=ON -- \
-  ninfer-serve ninfer_architecture_contract_test
+On each physical GPU the real loading test passed with:
+
+| Selected-MTP observation | Bytes / count |
+|---|---:|
+| Device capacity | 17,901,798,400 B |
+| Host capacity | 0 B |
+| Host-to-device transfer | 17,901,792,256 B |
+| Resident parents | 785 |
+| MTP selected | 1 |
+| Draft selected / draft-named weights | 0 / 0 |
+
+The loader checks all resident parents are reachable from selected weights. Server `Startup` uses `load_options(options)` for both `plan_load` and materialization; its resident-weight estimate is the selected plan's `placement(device, device).device_capacity_bytes` (`src/models/qwen3_5/startup.cpp:9-30`). Both amended server startups reported exactly **17,901,798,400 resident weight bytes**, **17,901,792,256 H2D bytes** and **785 device objects**. The decode runner asserted server weight-byte equality with the selected-MTP loader before generation. Together with the loader's zero selected draft tensors, this satisfies the no-DFlash2 residency assertion.
+
+## Baseline refusal and measured budget attribution
+
+Before the approved headroom amendment, both `5e2210ae6` server attempts emitted:
+
+```text
+ERROR startup failed | planning runtime | 836 ms
+FATAL server failed during startup | Device budget cannot hold model weights and required execution resources
 ```
 
-- Initial compile attempt (`20261025T010734Z-C2-arch-86-89-compile-212431`) failed during CMake configuration after 4 seconds: split projection and GDN input-convolution still registered sources against the omitted non-RDC archive. Both family manifests and their current-signature rejection entrypoints were corrected in `980b4966`.
-- The next lease (`20261025T011530Z-C2-arch-86-89-compile2-223772`) ended after 1 second before configuration: a shallow branch clone did not contain the pinned parent revision. The driver now explicitly fetches the full 40-character commit before detaching; this was a source-staging failure, not compiler evidence.
-- Compile lease `20261025T012416Z-C2-arch-86-89-compile3-239028` used candidate `980b4966ff0b002632c1f74857fa510be23ecc64`. **sm_86 compiled and linked `ninfer-serve` and `ninfer_architecture_contract_test`**, completing all 619 build steps. The build compiled the upstream DFlash2 loader and linked the server with its model libraries. No GPU execution was performed.
-- The same lease then failed the sm_89 build: the native FP8 forward declaration did not carry the default row policy, and NVCC's host compilation rejected four-argument callers. The first correction placed defaults on the first declaration. Combined lease runtime was 259 seconds.
-- Windows links, sm_89 completion, and native GPU qualification are not yet proven.
-- Native v3 artifact supplied by Infra: SHA-256 `5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7`, 18,210,749,936 bytes, 1,118 tensors. Infra reports v3 framing/directory validation; this is not a model-decode proof.
-- The secondary CPU build uses source `940b000c365887a8f4c3ad03a4a039e92039f396`, image `ov-build-env:master-64d10fbf-r2-cpu-local`, 12 workers, and the shared two-slot lock. Its driver builds `ninfer-serve` and the architecture-contract target, obtains the exact ops target names with `ctest -L ops --show-only=json-v1`, and builds those targets for `89`, then `86`. It does not execute GPU tests in that CPU-only image.
-- That secondary attempt **failed** during sm_89 compilation: NVCC host emission reported a repeated `Rows` default despite the source definition having none. The final correction removes both launcher defaults entirely and explicitly passes the unchanged `Fp8IdentityRows{}` policy at every formerly four-argument caller (projection, residual add, both split projections, and GDN). Custom-row callers were already explicit. This correction has **not been rebuilt**; the user requested handoff after the current step. No ops target batch or sm_86 rebuild ran after this failure.
+The baseline per-card driver exited 1. Its PowerShell server object did not retain a native exit code, so the native exit code is recorded as unknown, not invented. The stderr establishes the actual failure. Both baseline attempts retained INT8 KV, MTP3, optimized proposal head, C1 and 131,072 configured context/KV capacity. Their original blocker receipts remain historical evidence; neither baseline attempt became ready. Successful amended startup and decode evidence is recorded separately below.
 
-## Continued final-candidate qualification
+Source attribution at `5e2210ae6`:
 
-- The first sm_86 server start reached runtime planning, then rejected the GPU
-  with the upstream hard-coded compute-capability-12.0 requirement. Admission now
-  requires the capability of the compiled single-profile target (8.6, 8.9 or 12.0);
-  mismatched devices still fail before runtime preparation. The initial sm_86 ops
-  batch passed 91 targets with the one authorized block-scaled-MoE exclusion;
-  architecture contract, artifact materialization, expert cache and selected-MTP
-  loading passed. Server rebuild/decode and the corrected PLE invocation remain
-  required before that lane is accepted.
-- The first sm_89 GPU batch exposed an illegal access in the existing FP8 SwiGLU
-  negative-gate oracle. The ordinary-MMA adapter inherited the TMA schedule's
-  32 producer threads, although its launch contains only consumer warps. The
-  collective epilogue consequently subtracted a nonexistent producer warp from
-  thread indices. The native adapter now explicitly sets producer threads to
-  zero; the existing oracle's T=65/257/513 cases cover the affected TMA-selected
-  route. Rebuild and corrected-runner qualification are required before a pass.
-- Imported PortableCore's `ed99ff3f` compiler-neutral CPU expert changes as
-  `53e847dd`: unreachable intrinsic, F16C scalar conversion and isolated MSVC ISA flags.
-  At this revision, Linux sm_89 linked the server and architecture contract
-  (427/427 incremental tasks), then completed its ops target batch. Linux sm_86
-  also linked the server and architecture contract (619/619 tasks). Both ops
-  target batches completed all 228 tasks; the driver reported
-  `C2_NATIVE_LINUX_COMPILE_PASS` and exit zero for both profiles.
-  The one-hour observer expired during the sm_86 ops links; the detached
-  build remained alive and the reattached observer obtained its actual completion.
-  This is intermediate-source evidence, not the final combined-candidate proof.
-- PortableCore's combined MSVC sm_89 build at `ed99ff3f` passed the former CPU
-  compiler blockers, then failed at step 98/1289 after 101.566 seconds:
-  `bf16_a16_tma_mma.cuh:116`, C2719 on the 128-byte-aligned descriptor parameter.
-  No native executable bundle was produced. The unused native-profile TMA
-  descriptor/kernel definitions are now gated like the existing FP8 TMA definitions;
-  the cp.async launcher and Blackwell implementation are unchanged. This correction
-  still requires Linux and MSVC rebuild evidence.
-- The real Qwen loader retains its complete artifact/resident-byte/input checks.
-  Its peak-RSS observation now uses the native Windows process working-set query
-  on Windows and the unchanged `getrusage` path on Linux, allowing the direct
-  DFlash2 loading check to compile without a POSIX-only header.
-  Its MTP loading arm also rejects materialized draft-named weights, reports
-  selected MTP/draft components and draft-weight count, and retains the assertion
-  that every resident parent is reachable from selected model weights. This
-  covers both device and host parent placements; the decode receipt separately
-  records actual startup weight, transfer, VRAM and host-capacity observations.
-- Combined MSVC sm_89 candidate `3d2a3df4` passed the unused-TMA declaration
-  boundary, then failed at 26/1161 tasks after 47.261 seconds: C2326 rejected
-  outer `constexpr` kernel aliases referenced inside token-slicing lambdas.
-  The observed instances were BF16 sliced-K and folded gated-residual Up.
-  These launch sites and the analogous native FP8/NVFP4 A16 sliced-K sites now
-  name the same kernel specialization directly inside the lambda; shared-memory
-  setup stays outside the loop. Schedules, arguments and arithmetic are unchanged.
-  The Blackwell-only NVFP4 A4 TMA launcher is outside the native build and unchanged.
-- The preceding MSVC attempt exposed C++20 test portability errors: `constexpr std::sqrt` in attention
-  and GDN references, and GCC-only `_Float16` in sparse-attention fixtures.
-  These now retain the same square-root expressions as `const` values and reuse
-  the existing independent round-to-nearest-even binary16 fixture conversions.
-  No oracle tolerance or supported case was removed. W1 compiled these corrections.
-  Integrator's isolated `252bb209d` correction for missing `<array>`
-  in public `ninfer/types.h` and `<span>` in the generation-service header was
-  imported; no test include-order workaround was added.
+- `src/runtime/engine/model_startup.h:216-228` rejects the selected weights plus initial execution candidate before model materialization, graph calibration or graph preparation.
+- `src/models/qwen3_5/startup.cpp:32-49` returns no candidate when the requested capacity curve's reservation exceeds available runtime bytes.
+- The reservation is persistent state plus execution workspace (`program/planning/startup.cpp:839-850`). The upstream startup budget withholds **1,073,741,824 B** of headroom even for explicit KV capacity (`include/ninfer/types.h:47`, `runtime/engine/model_construction.cpp:112-114`). No `NINFER_VRAM_BUDGET_MIB` override was found in the queried process, user or machine environment.
+- The generic server error does not emit its budget breakdown. A subsequently authorized metadata-only diagnostic executed the existing selected-weight plan and `make_sequence_planner_impl` at the same implementation revision on each physical GPU. At C1 the minimum and maximum page count both equal the requested 131,072-token capacity. These later measurements reproduce the admission inequality; they are not invented telemetry from the original server attempts.
 
-### Native host-pool translation
+| Planner term | RTX 4090 | RTX 3090 |
+|---|---:|---:|
+| CUDA free before planning | 24,159,191,040 B | 24,468,520,960 B |
+| Selected model weights | 17,901,798,400 B | 17,901,798,400 B |
+| Persistent runtime | 5,200,372,480 B | 5,497,795,328 B |
+| — text KV / MTP KV | 4,429,185,024 / 276,959,232 B | 4,429,185,024 / 276,959,232 B |
+| — device StateImage pool | 461,862,912 B, 3 total slots | 769,771,520 B, 5 total slots |
+| — replay records | 7,151,616 B | 7,151,616 B |
+| — prefill hidden / other persistent | 20,971,520 / 4,242,176 B | 10,485,760 / 4,242,176 B |
+| Execution workspace, prefill peak | 207,896,576 B | 103,948,288 B |
+| Total runtime reservation | 5,408,269,056 B | 5,601,743,616 B |
+| Weights plus runtime | 23,310,067,456 B | 23,503,542,016 B |
+| Slack before mandatory headroom | 849,123,584 B | 964,978,944 B |
+| Mandatory startup headroom | 1,073,741,824 B | 1,073,741,824 B |
+| Available runtime after weights and headroom | 5,183,650,816 B | 5,492,980,736 B |
+| **Admission shortfall** | **224,618,240 B** | **108,762,880 B** |
 
-The shipped `cad19767` MTP StateImage layout contains 48 BF16 convolution histories,
-48 FP32 recurrent states and one BF16 continuation-hidden vector, with no DFlash
-local ring. Its size is
-`48 * (10240 * 3 * 2 + 128 * 128 * 48 * 4) + 5120 * 2 = 153954304` bytes;
-each region is already 256-byte aligned. Source authorities are
-`qwen3_6_27b/impl/config.h`, `qwen3_6/impl/runtime/layouts_impl.h` and
-`qwen3_6/impl/state/state_image.cpp` under the shipped native target tree.
-The inspected copies have no differences from those paths at `cad19767`.
+**Attribution: a genuine upstream admission-policy change, not K5 translation.** Shipped `cad19767:src/runtime/engine/kv_capacity.cpp:85-98` subtracts headroom only for automatic capacity; explicit capacity carries zero automatic headroom. At `5e2210ae6`, `model_construction.cpp:112-114` imposed the 1 GiB floor even for explicit capacity. The unchanged native profiles' selected weights plus runtime fit the measured free bytes, but their remaining slack is less than this newly mandatory floor. The selected planner has zero DFlash2 persistent state and zero DFlash2 workspace; selected weights match both real-loader measurements. The ordinary execution workspace is only about 198/99 MiB, and the baseline refusal occurred before CUDA graph calibration.
 
-| Native profile | Former Host KV MiB | Host StateImages | Unified host bytes | Exact `--host-context-mib` | Extra / total device StateImages at C1 | Prefill chunk |
-|---|---:|---:|---:|---:|---:|---:|
-| sm_89 | 11264 | 24 | 15506063360 | 14787.734375 | 2 / 3 | 2048 |
-| sm_86 | 8192 | 24 | 12284837888 | 11715.734375 | 4 / 5 | 1024 |
+The two metadata probes exited 0 in 1.343/1.342 seconds, sequentially, without model materialization or kernel execution. Their source/hook hashes, binary hashes, successful target-only builds, CMake injection removal and complete component breakdown are retained in `planner-sm89.json` and `planner-sm86.json`. Both cards were released afterward. No profile was changed during diagnosis. The lead accepted this cause and subsequently authorized the explicit K5 floor amendment; the successful amended runs below retain the original context, KV precision, MTP window, concurrency, state-slot and prefill settings.
 
-Both the shipped and upstream implementations add active concurrency to the
-configured device-state slots; the values above preserve that behavior. These are
-source-derived byte-equivalent budgets, not yet measured startup receipts. The
-decode driver accepts exact decimal MiB and checks the observed startup fields.
-Context 131072, INT8 KV, MTP3 and C1 are not tuned.
-The native controller's existing `--lm-head-draft` flag is also preserved: the
-selected-MTP loading probe and server use the optimized proposal head, not the
-upstream default full head.
+The slot-translation suspicion was checked against both sources. Shipped `targets/qwen3_6/impl/runtime/layouts_impl.h:112-114` and current `models/qwen3_5/program/planning/startup.cpp:83-85` both add concurrency to configured state slots. Changing 2 to 1 or 4 to 3 would therefore reduce the agreed capacity, not correct a translation error.
 
-## Provenance and remaining gates
+| Profile | Configured / total device StateImages | StateImage pool bytes | Prefill | Former host KV MiB | Host StateImages | Unified host bytes / exact MiB |
+|---|---:|---:|---:|---:|---:|---|
+| sm_89 | 2 / 3 | 461,862,912 | 2048 | 11264 | 24 | 15,506,063,360 / 14787.734375 |
+| sm_86 | 4 / 5 | 769,771,520 | 1024 | 8192 | 24 | 12,284,837,888 / 11715.734375 |
 
-- Behavioral references: shipped native fork and the upstream architecture/kernel contracts. Community ports were design references; no community source file was copied.
-- Required remaining proof: final-revision Linux compilation for both native profiles, MSVC sm_86 link, ops suites on their respective physical GPUs with the explicit exclusions, and one server-path model decode on each GPU with tokens/second and configured/measured context recorded. The assignment is not acceptance-complete.
-- Native runs use isolated work directories and loopback ports `18200–18209`, never installed release roots or the shipped port.
-- The lead additionally authorized `ninfer_artifact_materialization_test`, `ninfer_expert_cache_test`, and the PLE prepare GPU Python harness on each native GPU. PortableCore supplies the executables, DLLs, stdlib-only Python inputs, and the ops manifest. Python 3.13.15 was observed on the native runtime host.
-- The earlier GNU-only unreachable/F16C and ISA-flag errors were corrected by
-  PortableCore and imported here. The public v3 direct download timed out after
-  1800 seconds with curl exit 28; its partial file is not qualified and has no
-  whole-file SHA receipt. Infra2 independently reported a verified build-host copy.
-  No native artifact upgrade is part of the current path.
-- Test-only full-UUID `CUDA_VISIBLE_DEVICES` masking is explicitly authorized because upstream tests use CUDA ordinal zero. Receipts record the mask; skip 77 is accepted only for the named block-scaled MoE test with its exact exclusion message. Server probes instead leave that variable absent, use `CUDA_DEVICE_ORDER=PCI_BUS_ID` plus numeric `--device`, and require the server-start GPU UUID to match.
-- No native ops execution, real-model decode, throughput measurement, or native release qualification is claimed in this report.
+One native StateImage is 153,954,304 B: `48 * (10240 * 3 * 2 + 128 * 128 * 48 * 4) + 5120 * 2`. The amended startup receipts confirm the translated slot counts and exact unified host-byte budgets.
 
-## Portable-core prerequisite evidence
+## Approved amendment and successful real-model decodes
 
-- C1 history through `c796fcb7` is merged; subsequent core fixes and tests through
-  `c7f127c7` were imported. Its earlier immutable report is
-  [`REPORT.md` at `c796fcb762e1b6aaeb438d1ee9ad3f400379a304`](https://github.com/alphastorm/ninfer/blob/c796fcb762e1b6aaeb438d1ee9ad3f400379a304/REPORT.md).
-- The earlier C1 `f689e6bde` result was 8/9. PortableCore2 subsequently reported
-  **9/9 at combined `2a4266e30`, 2.45 seconds**, including anchored nonempty-directory
-  publication/tombstone, junction refusal and retained-reader cases. This is
-  native core evidence, not C2 numerical, model, or complete release qualification.
-- For W1, PortableCore2 reported native core **9/9 (10.00 seconds)** and remaining
-  host tests **43/43 (6.48 seconds)**, no failures/skips and no GPU execution.
-  The server is 322383360 bytes, SHA-256
-  `f7ec4d3426457bc5f9ccb706df369dfe032b94cd4a5e00a5dcfc8bcde8634c1d`.
+`caa110f74` adds `--admission-headroom-mib N`, an integer floor of at least 256 MiB. Its optional `EngineOptions::admission_headroom_bytes` replaces only the default operand of the existing headroom maximum. Omission retains 1 GiB, including the unchanged sm_120a profile. Larger automatic-capacity headroom, graph calibration, measured rebuild reservations and allocation-fit checks remain enforced. The floor is resource policy, not K2 identity.
+
+The option unit test covers omission, exact 256/640/768/1024 MiB conversion, invalid values, missing value, overflow, help text and preservation of the independent automatic-capacity lower bound. Both native builds ran only this focused test, 1/1 PASS each. All 26 executable/DLL payloads in each transferred amended package matched their SHA-256 and byte length before execution.
+
+Exactly one amended server decode ran per card, sequentially. Both startup receipts attest the requested physical GPU with numeric device selection, `CUDA_DEVICE_ORDER=PCI_BUS_ID` and no visibility mask. Both report **131,072 context and KV capacity, INT8-group64, MTP3, optimized proposal head and C1**. The 86-token prompt generated 256 completion tokens on each card; this is not a full-context prompt or a throughput benchmark corpus.
+
+| Amended startup / decode measurement | RTX 4090 | RTX 3090 |
+|---|---:|---:|
+| Configured / effective admission floor | 640 MiB / 671,088,640 B | 768 MiB / 805,306,368 B |
+| Runtime reservation | 5,408,269,056 B | 5,601,743,616 B |
+| Planned slack | 168,058,112 B | 149,695,744 B |
+| CUDA free after startup | 742,322,176 B | 953,155,584 B |
+| **CUDA spare after admission floor** | **71,233,536 B** | **147,849,216 B** |
+| Graph calibration increment / retained | 8,388,608 / 8,388,608 B | 8,388,608 / 8,388,608 B |
+| Graph preparation increment / rebuild estimate | 0 / 0 B | 0 / 0 B |
+| Decode throughput | **137.351036 tok/s** | **78.331888 tok/s** |
+| Prompt / completion tokens | 86 / 256 | 86 / 256 |
+| Draft proposals / accepted | 231 / 177 | 231 / 177 |
+
+`sm89-decode.json` and `sm86-decode.json` retain the full startup memory breakdown, configured/observed profile and attestation-match boolean without physical UUIDs. Each owned server was stopped after its decode. Final observation found no server process or isolated-port listener; idle used memory was 939 MiB / 322 MiB. These idle readings are separate from the CUDA startup budget measurements above.
+
+## Corrections and verification provenance
+
+1. Imported PortableCore's final static-linkage, host-compiler and UTF-8 boundary fixes (`b1f99a76b`, `679c063f4`, `6661b7d03`) as `370fd69df`, `190aedc54`, `f390abf20`. Before subsequent C2 fixes, the compiled-source difference between `f390abf20` and combined Windows `47ebc382` was only `REPORT.md`.
+2. **`a709f895d`: native FP8 producer-warp correction.** The ordinary-MMA adapter inherited 32 TMA producer threads although its launch has no producer warp. The SwiGLU collective epilogue consequently subtracted nonexistent threads and accessed invalid indices. Explicit zero producer threads fixes the adapter. The original complete FP8 SwiGLU oracle now passes, including negative-gate and graph cases. The initial invalid-exit-capture run and its real kernel error remain in `sm89-initial-diagnostic.json`.
+3. **`5e2210ae6`: runtime capability correction.** Qwen startup still required compute capability 12.0. It now requires exactly the compiled single-profile capability, 8.6, 8.9 or 12.0; mismatched devices still fail. Both baseline servers passed this boundary and reached the separate memory-budget rejection.
+4. The operator runner now retains a directly constructed .NET process rather than relying on PowerShell's null `Start-Process.ExitCode`. Host-only probes captured exact exits 0 and 77. The corrected sm_86 PLE invocation removed inappropriate quoting of the Python launcher version switch; its separate successful receipt supersedes only that failed harness invocation.
+5. Final Linux proof at `caa110f74` used the CPU-only CUDA 13.1.2 development image, 12 workers and the shared two-slot lock: both profiles and all 92 ops targets linked, with `C2_NATIVE_COMPILE_EXIT=0`. An earlier disk-full link failure was not treated as a compiler defect; redundant owned transfer artifacts were reclaimed. Final Windows server and focused options-test links used CUDA 13.3 / MSVC 14.44.35112; the options test passed on both profiles.
+6. **`caa110f74`: approved admission floor.** Public/serve option storage, parser/help, engine forwarding, minimum validation and floor selection are the only implementation boundaries changed. Existing ops evidence retains its original source identity; amended server and focused unit evidence is separate.
+
+Principal executed commands, with private locations and physical identities replaced by variables:
+
+```sh
+common/build-wsl.sh "$SOURCE" "$BUILD" -DCMAKE_CUDA_ARCHITECTURES=89 -DBUILD_TESTING=ON -- ninfer-serve ninfer_architecture_contract_test ninfer_qwen3_5_loading_real_test
+# Same command for 86; both then build every target enumerated by:
+ctest --test-dir "$BUILD" -L ops --show-only=json-v1
+```
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File run-gpu-chain.ps1 -Arch 86 -Attempt r2
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File run-gpu-chain.ps1 -Arch 89 -Attempt r3 -SourceCommit a709f895db658c86b210efff3a56af31bfb28ef1 -TestsOnly
+py.exe -3 tests/models/qwen4_exp/ple/disk/test_prepare.py $PleExecutable --gpu
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File decode-profile.ps1 -Arch 89
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File decode-profile.ps1 -Arch 86
+```
+
+The two `decode-profile.ps1` commands above are the retained baseline attempts. Final amended decodes used:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File decode-native.ps1 -Binary $SERVER89 -Artifact $MODEL -GpuUuid $GPU89 -Device 0 -Port 18200 -PrefillChunk 2048 -DeviceStateSlots 2 -HostContextMiB 14787.734375 -AdmissionHeadroomMiB 640 -MtpLoadEvidence $MTP89 -Evidence $EVIDENCE89
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File decode-native.ps1 -Binary $SERVER86 -Artifact $MODEL -GpuUuid $GPU86 -Device 1 -Port 18201 -PrefillChunk 1024 -DeviceStateSlots 4 -HostContextMiB 11715.734375 -AdmissionHeadroomMiB 768 -MtpLoadEvidence $MTP86 -Evidence $EVIDENCE86
+```
+
+Ops executables used an authorized full-UUID visibility mask. Servers used numeric devices, `CUDA_DEVICE_ORDER=PCI_BUS_ID`, no visibility mask and only the assigned isolated ports. Startup UUID attestation was a required readiness assertion and passed in both amended runs.
+
+## Delivery and containment
+
+- Content-safe receipts preserve separate build, numerical, residency, historical refusal and successful amended-decode scopes. Both cards satisfy the requested C2 technical gates. Integrated native release qualification is not claimed.
+- Current artifact staging was moved to the approved data drive. The relocation's verified archive and removed extracted duplicate reclaimed **54,018,305,491 B** from the system drive; `staging-relocation.json` records the result. Earlier superseded owned packaging copies and the failed partial archive were also removed. Referenced build binaries, receipts, verified models and all other holders' scratch were preserved.
+- The integration owner must include the NativeOps DirectStorage root correction `87ae8085a` and the full provider union in its three-binary native package, then run `ckpt-native` and integrated qualification. C1+C2 diagnostic proof is not a substitute. The founder-approved release split remains unchanged: v0.13.0 carries the v0.12.2 native packages; rebased natives follow in v0.13.1 with the explicit approved headroom settings.

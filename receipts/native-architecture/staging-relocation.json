@@ -1,0 +1,10 @@
+{
+  "schema": "ninfer-native-scratch-relocation/1",
+  "name": "c2-sm89-a709f895.tar",
+  "sha256": "09cf0d8c165b82543d0223a8c5fe01ccac21c035fe56de7f61e54c6958bd7b6c",
+  "archive_bytes": 27009199616,
+  "extracted_duplicate_bytes_removed": 27009105875,
+  "source_drive_bytes_reclaimed": 54018305491,
+  "destination_verified": true,
+  "source_drive_free_bytes": 138496172032
+}

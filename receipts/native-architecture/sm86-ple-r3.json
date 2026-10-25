@@ -1,0 +1,9 @@
+{
+  "schema": "ninfer-native-check/1",
+  "source_commit": "47ebc3824b8c32112458eb013e5d4bb20c8b98f6",
+  "architecture": "sm_86",
+  "name": "ninfer_ple_disk_prepare_gpu",
+  "exit_code": 0,
+  "stdout": "PLE preparation: exact hash/E, lifecycle and resource handoff passed\r\n",
+  "stderr": ""
+}

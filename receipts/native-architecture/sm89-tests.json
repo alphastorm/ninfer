@@ -1,0 +1,1049 @@
+{
+  "schema": "ninfer-native-architecture-tests/1",
+  "source_commit": "a709f895db658c86b210efff3a56af31bfb28ef1",
+  "architecture": "sm_89",
+  "gpu": "RTX 4090",
+  "device_selection": "full-UUID CUDA_VISIBLE_DEVICES mask",
+  "cuda_device_order": "PCI_BUS_ID",
+  "checks": [
+    {
+      "name": "ninfer_bench_fixtures_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 0.3610274,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_architecture_contract_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 0.2291132,
+      "failure": null,
+      "excluded_paths": [
+        "architecture refusal: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "architecture refusal: EXCLUDED (NVFP4 KV attention requires an sm_120a GPU)",
+        "architecture refusal: EXCLUDED (K8V4 KV attention requires an sm_120a GPU)",
+        "architecture refusal: EXCLUDED (Block-scaled MoE execution requires an sm_120a GPU)",
+        "architecture refusal: EXCLUDED (Block-scaled MoE execution requires an sm_120a GPU)"
+      ]
+    },
+    {
+      "name": "ninfer_add_bias_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.0938049999999997,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_gelu_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.019972,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_silu_mul_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.0077723,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_residual_add_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.1480304,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_sum_contributions_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 1.9942312,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_sigmoid_mul_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.064971,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_rmsnorm_pack_tail_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.5697107999999997,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_l2norm_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.0201325,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_kimi_delta_attention_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 23.994037799999997,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_causal_conv1d_silu_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 3.9861234999999997,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_layer_norm_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.1951964,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_embedding_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 6.5762239,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_argmax_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.396299,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_rope_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.5069029,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_embedding_interpolate_add_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.0609384,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_sampling_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.3118289,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_scalar_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.0166190999999998,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_cast_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.0701036,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_prepare_ragged_prefix_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 3.8205804999999997,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_scatter_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 1.9765499999999998,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_scatter_bf16_batch_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 8.246573099999999,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_target_logprobs_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.0448318,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_position_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.0479684,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_topk_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 4.7490736,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_candidate_selector_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 3.8413011999999997,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_softmax_attention_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 298.8373446,
+      "failure": null,
+      "excluded_paths": [
+        "EXCLUDED causal_softmax_attention nvfp4-g16 (native profile; refusal checked by architecture_contract)",
+        "EXCLUDED causal_softmax_attention k8v4 (native profile; refusal checked by architecture_contract)"
+      ]
+    },
+    {
+      "name": "ninfer_sliding_window_attention_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 31.014067999999998,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_kv_cache_append_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 20.1944257,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_rmsnorm_rope_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 3.3858992999999997,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_context_kv_materialize_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 308.1674802,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_prepare_masked_block_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.0388834,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_moe_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 8.174006499999999,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_moe_cpu_groupwise_int_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 8.791475499999999,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_moe_cpu_nvfp4_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 1.0447798,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_moe_cpu_groupwise_int_avx2_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 8.9536482,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_moe_cpu_nvfp4_avx2_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 1.5716192999999998,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_moe_cpu_groupwise_int_fma_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 8.6604466,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_moe_cpu_nvfp4_fma_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 1.1284741999999999,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_moe_block_scaled_test",
+      "status": "excluded-native-block-scaled-moe",
+      "exit_code": 77,
+      "wall_seconds": 0.2752312,
+      "failure": null,
+      "excluded_paths": [
+        "EXCLUDED block-scaled MoE (requires sm_120a; refusal checked by architecture_contract)"
+      ]
+    },
+    {
+      "name": "ninfer_mtp_pack_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.0363469,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_mtp_round_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.0130517,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_speculative_round_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 30.0393969,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_dynamic_grouped_conv_prepare_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.4366053,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_dynamic_grouped_conv_add_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 4.3623974,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_q4_a16_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 32.9638116,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_q5_a16_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 19.7690305,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_q6_a16_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 8.8673891,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_q8_a16_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 31.566278599999997,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_nvfp4_a16_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 5.7358727,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_nvfp4_a4_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 7.6330708,
+      "failure": null,
+      "excluded_paths": [
+        "NVFP4_A4 [14336,5120] T=4: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=5: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=7: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=8: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=16: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=17: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=63: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=64: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=65: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=95: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=96: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=97: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=127: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=128: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=129: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=191: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=192: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=193: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=383: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=384: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=385: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=511: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=512: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=513: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=1023: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=1024: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=1025: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=1280: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=1500: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=2048: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=63: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=97: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=193: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=385: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=1023: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [14336,5120] T=1024: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=1: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=2: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=3: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=4: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=5: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=7: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=8: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=16: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=17: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=63: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=64: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=65: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=95: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=96: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=97: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=127: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=128: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=129: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=191: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=192: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=193: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=383: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=384: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=385: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=511: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=512: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=513: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=1023: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=1024: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=1025: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=1280: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=1500: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=2048: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=63: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=97: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=193: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=385: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=1023: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [16384,5120] T=1024: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=1: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=4: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=8: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=32: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=33: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=64: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=65: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=128: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=1: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=2: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=3: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=4: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=5: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=7: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=8: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=16: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=17: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=63: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=64: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=65: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=95: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=96: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=97: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=127: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=128: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=129: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=191: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=192: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=193: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=383: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=384: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=385: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=511: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=512: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=513: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=1023: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=1024: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=1025: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=1280: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=1500: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=2048: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=63: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=97: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=193: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=385: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=1023: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=1024: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=31: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=32: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=33: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=34: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=255: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=256: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=257: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=511: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=512: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=513: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=767: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=768: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [34816,5120] T=769: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=17: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=63: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=64: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=65: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=95: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=96: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=97: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=127: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=128: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=129: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=191: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=192: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=193: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=383: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=384: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=385: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=511: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=512: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=513: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=1023: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=1024: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=1025: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=1280: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=1500: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=2048: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=63: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=97: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=193: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=385: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=1023: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,6144] T=1024: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=8: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=16: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=17: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=63: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=64: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=65: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=95: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=96: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=97: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=127: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=128: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=129: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=191: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=192: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=193: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=383: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=384: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=385: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=511: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=512: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=513: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=1023: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=1024: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=1025: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=1280: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=1500: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=2048: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=63: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=97: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=193: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=385: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=1023: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4_A4 [5120,17408] T=1024: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)"
+      ]
+    },
+    {
+      "name": "ninfer_linear_nvfp4_bank_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.7192211,
+      "failure": null,
+      "excluded_paths": [
+        "EXCLUDED NVFP4 bank A4 (refusal checked by architecture_contract)",
+        "EXCLUDED NVFP4 bank A4 (refusal checked by architecture_contract)",
+        "EXCLUDED NVFP4 bank A4 (refusal checked by architecture_contract)",
+        "EXCLUDED NVFP4 bank A4 (refusal checked by architecture_contract)"
+      ]
+    },
+    {
+      "name": "ninfer_linear_fp8_a16_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 9.972251799999999,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_fp8_a8_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 6.2039808,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_bf16_a16_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 132.7256643,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_split_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 11.8741103,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_split_multi_output_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 74.43093619999999,
+      "failure": null,
+      "excluded_paths": [
+        "EXCLUDED NVFP4 split A4 (refusal checked by architecture_contract)"
+      ]
+    },
+    {
+      "name": "ninfer_linear_split_two_output_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 15.641843399999999,
+      "failure": null,
+      "excluded_paths": [
+        "EXCLUDED NVFP4 split A4 (refusal checked by architecture_contract)"
+      ]
+    },
+    {
+      "name": "ninfer_qsa_tail_extract_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.4127158,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_qsa_prepare_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 43.0305008,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_qsa_indexer_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 8.5723487,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_qsa_sparse_gqa_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 638.7463124999999,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_add_q4_a16_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 3.3551420999999997,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_add_q5_a16_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 32.179573,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_add_bf16_a16_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.4002013,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_add_q8_a16_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 8.0466524,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_add_nvfp4_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.3719422,
+      "failure": null,
+      "excluded_paths": [
+        "NVFP4 linear_add [5120,17408] A4 T=8: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,17408] A4 T=17: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,17408] A4 T=8: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,17408] A4 T=16: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,17408] A4 T=32: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,17408] A4 T=64: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,17408] A4 T=96: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,17408] A4 T=128: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,17408] A4 T=129: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,17408] A4 T=1023: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,17408] A4 T=1024: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,17408] A4 T=1025: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,6144] A4 T=17: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,6144] A4 T=17: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,6144] A4 T=32: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,6144] A4 T=64: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,6144] A4 T=96: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,6144] A4 T=128: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,6144] A4 T=129: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,6144] A4 T=1023: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,6144] A4 T=1024: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 linear_add [5120,6144] A4 T=1025: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)"
+      ]
+    },
+    {
+      "name": "ninfer_linear_add_fp8_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 3.0921762,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_pair_q8_a16_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.8086336999999997,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_swiglu_q4_a16_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 4.2794852,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_swiglu_q8_a16_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 5.3716696,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_linear_swiglu_nvfp4_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 3.6484562,
+      "failure": null,
+      "excluded_paths": [
+        "NVFP4 SwiGLU: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 SwiGLU: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 SwiGLU: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "NVFP4 SwiGLU: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=5 eager: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=16 eager: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=56 eager: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=64 eager: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=65 eager: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=96 eager: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=97 eager: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=112 eager: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=128 eager: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=129 eager: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=255 eager: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=256 eager: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=257 eager: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=512 eager: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=1024 eager: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=65 graph: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=97 graph: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=128 graph: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)",
+        "LinearSwiGLU NVFP4_A4 T=129 graph: EXCLUDED (NVFP4 A4 execution requires an sm_120a GPU)"
+      ]
+    },
+    {
+      "name": "ninfer_linear_swiglu_fp8_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 6.245647399999999,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_gdn_input_proj_conv_snapshot_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 75.4352237,
+      "failure": null,
+      "excluded_paths": [
+        "EXCLUDED GDN snapshot NVFP4 A4 (refusal checked by architecture_contract)"
+      ]
+    },
+    {
+      "name": "ninfer_gdn_input_proj_conv_record_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 5.5328859,
+      "failure": null,
+      "excluded_paths": [
+        "EXCLUDED GDN record NVFP4 A4 (refusal checked by architecture_contract)"
+      ]
+    },
+    {
+      "name": "ninfer_ple_gate_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 5.4168275999999995,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_ple_conv_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 23.1651149,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_ple_state_extract_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 3.3499030999999997,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_gated_delta_net_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 52.4735642,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_gated_delta_net_replay_record_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 3.8291899999999996,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_gdn_replay_fold_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 19.786172999999998,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_rmsnorm_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 9.1203507,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_gated_rmsnorm_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 5.3338963,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_gdn_control_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.1389749,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_gdn_control_proj_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 36.4006786,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_gdn_norm_control_proj_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 25.543719199999998,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_hc_expand_norm_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 5.5423973,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_hc_grouped_rmsnorm_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 7.3411162,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_hc_combine_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 3.3266084,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_hc_combine_norm_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 62.879920999999996,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_hc_mix_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 6.321093299999999,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_artifact_materialization_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 2.2680051,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_expert_cache_test",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 0.3154034,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_ple_disk_prepare_gpu",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 1.0886581,
+      "failure": null,
+      "excluded_paths": []
+    },
+    {
+      "name": "ninfer_mtp_selected_loading",
+      "status": "pass",
+      "exit_code": 0,
+      "wall_seconds": 8.6313842,
+      "failure": null,
+      "excluded_paths": []
+    }
+  ]
+}
