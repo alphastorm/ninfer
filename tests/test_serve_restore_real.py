@@ -238,13 +238,24 @@ def main() -> int:
             active = None
             disabled_pointer_sha = digest_file(current)
 
-            active = Server(3, ("--no-prefix-reuse",))
-            code, _ = request("GET", "/v1/responses/" + child["id"], capability=session)
-            require(code == 404, "cache-disabled request imported native state")
-            require(digest_file(current) == disabled_pointer_sha, "policy refusal mutated the disk generation")
+            # A configured root plus globally disabled reuse is a shipped CLI refusal.
+            # Normal startup instead exercises real CacheParticipation::Disabled warmup.
+            # The unretained keyed request then must not auto-import the durable session.
+            active = Server(3)
+            require(digest_file(current) == disabled_pointer_sha, "startup warmup mutated the disk generation")
+            code, probe = request("POST", "/v1/responses", {**continuation, "store": False})
+            require(code == 200 and isinstance(probe.get("id"), str), "unretained policy probe failed")
+            probe_cached = probe.get("usage", {}).get("input_tokens_details", {}).get("cached_tokens")
+            require(type(probe_cached) is int and probe_cached == 0,
+                    "warmup/unretained native cache metric missing or nonzero")
+            code, _ = request("GET", "/v1/responses/" + probe["id"], capability=session)
+            require(code == 404, "unretained policy probe became a stored response")
+            require(digest_file(current) == disabled_pointer_sha, "request opt-out mutated the disk generation")
             active.terminate()
             active = None
-            receipt["policy_disabled"] = {"retrieve_status": 404, "current_unchanged": True}
+            require(digest_file(current) == disabled_pointer_sha, "unretained shutdown replaced the disk generation")
+            receipt["policy_disabled"] = {"mode": "startup_warmup_and_unretained_request",
+                "cached_input_tokens": probe_cached, "unretained_retrieve_status": 404, "current_unchanged": True}
             active = Server(4)
             code, _ = request("GET", "/v1/responses/" + restored["id"], capability=session)
             require(code == 404, "restart resurrected an explicitly deleted response")
