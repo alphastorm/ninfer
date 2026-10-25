@@ -88,8 +88,8 @@ Complete runtime builds are separate weekly/manual jobs. Windows MSVC
 configure-only activates when the PortableCore `vcpkg.json` manifest is present;
 it is not a Windows build or native-GPU qualification. No CI job runs GPU
 inference. The runtime publication workflow requires an explicit immutable,
-qualified master-compatible `base_image`; it does not reuse the shipped old
-runtime base digest automatically.
+qualified master-compatible `base_image` and its `runtime_base_receipt_release`;
+it does not reuse the shipped old runtime base digest automatically.
 
 Publish that dependency-only base with
 [`publish-runtime-base.yml`](../../.github/workflows/publish-runtime-base.yml).
@@ -106,8 +106,15 @@ and an SBOM. Its public prerelease
 `runtime-base-<sha8>-<yyyymmdd>` (UTC date) contains
 `ninfer-runtime-base.json`, artifact type
 `ninfer_runtime_base_publication_receipt`, schema **1**. Read `image_reference`
-from that receipt for the runtime image workflow's `base_image` input; the
-receipt also records the resolved NVIDIA runtime digest and the installed
+from that receipt for the runtime image workflow's `base_image` input and pass
+its prerelease tag as the required `runtime_base_receipt_release` input. Before
+building or pushing the image, the workflow downloads that prerelease's
+`ninfer-runtime-base.json`, requires its image reference to match `base_image`,
+and requires its `source_commit` to be an ancestor of the selected ref (which
+must equal the runtime's `source_commit`). Unrelated base sources are rejected;
+there is no allowlist bypass. The schema **4** runtime-image publication receipt
+records the base image, base receipt release, base source commit, and downloaded
+receipt SHA-256. The base receipt also records the resolved NVIDIA runtime digest and the installed
 package versions measured inside the published image. Discovering the digest
 through this GitHub release asset does not require `read:packages`.
 Each receipt release is created once, never overwritten.
@@ -119,6 +126,12 @@ gh workflow run publish-runtime-base.yml --repo alphastorm/ninfer \
 gh release download runtime-base-<sha8>-<yyyymmdd> --repo alphastorm/ninfer \
   --pattern ninfer-runtime-base.json --dir runtime-base-receipt
 jq -r .image_reference runtime-base-receipt/ninfer-runtime-base.json
+gh workflow run publish-runtime-image.yml --repo alphastorm/ninfer \
+  --ref <binary-release-tag> -f source_commit=<sha40> \
+  -f release_tag=<binary-release-tag> -f binary_asset=<archive-name> \
+  -f binary_sha256=<archive-sha256> \
+  -f base_image=<image_reference-from-receipt> \
+  -f runtime_base_receipt_release=runtime-base-<sha8>-<yyyymmdd>
 ```
 
 Before the first dispatch, merge the frozen release source, including this
@@ -128,6 +141,9 @@ branch is not sufficient for initial registration of a dispatch-only workflow.
 
 ### Receipt and consumer changelog
 
+- Runtime-image publication now binds the immutable base digest to a published
+  runtime-base receipt and its ancestor source, rather than accepting any
+  digest-shaped `base_image`; action pins are unchanged.
 - Product private-replay input now has meaningful private user context, without
   changing schema **2** or weakening the private/foreign path assertions. Failed
   repeats include whitelisted cache/counter evidence, never identity or request
