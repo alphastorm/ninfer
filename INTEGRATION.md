@@ -26,6 +26,7 @@ Read-only command for each candidate: `git merge-tree --write-tree --merge-base=
 |---|---|---|---|---|---|
 | Base | upstream `64d10fbf9` | Infra reports apps/tests ON, benches OFF, `120a`, 285.323 s; image `502ca8b3465c` | Infra evidence pending | Infra evidence pending | [Infra environment](https://github.com/alphastorm/ninfer/blob/ee39c4626/REPORT.md) |
 | Shared prerequisites | `dc3140b23`: native-profile gate and scope carriers | Apps/tests `120a` build passed; lease job elapsed 289 s, exit 0 | `ninfer_qwen_frontend_test` passed, 0.71 s | Not run; no GPU-ready environment yet | Integration-owned prerequisite, not a slice checkpoint |
+| Contracts candidate | frozen source `746b29d2`; proof/prose `cf9ba7db` | Integrated checkpoint pending; slice's three standalone C++20 header compiles passed | Slice: C++ five canonical vectors, Python six canonical/MAC tests passed; integrated CTest pending | Blocked on GPU-ready image and baseline | [Contracts proof](https://github.com/alphastorm/ninfer/blob/cf9ba7db/REPORT.md) |
 
 Baseline inventory must distinguish failures, skips and missing prerequisites. `tests/models/qwen3_5/tests.cmake` registers 14 `gpu;real` cases. `loading_real` needs explicit `--artifact` (the environment variable alone skips); MoE/offload cases need a matching MoE artifact. The supplied dense v3 artifact does not by itself prove every registered model/component route.
 
@@ -33,7 +34,7 @@ Observed prerequisite command sequence: `NINFER_BUILD_HOLDER=int` exported, then
 
 ## Merge queue and conflict watchlist
 
-Queue: Contracts → DurableStore standalone backend/I/O → ServePort snapshot/identity → DurableStore snapshot-aware store → Frontend → KernelRoutes → EngineCache → Harness → PortableCore → ArchEnable → Persistence → dependent A3/B2/C3/E2 integration. Main approved provider-first ordering: every merged boundary must be independently green; a source-only merge is not a green checkpoint.
+Queue is provider-first, not a fixed file-owner list. Contracts precedes every durable provider. Hardened DurableStore backends additionally require PortableCore's host-only K6 I/O. ServePort's status schema 2 requires EngineCache's real accounting, while its pure identity/snapshot provider precedes the snapshot-aware store. Frontend, KernelRoutes, Harness, ArchEnable and Persistence enter when their providers and proof are ready; dependent A3/B2/C3/E2 follow. Main approved this dependency rule: every merged boundary must be independently green; a source-only merge is not a green checkpoint.
 
 Preflight after a pushed slice is announced: `git fetch origin`, then `git merge-tree --write-tree rebase/upstream-64d10fbf origin/rebase/<slice>`. Preflight writes Git objects only, never the integration working tree. The first fetch found no current-program slice branches beyond the integration base; `rebase/durable-4090-v041` is unrelated and excluded. DurableStore standalone `0789709d` preflight against `7fccec947` was clean (exit 0); not yet merged or built.
 
@@ -72,7 +73,7 @@ K3/K4 publication rule: Main approved a mandatory Engine-supplied live-service g
 ## Open prerequisites
 
 - Infra valid vanilla host/model baseline evidence remains pending; image refresh isolates the link-only driver stub and adds Git plus Python oracle dependencies. GPU work is blocked until Infra broadcasts observed readiness.
-- Contracts declared the K1–K7 freeze; mergeable commit/report and standalone proof are pending.
+- Contracts' first candidate includes frozen declarations, fixtures and host CTest registration. Integrated build/host/model proof must pass before a checkpoint tag or the next implementation merge.
 - Frontend starts when a worker slot becomes available; grammar-whitespace handoff is queued.
 - Exact requested declarations/source lists before shared edits; do not register nonexistent sources on the integration branch.
 - PortableCore and ArchEnable must land before adding native Windows architecture builds to the routine.
