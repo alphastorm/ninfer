@@ -58,7 +58,8 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
             const execution::TextGraphExecutable* shared = nullptr;
             for (const auto& other : family.topologies) {
                 if (other.text &&
-                    family.profiles[*other.installed_profile].batch_size == profile.batch_size) {
+                    family.profiles[*other.installed_profile].batch_size == profile.batch_size &&
+                    family.profiles[*other.installed_profile].copy_round == profile.copy_round) {
                     shared = other.text.get();
                     break;
                 }
@@ -112,10 +113,12 @@ void instantiate_graph_family(DecodeGraphFamily& family, const char* label, Devi
 
 } // namespace
 
-DecodeGraphProfile& DecodeGraphFamily::select(std::uint32_t batch_size, std::uint32_t frontier) {
+DecodeGraphProfile& DecodeGraphFamily::select(std::uint32_t batch_size, std::uint32_t frontier,
+                                              bool copy_round) {
     const auto it =
         std::find_if(profiles.begin(), profiles.end(), [&](const DecodeGraphProfile& p) {
-            return p.batch_size == batch_size && p.min_execution_frontier <= frontier &&
+            return p.batch_size == batch_size && p.copy_round == copy_round &&
+                   p.min_execution_frontier <= frontier &&
                    frontier <= p.max_execution_frontier;
         });
     if (it == profiles.end()) {
@@ -230,7 +233,9 @@ void ProgramImpl::prepare_graphs() {
             }
             cache.page_pool().zero_pages(pages, device.stream());
         };
-    const auto prepare_representative = [&](std::uint32_t frontier, std::uint32_t batch_size) {
+    const auto prepare_representative = [&](std::uint32_t frontier, std::uint32_t batch_size,
+                                            std::uint32_t verify_drafts = 0,
+                                            bool copying = false) {
         if (batch_size == 0 || batch_size > max_concurrency) {
             throw std::logic_error("CUDA Graph representative batch is invalid");
         }
@@ -264,15 +269,18 @@ void ProgramImpl::prepare_graphs() {
         if (io.dflash_decode) {
             *dflash_host_ingress       = {};
             *dflash_host_egress        = {};
-            const std::uint32_t extent = std::min(draft_window, capacity - frontier - 1U);
-            const std::uint32_t width  = draft_window + 1U;
+            const auto k = verify_drafts != 0 ? verify_drafts : draft_window;
+            const std::uint32_t extent = std::min(k, capacity - frontier - 1U);
+            const std::uint32_t width  = k + 1U;
             for (std::uint32_t row = 0; row < batch_size; ++row) {
                 dflash_host_ingress->anchors[row] = 0;
                 dflash_host_ingress->execution_frontiers[row] =
                     context::checked_i32(frontier, "graph representative DFlash frontier");
                 dflash_host_ingress->context_frontiers[row] =
                     context::checked_i32(frontier, "graph representative DFlash context frontier");
-                dflash_host_ingress->proposal_valid_columns[row] = static_cast<std::int32_t>(width);
+                dflash_host_ingress->proposal_valid_columns[row] =
+                    static_cast<std::int32_t>(draft_window + 1U);
+                dflash_host_ingress->copy_rows[row] = copying ? 1 : 0;
                 dflash_host_ingress->proposal_extents[row] = static_cast<std::int32_t>(extent);
                 dflash_host_ingress->target_valid_columns[row] =
                     static_cast<std::int32_t>(extent + 1U);
@@ -348,10 +356,11 @@ void ProgramImpl::prepare_graphs() {
                                         moe.get()};
     };
 
-    const auto text_definition = [&](const DecodeGraphFamily& family, std::uint32_t batch) {
+    const auto text_definition = [&](const DecodeGraphFamily& family, std::uint32_t batch,
+                                     bool copying = false) {
         const execution::TextGraphDefinition* shared = nullptr;
         for (const auto& profile : family.profiles) {
-            if (profile.batch_size == batch && profile.text) {
+            if (profile.batch_size == batch && profile.copy_round == copying && profile.text) {
                 shared = profile.text.get();
                 break;
             }
@@ -427,12 +436,16 @@ void ProgramImpl::prepare_graphs() {
             device.synchronize();
         }
     }
-    if (speculative_backend != SpeculativeBackend::None) {
+    for (const bool copying : {false, true}) {
+        if (speculative_backend == SpeculativeBackend::None || (copying && ngram_window == 0))
+            continue;
         using execution::SpeculativePhase;
         const bool mtp = speculative_backend == SpeculativeBackend::Mtp;
+        const auto k = copying ? ngram_window : draft_window;
+        const auto batch_limit = copying ? std::min(max_concurrency, 2U) : max_concurrency;
         const auto forward_profiles =
             mtp ? mtp_graph_profiles(capacity, draft_window)
-                : dflash_graph_profiles(speculative_backend, capacity, draft_window);
+                : dflash_graph_profiles(speculative_backend, capacity, k);
         // DFlash acceptance has no context-dependent nodes or resource envelope.
         const auto finish_profiles =
             mtp ? forward_profiles : std::vector<GraphExecutionProfile>{{0, capacity - 1}};
@@ -448,7 +461,9 @@ void ProgramImpl::prepare_graphs() {
                                               state_images->continuation_hidden_store()};
         };
         const auto dflash_context = [&] {
-            return execution::DFlashBatchContext{execution_core(),
+            auto core = execution_core();
+            if (copying) core.replay_records = &*copy_replay_records;
+            return execution::DFlashBatchContext{core,
                                                  decoder->text_kv,
                                                  *dflash,
                                                  *io.dflash_decode,
@@ -456,12 +471,14 @@ void ProgramImpl::prepare_graphs() {
                                                  *dflash_host_egress,
                                                  state_images->continuation_hidden_store(),
                                                  dflash_draft_handoff->tokens(),
-                                                 dflash_draft_handoff->ready};
+                                                 dflash_draft_handoff->ready,
+                                                 copying,
+                                                 draft_window};
         };
         const auto target_envelope = [&](std::uint32_t frontier) {
             return ops::CausalAttentionExecutionEnvelope{
                 1, static_cast<std::uint32_t>(std::min<std::uint64_t>(
-                       capacity, static_cast<std::uint64_t>(frontier) + draft_window + 1ULL))};
+                       capacity, static_cast<std::uint64_t>(frontier) + k + 1ULL))};
         };
         const auto run = [&](SpeculativePhase phase, std::int32_t batch, std::uint32_t frontier,
                              DecodeGraphExecutable* executable,
@@ -478,8 +495,8 @@ void ProgramImpl::prepare_graphs() {
             } else {
                 auto state = dflash_context();
                 if (replay) state.execution.text_graph = &*replay;
-                execution::dflash_decode_batch(state, batch, draft_window,
-                                               dflash_envelopes(frontier, draft_window),
+                execution::dflash_decode_batch(state, batch, k,
+                                               dflash_envelopes(frontier, k),
                                                target_envelope(frontier), executable, phase);
             }
         };
@@ -488,7 +505,8 @@ void ProgramImpl::prepare_graphs() {
             const auto frontier = profile.max_execution_frontier;
             std::optional<execution::TextGraphRun> recording;
             if (moe && phase == SpeculativePhase::Forward) {
-                profile.text = text_definition(speculative_forward_graphs, profile.batch_size);
+                profile.text = text_definition(speculative_forward_graphs, profile.batch_size,
+                                                copying);
                 recording.emplace(*profile.text, device.execution_view());
             }
             if (mtp) {
@@ -502,13 +520,13 @@ void ProgramImpl::prepare_graphs() {
                 auto state = dflash_context();
                 if (recording) state.execution.text_graph = &*recording;
                 execution::capture_dflash_decode_batch(
-                    state, batch, draft_window, dflash_envelopes(frontier, draft_window),
+                    state, batch, k, dflash_envelopes(frontier, k),
                     target_envelope(frontier), profile.definition, phase);
             }
         };
 
         const auto code_warm = forward_profiles.front();
-        prepare_representative(code_warm.min, 1);
+        prepare_representative(code_warm.min, 1, k, copying);
         device.synchronize();
         run(SpeculativePhase::Forward, 1, code_warm.max, nullptr);
         run(SpeculativePhase::Finish, 1, code_warm.max, nullptr);
@@ -518,15 +536,17 @@ void ProgramImpl::prepare_graphs() {
             const bool forward = phase == SpeculativePhase::Forward;
             auto& family       = forward ? speculative_forward_graphs : speculative_finish_graphs;
             const auto& planned_profiles = forward ? forward_profiles : finish_profiles;
-            family.profiles.reserve(planned_profiles.size() * max_concurrency);
-            for (std::uint32_t batch = 1; batch <= max_concurrency; ++batch) {
+            family.profiles.reserve(family.profiles.size() + planned_profiles.size() * batch_limit);
+            for (std::uint32_t batch = 1; batch <= batch_limit; ++batch) {
                 for (const auto planned : planned_profiles) {
                     family.profiles.emplace_back();
                     auto& profile                  = family.profiles.back();
                     profile.batch_size             = batch;
                     profile.min_execution_frontier = planned.min;
                     profile.max_execution_frontier = planned.max;
-                    profile.topology_class = planned.topology_class * max_concurrency + batch - 1U;
+                    profile.copy_round = copying;
+                    profile.topology_class = (planned.topology_class * max_concurrency + batch - 1U)
+                                               | (copying ? 0x80000000U : 0U);
                     capture(phase, profile);
                 }
             }
@@ -537,11 +557,13 @@ void ProgramImpl::prepare_graphs() {
         // Warm complete transactions: finish consumes persistent outputs of its paired forward.
         for (auto& topology : speculative_forward_graphs.topologies) {
             auto& forward = speculative_forward_graphs.profiles[*topology.installed_profile];
+            if (forward.copy_round != copying) continue;
             speculative_forward_graphs.install(forward);
             auto& finish      = speculative_finish_graphs.select(forward.batch_size,
-                                                                 forward.min_execution_frontier);
+                                                                 forward.min_execution_frontier,
+                                                                 copying);
             auto& finish_exec = speculative_finish_graphs.install(finish);
-            prepare_representative(forward.min_execution_frontier, forward.batch_size);
+            prepare_representative(forward.min_execution_frontier, forward.batch_size, k, copying);
             device.synchronize();
             if (topology.text)
                 run(SpeculativePhase::Forward, forward.batch_size, forward.max_execution_frontier,

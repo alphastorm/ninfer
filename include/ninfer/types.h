@@ -81,6 +81,8 @@ struct SpeculativeOptions {
     // Startup-fixed K: MTP 1..5; DFlash and DFlash2 1..15 (query width K+1).
     std::uint32_t draft_tokens = 0;
     ProposalHead proposal_head = ProposalHead::Full;
+    // Optional own-prefix copies beside DFlash2: 0 (off) or 15, at at most two active lanes.
+    std::uint32_t ngram_draft_tokens = 0;
 };
 
 enum class StartupPhase : std::uint8_t {
@@ -880,6 +882,10 @@ struct SpeculativeStats {
     std::uint64_t accepted_tokens = 0;
     std::uint64_t fallback_steps  = 0;
     std::vector<std::uint64_t> attempted_per_position;
+    // Subsets of verification work above, not necessarily published output tokens.
+    std::uint64_t ngram_rounds          = 0;
+    std::uint64_t ngram_drafted_tokens  = 0;
+    std::uint64_t ngram_accepted_tokens = 0;
     std::vector<std::uint64_t> accepted_per_position;
 
     // Native verification facts, recorded once at the commit decision even if publication
@@ -894,6 +900,20 @@ struct SpeculativeStats {
         accepted_tokens += accepted;
         for (std::uint32_t i = 0; i < drafted; ++i) { ++attempted_per_position[i]; }
         for (std::uint32_t i = 0; i < accepted; ++i) { ++accepted_per_position[i]; }
+    }
+
+    // Copy verification contributes to totals, never to the K-wide neural histogram.
+    void observe_copy_round(std::uint32_t drafted, std::uint32_t accepted) noexcept {
+        if (drafted == 0) {
+            ++fallback_steps;
+            return;
+        }
+        ++rounds;
+        drafted_tokens += drafted;
+        accepted_tokens += accepted;
+        ++ngram_rounds;
+        ngram_drafted_tokens += drafted;
+        ngram_accepted_tokens += accepted;
     }
 };
 

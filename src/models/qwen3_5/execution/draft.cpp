@@ -21,6 +21,7 @@
 #include "ninfer/ops/linear_pair.h"
 #include "ninfer/ops/linear_swiglu.h"
 #include "ninfer/ops/sequence.h"
+#include "ninfer/ops/copy_proposals.h"
 #include "ninfer/ops/rmsnorm.h"
 #include "ninfer/ops/rope.h"
 #include "ninfer/ops/scalar.h"
@@ -31,6 +32,7 @@
 #include <cuda_runtime.h>
 
 #include <cstddef>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -571,11 +573,16 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
             throw std::logic_error("DFlash decode batch state is incomplete");
         }
         state.execution.work.reset();
-        qwen3_5::DFlashDecodeState& frame = state.frame;
+        std::optional<qwen3_5::DFlashDecodeState> narrow_frame;
+        if (k != static_cast<std::uint32_t>(state.frame.draft_tokens.ne[0]))
+            narrow_frame.emplace(state.frame.narrowed(k));
+        auto& frame = narrow_frame ? *narrow_frame : state.frame;
         const std::int32_t width          = static_cast<std::int32_t>(k) + 1;
         if (phase == SpeculativePhase::Forward && emit_forward_gpu(state.execution.text_graph)) {
             CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, &state.host_ingress,
-                                       sizeof(qwen3_5::DFlashDecodeIngress), cudaMemcpyHostToDevice,
+                                       state.copy_round ? sizeof(qwen3_5::DFlashDecodeIngress)
+                                           : offsetof(qwen3_5::DFlashDecodeIngress, copy_rows),
+                                       cudaMemcpyHostToDevice,
                                        state.execution.cuda.stream()));
         }
 
@@ -609,13 +616,54 @@ auto dflash_decode_batch_body(DFlashBatchContext& state, std::int32_t batch_size
                 DType::BF16,
                 {dimension(state.execution.parameters.draft->feature_projection.weight.k), width,
                  batch_size});
-            ops::prepare_ragged_prefix(dflash_state(state).pending_features, active_lanes,
+            const auto pending_features = dflash_state(state).pending_features.slice(1, 0, width);
+            ops::prepare_ragged_prefix(pending_features, active_lanes,
                                        context_starts, frontiers, compact_features,
                                        append_positions, append_counts, state.execution.cuda);
             append_context_impl(state, compact_features, append_positions, append_counts,
                                 state_destinations, dflash_rows, envelopes.append);
 
-            propose_batch_impl(state, frame, batch_size, k, envelopes);
+            if (!state.copy_round) {
+                propose_batch_impl(state, frame, batch_size, k, envelopes);
+            } else {
+                if (batch_size > 2 || state.neural_drafts == 0 || state.neural_drafts > k)
+                    throw std::logic_error("invalid copy graph family");
+                if (batch_size == 2) {
+                    auto neural = frame.narrowed(state.neural_drafts);
+                    propose_batch_impl(state, neural, batch_size, state.neural_drafts, envelopes);
+                    // Neural planes are densely packed at K. Stage before spreading them
+                    // into the wider verify frame because their backing addresses alias.
+                    const auto spread = [&](const Tensor& source, Tensor& destination, int axis) {
+                        auto scope = state.execution.work.scope();
+                        auto staging = state.execution.work.alloc_bytes(source.bytes());
+                        const auto source_pitch = source.nb[axis];
+                        const auto destination_pitch = destination.nb[axis];
+                        CUDA_CHECK(cudaMemcpyAsync(staging.data, source.data, source.bytes(),
+                                                   cudaMemcpyDeviceToDevice,
+                                                   state.execution.cuda.stream()));
+                        CUDA_CHECK(cudaMemcpy2DAsync(destination.data, destination_pitch,
+                                                     staging.data, source_pitch, source_pitch,
+                                                     batch_size, cudaMemcpyDeviceToDevice,
+                                                     state.execution.cuda.stream()));
+                    };
+                    Tensor neural_drafts = neural.draft_tokens.slice(1, 0, batch_size);
+                    Tensor neural_ids = neural.candidate_ids.slice(2, 0, batch_size);
+                    Tensor neural_q = neural.proposal_q.slice(2, 0, batch_size);
+                    Tensor ids = frame.candidate_ids.slice(2, 0, batch_size);
+                    Tensor q = frame.proposal_q.slice(2, 0, batch_size);
+                    spread(neural_drafts, drafts, 1);
+                    spread(neural_ids, ids, 2);
+                    spread(neural_q, q, 2);
+                }
+                Tensor copies = frame.copy_tokens.slice(1, 0, batch_size);
+                Tensor rows = frame.copy_rows.slice(0, 0, batch_size);
+                Tensor ids = frame.candidate_ids.slice(2, 0, batch_size);
+                Tensor q = frame.proposal_q.slice(2, 0, batch_size);
+                ops::overlay_copy_proposals(
+                    copies, rows,
+                    dimension(state.execution.parameters.model.resources().public_token_count),
+                    drafts, ids, q, state.execution.cuda);
+            }
             const auto draft_count = static_cast<std::size_t>(k) * batch_size;
             if (state.host_drafts.size() < draft_count) {
                 throw std::logic_error("DFlash host draft buffer is too small");

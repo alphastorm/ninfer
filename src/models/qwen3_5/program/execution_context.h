@@ -102,6 +102,9 @@ struct DFlashBatchContext {
     Tensor& continuation_hidden_store;
     std::span<TokenId> host_drafts;
     CudaCompletionEvent& drafts_ready;
+    // Capture-fixed round family; neural proposals retain their configured window.
+    bool copy_round = false;
+    std::uint32_t neural_drafts = 0;
 };
 
 struct DFlashAppendContext {

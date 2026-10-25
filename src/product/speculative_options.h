@@ -30,6 +30,10 @@ namespace ninfer::product {
 }
 
 inline void validate_speculative_cli_options(const SpeculativeOptions& options) {
+    if (options.ngram_draft_tokens != 0 &&
+        (options.ngram_draft_tokens != 15 || options.backend != SpeculativeBackend::DFlash2)) {
+        throw std::invalid_argument("--ngram-draft-tokens accepts 0 or 15 and requires --spec dflash2");
+    }
     switch (options.backend) {
     case SpeculativeBackend::None:
         if (options.draft_tokens != 0 || options.proposal_head != ProposalHead::Full) {

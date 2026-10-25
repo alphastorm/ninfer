@@ -430,8 +430,13 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
             const std::uint32_t lane = lanes[row];
             auto& request           = requests[lane];
             if (pending_kinds[row] == PendingKind::Speculative) {
-                request.speculative_stats.observe_round(request.pending.drafted,
-                                                        request.pending.accepted_drafts);
+                if (request.pending.copied) {
+                    request.speculative_stats.observe_copy_round(request.pending.drafted,
+                                                                 request.pending.accepted_drafts);
+                } else {
+                    request.speculative_stats.observe_round(request.pending.drafted,
+                                                            request.pending.accepted_drafts);
+                }
             }
             if (discarded[row]) {
                 timings[row]     = request.timings;

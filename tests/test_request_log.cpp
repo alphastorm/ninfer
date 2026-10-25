@@ -569,6 +569,9 @@ int main() {
     outcome.metrics.speculative_accepted_tokens       = 720;
     outcome.metrics.speculative_fallback_steps        = 2;
     outcome.metrics.speculative_attempted_per_position = {300, 300, 300};
+    outcome.metrics.ngram_rounds                      = 5;
+    outcome.metrics.ngram_drafted_tokens               = 75;
+    outcome.metrics.ngram_accepted_tokens              = 60;
     outcome.metrics.speculative_accepted_per_position = {290, 240, 190};
     outcome.metrics.engine_request_id                 = 991;
     outcome.metrics.scheduling                        = {
@@ -645,6 +648,10 @@ int main() {
         check(done.at("speculative").at("draft_window") == 3, "speculative draft window missing");
     failures += check(done.at("speculative").at("fallback_steps") == 2,
                       "speculative fallback count missing");
+    failures += check(done.at("speculative").at("ngram_rounds") == 5 &&
+                          done.at("speculative").at("ngram_drafted_tokens") == 75 &&
+                          done.at("speculative").at("ngram_accepted_tokens") == 60,
+                      "copy verification counters missing");
     failures +=
         check(done.at("speculative").at("attempted_per_position") == Json::array({300, 300, 300}),
               "speculative attempted position counts missing");
