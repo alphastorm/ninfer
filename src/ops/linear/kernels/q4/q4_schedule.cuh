@@ -111,7 +111,8 @@ enum class Q4SlicedKReduction {
 template <int BlockRows, int BlockTokens, int KWarps, int Stages, Cache WeightCache,
           Cache ActivationCache, int MinBlocksPerSm, int StaticK = 0,
           int TokenCapacity            = BlockTokens,
-          Q4SlicedKReduction Reduction = Q4SlicedKReduction::Linear>
+          Q4SlicedKReduction Reduction = Q4SlicedKReduction::Linear,
+          int CodeRowPadding = 0>
 struct Q4A16SlicedKMmaSchedule {
     static_assert(BlockRows == 16 || BlockRows == 32);
     static_assert(BlockTokens >= 8 && BlockTokens <= 64 && BlockTokens % 8 == 0);
@@ -122,10 +123,12 @@ struct Q4A16SlicedKMmaSchedule {
     static constexpr int kBlockTokens = BlockTokens;
     static_assert(StaticK == 0 || (StaticK > 0 && StaticK % 128 == 0));
     static_assert(TokenCapacity > 0 && TokenCapacity <= BlockTokens);
+    static_assert(CodeRowPadding == 0 || CodeRowPadding == 16);
     // Static K specializes a padding-free geometry, including physical row strides.
     static constexpr auto kReduction        = Reduction;
     static constexpr int kStaticK           = StaticK;
     static constexpr int kTokenCapacity     = TokenCapacity;
+    static constexpr int kCodeRowPadding    = CodeRowPadding;
     static constexpr int kKWarps            = KWarps;
     static constexpr int kWarps             = KWarps;
     static constexpr int kThreads           = KWarps * 32;
@@ -142,7 +145,7 @@ struct Q4A16SlicedKMmaSchedule {
         Stages * (BlockRows * KWarps *
                       (common::Q4RowSplitStorage::kCodeBytesPerGroup +
                        common::Q4RowSplitStorage::kScaleBytesPerGroup) +
-                  KWarps * BlockTokens * 64 * 2);
+                  BlockRows * CodeRowPadding + KWarps * BlockTokens * 64 * 2);
     static constexpr int kPartialBytes = KWarps * BlockRows * BlockTokens * sizeof(float);
     static constexpr int kSharedBytes =
         ((kStagingBytes > kPartialBytes ? kStagingBytes : kPartialBytes) + 15) / 16 * 16;

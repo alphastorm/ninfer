@@ -9,6 +9,7 @@
 #include "ops/linear/kernels/q4/q4_gemv_launch.cuh"
 #include "ops/linear/kernels/q5/q5_simt_launch.cuh"
 #include "ops/linear/kernels/q5/q5_gemv_launch.cuh"
+#include "ops/linear/kernels/q5/q5_sliced_k_launch.cuh"
 #include <cuda_bf16.h>
 #include <cstdint>
 #include <stdexcept>
@@ -39,11 +40,11 @@ void launch_q4_simt(const Tensor& x, const Weight& weight, Tensor& out, cudaStre
         LinearIdentityEpilogue{}, stream);
 }
 
-template <std::int32_t Capacity>
+template <std::int32_t Capacity,
+          class Schedule = Q4A16SlicedKMmaSchedule<16, (Capacity + 7) / 8 * 8, 8, 1,
+                                                   Cache::cg, Cache::ca, 6, kHidden, Capacity>>
 void launch_q4_sliced_exact(const Tensor& x, const Weight& weight, Tensor& out,
                             cudaStream_t stream) {
-    using Schedule = Q4A16SlicedKMmaSchedule<16, (Capacity + 7) / 8 * 8, 8, 1, Cache::cg, Cache::ca,
-                                             6, kHidden, Capacity>;
     launch_q4_a16_sliced_k_mma<Schedule>(
         q4_linear_operands(x, weight),
         LinearBf16StridedOutput{static_cast<__nv_bfloat16*>(out.data),
@@ -67,7 +68,13 @@ Q4Launcher select_q4_projection(int columns) {
     case 7:
         return launch_q4_sliced_exact<7>;
     case 8:
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+        return launch_q4_sliced_exact<8, q4_instances::SlicedK5120T8PairwisePad16>;
+    case 16:
+        return launch_q4_sliced_exact<16, q4_instances::SlicedK5120T16PairwisePad16>;
+#else
         return launch_q4_sliced_exact<8>;
+#endif
     case 9:
         return launch_q4_sliced_exact<9>;
     case 10:
@@ -114,6 +121,18 @@ void launch_q5_simt_cols(const Tensor& x, const Weight& weight, Tensor& value, T
 
 using Q5Launcher = void (*)(const Tensor&, const Weight&, Tensor&, Tensor&, cudaStream_t);
 
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+template <int Tokens>
+void launch_q5_verify(const Tensor& x, const Weight& weight, Tensor& value, Tensor& z,
+                      cudaStream_t stream) {
+    using Schedule = Q5A16SlicedKMmaSchedule<16, Tokens, 8, 2, Cache::cg, Cache::ca, 1,
+                                             kHidden, Tokens>;
+    launch_q5_a16_sliced_k_mma<Schedule>(
+        q5_linear_operands(x, weight), q5_projection_output(value, z),
+        LinearIdentityEpilogue{}, stream);
+}
+#endif
+
 Q5Launcher select_q5_projection(int columns) {
     switch (columns) {
     case 1:
@@ -131,7 +150,13 @@ Q5Launcher select_q5_projection(int columns) {
     case 7:
         return launch_q5_split4<7>;
     case 8:
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+        return launch_q5_verify<8>;
+    case 16:
+        return launch_q5_verify<16>;
+#else
         return launch_q5_split4<8>;
+#endif
     case 9:
         return launch_q5_split4<9>;
     case 10:

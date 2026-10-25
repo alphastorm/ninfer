@@ -1524,3 +1524,17 @@ total server decode milliseconds divided by total speculative rounds. Role media
 nearest-rank p95 decode milliseconds/token are also reported per workload class. A single corpus
 pass does not estimate a per-case tail distribution or establish quality equivalence. Missing log
 matches fail instead of silently dropping observations.
+
+G2 compares the median decode rate across the same 84 cases (candidate/shipped at least 0.98)
+and the empirical p95 decode milliseconds/token in each of the five workload classes
+(candidate/shipped at most 1.10). List individual case regressions as well. If the initial role
+median ratio is within two percentage points of the 0.98 boundary, repeat the corpus in
+candidate/shipped order before declaring the gate. Do not substitute weighted throughput for
+the median criterion or treat an incomplete corpus as a passing measurement.
+
+The sm_120a Q4/Q5 input-projection verify routes select aggregate T=8 and T=16 through the
+existing split-shape and GDN materialized-projection dispatchers. Q4 retains integer BF16 MMA,
+FP32 group scaling and pairwise K reduction, with a 16-byte shared code-row pad and two stages
+at T=8 (one at T=16). Q5 companions reuse the upstream two-stage sliced-K kernel. Native
+sm_86/sm_89 dispatch and all other token extents retain their previous schedules. Measure
+`linear_split` and GDN snapshot/record: the latter do not call the split projection dispatcher.

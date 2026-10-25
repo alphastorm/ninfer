@@ -1,0 +1,721 @@
+{
+  "experiment": "EXP-097",
+  "phase": "baseline_before_route_changes",
+  "engines": {
+    "shipped": "1302d639",
+    "vanilla": "64d10fbf"
+  },
+  "complete_common_cases": 84,
+  "shipped": {
+    "attempted": 84,
+    "completed": 84,
+    "completion_tokens": 60990,
+    "decode_s": 208.978651044,
+    "rounds": 13462,
+    "weighted_decode_tok_s": 291.8479935405396,
+    "median_decode_tok_s": 338.5734223209238,
+    "ms_per_round": 15.523596125687119,
+    "p95_decode_ms_per_token": 4.298656585798816
+  },
+  "vanilla": {
+    "attempted": 84,
+    "completed": 84,
+    "completion_tokens": 59846,
+    "decode_s": 241.311316941,
+    "rounds": 13095,
+    "weighted_decode_tok_s": 248.00328786333793,
+    "median_decode_tok_s": 280.1018405635705,
+    "ms_per_round": 18.427744707216494,
+    "p95_decode_ms_per_token": 4.95275242578711
+  },
+  "median_decode_ratio": 0.8273001425908445,
+  "weighted_decode_ratio": 0.849768692443961,
+  "round_ms_ratio": 1.1870796275563906,
+  "workload_p95_ratios": {
+    "log-triage": 1.154340094838831,
+    "regression-contract": 1.1722497573816313,
+    "repository-evidence": 1.1895282408954153,
+    "structured-output": 1.4187036932170745,
+    "work-log-extraction": 1.2541325530165868
+  },
+  "individual_cases": [
+    {
+      "id": "struct-002",
+      "workload": "structured-output",
+      "shipped_decode_tok_s": 359.0704850726924,
+      "vanilla_decode_tok_s": 253.09758957380217,
+      "decode_rate_ratio": 0.704868821291629,
+      "ms_per_token_ratio": 1.4187036932170742
+    },
+    {
+      "id": "log-021",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 275.77243737622325,
+      "vanilla_decode_tok_s": 209.61449802482718,
+      "decode_rate_ratio": 0.7600995227048745,
+      "ms_per_token_ratio": 1.3156171923926758
+    },
+    {
+      "id": "worklog-007",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 366.56539504343476,
+      "vanilla_decode_tok_s": 283.4423717604726,
+      "decode_rate_ratio": 0.773238215044514,
+      "ms_per_token_ratio": 1.2932625167037712
+    },
+    {
+      "id": "log-016",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 265.6962022469087,
+      "vanilla_decode_tok_s": 205.46005359902483,
+      "decode_rate_ratio": 0.7732893878855407,
+      "ms_per_token_ratio": 1.293176934361365
+    },
+    {
+      "id": "worklog-009",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 407.2167894867992,
+      "vanilla_decode_tok_s": 315.86301922960797,
+      "decode_rate_ratio": 0.7756630556114321,
+      "ms_per_token_ratio": 1.289219581576861
+    },
+    {
+      "id": "reg-commit-ddee681f",
+      "workload": "regression-contract",
+      "shipped_decode_tok_s": 314.9387377230646,
+      "vanilla_decode_tok_s": 246.77310944442598,
+      "decode_rate_ratio": 0.7835590858988621,
+      "ms_per_token_ratio": 1.2762279424695167
+    },
+    {
+      "id": "worklog-017",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 399.6471840058788,
+      "vanilla_decode_tok_s": 315.8599158981955,
+      "decode_rate_ratio": 0.7903469073200056,
+      "ms_per_token_ratio": 1.2652671766514645
+    },
+    {
+      "id": "worklog-005",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 302.08544996019396,
+      "vanilla_decode_tok_s": 240.3715024937534,
+      "decode_rate_ratio": 0.7957069846476464,
+      "ms_per_token_ratio": 1.256744026751026
+    },
+    {
+      "id": "log-013",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 345.88919814881086,
+      "vanilla_decode_tok_s": 275.59999427112655,
+      "decode_rate_ratio": 0.7967869356606967,
+      "ms_per_token_ratio": 1.2550406579781566
+    },
+    {
+      "id": "repo-030",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 399.0408941338943,
+      "vanilla_decode_tok_s": 318.7754480674853,
+      "decode_rate_ratio": 0.7988540842646651,
+      "ms_per_token_ratio": 1.2517930617084936
+    },
+    {
+      "id": "log-015",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 266.161793378203,
+      "vanilla_decode_tok_s": 212.95550744067287,
+      "decode_rate_ratio": 0.8000979582297653,
+      "ms_per_token_ratio": 1.249846959005523
+    },
+    {
+      "id": "worklog-020",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 301.45772609492377,
+      "vanilla_decode_tok_s": 241.20229173340465,
+      "decode_rate_ratio": 0.8001197874671631,
+      "ms_per_token_ratio": 1.2498128601038254
+    },
+    {
+      "id": "log-022",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 322.79995131016693,
+      "vanilla_decode_tok_s": 258.5199755099719,
+      "decode_rate_ratio": 0.8008674550931679,
+      "ms_per_token_ratio": 1.2486460695093
+    },
+    {
+      "id": "reg-commit-85d47e27",
+      "workload": "regression-contract",
+      "shipped_decode_tok_s": 310.759323070795,
+      "vanilla_decode_tok_s": 249.44107505580138,
+      "decode_rate_ratio": 0.8026825151726034,
+      "ms_per_token_ratio": 1.2458225775417155
+    },
+    {
+      "id": "struct-005",
+      "workload": "structured-output",
+      "shipped_decode_tok_s": 368.8268007156497,
+      "vanilla_decode_tok_s": 296.39875363304634,
+      "decode_rate_ratio": 0.8036258565210872,
+      "ms_per_token_ratio": 1.2443601607457238
+    },
+    {
+      "id": "worklog-019",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 407.80988816973735,
+      "vanilla_decode_tok_s": 328.1238560269376,
+      "decode_rate_ratio": 0.8046000490561104,
+      "ms_per_token_ratio": 1.2428535160706446
+    },
+    {
+      "id": "repo-010",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 407.92402470401004,
+      "vanilla_decode_tok_s": 328.2365621399562,
+      "decode_rate_ratio": 0.8046512150838012,
+      "ms_per_token_ratio": 1.2427744857078902
+    },
+    {
+      "id": "reg-commit-468dcf69",
+      "workload": "regression-contract",
+      "shipped_decode_tok_s": 312.78049698375594,
+      "vanilla_decode_tok_s": 252.98833357922152,
+      "decode_rate_ratio": 0.8088366634712532,
+      "ms_per_token_ratio": 1.236343560031439
+    },
+    {
+      "id": "worklog-003",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 351.08614322305596,
+      "vanilla_decode_tok_s": 284.049361365505,
+      "decode_rate_ratio": 0.8090588787066985,
+      "ms_per_token_ratio": 1.236003987248154
+    },
+    {
+      "id": "repo-002",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 419.10196266204264,
+      "vanilla_decode_tok_s": 339.1360433727828,
+      "decode_rate_ratio": 0.8091969820868076,
+      "ms_per_token_ratio": 1.2357930419131542
+    },
+    {
+      "id": "log-011",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 250.237582574281,
+      "vanilla_decode_tok_s": 203.5415794710154,
+      "decode_rate_ratio": 0.8133933255633005,
+      "ms_per_token_ratio": 1.2294175137317098
+    },
+    {
+      "id": "worklog-015",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 406.44082332840134,
+      "vanilla_decode_tok_s": 330.98374410621705,
+      "decode_rate_ratio": 0.8143467021736261,
+      "ms_per_token_ratio": 1.2279782030563082
+    },
+    {
+      "id": "log-010",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 235.20949882442483,
+      "vanilla_decode_tok_s": 192.673092823177,
+      "decode_rate_ratio": 0.8191552372933728,
+      "ms_per_token_ratio": 1.2207698302756007
+    },
+    {
+      "id": "repo-006",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 375.4476348119279,
+      "vanilla_decode_tok_s": 308.5577649487222,
+      "decode_rate_ratio": 0.8218396823921592,
+      "ms_per_token_ratio": 1.2167823255860108
+    },
+    {
+      "id": "repo-009",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 366.2168147054271,
+      "vanilla_decode_tok_s": 301.6201536923779,
+      "decode_rate_ratio": 0.823610881807793,
+      "ms_per_token_ratio": 1.214165599421222
+    },
+    {
+      "id": "log-017",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 227.1611943693219,
+      "vanilla_decode_tok_s": 187.12868726255297,
+      "decode_rate_ratio": 0.8237704850165407,
+      "ms_per_token_ratio": 1.2139303582598262
+    },
+    {
+      "id": "repo-017",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 364.17639981204223,
+      "vanilla_decode_tok_s": 300.27110814772107,
+      "decode_rate_ratio": 0.8245210516186556,
+      "ms_per_token_ratio": 1.2128253099624968
+    },
+    {
+      "id": "log-007",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 244.79579339389716,
+      "vanilla_decode_tok_s": 201.90793200027082,
+      "decode_rate_ratio": 0.824801477186268,
+      "ms_per_token_ratio": 1.2124129595541042
+    },
+    {
+      "id": "worklog-002",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 374.54008328864484,
+      "vanilla_decode_tok_s": 308.99551180453756,
+      "decode_rate_ratio": 0.824999848057399,
+      "ms_per_token_ratio": 1.212121435361071
+    },
+    {
+      "id": "repo-021",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 387.4932369020012,
+      "vanilla_decode_tok_s": 320.08500695929615,
+      "decode_rate_ratio": 0.8260402414203867,
+      "ms_per_token_ratio": 1.210594774753936
+    },
+    {
+      "id": "repo-026",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 382.30715171735943,
+      "vanilla_decode_tok_s": 316.0409345268663,
+      "decode_rate_ratio": 0.8266675972635639,
+      "ms_per_token_ratio": 1.2096760575958236
+    },
+    {
+      "id": "worklog-014",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 301.78000066109655,
+      "vanilla_decode_tok_s": 249.67388284026592,
+      "decode_rate_ratio": 0.827337405703877,
+      "ms_per_token_ratio": 1.2086967095960397
+    },
+    {
+      "id": "worklog-018",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 349.05944501397255,
+      "vanilla_decode_tok_s": 290.9987678708927,
+      "decode_rate_ratio": 0.833665359948201,
+      "ms_per_token_ratio": 1.1995220720963313
+    },
+    {
+      "id": "repo-027",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 307.06345818451325,
+      "vanilla_decode_tok_s": 256.10283522851154,
+      "decode_rate_ratio": 0.834038790361764,
+      "ms_per_token_ratio": 1.1989850011247682
+    },
+    {
+      "id": "repo-023",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 413.41224511620237,
+      "vanilla_decode_tok_s": 345.0230609766571,
+      "decode_rate_ratio": 0.834573878864371,
+      "ms_per_token_ratio": 1.1982162697935492
+    },
+    {
+      "id": "reg-commit-e881586f",
+      "workload": "regression-contract",
+      "shipped_decode_tok_s": 276.70196277607903,
+      "vanilla_decode_tok_s": 231.53002497182104,
+      "decode_rate_ratio": 0.8367487626359436,
+      "ms_per_token_ratio": 1.1951018569179344
+    },
+    {
+      "id": "repo-019",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 438.0541888003017,
+      "vanilla_decode_tok_s": 366.6060260081268,
+      "decode_rate_ratio": 0.8368965196113068,
+      "ms_per_token_ratio": 1.194890857551237
+    },
+    {
+      "id": "reg-title-commit-measure",
+      "workload": "regression-contract",
+      "shipped_decode_tok_s": 313.31553255646196,
+      "vanilla_decode_tok_s": 262.2605600425895,
+      "decode_rate_ratio": 0.8370493409717185,
+      "ms_per_token_ratio": 1.1946727045255354
+    },
+    {
+      "id": "repo-011",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 317.1216835686751,
+      "vanilla_decode_tok_s": 265.47671038896567,
+      "decode_rate_ratio": 0.8371446171749233,
+      "ms_per_token_ratio": 1.1945367377200107
+    },
+    {
+      "id": "repo-029",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 343.4430794089372,
+      "vanilla_decode_tok_s": 287.53544222308636,
+      "decode_rate_ratio": 0.8372142560506171,
+      "ms_per_token_ratio": 1.1944373770189851
+    },
+    {
+      "id": "log-006",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 260.7199743717908,
+      "vanilla_decode_tok_s": 218.28996326049983,
+      "decode_rate_ratio": 0.8372583028456996,
+      "ms_per_token_ratio": 1.1943745396147987
+    },
+    {
+      "id": "repo-016",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 333.7037652329103,
+      "vanilla_decode_tok_s": 279.5281814228663,
+      "decode_rate_ratio": 0.8376536633554856,
+      "ms_per_token_ratio": 1.1938108119699316
+    },
+    {
+      "id": "repo-024",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 445.6203859436242,
+      "vanilla_decode_tok_s": 373.36618812702386,
+      "decode_rate_ratio": 0.8378570637795253,
+      "ms_per_token_ratio": 1.1935209992609683
+    },
+    {
+      "id": "worklog-010",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 411.1753947573034,
+      "vanilla_decode_tok_s": 344.6527702768669,
+      "decode_rate_ratio": 0.8382135085692528,
+      "ms_per_token_ratio": 1.1930134622942317
+    },
+    {
+      "id": "repo-028",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 395.4658131399262,
+      "vanilla_decode_tok_s": 331.59474867140074,
+      "decode_rate_ratio": 0.8384915652723535,
+      "ms_per_token_ratio": 1.192617840675817
+    },
+    {
+      "id": "worklog-008",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 362.75360967787606,
+      "vanilla_decode_tok_s": 304.30814684898996,
+      "decode_rate_ratio": 0.8388838559572558,
+      "ms_per_token_ratio": 1.1920601319224262
+    },
+    {
+      "id": "worklog-012",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 406.572684451716,
+      "vanilla_decode_tok_s": 341.0766805971901,
+      "decode_rate_ratio": 0.8389070236165752,
+      "ms_per_token_ratio": 1.1920272114172366
+    },
+    {
+      "id": "repo-015",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 372.1965558760449,
+      "vanilla_decode_tok_s": 312.33808042232533,
+      "decode_rate_ratio": 0.8391750957694122,
+      "ms_per_token_ratio": 1.1916464216363962
+    },
+    {
+      "id": "repo-018",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 426.76953901611074,
+      "vanilla_decode_tok_s": 358.2024662519918,
+      "decode_rate_ratio": 0.8393346607581322,
+      "ms_per_token_ratio": 1.1914198790465131
+    },
+    {
+      "id": "repo-007",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 407.4936132911958,
+      "vanilla_decode_tok_s": 342.30191441489313,
+      "decode_rate_ratio": 0.8400178634708649,
+      "ms_per_token_ratio": 1.1904508743041557
+    },
+    {
+      "id": "log-024",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 228.137499182796,
+      "vanilla_decode_tok_s": 191.70761092751945,
+      "decode_rate_ratio": 0.8403160883862982,
+      "ms_per_token_ratio": 1.1900283879133515
+    },
+    {
+      "id": "repo-004",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 296.55211776108314,
+      "vanilla_decode_tok_s": 249.30229276259467,
+      "decode_rate_ratio": 0.8406694062574349,
+      "ms_per_token_ratio": 1.1895282408954155
+    },
+    {
+      "id": "repo-003",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 412.98033418693336,
+      "vanilla_decode_tok_s": 347.4911967179345,
+      "decode_rate_ratio": 0.8414231089285826,
+      "ms_per_token_ratio": 1.1884627239122771
+    },
+    {
+      "id": "repo-005",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 282.37674729952545,
+      "vanilla_decode_tok_s": 237.62946780003543,
+      "decode_rate_ratio": 0.8415334126218784,
+      "ms_per_token_ratio": 1.1883069465826719
+    },
+    {
+      "id": "repo-001",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 331.67946744461676,
+      "vanilla_decode_tok_s": 279.3106872927589,
+      "decode_rate_ratio": 0.8421102742496345,
+      "ms_per_token_ratio": 1.1874929336197135
+    },
+    {
+      "id": "worklog-006",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 333.2397356540378,
+      "vanilla_decode_tok_s": 280.6754997042747,
+      "decode_rate_ratio": 0.84226300069949,
+      "ms_per_token_ratio": 1.1872776070770188
+    },
+    {
+      "id": "log-002",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 258.58855223628495,
+      "vanilla_decode_tok_s": 218.35794988476061,
+      "decode_rate_ratio": 0.8444223380980777,
+      "ms_per_token_ratio": 1.1842415280632386
+    },
+    {
+      "id": "repo-022",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 343.520228069122,
+      "vanilla_decode_tok_s": 290.18690431877235,
+      "decode_rate_ratio": 0.8447447358482246,
+      "ms_per_token_ratio": 1.1837895609919138
+    },
+    {
+      "id": "worklog-016",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 375.3624349526928,
+      "vanilla_decode_tok_s": 317.56789038424114,
+      "decode_rate_ratio": 0.8460300254186716,
+      "ms_per_token_ratio": 1.1819911468332747
+    },
+    {
+      "id": "log-012",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 303.0187506064983,
+      "vanilla_decode_tok_s": 256.99851743223155,
+      "decode_rate_ratio": 0.8481274406875604,
+      "ms_per_token_ratio": 1.1790680881511386
+    },
+    {
+      "id": "log-019",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 286.38626063222523,
+      "vanilla_decode_tok_s": 243.03332017908653,
+      "decode_rate_ratio": 0.848620739146379,
+      "ms_per_token_ratio": 1.1783827025084164
+    },
+    {
+      "id": "worklog-001",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 445.65272385819276,
+      "vanilla_decode_tok_s": 378.44036506911544,
+      "decode_rate_ratio": 0.8491822102932678,
+      "ms_per_token_ratio": 1.1776035671480292
+    },
+    {
+      "id": "repo-008",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 402.1964282874204,
+      "vanilla_decode_tok_s": 341.6492716233281,
+      "decode_rate_ratio": 0.8494587410387849,
+      "ms_per_token_ratio": 1.1772202129289073
+    },
+    {
+      "id": "repo-025",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 359.5199457024215,
+      "vanilla_decode_tok_s": 305.86937613463425,
+      "decode_rate_ratio": 0.8507716464437987,
+      "ms_per_token_ratio": 1.1754035341680362
+    },
+    {
+      "id": "repo-020",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 355.3843709543567,
+      "vanilla_decode_tok_s": 302.9417418296377,
+      "decode_rate_ratio": 0.8524340589770775,
+      "ms_per_token_ratio": 1.173111268219388
+    },
+    {
+      "id": "reg-commit-708d6c94",
+      "workload": "regression-contract",
+      "shipped_decode_tok_s": 241.21498931582693,
+      "vanilla_decode_tok_s": 205.77098676873368,
+      "decode_rate_ratio": 0.8530605305763739,
+      "ms_per_token_ratio": 1.1722497573816313
+    },
+    {
+      "id": "worklog-013",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 378.88608866745506,
+      "vanilla_decode_tok_s": 323.90722189701165,
+      "decode_rate_ratio": 0.8548934141028919,
+      "ms_per_token_ratio": 1.1697364648075808
+    },
+    {
+      "id": "worklog-004",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 244.3754079572513,
+      "vanilla_decode_tok_s": 210.19769978597193,
+      "decode_rate_ratio": 0.8601426041311895,
+      "ms_per_token_ratio": 1.1625979171326797
+    },
+    {
+      "id": "log-020",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 252.81435312782764,
+      "vanilla_decode_tok_s": 217.51501862205598,
+      "decode_rate_ratio": 0.860374484007545,
+      "ms_per_token_ratio": 1.1622845848962096
+    },
+    {
+      "id": "log-023",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 244.12157830206914,
+      "vanilla_decode_tok_s": 210.23189725509303,
+      "decode_rate_ratio": 0.8611770361199207,
+      "ms_per_token_ratio": 1.1612014232352894
+    },
+    {
+      "id": "repo-013",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 374.9696694309928,
+      "vanilla_decode_tok_s": 323.25955299646506,
+      "decode_rate_ratio": 0.8620952022252986,
+      "ms_per_token_ratio": 1.1599646969600717
+    },
+    {
+      "id": "log-008",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 252.02547446915096,
+      "vanilla_decode_tok_s": 217.65223986039086,
+      "decode_rate_ratio": 0.8636120627045282,
+      "ms_per_token_ratio": 1.1579273185096013
+    },
+    {
+      "id": "repo-014",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 315.5508449676635,
+      "vanilla_decode_tok_s": 274.11981814970216,
+      "decode_rate_ratio": 0.8687025324802821,
+      "ms_per_token_ratio": 1.1511420337924458
+    },
+    {
+      "id": "log-004",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 238.55842830701982,
+      "vanilla_decode_tok_s": 207.62336278304969,
+      "decode_rate_ratio": 0.8703249944111916,
+      "ms_per_token_ratio": 1.1489960720667785
+    },
+    {
+      "id": "reg-title-rollback",
+      "workload": "regression-contract",
+      "shipped_decode_tok_s": 379.21287879199855,
+      "vanilla_decode_tok_s": 332.74488210985277,
+      "decode_rate_ratio": 0.8774619764229213,
+      "ms_per_token_ratio": 1.1396505226091045
+    },
+    {
+      "id": "log-018",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 221.29578177939848,
+      "vanilla_decode_tok_s": 197.01896760099748,
+      "decode_rate_ratio": 0.8902969863085702,
+      "ms_per_token_ratio": 1.1232206953168407
+    },
+    {
+      "id": "log-005",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 232.63081849888474,
+      "vanilla_decode_tok_s": 208.98805730389472,
+      "decode_rate_ratio": 0.8983678888826875,
+      "ms_per_token_ratio": 1.1131297237746485
+    },
+    {
+      "id": "repo-012",
+      "workload": "repository-evidence",
+      "shipped_decode_tok_s": 354.2435576908883,
+      "vanilla_decode_tok_s": 319.2333280184588,
+      "decode_rate_ratio": 0.9011690434100165,
+      "ms_per_token_ratio": 1.1096697199184826
+    },
+    {
+      "id": "log-009",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 258.5640625930266,
+      "vanilla_decode_tok_s": 233.98760327462546,
+      "decode_rate_ratio": 0.9049502120598875,
+      "ms_per_token_ratio": 1.1050331683151453
+    },
+    {
+      "id": "worklog-011",
+      "workload": "work-log-extraction",
+      "shipped_decode_tok_s": 345.26490321544986,
+      "vanilla_decode_tok_s": 315.29271262069005,
+      "decode_rate_ratio": 0.9131907404557226,
+      "ms_per_token_ratio": 1.0950614758762838
+    },
+    {
+      "id": "log-003",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 220.69750973204103,
+      "vanilla_decode_tok_s": 213.038180651141,
+      "decode_rate_ratio": 0.9652949002904493,
+      "ms_per_token_ratio": 1.035952846844118
+    },
+    {
+      "id": "reg-commit-5933e395",
+      "workload": "regression-contract",
+      "shipped_decode_tok_s": 245.5725827398674,
+      "vanilla_decode_tok_s": 240.48217531197787,
+      "decode_rate_ratio": 0.9792712713646793,
+      "ms_per_token_ratio": 1.0211675040833514
+    },
+    {
+      "id": "log-014",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 317.3992185535461,
+      "vanilla_decode_tok_s": 323.61820463973527,
+      "decode_rate_ratio": 1.0195935771818543,
+      "ms_per_token_ratio": 0.9807829535019132
+    },
+    {
+      "id": "log-001",
+      "workload": "log-triage",
+      "shipped_decode_tok_s": 269.5977933655106,
+      "vanilla_decode_tok_s": 279.1539891741873,
+      "decode_rate_ratio": 1.0354461202719147,
+      "ms_per_token_ratio": 0.9657672962620147
+    }
+  ],
+  "vanilla_passes_G2": false,
+  "notes": [
+    "Role requests are serial; server metrics are joined by completion token shape and submit time.",
+    "Within a two-client pair, identical token shapes make individual completion-order assignment ambiguous; pair aggregates are authoritative, not the per-index attribution.",
+    "Fixed global KV capacity 131072 is a performance counterfactual, not automatic-capacity or persistence acceptance."
+  ]
+}

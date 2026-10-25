@@ -32,6 +32,14 @@ using MmaR64T64K64Wr32Wt16S2A2B2 =
                      Q4ScaleLoad::Pair32>;
 
 using SlicedK5120T16 = Q4A16SlicedKMmaSchedule<16, 16, 8, 1, Cache::cg, Cache::ca, 6, 5120, 16>;
+// Padding separates the eight fragment rows' code loads across shared-memory banks.
+// Keep these verify schedules distinct from the other sliced-K consumers.
+using SlicedK5120T8PairwisePad16 =
+    Q4A16SlicedKMmaSchedule<16, 8, 8, 2, Cache::cg, Cache::ca, 6, 5120, 8,
+                           Q4SlicedKReduction::Pairwise, 16>;
+using SlicedK5120T16PairwisePad16 =
+    Q4A16SlicedKMmaSchedule<16, 16, 8, 1, Cache::cg, Cache::ca, 6, 5120, 16,
+                           Q4SlicedKReduction::Pairwise, 16>;
 using SlicedK5120T24 = Q4A16SlicedKMmaSchedule<16, 24, 8, 1, Cache::cg, Cache::ca, 6, 5120, 24>;
 using SlicedK2048T4  = Q4A16SlicedKMmaSchedule<16, 8, 8, 1, Cache::cg, Cache::ca, 6, 2048, 4>;
 

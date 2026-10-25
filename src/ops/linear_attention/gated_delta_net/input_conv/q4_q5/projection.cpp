@@ -13,7 +13,11 @@ Q4Q5GdnInputScheduleId select_grouped_projection(int columns) {
 void q4_q5_gdn_input_dispatch(const Tensor& x, const Weight& qk_weight,
                               const Weight& value_z_weight, Tensor& qkv, Tensor& z,
                               cudaStream_t stream) {
-    if (x.ne[1] <= 12) {
+    bool independent = x.ne[1] <= 12;
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+    independent = independent || x.ne[1] == 16;
+#endif
+    if (independent) {
         Tensor qk    = qkv.slice(0, 0, 4096);
         Tensor value = qkv.slice(0, 4096, 6144);
         launch_q4_q5_gdn_input_independent(x, qk_weight, value_z_weight, qk, value, z, stream);

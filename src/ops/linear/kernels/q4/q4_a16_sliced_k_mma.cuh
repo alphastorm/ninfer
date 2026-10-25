@@ -53,7 +53,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void q4_a16_sli
 
     union SharedStorage {
         struct {
-            alignas(16) std::uint8_t codes[S][R][W][32];
+            alignas(16) std::uint8_t codes[S][R][W * 32 + Schedule::kCodeRowPadding];
             alignas(16) std::uint16_t scales[S][R][W];
             alignas(16) __nv_bfloat16 x[S][W][T][64];
         } staging;
@@ -88,7 +88,8 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void q4_a16_sli
                             first_group + group
                       : 0;
             common::cp_async_zfill<16, Schedule::kWeightCache>(
-                &shared.staging.codes[slot][row][group][half * 16], codes + index * 32 + half * 16,
+                &shared.staging.codes[slot][row][group * 32 + half * 16],
+                codes + index * 32 + half * 16,
                 valid ? 16 : 0);
         }
         if constexpr (Full) {
@@ -149,7 +150,8 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void q4_a16_sli
                 const int r0      = mi * 16 + gid;
                 const int byte0   = ks * 8 + lid;
                 const auto decode = [&](int row, int byte) {
-                    return q4_sliced_k_integer_pair(shared.staging.codes[slot][row][warp][byte]);
+                    return q4_sliced_k_integer_pair(
+                        shared.staging.codes[slot][row][warp * 32 + byte]);
                 };
                 const unsigned a0 = decode(r0, byte0);
                 const unsigned a1 = decode(r0 + 8, byte0);
