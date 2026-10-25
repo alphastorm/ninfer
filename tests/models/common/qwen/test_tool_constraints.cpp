@@ -5,6 +5,7 @@
 
 #include <nlohmann/json.hpp>
 #include <iostream>
+#include <optional>
 #include <stdexcept>
 
 namespace {
@@ -32,8 +33,9 @@ auto contract(const Json& schema, bool strict, ninfer::ToolChoice choice = {}) {
 }
 
 bool accepts(ninfer::text::GrammarCompiler& compiler,
-             const frontend::ToolCallOutputContract& contract, std::string_view value) {
-    auto matcher = frontend::compile_tool_grammar(compiler, contract, {}, {});
+             const frontend::ToolCallOutputContract& contract, std::string_view value,
+             const std::optional<ninfer::OutputConstraint>& body = std::nullopt) {
+    auto matcher = frontend::compile_tool_grammar(compiler, contract, {}, {}, body);
     std::vector<std::uint32_t> words(matcher->mask_words());
     for (unsigned char c : value) {
         if (matcher->masks({}, words) || !(words[c / 32] & (1u << (c % 32)))) return false;
@@ -96,8 +98,23 @@ void basic_contracts(ninfer::text::GrammarCompiler& compiled) {
             "generic argument syntax rejected repeated keys");
     frontend::ToolCallOutputDecoder duplicate(integer, 64);
     (void)duplicate.feed(repeated);
-    require(duplicate.finish().tool_calls.at(0).arguments_json == R"({"x":2})",
-            "non-strict duplicate was not resolved to one final value");
+    const auto repeated_result = duplicate.finish();
+    require(repeated_result.tool_calls.empty() && repeated_result.content == repeated &&
+                repeated_result.diagnostics.fallback_reason ==
+                    ninfer::ToolCallParseFallbackReason::DuplicateParameter,
+            "non-strict duplicate did not fall back atomically");
+
+    const auto mismatched = call("not an integer");
+    require(accepts(compiled, *integer, mismatched),
+            "basic grammar unexpectedly enforced declared argument types");
+    frontend::ToolCallOutputDecoder mismatch(integer, 64);
+    (void)mismatch.feed(mismatched);
+    const auto mismatch_result = mismatch.finish();
+    require(mismatch_result.tool_calls.empty() && mismatch_result.content == mismatched &&
+                mismatch_result.diagnostics.schema_mismatch_arguments == 1 &&
+                mismatch_result.diagnostics.fallback_reason ==
+                    ninfer::ToolCallParseFallbackReason::SchemaMismatch,
+            "basic schema mismatch did not fall back atomically");
 
     // These requests share the same compiled envelope but have different value normalization.
     const auto string = contract(schema({{"type", "string"}}), false);
@@ -152,14 +169,21 @@ void selected_contracts(ninfer::text::GrammarCompiler& compiled) {
             "non-strict sibling relaxed strict values");
     require(!accepts(compiled, *selected, call("2", "excluded")),
             "selection admitted an excluded function");
-    const auto mixed = call("2", "strict") + "\n" + call("wrong", "loose");
+    const auto mixed = call("2", "strict") + "\n" + call("1", "loose");
     require(accepts(compiled, *selected, mixed), "mixed strict/non-strict calls rejected");
     frontend::ToolCallOutputDecoder decoder(selected, 64);
     (void)decoder.feed(mixed);
     const auto calls = decoder.finish().tool_calls;
     require(calls.size() == 2 && Json::parse(calls[0].arguments_json)["x"] == 2 &&
-                Json::parse(calls[1].arguments_json)["x"] == "wrong",
+                Json::parse(calls[1].arguments_json)["x"] == 1,
             "selected tools used another function's argument codec");
+    const auto invalid = mixed + "\n" + call("wrong", "loose");
+    require(accepts(compiled, *selected, invalid), "basic grammar rejected raw argument syntax");
+    frontend::ToolCallOutputDecoder fallback(selected, 64);
+    (void)fallback.feed(invalid);
+    const auto rejected_calls = fallback.finish();
+    require(rejected_calls.tool_calls.empty() && rejected_calls.content == invalid,
+            "a later non-strict mismatch published preceding calls");
 
     choice.allowed_names = std::vector<std::string>{"loose"};
     choice.mode          = ninfer::ToolChoiceMode::Required;
@@ -179,10 +203,75 @@ void selected_contracts(ninfer::text::GrammarCompiler& compiled) {
     }
 }
 
+void json_body_contracts(ninfer::text::GrammarCompiler& compiled) {
+    const auto parameters    = schema({{"type", "integer"}, {"minimum", 2}, {"maximum", 3}});
+    const auto automatic     = contract(parameters, true);
+    const auto body          = ninfer::OutputConstraint::json_schema(R"({"type":"object",
+        "properties":{"status":{"const":"ok"}},"required":["status"],
+        "additionalProperties":false})");
+    const std::string answer = " \n{ \"status\" : \"ok\" }\t";
+    require(accepts(compiled, *automatic, answer, body) &&
+                !accepts(compiled, *automatic, "{\"status\":\"bad\"}", body),
+            "tool composition changed formatted JSON body constraints");
+    require(accepts(compiled, *automatic, call("2"), body) &&
+                !accepts(compiled, *automatic, call("4"), body),
+            "JSON body whitespace changed strict tool parameters");
+    ninfer::ToolChoice choice;
+    choice.mode         = ninfer::ToolChoiceMode::Required;
+    const auto required = contract(parameters, true, choice);
+    require(!accepts(compiled, *required, answer, body) &&
+                accepts(compiled, *required, call("2"), body),
+            "JSON body whitespace bypassed required tool choice");
+}
+
+void custom_contracts(ninfer::text::GrammarCompiler& compiled) {
+    const Json definition{
+        {"type", "function"},
+        {"function", {{"name", "call"},
+                       {"parameters", {{"type", "object"},
+                                       {"properties", {{"input", {{"type", "string"}}}}},
+                                       {"required", {"input"}},
+                                       {"additionalProperties", false}}}}},
+        {"x-ninfer-tool-kind", "custom"}};
+    const std::vector<std::string> definitions{definition.dump()};
+    const auto bound = frontend::select_tool_call_contract(
+        frontend::build_tool_call_output_contract(definitions), {});
+    const std::string raw = "{\"a\":1}\nprint('ok')\n";
+    const std::string text = "<tool_call>\n<function=call>\n<parameter=input>\n" + raw +
+                             "\n</parameter>\n</function>\n</tool_call>";
+    require(accepts(compiled, *bound, text), "custom grammar rejected opaque raw input");
+    require(!accepts(compiled, *bound, call("wrong parameter")) &&
+                !accepts(compiled, *bound, "<tool_call>\n<function=call>\n</function>\n</tool_call>"),
+            "custom grammar did not require the sole input parameter");
+    frontend::ToolCallOutputDecoder decoder(bound, 128);
+    for (const char& byte : text)
+        require(decoder.feed(std::string_view(&byte, 1)).empty(), "custom input leaked as text");
+    const auto output = decoder.finish();
+    require(output.tool_calls.size() == 1 && output.tool_calls[0].arguments_json == raw &&
+                output.tool_calls[0].kind == ninfer::ToolKind::Custom,
+            "constrained custom input was JSON-coerced or lost its kind");
+    auto function = definition;
+    function.erase("x-ninfer-tool-kind");
+    const std::vector<std::string> ordinary{function.dump()};
+    const auto normal = frontend::select_tool_call_contract(
+        frontend::build_tool_call_output_contract(ordinary), {});
+    require(accepts(compiled, *normal, call("ordinary")),
+            "custom grammar cache constrained a function's open parameter list");
+    frontend::ToolCallOutputDecoder normal_decoder(normal, 128);
+    (void)normal_decoder.feed(text);
+    const auto normal_output = normal_decoder.finish();
+    require(normal_output.tool_calls.size() == 1 &&
+                normal_output.tool_calls[0].kind == ninfer::ToolKind::Function &&
+                Json::parse(normal_output.tool_calls[0].arguments_json)["input"] == raw,
+            "custom grammar cache changed a function's argument codec");
+}
+
 void run() {
     auto compiled = compiler();
     basic_contracts(compiled);
     selected_contracts(compiled);
+    json_body_contracts(compiled);
+    custom_contracts(compiled);
     ninfer::ToolChoice required;
     required.mode = ninfer::ToolChoiceMode::Required;
     auto fixed =

@@ -231,16 +231,19 @@ Reasoning is returned separately as `reasoning_content`; answer text remains in 
 
 For non-strict tools, a direct top-level tool-parameter
 `type`, or an `anyOf`/`oneOf` composed entirely of explicit primitive types, guides conversion of
-Qwen's untyped parameter text. It does not decide whether structurally complete markup is a tool
-call. String-admitting values remain strings, including the empty string. An empty block for a
-declared non-string parameter is omitted. Admitted JSON values retain their JSON type;
-case-insensitive boolean text is normalized to `true` or `false`. A nonempty schema mismatch remains
-a structured call: valid JSON retains its represented type and other text becomes a JSON string so
-the tool consumer can report the validation error and continue the agent loop. Schemas without a
-supported explicit type retain untyped inference. NInfer does not apply defaults, enforce required
-properties, or perform recursive JSON Schema validation on this route.
+Qwen's untyped parameter text. String-admitting values remain strings, including the empty string.
+An empty block for a declared non-string parameter is omitted. Admitted JSON values retain their
+JSON type; case-insensitive boolean text is normalized to `true` or `false`, and numeric lexemes retain their
+precision. A nonempty declared-type mismatch or a duplicate parameter causes the entire tool-call
+region to fall back atomically to ordinary content, without publishing preceding calls. This
+normalization rule applies to both free output and the non-strict basic envelope grammar; strict
+schema-aware decoding remains authoritative. Schemas without a supported explicit type and
+undeclared parameters retain untyped inference. NInfer does not apply defaults, enforce required
+properties, or perform recursive JSON Schema validation on this route. A custom tool's sole `input`
+is opaque text, including JSON-looking text; its kind and raw bytes survive output and retained
+history, with the history wrapper added only for template rendering.
 
-On the unconstrained route, string parameters preserve function/tool-call markers and balanced nested
+On the unconstrained route, function string parameters preserve function/tool-call markers and balanced nested
 `<parameter=...>...</parameter>` text as value bytes. The Qwen wire format has no delimiter escape,
 so an unmatched nested parameter opener or a standalone `</parameter>` cannot be represented
 unambiguously; either causes the complete tool-call region to fall back to ordinary content.
@@ -1047,9 +1050,10 @@ unspecified. `enable_thinking` records whether the response starts in thinking m
 
 `request_done.result.tool_call_parse` records whether a complete marker was seen, the structured
 call count, empty non-string arguments omitted during normalization, schema-mismatched arguments
-preserved for consumer validation, and a stable text-fallback reason. Fallback reasons are `none`,
-`malformed_structure`, `duplicate_parameter`, `invalid_tool_name`, `undeclared_tool`, and
-`trailing_content`. These counters contain no tool arguments or generated text.
+encountered during normalization, and a stable text-fallback reason. Fallback reasons are `none`,
+`malformed_structure`, `duplicate_parameter`, `invalid_tool_name`, `undeclared_tool`,
+`trailing_content`, and `schema_mismatch`. The latter identifies declared-type atomic fallback.
+These counters contain no tool arguments or generated text.
 
 `request_done.constraint` carries the same constraint observation as the HTTP terminal result,
 or `null` for unconstrained requests. Preparation failures and execution errors use the existing
