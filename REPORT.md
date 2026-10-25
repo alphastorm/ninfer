@@ -10,4 +10,5 @@
 - Verification: pending the explicitly assigned priority-2 K0 lease build; no tests, builds, linters or formatters run locally. Final measured result will replace this entry.
 - Registration requested from Integrator: standalone C++ test with `src` and `third_party` include roots, fixture-directory argument; Python CTest invocation `Python3_EXECUTABLE -B tests/test_durable_contracts.py`. Headers need no link source registration.
 - Not claimed: production MAC/parser validation, native codec/import, Engine transaction implementation, crash/restart proof, Windows build/runtime, G1/G2 or full K4 failure matrix. Owning slices/integration supply those gates.
+- Main-approved implementation-only follow-up: `durable_reason_name` centralizes frozen K7 spellings beside the enum, with compile-time assertions in the existing header test. This addition is not covered by the original K0 proof; Integrator owns verification in its next batched job, with no separate K0 lease.
 - Provenance: derived from upstream/fork interfaces and approved RepoPrompt plan `prep-v0-13-0-upstream-re-DF08C8`; no community code copied. No publication/tag/release action performed.
