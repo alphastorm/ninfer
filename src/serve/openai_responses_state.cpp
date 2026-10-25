@@ -23,12 +23,7 @@ namespace {
 }
 
 [[noreturn]] void response_not_found(const std::string& id) {
-    ApiError error{.status  = 404,
-                   .type    = "invalid_request_error",
-                   .message = "response '" + id + "' not found",
-                   .param   = "previous_response_id",
-                   .code    = "response_not_found"};
-    throw ApiException(std::move(error));
+    throw ApiException(make_previous_response_not_found_error(id));
 }
 
 bool has_user_query(const std::vector<ChatTurn>& turns) {
@@ -142,18 +137,41 @@ ChatTurn instruction_turn(const std::string& text) {
 
 } // namespace
 
+ApiError make_previous_response_not_found_error(const std::string& id) {
+    return {.status = 404, .type = "invalid_request_error",
+            .message = "previous response '" + id + "' not found",
+            .param = "previous_response_id", .code = "previous_response_not_found"};
+}
+
+ApiError make_response_not_found_error(const std::string& id) {
+    return {.status = 404, .type = "invalid_request_error",
+            .message = "response '" + id + "' not found",
+            .param = "response_id", .code = "response_not_found"};
+}
+
 OpenAIResponsesResolvedPrompt
 resolve_openai_responses_prompt(const OpenAIResponsesPromptRequest& request,
                                 OpenAIResponsesStore& store, std::optional<std::string> response_id,
-                                bool store_response) {
+                                bool store_response,
+                                const OpenAIResponseRestoreCallback& restore) {
     OpenAIResponsesResolvedPrompt resolved;
     resolved.generation = request.generation;
 
     std::shared_ptr<const StoredOpenAIResponse> parent_record;
     if (request.previous_response_id) {
-        parent_record = store.get(*request.previous_response_id);
+        parent_record = store.get_for_session(*request.previous_response_id,
+                                               request.generation.client_session_sha256);
+        if (!parent_record && request.generation.client_session_sha256 && restore) {
+            (void)restore(*request.generation.client_session_sha256,
+                          std::string_view(*request.previous_response_id), store);
+            parent_record = store.get_for_session(*request.previous_response_id,
+                                                   request.generation.client_session_sha256);
+        }
         if (!parent_record) { response_not_found(*request.previous_response_id); }
         resolved.parent = parent_record->context;
+    } else if (store_response && request.generation.client_session_sha256 && restore &&
+               !store.latest_response_id(*request.generation.client_session_sha256)) {
+        (void)restore(*request.generation.client_session_sha256, std::nullopt, store);
     }
 
     const std::optional<bool> parent_preserve =
@@ -166,11 +184,19 @@ resolve_openai_responses_prompt(const OpenAIResponsesPromptRequest& request,
     }
 
     std::vector<ChatTurn> context = flatten_openai_response_context(resolved.parent);
+    const std::size_t inherited_turns = context.size();
     context.insert(context.end(), request.input_turns.begin(), request.input_turns.end());
+    for (auto& turn : context) { turn.private_cache_boundary_after = false; }
     if (!has_user_query(context)) {
         invalid_input("input must provide a user query when no previous response contains one");
     }
     context = normalize_call_graph(std::move(context));
+    // Normalization preserves turn counts and the inherited prefix. Mark after reordering tool
+    // results, not on a result whose original wire position may move inside the call group.
+    if (response_id && inherited_turns != 0) {
+        context[inherited_turns - 1].private_cache_boundary_after = true;
+    }
+    if (store_response && !context.empty()) { context.back().private_cache_boundary_after = true; }
 
     resolved.generation.messages.reserve(context.size() + (request.instructions ? 1U : 0U));
     if (request.instructions) {
@@ -182,7 +208,10 @@ resolve_openai_responses_prompt(const OpenAIResponsesPromptRequest& request,
     apply_openai_prompt_cache_policy(resolved.generation, request.cache_policy);
 
     if (response_id) {
-        if (parent_record) {
+        if (request.generation.client_session_sha256) {
+            resolved.session_key = "http:" + *request.generation.client_session_sha256;
+            resolved.cache_hints.reuse_scope = resolved.session_key;
+        } else if (parent_record) {
             resolved.session_key = parent_record->session_key;
         } else if (store_response) {
             resolved.session_key = *response_id;

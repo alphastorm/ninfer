@@ -1,4 +1,8 @@
 add_library(ninfer_serve STATIC
+  client_identity.cpp
+  opaque_id.cpp
+  stop_event.cpp
+  server_identity.cpp
   http_transport.cpp
   request_validation.cpp
   openai_chat_request.cpp
@@ -26,3 +30,6 @@ ninfer_internal_includes(ninfer_serve)
 target_link_libraries(ninfer_serve
   PUBLIC ninfer_engine Threads::Threads ninfer::json ninfer::httplib
   PRIVATE ninfer_media_acquire ninfer_product_logging ninfer_grammar CUDA::cudart)
+if(WIN32)
+  target_link_libraries(ninfer_serve PRIVATE bcrypt advapi32)
+endif()

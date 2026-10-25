@@ -844,10 +844,37 @@ int test_constrained_decoding() {
     return failures;
 }
 
+int test_tool_name_limits() {
+    int failures = 0;
+    const std::string prefix = "mcp__github__";
+    for (const auto& name : {prefix + std::string(71 - prefix.size(), 'x'), std::string(128, 'n')}) {
+        Json body = base_request();
+        body["tools"] = Json::array({Json{{"name", name},
+                                          {"input_schema", Json{{"type", "object"}}}}});
+        body["tool_choice"] = Json{{"type", "tool"}, {"name", name}};
+        const auto request = parse(body);
+        failures += check(request.generation.tools[0].name == name &&
+                              request.generation.tool_choice.allowed_names ==
+                                  std::vector<std::string>{name} &&
+                              request.generation.tool_name_max_length == kMaxToolNameLength,
+                          "Anthropic rejected a 71-character MCP or maximum-length tool name");
+    }
+    for (const auto& name : {std::string(), std::string(129, 'n'), std::string("not.ascii"),
+                             std::string("caf\xc3\xa9")}) {
+        Json body = base_request();
+        body["tools"] = Json::array({Json{{"name", name},
+                                          {"input_schema", Json{{"type", "object"}}}}});
+        failures += check(!api_param([&] { (void)parse(body); }).empty(),
+                          "Anthropic accepted a name outside the 1..128 ASCII contract");
+    }
+    return failures;
+}
+
 } // namespace
 
 int main() {
     int failures = 0;
+    failures += test_tool_name_limits();
     failures += test_constrained_decoding();
     failures += test_envelope_and_field_policy();
     failures += test_message_normalization();

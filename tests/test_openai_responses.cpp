@@ -3,6 +3,7 @@
 // an Engine instance.
 
 #include "serve/generation_service.h"
+#include "serve/client_identity.h"
 #include "serve/openai_responses.h"
 #include "serve/translate.h"
 
@@ -289,13 +290,15 @@ int test_typed_items_and_cache_markers() {
             media.bytes = {1};
             return media;
         });
-    failures += check(translated.context_cache.markers.size() == 2 &&
+    failures += check(translated.context_cache.markers.size() == 3 &&
                           translated.context_cache.markers[0].kind ==
                               ninfer::PromptCacheMarkerKind::SharedStablePrefix &&
                           translated.context_cache.markers[0].location ==
                               ninfer::PromptCacheMarkerLocation::MessagePartBoundary &&
                           translated.context_cache.markers[1].kind ==
-                              ninfer::PromptCacheMarkerKind::SharedStablePrefix,
+                              ninfer::PromptCacheMarkerKind::SharedStablePrefix &&
+                          translated.context_cache.markers[2].kind ==
+                              ninfer::PromptCacheMarkerKind::PrivateLongAnchor,
                       "Responses breakpoints become shared Engine part boundaries");
     return failures;
 }
@@ -319,14 +322,17 @@ int test_prompt_cache_policy_after_history_resolution() {
     const auto first_prompt = to_prompt_input(first.generation, ResolvedPromptSemantics{}, {});
     int failures            = 0;
     failures +=
-        check(first_prompt.context_cache.markers.size() == 2 &&
+        check(first_prompt.context_cache.markers.size() == 3 &&
                   first_prompt.context_cache.markers[0].location == Location::MessagePartBoundary &&
                   first_prompt.context_cache.markers[0].after_message_part_count == 1 &&
                   first_prompt.context_cache.markers[0].evidence == Evidence::ExplicitBoundary &&
                   first_prompt.context_cache.markers[1].location == Location::MessagePartBoundary &&
                   first_prompt.context_cache.markers[1].after_message_part_count == 2 &&
                   first_prompt.context_cache.markers[1].after_message_count == 1 &&
-                  first_prompt.context_cache.markers[1].evidence == Evidence::DefaultAutomatic,
+                  first_prompt.context_cache.markers[1].evidence == Evidence::DefaultAutomatic &&
+                  first_prompt.context_cache.markers[2].kind ==
+                      ninfer::PromptCacheMarkerKind::PrivateLongAnchor &&
+                  first_prompt.context_cache.markers[2].after_message_count == 1,
               "Responses chooses the final source part after assembling input");
     failures += check(initial.prompt.input_turns.size() == 1 &&
                           !initial.prompt.input_turns[0].cache_boundary_after &&
@@ -346,16 +352,22 @@ int test_prompt_cache_policy_after_history_resolution() {
         resolve_openai_responses_prompt(followup.prompt, store, "resp_second", true);
     const auto second_prompt = to_prompt_input(second.generation, ResolvedPromptSemantics{}, {});
     failures += check(
-        second_prompt.context_cache.markers.size() == 2 &&
+        second_prompt.context_cache.markers.size() == 4 &&
             second_prompt.context_cache.markers[0].location == Location::MessagePartBoundary &&
             second_prompt.context_cache.markers[0].after_message_count == 2 &&
             second_prompt.context_cache.markers[0].evidence == Evidence::ExplicitBoundary &&
-            second_prompt.context_cache.markers[1].location == Location::MessagePartBoundary &&
-            second_prompt.context_cache.markers[1].after_message_part_count == 1 &&
-            second_prompt.context_cache.markers[1].after_message_count == 4 &&
-            second_prompt.context_cache.markers[1].evidence == Evidence::DefaultAutomatic,
+            second_prompt.context_cache.markers[1].kind ==
+                ninfer::PromptCacheMarkerKind::PrivateLongAnchor &&
+            second_prompt.context_cache.markers[1].after_message_count == 3 &&
+            second_prompt.context_cache.markers[2].location == Location::MessagePartBoundary &&
+            second_prompt.context_cache.markers[2].after_message_part_count == 1 &&
+            second_prompt.context_cache.markers[2].after_message_count == 4 &&
+            second_prompt.context_cache.markers[2].evidence == Evidence::DefaultAutomatic &&
+            second_prompt.context_cache.markers[3].kind ==
+                ninfer::PromptCacheMarkerKind::PrivateLongAnchor &&
+            second_prompt.context_cache.markers[3].after_message_count == 4,
         "previous_response_id preserves explicit history and caches only the new implicit tail");
-    const auto parent       = store.get("resp_parent");
+    const auto parent       = store.get_for_session("resp_parent", std::nullopt);
     const auto parent_turns = flatten_openai_response_context(parent->context);
     failures +=
         check(parent_turns.size() == 2 && !parent_turns[0].cache_boundary_after &&
@@ -376,7 +388,7 @@ int test_prompt_cache_policy_after_history_resolution() {
     const auto explicit_prompt =
         to_prompt_input(explicit_result.generation, ResolvedPromptSemantics{}, {});
     failures += check(
-        explicit_prompt.context_cache.markers.size() == 1 &&
+        explicit_prompt.context_cache.markers.size() == 3 &&
             explicit_prompt.context_cache.markers[0].location == Location::MessagePartBoundary &&
             explicit_prompt.context_cache.markers[0].after_message_count == 2 &&
             !explicit_prompt.context_cache.allow_engine_automatic_shared_prefixes,
@@ -796,7 +808,7 @@ int test_namespace_tools() {
     oversized["tool_choice"] = "auto";
     oversized["tools"] =
         Json::array({Json{{"type", "namespace"},
-                          {"name", std::string(60, 'n')},
+                          {"name", std::string(123, 'n')},
                           {"tools", Json::array({Json{{"type", "function"}, {"name", "tool"}}})}}});
     failures += check(api_code([&] {
                           (void)parse_openai_responses_create_request(oversized, limits());
@@ -923,7 +935,7 @@ int test_previous_response_call_graph() {
     failures += check(api_code([&] {
                           (void)resolve_openai_responses_prompt(missing_parent.prompt, store,
                                                                 "resp_new", true);
-                      }) == "response_not_found",
+                      }) == "previous_response_not_found",
                       "missing parent response is reported precisely");
     return failures;
 }
@@ -1157,10 +1169,119 @@ int test_constrained_decoding() {
     return failures;
 }
 
+int test_tool_name_limits() {
+    int failures = 0;
+    const std::string prefix = "mcp__github__";
+    for (const auto& name : {prefix + std::string(71 - prefix.size(), 'x'), std::string(128, 'n')}) {
+        const Json body{{"model", "m"}, {"input", "hello"},
+                        {"tools", Json::array({Json{{"type", "function"}, {"name", name}}})},
+                        {"tool_choice", Json{{"type", "function"}, {"name", name}}}};
+        const auto request = parse_openai_responses_create_request(body, limits());
+        failures += check(request.prompt.generation.tools[0].name == name &&
+                              request.prompt.generation.tool_choice.allowed_names ==
+                                  std::vector<std::string>{name} &&
+                              request.prompt.generation.tool_name_max_length == kMaxToolNameLength,
+                          "Responses rejected a 71-character MCP or maximum-length tool name");
+    }
+    for (const auto& name : {std::string(), std::string(129, 'n'), std::string("not.ascii"),
+                             std::string("caf\xc3\xa9")}) {
+        const Json body{{"model", "m"}, {"input", "hello"},
+                        {"tools", Json::array({Json{{"type", "function"}, {"name", name}}})}};
+        failures += check(api_error([&] {
+                          (void)parse_openai_responses_create_request(body, limits());
+                      }).status == 400,
+                      "Responses accepted a name outside the 1..128 ASCII contract");
+    }
+    return failures;
+}
+
+int test_scoped_restore_on_first_request() {
+    const std::string session(64, 'a'), foreign(64, 'b');
+    OpenAIResponsesStore disk_source(8, 1ULL << 20), live(8, 1ULL << 20);
+    auto historical = text_turn(ninfer::ChatRole::User, "parent");
+    historical.private_cache_boundary_after = true; // stale markers must not accumulate
+    auto parent = stored_parent(append_openai_response_context(
+        {}, {historical, text_turn(ninfer::ChatRole::Assistant, "answer")}));
+    parent.client_session_sha256 = session;
+    parent.session_key = "http:" + session;
+    disk_source.put(std::move(parent));
+    const auto snapshot = *disk_source.snapshot_session(session);
+    int loads = 0;
+    bool engine_committed = false;
+    const OpenAIResponseRestoreCallback restore =
+        [&](std::string_view digest, std::optional<std::string_view> required,
+            OpenAIResponsesStore& responses) {
+            ++loads;
+            auto guard = responses.begin_restore(std::string(digest)); // before disk read
+            if (digest != session || (required && *required != snapshot.latest_response_id)) {
+                return ninfer::runtime::DurableImportResult{
+                    .state = ninfer::runtime::DurableImportState::IdentityMismatch,
+                    .reason = ninfer::runtime::DurableReason::RequiredResponseMissing};
+            }
+            const bool restored = responses.restore_session(snapshot, guard, [&] {
+                engine_committed = true;
+                return true;
+            });
+            return ninfer::runtime::DurableImportResult{
+                .state = restored ? ninfer::runtime::DurableImportState::Imported
+                                  : ninfer::runtime::DurableImportState::CapacityRefused,
+                .reason = restored ? ninfer::runtime::DurableReason::None
+                                   : ninfer::runtime::DurableReason::Capacity};
+        };
+    auto request = parse_openai_responses_create_request(
+        Json{{"model", "m"}, {"input", "parent"},
+             {"prompt_cache_key", "stock-client-session"}}, limits());
+    resolve_client_session(request.prompt.generation, true, false);
+    request.prompt.generation.client_session_sha256 = session;
+    const auto resolved = resolve_openai_responses_prompt(request.prompt, live, "resp_new", true, restore);
+    int failures = 0;
+    failures += check(loads == 1 && engine_committed &&
+                          resolved.session_key == "http:" + session &&
+                          resolved.cache_hints.reuse_scope == "http:" + session &&
+                          resolved.generation.messages.size() == 1,
+                      "first keyed request failed to restore named Engine/Responses state");
+    (void)resolve_openai_responses_prompt(request.prompt, live, "resp_again", true, restore);
+    failures += check(loads == 1, "resident session reloaded on every request");
+
+    OpenAIResponsesStore cold(8, 1ULL << 20);
+    (void)resolve_openai_responses_prompt(request.prompt, cold, "resp_side", false, restore);
+    failures += check(loads == 1 && !cold.latest_response_id(session),
+                      "store:false advanced or restored the named stored continuation");
+    request.prompt.previous_response_id = "resp_parent";
+    const auto continued =
+        resolve_openai_responses_prompt(request.prompt, cold, "resp_child", true, restore);
+    failures += check(loads == 2 && continued.generation.messages.size() == 3 &&
+                          !continued.generation.messages[0].private_cache_boundary_after &&
+                          continued.generation.messages[1].private_cache_boundary_after &&
+                          continued.generation.messages[2].private_cache_boundary_after,
+                      "tagged restore lost inherited/pre-generation frontiers or kept stale ones");
+    const auto side =
+        resolve_openai_responses_prompt(request.prompt, cold, "resp_side", false, restore);
+    failures += check(!side.cache_hints.update_session_index &&
+                          side.cache_hints.reuse_scope == "http:" + session,
+                      "store:false lost isolation or advanced the stored session");
+    auto foreign_request = request;
+    foreign_request.prompt.generation.client_session_sha256 = foreign;
+    const auto foreign_error = api_error([&] {
+        (void)resolve_openai_responses_prompt(foreign_request.prompt, cold, "resp_foreign", true, restore);
+    });
+    OpenAIResponsesStore absent(8, 1ULL << 20);
+    const auto missing_error = api_error([&] {
+        (void)resolve_openai_responses_prompt(foreign_request.prompt, absent, "resp_missing", true, restore);
+    });
+    failures += check(foreign_error.status == 404 && foreign_error.code == missing_error.code &&
+                          foreign_error.message == missing_error.message &&
+                          foreign_error.param == missing_error.param,
+                      "cross-session continuation was distinguishable from a missing response");
+    return failures;
+}
+
 } // namespace
 
 int main() {
     int failures = 0;
+    failures += test_tool_name_limits();
+    failures += test_scoped_restore_on_first_request();
     failures += test_constrained_decoding();
     failures += test_basic_request_and_resolution();
     failures += test_budgets_and_nonsemantic_hints();

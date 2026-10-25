@@ -22,6 +22,8 @@
 
 namespace ninfer::serve {
 
+inline constexpr std::size_t kMaxToolNameLength = 128;
+
 // A structured API error mapped onto an error object + HTTP status. Wire-format
 // independent: each protocol layer renders it into its own error body shape.
 struct ApiError {
@@ -108,6 +110,7 @@ struct ChatTurn {
     std::string reasoning_content; // assistant thinking carried across turns (round-tripped to the
                                    // template)
     std::optional<CacheBoundary> cache_boundary_after;
+    bool private_cache_boundary_after = false;
 };
 
 // Sampling overrides that have an executable Engine meaning. Protocol-only
@@ -172,7 +175,7 @@ struct GenerationRequest {
     std::string constraint_param;
     std::vector<ChatTurn> messages;
     std::vector<ToolDefinition> tools;
-    std::size_t tool_name_max_length = 64;
+    std::size_t tool_name_max_length = kMaxToolNameLength;
     ToolChoice tool_choice;
     std::vector<std::string> stop_strings;
     bool stop_strings_apply_to_reasoning = false;
@@ -185,6 +188,10 @@ struct GenerationRequest {
     ninfer::PromptContinuationMode continuation = ninfer::PromptContinuationMode::NewAssistantTurn;
     bool allow_engine_automatic_shared_prefixes = true;
     SamplingParams sampling;
+    std::optional<std::string> client_session_sha256;
+    std::optional<std::string> client_request_id;
+    // Domain-separated digest only; raw prompt_cache_key never enters the request.
+    std::optional<std::string> prompt_cache_session_sha256;
 
     [[nodiscard]] bool uses_tools() const noexcept {
         return !tools.empty() && tool_choice.mode != ToolChoiceMode::None &&
