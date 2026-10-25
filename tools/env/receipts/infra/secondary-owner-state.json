@@ -1,0 +1,12 @@
+{
+  "strata_running_from_recorded_root": false,
+  "ocr_states": [
+    "exited",
+    "exited"
+  ],
+  "restore_guard_cancelled": true,
+  "restore_owner": "program lead",
+  "restore_recipe_exercised": false,
+  "gpu_lane_available": true,
+  "passed": true
+}

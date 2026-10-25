@@ -7,7 +7,7 @@
 
 ## Shared helper contract
 
-The operator installs the two executable scripts from `tools/env/` together in the shared `common/` directory. Set `COMMON`, `SRC`, and `BUILD` to the operator's absolute paths and `NINFER_BUILD_HOLDER` to the holder that owns the active exclusive lease. **All builds and GPU commands run inside that lease.** The helpers do not acquire a second lock or change production.
+The operator installs the executable scripts from `tools/env/` together in the shared `common/` directory. Set `COMMON`, `SRC`, and `BUILD` to the operator's absolute paths and `NINFER_BUILD_HOLDER` to the approved lane holder. **All primary-host builds and GPU commands run inside that holder's existing `gpu-lease`.** On the secondary host, `build-wsl.sh` owns one of two CPU build slots and GPU invocations own the single no-fork `flock` described below. The helpers never acquire a second lease or change production.
 
 ```sh
 export NINFER_BUILD_HOLDER=infra
@@ -125,6 +125,28 @@ Complete comparison lease: `20261025T012435Z-infra-artifact-reference-sha256-239
 
 Exact upgrade command shape: `python3 "$SRC/tools/upgrade_ninfer_v2_to_v3.py" "$V2_INPUT" "$V3_OUTPUT"`; SHA-256 was computed with bounded 8 MiB reads. `artifacts.json`, `tensor-payloads.json`, `manifest-field-diff.json` and `chat-template.diff` are the scrubbed receipt family.
 
+### Consumed Windows-stage exports
+
+The inherited jobs **`20261025T015811Z-infra-secondary-env-export-338653`** and **`20261025T011826Z-infra-native-v3-export-228815`** were observed **still queued**, not completed or failed. Both were cancelled while queued and each was resubmitted **once**, at the required **priority 3**:
+
+| Replacement job | Limit | Observed outcome |
+|---|---:|---|
+| `20261025T023555Z-infra-secondary-env-export-r1-419727` | 15 min | **Exit 0**, **292 s**, zero leftover/unowned containers |
+| `20261025T023555Z-infra-native-v3-export-r1-419745` | 10 min | **Exit 0**, **196 s**, zero leftover/unowned containers |
+
+```sh
+gpu-lease submit --holder infra --label secondary-env-export-r1 \
+  --priority 3 --minutes 15 -- bash "$STAGE/infra-secondary-export.sh"
+gpu-lease submit --holder infra --label native-v3-export-r1 \
+  --priority 3 --minutes 10 -- bash "$STAGE/infra-native-export.sh"
+```
+
+The primary Windows stage contains `secondary/build-env-master-64d10fbf-r2.tar` (**3,725,653,504 bytes**, SHA-256 **`1cf2a05505a3ff91703bd811be75177a9f06b46e6ce540e285e2c4adc4900008`**), `secondary/qwen3_8_27b.ninfer` (published **`81f924d4`**) and `native-v3/qwen3_8_27b.ninfer` (native **`5476dfd6`**). The frozen vanilla source archive is **70,103,040 bytes**, SHA-256 **`141bddf0f7f7c0331796f09848b817dee66966ca06163f508ffefe88cb4d4006`**. `secondary-export.json` and `native-export.json` contain the complete file identities; both exports were consumed and their availability sent to the native-lane owners.
+
+The attempted cross-region `scp -3` transfer was cancelled before claiming model arrival. The lead replaced model transport with an anonymous download from the canonical public repository directly onto each target host, or a verified local-network copy after download. Canonical revision: **`1cbd84e7221e51186bd7f093a149912d2489625b`** in **`neroued/Qwen3.8-27B-NInfer`**.
+
+**Current lead-owned binding: published v3 `81f924d4` for both primary and native lanes. Native upgrade `5476dfd6` is dropped, not a release artifact.** The frozen upgrader generates a new random file identity with `uuid.uuid4().bytes` (`tools/upgrade_ninfer_v2_to_v3.py:799`), so an unmodified rerun is not byte-deterministic. The native export and conversion receipts remain historical evidence only. No cross-region host-to-host model transfer, local re-upgrade, identity override or new artifact publication is part of the current plan. This decision was relayed to the native architecture, portability and packaging owners.
+
 ## Secondary lane: owner state and restore recipe
 
 Before pausing any owner workload, the bounded inventory found Strata running from **`E:\omp-strata-0.2.3-omp18.12.6-pro-262k`**, profile **`win11-rtxpro6000-iq3s-262k-slots4-parking-strata0.2.3-omp18.12.6`**. Both OCR containers (`alpha-diligence-ocr-paddle`, `alpha-diligence-ocr-mineru`) were **exited**. Preserve that exact state: do not invoke the generic window `take`/`release` pair, which expects running OCR and would start them on release. No other owner's engine/root or GPU power policy is changed.
@@ -164,7 +186,55 @@ The outer operator uses `omp-strata-remote.py launch "$SECONDARY_HOST" "$WINDOWS
 
 For native filesystem tests, `--volume ov-YOUR_HOLDER-native-root /nativeio --env TMPDIR=/nativeio` provides a caller-owned Docker volume in the Linux VM, independent of DrvFS source/build mounts. The actual probe returned filesystem magic **`0xef53`** (native ext family, not DrvFS/9p) and passed write/unlink. The owning backend suite still decides its supported-I/O contract; no test is skipped or suppressed. The durable-store owner received this recipe without changing its lead-approved current qualification batch.
 
-At the requested wrap-up boundary, **Strata is still running and both OCR containers remain exited as found**. No pause/restore, host reboot, power change, Docker Desktop restart, or GPU computation on the secondary card was performed. Exact-image/model export remains a separately queued lease job; the local CPU image is deliberately not presented as the exact exported r2 image. The secondary full build/model copy/GPU test are not proven.
+At the initial CPU-lane handoff, Strata was still running and no secondary GPU work had occurred. The continuation below completes the exact-image/model import and GPU proof; the CPU-local image is never represented as the exported r2 image.
+
+### Proven single-slot GPU correctness service
+
+- Vanilla master targets **`ninfer_device_test`** and **`ninfer_qwen3_5_native_transactions_test`** built successfully in **470.897 seconds**, using the CPU-local recipe image and the two-slot build wrapper without GPU computation. The source is the frozen vanilla archive; this is not represented as a clean integrated product build.
+- The canonical public v3 download completed anonymously in **654.743 seconds**, pinned to revision **`1cbd84e7221e51186bd7f093a149912d2489625b`**. It verified **20,437,521,664 bytes** and the full **`81f924d4`** SHA-256 before replacing the unverified SCP partial.
+- Import verified all three staged file hashes, loaded the image successfully and observed exact image ID **`sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1`**. Hash verification plus import took **375.825 seconds**. `secondary-public-download.json` and `secondary-import.json` are the corresponding receipts.
+- The exact restore PowerShell above was sent to the lead **before** invoking the recorded controller's `stop`. Pause began at **04:33:00 UTC**. The RTX PRO 6000 reported **97,887 MiB**, driver **616.92**; memory drained from **59,867 MiB** to **910 MiB**, below the required **1.5 GiB / 1,536 MiB** limit. Both OCR containers were checked **exited** and stayed exited.
+- One exclusive no-fork GPU `flock` job ran the two selected tests in the exact imported r2 image: **device test passed in 2.42091 s**, **real-model native-transactions passed in 52.5888 s**, overall **exit 0 / 57.356 s**. The proof completed well within two hours of the pause. `secondary-gpu.json` records both results; “native-transactions” is the upstream test name, **not** a native-Windows qualification claim.
+- The GPU-ready invocation was broadcast to **all ten live peers**, including real-driver/no-visible-device host-test guidance. GPU commands must use the **same `tensorfold` / root WSL namespace** and **`/var/lock/ov-ninfer-gpu.lock`**. CPU builds retain their independent two-slot service.
+
+**Owner state at handoff: Strata remains paused by explicit lead decision; the program lead owns restoration at program end. Both OCR containers remain exited.** The two-hour failure-only restore guard was cancelled after successful proof, so there is **no pending automatic restore** that can interrupt program consumers. The controller's stopped state was recorded; the restore `start` command has **not** been exercised in this continuation. `secondary-pause.json` and `secondary-owner-state.json` preserve these boundaries. No reboot, power-policy change, Docker Desktop restart or OCR start occurred.
+
+Exact preparation and measured GPU command shape:
+
+```sh
+NINFER_BUILD_HOLDER=infra \
+NINFER_BUILD_ENV_IMAGE=ov-build-env:master-64d10fbf-r2-cpu-local \
+timeout --signal=TERM --kill-after=120s 3000s \
+  bash "$COMMON/build-wsl.sh" "$SRC" "$BUILD" -- \
+  ninfer_device_test ninfer_qwen3_5_native_transactions_test
+```
+
+```powershell
+curl.exe -q --silent --show-error --fail --location `
+  --connect-timeout 30 --max-time 5400 --output "$MODEL.hf-part" `
+  'https://huggingface.co/neroued/Qwen3.8-27B-NInfer/resolve/1cbd84e7221e51186bd7f093a149912d2489625b/qwen3_8_27b.ninfer?download=true'
+Get-FileHash -LiteralPath "$MODEL.hf-part" -Algorithm SHA256
+```
+
+The downloader checks the exact expected digest and byte count before moving the verified file into place. `curl.exe -q` disables user configuration; no token, authorization header or credential file is read or passed.
+
+```sh
+NINFER_BUILD_HOLDER=infra \
+NINFER_BUILD_ENV_IMAGE=ov-build-env:master-64d10fbf-r2 \
+timeout --signal=TERM --kill-after=120s 1500s \
+  flock -x -F -w 600 /var/lock/ov-ninfer-gpu.lock \
+  bash "$COMMON/run-in-env-wsl.sh" --gpu --name secondary-gpu-r1 \
+  --mount "$SRC" --mount "$BUILD" --mount "$STAGE/receipts" \
+  --mount "$STAGE" --read-only-mount "$MODEL_DIR" \
+  --seccomp "$COMMON/ninfer_io_uring_seccomp.json" \
+  --env "NINFER_TEST_ARTIFACT=$MODEL" -- \
+  ctest --test-dir "$BUILD" \
+  -R '^ninfer_(device|qwen3_5_native_transactions)_test$' \
+  --output-on-failure --timeout 240 \
+  --output-junit "$STAGE/secondary-gpu-r1.xml"
+```
+
+The detached Windows launcher is unchanged from the CPU service above. Source and build are the holder's Windows-drive paths; the verified shared artifact is `secondary/qwen3_8_27b.ninfer` beneath the infrastructure Windows stage. The live `common/` scripts include supervised cleanup commit **`8700b2b21cef2e76ed7a3270ffaa9b4a30f80af8`**; consumers must not reinstall older unsupervised helpers. For subsequent GPU jobs use the broadcast **`flock -x -F`** shape and bound each job; for driver-linked host-only tests add **`--env CUDA_VISIBLE_DEVICES=`** while retaining the same exclusive GPU slot.
 
 ## Startup-budget observations and validity boundary
 
@@ -184,6 +254,51 @@ The full product engine shape **does construct on the 32 GB card**: 131,072 cont
 
 Explicit `--kv-capacity 131072` also constructed. Explicit **262144** refused before serving with exit **1**, `Device budget cannot hold model weights and required execution resources`. These observations come from actual `server_start` records and the actual fatal process exit, not from readiness polling. `vanilla-server-start.json` contains the sanitized measured baseline supplied to EngineCache; the zero legacy graph estimate must not substitute for the nonzero calibration/startup-retained measurements.
 
-The original external WSL observer used Docker host networking and could not reach the container's network namespace, even though a diagnostic internal `/health` returned **HTTP 200**. Its 240-second observer timeouts are **not capacity refusals**. That job was terminated after **947 seconds**; the lease stopped its one owned leftover container. Its receipt is explicitly archived as transport-invalid. The current `startup-budget.json` states the actual engine outcomes and leaves **the one-request/two-in-flight HTTP proof and maximum-explicit-capacity search unproven**. The corrected same-container observer implementation is retained outside Git for the lead to run; no success is fabricated.
+The original external WSL observer used Docker host networking and could not reach the container's network namespace, even though a diagnostic internal `/health` returned **HTTP 200**. Its 240-second observer timeouts are **not capacity refusals**. That job was terminated after **947 seconds**; the lease stopped its one owned leftover container. Its receipt remains explicitly archived as transport-invalid. `startup-budget.json` records that earlier engine-construction-only boundary; the corrected same-container proof below supersedes its unproven HTTP/capacity status without rewriting the historical receipt.
 
-The final receipt census parsed **14 JSON receipts** and found **zero** forbidden private-path/host/GPU-UUID markers. Upstream absolute provenance paths had already been replaced with digest-only markers. `receipt-census.json` records the exact inventory.
+### Completed HTTP and explicit-capacity proof
+
+Lease **`20261025T024116Z-infra-vanilla-http-capacity-r1-428268`**, submitted at **priority 3 / 30 minutes**, exited **0** after **104 seconds**, with **zero** leftover or unowned containers. Observer work took **103.290 seconds**. The server and urllib clients ran in the **same container/network namespace**; no external Windows/WSL route is claimed. Source, model, image and full product shape are unchanged from the table above.
+
+| Observation | Result |
+|---|---|
+| Automatic startup | HTTP health 200 in **22.352 s**, resolved KV **146432** |
+| One request | **HTTP 200**, 64 prompt / 256 completion tokens, **1.048 s** |
+| Two simultaneous requests | **HTTP 200 / 200**, overlapping client intervals, 64 prompt / 256 completion tokens each, **1.327 / 1.310 s** |
+| Largest explicit `--kv-capacity` constructed | **146432**, startup **27.676 s** |
+| Adjacent 64-token page, `--kv-capacity 146496` | **Exit 1**, actual calibrated-runtime refusal after **11.011 s** |
+
+The refusal is **`Device budget cannot hold the calibrated runtime and requested KV capacity`**, not a readiness/transport timeout. Twelve observed starts cover automatic startup, the explicit successful endpoint and the bounded binary search. The previously recorded **262144** refusal supplied the upper bound and was not rerun unchanged. Explicit capacities round upward to 64-token pages (`src/runtime/engine/kv_capacity.cpp`); the adjacent-page refusal therefore bounds intermediate token values as well. The maximum is an observation for this frozen shape and environment, not a proposed profile change.
+
+The automatic and explicit successful starts both recorded **11,350,282,753 bytes** runtime reservation, **1,072,693,248 bytes** available after startup and **31,457,280 bytes** actual graph-calibration retention. Request receipts contain status, token counts, timing, response length and SHA-256 only; generated text is not retained. One pair member reused **57** cached prompt tokens. This is short-request concurrency/startup coverage, **not** a throughput benchmark, 131K-prompt test or persistence proof. Numbers were sent to the lead and both engine-cache owners.
+
+Exact lease and inner invocation, with operator roots supplied through the same variables as the helper contract:
+
+```sh
+gpu-lease submit --holder infra --label vanilla-http-capacity-r1 \
+  --priority 3 --minutes 30 -- bash "$STAGE/startup-http-r1.sh"
+
+NINFER_BUILD_HOLDER=infra \
+NINFER_BUILD_ENV_IMAGE=ov-build-env:master-64d10fbf-r2 \
+timeout --signal=TERM --kill-after=60s 1700s \
+  "$COMMON/run-in-env.sh" --gpu --mount "$ROOT" \
+  --read-only-mount "$STAGE" --read-only-mount "$MODEL_DIR" \
+  --seccomp "$COMMON/ninfer_io_uring_seccomp.json" \
+  --name startup-http-r1 --env "NINFER_ENV_IMAGE_ID=$IMAGE_ID" -- \
+  python3 "$STAGE/infra-startup-inner-r1.py"
+```
+
+For each search point the observer executes:
+
+```sh
+"$BUILD/apps/ninfer-serve" "$MODEL" \
+  --host 0.0.0.0 --port 18170 --model-id q38-ninfer \
+  --max-context 131072 --max-concurrency 2 --kv-capacity "$KV" \
+  --prefill-chunk 1024 --kv-dtype bf16 --pending-timeout-ms 180000 \
+  --spec dflash2 --draft-tokens 7 --lm-head-draft --vision \
+  --preserve-thinking --device-state-slots 2 \
+  --host-context-mib 20867.734375 --request-log-jsonl "$PRIVATE_JSONL" \
+  --log-stats-interval-ms 0
+```
+
+`startup-http-capacity.json` is the authoritative completed HTTP/capacity receipt. All inherited sanitized receipts and continuation receipts are retained under `tools/env/receipts/infra/`. The final census parsed **29 JSON receipts** and checked this report, finding **zero** forbidden private-path, host-name or GPU-UUID markers. `receipt-census-inherited.json` preserves the original fourteen-file census; `receipt-census.json` records the complete current inventory. No formatters, linters or additional project-wide suites ran in this continuation.

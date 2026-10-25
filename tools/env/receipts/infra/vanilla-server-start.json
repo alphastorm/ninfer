@@ -1,0 +1,94 @@
+{
+  "startup": {
+    "engine": {
+      "context_cache": {
+        "device_state_slots": 2,
+        "enabled": true,
+        "host_capacity_bytes": 21881405440,
+        "total_device_state_slots": 4
+      },
+      "context_cost": {
+        "hardware_class": "nvidia-geforce-rtx-5090-sm120",
+        "prefill_signature": "e490f4a150c8573657ca0242b4ab9a0922e6986d5e295a03114fcdc4263b7fcc",
+        "prefill_source": "generic-default",
+        "transfer_source": "compiled-default"
+      },
+      "cuda_graph": true,
+      "kv_cache": "bf16",
+      "kv_capacity": 146432,
+      "kv_capacity_max_page_groups": 4096,
+      "kv_capacity_mode": "auto",
+      "kv_capacity_page_groups": 2288,
+      "log_stats_interval_ms": 0,
+      "max_concurrency": 2,
+      "max_context": 131072,
+      "max_pending_requests": 16,
+      "pending_timeout_ms": 180000,
+      "prefill_chunk": 1024,
+      "prefix_reuse": true,
+      "proposal_head": "optimized",
+      "speculative_backend": "dflash2",
+      "speculative_draft_window": 7,
+      "vision": true
+    },
+    "memory": {
+      "available_after_startup_bytes": 1072693248,
+      "available_after_weights_bytes": 12456034304,
+      "cuda_graph_calibration_increment_bytes": 31457280,
+      "cuda_graph_calibration_retained_bytes": 31457280,
+      "cuda_graph_prepare_increment_bytes": 0,
+      "cuda_graph_rebuild_estimate_bytes": 0,
+      "device_budget_bytes": 32429309952,
+      "host_context_capacity_bytes": 21881405440,
+      "host_context_occupied_bytes": 0,
+      "host_context_reserved_bytes": 0,
+      "host_kv_occupied_bytes": 0,
+      "host_state_occupied_slots": 0,
+      "kv_capacity_headroom_bytes": 1073741824,
+      "kv_capacity_increment_bytes": 4194304,
+      "kv_payload_bytes": 9596567552,
+      "minimum_runtime_reservation_bytes": 10343649793,
+      "moe": null,
+      "planned_slack_bytes": 552447,
+      "runtime_reservation_bytes": 11350282753,
+      "sequence": {
+        "capacity_bytes": 10483634688,
+        "peak_used_bytes": 10483634688,
+        "used_bytes": 10483634688
+      },
+      "startup_retained_bytes": 31689728,
+      "vision_workspace": {
+        "aggregate_prompt_tokens": 32768,
+        "encode_peak_bytes": 866648065,
+        "general_capacity_bytes": 121830240,
+        "handoff_active_bytes": 0,
+        "handoff_capacity_bytes": 167772160,
+        "handoff_offset_bytes": 150994944,
+        "handoff_peak_bytes": 0,
+        "max_item_tokens": 16384
+      },
+      "weights": {
+        "capacity_bytes": 19973043200,
+        "peak_used_bytes": 19973043200,
+        "used_bytes": 19973043200
+      },
+      "workspace": {
+        "capacity_bytes": 866648065,
+        "peak_used_bytes": 121830240,
+        "used_bytes": 0
+      }
+    },
+    "environment": {
+      "compute_capability_major": 12,
+      "compute_capability_minor": 0,
+      "cuda_compile_version": "13.1",
+      "cuda_driver_version": "13.5",
+      "cuda_runtime_version": "13.1",
+      "gpu_name": "NVIDIA GeForce RTX 5090",
+      "total_device_memory_bytes": 34162343936
+    }
+  },
+  "source": "64d10fbf",
+  "image_id": "sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
+  "scope": "Measured engine construction/server_start only. Original external WSL host-network observer was transport-invalid; one-request/pair proof is separate."
+}

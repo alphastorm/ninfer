@@ -1,0 +1,69 @@
+{
+  "source": "64d10fbf",
+  "artifact": "published-v3-81f924d4",
+  "shape": {
+    "max_context": 131072,
+    "max_concurrency": 2,
+    "prefill_chunk": 1024,
+    "kv_dtype": "bf16",
+    "spec": "dflash2",
+    "draft_tokens": 7,
+    "vision": true,
+    "lm_head_draft": true,
+    "preserve_thinking": true,
+    "device_state_slots_extra": 2,
+    "host_context_mib": "20867.734375"
+  },
+  "host_translation": {
+    "fork_host_kv_mib": 16384,
+    "fork_host_state_slots": 24,
+    "native_state_image_bytes": 195897344,
+    "shared_host_capacity_bytes": 21881405440,
+    "formula": "16 GiB + 24 native StateImages; shared upstream pool does not preserve separate slot quotas"
+  },
+  "attempts": [
+    {
+      "max_context": 131072,
+      "kv_capacity_requested": "auto",
+      "ready": false,
+      "startup_seconds": 240.223,
+      "exit_code": 0,
+      "refusal": [
+        "2026-10-25 01:50:43.695  INFO  capacity | KV 146,432 tokens, bf16, auto | pages 2,288/4,096 | runtime 10.6 GiB | free 1023.0 MiB"
+      ]
+    },
+    {
+      "max_context": 131072,
+      "kv_capacity_requested": 131072,
+      "ready": false,
+      "startup_seconds": 240.206,
+      "exit_code": 0,
+      "refusal": [
+        "2026-10-25 01:54:48.121  INFO  capacity | KV 131,072 tokens, bf16, explicit | pages 2,048/4,096 | runtime 9.63 GiB | free 1.94 GiB"
+      ]
+    },
+    {
+      "max_context": 131072,
+      "kv_capacity_requested": 262144,
+      "ready": false,
+      "startup_seconds": 2.003,
+      "exit_code": 1,
+      "refusal": [
+        "2026-10-25 01:58:24.778  ERROR startup failed | planning runtime | 487 ms",
+        "2026-10-25 01:58:24.778  FATAL server failed during startup | Device budget cannot hold model weights and required execution resources"
+      ]
+    },
+    {
+      "max_context": 65536,
+      "kv_capacity_requested": "auto",
+      "ready": false,
+      "startup_seconds": 240.209,
+      "exit_code": 0,
+      "refusal": [
+        "2026-10-25 01:58:54.124  INFO  capacity | KV 131,072 tokens, bf16, auto | pages 2,048/2,048 | runtime 9.63 GiB | free 1.94 GiB"
+      ]
+    }
+  ],
+  "image": "ov-build-env:master-64d10fbf-r2",
+  "image_id": "sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1"
+}

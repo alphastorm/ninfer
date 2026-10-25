@@ -1,0 +1,41 @@
+{
+  "scope": "CPU-only local recipe image; exact exported image required for final GPU proof",
+  "image": "ov-build-env:master-64d10fbf-r2-cpu-local",
+  "started_utc": "2026-10-25T02:11:51Z",
+  "image_build": {
+    "exit_code": 0,
+    "wall_seconds": 222.544
+  },
+  "image_id": "sha256:62a4feee8f308cde61095355ff11977986ecce388ad4f057c23014950b681326",
+  "parallel_builds": {
+    "slot-zero": {
+      "exit_code": 0,
+      "wall_seconds": 24.59
+    },
+    "slot-one": {
+      "exit_code": 0,
+      "wall_seconds": 25.573
+    }
+  },
+  "host_tests": {
+    "slot-zero": {
+      "exit_code": 0,
+      "wall_seconds": 0.493
+    },
+    "slot-one": {
+      "exit_code": 0,
+      "wall_seconds": 0.397
+    }
+  },
+  "slot_markers": {
+    "slot-zero": [
+      "build_slot=1"
+    ],
+    "slot-one": [
+      "build_slot=0"
+    ]
+  },
+  "workers_per_build": 12,
+  "maximum_build_slots": 2,
+  "ready": true
+}

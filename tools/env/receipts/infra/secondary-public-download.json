@@ -1,0 +1,11 @@
+{
+  "repository": "neroued/Qwen3.8-27B-NInfer",
+  "revision": "1cbd84e7221e51186bd7f093a149912d2489625b",
+  "file": "qwen3_8_27b.ninfer",
+  "method": "anonymous curl -q, directly from public canonical Hugging Face",
+  "bytes": 20437521664,
+  "sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+  "download_exit_code": 0,
+  "wall_seconds": 654.743,
+  "passed": true
+}

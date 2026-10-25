@@ -1,0 +1,11 @@
+{
+  "image": "ov-build-env:master-64d10fbf",
+  "exit_code": 0,
+  "wall_seconds": 47.008,
+  "change": "explicit Git development dependency; runtime unchanged",
+  "image_id": "sha256:e274c6a1811dc2a9d094482b681e257a33e157838151b0615264c38e0383ccae",
+  "git": {
+    "exit_code": 0,
+    "version": "==========\n== CUDA ==\n==========\n\nCUDA Version 13.1.2\n\nContainer image Copyright (c) 2016-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.\n\nThis container image and its contents are governed by the NVIDIA Deep Learning Container License.\nBy pulling and using the container, you accept the terms and conditions of this license:\nhttps://developer.nvidia.com/ngc/nvidia-deep-learning-container-license\n\nA copy of this license is made available in this container at /NGC-DL-CONTAINER-LICENSE for your convenience.\n\nWARNING: The NVIDIA Driver was not detected.  GPU functionality will not be available.\n   Use the NVIDIA Container Toolkit to start this container with GPU support; see\n   https://docs.nvidia.com/datacenter/cloud-native/ .\n\ngit version 2.43.0"
+  }
+}

@@ -1,0 +1,38 @@
+[
+  {
+    "field": "/files/0/payload_bytes",
+    "published": 20437148928,
+    "upgraded": 20437157872
+  },
+  {
+    "field": "/provenance/converter",
+    "published": "ninfer-v3"
+  },
+  {
+    "field": "/provenance/ranking",
+    "published": "<redacted-upstream-source-path:sha256=75b5ab7f0fb549aab8a65866d4e6d7d0b4a75443840d6ffcc8392f689253017d>"
+  },
+  {
+    "field": "/provenance/recipe",
+    "published": "qwen3_8_27b"
+  },
+  {
+    "field": "/provenance/sources",
+    "published": {
+      "base": {
+        "path": "<redacted-upstream-source-path:sha256=4190ba2acd5e86cfc733d123be60d972370d48fb5f301f26920156b9c1e8c260>"
+      },
+      "dflash2": {
+        "path": "<redacted-upstream-source-path:sha256=e2212ba0c4713a135a1e73cb9c6295eef10ff6ff9e1ee11462a3ccc5333a1994>"
+      }
+    }
+  },
+  {
+    "field": "/provenance/upgraded_from",
+    "upgraded": {
+      "version": 2,
+      "model_id": "qwen3.8-27b",
+      "weights_id": "groupwise-int"
+    }
+  }
+]

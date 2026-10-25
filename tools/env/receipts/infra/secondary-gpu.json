@@ -1,0 +1,22 @@
+{
+  "source": "64d10fbf9f8e6bfc79ab0570b94674c5b9997929",
+  "image_id": "sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
+  "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+  "gpu_info": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887, 616.92",
+  "slot": "single shared WSL flock; no-fork supervisor owns lock through container cleanup",
+  "exit_code": 0,
+  "wall_seconds": 57.356,
+  "tests": [
+    {
+      "name": "ninfer_device_test",
+      "seconds": 2.42091,
+      "status": "passed"
+    },
+    {
+      "name": "ninfer_qwen3_5_native_transactions_test",
+      "seconds": 52.5888,
+      "status": "passed"
+    }
+  ],
+  "passed": true
+}

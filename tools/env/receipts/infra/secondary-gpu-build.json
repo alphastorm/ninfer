@@ -1,0 +1,11 @@
+{
+  "scope": "Vanilla master CUDA targets built without GPU use; CPU-local recipe image",
+  "source": "64d10fbf9f8e6bfc79ab0570b94674c5b9997929",
+  "image": "ov-build-env:master-64d10fbf-r2-cpu-local",
+  "exit_code": 0,
+  "wall_seconds": 470.897,
+  "targets": [
+    "ninfer_device_test",
+    "ninfer_qwen3_5_native_transactions_test"
+  ]
+}
