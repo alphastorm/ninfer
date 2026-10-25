@@ -1,0 +1,58 @@
+{
+  "artifact_type": "ninfer_exp098_protocol",
+  "schema_version": 1,
+  "experiment": "EXP-098",
+  "registered_date": "2026-10-25",
+  "scope": "Receipt-only native DFlash2 measurement; no profile, package or runtime modification",
+  "runtime": "fc3208dbb9fe166f1dff1341a0a099057ae8a878 or the exact integrated N build; each receipt binds its actual binary and source",
+  "model_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+  "model_bytes": 20437521664,
+  "corpus_sha256": "7be1bd85dca30c3689ed351d6a60546b46ed6c430269d0786e28b551778a7617",
+  "roles": {
+    "count": 84,
+    "excluded_historical_json_schema_cases": ["struct-001", "struct-003", "struct-004", "struct-006", "struct-007"],
+    "runner": "KernelRoutes tools/bench/run_exp097.py request construction and log binding, adapted for native Windows",
+    "reasoning": "low",
+    "reasoning_token_headroom": 0,
+    "temperature": 0,
+    "concurrency": 1,
+    "repetitions_per_arm": 1,
+    "arms": ["MTP3 with optimized proposal head", "DFlash2 K=7"],
+    "equality": "Canonical content, reasoning and tool names/arguments hashes; transport IDs excluded",
+    "performance": "Server decode time; report median and weighted tokens/sec, acceptance, rounds, tokens/round, ms/round and workload nearest-rank p95"
+  },
+  "fit": {
+    "maximum_context": 131072,
+    "kv_dtype": "int8-group64",
+    "kv_capacity": "equal to configured max context",
+    "page_quantum_tokens": 64,
+    "rtx4090": {"headroom_mib": 640, "device_extra_slots": 2, "prefill_chunk": 2048, "host_context_bytes": 15506063360, "first_probe_context": 65536},
+    "rtx3090": {"headroom_mib": 768, "device_extra_slots": 4, "prefill_chunk": 1024, "host_context_bytes": 12284837888, "first_probe_context": 131072},
+    "search": "Binary search between fitting and unfitting page counts; no rerun of the assignment's known-unfit 4090 131072 input. A fit requires readiness, a 64-token decode probe and nonnegative CUDA spare after the lane floor. Report adjacent page boundary, or exact non-memory initialization/execution failure instead of relabeling it OOM.",
+    "matched_comparison": "Both arms use the same measured largest DFlash2 context and all lane settings above",
+    "limit": "Boundary is conditional on observed free VRAM and this process shape; not a full-context retrieval, C2 or durable-store qualification"
+  },
+  "leak_screen": {
+    "scope": "EXP-085's redaction subset only, not its full multi-metric quality verdict",
+    "controls": ["log-023", "log-024", "repo-029", "repo-030", "worklog-007", "worklog-008", "worklog-014"],
+    "variants_per_control": 72,
+    "prompts_per_arm": 504,
+    "prefix_family": "EXP-063/085 whitespace variants, unchanged",
+    "determinism": "EXP-063 fresh-server v0/v1 per control, 14 prompts per arm",
+    "bootstrap_resamples": 20000,
+    "seed": 20261001,
+    "confidence": "one-sided paired 95 percent, stratified within control",
+    "pass_rule": "Every validity check holds, leak-ratio upper bound <1.10 and redaction pass-rate delta lower bound >-0.05",
+    "validity": "504 scored rows in both arms, <=1 percent errors, >=4 controls perturbed in each arm, all 14 fresh-server repeats byte-identical"
+  },
+  "operations": {
+    "priority": "lowest; explicit Integrator6 grant per card; qualification and final acceptance take precedence",
+    "maximum_granted_window_minutes": 150,
+    "preemption": "between arms",
+    "ports": {"rtx4090": 18208, "rtx3090": 18218},
+    "resources": "Isolated scratch and owned subprocesses; never installed runtime roots or production port",
+    "vram": "nvidia-smi samples every two seconds plus CUDA startup memory breakdown",
+    "privacy": "Only numerical measurements, case identifiers and hashes in committed receipts; no raw prompt/output/secret or private paths"
+  },
+  "raw_prompts_outputs_or_secrets_included": false
+}
