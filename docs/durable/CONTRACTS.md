@@ -516,8 +516,13 @@ directories. Acknowledgement `dir_sync: "fsync"`.
 `REPLACE_IF_EXISTS | POSIX_SEMANTICS`, `RootDirectory` set to the pinned destination
 directory, and a leaf-only destination name. FlushFileBuffers flushes the staged
 file before replacement and the pinned parent handle after replacement. Parent
-pins deny WRITE and DELETE sharing; ancestor and leaf reparse checks remain
-mandatory. No retry weakens those pins or substitutes a pathname-based rename.
+directory pins permit `FILE_SHARE_WRITE` but still deny DELETE sharing: a rename
+into the directory requires `FILE_ADD_FILE` access, which conflicts with a deny-WRITE
+pin. Every operation remains handle-anchored. Immediately before each rename,
+re-check the pinned handle's attributes: it must not be a reparse point, and its
+file index and volume serial must equal those captured at pin time. Ancestor and
+leaf reparse checks remain mandatory. No retry weakens the DELETE pin or substitutes
+a pathname-based rename.
 There is no Win32 `SetFileInformationByHandle` or MoveFileExW fallback.
 
 The standalone Windows `sync_directory` primitive remains an intentional documented
