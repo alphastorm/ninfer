@@ -13,6 +13,8 @@ Both native lanes pin the same published file as the container lane: revision
 native-specific upgrade. MTP3/INT8 KV remain explicit; the artifact's inactive
 DFlash2 component must not be materialized by the native MTP configuration, which
 is a separate native runtime qualification assertion.
+The controller and pressure launcher retain `--lm-head-draft` for the optimized
+MTP proposal head; the upstream default full head is not the native profile.
 
 Master's `--host-context-mib` replaces the fork's separate Host KV/State pools.
 The layout-aware translation preserves the old Host KV budget plus 24 MTP

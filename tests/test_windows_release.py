@@ -167,6 +167,7 @@ class MultiGpuHostTests(unittest.TestCase):
         harness = (ROOT / "tools/qualification/qualify_native.py").read_text()
         for contract in ("--gpu-uuid", "-GpuUuid {ps_quote(self.gpu_uuid)}",
                          "GpuUuid={ps_quote(self.gpu_uuid)}", "'--device',[string]$gpuIndex",
+                         "'--spec','mtp','--draft-tokens',[string]$c.speculative.draft_tokens,'--lm-head-draft'",
                          "EnvironmentVariables['CUDA_DEVICE_ORDER']='PCI_BUS_ID'",
                          "pressure server_start GPU UUID mismatch", 'gpu_metrics(release["gpu_uuid"])'):
             self.assertIn(contract, harness)
@@ -538,6 +539,7 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         self.assertTrue({
             "--api-key-file", "--binary-sha256", "--artifact-sha256", "--config-sha256",
             "--deployment-profile", "--device-state-slots", "--host-context-mib",
+            "--spec", "--draft-tokens", "--lm-head-draft",
             "--session-checkpoint-dir",
             "--session-checkpoint-quota-mib", "--session-checkpoint-staging-mib",
         }.issubset(controller_flags))
