@@ -39,7 +39,10 @@ python3 -m unittest discover -s tests -p 'test_agent_protocol.py'
 ```
 
 `tools/smoke/serve_contract.py` accepts an optional `--api-key-file` and retains
-upstream's output-budget checks alongside exact greedy stream/non-stream parity.
+upstream's output-budget checks alongside exact greedy stream/non-stream output,
+finish-reason, and token-accounting parity. Cache-hit counts are validated for each
+request but need not match: the repeat can reuse a prefix that the cold request
+computed.
 `tools/smoke/agent_protocol.py` defaults to the authenticated **product** battery:
 status identity, request-correlated private reuse, cross-session Responses
 isolation, tool arguments/results, JSON-schema output, and streaming parity.

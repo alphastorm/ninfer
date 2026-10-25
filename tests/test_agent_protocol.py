@@ -124,6 +124,26 @@ class BatterySelectionTests(unittest.TestCase):
 
 
 class HttpHelperTests(unittest.TestCase):
+    def test_greedy_parity_keeps_token_accounting_but_allows_real_cache_hit_change(self) -> None:
+        first = {
+            'prompt_tokens': 19, 'completion_tokens': 2, 'total_tokens': 21,
+            'prompt_tokens_details': {'cached_tokens': 0},
+            'completion_tokens_details': {'reasoning_tokens': 0},
+        }
+        repeat = {**first, 'prompt_tokens_details': {'cached_tokens': 10}}
+        contract.require_greedy_usage_parity(repeat, first)
+        self.assertEqual(first['prompt_tokens_details']['cached_tokens'], 0)
+        self.assertEqual(repeat['prompt_tokens_details']['cached_tokens'], 10)
+        for changed in (
+            {**repeat, 'completion_tokens': 3, 'total_tokens': 22},
+            {**repeat, 'completion_tokens_details': {'reasoning_tokens': 1}},
+            {**repeat, 'total_tokens': 99},
+            {**repeat, 'prompt_tokens_details': {'cached_tokens': 20}},
+            {**repeat, 'prompt_tokens_details': {'cached_tokens': None}},
+        ):
+            with self.subTest(usage=changed), self.assertRaises(contract.ContractError):
+                contract.require_greedy_usage_parity(changed, first)
+
     def tearDown(self) -> None:
         contract.configure_api_key(None)
 

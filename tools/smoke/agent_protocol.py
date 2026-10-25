@@ -14,12 +14,12 @@ from typing import Any, Mapping
 if __package__:
     from .serve_contract import (
         ContractError, json_response, parse_openai_stream, request,
-        response_text, wait_for_health,
+        require_greedy_usage_parity, response_text, wait_for_health,
     )
 else:
     from serve_contract import (
         ContractError, json_response, parse_openai_stream, request,
-        response_text, wait_for_health,
+        require_greedy_usage_parity, response_text, wait_for_health,
     )
 
 
@@ -482,8 +482,7 @@ def streaming_and_session_checks(
         raise ProtocolError("streaming output differs from greedy non-streaming output")
     if finish_reason != first_choice.get("finish_reason"):
         raise ProtocolError("streaming finish_reason differs from non-streaming output")
-    if usage != first.get("usage"):
-        raise ProtocolError("streaming usage differs from non-streaming output")
+    require_greedy_usage_parity(usage, first["usage"])
 
     private_path: str | None = None
     isolated_path: str | None = None

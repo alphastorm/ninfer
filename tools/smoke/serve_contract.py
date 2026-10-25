@@ -145,6 +145,29 @@ def require_usage(usage: Any, prompt_key: str, completion_key: str) -> tuple[int
     return prompt, completion
 
 
+def require_greedy_usage_parity(streamed: dict[str, Any], reference: dict[str, Any]) -> None:
+    """Compare token accounting, not the cache hit count of two different requests."""
+    normalized = []
+    for usage in (streamed, reference):
+        prompt, completion = require_usage(usage, "prompt_tokens", "completion_tokens")
+        if usage.get("total_tokens") != prompt + completion:
+            raise ContractError("greedy comparison usage has an invalid total_tokens")
+        details = usage.get("prompt_tokens_details")
+        if not isinstance(details, dict):
+            raise ContractError("greedy comparison usage omitted prompt_tokens_details")
+        cached = details.get("cached_tokens")
+        if type(cached) is not int or not 0 <= cached <= prompt:
+            raise ContractError("greedy comparison usage has invalid cached_tokens")
+        normalized.append({
+            **usage,
+            "prompt_tokens_details": {
+                key: value for key, value in details.items() if key != "cached_tokens"
+            },
+        })
+    if normalized[0] != normalized[1]:
+        raise ContractError("streamed token accounting differs from non-streaming output")
+
+
 def openai_nonstream(
     base_url: str,
     model: str,
@@ -463,8 +486,9 @@ def exercise(base_url: str, model: str) -> dict[str, Any]:
     content, reasoning, stream_finish, stream_usage = parse_openai_stream(streamed)
     if (content, reasoning) != (message.get("content", ""), message.get("reasoning_content", "")):
         raise ContractError("streamed output differs from the non-streaming greedy response")
-    if stream_finish != nonstream["choices"][0]["finish_reason"] or stream_usage != nonstream["usage"]:
-        raise ContractError("streamed finish reason or usage differs from non-streaming output")
+    if stream_finish != nonstream["choices"][0]["finish_reason"]:
+        raise ContractError("streamed finish reason differs from non-streaming output")
+    require_greedy_usage_parity(stream_usage, nonstream["usage"])
     if not content and not reasoning:
         raise ContractError("OpenAI stream completed without publishing output bytes")
     if (
