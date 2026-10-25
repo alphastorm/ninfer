@@ -1,0 +1,63 @@
+{
+  "schema": "ninfer-persistence-diagnostic/1",
+  "source_commit": "3a96e84d7417a005f409bb73d8a0ac80f8112515",
+  "job": "20261025T035300Z-A2-persistence-diagnostic-3a96e84d-r4-484964",
+  "priority": 2,
+  "deadline_minutes": 30,
+  "job_seconds": 69,
+  "job_exit": 1,
+  "leftover_containers": 0,
+  "unowned_containers": 0,
+  "private_diagnostic_overlay_sha256": "2e9db0d159f295e679813f0247a6babaeb2d135b87e0ea29449917f4bf4a8195",
+  "overlay_changes": "Print failing page quote/reservation counters and native stack; original write guard remains intact; overlay is not committed and runner reverses it on exit.",
+  "build_seconds": 9.442,
+  "grammar": {
+    "command": "NINFER_TEST_ARTIFACT=/model.ninfer /build/tests/ninfer_qwen3_5_grammar_real_test",
+    "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+    "exit": 1,
+    "seconds": 11.85,
+    "begin": 8,
+    "end": 17,
+    "before_frontier": 8,
+    "before_quote": 1,
+    "after_quote": 1,
+    "reserved": 0,
+    "retained": 8,
+    "mapped_pages": 1,
+    "log_sha256": "5ec6f8c9e50e3e4968a35054d5c39e34b1afcb8226eaa1911a8725cec3b1c8cf"
+  },
+  "shared_prefix_mtp": {
+    "command": "NINFER_TEST_ARTIFACT=/model.ninfer NINFER_TEST_KV_DTYPE=fp8 /build/tests/ninfer_qwen3_5_shared_prefix_real_test mtp",
+    "artifact_sha256": "5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7",
+    "exit": 1,
+    "seconds": 13.75,
+    "begin": 280,
+    "end": 289,
+    "before_frontier": 280,
+    "before_quote": 1,
+    "after_quote": 1,
+    "reserved": 0,
+    "retained": 280,
+    "mapped_pages": 5,
+    "log_sha256": "1dfff70a98462447e55c08cf53fb7bb977bff1f3f777ef734a2a3351dce35c10"
+  },
+  "symbolized_stack_both_failures": [
+    "KVHistoryStore::prepare_write",
+    "ProgramImpl::ensure_sequence_kv_mapped",
+    "ProgramImpl::advance_prefill",
+    "Program::advance_prefill",
+    "EngineCore::run_prefill_step",
+    "EngineCore::worker_loop"
+  ],
+  "symbolized_stack_log_sha256": "4612eef4f60b699e5855fbb8f0b42a2d5e1462b002496121788253a4f975df02",
+  "restart": {
+    "command": "NINFER_TEST_ARTIFACT=/model.ninfer python3 /src/tests/models/qwen3_5/run_checkpoint_restart.py /build/tests/ninfer_qwen3_5_checkpoint_restart_test BACKEND",
+    "none": {"exit": 1, "seconds": 12.301, "evidence": "FAIL checkpoint restart: matching native source missing"},
+    "mtp": {"exit": 1, "seconds": 5.03, "evidence": "FAIL checkpoint restart: MTP draft window must be in [1,5]"},
+    "dflash2": {"exit": 1, "seconds": 12.851, "evidence": "FAIL checkpoint restart: matching native source missing"},
+    "none_dflash2_log_sha256": "a041fcb94350897695b6c999cf7f2be6612e73b429c9efea811904566adba10b",
+    "mtp_log_sha256": "55e2eae3463be5e571ec25939faa96228b1ba113e106d25ce828613ab452f31d",
+    "byte_identical_restart_proven": false
+  },
+  "status": "Diagnostic evidence only: third reservation cause and native restart fixture remain unresolved. No production pass claim."
+}

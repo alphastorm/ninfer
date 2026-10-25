@@ -2,7 +2,7 @@
 
 ## Invariants and decisions
 
-- Branch: `rebase/upstream-64d10fbf`; sole integration owner: Integrator2 (successor to Integrator). Frozen upstream base: `64d10fbf9`. All three release lanes target this base; older scout recommendations to retain native fork binaries are superseded.
+- Branch: `rebase/upstream-64d10fbf`; sole integration owner: Integrator3 (successor to Integrator2). Frozen upstream base: `64d10fbf9`. All three release lanes target this base; older scout recommendations to retain native fork binaries are superseded.
 - Preserve upstream scheduler, DFlash2, grammar and context ownership. No NVFP4 KV port, standby-pinning retries, old monolithic Program, or unshipped `3a2fadbd` route.
 - Contracts K1–K7 require lead approval before changes. Contracts merges first; dependent implementations consume its frozen declarations.
 - Preparation: RepoPrompt chat `prep-v0-13-0-upstream-re-DF08C8`, export `oracle-plan-2026-10-24-174946-prep-v0-13-0-upstrea-1d64.md` (private, not committed).
@@ -152,6 +152,7 @@ Custom-tool boundary: Main confirmed shipped raw custom calls and Responses repl
 
 ## Open prerequisites
 
+- Persistence `d4e24475` is admitted after consuming `persistence-green-r6.json`: exact provider `31333f3e`, job `508285`, ten commands passed, 201 s, no leftovers. Merge preserves newer frozen contracts, backend fixes and integration report; duplicate SHA target removed. Integrated build/host/dense/shared MTP-fp8/loading proof is pending, including the latest shared header and utf8proc fixes. No checkpoint tag is authorized yet.
 - The requested base CPU build and aggregate 47/47 host tests now pass. Frontend/Serve and corrected Store are merged; their integrated results above retain the real grammar failure, not a green tag.
 - **Next merge-ready provider:** Persistence `d4e24475`, tested clean source `31333f3e2f0e73bb5e996475fbd5ecf2724c72a2`, isolated third repair `fa92d9a9f` (Engine `c86d7872`). Owner reports unchanged grammar and shared MTP/fp8 both pass; native suites and none/MTP/DFlash2 separate-process restart all pass. Consume `persistence-green-r6.json` and its REPORT before admission; it is **not yet merged here**.
 - No green checkpoint tag exists. Next owner must merge that provider, rebuild, run all host tests and the applicable dense real subset plus shared MTP/fp8 before tagging. Latest source `9ef4c80ac` adds the two-header native include fix and static utf8proc registration; both isolated repairs are pushed and sent to PortableCore2, but not rebuilt here.

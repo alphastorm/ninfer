@@ -249,6 +249,33 @@ KVPrefixRef KVHistoryStore::retain_prefix(KVHistoryHandle h, std::uint32_t front
     return KVPrefixRef(h, frontier);
 }
 
+std::optional<KVHistory>
+KVHistoryStore::import_history(std::span<const LogicalKVPageHandle> pages,
+                               std::uint32_t frontier) {
+    if (pages.size() != page_count(frontier) || pages.size() > page_capacity_)
+        throw std::invalid_argument("imported KV history has invalid coverage");
+    for (std::size_t i = 0; i < pages.size(); ++i) {
+        if (!pages_->valid(pages[i]) || !pages_->host_covers(pages[i], coverage(frontier, i)))
+            throw std::invalid_argument("imported KV history has no covering Host page");
+        if (pages_->history_references(pages[i]) == UINT32_MAX)
+            return std::nullopt;
+    }
+    if (!free_count_) return std::nullopt;
+    KVHistory owner(allocate());
+    auto& history = require(owner.handle());
+    // Allocate the complete directory before retaining content, so allocation failure rolls back
+    // an empty history rather than exposing partially installed coverage.
+    for (std::size_t i = 0; i < pages.size(); ++i)
+        directory_slot(history.directory, i) = pages[i];
+    for (std::size_t i = 0; i < pages.size(); ++i) {
+        pages_->retain_reference(pages[i]);
+        pages_->update_required(pages[i], 0, coverage(frontier, i));
+        ++history.page_count;
+        history.frontier = std::min<std::uint64_t>(frontier, (i + 1) * kPageTokens);
+    }
+    return owner;
+}
+
 void KVHistoryStore::add_prefix(KVHistoryHandle h, std::uint32_t frontier) {
     auto& history = require(h);
     if (frontier > history.frontier)

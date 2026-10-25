@@ -4,8 +4,15 @@
 #include <iterator>
 #include <limits>
 #include <stdexcept>
+#include <nlohmann/json.hpp>
 
 namespace ninfer::models::qwen {
+std::string ResidentPrefixIdentity::trace_text_identity() const {
+    if (!vision_items_.empty()) { throw std::logic_error("disk tracer rejects media identity"); }
+    return nlohmann::json{{"types", token_types_}, {"positions", positions_},
+                         {"execution_frontiers", rewrite_execution_frontiers_}}.dump();
+}
+
 namespace {
 
 bool same_grid(const VisionGrid& left, const VisionGrid& right) {

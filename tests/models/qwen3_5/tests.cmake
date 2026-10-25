@@ -22,8 +22,23 @@ ninfer_add_test(ninfer_qwen3_5_native_transactions_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_native_transactions.cpp"
   LIBRARIES ninfer_model_runtime ninfer_model_loading ninfer_core)
 
+add_executable(ninfer_qwen3_5_checkpoint_restart_test
+  "${CMAKE_CURRENT_LIST_DIR}/test_checkpoint_restart.cpp")
+ninfer_test_includes(ninfer_qwen3_5_checkpoint_restart_test)
+target_link_libraries(ninfer_qwen3_5_checkpoint_restart_test PRIVATE
+  ninfer_model_runtime ninfer_model_loading ninfer_core ninfer_sha256)
+add_test(NAME ninfer_qwen3_5_checkpoint_restart_test
+  COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/run_checkpoint_restart.py"
+    $<TARGET_FILE:ninfer_qwen3_5_checkpoint_restart_test> dflash2)
+set_tests_properties(ninfer_qwen3_5_checkpoint_restart_test PROPERTIES
+  LABELS "gpu;real" SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 300)
+
 ninfer_add_test(ninfer_qwen3_5_prefix_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_engine_prefix_real.cpp"
+  LIBRARIES ninfer_engine)
+
+ninfer_add_test(ninfer_qwen3_5_shared_prefix_real_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_shared_prefix_real.cpp"
   LIBRARIES ninfer_engine)
 
 ninfer_add_test(ninfer_qwen3_5_preemption_real_test
@@ -77,6 +92,7 @@ set(ninfer_qwen3_5_real_tests
   ninfer_qwen3_5_loading_real_test
   ninfer_qwen3_5_native_transactions_test
   ninfer_qwen3_5_prefix_real_test
+  ninfer_qwen3_5_shared_prefix_real_test
   ninfer_qwen3_5_agent_continuation_real_test
   ninfer_qwen3_5_preemption_real_test
   ninfer_qwen3_5_grammar_real_test

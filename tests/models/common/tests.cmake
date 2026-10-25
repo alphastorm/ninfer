@@ -24,6 +24,11 @@ ninfer_add_test(ninfer_kv_history_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/context/test_kv_history.cpp"
   LIBRARIES ninfer_model_runtime ninfer_core)
 
+ninfer_add_test(ninfer_checkpoint_codec_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/context/test_checkpoint_codec.cpp"
+  LIBRARIES ninfer_model_runtime)
+set_tests_properties(ninfer_checkpoint_codec_test PROPERTIES LABELS "host")
+
 ninfer_add_test(ninfer_tool_call_parser_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/qwen/test_tool_call_parser.cpp"
   LIBRARIES ninfer_model_runtime ninfer::json)

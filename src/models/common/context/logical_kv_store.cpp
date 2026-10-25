@@ -390,7 +390,10 @@ bool LogicalKVPageStore::can_attach_host_replica(LogicalKVPageHandle handle, std
                                                  std::uint32_t coverage) const noexcept {
     if (!valid(handle)) { return false; }
     const Page& page = pages_[handle.index_];
-    return !page.host_replica && epoch == page.content_epoch && coverage <= page.device_columns;
+    return !page.host_replica && epoch == page.content_epoch &&
+           (coverage <= page.device_columns ||
+            (!page.device_replica && page.destination_pinned &&
+             coverage <= page.committed_columns));
 }
 
 void LogicalKVPageStore::attach_host_replica(LogicalKVPageHandle handle, HostKVPageReplica replica,

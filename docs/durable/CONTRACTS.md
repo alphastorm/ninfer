@@ -510,7 +510,6 @@ and current-pointer moves, use `io::replace_path` under the same confinement pol
 This lead-approved extension adds no dependency and does not change which generations
 the store is authorized to reclaim. PortableCore owns the primitive; DurableStore
 owns caller migration and the symlink-swap regression.
-
 Publication order:
 
 1. Create unique unpublished staging generation; failed export leaves current intact.

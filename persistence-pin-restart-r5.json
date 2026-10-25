@@ -1,0 +1,35 @@
+{
+  "schema": "ninfer-persistence-pin-restart/1",
+  "candidate": "f7638a913",
+  "job": "20261025T041911Z-A2-persistence-pin-restart-r5d-499377",
+  "image_sha256": "e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
+  "private_instrumentation": true,
+  "build": {"exit": 0, "seconds": 8.009, "log_sha256": "4f89af9f2c97ec2d9f4d51fb52af022018cfe0fbaac219bcb3d33ad8383d4e5d"},
+  "reservation_tests": [
+    {
+      "command": ["ninfer_qwen3_5_grammar_real_test"],
+      "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+      "exit": 1, "seconds": 11.752,
+      "log_sha256": "793a4f0565b88935fd500ab6deeef669d1af0ccc4eb2aa7e8b360b70498dbf57",
+      "interval": [8,17], "reservation": 0, "admission_quote": 0, "mapping_quote": 1,
+      "binding_pins_resident_writer_after_admission": true, "mapping_source_pins": 1
+    },
+    {
+      "command": ["ninfer_qwen3_5_shared_prefix_real_test", "mtp"],
+      "environment": {"NINFER_TEST_KV_DTYPE": "fp8"},
+      "artifact_sha256": "5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7",
+      "exit": 1, "seconds": 13.535,
+      "log_sha256": "fca7932bc90ef309fd0e697491bd070d8fc75c3894c192ea64350c976ed7adc9",
+      "interval": [280,289], "reservation": 0, "admission_quote": 0, "mapping_quote": 1,
+      "binding_pins_resident_writer_after_admission": true, "mapping_source_pins": 1
+    }
+  ],
+  "restart_command": ["python3", "tests/models/qwen3_5/run_checkpoint_restart.py", "ninfer_qwen3_5_checkpoint_restart_test", "BACKEND"],
+  "restarts": [
+    {"backend": "none", "exit": 0, "seconds": 25.014, "points": 3, "states": 3, "byte_identical_continuation_bytes": 146, "log_sha256": "513422000a328f690a70a36002a1f314fe61b3485ba749db573ea323640ac55a"},
+    {"backend": "mtp", "exit": 0, "seconds": 24.868, "points": 3, "states": 3, "byte_identical_continuation_bytes": 146, "log_sha256": "5a3ebd5b560cff3ff49ea5f108356101db648ba15b9d9cdd32079e7127eda14c"},
+    {"backend": "dflash2", "exit": 1, "seconds": 13.016, "diagnostic": "pending transaction decision is invalid", "classification": "fixture accepted a strict speculative prefix nonterminally", "log_sha256": "24e41ae8377395f408c5460c1ced6f253896cf3b970703d7ba101acc4cef8814"}
+  ],
+  "job_seconds": 98, "job_exit": 1,
+  "leftover_containers_stopped": 0, "unowned_containers_left": 0
+}

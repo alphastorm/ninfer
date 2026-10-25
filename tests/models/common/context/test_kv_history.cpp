@@ -912,6 +912,59 @@ void mixed_snapshot(DeviceContext& device) {
     expect(states.release(mutable_image), "mutable image leaked");
     f.empty();
 }
+void host_only_import(DeviceContext& device) {
+    Fixture f(device, 4, 4);
+    const std::array<std::uint32_t, 2> coverage{64, 1};
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        {
+            auto reservation = f.host->prepare_import(*f.pages, coverage);
+            expect(reservation.has_value(), "Host page import refused available capacity");
+            const auto view = reservation->writable_view();
+            std::memset(view.data(), 0x3a, 2 * f.host_layout.page_stride);
+            expect(f.physical->allocated_pages() == 0 && f.physical->reserved_pages() == 0,
+                   "Host-only page import touched Device ownership");
+            if (attempt & 1) reservation->publish();
+        }
+        f.empty();
+    }
+    {
+        auto reservation = f.host->prepare_import(*f.pages, coverage).value();
+        auto view = reservation.writable_view();
+        std::memset(view.data(), 0x3a, 2 * f.host_layout.page_stride);
+        reservation.publish();
+        auto history = f.histories->import_history(reservation.pages(), 65).value();
+        auto input = f.histories->retain_prefix(history.handle(), 32);
+        auto endpoint = f.histories->retain_prefix(history.handle(), 65);
+        history.reset();
+        expect(f.histories->bound_row(endpoint.history()) == -1 &&
+               f.physical->allocated_pages() == 0 && f.histories->occupied() == 1,
+               "shared Host history was not inactive");
+        auto restored = f.bind(&endpoint, 65, 65);
+        const auto page = f.histories->physical_page(restored.handle(), 0);
+        const auto plane = f.physical->page_plane(page, 0);
+        std::vector<std::byte> observed(plane.bytes());
+        CUDA_CHECK(cudaMemcpy(observed.data(), plane.data, observed.size(), cudaMemcpyDeviceToHost));
+        expect(std::all_of(observed.begin(), observed.end(), [](auto b) { return b == std::byte{0x3a}; }),
+               "ordinary native binding failed to restore imported Host bytes");
+        restored.reset();
+        endpoint.reset();
+        input.reset();
+    }
+    f.empty();
+    {
+        const std::array<std::uint32_t, 4> full{64, 64, 64, 64};
+        auto reservation = f.host->prepare_import(*f.pages, full);
+        expect(reservation.has_value() && !f.host->prepare_import(*f.pages, coverage),
+               "Host extent pressure did not return capacity refusal");
+    }
+    bool invalid = false;
+    try {
+        const std::array<std::uint32_t, 1> bad{65};
+        (void)f.host->prepare_import(*f.pages, bad);
+    } catch (const std::invalid_argument&) { invalid = true; }
+    expect(invalid, "invalid coverage was mistaken for capacity pressure");
+    f.empty();
+}
 
 void replay_write_reservation(DeviceContext& device) {
     // Artifact-independent reproduction of upstream #419: quote before a replay rewind,
@@ -959,6 +1012,7 @@ int main() {
         migration_restore_chain(device, PagedKVPlaneOrder::PageMajor);
         migration_restore_chain(device, PagedKVPlaneOrder::HeadMajor);
         mixed_snapshot(device);
+        host_only_import(device);
         replay_write_reservation(device);
         std::cout << "KV history and snapshot ownership passed\n";
         return 0;

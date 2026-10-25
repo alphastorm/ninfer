@@ -17,6 +17,7 @@ ninfer_internal_includes(ninfer_model_runtime)
 target_link_libraries(ninfer_model_runtime
   PUBLIC ninfer_model_loading ninfer_ops ninfer_runtime_support
   PRIVATE ninfer_media_decode ninfer_jinja ninfer_grammar ninfer_xgrammar)
+target_link_libraries(ninfer_model_runtime PRIVATE ninfer_sha256)
 target_include_directories(ninfer_model_runtime PRIVATE
   ${PROJECT_SOURCE_DIR}/third_party/xgrammar/cpp)
 target_include_directories(ninfer_model_runtime SYSTEM PRIVATE

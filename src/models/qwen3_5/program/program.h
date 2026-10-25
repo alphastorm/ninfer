@@ -4,6 +4,7 @@
 #include "models/common/context/checkpoint_store.h"
 #include "runtime/contract/execution.h"
 #include "runtime/contract/resources.h"
+#include "runtime/contract/durable_engine_api.h"
 #include "models/common/qwen/frontend/prepared_prompt.h"
 #include <array>
 #include <cstddef>
@@ -403,6 +404,54 @@ struct PhysicalUsageSnapshot {
     std::size_t host_kv_bytes            = 0;
 };
 
+class ExportLease {
+public:
+    ExportLease(ExportLease&&) noexcept;
+    ExportLease& operator=(ExportLease&&) noexcept;
+    ~ExportLease();
+    ExportLease(const ExportLease&) = delete;
+    ExportLease& operator=(const ExportLease&) = delete;
+    [[nodiscard]] runtime::DurablePrepareState state() const noexcept;
+    [[nodiscard]] runtime::DurableReason reason() const noexcept;
+    [[nodiscard]] runtime::DurableCheckpointStats stats() const noexcept;
+    [[nodiscard]] const runtime::DurableCheckpointSet& index() const;
+    // No Program access: immutable views, a dedicated stream, bounded staging and disk I/O only.
+    [[nodiscard]] runtime::DurableExportResult write(runtime::ContinuationCheckpointWriter&);
+private:
+    struct Impl;
+    explicit ExportLease(std::unique_ptr<Impl>) noexcept;
+    std::unique_ptr<Impl> impl_;
+    friend class Program;
+};
+
+class ImportReservation {
+public:
+    ImportReservation(ImportReservation&&) noexcept;
+    ImportReservation& operator=(ImportReservation&&) noexcept;
+    ~ImportReservation();
+    ImportReservation(const ImportReservation&) = delete;
+    ImportReservation& operator=(const ImportReservation&) = delete;
+    [[nodiscard]] runtime::DurablePrepareState state() const noexcept;
+    [[nodiscard]] runtime::DurableReason reason() const noexcept;
+    [[nodiscard]] runtime::DurableCheckpointStats stats() const noexcept;
+    [[nodiscard]] bool valid() const noexcept;
+private:
+    struct Impl;
+    explicit ImportReservation(std::unique_ptr<Impl>) noexcept;
+    std::unique_ptr<Impl> impl_;
+    friend class Program;
+};
+
+enum class CheckpointValidationState : std::uint8_t {
+    Validated, Unavailable, Corrupt, IdentityMismatch
+};
+
+struct CheckpointValidation {
+    CheckpointValidationState state = CheckpointValidationState::Corrupt;
+    runtime::DurableReason reason = runtime::DurableReason::InvalidIndex;
+    runtime::DurableCheckpointStats stats;
+};
+
 class Program {
 public:
     using ContextResources = qwen3_5::ContextResources;
@@ -427,6 +476,19 @@ public:
     [[nodiscard]] CheckpointMetadata checkpoint_metadata(CheckpointHandle checkpoint) const;
     [[nodiscard]] bool checkpoint_matches(CheckpointHandle checkpoint,
                                           const RequestBasePlan& base) const;
+    [[nodiscard]] ExportLease prepare_checkpoint_export(std::span<const CheckpointHandle>,
+                                                        const runtime::DurableLimits&);
+    [[nodiscard]] ImportReservation prepare_checkpoint_import(
+        const runtime::DurableCheckpointSet&, const runtime::ContinuationCheckpointReader&,
+        const runtime::DurableLimits&);
+    // Reader has consumed index.cbor; verify all remaining bytes without native reservations.
+    [[nodiscard]] CheckpointValidation validate_checkpoint_import(
+        const runtime::DurableCheckpointSet&, const runtime::ContinuationCheckpointReader&,
+        const runtime::DurableLimits&) const;
+    [[nodiscard]] std::vector<CheckpointHandle> commit_import(ImportReservation&&);
+    [[nodiscard]] static runtime::DurableCheckpointSet decode_checkpoint_index(
+        std::span<const std::byte>, const runtime::DurableLimits&);
+    [[nodiscard]] runtime::DurableNativeLayout checkpoint_layout() const;
     [[nodiscard]] std::uint32_t checkpoint_recovery_frontier(CheckpointHandle retained,
                                                              const RequestBasePlan& base,
                                                              std::uint32_t target) const;
