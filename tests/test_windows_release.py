@@ -343,6 +343,27 @@ class QualificationRestorationTests(unittest.TestCase):
                 self.assertEqual(subject.state["restoration"]["status"], "passed")
                 self.assertEqual(len(scripts), 3)
 
+    def test_preflight_receipt_hides_operator_paths_and_host_aliases(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            subject = self.orchestrator(Path(temporary))
+            found = {"incumbent_state_root": "C:/incumbent", "incumbent_was_running": False,
+                     "omp_models": ["ninfer-client-acceptance/q38-ninfer"]}
+            status = {
+                "lineage_exists": False, "active_release": "", "previous_release": "",
+                "incumbent_state_root": "C:/incumbent", "incumbent_was_running": False,
+                "power_limit_w": 370, "gpu": "NVIDIA GeForce RTX 3090, 24576, 621.01",
+                "model_sha256": "",
+            }
+            with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="")), \
+                    patch.object(subject, "remote_json", side_effect=[found, status]):
+                receipt = subject.phase("preflight", subject.preflight)
+            text = json.dumps(receipt)
+            for private in ("fake-builder", "fake-target", "C:/incumbent"):
+                self.assertNotIn(private, text)
+            for field in ("builder_identity_sha256", "target_identity_sha256", "incumbent_root_sha256"):
+                self.assertRegex(receipt[field], "^[0-9a-f]{64}$")
+            self.assertEqual(subject.state["found_incumbent"]["incumbent_state_root"], "C:/incumbent")
+
     def test_failed_found_state_write_never_reaches_stop(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             subject = self.orchestrator(Path(temporary))
@@ -460,6 +481,9 @@ class QualificationRestorationTests(unittest.TestCase):
             self.assertEqual(final["status"], "restore-failed")
             self.assertIsNone(final["qualified_utc"])
             self.assertEqual(subject.state["restoration"]["status"], "failed")
+            self.assertNotIn("error", final["restoration"])
+            self.assertEqual(final["restoration"]["reason"], "operator_failure")
+            self.assertRegex(final["restoration"]["error_sha256"], "^[0-9a-f]{64}$")
 
     def test_successful_cleanup_cannot_mask_failed_preflight_in_an_old_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

@@ -37,6 +37,10 @@ event, waits for synchronous final saves, and accepts only a launch-bound
 schema-1 shutdown report with `complete=true` and no refused sessions. Skipped
 sessions are counted, not treated as failed saves. Restart qualification checks
 the real scheduler/reuse counters reset before continuing either saved session.
+Public qualification phase receipts hash host-route and incumbent-root bindings;
+restoration summaries expose a bounded failure reason and diagnostic digest, not
+raw operator errors. The local orchestration state retains its private write-ahead
+recovery information and is not a public release asset.
 
 Disposable qualification installs may supply `-ScratchTaskSuffix C3`, creating
 the specification's task name plus `-Scratch-C3` without changing the production

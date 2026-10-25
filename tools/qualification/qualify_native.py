@@ -779,9 +779,12 @@ if(-not (Test-Path -LiteralPath $modelPath -PathType Leaf)){{throw 'pinned model
             "lane": self.lane.name,
             "release_id": self.lane.release_id,
             "source_commit": self.head,
-            "builder": self.config.builder,
-            "target": self.config.target,
-            "initial": status,
+            "builder_identity_sha256": hashlib.sha256(self.config.builder.encode()).hexdigest(),
+            "target_identity_sha256": hashlib.sha256(self.config.target.encode()).hexdigest(),
+            # Private write-ahead state owns the recovery path; public phase receipts bind
+            # that path without exporting operator roots or SSH aliases.
+            "incumbent_root_sha256": hashlib.sha256((incumbent or "").encode()).hexdigest(),
+            "initial": {key: value for key, value in status.items() if key != "incumbent_state_root"},
             "long_fixture_sha256": sha256_file(self.config.long_fixture),
         }
 
@@ -1424,7 +1427,12 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
         summary["qualified_utc"] = (
             time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) if summary["status"] == "passed" else None
         )
-        summary["restoration"] = restoration
+        public_restoration = dict(restoration)
+        detail = public_restoration.pop("error", None)
+        if detail is not None:
+            public_restoration["reason"] = "operator_failure"
+            public_restoration["error_sha256"] = hashlib.sha256(str(detail).encode()).hexdigest()
+        summary["restoration"] = public_restoration
         atomic_json(path, summary)
         summary["receipt_sha256"] = sha256_file(path)
         receipt_phase = self.state["phases"].get("receipt")
