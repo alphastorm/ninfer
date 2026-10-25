@@ -60,13 +60,13 @@ K3/K4 publication rule: Main approved a mandatory Engine-supplied live-service g
 
 | Requester | Requested surface | Ownership / current state |
 |---|---|---|
-| Contracts | New `runtime/contract/{durable_checkpoint_set,durable_engine_api,runtime_fingerprint}.h`; contract test registration | New headers reserved to Contracts; integration owns CMake; merge first. |
+| Contracts | New `runtime/contract/{durable_checkpoint_set,durable_engine_api,runtime_fingerprint}.h`; contract test registration | Frozen provider `746b29d2` preflight clean. Integration adds internal adapter friendship to Engine, PreparedPrompt and GenerationHandle; no public persistence methods. Contract CTest registration is staged for first merge. |
 | DurableStore | Store/backend sources and host-only test targets | Authorized standalone SHA/backend registration consumed as `dc5ffcbb`; snapshot-aware store remains dependent on ServePort and K6. |
 | ServePort | Serving source/test registration; persistence and managed-stop CLI union | Authorized source/test registration supplied. Identity, bounded API-key-file input, K5 persistence budgets and managed-stop options ported with parser regressions. Actual restore/final-save/shutdown orchestration awaits providers and must reject enabled launches without them. |
 | Persistence | `program/storage/durable_tracer.cpp` adjacent to `checkpoints.cpp` in `program_sources.cmake` | Exact slice-local insertion permitted for G1 build; integration owns merge disposition. Prefix-identity hook remains slice-owned and must become typed for final K1. |
 | EngineCache | `gpu_keep_warm_ms`, `--gpu-keep-warm-ms`, core source and test registration | Exact shared patch supplied and consumed on slice; runtime role/occupancy declarations pushed separately after Main approval. |
 | PortableCore | Root/core portability wiring; exact `Uint128` migrations in shared resources and serve options | Authorized platform registration consumed as `bb5bf4cc1`; shared arithmetic patch supplied. Minimal Qwen4 read-completion category migration authorized. |
-| ArchEnable | Single `120a`, `89` or `86` architecture gate; propagated `NINFER_SM86`/`NINFER_SM89` definitions | Root gate and existing `ninfer_internal_includes` compile-owner definitions applied; native support still awaits family-local gating and qualification. |
+| ArchEnable | Single `120a`, `89` or `86` architecture gate; propagated `NINFER_SM86`/`NINFER_SM89` definitions; ops CTest label | Root gate/definitions applied. Existing `ninfer_add_op_test` appends `ops` for `ctest -L ops`, preserving skip semantics; native support still awaits family-local gating and qualification. |
 | Harness | BuildInfo header/module, compile-owner verification, source registration and version consumers | Standalone provider `f4f42173` ready; exact compile-owner/core/app registration patch supplied for slice consumption. |
 
 ## Open prerequisites
