@@ -208,7 +208,7 @@ void pending_timeout(ninfer::Engine& engine) {
         };
         auto handle = engine.submit(
             engine.prepare_tokens({198, static_cast<ninfer::TokenId>(1000 + row), 198}),
-            request(256, false), ninfer::OutputConsumerMode::Aggregate, observation);
+            request(1024, false), ninfer::OutputConsumerMode::Aggregate, observation);
         // Observers are delivered by wait()'s consumer, not by the GPU worker. Keep both
         // consumers running while the main thread exercises a third queued request.
         active[row] = std::async(std::launch::async, [handle = std::move(handle)]() mutable {
@@ -221,7 +221,8 @@ void pending_timeout(ninfer::Engine& engine) {
                                [&] { return started[0] && started[1]; }),
                 "two requests never started before the pending-timeout fixture");
     }
-    (void)engine.memory_summary();
+    // The first-output observations establish live execution. memory_summary() takes
+    // execution_mutex_ and may wait behind decode; it is not a live-lane barrier.
     require(engine.runtime_stats().running_requests == 2,
             "timeout fixture did not hold both execution lanes");
     auto waiting = engine.submit(engine.prepare_tokens({198, 1002, 198}), request(2, false),
@@ -234,36 +235,56 @@ void pending_timeout(ninfer::Engine& engine) {
         timed_out = error.kind() == ninfer::RequestErrorKind::QueueTimeout;
     }
     require(timed_out, "queued deadline was ignored while both lanes decoded");
-    for (auto& result : active) { complete(result.get(), 256); }
+    for (auto& result : active) { complete(result.get(), 1024); }
     settled(engine);
 }
 
 void shared_readers_and_live_sibling(ninfer::Engine& engine) {
-    auto prefix = engine.tokenize_text(
-        "Explain deterministic scheduling, cancellation and independent branch continuation. ");
-    const auto seed = prefix;
-    while (prefix.size() < 256) { prefix.insert(prefix.end(), seed.begin(), seed.end()); }
-    const auto primed = engine.generate(engine.prepare_tokens(prefix), request(8));
+    std::string shared;
+    for (unsigned i = 0; i < 32; ++i) {
+        shared += "Explain deterministic scheduling, cancellation and independent branch continuation. ";
+    }
+    const auto prompt = [&](char session, std::string text) {
+        ninfer::PromptInput input;
+        input.options.enable_thinking = false;
+        input.context_cache.session_key = "http:" + std::string(64, session);
+        input.context_cache.reuse_scope = input.context_cache.session_key;
+        input.context_cache.shared_reuse_scope = "principal:c2-shared-readers";
+        input.context_cache.allow_engine_automatic_shared_prefixes = false;
+        input.context_cache.markers.push_back({.after_message_count = 1,
+            .kind = ninfer::PromptCacheMarkerKind::SharedStablePrefix,
+            .location = ninfer::PromptCacheMarkerLocation::MessageBoundary});
+        input.messages = {
+            {.role = ninfer::ChatRole::System, .parts = {{.text = shared}}},
+            {.role = ninfer::ChatRole::User, .parts = {{.text = std::move(text)}}}};
+        return input;
+    };
+    const auto options = [&](std::uint32_t outputs, bool reuse = true) {
+        auto value = request(outputs, reuse);
+        value.output.raw = false;
+        value.tool_choice.constraints = ninfer::ToolConstraintMode::Automatic;
+        return value;
+    };
+    // A private raw-token endpoint is consumable by its first reader. Shared fanout
+    // must instead use the same explicit, principal-scoped marker as production.
+    const auto primed = engine.generate(engine.prepare(prompt('c', "Name one short word.")), options(8));
     complete(primed, 8);
-    prefix.insert(prefix.end(), primed.generated_token_ids.begin(), primed.generated_token_ids.end());
-    prefix.push_back(198);
-    auto other = prefix;
-    other.push_back(5834);
+    auto other = prompt('e', "Explain the short branch.");
     const auto before = engine.runtime_stats();
-    auto older = engine.submit(engine.prepare_tokens(prefix), request(512));
-    auto younger = engine.submit(engine.prepare_tokens(other), request(16));
+    auto older = engine.submit(engine.prepare(prompt('d', "Explain the long branch.")), options(1024));
+    auto younger = engine.submit(engine.prepare(other), options(16));
     const auto branch = younger.wait();
     complete(branch, 16);
     require(branch.reused_prompt_tokens != 0, "second reader did not reuse the primed checkpoint");
     require(engine.runtime_stats().running_requests != 0,
             "short sibling waited for the long sibling to finish");
-    other.insert(other.end(), branch.generated_token_ids.begin(), branch.generated_token_ids.end());
-    other.push_back(198);
-    const auto continued = engine.generate(engine.prepare_tokens(other), request(8));
+    other.messages.push_back({.role = ninfer::ChatRole::Assistant, .parts = {{.text = branch.content}}});
+    other.messages.push_back({.role = ninfer::ChatRole::User, .parts = {{.text = "Continue briefly."}}});
+    const auto continued = engine.generate(engine.prepare(other), options(8));
     require(continued.prefix_reuse_path == ninfer::PrefixReusePath::PrivateEndpoint &&
                 engine.runtime_stats().last_selected_reuse_path == continued.prefix_reuse_path,
             "successful sibling binding lost its actual checkpoint-role telemetry");
-    const auto fresh = engine.generate(engine.prepare_tokens(other), request(8, false));
+    const auto fresh = engine.generate(engine.prepare(other), options(8, false));
     complete(continued, 8);
     complete(fresh, 8);
     require(continued.reused_prompt_tokens != 0 && fresh.reused_prompt_tokens == 0,
@@ -271,7 +292,7 @@ void shared_readers_and_live_sibling(ninfer::Engine& engine) {
     require(continued.generated_token_ids == fresh.generated_token_ids,
             "continuing a sibling changed deterministic tokens versus a fresh prefix");
     const auto long_branch = older.wait();
-    complete(long_branch, 512);
+    complete(long_branch, 1024);
     require(long_branch.reused_prompt_tokens != 0,
             "first reader lost its shared source while the sibling continued");
     settled(engine);

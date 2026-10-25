@@ -20,6 +20,12 @@ using namespace std::chrono_literals;
 void require(bool value, const char* message) {
     if (!value) { throw std::runtime_error(message); }
 }
+void phase(const char* name) {
+    static const auto started = std::chrono::steady_clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    std::cout << "E2 phase=" << name << " elapsed_ms=" << elapsed << std::endl;
+}
 struct File {
     DurablePayload descriptor;
     std::vector<std::byte> bytes;
@@ -181,7 +187,9 @@ void exercise(const char* artifact) {
     DurableExportResult exported;
     std::uint32_t prompt_tokens = 0;
     {
+        phase("source-load");
         Engine source(options);
+        phase("source-ready");
         auto prepared = source.prepare(prompt(a, text));
         prompt_tokens = prepared.summary().prompt_tokens;
         require(prompt_tokens >= 1500 && prompt_tokens < 1900, "unexpected E2 prompt geometry");
@@ -190,6 +198,7 @@ void exercise(const char* artifact) {
                 "source seed did not complete");
         exported = CheckpointEngineAccess::export_session(source, a, tag, seed, {});
         require(exported.state == DurableExportState::Exported && seed.finish(), "source export failed");
+        phase("source-exported");
     }
     const auto resident = exported.stats.payload_bytes - seed.files.at("engine/index.cbor").bytes.size();
     constexpr std::uint64_t mib = 1ULL << 20;
@@ -198,12 +207,15 @@ void exercise(const char* artifact) {
                 options.context_cache.host_capacity_bytes < 2 * resident,
             "fixture must fit one full set but not two");
     auto files = std::make_shared<const Files>(std::move(seed.files));
+    phase("target-load");
     Engine engine(options);
+    phase("target-ready");
     const auto identity = fingerprint(engine);
     Reader victim(files);
     require(CheckpointEngineAccess::import_session(engine, target(engine, b), victim,
                 identity, exported.stats, {}).state == DurableImportState::Imported,
             "initial Host-only session import failed");
+    phase("victim-imported");
     const auto occupied = engine.memory_summary().host_context_occupied_bytes;
     require(occupied >= resident && occupied * 2 > options.context_cache.host_capacity_bytes,
             "import did not exercise near-capacity Host pressure");
@@ -231,15 +243,18 @@ void exercise(const char* artifact) {
         std::unique_lock lock(mutex);
         require(ready.wait_for(lock, 30s, [&] { return started; }), "B never entered decode");
     }
+    phase("sibling-decoding");
     Reader blocked(files);
     const auto refused = CheckpointEngineAccess::import_session(
         engine, target(engine, a), blocked, identity, exported.stats, {});
     require(refused.state == DurableImportState::CapacityRefused && handler->pending.load() > 0,
             "Pending did not refuse destructive restore reclaim");
+    phase("pending-preserved");
     Writer protected_copy;
     const auto protected_export = CheckpointEngineAccess::export_session(engine, b, tag, protected_copy, {});
     require(protected_export.state == DurableExportState::Exported && protected_copy.finish(),
             "Pending destroyed the victim before save");
+    phase("victim-exported");
     const auto publication = CheckpointEngineAccess::publish_export(
         engine, b, tag, protected_export.captured_epoch, [&] {
             oracle->files = std::make_shared<const Files>(std::move(protected_copy.files));
@@ -247,6 +262,7 @@ void exercise(const char* artifact) {
             return true;
         });
     require(publication.state == DurableExportState::Exported, "save-before-evict publication failed");
+    phase("victim-save-published");
     CheckpointEngineAccess::notify_checkpoint_progress(engine);
     require(sibling.wait_for(0s) != std::future_status::ready && engine.runtime_stats().running_requests > 0,
             "B finished before restore overlap");
@@ -255,13 +271,16 @@ void exercise(const char* artifact) {
         engine, target(engine, a), restored, identity, exported.stats, {});
     require(imported.state == DurableImportState::Imported && handler->settled.load() > 0,
             "saved victim did not unblock restore");
+    phase("target-imported");
     require(sibling.wait_for(0s) != std::future_status::ready,
             "restore waited for B decode to finish");
     const auto before = engine.runtime_stats();
     auto continued_prompt = engine.prepare(prompt(a, text));
     CheckpointEngineAccess::set_checkpoint_tag(continued_prompt, "pressure-continuation");
     const auto continued = engine.generate(std::move(continued_prompt), request(16));
+    phase("target-continued");
     const auto live = sibling.get();
+    phase("sibling-finished");
     const auto after = engine.runtime_stats();
     require(live.generated_token_ids.size() == 2048 && continued.generated_token_ids.size() == 16 &&
                 continued.reused_prompt_tokens >= 1500, "restored A or live B lost its continuation");
