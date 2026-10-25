@@ -55,13 +55,16 @@ void handler_removal_keeps_callback_alive() {
         void save_before_eviction(std::span<PressureCheckpointVictim> victims) noexcept override {
             control.set_handler({});
             completed = !destroyed;
-            for (auto& victim : victims) { victim.outcome = PressureCheckpointOutcome::Settled; }
+            for (auto& victim : victims) { victim.outcome = PressureCheckpointOutcome::Pending; }
         }
     };
     control.set_handler(std::make_shared<Handler>(control, destroyed, completed));
     PressureCheckpointVictim victim{"session", "turn"};
-    require(control.settle({&victim, 1}) && completed && destroyed,
+    require(!control.settle({&victim, 1}) && completed && destroyed && control.pending(),
             "removing the installed handler destroyed its in-flight callback");
+    control.begin_turn();
+    require(!control.pending() && control.settle({&victim, 1}),
+            "callback-time provider progress was lost or erased the current Pending result");
 }
 
 void publication_and_restore_share_one_gate() {

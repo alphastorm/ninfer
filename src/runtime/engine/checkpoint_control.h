@@ -83,10 +83,14 @@ public:
     // legal and cannot destroy that callback's receiver while it is on the stack.
     void notify_progress() noexcept { progress_.fetch_add(1); }
     // The pending snapshot is worker-owned. Only progress_ is touched by provider threads.
-    [[nodiscard]] bool pending() const noexcept {
-        return pending_progress_ && *pending_progress_ == progress_.load();
+    void begin_turn() noexcept {
+        if (pending_progress_ && *pending_progress_ != progress_.load()) {
+            pending_progress_.reset();
+        }
     }
+    [[nodiscard]] bool pending() const noexcept { return pending_progress_.has_value(); }
     [[nodiscard]] bool settle(std::span<PressureCheckpointVictim> victims) noexcept {
+        begin_turn();
         if (pending()) { return false; }
         const auto progress = progress_.load();
         const auto handler = handler_.load();
@@ -94,6 +98,9 @@ public:
         handler->save_before_eviction(victims);
         for (const auto& victim : victims) {
             if (victim.outcome == PressureCheckpointOutcome::Pending) {
+                // Preserve this attempt's classification even when its callback itself signals
+                // progress. The next attempt/worker turn may retry; this one must not fail as
+                // native capacity impossibility or consume a different destructive plan.
                 pending_progress_ = progress;
                 return false;
             }

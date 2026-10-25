@@ -2314,6 +2314,7 @@ private:
             }
             std::unique_lock execution_lock(execution_mutex_);
             checkpoint_execution_lock_ = &execution_lock;
+            checkpoints_.begin_turn();
             run_checkpoint_commands();
             if (failed_) {
                 execution_lock.unlock();
