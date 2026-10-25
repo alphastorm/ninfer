@@ -57,6 +57,12 @@ endif()
 ninfer_add_test(ninfer_session_checkpoint_store_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_session_checkpoint_store.cpp"
   LIBRARIES ninfer_session_checkpoint_store)
+if(WIN32)
+  add_test(NAME ninfer_session_checkpoint_store_current_flush_test
+    COMMAND ninfer_session_checkpoint_store_test current_flush)
+  set_tests_properties(ninfer_session_checkpoint_store_current_flush_test
+    PROPERTIES LABELS "host;durable" TIMEOUT 180)
+endif()
 ninfer_add_test(ninfer_automatic_checkpoint_queue_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_automatic_checkpoint_queue.cpp"
   LIBRARIES ninfer_session_checkpoint_store)
