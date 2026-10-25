@@ -4,6 +4,23 @@ add_executable(ninfer_public_api_test "${CMAKE_CURRENT_LIST_DIR}/../test_public_
 target_include_directories(ninfer_public_api_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
 add_test(NAME ninfer_public_api_test COMMAND ninfer_public_api_test)
 
+ninfer_add_test(ninfer_uint128_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../cpu/test_uint128.cpp")
+add_test(NAME ninfer_uint128_exact_test
+  COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/../cpu/test_uint128_exact.py"
+          $<TARGET_FILE:ninfer_uint128_test>)
+set_tests_properties(ninfer_uint128_test ninfer_uint128_exact_test PROPERTIES LABELS "host")
+
+ninfer_add_test(ninfer_durable_file_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../io/test_durable_file.cpp"
+  LIBRARIES ninfer_durable_io)
+set_tests_properties(ninfer_durable_file_test PROPERTIES LABELS "host")
+
+ninfer_add_test(ninfer_file_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../io/test_file.cpp"
+  LIBRARIES ninfer_core)
+set_tests_properties(ninfer_file_test PROPERTIES LABELS "host" TIMEOUT 30)
+
 foreach(part IN ITEMS system task_pool executor)
   ninfer_add_test(ninfer_cpu_${part}_test
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../cpu/test_${part}.cpp"
@@ -47,8 +64,10 @@ add_test(NAME ninfer_nf4_exact_test
     $<TARGET_FILE:ninfer_nf4_test>)
 
 ninfer_add_test(ninfer_read_queue_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../io/test_read_queue.cpp"
-  LIBRARIES ninfer_core PkgConfig::URING)
-target_link_options(ninfer_read_queue_test PRIVATE "LINKER:--wrap=io_uring_submit")
+  LIBRARIES ninfer_core ${NINFER_URING_TARGET})
+if(NOT WIN32)
+  target_link_options(ninfer_read_queue_test PRIVATE "LINKER:--wrap=io_uring_submit")
+endif()
 set_tests_properties(ninfer_read_queue_test PROPERTIES TIMEOUT 30)
 
 ninfer_add_test(ninfer_arena_test        SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_arena.cpp"
