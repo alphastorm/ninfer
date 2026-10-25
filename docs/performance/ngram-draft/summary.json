@@ -1,0 +1,737 @@
+{
+  "schema_version": 1,
+  "experiment": "S1",
+  "recommendation": "no-go",
+  "binary_sha256": "91ce5b48a40a4a103e68e45a4e06bf25506de933393647de910ace211bb4f23c",
+  "source_commit": "60a95b0e91e4eee32b6982ccd9c6b27161659b5d",
+  "baseline_source_commit": "9eb0a5fb9951527adaa2b262fac8ed1124eb83b4",
+  "baseline_binary_sha256": "d4c6317a67dc342c5ae3660c10fa3b64da50e35ba8380d8c22e9adc75246b5a3",
+  "baseline_receipt": "baseline.json",
+  "arm_receipts": [
+    "0-off.json",
+    "1-on.json",
+    "2-on.json",
+    "3-off.json"
+  ],
+  "groups": {
+    "read": {
+      "weighted_decode_tok_s_abba": [
+        109.3937727120844,
+        104.55770157914542,
+        105.49560914087805,
+        109.87886843664675
+      ],
+      "change_percent": -4.204505578265138
+    },
+    "edit": {
+      "weighted_decode_tok_s_abba": [
+        422.17516564410744,
+        647.3110950357673,
+        647.5265509694736,
+        421.7301006618163
+      ],
+      "change_percent": 53.43400470448656
+    },
+    "explain": {
+      "weighted_decode_tok_s_abba": [
+        159.82946143365538,
+        159.74224560165624,
+        159.79335765067586,
+        159.6564329350768
+      ],
+      "change_percent": 0.01555902294156919
+    },
+    "role": {
+      "weighted_decode_tok_s_abba": [
+        223.82221625595457,
+        224.11429353240692,
+        224.19475249005657,
+        223.54309361836982
+      ],
+      "change_percent": 0.21095425311457028
+    },
+    "depth": {
+      "weighted_decode_tok_s_abba": [
+        258.9673830595264,
+        259.5519965364469,
+        259.5164341472918,
+        258.7223128251792
+      ],
+      "change_percent": 0.2663245588995222
+    },
+    "paired_copy": {
+      "weighted_decode_tok_s_abba": [
+        345.2732416906219,
+        513.2254476473015,
+        513.7955079839164,
+        345.00161126533766
+      ],
+      "change_percent": 48.7843503545309
+    },
+    "paired_control": {
+      "weighted_decode_tok_s_abba": [
+        153.86510773424482,
+        152.69879920342498,
+        152.83324882599925,
+        153.76359005216722
+      ],
+      "change_percent": -0.6815520697758592
+    },
+    "constraint_copy": {
+      "weighted_decode_tok_s_abba": [
+        346.83855033181806,
+        490.0418852098715,
+        490.6149510302463,
+        346.4243468846965
+      ],
+      "change_percent": 41.455260360464166
+    },
+    "constraint_control": {
+      "weighted_decode_tok_s_abba": [
+        175.14092165805587,
+        179.59109585270247,
+        179.84956617924124,
+        174.95829592227201
+      ],
+      "change_percent": 2.668227743031859
+    }
+  },
+  "requests": [
+    {
+      "id": "chain-0-read",
+      "kind": "read",
+      "same_input": true,
+      "greedy_equal": true,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        108.98158075058339,
+        98.68681890983534,
+        100.11065230399159,
+        110.08532989133202
+      ],
+      "decode_change_percent": -9.252624857261393,
+      "copy_proposed_abba": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "chain-0-edit",
+      "kind": "edit",
+      "same_input": true,
+      "greedy_equal": true,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        437.0561254846837,
+        727.3938910120407,
+        727.4013514666566,
+        436.55955866417025
+      ],
+      "decode_change_percent": 66.52576972631562,
+      "copy_proposed_abba": [
+        0,
+        1170,
+        1170,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        1158,
+        1158,
+        0
+      ]
+    },
+    {
+      "id": "chain-0-explain",
+      "kind": "explain",
+      "same_input": true,
+      "greedy_equal": true,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        143.02957533529283,
+        143.17501489004925,
+        142.9686878748055,
+        142.8651145351257
+      ],
+      "decode_change_percent": 0.0870995171505573,
+      "copy_proposed_abba": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "chain-1-read",
+      "kind": "read",
+      "same_input": true,
+      "greedy_equal": true,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        109.30419735222607,
+        107.60312952941923,
+        108.46520487748502,
+        109.9171180962707
+      ],
+      "decode_change_percent": -1.4382639001786601,
+      "copy_proposed_abba": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "chain-1-edit",
+      "kind": "edit",
+      "same_input": true,
+      "greedy_equal": true,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        340.72968145338626,
+        334.37962223344687,
+        335.24860711565617,
+        339.6644819034085
+      ],
+      "decode_change_percent": -1.5823084011445276,
+      "copy_proposed_abba": [
+        0,
+        15,
+        15,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        1,
+        1,
+        0
+      ]
+    },
+    {
+      "id": "chain-1-explain",
+      "kind": "explain",
+      "same_input": true,
+      "greedy_equal": true,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        163.75751404166553,
+        163.60699551101558,
+        163.6173761535609,
+        163.62130721918246
+      ],
+      "decode_change_percent": -0.04717763833245181,
+      "copy_proposed_abba": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "chain-2-read",
+      "kind": "read",
+      "same_input": true,
+      "greedy_equal": true,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        109.89949965505294,
+        107.92358211751572,
+        108.3575178283333,
+        109.63509985263399
+      ],
+      "decode_change_percent": -1.481998541065499,
+      "copy_proposed_abba": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "chain-2-edit",
+      "kind": "edit",
+      "same_input": true,
+      "greedy_equal": true,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        294.7079208737804,
+        295.0101085213685,
+        295.2007246847566,
+        295.4148288880954
+      ],
+      "decode_change_percent": 0.014926291908734513,
+      "copy_proposed_abba": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "chain-2-explain",
+      "kind": "explain",
+      "same_input": true,
+      "greedy_equal": true,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        174.45698158964922,
+        174.1268339360886,
+        174.5788620565697,
+        174.23293768941264
+      ],
+      "decode_change_percent": 0.004524568312458399,
+      "copy_proposed_abba": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "paired-copy",
+      "kind": "paired_copy",
+      "same_input": true,
+      "greedy_equal": true,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        345.2732416906219,
+        513.2254476473015,
+        513.7955079839164,
+        345.00161126533766
+      ],
+      "decode_change_percent": 48.7843503545309,
+      "copy_proposed_abba": [
+        0,
+        929,
+        929,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        929,
+        929,
+        0
+      ]
+    },
+    {
+      "id": "paired-control",
+      "kind": "paired_control",
+      "same_input": true,
+      "greedy_equal": false,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        153.86510773424482,
+        152.69879920342498,
+        152.83324882599925,
+        153.76359005216722
+      ],
+      "decode_change_percent": -0.6815520697758592,
+      "copy_proposed_abba": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "constrained-copy",
+      "kind": "constraint_copy",
+      "same_input": true,
+      "greedy_equal": true,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        346.83855033181806,
+        490.0418852098715,
+        490.6149510302463,
+        346.4243468846965
+      ],
+      "decode_change_percent": 41.455260360464166,
+      "copy_proposed_abba": [
+        0,
+        375,
+        375,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        365,
+        365,
+        0
+      ]
+    },
+    {
+      "id": "constrained-partner",
+      "kind": "constraint_control",
+      "same_input": true,
+      "greedy_equal": false,
+      "disabled_equal": true,
+      "baseline_disabled_equal": false,
+      "decode_tok_s_abba": [
+        175.14092165805587,
+        179.59109585270247,
+        179.84956617924124,
+        174.95829592227201
+      ],
+      "decode_change_percent": 2.668227743031859,
+      "copy_proposed_abba": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "log-001",
+      "kind": "role",
+      "same_input": true,
+      "greedy_equal": false,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        204.8793134808142,
+        205.7577289786442,
+        205.88387795393675,
+        204.74354035809714
+      ],
+      "decode_change_percent": 0.49283214419073573,
+      "copy_proposed_abba": [
+        0,
+        90,
+        90,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        17,
+        17,
+        0
+      ]
+    },
+    {
+      "id": "log-002",
+      "kind": "role",
+      "same_input": true,
+      "greedy_equal": false,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        225.71091866731797,
+        221.76368895020465,
+        221.74488920755266,
+        225.30884187160137
+      ],
+      "decode_change_percent": -1.6653776704122603,
+      "copy_proposed_abba": [
+        0,
+        255,
+        255,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        155,
+        155,
+        0
+      ]
+    },
+    {
+      "id": "repo-001",
+      "kind": "role",
+      "same_input": true,
+      "greedy_equal": true,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        269.4112012149441,
+        269.41900380153334,
+        269.3245385643443,
+        268.8330705846684
+      ],
+      "decode_change_percent": 0.09275910444819235,
+      "copy_proposed_abba": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "repo-005",
+      "kind": "role",
+      "same_input": true,
+      "greedy_equal": true,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        237.5447153106195,
+        268.739138804344,
+        269.37041366911905,
+        237.2608288412609
+      ],
+      "decode_change_percent": 13.332617763480247,
+      "copy_proposed_abba": [
+        0,
+        60,
+        60,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        54,
+        54,
+        0
+      ]
+    },
+    {
+      "id": "struct-002",
+      "kind": "role",
+      "same_input": true,
+      "greedy_equal": true,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        253.365409942049,
+        253.12959626905763,
+        252.8852625071366,
+        252.95851563067927
+      ],
+      "decode_change_percent": -0.06104131780548805,
+      "copy_proposed_abba": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "struct-003",
+      "kind": "role",
+      "same_input": true,
+      "greedy_equal": true,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        334.61097180581055,
+        334.35232184583094,
+        334.56096542244967,
+        333.9978559218942
+      ],
+      "decode_change_percent": 0.04553627292218643,
+      "copy_proposed_abba": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "id": "depth-0",
+      "kind": "depth",
+      "same_input": true,
+      "greedy_equal": false,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        311.25253563766546,
+        307.568316673144,
+        307.74324007701426,
+        310.6546985291685
+      ],
+      "decode_change_percent": -1.060556471177232,
+      "copy_proposed_abba": [
+        0,
+        120,
+        120,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        49,
+        49,
+        0
+      ]
+    },
+    {
+      "id": "depth-32000",
+      "kind": "depth",
+      "same_input": true,
+      "greedy_equal": false,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        263.5282589787454,
+        261.8452700907506,
+        261.83565539460966,
+        263.2294347025208
+      ],
+      "decode_change_percent": -0.5840955400961967,
+      "copy_proposed_abba": [
+        0,
+        105,
+        105,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        15,
+        15,
+        0
+      ]
+    },
+    {
+      "id": "depth-64000",
+      "kind": "depth",
+      "same_input": true,
+      "greedy_equal": false,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        256.3789735981988,
+        264.8740694254364,
+        264.8767895937432,
+        256.252377072374
+      ],
+      "decode_change_percent": 3.339535969895868,
+      "copy_proposed_abba": [
+        0,
+        180,
+        180,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        90,
+        90,
+        0
+      ]
+    },
+    {
+      "id": "depth-120000",
+      "kind": "depth",
+      "same_input": true,
+      "greedy_equal": false,
+      "disabled_equal": true,
+      "baseline_disabled_equal": true,
+      "decode_tok_s_abba": [
+        220.36138979131854,
+        219.0373357010358,
+        218.85237402190134,
+        220.25396721598997
+      ],
+      "decode_change_percent": -0.6186001556741316,
+      "copy_proposed_abba": [
+        0,
+        75,
+        75,
+        0
+      ],
+      "copy_accepted_abba": [
+        0,
+        23,
+        23,
+        0
+      ]
+    }
+  ],
+  "acceptance": {
+    "edit_gain_min_percent": 15,
+    "other_loss_max_percent": 0.5,
+    "matched_inputs": true,
+    "greedy_equal": false,
+    "baseline_disabled_equal": false,
+    "edits_exact": false,
+    "accepted_copies_exercised": true,
+    "mixed_constraint_exact": true,
+    "read_decode_measurable": true,
+    "passed": false,
+    "native_default_off_passed": true
+  },
+  "scope": "One bounded ABBA experiment, not a powered statistical or release qualification.",
+  "raw_content_included": false
+}

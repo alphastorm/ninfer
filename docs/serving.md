@@ -1133,17 +1133,19 @@ rejection/error records rather than successful constraint outcomes.
 
 `request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
 as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,
-`drafted_tokens`, `accepted_tokens`, `fallback_steps`, `accepted_per_position`, and the additive
-optional `attempted_per_position`. For Qwen3.5 MTP and DFlash/DFlash2, each zero-based position
+`drafted_tokens`, `accepted_tokens`, `fallback_steps`, `ngram_rounds`, `ngram_drafted_tokens`,
+`ngram_accepted_tokens`, `accepted_per_position`, and the additive optional
+`attempted_per_position`. For Qwen3.5 MTP and DFlash/DFlash2, each zero-based neural position
 counts native verification attempts and accepts at the commit decision, including work whose
 output is truncated or discarded. All proposed positions count as attempted even when
 position zero rejects. A zero-draft fallback increments only `fallback_steps`. Each array has
-`draft_window` entries; its sum equals `drafted_tokens` or `accepted_tokens`, respectively.
+`draft_window` entries; its sum equals the corresponding total minus copied-token work.
+Copy counters are subsets of verification totals and remain zero when copy drafting is disabled.
 The non-speculative backend uses empty arrays. The live Prometheus counter
 `ninfer_spec_decode_position_tokens_total` (labels `position="0"`, `kind="attempted"` or
-`kind="accepted"`) exposes the
-same native work across requests, excluding startup warmup like the existing totals. Rates can be
-derived downstream from raw token counts and seconds instead of rounded stderr strings.
+`kind="accepted"`) exposes the same neural work across requests, excluding startup warmup like
+the existing totals. Rates can be derived downstream from raw token counts and seconds instead
+of rounded stderr strings.
 `generation.scheduling` records preemptions, snapshot/replay restores, replayed tokens, paused time
 and request-owned transfer bytes. Replay rebuilds committed state without adding new output usage.
 
