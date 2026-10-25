@@ -9,6 +9,7 @@
 #include "ops/linear/kernels/fp8/fp8_a8_mma_common.cuh"
 #endif
 #include "ops/linear/kernels/fp8/fp8_operands.h"
+#include "ops/linear/kernels/fp8/fp8_schedule.cuh"
 
 #include <cuda.h>
 #include <algorithm>
@@ -18,6 +19,9 @@
 
 namespace ninfer::ops::detail {
 
+template <class Schedule, class Output, class Epilogue, class Rows = Fp8IdentityRows>
+void launch_fp8_a8_mma(const Fp8A8Operands&, Output, Epilogue, cudaStream_t, Rows = {});
+
 #if defined(NINFER_SM89)
 template <class Schedule>
 struct Fp8Sm89MmaSchedule : Schedule {
@@ -25,8 +29,6 @@ struct Fp8Sm89MmaSchedule : Schedule {
     static constexpr int kThreads = Schedule::kWarps * 32;
     static constexpr int kSharedBytes = Schedule::kStorageBytes;
 };
-template <class Schedule, class Output, class Epilogue, class Rows>
-void launch_fp8_a8_mma(const Fp8A8Operands&, Output, Epilogue, cudaStream_t, Rows);
 #endif
 
 #if !defined(NINFER_SM86) && !defined(NINFER_SM89)

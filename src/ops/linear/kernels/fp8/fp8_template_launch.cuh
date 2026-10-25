@@ -91,9 +91,9 @@ void launch_fp8_a16_sliced_k_mma(const Fp8A16Operands& p, Output output, Epilogu
     });
 }
 
-template <class Schedule, class Output, class Epilogue, class Rows = Fp8IdentityRows>
+template <class Schedule, class Output, class Epilogue, class Rows>
 void launch_fp8_a8_mma(const Fp8A8Operands& p, Output output, Epilogue epilogue,
-                       cudaStream_t stream, Rows rows = {}) {
+                       cudaStream_t stream, Rows rows) {
 #if defined(NINFER_SM86)
     throw std::runtime_error("FP8 A8 execution requires an sm_89 or newer GPU");
 #else
