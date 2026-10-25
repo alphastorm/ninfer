@@ -88,7 +88,7 @@ SessionCheckpointStoreOptions store_options(Engine& engine, const ServeOptions& 
         .write_buffer_bytes = options.session_checkpoint_write_buffer_bytes,
         .origin_mac_key = std::string(reinterpret_cast<const char*>(key.data()), key.size()),
         .require_origin_auth = options.session_checkpoint_require_origin_auth,
-        .read_queue = Access::make_read_queue(engine)};
+        .read_queue = Access::make_read_queue(engine, options.session_checkpoint_root)};
 }
 
 const char* import_name(ImportState state) noexcept {
@@ -133,8 +133,10 @@ runtime::DurableImportResult prepared_refusal(const runtime::DurablePrepareResul
 } // namespace
 
 SessionCheckpointService::SessionCheckpointService(Engine& engine, const ServeOptions& options,
-                                                   OpenAIResponsesStore& responses)
+                                                   OpenAIResponsesStore& responses,
+                                                   std::optional<std::string> principal_scope)
     : engine_(engine), responses_(responses), options_(options),
+      principal_scope_(std::move(principal_scope)),
       fingerprint_(startup_fingerprint(engine, options)),
       fingerprint_json_(session_checkpoint_runtime_fingerprint(fingerprint_)),
       limits_{.staging_bytes = options.session_checkpoint_staging_bytes,
@@ -164,7 +166,7 @@ runtime::DurableImportResult SessionCheckpointService::restore(
     auto guard = responses_.begin_restore(std::string(session));
     runtime::DurableImportTarget target{.session_sha256 = std::string(session),
         .expected_epoch = Access::session_epoch(engine_, session),
-        .shared_reuse_scope = authenticated_principal_scope(options_.api_key),
+        .shared_reuse_scope = principal_scope_,
         .allow_prefix_reuse = options_.allow_prefix_reuse, .cache_participation = true};
     auto loaded = store_.load(session, fingerprint_json_, required_response);
     if (loaded.state != SessionCheckpointLoadState::Available || !loaded.checkpoint) {
@@ -216,9 +218,9 @@ SessionCheckpointService::SaveOutcome SessionCheckpointService::save_session(
         return outcome;
     }
     const auto& tag = snapshot->latest_response_id;
-    outcome.tag = tag;
     if (allow_covered && store_.covers(session, fingerprint_json_, tag)) {
         outcome.covered = true;
+        outcome.tag = std::move(snapshot->latest_response_id);
         return outcome;
     }
     try {
@@ -233,6 +235,7 @@ SessionCheckpointService::SaveOutcome SessionCheckpointService::save_session(
         outcome.skip.export_state = runtime::DurableExportState::Refused;
         if (outcome.skip.durable_reason == Reason::None) { outcome.skip.durable_reason = Reason::IoUnavailable; }
     }
+    outcome.tag = std::move(snapshot->latest_response_id);
     return outcome;
 }
 
@@ -361,14 +364,21 @@ void SessionCheckpointService::save_before_eviction(
     for (auto& victim : victims) {
         victim.outcome = Outcome::Pending;
         try {
-            if (store_.covers(victim.session_sha256, fingerprint_json_, victim.checkpoint_tag) ||
-                responses_.await_publication(victim.session_sha256, victim.checkpoint_tag,
-                                             std::chrono::milliseconds(0)) == ResponsePublicationState::Absent) {
+            const bool covered = store_.covers(
+                victim.session_sha256, fingerprint_json_, victim.checkpoint_tag);
+            const auto publication = covered ? ResponsePublicationState::Stored
+                : responses_.await_publication(victim.session_sha256, victim.checkpoint_tag,
+                                                std::chrono::milliseconds(0));
+            if (covered || publication == ResponsePublicationState::Absent) {
                 victim.outcome = Outcome::Settled;
                 std::lock_guard lock(pressure_mutex_);
                 pressure_saves_.erase(victim.session_sha256);
                 continue;
             }
+            // Native completion may precede its HTTP handler. Do not export an older
+            // snapshot or manufacture retry progress while this exact reply is publishing.
+            // Its publication guard notifies again on either put or abandonment.
+            if (publication == ResponsePublicationState::Publishing) { continue; }
             std::lock_guard lock(pressure_mutex_);
             auto found = pressure_saves_.find(victim.session_sha256);
             const auto progress = progress_.load(std::memory_order_acquire);

@@ -345,7 +345,8 @@ std::shared_ptr<SessionCheckpointService>
 GenerationService::bind_checkpoints(OpenAIResponsesStore& responses) {
     if (options_.session_checkpoint_root.empty()) { return {}; }
     if (checkpoints_) { throw std::logic_error("checkpoint service is already bound"); }
-    auto service = std::make_shared<SessionCheckpointService>(*engine_, options_, responses);
+    auto service = std::make_shared<SessionCheckpointService>(
+        *engine_, options_, responses, principal_reuse_scope_);
     runtime::CheckpointEngineAccess::set_pressure_checkpoint_handler(*engine_, service);
     runtime::CheckpointEngineAccess::set_reclaimable_session_oracle(*engine_, service);
     checkpoint_hooks_ = {

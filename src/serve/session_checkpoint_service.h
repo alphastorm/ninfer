@@ -25,7 +25,8 @@ class SessionCheckpointService final : public runtime::PressureCheckpointHandler
                                        public runtime::ReclaimableSessionOracle {
 public:
     SessionCheckpointService(Engine& engine, const ServeOptions& options,
-                              OpenAIResponsesStore& responses);
+                              OpenAIResponsesStore& responses,
+                              std::optional<std::string> principal_scope);
     ~SessionCheckpointService();
     SessionCheckpointService(const SessionCheckpointService&) = delete;
     SessionCheckpointService& operator=(const SessionCheckpointService&) = delete;
@@ -62,6 +63,7 @@ private:
     Engine& engine_;
     OpenAIResponsesStore& responses_;
     const ServeOptions& options_;
+    const std::optional<std::string> principal_scope_;
     const runtime::RuntimeFingerprintV2 fingerprint_;
     const nlohmann::json fingerprint_json_;
     const runtime::DurableLimits limits_;
