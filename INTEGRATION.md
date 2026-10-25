@@ -9,6 +9,7 @@
 - Release assurance: production/hard-to-reverse; Main owns the final G4 council over the frozen candidate. This lane owns integration proof, not publication or review dispatch.
 - Infra owns the single vanilla-master build/test baseline; Integrator consumes its evidence and runs subsequent integrated checkpoints. No duplicate vanilla run.
 - All heavy work uses the assigned GPU lease; no production-container or existing-package changes. Checkpoint tags are created only after the required checks pass.
+- Main's continuation decision permits provider merges while Persistence3 owns the known-red grammar/C2-MTP reservation cases. Every provider still receives build, host and dense-model proof; failures remain explicit and **no green tag** exists until both cases pass. This supersedes blocking all provider source merges behind checkpoint 1.
 
 ## Base cherry-pick evaluation
 
@@ -46,7 +47,7 @@ The three host loader failures were `ninfer_openai_schema_test`, `ninfer_request
 
 | Applicable release blocker | Observed failure / root cause | Owner and accepted action |
 |---|---|---|
-| `ninfer_qwen3_5_grammar_real_test` | `KV write exceeds its page reservation`; replay growth was quoted against pre-rewind membership | Persistence's isolated [#419](https://github.com/Neroued/ninfer/issues/419) fix preserves the reservation guard and adds a 65→8→65 retained/unretained regression. Changed-source GPU proof pending; related [#414](https://github.com/Neroued/ninfer/issues/414) is not claimed fixed. |
+| `ninfer_qwen3_5_grammar_real_test` | `KV write exceeds its page reservation` still occurs after both isolated reservation repairs | Persistence lease `20261025T032946Z-A2-persistence-proof-de640b20-r3-477212`: full native none/MTP/DFlash2 passes, grammar fails in 11.650 s. Both isolated regression proofs are green, but they do not close [#419](https://github.com/Neroued/ninfer/issues/419); Persistence3 owns the third cause. **Blocks green tags, not Main-authorized provider source merges; no unchanged-red confirmation or hidden exclusion.** |
 | `ninfer_qwen3_5_prefix_real_test` | Thinking-prompt golden differs from the supplied artifact | Frontend `a072d149b` proved the old Qwen3.6 16-token golden versus maintained Qwen3.8's 58-token prompt with a 42-token xhigh system preamble; actual-resource C++ and independent Jinja2 agree. No-thinking remains 18. Correction is not yet integrated/GPU-proven; **not excluded**. |
 | `ninfer_qwen3_5_agent_continuation_real_test` | Basic constraints reject the fixture's intentional no-default-EOS policy | Main approved explicit Automatic constraints in five non-strict cache helpers. Production defaults/guard and token/frontier/role assertions are unchanged; changed-source proof pending. |
 
@@ -146,6 +147,7 @@ Custom-tool boundary: Main confirmed shipped raw custom calls and Responses repl
 ## Open prerequisites
 
 - Valid vanilla model and 45/45 aggregate host evidence is consumed above. The first changed-source integration build failed on the repaired JSON test dependency; no runtime proof followed.
+- Persistence's latest exact-source GPU proof still fails the real grammar reservation guard after both isolated fixes; checkpoint 1 waits for its cause-specific repair. C2 MTP/fp8 also reproduces #414 on baseline and candidate; DFlash2/fp8 passes that fixture.
 - No green checkpoint tag exists. The next provider union requires a successful build, all host tests and the full applicable dense real subset, including the corrected prefix golden.
 - DurableStore's final `148384bda` six-target receipt closes its provider lock-order/schema/factory proof; its integration checkpoint still requires complete host and dense-model proof.
 - Frontend `8c3102905` has CPU corpus and independent template-epoch evidence; its integrated real-model proof is still required.
