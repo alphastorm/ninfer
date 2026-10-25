@@ -25,7 +25,10 @@
     }
 
     void set_pressure_checkpoint_handler(std::shared_ptr<PressureCheckpointHandler> handler) {
+        std::lock_guard providers(checkpoint_provider_mutex_);
+        const bool enabled = bool(handler);
         checkpoints_.set_handler(std::move(handler));
+        resources_.enable_release_guard(enabled);
         notify_checkpoint_progress();
     }
     void set_reclaimable_session_oracle(std::shared_ptr<const ReclaimableSessionOracle> oracle) {
@@ -176,11 +179,11 @@
                     result.reason = pending->native->reason();
                     if (result.state == DurablePrepareState::Prepared) {
                         const auto stats = pending->native->stats();
+                        // K1's manifest attests these three values. Point/state/page counts
+                        // are native index-derived result statistics, not manifest fields.
                         if (stats.frontier_tokens != expected.frontier_tokens ||
                             stats.restored_tokens != expected.restored_tokens ||
-                            stats.payload_bytes != expected.payload_bytes ||
-                            stats.points != expected.points || stats.states != expected.states ||
-                            stats.pages != expected.pages) {
+                            stats.payload_bytes != expected.payload_bytes) {
                             pending->native.reset();
                             result.state = DurablePrepareState::Corrupt;
                             result.reason = DurableReason::PayloadSizeMismatch;

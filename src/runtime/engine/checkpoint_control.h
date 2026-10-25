@@ -24,9 +24,12 @@ public:
 
     [[nodiscard]] std::shared_ptr<Session> session(std::string_view digest) {
         std::lock_guard lock(mutex_);
-        auto [entry, inserted] = sessions_.try_emplace(std::string(digest));
-        if (inserted) { entry->second = std::make_shared<Session>(); }
-        return entry->second;
+        if (const auto entry = sessions_.find(digest); entry != sessions_.end()) {
+            return entry->second;
+        }
+        auto state = std::make_shared<Session>();
+        sessions_.emplace(std::string(digest), state);
+        return state;
     }
 
     [[nodiscard]] DurableSessionEpoch epoch(std::string_view digest) {

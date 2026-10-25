@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -86,7 +87,10 @@ public:
 
     void set_release_guard(std::function<bool(std::span<PressureCheckpointVictim>)> guard) {
         release_guard_ = std::move(guard);
+        release_guard_enabled_ = bool(release_guard_);
     }
+
+    void enable_release_guard(bool enabled) noexcept { release_guard_enabled_ = enabled; }
 
     [[nodiscard]] bool approve_release(std::span<const Handle> handles) const {
         return allow_release(handles);
@@ -310,7 +314,7 @@ public:
         const auto private_owner =
             choice.resume_owner.value_or(choice.take_over ? choice.owner : 0);
         const bool consume = selected && consumable(*selected, private_owner, request, revocation);
-        if (release_guard_ && (!retired.empty() || consume)) {
+        if (release_guard_enabled_ && (!retired.empty() || consume)) {
             if (consume) { retired.push_back(*selected); }
             const bool approved = allow_release(retired);
             if (consume) { retired.pop_back(); }
@@ -1101,19 +1105,21 @@ private:
         for (const auto& point : owner.points) { old.push_back(point.handle); }
         // A Pending checkpoint retains all old points; carrying an already retained point
         // does not destroy it. New points can be published after checkpoint progress.
-        std::vector<Handle> removed;
-        for (const auto handle : old) {
-            if (!contains(carried, handle)) { removed.push_back(handle); }
-        }
-        if (!allow_release(removed)) {
-            for (const auto handle : carried) {
-                if (!contains(old, handle) && program.valid_checkpoint(handle)) {
-                    const auto summary = program.checkpoint_metadata(handle);
-                    owner.points.push_back({handle, summary.role});
-                    index_.insert(program, handle, summary.frontier);
-                }
+        if (release_guard_enabled_) {
+            std::vector<Handle> removed;
+            for (const auto handle : old) {
+                if (!contains(carried, handle)) { removed.push_back(handle); }
             }
-            return;
+            if (!allow_release(removed)) {
+                for (const auto handle : carried) {
+                    if (!contains(old, handle) && program.valid_checkpoint(handle)) {
+                        const auto summary = program.checkpoint_metadata(handle);
+                        owner.points.push_back({handle, summary.role});
+                        index_.insert(program, handle, summary.frontier);
+                    }
+                }
+                return;
+            }
         }
         owner.points.clear();
         for (const auto handle : carried) {
@@ -1496,7 +1502,7 @@ private:
     }
 
     [[nodiscard]] bool allow_release(std::span<const Handle> handles) const {
-        if (!release_guard_ || handles.empty()) { return true; }
+        if (!release_guard_enabled_ || handles.empty()) { return true; }
         std::vector<PressureCheckpointVictim> victims;
         for (const auto& owner : owners_) {
             if (owner.durable_session.empty() || owner.checkpoint_tag.empty()) { continue; }
@@ -1669,6 +1675,7 @@ private:
     }
 
     bool enabled_;
+    std::atomic<bool> release_guard_enabled_{false};
     std::function<bool(std::span<PressureCheckpointVictim>)> release_guard_;
     ContextMachineCostModel costs_;
     PrefixIndex<Model> index_;

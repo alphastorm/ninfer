@@ -105,6 +105,7 @@ public:
         resources_.set_release_guard([this](std::span<PressureCheckpointVictim> victims) {
             return checkpoint_pressure(victims);
         });
+        resources_.enable_release_guard(false);
         std::promise<void> startup;
         std::future<void> started = startup.get_future();
         worker_                   = std::thread([this, startup = std::move(startup)]() mutable {
@@ -2484,6 +2485,7 @@ private:
     const bool checkpoint_cache_enabled_;
     ResourceManagement resources_;
     CheckpointControl checkpoints_;
+    std::mutex checkpoint_provider_mutex_;
     std::deque<std::function<void()>> checkpoint_commands_;
     std::unique_lock<std::mutex>* checkpoint_execution_lock_ = nullptr;
 
