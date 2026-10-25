@@ -587,6 +587,138 @@ class QualificationRestorationTests(unittest.TestCase):
             self.assertIsNone(summary["qualified_utc"])
 
 
+class RestartFixtureTests(unittest.TestCase):
+    @staticmethod
+    def status(prefill: int = 53, decode: int = 3, reused: int = 0) -> dict:
+        return {
+            "schema_version": 2,
+            "scheduler": {"computed_prefill_tokens": prefill, "committed_decode_tokens": decode},
+            "cache": {"reused_prompt_tokens": reused},
+        }
+
+    def restart_fixture(
+        self, *, baseline: dict | None = None, restarted: dict | None = None,
+        pids: tuple[int, int] = (101, 202), control_answer: str | None = None,
+        flush_answer: str | None = None, control_cached: int = 1600, flush_cached: int = 1600,
+    ) -> tuple[dict, list, list]:
+        baseline = copy.deepcopy(self.status() if baseline is None else baseline)
+        restarted = copy.deepcopy(baseline if restarted is None else restarted)
+        events, seeds = [], []
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cache = root / "cache"
+            generation = cache / "session-checkpoints-v3" / "sessions" / "unit-session"
+            generation.mkdir(parents=True)
+            (generation / "unit-payload").write_bytes(b"unit-only checkpoint fixture")
+            (root / "state.json").write_text(json.dumps({
+                "active_release": "unit-release",
+                "releases": {"unit-release": {
+                    "api_key_file": str(root / "unit.key"), "host": "127.0.0.1",
+                    "port": 18211, "cache_root": str(cache),
+                }},
+            }))
+            args = SimpleNamespace(evidence_root=str(root / "evidence"),
+                                   state_root=str(root), model_id="unit-model")
+            counters, listeners = iter((baseline, restarted)), iter(pids)
+            save = json.loads((ROOT / "tests/fixtures/durable/ack-windows.json").read_text())
+
+            def controller(_controller, _root, action):
+                events.append(("controller", action))
+                return {"last_stop": {"mode": "stop-event", "outcome": "graceful", "forced": False}}
+
+            def run(command, **_kwargs):
+                if any("Get-NetTCPConnection" in str(part) for part in command):
+                    return SimpleNamespace(stdout=str(next(listeners)))
+                return SimpleNamespace(stdout="")
+
+            def request(_base, _key, method, route, body=None):
+                events.append(("request", method, route))
+                if method == "GET" and route == "/v1/ninfer/status":
+                    return next(counters)
+                if method == "POST" and route == "/v1/ninfer/checkpoints":
+                    return save
+                if method == "DELETE":
+                    return {"deleted": True}
+                if method == "POST" and route == "/v1/responses":
+                    if "previous_response_id" not in body:
+                        seeds.append(body)
+                        return {"id": f"unit-response-{len(seeds)}"}
+                    control = body["previous_response_id"] == "unit-response-1"
+                    answer = ((qualify_native.CHECKPOINT_MARKER if control_answer is None else control_answer)
+                              if control else (qualify_native.FLUSH_MARKER if flush_answer is None else flush_answer))
+                    return {
+                        "output": [{"type": "message", "content": [{"type": "output_text", "text": answer}]}],
+                        "usage": {"input_tokens_details": {
+                            "cached_tokens": control_cached if control else flush_cached,
+                        }},
+                    }
+                self.fail(f"unexpected unit request: {method} {route}")
+
+            with patch.object(qualify_native, "run", side_effect=run), \
+                    patch.object(qualify_native, "read_key", return_value="unit-only credential"), \
+                    patch.object(qualify_native, "controller_status", side_effect=controller), \
+                    patch.object(qualify_native, "request_json", side_effect=request), \
+                    patch.object(qualify_native, "checkpoint_state",
+                                 side_effect=("available", "missing", "available")):
+                receipt = qualify_native.internal_restart(args)
+            return receipt, events, seeds
+
+    def test_restart_resets_to_measured_nonzero_warmup_baseline(self) -> None:
+        for prefill, decode in ((53, 3), (137, 11)):
+            with self.subTest(prefill=prefill, decode=decode):
+                receipt, events, _ = self.restart_fixture(baseline=self.status(prefill, decode))
+                expected = {"computed_prefill_tokens": prefill, "committed_decode_tokens": decode,
+                            "reused_prompt_tokens": 0}
+                self.assertEqual(receipt["counter_baseline"], expected)
+                self.assertEqual(receipt["counters_after_restart"], expected)
+                self.assertTrue(receipt["restart_counters_reset"])
+                self.assertNotEqual(receipt["old_pid"], receipt["new_pid"])
+                self.assertEqual(events[0], ("controller", "Restart"))
+                self.assertEqual(events[1], ("request", "GET", "/v1/ninfer/status"))
+                self.assertEqual([event for event in events if event[0] == "controller"],
+                                 [("controller", "Restart"), ("controller", "Restart")])
+
+    def test_restart_refuses_drift_from_each_measured_counter(self) -> None:
+        for section, field in (("scheduler", "computed_prefill_tokens"),
+                               ("scheduler", "committed_decode_tokens"),
+                               ("cache", "reused_prompt_tokens")):
+            changed = self.status()
+            changed[section][field] += 1
+            with self.subTest(field=field), self.assertRaises(qualify_native.LaneError):
+                self.restart_fixture(restarted=changed)
+
+    def test_restart_requires_schema_two_and_real_integer_counters(self) -> None:
+        for value in (None, True, -1, "53"):
+            for when in ("baseline", "restarted"):
+                damaged = self.status()
+                damaged["scheduler"]["computed_prefill_tokens"] = value
+                with self.subTest(value=value, when=when), self.assertRaises(qualify_native.LaneError):
+                    self.restart_fixture(**{when: damaged})
+        with self.assertRaises(qualify_native.LaneError):
+            self.restart_fixture(baseline={**self.status(), "schema_version": 1})
+        with self.assertRaises(qualify_native.LaneError):
+            self.restart_fixture(baseline=self.status(reused=1))
+
+    def test_restart_requires_actual_process_replacement(self) -> None:
+        with self.assertRaisesRegex(qualify_native.LaneError, "replace"):
+            self.restart_fixture(pids=(101, 101))
+
+    def test_restart_keeps_both_exact_marker_and_positive_cache_gates(self) -> None:
+        for damage in ({"control_answer": "wrong"}, {"flush_answer": "wrong"},
+                       {"control_cached": 0}, {"flush_cached": 0}):
+            with self.subTest(damage=damage), self.assertRaises(qualify_native.LaneError):
+                self.restart_fixture(**damage)
+
+    def test_restart_seeds_use_canonical_private_user_context(self) -> None:
+        _, _, seeds = self.restart_fixture()
+        self.assertEqual(len(seeds), 2)
+        context = "Private user context:" + " durable" * 1600
+        for seed, marker in zip(seeds, (qualify_native.CHECKPOINT_MARKER, qualify_native.FLUSH_MARKER)):
+            self.assertTrue(seed["input"].startswith(context + "\n\n"))
+            self.assertIn(marker, seed["input"])
+            self.assertNotIn("instructions", seed)
+
+
 class PrivateMarkerTests(unittest.TestCase):
     def test_forward_separator_profile_fixture_is_rejected(self) -> None:
         separator = bytes((92,))
