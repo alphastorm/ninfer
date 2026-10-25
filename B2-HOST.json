@@ -1,0 +1,67 @@
+{
+  "schema": "ninfer-serve-restore-host-proof/1",
+  "source": "5f8b2ac8bda4bd9eb91c65b2e7c2e06eafea314c",
+  "classification": "source_union_not_integration_qualified",
+  "environment": "ov-build-env:master-64d10fbf-r2-cpu-local",
+  "build": {
+    "slot": 0,
+    "workers": 12,
+    "targets": ["ninfer_session_checkpoint_service_test", "ninfer_openai_responses_store_test"],
+    "completed_ninja_edges": 12,
+    "batch_exit": 0
+  },
+  "ctest": {
+    "passed": 2,
+    "failed": 0,
+    "skipped": 0,
+    "elapsed_seconds": 0.09,
+    "tests": [
+      {"name": "ninfer_openai_responses_store_test", "passed": true, "elapsed_seconds": 0.02},
+      {"name": "ninfer_session_checkpoint_service_test", "passed": true, "elapsed_seconds": 0.0}
+    ]
+  },
+  "prior_failed_attempt": {
+    "source": "99a6b0991c04b7655007b20acbd89f5e49f35ed0",
+    "stage": "configure",
+    "cause": "duplicate_ninfer_sha256_source_union_target",
+    "tests_run": 0,
+    "repair": "3cd887d2c"
+  },
+  "coverage": [
+    "native_refusal_result_preservation",
+    "capacity_without_unrelated_eviction",
+    "stale_response_revision",
+    "active_publication_refusal",
+    "foreign_response_id_collision",
+    "atomic_replacement_on_successful_commit",
+    "fresh_live_publication_order",
+    "scoped_retrieve_delete",
+    "publication_completion_off_lock"
+  ],
+  "standalone_store_provider_proof": {
+    "source": "202b1706412e4f2ecbb0ce7e3124711cc917e7d4",
+    "report_commit": "7c2623c43",
+    "integration_qualified": false,
+    "passed": 6,
+    "failed": 0,
+    "skipped": 0,
+    "ctest_elapsed_seconds": 2.55,
+    "tests": [
+      "ninfer_checkpoint_io_contract_test",
+      "ninfer_direct_storage_checkpoint_backend_test",
+      "ninfer_io_uring_checkpoint_backend_test",
+      "ninfer_session_checkpoint_store_test",
+      "ninfer_automatic_checkpoint_queue_test",
+      "ninfer_checkpoint_policy_test"
+    ]
+  },
+  "static_serving_compile": {
+    "source": "fd4a7e58f78094b480d79fd1a76d126aa015d3c0",
+    "target": "ninfer_serve",
+    "completed_ninja_edges": 637,
+    "batch_exit": 0,
+    "program_linked": false,
+    "note": "Pre-root-parameter compile; does not qualify the later rooted adapter implementation"
+  },
+  "not_proven": ["production_engine_adapter_link", "disk_native_responses_restart", "gpu_model_execution"]
+}

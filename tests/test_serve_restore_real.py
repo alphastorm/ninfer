@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import secrets
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -33,6 +36,17 @@ def require(condition: bool, message: str) -> None:
     if not condition:
         raise RuntimeError(message)
 
+@contextmanager
+def proof_workdir():
+    root = Path(tempfile.mkdtemp(prefix="serve-restore-"))
+    try:
+        yield root
+    except BaseException:
+        # Keep failed-run logs/checkpoints privately under the caller's TMPDIR.
+        raise
+    else:
+        shutil.rmtree(root)
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -46,12 +60,18 @@ def main() -> int:
         print("SKIP: explicit real-model artifact is required")
         return 77
     require(args.server.is_file() and args.artifact.is_file(), "explicit server/artifact prerequisite missing")
-    artifact_sha = args.artifact_sha256 or digest_file(args.artifact)
+    artifact_sha = digest_file(args.artifact)
+    require(args.artifact_sha256 is None or artifact_sha == args.artifact_sha256,
+            "model artifact identity mismatch")
     binary_sha = digest_file(args.server)
+    version = subprocess.run([str(args.server), "--version"], check=True, capture_output=True,
+                             text=True).stdout.strip()
+    source = re.search(r"(?:^| )patch_stack_sha=([0-9a-f]{40})(?: |$)", version)
+    require(source is not None and "source_dirty=false" in version, "clean binary source provenance missing")
     receipt: dict = {"artifact_type": "ninfer-serve-restore-proof/1", "binary_sha256": binary_sha,
-                     "artifact_sha256": artifact_sha, "production_path": True, "tracer": False}
-    with tempfile.TemporaryDirectory(prefix="serve-restore-") as scratch:
-        root = Path(scratch)
+                     "source": source.group(1), "artifact_sha256": artifact_sha,
+                     "production_path": True, "tracer": False}
+    with proof_workdir() as root:
         checkpoint_root = root / "checkpoints"
         api_key = secrets.token_hex(32)
         key_file = root / "api.key"
@@ -61,8 +81,6 @@ def main() -> int:
         session = hashlib.sha256(b"ninfer:prompt_cache_key:v1\0" + cache_key.encode()).hexdigest()
         foreign = hashlib.sha256(b"foreign-test-capability" + cache_key.encode()).hexdigest()
         base_url = f"http://127.0.0.1:{args.port}"
-        config_sha = hashlib.sha256(b"serve-restore-real:bf16:dflash2:k7:c1:32768:v1").hexdigest()
-
         def request(method: str, route: str, body: dict | None = None,
                     capability: str | None = None) -> tuple[int, dict]:
             headers = {"Authorization": f"Bearer {api_key}"}
@@ -85,13 +103,17 @@ def main() -> int:
                 argv = [str(args.server), str(args.artifact), "--host", "127.0.0.1", "--port", str(args.port),
                         "--model-id", "serve-restore-proof", "--api-key-file", str(key_file),
                         "--binary-sha256", binary_sha, "--artifact-sha256", artifact_sha,
-                        "--config-sha256", config_sha, "--deployment-profile", "serve-restore-proof",
+                        "--deployment-profile", "serve-restore-proof",
                         "--max-context", "32768", "--kv-capacity", "32768", "--max-concurrency", "1",
-                        "--prefill-chunk", "1024", "--device-state-slots", "4", "--host-context-mib", "8192",
+                        "--prefill-chunk", "1024", "--device-state-slots", "16", "--host-context-mib", "8192",
                         "--kv-dtype", "bf16", "--spec", "dflash2", "--draft-tokens", "7", "--lm-head-draft",
                         "--session-checkpoint-dir", str(checkpoint_root), "--session-checkpoint-require-origin-auth",
                         "--session-checkpoint-min-tokens", "4294967295", "--shutdown-report", str(self.report),
                         "--log-stats-interval-ms", "0", "--no-thinking", *extra]
+                # Actual qualification argv, excluding only this self-referential digest.
+                # Authentication is file-based: no credential value enters the projection.
+                config_sha = hashlib.sha256(json.dumps(argv, separators=(",", ":")).encode()).hexdigest()
+                argv.extend(("--config-sha256", config_sha))
                 self.child = subprocess.Popen(argv, stdout=self.log, stderr=subprocess.STDOUT)
                 deadline = time.monotonic() + 180
                 try:
@@ -179,6 +201,11 @@ def main() -> int:
                 require(code == 404, "scoped delete accepted a foreign/missing capability")
             code, _ = request("GET", "/v1/responses/" + seed["id"], capability=session)
             require(code == 200, "own capability could not retrieve restored lineage")
+            code, child = request("POST", "/v1/responses", {
+                "model": "serve-restore-proof", "prompt_cache_key": cache_key,
+                "previous_response_id": restored["id"], "input": "Add one short closing sentence.",
+                "max_output_tokens": 8, "temperature": 0, "store": True})
+            require(code == 200 and isinstance(child.get("id"), str), "restored parent continuation failed")
             code, saved = request("POST", "/v1/ninfer/checkpoints", {"session_sha256": session})
             require(code == 200 and saved.get("schema") == "ninfer-durable-operation/1" and
                     saved.get("operation") == "save" and saved.get("state") == "exported" and
@@ -187,25 +214,25 @@ def main() -> int:
                     "explicit save did not acknowledge all production durability gates")
             receipt["save"] = {key: saved[key] for key in ("state", "reason", "committed", "origin", "dir_sync",
                 "frontier_tokens", "restored_tokens", "payload_bytes", "points", "states", "pages")}
-            code, _ = request("DELETE", "/v1/responses/" + seed["id"], capability=session)
+            code, _ = request("DELETE", "/v1/responses/" + restored["id"], capability=session)
             require(code == 200, "authorized response deletion failed")
-            code, _ = request("GET", "/v1/responses/" + seed["id"], capability=session)
+            code, _ = request("GET", "/v1/responses/" + restored["id"], capability=session)
             require(code == 404, "deleted response remained addressable")
             active.terminate()
             active = None
             disabled_pointer_sha = digest_file(current)
 
             active = Server(3, ("--no-prefix-reuse",))
-            code, _ = request("GET", "/v1/responses/" + restored["id"], capability=session)
+            code, _ = request("GET", "/v1/responses/" + child["id"], capability=session)
             require(code == 404, "cache-disabled request imported native state")
             require(digest_file(current) == disabled_pointer_sha, "policy refusal mutated the disk generation")
             active.terminate()
             active = None
             receipt["policy_disabled"] = {"retrieve_status": 404, "current_unchanged": True}
             active = Server(4)
-            code, _ = request("GET", "/v1/responses/" + seed["id"], capability=session)
-            require(code == 404, "restart resurrected an explicitly deleted response")
             code, _ = request("GET", "/v1/responses/" + restored["id"], capability=session)
+            require(code == 404, "restart resurrected an explicitly deleted response")
+            code, _ = request("GET", "/v1/responses/" + child["id"], capability=session)
             require(code == 200, "deleting an ancestor lost the retained descendant")
             active.terminate()
             active = None
@@ -228,7 +255,7 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (RuntimeError, OSError, ValueError) as error:
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as error:
         # Deliberately do not print raw HTTP bodies, model text, argv, logs or host paths.
         print("FAIL: " + (str(error) if isinstance(error, RuntimeError) else type(error).__name__))
         raise SystemExit(1) from None
