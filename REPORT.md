@@ -1,5 +1,10 @@
 # Persistence slice
 
+## Continuation qualification
+
+- Native restart fixture now reconstructs the continuation's exact token types, positions and execution splits from each exported point before comparing it with the live source. Raw token IDs alone discard Chat rewrite boundaries included in the native prefix digest. MTP uses its supported five-token draft window; DFlash2 remains seven. Runtime proof pending.
+- Private accounting overlay traces admission quotes, reservation resizing and write mapping; it is not a production change. Initial job `20261025T040158Z-A2-persistence-accounting-r5-488462` refused a context-short patch before build/test execution, exit 1 in 2 seconds, zero leftover/unowned containers. Corrected overlay submitted as `20261025T040852Z-A2-persistence-accounting-r5b-491183`.
+
 ## Current handoff
 
 - **Incomplete qualification:** user requested handoff after the current diagnostic step. Native K3 source is implemented; production restart/D1 and joint A3 runtime acceptance are not proven.

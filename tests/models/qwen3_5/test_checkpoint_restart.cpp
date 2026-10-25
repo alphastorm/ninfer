@@ -8,6 +8,7 @@
 #include "models/qwen3_5/program/program_impl.h"
 #include "runtime/contract/continuation_checkpoint.h"
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <filesystem>
@@ -187,7 +188,7 @@ struct Generated {
     std::uint32_t reused = 0;
 };
 Generated generate(DeviceContext& device, q35::Program& program,
-                   models::qwen::PreparedPrompt prompt, std::optional<q35::CheckpointHandle> source,
+                   models::qwen::PreparedPromptData prompt, std::optional<q35::CheckpointHandle> source,
                    bool capture, std::string_view scenario = "terminal") {
     ResolvedExecutionOptions options;
     options.requested_output_tokens = scenario == "terminal" ? 8 : 24;
@@ -277,7 +278,7 @@ Generated generate(DeviceContext& device, q35::Program& program,
     result.points.push_back(*finish.checkpoint);
     return result;
 }
-models::qwen::PreparedPrompt seed_prompt(models::qwen::Frontend& frontend) {
+models::qwen::PreparedPromptData seed_prompt(models::qwen::Frontend& frontend) {
     PromptInput input;
     input.options.enable_thinking = false;
     std::string prefix, suffix;
@@ -291,7 +292,31 @@ models::qwen::PreparedPrompt seed_prompt(models::qwen::Frontend& frontend) {
     input.context_cache.markers.push_back({.after_message_count = 1,
         .kind = PromptCacheMarkerKind::PrivateLongAnchor,
         .location = PromptCacheMarkerLocation::MessageBoundary});
-    return frontend.prepare(std::move(input));
+    return models::qwen::PreparedPromptAccess::take(frontend.prepare(std::move(input)));
+}
+models::qwen::PreparedPromptData continuation_prompt(models::qwen::Frontend& frontend,
+                                                     const DurableCheckpointSet& index,
+                                                     std::size_t point_index) {
+    const auto& point = index.points.at(point_index);
+    const auto& identity = index.identities.at(point.identity);
+    require(identity.vision_items.empty(), "text restart fixture received media identity");
+    auto tokens = identity.ledger;
+    tokens.resize(point.frontier);
+    tokens.insert(tokens.end(), 8, 198);
+    auto prompt = models::qwen::PreparedPromptAccess::take(frontend.prepare_tokens(std::move(tokens)));
+    // A Chat checkpoint includes execution splits as well as token IDs. Preserve its
+    // exact native prefix rather than asking a raw-token prompt to match a different identity.
+    std::copy_n(identity.token_types.begin(), point.frontier, prompt.token_types.begin());
+    for (std::size_t axis = 0; axis < identity.positions.size(); ++axis) {
+        auto begin = prompt.positions.begin() + axis * prompt.token_ids.size();
+        std::copy_n(identity.positions[axis].begin(), point.frontier, begin);
+        for (std::size_t i = point.frontier; i < prompt.token_ids.size(); ++i)
+            begin[i] = static_cast<std::int32_t>(i) + point.rope_delta;
+    }
+    prompt.rope_delta = point.rope_delta;
+    for (const auto frontier : identity.execution_frontiers)
+        if (frontier <= point.frontier) prompt.identity.rewrite_execution_frontiers.push_back(frontier);
+    return prompt;
 }
 void release(q35::Program& program, const std::vector<q35::CheckpointHandle>& points) {
     for (auto point : points) require(program.release_checkpoint(point), "checkpoint ownership leaked");
@@ -318,7 +343,8 @@ int main(int argc, char** argv) {
         options.max_context = 1024; options.kv_capacity = KvCapacityPolicy::explicit_capacity(1024);
         options.prefill_chunk = 128; options.max_concurrency = 1; options.kv_cache = KvCacheStorage::BFloat16;
         options.use_cuda_graph = false; options.speculative.backend = backend;
-        options.speculative.draft_tokens = backend == SpeculativeBackend::None ? 0 : 7;
+        options.speculative.draft_tokens = backend == SpeculativeBackend::None ? 0 :
+            backend == SpeculativeBackend::Mtp ? 5 : 7;
         options.context_cache.device_state_slots = 3; options.context_cache.host_capacity_bytes = 1ULL << 30;
         const auto make_program = [&] {
             auto planner = q35::make_sequence_planner(parameters, device, options);
@@ -365,13 +391,12 @@ int main(int argc, char** argv) {
             Json continuations = Json::array();
             for (std::size_t i = 0; i < index.points.size(); ++i) {
                 const auto& point = index.points[i];
-                auto prompt = index.identities[point.identity].ledger;
-                prompt.resize(point.frontier);
-                prompt.insert(prompt.end(), 8, 198);
-                auto expected = generate(device, *program, frontend.prepare_tokens(prompt), seed.points[i], false);
+                auto prompt = continuation_prompt(frontend, index, i);
+                const auto input = prompt.token_ids;
+                auto expected = generate(device, *program, std::move(prompt), seed.points[i], false);
                 require(expected.reused == point.frontier, "live baseline did not hit selected point");
                 const auto bytes = decoded(expected.tokens);
-                continuations.push_back({{"input", prompt}, {"tokens", expected.tokens},
+                continuations.push_back({{"input", input}, {"tokens", expected.tokens},
                     {"bytes", bytes}, {"frontier", point.frontier}});
                 release(*program, expected.points);
             }
@@ -486,8 +511,10 @@ int main(int argc, char** argv) {
             std::size_t continuation_bytes = 0;
             for (std::size_t i = 0; i < points.size(); ++i) {
                 const auto& expected = oracle.at("continuations").at(i);
-                const auto observed = generate(device, *program,
-                    frontend.prepare_tokens(expected.at("input").get<std::vector<TokenId>>()), points[i], false);
+                auto prompt = continuation_prompt(frontend, index, i);
+                require(prompt.token_ids == expected.at("input").get<std::vector<TokenId>>(),
+                        "restart changed continuation input");
+                const auto observed = generate(device, *program, std::move(prompt), points[i], false);
                 const auto bytes = decoded(observed.tokens);
                 require(observed.tokens == expected.at("tokens").get<std::vector<TokenId>>() &&
                         observed.reused == expected.at("frontier").get<std::uint32_t>() &&
