@@ -63,5 +63,56 @@ if (($# == 0)); then
 fi
 mkdir -p "$cache"
 cache_source="$(host_path "$cache")"
-exec "$docker" "${docker_args[@]}" run "${args[@]}" --name "$name" \
-    --mount "type=bind,source=${cache_source},target=/ccache" "$image" "$@"
+create_output="$(mktemp "$cache/container-id.XXXXXX")"
+create_pid=
+client_pid=
+container_id=
+cleanup() {
+    status=$?
+    trap - EXIT
+    trap '' INT TERM
+    # Windows Docker does not die with its WSL client. Finish creation before
+    # cleanup so a signal cannot race a later, unobserved container start.
+    if [[ -n "$create_pid" ]]; then
+        wait "$create_pid" || true
+    elif [[ -z "$container_id" ]]; then
+        # A trap may run between spawning create and assigning its PID.
+        wait || true
+    fi
+    if [[ -z "$container_id" ]]; then
+        candidate="$(tr -d '\r\n' < "$create_output")"
+        if [[ "$candidate" =~ ^[0-9a-f]{64}$ ]]; then container_id="$candidate"; fi
+    fi
+    if [[ -n "$container_id" ]]; then
+        # Keep the caller's build/GPU flock held until this exact container has
+        # stopped or the daemon confirms that auto-removal already completed.
+        while ! "$docker" "${docker_args[@]}" stop --time 15 "$container_id" >/dev/null 2>&1; do
+            if remaining="$("$docker" "${docker_args[@]}" container ls --all --quiet \
+                --filter "id=$container_id")"; then
+                [[ -z "$remaining" ]] && break
+            fi
+            sleep 1
+        done
+        if [[ -n "$client_pid" ]]; then wait "$client_pid" || true; fi
+        "$docker" "${docker_args[@]}" rm "$container_id" >/dev/null 2>&1 || true
+    fi
+    wait || true
+    rm -f -- "$create_output"
+    exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+"$docker" "${docker_args[@]}" create "${args[@]}" --name "$name" \
+    --mount "type=bind,source=${cache_source},target=/ccache" "$image" "$@" >"$create_output" &
+create_pid=$!
+wait "$create_pid"
+container_id="$(tr -d '\r\n' < "$create_output")"
+create_pid=
+if [[ ! "$container_id" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "Docker create did not return a container ID" >&2
+    exit 1
+fi
+"$docker" "${docker_args[@]}" start --attach "$container_id" &
+client_pid=$!
+wait "$client_pid"
