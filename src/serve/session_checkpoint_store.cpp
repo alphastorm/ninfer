@@ -1891,7 +1891,8 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         }
         return std::nullopt;
     }
-    if (runtime_fingerprint.at("responses").at("codec") != kResponseStoreSnapshotCodec) {
+    if (runtime_fingerprint.at("responses").at("codec").get_ref<const std::string&>() !=
+        kResponseStoreSnapshotCodec) {
         if (skip != nullptr) { skip->durable_reason = runtime::DurableReason::UnsupportedCodec; }
         return std::nullopt;
     }
@@ -2127,7 +2128,8 @@ SessionCheckpointStore::load(std::string_view session_sha256,
         return {.state = SessionCheckpointLoadState::Incompatible,
                  .reason = runtime::DurableReason::FingerprintMismatch};
     }
-    if (runtime_fingerprint.at("responses").at("codec") != kResponseStoreSnapshotCodec) {
+    if (runtime_fingerprint.at("responses").at("codec").get_ref<const std::string&>() !=
+        kResponseStoreSnapshotCodec) {
         return {.state = SessionCheckpointLoadState::Incompatible,
                  .reason = runtime::DurableReason::UnsupportedCodec};
     }
@@ -2339,7 +2341,8 @@ bool SessionCheckpointStore::covers(std::string_view session_sha256,
                                     std::string_view response_id) const {
     if (!valid_digest(session_sha256) ||
         !validate_session_checkpoint_runtime_fingerprint(runtime_fingerprint) ||
-        runtime_fingerprint.at("responses").at("codec") != kResponseStoreSnapshotCodec ||
+        runtime_fingerprint.at("responses").at("codec").get_ref<const std::string&>() !=
+            kResponseStoreSnapshotCodec ||
         response_id.empty()) {
         return false;
     }
@@ -2381,7 +2384,8 @@ nlohmann::json SessionCheckpointStore::status(std::string_view session_sha256,
                              {"state", "missing"}};
     if (!valid_digest(session_sha256)) { return result; }
     if (!validate_session_checkpoint_runtime_fingerprint(runtime_fingerprint) ||
-        runtime_fingerprint.at("responses").at("codec") != kResponseStoreSnapshotCodec) {
+        runtime_fingerprint.at("responses").at("codec").get_ref<const std::string&>() !=
+            kResponseStoreSnapshotCodec) {
         result["state"] = "incompatible";
         return result;
     }
