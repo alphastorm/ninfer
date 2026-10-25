@@ -264,7 +264,9 @@ Generated generate(DeviceContext& device, q35::Program& program,
             q35::ContextProgress paused; settle(device, program, paused);
             require(paused.paused && paused.paused->has_snapshot(), "draft pause lost its snapshot");
             auto root = program.inspect_source(base, std::nullopt);
-            require(root && static_cast<bool>(program.start_binding(base, {0}, *root, &*paused.paused)),
+            require(root && static_cast<bool>(program.start_binding(
+                        base, {0}, *root, &*paused.paused, q35::ExecutionUnitKind::Decode,
+                        static_cast<std::uint32_t>(target - result.tokens.size()))),
                     "draft snapshot resume refused");
             q35::ContextProgress resumed; settle(device, program, resumed);
             require(resumed.sequence.has_value(), "draft snapshot resume did not publish");
