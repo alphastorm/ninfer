@@ -149,7 +149,6 @@ public:
     // Never reconstruct it from paths or re-hash resources for individual saves.
     [[nodiscard]] static DurableNativeLayout checkpoint_layout(const Engine&);
     [[nodiscard]] static DurableFrontendIdentity frontend_identity(const Engine&);
-
     static void set_checkpoint_tag(PreparedPrompt&, std::string_view tag);
     [[nodiscard]] static DurableSessionEpoch session_epoch(Engine&, std::string_view session_sha256);
     [[nodiscard]] static DurableSessionEpoch publication_epoch(const GenerationHandle&);

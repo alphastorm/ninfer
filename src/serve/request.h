@@ -22,6 +22,8 @@
 
 namespace ninfer::serve {
 
+inline constexpr std::size_t kMaxToolNameLength = 128;
+
 // A structured API error mapped onto an error object + HTTP status. Wire-format
 // independent: each protocol layer renders it into its own error body shape.
 struct ApiError {
@@ -77,6 +79,8 @@ struct ContentPart {
     std::optional<CacheBoundary> cache_boundary_after;
 };
 
+using ToolKind = ninfer::ToolKind;
+
 struct ToolDefinition {
     std::string name;
     std::string description;
@@ -85,12 +89,14 @@ struct ToolDefinition {
     bool strict = false;
     std::optional<std::string> input_examples_json;
     std::optional<CacheBoundary> cache_boundary_after;
+    ToolKind kind = ToolKind::Function;
 };
 
 struct ToolCall {
     std::string id;
     std::string name;
-    std::string arguments_json;
+    std::string arguments_json; // Function: JSON object; Custom: opaque raw input.
+    ToolKind kind = ToolKind::Function;
 };
 
 using ToolChoiceMode = ninfer::ToolChoiceMode;
@@ -101,6 +107,7 @@ struct ChatTurn {
     std::vector<ContentPart> content; // ordered parts; may be empty when wire content is empty
     std::vector<ToolCall> tool_calls;
     std::string tool_call_id; // populated for role=tool
+    ToolKind tool_kind = ToolKind::Function;
     // Optional protocol assertion for a tool result. Call-graph normalization verifies it against
     // the function identified by tool_call_id before the Engine sees the history.
     std::optional<std::string> tool_result_name;
@@ -108,6 +115,7 @@ struct ChatTurn {
     std::string reasoning_content; // assistant thinking carried across turns (round-tripped to the
                                    // template)
     std::optional<CacheBoundary> cache_boundary_after;
+    bool private_cache_boundary_after = false;
 };
 
 // Sampling overrides that have an executable Engine meaning. Protocol-only
@@ -172,7 +180,7 @@ struct GenerationRequest {
     std::string constraint_param;
     std::vector<ChatTurn> messages;
     std::vector<ToolDefinition> tools;
-    std::size_t tool_name_max_length = 64;
+    std::size_t tool_name_max_length = kMaxToolNameLength;
     ToolChoice tool_choice;
     std::vector<std::string> stop_strings;
     bool stop_strings_apply_to_reasoning = false;
@@ -185,6 +193,10 @@ struct GenerationRequest {
     ninfer::PromptContinuationMode continuation = ninfer::PromptContinuationMode::NewAssistantTurn;
     bool allow_engine_automatic_shared_prefixes = true;
     SamplingParams sampling;
+    std::optional<std::string> client_session_sha256;
+    std::optional<std::string> client_request_id;
+    // Domain-separated digest only; raw prompt_cache_key never enters the request.
+    std::optional<std::string> prompt_cache_session_sha256;
 
     [[nodiscard]] bool uses_tools() const noexcept {
         return !tools.empty() && tool_choice.mode != ToolChoiceMode::None &&

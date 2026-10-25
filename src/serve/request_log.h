@@ -20,7 +20,7 @@ class logger;
 
 namespace ninfer::serve {
 
-inline constexpr int kRequestLogSchemaVersion        = 29;
+inline constexpr int kRequestLogSchemaVersion        = 30;
 inline constexpr const char* kRequestLogArtifactType = "ninfer_serve_request_log";
 
 struct ServerLogEnvironment {
@@ -43,6 +43,11 @@ std::string format_server_start_json(
     const ninfer::ModelSamplingDefaults& sampling_defaults, const std::string& public_model_id,
     const ninfer::LoadSummary& load, const ninfer::MemorySummary& memory,
     const ServerLogEnvironment& environment, std::optional<std::uint64_t> artifact_size_bytes);
+std::string format_status_json(const ServeOptions& options,
+                               const ninfer::EngineOptions& engine_options,
+                               const std::string& public_model_id, const ninfer::LoadSummary& load,
+                               const ninfer::MemorySummary& memory,
+                               const ninfer::RuntimeStats& runtime, bool available = true);
 std::string format_request_start_json(const std::string& server_instance_id,
                                       std::uint64_t timestamp_unix_ms,
                                       const RequestLogContext& context);

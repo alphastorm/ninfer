@@ -1,6 +1,7 @@
 # Internal headers are private to each compile owner. External headers come from
 # the dependency targets (or a component-local include for bundled C sources).
 function(ninfer_internal_includes target)
+  add_dependencies(${target} ninfer_verify_build_source)
   target_include_directories(${target} PRIVATE
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/src)

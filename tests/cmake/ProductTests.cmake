@@ -56,6 +56,15 @@ ninfer_add_test(ninfer_http_error_handler_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_http_error_handler.cpp"
   LIBRARIES ninfer_serve)
 
+ninfer_add_test(ninfer_http_server_stop_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_http_server_stop.cpp"
+  LIBRARIES ninfer_serve)
+
+ninfer_add_test(ninfer_stop_event_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_stop_event.cpp"
+  LIBRARIES ninfer_serve)
+set_tests_properties(ninfer_stop_event_test PROPERTIES SKIP_RETURN_CODE 77)
+
 ninfer_add_test(ninfer_http_transport_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_http_transport.cpp"
   LIBRARIES ninfer_serve)

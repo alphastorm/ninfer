@@ -39,6 +39,7 @@ if(NINFER_BUILD_APPS OR BUILD_TESTING)
 endif()
 
 include(cmake/Dependencies.cmake)
+include(cmake/BuildIdentity.cmake)
 include(cmake/NinferTargets.cmake)
 
 # --- Subdirectories ----------------------------------------------------------

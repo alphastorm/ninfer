@@ -84,7 +84,6 @@ Latest read-only preflights use `36a42facf`; these are conflict inventories, not
 Recheck newer source boundaries before merging. No native-import APIs or tests were pulled into the isolated `36a42facf` correction.
 
 Main approved the next isolated checkpoint additions: Persistence `d1f4832e` refreshes an already-admitted unit's reservation when a new reader requires tail COW; Contracts `c30e5746` centralizes frozen K7 reason spellings with compile-time assertions. Read-only cherry-pick preflights against `b54b56a43` found only the root report conflict for `d1f4832e`, and no conflict for `c30e5746`. Neither changes the currently queued `36a42facf` proof input, and neither establishes that upstream #414 is resolved.
-
 | Boundary | Expected overlap / dependency | Disposition rule |
 |---|---|---|
 | Slice reports | Every slice adds root `REPORT.md` | Link each immutable slice commit's report from the merge log; do not silently overwrite another slice's evidence. |
@@ -105,7 +104,6 @@ K7 telemetry prerequisite: Main approved `PrivateEndpoint`, `PrivateInputReplay`
 K3/K4 publication rule: Main approved a mandatory Engine-supplied live-service guard around final epoch recheck, atomic `current` replacement and sync. Payload export, hashing and bulk writes remain outside the Engine lock; only tests may inject a fake publication guard. Contracts owns the exact interface freeze.
 
 K2 identity accessors: Main approved internal `checkpoint_layout(const Engine&)` and `frontend_identity(const Engine&)`, returning the existing typed identity structures. Shared declarations and compile-time signature assertions are present. Persistence owns actual native geometry; Frontend owns one-time hashing of loaded resource bytes and exact selected template source. Serving queries once at startup and caches its fingerprint; provider implementation and integration proof remain separate from these declarations.
-
 Custom-tool boundary: Main confirmed shipped raw custom calls and Responses replay remain in scope. Shared `ToolKind { Function, Custom }` defaults to Function on history/output tool calls; Custom input remains opaque text. Master carries tool declarations as JSON, so Frontend owns kind propagation into its internal definition contract, templates and parser; ServePort owns wire objects/replay. Main also approved `SchemaMismatch` / `schema_mismatch` for declared-type atomic fallback, without changing inference for unknown parameters. Declaration → Frontend → ServePort custom-tool commit is distinct from the identity/publication merge.
 
 ## Shared-file requests
