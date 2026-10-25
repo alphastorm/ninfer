@@ -512,13 +512,13 @@ Publication order:
 directories. Acknowledgement `dir_sync: "fsync"`.
 
 **Windows (binding lead decision):** atomic replacement uses handle-anchored
-`SetFileInformationByHandle` with `FileRenameInfoEx`,
+`NtSetInformationFile` with `FileRenameInformationEx = 65`,
 `REPLACE_IF_EXISTS | POSIX_SEMANTICS`, `RootDirectory` set to the pinned destination
 directory, and a leaf-only destination name. FlushFileBuffers flushes the staged
 file before replacement and the pinned parent handle after replacement. Parent
 pins deny WRITE and DELETE sharing; ancestor and leaf reparse checks remain
 mandatory. No retry weakens those pins or substitutes a pathname-based rename.
-This supersedes the earlier MoveFileExW binding.
+There is no Win32 `SetFileInformationByHandle` or MoveFileExW fallback.
 
 The standalone Windows `sync_directory` primitive remains an intentional documented
 NTFS no-op and never throws; it is distinct from the parent-handle flush within
