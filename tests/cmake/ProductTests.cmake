@@ -42,6 +42,10 @@ ninfer_add_test(ninfer_session_checkpoint_service_test
   LIBRARIES ninfer_serve_state)
 set_tests_properties(ninfer_session_checkpoint_service_test PROPERTIES LABELS "host" TIMEOUT 30)
 
+add_test(NAME ninfer_serve_restore_runner_test
+  COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/../test_serve_restore_runner.py")
+set_tests_properties(ninfer_serve_restore_runner_test PROPERTIES LABELS "host")
+
 if(TARGET ninfer-serve)
   add_test(NAME ninfer_serve_restore_real_test
     COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/../test_serve_restore_real.py"

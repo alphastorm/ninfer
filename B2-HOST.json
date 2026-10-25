@@ -39,13 +39,13 @@
     "publication_completion_off_lock"
   ],
   "standalone_store_provider_proof": {
-    "source": "202b1706412e4f2ecbb0ce7e3124711cc917e7d4",
-    "report_commit": "7c2623c43",
+    "source": "148384bda50c0eac475ee6c77b245244df4934c1",
+    "report_commit": "a20fcf74e",
     "integration_qualified": false,
     "passed": 6,
     "failed": 0,
     "skipped": 0,
-    "ctest_elapsed_seconds": 2.55,
+    "ctest_elapsed_seconds": 2.53,
     "tests": [
       "ninfer_checkpoint_io_contract_test",
       "ninfer_direct_storage_checkpoint_backend_test",
