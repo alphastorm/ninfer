@@ -2246,6 +2246,7 @@ private:
                     executed |= progress_context_operation(boundary);
                 }
                 reserve_resident_units();
+                bool refresh_resident_units = false;
                 // A failed restore leaves spare resources available to fresh requests.
                 // An in-flight restoration/reclaim keeps its own candidate until settled.
                 if (!admission_decision_ || !admission_decision_->restoring) {
@@ -2255,11 +2256,17 @@ private:
                     }
                     if (admission_decision_ || scheduler_.admission_scan_pending()) {
                         (void)try_admit_one(false);
+                        refresh_resident_units = true;
                     }
                 }
                 if (instance_.program->has_context_operation()) {
                     executed |= progress_context_operation(boundary);
-                    if (!instance_.program->has_context_operation()) { reserve_resident_units(); }
+                    refresh_resident_units = true;
+                }
+                if (refresh_resident_units) {
+                    // Admission can pin a resident's retained tail before its binding completes.
+                    // Refresh writer eligibility and the same permit's COW quote after that pin.
+                    reserve_resident_units();
                 }
                 const auto cancelled = snapshot_cancellations();
                 auto controls = scheduler_.build_control_membership(slots_, max_concurrency_);
@@ -2311,11 +2318,10 @@ private:
                     set_host_work_class(HostWorkClass::Control);
                     auto progress_boundary = begin_host_phase();
                     executed |= progress_context_operation(progress_boundary);
-                    if (!instance_.program->has_context_operation()) {
-                        // Control/Decode permits were consumed. Only the still-unexecuted
-                        // Prefill/Replay turn can receive a new permit in this round.
-                        reserve_resident_units(ReservationScope::Prefill);
-                    }
+                    // Control/Decode may have started another binding. Even while it remains
+                    // in flight, its pins can change an unexecuted Prefill/Replay permit.
+                    // Already-consumed Control/Decode permits must not be reserved again.
+                    reserve_resident_units(ReservationScope::Prefill);
                     finish_engine_phase(progress_boundary, EngineHostPhase::Boundary);
                 }
                 auto prefill_slots = slots_;
