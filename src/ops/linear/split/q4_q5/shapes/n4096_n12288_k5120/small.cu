@@ -11,6 +11,7 @@
 #include "ops/linear/kernels/q4/q4_gemv_launch.cuh"
 #include "ops/linear/kernels/q5/q5_simt_launch.cuh"
 #include "ops/linear/kernels/q5/q5_gemv_launch.cuh"
+#include "ops/linear/kernels/q5/q5_sliced_k_launch.cuh"
 
 #include <cuda_bf16.h>
 
@@ -43,11 +44,11 @@ void launch_q4_simt(const Tensor& x, const Weight& weight, const Tensor& out, cu
         LinearIdentityEpilogue{}, stream);
 }
 
-template <std::int32_t Capacity>
+template <std::int32_t Capacity,
+          class Schedule = Q4A16SlicedKMmaSchedule<16, (Capacity + 7) / 8 * 8, 8, 1,
+                                                   Cache::cg, Cache::ca, 6, kHidden, Capacity>>
 void launch_q4_sliced_exact(const Tensor& x, const Weight& weight, const Tensor& out,
                             cudaStream_t stream) {
-    using Schedule = Q4A16SlicedKMmaSchedule<16, (Capacity + 7) / 8 * 8, 8, 1, Cache::cg, Cache::ca,
-                                             6, kHidden, Capacity>;
     launch_q4_a16_sliced_k_mma<Schedule>(
         q4_linear_operands(x, weight),
         LinearBf16StridedOutput{static_cast<__nv_bfloat16*>(out.data),
@@ -65,7 +66,14 @@ void launch_q4_sliced_band(const Tensor& x, const Weight& weight, const Tensor& 
         launch_q4_sliced_exact<7>(x, weight, out, stream);
         return;
     case 8:
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+        launch_q4_sliced_exact<8, q4_instances::SlicedK5120T8PairwisePad16>(x, weight, out, stream);
+        return;
+    case 16:
+        launch_q4_sliced_exact<16, q4_instances::SlicedK5120T16PairwisePad16>(x, weight, out, stream);
+#else
         launch_q4_sliced_exact<8>(x, weight, out, stream);
+#endif
         return;
     case 9:
         launch_q4_sliced_exact<9>(x, weight, out, stream);
@@ -80,7 +88,7 @@ void launch_q4_sliced_band(const Tensor& x, const Weight& weight, const Tensor& 
         launch_q4_sliced_exact<12>(x, weight, out, stream);
         return;
     default:
-        throw std::invalid_argument("Q4/Q5 split K-split band covers T in [7,12]");
+        throw std::invalid_argument("unsupported Q4/Q5 split K-split extent");
     }
 }
 
@@ -100,6 +108,9 @@ void launch_q4(const Tensor& x, const Weight& weight, const Tensor& out, cudaStr
     case 10:
     case 11:
     case 12:
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+    case 16:
+#endif
         launch_q4_sliced_band(x, weight, out, stream);
         return;
     default:
@@ -107,7 +118,7 @@ void launch_q4(const Tensor& x, const Weight& weight, const Tensor& out, cudaStr
             launch_q4_simt<SmallR8T8>(x, weight, out, stream);
             return;
         }
-        throw std::invalid_argument("Q4/Q5 split independent launch requires T in [1,15]");
+        throw std::invalid_argument("unsupported Q4/Q5 split independent extent");
     }
 }
 
@@ -178,12 +189,35 @@ void launch_q5_simt_cols(const Tensor& x, const Weight& weight, const Tensor& va
                                  LinearIdentityEpilogue{}, stream);
 }
 
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+template <int Tokens>
+void launch_q5_verify(const Tensor& x, const Weight& weight, const Tensor& value,
+                      const Tensor& z, cudaStream_t stream) {
+    using Schedule = Q5A16SlicedKMmaSchedule<16, Tokens, 8, Tokens == 8 ? 3 : 2,
+                                             Cache::cg, Cache::ca, 1, kHidden, Tokens,
+                                             Q5SlicedKReduction::Linear, 16, false>;
+    launch_q5_a16_sliced_k_mma<Schedule>(
+        q5_linear_operands(x, weight), q5_projection_output(value, z),
+        LinearIdentityEpilogue{}, stream);
+}
+#endif
+
 void launch_q5(const Tensor& x, const Weight& weight, const Tensor& value, const Tensor& z,
                cudaStream_t stream) {
     if (x.ne[1] == 1) {
         launch_q5_gemv(x, weight, value, z, stream);
         return;
     }
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+    if (x.ne[1] == 8) {
+        launch_q5_verify<8>(x, weight, value, z, stream);
+        return;
+    }
+    if (x.ne[1] == 16) {
+        launch_q5_verify<16>(x, weight, value, z, stream);
+        return;
+    }
+#endif
     if (x.ne[1] <= 10) {
         launch_q5_split4_exact(x, weight, value, z, stream);
         return;
@@ -196,7 +230,7 @@ void launch_q5(const Tensor& x, const Weight& weight, const Tensor& value, const
         launch_q5_simt_cols<8>(x, weight, value, z, stream);
         return;
     }
-    throw std::invalid_argument("Q4/Q5 split independent launch requires T in [1,15]");
+    throw std::invalid_argument("unsupported Q4/Q5 split independent extent");
 }
 
 void launch_t4_pdl(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,

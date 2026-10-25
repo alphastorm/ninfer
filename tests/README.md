@@ -464,3 +464,15 @@ about 64 GiB of available Host memory plus system headroom. These are loading/re
 Text/Vision/MTP generation, eager or CUDA Graph decode, and text causal scoring use the public Engine,
 with current support described in the [execution reference](../docs/maintainer/qwen4_exp-execution.md)
 and commands in the [CLI guide](../docs/cli.md).
+
+## EXP-097 accounting
+
+`python3 -m unittest discover -s tests -p test_exp097.py` checks weighted decode and round-cost
+aggregation, empirical p95, distinct consumption of same-token-shape request logs, and refusal of
+missing log evidence. It needs no GPU or private corpus and does not qualify any numerical route.
+
+The Q4/Q5 split projection tests compare every output against the decoded-input FP64 oracle at
+aggregate T=8 and T=16, with graph coverage on either side of T=16. GDN snapshot includes full
+T=16 references; record includes dense and masked B=2/W=8. BF16 causal attention additionally
+replays B=2/W=7 and W=8 with changing valid prefixes. Run these public Op tests on a GPU;
+the Python accounting tests are not substitutes for them.

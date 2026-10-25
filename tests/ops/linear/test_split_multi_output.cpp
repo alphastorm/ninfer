@@ -137,7 +137,9 @@ int run_target_projection_case(DevicePackedWeight& parent, DevicePackedWeight* g
         const auto criterion     = dual ? kAttnInputProjA16Tolerance
                                    : a8 ? kAttnInputProjA8Tolerance
                                         : kFp8AttnInputProjA16Tolerance;
-        const int sample_count   = (a8 || replay) ? 31 : 7;
+        const int sample_count   = dual && (tokens == 8 || tokens == 16)
+                                       ? qrows
+                                       : (a8 || replay) ? 31 : 7;
         const std::string suffix = std::string(dual ? " Q4/Q5" : " FP8") +
                                    (a8 ? " allow-a8" : " a16") + " T=" + std::to_string(tokens) +
                                    " phase=" + std::to_string(phase);
@@ -181,7 +183,8 @@ int run_q4_q5() {
     // The replayed set covers the Q5 split4 band's new counts (7 and 9) next to the ones already
     // there, so the instances this change re-routes are replayed with a re-poisoned output and a
     // changed activation at the captured address.
-    for (int t : {1, 7, 8, 9, 12, 13, 16, 32, 63, 64, 65, 96, 104, 105, 127, 128, 129, 192, 193})
+    for (int t : {1, 7, 8, 9, 12, 13, 15, 16, 17, 32, 63, 64, 65, 96, 104, 105, 127, 128, 129,
+                  192, 193})
         failures +=
             run_target_projection_case(query_key, &gate_value, t, ops::LinearPolicy::A16Only, true);
     return failures;

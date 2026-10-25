@@ -1,6 +1,7 @@
 #include "runtime/engine/model_construction.h"
 
 #include "core/device.h"
+#include "product/speculative_options.h"
 #include "runtime/engine/context_cache/context_cost.h"
 #include "runtime/engine/kv_capacity.h"
 
@@ -35,6 +36,7 @@ struct Options {
     std::uint32_t context_tokens   = 128;
     std::uint32_t draft_tokens     = 15;
     std::uint32_t batch_size       = 1;
+    ninfer::SpeculativeBackend backend = ninfer::SpeculativeBackend::DFlash;
     ninfer::ProposalHead proposal  = ninfer::ProposalHead::Optimized;
     bool use_cuda_graph            = true;
 };
@@ -44,6 +46,7 @@ void print_usage(const char* executable) {
               << " [--artifact <model.ninfer>] [--device <id>] [--context <tokens>]"
                  " [--warmup <n>] [--reps <n>] [--draft-tokens <1..15>]"
                  " [--batch <1..8>]"
+                 " [--spec dflash|dflash2]"
                  " [--proposal-head full|optimized] [--no-cuda-graph]\n";
 }
 
@@ -80,6 +83,12 @@ Options parse_options(int argc, char** argv) {
             options.draft_tokens = parse_u32(value("--draft-tokens"), "draft-tokens");
         } else if (argument == "--batch") {
             options.batch_size = parse_u32(value("--batch"), "batch");
+        } else if (argument == "--spec") {
+            options.backend = ninfer::product::parse_speculative_backend(value("--spec"));
+            if (options.backend != ninfer::SpeculativeBackend::DFlash &&
+                options.backend != ninfer::SpeculativeBackend::DFlash2) {
+                throw std::invalid_argument("--spec must be dflash or dflash2");
+            }
         } else if (argument == "--proposal-head") {
             const std::string_view head(value("--proposal-head"));
             if (head == "full") {
@@ -212,7 +221,7 @@ int run(const Options& options) {
         ninfer::KvCapacityPolicy::explicit_capacity(static_cast<std::uint32_t>(capacity));
     engine.prefill_chunk             = 128;
     engine.kv_cache                  = ninfer::KvCacheStorage::BFloat16;
-    engine.speculative.backend       = ninfer::SpeculativeBackend::DFlash;
+    engine.speculative.backend       = options.backend;
     engine.speculative.draft_tokens  = options.draft_tokens;
     engine.speculative.proposal_head = options.proposal;
     engine.use_cuda_graph            = options.use_cuda_graph;
@@ -333,6 +342,8 @@ int run(const Options& options) {
     std::cout << "artifact," << options.artifact.string() << '\n';
     std::cout << "device," << device.properties().name << '\n';
     std::cout << "context_tokens," << options.context_tokens << '\n';
+    std::cout << "speculative_backend,"
+              << ninfer::product::speculative_backend_name(options.backend) << '\n';
     std::cout << "draft_tokens," << options.draft_tokens << '\n';
     std::cout << "batch_size," << options.batch_size << '\n';
     std::cout << "proposal_head,"

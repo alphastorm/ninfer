@@ -321,6 +321,9 @@ int run_q4_q5() {
     // zeroed column.
     failures += run(4, 2, {}, 1493U);
     failures += run(4, 2, {4, 2}, 1494U);
+    // Two K=7 verify blocks flatten to sixteen projection columns.
+    failures += run(8, 2, {}, 1495U);
+    failures += run(8, 2, {8, 5}, 1496U);
     failures += qk.verify_preserved("Q4 record qk weight");
     failures += value_z.verify_preserved("Q5 record value/z weight");
     return failures;

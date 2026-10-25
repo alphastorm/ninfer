@@ -6,6 +6,7 @@
 #include "ops/linear/swiglu/q4/launch.h"
 
 #include "core/device.h" // CUDA_CHECK
+#include "ops/linear/kernels/q4/q4_instances.cuh"
 #include "ops/linear/kernels/q4/q4_sliced_k_launch.cuh"
 
 #include <cuda_bf16.h>
@@ -62,6 +63,14 @@ struct Q4SwiGluSmallTEpilogue {
 
 using SmallTLauncher = void (*)(const Tensor&, const Weight&, Tensor&, cudaStream_t);
 
+template <class Schedule>
+void launch_small_t_schedule(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+    launch_q4_a16_sliced_k_mma<Schedule>(
+        q4_linear_operands(x, w),
+        LinearBf16Output{static_cast<__nv_bfloat16*>(out.data), kIntermediate},
+        Q4SwiGluSmallTEpilogue{}, stream, Q4SwiGluSmallTRows{});
+}
+
 template <int ActiveCols>
 void launch_small_t_active(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
     // Wider tiles are shared-memory limited before six CTAs can be resident.
@@ -73,10 +82,7 @@ void launch_small_t_active(const Tensor& x, const Weight& w, Tensor& out, cudaSt
     using Schedule =
         Q4A16SlicedKMmaSchedule<16, (ActiveCols + 7) / 8 * 8, 8, 1, Cache::cg, Cache::ca,
                                 kMinBlocks, kK, ActiveCols, Q4SlicedKReduction::Pairwise>;
-    launch_q4_a16_sliced_k_mma<Schedule>(
-        q4_linear_operands(x, w),
-        LinearBf16Output{static_cast<__nv_bfloat16*>(out.data), kIntermediate},
-        Q4SwiGluSmallTEpilogue{}, stream, Q4SwiGluSmallTRows{});
+    launch_small_t_schedule<Schedule>(x, w, out, stream);
 }
 
 template <std::size_t... Offsets>
@@ -217,6 +223,12 @@ void launch_q4_swiglu_small_t_tiled(const Tensor& x, const Weight& w, Tensor& ou
     if (x.ne[1] < 2 || x.ne[1] > 32) {
         throw std::invalid_argument("Q4 LinearSwiGLU exact small-T requires T=2..32");
     }
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+    if (x.ne[1] == 8)
+        return launch_small_t_schedule<q4_instances::SlicedK5120T8PairwisePad16>(x, w, out, stream);
+    if (x.ne[1] == 16)
+        return launch_small_t_schedule<q4_instances::SlicedK5120T16PairwisePad16>(x, w, out, stream);
+#endif
     kSmallTLaunchers[static_cast<std::size_t>((x.ne[1] - 1) / 8)](x, w, out, stream);
 }
 

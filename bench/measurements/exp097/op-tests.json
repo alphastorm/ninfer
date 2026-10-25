@@ -1,0 +1,50 @@
+{
+  "source_commit": "9b391d513726b3ed7d60a80a95daa68cf9dacc97",
+  "checks": [
+    {
+      "command": [
+        "ninfer_linear_split_multi_output_test"
+      ],
+      "returncode": 0,
+      "wall_seconds": 126.937
+    },
+    {
+      "command": [
+        "ninfer_linear_split_two_output_test"
+      ],
+      "returncode": 0,
+      "wall_seconds": 46.688
+    },
+    {
+      "command": [
+        "ninfer_linear_split_test"
+      ],
+      "returncode": 0,
+      "wall_seconds": 14.198
+    },
+    {
+      "command": [
+        "ninfer_gdn_input_proj_conv_snapshot_test"
+      ],
+      "returncode": 0,
+      "wall_seconds": 34.15
+    },
+    {
+      "command": [
+        "ninfer_gdn_input_proj_conv_record_test"
+      ],
+      "returncode": 0,
+      "wall_seconds": 8.588
+    },
+    {
+      "command": [
+        "ninfer_softmax_attention_test",
+        "--causal-only",
+        "--kv-dtype",
+        "bf16"
+      ],
+      "returncode": 0,
+      "wall_seconds": 67.749
+    }
+  ]
+}

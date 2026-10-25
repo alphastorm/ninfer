@@ -114,12 +114,14 @@ enum class Q5SlicedKReduction {
 template <int BlockRows, int BlockTokens, int KWarps, int Stages, Cache WeightCache,
           Cache ActivationCache, int MinBlocksPerSm, int StaticK = 0,
           int TokenCapacity            = BlockTokens,
-          Q5SlicedKReduction Reduction = Q5SlicedKReduction::Linear>
+          Q5SlicedKReduction Reduction = Q5SlicedKReduction::Linear,
+          int RowPadding = 0, bool UnrollTiles = true>
 struct Q5A16SlicedKMmaSchedule {
     static_assert(BlockRows == 16 || BlockRows == 32);
     static_assert(BlockTokens >= 8 && BlockTokens <= 64 && BlockTokens % 8 == 0);
     static_assert(KWarps == 2 || KWarps == 4 || KWarps == 8);
-    static_assert(Stages == 1 || Stages == 2);
+    static_assert(Stages >= 1 && Stages <= 3);
+    static_assert(RowPadding >= 0 && RowPadding % 16 == 0);
     static_assert(MinBlocksPerSm > 0);
     static constexpr int kBlockRows   = BlockRows;
     static constexpr int kBlockTokens = BlockTokens;
@@ -127,6 +129,8 @@ struct Q5A16SlicedKMmaSchedule {
     static_assert(TokenCapacity > 0 && TokenCapacity <= BlockTokens);
     // Static K specializes a padding-free geometry, including physical row strides.
     static constexpr auto kReduction        = Reduction;
+    static constexpr int kRowPadding        = RowPadding;
+    static constexpr bool kUnrollTiles      = UnrollTiles;
     static constexpr int kStaticK           = StaticK;
     static constexpr int kTokenCapacity     = TokenCapacity;
     static constexpr int kKWarps            = KWarps;
@@ -146,6 +150,7 @@ struct Q5A16SlicedKMmaSchedule {
                       (common::Q5RowSplitStorage::kCodeBytesPerGroup +
                        common::Q5RowSplitStorage::kHighBytesPerGroup +
                        common::Q5RowSplitStorage::kScaleBytesPerGroup) +
+                  2 * BlockRows * RowPadding +
                   KWarps * BlockTokens * 64 * 2);
     static constexpr int kPartialBytes = KWarps * BlockRows * BlockTokens * sizeof(float);
     static constexpr int kSharedBytes =
