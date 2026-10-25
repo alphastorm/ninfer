@@ -2,8 +2,10 @@
 #include "core/sha256.h"
 #include "models/qwen3_5/execution/parameters.h"
 #include "models/common/qwen/frontend/frontend.h"
+#include "models/common/qwen/frontend/resources.h"
 #include "models/qwen3_5/load.h"
 #include "models/qwen3_5/program/program.h"
+#include "models/qwen3_5/program/program_impl.h"
 #include "runtime/contract/continuation_checkpoint.h"
 #include <nlohmann/json.hpp>
 #include <array>
@@ -139,20 +141,21 @@ struct Generated {
     std::vector<q35::CheckpointHandle> points;
     std::uint32_t reused = 0;
 };
-Generated generate(DeviceContext& device, q35::Program& program, models::qwen::Frontend& frontend,
-                   const std::vector<TokenId>& input, std::optional<q35::CheckpointHandle> source,
-                   bool capture) {
+Generated generate(DeviceContext& device, q35::Program& program,
+                   models::qwen::PreparedPrompt prompt, std::optional<q35::CheckpointHandle> source,
+                   bool capture, std::string_view scenario = "terminal") {
     ResolvedExecutionOptions options;
-    options.requested_output_tokens = 8; options.allow_prefix_reuse = true;
+    options.requested_output_tokens = scenario == "terminal" ? 8 : 24;
+    options.allow_prefix_reuse = true;
     options.sampling.temperature = 0; options.sampling.top_k = 1;
-    auto base = program.plan_request(frontend.prepare_tokens(input), options);
+    auto base = program.plan_request(std::move(prompt), options);
     auto candidate = program.inspect_source(base, source);
     require(candidate.has_value(), "matching native source missing");
     Generated result; result.reused = candidate->reused_tokens;
     require(static_cast<bool>(program.start_binding(base, {0}, *candidate)), "native source binding refused");
     q35::ContextProgress bound; settle(device, program, bound);
     require(bound.sequence.has_value(), "native binding did not publish sequence");
-    const auto sequence = *bound.sequence;
+    auto sequence = *bound.sequence;
     const auto reserve = [&](q35::ExecutionUnitKind kind, std::uint32_t budget = 0) {
         const std::array<q35::ExecutionUnit, 1> units{{{sequence, kind, budget}}};
         require(static_cast<bool>(program.reserve_units(units)), "native unit reservation refused");
@@ -178,22 +181,72 @@ Generated generate(DeviceContext& device, q35::Program& program, models::qwen::F
         began = true; break;
     }
     require(began, "prefill failed to finish");
-    while (result.tokens.size() < 8) {
-        const auto remaining = static_cast<std::uint32_t>(8 - result.tokens.size());
+    const auto target = scenario == "terminal" ? 8U : 24U;
+    bool exercised = scenario == "terminal";
+    while (result.tokens.size() < target) {
+        const auto remaining = static_cast<std::uint32_t>(target - result.tokens.size());
         reserve(q35::ExecutionUnitKind::Decode, remaining);
         const std::array members{sequence};
         const std::array<RoundBudget, 1> budgets{{{.generated_tokens_remaining = remaining}}};
         auto pending = program.decode(members, budgets);
-        const auto count = pending.row_counts().empty() ? 1U : static_cast<std::uint32_t>(pending.row_counts()[0]);
+        auto count = pending.row_counts().empty() ? 1U : static_cast<std::uint32_t>(pending.row_counts()[0]);
         require(count && count <= remaining, "decode exceeded requested tokens");
+        const bool partial = scenario == "partial" && !exercised && count > 1;
+        if (partial) count = 1;
         result.tokens.insert(result.tokens.end(), pending.tokens().begin(), pending.tokens().begin() + count);
-        const std::array<CommitDecision, 1> accept{{{.accepted_tokens = count, .terminal = result.tokens.size() == 8}}};
+        const bool terminal = result.tokens.size() == target;
+        const std::array<CommitDecision, 1> accept{{{.accepted_tokens = count, .terminal = terminal}}};
         (void)program.commit(std::move(pending), accept);
+        if (partial) exercised = true;
+        if (!terminal && !exercised && scenario == "forced") {
+            const std::array<TokenId, 3> forced{198, 198, 199};
+            const std::array<std::optional<std::uint32_t>, 1> splits{std::nullopt};
+            reserve(q35::ExecutionUnitKind::Control, forced.size());
+            (void)program.append_forced_tokens(members, forced, forced.size(), splits);
+            result.tokens.insert(result.tokens.end(), forced.begin(), forced.end());
+            exercised = true;
+        }
+        if (!terminal && !exercised && scenario == "pause") {
+            const auto* native = static_cast<const q35::detail::ProgramImpl*>(
+                q35::detail::ContractAccess::owner(sequence));
+            const auto lane = q35::detail::ContractAccess::lane(sequence).value;
+            const auto before = native->sequences[lane].continuation.metadata;
+            if (native->speculative_backend == SpeculativeBackend::DFlash2)
+                require(before.dflash_context_frontier < before.execution_frontier,
+                        "pause did not exercise an unsettled draft frontier");
+            require(program.start_pause(sequence, true), "draft pause refused");
+            q35::ContextProgress paused; settle(device, program, paused);
+            require(paused.paused && paused.paused->has_snapshot(), "draft pause lost its snapshot");
+            auto root = program.inspect_source(base, std::nullopt);
+            require(root && static_cast<bool>(program.start_binding(base, {0}, *root, &*paused.paused)),
+                    "draft snapshot resume refused");
+            q35::ContextProgress resumed; settle(device, program, resumed);
+            require(resumed.sequence.has_value(), "draft snapshot resume did not publish");
+            sequence = *resumed.sequence;
+            exercised = true;
+        }
     }
+    require(exercised, "requested draft regression transition was not exercised");
     const auto finish = program.finish(sequence);
     require(finish.status == ConsumeStatus::Consumed && finish.checkpoint, "native endpoint not retained");
     result.points.push_back(*finish.checkpoint);
     return result;
+}
+models::qwen::PreparedPrompt seed_prompt(models::qwen::Frontend& frontend) {
+    PromptInput input;
+    input.options.enable_thinking = false;
+    std::string prefix, suffix;
+    for (unsigned i = 0; i < 130; ++i) prefix += "alpha ";
+    for (unsigned i = 0; i < 140; ++i) suffix += "beta ";
+    input.messages.push_back({.role = ChatRole::System,
+        .parts = {{.kind = MessagePartKind::Text, .text = std::move(prefix)}}});
+    input.messages.push_back({.role = ChatRole::User,
+        .parts = {{.kind = MessagePartKind::Text, .text = std::move(suffix)}}});
+    input.context_cache.allow_engine_automatic_shared_prefixes = false;
+    input.context_cache.markers.push_back({.after_message_count = 1,
+        .kind = PromptCacheMarkerKind::PrivateLongAnchor,
+        .location = PromptCacheMarkerLocation::MessageBoundary});
+    return frontend.prepare(std::move(input));
 }
 void release(q35::Program& program, const std::vector<q35::CheckpointHandle>& points) {
     for (auto point : points) require(program.release_checkpoint(point), "checkpoint ownership leaked");
@@ -209,7 +262,7 @@ int main(int argc, char** argv) {
         const auto backend = backend_name == "none" ? SpeculativeBackend::None :
             backend_name == "mtp" ? SpeculativeBackend::Mtp : SpeculativeBackend::DFlash2;
         require(backend_name == "none" || backend_name == "mtp" || backend_name == "dflash2", "invalid backend");
-        const fs::path root(argv[2]);
+        const fs::path directory(argv[2]);
         DeviceContext device;
         models::LoadOptions selected; selected.speculative = backend;
         auto model = q35::load_model(artifact, selected, device);
@@ -227,13 +280,23 @@ int main(int argc, char** argv) {
             return q35::create_program(parameters, std::move(planner).finalize(16), device, {});
         };
         auto program = make_program();
+        const auto native_layout = program->checkpoint_layout();
+        const auto decoded = [&](const std::vector<TokenId>& tokens) {
+            std::string bytes;
+            for (auto token : tokens) bytes += model->resources().tokenizer->decode_token_bytes(token);
+            return bytes;
+        };
+        const std::vector<std::string> scenarios = backend == SpeculativeBackend::DFlash2
+            ? std::vector<std::string>{"terminal", "partial", "forced", "pause"}
+            : std::vector<std::string>{"terminal"};
+        for (const auto& scenario : scenarios) {
+        const auto root = directory / scenario;
         if (mode == "export") {
             require(!fs::exists(root), "restart export directory already exists"); fs::create_directories(root);
-            std::vector<TokenId> prompt(257, 198); prompt.front() = 1000;
-            auto seed = generate(device, *program, frontend, prompt, std::nullopt, true);
-            require(seed.points.size() >= 2, "test did not retain input and endpoint");
-            const auto frontier = program->checkpoint_summary(seed.points.back()).frontier;
+            auto seed = generate(device, *program, seed_prompt(frontend), std::nullopt, true, scenario);
+            require(seed.points.size() == 3, "test did not retain anchor, input and endpoint");
             DurableCheckpointStats stats;
+            DurableCheckpointSet index;
             {
                 auto capture = program->prepare_checkpoint_export(seed.points, {});
                 require(capture.state() == DurablePrepareState::Prepared, "native set export refused");
@@ -241,15 +304,35 @@ int main(int argc, char** argv) {
                 const auto exported = capture.write(writer);
                 require(exported.state == DurableExportState::Exported, "native payload write refused");
                 stats = exported.stats;
-                require(capture.index().points.size() >= 2 && capture.index().histories.size() == 1,
-                        "input and endpoint did not share a logical history");
+                index = capture.index();
+                require(index.points.size() == 3 && !index.histories.empty() &&
+                        index.histories.size() <= index.points.size() * native_layout.pools.size(),
+                        "anchor, input and endpoint lost their native histories");
+                require(index.points[0].role == DurablePointRole::LongAnchor &&
+                        index.points[1].role == DurablePointRole::InputReplay &&
+                        index.points[2].role == DurablePointRole::Continuation,
+                        "native set lost a semantic point role");
+                for (const auto& point : index.points)
+                    require(backend != SpeculativeBackend::DFlash2 ||
+                            point.dflash_context_frontier == point.frontier,
+                            "exported StateImage has an unsettled draft ring");
             }
-            prompt.insert(prompt.end(), seed.tokens.begin(), seed.tokens.end()); prompt.insert(prompt.end(), 8, 198);
-            auto expected = generate(device, *program, frontend, prompt, seed.points.back(), false);
-            require(expected.reused == frontier, "live baseline did not hit endpoint");
-            write_json(root / "test-oracle.json", {{"pid", pid()}, {"input", prompt}, {"tokens", expected.tokens},
-                {"frontier", frontier}, {"points", stats.points}, {"states", stats.states}, {"pages", stats.pages}});
-            release(*program, expected.points); release(*program, seed.points);
+            Json continuations = Json::array();
+            for (std::size_t i = 0; i < index.points.size(); ++i) {
+                const auto& point = index.points[i];
+                auto prompt = index.identities[point.identity].ledger;
+                prompt.resize(point.frontier);
+                prompt.insert(prompt.end(), 8, 198);
+                auto expected = generate(device, *program, frontend.prepare_tokens(prompt), seed.points[i], false);
+                require(expected.reused == point.frontier, "live baseline did not hit selected point");
+                const auto bytes = decoded(expected.tokens);
+                continuations.push_back({{"input", prompt}, {"tokens", expected.tokens},
+                    {"bytes", bytes}, {"frontier", point.frontier}});
+                release(*program, expected.points);
+            }
+            write_json(root / "test-oracle.json", {{"pid", pid()}, {"continuations", continuations},
+                {"points", stats.points}, {"states", stats.states}, {"pages", stats.pages}});
+            release(*program, seed.points);
         } else {
             const auto oracle = read_json(root / "test-oracle.json");
             require(oracle.at("pid").get<std::uint64_t>() != pid(), "restart test reused the exporting process");
@@ -272,6 +355,8 @@ int main(int argc, char** argv) {
             require(program->physical_usage().occupied == empty.occupied &&
                     program->physical_usage().host_reserved_bytes == 0, "prepare abort leaked resources");
             program.reset(); options.context_cache.host_capacity_bytes = 0; program = make_program();
+            require(program->checkpoint_layout() == native_layout,
+                    "Host admission capacity changed the native layout identity");
             {
                 Reader reader(root); const auto index = reader.index();
                 auto refused = program->prepare_checkpoint_import(index, reader, {});
@@ -284,13 +369,25 @@ int main(int argc, char** argv) {
             require(prepared.valid(), "native final import refused");
             auto points = program->commit_import(std::move(prepared));
             require(points.size() == index.points.size(), "native commit lost checkpoint points");
-            const auto observed = generate(device, *program, frontend, oracle.at("input").get<std::vector<TokenId>>(),
-                                           points[index.endpoint], false);
-            require(observed.tokens == oracle.at("tokens").get<std::vector<TokenId>>() &&
-                    observed.reused == oracle.at("frontier").get<std::uint32_t>(),
-                    "real restart changed continuation tokens or checkpoint hit frontier");
-            release(*program, observed.points); release(*program, points);
+            std::size_t continuation_bytes = 0;
+            for (std::size_t i = 0; i < points.size(); ++i) {
+                const auto& expected = oracle.at("continuations").at(i);
+                const auto observed = generate(device, *program,
+                    frontend.prepare_tokens(expected.at("input").get<std::vector<TokenId>>()), points[i], false);
+                const auto bytes = decoded(observed.tokens);
+                require(observed.tokens == expected.at("tokens").get<std::vector<TokenId>>() &&
+                        observed.reused == expected.at("frontier").get<std::uint32_t>() &&
+                        bytes == expected.at("bytes").get<std::string>(),
+                        "real restart changed continuation bytes, tokens or checkpoint hit frontier");
+                continuation_bytes += bytes.size();
+                release(*program, observed.points);
+            }
+            release(*program, points);
             require(program->physical_usage().occupied == q35::ContextResources{}, "native import retained resources");
+            std::cout << "PASS restart scenario=" << scenario << " backend=" << backend_name
+                      << " points=" << points.size() << " states=" << index.states.size()
+                      << " continuation_bytes=" << continuation_bytes << '\n';
+        }
         }
         std::cout << "OK checkpoint restart " << mode << ' ' << backend_name << '\n'; return 0;
     } catch (const std::exception& error) {
