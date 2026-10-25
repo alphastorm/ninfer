@@ -440,12 +440,12 @@ int test_prompt_object_order() {
                      [](const ChatTurn& turn) { return turn.role == ninfer::ChatRole::Assistant; });
     const ninfer::PromptInput translated = prompt(request);
     const std::string expected_tool =
-        R"({"type":"function","function":{"name":"probe","parameters":{"type":"object","properties":{"zeta":{"type":"string"},"alpha":{"type":"object","properties":{"yankee":{"type":"integer"},"bravo":{"type":"boolean"}}}}},"strict":false}})";
+        R"({"function":{"name":"probe","parameters":{"properties":{"alpha":{"properties":{"bravo":{"type":"boolean"},"yankee":{"type":"integer"}},"type":"object"},"zeta":{"type":"string"}},"type":"object"},"strict":false},"type":"function"})";
     int failures = check(assistant != request.messages.end() && assistant->tool_calls.size() == 1 &&
                              assistant->tool_calls.front().arguments_json == original &&
                              translated.options.tool_jsons.size() == 1 &&
                              translated.options.tool_jsons.front() == expected_tool,
-                         "Anthropic request changed prompt-bearing object member order");
+                         "Anthropic tool definition must sort nested keys without reordering tool input");
 
     const GenerationRequest reordered =
         parse_raw(R"({"alpha":{"yankee":2,"bravo":true},"zeta":"last"})");

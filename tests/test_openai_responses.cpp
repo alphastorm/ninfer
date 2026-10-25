@@ -650,8 +650,8 @@ int test_tools_and_effective_subset() {
     failures += check(
         ordered_prompt.options.tool_jsons.size() == 1 &&
             ordered_prompt.options.tool_jsons.front() ==
-                R"({"type":"function","function":{"name":"probe","parameters":{"type":"object","properties":{"zeta":{"type":"string"},"alpha":{"type":"integer"}}},"strict":false}})",
-        "OpenAI Responses changed tool-schema member order before PromptInput");
+                R"({"function":{"name":"probe","parameters":{"properties":{"alpha":{"type":"integer"},"zeta":{"type":"string"}},"type":"object"},"strict":false},"type":"function"})",
+        "OpenAI Responses tool definition is not serialized with sorted keys");
     return failures;
 }
 

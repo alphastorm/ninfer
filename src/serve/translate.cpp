@@ -88,7 +88,7 @@ ninfer::SamplingOverrides resolve_sampling_overrides(const SamplingParams& reque
 }
 
 std::string render_tool_definition(const ToolDefinition& tool) {
-    using Json  = RequestJson;
+    using Json  = nlohmann::json;
     Json schema = Json::parse(tool.input_schema_json);
     Json function{{"name", tool.name}, {"parameters", std::move(schema)}, {"strict", tool.strict}};
     if (!tool.description.empty()) { function["description"] = tool.description; }

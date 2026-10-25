@@ -518,8 +518,13 @@ int test_tools() {
     failures += check(
         ordered_prompt.options.tool_jsons.size() == 1 &&
             ordered_prompt.options.tool_jsons.front() ==
-                R"({"type":"function","function":{"name":"probe","parameters":{"type":"object","properties":{"zeta":{"type":"string"},"alpha":{"type":"integer"}}},"strict":false}})",
-        "OpenAI Chat changed tool-schema member order before PromptInput");
+                R"({"function":{"name":"probe","parameters":{"properties":{"alpha":{"type":"integer"},"zeta":{"type":"string"}},"type":"object"},"strict":false},"type":"function"})",
+        "OpenAI Chat tool definition is not serialized with sorted keys");
+    const Json reordered = Json::parse(
+        R"({"model":"qwen","messages":[{"role":"user","content":"probe"}],"tools":[{"function":{"parameters":{"properties":{"alpha":{"type":"integer"},"zeta":{"type":"string"}},"type":"object"},"name":"probe"},"type":"function"}]})");
+    failures += check(prompt(parse(reordered).generation).options.tool_jsons ==
+                          ordered_prompt.options.tool_jsons,
+                      "equivalent tool definitions changed prompt bytes across key orderings");
     return failures;
 }
 
