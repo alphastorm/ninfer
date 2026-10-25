@@ -23,7 +23,7 @@
 | FP8 TMA-selected tiles | Existing TMA/split-K | Ordinary full-K MMA; no split-K partial allocation | Explicit refusal | L1 linked both; numerical/refusal proof pending |
 | FP8 and NVFP4 A16 weight dequantization | Existing routes | Retained; portable widening | Retained; portable widening | L1 linked both; A16 oracle runs pending |
 | NVFP4 A4 | Existing non-RDC/TMA and MMA | Explicit refusal | Explicit refusal | L1 linked contract/exclusions; execution pending |
-| Dense BF16/INT8 KV attention | Existing routes | Retained | Retained | L1 linked both; W1 test-source portability corrections not rebuilt |
+| Dense BF16/INT8 KV attention | Existing routes | Retained | Retained | L1 linked both; W1 linked corrected sm_89 tests; numerical proof pending |
 | Dense FP8 KV attention | Existing routes | Retained | Explicit refusal | L1 linked both; sm_89 numerical / sm_86 refusal execution pending |
 | Dense NVFP4/K8V4 KV attention | Existing routes | Explicit refusal | Explicit refusal | L1 linked contract/exclusions; execution pending |
 | Block-scaled FP8/NVFP4 MoE | Existing non-RDC routes | Explicit refusal | Explicit refusal | L1 linked contract; only exact named block-scaled exit 77 permitted |
@@ -31,12 +31,15 @@
 | Striped gated-residual projection | Existing TMA selection | Existing folded cp.async route | Existing folded cp.async route | W1 passed corrected launcher boundary; numerical proof pending |
 
 Statuses above describe route admission, not numerical qualification.
-**L1:** Linux `53e847dd` linked `ninfer-serve`, architecture contract and every ops
-target for both profiles, driver exit 0; this includes `b5bd4926` and the CPU
-compiler-neutral fix but predates subsequent corrections.
-**W1:** combined MSVC sm_89 `2a4266e30` passed the corrected kernel boundaries,
-then failed in ops test compilation; it is not a successful native bundle.
-Final-tip Linux links, complete Windows links and all per-GPU oracle runs remain pending.
+**L1:** Linux `9ee8a29cb87524410238b3d964dd84af546d8f2b` linked `ninfer-serve`,
+loading-real, architecture contract and all 92 ops-inventory targets for both
+profiles; combined driver and per-profile receipts exited 0. This supersedes the
+earlier successful `53e847dd` links but predates the later launcher/test corrections.
+**W1:** PortableCore2 reports successful combined MSVC sm_89
+`47ebc3824b8c32112458eb013e5d4bb20c8b98f6` (C1 `6661b7d03` plus C2 `363ccccc`):
+97 binary targets, including all 92 ops-inventory targets and `ninfer-serve`.
+Its earlier `2a4266e30` attempt failed in the now-corrected ops test sources.
+Final-tip Linux links, Windows sm_86 links and all per-GPU oracle runs remain pending.
 The explicit exclusion authority is `tests/ops/excluded_paths.h`; its refusal messages,
 not arbitrary failures or skips, determine unsupported cases.
 
@@ -110,12 +113,12 @@ common/build.sh "$SOURCE" "$BUILD/native-sm89" \
   name the same kernel specialization directly inside the lambda; shared-memory
   setup stays outside the loop. Schedules, arguments and arithmetic are unchanged.
   The Blackwell-only NVFP4 A4 TMA launcher is outside the native build and unchanged.
-- W1 exposed C++20 test portability errors: `constexpr std::sqrt` in attention
+- The preceding MSVC attempt exposed C++20 test portability errors: `constexpr std::sqrt` in attention
   and GDN references, and GCC-only `_Float16` in sparse-attention fixtures.
   These now retain the same square-root expressions as `const` values and reuse
   the existing independent round-to-nearest-even binary16 fixture conversions.
-  No oracle tolerance or supported case was removed. These corrections have not
-  been rebuilt. Integrator's isolated `252bb209d` correction for missing `<array>`
+  No oracle tolerance or supported case was removed. W1 compiled these corrections.
+  Integrator's isolated `252bb209d` correction for missing `<array>`
   in public `ninfer/types.h` and `<span>` in the generation-service header was
   imported; no test include-order workaround was added.
 
@@ -147,13 +150,14 @@ upstream default full head.
 ## Provenance and remaining gates
 
 - Behavioral references: shipped native fork and the upstream architecture/kernel contracts. Community ports were design references; no community source file was copied.
-- Required remaining proof: final-revision Linux compilation for both native profiles, MSVC link for both profiles, ops suites on their respective physical GPUs with the explicit exclusions, and one server-path model decode on each GPU with tokens/second and configured/measured context recorded. The assignment is not acceptance-complete.
+- Required remaining proof: final-revision Linux compilation for both native profiles, MSVC sm_86 link, ops suites on their respective physical GPUs with the explicit exclusions, and one server-path model decode on each GPU with tokens/second and configured/measured context recorded. The assignment is not acceptance-complete.
 - Native runs use isolated work directories and loopback ports `18200–18209`, never installed release roots or the shipped port.
 - The lead additionally authorized `ninfer_artifact_materialization_test`, `ninfer_expert_cache_test`, and the PLE prepare GPU Python harness on each native GPU. PortableCore supplies the executables, DLLs, stdlib-only Python inputs, and the ops manifest. Python 3.13.15 was observed on the native runtime host.
 - The earlier GNU-only unreachable/F16C and ISA-flag errors were corrected by
-  PortableCore and imported here. The public v3 direct download is still awaiting
-  its own runtime-host SHA receipt; the build-host copy was independently reported
-  verified by Infra2. No native artifact upgrade is part of the current path.
+  PortableCore and imported here. The public v3 direct download timed out after
+  1800 seconds with curl exit 28; its partial file is not qualified and has no
+  whole-file SHA receipt. Infra2 independently reported a verified build-host copy.
+  No native artifact upgrade is part of the current path.
 - Test-only full-UUID `CUDA_VISIBLE_DEVICES` masking is explicitly authorized because upstream tests use CUDA ordinal zero. Receipts record the mask; skip 77 is accepted only for the named block-scaled MoE test with its exact exclusion message. Server probes instead leave that variable absent, use `CUDA_DEVICE_ORDER=PCI_BUS_ID` plus numeric `--device`, and require the server-start GPU UUID to match.
 - No native ops execution, real-model decode, throughput measurement, or native release qualification is claimed in this report.
 
@@ -166,3 +170,7 @@ upstream default full head.
   **9/9 at combined `2a4266e30`, 2.45 seconds**, including anchored nonempty-directory
   publication/tombstone, junction refusal and retained-reader cases. This is
   native core evidence, not C2 numerical, model, or complete release qualification.
+- For W1, PortableCore2 reported native core **9/9 (10.00 seconds)** and remaining
+  host tests **43/43 (6.48 seconds)**, no failures/skips and no GPU execution.
+  The server is 322383360 bytes, SHA-256
+  `f7ec4d3426457bc5f9ccb706df369dfe032b94cd4a5e00a5dcfc8bcde8634c1d`.
