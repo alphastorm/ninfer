@@ -202,6 +202,13 @@ required identity value; unknown/empty/dirty inputs reject launch. Tests may sup
 explicit fixture identities. Model binding/frontend/layout identities come from
 loaded resources; never synthesize them from a filename or host path.
 
+Serving queries `CheckpointEngineAccess::checkpoint_layout(const Engine&)` and
+`frontend_identity(const Engine&)` once at startup and caches the resulting K2
+fingerprint. The native query returns `DurableNativeLayout` from the loaded Program's
+actual geometry. The frontend query returns `DurableFrontendIdentity` computed once
+from loaded tokenizer/resource bytes and the exact selected template source at
+compilation. Never reopen the template filename after load or hash resources per save.
+
 ## K3 — Engine/Program ownership and transaction API
 
 Only the internal `runtime::CheckpointEngineAccess` adapter exposes persistence.
@@ -210,6 +217,9 @@ The public `Engine` API stays unchanged except integration-owned friendship.
 `DurableEngineImport`; the store owns streaming Reader/Writer declarations in
 `continuation_checkpoint.h`. Stats on the set API additionally count points/states/pages.
 
+- `checkpoint_layout(const Engine&)` and `frontend_identity(const Engine&)` expose
+  the immutable K2 startup identity described above; neither introduces a public
+  Engine persistence method or derives identity from admission capacities.
 - `export_session(engine, digest, expected_tag, Writer&, limits)` returns
   `Exported`, `Refused(reason)`, or `Stale`, with `captured_epoch` on success.
   No silent retry against a different tag.

@@ -21,6 +21,10 @@ static_assert(!std::is_copy_constructible_v<DurableEngineImport>);
 static_assert(std::is_nothrow_move_constructible_v<DurableEngineImport>);
 static_assert(std::is_nothrow_move_assignable_v<DurableEngineImport>);
 static_assert(std::is_same_v<DurableLocalId, std::uint32_t>);
+static_assert(std::is_same_v<decltype(&CheckpointEngineAccess::checkpoint_layout),
+                             DurableNativeLayout (*)(const ninfer::Engine&)>);
+static_assert(std::is_same_v<decltype(&CheckpointEngineAccess::frontend_identity),
+                             DurableFrontendIdentity (*)(const ninfer::Engine&)>);
 
 int main(int argc, char** argv) {
     try {

@@ -26,17 +26,21 @@ Read-only command for each candidate: `git merge-tree --write-tree --merge-base=
 |---|---|---|---|---|---|
 | Base | upstream `64d10fbf9` | Infra reports apps/tests ON, benches OFF, `120a`, 285.323 s; image `502ca8b3465c` | Infra evidence pending | Infra evidence pending | [Infra environment](https://github.com/alphastorm/ninfer/blob/ee39c4626/REPORT.md) |
 | Shared prerequisites | `dc3140b23`: native-profile gate and scope carriers | Apps/tests `120a` build passed; lease job elapsed 289 s, exit 0 | `ninfer_qwen_frontend_test` passed, 0.71 s | Not run; no GPU-ready environment yet | Integration-owned prerequisite, not a slice checkpoint |
-| Contracts candidate | frozen source `746b29d2`; proof/prose `cf9ba7db` | Integrated checkpoint pending; slice's three standalone C++20 header compiles passed | Slice: C++ five canonical vectors, Python six canonical/MAC tests passed; integrated CTest pending | Blocked on GPU-ready image and baseline | [Contracts proof](https://github.com/alphastorm/ninfer/blob/cf9ba7db/REPORT.md) |
+| Contracts candidate | merge `a2fcef5c`, proof/prose `bc551eefb`; shared declarations through `7c6ba673a` | Integrated lease queued; slice's three standalone C++20 header compiles passed | Slice: C++ five canonical vectors, Python six canonical/MAC tests passed; integrated 47-test selector queued | Qwen3.5 real subset plus explicit loading queued on fixed image | [Contracts proof](https://github.com/alphastorm/ninfer/blob/cf9ba7db/REPORT.md) |
 
 Baseline inventory must distinguish failures, skips and missing prerequisites. `tests/models/qwen3_5/tests.cmake` registers 14 `gpu;real` cases. `loading_real` needs explicit `--artifact` (the environment variable alone skips); MoE/offload cases need a matching MoE artifact. The supplied dense v3 artifact does not by itself prove every registered model/component route.
 
 Observed prerequisite command sequence: `NINFER_BUILD_HOLDER=int` exported, then `build.sh <source> <build>`, then `run-in-env.sh --mount <source> --mount <build> -- ctest --test-dir <build> -R '^ninfer_qwen_frontend_test$' --output-on-failure --timeout 180`. The private absolute holder roots are intentionally omitted. This proves compilation and the scope-carrier host regression, not runtime isolation or GPU behavior. Infra's initial GPU baseline is environment-invalid: its driver stub overrode the real driver (`cudaErrorStubLibrary`); Python oracle dependencies were also absent. The corrected environment must pass Infra's device/oracle smoke before GPU work resumes.
+
+Infra reports corrected `ov-build-env:master-64d10fbf-r2`, image `e7f34ca2f41e`, passed the real device test (1.298 s) and three Python-backed template/schema oracles (2.709 s). Integration job `20261025T013006Z-int-checkpoint-7c6ba673-250067` pins that image tag and exact source, builds apps/tests, runs Infra's 45 host tests plus two contract tests, then `ctest -L real -R '^ninfer_qwen3_5_' --timeout 180` and explicit v3 loading with Vision/DFlash2/optimized proposal. Results and the corrected vanilla baseline are pending; no green checkpoint is claimed.
 
 ## Merge queue and conflict watchlist
 
 Queue is provider-first, not a fixed file-owner list. Contracts precedes every durable provider. Hardened DurableStore backends additionally require PortableCore's host-only K6 I/O. ServePort's status schema 2 requires EngineCache's real accounting, while its pure identity/snapshot provider precedes the snapshot-aware store. Frontend, KernelRoutes, Harness, ArchEnable and Persistence enter when their providers and proof are ready; dependent A3/B2/C3/E2 follow. Main approved this dependency rule: every merged boundary must be independently green; a source-only merge is not a green checkpoint.
 
 Preflight after a pushed slice is announced: `git fetch origin`, then `git merge-tree --write-tree rebase/upstream-64d10fbf origin/rebase/<slice>`. Preflight writes Git objects only, never the integration working tree. The first fetch found no current-program slice branches beyond the integration base; `rebase/durable-4090-v041` is unrelated and excluded. DurableStore standalone `0789709d` preflight against `7fccec947` was clean (exit 0); not yet merged or built.
+
+Latest read-only preflights against `7c6ba673a`: PortableCore `5ba2cc8b` conflicts only in the copied integration log; EngineCache `34f2a3e1` additionally conflicts in root reports and two test insertion sites (`RuntimeTests.cmake`, `test_serve_options.cpp`); ServePort `06f5842b` conflicts only in logs/reports and the older copied contracts prose. Production sources auto-merged in these preflights. Preserve both independently added test blocks, the lead-approved contract text and immutable report links. Recheck newer source boundaries rather than treating these earlier trees as final proof.
 
 | Boundary | Expected overlap / dependency | Disposition rule |
 |---|---|---|
@@ -57,6 +61,8 @@ K7 telemetry prerequisite: Main approved `PrivateEndpoint`, `PrivateInputReplay`
 
 K3/K4 publication rule: Main approved a mandatory Engine-supplied live-service guard around final epoch recheck, atomic `current` replacement and sync. Payload export, hashing and bulk writes remain outside the Engine lock; only tests may inject a fake publication guard. Contracts owns the exact interface freeze.
 
+K2 identity accessors: Main approved internal `checkpoint_layout(const Engine&)` and `frontend_identity(const Engine&)`, returning the existing typed identity structures. Shared declarations and compile-time signature assertions are present. Persistence owns actual native geometry; Frontend owns one-time hashing of loaded resource bytes and exact selected template source. Serving queries once at startup and caches its fingerprint; provider implementation and integration proof remain separate from these declarations.
+
 Custom-tool boundary: Main confirmed shipped raw custom calls and Responses replay remain in scope. Shared `ToolKind { Function, Custom }` defaults to Function on history/output tool calls; Custom input remains opaque text. Master carries tool declarations as JSON, so Frontend owns kind propagation into its internal definition contract, templates and parser; ServePort owns wire objects/replay. Main also approved `SchemaMismatch` / `schema_mismatch` for declared-type atomic fallback, without changing inference for unknown parameters. Declaration → Frontend → ServePort custom-tool commit is distinct from the identity/publication merge.
 
 ## Shared-file requests
@@ -74,9 +80,9 @@ Custom-tool boundary: Main confirmed shipped raw custom calls and Responses repl
 
 ## Open prerequisites
 
-- Infra valid vanilla host/model baseline evidence remains pending; image refresh isolates the link-only driver stub and adds Git plus Python oracle dependencies. GPU work is blocked until Infra broadcasts observed readiness.
+- Infra valid vanilla host/model baseline evidence remains pending; the corrected image is GPU-ready and the first integrated checkpoint proof is queued.
 - Contracts' first candidate includes frozen declarations, fixtures and host CTest registration. Integrated build/host/model proof must pass before a checkpoint tag or the next implementation merge.
-- Frontend starts when a worker slot becomes available; grammar-whitespace handoff is queued.
+- Frontend is active on grammar whitespace, parser/custom-tool preservation and the approved loaded-identity provider; its source inspection found upstream already inserts stable leading/tool boundaries, with regression coverage being added.
 - Exact requested declarations/source lists before shared edits; do not register nonexistent sources on the integration branch.
 - PortableCore and ArchEnable must land before adding native Windows architecture builds to the routine.
 - GPU selection remains numeric `--device`; no new engine UUID flag/field. Controller sets child `CUDA_DEVICE_ORDER=PCI_BUS_ID`, requires absent `CUDA_VISIBLE_DEVICES`, and attests the request-log GPU UUID. Tooling UUID arguments remain unchanged.
