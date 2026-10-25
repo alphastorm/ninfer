@@ -19,7 +19,11 @@
 #include <system_error>
 #include <utility>
 
+#if defined(_WIN32)
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace ninfer::serve {
 namespace {
@@ -40,7 +44,12 @@ std::uint64_t unix_time_ms() {
 std::string new_server_instance_id() {
     const auto now    = std::chrono::system_clock::now().time_since_epoch();
     const auto micros = std::chrono::duration_cast<std::chrono::microseconds>(now).count();
-    return "serve-" + std::to_string(static_cast<long long>(::getpid())) + '-' +
+#if defined(_WIN32)
+    const auto pid = ::_getpid();
+#else
+    const auto pid = ::getpid();
+#endif
+    return "serve-" + std::to_string(static_cast<long long>(pid)) + '-' +
            std::to_string(micros);
 }
 
@@ -140,6 +149,14 @@ const char* prefix_reuse_path_name(ninfer::PrefixReusePath path) {
         return "root";
     case ninfer::PrefixReusePath::Checkpoint:
         return "checkpoint";
+    case ninfer::PrefixReusePath::PrivateEndpoint:
+        return "private_endpoint";
+    case ninfer::PrefixReusePath::PrivateInputReplay:
+        return "private_input_replay";
+    case ninfer::PrefixReusePath::PrivateLongAnchor:
+        return "private_long_anchor";
+    case ninfer::PrefixReusePath::SharedStablePrefix:
+        return "shared_stable_prefix";
     }
     return "unknown";
 }
@@ -567,6 +584,7 @@ std::string format_server_start_json(
              {"max_concurrency", engine_options.max_concurrency},
              {"max_pending_requests", engine_options.max_pending_requests},
              {"pending_timeout_ms", engine_options.pending_timeout_ms},
+             {"gpu_keep_warm_ms", engine_options.gpu_keep_warm_ms},
              {"prefill_chunk", engine_options.prefill_chunk},
              {"log_stats_interval_ms", options.log_stats_interval_ms},
              {"kv_cache", kv_cache_name(engine_options.kv_cache)},
