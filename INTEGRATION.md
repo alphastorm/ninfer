@@ -57,6 +57,8 @@ K7 telemetry prerequisite: Main approved `PrivateEndpoint`, `PrivateInputReplay`
 
 K3/K4 publication rule: Main approved a mandatory Engine-supplied live-service guard around final epoch recheck, atomic `current` replacement and sync. Payload export, hashing and bulk writes remain outside the Engine lock; only tests may inject a fake publication guard. Contracts owns the exact interface freeze.
 
+Custom-tool boundary: Main confirmed shipped raw custom calls and Responses replay remain in scope. Shared `ToolKind { Function, Custom }` defaults to Function on history/output tool calls; Custom input remains opaque text. Master carries tool declarations as JSON, so Frontend owns kind propagation into its internal definition contract, templates and parser; ServePort owns wire objects/replay. Main also approved `SchemaMismatch` / `schema_mismatch` for declared-type atomic fallback, without changing inference for unknown parameters. Declaration → Frontend → ServePort custom-tool commit is distinct from the identity/publication merge.
+
 ## Shared-file requests
 
 | Requester | Requested surface | Ownership / current state |
