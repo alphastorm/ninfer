@@ -2190,7 +2190,7 @@ int test_tool_output_atomic_fallback() {
 }
 
 int test_custom_tool_template_and_output() {
-    using Json = nlohmann::json;
+    using Json = nlohmann::ordered_json;
     const Frontend frontend = make_frontend(resources(), false);
     ninfer::PromptInput input;
     input.options.enable_thinking = false;
