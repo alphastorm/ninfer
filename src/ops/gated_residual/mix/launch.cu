@@ -2,7 +2,9 @@
 #include "ops/common/host/launch.h"
 #include "ops/gated_residual/mix/kernel/output.cuh"
 #include "ops/gated_residual/mix/kernel/up_mma_mix.cuh"
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
 #include "ops/gated_residual/mix/kernel/up_tma_mix.cuh"
+#endif
 #include "ops/linear/kernels/bf16/bf16_template_launch.cuh"
 #include "ops/linear/kernels/bf16/bf16_split_k_launch.cuh"
 
@@ -96,6 +98,9 @@ void folded_up(Operands o, Scratch scratch, cudaStream_t stream) {
 
 template <int Features>
 void tma_folded_up(Operands o, Scratch scratch, cudaStream_t stream) {
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+    folded_up<Features, 32>(o, scratch, stream);
+#else
     using S = Bf16ScheduleInstance<Bf16A16TmaMmaSchedule<kStreams * Features, 64, 64, 32, 16, 2, 1>,
                                    kRank>;
     const Bf16A16Operands p{static_cast<const __nv_bfloat16*>(scratch.activation),
@@ -104,6 +109,7 @@ void tma_folded_up(Operands o, Scratch scratch, cudaStream_t stream) {
     launch_bf16_a16_tma_mma<S, 1, LinearBf16Output, TmaMixEpilogue, StripedTmaWeightAccess>(
         p, {static_cast<__nv_bfloat16*>(o.output), kWidth},
         {static_cast<const __nv_bfloat16*>(o.normalized)}, stream);
+#endif
 }
 
 } // namespace

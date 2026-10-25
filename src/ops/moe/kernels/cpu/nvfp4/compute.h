@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ops/moe/kernels/cpu/nvfp4/work.h"
+#include "ops/common/cpu/compiler.h"
 #include "ops/common/numeric/math.h"
 #include "ops/common/quant/nvfp4.h"
 
@@ -39,7 +40,7 @@ inline void with_columns(int columns, Function&& function) noexcept {
         if constexpr (MaxColumns >= 8) { return function.template operator()<8>(); }
         break;
     }
-    __builtin_unreachable();
+    NINFER_UNREACHABLE();
 }
 
 template <class Simd, int K, int Rows, int Columns, class Input>

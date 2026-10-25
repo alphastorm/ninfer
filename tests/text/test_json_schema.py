@@ -24,7 +24,7 @@ class SchemaContracts(unittest.TestCase):
         payload = "".join(compact({"schema": schema, "candidates": [compact(v) for v in values]}) + "\n"
                           for schema, values in cases)
         result = subprocess.run([str(PROBE), "--probe"], input=payload, text=True,
-                                capture_output=True, check=True, timeout=90)
+                                encoding="utf-8", capture_output=True, check=True, timeout=90)
         reports = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertEqual(len(reports), len(cases))
         for (schema, values), report in zip(cases, reports):
@@ -299,7 +299,7 @@ class SchemaContracts(unittest.TestCase):
         ]
         reports = subprocess.run([str(PROBE), "--probe"],
             input="".join(compact({"schema": s, "candidates": v}) + "\n" for s, v in cases),
-            text=True, capture_output=True, check=True, timeout=45)
+            text=True, encoding="utf-8", capture_output=True, check=True, timeout=45)
         for (schema, values), line in zip(cases, reports.stdout.splitlines()):
             report = json.loads(line)
             self.assertNotIn("error", report, report)
@@ -327,7 +327,7 @@ class SchemaContracts(unittest.TestCase):
         ]
         result = subprocess.run([str(PROBE), "--probe"],
             input="".join(compact({"schema_source": s, "candidates": []}) + "\n" for s, _ in sources),
-            text=True, capture_output=True, check=True, timeout=30)
+            text=True, encoding="utf-8", capture_output=True, check=True, timeout=30)
         for (source, pointer), line in zip(sources, result.stdout.splitlines()):
             with self.subTest(source=source):
                 report = json.loads(line)
@@ -355,7 +355,7 @@ class SchemaContracts(unittest.TestCase):
         result = subprocess.run(
             [str(PROBE), "--probe"],
             input=compact({"schema": schema, "candidates": candidates}) + "\n",
-            text=True, capture_output=True, check=True, timeout=30,
+            text=True, encoding="utf-8", capture_output=True, check=True, timeout=30,
         )
         self.assertEqual(json.loads(result.stdout)["accepted"], [False, False, True])
 
@@ -399,7 +399,7 @@ class SchemaContracts(unittest.TestCase):
         result = subprocess.run(
             [str(PROBE), "--probe"],
             input="".join(compact({"schema": s, "candidates": []}) + "\n" for s, _ in cases),
-            text=True, capture_output=True, check=True, timeout=30,
+            text=True, encoding="utf-8", capture_output=True, check=True, timeout=30,
         )
         self.assertEqual(len(result.stdout.splitlines()), len(cases))
         for report, (schema, pointer) in zip(result.stdout.splitlines(), cases):
@@ -429,7 +429,7 @@ class SchemaContracts(unittest.TestCase):
         result = subprocess.run(
             [str(PROBE), "--probe"],
             input="".join(compact({"schema": s, "candidates": []}) + "\n" for s in schemas),
-            text=True, capture_output=True, check=True, timeout=30,
+            text=True, encoding="utf-8", capture_output=True, check=True, timeout=30,
         )
         self.assertEqual(len(result.stdout.splitlines()), len(schemas))
         for schema, line in zip(schemas, result.stdout.splitlines()):

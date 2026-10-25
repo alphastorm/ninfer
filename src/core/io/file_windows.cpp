@@ -3,7 +3,9 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 
 #include <algorithm>
@@ -51,7 +53,7 @@ std::size_t read_once(FileView file, std::uint64_t offset, std::span<std::byte> 
 }
 } // namespace
 
-ReadOnlyFile::ReadOnlyFile(const std::filesystem::path& path, ReadMode mode) : path_(path) {
+ReadOnlyFile::ReadOnlyFile(const std::filesystem::path& path, ReadMode mode) {
     if (mode != ReadMode::Buffered && mode != ReadMode::Direct)
         throw std::invalid_argument("invalid file read mode");
     const auto flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED |
@@ -63,8 +65,9 @@ ReadOnlyFile::ReadOnlyFile(const std::filesystem::path& path, ReadMode mode) : p
     view_.mode = mode;
     try {
         FILE_STANDARD_INFO info{};
-        if (GetFileType(file) != FILE_TYPE_DISK ||
-            !GetFileInformationByHandleEx(file, FileStandardInfo, &info, sizeof(info)))
+        if (GetFileType(file) != FILE_TYPE_DISK)
+            fail("expected regular file", ERROR_INVALID_DATA);
+        if (!GetFileInformationByHandleEx(file, FileStandardInfo, &info, sizeof(info)))
             fail("inspect immutable file");
         if (info.Directory || info.EndOfFile.QuadPart < 0)
             fail("expected regular file", ERROR_INVALID_DATA);
@@ -98,12 +101,11 @@ ReadOnlyFile::~ReadOnlyFile() {
 }
 
 ReadOnlyFile::ReadOnlyFile(ReadOnlyFile&& other) noexcept
-    : path_(std::move(other.path_)), view_(std::exchange(other.view_, {})) {}
+    : view_(std::exchange(other.view_, {})) {}
 
 ReadOnlyFile& ReadOnlyFile::operator=(ReadOnlyFile&& other) noexcept {
     if (this != &other) {
         if (view_.native_handle != -1) CloseHandle(handle(view_));
-        path_ = std::move(other.path_);
         view_ = std::exchange(other.view_, {});
     }
     return *this;
@@ -131,7 +133,9 @@ std::size_t ReadOnlyFile::read_direct(std::uint64_t offset,
     if (destination.empty()) return 0;
     Event event;
     std::size_t total = 0;
-    const auto maximum = std::size_t{MAXDWORD} / view_.offset_alignment * view_.offset_alignment;
+    const auto alignment = std::max(view_.memory_alignment, view_.offset_alignment);
+    const auto maximum = std::size_t{MAXDWORD} / alignment * alignment;
+    if (!maximum) fail("direct read alignment exceeds native request size", ERROR_NOT_SUPPORTED);
     while (!destination.empty()) {
         const auto count = std::min(destination.size(), maximum);
         const auto received = read_once(view_, offset, destination.first(count), event);

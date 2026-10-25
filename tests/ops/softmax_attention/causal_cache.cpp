@@ -2762,6 +2762,23 @@ int run_softmax_attention_causal_cache_tests(std::optional<KvCacheStorage> selec
          {KvCacheStorage::BFloat16, KvCacheStorage::Int8Group64, KvCacheStorage::Fp8E4M3Row256,
           KvCacheStorage::Nvfp4Group16, KvCacheStorage::Fp8KeyNvfp4Value}) {
         if (selected && storage != *selected) continue;
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+        if (storage == KvCacheStorage::Nvfp4Group16 ||
+            storage == KvCacheStorage::Fp8KeyNvfp4Value) {
+            std::cout << "EXCLUDED causal_softmax_attention " << cache_name(storage)
+                      << " (native profile; refusal checked by architecture_contract)\n";
+            if (selected) return 77;
+            continue;
+        }
+#endif
+#if defined(NINFER_SM86)
+        if (storage == KvCacheStorage::Fp8E4M3Row256) {
+            std::cout << "EXCLUDED causal_softmax_attention fp8"
+                      << " (sm_86; refusal checked by architecture_contract)\n";
+            if (selected) return 77;
+            continue;
+        }
+#endif
         const auto start = std::chrono::steady_clock::now();
         std::cout << "RUN causal_softmax_attention " << cache_name(storage) << std::endl;
         const int current = run_storage_cases(execution, storage);

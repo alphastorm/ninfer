@@ -39,7 +39,9 @@ public:
                                           std::span<std::byte> destination) const;
 
 private:
+#ifndef _WIN32
     std::filesystem::path path_;
+#endif
     FileView view_;
 };
 

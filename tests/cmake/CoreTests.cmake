@@ -57,7 +57,6 @@ if(WIN32)
   set_tests_properties(ninfer_direct_storage_checkpoint_windows_test PROPERTIES
     LABELS "windows;directstorage" SKIP_RETURN_CODE 77 TIMEOUT 180)
 endif()
-
 foreach(part IN ITEMS system task_pool executor)
   ninfer_add_test(ninfer_cpu_${part}_test
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../cpu/test_${part}.cpp"
@@ -159,10 +158,13 @@ ninfer_add_test(ninfer_expert_cache_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_expert_cache.cu"
           "${CMAKE_CURRENT_LIST_DIR}/../expert_cache_cuda_errors.cpp"
   LIBRARIES ninfer_core)
+ninfer_cuda_test_interposition(ninfer_expert_cache_test)
 set_tests_properties(ninfer_expert_cache_test PROPERTIES TIMEOUT 60)
 
+if(NOT WIN32)
 foreach(symbol IN ITEMS
     cudaEventRecord cudaMemcpyAsync cudaMemcpyBatchAsync cudaStreamSynchronize cudaStreamWaitEvent
     cudaFree cudaFreeHost)
   target_link_options(ninfer_expert_cache_test PRIVATE "LINKER:--wrap=${symbol}")
 endforeach()
+endif()

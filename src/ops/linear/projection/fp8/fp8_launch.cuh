@@ -40,7 +40,7 @@ void launch_fp8_a8(const Tensor& x, const Weight& w, Tensor& out, Fp8A8Workspace
     launch_fp8_a8_mma<Fp8ScheduleInstance<Schedule, Geometry::kInputRows>>(
         fp8_a8_operands(w, scratch, x.ne[1]),
         LinearBf16Output{static_cast<__nv_bfloat16*>(out.data), w.n}, LinearIdentityEpilogue{},
-        stream);
+        stream, Fp8IdentityRows{});
 }
 
 template <class Geometry, class Schedule>

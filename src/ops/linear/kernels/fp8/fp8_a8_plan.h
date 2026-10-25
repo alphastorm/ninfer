@@ -32,6 +32,10 @@ inline std::size_t fp8_a8_checked_bytes(std::int32_t tokens, std::size_t bytes_p
 template <class Arena>
 Fp8A8Workspace allocate_fp8_a8_workspace(Arena& arena, std::int32_t tokens, std::int32_t input_rows,
                                          std::size_t partial_bytes = 0) {
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+    // Native routes use ordinary MMA over full K, without TMA tail-wave split-K.
+    partial_bytes = 0;
+#endif
     if (input_rows <= 0 || (input_rows % 32) != 0) {
         throw std::invalid_argument("fp8 A8 workspace: invalid K");
     }

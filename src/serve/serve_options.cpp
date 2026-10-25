@@ -1,4 +1,5 @@
 #include "serve/serve_options.h"
+#include "core/uint128.h"
 #include "product/speculative_options.h"
 
 #include <algorithm>
@@ -145,17 +146,20 @@ std::size_t parse_host_context_mib(const char* text) {
     if (fraction.size() > 20) {
         throw std::invalid_argument("--host-context-mib must resolve to a whole number of bytes");
     }
-    unsigned __int128 numerator = 0;
-    unsigned __int128 divisor   = 1;
+    if (fraction.empty()) { return whole_mib * bytes_per_mib; }
+    core::Uint128 numerator{};
+    core::Uint128 divisor{0, 1};
     for (const char character : fraction) {
-        numerator = numerator * 10 + static_cast<unsigned int>(character - '0');
-        divisor *= 10;
+        numerator = core::wide_add_saturating(core::wide_multiply_saturating(numerator, 10),
+            {0, static_cast<unsigned int>(character - '0')});
+        divisor = core::wide_multiply_saturating(divisor, 10);
     }
-    numerator *= bytes_per_mib;
-    if (numerator % divisor != 0) {
+    numerator = core::wide_multiply_saturating(numerator, bytes_per_mib);
+    const auto division = core::wide_divide(numerator, divisor);
+    if (division.remainder != core::Uint128{}) {
         throw std::invalid_argument("--host-context-mib must resolve to a whole number of bytes");
     }
-    const std::size_t fractional_bytes = static_cast<std::size_t>(numerator / divisor);
+    const std::size_t fractional_bytes = static_cast<std::size_t>(division.quotient.lo);
     const std::size_t whole_bytes      = whole_mib * bytes_per_mib;
     if (fractional_bytes > maximum - whole_bytes) {
         throw std::invalid_argument("--host-context-mib is out of range");
