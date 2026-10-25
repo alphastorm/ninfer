@@ -189,9 +189,11 @@ struct DirectoryApi {
     using Query = NTSTATUS (NTAPI*)(HANDLE, HANDLE, PIO_APC_ROUTINE, PVOID, PIO_STATUS_BLOCK,
                                     PVOID, ULONG, FILE_INFORMATION_CLASS, BOOLEAN,
                                     PUNICODE_STRING, BOOLEAN);
+    using Set = NTSTATUS (NTAPI*)(HANDLE, PIO_STATUS_BLOCK, PVOID, ULONG, FILE_INFORMATION_CLASS);
     using Error = ULONG (NTAPI*)(NTSTATUS);
     Create create;
     Query query;
+    Set set;
     Error error;
 
     template <class Function>
@@ -203,6 +205,7 @@ struct DirectoryApi {
 
     DirectoryApi()
         : create(resolve<Create>("NtCreateFile")), query(resolve<Query>("NtQueryDirectoryFile")),
+          set(resolve<Set>("NtSetInformationFile")),
           error(resolve<Error>("RtlNtStatusToDosError")) {}
 
     Handle open(HANDLE parent, std::wstring_view name,
@@ -499,9 +502,10 @@ void replace_path(const std::filesystem::path& source, const std::filesystem::pa
     rename->RootDirectory = to_parent.handle();
     rename->FileNameLength = static_cast<DWORD>(name_bytes);
     std::memcpy(rename->FileName, leaf.c_str(), name_bytes);
-    if (!SetFileInformationByHandle(file.value, FileRenameInfoEx, rename,
-                                    static_cast<DWORD>(buffer.size())))
-        fail_windows("replace anchored durable path");
+    IO_STATUS_BLOCK completion{};
+    const auto status = api.set(file.value, &completion, rename, static_cast<ULONG>(buffer.size()),
+                                static_cast<FILE_INFORMATION_CLASS>(65)); // FileRenameInformationEx.
+    if (status < 0) fail_windows("replace anchored durable path", api.error(status));
     if (!FlushFileBuffers(to_parent.handle())) fail_windows("flush durable replacement parent");
 #else
     Parent from_parent(from.parent_path(), false), to_parent(to.parent_path(), false);

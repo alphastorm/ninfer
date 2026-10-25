@@ -20,7 +20,8 @@ void write_exact(std::FILE* file, std::span<const std::byte> bytes);
 void flush_file(std::FILE* file);
 // Source and destination parents are pinned, with no symlink/reparse traversal. Cross-volume
 // moves fail rather than copy. Windows flushes the staged file, renames relative to the
-// pinned destination with FileRenameInfoEx, then flushes that directory handle.
+// pinned destination with NtSetInformationFile(FileRenameInformationEx), then flushes that
+// directory handle. The native policy requires NTFS on Windows 10 1709 or newer.
 void replace_path(const std::filesystem::path& source, const std::filesystem::path& destination);
 // Removes a regular file, final link, or complete directory tree through anchored handles.
 // Ancestor links are rejected; final links are unlinked, never traversed. Returns false if
