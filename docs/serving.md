@@ -1082,6 +1082,9 @@ choice retains its existing selection behavior. Call IDs still use the opaque-ID
 Duplicate tool names within a single request are rejected with a 400 on all three
 protocol surfaces (OpenAI Chat Completions, OpenAI Responses, Anthropic Messages),
 keeping the per-tool parameter type map unambiguous.
+All three surfaces accept tool names of 1–128 ASCII letters, digits, underscores, or hyphens,
+including tool history and supported named choices. The same limit applies when parsing generated
+Qwen calls; longer names are rejected rather than truncated.
 
 Prompt-token usage includes chat-template and expanded media tokens. Generated-token usage comes
 from accepted output token IDs, including a stop token whose decoded text may be withheld.

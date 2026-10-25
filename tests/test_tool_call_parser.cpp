@@ -110,23 +110,25 @@ int test_configured_name_limit() {
     const std::string name(128, 'a');
     const std::string text = "<tool_call>\n<function=" + name + ">\n</function>\n</tool_call>";
 
-    const ninfer::serve::ParsedToolCallOutput anthropic =
-        ninfer::serve::parse_qwen_tool_call_output(text, 128, kNoTypeContracts);
-    const ninfer::serve::ParsedToolCallOutput openai =
+    const ninfer::serve::ParsedToolCallOutput parsed =
+        ninfer::serve::parse_qwen_tool_call_output(
+            text, ninfer::serve::GenerationRequest{}.tool_name_max_length, kNoTypeContracts);
+    const ninfer::serve::ParsedToolCallOutput restricted =
         ninfer::serve::parse_qwen_tool_call_output(text, 64, kNoTypeContracts);
     const std::string too_long_text =
         "<tool_call>\n<function=" + std::string(129, 'a') + ">\n</function>\n</tool_call>";
     const ninfer::serve::ParsedToolCallOutput too_long =
-        ninfer::serve::parse_qwen_tool_call_output(too_long_text, 128, kNoTypeContracts);
+        ninfer::serve::parse_qwen_tool_call_output(
+            too_long_text, ninfer::serve::kMaxToolNameLength, kNoTypeContracts);
 
     int failures = 0;
-    failures += check(anthropic.is_tool_call_response && anthropic.tool_calls.size() == 1 &&
-                          anthropic.tool_calls[0].name == name,
-                      "128-character name accepted with Anthropic limit");
+    failures += check(parsed.is_tool_call_response && parsed.tool_calls.size() == 1 &&
+                          parsed.tool_calls[0].name == name,
+                      "128-character name accepted with the shared serving limit");
     failures +=
-        check(!openai.is_tool_call_response, "128-character name rejected with OpenAI limit");
+        check(!restricted.is_tool_call_response, "explicitly smaller parser limit remains honored");
     failures +=
-        check(!too_long.is_tool_call_response, "129-character name rejected with Anthropic limit");
+        check(!too_long.is_tool_call_response, "129-character name rejected with shared limit");
     return failures;
 }
 

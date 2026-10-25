@@ -80,7 +80,7 @@ struct PreparedRequest {
     int prompt_tokens                = 0;
     bool include_usage               = false;
     bool tool_capable                = false;
-    std::size_t tool_name_max_length = 64;
+    std::size_t tool_name_max_length = kMaxToolNameLength;
     ToolArgumentTypeContracts tool_argument_types;
 
     bool enable_thinking = true;

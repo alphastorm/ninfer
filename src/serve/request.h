@@ -22,6 +22,8 @@
 
 namespace ninfer::serve {
 
+inline constexpr std::size_t kMaxToolNameLength = 128;
+
 // A structured API error mapped onto an error object + HTTP status. Wire-format
 // independent: each protocol layer renders it into its own error body shape.
 struct ApiError {
@@ -187,7 +189,7 @@ struct GenerationRequest {
     std::optional<std::string> prompt_cache_session_sha256;
     std::vector<ChatTurn> messages;
     std::vector<ToolDefinition> tools;
-    std::size_t tool_name_max_length = 64;
+    std::size_t tool_name_max_length = kMaxToolNameLength;
     ToolChoice tool_choice;
     std::vector<std::string> stop_strings;
     int max_tokens      = 0; // 0 => use server default
