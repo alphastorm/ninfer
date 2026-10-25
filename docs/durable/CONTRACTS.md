@@ -438,6 +438,7 @@ specifications move to schema 4; older releases keep their own capability gates.
 |---|---|---|
 | `--max-context N` | same | `engine.max_context` |
 | `--kv-capacity N\|auto` | same (resolved tokens) | `--context-capacity`, `engine.context_capacity`: shared Device KV+State **bytes**, not a numeric rename |
+| no fork equivalent | `--admission-headroom-mib N` (v0.13.1 amendment): explicit admission floor, minimum 256 MiB; omitted retains 1024 MiB | product admission policy, not an alias for Device context capacity |
 | `--device-state-slots N` | same: extra checkpoints beyond active lanes | part of shared `engine.context_capacity`; no independent dev slot knob |
 | `--host-state-slots N` + `--host-kv-mib N` | `--host-context-mib N`, shared Host State/KV/in-flight bytes | `--host-cache-capacity SIZE`, `context_cache.host_capacity` |
 | `--max-private-continuations`, `--max-shared-prefixes`, `--max-long-anchors-per-continuation`, `--max-cache-markers-per-request` | not aliases: upstream resource policy is authoritative; reject obsolete flags | no matching dev fields; admission/retention policy is not identity |
@@ -468,6 +469,26 @@ required in-flight headroom, not an invented constant image size. Dev Device con
 requires native geometry/startup accounting; `auto` remains auto. Preserve effective
 shipped profiles via measured admission, not unsupported aliases. GPU UUID is stable
 controller selection, not cross-GPU inference or checkpoint layout identity.
+
+### v0.13.1 native admission-headroom amendment
+
+`--admission-headroom-mib N` replaces the default 1 GiB admission-headroom floor
+when explicitly supplied. Values below 256 MiB are refused. The calibrated automatic
+headroom remains a lower bound: effective admission headroom is
+`max(configured_floor_bytes, calibrated_headroom_bytes)`, with a 1024 MiB configured
+floor when the option is omitted. Explicit KV capacity does not bypass this policy.
+
+The v0.13.1 native lane specifications set the floor to **640 MiB for RTX 4090**
+and **768 MiB for RTX 3090**. The RTX 5090 profile keeps the default; this amendment
+does not change its profile.
+
+Reason for the amendment: upstream `64d10fbf` applies
+`max(1 GiB, calibrated_headroom)` even in explicit-capacity mode, refusing the shipped
+24 GB native shapes by 224,618,240 bytes on RTX 4090 and 108,762,880 bytes on RTX 3090.
+The fork's explicit-capacity mode subtracted no admission headroom. The explicit
+floor restores bounded native admission without removing calibration's lower bound
+or reinstating the fork's zero-headroom behavior. ArchEnable3 owns implementation;
+this contract amendment is not a native qualification result.
 
 ## K6 — durable file I/O and publication acknowledgement
 
