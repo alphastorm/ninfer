@@ -241,7 +241,7 @@ std::FILE* open_stream(const std::filesystem::path& input, bool write) {
     // Readers retain an immutable file object across POSIX-style name replacement.
     // FILE_CREATE is exclusive; FILE_NON_DIRECTORY_FILE rejects directory streams.
     auto file = api.open(parent.handle(), path.filename().native(),
-                         (write ? GENERIC_WRITE : GENERIC_READ) | SYNCHRONIZE,
+                         (write ? GENERIC_WRITE : GENERIC_READ) | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
                          write ? 0 : (FILE_SHARE_READ | FILE_SHARE_DELETE),
                          write ? 2 : 1, 0x40);
     if (file.value == INVALID_HANDLE_VALUE)
