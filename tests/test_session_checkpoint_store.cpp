@@ -1,4 +1,5 @@
 #include "core/sha256.h"
+#include "runtime/engine/checkpoint_control.h"
 #include "serve/session_checkpoint_store.h"
 #include "serve/server_identity.h"
 
@@ -387,22 +388,22 @@ int test_codec_round_trip() {
     const auto live_guard = live.begin_restore(original.client_session_sha256);
     bool repaired_external_commit = false;
     failures += check(
-        live.restore_session(original, live_guard,
+        !live.restore_session(original, live_guard,
                              [&] {
                                  repaired_external_commit = true;
                                  return true;
                              }) &&
-            repaired_external_commit && live.size() == 2 &&
+            !repaired_external_commit && live.size() == 2 &&
             live.get_for_session("resp_private_first",
                                  std::optional<std::string>{original.client_session_sha256}) !=
                 nullptr &&
             live.get_for_session("resp_private_second",
-                                 std::optional<std::string>{original.client_session_sha256}) !=
+                                 std::optional<std::string>{original.client_session_sha256}) ==
                 nullptr &&
             live.get_for_session("resp_private_stale",
-                                 std::optional<std::string>{original.client_session_sha256}) ==
+                                 std::optional<std::string>{original.client_session_sha256}) !=
                 nullptr,
-        "partial same-session store repairs to the complete verified lineage");
+        "restore preserves live records absent from the older disk lineage");
 
     OpenAIResponsesStore foreign(4, 1ULL << 20);
     StoredOpenAIResponse foreign_owner        = original.records.front();
@@ -419,7 +420,7 @@ int test_codec_round_trip() {
                       "incoming id owned by another session stays a fail-closed collision");
 
     OpenAIResponsesStore partial(4, 1ULL << 20);
-    partial.put(original.records.front());
+    partial.put(original.records.back());
     const auto partial_guard = partial.begin_restore(original.client_session_sha256);
     bool partial_commit = false;
     failures += check(!partial.restore_session(original, partial_guard,
@@ -429,7 +430,7 @@ int test_codec_round_trip() {
                                                }) &&
                           partial_commit && partial.size() == 1 &&
                           partial.get_for_session(
-                              "resp_private_first",
+                              "resp_private_second",
                               std::optional<std::string>{original.client_session_sha256}) !=
                               nullptr,
                       "failed external commit preserves the partial session exactly");
@@ -1013,8 +1014,8 @@ int test_store_wide_quota_across_sessions() {
     const std::string previous_engine = read_file_bytes(previous_generation / "engine/state/0.bin");
 
     // Re-saving at the same size fits the tolerated publish transient and evicts nobody. A
-    // successor that grows past it (while still fitting the quota on its own) needs a real
-    // eviction, and when that eviction cannot be cleaned up the save is refused before publication.
+    // successor that grows past it plans reclamation, but cleanup happens only after
+    // publication. Cleanup failure must not turn that committed save into a refusal.
     std::vector<std::byte> grown = payload;
     grown.insert(grown.end(), payload.begin(), payload.begin() + payload.size() / 2);
     const auto grown_exporter =
@@ -1023,40 +1024,42 @@ int test_store_wide_quota_across_sessions() {
         return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096, .payload_bytes = grown.size()});
     };
     refuse_cleanup                = true;
-    const auto failed_replacement = failure_store.save(second_session, fingerprint(), grown_exporter, publish_fixture);
+    const auto replacement = failure_store.save(second_session, fingerprint(), grown_exporter, publish_fixture);
     SessionCheckpointLoadResult previous_loaded =
         failure_store.load(second_session.client_session_sha256, fingerprint());
     std::filesystem::path deferred_tombstone;
     for (const auto& entry :
          std::filesystem::directory_iterator(failure_temporary.path / ".tombstones")) {
-        if (entry.path().filename().string().starts_with(first_session.client_session_sha256 +
-                                                         "--session--")) {
+        if (entry.path().filename().string().starts_with(second_session.client_session_sha256 +
+                                                         "--generation--")) {
             deferred_tombstone = entry.path();
             break;
         }
     }
     failures += check(
-        !failed_replacement && previous_loaded.state == SessionCheckpointLoadState::Available &&
+        replacement && previous_loaded.state == SessionCheckpointLoadState::Available &&
             previous_loaded.checkpoint &&
-            previous_loaded.checkpoint->generation == failure_previous->generation &&
-            read_file_bytes(previous_session / "current") == previous_current &&
-            read_file_bytes(previous_generation / "manifest.json") == previous_manifest &&
-            read_file_bytes(previous_generation / "responses.cbor") == previous_responses &&
-            read_file_bytes(previous_generation / "engine/state/0.bin") == previous_engine &&
-            std::filesystem::is_directory(previous_generation) &&
+            previous_loaded.checkpoint->generation == replacement->generation &&
+            read_file_bytes(previous_session / "current") != previous_current &&
             std::filesystem::is_directory(deferred_tombstone) &&
-            regular_file_bytes(deferred_tombstone / "generations") == failure_first->bytes &&
+            read_file_bytes(deferred_tombstone / "manifest.json") == previous_manifest &&
+            read_file_bytes(deferred_tombstone / "responses.cbor") == previous_responses &&
+            read_file_bytes(deferred_tombstone / "engine/state/0.bin") == previous_engine &&
+            failure_store.status(first_session.client_session_sha256, fingerprint()).at("state") ==
+                "available" &&
             retained_generation_bytes(failure_temporary.path) ==
-                failure_first->bytes + failure_previous->bytes,
-        "cleanup failure rejects save before publication and preserves the prior current bytes");
+                failure_first->bytes + failure_previous->bytes + replacement->bytes,
+        "cleanup failure after publication keeps its acknowledgement and unrelated current");
     previous_loaded.checkpoint.reset();
+    failures += check(!failure_store.save(second_session, fingerprint(), grown_exporter, publish_fixture),
+                      "stuck cleanup refuses the next transient instead of accumulating excess");
     refuse_cleanup = false;
     failure_store.collect_garbage();
     failures += check(
         !std::filesystem::exists(deferred_tombstone) &&
             failure_store.status(second_session.client_session_sha256, fingerprint()).at("state") ==
                 "available" &&
-            retained_generation_bytes(failure_temporary.path) == failure_previous->bytes,
+            retained_generation_bytes(failure_temporary.path) == replacement->bytes,
         "deferred tombstones remain quota-accounted and are reclaimed by GC");
     return failures;
 }
@@ -1106,6 +1109,177 @@ int test_quota_reclaims_short_sessions_first() {
     failures += check(state(long_first) == "available" && state(short_middle) == "missing" &&
                           state(long_last) == "available",
                       "quota reclamation took an older long session before a short one");
+    return failures;
+}
+
+int test_quota_stale_publication_preserves_unrelated_currents() {
+    TemporaryDirectory measurement;
+    const auto a = sample_snapshot('a');
+    const auto b = sample_snapshot('b');
+    const auto c = sample_snapshot('c');
+    const auto payload = engine_payload();
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) {
+            return DurableExportResult{.state = runtime::DurableExportState::Refused};
+        }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                 .payload_bytes = payload.size()});
+    };
+    SessionCheckpointStore measure({.root = measurement.path, .disk_quota_bytes = 1ULL << 20,
+        .staging_bytes = 1ULL << 20, .read_queue = std::make_shared<TestReadQueue>()});
+    const auto size = measure.save(a, fingerprint(), exporter, publish_fixture);
+    if (!size) { return check(false, "quota regression fixture failed"); }
+    TemporaryDirectory temporary;
+    SessionCheckpointStore store({.root = temporary.path, .disk_quota_bytes = 2 * size->bytes,
+        .staging_bytes = 1ULL << 20, .read_queue = std::make_shared<TestReadQueue>()});
+    const auto first = store.save(a, fingerprint(), exporter, publish_fixture);
+    const auto second = store.save(b, fingerprint(), exporter, publish_fixture);
+    if (!first || !second) { return check(false, "quota regression could not fill quota"); }
+    int failures = 0;
+    for (const auto reason : {runtime::DurableReason::StalePublication,
+                              runtime::DurableReason::IoUnavailable}) {
+        runtime::SessionCheckpointSkipDetail skip;
+        const auto refused = store.save(c, fingerprint(), exporter,
+            [&](runtime::DurableSessionEpoch, const std::function<bool()>&) {
+                return runtime::DurablePublicationResult{
+                    reason == runtime::DurableReason::StalePublication
+                        ? runtime::DurableExportState::Stale : runtime::DurableExportState::Refused,
+                    reason};
+            }, &skip);
+        failures += check(!refused && skip.durable_reason == reason &&
+            store.status(a.client_session_sha256, fingerprint()).value("generation", "") == first->generation &&
+            store.status(b.client_session_sha256, fingerprint()).value("generation", "") == second->generation,
+            "failed quota publication deleted an unrelated current");
+    }
+    return failures;
+}
+
+int test_replay_only_survivors_are_durable_without_native_authority() {
+    TemporaryDirectory temporary;
+    auto survivors = sample_snapshot();
+    survivors.records.pop_back();
+    survivors.latest_response_id = survivors.records.front().id;
+    survivors.replay_only = true;
+    const std::string key(32, 'r');
+    const SessionCheckpointStoreOptions options{.root = temporary.path,
+        .disk_quota_bytes = 1ULL << 20, .staging_bytes = 1ULL << 20,
+        .origin_mac_key = key, .read_queue = std::make_shared<TestReadQueue>()};
+    std::string generation;
+    int failures = 0;
+    {
+        SessionCheckpointStore store(options);
+        const auto saved = store.save_responses(survivors, fingerprint());
+        if (!saved) { return check(false, "replay-only survivor publication failed"); }
+        generation = saved->generation;
+        failures += check(saved->engine.payload_bytes == 0 &&
+                          saved->engine.frontier_tokens == 0 && saved->origin_authenticated,
+                          "replay-only save fabricated native export evidence");
+    }
+    SessionCheckpointStore restarted(options);
+    const auto loaded = restarted.load(survivors.client_session_sha256, fingerprint(),
+                                       survivors.latest_response_id);
+    failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+        loaded.checkpoint && loaded.checkpoint->responses.replay_only &&
+        loaded.checkpoint->responses.records.size() == 1 && !loaded.checkpoint->engine &&
+        loaded.checkpoint->origin_authenticated &&
+        !restarted.covers(survivors.client_session_sha256, fingerprint(), survivors.latest_response_id),
+        "restart lost replay-only survivors or granted them native release authority");
+    const auto directory = stored_generation_root(temporary.path, survivors, generation);
+    const auto manifest = nlohmann::json::parse(read_file_bytes(directory / "manifest.json"));
+    failures += check(manifest.at("mode") == "responses_only" && manifest.at("files").size() == 2 &&
+                      manifest.at("engine_payload_bytes") == 0 &&
+                      !std::filesystem::exists(directory / "engine"),
+                      "replay-only generation contains a fabricated native checkpoint");
+    const auto missing = restarted.load(survivors.client_session_sha256, fingerprint(),
+                                        "resp_private_second");
+    failures += check(missing.state == SessionCheckpointLoadState::Missing &&
+                      missing.reason == runtime::DurableReason::RequiredResponseMissing,
+                      "deleted endpoint reappeared after replay-only restart");
+    auto native = survivors;
+    native.replay_only = false;
+    runtime::SessionCheckpointSkipDetail skip;
+    failures += check(!restarted.save_responses(native, fingerprint(), &skip) &&
+                      skip.durable_reason == runtime::DurableReason::InvalidManifest,
+                      "native snapshot silently became replay-only");
+    std::filesystem::remove(directory / "manifest.mac");
+    const auto unauthenticated = restarted.load(survivors.client_session_sha256, fingerprint());
+    failures += check(unauthenticated.state == SessionCheckpointLoadState::Incompatible &&
+                      unauthenticated.reason == runtime::DurableReason::OriginRequired,
+                      "replay-only tombstone was accepted without origin authentication");
+    return failures;
+}
+
+template <class Control, class Validator>
+void install_pressure_validator(Control& control, Validator validator) {
+    // The baseline has no proof hook; its existing settle path remains exercised.
+    if constexpr (requires { control.set_validator(validator); }) {
+        control.set_validator(std::move(validator));
+    }
+}
+
+template <class Victim>
+runtime::DurableReason pressure_reason(const Victim& victim) {
+    if constexpr (requires { victim.reason; }) { return victim.reason; }
+    return runtime::DurableReason::None;
+}
+
+int test_ordinary_pressure_preserves_same_size_corrupt_victim() {
+    using namespace runtime;
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    SessionCheckpointStore store({.root = temporary.path, .disk_quota_bytes = 1ULL << 20,
+        .staging_bytes = 1ULL << 20, .origin_mac_key = std::string(32, 'k'),
+        .read_queue = std::make_shared<TestReadQueue>()});
+    const auto saved = store.save(responses, fingerprint(), [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) {
+            return DurableExportResult{.state = DurableExportState::Refused};
+        }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                 .payload_bytes = payload.size()});
+    }, publish_fixture);
+    if (!saved) { return check(false, "pressure corruption fixture failed"); }
+    auto bytes = read_file_bytes(stored_generation_root(temporary.path, responses, saved->generation) /
+                                 "engine/state/0.bin");
+    bytes[bytes.size() / 2] ^= 1;
+    std::ofstream(stored_generation_root(temporary.path, responses, saved->generation) /
+                  "engine/state/0.bin", std::ios::binary | std::ios::trunc) << bytes;
+    struct Oracle final : ReclaimableSessionOracle {
+        SessionCheckpointStore& store;
+        explicit Oracle(SessionCheckpointStore& value) : store(value) {}
+        std::shared_ptr<const ContinuationCheckpointReader> pin_recoverable(
+            std::string_view session, std::string_view tag) const noexcept override {
+            try {
+                auto loaded = store.load(session, fingerprint(), tag);
+                if (!loaded.checkpoint) { return {}; }
+                return std::move(loaded.checkpoint->engine);
+            } catch (...) { return {}; }
+        }
+    };
+    struct Handler final : PressureCheckpointHandler {
+        void save_before_eviction(std::span<PressureCheckpointVictim> victims) noexcept override {
+            for (auto& victim : victims) { victim.outcome = PressureCheckpointOutcome::Settled; }
+        }
+    };
+    CheckpointControl control;
+    control.set_oracle(std::make_shared<Oracle>(store));
+    control.set_handler(std::make_shared<Handler>());
+    unsigned validations = 0;
+    install_pressure_validator(control, [&](const ContinuationCheckpointReader& reader) {
+        ++validations;
+        std::vector<std::byte> streamed(payload.size());
+        return reader.read_file("engine/state/0.bin", 0, streamed) && reader.verify_complete()
+            ? DurableReason::None : reader.failure_reason();
+    });
+    int failures = check(store.covers(responses.client_session_sha256, fingerprint(),
+                                      responses.latest_response_id),
+                         "same-size corruption fixture must pass metadata-only covers");
+    PressureCheckpointVictim victim{responses.client_session_sha256, responses.latest_response_id};
+    const bool release_allowed = control.settle({&victim, 1});
+    failures += check(!release_allowed && validations == 1 &&
+                      victim.outcome == PressureCheckpointOutcome::Pending &&
+                      pressure_reason(victim) == DurableReason::PayloadDigestMismatch,
+                      "ordinary pressure released the last resident copy on metadata-only coverage");
     return failures;
 }
 
@@ -2408,8 +2582,17 @@ int test_manifest_origin_transient_tag_failure_preserves_current() {
 }
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2) {
+        const std::string_view test = argv[1];
+        if (test == "quota_stale") { return test_quota_stale_publication_preserves_unrelated_currents(); }
+        if (test == "ordinary_corrupt") { return test_ordinary_pressure_preserves_same_size_corrupt_victim(); }
+        return 2;
+    }
     int failures = 0;
+    failures += test_quota_stale_publication_preserves_unrelated_currents();
+    failures += test_ordinary_pressure_preserves_same_size_corrupt_victim();
+    failures += test_replay_only_survivors_are_durable_without_native_authority();
     failures += test_sha256_streaming();
     failures += test_codec_round_trip();
     failures += test_export_refusal_diagnostics();
