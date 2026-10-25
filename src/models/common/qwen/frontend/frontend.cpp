@@ -263,7 +263,8 @@ std::vector<fi::ChatMessage> convert_messages(std::vector<ChatMessage> messages)
             target.tool_calls.push_back(
                 fi::ToolCall{.id             = std::move(call.id),
                              .name           = std::move(call.name),
-                             .arguments_json = std::move(call.arguments_json)});
+                             .arguments_json = std::move(call.arguments_json),
+                             .kind           = call.kind});
         }
         target.parts.reserve(source.parts.size());
         for (MessagePart& part : source.parts) {
@@ -695,7 +696,8 @@ PreparedPrompt Frontend::prepare(PromptInput input, const PreparationControl& co
     std::vector<ChatRole> message_roles;
     message_roles.reserve(input.messages.size());
     for (const ChatMessage& message : input.messages) { message_roles.push_back(message.role); }
-    const auto tool_call_output = fi::build_tool_call_output_contract(options.tool_jsons);
+    const auto tool_call_output =
+        fi::build_tool_call_output_contract(options.tool_jsons, input.messages);
     const std::optional<std::uint32_t> leading_boundary =
         leading_instruction_boundary(message_roles);
     std::vector<PromptCacheMarker> rendered_markers = cache_hints.markers;

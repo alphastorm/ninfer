@@ -76,18 +76,14 @@ int check_rejected(const std::string& text, const fi::ToolCallOutputContract& co
 
 int check_parameter_schema_mismatch(const fi::ToolCallOutputContract& contract,
                                     std::string_view parameter_name, std::string_view value,
-                                    std::string_view expected_json_value,
                                     std::string_view message) {
-    const auto parsed = fi::parse_qwen_tool_call_output(
-        tool_call("configure", {{parameter_name, value}}), 64, contract);
-    const std::string expected_arguments = "{" + Json(std::string(parameter_name)).dump() + ":" +
-                                           std::string(expected_json_value) + "}";
+    const auto text = tool_call("configure", {{parameter_name, value}});
+    const auto parsed = fi::parse_qwen_tool_call_output(text, 64, contract);
     return check(
-        parsed.is_tool_call_response && parsed.content.empty() && parsed.tool_calls.size() == 1 &&
-            parsed.tool_calls.front().arguments_json == expected_arguments &&
-            parsed.diagnostics.marker_seen && parsed.diagnostics.structured_call_count == 1 &&
+        !parsed.is_tool_call_response && parsed.content == text && parsed.tool_calls.empty() &&
+            parsed.diagnostics.marker_seen && parsed.diagnostics.structured_call_count == 0 &&
             parsed.diagnostics.schema_mismatch_arguments == 1 &&
-            parsed.diagnostics.fallback_reason == ninfer::ToolCallParseFallbackReason::None,
+            parsed.diagnostics.fallback_reason == ninfer::ToolCallParseFallbackReason::SchemaMismatch,
         std::string(message));
 }
 
@@ -301,18 +297,18 @@ int test_boolean_boundary() {
                       "false variants were not canonicalized");
 
     const auto one_flag = contract_for("configure", Json{{"flag", Json{{"type", "boolean"}}}});
-    failures += check_parameter_schema_mismatch(one_flag, "flag", "1", "1",
-                                                "integer boolean mismatch was not structured");
-    failures += check_parameter_schema_mismatch(one_flag, "flag", "0", "0",
-                                                "zero boolean mismatch was not structured");
-    failures += check_parameter_schema_mismatch(one_flag, "flag", "\"true\"", "\"true\"",
-                                                "string boolean mismatch was not structured");
-    failures += check_parameter_schema_mismatch(one_flag, "flag", "yes", "\"yes\"",
-                                                "plain boolean mismatch was not structured");
-    failures += check_parameter_schema_mismatch(one_flag, "flag", "None", "\"None\"",
-                                                "Python null mismatch was not structured");
-    failures += check_parameter_schema_mismatch(one_flag, "flag", "null", "null",
-                                                "null boolean mismatch was not structured");
+    failures += check_parameter_schema_mismatch(one_flag, "flag", "1",
+                                                "integer boolean mismatch did not fall back");
+    failures += check_parameter_schema_mismatch(one_flag, "flag", "0",
+                                                "zero boolean mismatch did not fall back");
+    failures += check_parameter_schema_mismatch(one_flag, "flag", "\"true\"",
+                                                "string boolean mismatch did not fall back");
+    failures += check_parameter_schema_mismatch(one_flag, "flag", "yes",
+                                                "plain boolean mismatch did not fall back");
+    failures += check_parameter_schema_mismatch(one_flag, "flag", "None",
+                                                "Python null mismatch did not fall back");
+    failures += check_parameter_schema_mismatch(one_flag, "flag", "null",
+                                                "null boolean mismatch did not fall back");
     return failures;
 }
 
@@ -341,13 +337,13 @@ int test_exact_integer_boundary() {
     }
 
     const auto one_integer = contract_for("configure", Json{{"value", Json{{"type", "integer"}}}});
-    failures += check_parameter_schema_mismatch(one_integer, "value", "7.5", "7.5",
-                                                "fractional integer mismatch was not structured");
-    failures += check_parameter_schema_mismatch(one_integer, "value", "1e-1", "1e-1",
-                                                "fractional exponent mismatch was not structured");
+    failures += check_parameter_schema_mismatch(one_integer, "value", "7.5",
+                                                "fractional integer mismatch did not fall back");
+    failures += check_parameter_schema_mismatch(one_integer, "value", "1e-1",
+                                                "fractional exponent mismatch did not fall back");
     failures += check_parameter_schema_mismatch(
-        one_integer, "value", "9007199254740992.5", "9007199254740992.5",
-        "large fractional integer mismatch lost its exact lexeme");
+        one_integer, "value", "9007199254740992.5",
+        "large fractional integer mismatch did not fall back");
 
     const auto one_number = contract_for("configure", Json{{"value", Json{{"type", "number"}}}});
     const std::string large_fraction = tool_call("configure", {{"value", "9007199254740992.5"}});
@@ -394,8 +390,8 @@ int test_composed_schema_types() {
                           "string-admitting composition did not preserve text");
     }
     failures += check_parameter_schema_mismatch(
-        contract, "count", "7.5", "7.5",
-        "fractional anyOf integer/null mismatch was not structured");
+        contract, "count", "7.5",
+        "fractional anyOf integer/null mismatch did not fall back");
     return failures;
 }
 
@@ -479,7 +475,7 @@ int test_empty_declared_non_string_is_omitted() {
     return failures;
 }
 
-int test_schema_mismatches_remain_structured() {
+int test_schema_mismatches_fall_back() {
     const auto contract =
         contract_for("configure", Json{{"integer_value", Json{{"type", "integer"}}},
                                        {"number_value", Json{{"type", "number"}}},
@@ -489,22 +485,22 @@ int test_schema_mismatches_remain_structured() {
                                        {"null_value", Json{{"type", "null"}}}});
 
     int failures = 0;
-    failures += check_parameter_schema_mismatch(contract, "number_value", "\"1\"", "\"1\"",
-                                                "string number mismatch was not structured");
-    failures += check_parameter_schema_mismatch(contract, "boolean_value", "[]", "[]",
-                                                "array boolean mismatch was not structured");
-    failures += check_parameter_schema_mismatch(contract, "object_value", "[]", "[]",
-                                                "array object mismatch was not structured");
-    failures += check_parameter_schema_mismatch(contract, "array_value", "{}", "{}",
-                                                "object array mismatch was not structured");
-    failures += check_parameter_schema_mismatch(contract, "null_value", "false", "false",
-                                                "boolean null mismatch was not structured");
+    failures += check_parameter_schema_mismatch(contract, "number_value", "\"1\"",
+                                                "string number mismatch did not fall back");
+    failures += check_parameter_schema_mismatch(contract, "boolean_value", "[]",
+                                                "array boolean mismatch did not fall back");
+    failures += check_parameter_schema_mismatch(contract, "object_value", "[]",
+                                                "array object mismatch did not fall back");
+    failures += check_parameter_schema_mismatch(contract, "array_value", "{}",
+                                                "object array mismatch did not fall back");
+    failures += check_parameter_schema_mismatch(contract, "null_value", "false",
+                                                "boolean null mismatch did not fall back");
     failures += check_parameter_schema_mismatch(
-        contract, "object_value", "{'x': True}", "\"{'x': True}\"",
-        "Python object mismatch was not preserved for client validation");
+        contract, "object_value", "{'x': True}",
+        "Python object mismatch did not fall back");
     failures += check_parameter_schema_mismatch(
-        contract, "array_value", "['a', None]", "\"['a', None]\"",
-        "Python array mismatch was not preserved for client validation");
+        contract, "array_value", "['a', None]",
+        "Python array mismatch did not fall back");
     return failures;
 }
 
@@ -750,6 +746,187 @@ int test_free_tool_continuation() {
     return failures;
 }
 
+int check_parse_and_stream(
+    const std::string& text, const std::shared_ptr<const fi::ToolCallOutputContract>& contract,
+    const std::string* expected_arguments, std::string_view expected_content = "prefix",
+    ninfer::ToolKind expected_kind = ninfer::ToolKind::Function) {
+    const auto parsed = fi::parse_qwen_tool_call_output(text, 128, *contract);
+    int failures = 0;
+    if (expected_arguments) {
+        failures += check(parsed.is_tool_call_response && parsed.tool_calls.size() == 1 &&
+                              parsed.tool_calls[0].arguments_json == *expected_arguments &&
+                              parsed.tool_calls[0].kind == expected_kind &&
+                              parsed.content == expected_content,
+                          "fork argument corpus changed: " + text);
+    } else {
+        failures += check(!parsed.is_tool_call_response && parsed.tool_calls.empty() &&
+                              parsed.content == text,
+                          "invalid fork corpus did not fall back atomically: " + text);
+    }
+    const auto matches = [&](const std::string& visible,
+                             const fi::ToolCallOutputDecoder::Terminal& terminal) {
+        if (visible + terminal.content != parsed.content ||
+            terminal.diagnostics != parsed.diagnostics ||
+            terminal.tool_calls.size() != parsed.tool_calls.size())
+            return false;
+        for (std::size_t i = 0; i < terminal.tool_calls.size(); ++i) {
+            const auto& left = terminal.tool_calls[i];
+            const auto& right = parsed.tool_calls[i];
+            if (left.name != right.name || left.arguments_json != right.arguments_json ||
+                left.kind != right.kind)
+                return false;
+        }
+        return true;
+    };
+    fi::ToolCallOutputDecoder bytewise(contract, 128);
+    std::string visible;
+    for (const char& byte : text) { visible += bytewise.feed(std::string_view(&byte, 1)); }
+    failures += check(matches(visible, bytewise.finish()), "bytewise fork corpus changed");
+    for (std::size_t split = 0; split <= text.size(); ++split) {
+        fi::ToolCallOutputDecoder decoder(contract, 128);
+        auto emitted = decoder.feed(std::string_view(text).substr(0, split));
+        emitted += decoder.feed(std::string_view(text).substr(split));
+        failures += check(matches(emitted, decoder.finish()),
+                          "fork corpus changed at split " + std::to_string(split));
+    }
+    return failures;
+}
+
+std::string parameter_call(std::string_view value) {
+    return "prefix  \n" + tool_call("configure", {{"value", value}});
+}
+
+int test_fork_scalar_and_transport_corpus() {
+    int failures = 0;
+    const auto boolean = output_contract_for("configure", {{"value", {{"type", "boolean"}}}});
+    const std::string truth = R"({"value":true})";
+    failures += check_parse_and_stream(parameter_call("TrUe"), boolean, &truth);
+    for (const auto value : {"1", "\"true\"", "null", "yes"})
+        failures += check_parse_and_stream(parameter_call(value), boolean, nullptr);
+    const auto integer = output_contract_for("configure", {{"value", {{"type", "integer"}}}});
+    for (const auto value : {"{}", "7.5", "1e-1", "9007199254740992.5"})
+        failures += check_parse_and_stream(parameter_call(value), integer, nullptr);
+    for (const auto value : {"7.0", "100e-2", "-0.0", "9007199254740992.0"}) {
+        const auto expected = "{\"value\":" + std::string(value) + "}";
+        failures += check_parse_and_stream(parameter_call(value), integer, &expected);
+    }
+    const auto number = output_contract_for("configure", {{"value", {{"type", "number"}}}});
+    const std::string precise = R"({"value":9007199254740992.5})";
+    failures += check_parse_and_stream(parameter_call("9007199254740992.5"), number, &precise);
+    const auto boolean_union = output_contract_for(
+        "configure",
+        {{"value",
+          {{"anyOf", Json::array({Json{{"oneOf", Json::array({Json{{"type", "boolean"}},
+                                                                Json{{"type", "null"}}})}},
+                                  Json{{"type", "integer"}}})}}}});
+    const std::string falsity = R"({"value":false})";
+    failures += check_parse_and_stream(parameter_call("False"), boolean_union, &falsity);
+    failures += check_parse_and_stream(parameter_call("7.5"), boolean_union, nullptr);
+    const auto string_union = output_contract_for(
+        "configure",
+        {{"value", {{"oneOf", Json::array({Json{{"type", "string"}},
+                                            Json{{"type", "number"}}})}}}});
+    const std::string raw_string = R"({"value":"7"})";
+    failures += check_parse_and_stream(parameter_call("7"), string_union, &raw_string);
+    const auto unsupported = output_contract_for(
+        "configure",
+        {{"value", {{"anyOf", Json::array({Json{{"type", "integer"}},
+                                            Json{{"enum", Json::array({1, 2})}}})}}}});
+    const std::string legacy = R"({"value":"False"})";
+    failures += check_parse_and_stream(parameter_call("False"), unsupported, &legacy);
+    return failures;
+}
+
+int test_fork_balanced_markup_and_atomic_fallback() {
+    const auto strings = output_contract_for("configure", {{"value", {{"type", "string"}}}});
+    const std::string markup = "é \r\n<parameter=inner><parameter=deep>x</parameter></parameter> "
+                               "</function> </tool_call>\n";
+    const auto expected = Json{{"value", markup}}.dump();
+    int failures = check_parse_and_stream(parameter_call(markup), strings, &expected);
+    for (const auto value : {"echo '<parameter=unterminated>'", "echo '</parameter>'"})
+        failures += check_parse_and_stream(parameter_call(value), strings, nullptr);
+    const auto duplicate = tool_call("configure", {{"value", "first"}, {"value", "second"}});
+    failures += check_parse_and_stream(duplicate, strings, nullptr);
+    const auto boolean = output_contract_for("configure", {{"value", {{"type", "boolean"}}}});
+    const auto invalid = parameter_call("true") + "\n" + tool_call("configure", {{"value", "yes"}});
+    failures += check_parse_and_stream(invalid, boolean, nullptr);
+    failures += check_parse_and_stream(parameter_call("text") + '\v', strings, nullptr);
+    const auto prefix = "prefix\v\f" + tool_call("configure", {{"value", "text"}});
+    const std::string ordinary = R"({"value":"text"})";
+    failures += check_parse_and_stream(prefix, strings, &ordinary, "prefix\v\f");
+    return failures;
+}
+
+int test_deep_supported_union_without_recursive_compilation() {
+    std::string definition =
+        R"({"type":"function","function":{"name":"configure","parameters":{"type":"object","properties":{"value":)";
+    for (int i = 0; i < 8192; ++i) { definition += R"({"anyOf":[)"; }
+    definition += R"({"type":"boolean"})";
+    for (int i = 0; i < 8192; ++i) { definition += "]}"; }
+    definition += "}}}}";
+    const auto contract = contract_from_definitions({definition});
+    const std::string expected = R"({"value":false})";
+    return check_parse_and_stream(parameter_call("False"), contract, &expected);
+}
+
+int test_large_malformed_region_without_rescans() {
+    std::string text = "<tool_call><function=configure><parameter=value>";
+    for (int i = 0; i < 22000; ++i) { text += "<parameter="; }
+    text += "</parameter>";
+    for (int i = 0; i < 1000; ++i) { text += "</tool_call><tool_call>"; }
+    const auto contract = output_contract_for("configure", Json::object());
+    const auto parsed = fi::parse_qwen_tool_call_output(text, 128, *contract);
+    int failures = check(!parsed.is_tool_call_response && parsed.tool_calls.empty() &&
+                             parsed.content == text,
+                         "large malformed region did not fall back exactly");
+    fi::ToolCallOutputDecoder decoder(contract, 128);
+    std::string visible;
+    for (const char& byte : text) { visible += decoder.feed(std::string_view(&byte, 1)); }
+    visible += decoder.finish().content;
+    failures += check(visible == text, "large malformed stream lost bytes");
+    return failures;
+}
+
+int test_custom_raw_input_and_history_contracts() {
+    auto definition = Json::parse(tool_definition("eval", {{"input", {{"type", "string"}}}}));
+    definition["x-ninfer-tool-kind"] = "custom";
+    const auto contract = contract_from_definitions({definition.dump()});
+    const std::string raw = "print('ok')\nliteral = \"</parameter> </function> </tool_call>\"\n"
+                            "{\"looks\":\"like json\"}\n";
+    const auto text = "prefix  \n" + tool_call("eval", {{"input", raw}});
+    int failures = check_parse_and_stream(text, contract, &raw, "prefix", ninfer::ToolKind::Custom);
+    failures += check_parse_and_stream(tool_call("eval", {{"code", "print('wrong')"}}),
+                                      contract, nullptr);
+    std::vector<ninfer::ChatMessage> history(1);
+    history[0].role = ninfer::ChatRole::Assistant;
+    history[0].tool_calls.push_back({.id = "call_prior",
+                                     .name = "eval",
+                                     .arguments_json = "print('prior')",
+                                     .kind = ninfer::ToolKind::Custom});
+    const auto historical = fi::build_tool_call_output_contract({}, history);
+    const std::string next = "{\"a\":1}\nprint('next')";
+    failures += check_parse_and_stream("prefix  \n" + tool_call("eval", {{"input", next}}),
+                                      historical, &next, "prefix", ninfer::ToolKind::Custom);
+    failures += check_parse_and_stream(tool_call("other", {{"input", "x"}}), historical, nullptr);
+    history[0].tool_calls.push_back({.name = "eval", .kind = ninfer::ToolKind::Function});
+    const auto conflicting = fi::build_tool_call_output_contract({}, history);
+    failures += check_parse_and_stream(text, conflicting, nullptr);
+
+    const auto automatic = fi::select_tool_call_contract(historical, {});
+    fi::ToolCallOutputDecoder decoder(automatic, 128);
+    (void)decoder.feed(tool_call("eval", {{"input", next}}));
+    const auto result = decoder.finish();
+    failures += check(result.tool_calls.size() == 1 &&
+                          result.tool_calls[0].kind == ninfer::ToolKind::Custom &&
+                          result.tool_calls[0].arguments_json == next,
+                      "automatic history-only custom output lost its raw kind");
+    ninfer::ToolChoice none;
+    none.mode = ninfer::ToolChoiceMode::None;
+    failures += check(fi::select_tool_call_contract(historical, none)->tools.empty(),
+                      "historical custom kind weakened explicit no-tools selection");
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -765,7 +942,7 @@ int main() {
     failures += test_exact_integer_boundary();
     failures += test_composed_schema_types();
     failures += test_empty_declared_non_string_is_omitted();
-    failures += test_schema_mismatches_remain_structured();
+    failures += test_schema_mismatches_fall_back();
     failures += test_unsupported_schema_uses_legacy_policy();
     failures += test_strict_structure_and_active_tool_set();
     failures += test_name_limits_and_non_strict_omissions();
@@ -774,6 +951,11 @@ int main() {
     failures += test_incremental_valid_and_boolean();
     failures += test_incremental_fallback_preserves_bytes();
     failures += test_incremental_embedded_parameter_markup();
+    failures += test_fork_scalar_and_transport_corpus();
+    failures += test_fork_balanced_markup_and_atomic_fallback();
+    failures += test_deep_supported_union_without_recursive_compilation();
+    failures += test_large_malformed_region_without_rescans();
+    failures += test_custom_raw_input_and_history_contracts();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

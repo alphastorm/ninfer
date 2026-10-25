@@ -22,6 +22,7 @@ struct ToolCall {
     std::string id;
     std::string name;
     std::string arguments_json;
+    ToolKind kind = ToolKind::Function;
 };
 
 enum class ChatPartKind {

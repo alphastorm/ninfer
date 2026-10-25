@@ -1512,6 +1512,61 @@ int test_explicit_leading_instruction_cache_boundary() {
                  "full-system marker");
 }
 
+int test_automatic_instruction_frontier_parity() {
+    const Frontend frontend = make_frontend(resources(), false);
+    int failures = 0;
+    for (const auto& roles :
+         std::vector<std::vector<ninfer::ChatRole>>{
+             {ninfer::ChatRole::System}, {ninfer::ChatRole::Developer},
+             {ninfer::ChatRole::System, ninfer::ChatRole::Developer},
+             {ninfer::ChatRole::System, ninfer::ChatRole::Developer, ninfer::ChatRole::System}}) {
+        ninfer::PromptInput input;
+        for (const auto role : roles) {
+            ninfer::ChatMessage instruction;
+            instruction.role = role;
+            instruction.parts.push_back({.text = "stable instructions"});
+            input.messages.push_back(std::move(instruction));
+        }
+        ninfer::ChatMessage user;
+        user.role = ninfer::ChatRole::User;
+        user.parts.push_back({.text = "variable question"});
+        input.messages.push_back(std::move(user));
+        input.context_cache.shared_reuse_scope = "principal:shared";
+        const auto prepared = frontend.prepare(input);
+        const auto& automatic = FrontendFactory::inspect(prepared).context_cache;
+        failures += check(automatic.opportunities.size() == 1 &&
+                              automatic.opportunities[0].kind ==
+                                  ninfer::PromptCacheMarkerKind::SharedStablePrefix &&
+                              ninfer::has_shared_candidate_evidence(
+                                  automatic.opportunities[0].evidence,
+                                  ninfer::SharedCandidateEvidence::EngineStructural) &&
+                              automatic.shared_reuse_scope &&
+                              automatic.shared_reuse_scope->view() == "principal:shared",
+                          "automatic leading system/developer frontier was not preserved");
+        input.context_cache.markers.push_back(
+            {.kind = ninfer::PromptCacheMarkerKind::SharedStablePrefix,
+             .after_message_count = static_cast<std::uint32_t>(roles.size())});
+        const auto deduplicated = frontend.prepare(input);
+        const auto& merged = FrontendFactory::inspect(deduplicated).context_cache;
+        failures += check(merged.opportunities.size() == 1 &&
+                              merged.opportunities[0].frontier ==
+                                  automatic.opportunities[0].frontier &&
+                              ninfer::has_shared_candidate_evidence(
+                                  merged.opportunities[0].evidence,
+                                  ninfer::SharedCandidateEvidence::ExplicitBoundary) &&
+                              ninfer::has_shared_candidate_evidence(
+                                  merged.opportunities[0].evidence,
+                                  ninfer::SharedCandidateEvidence::EngineStructural),
+                          "coincident automatic and explicit frontiers were not deduplicated");
+        input.context_cache.markers.clear();
+        input.context_cache.allow_engine_automatic_shared_prefixes = false;
+        const auto disabled = frontend.prepare(input);
+        failures += check(FrontendFactory::inspect(disabled).context_cache.opportunities.empty(),
+                          "automatic frontier ignored the disable policy");
+    }
+    return failures;
+}
+
 int test_trimmed_source_cache_boundaries() {
     struct Case {
         std::vector<std::string> parts;
@@ -2066,7 +2121,7 @@ int test_structured_tool_output() {
 
     const std::string generated =
         "Calling.  \n<tool_call>\n<function=TaskUpdate>\n<parameter=taskId>\n1\n"
-        "</parameter>\n<parameter=enabled>\n\n</parameter>\n<parameter=count>\nmany\n"
+        "</parameter>\n<parameter=enabled>\n\n</parameter>\n<parameter=count>\n7\n"
         "</parameter>\n</function>\n</tool_call>";
     const std::vector<ninfer::TokenId> tokens = fixture_tokenizer().encode(generated);
     const auto decision = session.preview_model(tokens, static_cast<std::uint32_t>(tokens.size()),
@@ -2084,16 +2139,119 @@ int test_structured_tool_output() {
                               .marker_seen               = true,
                               .structured_call_count     = 1,
                               .empty_arguments_omitted   = 1,
-                              .schema_mismatch_arguments = 1,
+                              .schema_mismatch_arguments = 0,
                               .fallback_reason = ninfer::ToolCallParseFallbackReason::None,
                           },
                       "frontend did not retain tool-call parse diagnostics");
     if (!calls.empty()) {
         const nlohmann::json arguments = nlohmann::json::parse(calls.front().arguments_json);
         failures += check(arguments.at("taskId").is_string() && arguments.at("taskId") == "1" &&
-                              !arguments.contains("enabled") && arguments.at("count") == "many",
+                              !arguments.contains("enabled") && arguments.at("count") == 7,
                           "frontend did not preserve normalized tool arguments");
     }
+    return failures;
+}
+
+int test_tool_output_atomic_fallback() {
+    const Frontend frontend = make_frontend(resources(), false);
+    ninfer::PromptInput input;
+    ninfer::ChatMessage user;
+    user.role = ninfer::ChatRole::User;
+    user.parts.push_back({.text = "configure"});
+    input.messages.push_back(std::move(user));
+    input.options.enable_thinking = false;
+    input.options.tool_jsons.push_back(
+        R"({"type":"function","function":{"name":"configure","parameters":{"type":"object","properties":{"value":{"type":"integer"}}}}})");
+    const auto prompt = frontend.prepare(std::move(input));
+    int failures = 0;
+    for (const auto mode :
+         {ninfer::ToolConstraintMode::Automatic, ninfer::ToolConstraintMode::Basic}) {
+        ninfer::ToolChoice choice;
+        choice.constraints = mode;
+        for (const auto& parameters : {
+                 std::string("<parameter=value>\nmany\n</parameter>\n"),
+                 std::string("<parameter=value>\n1\n</parameter>\n"
+                             "<parameter=value>\n2\n</parameter>\n")}) {
+            const auto text = "Calling.  \n<tool_call>\n<function=configure>\n" + parameters +
+                               "</function>\n</tool_call>";
+            auto session = frontend.make_output_session(prompt, {}, {}, {}, {}, choice);
+            const auto tokens = fixture_tokenizer().encode(text);
+            (void)session.preview_model(tokens, static_cast<std::uint32_t>(tokens.size()),
+                                        ninfer::FinishReason::OutputLimit);
+            failures += check(channel_text(session.commit_preview(), ninfer::OutputChannel::Content) ==
+                                      text &&
+                                  session.take_tool_calls().empty() &&
+                                  session.tool_call_parse_diagnostics().structured_call_count == 0,
+                              "output session partially published an invalid argument region");
+        }
+    }
+    return failures;
+}
+
+int test_custom_tool_template_and_output() {
+    using Json = nlohmann::json;
+    const Frontend frontend = make_frontend(resources(), false);
+    ninfer::PromptInput input;
+    input.options.enable_thinking = false;
+    input.options.tool_jsons.push_back(
+        R"({"type":"function","function":{"name":"eval","parameters":{"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false}},"x-ninfer-tool-kind":"custom"})");
+    ninfer::ChatMessage user;
+    user.role = ninfer::ChatRole::User;
+    user.parts.push_back({.text = "evaluate"});
+    input.messages.push_back(std::move(user));
+    ninfer::ChatMessage assistant;
+    assistant.role = ninfer::ChatRole::Assistant;
+    const std::string prior = "{\"looks\":\"like JSON\"}\nprint('prior')";
+    assistant.tool_calls.push_back({.id = "call_eval",
+                                    .name = "eval",
+                                    .arguments_json = prior,
+                                    .kind = ninfer::ToolKind::Custom});
+    input.messages.push_back(std::move(assistant));
+    ninfer::ChatMessage output;
+    output.role = ninfer::ChatRole::Tool;
+    output.tool_call_id = "call_eval";
+    output.parts.push_back({.text = "ok"});
+    input.messages.push_back(std::move(output));
+    const auto prompt = frontend.prepare(input);
+    auto wrapped = input;
+    auto declaration = Json::parse(wrapped.options.tool_jsons[0]);
+    declaration.erase("x-ninfer-tool-kind");
+    wrapped.options.tool_jsons[0] = declaration.dump();
+    wrapped.messages[1].tool_calls[0].kind = ninfer::ToolKind::Function;
+    wrapped.messages[1].tool_calls[0].arguments_json = Json{{"input", prior}}.dump();
+    const auto canonical = frontend.prepare(std::move(wrapped));
+    int failures = check(FrontendFactory::inspect(prompt).token_ids ==
+                             FrontendFactory::inspect(canonical).token_ids,
+                         "custom history was not wrapped exactly once or metadata leaked to template");
+    const std::string raw = "{\"a\":1}\nprint('next')\n";
+    const auto text = "<tool_call>\n<function=eval>\n<parameter=input>\n" + raw +
+                       "\n</parameter>\n</function>\n</tool_call>";
+    for (const auto mode :
+         {ninfer::ToolConstraintMode::Automatic, ninfer::ToolConstraintMode::Basic}) {
+        ninfer::ToolChoice choice;
+        choice.constraints = mode;
+        auto session = frontend.make_output_session(prompt, {}, {}, {}, {}, choice);
+        const auto tokens = fixture_tokenizer().encode(text);
+        (void)session.preview_model(tokens, static_cast<std::uint32_t>(tokens.size()),
+                                    ninfer::FinishReason::OutputLimit);
+        failures += check(channel_text(session.commit_preview(), ninfer::OutputChannel::Content).empty(),
+                          "custom output leaked into visible content");
+        const auto calls = session.take_tool_calls();
+        failures += check(calls.size() == 1 && calls[0].kind == ninfer::ToolKind::Custom &&
+                              calls[0].arguments_json == raw,
+                          "custom output session coerced raw input or lost its kind");
+    }
+    input.options.tool_jsons.clear();
+    const auto historical = frontend.prepare(std::move(input));
+    auto history_session = frontend.make_output_session(historical, {});
+    const auto tokens = fixture_tokenizer().encode(text);
+    (void)history_session.preview_model(tokens, static_cast<std::uint32_t>(tokens.size()),
+                                        ninfer::FinishReason::OutputLimit);
+    (void)history_session.commit_preview();
+    const auto calls = history_session.take_tool_calls();
+    failures += check(calls.size() == 1 && calls[0].kind == ninfer::ToolKind::Custom &&
+                          calls[0].arguments_json == raw,
+                      "history-only frontend generation lost custom raw input");
     return failures;
 }
 
@@ -2686,6 +2844,7 @@ int main() {
     failures += test_image_resize_rejection_policy();
     failures += test_context_cache_scopes();
     failures += test_explicit_leading_instruction_cache_boundary();
+    failures += test_automatic_instruction_frontier_parity();
     failures += test_trimmed_source_cache_boundaries();
     failures += test_source_part_recovery_boundary();
     failures += test_input_recovery_requires_proven_closing();
@@ -2698,6 +2857,8 @@ int main() {
     failures += test_same_token_stop_priority(frontend);
     failures += test_terminal_flush(frontend);
     failures += test_structured_tool_output();
+    failures += test_tool_output_atomic_fallback();
+    failures += test_custom_tool_template_and_output();
     failures += test_tools_and_json_output();
     failures += test_reasoning_split(frontend);
     failures += test_thinking_budget_control(frontend);
