@@ -132,6 +132,8 @@ public:
     // The exporter writes every Engine payload into a unique staging generation. Payloads and their
     // checksums are flushed first; manifest.json is written last; only then is current atomically
     // replaced. A failed or cancelled save never changes the previously published generation.
+    // Saves are single-flight: competing saves return TransactionBusy rather than blocking an
+    // Engine worker. Neither exporter nor publication-gate entry holds the catalog mutex.
     [[nodiscard]] std::optional<SessionCheckpointSaveResult>
     save(const OpenAIResponseStoreSnapshot& responses, const nlohmann::json& runtime_fingerprint,
          const ExportCheckpoint& exporter, const PublishExport& publish_export,
@@ -157,6 +159,10 @@ public:
                               const nlohmann::json& runtime_fingerprint,
                               std::string_view response_id) const;
     [[nodiscard]] SessionCheckpointEraseResult erase(std::string_view session_sha256);
+    // Integrity evidence only. Never removes a newer current generation; active readers keep
+    // their payload paths until their final lease retires. False means no quarantine ack.
+    [[nodiscard]] bool quarantine(std::string_view session_sha256, std::string_view generation,
+                                  runtime::DurableReason reason) noexcept;
     // Lock-free pre-filter: false only when the session has no published current generation, so
     // a caller can skip load() and its locks for sessions that have nothing to restore.
     [[nodiscard]] bool may_hold(std::string_view session_sha256) const noexcept;

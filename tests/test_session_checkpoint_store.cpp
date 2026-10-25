@@ -84,6 +84,7 @@ public:
     submit(const std::filesystem::path& path,
            std::span<const runtime::ContinuationCheckpointReadRequest> requests) override {
         ++submit_count;
+        if (fail_submit) { throw std::runtime_error("injected checkpoint queue read failure"); }
         if (!overlaps && outstanding != 0) { ++overlap_violations; }
         ++outstanding;
         for (const runtime::ContinuationCheckpointReadRequest& request : requests) {
@@ -102,6 +103,7 @@ public:
 
     bool is_available = true;
     bool overlaps     = true;
+    bool fail_submit  = false;
     std::string reason;
     std::size_t submit_count       = 0;
     std::size_t wait_count         = 0;
@@ -1520,6 +1522,9 @@ int test_post_verification_replacement_fails_closed() {
     std::vector<std::byte> victim(payload.size());
     failures += check(!loaded.checkpoint->engine->read_file("engine/state/0.bin", 0, victim),
                       "post-verification replacement fails the streamed re-hash closed");
+    failures += check(loaded.checkpoint->engine->failure_reason() ==
+                          runtime::DurableReason::PayloadDigestMismatch,
+                      "delivered-byte mismatch reports integrity, not transient I/O");
     failures += check(!loaded.checkpoint->engine->read_file("engine/state/0.bin", 0, victim),
                       "a failed payload stays refused for the reader's lifetime");
     std::vector<std::byte> skewed(1);
@@ -2075,6 +2080,190 @@ int test_schema_v3_and_stream_completion() {
     return failures;
 }
 
+int test_export_and_publication_callbacks_are_catalog_unlocked() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .read_queue = std::make_shared<TestReadQueue>()});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) { return DurableExportResult{}; }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto initial = store.save(responses, fingerprint(), exporter, publish_fixture);
+    int failures = check(initial.has_value(), "catalog callback fixture publishes");
+    if (!initial) { return failures; }
+    bool exporter_entered = false;
+    bool publisher_entered = false;
+    const auto replacement = store.save(
+        responses, fingerprint(),
+        [&](ContinuationCheckpointWriter& writer) {
+            exporter_entered = true;
+            failures += check(store.covers(responses.client_session_sha256, fingerprint(),
+                                            responses.latest_response_id),
+                              "export can query catalog without lock inversion");
+            store.collect_garbage();
+            failures += check(store.erase(responses.client_session_sha256) ==
+                                  SessionCheckpointEraseResult::Conflict,
+                              "save lease pins session while export runs off catalog lock");
+            bool nested_exported = false;
+            runtime::SessionCheckpointSkipDetail skip;
+            const auto busy = store.save(
+                responses, fingerprint(),
+                [&](ContinuationCheckpointWriter&) {
+                    nested_exported = true;
+                    return DurableExportResult{};
+                }, publish_fixture, &skip);
+            failures += check(!busy && !nested_exported &&
+                                  skip.durable_reason == runtime::DurableReason::TransactionBusy,
+                              "reentrant save refuses transiently instead of waiting on Engine");
+            return exporter(writer);
+        },
+        [&](runtime::DurableSessionEpoch epoch, const std::function<bool()>& commit) {
+            publisher_entered = true;
+            failures += check(store.status(responses.client_session_sha256, fingerprint())
+                                      .at("generation") == initial->generation,
+                              "publication gate can inspect catalog before committing");
+            store.collect_garbage();
+            const auto result = publish_fixture(epoch, commit);
+            failures += check(store.status(responses.client_session_sha256, fingerprint())
+                                      .at("state") == "available",
+                              "publication callback returns with catalog ownership released");
+            return result;
+        });
+    failures += check(replacement && exporter_entered && publisher_entered &&
+                          replacement->generation != initial->generation,
+                      "pinned staged generation survives concurrent catalog operations");
+    return failures;
+}
+
+int test_reader_failure_reasons_and_fresh_retries() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    auto queue = std::make_shared<TestReadQueue>();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .read_queue = queue});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) { return DurableExportResult{}; }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto saved = store.save(responses, fingerprint(), exporter, publish_fixture);
+    int failures = check(saved.has_value(), "typed reader fixture publishes");
+    if (!saved) { return failures; }
+    auto loaded = store.load(responses.client_session_sha256, fingerprint());
+    if (!loaded.checkpoint) { return failures + check(false, "typed reader fixture loads"); }
+    const auto& original = *loaded.checkpoint->engine;
+    std::vector<std::byte> bytes(payload.size());
+    failures += check(original.failure_reason() == runtime::DurableReason::None &&
+                          original.read_file("engine/state/0.bin", 0, std::span(bytes).first(113)) &&
+                          !original.verify_complete(),
+                      "partial consumption is not an I/O or integrity failure");
+    auto fresh = original.fresh_reader();
+    failures += check(fresh && fresh->failure_reason() == runtime::DurableReason::None &&
+                          fresh->read_file("engine/state/0.bin", 0, bytes) &&
+                          fresh->verify_complete() && bytes == payload &&
+                          !original.verify_complete(),
+                      "fresh retry shares descriptors but resets single-pass consumption");
+    queue->fail_submit = true;
+    failures += check(!original.read_file("engine/state/0.bin", 113,
+                                          std::span(bytes).subspan(113)) &&
+                          original.failure_reason() == runtime::DurableReason::IoUnavailable,
+                      "queue exception reports transient unavailability");
+    queue->fail_submit = false;
+    fresh = original.fresh_reader();
+    failures += check(fresh && fresh->failure_reason() == runtime::DurableReason::None &&
+                          fresh->read_file("engine/state/0.bin", 0, bytes) &&
+                          fresh->verify_complete() &&
+                          store.status(responses.client_session_sha256, fingerprint())
+                                  .at("state") == "available",
+                      "I/O retry gets a fresh verifier without quarantining the generation");
+    fresh = original.fresh_reader();
+    std::byte one{};
+    failures += check(fresh &&
+                          !fresh->read_file("engine/state/0.bin", payload.size(),
+                                            std::span(&one, 1)) &&
+                          fresh->failure_reason() == runtime::DurableReason::PayloadSizeMismatch,
+                      "out-of-bounds native index request reports a size mismatch");
+    fresh = original.fresh_reader();
+    failures += check(fresh &&
+                          !fresh->read_file("engine/state/1.bin", 0, std::span(&one, 1)) &&
+                          fresh->failure_reason() == runtime::DurableReason::InvalidIndex,
+                      "undeclared native payload request reports invalid index");
+    return failures;
+}
+
+int test_native_corruption_quarantine_is_generation_bound() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .read_queue = std::make_shared<TestReadQueue>()});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) { return DurableExportResult{}; }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto first = store.save(responses, fingerprint(), exporter, publish_fixture);
+    int failures = check(first.has_value(), "native quarantine fixture publishes");
+    if (!first) { return failures; }
+    auto older = store.load(responses.client_session_sha256, fingerprint());
+    if (!older.checkpoint) { return failures + check(false, "old generation is pinned"); }
+    for (const auto reason : {runtime::DurableReason::Capacity,
+                              runtime::DurableReason::FingerprintMismatch,
+                              runtime::DurableReason::IoUnavailable,
+                              runtime::DurableReason::StalePublication}) {
+        failures += check(!store.quarantine(responses.client_session_sha256,
+                                             first->generation, reason) &&
+                              store.covers(responses.client_session_sha256, fingerprint(),
+                                            responses.latest_response_id),
+                          "non-integrity outcome cannot quarantine native data");
+    }
+    const auto second = store.save(responses, fingerprint(), exporter, publish_fixture);
+    if (!second) { return failures + check(false, "newer current publishes with older pin"); }
+    const auto older_root =
+        stored_generation_root(temporary.path, responses, first->generation);
+    failures += check(store.quarantine(responses.client_session_sha256, first->generation,
+                                        runtime::DurableReason::InvalidIndex) &&
+                          store.status(responses.client_session_sha256, fingerprint())
+                                  .at("generation") == second->generation &&
+                          std::filesystem::is_directory(older_root),
+                      "native corruption keeps newer current and active-reader payload paths");
+    std::vector<std::byte> bytes(payload.size());
+    failures += check(older.checkpoint->engine->read_file("engine/state/0.bin", 0, bytes) &&
+                          bytes == payload && !older.checkpoint->engine->fresh_reader() &&
+                          older.checkpoint->engine->failure_reason() ==
+                              runtime::DurableReason::InvalidIndex,
+                      "existing lease can retire reads but known corruption cannot be retried");
+    older.checkpoint.reset();
+    failures += check(!std::filesystem::exists(older_root) &&
+                          store.status(responses.client_session_sha256, fingerprint())
+                                  .at("generation") == second->generation,
+                      "last old reader finalizes only the corrupt generation quarantine");
+    auto current = store.load(responses.client_session_sha256, fingerprint());
+    if (!current.checkpoint) { return failures + check(false, "current generation is pinned"); }
+    const auto current_root =
+        stored_generation_root(temporary.path, responses, second->generation);
+    failures += check(store.quarantine(responses.client_session_sha256, second->generation,
+                                        runtime::DurableReason::PayloadSizeMismatch) &&
+                          store.status(responses.client_session_sha256, fingerprint())
+                                  .at("state") == "missing" &&
+                          std::filesystem::is_directory(current_root),
+                      "current quarantine detaches pointer without breaking a live reader");
+    current.checkpoint.reset();
+    failures += check(!std::filesystem::exists(current_root),
+                      "last current reader finalizes the deferred directory quarantine");
+    return failures;
+}
+
 int test_manifest_origin_transient_tag_failure_preserves_current() {
     // Council CR-20260831-originauth R2 (all three reviewers): a transient inability to
     // read manifest.mac is a filesystem fault, never forgery - load must report
@@ -2155,6 +2344,9 @@ int main() {
 #endif
     failures += test_v3_manifest_validation_and_publication_guard();
     failures += test_schema_v3_and_stream_completion();
+    failures += test_export_and_publication_callbacks_are_catalog_unlocked();
+    failures += test_reader_failure_reasons_and_fresh_retries();
+    failures += test_native_corruption_quarantine_is_generation_bound();
     failures += test_manifest_origin_transient_tag_failure_preserves_current();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
