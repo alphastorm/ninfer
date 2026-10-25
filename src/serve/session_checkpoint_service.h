@@ -77,10 +77,8 @@ private:
     std::unordered_map<std::string, std::weak_ptr<std::mutex>> operations_;
     struct PressureSave {
         std::string tag;
-        std::uint64_t attempted_progress = 0;
         bool settled = false;
     };
-    std::atomic<std::uint64_t> progress_{1};
     std::mutex pressure_mutex_;
     std::unordered_map<std::string, PressureSave> pressure_saves_;
     std::mutex final_mutex_;

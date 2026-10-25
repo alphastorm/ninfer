@@ -262,7 +262,6 @@ Json SessionCheckpointService::save(std::string_view session) {
     }
     receipt(result);
     if (outcome.saved) {
-        progress_.fetch_add(1, std::memory_order_release);
         Access::notify_checkpoint_progress(engine_);
     }
     return result;
@@ -325,7 +324,6 @@ SessionCheckpointService::pin_recoverable(std::string_view session, std::string_
 }
 
 void SessionCheckpointService::response_stored(std::string_view session, std::uint64_t frontier_tokens) noexcept {
-    progress_.fetch_add(1, std::memory_order_release);
     Access::notify_checkpoint_progress(engine_);
     if (stopping_.load(std::memory_order_acquire)) { return; }
     try {
@@ -338,7 +336,6 @@ void SessionCheckpointService::response_stored(std::string_view session, std::ui
 }
 
 void SessionCheckpointService::publication_changed() noexcept {
-    progress_.fetch_add(1, std::memory_order_release);
     Access::notify_checkpoint_progress(engine_);
 }
 
@@ -361,7 +358,6 @@ void SessionCheckpointService::automatic_save(std::string_view session) noexcept
               found->second.settled = settled;
           } }
         if (settled) {
-            progress_.fetch_add(1, std::memory_order_release);
             Access::notify_checkpoint_progress(engine_);
         }
     } catch (...) {}
@@ -390,18 +386,14 @@ void SessionCheckpointService::save_before_eviction(
             if (publication == ResponsePublicationState::Publishing) { continue; }
             std::lock_guard lock(pressure_mutex_);
             auto found = pressure_saves_.find(victim.session_sha256);
-            const auto progress = progress_.load(std::memory_order_acquire);
             if (found != pressure_saves_.end() && found->second.tag == victim.checkpoint_tag &&
                 found->second.settled) {
                 victim.outcome = Outcome::Settled;
                 pressure_saves_.erase(found);
                 continue;
             }
-            if (found != pressure_saves_.end() && found->second.tag == victim.checkpoint_tag &&
-                found->second.attempted_progress == progress) { continue; }
             if (found == pressure_saves_.end() && pressure_saves_.size() >= 64) { continue; }
-            pressure_saves_[victim.session_sha256] = {
-                .tag = victim.checkpoint_tag, .attempted_progress = progress};
+            pressure_saves_[victim.session_sha256] = {.tag = victim.checkpoint_tag};
             if (automatic_.enqueue(victim.session_sha256) == AutomaticCheckpointEnqueueResult::Dropped) {
                 pressure_saves_.erase(victim.session_sha256);
             }
