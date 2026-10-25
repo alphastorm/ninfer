@@ -330,14 +330,23 @@ without native reservation. Disk cannot enable reuse, add authority or force evi
 Capacity/reclamation attempts are bounded and require observed progress; no standby
 pinning retry policy from the old fork is reinstated by these interfaces.
 
-`ReclaimableSessionOracle::recoverable(session_sha256, tag)` returns an optional
-generation pin, not a boolean. The pin identifies the durable generation and its
-captured publication epoch for that exact session/tag. Destructive reclaim MUST
-perform a fresh oracle lookup for every attempt and revalidate the pin at eviction
-time; a missing pin or stale generation/epoch makes the session not reclaimable.
-An earlier successful query, cached boolean or pin from a previous attempt is not
-authority to destroy a live continuation. This is an in-process reclaim contract;
-captured runtime epochs are not added to the durable manifest.
+`ReclaimableSessionOracle::pin_recoverable(session_sha256, tag) const noexcept`
+returns `shared_ptr<const ContinuationCheckpointReader>`: a generation-pinned reader,
+or null when the session is not provably reclaimable. The live oracle calls
+`store.load(session, active_fingerprint, tag)`, requires the loaded snapshot's
+`latest_response_id == tag`, and retains its engine Reader. A cached `covers` boolean
+is not an authority substitute. A3 captures the installed oracle for each restore
+and retains the reader leases across that restore's bounded retries; no new
+`prepare_import` parameter or global mutable per-request state is introduced.
+
+`Reader::fresh_reader() const` returns `shared_ptr<const ContinuationCheckpointReader>`
+over the same immutable verified descriptors and pinned generation, with fresh
+single-pass read/hash state. It does not reuse a partially consumed verifier.
+Destructive reclaim re-validates the pinned reader's generation/tag against the
+current publication state per attempt (fresh lookup); stale or missing evidence
+makes the session not reclaimable. `publish_export` still compares the captured
+epoch under the gate. This pinned-reader shape supersedes the earlier optional
+generation/epoch value return; runtime epochs remain absent from the manifest.
 
 ## K4 — Responses restore and session isolation
 
@@ -353,7 +362,7 @@ serialized restore inputs; no public Engine API is added. Restore without a prov
 oracle must preserve unrelated sessions rather than infer their recoverability.
 
 Any Engine pressure reclamation used to make room for this restore obeys K3's
-fresh generation-pin validation at destructive eviction. A stale or missing pin
+fresh pinned-reader generation/tag validation at destructive eviction. A stale or missing pin
 preserves the candidate's live state; it cannot be converted into a successful
 restore or a claim that the candidate remains durably recoverable.
 
