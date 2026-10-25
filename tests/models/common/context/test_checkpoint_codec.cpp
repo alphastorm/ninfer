@@ -49,12 +49,14 @@ void rejects(const std::function<void(DurableCheckpointSet&)>& mutate) {
     try { codec::validate(set, {}); } catch (const std::exception&) { rejected = true; }
     require(rejected, "invalid checkpoint set accepted");
 }
-void rejects_cbor(const nlohmann::json& document) {
-    const auto bytes = nlohmann::json::to_cbor(document);
+void rejects_encoded(std::span<const std::uint8_t> bytes) {
     bool rejected = false;
-    try { (void)codec::decode(std::as_bytes(std::span(bytes)), {}); }
-    catch (const std::exception&) { rejected = true; }
-    require(rejected, "noncanonical typed checkpoint CBOR accepted");
+    try { (void)codec::decode(std::as_bytes(bytes), {}); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    require(rejected, "invalid checkpoint CBOR was not classified as invalid_argument");
+}
+void rejects_cbor(const nlohmann::json& document) {
+    rejects_encoded(nlohmann::json::to_cbor(document));
 }
 } // namespace
 int main() {
@@ -82,7 +84,16 @@ int main() {
         rejects([](auto& x) { x.payloads[0].path = "../engine/kv/0.bin"; });
         rejects([](auto& x) { x.payloads[0].alignment = 3; });
         rejects([](auto& x) { x.payloads[0].sha256[0] = 'A'; });
+        rejects_encoded({});
+        rejects_encoded(std::array<std::uint8_t, 1>{0xff});
+        rejects_encoded(std::span(bytes).first(bytes.size() - 1));
         auto document = nlohmann::json::from_cbor(bytes);
+        document.erase("format"); rejects_cbor(document);
+        document = nlohmann::json::from_cbor(bytes);
+        document.erase("points"); rejects_cbor(document);
+        document = nlohmann::json::from_cbor(bytes);
+        document["points"] = false; rejects_cbor(document);
+        document = nlohmann::json::from_cbor(bytes);
         document["unknown"] = true; rejects_cbor(document);
         document = nlohmann::json::from_cbor(bytes);
         document["points"][0]["frontier"] = UINT64_MAX; rejects_cbor(document);
