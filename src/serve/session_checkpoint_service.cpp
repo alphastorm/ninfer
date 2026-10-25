@@ -142,7 +142,15 @@ SessionCheckpointService::SessionCheckpointService(Engine& engine, const ServeOp
       limits_{.staging_bytes = options.session_checkpoint_staging_bytes,
                .write_buffer_bytes = options.session_checkpoint_write_buffer_bytes},
       store_(store_options(engine, options)),
-      automatic_([this](std::string_view session) { automatic_save(session); }) {}
+      automatic_(
+          [this](std::string_view session, std::optional<std::string_view> tag) {
+              return automatic_save(session, tag);
+          },
+          [this] {
+              return CheckpointSaveProgress{Access::checkpoint_progress(engine_),
+                  publication_progress_.load(), storage_progress_.load()};
+          },
+          [this] { Access::notify_checkpoint_progress(engine_); }) {}
 
 SessionCheckpointService::~SessionCheckpointService() { automatic_.drain(); }
 
@@ -189,6 +197,18 @@ runtime::DurableImportResult SessionCheckpointService::restore(
     auto& verified = *loaded.checkpoint;
     target.expected_tag = verified.responses.latest_response_id;
     const std::string_view origin = verified.origin_authenticated ? "authenticated" : "unauthenticated";
+    if (verified.responses.replay_only) {
+        // This authenticated generation deliberately has no native continuation. Publish only
+        // its guarded Responses lineage; a subsequent parent request replays its transcript.
+        const auto result = commit_openai_response_restore(responses_, std::move(verified.responses), guard,
+            [] { return runtime::DurableImportResult{.state = ImportState::Imported, .reason = Reason::None}; });
+        auto value = operation("restore", import_name(result.state), result.reason,
+                               result.state == ImportState::Imported && result.reason == Reason::None,
+                               result.stats, origin);
+        value["replay_only"] = true;
+        receipt(value);
+        return result;
+    }
     auto prepared = [&]() -> runtime::DurablePrepareResult {
         try {
             return Access::prepare_import(engine_, target, *verified.engine, fingerprint_,
@@ -215,7 +235,7 @@ runtime::DurableImportResult SessionCheckpointService::restore(
 
 SessionCheckpointService::SaveOutcome SessionCheckpointService::save_session(
     std::string_view session, std::optional<std::string_view> expected_tag, bool allow_covered) {
-    // A Response DELETE owns the same session operation through disk invalidation and RAM
+    // A Response DELETE owns the same session operation through durable publication and RAM
     // deletion. No pre-delete snapshot may enter save() after a successful deletion.
     auto operation_mutex = session_operation(session);
     std::lock_guard operation_lock(*operation_mutex);
@@ -228,19 +248,24 @@ SessionCheckpointService::SaveOutcome SessionCheckpointService::save_session(
         return outcome;
     }
     const auto& tag = snapshot->latest_response_id;
+    outcome.replay_only = snapshot->replay_only;
     if (allow_covered && store_.covers(session, fingerprint_json_, tag)) {
         outcome.covered = true;
         outcome.tag = std::move(snapshot->latest_response_id);
         return outcome;
     }
     try {
-        outcome.saved = store_.save(*snapshot, fingerprint_json_,
+        if (snapshot->replay_only) {
+            outcome.saved = store_.save_responses(*snapshot, fingerprint_json_, &outcome.skip);
+        } else {
+            outcome.saved = store_.save(*snapshot, fingerprint_json_,
             [&](runtime::ContinuationCheckpointWriter& writer) {
                 return Access::export_session(engine_, session, tag, writer, limits_);
             },
             [&](runtime::DurableSessionEpoch epoch, const std::function<bool()>& commit) {
                 return Access::publish_export(engine_, session, tag, epoch, commit);
             }, &outcome.skip);
+        }
     } catch (...) {
         outcome.skip.export_state = runtime::DurableExportState::Refused;
         if (outcome.skip.durable_reason == Reason::None) { outcome.skip.durable_reason = Reason::IoUnavailable; }
@@ -262,6 +287,7 @@ Json SessionCheckpointService::save(std::string_view session) {
     }
     receipt(result);
     if (outcome.saved) {
+        storage_progress_.fetch_add(1);
         Access::notify_checkpoint_progress(engine_);
     }
     return result;
@@ -289,7 +315,11 @@ std::shared_ptr<std::mutex> SessionCheckpointService::session_operation(std::str
 SessionCheckpointEraseResult SessionCheckpointService::erase(std::string_view session) {
     auto operation_mutex = session_operation(session);
     std::lock_guard operation_lock(*operation_mutex);
-    try { return store_.erase(session); }
+    try {
+        const auto result = store_.erase(session);
+        if (result != SessionCheckpointEraseResult::Conflict) { storage_progress_.fetch_add(1); }
+        return result;
+    }
     catch (...) {
         throw ApiException({.status = 503, .type = "server_error",
             .message = "checkpoint storage is unavailable", .code = "io_unavailable"});
@@ -299,18 +329,65 @@ SessionCheckpointEraseResult SessionCheckpointService::erase(std::string_view se
 bool SessionCheckpointService::erase_response(const std::string& id, const std::string& session) {
     auto operation_mutex = session_operation(session);
     std::lock_guard operation_lock(*operation_mutex);
+    Reason refusal = Reason::None;
+    bool erased = false;
     if (!responses_.get_for_session(id, session)) { return false; }
-    SessionCheckpointEraseResult erased;
-    try { erased = store_.erase(session); }
+    try {
+        auto prior = store_.load(session, fingerprint_json_);
+        if (prior.state != SessionCheckpointLoadState::Available &&
+            prior.state != SessionCheckpointLoadState::Missing) {
+            throw std::runtime_error("checkpoint deletion cannot verify prior survivors");
+        }
+        erased = responses_.erase_for_session_durably(id, session,
+            [&](std::optional<OpenAIResponseStoreSnapshot>& survivors) {
+                if (!survivors) {
+                    // erase must not conflict with this operation's own prior-generation pin.
+                    if (prior.checkpoint) { prior.checkpoint->engine.reset(); }
+                    const auto result = store_.erase(session);
+                    if (result == SessionCheckpointEraseResult::Conflict) {
+                        refusal = Reason::TransactionBusy;
+                        return false;
+                    }
+                    return true;
+                }
+                runtime::SessionCheckpointSkipDetail skip;
+                const auto& tag = survivors->latest_response_id;
+                auto saved = survivors->replay_only
+                    ? store_.save_responses(*survivors, fingerprint_json_, &skip)
+                    : store_.save(*survivors, fingerprint_json_,
+                    [&](runtime::ContinuationCheckpointWriter& writer) {
+                        return Access::export_session(engine_, session, tag, writer, limits_);
+                    },
+                    [&](runtime::DurableSessionEpoch epoch, const std::function<bool()>& commit) {
+                        return Access::publish_export(engine_, session, tag, epoch, commit);
+                    }, &skip);
+                if (!saved && (skip.durable_reason == Reason::SessionNotIndexed ||
+                               skip.durable_reason == Reason::TagMismatch)) {
+                    // DELETE never promises that an older native endpoint still resides in
+                    // cache. Preserve shipped success semantics through authenticated replay.
+                    survivors->replay_only = true;
+                    saved = store_.save_responses(*survivors, fingerprint_json_, &skip);
+                }
+                if (!saved) { refusal = skip.durable_reason; return false; }
+                receipt("save", "exported", Reason::None, true, saved->engine,
+                        saved->origin_authenticated ? "authenticated" : "unauthenticated", saved->dir_sync);
+                return true;
+            }, &refusal, prior.checkpoint ? &prior.checkpoint->responses : nullptr);
+    }
     catch (...) {
         throw ApiException({.status = 503, .type = "server_error",
             .message = "checkpoint storage is unavailable", .code = "io_unavailable"});
     }
-    if (erased == SessionCheckpointEraseResult::Conflict) {
+    if (!erased && refusal != Reason::None) {
         throw ApiException({.status = 409, .type = "server_error",
-            .message = "session checkpoint is in use", .code = "transaction_busy"});
+            .message = "response deletion requires a durable survivor checkpoint",
+            .code = std::string(runtime::durable_reason_name(refusal))});
     }
-    return responses_.erase_for_session(id, session);
+    if (erased) {
+        storage_progress_.fetch_add(1);
+        publication_changed();
+    }
+    return erased;
 }
 
 std::shared_ptr<const runtime::ContinuationCheckpointReader>
@@ -318,16 +395,21 @@ SessionCheckpointService::pin_recoverable(std::string_view session, std::string_
     try {
         auto loaded = store_.load(session, fingerprint_json_, tag);
         if (loaded.state != SessionCheckpointLoadState::Available || !loaded.checkpoint ||
+            loaded.checkpoint->responses.replay_only || !loaded.checkpoint->engine ||
             loaded.checkpoint->responses.latest_response_id != tag) { return {}; }
         return std::move(loaded.checkpoint->engine);
     } catch (...) { return {}; }
 }
 
 void SessionCheckpointService::response_stored(std::string_view session, std::uint64_t frontier_tokens) noexcept {
-    Access::notify_checkpoint_progress(engine_);
+    try {
+        if (const auto tag = responses_.latest_response_id(session)) {
+            Access::response_stored(engine_, session, *tag);
+        }
+    } catch (...) {}
+    publication_changed();
     if (stopping_.load(std::memory_order_acquire)) { return; }
     try {
-        { std::lock_guard lock(pressure_mutex_); pressure_saves_.erase(std::string(session)); }
         if (checkpoint_worth_saving(frontier_tokens, options_.session_checkpoint_min_tokens,
                                     store_.may_hold(session))) {
             (void)automatic_.enqueue(std::string(session));
@@ -336,71 +418,48 @@ void SessionCheckpointService::response_stored(std::string_view session, std::ui
 }
 
 void SessionCheckpointService::publication_changed() noexcept {
+    publication_progress_.fetch_add(1);
     Access::notify_checkpoint_progress(engine_);
 }
 
-void SessionCheckpointService::automatic_save(std::string_view session) noexcept {
-    try {
-        const auto outcome = save_session(session);
-        const bool settled = outcome.saved || outcome.covered ||
-            (!checkpoint_refusal_is_transient(outcome.skip) &&
-             outcome.skip.durable_reason != Reason::IoUnavailable &&
-             outcome.skip.durable_reason != Reason::Capacity);
-        if (outcome.saved) {
-            receipt("save", "exported", Reason::None, true, outcome.saved->engine,
-                    outcome.saved->origin_authenticated ? "authenticated" : "unauthenticated",
-                    outcome.saved->dir_sync);
-        } else if (!outcome.covered) {
-            receipt("save", outcome.skip.export_state == runtime::DurableExportState::Stale
-                                ? "stale" : "refused", outcome.skip.durable_reason, false);
+AutomaticCheckpointResult SessionCheckpointService::automatic_save(
+    std::string_view session, std::optional<std::string_view> expected_tag) {
+    if (expected_tag) {
+        if (store_.covers(session, fingerprint_json_, *expected_tag)) {
+            return {std::string(*expected_tag), Reason::None};
         }
-        { std::lock_guard lock(pressure_mutex_);
-          const auto found = pressure_saves_.find(std::string(session));
-          if (found != pressure_saves_.end() && found->second.tag == outcome.tag) {
-              found->second.settled = settled;
-          } }
-        if (settled) {
-            Access::notify_checkpoint_progress(engine_);
+        const auto publication = responses_.await_publication(
+            session, std::string(*expected_tag), std::chrono::milliseconds(0));
+        if (publication != ResponsePublicationState::Stored) {
+            const auto reason = publication == ResponsePublicationState::Publishing
+                ? Reason::TransactionBusy : Reason::RequiredResponseMissing;
+            receipt("save", "refused", reason, false);
+            return {std::string(*expected_tag), reason};
         }
-    } catch (...) {}
+    }
+    const auto outcome = save_session(session, expected_tag);
+    if (outcome.saved) {
+        storage_progress_.fetch_add(1);
+        receipt("save", "exported", Reason::None, true, outcome.saved->engine,
+                outcome.saved->origin_authenticated ? "authenticated" : "unauthenticated",
+                outcome.saved->dir_sync);
+    } else if (!outcome.covered) {
+        receipt("save", outcome.skip.export_state == runtime::DurableExportState::Stale
+                            ? "stale" : "refused", outcome.skip.durable_reason, false);
+    }
+    // A responses-only generation promises replay, not a native continuation. The reported
+    // absence of a native index settles pressure without presenting it as byte-validated.
+    if (expected_tag && outcome.replay_only && outcome.saved) {
+        receipt("save", "refused", Reason::SessionNotIndexed, false);
+    }
+    return {outcome.tag, outcome.saved || outcome.covered
+        ? (expected_tag && outcome.replay_only ? Reason::SessionNotIndexed : Reason::None)
+        : outcome.skip.durable_reason};
 }
 
 void SessionCheckpointService::save_before_eviction(
     std::span<runtime::PressureCheckpointVictim> victims) noexcept {
-    using Outcome = runtime::PressureCheckpointOutcome;
-    for (auto& victim : victims) {
-        victim.outcome = Outcome::Pending;
-        try {
-            const bool covered = store_.covers(
-                victim.session_sha256, fingerprint_json_, victim.checkpoint_tag);
-            const auto publication = covered ? ResponsePublicationState::Stored
-                : responses_.await_publication(victim.session_sha256, victim.checkpoint_tag,
-                                                std::chrono::milliseconds(0));
-            if (covered || publication == ResponsePublicationState::Absent) {
-                victim.outcome = Outcome::Settled;
-                std::lock_guard lock(pressure_mutex_);
-                pressure_saves_.erase(victim.session_sha256);
-                continue;
-            }
-            // Native completion may precede its HTTP handler. Do not export an older
-            // snapshot or manufacture retry progress while this exact reply is publishing.
-            // Its publication guard notifies again on either put or abandonment.
-            if (publication == ResponsePublicationState::Publishing) { continue; }
-            std::lock_guard lock(pressure_mutex_);
-            auto found = pressure_saves_.find(victim.session_sha256);
-            if (found != pressure_saves_.end() && found->second.tag == victim.checkpoint_tag &&
-                found->second.settled) {
-                victim.outcome = Outcome::Settled;
-                pressure_saves_.erase(found);
-                continue;
-            }
-            if (found == pressure_saves_.end() && pressure_saves_.size() >= 64) { continue; }
-            pressure_saves_[victim.session_sha256] = {.tag = victim.checkpoint_tag};
-            if (automatic_.enqueue(victim.session_sha256) == AutomaticCheckpointEnqueueResult::Dropped) {
-                pressure_saves_.erase(victim.session_sha256);
-            }
-        } catch (...) {}
-    }
+    automatic_.save_before_eviction(victims);
 }
 
 bool SessionCheckpointService::write_shutdown_report(const ShutdownCheckpointSummary& summary) const noexcept {

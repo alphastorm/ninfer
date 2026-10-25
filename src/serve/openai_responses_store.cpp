@@ -206,7 +206,7 @@ bool OpenAIResponsesStore::erase_for_session(const std::string& id,
 
 bool OpenAIResponsesStore::erase_for_session_durably(
     const std::string& id, const std::string& session,
-    const std::function<bool(const std::optional<OpenAIResponseStoreSnapshot>&)>& publish,
+    const std::function<bool(std::optional<OpenAIResponseStoreSnapshot>&)>& publish,
     runtime::DurableReason* refusal, const OpenAIResponseStoreSnapshot* persisted) {
     using Reason = runtime::DurableReason;
     if (refusal) { *refusal = Reason::None; }
@@ -253,8 +253,11 @@ bool OpenAIResponsesStore::erase_for_session_durably(
         if (snapshot && persisted->replay_only &&
             snapshot->latest_response_id == persisted->latest_response_id) { snapshot->replay_only = true; }
     }
-    std::string replay_endpoint = snapshot && snapshot->replay_only ? snapshot->latest_response_id : "";
+    // Preallocate even for a native attempt: the publisher may fall back to authenticated
+    // replay if that native endpoint is no longer indexed. Nothing allocates after its ack.
+    std::string replay_endpoint = snapshot ? snapshot->latest_response_id : "";
     if (!publish || !publish(snapshot)) { return false; }
+    if (!snapshot || !snapshot->replay_only) { replay_endpoint.clear(); }
     // Publication may wait for the Engine worker. Its pressure callback never takes this mutex.
     // All allocating work and durable acknowledgement precede the invariant-preserving erase.
     erase_locked(id);
