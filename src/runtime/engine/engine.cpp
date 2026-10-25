@@ -56,6 +56,32 @@ std::string context_capacity_error(std::size_t prompt_tokens, std::uint32_t max_
            " tokens, exceeding Engine max_context " + std::to_string(max_context);
 }
 
+runtime::DurableEngineIdentity engine_identity(const EngineOptions& options,
+                                               const MemorySummary& memory) {
+    const char* kv;
+    switch (options.kv_cache) {
+    case KvCacheStorage::BFloat16: kv = "bf16"; break;
+    case KvCacheStorage::Int8Group64: kv = "int8"; break;
+    case KvCacheStorage::Fp8E4M3Row256: kv = "fp8"; break;
+    case KvCacheStorage::Fp8KeyNvfp4Value: kv = "k8v4"; break;
+    case KvCacheStorage::Nvfp4Group16: kv = "nvfp4"; break;
+    }
+    const char* backend;
+    switch (options.speculative.backend) {
+    case SpeculativeBackend::None: backend = "none"; break;
+    case SpeculativeBackend::Mtp: backend = "mtp"; break;
+    case SpeculativeBackend::DFlash: backend = "dflash"; break;
+    case SpeculativeBackend::DFlash2: backend = "dflash2"; break;
+    }
+    return {.max_context = options.max_context, .kv_capacity = memory.kv_capacity,
+            .kv_dtype = kv, .max_concurrency = options.max_concurrency,
+            .prefill_chunk = memory.prefill_chunk, .speculative_backend = backend,
+            .draft_window = options.speculative.draft_tokens,
+            .proposal_head = options.speculative.proposal_head == ProposalHead::Optimized
+                ? "optimized" : "full",
+            .enable_vision = options.enable_vision, .use_cuda_graph = options.use_cuda_graph};
+}
+
 } // namespace
 
 class PreparedPrompt::Impl {
@@ -193,6 +219,9 @@ public:
                 if (options.purpose == EnginePurpose::CausalScoring) {
                     core = std::make_unique<runtime::CausalScoreCore<Instance>>(*instance, device);
                 } else {
+                    // Resolved identity is immutable. Capture it before the worker starts;
+                    // import must not contend for live execution just to compare K2 fields.
+                    checkpoint_identity = engine_identity(options, instance->program->memory_summary());
                     core = std::make_unique<runtime::EngineCore<Instance>>(
                         *instance, device, options, std::move(constructed.context_cost));
                 }
@@ -222,6 +251,7 @@ public:
     runtime::ActiveModel active;
     LoadSummary load;
     ModelSamplingDefaults sampling_defaults;
+    runtime::DurableEngineIdentity checkpoint_identity;
     Core core;
 };
 
@@ -493,30 +523,6 @@ auto generation_core(Variant& cores, Function&& function)
     }, cores);
 }
 
-DurableEngineIdentity engine_identity(const EngineOptions& options, const MemorySummary& memory) {
-    const char* kv;
-    switch (options.kv_cache) {
-    case KvCacheStorage::BFloat16: kv = "bf16"; break;
-    case KvCacheStorage::Int8Group64: kv = "int8"; break;
-    case KvCacheStorage::Fp8E4M3Row256: kv = "fp8"; break;
-    case KvCacheStorage::Fp8KeyNvfp4Value: kv = "k8v4"; break;
-    case KvCacheStorage::Nvfp4Group16: kv = "nvfp4"; break;
-    }
-    const char* backend;
-    switch (options.speculative.backend) {
-    case SpeculativeBackend::None: backend = "none"; break;
-    case SpeculativeBackend::Mtp: backend = "mtp"; break;
-    case SpeculativeBackend::DFlash: backend = "dflash"; break;
-    case SpeculativeBackend::DFlash2: backend = "dflash2"; break;
-    }
-    return {.max_context = options.max_context, .kv_capacity = memory.kv_capacity,
-            .kv_dtype = kv, .max_concurrency = options.max_concurrency,
-            .prefill_chunk = memory.prefill_chunk, .speculative_backend = backend,
-            .draft_window = options.speculative.draft_tokens,
-            .proposal_head = options.speculative.proposal_head == ProposalHead::Optimized
-                ? "optimized" : "full",
-            .enable_vision = options.enable_vision, .use_cuda_graph = options.use_cuda_graph};
-}
 } // namespace
 
 struct DurableEngineImport::Impl {
@@ -643,7 +649,7 @@ DurablePrepareResult CheckpointEngineAccess::prepare_import(
         !target.cache_participation || options.purpose != EnginePurpose::Generation) {
         return {.state = DurablePrepareState::PolicyDisabled, .reason = DurableReason::CacheDisabled};
     }
-    if (fingerprint.engine != engine_identity(options, engine.memory_summary()) ||
+    if (fingerprint.engine != engine.impl_->checkpoint_identity ||
         fingerprint.frontend != frontend_identity(engine)) {
         return {.state = DurablePrepareState::IdentityMismatch,
                 .reason = DurableReason::FingerprintMismatch};
