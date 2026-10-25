@@ -4,6 +4,7 @@
 // adapters normalize before this layer and render IDs, usage, and response events after it.
 
 #include "ninfer/engine.h"
+#include "runtime/contract/durable_engine_api.h"
 #include "serve/request.h"
 #include "serve/serve_options.h"
 
@@ -28,6 +29,7 @@ struct RequestCapacity;
 // attach an owning response tag to a native prompt; the public Engine API stays persistence-free.
 struct GenerationCheckpointHooks {
     std::function<void(ninfer::PreparedPrompt&, std::string_view)> set_checkpoint_tag;
+    std::function<runtime::DurableSessionEpoch(const ninfer::GenerationHandle&)> publication_epoch;
 };
 
 struct GenerationMetrics {
@@ -107,6 +109,7 @@ struct PreparedRequest {
     std::string constraint_param;
     std::vector<std::string> tool_schema_params;
     ninfer::GenerationHandle generation;
+    std::uint64_t publication_order = 0;
     ninfer::ResolvedSamplingParameters sampling;
     // Service input acquisition/bookkeeping; Engine timings own prompt and constraint preparation.
     double service_prepare_seconds = 0.0;
@@ -162,7 +165,7 @@ public:
     void warmup();
     void set_checkpoint_hooks(GenerationCheckpointHooks hooks) { checkpoint_hooks_ = std::move(hooks); }
     [[nodiscard]] bool has_checkpoint_hooks() const noexcept {
-        return static_cast<bool>(checkpoint_hooks_.set_checkpoint_tag);
+        return checkpoint_hooks_.set_checkpoint_tag && checkpoint_hooks_.publication_epoch;
     }
 
 private:

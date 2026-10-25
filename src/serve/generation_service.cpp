@@ -447,6 +447,12 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
                                                   ? ninfer::OutputConsumerMode::Streaming
                                                   : ninfer::OutputConsumerMode::Aggregate,
                                               std::move(observation), prepared.lifetime->deadline);
+        if (!checkpoint_tag.empty() && checkpoint_hooks_.publication_epoch) {
+            prepared.publication_order = checkpoint_hooks_.publication_epoch(prepared.generation).value;
+            if (prepared.publication_order == 0) {
+                throw std::logic_error("checkpointed request has no publication epoch");
+            }
+        }
         prepared.sampling   = prepared.generation.resolved_sampling();
     } catch (const ApiException&) { throw; } catch (const ninfer::RequestError& exception) {
         throw_request_error(exception, request.constraint_param, prepared.tool_schema_params);

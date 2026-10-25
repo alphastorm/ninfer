@@ -355,7 +355,8 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         try {
             commit_stored_response(openai_responses_store_, std::move(storage), id, response->body,
                                    std::move(response->output_history), prepared.preserve_thinking,
-                                   outcome.metrics.engine_request_id);
+                                   prepared.publication_order != 0 ? prepared.publication_order
+                                                                    : outcome.metrics.engine_request_id);
         } catch (const ApiException& exception) {
             const ApiError error = responses_error(exception.error());
             lifecycle->response_failure(
@@ -493,7 +494,9 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                                            finished->response.body,
                                            std::move(finished->response.output_history),
                                            stream->prepared.preserve_thinking,
-                                           outcome.metrics.engine_request_id);
+                                           stream->prepared.publication_order != 0
+                                               ? stream->prepared.publication_order
+                                               : outcome.metrics.engine_request_id);
                 } catch (const ApiException& exception) {
                     const ApiError error = responses_error(exception.error());
                     lifecycle->response_failure(

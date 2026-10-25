@@ -549,7 +549,7 @@ void HttpServer::attach(GenerationService& service, SessionCheckpointCallbacks c
     }
     if (!options_.session_checkpoint_root.empty() &&
         (!checkpoints.restore || !checkpoints.final_save || !service.has_checkpoint_hooks())) {
-        throw std::logic_error("session persistence requires restore, tag and final-save providers");
+        throw std::logic_error("session persistence requires restore, tag, epoch and final-save providers");
     }
     status_load_ = service.load_summary();
     // memory_summary waits for the completed worker boundary, including warmup publication.
