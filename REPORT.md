@@ -4,6 +4,8 @@
 - K3 signatures and `Program::checkpoint_layout()` are unchanged from `cc054663`; native and Engine-adapter runtime qualification remains pending. CMake/launcher removal authorized by Integrator; exact Engine-hook removal authorized by EngineCache.
 - Added native restart coverage for terminal, genuinely partial accepted speculative output, forced control and pause with a lagging DFlash2 frontier. Each checkpoint set contains a real frontend long anchor, input replay point and endpoint; each point is compared against its live continuation after a separate-process Host-only import, including exact token bytes. None/MTP run the same three-point terminal path. These new cases are not yet executed.
 - Added an isolated two-client #414 regression at 65/257/513-token prefixes, cold and primed, requiring shared-prefix hits, actual multi-row decode and a healthy subsequent request. BF16 is the portable default; `NINFER_TEST_KV_DTYPE=fp8` selects the reported configuration. The native admitted-tail-reader regression now has an explicit standalone selector for red→green diagnosis; the complete suite still runs it.
+- Expanded candidate `25571c063cf753e78cf39e3cbf88f56a040725a8` compiled on the CPU lane: **42 Ninja steps**, all seven requested targets linked; codec CTest **PASS**, 0.00 seconds (0.03 seconds total). Detached wait observed 304.39 seconds, including queue/build time; not a GPU qualification.
+- Main-approved K3/K7 amendment: typed Reader `IoUnavailable` becomes native `Unavailable/IoUnavailable`, never corruption; digest/size mismatch remains `Corrupt`. Native import releases all unpublished reservations through existing RAII. Fake-reader cases cover read and final-verification failure at each classification; runtime execution is pending.
 - Base: upstream `64d10fbf`; branch `rebase/persistence`.
 - RepoPrompt preparation: `prep-v0-13-0-upstream-re-DF08C8`; export `oracle-plan-2026-10-24-174946-prep-v0-13-0-upstrea-1d64.md` (private, not committed).
 - G1 tracer re-expressed on `CheckpointStore::Lease`, `StateImageStore::ReadLease`, `ContextSnapshot`, `KVHistoryStore` and native sequence mapping/commit helpers. Full StateImage includes the DFlash2 ring; settled ring frontier is required.
@@ -19,6 +21,19 @@
 - Host-only import reserves StateImages, logical pages, extents, inactive histories and checkpoint slots; payload descriptors and delivered-byte verification precede native publication. Prepared reservations abort through RAII; capacity refusal is separate from corruption. Endpoint/input/anchor records preserve exact text/media identity and DFlash2 ring/frontier metadata.
 - Phase 2 source `0e64cc77` built successfully on the approved CPU-only lane: **642 Ninja steps**, serving binary plus all five native/codec test targets linked; `ninfer_checkpoint_codec_test` **PASS**, 0.01 seconds (CTest total 0.04 seconds). CPU image SHA-256 `62a4feee8f308cde61095355ff11977986ecce388ad4f057c23014950b681326`. The queued NYC native job `...333221` was canceled before execution to move compilation off the GPU queue. GPU ownership/restart/regression tests were compiled but not executed; this is not native runtime qualification.
 - Release-blocking upstream [#419](https://github.com/Neroued/ninfer/issues/419): `write_pages` quoted growth against pre-rewind membership, while `prepare_write` first trims/forks to `begin`. The fix quotes post-trim membership and retains the strict write-side reservation guard. Regression: rewind a 65-token history to 8, then write through 65; one new page is required, plus one tail-COW page when the old endpoint remains retained. A separate fix refreshes page reservations for unchanged execution permits: readers acquired after admission can add COW demand. Its real-model regression pins the shared tail after admission, then re-reserves and executes the same unit. Both source-derived regressions await execution; resolution of [#414](https://github.com/Neroued/ninfer/issues/414) is not yet established.
+
+## Upstream-ready draft: #414 / #419 reservation accounting
+
+**Title:** Reserve post-rewind KV growth and refresh admitted units when readers change.
+
+The strict reservation check in `KVHistoryStore::prepare_write` is correct and remains intact. Two independent planning paths can underquote its real work:
+
+1. `write_pages(handle, begin, end)` previously counted all current history pages even when `begin < committed_frontier`. `prepare_write` first trims or forks the owner to `begin`, so later pages no longer belong to that writable history. The quote must use `page_count(begin)` for the post-rewind membership, then include tail COW. With native 64-token pages, rewind 65→8 and write through 65 needs one new page; retaining the old endpoint additionally requires one tail-COW page. This is the isolated `117a166a6` repair.
+2. `ProgramImpl::reserve_units` previously skipped page accounting for an already-admitted execution permit. The permit fixes execution bounds, not page writability: another checkpoint/read lease can pin a shared partial tail after admission. Refresh the reservation for the unchanged unit while preserving its permit and rollback ownership. `admitted_unit_acquires_tail_reader` binds a retained 65-token prefix, admits one decode unit, pins the tail, then requires a one-page COW reservation and executes that same unit. This is the isolated `d1f4832e1` repair.
+
+Patch summary: two production files (`kv_history.cpp`, `planning/request_plan.cpp`), no relaxed write-side assertion, no grammar bypass, no retry, and no change to token arithmetic or native page size. The minimal KV fixture is artifact-independent; the late-reader fixture uses real Program admission/execution. The separate Engine fixture launches two synchronized clients over identical 65/257/513-token prefixes, both cold and primed, and requires actual multi-row decode, reuse on primed requests and continued Engine availability.
+
+Evidence status: source-derived regressions are compiled in the predecessor handoff; the expanded D1/#414 candidate and pre-fix test-overlay batch have not yet executed. The already-observed vanilla grammar failure is not rerun merely to reconfirm it. The repaired real grammar scenario is included in the candidate batch. Do not claim #414 reproduced or resolved until the measured baseline/candidate results below are populated. This draft is for ProductOps; nothing has been posted upstream.
 
 ## Commands
 
@@ -52,6 +67,11 @@ NINFER_BUILD_HOLDER=A2 NINFER_BUILD_ENV_IMAGE=ov-build-env:master-64d10fbf-r2-cp
   "$CPU_COMMON/build-wsl.sh" "$CPU_SOURCE" "$CPU_BUILD" -- \
   ninfer-serve ninfer_context_store_test ninfer_kv_history_test ninfer_checkpoint_codec_test \
   ninfer_qwen3_5_checkpoint_restart_test ninfer_qwen3_5_native_transactions_test
+NINFER_BUILD_HOLDER=A2 NINFER_BUILD_ENV_IMAGE=ov-build-env:master-64d10fbf-r2-cpu-local \
+  "$CPU_COMMON/build-wsl.sh" "$CPU_SOURCE" "$CPU_BUILD" -- \
+  ninfer_context_store_test ninfer_kv_history_test ninfer_checkpoint_codec_test \
+  ninfer_qwen3_5_checkpoint_restart_test ninfer_qwen3_5_native_transactions_test \
+  ninfer_qwen3_5_shared_prefix_real_test ninfer_qwen3_5_grammar_real_test
 NINFER_BUILD_HOLDER=A2 NINFER_BUILD_ENV_IMAGE=ov-build-env:master-64d10fbf-r2-cpu-local \
   "$CPU_COMMON/run-in-env-wsl.sh" --gpu --env CUDA_VISIBLE_DEVICES= \
   --mount "$CPU_SOURCE" --mount "$CPU_BUILD" -- \
