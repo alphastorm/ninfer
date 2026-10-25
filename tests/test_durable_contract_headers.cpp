@@ -31,6 +31,9 @@ static_assert(std::is_same_v<decltype(&CheckpointEngineAccess::set_reclaimable_s
                              void (*)(ninfer::Engine&, std::shared_ptr<const ReclaimableSessionOracle>)>);
 static_assert(std::is_same_v<decltype(&CheckpointEngineAccess::notify_checkpoint_progress),
                              void (*)(ninfer::Engine&) noexcept>);
+static_assert(std::is_same_v<decltype(&CheckpointEngineAccess::make_read_queue),
+                             std::shared_ptr<ContinuationCheckpointReadQueue> (*)(
+                                 ninfer::Engine&, const std::filesystem::path&)>);
 
 static_assert(durable_reason_name(DurableReason::None) == "none");
 static_assert(durable_reason_name(DurableReason::StoreDisabled) == "store_disabled");
