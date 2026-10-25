@@ -1,0 +1,33 @@
+{
+  "fixture_scope": "Canonical/authentication envelope fixtures only; not a native restart corpus.",
+  "fixture_bearer_hex": "7075626c69632d636f6e74726163742d666978747572652d6b65792d6e6f742d612d63726564656e7469616c",
+  "origin_key_hex": "41c828e7a9d5ea7c04596344353b81b70ccd59e1cd6e4c4af29cef7109ecc8c2",
+  "rfc4231": [
+    {
+      "case": 1,
+      "key_hex": "0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b",
+      "message_hex": "4869205468657265",
+      "hmac_sha256": "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+    },
+    {
+      "case": 2,
+      "key_hex": "4a656665",
+      "message_hex": "7768617420646f2079612077616e7420666f72206e6f7468696e673f",
+      "hmac_sha256": "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+    }
+  ],
+  "manifests": [
+    {
+      "file": "manifest-text.json",
+      "mac_file": "manifest-text.mac",
+      "sha256": "f4b22d73fcd222b0a1f22c7b1c2db5a7d7e0a394cd009e92ae2ea5baee98b2f9",
+      "hmac_sha256": "84f8e76275e22018dabf502dbe8120ef3ced5c7ce18dde96d8c6459fd4eb077d"
+    },
+    {
+      "file": "manifest-dflash2.json",
+      "mac_file": "manifest-dflash2.mac",
+      "sha256": "0fa52ca48a3151a2c93de99d212e6f93328a24d2dd607e1c1c054c37c2579aa1",
+      "hmac_sha256": "a73139404a575b0a0d1d4cdaccd1f49a9283b50e6ebb849826fc4c18885460c3"
+    }
+  ]
+}
