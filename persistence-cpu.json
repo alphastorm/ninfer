@@ -29,6 +29,16 @@
     "detached_wait_seconds": 134.02,
     "completion_marker": "A2_CPU_PROOF_RESULT=PASS"
   },
+  "validation_run": {
+    "source_commit": "e355e55afc0e373599f8a5f86edc834ef6fd47c5",
+    "ninja_steps": 40,
+    "linked_target_count": 7,
+    "host_test_passed": true,
+    "host_test_seconds": 0.01,
+    "ctest_seconds": 0.07,
+    "detached_wait_seconds": 314.25,
+    "completion_marker": "A2_CPU_PROOF_RESULT=PASS"
+  },
   "gpu_tests_executed": false,
   "completion_marker": "A2_CPU_PROOF_RESULT=PASS"
 }
