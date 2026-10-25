@@ -1237,6 +1237,8 @@ function Invoke-Run {
                 shutdown_report = $shutdownReport
                 launch_id = $launchId
                 gpu_uuid = [string]$release.gpu_uuid
+                gpu_device = $resolvedGpuIndex
+                gpu_name = [string]$release.gpu_name
                 gpu_uuid_verified = $false
                 request_log_start_offset = $requestLogOffset
                 request_log_creation_utc_ticks = $requestLogCreationTicks

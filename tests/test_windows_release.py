@@ -182,7 +182,7 @@ class MultiGpuHostTests(unittest.TestCase):
             lane=SimpleNamespace(model_id="model", spec=json.loads(
                 (WINDOWS / "lanes/rtx3090/release-spec.json").read_text())),
             remote_json=lambda host, script, **kwargs: captured.append(script) or {},
-            config=SimpleNamespace(target="not-contacted"),
+            config=SimpleNamespace(target="not-contacted", pressure_port=18201),
         )
         qualify_native.Orchestrator.pressure_protocol(subject)
         self.assertIn(r"""'(\\*)"'""", captured[0])
@@ -290,6 +290,7 @@ class QualificationRestorationTests(unittest.TestCase):
             source_root=directory, state_dir=directory, long_fixture=fixture,
             incumbent_state_root="C:/incumbent", target="fake-target", builder="fake-builder",
             model_path="C:/model", gpu_uuid=None, resume=False, omp_root="C:/omp-fixture",
+            scratch_state_root="C:/candidate", scratch_task_suffix="I6",
         )
         subject.head = subject.tool_head = "source"
         subject.lane = SimpleNamespace(
@@ -332,7 +333,7 @@ class QualificationRestorationTests(unittest.TestCase):
                         raise qualify_native.LaneError("target refused after incumbent stop")
                     self.assertIn("$incumbentRoot='C:/incumbent'", script)
                     self.assertIn("if($true){if(-not (Test-ScopedControllerOrQuiescent $incumbentRoot))", script)
-                    return {"status": "passed", "process_count": 1}
+                    return {"status": "passed", "process_count": 0}
 
                 subject.remote_json = remote
                 with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="")):
@@ -523,6 +524,159 @@ class QualificationRestorationTests(unittest.TestCase):
             summary = json.loads((Path(temporary) / "qualification-summary.json").read_text())
             self.assertEqual(summary["status"], "failed")
             self.assertIsNone(summary["qualified_utc"])
+
+
+class ScratchQualificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.spec = json.loads((WINDOWS / "lanes/rtx4090/release-spec.json").read_text())
+        self.config = json.loads((WINDOWS / "lanes/rtx4090/server-config.json").read_text())
+        self.lane = qualify_native.Lane("rtx4090", self.spec, self.config)
+
+    def test_scratch_binding_refuses_product_roots_tasks_and_ports(self) -> None:
+        config = SimpleNamespace(
+            scratch_state_root="C:/ProgramData/NInferQualification/C3-I6/qwen38-4090-native",
+            scratch_task_suffix="I6", scratch_port=18210, pressure_port=18200,
+            api_key_file="C:/protected/operator.key", qualified_runtime_bin=None, qualified_build_receipt=None,
+        )
+        qualify_native.validate_scratch_configuration(config, self.spec)
+        for field, value in (
+            ("scratch_state_root", "C:/ProgramData/NInfer/qwen38-4090-native"),
+            ("scratch_state_root", "c:/programdata/ninfer/qwen38-4090-native"),
+            ("scratch_state_root", "C:/scratch/wrong-leaf"),
+            ("scratch_state_root", "C:/scratch/../qwen38-4090-native"),
+            ("scratch_task_suffix", "../unsafe"), ("scratch_task_suffix", "x" * 27),
+            ("scratch_port", 18082), ("pressure_port", 18210),
+            ("api_key_file", ""), ("qualified_runtime_bin", "D:/qualified/bin"),
+        ):
+            changed = copy.copy(config)
+            setattr(changed, field, value)
+            with self.subTest(field=field, value=value), self.assertRaises(qualify_native.LaneError):
+                qualify_native.validate_scratch_configuration(changed, self.spec)
+        subject = qualify_native.Orchestrator.__new__(qualify_native.Orchestrator)
+        subject.config, subject.lane = config, self.lane
+        self.assertEqual(subject.task_name, self.spec["lifecycle"]["task_name"] + "-Scratch-I6")
+        self.assertEqual(subject.state_root, config.scratch_state_root)
+        source = (ROOT / "tools/qualification/qualify_native.py").read_text()
+        self.assertNotIn("Unregister-ScheduledTask", source)
+        self.assertNotIn("Export-ScheduledTask", source)
+        self.assertIn("ScratchTaskSuffix=", source)
+
+    def test_scratch_equivalence_allows_only_the_explicit_port_change(self) -> None:
+        scratch = copy.deepcopy(self.config)
+        scratch["listen"]["port"] = 18210
+        original = copy.deepcopy(scratch)
+        qualify_native.require_port_only_equivalence(self.config, scratch, 18210)
+        self.assertEqual(scratch, original)
+        for group, key, value in (
+            ("engine", "admission_headroom_mib", 256), ("engine", "device", 1),
+            ("session_checkpoint", "require_origin_auth", False), ("listen", "port", 18082),
+        ):
+            changed = copy.deepcopy(scratch)
+            changed[group][key] = value
+            with self.subTest(group=group, key=key), self.assertRaises(qualify_native.LaneError):
+                qualify_native.require_port_only_equivalence(self.config, changed, 18210)
+
+    def test_failed_inner_receipt_cannot_be_recorded_as_a_passing_phase(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            subject = QualificationRestorationTests().orchestrator(Path(temporary))
+            with self.assertRaisesRegex(qualify_native.LaneError, "non-passing receipt"):
+                subject.phase("protocol", lambda: {"status": "failed"})
+            self.assertEqual(subject.state["phases"]["protocol"]["status"], "failed")
+
+    def stage_fixture(self) -> tuple[dict, dict]:
+        # Synthetic unit evidence exercises the adapter, not a native/GPU qualification.
+        package = {
+            "package": {"filename": "unit.tar.gz", "sha256": "a" * 64, "bytes": 1},
+            "config_sha256": "c" * 64, "binaries": {"server_sha256": "b" * 64},
+            "support_assets": {"installer_sha256": "e" * 64},
+            "upstream_base_sha": self.spec["source"]["upstream_base_sha"],
+            "lineage_base_sha": self.spec["source"]["lineage_base_sha"],
+            "build_profile": self.spec["build_profile"], "model_sha256": self.spec["model"]["sha256"],
+            "sbom": {"sha256": "f" * 64}, "dependency_sbom": {"sha256": "f" * 64},
+            "outer_sha256": "f" * 64,
+        }
+        scratch = copy.deepcopy(package)
+        scratch["package"]["sha256"] = "d" * 64
+        scratch["config_sha256"] = "e" * 64
+        package["scratch_package"] = scratch
+        package["scratch_equivalence"] = {
+            "status": "passed", "public_package_executed": False,
+            "configuration_delta": {"path": "/listen/port", "public": 18082, "scratch": 18210},
+            "public_package_sha256": package["package"]["sha256"],
+            "scratch_package_sha256": scratch["package"]["sha256"],
+            "public_configuration_sha256": package["config_sha256"],
+            "scratch_configuration_sha256": scratch["config_sha256"],
+        }
+        protocol = {"artifact_type": "ninfer_agent_protocol_smoke", "schema_version": 1,
+                    "status": "passed", "checks": {"unit_oracle": True}}
+        identity = {
+            "patch_stack_sha": "a" * 40, "source_dirty": False,
+            "upstream_base_sha": package["upstream_base_sha"], "build_profile": package["build_profile"],
+            "deployment_profile": self.spec["deployment_profile"], "model_id": self.lane.model_id,
+            "binary_sha256": "b" * 64, "model_artifact_sha256": package["model_sha256"],
+            "config_sha256": scratch["config_sha256"],
+        }
+        receipts = {
+            "package": package, "transfer_install": {"package_sha256": scratch["package"]["sha256"]},
+            "protocol": {
+                "protocol": protocol, "identity": identity,
+                "startup_attestation": {"request_log_schema": 30, "gpu_uuid_verified": True,
+                                        "gpu_index": 0, "gpu_name": self.spec["gpu"]["name"]},
+            },
+            "pressure_protocol": {"protocol": copy.deepcopy(protocol), "host_context_mib": "1",
+                                  "device_state_slots": 2},
+            "context_128k": {"prompt_tokens": 130048, "exact_output": qualify_native.EXPECTED_LONG},
+            "restart": {
+                "old_pid": 1, "new_pid": 2, "cached_input_tokens": 100,
+                "managed_stop": {"mode": "stop-event", "outcome": "graceful", "forced": False},
+                "managed_stop_flush": {"exact_output": qualify_native.FLUSH_MARKER},
+            },
+            "security": {"security": {"status": "passed", "root_dacl_protected": True,
+                                      "low_privilege_effective_read_denials": 2}},
+            "omp": {"status": "passed", "exact_final_answer": True, "typed_tool_name": "read",
+                    "tool_results": 1, "events": 1, "client_version": "unit-fixture"},
+            "benchmark_c1": {"completion_tokens": 1024, "decode_tokens_per_second": 100,
+                             "gpu_uuid": "GPU-private-unit-value"},
+            "rollback": {"status": "not_applicable", "directions": 0},
+        }
+        state = {
+            "status": "passed", "source_commit": "a" * 40,
+            "phases": {name: {"status": "passed", "receipt_sha256": "f" * 64,
+                               "receipt": receipts.get(name, {"status": "passed"})}
+                       for name in qualify_native.PHASES},
+        }
+        summary = {"status": "passed", "qualified_utc": "2026-01-01T00:00:00Z",
+                   "restoration": {"status": "passed"}}
+        return state, summary
+
+    def test_stage_adapter_binds_public_package_and_real_scratch_identity_separately(self) -> None:
+        state, summary = self.stage_fixture()
+        staged = qualify_native.stage_lane_qualification(state, summary, self.lane)
+        self.assertEqual(staged["artifact_type"], "ninfer_windows_release_qualification")
+        self.assertEqual(staged["identity"]["config_sha256"], "c" * 64)
+        self.assertEqual(staged["identity"]["qualified_configuration_sha256"], "e" * 64)
+        self.assertEqual(staged["scratch_equivalence"]["observed_identity"]["config_sha256"], "e" * 64)
+        self.assertFalse(staged["scratch_equivalence"]["public_package_executed"])
+        self.assertEqual(staged["deterministic_gates"]["rollback"], "not_applicable")
+        self.assertNotIn("GPU-private", json.dumps(staged))
+
+    def test_stage_adapter_refuses_missing_failed_or_misbound_evidence(self) -> None:
+        for damage in (
+            lambda state, summary: state["phases"]["restart"].update(status="failed"),
+            lambda state, summary: summary["restoration"].update(status="failed"),
+            lambda state, summary: state["phases"]["protocol"]["receipt"]["identity"].update(config_sha256="c" * 64),
+            lambda state, summary: state["phases"]["protocol"]["receipt"]["protocol"]["checks"].update(unit_oracle=False),
+            lambda state, summary: state["phases"]["package"]["receipt"]["scratch_equivalence"].update(public_package_executed=True),
+            lambda state, summary: state["phases"]["transfer_install"]["receipt"].update(package_sha256="f" * 64),
+            lambda state, summary: state["phases"]["restart"]["receipt"].update(new_pid=1),
+            lambda state, summary: state["phases"]["omp"]["receipt"].update(exact_final_answer=False),
+            lambda state, summary: state["phases"]["omp"]["receipt"].update(status="failed"),
+            lambda state, summary: state["phases"]["benchmark_c1"]["receipt"].update(completion_tokens=1),
+        ):
+            state, summary = self.stage_fixture()
+            damage(state, summary)
+            with self.assertRaises(qualify_native.LaneError):
+                qualify_native.stage_lane_qualification(state, summary, self.lane)
 
 
 class SharedLifecycleTreeTests(unittest.TestCase):
@@ -1008,6 +1162,74 @@ foreach($path in @({literal})){{
 ConvertTo-Json -InputObject @($failures) -Compress
 """)
         self.assertEqual(parsed, [])
+
+    def test_orchestrator_scratch_and_package_scripts_parse(self) -> None:
+        class CapturedScript(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            subject = qualify_native.Orchestrator.__new__(qualify_native.Orchestrator)
+            subject.config = SimpleNamespace(
+                source_root=ROOT, state_dir=root, builder="not-contacted", target="not-contacted",
+                dependency_sbom_tool="D:/P4/generate.py", vcpkg_resolved="D:/P4/vcpkg.json",
+                cuda_inventory="D:/P4/cuda.json", third_party_inventory="D:/P4/third-party.json",
+                runtime_inventory="D:/P4/runtime.json", scratch_port=18210, pressure_port=18200,
+                scratch_state_root="C:/qualification/qwen38-4090-native", scratch_task_suffix="I6",
+                api_key_file="C:/protected/key", model_path="C:/models/model.ninfer",
+                qualified_runtime_bin="D:/qualified/bin", qualified_build_receipt="D:/qualified/build.json",
+                gpu_uuid=None, long_fixture=root / "fixture.json", omp_root="C:/omp-fixture",
+            )
+            subject.lane = qualify_native.Lane(
+                "rtx4090", json.loads((WINDOWS / "lanes/rtx4090/release-spec.json").read_text()),
+                json.loads((WINDOWS / "lanes/rtx4090/server-config.json").read_text()),
+            )
+            subject.head = "f" * 40
+            subject.head8 = "f" * 8
+            subject.script = ROOT / "tools/qualification/qualify_native.py"
+            subject.local_stage = root / "stage"
+            subject.builder_root = "D:/overnight/C3/native-unit"
+            subject.builder_source = subject.builder_root + "/source"
+            subject.builder_bin = subject.builder_root + "/bin"
+            subject.builder_script = subject.builder_root + "/qualify_native.py"
+            subject.builder_out_a, subject.builder_out_b = "D:/C3/public-a", "D:/C3/public-b"
+            subject.builder_scratch_a, subject.builder_scratch_b = "D:/C3/scratch-a", "D:/C3/scratch-b"
+            subject.target_root = "C:/qualification"
+            subject.state = {"gpu_uuid": "GPU-00000000-0000-4000-8000-000000004090",
+                             "phases": {"package": {"receipt": {"scratch_package": {
+                                 "package": {"sha256": "e" * 64}}}}}}
+            scripts = []
+
+            def capture(host: str, script: str, **kwargs: object) -> None:
+                scripts.append(script)
+                raise CapturedScript
+
+            subject.remote_json = capture
+            with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="1700000000")), \
+                    patch.object(qualify_native, "sha256_file", return_value="f" * 64), \
+                    patch.object(qualify_native.subprocess, "check_output", return_value=b"unit-config"), \
+                    patch.object(qualify_native, "scp"), patch.object(qualify_native, "remote_ps"):
+                for method in ("consume_qualified_build", "package", "transfer_install", "protocol",
+                               "pressure_protocol", "security", "omp", "restore"):
+                    with self.subTest(method=method), self.assertRaises(CapturedScript):
+                        getattr(subject, method)()
+            paths = []
+            for index, script in enumerate(scripts):
+                path = root / f"generated-{index}.ps1"
+                path.write_text(script, encoding="utf-8")
+                paths.append(path)
+            literal = ",".join(qualify_native.ps_quote(str(path)) for path in paths)
+            errors = self.invoke(f"""
+$failures=@()
+foreach($path in @({literal})){{
+  $tokens=$null;$errors=$null
+  [void][Management.Automation.Language.Parser]::ParseFile($path,[ref]$tokens,[ref]$errors)
+  foreach($entry in $errors){{$failures+=([IO.Path]::GetFileName($path)+': '+$entry.Message)}}
+}}
+ConvertTo-Json -InputObject @($failures) -Compress
+""")
+            self.assertEqual(len(scripts), 8)
+            self.assertEqual(errors, [])
 
     def test_schema4_and_rollback_arguments_execute_without_aliases(self) -> None:
         controller = (WINDOWS / "Control-Release.ps1").read_text()
