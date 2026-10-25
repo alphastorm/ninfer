@@ -355,6 +355,7 @@ int run_cases(std::string_view label, WeightFormat format, const InvocationCase&
     const QType qtype         = qtype_for(format);
     int failures              = 0;
     std::size_t executed_peak = 0;
+    bool excluded_invocation = false;
     for (const Invocation& invocation : shape.invocations) {
         const auto t = invocation.tokens;
         GuardedDeviceBuffer output(checked_elements(shape.n, t, "output") * sizeof(std::uint16_t));
@@ -441,6 +442,11 @@ int run_cases(std::string_view label, WeightFormat format, const InvocationCase&
                 verify("permissive policy");
             }
         } catch (const std::exception& error) {
+            if (invocation.arithmetic != Arithmetic::A16 &&
+                report_excluded_path(case_label, error.what())) {
+                excluded_invocation = true;
+                continue;
+            }
             std::cerr << case_label << ": unexpected exception: " << error.what() << '\n';
             ++failures;
             continue;
@@ -452,7 +458,7 @@ int run_cases(std::string_view label, WeightFormat format, const InvocationCase&
         failures += scratch.verify_guards(case_label);
         executed_peak = std::max(executed_peak, workspace.peak_used());
     }
-    if (shape.interval_witness) {
+    if (shape.interval_witness && !excluded_invocation) {
         const auto capacity =
             ops::linear_add_workspace_capacity_bytes(qtype, shape.n, shape.k, 1, maximum_t);
         if (executed_peak != capacity) {

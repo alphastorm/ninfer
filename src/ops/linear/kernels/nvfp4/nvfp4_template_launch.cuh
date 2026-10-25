@@ -9,7 +9,9 @@
 #include "ops/linear/kernels/nvfp4/nvfp4_a16_simt.cuh"
 #include "ops/linear/kernels/nvfp4/nvfp4_a16_mma.cuh"
 #include "ops/linear/kernels/nvfp4/nvfp4_a16_sliced_k_mma.cuh"
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
 #include "ops/linear/kernels/nvfp4/nvfp4_a4_mma.cuh"
+#endif
 
 namespace ninfer::ops::detail {
 template <class Schedule, class Output, class Epilogue, class Rows = Nvfp4IdentityRows>
@@ -97,6 +99,9 @@ void launch_nvfp4_a16_sliced_k_mma(const Nvfp4A16Operands& p, Output output, Epi
 template <class Schedule, class Output, class Epilogue, class Rows = Nvfp4IdentityRows>
 void launch_nvfp4_a4_mma(const Nvfp4A4Operands& p, Output output, Epilogue epilogue,
                          cudaStream_t stream, Rows rows = {}) {
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+    throw std::runtime_error("NVFP4 A4 execution requires an sm_120a GPU");
+#else
     validate_nvfp4_operands<Schedule>(p);
     if (p.rows % Schedule::kBlockRows || p.k % Schedule::kBlockK ||
         p.k / Schedule::kBlockK < Schedule::kStages)
@@ -121,5 +126,6 @@ void launch_nvfp4_a4_mma(const Nvfp4A4Operands& p, Output output, Epilogue epilo
         else
             launch.template operator()<false>();
     });
+#endif
 }
 } // namespace ninfer::ops::detail

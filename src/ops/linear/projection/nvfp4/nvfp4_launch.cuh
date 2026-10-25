@@ -3,7 +3,7 @@
 #include "ops/linear/kernels/nvfp4/nvfp4_launch.h"
 #include "ops/linear/kernels/nvfp4/nvfp4_template_launch.cuh"
 #include "ops/linear/kernels/nvfp4/nvfp4_a16_simt.cuh"
-#include "ops/linear/kernels/nvfp4/nvfp4_a4_mma.cuh"
+
 #include "ops/linear/projection/nvfp4/nvfp4_a4_tma_launch.h"
 #include "ops/linear/kernels/nvfp4/nvfp4_a4_plan.h"
 

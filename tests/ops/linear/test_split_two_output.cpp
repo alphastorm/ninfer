@@ -404,6 +404,7 @@ int run_nvfp4() {
     int failures = 0;
     failures += run_nvfp4_case(parent, 1, ops::LinearPolicy::A16Only);
     failures += run_nvfp4_case(parent, 4, ops::LinearPolicy::AllowA8);
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
     failures += run_nvfp4_case(parent, 1, ops::LinearPolicy::AllowA4);
     failures += run_nvfp4_case(parent, 2, ops::LinearPolicy::AllowA4);
     failures += run_nvfp4_case(parent, 17, ops::LinearPolicy::AllowA4);
@@ -413,6 +414,9 @@ int run_nvfp4() {
     failures += run_nvfp4_case(parent, 1023, ops::LinearPolicy::AllowA4);
     failures += run_nvfp4_case(parent, 1024, ops::LinearPolicy::AllowA4);
     failures += run_nvfp4_case(parent, 1025, ops::LinearPolicy::AllowA4);
+#else
+    std::cout << "EXCLUDED NVFP4 split A4 (refusal checked by architecture_contract)\n";
+#endif
     return failures;
 }
 
@@ -538,6 +542,7 @@ int run_fp8() {
 
     failures += run_fp8_case(parent, 1, ops::LinearPolicy::A16Only, true);
     failures += run_fp8_case(parent, 2, ops::LinearPolicy::A16Only);
+#if !defined(NINFER_SM86)
     for (const std::int32_t tokens :
          {1,   2,   4,   8,   16,  17,  18,  32,  33,  48,  64,  65,  127,  128, 129,
           191, 192, 193, 255, 256, 257, 383, 384, 385, 511, 512, 513, 1024, 1025}) {
@@ -546,6 +551,12 @@ int run_fp8() {
     }
     for (int tokens : {4, 17, 128, 385, 512, 1025})
         failures += run_fp8_case(parent, tokens, ops::LinearPolicy::AllowA8, false, true);
+#else
+    for (int tokens : {1, 2, 4, 8, 16})
+        failures += run_fp8_case(parent, tokens, ops::LinearPolicy::AllowA8);
+    failures += run_fp8_case(parent, 4, ops::LinearPolicy::AllowA8, false, true);
+    std::cout << "EXCLUDED FP8 split A8 (refusal checked by architecture_contract)\n";
+#endif
     return failures;
 }
 
