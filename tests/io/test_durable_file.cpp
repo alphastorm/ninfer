@@ -272,12 +272,21 @@ void native_publication_guards(const std::filesystem::path& root,
     require(io::remove_tree(parent) && std::filesystem::exists(outside / "sentinel"),
             "removing swapped parent followed the junction");
     io::create_directories(parent);
+    const auto current = parent / "current";
+    write(current, std::byte{41});
     for (const auto mutation : {Mutation::FileIndex, Mutation::Volume}) {
-        PublicationScope scope(parent, mutation);
-        rejects([&] { publish(staging, parent / "escaped", "identity-change publication"); });
-        require(publication_trace.mutated && publication_trace.file_flushes == 1 &&
-                    publication_trace.parent_flushes == 0 && std::filesystem::exists(staging),
-                "publication did not re-check the pinned parent's file index and volume");
+        {
+            PublicationScope scope(parent, mutation);
+            rejects([&] { publish(staging, current, "identity-change publication"); });
+            require(publication_trace.mutated && publication_trace.file_flushes == 1 &&
+                        publication_trace.parent_flushes == 0 && std::filesystem::exists(staging),
+                    "publication did not re-check the pinned parent's file index and volume");
+        }
+        Stream previous(io::open_binary_read(current), &std::fclose);
+        std::array<std::byte, 3> bytes{};
+        io::read_exact(previous.get(), bytes);
+        require(bytes == std::array{std::byte{41}, std::byte{41}, std::byte{41}},
+                "refused publication changed the old current generation");
     }
     require(io::remove_tree(staging), "identity-test staging cleanup failed");
 }
