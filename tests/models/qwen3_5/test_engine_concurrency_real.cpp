@@ -328,7 +328,7 @@ int main() {
         ninfer::EngineOptions options;
         options.artifact_path = artifact;
         options.max_context = 4096;
-        options.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(16384);
+        options.kv_capacity = ninfer::KvCapacityPolicy::explicit_capacity(8192);
         options.max_concurrency = 2;
         options.max_pending_requests = 2;
         options.prefill_chunk = 256;
