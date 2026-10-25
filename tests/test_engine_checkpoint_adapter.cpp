@@ -1,6 +1,7 @@
 #include "runtime/engine/checkpoint_control.h"
 
 #include <algorithm>
+#include <array>
 #include <deque>
 #include <future>
 #include <iostream>
@@ -17,6 +18,10 @@ using namespace ninfer::runtime;
 // Instantiate only the request-settlement path of the production adapter. Other
 // adapter methods remain dependent, as they do for unsupported model contracts.
 struct Contract {
+    struct CacheSessionKey {
+        std::array<char, 128> bytes;
+        std::uint16_t size = 0;
+    };
     struct Program {};
     struct Instance { Program* program = nullptr; };
     struct Resources {};
