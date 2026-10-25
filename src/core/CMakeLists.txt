@@ -12,6 +12,7 @@ ninfer_internal_includes(ninfer_cpu)
 target_link_libraries(ninfer_cpu PRIVATE PkgConfig::HWLOC Threads::Threads)
 
 add_library(ninfer_core STATIC
+  build_info.cpp
   arena.cpp
   buffer.cpp
   buffer.cu
@@ -38,6 +39,7 @@ add_library(ninfer_core STATIC
   decode_graph.cpp
 )
 ninfer_internal_includes(ninfer_core)
+target_include_directories(ninfer_core PRIVATE ${PROJECT_BINARY_DIR}/generated)
 ninfer_cuda_archive(ninfer_core)
 target_link_libraries(ninfer_core PUBLIC ninfer_cpu CUDA::cudart CUDA::nvtx3 Threads::Threads)
 target_link_libraries(ninfer_core PRIVATE PkgConfig::URING)

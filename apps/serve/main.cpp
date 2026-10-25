@@ -3,6 +3,7 @@
 #include "serve/generation_service.h"
 #include "serve/http_server.h"
 #include "serve/serve_options.h"
+#include "ninfer/build_info.h"
 
 #include <spdlog/logger.h>
 
@@ -14,6 +15,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <utility>
 
 namespace {
@@ -28,6 +30,10 @@ void handle_signal(int) {
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--version") {
+        std::cout << ninfer::format_build_info("ninfer-serve") << '\n';
+        return 0;
+    }
     ninfer::serve::ServeOptions options;
     try {
         options = ninfer::serve::parse_serve_options(argc, argv);
