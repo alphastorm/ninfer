@@ -1154,6 +1154,61 @@ int test_quota_stale_publication_preserves_unrelated_currents() {
     return failures;
 }
 
+int test_replay_only_survivors_are_durable_without_native_authority() {
+    TemporaryDirectory temporary;
+    auto survivors = sample_snapshot();
+    survivors.records.pop_back();
+    survivors.latest_response_id = survivors.records.front().id;
+    survivors.replay_only = true;
+    const std::string key(32, 'r');
+    const SessionCheckpointStoreOptions options{.root = temporary.path,
+        .disk_quota_bytes = 1ULL << 20, .staging_bytes = 1ULL << 20,
+        .origin_mac_key = key, .read_queue = std::make_shared<TestReadQueue>()};
+    std::string generation;
+    int failures = 0;
+    {
+        SessionCheckpointStore store(options);
+        const auto saved = store.save_responses(survivors, fingerprint());
+        if (!saved) { return check(false, "replay-only survivor publication failed"); }
+        generation = saved->generation;
+        failures += check(saved->engine.payload_bytes == 0 &&
+                          saved->engine.frontier_tokens == 0 && saved->origin_authenticated,
+                          "replay-only save fabricated native export evidence");
+    }
+    SessionCheckpointStore restarted(options);
+    const auto loaded = restarted.load(survivors.client_session_sha256, fingerprint(),
+                                       survivors.latest_response_id);
+    failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+        loaded.checkpoint && loaded.checkpoint->responses.replay_only &&
+        loaded.checkpoint->responses.records.size() == 1 && !loaded.checkpoint->engine &&
+        loaded.checkpoint->origin_authenticated &&
+        !restarted.covers(survivors.client_session_sha256, fingerprint(), survivors.latest_response_id),
+        "restart lost replay-only survivors or granted them native release authority");
+    const auto directory = stored_generation_root(temporary.path, survivors, generation);
+    const auto manifest = nlohmann::json::parse(read_file_bytes(directory / "manifest.json"));
+    failures += check(manifest.at("mode") == "responses_only" && manifest.at("files").size() == 2 &&
+                      manifest.at("engine_payload_bytes") == 0 &&
+                      !std::filesystem::exists(directory / "engine"),
+                      "replay-only generation contains a fabricated native checkpoint");
+    const auto missing = restarted.load(survivors.client_session_sha256, fingerprint(),
+                                        "resp_private_second");
+    failures += check(missing.state == SessionCheckpointLoadState::Missing &&
+                      missing.reason == runtime::DurableReason::RequiredResponseMissing,
+                      "deleted endpoint reappeared after replay-only restart");
+    auto native = survivors;
+    native.replay_only = false;
+    runtime::SessionCheckpointSkipDetail skip;
+    failures += check(!restarted.save_responses(native, fingerprint(), &skip) &&
+                      skip.durable_reason == runtime::DurableReason::InvalidManifest,
+                      "native snapshot silently became replay-only");
+    std::filesystem::remove(directory / "manifest.mac");
+    const auto unauthenticated = restarted.load(survivors.client_session_sha256, fingerprint());
+    failures += check(unauthenticated.state == SessionCheckpointLoadState::Incompatible &&
+                      unauthenticated.reason == runtime::DurableReason::OriginRequired,
+                      "replay-only tombstone was accepted without origin authentication");
+    return failures;
+}
+
 template <class Control, class Validator>
 void install_pressure_validator(Control& control, Validator validator) {
     // The baseline has no proof hook; its existing settle path remains exercised.
@@ -2537,6 +2592,7 @@ int main(int argc, char** argv) {
     int failures = 0;
     failures += test_quota_stale_publication_preserves_unrelated_currents();
     failures += test_ordinary_pressure_preserves_same_size_corrupt_victim();
+    failures += test_replay_only_survivors_are_durable_without_native_authority();
     failures += test_sha256_streaming();
     failures += test_codec_round_trip();
     failures += test_export_refusal_diagnostics();
