@@ -78,7 +78,7 @@ int main() {
                       "unauthenticated key selected an ownership namespace");
     keyed = parse_chat_completion_request(chat_body, {}).generation;
     resolve_client_session(keyed, true, false);
-    ContextCacheHints hints;
+    ninfer::ContextCacheHints hints;
     hints.update_session_index = false;
     apply_client_identity_cache_hints(keyed, true, hints);
     failures += check(hints.session_key == "http:" + *keyed.client_session_sha256 &&
