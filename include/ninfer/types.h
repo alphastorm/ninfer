@@ -299,6 +299,7 @@ struct OutputConstraint {
     bool operator==(const OutputConstraint&) const = default;
 };
 
+enum class ToolKind : std::uint8_t { Function, Custom };
 enum class ToolChoiceMode : std::uint8_t { Auto, None, Required };
 // Basic protects every tool call. Automatic applies constraints only for strict tools or an
 // explicit selection/count policy.
@@ -341,13 +342,17 @@ struct OwnedMedia {
 struct ToolCall {
     std::string id;
     std::string name;
+    // Function arguments are JSON; Custom input is opaque text without JSON coercion.
     std::string arguments_json;
+    ToolKind kind = ToolKind::Function;
 };
 
 // Model-origin structured output. Protocol adapters own any wire-level call identifier.
 struct GeneratedToolCall {
     std::string name;
+    // Function arguments are JSON; Custom input is opaque text without JSON coercion.
     std::string arguments_json;
+    ToolKind kind = ToolKind::Function;
 };
 
 // Diagnostics for model-origin tool-call markup. Free generation uses schema-guided value
@@ -360,6 +365,7 @@ enum class ToolCallParseFallbackReason : std::uint8_t {
     InvalidToolName,
     UndeclaredTool,
     TrailingContent,
+    SchemaMismatch,
 };
 
 [[nodiscard]] inline constexpr const char*
@@ -377,6 +383,8 @@ tool_call_parse_fallback_reason_name(ToolCallParseFallbackReason reason) noexcep
         return "undeclared_tool";
     case ToolCallParseFallbackReason::TrailingContent:
         return "trailing_content";
+    case ToolCallParseFallbackReason::SchemaMismatch:
+        return "schema_mismatch";
     }
     return "malformed_structure";
 }
