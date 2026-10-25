@@ -105,16 +105,23 @@ public:
     }
 
     [[nodiscard]] std::vector<Handle> session_points(
-        const Program& program, std::string_view digest, std::string_view tag) const {
+        const Program& program, std::string_view digest, std::string_view tag,
+        bool& pending) const {
+        pending = false;
         const Owner* newest = nullptr;
         for (const auto& owner : owners_) {
-            if (owner.durable_session == digest && owner.checkpoint_tag == tag && !owner.active &&
-                (!newest || owner.publication_order > newest->publication_order)) {
+            if (owner.durable_session != digest || owner.checkpoint_tag != tag) { continue; }
+            if (owner.active) {
+                pending = true;
+                return {};
+            }
+            if (!newest || owner.publication_order > newest->publication_order) {
                 newest = &owner;
             }
         }
         std::vector<Handle> result;
         if (newest) {
+            result.reserve(newest->points.size());
             for (const auto& point : newest->points) {
                 if (program.valid_checkpoint(point.handle)) { result.push_back(point.handle); }
             }

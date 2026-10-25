@@ -82,8 +82,13 @@
                     result.reason = DurableReason::TagMismatch;
                     return;
                 }
-                const auto points = resources_.session_points(*instance_.program, digest, tag);
-                if (points.empty()) { result.reason = DurableReason::SessionNotIndexed; return; }
+                bool pending = false;
+                const auto points = resources_.session_points(*instance_.program, digest, tag, pending);
+                if (points.empty()) {
+                    result.reason = pending ? DurableReason::TransactionBusy
+                                            : DurableReason::SessionNotIndexed;
+                    return;
+                }
                 lease.emplace(instance_.program->prepare_checkpoint_export(points, limits));
                 result.reason = lease->reason();
             });

@@ -2053,7 +2053,13 @@ void test_import_publication_is_private_and_freshly_ordered() {
     const auto old = f.begin(original);
     const auto predecessor = f.program.add({1, 2}, {}, Role::Continuation);
     f.cache.publish(f.program, old, predecessor);
+    f.cache.set_checkpoint_identity(old, "session", "old-turn");
+    bool pending = false;
+    require(f.cache.session_points(f.program, "session", "old-turn", pending).empty() && pending,
+            "active native export was classified as permanent session absence");
     f.cache.finish(f.program, old, original, 1);
+    require(f.cache.session_points(f.program, "session", "old-turn", pending).size() == 1 && !pending,
+            "finished native export remained temporarily unavailable");
     auto prepared = f.cache.prepare_import_publication(11, 9, "session", "restored", 2);
     // Native commits in index.points order; endpoint is not assumed to be the last handle.
     const auto endpoint = f.program.add({1, 2, 3}, {}, Role::Continuation);
