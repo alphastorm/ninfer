@@ -1,0 +1,1830 @@
+#!/usr/bin/env python3
+"""Idempotent two-host build, qualification, and restoration lane for a native Windows NInfer release.
+
+One orchestrator serves every native lane. ``--lane`` selects the lane directory under
+``packaging/windows/lanes``; its release specification supplies the identity (release id,
+package names, GPU, architecture, power policy, task and state-root names) and its server
+configuration the model id. The builder host compiles a neutral deterministic candidate and
+packages it twice; the target host installs it beside the incumbent lineage, proves the
+protocol, 128K retrieval, restart continuation, rollback (when a previous release exists),
+state security, the OMP client run, and the bounded C1 benchmark, then restores its found state.
+When the builder and target are different hosts the package travels between them directly as
+ranged HTTP (``--transfer-tool``, a script with ``serve``/``fetch`` subcommands such as
+omp-ninfer's ``scripts/hosts/pscp.py``); one host copies locally.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import dataclasses
+from decimal import Decimal
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tarfile
+import tempfile
+import threading
+import time
+from typing import Any, Callable
+import urllib.error
+import urllib.request
+
+PHASES = (
+    "preflight",
+    "neutral_build",
+    "private_path_scan",
+    "package",
+    "transfer_install",
+    "protocol",
+    "pressure_protocol",
+    "context_128k",
+    "restart",
+    "rollback",
+    "security",
+    "omp",
+    "benchmark_c1",
+    "receipt",
+    "restore",
+)
+EMPTY_SHA256 = hashlib.sha256(b"").hexdigest()
+EXPECTED_LONG = "ORCHID=493817; COLOR=COBALT"
+LONG_PROMPT_TOKENS = 130048
+CHECKPOINT_MARKER = "CHECKPOINT-NATIVE-731942"
+# The second restart marker belongs to a session nothing ever published: only the shutdown flush
+# a managed stop now reaches can carry it across the restart.
+FLUSH_MARKER = "MANAGED-STOP-FLUSH-408137"
+# Master has a shared Host pool, not independent Host State slots. Exercise a smaller byte
+# budget equivalent to the predecessor's KV budget plus eight actual native StateImages.
+# This is pressure on the shared pool, not a claim that only StateImages can consume it.
+PRESSURE_STATE_IMAGES = 8
+PRESSURE_PORT_OFFSET = 1
+# The app-local DLLs a native package carries are the binaries' own imports resolved from the
+# builder's vcpkg tree plus the DirectStorage redistributables the build stages beside the apps.
+DIRECTSTORAGE_DLLS = ("dstorage.dll", "dstoragecore.dll")
+
+
+@dataclasses.dataclass(frozen=True)
+class Lane:
+    """The identity a lane's release specification and server configuration declare."""
+
+    name: str
+    spec: dict[str, Any]
+    config: dict[str, Any]
+
+    @classmethod
+    def load(cls, source_root: Path, name: str, head: str) -> "Lane":
+        lane_dir = f"packaging/windows/lanes/{name}"
+        try:
+            spec = json.loads(run(["git", "show", f"{head}:{lane_dir}/release-spec.json"], cwd=source_root).stdout)
+            config = json.loads(run(["git", "show", f"{head}:{lane_dir}/server-config.json"], cwd=source_root).stdout)
+        except LaneError as error:
+            raise LaneError(f"lane {name} is not committed at {head[:8]}: {error}") from error
+        if spec.get("artifact_type") != "ninfer_windows_release_spec" or spec.get("schema_version") != 4:
+            raise LaneError("release specification is not a schema 4 native lane spec")
+        if config.get("schema_version") != 4 or spec.get("lane") != name or config.get("release_id") != spec.get("release_id"):
+            raise LaneError("lane specification and server configuration disagree")
+        declared_mib = str(config.get("context_cache", {}).get("host_context_mib", ""))
+        if not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", declared_mib):
+            raise LaneError("lane must declare an exact positive shared Host budget")
+        expected_mib = host_context_mib(spec)
+        if Decimal(declared_mib) != Decimal(expected_mib):
+            raise LaneError("lane shared Host budget differs from its native layout translation")
+        return cls(name, spec, config)
+
+    @property
+    def release_id(self) -> str:
+        return self.spec["release_id"]
+
+    @property
+    def release_version(self) -> str:
+        return "v" + self.spec["release_version"]
+
+    @property
+    def asset_stem(self) -> str:
+        return f"{self.spec['product_prefix']}-{self.release_version}-{self.spec['platform']}"
+
+    @property
+    def package_name(self) -> str:
+        return self.asset_stem + ".tar.gz"
+
+    @property
+    def source_name(self) -> str:
+        return f"{self.spec['product_prefix']}-{self.release_version}-source.tar.gz"
+
+    @property
+    def spdx_name(self) -> str:
+        return self.asset_stem + ".spdx.json"
+
+    @property
+    def cuda_architecture(self) -> str:
+        return self.spec["gpu"]["cmake_cuda_architecture"]
+
+    @property
+    def build_profile(self) -> str:
+        return self.spec["build_profile"]
+
+    @property
+    def upstream_sha(self) -> str:
+        return self.spec["source"]["upstream_base_sha"]
+
+    @property
+    def lineage_sha(self) -> str:
+        return self.spec["source"]["lineage_base_sha"]
+
+    @property
+    def model_sha256(self) -> str:
+        return self.spec["model"]["sha256"]
+
+    @property
+    def model_id(self) -> str:
+        return self.config["model_id"]
+
+    @property
+    def task_name(self) -> str:
+        return self.spec["lifecycle"]["task_name"]
+
+    @property
+    def state_root(self) -> str:
+        return "C:/ProgramData/NInfer/" + self.spec["lifecycle"]["state_root_name"]
+
+    @property
+    def owner_power_limit_w(self) -> int:
+        return int(self.spec["lifecycle"]["gpu_owner_controller_protocol"]["owner_power_limit_w"])
+
+    @property
+    def qualified_power_limit_w(self) -> int:
+        value = self.spec["lifecycle"]["gpu_owner_controller_protocol"].get("qualified_power_limit_w")
+        return 0 if value is None else int(value)
+
+    @property
+    def managed_power_envelope_w(self) -> float | None:
+        value = self.spec["lifecycle"]["gpu_owner_controller_protocol"].get("managed_power_envelope_w")
+        return None if value is None else float(value)
+CREDENTIAL_PATTERNS = (
+    re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+    re.compile(rb"\bAKIA[A-Z0-9]{16}\b"),
+    re.compile(rb"\bgh[pousr]_[A-Za-z0-9]{36,}\b"),
+)
+
+
+class LaneError(RuntimeError):
+    pass
+
+
+def host_context_mib(spec: dict[str, Any], *, state_images: int | None = None) -> str:
+    translation = spec.get("host_context_translation")
+    fields = ("predecessor_host_kv_mib", "predecessor_host_state_slots", "native_state_image_bytes",
+              "host_context_bytes")
+    if not isinstance(translation, dict) or any(
+        type(translation.get(field)) is not int or translation[field] <= 0 for field in fields
+    ):
+        raise LaneError("lane lacks its layout-aware shared Host budget translation")
+    full_bytes = ((translation["predecessor_host_kv_mib"] << 20) +
+                  translation["predecessor_host_state_slots"] * translation["native_state_image_bytes"])
+    if full_bytes != translation["host_context_bytes"]:
+        raise LaneError("lane shared Host byte budget translation is inconsistent")
+    count = translation["predecessor_host_state_slots"] if state_images is None else state_images
+    total_bytes = (translation["predecessor_host_kv_mib"] << 20) + count * translation["native_state_image_bytes"]
+    return format(Decimal(total_bytes) / Decimal(1 << 20), "f")
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def atomic_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def run(
+    command: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout: int = 600,
+    check: bool = True,
+    text: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.run(
+        command,
+        cwd=cwd,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=text,
+        timeout=timeout,
+    )
+    if check and result.returncode:
+        stdout = result.stdout[-4000:] if isinstance(result.stdout, str) else ""
+        stderr = result.stderr[-4000:] if isinstance(result.stderr, str) else ""
+        raise LaneError(
+            f"command failed ({result.returncode}): {command[0]}\n{stdout}\n{stderr}"
+        )
+    return result
+
+
+def ps_encoded(script: str) -> str:
+    return base64.b64encode(script.encode("utf-16le")).decode("ascii")
+
+
+def remote_ps(host: str, script: str, *, timeout: int = 600) -> str:
+    encoded = ps_encoded(script)
+    if len(encoded) > 7000:
+        digest = hashlib.sha256(script.encode("utf-8")).hexdigest()[:16]
+        remote_path = f"C:/Windows/Temp/ninfer-qualification-{digest}.ps1"
+        local_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", suffix=".ps1", delete=False
+            ) as stream:
+                stream.write(script)
+                local_path = Path(stream.name)
+            scp(str(local_path), remote_spec(host, remote_path))
+            result = run(
+                [
+                    "ssh", "-T", host, "powershell", "-NoProfile", "-NonInteractive",
+                    "-ExecutionPolicy", "Bypass", "-OutputFormat", "Text", "-File", remote_path,
+                ],
+                timeout=timeout,
+            )
+            return result.stdout
+        finally:
+            if local_path is not None:
+                local_path.unlink(missing_ok=True)
+            run(
+                [
+                    "ssh", "-T", host, "powershell", "-NoProfile", "-NonInteractive",
+                    "-Command", f"Remove-Item -LiteralPath '{remote_path}' -Force -ErrorAction SilentlyContinue",
+                ],
+                timeout=60,
+                check=False,
+            )
+    result = run(
+        [
+            "ssh",
+            "-T",
+            host,
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-OutputFormat",
+            "Text",
+            "-EncodedCommand",
+            encoded,
+        ],
+        timeout=timeout,
+    )
+    return result.stdout
+
+
+def compact_json_from_output(output: str) -> dict[str, Any]:
+    for line in reversed(output.splitlines()):
+        line = line.strip()
+        if line.startswith("{") and line.endswith("}"):
+            value = json.loads(line)
+            if isinstance(value, dict):
+                return value
+    raise LaneError("command emitted no compact JSON receipt")
+
+
+def ps_quote(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+GPU_UUID = re.compile(r"GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}")
+
+TARGET_CONTROLLER_GUARD = r"""
+function Test-ScopedControllerOrQuiescent([string]$Root) {
+  $state=Get-Content (Join-Path $Root 'state.json') -Raw|ConvertFrom-Json
+  $owner=$state.gpu_owner
+  if((Get-FileHash ([string]$owner.controller_path) -Algorithm SHA256).Hash.ToLowerInvariant() -cne [string]$owner.controller_sha256){throw 'installed owner hash mismatch'}
+  if((Get-Command -Name ([string]$owner.controller_path)).Parameters.ContainsKey('GpuUuid')){return $true}
+  $task=Get-ScheduledTask -TaskName ([string]$state.task_name) -ErrorAction SilentlyContinue
+  if(($null -ne $task -and [string]$task.State -ceq 'Running') -or
+     (Test-Path (Join-Path $Root 'runtime.json')) -or
+     (Test-Path (Join-Path $Root 'gpu-owner-lease.json')) -or
+     (Test-Path (Join-Path $Root 'gpu-owner-state/lease.json'))){throw 'legacy unscoped installation must be safely quiescent before qualification'}
+  return $false
+}
+"""
+
+
+def gpu_uuid_argument(value: str) -> str:
+    if not GPU_UUID.fullmatch(value):
+        raise argparse.ArgumentTypeError("expected a full GPU UUID (GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)")
+    return value
+
+
+def select_qualified_gpu(rows: list[str], spec: dict[str, Any], requested: str | None) -> dict[str, Any]:
+    """Match the installer's lane name/compute-capability rule, not the packaged ordinal."""
+    if requested is not None:
+        gpu_uuid_argument(requested)
+    qualified = []
+    for row in rows:
+        parts = [part.strip() for part in row.split(",")]
+        if (len(parts) != 6 or not parts[0].isdigit() or not GPU_UUID.fullmatch(parts[1])
+                or not re.fullmatch(r"[0-9a-fA-F]{8}:[0-9a-fA-F]{2}:[0-9a-fA-F]{2}\.[0-7]", parts[3])):
+            raise LaneError("target GPU selection returned an invalid row")
+        if requested and parts[1].lower() != requested.lower():
+            continue
+        if parts[2] == spec["gpu"]["name"] and parts[4] == spec["gpu"]["compute_capability"]:
+            qualified.append(dict(index=int(parts[0]), uuid=parts[1], name=parts[2], pci_bus_id=parts[3].upper()))
+    if not qualified:
+        raise LaneError("no qualified target GPU (or --gpu-uuid is not qualified for this lane)")
+    if len(qualified) != 1:
+        raise LaneError("more than one qualified target GPU; select one with --gpu-uuid")
+    return qualified[0]
+
+
+def remote_spec(host: str, path: str) -> str:
+    return f"{host}:{path}"
+
+
+def scp(source: str, destination: str, *, through_local: bool = False, timeout: int = 900) -> None:
+    command = ["scp", "-q"]
+    if through_local:
+        command.append("-3")
+    command.extend([source, destination])
+    run(command, timeout=timeout)
+
+
+def request_json(
+    base_url: str,
+    key: str,
+    method: str,
+    path: str,
+    body: dict[str, Any] | None = None,
+    timeout: int = 1800,
+) -> dict[str, Any]:
+    data = None if body is None else json.dumps(body).encode("utf-8")
+    request = urllib.request.Request(
+        base_url + path,
+        data=data,
+        method=method,
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        value = json.load(response)
+    if not isinstance(value, dict):
+        raise LaneError(f"{path} returned a non-object")
+    return value
+
+
+def read_key(path: Path) -> str:
+    value = path.read_bytes().rstrip(b"\r\n")
+    if not value or b"\r" in value or b"\n" in value or b"\0" in value:
+        raise LaneError("API-key file must contain exactly one non-empty line")
+    return value.decode("utf-8")
+
+
+def response_text(value: dict[str, Any]) -> str:
+    output = value.get("output")
+    if not isinstance(output, list):
+        raise LaneError("Responses output is missing")
+    chunks: list[str] = []
+    for item in output:
+        if not isinstance(item, dict):
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                chunks.append(part["text"])
+    return "".join(chunks)
+
+
+def digest(label: str) -> str:
+    return hashlib.sha256(f"ninfer-native-orchestrated-v1/{label}".encode()).hexdigest()
+
+
+def marker_findings(
+    data: bytes,
+    dynamic_home: bytes | None = None,
+    private_markers: tuple[bytes, ...] = (),
+) -> int:
+    lowered = data.lower()
+    markers: list[bytes] = list(private_markers)
+    if dynamic_home:
+        markers.append(dynamic_home.lower().rstrip(b"\\/") + b"\\")
+    return sum(lowered.count(marker) for marker in markers) + sum(
+        len(pattern.findall(data)) for pattern in CREDENTIAL_PATTERNS
+    )
+
+
+def scan_directory(path: Path) -> dict[str, Any]:
+    dynamic_home = os.environ.get("USERPROFILE", "").encode()
+    files = 0
+    size = 0
+    findings = 0
+    for candidate in sorted(path.rglob("*")):
+        if not candidate.is_file():
+            continue
+        files += 1
+        size += candidate.stat().st_size
+        findings += marker_findings(candidate.read_bytes(), dynamic_home)
+    return {"files": files, "bytes": size, "findings": findings}
+
+
+def scan_archive(path: Path, source_archive: bool = False) -> dict[str, Any]:
+    dynamic_home = os.environ.get("USERPROFILE", "").encode()
+    files = 0
+    size = 0
+    findings = 0
+    generic_paths = 0
+    generic = re.compile(
+        rb"(?:[A-Za-z]:\\Users\\(?:<[^>]+>|USER|username)|/Users/(?:<[^>]+>|USER|username))",
+        re.IGNORECASE,
+    )
+    with tarfile.open(path, "r:*") as archive:
+        for member in archive:
+            if not member.isfile():
+                continue
+            stream = archive.extractfile(member)
+            if stream is None:
+                continue
+            data = stream.read()
+            files += 1
+            size += len(data)
+            findings += marker_findings(data, dynamic_home)
+            if source_archive:
+                generic_paths += len(generic.findall(data))
+    return {
+        "files": files,
+        "bytes": size,
+        "findings": findings,
+        "generic_home_references": generic_paths,
+    }
+
+
+@dataclasses.dataclass
+class Config:
+    source_root: Path
+    state_dir: Path
+    lane: str
+    builder: str
+    target: str
+    builder_vcpkg: str
+    builder_cuda_compiler: str
+    builder_cxx_compiler: str
+    model_path: str
+    long_fixture: Path
+    omp_root: str
+    transfer_tool: Path | None
+    incumbent_state_root: str | None
+    resume: bool
+    dry_run: bool
+    through_phase: str | None
+    candidate_source: str | None
+    upgrade_orchestrator_state: bool
+    gpu_uuid: str | None = None
+
+
+class Orchestrator:
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.tool_head = run(["git", "rev-parse", "HEAD"], cwd=config.source_root).stdout.strip()
+        self.head = config.candidate_source or self.tool_head
+        run(["git", "cat-file", "-e", f"{self.head}^{{commit}}"], cwd=config.source_root)
+        self.head8 = self.head[:8]
+        self.lane = Lane.load(config.source_root, config.lane, self.head)
+        self.script = Path(__file__).resolve()
+        self.script_sha = sha256_file(self.script)
+        self.state_path = config.state_dir / "state.json"
+        self.receipt_dir = config.state_dir / "receipts"
+        self.local_stage = config.state_dir / "stage"
+        self.builder_root = f"C:/b/ninfer-{self.lane.name}-{self.head8}"
+        self.builder_source = f"{self.builder_root}/source"
+        self.builder_build = f"{self.builder_root}/build"
+        self.builder_bin = f"{self.builder_root}/neutral-bin"
+        self.builder_out_a = f"{self.builder_root}/package-a"
+        self.builder_out_b = f"{self.builder_root}/package-b"
+        self.builder_script = f"{self.builder_root}/qualify_native.py"
+        self.target_root = f"C:/ProgramData/NInferQualification/orchestrated-{self.lane.name}-{self.head8}"
+        self.state = self._load_state()
+
+    @property
+    def state_root(self) -> str:
+        return self.lane.state_root
+
+    @property
+    def gpu_uuid(self) -> str:
+        bound = self.state.get("gpu_uuid")
+        if bound:
+            gpu_uuid_argument(bound)
+            if self.config.gpu_uuid and self.config.gpu_uuid.lower() != bound.lower():
+                raise LaneError("checkpoint belongs to another GPU UUID")
+            return bound
+        result = self.remote_json(self.config.target, """
+$ErrorActionPreference='Stop'
+if(Test-Path Env:CUDA_VISIBLE_DEVICES){throw 'CUDA_VISIBLE_DEVICES must be absent'}
+$rows=@(nvidia-smi.exe --query-gpu=index,uuid,name,pci.bus_id,compute_cap,driver_version --format=csv,noheader,nounits)
+if($LASTEXITCODE -ne 0){throw 'target GPU selection failed'}
+[Console]::Out.WriteLine((@{rows=$rows}|ConvertTo-Json -Compress))
+""")
+        selected = select_qualified_gpu(result["rows"], self.lane.spec, self.config.gpu_uuid)
+        self.state["gpu_uuid"] = selected["uuid"]
+        self._save()
+        return selected["uuid"]
+
+    def _load_state(self) -> dict[str, Any]:
+        if self.state_path.exists():
+            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+            if state.get("phases") and not state.get("gpu_uuid"):
+                raise LaneError("unscoped qualification checkpoints cannot be reused; use a fresh state directory")
+            if state.get("source_commit") != self.head or state.get("lane") != self.lane.name:
+                raise LaneError("checkpoint belongs to another source, lane, or orchestrator revision")
+            if state.get("orchestrator_sha256") != self.script_sha:
+                if not self.config.upgrade_orchestrator_state:
+                    raise LaneError("checkpoint belongs to another source or orchestrator revision")
+                runtime_diff = run(
+                    [
+                        "git", "diff", "--name-only", self.head, self.tool_head, "--",
+                        "src", "include", "apps", "cmake", "CMakeLists.txt", "CMakePresets.json",
+                    ],
+                    cwd=self.config.source_root,
+                ).stdout.strip()
+                if runtime_diff:
+                    raise LaneError("qualification-tool advancement changed runtime source paths")
+                revisions = state.setdefault("orchestrator_revisions", [])
+                revisions.append(state.get("orchestrator_sha256"))
+                state["orchestrator_sha256"] = self.script_sha
+                state["qualification_tool_commit"] = self.tool_head
+                atomic_json(self.state_path, state)
+            return state
+        state = {
+            "artifact_type": "ninfer_native_qualification_orchestration",
+            "schema_version": 2,
+            "lane": self.lane.name,
+            "release_id": self.lane.release_id,
+            "source_commit": self.head,
+            "orchestrator_sha256": self.script_sha,
+            "qualification_tool_commit": self.tool_head,
+            "status": "not_started",
+            "current_phase": None,
+            "phases": {},
+            "restoration": {"status": "required"},
+        }
+        atomic_json(self.state_path, state)
+        return state
+
+    def _save(self) -> None:
+        atomic_json(self.state_path, self.state)
+
+    def verify_checkpoint(self, name: str, receipt: dict[str, Any]) -> bool:
+        if name == "preflight":
+            return False  # Every window must re-establish target quiescence and found state.
+        try:
+            if name == "neutral_build":
+                script = f"""
+$ok=$true
+$items={ps_quote(json.dumps(receipt.get('files', []), separators=(',', ':')))}|ConvertFrom-Json
+foreach($item in @($items)){{
+  $path=Join-Path {ps_quote(self.builder_bin)} ([string]$item.name)
+  if(-not(Test-Path $path -PathType Leaf) -or (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant() -ne [string]$item.sha256){{$ok=$false}}
+}}
+[Console]::Out.WriteLine(([ordered]@{{ok=$ok}}|ConvertTo-Json -Compress))
+"""
+                return bool(self.remote_json(self.config.builder, script)["ok"])
+            if name == "package":
+                expected = receipt["package"]["sha256"]
+                script = f"""
+$path=Join-Path {ps_quote(self.builder_out_a)} {ps_quote(self.lane.package_name)}
+$ok=(Test-Path $path -PathType Leaf) -and ((Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant() -eq {ps_quote(expected)})
+[Console]::Out.WriteLine(([ordered]@{{ok=$ok}}|ConvertTo-Json -Compress))
+"""
+                return bool(self.remote_json(self.config.builder, script)["ok"])
+            if name == "transfer_install":
+                script = f"""
+$s=Get-Content (Join-Path {ps_quote(self.state_root)} 'state.json') -Raw|ConvertFrom-Json
+$r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
+[Console]::Out.WriteLine(([ordered]@{{ok=([string]$r.patch_stack_sha -eq {ps_quote(self.head)} -and [string]$r.gpu_uuid -ceq {ps_quote(self.gpu_uuid)})}}|ConvertTo-Json -Compress))
+"""
+                return bool(self.remote_json(self.config.target, script)["ok"])
+            evidence_names = {
+                "protocol": "agent-protocol.json",
+                "context_128k": "long-context-128k.json",
+                "restart": "checkpoint-restart-proof.json",
+                "security": "state-security.json",
+                "benchmark_c1": "managed-c1.json",
+            }
+            if name in evidence_names:
+                script = f"""
+$path=Join-Path {ps_quote(self.target_root)} {ps_quote('evidence/' + evidence_names[name])}
+[Console]::Out.WriteLine(([ordered]@{{ok=(Test-Path $path -PathType Leaf)}}|ConvertTo-Json -Compress))
+"""
+                return bool(self.remote_json(self.config.target, script)["ok"])
+            if name == "receipt":
+                return (self.config.state_dir / "qualification-summary.json").is_file()
+            if name == "rollback":
+                return True
+            if name == "restore":
+                script = f"""
+$root={ps_quote(self.state_root)}
+$status=&(Join-Path $root 'Control-Release.ps1') -Action Status -StateRoot $root|ConvertFrom-Json
+$limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=power.limit --format=csv,noheader,nounits)
+[Console]::Out.WriteLine(([ordered]@{{ok=([string]$status.process_state -eq 'stopped' -and -not [bool]$status.gpu_owner.lease_active -and $limit -eq {self.lane.owner_power_limit_w})}}|ConvertTo-Json -Compress))
+"""
+                return bool(self.remote_json(self.config.target, script)["ok"])
+            return True
+        except Exception:
+            return False
+
+    def phase(self, name: str, action: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+        existing = self.state["phases"].get(name)
+        if self.config.resume and existing and existing.get("status") == "passed":
+            receipt = existing["receipt"]
+            if self.verify_checkpoint(name, receipt):
+                return receipt
+        self.state["status"] = "running"
+        self.state["current_phase"] = name
+        self.state["phases"][name] = {
+            "status": "running",
+            "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        self._save()
+        try:
+            receipt = action()
+        except Exception as error:
+            self.state["status"] = "failed"
+            self.state["phases"][name] = {
+                "status": "failed",
+                "error": str(error),
+                "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            if name == "restore":
+                self.state["restoration"] = {"status": "failed", "error": str(error)}
+                self._record_summary_restoration(self.state["restoration"])
+            self._save()
+            raise
+        receipt_path = self.receipt_dir / f"{name}.json"
+        atomic_json(receipt_path, receipt)
+        self.state["phases"][name] = {
+            "status": "passed",
+            "receipt": receipt,
+            "receipt_sha256": sha256_file(receipt_path),
+            "finished_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        self._save()
+        return receipt
+
+    def stage_script(self, host: str, destination: str) -> None:
+        scp(str(self.script), remote_spec(host, destination))
+
+    def remote_json(self, host: str, script: str, timeout: int = 600) -> dict[str, Any]:
+        if host == self.config.target:
+            script = TARGET_CONTROLLER_GUARD + script
+        return compact_json_from_output(remote_ps(host, script, timeout=timeout))
+
+    def preflight(self) -> dict[str, Any]:
+        if run(["git", "status", "--porcelain"], cwd=self.config.source_root).stdout.strip():
+            raise LaneError("source worktree must be clean before qualification")
+        runtime_diff = run(
+            [
+                "git", "diff", "--name-only", self.head, self.tool_head, "--",
+                "src", "include", "apps", "cmake", "CMakeLists.txt", "CMakePresets.json",
+            ],
+            cwd=self.config.source_root,
+        ).stdout.strip()
+        if runtime_diff:
+            raise LaneError("qualification-tool advancement changed runtime source paths")
+        if self.config.long_fixture.stat().st_size <= 0:
+            raise LaneError("128K fixture is empty")
+        run(["ssh", "-T", self.config.builder, "exit"], timeout=30)
+        run(["ssh", "-T", self.config.target, "exit"], timeout=30)
+        incumbent = self.config.incumbent_state_root
+        selector = f"ninfer-client-acceptance/{self.lane.model_id}"
+        # Read-only facts before anything stops: the incumbent's run state, and the models the OMP client fixture
+        # declares, listed by that client's own parser (no request reaches a provider). Listing runs last because it
+        # changes this session's environment.
+        found = self.remote_json(
+            self.config.target,
+            f"""
+$ErrorActionPreference='Stop'
+$incumbentRoot={ps_quote(incumbent or "")}
+$incumbentRunning=$false
+if($incumbentRoot -and (Test-Path (Join-Path $incumbentRoot 'Control-Release.ps1')) -and (Test-ScopedControllerOrQuiescent $incumbentRoot)){{
+  $incumbentStatus=&(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Status -StateRoot $incumbentRoot|ConvertFrom-Json
+  $incumbentRunning=([string]$incumbentStatus.process_state -eq 'running')
+}}
+$ompRoot={ps_quote(self.config.omp_root)}
+$env:LOCALAPPDATA=Join-Path $ompRoot 'localappdata'
+$env:PI_CODING_AGENT_DIR=Join-Path $ompRoot 'agent'
+$env:NO_COLOR='1'
+$listing=&(Join-Path $env:LOCALAPPDATA 'OMP\\omp.cmd') models ninfer-client-acceptance --json --no-extensions|Out-String
+if($LASTEXITCODE -ne 0){{throw 'the OMP client fixture could not list its models'}}
+$ompModels=@(@(($listing|ConvertFrom-Json).models)|ForEach-Object{{[string]$_.selector}})
+[Console]::Out.WriteLine(([ordered]@{{incumbent_state_root=$incumbentRoot;incumbent_was_running=$incumbentRunning;omp_models=$ompModels}}|ConvertTo-Json -Compress))
+""",
+        )
+        if selector not in found.pop("omp_models"):
+            raise LaneError(f"the OMP client fixture does not declare {selector}: add it to {self.config.omp_root}/agent/models.yml")
+        pending = self.state.get("found_incumbent")
+        if pending and self.state["restoration"].get("status") != "passed":
+            if pending["incumbent_state_root"] != found["incumbent_state_root"]:
+                raise LaneError("restore the recorded incumbent before changing its state root")
+            # A crash after Stop must not turn an outstanding restart obligation into 'found stopped'.
+            found["incumbent_was_running"] |= pending["incumbent_was_running"]
+        self.state["found_incumbent"] = found
+        self.state["restoration"] = {"status": "required"}
+        self.state["phases"].pop("restore", None)
+        self._record_summary_restoration(self.state["restoration"])
+        self._save()  # Write-ahead: no target-side stop is permitted before this succeeds.
+        status = self.remote_json(
+            self.config.target,
+            f"""
+$ErrorActionPreference='Stop'
+$root={ps_quote(self.state_root)}
+$incumbentRoot={ps_quote(incumbent or "")}
+$incumbentRunning={'$true' if found['incumbent_was_running'] else '$false'}
+if($incumbentRoot -and (Test-Path (Join-Path $incumbentRoot 'Control-Release.ps1')) -and (Test-ScopedControllerOrQuiescent $incumbentRoot)){{
+  &(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Stop -StateRoot $incumbentRoot|Out-Null
+}}
+$controller=Join-Path $root 'Control-Release.ps1'
+if((Test-Path $controller) -and (Test-ScopedControllerOrQuiescent $root)){{&$controller -Action Stop -StateRoot $root|Out-Null}}
+$active='';$previous='';$modelSha=''
+if(Test-Path (Join-Path $root 'state.json')){{
+  $s=Get-Content (Join-Path $root 'state.json') -Raw|ConvertFrom-Json
+  $r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
+  $active=[string]$s.active_release;$previous=[string]$s.previous_release;$modelSha=[string]$r.model_artifact_sha256
+}}
+if((Get-Process ninfer-serve -ErrorAction SilentlyContinue).Count -ne 0){{throw 'a ninfer-serve process is still running on the target'}}
+$limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=power.limit --format=csv,noheader,nounits)
+$gpu=nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits
+$modelPath={ps_quote(self.config.model_path)}
+if(-not (Test-Path -LiteralPath $modelPath -PathType Leaf)){{throw 'pinned model artifact is missing on the target'}}
+[Console]::Out.WriteLine(([ordered]@{{lineage_exists=(Test-Path (Join-Path $root 'state.json'));active_release=$active;previous_release=$previous;incumbent_state_root=$incumbentRoot;incumbent_was_running=$incumbentRunning;power_limit_w=$limit;gpu=[string]$gpu;model_sha256=$modelSha}}|ConvertTo-Json -Compress))
+""",
+            timeout=900,
+        )
+        if status["power_limit_w"] != self.lane.owner_power_limit_w:
+            raise LaneError(f"target is not at its {self.lane.owner_power_limit_w} W owner state")
+        if status["lineage_exists"] and status["model_sha256"] != self.lane.model_sha256:
+            raise LaneError("target predecessor model binding changed")
+        if not status["gpu"].startswith(self.lane.spec["gpu"]["name"]):
+            raise LaneError(f"target GPU is not the lane's {self.lane.spec['gpu']['name']}")
+        return {
+            "lane": self.lane.name,
+            "release_id": self.lane.release_id,
+            "source_commit": self.head,
+            "builder": self.config.builder,
+            "target": self.config.target,
+            "initial": status,
+            "long_fixture_sha256": sha256_file(self.config.long_fixture),
+        }
+
+    def neutral_build(self) -> dict[str, Any]:
+        self.local_stage.mkdir(parents=True, exist_ok=True)
+        bundle = self.local_stage / "source.bundle"
+        run(["git", "bundle", "create", str(bundle), "HEAD"], cwd=self.config.source_root)
+        bundle_sha = sha256_file(bundle)
+        bootstrap = f"""
+$ErrorActionPreference='Stop'
+$root={ps_quote(self.builder_root)}
+Get-CimInstance Win32_Process | Where-Object {{
+  [string]$_.CommandLine -like ('*'+$root+'*') -and $_.Name -in @('cmake.exe','ninja.exe','nvcc.exe')
+}} | ForEach-Object {{ & taskkill.exe /PID $_.ProcessId /T /F 2>$null | Out-Null }}
+Start-Sleep -Seconds 1
+if(Test-Path $root){{Remove-Item -LiteralPath $root -Recurse -Force}}
+New-Item -ItemType Directory -Path $root|Out-Null
+"""
+        remote_ps(self.config.builder, bootstrap)
+        scp(str(bundle), remote_spec(self.config.builder, f"{self.builder_root}/source.bundle"))
+        self.stage_script(self.config.builder, self.builder_script)
+        focused_tests = "|".join((
+            "ninfer_direct_storage_checkpoint_windows_test",
+            "ninfer_direct_storage_checkpoint_backend_test",
+            "ninfer_session_checkpoint_store_test",
+            "ninfer_openai_responses_store_test",
+            "ninfer_automatic_checkpoint_queue_test",
+            "ninfer_http_error_handler_test",
+            "ninfer_serve_options_test",
+            "ninfer_http_server_stop_test",
+        ))
+        build_script = f"""
+$ErrorActionPreference='Stop'
+$root={ps_quote(self.builder_root)}
+$source={ps_quote(self.builder_source)}
+$build={ps_quote(self.builder_build)}
+$bundle=Join-Path $root 'source.bundle'
+if((Get-FileHash $bundle -Algorithm SHA256).Hash.ToLowerInvariant()-ne{ps_quote(bundle_sha)}){{throw 'bundle hash mismatch'}}
+git clone --quiet $bundle $source
+git -C $source checkout --quiet --detach {self.head}
+$env:_CL_="/experimental:deterministic /pathmap:$env:USERPROFILE=C:\\build"
+# The app-local DLLs are built by vcpkg from the manifest under short neutral roots, so the
+# paths they embed (__FILE__ strings, PDB references) never name the builder's profile; the
+# neutral binary cache lets the second lane reuse them.
+$env:VCPKG_BINARY_SOURCES='clear;files,C:\\b\\vcpkg-neutral-cache,readwrite'
+New-Item -ItemType Directory -Force -Path 'C:\\b\\vcpkg-neutral-cache','C:\\b\\vt','C:\\b\\vp'|Out-Null
+$pf=[Environment]::GetFolderPath('ProgramFilesX86')
+$vsdev=Join-Path $pf 'Microsoft Visual Studio\\2022\\BuildTools\\Common7\\Tools\\VsDevCmd.bat'
+$lines=&cmd.exe /d /s /c ('"'+$vsdev+'" -arch=x64 -host_arch=x64 >nul && set')
+foreach($line in $lines){{$i=$line.IndexOf('=');if($i -gt 0){{[Environment]::SetEnvironmentVariable($line.Substring(0,$i),$line.Substring($i+1),'Process')}}}}
+&cmake -S $source -B $build -G Ninja '-DCMAKE_BUILD_TYPE=Release' '-DCMAKE_CUDA_ARCHITECTURES={self.lane.cuda_architecture}' ('-DCMAKE_CUDA_COMPILER='+{ps_quote(self.config.builder_cuda_compiler)}) ('-DCMAKE_CXX_COMPILER='+{ps_quote(self.config.builder_cxx_compiler)}) ('-DCMAKE_C_COMPILER='+{ps_quote(self.config.builder_cxx_compiler)}) '-DNINFER_BUILD_APPS=ON' '-DBUILD_TESTING=ON' '-DNINFER_BUILD_BENCHMARKS=ON' '-DNINFER_BUILD_PROFILE={self.lane.build_profile}' '-DNINFER_UPSTREAM_BASE_SHA={self.lane.upstream_sha}' '-DNINFER_PATCH_STACK_SHA={self.head}' ('-DCMAKE_TOOLCHAIN_FILE='+{ps_quote(self.config.builder_vcpkg)}) '-DVCPKG_TARGET_TRIPLET=x64-windows' '-DVCPKG_INSTALL_OPTIONS=--x-buildtrees-root=C:/b/vt;--x-packages-root=C:/b/vp'
+if($LASTEXITCODE -ne 0){{throw 'configure failed'}}
+&cmake --build $build --target {" ".join(focused_tests.split("|"))} ninfer-serve ninfer ninfer_bench --parallel 12
+if($LASTEXITCODE -ne 0){{throw 'build failed'}}
+&ctest --test-dir $build -C Release --output-on-failure -R '^({focused_tests})$'
+if($LASTEXITCODE -ne 0){{throw 'focused tests failed'}}
+$bin={ps_quote(self.builder_bin)}
+New-Item -ItemType Directory -Path $bin|Out-Null
+Copy-Item (Join-Path $build 'apps\\ninfer.exe'),(Join-Path $build 'apps\\ninfer-serve.exe'),(Join-Path $build 'bench\\ninfer_bench.exe') -Destination $bin
+# App-local runtime: the binaries' DLL imports resolved transitively from the build's vcpkg tree,
+# plus the DirectStorage redistributables the build stages beside the apps.
+$vcpkgBin=Join-Path $build 'vcpkg_installed\\x64-windows\\bin'
+$dumpbin=(Get-Command dumpbin.exe).Source
+$pending=[Collections.Generic.Queue[string]]::new()
+foreach($exe in @('ninfer.exe','ninfer-serve.exe','ninfer_bench.exe')){{$pending.Enqueue((Join-Path $bin $exe))}}
+$copied=[Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+while($pending.Count -gt 0){{
+  $file=$pending.Dequeue()
+  $imports=@(&$dumpbin /nologo /dependents $file|Where-Object{{$_ -match '^\\s+([A-Za-z0-9_.-]+\\.dll)\\s*$'}}|ForEach-Object{{$Matches[1]}})
+  foreach($import in $imports){{
+    $candidate=Join-Path $vcpkgBin $import
+    if((Test-Path -LiteralPath $candidate -PathType Leaf) -and $copied.Add($import)){{Copy-Item -LiteralPath $candidate -Destination (Join-Path $bin $import);$pending.Enqueue((Join-Path $bin $import))}}
+  }}
+}}
+foreach($name in @({", ".join(ps_quote(name) for name in DIRECTSTORAGE_DLLS)})){{Copy-Item -LiteralPath (Join-Path $build ('apps\\'+$name)) -Destination (Join-Path $bin $name) -Force}}
+$items=Get-ChildItem $bin -File|Sort-Object Name|ForEach-Object{{[ordered]@{{name=$_.Name;bytes=$_.Length;sha256=(Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()}}}}
+[Console]::Out.WriteLine(([ordered]@{{status='passed';source_commit=(git -C $source rev-parse HEAD);bundle_sha256={ps_quote(bundle_sha)};cuda_architecture={ps_quote(self.lane.cuda_architecture)};build_profile={ps_quote(self.lane.build_profile)};runtime_dlls=@($copied);files=$items}}|ConvertTo-Json -Depth 6 -Compress))
+"""
+        receipt = self.remote_json(self.config.builder, build_script, timeout=5400)
+        return receipt
+
+    def private_scan(self) -> dict[str, Any]:
+        output = run(
+            [
+                "ssh",
+                "-T",
+                self.config.builder,
+                "python",
+                self.builder_script,
+                "_scan-dir",
+                "--path",
+                self.builder_bin,
+            ],
+            timeout=600,
+        ).stdout
+        remote = compact_json_from_output(output)
+        if remote["findings"]:
+            raise LaneError(f"neutral binary scan found {remote['findings']} private markers")
+        tracked = 0
+        tracked_findings = 0
+        names = subprocess.check_output(["git", "ls-files", "-z"], cwd=self.config.source_root)
+        private_markers = tuple(
+            value.lower().encode()
+            for value in (
+                self.config.builder,
+                self.config.target,
+                str(Path.home()) + os.sep,
+            )
+            if value
+        )
+        for raw in names.split(b"\0"):
+            if not raw or raw == b"AGENTS.md":
+                continue
+            path = self.config.source_root / raw.decode()
+            if path.is_file():
+                tracked += 1
+                tracked_findings += marker_findings(path.read_bytes(), private_markers=private_markers)
+        if tracked_findings:
+            raise LaneError("tracked source contains a private marker or credential-shaped value")
+        return {"status": "passed", "neutral_bin": remote, "tracked_files": tracked, "tracked_findings": 0}
+
+    def package(self) -> dict[str, Any]:
+        epoch = run(["git", "show", "-s", "--format=%ct", self.head], cwd=self.config.source_root).stdout.strip()
+        package_script = f"""
+$ErrorActionPreference='Stop'
+$source={ps_quote(self.builder_source)}
+$bin={ps_quote(self.builder_bin)}
+$runtime=@(Get-ChildItem $bin -Filter '*.dll' -File|Sort-Object Name|ForEach-Object FullName)
+function Build-One([string]$Out){{if(Test-Path $Out){{Remove-Item $Out -Recurse -Force}};&(Join-Path $source 'packaging\\windows\\New-Package.ps1') -Lane {ps_quote(self.lane.name)} -SourceRoot $source -NInferExecutable (Join-Path $bin 'ninfer.exe') -ServerExecutable (Join-Path $bin 'ninfer-serve.exe') -BenchmarkExecutable (Join-Path $bin 'ninfer_bench.exe') -ReleaseHeadSha {ps_quote(self.head)} -RuntimeSourceSha {ps_quote(self.head)} -RuntimeFile $runtime -PythonExecutable python -SourceDateEpoch {epoch} -OutputDirectory $Out|Out-Null}}
+Build-One {ps_quote(self.builder_out_a)}
+Build-One {ps_quote(self.builder_out_b)}
+$a=Get-Content (Join-Path {ps_quote(self.builder_out_a)} 'package-build-receipt.json') -Raw | ConvertFrom-Json
+$b=Get-Content (Join-Path {ps_quote(self.builder_out_b)} 'package-build-receipt.json') -Raw | ConvertFrom-Json
+if([string]$a.package.sha256 -cne [string]$b.package.sha256){{throw 'package is not deterministic'}}
+[Console]::Out.WriteLine(($a|ConvertTo-Json -Depth 8 -Compress))
+"""
+        receipt = self.remote_json(self.config.builder, package_script, timeout=1800)
+        scan_output = run(
+            [
+                "ssh",
+                "-T",
+                self.config.builder,
+                "python",
+                self.builder_script,
+                "_scan-archive",
+                "--path",
+                f"{self.builder_out_a}/{self.lane.package_name}",
+            ],
+            timeout=900,
+        ).stdout
+        scan = compact_json_from_output(scan_output)
+        if scan["findings"]:
+            raise LaneError(f"packaged binary contains {scan['findings']} private markers")
+        receipt["public_scan"] = scan
+        return receipt
+
+    def transfer_package(self) -> dict[str, Any]:
+        """Move the package and its lifecycle scripts from the builder's package-a to the target.
+
+        The same host copies locally. Two Windows hosts cannot carry bulk over ssh in either
+        direction, and relaying through the operator's machine (``scp -3``) moves a 0.6 GB
+        package at well under 1 MB/s across two long links, so the package travels as ranged
+        HTTP served by the builder and fetched by the target (95 MB/s measured on the SF LAN)
+        while the small scripts still relay. Both ends verify the SHA-256; the installer
+        checks it again against the package receipt.
+        """
+        names = (
+            "Install-Release.ps1",
+            "Protect-StateRoot.ps1",
+            "Control-GpuOwner.ps1",
+            "package-build-receipt.json",
+        )
+        if self.config.builder == self.config.target:
+            items = ",".join(ps_quote(f"{self.builder_out_a}/{name}") for name in (self.lane.package_name, *names))
+            remote_ps(
+                self.config.target,
+                f"Copy-Item -LiteralPath @({items}) -Destination {ps_quote(self.target_root)} -Force",
+            )
+            return {"transport": "local_copy"}
+        for name in names:
+            scp(
+                remote_spec(self.config.builder, f"{self.builder_out_a}/{name}"),
+                remote_spec(self.config.target, f"{self.target_root}/{name}"),
+                through_local=True,
+            )
+        tool = self.config.transfer_tool
+        if tool is None:
+            raise LaneError("--transfer-tool is required when the builder and target are different hosts")
+        source = f"{self.builder_out_a}/{self.lane.package_name}"
+        destination = f"{self.target_root}/{self.lane.package_name}"
+        scp(str(tool), remote_spec(self.config.builder, f"{self.builder_root}/transfer.py"))
+        scp(str(tool), remote_spec(self.config.target, f"{self.target_root}/transfer.py"))
+        server = subprocess.Popen(
+            ["ssh", "-T", self.config.builder, "python", f"{self.builder_root}/transfer.py", "serve",
+             "--local", source, "--timeout", "900"],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            announced = json.loads(server.stdout.readline() or "{}")
+            if announced.get("status") != "serving":
+                raise LaneError(f"the builder did not start serving the package: {announced}")
+            address = run(["ssh", "-G", self.config.builder]).stdout
+            host = next(line.split()[1] for line in address.splitlines() if line.startswith("hostname "))
+            fetched = compact_json_from_output(run(
+                ["ssh", "-T", self.config.target, "python", f"{self.target_root}/transfer.py", "fetch",
+                 "--url", f"http://{host}:{announced['port']}", "--token", announced["token"],
+                 "--local", destination, "--timeout", "300"],
+                timeout=900,
+            ).stdout)
+            served, _ = server.communicate(timeout=120)
+        finally:
+            if server.poll() is None:
+                server.kill()
+        if fetched.get("status") != "passed" or fetched.get("sha256") != announced.get("sha256"):
+            raise LaneError(f"package fetch did not pass: {fetched}")
+        if compact_json_from_output(served).get("status") != "passed":
+            raise LaneError(f"package serve did not complete: {served[-400:]}")
+        return {"transport": "ranged_http", "streams": fetched.get("streams"), "wall_s": fetched.get("wall_s"),
+                "mb_per_s": fetched.get("mb_per_s"), "bytes": fetched.get("bytes")}
+
+    def transfer_install(self) -> dict[str, Any]:
+        package = self.state["phases"]["package"]["receipt"]["package"]
+        target_root = self.target_root
+        # The staging root and the clean-install root live under the qualification parent, so
+        # the parent must be a protected root (SYSTEM and Administrators only, no inherited
+        # DACL): a plain New-Item under ProgramData would inherit BUILTIN\Users write access,
+        # and the installer refuses to create protected state beneath such an ancestor. The
+        # candidate's own protection library creates or checks it before anything is staged.
+        protect = self.config.source_root / "packaging" / "windows" / "Protect-StateRoot.ps1"
+        helper = f"C:/Windows/Temp/ninfer-protect-{self.head8}.ps1"
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".ps1", delete=False) as stream:
+            stream.write(run(["git", "show", f"{self.head}:{protect.relative_to(self.config.source_root).as_posix()}"],
+                             cwd=self.config.source_root).stdout)
+            local_helper = Path(stream.name)
+        try:
+            scp(str(local_helper), remote_spec(self.config.target, helper))
+        finally:
+            local_helper.unlink(missing_ok=True)
+        remote_ps(
+            self.config.target,
+            f"""
+$ErrorActionPreference='Stop'
+. {ps_quote(helper)}
+$p={ps_quote(target_root)}
+Initialize-NInferProtectedStateRoot (Split-Path -Parent $p)|Out-Null
+New-Item -ItemType Directory -Path $p,(Join-Path $p 'evidence') -Force|Out-Null
+Remove-Item -LiteralPath {ps_quote(helper)} -Force
+""",
+        )
+        transfer = self.transfer_package()
+        self.stage_script(self.config.target, f"{target_root}/qualify_native.py")
+        scp(str(self.config.long_fixture), remote_spec(self.config.target, f"{target_root}/long_niah_128k.json"))
+        scp(
+            str(self.config.source_root / "tests" / "test_release_security.ps1"),
+            remote_spec(self.config.target, f"{target_root}/test_release_security.ps1"),
+        )
+        # The lane's API key: reused from the lineage when it exists, otherwise from the
+        # incumbent lineage on the same host (the same operator secret keeps the OMP client
+        # configuration valid), and never printed.
+        install_script = f"""
+$ErrorActionPreference='Stop'
+$root={ps_quote(self.state_root)}
+$stage={ps_quote(target_root)}
+$incumbentRoot={ps_quote(self.config.incumbent_state_root or "")}
+$taskName={ps_quote(self.lane.task_name)}
+$before=''
+$apiKeyFile=$null
+if(Test-Path (Join-Path $root 'state.json')){{
+  if(Test-ScopedControllerOrQuiescent $root){{&(Join-Path $root 'Control-Release.ps1') -Action Stop -StateRoot $root|Out-Null}}
+  $s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
+  $before=[string]$s.active_release
+  $apiKeyFile=[string]$s.releases.PSObject.Properties[$before].Value.api_key_file
+}}elseif($incumbentRoot -and (Test-Path (Join-Path $incumbentRoot 'state.json'))){{
+  $i=Get-Content (Join-Path $incumbentRoot 'state.json') -Raw | ConvertFrom-Json
+  $apiKeyFile=[string]$i.releases.PSObject.Properties[[string]$i.active_release].Value.api_key_file
+}}
+if(-not $apiKeyFile -or -not (Test-Path -LiteralPath $apiKeyFile -PathType Leaf)){{throw 'no operator API-key file is available for the lane'}}
+$package=Join-Path $stage {ps_quote(self.lane.package_name)}
+if((Get-FileHash $package -Algorithm SHA256).Hash.ToLowerInvariant() -ne {ps_quote(package['sha256'])}){{throw 'package transfer hash mismatch'}}
+$cleanRoot='C:\\ProgramData\\NInferQualification\\orchestrated-clean-{self.lane.name}-{self.head8}\\{self.lane.spec['lifecycle']['state_root_name']}'
+if(Test-Path $cleanRoot){{throw 'clean-install root already exists'}}
+$existingTask=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+$taskXml=$null
+if($null -ne $existingTask){{$taskXml=Export-ScheduledTask -TaskName $taskName;Unregister-ScheduledTask -TaskName $taskName -Confirm:$false}}
+try{{
+  $cleanLines=@(&(Join-Path $stage 'Install-Release.ps1') -PackagePath $package -PackageSha256 {ps_quote(package['sha256'])} -ModelArtifactPath {ps_quote(self.config.model_path)} -ApiKeyFile $apiKeyFile -GpuUuid {ps_quote(self.gpu_uuid)} -GpuOwnerControllerPath (Join-Path $stage 'Control-GpuOwner.ps1') -StateRoot $cleanRoot -NoStart)
+  $clean=[string]$cleanLines[-1]|ConvertFrom-Json
+  if([string]$clean.status -cne 'passed'){{throw 'clean install did not pass'}}
+  &(Join-Path $cleanRoot 'Control-Release.ps1') -Action Uninstall -StateRoot $cleanRoot|Out-Null
+}}finally{{
+  if($null -ne $taskXml -and $null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)){{Register-ScheduledTask -TaskName $taskName -Xml $taskXml -Force|Out-Null}}
+}}
+$managedArguments=@{{PackagePath=$package;PackageSha256={ps_quote(package['sha256'])};ModelArtifactPath={ps_quote(self.config.model_path)};ApiKeyFile=$apiKeyFile;StateRoot=$root;NoStart=$true;GpuUuid={ps_quote(self.gpu_uuid)};GpuOwnerControllerPath=(Join-Path $stage 'Control-GpuOwner.ps1')}}
+$upgradeLines=@(&(Join-Path $stage 'Install-Release.ps1') @managedArguments)
+$upgrade=[string]$upgradeLines[-1]|ConvertFrom-Json
+if([string]$upgrade.status -cnotin @('passed','already_installed')){{throw 'managed install did not pass'}}
+$after=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
+[Console]::Out.WriteLine(([ordered]@{{status='passed';before=$before;active_release=[string]$after.active_release;previous_release=[string]$after.previous_release;package_sha256={ps_quote(package['sha256'])};clean_installs=1;managed_installs=1;first_release_of_lineage=(-not $before)}}|ConvertTo-Json -Compress))
+"""
+        receipt = self.remote_json(self.config.target, install_script, timeout=1800)
+        receipt["transfer"] = transfer
+        return receipt
+
+    def target_internal(self, phase: str, *arguments: str, timeout: int = 1800) -> dict[str, Any]:
+        self.stage_script(self.config.target, f"{self.target_root}/qualify_native.py")
+        command = [
+            "ssh",
+            "-T",
+            self.config.target,
+            "python",
+            f"{self.target_root}/qualify_native.py",
+            phase,
+            "--state-root",
+            self.state_root,
+            "--model-id",
+            self.lane.model_id,
+            "--gpu-uuid",
+            self.gpu_uuid,
+            "--evidence-root",
+            f"{self.target_root}/evidence",
+            *arguments,
+        ]
+        return compact_json_from_output(run(command, timeout=timeout).stdout)
+
+    def protocol(self) -> dict[str, Any]:
+        script = f"""
+$ErrorActionPreference='Stop'
+$root={ps_quote(self.state_root)}
+$stage={ps_quote(self.target_root)}
+New-Item -ItemType Directory -Path (Join-Path $stage 'evidence') -Force|Out-Null
+$controller=Join-Path $root 'Control-Release.ps1'
+&$controller -Action Start -StateRoot $root|Out-Null
+$s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
+$r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
+$path=Join-Path ([string]$r.release_root) 'bin\\qualification\\agent_protocol.py'
+$out=Join-Path $stage 'evidence\\agent-protocol.json'
+&python $path --base-url ('http://'+[string]$r.host+':'+[string]$r.port) --model {ps_quote(self.lane.model_id)} --api-key-file ([string]$r.api_key_file) --expect-binary-sha256 ([string]$r.binary_sha256) --expect-model-artifact-sha256 ([string]$r.model_artifact_sha256) --expect-config-sha256 ([string]$r.config_sha256) --expect-deployment-profile ([string]$r.deployment_profile) 1>$out
+if($LASTEXITCODE -ne 0){{throw 'protocol failed'}}
+$v=Get-Content $out -Raw | ConvertFrom-Json
+[Console]::Out.WriteLine(([ordered]@{{status=[string]$v.status;checks=@($v.checks.PSObject.Properties).Count;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant()}}|ConvertTo-Json -Compress))
+"""
+        return self.remote_json(self.config.target, script, timeout=1200)
+
+    def pressure_protocol(self) -> dict[str, Any]:
+        """Exercise the installed bytes with a reduced shared Host budget and scratch store.
+
+        No independent Host slot policy is recreated, and the managed release's cache is untouched.
+        """
+        pressure_mib = host_context_mib(self.lane.spec, state_images=PRESSURE_STATE_IMAGES)
+        script = f"""
+$ErrorActionPreference='Stop'
+$root={ps_quote(self.state_root)}
+$stage={ps_quote(self.target_root)}
+$controller=Join-Path $root 'Control-Release.ps1'
+&$controller -Action Stop -StateRoot $root|Out-Null
+$s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
+$r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
+$c=Get-Content ([string]$r.config_file) -Raw | ConvertFrom-Json
+$scratch=Join-Path $stage 'pressure'
+if(Test-Path $scratch){{Remove-Item $scratch -Recurse -Force}}
+$checkpoints=Join-Path $scratch 'checkpoints'
+New-Item -ItemType Directory -Force -Path $checkpoints|Out-Null
+$port=[int]$r.port + {PRESSURE_PORT_OFFSET}
+if(Test-Path Env:CUDA_VISIBLE_DEVICES){{throw 'CUDA_VISIBLE_DEVICES must be absent'}}
+if([string]$r.gpu_uuid -cne {ps_quote(self.gpu_uuid)}){{throw 'pressure release GPU differs from qualification target'}}
+$gpuRows=@(nvidia-smi.exe -i ([string]$r.gpu_uuid) --query-gpu=index,uuid --format=csv,noheader,nounits)
+if($LASTEXITCODE -ne 0 -or $gpuRows.Count -ne 1){{throw 'pressure GPU identity query failed'}}
+$gpuParts=@(([string]$gpuRows[0] -split ',')|ForEach-Object {{$_.Trim()}})
+$gpuIndex=-1
+if($gpuParts.Count -ne 2 -or -not [int]::TryParse($gpuParts[0],[ref]$gpuIndex) -or $gpuIndex -lt 0 -or $gpuParts[1] -cne [string]$r.gpu_uuid){{throw 'pressure GPU identity mismatch'}}
+if($null -ne (Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)){{throw 'pressure port is occupied'}}
+$requestLog=Join-Path $scratch 'requests.jsonl'
+$serverArguments=@(
+  [string]$r.model_artifact,
+  '--host',[string]$r.host,'--port',[string]$port,
+  '--api-key-file',[string]$r.api_key_file,'--model-id',[string]$c.model_id,
+  '--binary-sha256',[string]$r.binary_sha256,'--artifact-sha256',[string]$r.model_artifact_sha256,
+  '--config-sha256',[string]$r.config_sha256,'--deployment-profile',[string]$r.deployment_profile,
+  '--device',[string]$gpuIndex,'--max-context',[string]$c.engine.max_context,
+  '--kv-capacity',[string]$c.engine.kv_capacity,'--prefill-chunk',[string]$c.engine.prefill_chunk,
+  '--kv-dtype',[string]$c.engine.kv_dtype,'--max-concurrency',[string]$c.engine.max_concurrency,
+  '--max-pending-requests',[string]$c.engine.max_pending_requests,
+  '--pending-timeout-ms',[string]$c.engine.pending_timeout_ms,
+  '--device-state-slots',[string]$c.context_cache.device_state_slots,
+  '--host-context-mib','{pressure_mib}',
+  '--response-store-max-records',[string]$c.response_store.max_records,
+  '--response-store-max-mib',[string]$c.response_store.max_mib,
+  '--session-checkpoint-dir',$checkpoints,
+  '--session-checkpoint-quota-mib',[string]$c.session_checkpoint.quota_mib,
+  '--session-checkpoint-staging-mib',[string]$c.session_checkpoint.staging_mib,
+  '--request-log-jsonl',$requestLog,'--log-stats-interval-ms','0','--preserve-thinking',
+  '--spec','mtp','--draft-tokens',[string]$c.speculative.draft_tokens,'--lm-head-draft')
+$keepWarm=$c.engine.PSObject.Properties['gpu_keep_warm_ms']
+if($null -ne $keepWarm -and [int]$keepWarm.Value -gt 0){{$serverArguments+=@('--gpu-keep-warm-ms',[string]$keepWarm.Value)}}
+$stdout=Join-Path $scratch 'stdout.log'
+$stderr=Join-Path $scratch 'stderr.log'
+$startInfo=[Diagnostics.ProcessStartInfo]::new()
+$startInfo.FileName=[string]$r.server_executable
+# Windows argv quoting: double backslashes before quotes and at the quoted argument's end.
+$startInfo.Arguments=(@($serverArguments|ForEach-Object {{'"'+[regex]::Replace([regex]::Replace($_,'(\\\\*)"','$1$1\\"'),'(\\\\+)$','$1$1')+'"'}}) -join ' ')
+$startInfo.WorkingDirectory=[string]$r.release_root
+$startInfo.UseShellExecute=$false
+$startInfo.RedirectStandardOutput=$true;$startInfo.RedirectStandardError=$true
+$startInfo.EnvironmentVariables['CUDA_DEVICE_ORDER']='PCI_BUS_ID'
+$stdoutStream=$null;$stderrStream=$null;$stdoutCopy=$null;$stderrCopy=$null;$process=$null
+try{{
+  $stdoutStream=[IO.File]::Open($stdout,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+  $stderrStream=[IO.File]::Open($stderr,[IO.FileMode]::Create,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+  $process=[Diagnostics.Process]::Start($startInfo)
+  $stdoutCopy=$process.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
+  $stderrCopy=$process.StandardError.BaseStream.CopyToAsync($stderrStream)
+  $key=(Get-Content ([string]$r.api_key_file) -Raw).Trim()
+  $deadline=(Get-Date).AddSeconds(600)
+  $ready=$false
+  while((Get-Date) -lt $deadline){{
+    if($process.HasExited){{throw "pressure server exited with code $($process.ExitCode)"}}
+    try{{
+      Invoke-RestMethod -Method Get -Uri ('http://'+[string]$r.host+':'+[string]$port+'/v1/ninfer/status') -Headers @{{Authorization=('Bearer '+$key)}} -TimeoutSec 5|Out-Null
+      $ready=$true;break
+    }}catch{{Start-Sleep -Seconds 2}}
+  }}
+  if(-not $ready){{throw 'pressure server did not become ready'}}
+  $start=Get-Content $requestLog -TotalCount 1|ConvertFrom-Json
+  if([string]$start.artifact_type -cne 'ninfer_serve_request_log' -or [int]$start.schema_version -ne 30 -or
+     [string]$start.event -cne 'server_start' -or [string]$start.environment.gpu_uuid -cne [string]$r.gpu_uuid -or
+     [int]$start.environment.device -ne $gpuIndex -or [string]$start.environment.gpu_name -cne [string]$r.gpu_name -or
+     [string]$start.server_instance_id -cnotmatch ('^serve-'+$process.Id+'-[0-9]+$')){{throw 'pressure server_start GPU UUID mismatch'}}
+  $path=Join-Path ([string]$r.release_root) 'bin\\qualification\\agent_protocol.py'
+  $out=Join-Path $stage 'evidence\\agent-protocol-pressure.json'
+  &python $path --base-url ('http://'+[string]$r.host+':'+[string]$port) --model {ps_quote(self.lane.model_id)} --api-key-file ([string]$r.api_key_file) --expect-binary-sha256 ([string]$r.binary_sha256) --expect-model-artifact-sha256 ([string]$r.model_artifact_sha256) --expect-config-sha256 ([string]$r.config_sha256) --expect-deployment-profile ([string]$r.deployment_profile) 1>$out
+  if($LASTEXITCODE -ne 0){{throw ('protocol under shared Host pressure failed: '+((Get-Content $stderr -Tail 2) -join ' | '))}}
+  $v=Get-Content $out -Raw | ConvertFrom-Json
+  [Console]::Out.WriteLine(([ordered]@{{status=[string]$v.status;host_context_mib='{pressure_mib}';device_state_slots=[int]$c.context_cache.device_state_slots;checks=@($v.checks.PSObject.Properties).Count;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant()}}|ConvertTo-Json -Compress))
+}}
+finally{{
+  try{{
+    if($null -ne $process -and -not $process.HasExited){{Stop-Process -Id $process.Id -Force;$process.WaitForExit(30000)|Out-Null}}
+    if($null -ne $stdoutCopy){{$stdoutCopy.GetAwaiter().GetResult()}}
+    if($null -ne $stderrCopy){{$stderrCopy.GetAwaiter().GetResult()}}
+  }}finally{{
+    if($null -ne $stdoutStream){{$stdoutStream.Dispose()}}
+    if($null -ne $stderrStream){{$stderrStream.Dispose()}}
+    Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
+  }}
+}}
+"""
+        return self.remote_json(self.config.target, script, timeout=1800)
+
+    def context(self) -> dict[str, Any]:
+        return self.target_internal("_long", "--fixture", f"{self.target_root}/long_niah_128k.json", timeout=1800)
+
+    def restart(self) -> dict[str, Any]:
+        return self.target_internal("_restart", timeout=1800)
+
+    def rollback(self) -> dict[str, Any]:
+        install = self.state["phases"]["transfer_install"]["receipt"]
+        candidate = install["active_release"]
+        if not install.get("previous_release"):
+            # The first release of a lineage has nothing to roll back to; the bidirectional
+            # rollback is proven on the next release of the same lineage.
+            return {"status": "not_applicable", "reason": "first release of the lineage",
+                    "active_release": candidate, "directions": 0}
+        # Each direction records how its stop reached the server. The candidate declares the
+        # stop-event channel, so its stop is a signal; the predecessor predates the channel and
+        # its record says so, which is exactly why the shared controller must not pass the flag
+        # to a binary that would refuse it.
+        script = f"""
+$ErrorActionPreference='Stop'
+$root={ps_quote(self.state_root)}
+$c={ps_quote(candidate)}
+$controller=Join-Path $root 'Control-Release.ps1'
+function Stop-And-Report {{
+  &$controller -Action Stop -StateRoot $root|Out-Null
+  $s=Get-Content (Join-Path $root 'last-stop.json') -Raw | ConvertFrom-Json
+  return [ordered]@{{release=[string]$s.release_id;mode=[string]$s.mode;outcome=[string]$s.outcome;forced=[bool]$s.forced;exit_code=$s.exit_code}}
+}}
+$stops=[Collections.Generic.List[object]]::new()
+&$controller -Action Start -StateRoot $root|Out-Null
+$stops.Add((Stop-And-Report))
+&$controller -Action Rollback -StateRoot $root|Out-Null
+$a=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
+$first=[string]$a.active_release
+$stops.Add((Stop-And-Report))
+&$controller -Action Rollback -StateRoot $root|Out-Null
+$b=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
+if([string]$b.active_release -cne $c){{throw 'bidirectional rollback did not restore candidate'}}
+$candidateStop=@($stops|Where-Object{{[string]$_.release -ceq $c}})
+if($candidateStop.Count -lt 1){{throw 'no recorded stop belongs to the candidate'}}
+if([string]$candidateStop[0].mode -cne 'stop-event' -or [string]$candidateStop[0].outcome -cne 'graceful'){{
+  throw ('the candidate was not stopped by its signal: '+([string]$candidateStop[0].mode)+'/'+([string]$candidateStop[0].outcome))
+}}
+$predecessorStop=@($stops|Where-Object{{[string]$_.release -cne $c}})
+$predecessorMode=$null
+if($predecessorStop.Count -ge 1){{
+  $predecessorMode=[string]$predecessorStop[0].mode
+  $record=$b.releases.PSObject.Properties[[string]$predecessorStop[0].release].Value
+  $declared=if($null -eq $record.PSObject.Properties['managed_stop']){{'terminate'}}else{{[string]$record.managed_stop}}
+  if($predecessorMode -cne $declared){{
+    throw ('the predecessor stop used '+$predecessorMode+' against a release that declares '+$declared)
+  }}
+}}
+[Console]::Out.WriteLine(([ordered]@{{status='passed';directions=2;intermediate_release=$first;active_release=[string]$b.active_release;stops=$stops;candidate_stop_mode=[string]$candidateStop[0].mode;predecessor_stop_mode=$predecessorMode}}|ConvertTo-Json -Depth 6 -Compress))
+"""
+        return self.remote_json(self.config.target, script, timeout=1800)
+
+    def security(self) -> dict[str, Any]:
+        script = f"""
+$ErrorActionPreference='Stop'
+$root={ps_quote(self.state_root)}
+$stage={ps_quote(self.target_root)}
+$controller=Join-Path $root 'Control-Release.ps1'
+&$controller -Action Stop -StateRoot $root|Out-Null
+$s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
+$r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
+$l=Join-Path ([string]$r.release_root) 'bin\\lifecycle'
+$lines=@(&(Join-Path $stage 'test_release_security.ps1') -StateProtectionPath (Join-Path $l 'Protect-StateRoot.ps1') -GpuOwnerControllerPath (Join-Path $l 'Control-GpuOwner.ps1') -InstallerPath (Join-Path $l 'Install-Release.ps1') -ManagedStateRoot $root -GpuUuid {ps_quote(self.gpu_uuid)} -QualifiedPowerLimitW {self.lane.qualified_power_limit_w} -OwnerPowerLimitW {self.lane.owner_power_limit_w})
+$v=[string]$lines[-1] | ConvertFrom-Json
+if([string]$v.status -cne 'passed'){{throw 'security failed'}}
+$out=Join-Path $stage 'evidence\\state-security.json'
+[IO.File]::WriteAllText($out,($v|ConvertTo-Json -Depth 12),[Text.UTF8Encoding]::new($false))
+[Console]::Out.WriteLine(([ordered]@{{status='passed';root_dacl_protected=[bool]$v.root_dacl_protected;low_privilege_read_denials=[int]$v.low_privilege_effective_read_denials;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant()}}|ConvertTo-Json -Compress))
+"""
+        return self.remote_json(self.config.target, script, timeout=1200)
+
+    def omp(self) -> dict[str, Any]:
+        script = f"""
+$ErrorActionPreference='Stop'
+$root={ps_quote(self.state_root)}
+$stage={ps_quote(self.target_root)}
+$ompRoot={ps_quote(self.config.omp_root)}
+$controller=Join-Path $root 'Control-Release.ps1'
+&$controller -Action Start -StateRoot $root|Out-Null
+$s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
+$r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
+$env:LOCALAPPDATA=Join-Path $ompRoot 'localappdata'
+$env:PI_CODING_AGENT_DIR=Join-Path $ompRoot 'agent'
+$env:NINFER_ACCEPTANCE_API_KEY=(Get-Content ([string]$r.api_key_file) -Raw).Trim()
+$env:NO_COLOR='1'
+$events=Join-Path $stage 'evidence\\omp-events.jsonl'
+$args=@('--mode','json','--print','--no-session','--no-title','--no-extensions','--no-skills','--no-rules','--no-lsp','--no-pty','--no-tools','--tools','read','--auto-approve','--approval-mode','yolo','--model',('ninfer-client-acceptance/'+{ps_quote(self.lane.model_id)}),'--thinking','off','--system-prompt','Use the read tool exactly once on marker.txt, then return exactly its single line with no other text.','--cwd',(Join-Path $ompRoot 'workspace'),'--max-time','300','Read marker.txt with the read tool and return its exact single line.')
+&(Join-Path $env:LOCALAPPDATA 'OMP\\omp.cmd') @args 1>$events
+if($LASTEXITCODE -ne 0){{throw 'OMP failed'}}
+$parsed=@(Get-Content $events|Where-Object{{$_.Trim()}}|ForEach-Object{{$_|ConvertFrom-Json}})
+$ended=@($parsed|Where-Object{{$_.type -eq 'message_end' -and $null -ne $_.message}}|ForEach-Object{{$_.message}})
+$assistants=@($ended|Where-Object{{$_.role -eq 'assistant'}});$results=@($ended|Where-Object{{$_.role -eq 'toolResult'}})
+$calls=@($assistants|ForEach-Object{{@($_.content|Where-Object{{$_.type -eq 'toolCall'}})}})
+$text=[string]::Join('',@($assistants[-1].content|Where-Object{{$_.type -eq 'text'}}|ForEach-Object{{[string]$_.text}}))
+if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -or $text -cne 'OMP_NINFER_WINDOWS_C12_OK'){{throw 'OMP exact oracle failed'}}
+[Console]::Out.WriteLine(([ordered]@{{status='passed';events=$parsed.Count;typed_tool_name='read';tool_results=$results.Count;exact_final_answer=$true}}|ConvertTo-Json -Compress))
+"""
+        return self.remote_json(self.config.target, script, timeout=900)
+
+    def benchmark(self) -> dict[str, Any]:
+        arguments: list[str] = []
+        if self.lane.managed_power_envelope_w is not None:
+            arguments += ["--power-envelope-w", str(self.lane.managed_power_envelope_w)]
+        return self.target_internal("_benchmark", *arguments, timeout=1800)
+
+    def receipt(self) -> dict[str, Any]:
+        evidence = {
+            name: {
+                "status": self.state["phases"][name]["status"],
+                "receipt_sha256": self.state["phases"][name]["receipt_sha256"],
+            }
+            for name in PHASES
+            if name in self.state["phases"]
+            and name not in {"preflight", "receipt", "restore"}
+        }
+        context = self.state["phases"]["context_128k"]["receipt"]
+        restart = self.state["phases"]["restart"]["receipt"]
+        benchmark = self.state["phases"]["benchmark_c1"]["receipt"]
+        package_receipt = self.state["phases"]["package"]["receipt"]
+        build = self.state["phases"]["neutral_build"]["receipt"]
+        summary = {
+            "artifact_type": "ninfer_native_qualification_summary",
+            "schema_version": 1,
+            "gpu_uuid": self.gpu_uuid,
+            "lane": self.lane.name,
+            "release_id": self.lane.release_id,
+            "deployment_profile": self.lane.spec["deployment_profile"],
+            "cuda_architecture": self.lane.spec["gpu"]["cuda_architecture"],
+            "status": "restore-pending",
+            "qualified_utc": None,
+            "restoration": {"status": "required"},
+            "source_commit": self.head,
+            "qualification_tool_commit": self.tool_head,
+            "package": package_receipt["package"],
+            "build_profile": package_receipt["build_profile"],
+            "upstream_base_sha": package_receipt["upstream_base_sha"],
+            "lineage_base_sha": package_receipt["lineage_base_sha"],
+            "model_sha256": package_receipt["model_sha256"],
+            "server_binary_sha256": package_receipt["binaries"]["server_sha256"],
+            "configuration_sha256": package_receipt["config_sha256"],
+            "support_assets": package_receipt["support_assets"],
+            "runtime_dlls": build.get("runtime_dlls", []),
+            "evidence": evidence,
+            "observed": {
+                "context_prompt_tokens": context["prompt_tokens"],
+                "context_exact_output": context["exact_output"],
+                "restart_cached_input_tokens": restart["cached_input_tokens"],
+                "restart_process_replaced": restart["old_pid"] != restart["new_pid"],
+                "managed_stop_mode": restart["managed_stop"]["mode"],
+                "managed_stop_outcome": restart["managed_stop"]["outcome"],
+                "managed_stop_forced": restart["managed_stop"]["forced"],
+                "unsaved_session_survived_managed_stop": restart["managed_stop_flush"]["exact_output"] == FLUSH_MARKER,
+                "unsaved_session_cached_input_tokens": restart["managed_stop_flush"]["cached_input_tokens"],
+                "c1_decode_tokens_per_second": benchmark["decode_tokens_per_second"],
+                "c1_prefill_tokens_per_second": benchmark["prefill_tokens_per_second"],
+                "c1_max_power_w": benchmark["max_power_w"],
+                "c1_max_memory_used_mib": benchmark["max_memory_used_mib"],
+                "c1_mtp_acceptance_percent": benchmark["mtp_acceptance_percent"],
+                "context_elapsed_seconds": context["elapsed_seconds"],
+                "protocol_checks": self.state["phases"]["protocol"]["receipt"]["checks"],
+                "rollback": self.state["phases"]["rollback"]["receipt"]["status"],
+                "rollback_predecessor_stop_mode": self.state["phases"]["rollback"]["receipt"].get("predecessor_stop_mode"),
+                "security_low_privilege_read_denials": self.state["phases"]["security"]["receipt"]["low_privilege_read_denials"],
+                "omp_exact_final_answer": self.state["phases"]["omp"]["receipt"]["exact_final_answer"],
+            },
+            "automatic_route_activation_allowed": False,
+            "stable_promotion_performed": False,
+            "production_route_activation_performed": False,
+        }
+        atomic_json(self.config.state_dir / "qualification-summary.json", summary)
+        summary["receipt_sha256"] = sha256_file(self.config.state_dir / "qualification-summary.json")
+        return summary
+
+    def _record_summary_restoration(self, restoration: dict[str, Any]) -> None:
+        path = self.config.state_dir / "qualification-summary.json"
+        if not path.is_file():
+            return
+        summary = json.loads(path.read_text(encoding="utf-8"))
+        checks_passed = all(
+            self.state["phases"].get(name, {}).get("status") == "passed"
+            for name in PHASES if name != "restore"
+        )
+        if restoration["status"] == "passed":
+            summary["status"] = "passed" if checks_passed else "failed"
+        else:
+            summary["status"] = "restore-failed" if restoration["status"] == "failed" else "restore-pending"
+        summary["qualified_utc"] = (
+            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()) if summary["status"] == "passed" else None
+        )
+        summary["restoration"] = restoration
+        atomic_json(path, summary)
+        summary["receipt_sha256"] = sha256_file(path)
+        receipt_phase = self.state["phases"].get("receipt")
+        if receipt_phase and "receipt" in receipt_phase:
+            # Keep the phase receipt and its hash consistent with the finalized summary.
+            receipt_path = self.receipt_dir / "receipt.json"
+            atomic_json(receipt_path, summary)
+            receipt_phase["receipt"] = summary
+            receipt_phase["receipt_sha256"] = sha256_file(receipt_path)
+
+    def restore(self) -> dict[str, Any]:
+        self._record_summary_restoration({"status": "required"})
+        found = self.state.get("found_incumbent", {})
+        incumbent = found.get("incumbent_state_root", "")
+        restart_incumbent = bool(found.get("incumbent_was_running")) and bool(incumbent)
+        status = self.remote_json(
+            self.config.target,
+            f"""
+$ErrorActionPreference='Stop'
+$root={ps_quote(self.state_root)}
+$taskName={ps_quote(self.lane.task_name)}
+$controller=Join-Path $root 'Control-Release.ps1'
+$scoped=(Test-Path $controller) -and (Test-ScopedControllerOrQuiescent $root)
+if($scoped){{&$controller -Action Stop -StateRoot $root|Out-Null}}
+$task=Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+if($null -ne $task -and $task.State -eq 'Running'){{throw 'managed wrapper did not finish restoration'}}
+$leaseActive=$false
+if($scoped){{$status=&$controller -Action Status -StateRoot $root|ConvertFrom-Json;if([string]$status.gpu_owner.status -cne 'ok'){{throw 'GPU-owner restoration status failed'}};$leaseActive=([bool]$status.gpu_owner.lease_active -or [bool]$status.gpu_owner.current_paused)}}
+$limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=power.limit --format=csv,noheader,nounits)
+if($limit -ne {self.lane.owner_power_limit_w}){{throw '{self.lane.owner_power_limit_w} W owner state was not restored'}}
+if($leaseActive){{throw 'GPU-owner lease remained active'}}
+$incumbentRoot={ps_quote(incumbent)}
+$incumbentState='untouched'
+if({'$true' if restart_incumbent else '$false'}){{if(-not (Test-ScopedControllerOrQuiescent $incumbentRoot)){{throw 'refusing to restart legacy unscoped incumbent'}};&(Join-Path $incumbentRoot 'Control-Release.ps1') -Action Start -StateRoot $incumbentRoot|Out-Null;$incumbentState='running'}}
+$taskState=if($null -eq (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue)){{'absent'}}else{{[string](Get-ScheduledTask -TaskName $taskName).State}}
+[Console]::Out.WriteLine(([ordered]@{{status='passed';task_state=$taskState;power_limit_w=$limit;gpu_lease_active=$leaseActive;incumbent_state=$incumbentState;process_count=@(Get-Process ninfer-serve -ErrorAction SilentlyContinue).Count}}|ConvertTo-Json -Compress))
+""",
+            timeout=900,
+        )
+        expected_processes = 1 if restart_incumbent else 0
+        if status["process_count"] != expected_processes:
+            raise LaneError("target process count after restoration does not match its found state")
+        self.state["restoration"] = status
+        self._record_summary_restoration(status)
+        return status
+
+    def cleanup(self) -> None:
+        try:
+            receipt = self.restore()
+            self.state["restoration"] = receipt
+        except Exception as error:
+            self.state["restoration"] = {"status": "failed", "error": str(error)}
+            self._record_summary_restoration(self.state["restoration"])
+        self._save()
+
+    def execute(self) -> dict[str, Any]:
+        if self.config.dry_run:
+            return {
+                "status": "dry_run",
+                "lane": self.lane.name,
+                "release_id": self.lane.release_id,
+                "package_name": self.lane.package_name,
+                "state_root": self.state_root,
+                "source_commit": self.head,
+                "phases": list(PHASES),
+                "builder_root": self.builder_root,
+                "target_root": self.target_root,
+            }
+        actions: tuple[tuple[str, Callable[[], dict[str, Any]]], ...] = (
+            ("preflight", self.preflight),
+            ("neutral_build", self.neutral_build),
+            ("private_path_scan", self.private_scan),
+            ("package", self.package),
+            ("transfer_install", self.transfer_install),
+            ("protocol", self.protocol),
+            ("pressure_protocol", self.pressure_protocol),
+            ("context_128k", self.context),
+            ("restart", self.restart),
+            ("rollback", self.rollback),
+            ("security", self.security),
+            ("omp", self.omp),
+            ("benchmark_c1", self.benchmark),
+            ("receipt", self.receipt),
+            ("restore", self.restore),
+        )
+        completed_all = False
+        try:
+            for name, action in actions:
+                self.phase(name, action)
+                if self.config.through_phase == name:
+                    break
+            else:
+                completed_all = True
+        finally:
+            restored = self.state["phases"].get("restore", {}).get("status") == "passed"
+            if not restored:
+                self.cleanup()
+        self.state["status"] = "passed" if completed_all else "paused"
+        self._save()
+        return self.state
+
+
+def internal_long(args: argparse.Namespace) -> dict[str, Any]:
+    evidence = Path(args.evidence_root)
+    evidence.mkdir(parents=True, exist_ok=True)
+    state = json.loads((Path(args.state_root) / "state.json").read_text(encoding="utf-8"))
+    release = state["releases"][state["active_release"]]
+    controller = Path(args.state_root) / "Control-Release.ps1"
+    run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(controller), "-Action", "Start", "-StateRoot", args.state_root], timeout=600)
+    key = read_key(Path(release["api_key_file"]))
+    messages = json.loads(Path(args.fixture).read_text(encoding="utf-8"))
+    started = time.perf_counter()
+    result = request_json(
+        f"http://{release['host']}:{release['port']}", key, "POST", "/v1/chat/completions",
+        {"model": args.model_id, "messages": messages, "max_completion_tokens": 128, "temperature": 0, "reasoning_effort": "none"},
+    )
+    usage = result["usage"]
+    content = result["choices"][0]["message"]["content"].strip()
+    if usage["prompt_tokens"] != LONG_PROMPT_TOKENS or content != EXPECTED_LONG:
+        raise LaneError("128K retrieval was not exact")
+    receipt = {"status": "passed", "prompt_tokens": LONG_PROMPT_TOKENS, "completion_tokens": usage["completion_tokens"], "exact_output": content, "elapsed_seconds": time.perf_counter() - started, "fixture_sha256": sha256_file(Path(args.fixture))}
+    atomic_json(evidence / "long-context-128k.json", receipt)
+    return receipt
+
+
+def controller_status(controller: Path, state_root: Path, action: str, timeout: int = 900) -> dict[str, Any]:
+    """Runs a controller action and returns the lifecycle status object it prints."""
+    text = run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(controller),
+         "-Action", action, "-StateRoot", str(state_root)],
+        timeout=timeout,
+    ).stdout
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        raise LaneError(f"controller -Action {action} printed no status object")
+    return json.loads(text[start:end + 1])
+
+
+def checkpoint_state(base: str, key: str, session: str) -> str:
+    try:
+        return str(request_json(base, key, "GET", f"/v1/ninfer/checkpoints/{session}/status").get("state"))
+    except urllib.error.HTTPError as error:
+        return f"http_{error.code}"
+
+
+def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
+    evidence = Path(args.evidence_root)
+    state_root = Path(args.state_root)
+    state = json.loads((state_root / "state.json").read_text(encoding="utf-8"))
+    release = state["releases"][state["active_release"]]
+    controller = state_root / "Control-Release.ps1"
+    run(
+        [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(controller), "-Action", "Start", "-StateRoot", str(state_root),
+        ],
+        timeout=900,
+    )
+    key = read_key(Path(release["api_key_file"]))
+    base = f"http://{release['host']}:{release['port']}"
+    listener = ["powershell", "-NoProfile", "-Command",
+                f"(Get-NetTCPConnection -State Listen -LocalPort {release['port']}).OwningProcess"]
+
+    def seed(session: str, marker: str, label: str) -> dict[str, Any]:
+        return request_json(base, key, "POST", "/v1/responses", {"model": args.model_id, "input": f"Memorize this exact marker for the next turn: {marker}. Reply only SAVED.", "max_output_tokens": 32, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "ninfer_request_id": digest(label)})
+
+    def resume(session: str, previous: str, label: str) -> tuple[str, int]:
+        value = request_json(base, key, "POST", "/v1/responses", {"model": args.model_id, "input": "Return only the exact marker from the previous turn.", "max_output_tokens": 64, "temperature": 0, "reasoning": {"effort": "none"}, "store": True, "ninfer_session": session, "previous_response_id": previous, "ninfer_request_id": digest(label)})
+        return response_text(value).strip(), int(value["usage"]["input_tokens_details"]["cached_tokens"])
+
+    # Two sessions, both far below the 32,768-token automatic gate. The control is published the
+    # documented explicit way; the second is never saved at all, so only the managed stop's
+    # shutdown flush can carry it across the restart.
+    control_session = digest("checkpoint-session")
+    flush_session = digest("managed-stop-session")
+    control_seed = seed(control_session, CHECKPOINT_MARKER, "seed")
+    saved = request_json(base, key, "POST", "/v1/ninfer/checkpoints", {"session_sha256": control_session})
+    if (saved.get("operation") != "save" or saved.get("state") != "exported" or
+            saved.get("committed") is not True or saved.get("reason") != "none" or
+            saved.get("origin") != "authenticated" or saved.get("dir_sync") != "ntfs-write-through" or
+            int(saved.get("frontier_tokens", 0)) <= 0):
+        raise LaneError("explicit session checkpoint was not published")
+    if request_json(base, key, "GET", f"/v1/ninfer/checkpoints/{control_session}/status").get("state") != "available":
+        raise LaneError("published session checkpoint did not become available")
+    # The proof is that nothing published this session, and this cache root outlives the phase:
+    # a generation an earlier run left behind is exactly the state the precondition denies. Own
+    # it rather than assume it, so the phase is as re-runnable as the rest of the lane.
+    try:
+        request_json(base, key, "DELETE", f"/v1/ninfer/checkpoints/{flush_session}")
+    except urllib.error.HTTPError as error:
+        if error.code != 404:
+            raise
+    flush_seed = seed(flush_session, FLUSH_MARKER, "flush-seed")
+    flush_before = checkpoint_state(base, key, flush_session)
+    if flush_before == "available":
+        raise LaneError("the managed-stop session was already published before the stop")
+
+    old_pid = int(run(listener).stdout.strip())
+    restart_started = time.perf_counter()
+    status = controller_status(controller, state_root, "Restart")
+    restart_seconds = time.perf_counter() - restart_started
+    new_pid = int(run(listener).stdout.strip())
+    stop = status.get("last_stop") or {}
+    if stop.get("mode") != "stop-event" or stop.get("outcome") != "graceful" or stop.get("forced"):
+        raise LaneError(f"the managed stop was not a graceful signal: {json.dumps(stop)}")
+    restarted = request_json(base, key, "GET", "/v1/ninfer/status")
+    if (restarted.get("schema_version") != 2 or
+            restarted.get("scheduler", {}).get("committed_decode_tokens") != 0 or
+            restarted.get("scheduler", {}).get("computed_prefill_tokens") != 0 or
+            restarted.get("cache", {}).get("reused_prompt_tokens") != 0):
+        raise LaneError("restart did not reset the real scheduler and cache counters")
+
+    control_answer, control_cached = resume(control_session, control_seed["id"], "continue")
+    flush_answer, flush_cached = resume(flush_session, flush_seed["id"], "flush-continue")
+    if old_pid == new_pid:
+        raise LaneError("the managed restart did not replace the server process")
+    if control_answer != CHECKPOINT_MARKER or control_cached <= 0:
+        raise LaneError("explicitly published session did not resume across the restart")
+    if flush_answer != FLUSH_MARKER or flush_cached <= 0:
+        raise LaneError("the managed stop did not flush the unsaved session")
+
+    cache = Path(release["cache_root"]) / "session-checkpoints-v3" / "sessions"
+    directories = sorted(cache.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True)
+    files = [path for path in directories[0].rglob("*") if path.is_file()]
+    receipt = {
+        "status": "passed",
+        "old_pid": old_pid,
+        "new_pid": new_pid,
+        "restart_seconds": restart_seconds,
+        "status_schema_version": 2,
+        "restart_counters_reset": True,
+        "managed_stop": {
+            "mode": stop.get("mode"),
+            "outcome": stop.get("outcome"),
+            "forced": bool(stop.get("forced")),
+            "exit_code": stop.get("exit_code"),
+            "elapsed_seconds": stop.get("elapsed_seconds"),
+            "graceful_wait_seconds": stop.get("graceful_wait_seconds"),
+        },
+        "explicit_control": {
+            "checkpoint_save": "explicit_endpoint",
+            "save_bytes": saved["payload_bytes"],
+            "frontier_tokens": saved["frontier_tokens"],
+            "cached_input_tokens": control_cached,
+            "exact_output": control_answer,
+        },
+        "managed_stop_flush": {
+            "checkpoint_save": "shutdown_flush",
+            "state_before_stop": flush_before,
+            "state_after_restart": checkpoint_state(base, key, flush_session),
+            "cached_input_tokens": flush_cached,
+            "exact_output": flush_answer,
+        },
+        "checkpoint_files": len(files),
+        "checkpoint_bytes": sum(path.stat().st_size for path in files),
+        "cached_input_tokens": control_cached,
+        "exact_output": control_answer,
+        "deletion_semantics": "logical-object-deletion",
+        "secure_erasure_claimed": False,
+    }
+    atomic_json(evidence / "checkpoint-restart-proof.json", receipt)
+    return receipt
+
+
+def gpu_metrics(gpu_uuid: str) -> tuple[float, int, int, int]:
+    rows = run(["nvidia-smi", "-i", gpu_uuid, "--query-gpu=power.draw,temperature.gpu,utilization.gpu,memory.used", "--format=csv,noheader,nounits"]).stdout.strip().splitlines()
+    if len(rows) != 1:
+        raise LaneError("selected GPU metrics returned more or fewer than one row")
+    output = rows[0]
+    values = [item.strip() for item in output.split(",")]
+    return float(values[0]), int(values[1]), int(values[2]), int(values[3])
+
+
+def internal_benchmark(args: argparse.Namespace) -> dict[str, Any]:
+    evidence = Path(args.evidence_root)
+    state_root = Path(args.state_root)
+    state = json.loads((state_root / "state.json").read_text(encoding="utf-8"))
+    release = state["releases"][state["active_release"]]
+    if args.gpu_uuid and release["gpu_uuid"] != args.gpu_uuid:
+        raise LaneError("benchmark release GPU differs from qualification target")
+    controller = state_root / "Control-Release.ps1"
+    run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(controller), "-Action", "Start", "-StateRoot", str(state_root)], timeout=900)
+    key = read_key(Path(release["api_key_file"]))
+    base = f"http://{release['host']}:{release['port']}"
+    request_json(base, key, "POST", "/v1/chat/completions", {"model": args.model_id, "messages": [{"role": "user", "content": "Warm the managed path."}], "max_tokens": 32, "temperature": 0})
+    log = Path(release["release_root"]) / "logs" / "requests.jsonl"
+    before = len(log.read_text(encoding="utf-8").splitlines())
+    paragraph = "A reliable GPU inference service separates admission control, scheduling, memory accounting, observability, and failure recovery. "
+    prompt = (paragraph * (28000 // len(paragraph) + 2))[:28000]
+    maximums = list(gpu_metrics(release["gpu_uuid"]))
+    stop = threading.Event()
+    poll_errors: list[Exception] = []
+    def poll() -> None:
+        try:
+            while not stop.wait(0.1):
+                values = gpu_metrics(release["gpu_uuid"])
+                for index, value in enumerate(values): maximums[index] = max(maximums[index], value)
+        except Exception as error:
+            poll_errors.append(error)
+            stop.set()
+    thread = threading.Thread(target=poll, daemon=True); thread.start()
+    started = time.perf_counter()
+    try:
+        request_json(base, key, "POST", "/v1/chat/completions", {"model": args.model_id, "messages": [{"role": "user", "content": prompt + "\nContinue until the output limit."}], "max_tokens": 1024, "temperature": 0, "seed": 57004, "reasoning_effort": "medium"})
+    finally:
+        stop.set()
+        thread.join()
+    wall = time.perf_counter() - started
+    if poll_errors:
+        raise LaneError("selected GPU metrics failed during the benchmark") from poll_errors[0]
+    records = [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines()[before:]]
+    done = [record for record in records if record.get("event") == "request_done"]
+    if len(done) != 1 or done[0]["result"]["completion_tokens"] != 1024:
+        raise LaneError("managed C1 did not produce exactly 1024 tokens")
+    if (done[0].get("artifact_type") != "ninfer_serve_request_log" or
+            done[0].get("schema_version") != 30):
+        raise LaneError("managed C1 request log is not schema 30")
+    record = done[0]; result = record["result"]; timing = record["timings_seconds"]; spec = record["speculative"]
+    receipt = {"status": "passed", "completion_tokens": 1024, "prompt_tokens": result["prompt_tokens"], "computed_prefill_tokens": result["computed_prefill_tokens"], "decode_tokens_per_second": 1024 / timing["decode"], "prefill_tokens_per_second": result["computed_prefill_tokens"] / timing["prefill"], "wall_seconds": wall, "max_power_w": maximums[0], "max_temperature_c": maximums[1], "max_gpu_utilization_percent": maximums[2], "max_memory_used_mib": maximums[3], "mtp_acceptance_percent": 100 * spec["accepted_tokens"] / spec["drafted_tokens"]}
+    if args.power_envelope_w is not None:
+        receipt["power_envelope_w"] = args.power_envelope_w
+        if receipt["max_power_w"] > args.power_envelope_w:
+            raise LaneError(f"managed C1 exceeded the {args.power_envelope_w:g} W qualification envelope")
+    receipt["gpu_uuid"] = release["gpu_uuid"]
+    atomic_json(evidence / "managed-c1.json", receipt)
+    return receipt
+
+
+def internal_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--path", type=Path)
+    parser.add_argument("--state-root")
+    parser.add_argument("--evidence-root")
+    parser.add_argument("--fixture")
+    parser.add_argument("--model-id", default="q38-ninfer")
+    parser.add_argument("--power-envelope-w", type=float)
+    parser.add_argument("--gpu-uuid", type=gpu_uuid_argument)
+    return parser
+
+
+def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1].startswith("_"):
+        phase = sys.argv[1]
+        args = internal_parser().parse_args(sys.argv[2:])
+        if phase == "_scan-dir": result = scan_directory(args.path)
+        elif phase == "_scan-archive": result = scan_archive(args.path)
+        elif phase == "_long": result = internal_long(args)
+        elif phase == "_restart": result = internal_restart(args)
+        elif phase == "_benchmark": result = internal_benchmark(args)
+        else: raise LaneError(f"unknown internal phase: {phase}")
+        print(json.dumps(result, sort_keys=True))
+        return 0
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--source-root", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--state-dir", type=Path, required=True)
+    parser.add_argument("--lane", required=True, help="lane directory name under packaging/windows/lanes")
+    parser.add_argument("--builder", required=True)
+    parser.add_argument("--target", required=True)
+    parser.add_argument("--gpu-uuid", type=gpu_uuid_argument,
+                        help="target GPU UUID; otherwise require exactly one lane-qualified card")
+    parser.add_argument("--builder-vcpkg", required=True, help="vcpkg.cmake toolchain file on the builder")
+    parser.add_argument("--builder-cuda-compiler", required=True, help="nvcc.exe on the builder")
+    parser.add_argument("--builder-cxx-compiler", required=True, help="cl.exe on the builder")
+    parser.add_argument("--model-path", required=True)
+    parser.add_argument("--long-fixture", type=Path, required=True)
+    parser.add_argument("--omp-root", required=True)
+    parser.add_argument("--transfer-tool", type=Path,
+                        help="ranged-HTTP transfer script with serve/fetch subcommands (omp-ninfer "
+                             "scripts/hosts/pscp.py); required when the builder and target differ")
+    parser.add_argument("--incumbent-state-root",
+                        help="another lineage's state root on the target, stopped for the window and "
+                             "restarted afterwards when it was running")
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--through-phase", choices=PHASES)
+    parser.add_argument("--candidate-source")
+    parser.add_argument("--upgrade-orchestrator-state", action="store_true")
+    args = parser.parse_args()
+    config = Config(
+        source_root=args.source_root.resolve(), state_dir=args.state_dir.resolve(), lane=args.lane,
+        builder=args.builder, target=args.target, builder_vcpkg=args.builder_vcpkg,
+        builder_cuda_compiler=args.builder_cuda_compiler, builder_cxx_compiler=args.builder_cxx_compiler,
+        model_path=args.model_path, long_fixture=args.long_fixture.resolve(), omp_root=args.omp_root,
+        transfer_tool=args.transfer_tool.resolve() if args.transfer_tool else None,
+        incumbent_state_root=args.incumbent_state_root, resume=args.resume, dry_run=args.dry_run,
+        through_phase=args.through_phase,
+        candidate_source=args.candidate_source,
+        upgrade_orchestrator_state=args.upgrade_orchestrator_state,
+        gpu_uuid=args.gpu_uuid,
+    )
+    result = Orchestrator(config).execute()
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (LaneError, OSError, subprocess.SubprocessError, urllib.error.URLError) as error:
+        print(json.dumps({"status": "failed", "error": str(error)}, sort_keys=True), file=sys.stderr)
+        raise SystemExit(1)
