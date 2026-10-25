@@ -28,6 +28,10 @@ struct ServeOptions {
     std::string api_key;                          // empty => no auth
     std::optional<std::string> model_id_override; // unset => artifact metadata.name
     std::string request_log_jsonl;                // empty => structured request logging disabled
+    std::string binary_sha256;                    // lifecycle-computed executable identity
+    std::string artifact_sha256;                  // lifecycle-computed artifact identity
+    std::string config_sha256;                    // lifecycle-computed full config identity
+    std::string deployment_profile;               // public deployment profile name
     std::uint32_t max_context          = 8192;
     KvCapacityPolicy kv_capacity       = KvCapacityPolicy::explicit_capacity(8192);
     std::uint32_t max_concurrency      = 1;

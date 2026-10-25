@@ -24,7 +24,8 @@ Read-only command for each candidate: `git merge-tree --write-tree --merge-base=
 
 | Checkpoint | Source / commit | Build | Host tests | Real-model tests | Slice report |
 |---|---|---|---|---|---|
-| Base | upstream `64d10fbf9` | Awaiting Infra baseline | Not run by integration | Not run by integration | Infra report pending |
+| Base | upstream `64d10fbf9` | Infra reports apps/tests ON, benches OFF, `120a`, 285.323 s; image `502ca8b3465c` | Infra evidence pending | Infra evidence pending | [Infra environment](https://github.com/alphastorm/ninfer/blob/ee39c4626/REPORT.md) |
+| Shared prerequisites | `dc3140b23`: native-profile gate and scope carriers | Leased integration build submitted; pending | Qwen frontend test included in leased job; pending | Not yet run | Integration-owned prerequisite, not a slice checkpoint |
 
 Baseline inventory must distinguish failures, skips and missing prerequisites. `tests/models/qwen3_5/tests.cmake` registers 14 `gpu;real` cases. `loading_real` needs explicit `--artifact` (the environment variable alone skips); MoE/offload cases need a matching MoE artifact. The supplied dense v3 artifact does not by itself prove every registered model/component route.
 
@@ -58,18 +59,18 @@ K3/K4 publication rule: Main approved a mandatory Engine-supplied live-service g
 | Requester | Requested surface | Ownership / current state |
 |---|---|---|
 | Contracts | New `runtime/contract/{durable_checkpoint_set,durable_engine_api,runtime_fingerprint}.h`; contract test registration | New headers reserved to Contracts; integration owns CMake; merge first. |
-| DurableStore | Store/backend sources and host-only test targets | Exact entries awaited; use existing test helpers, no duplicate convention. |
-| ServePort | Serving source/test registration; persistence and managed-stop CLI union | Integration owns shared CMake/options; ServePort owns request declarations and shutdown orchestration. |
+| DurableStore | Store/backend sources and host-only test targets | Authorized standalone SHA/backend registration consumed as `dc5ffcbb`; snapshot-aware store remains dependent on ServePort and K6. |
+| ServePort | Serving source/test registration; persistence and managed-stop CLI union | Authorized source/test registration supplied. Identity options and bounded API-key-file input ported with parser regressions; persistence/stop lifecycle still awaits providers. |
 | Persistence | `program/storage/durable_tracer.cpp` adjacent to `checkpoints.cpp` in `program_sources.cmake` | Exact slice-local insertion permitted for G1 build; integration owns merge disposition. Prefix-identity hook remains slice-owned and must become typed for final K1. |
-| EngineCache | `gpu_keep_warm_ms`, `--gpu-keep-warm-ms`, core source and test registration | Integration owns public option/CLI/CMake; EngineCache supplies exact entries. |
-| PortableCore | Root/core portability wiring; exact `Uint128` migrations in shared resources and serve options | `src/core/uint128.h` is PortableCore-owned; EngineCache owns engine arithmetic callers; integration owns shared callers. |
+| EngineCache | `gpu_keep_warm_ms`, `--gpu-keep-warm-ms`, core source and test registration | Exact shared patch supplied and consumed on slice; runtime role/occupancy declarations pushed separately after Main approval. |
+| PortableCore | Root/core portability wiring; exact `Uint128` migrations in shared resources and serve options | Authorized platform registration consumed as `bb5bf4cc1`; shared arithmetic patch supplied. Minimal Qwen4 read-completion category migration authorized. |
 | ArchEnable | Single `120a`, `89` or `86` architecture gate; propagated `NINFER_SM86`/`NINFER_SM89` definitions | Root gate and existing `ninfer_internal_includes` compile-owner definitions applied; native support still awaits family-local gating and qualification. |
-| Harness | BuildInfo header/module, compile-owner verification, source registration and version consumers | New provenance files reserved to Harness; integration owns shared wiring/consumers. |
+| Harness | BuildInfo header/module, compile-owner verification, source registration and version consumers | Standalone provider `f4f42173` ready; exact compile-owner/core/app registration patch supplied for slice consumption. |
 
 ## Open prerequisites
 
-- Infra build image/helper and vanilla baseline evidence.
-- Contracts freeze and mergeable branch/report.
+- Infra vanilla host/model baseline evidence remains pending; image and build/run helpers are available. Git-only image refresh is queued for provenance-aware builds.
+- Contracts declared the K1–K7 freeze; mergeable commit/report and standalone proof are pending.
 - Frontend starts when a worker slot becomes available; grammar-whitespace handoff is queued.
 - Exact requested declarations/source lists before shared edits; do not register nonexistent sources on the integration branch.
 - PortableCore and ArchEnable must land before adding native Windows architecture builds to the routine.
