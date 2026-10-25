@@ -7,7 +7,7 @@ add_test(NAME ninfer_engine_cache_gate_test
 
 ninfer_add_test(ninfer_engine_options_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_engine_options.cpp"
-  LIBRARIES ninfer_engine)
+  LIBRARIES ninfer_engine ninfer_core)
 set_tests_properties(ninfer_engine_options_test PROPERTIES LABELS "host")
 add_executable(ninfer_durable_contract_headers_test
   "${CMAKE_CURRENT_LIST_DIR}/../test_durable_contract_headers.cpp")
