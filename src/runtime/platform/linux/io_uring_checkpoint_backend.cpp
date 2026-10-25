@@ -1820,7 +1820,8 @@ public:
         // K6 resolves every parent using anchored no-follow directory handles.
         // Duplicating the verified descriptor pins these exact bytes for this batch;
         // enabling O_DIRECT does not reopen the pathname or change the reader contract.
-        std::unique_ptr<std::FILE, decltype(&std::fclose)> stream(nullptr, &std::fclose);
+        const auto close_file = [](std::FILE* file) { std::fclose(file); };
+        std::unique_ptr<std::FILE, decltype(close_file)> stream(nullptr, close_file);
         try {
             stream.reset(io::open_binary_read(path));
         } catch (const std::exception& error) {

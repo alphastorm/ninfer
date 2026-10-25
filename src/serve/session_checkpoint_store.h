@@ -21,6 +21,7 @@
 namespace ninfer::serve {
 inline constexpr std::uint32_t kSessionCheckpointSchemaVersion =
     runtime::kDurableSessionSchemaVersion;
+inline constexpr std::string_view kResponseStoreSnapshotCodec = "ninfer-responses-cbor/1";
 
 struct SessionCheckpointStoreOptions {
     std::filesystem::path root;
@@ -31,9 +32,9 @@ struct SessionCheckpointStoreOptions {
     // long session's checkpoint. Zero keeps plain oldest-first order.
     std::uint64_t short_session_tokens = 0;
     std::size_t staging_bytes          = 256ULL << 20;
-    // Bounds the in-memory chunk queue between the engine-held export and the drain thread
-    // that performs the disk writes (ninfer#34). The engine blocks only when the queue is
-    // full; sizing it at or above the typical payload keeps engine-held time at staging cost.
+    // Bounds owned chunk copies queued to the hashing/file drain thread (ninfer#34).
+    // Backpressure and finish() run off the Engine execution lock; the export lease keeps
+    // native content stable while copies retire.
     std::size_t write_buffer_bytes = 6ULL << 30;
     // Authenticates checkpoint manifest ORIGIN, not just consistency (alphastorm/ninfer#32):
     // 32 raw bytes of HMAC-SHA256 key material held outside the checkpoint root (derived from
@@ -79,6 +80,7 @@ enum class SessionCheckpointLoadState : std::uint8_t {
 struct SessionCheckpointLoadResult {
     SessionCheckpointLoadState state = SessionCheckpointLoadState::Missing;
     std::optional<VerifiedSessionCheckpoint> checkpoint;
+    runtime::DurableReason reason = runtime::DurableReason::None;
 };
 
 enum class SessionCheckpointEraseResult : std::uint8_t {
@@ -88,7 +90,8 @@ enum class SessionCheckpointEraseResult : std::uint8_t {
 };
 
 // Exact, binary-preserving encoding for response bodies, typed tool items, media bytes, thinking,
-// and the shared context DAG. The limit is checked before allocation and again after encoding.
+// and the shared context DAG. Decode bounds input before parsing; encode refuses oversized output
+// before any snapshot bytes are written to a generation.
 [[nodiscard]] std::vector<std::byte>
 encode_response_store_snapshot(const OpenAIResponseStoreSnapshot& snapshot, std::size_t byte_limit);
 [[nodiscard]] std::optional<OpenAIResponseStoreSnapshot>

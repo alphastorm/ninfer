@@ -121,6 +121,10 @@ ChatTurn rich_turn() {
     turn.content.push_back(std::move(image));
     turn.tool_calls.push_back(serve::ToolCall{
         .id = "call_private", .name = "workspace_diff", .arguments_json = "{\"x\":1}"});
+    turn.tool_calls.push_back(serve::ToolCall{
+        .id = "call_custom", .name = "raw_custom",
+        .arguments_json = "literal raw input\n<tool_call>not JSON</tool_call>",
+        .kind = ToolKind::Custom});
     turn.reasoning_content = "preserved private reasoning";
     turn.cache_boundary_after = CacheBoundary{.kind = PromptCacheMarkerKind::PrivateLongAnchor};
     turn.private_cache_boundary_after = true;
@@ -315,7 +319,7 @@ int test_codec_round_trip() {
     failures += check(turns.size() == 2 && turns.front().content.size() == 1 &&
                           turns.front().content[0].text == "marker private text",
                       "exact continuation marker survives codec");
-    failures += check(turns.back().tool_calls.size() == 1 &&
+    failures += check(turns.back().tool_calls.size() == 2 &&
                           turns.back().tool_calls[0].arguments_json == "{\"x\":1}",
                       "typed tool call survives codec");
     failures += check(second.input_items == original.records.back().input_items &&
@@ -341,6 +345,32 @@ int test_codec_round_trip() {
                           decoded->records.back().publication_order == 2,
                       "upstream cache boundaries, tool-result semantics, thinking null and "
                       "lineage publication order survive codec");
+    failures += check(turns.back().tool_calls[0].kind == ToolKind::Function &&
+                          turns.back().tool_calls[1].kind == ToolKind::Custom &&
+                          turns.back().tool_calls[1].arguments_json ==
+                              original.records.back().context->turns.back()
+                                  .tool_calls[1].arguments_json,
+                      "function/custom kinds and raw custom input survive without JSON wrapping");
+    auto custom_result = original;
+    ChatTurn tool_result;
+    tool_result.role = ChatRole::Tool;
+    tool_result.tool_kind = ToolKind::Custom;
+    tool_result.tool_call_id = "call_custom";
+    tool_result.tool_result_name = "raw_custom";
+    tool_result.content.push_back(ContentPart{.kind = ContentKind::Text,
+                                              .text = "raw result\n<literal>"});
+    custom_result.records.back().context =
+        append_openai_response_context(custom_result.records.back().context, {tool_result});
+    const auto custom_decoded = decode_response_store_snapshot(
+        encode_response_store_snapshot(custom_result, 1ULL << 20), 1ULL << 20);
+    const auto custom_turns = custom_decoded
+                                  ? flatten_openai_response_context(
+                                        custom_decoded->records.back().context)
+                                  : std::vector<ChatTurn>{};
+    failures += check(!custom_turns.empty() &&
+                          custom_turns.back().tool_kind == ToolKind::Custom &&
+                          custom_turns.back().content.front().text == "raw result\n<literal>",
+                      "custom tool-result history round-trips as raw typed history");
     const std::vector<std::byte> reencoded = encode_response_store_snapshot(*decoded, 1ULL << 20);
     failures += check(encoded == reencoded, "response snapshot has a stable canonical encoding");
     OpenAIResponsesStore live(4, 1ULL << 20);
@@ -401,22 +431,24 @@ int test_codec_round_trip() {
                               nullptr,
                       "failed external commit preserves the partial session exactly");
 
-    ResponseStore mixed(4, 1ULL << 20);
+    OpenAIResponsesStore mixed(4, 1ULL << 20);
     StoredOpenAIResponse unrelated;
     unrelated.id                    = "resp_unrelated";
     unrelated.session_key           = "other-session";
     unrelated.client_session_sha256 = std::string(64, 'e');
     unrelated.response              = nlohmann::json::object();
     mixed.put(unrelated);
+    const auto mixed_guard = mixed.begin_restore(original.client_session_sha256);
     failures += check(
-        mixed.restore_session(original, [] { return true; }) && mixed.size() == 3 &&
+        mixed.restore_session(original, mixed_guard, [] { return true; }) && mixed.size() == 3 &&
             mixed.get_for_session("resp_unrelated",
                                   std::optional<std::string>{std::string(64, 'e')}) != nullptr,
         "unrelated sessions survive a target-session restore");
 
-    ResponseStore gated(4, 1ULL << 20);
+    OpenAIResponsesStore gated(4, 1ULL << 20);
+    const auto gated_guard = gated.begin_restore(original.client_session_sha256);
     bool failed_external_commit = false;
-    failures += check(!gated.restore_session(original,
+    failures += check(!gated.restore_session(original, gated_guard,
                                              [&] {
                                                  failed_external_commit = true;
                                                  return false;
@@ -424,7 +456,7 @@ int test_codec_round_trip() {
                           failed_external_commit && gated.size() == 0,
                       "failed external restore does not publish Responses state");
     failures += check(
-        gated.restore_session(original, [] { return true; }) && gated.size() == 2 &&
+        gated.restore_session(original, gated_guard, [] { return true; }) && gated.size() == 2 &&
             gated.get_for_session("resp_private_first",
                                   std::optional<std::string>{original.client_session_sha256}) !=
                 nullptr &&
@@ -540,6 +572,21 @@ int test_kv_layout_runtime_fingerprint_rejection() {
                           compatible.checkpoint && compatible.checkpoint->generation == saved->generation,
                       "wrong KV profile does not quarantine the compatible checkpoint");
     compatible.checkpoint.reset();
+    auto unsupported = identity;
+    unsupported["responses"]["codec"] = "ninfer-responses-cbor/999";
+    refresh_config_digest(unsupported);
+    runtime::SessionCheckpointSkipDetail skip;
+    bool attempted = false;
+    failures += check(!store.save(
+                          responses, unsupported,
+                          [&](ContinuationCheckpointWriter&) {
+                              attempted = true;
+                              return exported_fixture({});
+                          }, publish_fixture, &skip) &&
+                          !attempted && skip.durable_reason == runtime::DurableReason::UnsupportedCodec &&
+                          store.load(responses.client_session_sha256, unsupported).state ==
+                              SessionCheckpointLoadState::Incompatible,
+                      "the actual Responses codec authority rejects unsupported identity labels");
     return failures;
 }
 
@@ -1665,6 +1712,10 @@ int test_manifest_origin_authentication() {
             responses.client_session_sha256, fingerprint(), responses.latest_response_id);
         failures += check(loaded.state == SessionCheckpointLoadState::Available,
                           "authentic generation loads under its own key");
+        failures += check(loaded.reason == runtime::DurableReason::None &&
+                              loaded.checkpoint && loaded.checkpoint->origin_authenticated &&
+                              saved->origin_authenticated,
+                          "authenticated publication and load retain exact origin evidence");
         loaded.checkpoint.reset();
         failures += check(store.covers(responses.client_session_sha256, fingerprint(),
                                        responses.latest_response_id),
@@ -1672,6 +1723,17 @@ int test_manifest_origin_authentication() {
     }
     const std::filesystem::path root =
         stored_generation_root(temporary.path, responses, generation);
+    {
+        SessionCheckpointStore no_key({.root = temporary.path,
+                                       .disk_quota_bytes = 8ULL << 20,
+                                       .staging_bytes = 1ULL << 20,
+                                       .read_queue = std::make_shared<TestReadQueue>()});
+        const auto unavailable = no_key.load(responses.client_session_sha256, fingerprint());
+        failures += check(unavailable.state == SessionCheckpointLoadState::Unavailable &&
+                              unavailable.reason == runtime::DurableReason::OriginKeyUnavailable &&
+                              std::filesystem::is_regular_file(root / "manifest.json"),
+                          "present MAC without a verification key preserves the generation");
+    }
     {
         // Same root, different key: a valid-looking store produced elsewhere is forged here.
         SessionCheckpointStore foreign({.root             = temporary.path,
@@ -1684,7 +1746,8 @@ int test_manifest_origin_authentication() {
                           "a skip decision never trusts a foreign-keyed catalogue");
         const SessionCheckpointLoadResult loaded = foreign.load(
             responses.client_session_sha256, fingerprint(), responses.latest_response_id);
-        failures += check(loaded.state == SessionCheckpointLoadState::Corrupt,
+        failures += check(loaded.state == SessionCheckpointLoadState::Corrupt &&
+                              loaded.reason == runtime::DurableReason::OriginMacMismatch,
                           "foreign-keyed generation quarantines as tampering");
     }
     return failures;
@@ -1744,7 +1807,8 @@ int test_manifest_origin_compatibility_window() {
         // never quarantine (council CR-20260831-originauth grok R2).
         const SessionCheckpointLoadResult refused = strict.load(
             responses.client_session_sha256, fingerprint(), responses.latest_response_id);
-        failures += check(refused.state == SessionCheckpointLoadState::Incompatible,
+        failures += check(refused.state == SessionCheckpointLoadState::Incompatible &&
+                              refused.reason == runtime::DurableReason::OriginRequired,
                           "strict origin auth refuses reversibly without quarantining");
         failures += check(std::filesystem::is_regular_file(root / "manifest.json"),
                           "strict refusal leaves the generation untouched");
@@ -1764,6 +1828,65 @@ int test_manifest_origin_compatibility_window() {
     }
     return failures;
 }
+
+#ifndef _WIN32
+int test_quota_and_erase_refuse_ancestor_symlink_swaps() {
+    TemporaryDirectory temporary;
+    TemporaryDirectory outside;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .read_queue = std::make_shared<TestReadQueue>()});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) {
+            return DurableExportResult{.state = runtime::DurableExportState::Refused,
+                                        .reason = runtime::DurableReason::IoUnavailable};
+        }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto saved = store.save(responses, fingerprint(), exporter, publish_fixture);
+    int failures = check(saved.has_value(), "ancestor-swap fixture publishes");
+    if (!saved) { return failures; }
+    const std::string marker = "outside-root sentinel";
+    const auto outside_file = outside.path / "sentinel.txt";
+    std::ofstream(outside_file, std::ios::binary) << marker;
+
+    const auto tombstones = temporary.path / ".tombstones";
+    const auto held_tombstones = temporary.path / ".tombstones-held";
+    std::filesystem::rename(tombstones, held_tombstones);
+    std::filesystem::create_directory_symlink(outside.path, tombstones);
+    try {
+        store.collect_garbage();
+    } catch (const std::exception&) {
+        // A rejected inventory is also fail-closed; no outside entry may be reclaimed.
+    }
+    failures += check(read_file_bytes(outside_file) == marker,
+                      "tombstone ancestor swap cannot make GC remove outside-root data");
+    std::filesystem::remove(tombstones);
+    std::filesystem::rename(held_tombstones, tombstones);
+
+    const auto external_session = outside.path / responses.client_session_sha256;
+    std::filesystem::create_directory(external_session);
+    std::ofstream(external_session / "current", std::ios::binary) << marker;
+    const auto sessions = temporary.path / "sessions";
+    const auto held_sessions = temporary.path / "sessions-held";
+    std::filesystem::rename(sessions, held_sessions);
+    std::filesystem::create_directory_symlink(outside.path, sessions);
+    failures += check(store.erase(responses.client_session_sha256) ==
+                              SessionCheckpointEraseResult::Conflict &&
+                          read_file_bytes(external_session / "current") == marker,
+                      "session ancestor swap cannot rename or erase an outside-root lineage");
+    std::filesystem::remove(sessions);
+    std::filesystem::rename(held_sessions, sessions);
+    failures += check(store.status(responses.client_session_sha256, fingerprint()).at("state") ==
+                          "available",
+                      "refused path mutations preserve the original current for retry");
+    return failures;
+}
+#endif
 
 int test_v3_manifest_validation_and_publication_guard() {
     TemporaryDirectory temporary;
@@ -1910,6 +2033,7 @@ int test_schema_v3_and_stream_completion() {
         std::ofstream(manifest_path, std::ios::binary | std::ios::trunc) << replacement;
         const auto incompatible = store.load(responses.client_session_sha256, fingerprint());
         failures += check(incompatible.state == SessionCheckpointLoadState::Incompatible &&
+                              incompatible.reason == runtime::DurableReason::IncompatibleSchema &&
                               store.status(responses.client_session_sha256, fingerprint())
                                       .at("state") == "incompatible" &&
                               read_file_bytes(manifest_path) == replacement &&
@@ -1918,6 +2042,17 @@ int test_schema_v3_and_stream_completion() {
                           "old and unknown schemas are reversible incompatibilities");
     }
     std::ofstream(manifest_path, std::ios::binary | std::ios::trunc) << original_text;
+    {
+        SessionCheckpointStore bounded({.root = temporary.path,
+                                        .disk_quota_bytes = 8ULL << 20,
+                                        .staging_bytes = 64,
+                                        .read_queue = std::make_shared<TestReadQueue>()});
+        const auto refused = bounded.load(responses.client_session_sha256, fingerprint());
+        failures += check(refused.state == SessionCheckpointLoadState::Incompatible &&
+                              refused.reason == runtime::DurableReason::StagingLimit &&
+                              read_file_bytes(manifest_path) == original_text,
+                          "a reduced staging budget refuses without quarantining valid bytes");
+    }
     const auto incomplete =
         [&](ContinuationCheckpointWriter& writer) -> DurableExportResult {
         (void)writer.write_file("engine/index.cbor", 0, payload.size() + 1, payload, 1);
@@ -2011,6 +2146,9 @@ int main() {
     failures += test_hmac_sha256_rfc4231_vectors();
     failures += test_manifest_origin_authentication();
     failures += test_manifest_origin_compatibility_window();
+#ifndef _WIN32
+    failures += test_quota_and_erase_refuse_ancestor_symlink_swaps();
+#endif
     failures += test_v3_manifest_validation_and_publication_guard();
     failures += test_schema_v3_and_stream_completion();
     failures += test_manifest_origin_transient_tag_failure_preserves_current();

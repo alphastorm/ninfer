@@ -578,7 +578,8 @@ public:
 
         // Resolve all parents without reparse traversal and hold the resulting file
         // against replacement while DirectStorage opens its native source object.
-        std::unique_ptr<std::FILE, decltype(&std::fclose)> pinned(nullptr, &std::fclose);
+        const auto close_file = [](std::FILE* file) { std::fclose(file); };
+        std::unique_ptr<std::FILE, decltype(close_file)> pinned(nullptr, close_file);
         try {
             pinned.reset(io::open_binary_read(path));
         } catch (const std::exception& error) {

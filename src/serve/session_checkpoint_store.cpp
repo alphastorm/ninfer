@@ -49,11 +49,17 @@ static_assert(std::is_nothrow_move_assignable_v<VerifiedSessionCheckpoint>);
 class CheckpointCorruption final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
+    CheckpointCorruption(runtime::DurableReason cause, const char* message)
+        : std::runtime_error(message), reason(cause) {}
+    const runtime::DurableReason reason = runtime::DurableReason::InvalidManifest;
 };
 
 class CheckpointUnavailable final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
+    CheckpointUnavailable(runtime::DurableReason cause, const char* message)
+        : std::runtime_error(message), reason(cause) {}
+    const runtime::DurableReason reason = runtime::DurableReason::IoUnavailable;
 };
 
 struct FileDescriptor {
@@ -192,6 +198,13 @@ void write_synced(const std::filesystem::path& path, std::string_view bytes) {
     write_synced(path, std::as_bytes(std::span(bytes.data(), bytes.size())));
 }
 
+[[nodiscard]] bool remove_best_effort(const std::filesystem::path& path) noexcept {
+    try {
+        (void)io::remove_tree(path);
+        return true;
+    } catch (...) { return false; }
+}
+
 [[nodiscard]] std::vector<std::byte> read_bounded(const std::filesystem::path& path,
                                                   std::size_t limit) {
     std::error_code error;
@@ -257,11 +270,17 @@ enum class ManifestOriginState : std::uint8_t { Authentic, Unauthenticated, Forg
         throw CheckpointUnavailable("checkpoint origin tag probe failed");
     }
     if (!tag_exists) { return ManifestOriginState::Unauthenticated; }
-    if (key.empty()) { throw CheckpointUnavailable("checkpoint origin key is unavailable"); }
+    if (key.empty()) {
+        throw CheckpointUnavailable(runtime::DurableReason::OriginKeyUnavailable,
+                                    "checkpoint origin key is unavailable");
+    }
     // read_text_bounded throws CheckpointUnavailable on open/size/read faults; let it
     // propagate so a transient tag read reports Unavailable instead of quarantining a
     // valid generation. Only structural badness or a mismatch is forgery evidence.
-    std::string recorded = read_text_bounded(root / "manifest.mac", 128);
+    std::string recorded;
+    try {
+        recorded = read_text_bounded(root / "manifest.mac", 128);
+    } catch (const CheckpointCorruption&) { return ManifestOriginState::Forged; }
     if (recorded.size() != 64) { return ManifestOriginState::Forged; }
     const std::string expected = manifest_origin_mac_hex(key, manifest_text);
     return constant_time_hex_equal(recorded, expected) ? ManifestOriginState::Authentic
@@ -286,7 +305,8 @@ void require_payload_shape(const std::filesystem::path& root, const std::string&
     const std::uintmax_t actual_bytes = std::filesystem::file_size(path, error);
     if (error) { throw CheckpointUnavailable("checkpoint payload size is unavailable"); }
     if (actual_bytes != expected_bytes) {
-        throw CheckpointCorruption("checkpoint payload size mismatch");
+        throw CheckpointCorruption(runtime::DurableReason::PayloadSizeMismatch,
+                                   "checkpoint payload size mismatch");
     }
     if (!read_queue || !read_queue->available()) {
         throw CheckpointUnavailable("checkpoint native read queue is unavailable");
@@ -297,7 +317,7 @@ void require_payload_shape(const std::filesystem::path& root, const std::string&
     std::error_code error;
     std::uint64_t total = 0;
     for (std::filesystem::recursive_directory_iterator
-             iterator(path, std::filesystem::directory_options::skip_permission_denied, error),
+             iterator(path, std::filesystem::directory_options::none, error),
          end;
          !error && iterator != end; iterator.increment(error)) {
         if (!iterator->is_regular_file(error) || error) { continue; }
@@ -359,6 +379,20 @@ std::optional<CacheBoundary> boundary_from_json(const nlohmann::json& value) {
                          .ttl = static_cast<CacheBoundary::Ttl>(ttl)};
 }
 
+std::string_view checkpoint_tool_kind_name(ToolKind kind) {
+    switch (kind) {
+    case ToolKind::Function: return "function";
+    case ToolKind::Custom: return "custom";
+    }
+    throw std::invalid_argument("checkpoint tool kind is invalid");
+}
+
+ToolKind checkpoint_tool_kind(const nlohmann::json& value) {
+    if (value == "function") { return ToolKind::Function; }
+    if (value == "custom") { return ToolKind::Custom; }
+    throw std::invalid_argument("checkpoint tool kind is invalid");
+}
+
 nlohmann::json turn_to_json(const ChatTurn& turn) {
     nlohmann::json content = nlohmann::json::array();
     for (const ContentPart& part : turn.content) {
@@ -373,12 +407,14 @@ nlohmann::json turn_to_json(const ChatTurn& turn) {
     nlohmann::json calls = nlohmann::json::array();
     for (const ToolCall& call : turn.tool_calls) {
         calls.push_back(
-            {{"id", call.id}, {"name", call.name}, {"arguments_json", call.arguments_json}});
+            {{"id", call.id}, {"name", call.name}, {"arguments_json", call.arguments_json},
+             {"kind", checkpoint_tool_kind_name(call.kind)}});
     }
     return {{"role", static_cast<std::uint8_t>(turn.role)},
             {"content", std::move(content)},
             {"tool_calls", std::move(calls)},
             {"tool_call_id", turn.tool_call_id},
+            {"tool_kind", checkpoint_tool_kind_name(turn.tool_kind)},
             {"tool_result_name", turn.tool_result_name ? nlohmann::json(*turn.tool_result_name)
                                                        : nlohmann::json(nullptr)},
             {"tool_result_is_error", turn.tool_result_is_error},
@@ -399,6 +435,7 @@ std::optional<ChatTurn> turn_from_json(const nlohmann::json& value) {
     ChatTurn turn;
     turn.role              = static_cast<ChatRole>(role);
     turn.tool_call_id      = value.at("tool_call_id").get<std::string>();
+    turn.tool_kind         = checkpoint_tool_kind(value.at("tool_kind"));
     if (!value.at("tool_result_name").is_null()) {
         turn.tool_result_name = value.at("tool_result_name").get<std::string>();
     }
@@ -432,7 +469,8 @@ std::optional<ChatTurn> turn_from_json(const nlohmann::json& value) {
         turn.tool_calls.push_back(
             ToolCall{.id             = encoded.at("id").get<std::string>(),
                      .name           = encoded.at("name").get<std::string>(),
-                     .arguments_json = encoded.at("arguments_json").get<std::string>()});
+                     .arguments_json = encoded.at("arguments_json").get<std::string>(),
+                     .kind           = checkpoint_tool_kind(encoded.at("kind"))});
     }
     return turn;
 }
@@ -464,11 +502,22 @@ public:
     }
 
     [[nodiscard]] bool finish() override {
-        return !failed_ && !states_.empty() &&
-               std::all_of(states_.begin(), states_.end(), [](const auto& entry) {
-                   const auto& state = entry.second;
-                   return state.complete && state.file == nullptr && state.written == state.total;
-               });
+        if (failed_ || states_.empty() ||
+            !std::all_of(states_.begin(), states_.end(), [](const auto& entry) {
+                const auto& state = entry.second;
+                return state.complete && state.file == nullptr && state.written == state.total;
+            })) {
+            return false;
+        }
+#ifndef _WIN32
+        // File fsync does not publish nested directory entries. Children precede their
+        // parents; the store syncs the generation root after writing its manifest/MAC.
+        for (auto path = dirty_directories_.rbegin(); path != dirty_directories_.rend(); ++path) {
+            sync_directory(*path);
+        }
+        dirty_directories_.clear();
+#endif
+        return true;
     }
 
     [[nodiscard]] std::optional<std::vector<FileDescriptor>> files() const {
@@ -509,6 +558,12 @@ private:
                 state.alignment = alignment;
                 const std::filesystem::path destination = root_ / key;
                 io::create_directories(destination.parent_path());
+#ifndef _WIN32
+                for (auto parent = destination.parent_path(); parent != root_;
+                     parent = parent.parent_path()) {
+                    dirty_directories_.insert(parent);
+                }
+#endif
                 state.file = open_binary_write(destination);
                 if (state.file == nullptr) {
                     failed_ = true;
@@ -556,15 +611,15 @@ private:
     std::filesystem::path root_;
     std::size_t staging_limit_ = 0;
     std::map<std::string, State> states_;
+#ifndef _WIN32
+    std::set<std::filesystem::path> dirty_directories_;
+#endif
     bool failed_ = false;
 };
 
-// Decouples the engine-held export from disk latency (ninfer#34): the engine's exporter runs
-// under the Engine execution lock, so every microsecond it spends inside write_file serializes
-// queued requests behind the save. This writer copies each chunk into a bounded in-memory queue
-// and returns, while one drain thread performs the real DirectoryCheckpointWriter writes.
-// finish() joins the drain and reports whether every deferred write succeeded; a deferred
-// failure fails the save exactly like an inline write failure, before anything publishes.
+// Owns each accepted chunk while a drain thread hashes and writes it (ninfer#34). K3 captures
+// immutable native views under Engine serialization, then streams and backpressures off-lock.
+// finish() joins the drain off-lock and reports every deferred failure before publication.
 class BufferedCheckpointWriter final : public ContinuationCheckpointWriter {
 public:
     BufferedCheckpointWriter(DirectoryCheckpointWriter& inner, std::size_t capacity_bytes)
@@ -630,7 +685,12 @@ public:
             } catch (...) { return false; }
         }
         std::lock_guard lock(mutex_);
-        return !failed_ && inner_.finish();
+        try {
+            return !failed_ && inner_.finish();
+        } catch (...) {
+            failed_ = true;
+            return false;
+        }
     }
 
 private:
@@ -1014,9 +1074,7 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
             if (!options.tombstone_cleanup(path)) { return false; }
         } catch (...) { return false; }
     } else {
-        std::error_code error;
-        std::filesystem::remove_all(path, error);
-        if (error) { return false; }
+        if (!remove_best_effort(path)) { return false; }
     }
     std::error_code error;
     return !std::filesystem::exists(path, error) && !error;
@@ -1064,13 +1122,13 @@ candidate_tombstone(const SessionCheckpointStoreOptions& options,
             continue;
         }
 
-        std::error_code error;
         const std::uint64_t reclaimed         = candidate.kind == CandidateKind::CurrentSession
                                                     ? session_generation_bytes(candidate.path)
                                                     : directory_bytes(candidate.path);
         const std::filesystem::path tombstone = candidate_tombstone(options, candidate);
-        std::filesystem::rename(candidate.path, tombstone, error);
-        if (error) {
+        try {
+            replace_path(candidate.path, tombstone);
+        } catch (...) {
             reclamation_healthy = false;
             continue;
         }
@@ -1114,7 +1172,8 @@ public:
         for (const auto& [path, file] : files_) {
             if (path.starts_with("engine/") && file.bytes == 0) {
                 if (crypto::sha256_hex(crypto::sha256({})) != file.sha256) {
-                    throw CheckpointCorruption("empty checkpoint payload digest mismatch");
+                    throw CheckpointCorruption(runtime::DurableReason::PayloadDigestMismatch,
+                                               "empty checkpoint payload digest mismatch");
                 }
                 verify_[path].verified = true;
             }
@@ -1267,15 +1326,15 @@ private:
     mutable bool verification_failed_ = false;
 };
 
-void quarantine_generation(const std::filesystem::path& session, const std::string& generation) {
-    std::error_code error;
-    const std::filesystem::path source = session / "generations" / generation;
-    const std::filesystem::path target =
-        session / "generations" / (generation + ".corrupt-" + std::to_string(unix_milliseconds()));
-    std::filesystem::rename(source, target, error);
-    error.clear();
-    std::filesystem::remove(session / "current", error);
+void quarantine_generation(const std::filesystem::path& session,
+                             const std::string& generation) noexcept {
     try {
+        const std::filesystem::path source = session / "generations" / generation;
+        const std::filesystem::path target =
+            session / "generations" /
+            (generation + ".corrupt-" + std::to_string(unix_milliseconds()));
+        replace_path(source, target);
+        (void)remove_best_effort(session / "current");
         sync_directory(session);
     } catch (...) {}
 }
@@ -1587,6 +1646,10 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
                              const ExportCheckpoint& exporter,
                              const PublishExport& publish_export,
                              runtime::SessionCheckpointSkipDetail* skip) {
+    if (skip != nullptr) {
+        skip->export_state = runtime::DurableExportState::Refused;
+        skip->durable_reason = runtime::DurableReason::None;
+    }
     if (!valid_digest(responses.client_session_sha256) ||
         !validate_session_checkpoint_runtime_fingerprint(runtime_fingerprint) ||
         !exporter || !publish_export) {
@@ -1595,6 +1658,10 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
             runtime::ContinuationExportSkipDetail::record(
                 &skip->export_detail, runtime::ContinuationExportSkipReason::StoreInputInvalid);
         }
+        return std::nullopt;
+    }
+    if (runtime_fingerprint.at("responses").at("codec") != kResponseStoreSnapshotCodec) {
+        if (skip != nullptr) { skip->durable_reason = runtime::DurableReason::UnsupportedCodec; }
         return std::nullopt;
     }
     std::lock_guard lock(impl_->mutex);
@@ -1606,8 +1673,7 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         std::to_string(unix_milliseconds()) + "-" + std::to_string(ordinal);
     const std::filesystem::path staging   = generations / (".staging-" + generation);
     const std::filesystem::path published = generations / generation;
-    std::error_code cleanup_error;
-    std::filesystem::remove_all(staging, cleanup_error);
+    (void)io::remove_tree(staging);
     io::create_directories(staging);
 
     try {
@@ -1617,8 +1683,8 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         if (!writer.write_store_file("responses.cbor", 0, response_bytes.size(), response_bytes)) {
             throw std::runtime_error("response checkpoint write failed");
         }
-        // The exporter holds the Engine execution lock: buffer its writes so the engine pays
-        // staging cost only, and fail the save if any deferred disk write failed (ninfer#34).
+        // K3 streams the leased native set off-lock. Drain all accepted copies before publishing;
+        // neither backpressure nor finish may run under the Engine execution lock (ninfer#34).
         BufferedCheckpointWriter buffered(writer, options_.write_buffer_bytes);
         const runtime::DurableExportResult exported = exporter(buffered);
         if (skip != nullptr) {
@@ -1626,14 +1692,25 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
             skip->durable_reason = exported.reason;
         }
         if (!buffered.finish()) {
-            if (skip != nullptr) { skip->durable_reason = runtime::DurableReason::IoUnavailable; }
+            if (skip != nullptr) {
+                skip->export_state = runtime::DurableExportState::Refused;
+                skip->durable_reason = runtime::DurableReason::IoUnavailable;
+            }
             throw std::runtime_error("checkpoint payload write failed");
         }
         if (exported.state != runtime::DurableExportState::Exported ||
             exported.reason != runtime::DurableReason::None ||
             !valid_checkpoint_stats(exported.stats)) {
-            std::filesystem::remove_all(staging, cleanup_error);
+            (void)remove_best_effort(staging);
             if (skip != nullptr) {
+                if (exported.state == runtime::DurableExportState::Exported) {
+                    skip->export_state = runtime::DurableExportState::Refused;
+                }
+                if (skip->durable_reason == runtime::DurableReason::None) {
+                    skip->durable_reason = exported.state == runtime::DurableExportState::Stale
+                                               ? runtime::DurableReason::StalePublication
+                                               : runtime::DurableReason::InvalidIndex;
+                }
                 if (skip->first_reason == runtime::SessionCheckpointSkipReason::None) {
                     skip->first_reason = skip->reason;
                 }
@@ -1726,15 +1803,16 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         const std::uint64_t total_bytes = directory_bytes(staging);
         if (total_bytes > options_.disk_quota_bytes ||
             !enforce_disk_quota_locked(options_, *impl_, staging, session, previous_bytes)) {
-            std::filesystem::remove_all(staging, cleanup_error);
+            (void)remove_best_effort(staging);
             if (skip != nullptr) {
+                skip->export_state = runtime::DurableExportState::Refused;
                 skip->reason = runtime::SessionCheckpointSkipReason::QuotaExceeded;
                 skip->durable_reason = runtime::DurableReason::Quota;
             }
             return std::nullopt;
         }
 
-        std::filesystem::rename(staging, published);
+        replace_path(staging, published);
         sync_directory(generations);
         const std::filesystem::path current_staging = session / (".current-" + generation);
         write_synced(current_staging, generation + "\n");
@@ -1752,10 +1830,17 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
         });
         if (publication.state != runtime::DurableExportState::Exported ||
             publication.reason != runtime::DurableReason::None || !committed) {
-            std::filesystem::remove(current_staging, cleanup_error);
+            (void)remove_best_effort(current_staging);
             if (skip != nullptr) {
-                skip->export_state = publication.state;
-                skip->durable_reason = publication.reason;
+                skip->export_state = publication.state == runtime::DurableExportState::Stale
+                                         ? runtime::DurableExportState::Stale
+                                         : runtime::DurableExportState::Refused;
+                skip->durable_reason =
+                    publication.reason != runtime::DurableReason::None
+                        ? publication.reason
+                        : publication.state == runtime::DurableExportState::Stale
+                              ? runtime::DurableReason::StalePublication
+                              : runtime::DurableReason::IoUnavailable;
             }
             return std::nullopt;
         }
@@ -1776,7 +1861,11 @@ SessionCheckpointStore::save(const OpenAIResponseStoreSnapshot& responses,
             .dir_sync = io::directory_sync_mode(),
             .origin_authenticated = !options_.origin_mac_key.empty()};
     } catch (...) {
-        std::filesystem::remove_all(staging, cleanup_error);
+        (void)remove_best_effort(staging);
+        if (skip != nullptr && skip->durable_reason == runtime::DurableReason::None) {
+            skip->export_state = runtime::DurableExportState::Refused;
+            skip->durable_reason = runtime::DurableReason::IoUnavailable;
+        }
         throw;
     }
 }
@@ -1786,10 +1875,16 @@ SessionCheckpointStore::load(std::string_view session_sha256,
                              const nlohmann::json& runtime_fingerprint,
                              std::optional<std::string_view> required_response_id) {
     if (!valid_digest(session_sha256)) {
-        return {.state = SessionCheckpointLoadState::Missing};
+        return {.state = SessionCheckpointLoadState::Missing,
+                 .reason = runtime::DurableReason::NoSessionRecords};
     }
     if (!validate_session_checkpoint_runtime_fingerprint(runtime_fingerprint)) {
-        return {.state = SessionCheckpointLoadState::Incompatible};
+        return {.state = SessionCheckpointLoadState::Incompatible,
+                 .reason = runtime::DurableReason::FingerprintMismatch};
+    }
+    if (runtime_fingerprint.at("responses").at("codec") != kResponseStoreSnapshotCodec) {
+        return {.state = SessionCheckpointLoadState::Incompatible,
+                 .reason = runtime::DurableReason::UnsupportedCodec};
     }
     std::lock_guard lock(impl_->mutex);
     const std::filesystem::path session = session_path(session_sha256);
@@ -1797,13 +1892,21 @@ SessionCheckpointStore::load(std::string_view session_sha256,
     try {
         generation = current_generation(session);
     } catch (const CheckpointCorruption&) {
-        return {.state = SessionCheckpointLoadState::Corrupt};
-    } catch (...) { return {.state = SessionCheckpointLoadState::Unavailable}; }
-    if (!generation) { return {.state = SessionCheckpointLoadState::Missing}; }
+        return {.state = SessionCheckpointLoadState::Corrupt,
+                 .reason = runtime::DurableReason::InvalidManifest};
+    } catch (...) {
+        return {.state = SessionCheckpointLoadState::Unavailable,
+                 .reason = runtime::DurableReason::IoUnavailable};
+    }
+    if (!generation) {
+        return {.state = SessionCheckpointLoadState::Missing,
+                 .reason = runtime::DurableReason::NoSessionRecords};
+    }
     const std::filesystem::path root = session / "generations" / *generation;
     if (impl_->consume_corrupt(std::string(session_sha256) + "/" + *generation)) {
         quarantine_generation(session, *generation);
-        return {.state = SessionCheckpointLoadState::Corrupt};
+        return {.state = SessionCheckpointLoadState::Corrupt,
+                 .reason = runtime::DurableReason::PayloadDigestMismatch};
     }
     try {
         const std::string manifest_text = read_text_bounded(root / "manifest.json", 16ULL << 20);
@@ -1817,10 +1920,12 @@ SessionCheckpointStore::load(std::string_view session_sha256,
         switch (origin) {
         case ManifestOriginState::Authentic: break;
         case ManifestOriginState::Forged:
-            throw CheckpointCorruption("checkpoint manifest origin authentication failed");
+            throw CheckpointCorruption(runtime::DurableReason::OriginMacMismatch,
+                                       "checkpoint manifest origin authentication failed");
         case ManifestOriginState::Unauthenticated:
             if (options_.require_origin_auth) {
-                return {.state = SessionCheckpointLoadState::Incompatible};
+                return {.state = SessionCheckpointLoadState::Incompatible,
+                         .reason = runtime::DurableReason::OriginRequired};
             }
             break;
         }
@@ -1829,7 +1934,8 @@ SessionCheckpointStore::load(std::string_view session_sha256,
             manifest.at("schema_version").is_number_unsigned() &&
             manifest.at("schema_version").get<std::uint64_t>() !=
                 kSessionCheckpointSchemaVersion) {
-            return {.state = SessionCheckpointLoadState::Incompatible};
+            return {.state = SessionCheckpointLoadState::Incompatible,
+                     .reason = runtime::DurableReason::IncompatibleSchema};
         }
         require_manifest_shape(manifest);
         if (!manifest.is_object() ||
@@ -1841,7 +1947,8 @@ SessionCheckpointStore::load(std::string_view session_sha256,
         }
         if (!validate_session_checkpoint_runtime_fingerprint(manifest.at("runtime_fingerprint")) ||
             manifest.at("runtime_fingerprint") != runtime_fingerprint) {
-            return {.state = SessionCheckpointLoadState::Incompatible};
+            return {.state = SessionCheckpointLoadState::Incompatible,
+                     .reason = runtime::DurableReason::FingerprintMismatch};
         }
         if (!manifest.at("files").is_array() || manifest.at("files").empty() ||
             manifest.at("files").size() > 4096) {
@@ -1861,7 +1968,8 @@ SessionCheckpointStore::load(std::string_view session_sha256,
             require_payload_shape(root, expected->path, expected->bytes, options_.read_queue);
             if ((expected->path == "engine/index.cbor" || expected->path == "responses.cbor") &&
                 expected->bytes > options_.staging_bytes) {
-                throw CheckpointCorruption("checkpoint metadata exceeds staging capacity");
+                return {.state = SessionCheckpointLoadState::Incompatible,
+                         .reason = runtime::DurableReason::StagingLimit};
             }
             if (expected->bytes > std::numeric_limits<std::uint64_t>::max() - verified_bytes) {
                 throw CheckpointCorruption("checkpoint verified byte count overflowed");
@@ -1880,14 +1988,18 @@ SessionCheckpointStore::load(std::string_view session_sha256,
             throw CheckpointCorruption("checkpoint manifest payload summary is corrupt");
         }
         const auto checksum_file = allowed.find("checksums.json");
-        if (checksum_file == allowed.end() ||
-            checksum_file->second.bytes > options_.staging_bytes) {
+        if (checksum_file == allowed.end()) {
             throw CheckpointCorruption("checkpoint checksum descriptor is corrupt");
+        }
+        if (checksum_file->second.bytes > options_.staging_bytes) {
+            return {.state = SessionCheckpointLoadState::Incompatible,
+                     .reason = runtime::DurableReason::StagingLimit};
         }
         const auto checksum_bytes = read_bounded(root / "checksums.json", options_.staging_bytes);
         if (checksum_bytes.size() != checksum_file->second.bytes ||
             crypto::sha256_hex(crypto::sha256(checksum_bytes)) != checksum_file->second.sha256) {
-            throw CheckpointCorruption("checkpoint checksum inventory digest mismatch");
+            throw CheckpointCorruption(runtime::DurableReason::PayloadDigestMismatch,
+                                       "checkpoint checksum inventory digest mismatch");
         }
         nlohmann::json checksum_inventory = nlohmann::json::array();
         for (const auto& [path, file] : allowed) {
@@ -1904,7 +2016,7 @@ SessionCheckpointStore::load(std::string_view session_sha256,
             throw CheckpointCorruption("checkpoint checksum inventory differs from manifest");
         }
         const auto response_file = allowed.find("responses.cbor");
-        if (response_file == allowed.end() || response_file->second.bytes > options_.staging_bytes) {
+        if (response_file == allowed.end()) {
             throw CheckpointCorruption("checkpoint response payload descriptor is corrupt");
         }
         const std::vector<std::byte> response_bytes =
@@ -1914,7 +2026,8 @@ SessionCheckpointStore::load(std::string_view session_sha256,
         if (response_bytes.size() != response_file->second.bytes ||
             crypto::sha256_hex(crypto::sha256(std::span<const std::byte>(response_bytes))) !=
                 response_file->second.sha256) {
-            throw CheckpointCorruption("checkpoint response payload checksum mismatch");
+            throw CheckpointCorruption(runtime::DurableReason::PayloadDigestMismatch,
+                                       "checkpoint response payload checksum mismatch");
         }
         std::optional<OpenAIResponseStoreSnapshot> responses =
             decode_response_store_snapshot(response_bytes, options_.staging_bytes);
@@ -1928,7 +2041,8 @@ SessionCheckpointStore::load(std::string_view session_sha256,
                          [&](const StoredOpenAIResponse& response) {
                              return response.id == *required_response_id;
                          })) {
-            return {.state = SessionCheckpointLoadState::Missing};
+            return {.state = SessionCheckpointLoadState::Missing,
+                     .reason = runtime::DurableReason::RequiredResponseMissing};
         }
         DurableCheckpointStats expected{
             .frontier_tokens = manifest.at("frontier_tokens").get<std::uint32_t>(),
@@ -1951,13 +2065,19 @@ SessionCheckpointStore::load(std::string_view session_sha256,
             root, std::move(allowed), options_.read_queue, impl_, active_key);
         verified.engine = std::move(reader);
         return {.state = SessionCheckpointLoadState::Available, .checkpoint = std::move(verified)};
-    } catch (const CheckpointCorruption&) {
+    } catch (const CheckpointCorruption& error) {
         quarantine_generation(session, *generation);
-        return {.state = SessionCheckpointLoadState::Corrupt};
+        return {.state = SessionCheckpointLoadState::Corrupt, .reason = error.reason};
+    } catch (const CheckpointUnavailable& error) {
+        return {.state = SessionCheckpointLoadState::Unavailable, .reason = error.reason};
     } catch (const nlohmann::json::exception&) {
         quarantine_generation(session, *generation);
-        return {.state = SessionCheckpointLoadState::Corrupt};
-    } catch (...) { return {.state = SessionCheckpointLoadState::Unavailable}; }
+        return {.state = SessionCheckpointLoadState::Corrupt,
+                 .reason = runtime::DurableReason::InvalidManifest};
+    } catch (...) {
+        return {.state = SessionCheckpointLoadState::Unavailable,
+                 .reason = runtime::DurableReason::IoUnavailable};
+    }
 }
 
 bool SessionCheckpointStore::covers(std::string_view session_sha256,
@@ -1965,6 +2085,7 @@ bool SessionCheckpointStore::covers(std::string_view session_sha256,
                                     std::string_view response_id) const {
     if (!valid_digest(session_sha256) ||
         !validate_session_checkpoint_runtime_fingerprint(runtime_fingerprint) ||
+        runtime_fingerprint.at("responses").at("codec") != kResponseStoreSnapshotCodec ||
         response_id.empty()) {
         return false;
     }
@@ -2005,7 +2126,8 @@ nlohmann::json SessionCheckpointStore::status(std::string_view session_sha256,
                              {"dir_sync", io::directory_sync_mode()},
                              {"state", "missing"}};
     if (!valid_digest(session_sha256)) { return result; }
-    if (!validate_session_checkpoint_runtime_fingerprint(runtime_fingerprint)) {
+    if (!validate_session_checkpoint_runtime_fingerprint(runtime_fingerprint) ||
+        runtime_fingerprint.at("responses").at("codec") != kResponseStoreSnapshotCodec) {
         result["state"] = "incompatible";
         return result;
     }
@@ -2088,16 +2210,14 @@ SessionCheckpointEraseResult SessionCheckpointStore::erase(std::string_view sess
     try {
         tombstone = unique_tombstone(options_, std::string(session_sha256) + "--session");
     } catch (...) { return SessionCheckpointEraseResult::Conflict; }
-    std::error_code error;
-    std::filesystem::rename(session, tombstone, error);
-    if (error) {
-        std::error_code status_error;
-        const bool source_exists = std::filesystem::exists(session, status_error);
-        if (error == std::errc::no_such_file_or_directory || (!status_error && !source_exists)) {
+    try {
+        replace_path(session, tombstone);
+    } catch (const std::system_error& error) {
+        if (error.code() == std::errc::no_such_file_or_directory) {
             return SessionCheckpointEraseResult::Missing;
         }
         return SessionCheckpointEraseResult::Conflict;
-    }
+    } catch (...) { return SessionCheckpointEraseResult::Conflict; }
     if (!sync_rename_parents(session, tombstone)) {
         // The rename may not be durable; report a retryable failure instead of
         // acknowledging a deletion that a crash could resurrect (review CR-20260830 R2).
