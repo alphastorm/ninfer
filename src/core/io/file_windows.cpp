@@ -53,7 +53,7 @@ std::size_t read_once(FileView file, std::uint64_t offset, std::span<std::byte> 
 }
 } // namespace
 
-ReadOnlyFile::ReadOnlyFile(const std::filesystem::path& path, ReadMode mode) : path_(path) {
+ReadOnlyFile::ReadOnlyFile(const std::filesystem::path& path, ReadMode mode) {
     if (mode != ReadMode::Buffered && mode != ReadMode::Direct)
         throw std::invalid_argument("invalid file read mode");
     const auto flags = FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED |
@@ -101,12 +101,11 @@ ReadOnlyFile::~ReadOnlyFile() {
 }
 
 ReadOnlyFile::ReadOnlyFile(ReadOnlyFile&& other) noexcept
-    : path_(std::move(other.path_)), view_(std::exchange(other.view_, {})) {}
+    : view_(std::exchange(other.view_, {})) {}
 
 ReadOnlyFile& ReadOnlyFile::operator=(ReadOnlyFile&& other) noexcept {
     if (this != &other) {
         if (view_.native_handle != -1) CloseHandle(handle(view_));
-        path_ = std::move(other.path_);
         view_ = std::exchange(other.view_, {});
     }
     return *this;
