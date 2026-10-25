@@ -57,6 +57,11 @@ public:
                            std::span<std::byte> destination) const                            = 0;
     // Import may commit only after every declared engine payload was consumed and verified.
     [[nodiscard]] virtual bool verify_complete() const = 0;
+    // Distinguish retryable payload I/O failure from verified integrity failure.
+    [[nodiscard]] virtual DurableReason failure_reason() const noexcept = 0;
+    // Fresh verification state over the same immutable, generation-pinned descriptors.
+    [[nodiscard]] virtual std::shared_ptr<const ContinuationCheckpointReader>
+    fresh_reader() const = 0;
 };
 
 // Names the first failed gate when a session checkpoint export is refused. The engine and the
@@ -522,7 +527,7 @@ session_restore_skip_reason_name(SessionRestoreSkipReason reason) noexcept {
 // A restore that needs room may drop a *different* live continuation instead of refusing, but
 // only when dropping it loses nothing: that session's own checkpoint must already be current on
 // disk, so its next request restores it. Only the serve layer owns the checkpoint store, so it
-// answers per candidate. Absent oracle means nothing is reclaimable, which is the old behaviour.
+// pins a proven generation per candidate. Absent oracle means nothing is reclaimable.
 class ReclaimableSessionOracle {
 public:
     ReclaimableSessionOracle()                                           = default;
@@ -530,10 +535,12 @@ public:
     ReclaimableSessionOracle(const ReclaimableSessionOracle&)            = delete;
     ReclaimableSessionOracle& operator=(const ReclaimableSessionOracle&) = delete;
 
-    // True when session_sha256's stored checkpoint already covers checkpoint_tag. Must answer
-    // false - never throw - when the store cannot prove it: an unprovable candidate is kept.
-    [[nodiscard]] virtual bool recoverable(std::string_view session_sha256,
-                                           std::string_view checkpoint_tag) const noexcept = 0;
+    // Fresh store lookup plus newest-tag validation, retaining the generation through Reader.
+    // Destructive reclaim revalidates generation/tag against current publication each attempt.
+    // Return null, never throw, when proof is missing or stale; retain an unprovable candidate.
+    [[nodiscard]] virtual std::shared_ptr<const ContinuationCheckpointReader>
+    pin_recoverable(std::string_view session_sha256,
+                    std::string_view checkpoint_tag) const noexcept = 0;
 };
 
 struct SessionRestoreSkipDetail {
