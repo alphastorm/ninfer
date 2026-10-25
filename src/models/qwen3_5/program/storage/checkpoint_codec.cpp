@@ -71,17 +71,22 @@ std::vector<std::uint8_t> encode(const DurableCheckpointSet& set) {
 DurableCheckpointSet decode(std::span<const std::byte> bytes, const DurableLimits& limits) {
     require(bytes.size() <= limits.manifest_bytes && bytes.size() <= limits.staging_bytes,
             "native index exceeds metadata limit");
-    const auto* begin = reinterpret_cast<const std::uint8_t*>(bytes.data());
-    const auto document = nlohmann::json::from_cbor(begin, begin + bytes.size());
-    require(document.at("format") == kDurableCheckpointSetFormat, "unsupported native index format");
-    auto set = document.get<DurableCheckpointSet>();
-    // Typed round-trip also rejects integer narrowing, floats, unknown keys, duplicate keys,
-    // indefinite containers, tags, non-shortest integers and out-of-order map keys.
-    const auto canonical = encode(set);
-    require(canonical.size() == bytes.size() && std::equal(canonical.begin(), canonical.end(), begin),
-            "native index is not canonical field-wise CBOR");
-    validate(set, limits);
-    return set;
+    require(!bytes.empty(), "native index is empty");
+    try {
+        const auto* begin = reinterpret_cast<const std::uint8_t*>(bytes.data());
+        const auto document = nlohmann::json::from_cbor(begin, begin + bytes.size());
+        require(document.at("format") == kDurableCheckpointSetFormat, "unsupported native index format");
+        auto set = document.get<DurableCheckpointSet>();
+        // Typed round-trip also rejects integer narrowing, floats, unknown keys, duplicate keys,
+        // indefinite containers, tags, non-shortest integers and out-of-order map keys.
+        const auto canonical = encode(set);
+        require(canonical.size() == bytes.size() && std::equal(canonical.begin(), canonical.end(), begin),
+                "native index is not canonical field-wise CBOR");
+        validate(set, limits);
+        return set;
+    } catch (const nlohmann::json::exception&) {
+        throw std::invalid_argument("invalid native checkpoint CBOR");
+    }
 }
 
 void validate(const DurableCheckpointSet& set, const DurableLimits& limits) {
