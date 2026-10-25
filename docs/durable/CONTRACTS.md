@@ -220,7 +220,6 @@ fingerprint. The native query returns `DurableNativeLayout` from the loaded Prog
 actual geometry. The frontend query returns `DurableFrontendIdentity` computed once
 from loaded tokenizer/resource bytes and the exact selected template source at
 compilation. Never reopen the template filename after load or hash resources per save.
-
 ## K3 — Engine/Program ownership and transaction API
 
 Only the internal `runtime::CheckpointEngineAccess` adapter exposes persistence.
@@ -303,7 +302,6 @@ foreign/stale Program is a programming error before publication, not partial suc
 same identity, frontier and layout checks as import, without reservation or
 publication. `Validated` means the pinned checkpoint passed validation, not that
 native state was imported or any victim is unconditionally safe to evict.
-
 Export pins `CheckpointStore::Lease`, `StateImageStore::ReadLease`, page read leases
 and immutable identity. Resolve immutable copy views under Engine serialization;
 then perform dedicated transfer-stream copies with bounded pinned staging, hashing
@@ -346,7 +344,6 @@ Verified size/digest mismatches report `PayloadSizeMismatch`/`PayloadDigestMisma
 and map to `Corrupt`, permitting quarantine of that generation. `None` denotes no
 recorded failure, not a substitute for an observed I/O error. A1 implements the
 accessor in concrete readers/fakes; native and Engine import layers propagate it.
-
 Import never bypasses `allow_prefix_reuse` or serving `CacheParticipation`:
 `Disabled`, startup warmup, or disabled cache gives `PolicyDisabled/cache_disabled`
 without native reservation. Disk cannot enable reuse, add authority or force eviction.
@@ -376,7 +373,6 @@ Validation is single-pass, so actual import after validation uses `fresh_reader(
 `publish_export` still compares the captured
 epoch under the gate. This pinned-reader shape supersedes the earlier optional
 generation/epoch value return; runtime epochs remain absent from the manifest.
-
 ## K4 — Responses restore and session isolation
 
 Extend `OpenAIResponsesStore`, not a parallel store. The snapshot owns a session
@@ -394,7 +390,6 @@ Any Engine pressure reclamation used to make room for this restore obeys K3's
 fresh pinned-reader generation/tag validation at destructive eviction. A stale or missing pin
 preserves the candidate's live state; it cannot be converted into a successful
 restore or a claim that the candidate remains durably recoverable.
-
 State machine:
 
 ```
@@ -515,7 +510,6 @@ and current-pointer moves, use `io::replace_path` under the same confinement pol
 This lead-approved extension adds no dependency and does not change which generations
 the store is authorized to reclaim. PortableCore owns the primitive; DurableStore
 owns caller migration and the symlink-swap regression.
-
 Publication order:
 
 1. Create unique unpublished staging generation; failed export leaves current intact.
@@ -598,7 +592,6 @@ integer `schema_version < 3` yields `incompatible/incompatible_schema` with no
 quarantine, mutation or import even if the MAC is present and invalid. At or above
 3, MAC verification precedes further parsing. Do not report `origin_mac_mismatch`
 or quarantine a legacy generation that has already met the schema-refusal rule.
-
 Public Responses routes do not reveal foreign-session existence or low-level paths.
 Detailed receipt reasons are bounded symbolic names, not raw exceptions. Reports must
 not include keys, payloads, raw IDs, prompts, checkpoint root paths or machine names.

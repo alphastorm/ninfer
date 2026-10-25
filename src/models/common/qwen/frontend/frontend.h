@@ -12,6 +12,10 @@
 #include <string_view>
 #include <vector>
 
+namespace ninfer::runtime {
+struct DurableFrontendIdentity;
+}
+
 namespace ninfer::models::qwen {
 
 struct FrontendOptions {
@@ -77,6 +81,7 @@ public:
                         const ToolChoice& tool_choice                     = {}) const;
     [[nodiscard]] const StopPolicy& default_stop_policy() const noexcept;
     [[nodiscard]] const ModelSamplingDefaults& sampling_defaults() const noexcept;
+    [[nodiscard]] const runtime::DurableFrontendIdentity& durable_identity() const;
 
 private:
     class Impl;

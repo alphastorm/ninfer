@@ -105,7 +105,6 @@ enum class DurableReason : std::uint8_t {
     }
     return "unknown";
 }
-
 struct DurableLimits {
     std::uint64_t staging_bytes = 256ULL << 20;
     std::uint64_t write_buffer_bytes = 6ULL << 30;
