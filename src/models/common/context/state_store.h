@@ -71,6 +71,7 @@ public:
         [[nodiscard]] std::uint64_t epoch() const noexcept { return epoch_; }
 
         [[nodiscard]] std::int32_t device_slot() const;
+        [[nodiscard]] ConstMemorySpan host_view() const;
         void reset() noexcept;
     private:
         ReadLease(StateImageStore& store, Handle image, std::uint64_t epoch) noexcept
@@ -156,6 +157,10 @@ public:
     [[nodiscard]] std::optional<Handle> reserve_destination() noexcept;
 
     [[nodiscard]] std::optional<Handle> reserve_logical_destination() noexcept;
+    // Fresh unpublished Host-only image. Destination owns rollback until snapshot adoption.
+    [[nodiscard]] std::optional<Handle> reserve_host_destination() noexcept;
+    [[nodiscard]] MemorySpan writable_host_view(Handle);
+    void complete_host_initialization(Handle);
 
     // The caller has initialized every required field, ordered on its execution stream.
     // Adopting a materialized copy retains its content epoch; native writes use complete_write.

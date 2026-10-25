@@ -2091,6 +2091,14 @@ int main(int argc, char** argv) {
         auto planner = q35::make_sequence_planner(parameters, device, options);
         auto plan    = std::move(planner).finalize(16);
         auto program = q35::create_program(parameters, std::move(plan), device, {});
+        if (const char* scenario = std::getenv("NINFER_NATIVE_TRANSACTION_SCENARIO")) {
+            require(std::string_view(scenario) == "admitted-tail-reader",
+                    "unknown native transaction scenario");
+            Fixture fixture(device, *program, frontend);
+            fixture.admitted_unit_acquires_tail_reader();
+            std::cout << "OK admitted_unit_acquires_tail_reader\n";
+            return 0;
+        }
         {
             Fixture fixture(device, *program, frontend);
             fixture.capture_opportunities();

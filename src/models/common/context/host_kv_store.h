@@ -29,7 +29,7 @@ public:
     HostKVExtentReservation(HostKVExtentReservation&& other) noexcept
         : owner_(std::exchange(other.owner_, nullptr)), descriptor_(other.descriptor_),
           generation_(other.generation_), page_store_(other.page_store_),
-          allocation_(std::move(other.allocation_)) {}
+          allocation_(std::move(other.allocation_)), imported_(other.imported_) {}
 
     HostKVExtentReservation& operator=(HostKVExtentReservation&&)      = delete;
     HostKVExtentReservation(const HostKVExtentReservation&)            = delete;
@@ -43,6 +43,7 @@ private:
     std::uint32_t generation_       = 0;
     LogicalKVPageStore* page_store_ = nullptr;
     std::optional<HostKVAllocation> allocation_;
+    bool imported_ = false;
 
     friend class HostKVExtentStore;
 };
@@ -51,6 +52,28 @@ private:
 // checkpoint, retention, or scheduling policy.
 class HostKVExtentStore {
 public:
+    // Owns unpublished Host-only pages, then their temporary references after publish.
+    // Histories retain their own references; destruction retires every unadopted page.
+    class Import {
+    public:
+        ~Import();
+        Import(Import&&) noexcept;
+        Import& operator=(Import&&) = delete;
+        Import(const Import&) = delete;
+        Import& operator=(const Import&) = delete;
+        [[nodiscard]] std::span<const LogicalKVPageHandle> pages() const noexcept { return pages_; }
+        [[nodiscard]] HostKVAllocationView writable_view();
+        void publish();
+    private:
+        Import(HostKVExtentStore&, LogicalKVPageStore&, HostKVExtentReservation,
+               std::vector<LogicalKVPageHandle>);
+        HostKVExtentStore* owner_;
+        LogicalKVPageStore* store_;
+        HostKVExtentReservation reservation_;
+        std::vector<LogicalKVPageHandle> pages_;
+        friend class HostKVExtentStore;
+    };
+
     HostKVExtentStore(HostKVArena& arena, std::uint32_t descriptor_capacity);
 
     HostKVExtentStore(const HostKVExtentStore&)            = delete;
@@ -71,6 +94,8 @@ public:
 
     [[nodiscard]] std::optional<HostKVExtentReservation>
     prepare(LogicalKVPageStore& pages, std::span<const LogicalKVPageHandle> membership);
+    [[nodiscard]] std::optional<Import>
+    prepare_import(LogicalKVPageStore& pages, std::span<const std::uint32_t> coverage);
 
     [[nodiscard]] HostKVAllocationView writable_view(HostKVExtentReservation& reservation);
 

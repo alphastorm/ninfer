@@ -104,7 +104,6 @@ enum class DurableReason : std::uint8_t {
     }
     return "unknown";
 }
-
 struct DurableLimits {
     std::uint64_t staging_bytes = 256ULL << 20;
     std::uint64_t write_buffer_bytes = 6ULL << 30;
@@ -196,7 +195,6 @@ public:
     static void set_reclaimable_session_oracle(
         Engine&, std::shared_ptr<const ReclaimableSessionOracle>);
     static void notify_checkpoint_progress(Engine&) noexcept;
-
     static void set_checkpoint_tag(PreparedPrompt&, std::string_view tag);
     [[nodiscard]] static DurableSessionEpoch session_epoch(Engine&, std::string_view session_sha256);
     [[nodiscard]] static DurableSessionEpoch publication_epoch(const GenerationHandle&);
