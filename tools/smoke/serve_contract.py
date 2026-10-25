@@ -8,7 +8,8 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Mapping
 
 # A one-pixel PNG. The target frontend performs its normal resize/patch expansion.
 _IMAGE_DATA_URI = (
@@ -16,6 +17,8 @@ _IMAGE_DATA_URI = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUB"
     "AScY42YAAAAASUVORK5CYII="
 )
+
+_DEFAULT_HEADERS: dict[str, str] = {}
 
 
 class ContractError(RuntimeError):
@@ -30,35 +33,61 @@ class Response:
 
 
 def request(
-    base_url: str, method: str, path: str, payload: Any | None = None
+    base_url: str,
+    method: str,
+    path: str,
+    payload: Any | None = None,
+    *,
+    headers: Mapping[str, str] | None = None,
+    expected_status: int = 200,
 ) -> Response:
     body = None
-    headers = {"Accept": "application/json"}
+    request_headers = {
+        **_DEFAULT_HEADERS,
+        "Accept": "application/json",
+        **dict(headers or {}),
+    }
     if payload is not None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        headers["Content-Type"] = "application/json"
+        request_headers["Content-Type"] = "application/json"
     req = urllib.request.Request(
-        base_url + path, data=body, headers=headers, method=method
+        base_url + path, data=body, headers=request_headers, method=method
     )
     try:
         with urllib.request.urlopen(req, timeout=300) as response:
-            return Response(
+            value = Response(
                 status=response.status,
                 content_type=response.headers.get_content_type(),
                 body=response.read(),
             )
     except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
+        value = Response(
+            status=error.code,
+            content_type=error.headers.get_content_type(),
+            body=error.read(),
+        )
+    if value.status != expected_status:
+        detail = value.body.decode("utf-8", errors="replace")
         raise ContractError(
-            f"{method} {path} returned HTTP {error.code}: {detail}"
-        ) from error
+            f"{method} {path} returned HTTP {value.status}, expected {expected_status}: {detail}"
+        )
+    return value
 
 
 def json_response(
-    base_url: str, method: str, path: str, payload: Any | None = None
+    base_url: str,
+    method: str,
+    path: str,
+    payload: Any | None = None,
+    *,
+    headers: Mapping[str, str] | None = None,
+    expected_status: int = 200,
 ) -> dict[str, Any]:
-    response = request(base_url, method, path, payload)
-    if response.status != 200 or response.content_type != "application/json":
+    response = request(
+        base_url, method, path, payload,
+        headers=headers, expected_status=expected_status,
+    )
+    if response.content_type != "application/json":
         raise ContractError(
             f"{method} {path} returned status={response.status} content-type={response.content_type}"
         )
@@ -69,6 +98,24 @@ def json_response(
     if not isinstance(value, dict):
         raise ContractError(f"{method} {path} did not return a JSON object")
     return value
+
+
+def configure_api_key(path: Path | None) -> None:
+    global _DEFAULT_HEADERS
+    if path is None:
+        _DEFAULT_HEADERS = {}
+        return
+    try:
+        value = path.read_bytes().rstrip(b"\r\n")
+    except OSError as error:
+        raise ContractError("failed to read --api-key-file") from error
+    if not value or b"\n" in value or b"\r" in value or b"\x00" in value:
+        raise ContractError("--api-key-file must contain one non-empty line")
+    try:
+        api_key = value.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ContractError("--api-key-file must contain UTF-8") from error
+    _DEFAULT_HEADERS = {"Authorization": f"Bearer {api_key}"}
 
 
 def wait_for_health(base_url: str, timeout: float) -> None:
@@ -414,6 +461,10 @@ def exercise(base_url: str, model: str) -> dict[str, Any]:
     }
     streamed = request(base_url, "POST", "/v1/chat/completions", stream_payload)
     content, reasoning, stream_finish, stream_usage = parse_openai_stream(streamed)
+    if (content, reasoning) != (message.get("content", ""), message.get("reasoning_content", "")):
+        raise ContractError("streamed output differs from the non-streaming greedy response")
+    if stream_finish != nonstream["choices"][0]["finish_reason"] or stream_usage != nonstream["usage"]:
+        raise ContractError("streamed finish reason or usage differs from non-streaming output")
     if not content and not reasoning:
         raise ContractError("OpenAI stream completed without publishing output bytes")
     if (
@@ -557,8 +608,10 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://127.0.0.1:18080")
     parser.add_argument("--model", required=True)
     parser.add_argument("--health-timeout", type=float, default=300.0)
+    parser.add_argument("--api-key-file", type=Path)
     args = parser.parse_args()
 
+    configure_api_key(args.api_key_file)
     base_url = args.base_url.rstrip("/")
     wait_for_health(base_url, args.health_timeout)
     print(json.dumps(exercise(base_url, args.model), ensure_ascii=False, indent=2))

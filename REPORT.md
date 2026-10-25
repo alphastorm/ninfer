@@ -1,43 +1,26 @@
-# Infrastructure slice
+# Harness port — upstream master `64d10fbf`
 
-## Source and ownership
+- Branch: `rebase/harness`; base: upstream `64d10fbf`. Reference: shipped RTX 5090 source `1302d639`; build identity/native packaging API matches the native reference. No community code copied.
+- Build provenance: modular `cmake/BuildIdentity.cmake`, public `BuildInfo`, generated header, per-compile Git source verification, and artifact/GPU-free `--version` for CLI/server/benchmark. Shared registration patch was supplied and authorized by Integrator. No-Git archives cannot claim clean provenance; the lifecycle builder materializes detached real Git.
+- Container environment prerequisites: Infra commits `1422cb510` and `ee39c4626` were cherry-picked as `761a462c9` and `3bdd4a436`. They preserve real Git in the Docker context and forward provenance build arguments. GPU qualification must use Infra's GPU-ready refreshed environment, not its superseded driver-stub-invalid image.
+- Harness: new profile/controller/A-B/NCU tools, smoke battery, release packager, container lifecycle and pinned io_uring seccomp policy, plus their host-only regression tests. Upstream TTFT/corpus/concurrency implementations remain authoritative rather than replacing them with the older fork versions.
+- Master adaptation: current Q4/Q5 public flags and `ninfer_qwen3_5_mtp_round_bench`; public `ninfer_bench --profile-measured` supplies the measured Nsight Systems boundary. Removed dead private post-mixer/candidate/activation-state calls and historical C16/split2 conclusions; these are obsolete benchmark internals, not removed runtime product behavior. New packets collect real public measurements instead.
+- Receipt changelog: agent smoke schema 2 now proves Chat/Responses JSON-schema success and explicitly distinguishes default product coverage from `--contract public` vanilla coverage. Status consumers pin schema 2 and retain required real attestation/reuse/scheduler counters, including `private_input_replay`. Corpus/TTFT request-log consumers and fixtures move to schema 30 without changing diagnostic calculations. Preparation schema 2, capture schema 3, current public Q4 manifest/summary schema 2; historical Q4 schema 1 remains strictly readable. Profile image revision 3 includes hwloc/liburing. Package/lifecycle/publication receipt schemas remain unchanged. Details: `tools/bench/README.md`.
+- CI: `.github/workflows/build.yml` installs NVIDIA apt CUDA 13.1 on `ubuntu-latest`, caches ccache, builds host targets plus bounded native 120a core/Q4 objects, runs selected host CTest/tooling contracts, and separates weekly/manual full builds. Windows MSVC configure-only activates with PortableCore's manifest; no native/GPU qualification is claimed. Publication workflow now requires a validated immutable master-compatible base image rather than the shipped old base digest. No workflow dispatch, publication, tag, issue, or PR operation performed.
+- Host evidence: `test_sm120_*.py` **30 passed** (13.078 s); release packaging **5 passed, 1 built-binary test skipped** (2.359 s); lifecycle **15 passed** (0.428 s); agent protocol **10 passed** (0.002 s). The initial lifecycle fixture run exposed writable OS-temp ancestors; fixtures now use private repository-owned temporary directories without weakening production path validation.
+- TTFT/corpus evidence: initial targeted pytest run **56 passed, 2 failed**; both failures were the remaining runtime-interval fixture default pinned to schema 29. Migrated that default to schema 30; both exact failing tests then **passed** (0.05 s). No diagnostic assertion was removed. System Python lacked pytest; an isolated ignored test environment supplied it.
+- K7 audit deliverable: `local://K7-status-consumers.md` inventories every observed status/JSONL environment/counter reader across product scripts, native controllers/packaged smoke/qualification, and engine smoke. Sent to ServePort, EngineCache, Integrator, Contracts, and ProductOps. UUID/device/name, exact runtime identity, actual scheduler/reuse counters, and perf accounting remain mandatory; null diagnostics are not replacement proofs. The distinct native packaged battery and strict product startup-key classifier need atomic owner updates.
+- This implementation checkpoint does **not** claim live GPU smoke, real compiled-package output, or a green GitHub run. Those results must be recorded before the slice hand-off; full G1/G2/G3 and native-lane qualification remain lead/integration gates.
 
-- Base: upstream master `64d10fbf`; branch `rebase/infra`. Vanilla measurements use an unmodified upstream archive, not the ported integration tree. Changes are limited to container build inputs and reusable environment helpers.
-- `Dockerfile` re-expresses the dependency completion from upstream dev `1e902680`: JPEG and io_uring build/runtime packages and the build-only CUDA driver stub. It retains hwloc and adds ccache/Python for the reusable `build-env` target. The lead approved explicitly installing Git in that development stage for provenance, with the runtime stage unchanged. Dev's shared-library `/build/lib` copy is intentionally omitted because this master builds static libraries. Build-identity arguments are forwarded to the integration-owned CMake contract; archive builds are not represented as clean product builds.
+## Host commands exercised
 
-## Shared helper contract
-
-The operator installs the two executable scripts from `tools/env/` together in the shared `common/` directory. Set `COMMON`, `SRC`, and `BUILD` to the operator's absolute paths and `NINFER_BUILD_HOLDER` to the holder that owns the active exclusive lease. **All builds and GPU commands run inside that lease.** The helpers do not acquire a second lock or change production.
-
-```sh
-export NINFER_BUILD_HOLDER=infra
-"$COMMON/build.sh" "$SRC" "$BUILD"
-"$COMMON/build.sh" "$SRC" "$BUILD" -DBUILD_TESTING=OFF -- ninfer-serve
-"$COMMON/run-in-env.sh" --mount "$SRC" --mount "$BUILD" -- \
-  ctest --test-dir "$BUILD" -R '^ninfer_public_api_test$' --output-on-failure
-"$COMMON/run-in-env.sh" --gpu --mount "$SRC" --mount "$BUILD" \
-  --read-only-mount "$MODEL_DIR" --seccomp "$COMMON/ninfer_io_uring_seccomp.json" \
-  --env "NINFER_TEST_ARTIFACT=$MODEL" -- \
-  ctest --test-dir "$BUILD" -L real --output-on-failure
+```text
+python3.13 -m unittest discover -s tests -p 'test_sm120_*.py'
+python3.13 -m unittest discover -s tests -p test_release_package.py
+python3.13 -m unittest discover -s tests -p test_lifecycle_container.py
+python3.13 -m unittest discover -s tests -p test_agent_protocol.py
+<isolated-python> -m pytest -q tests/bench/ttft/test_measurements.py tests/test_serve_corpus.py
+<isolated-python> -m pytest -q tests/bench/ttft/test_measurements.py::test_global_intervals_include_unowned_demotion_and_shutdown_tail tests/bench/ttft/test_measurements.py::test_missing_runtime_fields_remain_explicit
 ```
 
-- Defaults: `ov-build-env:master-64d10fbf`, Release/Ninja, `120a`, apps/tests on, benches off, `--parallel 16`, ccache launchers for C/C++/CUDA. Later CMake arguments override defaults; names after `--` select build targets. Use a distinct persistent build directory per holder and architecture. Source and build paths remain identical inside/outside the container.
-- `run-in-env.sh` accepts `--gpu`, repeatable `--mount` / `--read-only-mount`, `--env KEY=value`, `--seccomp FILE`, and `--name SUFFIX`. It uses host networking; servers must bind loopback and their holder's assigned port. Containers are always `ov-<holder>-<suffix>`, auto-removed, run as the caller's UID/GID, and use a persistent 20 GB ccache under the caller's cache directory. Image/cache overrides are `NINFER_BUILD_ENV_IMAGE` and `NINFER_CCACHE_DIR`.
-- Integrated source transfer must retain real Git identity: clone/fetch the pushed slice or integration branch, then detach at its full commit SHA (or import a full Git bundle). Use a real detached repository, not a linked-worktree `.git` file pointing outside the Docker context; never copy unrelated repository metadata. A plain archive is valid only for this explicitly vanilla baseline. The Docker context retains `.git` for identity verification. `NINFER_SOURCE_DIRTY=auto` is not a clean-source override; Harness owns its absent-Git refusal.
-- Docker Desktop's credential helper failed when resolving the Dockerfile frontend from a noninteractive WSL session. The image build uses a new, empty `DOCKER_CONFIG` directory for anonymous public-image resolution; no credentials are read, copied or changed. The failed attempt lasted 10.799 seconds and made no runtime changes.
-
-## Qualification evidence scope
-
-Receipts contain relative file identities, counts, hashes and metrics only. Private raw logs stay outside Git; no credentials, model text, checkpoint bytes, private host paths or GPU UUIDs belong in committed receipts. This slice's startup probe is a vanilla capacity observation, not product durability or release qualification.
-
-## Environment proof
-
-Upstream commit: `64d10fbf9f8e6bfc79ab0570b94674c5b9997929`. The build-env image is `sha256:502ca8b3465cb29fef4523a29fbaae5cece976e32f5524caf19e7ab05af35265`; its successful anonymous image build took **50.675 seconds**. The helper built all vanilla apps and tests with benchmarks off, `120a`, and `-j16` in **285.323 seconds**, exit zero. Lease job: `20261025T010304Z-infra-env-master-anonymous-210198` (338 seconds total, no leftover containers).
-
-| Binary | Bytes | SHA-256 |
-|---|---:|---|
-| `apps/ninfer` | 302316680 | `9b07f7a06e718c3db69bb130f07fc4cb41bb12edcccdc4cbd533c0ea88a0a372` |
-| `apps/ninfer-perplexity` | 302303160 | `aad246dc95761de9f90b5b79a4691f029b5c7a4476ebb918edcf3c59e54da631` |
-| `apps/ninfer-serve` | 304492472 | `d7d90126c646b0d26517abedf17a05246a24af979b40f6bf6cf8eb905705f50d` |
-
-The shared helper/environment announcement was delivered to all twelve peers after this proof succeeded. Exact measured build command was `NINFER_BUILD_HOLDER=infra "$COMMON/build.sh" "$SRC" "$BUILD"` against the vanilla source and persistent `infra/build-master` directory. `environment.json` records image/build exit codes, monotonic wall times and the binary hashes.
+The built-app test is enabled only by explicit `NINFER_TEST_BINARY`, `NINFER_TEST_SERVE_BINARY`, and `NINFER_TEST_BENCH_BINARY` selections. Host fixtures prove tool control flow/contracts, not GPU inference, restart durability, or native packaging qualification.
