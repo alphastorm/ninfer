@@ -309,6 +309,38 @@ class QualificationRestorationTests(unittest.TestCase):
         }
         return subject
 
+    def test_transfer_install_bootstrap_protects_each_root_and_uses_unique_helpers(self) -> None:
+        class BootstrapCaptured(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory() as temporary:
+            subject = self.orchestrator(Path(temporary))
+            subject.head8 = "f" * 8
+            subject.state["phases"]["package"] = {
+                "receipt": {"scratch_package": {"package": {"sha256": "e" * 64}}}
+            }
+            helpers = []
+            scripts = []
+            for lane in ("rtx4090", "rtx3090"):
+                subject.lane.name = lane
+                subject.target_root = f"C:/qualification-{lane}"
+                for _ in range(2):
+                    with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="# helper")), \
+                            patch.object(qualify_native, "scp") as copied, \
+                            patch.object(qualify_native, "remote_ps", side_effect=BootstrapCaptured) as remote:
+                        with self.assertRaises(BootstrapCaptured):
+                            subject.transfer_install()
+                        helpers.append(copied.call_args.args[1])
+                        scripts.append(remote.call_args.args[1])
+                with self.subTest(lane=lane):
+                    self.assertTrue(all(lane in helper for helper in helpers[-2:]))
+            with self.subTest(invariant="unique helper for every invocation"):
+                self.assertEqual(len(helpers), len(set(helpers)))
+            for script in scripts:
+                with self.subTest(invariant="protected staging root"):
+                    self.assertIn("Initialize-NInferProtectedStateRoot $p|Out-Null", script)
+                    self.assertNotIn("New-Item -ItemType Directory -Path $p,", script)
+
     def test_preflight_found_state_is_durable_before_stop_and_survives_failure(self) -> None:
         for was_running, pending_restart in ((True, False), (False, True)):
             with self.subTest(was_running=was_running, pending_restart=pending_restart), tempfile.TemporaryDirectory() as temporary:
