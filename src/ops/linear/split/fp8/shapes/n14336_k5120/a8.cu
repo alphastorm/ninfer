@@ -29,7 +29,8 @@ void launch_a8(const Tensor& x, const Weight& weight, std::span<const Tensor> ou
             launch_fp8_a8_tma_mma<S>(operands, output, LinearIdentityEpilogue{}, stream,
                                        workspace.partials);
         else
-            launch_fp8_a8_mma<S>(operands, output, LinearIdentityEpilogue{}, stream);
+            launch_fp8_a8_mma<S>(operands, output, LinearIdentityEpilogue{}, stream,
+                                 Fp8IdentityRows{});
     };
     if (x.ne[1] <= 32) return launch.template operator()<Fp8A8T32R32K128>();
     if (x.ne[1] <= 96) return launch.template operator()<Fp8A8T32R128K128>();
