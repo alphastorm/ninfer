@@ -530,6 +530,11 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (cuda_unavailable()) { return 77; }
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+    std::cout << "EXCLUDED block-scaled MoE (requires sm_120a;"
+                 " refusal checked by architecture_contract)\n";
+    return 77;
+#endif
     try {
         cudaStream_t stream;
         cuda_check(cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking), "stream");

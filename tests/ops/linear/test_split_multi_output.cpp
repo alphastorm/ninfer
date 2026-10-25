@@ -452,6 +452,7 @@ int run_nvfp4_target() {
     }
     failures += run_nvfp4_target_case(parent, 4, ops::LinearPolicy::AllowA8);
     failures += run_nvfp4_target_case(parent, 4, ops::LinearPolicy::AllowA8, true);
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
     failures += run_nvfp4_target_case(parent, 4, ops::LinearPolicy::AllowA4);
     failures += run_nvfp4_target_case(parent, 17, ops::LinearPolicy::AllowA4);
     // 1023, 1024 and 1025 straddle this route's floor. 1024 was the narrowest width it
@@ -460,6 +461,9 @@ int run_nvfp4_target() {
     failures += run_nvfp4_target_case(parent, 1023, ops::LinearPolicy::AllowA4);
     failures += run_nvfp4_target_case(parent, 1024, ops::LinearPolicy::AllowA4);
     failures += run_nvfp4_target_case(parent, 1025, ops::LinearPolicy::AllowA4);
+#else
+    std::cout << "EXCLUDED NVFP4 split A4 (refusal checked by architecture_contract)\n";
+#endif
     return failures;
 }
 
@@ -471,6 +475,14 @@ int run_fp8_target() {
 
     int failures = 0;
     for (auto policy : {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8}) {
+#if defined(NINFER_SM86)
+        if (policy == ops::LinearPolicy::AllowA8) {
+            for (int t : {1, 4, 8, 16})
+                failures += run_target_projection_case(parent, nullptr, t, policy, true);
+            std::cout << "EXCLUDED FP8 split A8 (refusal checked by architecture_contract)\n";
+            continue;
+        }
+#endif
         std::size_t peak = 0;
         for (int t = 1; t <= 128; ++t) {
             peak = std::max(

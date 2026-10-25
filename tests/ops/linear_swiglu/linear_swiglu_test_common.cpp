@@ -406,8 +406,14 @@ int run_negative_gate(std::string_view label, const quantized_weight::PackedWeig
     for (const std::int32_t tokens : token_cases) {
         Tensor input(input_storage.span(), DType::BF16, {k, tokens});
         Tensor output(output_storage.span(), DType::BF16, {half, tokens});
-        ops::linear_swiglu(input, weight, output, policy, workspace,
-                           ninfer::test::cuda_environment().default_execution);
+        try {
+            ops::linear_swiglu(input, weight, output, policy, workspace,
+                               ninfer::test::cuda_environment().default_execution);
+        } catch (const std::runtime_error& error) {
+            if (activation_compute != ActivationCompute::A16 &&
+                report_excluded_path(label, error.what())) continue;
+            throw;
+        }
         test::cuda_synchronize();
         const auto elements = checked_elements(half, tokens, "output size");
         const auto actual   = read_bf16_output(output_storage, elements);

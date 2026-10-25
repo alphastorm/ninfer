@@ -1,4 +1,5 @@
 set(ninfer_op_tests
+  architecture_contract
   add_bias
   gelu
   silu_mul
