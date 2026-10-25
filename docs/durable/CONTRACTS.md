@@ -312,6 +312,15 @@ without native reservation. Disk cannot enable reuse, add authority or force evi
 Capacity/reclamation attempts are bounded and require observed progress; no standby
 pinning retry policy from the old fork is reinstated by these interfaces.
 
+`ReclaimableSessionOracle::recoverable(session_sha256, tag)` returns an optional
+generation pin, not a boolean. The pin identifies the durable generation and its
+captured publication epoch for that exact session/tag. Destructive reclaim MUST
+perform a fresh oracle lookup for every attempt and revalidate the pin at eviction
+time; a missing pin or stale generation/epoch makes the session not reclaimable.
+An earlier successful query, cached boolean or pin from a previous attempt is not
+authority to destroy a live continuation. This is an in-process reclaim contract;
+captured runtime epochs are not added to the durable manifest.
+
 ## K4 — Responses restore and session isolation
 
 Extend `OpenAIResponsesStore`, not a parallel store. The snapshot owns a session
@@ -319,6 +328,11 @@ digest, explicit latest response ID, parent-before-child DAG and exact records.
 Encode `optional<bool> preserve_thinking` as distinct null/false/true values.
 Validate IDs, parents, cycles, media/tool types and byte/count bounds before publish.
 A required response ID must exist in the authenticated target lineage.
+
+Any Engine pressure reclamation used to make room for this restore obeys K3's
+fresh generation-pin validation at destructive eviction. A stale or missing pin
+preserves the candidate's live state; it cannot be converted into a successful
+restore or a claim that the candidate remains durably recoverable.
 
 State machine:
 
