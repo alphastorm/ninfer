@@ -13,7 +13,7 @@
 - Phase 2 uses frozen Contracts `746b29d2`, streaming/crypto prerequisites `0789709d` and `cb89c89a`. Native CBOR is field-wise and bounded; typed canonical round-trip rejects unknown fields, narrowing, duplicates and noncanonical containers.
 - Native set export retains checkpoint, state and page leases, resolves views while serialized, then copies/hashes/writes through a dedicated stream and bounded pinned staging outside Engine serialization. Padding and uncommitted KV columns are zeroed. K2 layout derives from immutable geometry, not allocation capacity.
 - Host-only import reserves StateImages, logical pages, extents, inactive histories and checkpoint slots; payload descriptors and delivered-byte verification precede native publication. Prepared reservations abort through RAII; capacity refusal is separate from corruption. Endpoint/input/anchor records preserve exact text/media identity and DFlash2 ring/frontier metadata.
-- Added synthetic backing ownership/rollback tests, canonical codec failure tests and an actual separate-process real-model export/import test. Phase 2 build/test results are not yet available; no Phase 2 qualification claim.
+- Added synthetic backing ownership/rollback tests, canonical codec failure tests and an actual separate-process real-model export/import test. Phase 2 candidate `19043a49` was submitted as lease job `20261025T014145Z-A2-native-19043a49-287234`; results are not yet available, so this branch is not merge-qualified. That job does not contain the later isolated replay-reservation fix.
 - Release-blocking upstream [#419](https://github.com/Neroued/ninfer/issues/419): `write_pages` quoted growth against pre-rewind membership, while `prepare_write` first trims/forks to `begin`. The fix quotes post-trim membership and retains the strict write-side reservation guard. Regression: rewind a 65-token history to 8, then write through 65; one new page is required, plus one tail-COW page when the old endpoint remains retained. The previous quote omits that growth page. Regression execution remains pending; this does not yet establish resolution of the separate concurrent-prefix report [#414](https://github.com/Neroued/ninfer/issues/414).
 
 ## Commands
@@ -31,4 +31,9 @@ python3 "$A2_WORK_ROOT/src/tools/durable_tracer.py" --workdir "$A2_WORK_ROOT/run
 gpu-lease submit --holder A2 --label tracer-restart-e442df4d-r2 --priority 2 --minutes 10 -- bash "$A2_SCRIPT_ROOT/run-e442df4d-r2.sh"
 gpu-lease wait 20261025T012810Z-A2-tracer-restart-e442df4d-r2-245426 50
 python3 "$A2_WORK_ROOT/src/tools/durable_tracer.py" --workdir "$A2_WORK_ROOT/run-e442df4d-r2" --build "$A2_WORK_ROOT/build" --model "$V3_MODEL" --model-sha256 "$MODEL_SHA256" --source-commit e442df4d --image ov-build-env:master-64d10fbf-r2
+gpu-lease submit --holder A2 --label native-19043a49 --priority 2 --minutes 20 -- bash "$A2_SCRIPT_ROOT/native-19043a49.sh"
+gpu-lease wait 20261025T014145Z-A2-native-19043a49-287234 50
+cmake -S /src -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=120a -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=ON -DNINFER_BUILD_BENCHMARKS=OFF
+cmake --build /build -j16 --target ninfer-serve ninfer_context_store_test ninfer_kv_history_test ninfer_checkpoint_codec_test ninfer_qwen3_5_checkpoint_restart_test
+ctest --test-dir /build --output-on-failure -R '^(ninfer_context_store_test|ninfer_kv_history_test|ninfer_checkpoint_codec_test|ninfer_qwen3_5_checkpoint_restart_test)$'
 ```
