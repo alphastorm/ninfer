@@ -407,16 +407,22 @@ prepare_context_cache(ContextCacheHints hints, std::size_t message_count,
         throw std::logic_error("rendered cache marker count changed during preparation");
     }
 
-    PreparedContextCache out;
-    if (hints.session_key) {
-        if (hints.session_key->empty() || hints.session_key->size() > kPreparedSessionKeyCapacity) {
-            throw std::invalid_argument("context cache session_key must contain 1 to 256 bytes");
+    const auto prepare_key = [](const std::optional<std::string>& value,
+                                const char* field) -> std::optional<PreparedSessionKey> {
+        if (!value) { return std::nullopt; }
+        if (value->empty() || value->size() > kPreparedSessionKeyCapacity) {
+            throw std::invalid_argument(std::string("context cache ") + field +
+                                        " must contain 1 to 256 bytes");
         }
         PreparedSessionKey key;
-        key.size = static_cast<std::uint16_t>(hints.session_key->size());
-        std::copy(hints.session_key->begin(), hints.session_key->end(), key.bytes.begin());
-        out.session_key = key;
-    }
+        key.size = static_cast<std::uint16_t>(value->size());
+        std::copy(value->begin(), value->end(), key.bytes.begin());
+        return key;
+    };
+    PreparedContextCache out;
+    out.session_key          = prepare_key(hints.session_key, "session_key");
+    out.reuse_scope          = prepare_key(hints.reuse_scope, "reuse_scope");
+    out.shared_reuse_scope   = prepare_key(hints.shared_reuse_scope, "shared_reuse_scope");
     out.update_session_index = hints.update_session_index;
 
     for (const PromptCacheMarker marker : hints.markers) {
