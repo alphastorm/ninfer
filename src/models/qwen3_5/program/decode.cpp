@@ -589,6 +589,8 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
         throw std::invalid_argument("DFlash batch membership is invalid");
     }
 
+    // Include host proposal/index work in decode time, including requests that never copy.
+    const auto started = context::Clock::now();
     std::array<NgramProposal, 2> copies{};
     bool copy_round = false;
     std::uint32_t maximum_frontier      = 0;
@@ -648,7 +650,6 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
 
     const std::uint32_t k = copy_round ? ngram_window : draft_window;
     const std::uint32_t width = k + 1U;
-    const auto started = context::Clock::now();
     try {
         std::optional<nvtx::ScopedRange> submit_range;
         submit_range.emplace(nvtx::Name::DecodeDFlashSubmit, nvtx::Category::DFlash,

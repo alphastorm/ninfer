@@ -9,7 +9,7 @@ ops::SamplingMask ProgramImpl::bind_grammar_mask(runtime::TokenMaskProvider* pro
     if (!provider || !provider->constrained(row)) { return {}; }
     const auto words = grammar_masks_device.ne[0];
     return {static_cast<const std::uint32_t*>(grammar_masks_device.data) +
-                row * (draft_window + 1) * words,
+                row * (round_window + 1) * words,
             words};
 }
 
@@ -18,7 +18,7 @@ ops::SamplingMask ProgramImpl::fill_grammar_mask(runtime::TokenMaskProvider* pro
     grammar_dead_positions[row] = 0;
     if (!provider || !provider->constrained(row)) { return {}; }
     const auto words  = static_cast<std::size_t>(grammar_masks_device.ne[0]);
-    const auto offset = row * (draft_window + 1) * words;
+    const auto offset = row * (round_window + 1) * words;
     std::span<std::uint32_t> host(static_cast<std::uint32_t*>(grammar_masks_host->data()) + offset,
                                   (drafts.size() + 1) * words);
     grammar_dead_positions[row] = provider->fill(row, drafts, host);
