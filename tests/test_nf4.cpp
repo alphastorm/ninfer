@@ -1,5 +1,10 @@
 #include "core/nf4.h"
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#endif
+
 #include <algorithm>
 #include <bit>
 #include <iostream>
@@ -51,6 +56,10 @@ int main(int argc, char**) {
             validation();
             return 0;
         }
+#ifdef _WIN32
+        if (_setmode(_fileno(stdin), _O_BINARY) == -1 || _setmode(_fileno(stdout), _O_BINARY) == -1)
+            throw std::runtime_error("set binary NF4 test transport failed");
+#endif
         // Binary test protocol: divisor word -> success word and LUT, or zero on rejection.
         std::uint32_t divisor;
         while (std::cin.read(reinterpret_cast<char*>(&divisor), sizeof(divisor))) {
