@@ -163,6 +163,37 @@ def cache_reuse_path(status: dict[str, Any]) -> str:
     return path
 
 
+def cache_reuse_diagnostic(status: dict[str, Any]) -> dict[str, Any]:
+    """Retain cache/counter evidence without identity, credentials or request content."""
+    cache = status.get("cache") or {}
+    scheduler = status.get("scheduler") or {}
+    selection = cache.get("last_selection") or {}
+    cache_fields: dict[str, Any] = {
+        "last_selection": {field: selection.get(field) for field in ("path", "frontier_tokens")},
+        "reused_prompt_tokens": cache.get("reused_prompt_tokens"),
+    }
+    for group, fields in (
+        ("device_state", ("occupied", "capacity")),
+        ("host_state", ("occupied", "capacity")),
+        ("host_kv", ("occupied_bytes", "capacity_bytes")),
+        ("private_catalog", ("occupied", "capacity")),
+        ("shared_catalog", ("occupied", "capacity", "active_references")),
+    ):
+        values = cache.get(group) or {}
+        cache_fields[group] = {field: values.get(field) for field in fields}
+    return {
+        "cache": cache_fields,
+        "scheduler": {
+            field: scheduler.get(field)
+            for field in (
+                "max_concurrency", "running", "prefilling", "decode_ready", "waiting",
+                "materializing", "capture_pending", "computed_prefill_tokens",
+                "committed_decode_tokens",
+            )
+        },
+    }
+
+
 def parse_choice(response: dict[str, Any]) -> dict[str, Any]:
     choices = response.get("choices")
     if (
@@ -518,7 +549,12 @@ def streaming_and_session_checks(
         private_path = cache_reuse_path(status_after_repeat)
         if private_path not in _PRIVATE_REUSE_PATHS:
             raise ProtocolError(
-                "same-session repeat did not select a private continuation"
+                "same-session repeat did not select a private continuation: "
+                + json.dumps({
+                    "actual_path": private_path,
+                    "after_first": cache_reuse_diagnostic(status_before_repeat),
+                    "after_repeat": cache_reuse_diagnostic(status_after_repeat),
+                }, sort_keys=True)
             )
 
         isolated_payload = dict(common)
