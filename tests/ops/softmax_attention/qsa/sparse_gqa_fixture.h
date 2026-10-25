@@ -5,7 +5,6 @@
 #include "ops/softmax_attention/oracle.h"
 #include "sparse_gqa_cache_fixture.h"
 
-#include <bit>
 #include <memory>
 #include <numeric>
 
@@ -21,9 +20,9 @@ inline std::uint32_t hash(std::uint32_t x) {
 
 inline float sample(std::uint32_t i) { return (int(hash(i) % 10001) - 5000) / 3000.0F; }
 
-inline std::uint16_t half(float x) { return std::bit_cast<std::uint16_t>(_Float16(x)); }
+inline std::uint16_t half(float x) { return prepare::fp16_encode(x); }
 
-inline float unhalf(std::uint16_t x) { return float(std::bit_cast<_Float16>(x)); }
+inline float unhalf(std::uint16_t x) { return prepare::fp16_decode(x); }
 
 struct Plane {
     int leading;

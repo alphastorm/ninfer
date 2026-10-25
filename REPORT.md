@@ -16,23 +16,27 @@
 
 | Execution family | sm_120a | sm_89 route / exclusion | sm_86 route / exclusion | Native proof status / evidence |
 |---|---|---|---|---|
-| BF16/F16/INT8 MMA and Q4/Q5/Q6/Q8 A16 | Existing routes | Retained | Retained | sm_86 server link `980b4966`; final ops numerical proof pending |
-| Programmatic dependent launch | Existing behavior | Ordinary stream ordering | Ordinary stream ordering | sm_86 server link `980b4966`; GPU ordering coverage pending |
-| Dense BF16 TMA-selected tiles | Existing TMA | cp.async staging of the same MMA tiles | cp.async staging of the same MMA tiles | MSVC unused-definition failure; `ca85f257` gate awaiting rebuild |
-| FP8 activation MMA | Block-scaled unit-scale opcode | Plain Ada E4M3 MMA | Explicit refusal | `b5bd4926` explicit-row-policy rebuild in flight; refusal test pending |
-| FP8 TMA-selected tiles | Existing TMA/split-K | Ordinary full-K MMA; no split-K partial allocation | Explicit refusal | `b5bd4926` rebuild in flight; numerical/refusal proof pending |
-| FP8 and NVFP4 A16 weight dequantization | Existing routes | Retained; portable widening | Retained; portable widening | sm_86 server link `980b4966`; A16 mathematical-oracle runs pending |
-| NVFP4 A4 | Existing non-RDC/TMA and MMA | Explicit refusal | Explicit refusal | `architecture_contract` and explicit A4 suite exclusions; execution pending |
-| Dense BF16/INT8 KV attention | Existing routes | Retained | Retained | sm_86 server link `980b4966`; softmax-attention numerical runs pending |
-| Dense FP8 KV attention | Existing routes | Retained | Explicit refusal | sm_89 numerical and sm_86 `architecture_contract` runs pending |
-| Dense NVFP4/K8V4 KV attention | Existing routes | Explicit refusal | Explicit refusal | `architecture_contract` and exact attention refusal messages; execution pending |
-| Block-scaled FP8/NVFP4 MoE | Existing non-RDC routes | Explicit refusal | Explicit refusal | `architecture_contract`; only named block-scaled test exit 77 permitted |
-| Groupwise-integer MoE and CPU experts | Existing routes | Retained | Retained | PortableCore `ed99ff3f` passed former MSVC compilation blockers; numerical proof pending |
-| Striped gated-residual projection | Existing TMA selection | Existing folded cp.async route | Existing folded cp.async route | sm_86 server link `980b4966`; gated-residual numerical runs pending |
+| BF16/F16/INT8 MMA and Q4/Q5/Q6/Q8 A16 | Existing routes | Retained | Retained | L1 linked both profiles; numerical proof pending |
+| Programmatic dependent launch | Existing behavior | Ordinary stream ordering | Ordinary stream ordering | L1 linked both; GPU ordering coverage pending |
+| Dense BF16 TMA-selected tiles | Existing TMA | cp.async staging of the same MMA tiles | cp.async staging of the same MMA tiles | W1 passed corrected TMA/launcher boundary; numerical proof pending |
+| FP8 activation MMA | Block-scaled unit-scale opcode | Plain Ada E4M3 MMA | Explicit refusal | L1 linked both with explicit row policy; numerical/refusal proof pending |
+| FP8 TMA-selected tiles | Existing TMA/split-K | Ordinary full-K MMA; no split-K partial allocation | Explicit refusal | L1 linked both; numerical/refusal proof pending |
+| FP8 and NVFP4 A16 weight dequantization | Existing routes | Retained; portable widening | Retained; portable widening | L1 linked both; A16 oracle runs pending |
+| NVFP4 A4 | Existing non-RDC/TMA and MMA | Explicit refusal | Explicit refusal | L1 linked contract/exclusions; execution pending |
+| Dense BF16/INT8 KV attention | Existing routes | Retained | Retained | L1 linked both; W1 test-source portability corrections not rebuilt |
+| Dense FP8 KV attention | Existing routes | Retained | Explicit refusal | L1 linked both; sm_89 numerical / sm_86 refusal execution pending |
+| Dense NVFP4/K8V4 KV attention | Existing routes | Explicit refusal | Explicit refusal | L1 linked contract/exclusions; execution pending |
+| Block-scaled FP8/NVFP4 MoE | Existing non-RDC routes | Explicit refusal | Explicit refusal | L1 linked contract; only exact named block-scaled exit 77 permitted |
+| Groupwise-integer MoE and CPU experts | Existing routes | Retained | Retained | L1 linked both; W1 passed former MSVC CPU blockers; numerical proof pending |
+| Striped gated-residual projection | Existing TMA selection | Existing folded cp.async route | Existing folded cp.async route | W1 passed corrected launcher boundary; numerical proof pending |
 
-Statuses above describe route admission, not numerical qualification. Current evidence
-for every retained family is the sm_86 server/contract link at `980b4966`; final-tip
-Linux ops links, native MSVC links and per-GPU mathematical-oracle runs remain pending.
+Statuses above describe route admission, not numerical qualification.
+**L1:** Linux `53e847dd` linked `ninfer-serve`, architecture contract and every ops
+target for both profiles, driver exit 0; this includes `b5bd4926` and the CPU
+compiler-neutral fix but predates subsequent corrections.
+**W1:** combined MSVC sm_89 `2a4266e30` passed the corrected kernel boundaries,
+then failed in ops test compilation; it is not a successful native bundle.
+Final-tip Linux links, complete Windows links and all per-GPU oracle runs remain pending.
 The explicit exclusion authority is `tests/ops/excluded_paths.h`; its refusal messages,
 not arbitrary failures or skips, determine unsupported cases.
 
@@ -106,6 +110,13 @@ common/build.sh "$SOURCE" "$BUILD/native-sm89" \
   name the same kernel specialization directly inside the lambda; shared-memory
   setup stays outside the loop. Schedules, arguments and arithmetic are unchanged.
   The Blackwell-only NVFP4 A4 TMA launcher is outside the native build and unchanged.
+- W1 exposed C++20 test portability errors: `constexpr std::sqrt` in attention
+  and GDN references, and GCC-only `_Float16` in sparse-attention fixtures.
+  These now retain the same square-root expressions as `const` values and reuse
+  the existing independent round-to-nearest-even binary16 fixture conversions.
+  No oracle tolerance or supported case was removed. These corrections have not
+  been rebuilt. The separate missing `<array>` include in public `ninfer/types.h`
+  was reported to the integration owner; a test include-order workaround was not added.
 
 ### Native host-pool translation
 
@@ -128,6 +139,9 @@ configured device-state slots; the values above preserve that behavior. These ar
 source-derived byte-equivalent budgets, not yet measured startup receipts. The
 decode driver accepts exact decimal MiB and checks the observed startup fields.
 Context 131072, INT8 KV, MTP3 and C1 are not tuned.
+The native controller's existing `--lm-head-draft` flag is also preserved: the
+selected-MTP loading probe and server use the optimized proposal head, not the
+upstream default full head.
 
 ## Provenance and remaining gates
 
@@ -135,11 +149,19 @@ Context 131072, INT8 KV, MTP3 and C1 are not tuned.
 - Required remaining proof: final-revision Linux compilation for both native profiles, MSVC link for both profiles, ops suites on their respective physical GPUs with the explicit exclusions, and one server-path model decode on each GPU with tokens/second and configured/measured context recorded. The assignment is not acceptance-complete.
 - Native runs use isolated work directories and loopback ports `18200–18209`, never installed release roots or the shipped port.
 - The lead additionally authorized `ninfer_artifact_materialization_test`, `ninfer_expert_cache_test`, and the PLE prepare GPU Python harness on each native GPU. PortableCore supplies the executables, DLLs, stdlib-only Python inputs, and the ops manifest. Python 3.13.15 was observed on the native runtime host.
-- PortableCore reports its native candidate (including architecture source `940b000c`) failed compilation in CPU expert code on GNU-only unreachable/F16C intrinsics and ISA flags. The lead assigned those minimal `src/ops/moe` MSVC fixes to PortableCore; this slice leaves those files unchanged. The immutable native artifact's Windows export is also still awaiting its queued job receipt.
+- The earlier GNU-only unreachable/F16C and ISA-flag errors were corrected by
+  PortableCore and imported here. The public v3 direct download is still awaiting
+  its own runtime-host SHA receipt; the build-host copy was independently reported
+  verified by Infra2. No native artifact upgrade is part of the current path.
 - Test-only full-UUID `CUDA_VISIBLE_DEVICES` masking is explicitly authorized because upstream tests use CUDA ordinal zero. Receipts record the mask; skip 77 is accepted only for the named block-scaled MoE test with its exact exclusion message. Server probes instead leave that variable absent, use `CUDA_DEVICE_ORDER=PCI_BUS_ID` plus numeric `--device`, and require the server-start GPU UUID to match.
 - No native ops execution, real-model decode, throughput measurement, or native release qualification is claimed in this report.
 
 ## Portable-core prerequisite evidence
 
-- Full C1 history is merged. Its independent immutable report is [`REPORT.md` at `c796fcb762e1b6aaeb438d1ee9ad3f400379a304`](https://github.com/alphastorm/ninfer/blob/c796fcb762e1b6aaeb438d1ee9ad3f400379a304/REPORT.md); the C2 report before this import is commit `7b4d3088`.
-- C1 final native core result at `f689e6bde` is **8/9, not green**: the first same-parent durable publication still fails with sharing violation. This is a separate native K6 blocker, not a passed C2 numerical or server gate. C2 continues the assigned operator/server/loading builds without claiming durability qualification.
+- C1 history through `c796fcb7` is merged; subsequent core fixes and tests through
+  `c7f127c7` were imported. Its earlier immutable report is
+  [`REPORT.md` at `c796fcb762e1b6aaeb438d1ee9ad3f400379a304`](https://github.com/alphastorm/ninfer/blob/c796fcb762e1b6aaeb438d1ee9ad3f400379a304/REPORT.md).
+- The earlier C1 `f689e6bde` result was 8/9. PortableCore2 subsequently reported
+  **9/9 at combined `2a4266e30`, 2.45 seconds**, including anchored nonempty-directory
+  publication/tombstone, junction refusal and retained-reader cases. This is
+  native core evidence, not C2 numerical, model, or complete release qualification.
