@@ -55,6 +55,9 @@ struct OpenAIResponseStoreSnapshot {
     std::string client_session_sha256;
     std::string latest_response_id;
     std::vector<StoredOpenAIResponse> records;
+    // Authenticated survivor lineage after deleting its native endpoint. It remains
+    // addressable, but continuation must replay rather than import a different endpoint.
+    bool replay_only = false;
 };
 
 enum class ResponsePublicationState : std::uint8_t { Stored, Publishing, Absent };
@@ -105,12 +108,13 @@ public:
     void put(StoredOpenAIResponse response);
     bool erase_for_session(const std::string& id,
                             const std::optional<std::string>& session_sha256);
-    // Publish the survivor snapshot before the no-allocation RAM erase. An endpoint with
-    // survivors cannot be deleted without a matching older native continuation: refuse it.
+    // Publish the survivor snapshot before the no-allocation RAM erase. Deleting its
+    // native endpoint marks survivors replay-only, never relabels a different continuation.
     [[nodiscard]] bool erase_for_session_durably(
         const std::string& id, const std::string& session_sha256,
         const std::function<bool(const std::optional<OpenAIResponseStoreSnapshot>&)>& publish,
-        runtime::DurableReason* refusal = nullptr);
+        runtime::DurableReason* refusal = nullptr,
+        const OpenAIResponseStoreSnapshot* persisted = nullptr);
 
     [[nodiscard]] std::optional<OpenAIResponseStoreSnapshot>
     snapshot_session(std::string_view session_sha256) const;
@@ -145,6 +149,7 @@ private:
         std::size_t records = 0;
         std::size_t publications = 0;
         std::size_t guards = 0;
+        std::string replay_endpoint;
     };
     void retain_context_locked(const OpenAIResponseContext& context);
     void release_context_locked(const OpenAIResponseContext& context);
