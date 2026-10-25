@@ -966,6 +966,47 @@ available, and the capacity flags may still be specified.
 
 Run `./build/apps/ninfer-serve --help` for the exact option contract.
 
+### Durable Responses and graceful stop
+
+`--session-checkpoint-dir` enables schema-3 durable generations in a new,
+release-isolated root. Persistence requires authenticated serving, complete clean
+build/model provenance and the real Engine export/import, publication-gate and
+final-save providers. An unavailable provider refuses startup; there is no
+production in-memory substitute. Older schema-2 roots are not migrated or discovered.
+The byte formats and failure taxonomy are defined by [K1–K7](durable/CONTRACTS.md).
+
+Authenticated `prompt_cache_key` requests name private sessions without persisting
+the raw key. A first stored keyed request can restore native state even without
+`previous_response_id`; a missing parent or scoped retrieve can restore the verified
+Responses lineage. Import prepares native resources and the complete replacement
+DAG before committing either visible side. A capacity, revision, epoch or identity
+refusal leaves existing live state intact. Cache-disabled requests cannot import.
+Private retrieve/delete/input-item routes require `X-NInfer-Session` with the
+matching session digest; absent and foreign capabilities receive the same 404.
+Deleting a private stored response first invalidates its disk generation, preventing
+a later restore from resurrecting it.
+
+Checkpoint management uses the same API authentication. `POST /v1/ninfer/checkpoints`
+accepts `{"session_sha256":"<64 lowercase hex>"}`; a supplied session header must
+agree. A successful response is a K7 `ninfer-durable-operation/1` save receipt with
+`state="exported"`, `reason="none"`, `committed=true`, authenticated origin,
+token/byte/point/state/page counts and the actual `dir_sync` mode. Staged export alone
+is not a successful save. `GET /v1/ninfer/checkpoints/status` takes the session header;
+the explicit `/<digest>/status` route is also supported. `DELETE /v1/ninfer/checkpoints`
+accepts the session capability in its body/header or explicit `/<digest>` route.
+Missing or conflicting capabilities cannot access another namespace.
+
+Automatic saves run on one bounded worker and honor
+`--session-checkpoint-min-tokens`. Pressure checkpoints and graceful final saves
+also save shorter sessions. The stop path drains HTTP workers and accepted automatic
+work, then synchronously saves every relevant live session. A queued write is never
+an acknowledgement. When `--shutdown-report` is set, the schema-1
+`ninfer_serve_shutdown_report` contains the managed launch ID and
+`saved`/`skipped`/`refused` counts; `complete=true` requires no refused final save.
+Publication or shutdown-report I/O failure makes the process exit unsuccessfully.
+Operation receipts contain symbolic outcomes and counts, never prompts, credentials,
+raw session names or checkpoint paths.
+
 Serve writes human-readable operational records to stderr using
 `YYYY-MM-DD HH:MM:SS.mmm  LEVEL  message`. Normal output covers material startup milestones,
 readiness, request lifecycle, fixed-interval throughput, and shutdown; `--log-level debug` exposes

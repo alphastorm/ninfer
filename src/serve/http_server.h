@@ -6,6 +6,7 @@
 #include "serve/openai_responses_store.h"
 #include "serve/request_log.h"
 #include "serve/serve_options.h"
+#include "serve/session_checkpoint_store.h"
 
 #include <httplib.h>
 
@@ -42,6 +43,12 @@ void apply_client_session_header(const httplib::Request& request, bool authentic
 
 struct SessionCheckpointCallbacks {
     OpenAIResponseRestoreCallback restore;
+    std::function<void()> publication_changed;
+    std::function<void(std::string_view, std::uint64_t)> response_stored;
+    std::function<nlohmann::json(std::string_view)> save;
+    std::function<nlohmann::json(std::string_view)> status;
+    std::function<SessionCheckpointEraseResult(std::string_view)> erase;
+    std::function<bool(const std::string&, const std::string&)> erase_response;
     // Called after HTTP workers drain. True acknowledges complete synchronous final saves; the
     // provider retains the detailed K7 receipts and must never equate queued work with durability.
     std::function<bool()> final_save;
@@ -54,7 +61,10 @@ public:
     // Reserves the configured address before model loading. The service is attached only after its
     // Engine is ready, then listen() enters the blocking accept loop on the already-bound socket.
     bool bind();
-    void attach(GenerationService& service, SessionCheckpointCallbacks checkpoints = {});
+    // The default path binds only real Engine/disk providers. Explicit callbacks are the
+    // deterministic test seam and still must provide every enabled persistence boundary.
+    void attach(GenerationService& service);
+    void attach(GenerationService& service, SessionCheckpointCallbacks checkpoints);
     bool listen();
     bool stop() noexcept;
 
@@ -98,6 +108,11 @@ private:
     void handle_response_input_items(const httplib::Request& req, httplib::Response& res);
     void handle_response_cancel(const httplib::Request& req, httplib::Response& res);
     void handle_response_compact(const httplib::Request& req, httplib::Response& res);
+    void handle_checkpoint_save(const httplib::Request& req, httplib::Response& res);
+    void handle_checkpoint_status(const httplib::Request& req, httplib::Response& res);
+    void handle_checkpoint_delete(const httplib::Request& req, httplib::Response& res);
+    [[nodiscard]] std::shared_ptr<const StoredOpenAIResponse>
+    find_stored_response(const std::string& id, const std::optional<std::string>& session);
     void handle_models(const httplib::Request& req, httplib::Response& res) const;
     void handle_model(const httplib::Request& req, httplib::Response& res) const;
 

@@ -6,6 +6,8 @@
 #include "serve/http_transport.h"
 #include "serve/openai_common.h"
 #include "serve/request_log.h"
+#include "serve/request_validation.h"
+#include "serve/session_checkpoint_service.h"
 
 #include <nlohmann/json.hpp>
 
@@ -461,6 +463,18 @@ void HttpServer::register_routes() {
         res.set_content(nlohmann::json{{"status", available ? "ok" : "unavailable"}}.dump(),
                         "application/json");
     });
+    if (!options_.session_checkpoint_root.empty()) {
+        server_.Post("/v1/ninfer/checkpoints",
+            [this](const httplib::Request& req, httplib::Response& res) { handle_checkpoint_save(req, res); });
+        server_.Get("/v1/ninfer/checkpoints/status",
+            [this](const httplib::Request& req, httplib::Response& res) { handle_checkpoint_status(req, res); });
+        server_.Get(R"(/v1/ninfer/checkpoints/([0-9a-f]{64})/status)",
+            [this](const httplib::Request& req, httplib::Response& res) { handle_checkpoint_status(req, res); });
+        server_.Delete("/v1/ninfer/checkpoints",
+            [this](const httplib::Request& req, httplib::Response& res) { handle_checkpoint_delete(req, res); });
+        server_.Delete(R"(/v1/ninfer/checkpoints/([0-9a-f]{64}))",
+            [this](const httplib::Request& req, httplib::Response& res) { handle_checkpoint_delete(req, res); });
+    }
     server_.Get("/v1/ninfer/status", [this](const httplib::Request&, httplib::Response& res) {
         const bool available = service_->is_available();
         res.status = available ? 200 : 503;
@@ -543,13 +557,111 @@ void HttpServer::handle_model(const httplib::Request& req, httplib::Response& re
 
 bool HttpServer::bind() { return server_.bind_to_port(options_.host, options_.port); }
 
+namespace {
+std::string checkpoint_session(const httplib::Request& request, bool authenticated,
+                               bool body_required) {
+    auto digest = parse_client_session_header(request, authenticated);
+    const auto accept = [&](std::string candidate) {
+        candidate = parse_client_identity_sha256(candidate, "session_sha256");
+        if (digest && !credential_equal(*digest, candidate)) {
+            bad_request("conflicting session capabilities", "session_sha256");
+        }
+        digest = std::move(candidate);
+    };
+    if (request.matches.size() > 1) { accept(request.matches[1].str()); }
+    if (!request.body.empty()) {
+        nlohmann::json body;
+        try { body = nlohmann::json::parse(request.body); }
+        catch (const nlohmann::json::exception&) { bad_request("invalid checkpoint request JSON"); }
+        if (!body.is_object() || body.size() != 1 || !body.contains("session_sha256") ||
+            !body.at("session_sha256").is_string()) {
+            bad_request("checkpoint request requires only session_sha256", "session_sha256");
+        }
+        accept(body.at("session_sha256").get<std::string>());
+    } else if (body_required) {
+        bad_request("checkpoint request requires session_sha256", "session_sha256");
+    }
+    if (!authenticated || !digest) {
+        bad_request("authenticated session capability required", "session_sha256");
+    }
+    return *digest;
+}
+} // namespace
+
+void HttpServer::handle_checkpoint_save(const httplib::Request& request, httplib::Response& response) {
+    const auto session = checkpoint_session(request, !options_.api_key.empty(), true);
+    if (!checkpoints_.save) {
+        response.status = 503;
+        response.set_content(R"({"state":"unavailable","reason":"store_disabled"})", "application/json");
+        return;
+    }
+    const auto saved = checkpoints_.save(session);
+    response.status = saved.value("committed", false) ? 200 : 409;
+    response.set_content(saved.dump(), "application/json");
+}
+
+void HttpServer::handle_checkpoint_status(const httplib::Request& request, httplib::Response& response) {
+    const auto session = checkpoint_session(request, !options_.api_key.empty(), false);
+    response.set_header("Cache-Control", "no-store");
+    if (!checkpoints_.status) {
+        response.status = 503;
+        response.set_content(R"({"state":"disabled"})", "application/json");
+        return;
+    }
+    response.set_content(checkpoints_.status(session).dump(), "application/json");
+}
+
+void HttpServer::handle_checkpoint_delete(const httplib::Request& request, httplib::Response& response) {
+    const auto session = checkpoint_session(request, !options_.api_key.empty(), false);
+    if (!checkpoints_.erase) {
+        response.status = 503;
+        response.set_content(R"({"state":"disabled"})", "application/json");
+        return;
+    }
+    switch (checkpoints_.erase(session)) {
+    case SessionCheckpointEraseResult::Erased:
+        response.set_content(R"({"state":"deleted"})", "application/json"); return;
+    case SessionCheckpointEraseResult::Missing:
+        response.set_content(R"({"state":"missing"})", "application/json"); return;
+    case SessionCheckpointEraseResult::Conflict:
+        response.status = 409;
+        response.set_content(R"({"state":"unavailable","reason":"transaction_busy"})", "application/json"); return;
+    }
+}
+
+void HttpServer::attach(GenerationService& service) {
+    auto persistence = service.bind_checkpoints(openai_responses_store_);
+    SessionCheckpointCallbacks callbacks;
+    if (persistence) {
+        callbacks.restore = [persistence](std::string_view session,
+                                          std::optional<std::string_view> required,
+                                          OpenAIResponsesStore&) {
+            return persistence->restore(session, required);
+        };
+        callbacks.response_stored = [persistence](std::string_view session, std::uint64_t tokens) {
+            persistence->response_stored(session, tokens);
+        };
+        callbacks.publication_changed = [persistence] { persistence->publication_changed(); };
+        callbacks.save = [persistence](std::string_view session) { return persistence->save(session); };
+        callbacks.status = [persistence](std::string_view session) { return persistence->status(session); };
+        callbacks.erase = [persistence](std::string_view session) { return persistence->erase(session); };
+        callbacks.erase_response = [persistence](const std::string& id, const std::string& session) {
+            return persistence->erase_response(id, session);
+        };
+        callbacks.final_save = [persistence] { return persistence->final_save(); };
+    }
+    attach(service, std::move(callbacks));
+}
+
 void HttpServer::attach(GenerationService& service, SessionCheckpointCallbacks checkpoints) {
     if (service_ != nullptr) {
         throw std::logic_error("HTTP generation service is already attached");
     }
     if (!options_.session_checkpoint_root.empty() &&
-        (!checkpoints.restore || !checkpoints.final_save || !service.has_checkpoint_hooks())) {
-        throw std::logic_error("session persistence requires restore, tag, epoch and final-save providers");
+        (!checkpoints.restore || !checkpoints.publication_changed || !checkpoints.response_stored || !checkpoints.save ||
+         !checkpoints.status || !checkpoints.erase || !checkpoints.erase_response || !checkpoints.final_save ||
+         !service.has_checkpoint_hooks())) {
+        throw std::logic_error("session persistence requires all native, store and final-save providers");
     }
     status_load_ = service.load_summary();
     // memory_summary waits for the completed worker boundary, including warmup publication.
