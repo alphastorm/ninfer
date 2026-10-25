@@ -14,8 +14,11 @@ They do not implement the store, native codec or Engine adapter.
 
 - Use new release-isolated roots. Preserve the previous release's roots for rollback.
   Never discover, rewrite, quarantine or import fork-v2 generations as v3.
-- Unknown/older outer or native schemas return `Incompatible` without mutation. A v1
-  fingerprint fails closed. Native StateImages are not portable across builds,
+- Older outer schemas (`schema_version < 3`) return `Incompatible` before origin
+  verification, without mutation even when a MAC is present and invalid. Unknown
+  outer schemas at or above 3 and unknown native schemas are refused after their
+  applicable authentication gates; schema incompatibility itself never quarantines.
+  A v1 fingerprint fails closed. Native StateImages are not portable across builds,
   platforms or compiled GPU architectures. Same format does not imply same layout.
 - Upstream owns scheduling, DFlash2 execution, context caches, grammar and frontend.
   Persistence transfers their committed state; it does not install a second scheduler.
@@ -75,8 +78,17 @@ Floating-point literals, NaN, Infinity, duplicate keys, invalid UTF-8 and surrog
 code points are rejected. Typed schemas reject null except explicitly nullable
 Responses fields. This is a restricted encoding, not unrestricted RFC 8785/JCS.
 
-Verify the MAC over the exact bounded bytes read from `manifest.json`, then parse
-with duplicate-key detection and require re-encoding to equal those exact bytes.
+Before origin verification, the loader may inspect only the top-level
+`schema_version` integer from the bounded manifest read; nothing else is trusted.
+If it is less than 3, return `Incompatible/incompatible_schema` with no quarantine,
+mutation or import, regardless of whether the MAC is missing, valid or invalid.
+A forged schema value can therefore cause only a refusal, never grant authority.
+For a value at or above 3, verify the MAC before any further parsing. This narrow
+schema-refusal probe does not permit pre-authentication trust of payload paths,
+statistics, fingerprint fields or other manifest content.
+
+Verify the MAC over the exact bounded bytes read from `manifest.json`, then perform
+normal parsing with duplicate-key detection and require re-encoding to equal those exact bytes.
 Do not authenticate a parsed-and-reserialized replacement for the received bytes.
 The Python fixture test is the independent canonical/MAC reference; production
 uses nlohmann's compact sorted-object encoding only after these validation gates.
@@ -237,6 +249,9 @@ The public `Engine` API stays unchanged except integration-owned friendship.
   convenience API and service restore callbacks; never coerce it to corruption.
 - Capture `session_epoch` before disk loading. Capture publication epoch from the
   submitted handle, not handler completion time. Tokens are runtime-only.
+- `make_read_queue(Engine&, const std::filesystem::path& root)` receives the
+  configured checkpoint root from serving. The factory preserves no-follow
+  anchoring; an untrusted manifest never supplies or substitutes this root.
 
 The `fingerprint` argument is the trusted cached active `RuntimeFingerprintV2`
 collected by serving, never the untrusted parsed manifest object. Before producing
@@ -532,6 +547,12 @@ is the source of that distinction from verified payload corruption.
 | Integrity | `origin_mac_mismatch`, `invalid_manifest`, `invalid_index`, `payload_size_mismatch`, `payload_digest_mismatch` | abort; quarantine verified corrupt generation only |
 | Admission | `metadata_limit`, `staging_limit`, `capacity`, `quota`, `foreign_session_collision` | old state intact; no unrelated eviction for DAG restore |
 | Availability | `origin_key_unavailable`, `io_unavailable`, `durability_unsupported`, `cancelled` | preserve generation; retry only after cause/progress changes |
+
+K1's bounded top-level schema probe is the sole pre-origin refusal exception:
+integer `schema_version < 3` yields `incompatible/incompatible_schema` with no
+quarantine, mutation or import even if the MAC is present and invalid. At or above
+3, MAC verification precedes further parsing. Do not report `origin_mac_mismatch`
+or quarantine a legacy generation that has already met the schema-refusal rule.
 
 Public Responses routes do not reveal foreign-session existence or low-level paths.
 Detailed receipt reasons are bounded symbolic names, not raw exceptions. Reports must
