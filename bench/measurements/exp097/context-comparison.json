@@ -1,0 +1,99 @@
+{
+  "experiment": "EXP-097",
+  "baseline_order": [
+    "A1-shipped",
+    "B1-vanilla",
+    "B2-vanilla",
+    "A2-shipped"
+  ],
+  "candidate_order": [
+    "C1-q4"
+  ],
+  "method": "Arithmetic mean of two baseline arm observations per depth; one candidate arm. Pair client wall rate includes prefill, queueing, decode and delivery; it is not constant-B2 decode throughput.",
+  "rows": [
+    {
+      "context_target": 0,
+      "shipped": {
+        "repetitions": 2,
+        "single_decode_tok_s": 354.89366149916043,
+        "single_ms_per_round": 15.226571217678114,
+        "pair_client_wall_tok_s": 442.97382694801877
+      },
+      "vanilla": {
+        "repetitions": 2,
+        "single_decode_tok_s": 301.86583745561245,
+        "single_ms_per_round": 18.121023876584797,
+        "pair_client_wall_tok_s": 456.41869548941054
+      },
+      "candidate": {
+        "repetitions": 1,
+        "single_decode_tok_s": 326.0917334291856,
+        "single_ms_per_round": 16.48409797900263,
+        "pair_client_wall_tok_s": 496.4212948673057
+      }
+    },
+    {
+      "context_target": 32000,
+      "shipped": {
+        "repetitions": 2,
+        "single_decode_tok_s": 342.5244290730561,
+        "single_ms_per_round": 16.74832235854341,
+        "pair_client_wall_tok_s": 75.05516829849932
+      },
+      "vanilla": {
+        "repetitions": 2,
+        "single_decode_tok_s": 273.6551056607413,
+        "single_ms_per_round": 19.69455347105262,
+        "pair_client_wall_tok_s": 76.68247843411896
+      },
+      "candidate": {
+        "repetitions": 1,
+        "single_decode_tok_s": 297.678987371365,
+        "single_ms_per_round": 17.963170772845967,
+        "pair_client_wall_tok_s": 77.31696210251893
+      }
+    },
+    {
+      "context_target": 64000,
+      "shipped": {
+        "repetitions": 2,
+        "single_decode_tok_s": 335.3803318911529,
+        "single_ms_per_round": 18.066580446745558,
+        "pair_client_wall_tok_s": 37.22579630871556
+      },
+      "vanilla": {
+        "repetitions": 2,
+        "single_decode_tok_s": 214.40088633115496,
+        "single_ms_per_round": 20.993857016483528,
+        "pair_client_wall_tok_s": 38.26250732783836
+      },
+      "candidate": {
+        "repetitions": 1,
+        "single_decode_tok_s": 271.35821017348184,
+        "single_ms_per_round": 19.253111201530633,
+        "pair_client_wall_tok_s": 39.000309893646254
+      }
+    },
+    {
+      "context_target": 120000,
+      "shipped": {
+        "repetitions": 2,
+        "single_decode_tok_s": 274.0688228532381,
+        "single_ms_per_round": 20.305924444293474,
+        "pair_client_wall_tok_s": 17.561267784323984
+      },
+      "vanilla": {
+        "repetitions": 2,
+        "single_decode_tok_s": 225.76970448534968,
+        "single_ms_per_round": 23.259463305128207,
+        "pair_client_wall_tok_s": 15.019126910201832
+      },
+      "candidate": {
+        "repetitions": 1,
+        "single_decode_tok_s": 253.25195577851014,
+        "single_ms_per_round": 21.50746869414894,
+        "pair_client_wall_tok_s": 15.0609469916221
+      }
+    }
+  ]
+}

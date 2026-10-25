@@ -1,0 +1,319 @@
+{
+  "reference": "1302d639",
+  "method": "all BF16 output bits; identical generated weights and activations",
+  "cases": [
+    {
+      "format": "q4",
+      "rows": 4096,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 1,
+      "values": 32768,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q4",
+      "rows": 4096,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 1,
+      "values": 65536,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q4",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 1,
+      "values": 57344,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q4",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 1,
+      "values": 114688,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 1,
+      "values": 57344,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 1,
+      "values": 114688,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 12288,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 1,
+      "values": 98304,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 12288,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 1,
+      "values": 196608,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q4",
+      "rows": 4096,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 17,
+      "values": 32768,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q4",
+      "rows": 4096,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 17,
+      "values": 65536,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q4",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 17,
+      "values": 57344,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q4",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 17,
+      "values": 114688,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 17,
+      "values": 57344,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 17,
+      "values": 114688,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 12288,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 17,
+      "values": 98304,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 12288,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 17,
+      "values": 196608,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q4",
+      "rows": 4096,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 103,
+      "values": 32768,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q4",
+      "rows": 4096,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 103,
+      "values": 65536,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q4",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 103,
+      "values": 57344,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q4",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 103,
+      "values": 114688,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 103,
+      "values": 57344,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 103,
+      "values": 114688,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 12288,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 103,
+      "values": 98304,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 12288,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 103,
+      "values": 196608,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q4",
+      "rows": 4096,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 501,
+      "values": 32768,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q4",
+      "rows": 4096,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 501,
+      "values": 65536,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q4",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 501,
+      "values": 57344,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q4",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 501,
+      "values": 114688,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 501,
+      "values": 57344,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 7168,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 501,
+      "values": 114688,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 12288,
+      "k": 5120,
+      "tokens": 8,
+      "seed": 501,
+      "values": 98304,
+      "bit_mismatches": 0
+    },
+    {
+      "format": "q5",
+      "rows": 12288,
+      "k": 5120,
+      "tokens": 16,
+      "seed": 501,
+      "values": 196608,
+      "bit_mismatches": 0
+    }
+  ],
+  "total_values": 2949120,
+  "total_bit_mismatches": 0,
+  "candidate_source": "9b391d513726b3ed7d60a80a95daa68cf9dacc97",
+  "toolchain_image": "sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
+  "reference_headers": [
+    "src/ops/common/memory.cuh",
+    "src/ops/common/mma.cuh",
+    "src/ops/linear/q4/q4_small_t_mma.cuh",
+    "src/ops/linear/q5/q5_small_t_mma.cuh",
+    "src/core/pdl.cuh"
+  ],
+  "reference_archive_sha256": "ba4b5a389887ed592d4799600ee802ec1a751a8374430590afe2e49b8f9e7c67",
+  "proof_source_utf8": "// Task-local EXP-097 proof. Reference headers are git-archived from 1302d639,\n// unmodified, Apache-2.0, and wrapped in a namespace to coexist with master.\n#include <cuda_runtime.h>\n#include <cuda_pipeline.h>\n#include <cuda_bf16.h>\n#include <cuda_fp16.h>\n#include <cstddef>\n#include <cstdint>\n#include <type_traits>\n#include <utility>\n#include <cstdio>\n#include <cstdlib>\n#include <random>\n#include <vector>\n#include \"ops/linear/kernels/q4/q4_a16_sliced_k_mma.cuh\"\n#include \"ops/linear/kernels/q5/q5_a16_sliced_k_mma.cuh\"\nnamespace shipped_reference {\n#include \"ops/linear/q4/q4_small_t_mma.cuh\"\n#include \"ops/linear/q5/q5_small_t_mma.cuh\"\n}\nnamespace current = ninfer::ops::detail;\nnamespace shipped = shipped_reference::ninfer::ops::detail;\nstatic void check(cudaError_t error) {\n    if (error != cudaSuccess) {\n        std::fprintf(stderr, \"%s\\n\", cudaGetErrorString(error));\n        std::exit(2);\n    }\n}\ntemplate<class T> struct Buffer {\n    T* data{};\n    explicit Buffer(std::size_t count) { check(cudaMalloc(&data, count * sizeof(T))); }\n    ~Buffer() { cudaFree(data); }\n    Buffer(const Buffer&) = delete;\n    Buffer& operator=(const Buffer&) = delete;\n};\nstruct Store {\n    __nv_bfloat16* data;\n    int rows;\n    __device__ void store(int row, int token, float value) const {\n        data[std::int64_t(token) * rows + row] = __float2bfloat16_rn(value);\n    }\n};\nstruct Identity { __device__ float apply(int, int, float value) const { return value; } };\ntemplate<int Rows> struct Geometry {\n    static constexpr int kInputRows = 5120;\n    static constexpr int kOutputRows = Rows;\n    static constexpr int kGroupsPerRow = kInputRows / 64;\n};\nstd::size_t total_values = 0, total_mismatches = 0;\nbool first = true;\ntemplate<bool Q5, int Rows, int Tokens> void compare(unsigned seed) {\n    constexpr int K = 5120;\n    std::mt19937 random(seed);\n    std::uniform_real_distribution<float> value(-1.0f, 1.0f);\n    std::uniform_real_distribution<float> scale(0.001f, 0.125f);\n    std::vector<std::uint8_t> codes(std::size_t(Rows) * K / 2), high(std::size_t(Rows) * K / 8);\n    std::vector<__half> scales(std::size_t(Rows) * K / 64);\n    std::vector<__nv_bfloat16> input(K * Tokens);\n    for (auto& x : codes) x = static_cast<std::uint8_t>(random());\n    for (auto& x : high) x = static_cast<std::uint8_t>(random());\n    for (auto& x : scales) x = __float2half(scale(random));\n    for (auto& x : input) x = __float2bfloat16_rn(value(random));\n    Buffer<std::uint8_t> dc(codes.size()), dh(high.size());\n    Buffer<__half> ds(scales.size());\n    Buffer<__nv_bfloat16> dx(input.size()), before(Rows * Tokens), after(Rows * Tokens);\n    check(cudaMemcpy(dc.data, codes.data(), codes.size(), cudaMemcpyHostToDevice));\n    check(cudaMemcpy(dh.data, high.data(), high.size(), cudaMemcpyHostToDevice));\n    check(cudaMemcpy(ds.data, scales.data(), scales.size() * 2, cudaMemcpyHostToDevice));\n    check(cudaMemcpy(dx.data, input.data(), input.size() * 2, cudaMemcpyHostToDevice));\n    auto* scale_bytes = reinterpret_cast<const std::uint8_t*>(ds.data);\n    if constexpr (Q5) {\n        shipped::q5_small_t_mma_launch<K, Tokens>(dx.data, dc.data, dh.data, scale_bytes, Rows,\n                                                Store{before.data, Rows}, nullptr);\n        using Schedule = current::Q5A16SlicedKMmaSchedule<16, Tokens, 8, 2,\n            ninfer::ops::Cache::cg, ninfer::ops::Cache::ca, 1, K, Tokens,\n            current::Q5SlicedKReduction::Linear>;\n        current::q5_a16_sliced_k_mma_kernel<Schedule, true, true><<<Rows / 16, 256>>>(\n            dx.data, dc.data, dh.data, scale_bytes, Store{after.data, Rows}, Identity{}, Rows,\n            K, Tokens, K, 0, current::Q5IdentityRows<16>{});\n    } else {\n        shipped::q4_small_t_mma_kernel<Geometry<Rows>, Tokens, Tokens><<<Rows / 16, 256>>>(\n            dx.data, dc.data, scale_bytes, before.data);\n        using Schedule = current::Q4A16SlicedKMmaSchedule<16, Tokens, 8, Tokens == 8 ? 2 : 1,\n            ninfer::ops::Cache::cg, ninfer::ops::Cache::ca, 6, K, Tokens,\n            current::Q4SlicedKReduction::Pairwise, 16>;\n        current::q4_a16_sliced_k_mma_kernel<Schedule, true, true><<<Rows / 16, 256>>>(\n            dx.data, dc.data, scale_bytes, Store{after.data, Rows}, Identity{}, Rows,\n            K, Tokens, K, 0, current::Q4IdentityRows<16>{});\n    }\n    check(cudaGetLastError());\n    check(cudaDeviceSynchronize());\n    std::vector<std::uint16_t> expected(Rows * Tokens), actual(Rows * Tokens);\n    check(cudaMemcpy(expected.data(), before.data, expected.size() * 2, cudaMemcpyDeviceToHost));\n    check(cudaMemcpy(actual.data(), after.data, actual.size() * 2, cudaMemcpyDeviceToHost));\n    std::size_t mismatches = 0;\n    for (std::size_t i = 0; i < actual.size(); ++i) mismatches += actual[i] != expected[i];\n    total_values += actual.size();\n    total_mismatches += mismatches;\n    std::printf(\"%s{\\\"format\\\":\\\"%s\\\",\\\"rows\\\":%d,\\\"k\\\":%d,\\\"tokens\\\":%d,\\\"seed\\\":%u,\\\"values\\\":%zu,\\\"bit_mismatches\\\":%zu}\",\n                first ? \"\" : \",\", Q5 ? \"q5\" : \"q4\", Rows, K, Tokens, seed, actual.size(), mismatches);\n    first = false;\n}\nint main() {\n    std::printf(\"{\\\"reference\\\":\\\"1302d639\\\",\\\"method\\\":\\\"all BF16 output bits; identical generated weights and activations\\\",\\\"cases\\\":[\");\n    for (unsigned seed : {1U, 17U, 103U, 501U}) {\n        compare<false, 4096, 8>(seed); compare<false, 4096, 16>(seed);\n        compare<false, 7168, 8>(seed); compare<false, 7168, 16>(seed);\n        compare<true, 7168, 8>(seed); compare<true, 7168, 16>(seed);\n        compare<true, 12288, 8>(seed); compare<true, 12288, 16>(seed);\n    }\n    std::printf(\"],\\\"total_values\\\":%zu,\\\"total_bit_mismatches\\\":%zu}\\n\", total_values, total_mismatches);\n    return total_mismatches ? 1 : 0;\n}\n",
+  "compile_command": [
+    "nvcc",
+    "-std=c++20",
+    "-O3",
+    "-arch=sm_120a",
+    "-I$REFERENCE/src",
+    "-I$SOURCE/src",
+    "-I$SOURCE/include",
+    "$PROOF/fork-parity.cu",
+    "-o",
+    "$BUILD/fork-parity"
+  ]
+}
