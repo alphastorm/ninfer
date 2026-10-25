@@ -263,7 +263,7 @@ int test_atomic_restore_and_revision_guard() {
     failures += check(!store.restore_session(malformed, fresh, [] { return true; }),
                       "ambiguous publication ordering was accepted");
     OpenAIResponsesStore rejected_epoch(8, 1ULL << 20);
-    rejected_epoch.put(scoped_record("resp_live", b, 10));
+    rejected_epoch.put(scoped_record("resp_second", b, 10));
     auto epoch_guard = rejected_epoch.begin_restore(b);
     bool commit_attempted = false;
     failures += check(!rejected_epoch.restore_session(snapshot, epoch_guard, [&] {
@@ -271,10 +271,33 @@ int test_atomic_restore_and_revision_guard() {
                           return false;
                       }, &refusal) && commit_attempted &&
                           refusal == ninfer::runtime::DurableReason::None &&
-                          rejected_epoch.latest_response_id(b) == "resp_live" &&
+                          rejected_epoch.latest_response_id(b) == "resp_second" &&
                           !rejected_epoch.get_for_session("resp_first", b),
                       "Engine epoch refusal replaced newer live Responses or lost its K3 reason");
     return failures;
+}
+
+int test_restore_guard_captured_after_newer_turn() {
+    const std::string session(64, 'e');
+    OpenAIResponsesStore store(3, 1ULL << 20);
+    store.put(scoped_record("resp_disk_1", session, 1));
+    store.put(scoped_record("resp_disk_2", session, 2));
+    store.put(scoped_record("resp_disk_3", session, 3));
+    const auto disk = *store.snapshot_session(session);
+    store.put(scoped_record("resp_new_unsaved", session, 4)); // real LRU miss for disk_1
+    auto guard = store.begin_restore(session); // no mutation after capture
+    bool engine_called = false;
+    ninfer::runtime::DurableReason refusal{};
+    const bool restored = store.restore_session(disk, guard, [&] {
+        engine_called = true;
+        return true; // captured Engine epoch is current too
+    }, &refusal);
+    return check(!restored && !engine_called &&
+                     refusal == ninfer::runtime::DurableReason::StaleRevision &&
+                     store.latest_response_id(session) == "resp_new_unsaved" &&
+                     store.get_for_session("resp_new_unsaved", session) &&
+                     !store.get_for_session("resp_disk_1", session),
+                 "RAM-miss restore rolled back a newer turn that preceded guard capture");
 }
 
 } // namespace
@@ -287,6 +310,7 @@ int main() {
     failures += test_isolation_and_submission_order();
     failures += test_publication_guard();
     failures += test_atomic_restore_and_revision_guard();
+    failures += test_restore_guard_captured_after_newer_turn();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
 }

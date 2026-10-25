@@ -105,6 +105,12 @@ public:
     void put(StoredOpenAIResponse response);
     bool erase_for_session(const std::string& id,
                             const std::optional<std::string>& session_sha256);
+    // Publish the survivor snapshot before the no-allocation RAM erase. An endpoint with
+    // survivors cannot be deleted without a matching older native continuation: refuse it.
+    [[nodiscard]] bool erase_for_session_durably(
+        const std::string& id, const std::string& session_sha256,
+        const std::function<bool(const std::optional<OpenAIResponseStoreSnapshot>&)>& publish,
+        runtime::DurableReason* refusal = nullptr);
 
     [[nodiscard]] std::optional<OpenAIResponseStoreSnapshot>
     snapshot_session(std::string_view session_sha256) const;
@@ -151,6 +157,8 @@ private:
     void end_restore(const std::string& session) noexcept;
     void prune_revision_locked(const std::string& session) noexcept;
     [[nodiscard]] const Entry* newest_locked(std::string_view session) const noexcept;
+    [[nodiscard]] std::optional<OpenAIResponseStoreSnapshot>
+    snapshot_locked(std::string_view session, std::string_view excluded = {}) const;
 
     std::size_t max_records_;
     std::size_t max_bytes_;
