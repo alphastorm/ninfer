@@ -406,7 +406,9 @@ enum class ManifestOriginState : std::uint8_t { Authentic, Unauthenticated, Forg
 void require_payload_shape(const std::filesystem::path& root, const std::string& relative,
                            std::uint64_t expected_bytes,
                            const std::shared_ptr<runtime::ContinuationCheckpointReadQueue>& read_queue) {
-    const std::filesystem::path path = root / relative;
+    std::filesystem::path path = root / relative;
+    // Wire descriptors use '/', but extended Win32 paths require native separators.
+    path.make_preferred();
     std::error_code error;
     const std::filesystem::file_status status = std::filesystem::symlink_status(path, error);
     if (error || !std::filesystem::exists(status)) {
@@ -678,7 +680,8 @@ private:
                 }
                 state.total                             = total_bytes;
                 state.alignment = alignment;
-                const std::filesystem::path destination = root_ / key;
+                std::filesystem::path destination = root_ / key;
+                destination.make_preferred();
                 io::create_directories(destination.parent_path());
 #ifndef _WIN32
                 for (auto parent = destination.parent_path(); parent != root_;
@@ -1462,7 +1465,8 @@ public:
 
         // The destination belongs to the engine, so no read may still be landing in it when
         // this call returns: every issued batch is awaited on every exit path.
-        const std::filesystem::path file = root_ / found->first;
+        std::filesystem::path file = root_ / found->first;
+        file.make_preferred();
         std::vector<std::unique_ptr<runtime::ContinuationCheckpointReadCompletion>> issued;
         issued.reserve(2);
         const auto settle = [&]() noexcept {

@@ -12,6 +12,7 @@ namespace ninfer::io {
 // Absolute extended local-drive spelling for Win32/std::filesystem metadata consumers.
 // Independent of MAX_PATH opt-in policy. Rejects UNC/device namespaces, traversal and
 // alternate streams; this is lexical validation only, not a substitute for anchored I/O.
+// Joining a POSIX wire-relative name requires make_preferred() before Win32 metadata access.
 [[nodiscard]] std::filesystem::path extended_local_path(const std::filesystem::path& path);
 #endif
 

@@ -361,6 +361,7 @@ void native_extended_paths(const std::filesystem::path& fixture) {
     auto nul = (root / L"nul").native();
     nul.push_back(L'\0');
     rejects([&] { (void)io::extended_local_path(nul); });
+    rejects([&] { io::create_directories(nul); });
     io::create_directories(root);
     native_pinned_destination(root);
     native_identity_guards(root);
