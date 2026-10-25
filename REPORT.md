@@ -11,7 +11,7 @@
 - Pending pressure blocks complete Host-release plans, point replacement, input recycling, private-owner abandonment, source consumption/retirement and paused-snapshot revocation. Terminal fail-all cleanup remains separate. Deterministic tests cover coordination-held pressure, provider removal during callback, disk publication finishing during restore, stale epochs, full-plan Pending and private/fresh import publication. Direct production Engine policy/stale-epoch assertions are added to the existing real C2 test.
 - Pending also defers capture/resident admission rather than misclassifying a temporarily protected victim as native impossibility. Callback-time progress preserves the current Pending result and permits the next worker turn to retry. Handler calls and admission rescans resume only after queue, capacity, provider or checkpoint-publication progress. Active native export returns retryable `TransactionBusy`, not permanent absence. Production serving coordinator `37a2824a`, its documentation/early-stop/progress/capacity closures `9f9f83ab4`, `1bab66130`, `0dddecc83`, `687a31d06`, and strict legacy/rooted-factory correction `148384bda50c0eac475ee6c77b245244df4934c1` are consumed; stale merge conflicts preserve the corrected provider and current contracts.
 
-## Observed verification (not acceptance)
+## Earlier verification and corrected failures
 
 - Inherited proof `366800` failed compilation at the Engine-options test's missing NVTX usage requirements (196 s); `809365a9` added `ninfer_core`. Corrected-input E1 lease job `20261025T031458Z-E1-engine-cache-e1-proof-468630`, source full `809365a96944f825099e46cd5fb0847cc69548e3`, image `ov-build-env:master-64d10fbf-r2`, failed after 67 s at that test's missing `nlohmann/json.hpp` through `model_construction.h → artifact/schema.h`. No CTest, GPU, TTFT or startup-gate phase ran. The test now also links `ninfer::json` and passes at the exact-source CPU boundary below. An earlier queued invocation with an abbreviated source SHA was cancelled before execution and replaced with the full-SHA job.
 - Command executed: `gpu-lease submit --holder E1 --label engine-cache-e1-proof --priority 3 --minutes 40 -- bash engine-cache-proof.sh 809365a96944f825099e46cd5fb0847cc69548e3 vanilla-server-start.json ov-build-env:master-64d10fbf-r2`, then `gpu-lease wait <job-id> 50`. Private runner/build/log locations are intentionally omitted. This is failure evidence, not candidate qualification.
@@ -24,7 +24,7 @@
 
 ## E2 integration cases
 
-- `tests/models/qwen3_5/test_engine_durable_pressure_real.cpp` adds an actual-Engine C2 restore-pressure fixture. It derives a one-set Host budget from a real exported checkpoint, imports B, starts B's store-free decoding turn, and requires A's restore to return CapacityRefused while B's save is Pending. B must remain exportable; publication then authorizes reclaim, A imports before B finishes, and A's cached continuation must decode at C2 and match a fresh deterministic request. Readers verify all bytes against immutable SHA-256 descriptors. This fixture is not yet qualified; the production disk/restart proof remains a separate required receipt.
+- `tests/models/qwen3_5/test_engine_durable_pressure_real.cpp` adds an actual-Engine C2 restore-pressure fixture. It derives a one-set Host budget from a real exported checkpoint, imports B, starts B's store-free decoding turn, and requires A's restore to return CapacityRefused while B's save is Pending. B must remain exportable; publication then authorizes reclaim, A imports before B finishes, and A's cached continuation must decode at C2 and match a fresh deterministic request. Readers verify all bytes against immutable SHA-256 descriptors. Final lease 582334 qualifies this unchanged fixture and the separate production disk/restart proof below.
 - Initial E2 compile at `a5313d93` failed before execution: the test oracle omitted its required `noexcept`, and receipt output streamed the optional Host-capacity value rather than its value. Both fixture-only compile errors are corrected; no runtime result is inferred.
 - Corrected E2 source `fad2d862919ce054594f7c84c0996bcfe214d234` compiled and linked `ninfer_qwen3_5_durable_pressure_real_test` in the CPU image (CUDA 13.1.2); `E2_CPU_COMPILE_COMPLETE` observed. No GPU execution is implied.
 - Source `9a6f1dd9` compiled both corrected C2 and E2 targets; source `9e2261f9` compiled E2 plus Persistence3's actual-Engine victim fixture. The latter fixture is consumed minimally as `9608ec74` + target registration `a41b0ce2` + receipt-output type fix `9e2261f9`; no whole provider-branch merge was used. Provider GPU receipt at `138939f385ba4ded5e6774effb7463d39048654f` passes in **96.004 s**: **608,663,552** resident bytes / **913,309,696** Host bytes, complete payload validation, two pins, one release, one fresh target reader, native-invalid victim preserved, **278** reused tokens and exact continuation. Evidence: [`receipts/engine-cache/a3-victim-provider.json`](receipts/engine-cache/a3-victim-provider.json).
@@ -41,10 +41,39 @@
 
 No image/package publication, production-container operation, upstream posting or native package replacement is authorized by this lane.
 
-## Requested handoff boundary
+## Final A3/E2 and production restart acceptance
 
-- User requested wrap-up before final acceptance. Latest production change is **`12ae6ee3c157462f4dde009f59eacc47f88c1595`**, immutable Engine identity caching; it is committed/pushed but **not compiled or GPU-qualified**. Latest exercised source is `fff4f17c79db65e253384a310fa8515e580180cb`, lease 580588. No owned build/GPU jobs remain active.
-- **Not mergeable as acceptance-complete:** E2 restore/decode overlap and all four production boots remain open. Required changed-input qualification is the identity-cache fix plus ServePort2's forthcoming Main-approved Boot3 correction, with actual `-DNINFER_UPSTREAM_BASE_SHA=64d10fbf9f8e6bfc79ab0570b94674c5b9997929`. Do not repeat already-passing E1/startup, prefixes, native victim validation or preemption without a changed relevant input.
-- Main ruled that the checkpoint-root/global-`--no-prefix-reuse` CLI guard stays. ServePort2 owns a normally configured Boot3 exercising real startup warmup and keyed `store:false` request opt-out, with zero restored tokens, no retained probe response and unchanged current pointer. Direct adapter policy-refusal checks remain the explicit warmup/cache-disabled-before-reservation proof.
-- K5 stands: retain `--gpu-keep-warm-ms 60000`, drop obsolete `--max-private-continuations`; ReleaseStage was notified. Integrator3 owns integration; Integrator2 is also notified of this lane's terminal handoff.
-- Secondary scratch cleanup removed only **645 owned intermediate object files / 363,710,256 B**; all binaries, archives, source and receipts remain. New secondary bulk scratch must use the D drive, including `NINFER_CCACHE_DIR`; the failed Windows-bind Ninja metadata is preserved. No secondary retry was launched after the filesystem error.
+- **PASS / mergeable:** exact source **`d693c6c7ca805cdb5a6ab4d7688ce600aa58f6b4`**, lease **`20261025T065709Z-E1-engine-cache-final-overlap-restart-582334`**, exit **0 / 201 s**, zero leftover or unowned containers. CUDA **13.1.2**, image `ov-build-env:master-64d10fbf-r2`; eight incremental Ninja edges compiled the immutable-identity production fix and linked `ninfer-serve` plus the E2 executable. Evidence: [`a3-e2-582334.json`](receipts/engine-cache/a3-e2-582334.json) and the original production receipt [`serve-restore-582334.json`](receipts/engine-cache/serve-restore-582334.json).
+- E2 **1/1 passed, zero skips/failures, 46.6706 s** (48 s phase). Host capacity **758,120,448 B**, resident/occupied **505,040,896 B**, **1,658** prompt / **1,651** cached tokens, **2** Pending / **4** settled callbacks. Sibling decode began at **22,342 ms**; Pending refusal returned at **22,571 ms**; save published at **23,951 ms**; restore returned at **24,420 ms**, while the sibling remained live, and continuation completed at **24,558 ms**. Sibling completion was observed at **45,494 ms**. The unchanged overlap assertion passed, as did **1,173 rows / 1,170 rounds** C2 continuation and equality against fresh deterministic tokens. The previously roughly 10-second Pending path now takes **229 ms**, and publication-to-import takes **469 ms**. No assertion or output budget was weakened.
+- All **four production boots passed in 130 s** through actual HTTP, authenticated disk store, Engine import and synchronous final-save. First stop saved one below-threshold session, with zero refusals. Restart reused **20,926 tokens**, and the **27-byte** continuation was byte-identical (SHA-256 `5a2528e22c6a6603d5eeafd214223e57812a9da7174bc1a4445c8f9308f8344c`). Explicit save committed **2,164,056,150 B**, **4 points / 4 states / 329 pages**, frontier/restored **20,993**, authenticated origin and `fsync`.
+- Boot3 used normal startup warmup plus keyed `store:false`: **0 cached tokens**, unretained probe retrieval **404**, unchanged current pointer before/after shutdown. Boot4 kept the deleted ancestor absent (**404**) and the retained descendant available (**200**); foreign/missing capability retrieval and foreign deletion remained **404**. Main's shipped checkpoint-root/global-`--no-prefix-reuse` CLI guard remains unchanged. Direct adapter policy-before-Reader/reservation checks retain their earlier separate proof.
+- Merge `rebase/engine-cache` through the final receipt commit; qualified code tip is `d693c6c7…`. Final production delta is **`12ae6ee3c157462f4dde009f59eacc47f88c1595`**. ServePort2's `33ea3f13` is consumed as `fff4f17c`; corrected Boot3 `6e4cca2e8a0364145e8b499c1701bfe1e79df2ab` is consumed as **`13e5172a7`**, and cleanup `1510dfdc392da6880fb1d5c3e2ba08cf4d403c36` as **`d693c6c7c`** (provider tip `b44efcf5a9914c014fd6d5884d4f30c66ffff926`). REPORT conflict resolution preserved this lane's report, not the provider's standalone proof claims. Persistence3's actual-victim fixture remains **`9608ec74e` + `a41b0ce2d` + `9e2261f92`**, with its separately qualified `a3-victim-provider.json`; no later correction was required.
+- No unchanged E1/startup, prefixes, native-victim or preemption input was rerun. The earlier partial/failing receipts above remain historical evidence, superseded only for the E2/four-boot gates by this changed-input batch. Integrator3 owns the integrated checkpoint, RC verification and Main's final G4 council; this lane does not claim a frozen integrated RC or release. K5 retains `--gpu-keep-warm-ms 60000` and excludes obsolete `--max-private-continuations`.
+
+### Exact final commands
+
+Private locations are represented by `$SOURCE` (detached checkout), `$BUILD` (persistent build), `$COMMON` (approved helpers), `$ROOT` (holder workspace), `$MODEL_DIR` / `$MODEL` (read-only v3 artifact), `$PRIVATE` (native-ext4 TMPDIR), and `$RECEIPTS` (per-source evidence). The submitted runner is the existing `engine-cache-e2.sh`, restricted to these two changed-input phases.
+
+```sh
+gpu-lease submit --holder E1 --label engine-cache-final-overlap-restart \
+  --priority 2 --minutes 15 -- bash engine-cache-e2.sh \
+  d693c6c7ca805cdb5a6ab4d7688ce600aa58f6b4
+gpu-lease wait 20261025T065709Z-E1-engine-cache-final-overlap-restart-582334 20
+
+export NINFER_BUILD_HOLDER=E1
+export NINFER_BUILD_ENV_IMAGE=ov-build-env:master-64d10fbf-r2
+"$COMMON/build.sh" "$SOURCE" "$BUILD" \
+  -DNINFER_UPSTREAM_BASE_SHA=64d10fbf9f8e6bfc79ab0570b94674c5b9997929 \
+  -- ninfer-serve ninfer_qwen3_5_durable_pressure_real_test
+"$COMMON/run-in-env.sh" --gpu --mount "$ROOT" --read-only-mount "$MODEL_DIR" \
+  --env "NINFER_TEST_ARTIFACT=$MODEL" --env NINFER_TEST_BACKEND=dflash2 \
+  --seccomp "$COMMON/ninfer_io_uring_seccomp.json" -- \
+  ctest --test-dir "$BUILD" --output-on-failure --timeout 600 \
+  --output-junit "$RECEIPTS/dflash2.xml" -R '^ninfer_qwen3_5_durable_pressure_real_test$'
+"$COMMON/run-in-env.sh" --gpu --mount "$ROOT" --read-only-mount "$MODEL_DIR" \
+  --env "TMPDIR=$PRIVATE" --seccomp "$COMMON/ninfer_io_uring_seccomp.json" -- \
+  python3 -B "$SOURCE/tests/test_serve_restore_real.py" \
+  --server "$BUILD/apps/ninfer-serve" --artifact "$MODEL" \
+  --artifact-sha256 81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da \
+  --port 18151 --receipt "$RECEIPTS/serve-restore.json"
+```
