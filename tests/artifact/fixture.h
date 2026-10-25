@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -15,6 +16,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace ninfer::test::artifact_fixture {
@@ -139,6 +141,9 @@ struct Fixture {
             header[16]      = std::byte{0x71};
             const auto path = i == 0 ? entry : directory / record.at("path").get<std::string>();
             std::ofstream file(path, std::ios::binary | std::ios::trunc);
+            if (!file)
+                throw std::system_error(errno, std::generic_category(),
+                                        "open artifact fixture part " + std::to_string(i));
             file.exceptions(std::ios::badbit | std::ios::failbit);
             file.write(reinterpret_cast<const char*>(header.data()), header.size());
             if (i == 0) { file.write(text.data(), static_cast<std::streamsize>(text.size())); }
