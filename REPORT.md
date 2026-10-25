@@ -8,7 +8,12 @@
 - Engine hooks honor `allow_prefix_reuse`, so startup warmup never attempts import. Other architecture Programs are not given a fake persistence implementation.
 - Launcher confines containers to holder `A2` and loopback port `18120`; receipts contain names, hashes and counters, not host paths, model text or credentials.
 - G1 candidate `e442df4d` compiled successfully: 627 Ninja steps, lease `20261025T010431Z-A2-tracer-build-e442df4d-210506`, exit 0, 192 seconds, zero leftover/unowned containers. Binary SHA-256 `da54f5a633527515f78eef98f9c967f99b176a9036cd2097098aa9bfd9f362cd`; source archive SHA-256 `ac994248f3396b13a86411d656520752f0329c01c4827d0061ab31000d7f8bd6`.
-- Restart proof submitted as `20261025T011218Z-A2-tracer-restart-e442df4d-218677`; no G1 verdict yet. Phase 2 begins after Contracts freezes K1/K3.
+- Initial restart job `20261025T011218Z-A2-tracer-restart-e442df4d-218677` exited before health with `cudaErrorStubLibrary`; this is an invalid environment, not an engine G1 failure. Corrected image `ov-build-env:master-64d10fbf-r2`, SHA-256 `e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1`, is GPU-qualified by Infra.
+- Corrected-image G1 job: `20261025T012810Z-A2-tracer-restart-e442df4d-r2-245426`; verdict pending.
+- Phase 2 uses frozen Contracts `746b29d2`, streaming/crypto prerequisites `0789709d` and `cb89c89a`. Native CBOR is field-wise and bounded; typed canonical round-trip rejects unknown fields, narrowing, duplicates and noncanonical containers.
+- Native set export retains checkpoint, state and page leases, resolves views while serialized, then copies/hashes/writes through a dedicated stream and bounded pinned staging outside Engine serialization. Padding and uncommitted KV columns are zeroed. K2 layout derives from immutable geometry, not allocation capacity.
+- Host-only import reserves StateImages, logical pages, extents, inactive histories and checkpoint slots; payload descriptors and delivered-byte verification precede native publication. Prepared reservations abort through RAII; capacity refusal is separate from corruption. Endpoint/input/anchor records preserve exact text/media identity and DFlash2 ring/frontier metadata.
+- Added synthetic backing ownership/rollback tests, canonical codec failure tests and an actual separate-process real-model export/import test. Phase 2 build/test results are not yet available; no Phase 2 qualification claim.
 
 ## Commands
 
@@ -22,4 +27,7 @@ cmake --build /build -j16 --target ninfer-serve
 gpu-lease submit --holder A2 --label tracer-restart-e442df4d --priority 2 --minutes 10 -- bash "$A2_SCRIPT_ROOT/run-e442df4d.sh"
 gpu-lease wait 20261025T011218Z-A2-tracer-restart-e442df4d-218677 50
 python3 "$A2_WORK_ROOT/src/tools/durable_tracer.py" --workdir "$A2_WORK_ROOT/run-e442df4d" --build "$A2_WORK_ROOT/build" --model "$V3_MODEL" --model-sha256 "$MODEL_SHA256" --source-commit e442df4d
+gpu-lease submit --holder A2 --label tracer-restart-e442df4d-r2 --priority 2 --minutes 10 -- bash "$A2_SCRIPT_ROOT/run-e442df4d-r2.sh"
+gpu-lease wait 20261025T012810Z-A2-tracer-restart-e442df4d-r2-245426 50
+python3 "$A2_WORK_ROOT/src/tools/durable_tracer.py" --workdir "$A2_WORK_ROOT/run-e442df4d-r2" --build "$A2_WORK_ROOT/build" --model "$V3_MODEL" --model-sha256 "$MODEL_SHA256" --source-commit e442df4d --image ov-build-env:master-64d10fbf-r2
 ```

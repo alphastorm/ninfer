@@ -345,6 +345,43 @@ void test_migration_state_fields(ninfer::DeviceContext& device) {
            "State field migration retained a reservation");
 }
 
+void test_host_only_state_import(ninfer::DeviceContext& device) {
+    ninfer::StateImageBuilder schema;
+    (void)schema.add(ninfer::DType::I32, {8}, 1, "fake recurrent state");
+    ninfer::LayoutBuilder builder;
+    const auto layout = schema.finish(builder, 1);
+    ninfer::DeviceBuffer backing(device.device(), builder.finish());
+    ninfer::StateImageStorage storage(backing.span(), layout);
+    ninfer::HostContextArena host(layout.image_stride * 2, layout.image_stride);
+    store::StateImageStore states(storage, &host, 3);
+    for (int attempt = 0; attempt < 4; ++attempt) {
+        {
+            auto reserved = states.reserve_host_destination();
+            expect(reserved.has_value(), "Host-only state reserve");
+            store::StateImageStore::Destination owner(states, *reserved);
+            expect(!states.device_resident(*reserved) && states.device_occupied() == 0,
+                   "Host import allocated a Device state slot");
+            const auto bytes = states.writable_host_view(*reserved);
+            std::memset(bytes.data, 0x37, bytes.bytes);
+            if (attempt & 1) {
+                states.complete_host_initialization(*reserved);
+                auto reader = states.read(*reserved);
+                expect(reader.host_view().bytes == storage.image_bytes() &&
+                       static_cast<const std::byte*>(reader.host_view().data)[0] == std::byte{0x37},
+                       "Host StateImage publication lost bytes");
+            }
+        }
+        expect(states.occupied() == 0 && host.occupied_bytes() == 0 &&
+               host.reserved_bytes() == 0, "Host state abort leaked reservations");
+    }
+    const auto first = states.reserve_host_destination().value();
+    store::StateImageStore::Destination a(states, first);
+    const auto second = states.reserve_host_destination().value();
+    store::StateImageStore::Destination b(states, second);
+    expect(!states.reserve_host_destination(), "Host state capacity must refuse without Device fallback");
+    expect(states.device_occupied() == 0, "Host capacity refusal allocated Device storage");
+}
+
 } // namespace
 
 int main() {
@@ -360,6 +397,7 @@ int main() {
         ninfer::DeviceContext device(0);
         test_state_store(device);
         test_migration_state_fields(device);
+        test_host_only_state_import(device);
         device.synchronize();
     } catch (const std::exception& error) {
         std::cerr << "FAIL: unexpected exception: " << error.what() << '\n';

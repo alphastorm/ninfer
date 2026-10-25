@@ -9,6 +9,37 @@ HostKVExtentReservation::~HostKVExtentReservation() {
     if (owner_ != nullptr) { owner_->abort(*this); }
 }
 
+HostKVExtentStore::Import::Import(HostKVExtentStore& owner, LogicalKVPageStore& store,
+                                 HostKVExtentReservation reservation,
+                                 std::vector<LogicalKVPageHandle> pages)
+    : owner_(&owner), store_(&store), reservation_(std::move(reservation)),
+      pages_(std::move(pages)) {}
+
+HostKVExtentStore::Import::Import(Import&& other) noexcept
+    : owner_(std::exchange(other.owner_, nullptr)), store_(other.store_),
+      reservation_(std::move(other.reservation_)), pages_(std::move(other.pages_)) {}
+
+HostKVExtentStore::Import::~Import() {
+    if (!owner_ || reservation_.valid()) return; // Reservation abort owns unpublished pages.
+    for (auto page : pages_)
+        if (!store_->release_reference(page)) std::terminate();
+    // A history retains adopted pages. Only the remaining orphan pages may lose their Host bytes.
+    std::erase_if(pages_, [&](auto page) {
+        return !store_->valid(page) || store_->history_references(page) != 0;
+    });
+    if (!pages_.empty() && !owner_->release_page_replicas(*store_, pages_)) std::terminate();
+}
+
+HostKVAllocationView HostKVExtentStore::Import::writable_view() {
+    if (!owner_) throw std::logic_error("Host KV import was moved");
+    return owner_->writable_view(reservation_);
+}
+
+void HostKVExtentStore::Import::publish() {
+    if (!owner_ || !reservation_.valid()) throw std::logic_error("Host KV import already published");
+    (void)owner_->publish(std::move(reservation_));
+}
+
 HostKVExtentStore::HostKVExtentStore(HostKVArena& arena, std::uint32_t descriptor_capacity)
     : arena_(&arena), extents_(descriptor_capacity), free_(descriptor_capacity),
       free_count_(descriptor_capacity), memberships_(descriptor_capacity),
@@ -107,6 +138,55 @@ HostKVExtentStore::prepare(LogicalKVPageStore& pages,
     return reservation;
 }
 
+std::optional<HostKVExtentStore::Import>
+HostKVExtentStore::prepare_import(LogicalKVPageStore& pages,
+                                  std::span<const std::uint32_t> coverage) {
+    if (coverage.empty() || std::any_of(coverage.begin(), coverage.end(), [](auto value) {
+            return value == 0 || value > static_cast<std::uint32_t>(kPagedKVPageSize);
+        }))
+        throw std::invalid_argument("Host KV import coverage is invalid");
+    if (!free_count_ || coverage.size() > free_membership_count_ ||
+        coverage.size() > pages.free_count_)
+        return std::nullopt;
+    std::vector<LogicalKVPageHandle> handles;
+    handles.reserve(coverage.size());
+    auto allocation = arena_->allocate(page_layout(pages), coverage.size());
+    if (!allocation) return std::nullopt;
+    const auto descriptor = free_[--free_count_];
+    auto& extent = extents_[descriptor];
+    extent.state = ExtentState::Reserved;
+    extent.page_store = &pages;
+    HostKVExtentReservation reservation;
+    reservation.owner_ = this;
+    reservation.descriptor_ = descriptor;
+    reservation.generation_ = extent.generation;
+    reservation.page_store_ = &pages;
+    reservation.allocation_ = std::move(allocation);
+    reservation.imported_ = true;
+    // All allocations and validation precede descriptor mutation.
+    for (auto columns : coverage) {
+        const auto index = pages.free_[--pages.free_count_];
+        auto& page = pages.pages_[index];
+        page.content_epoch = LogicalKVPageStore::next_epoch(page.content_epoch);
+        page.committed_columns = columns;
+        page.references = 1; // Import owns this reference until histories retain their own.
+        page.destination_pinned = true;
+        page.occupied = true;
+        const LogicalKVPageHandle handle(&pages, index, page.generation);
+        handles.push_back(handle);
+        const auto node = take_membership();
+        if (node == kInvalidIndex) std::terminate();
+        auto& entry = memberships_[node];
+        entry = {.page = handle, .epoch = page.content_epoch, .coverage = columns,
+                 .extent = descriptor, .offset = extent.page_count, .next = kInvalidIndex};
+        if (extent.tail == kInvalidIndex) extent.head = node;
+        else memberships_[extent.tail].next = node;
+        extent.tail = node;
+        ++extent.page_count;
+    }
+    return Import(*this, pages, std::move(reservation), std::move(handles));
+}
+
 HostKVAllocationView HostKVExtentStore::writable_view(HostKVExtentReservation& reservation) {
     validate(reservation);
     return arena_->writable_view(*reservation.allocation_);
@@ -140,6 +220,29 @@ void HostKVExtentStore::device_sources(const HostKVExtentReservation& reservatio
 HostKVExtentCapability HostKVExtentStore::publish(HostKVExtentReservation&& reservation) noexcept {
     if (!valid(reservation)) { std::terminate(); }
     Extent& extent = extents_[reservation.descriptor_];
+    if (reservation.imported_) {
+        extent.allocation = std::move(reservation.allocation_);
+        extent.allocation->publish();
+        extent.state = ExtentState::Published;
+        const HostKVExtentCapability capability(this, reservation.descriptor_, extent.generation);
+        auto node = extent.head;
+        for (std::uint32_t i = 0; i < extent.page_count; ++i) {
+            const auto& entry = memberships_[node];
+            auto& page = extent.page_store->require(entry.page);
+            if (!page.destination_pinned || page.device_replica || page.host_replica ||
+                page.references != 1 || page.readers() || page.content_epoch != entry.epoch)
+                std::terminate();
+            try {
+                extent.page_store->attach_host_replica(entry.page,
+                    {.extent = capability, .page_offset = i, .membership_node = node,
+                     .content_epoch = entry.epoch, .committed_columns = entry.coverage}, *this);
+            } catch (...) { std::terminate(); }
+            page.destination_pinned = false;
+            node = entry.next;
+        }
+        consume(reservation);
+        return capability;
+    }
     std::vector<LogicalKVPageHandle> readers;
     readers.reserve(extent.page_count);
     std::vector<LogicalKVPageHandle> replaced;
@@ -201,6 +304,15 @@ void HostKVExtentStore::abort(HostKVExtentReservation& reservation) noexcept {
     for (std::uint32_t index = 0; index < extent.page_count; ++index) {
         if (node == kInvalidIndex) { std::terminate(); }
         const LogicalKVPageHandle page = memberships_[node].page;
+        if (reservation.imported_) {
+            auto& value = extent.page_store->require(page);
+            if (!value.destination_pinned || value.device_replica || value.host_replica ||
+                value.references != 1 || value.readers())
+                std::terminate();
+            extent.page_store->release_descriptor(page, value);
+            node = memberships_[node].next;
+            continue;
+        }
         if (!extent.page_store->valid(page) || extent.page_store->source_pins(page) == 0) {
             std::terminate();
         }

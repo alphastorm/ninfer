@@ -386,6 +386,8 @@ public:
     std::unique_ptr<context::KVHistoryStore> backend_kv_histories;
     std::unique_ptr<context::HostKVExtentStore> host_kv_extents;
     std::vector<runtime::KvPoolDescriptor> kv_pools;
+    // Initialized under Program serialization; geometry is immutable for this Program lifetime.
+    std::optional<runtime::DurableNativeLayout> checkpoint_layout_cache;
     std::size_t text_host_kv_page_stride    = 0;
     std::size_t backend_host_kv_page_stride = 0;
     std::unique_ptr<qwen3_5::StateImageViews> state_images;
