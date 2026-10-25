@@ -127,6 +127,9 @@ void shared_readers_and_live_sibling(ninfer::Engine& engine) {
     other.insert(other.end(), branch.generated_token_ids.begin(), branch.generated_token_ids.end());
     other.push_back(198);
     const auto continued = engine.generate(engine.prepare_tokens(other), request(8));
+    require(continued.prefix_reuse_path == ninfer::PrefixReusePath::PrivateEndpoint &&
+                engine.runtime_stats().last_selected_reuse_path == continued.prefix_reuse_path,
+            "successful sibling binding lost its actual checkpoint-role telemetry");
     const auto fresh = engine.generate(engine.prepare_tokens(other), request(8, false));
     complete(continued, 8);
     complete(fresh, 8);

@@ -1338,11 +1338,19 @@ private:
         if (!request->lane || !progress.pending) {
             throw std::logic_error("completed prefill has no lane or pending token");
         }
-        if (!request->admitted_begin || progress.summary != *request->admitted_begin) {
+        // Native's BeginSummary reports Root/Checkpoint; Engine has the exact selected role.
+        // Normalize only that known generic classification, preserving the strict frontier and
+        // Root-vs-hit check. Native does not own the private/shared policy classification.
+        auto native_begin = progress.summary;
+        if (native_begin.prefix_reuse_path == PrefixReusePath::Checkpoint &&
+            begin.reused_prompt_tokens != 0) {
+            native_begin.prefix_reuse_path = begin.prefix_reuse_path;
+        }
+        if (native_begin != begin) {
             throw std::logic_error("runtime Begin summary differs from committed admission");
         }
         const std::uint32_t lane = request->lane->value;
-        request->begin           = progress.summary;
+        request->begin           = begin;
         const std::array<std::uint32_t, 1> lanes{lane};
         phase.finish();
         commit_pending(std::move(*progress.pending), lanes, false, cancelled_at_unit_start);
