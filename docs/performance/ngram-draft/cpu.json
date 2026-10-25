@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "experiment": "S1",
+  "source_commit": "c925c710a884d5ca40e9a832dba7512da889d954",
+  "build_image_tag": "ov-build-env:master-64d10fbf-r2-cpu-local",
+  "infra_reference_image_id": "sha256:62a4feee8f308cde61095355ff11977986ecce388ad4f057c23014950b681326",
+  "cuda_toolkit": "13.1.2",
+  "build_configuration": "Release, Ninja, sm_120a, 12 workers in an approved CPU slot",
+  "build_exit_code": 0,
+  "final_build": {
+    "source_commit": "60a95b0e91e4eee32b6982ccd9c6b27161659b5d",
+    "exit_code": 0,
+    "image_id_observed_after_build": "sha256:62a4feee8f308cde61095355ff11977986ecce388ad4f057c23014950b681326",
+    "changed_translation_units": [
+      "src/models/qwen3_5/program/grammar_masks.cpp",
+      "src/models/qwen3_5/program/decode.cpp"
+    ],
+    "binaries_exported": true
+  },
+  "unmodified_base_build": {
+    "source_commit": "9eb0a5fb9951527adaa2b262fac8ed1124eb83b4",
+    "target": "ninfer-serve",
+    "exit_code": 0,
+    "separate_source_and_build_directories": true,
+    "same_build_configuration": true,
+    "binary_exported": true
+  },
+  "built_targets": [
+    "ninfer-serve",
+    "ninfer_qwen3_5_ngram_proposer_test",
+    "ninfer_copy_proposals_test",
+    "ninfer_cli_options_test",
+    "ninfer_serve_options_test",
+    "ninfer_request_log_test",
+    "ninfer_qwen3_5_native_transactions_test"
+  ],
+  "tests": [
+    {
+      "command": "ctest --test-dir BUILD -R '^ninfer_qwen3_5_ngram_proposer_test$' --output-on-failure",
+      "passed": 1,
+      "failed": 0,
+      "ctest_total_seconds": 0.06,
+      "gpu_used": false
+    }
+  ],
+  "scope": "Header-only proposer and its unit test are unchanged by the subsequent grammar-stride, decode-timing and measurement-runner commit.",
+  "raw_content_included": false
+}
