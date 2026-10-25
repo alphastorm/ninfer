@@ -13,6 +13,7 @@
 - History-only automatic output retains known tool kinds; conflicting historical kinds are not callable. Explicit `tool_choice: none` still selects upstream's no-tools grammar (lead-approved divergence from the old parser's ability to emit historical calls under None).
 - Automatic system/developer-frontier and tool-boundary `SharedStablePrefix` markers already exist upstream. No insertion was ported. Added coverage proves leading-role sequences, coincident explicit/automatic deduplication, shared-principal scope retention, and the automatic-disable policy.
 - Ported the behavioral portion of upstream `Neroued/ninfer@9822c38d7dba8d7f9d1bd5382d314ef24a4b34e8`: JSON structural/outer whitespace and const/enum container punctuation, with mask preview/commit/discard and combined tool/body tests. The vendor helper is attributed in place. Did not carry the unrelated upstream issue checklist or dev-only fixture changes. No community-fork code copied.
+- Added the separately approved K2 loaded-frontend provider: `Frontend::durable_identity()` returns the immutable cached typed identity. It hashes the effective selected template while the exact loaded source is still owned, hashes tokenizer bytes, and hashes a six-resource inventory once during construction. Each inventory record frames name length/name, original byte length, and SHA length/SHA with unsigned 64-bit big-endian lengths after a domain/NUL prefix; raw resource payloads are not recopied into the inventory. Vision uses a separately domain-separated inventory of its two loaded configs or `disabled`. Codec spellings come from source-owned `kParserCodec` and Persistence's `kIdentityCodec`. Getter calls do not reopen paths, inspect resource views, or hash data.
 
 ## Fork corpus disposition
 
@@ -50,4 +51,5 @@ Planned targeted build/test targets: `ninfer_tool_call_parser_test`, `ninfer_qwe
 
 - Merge the shared declaration provider before the frontend implementation.
 - ServePort owns Responses custom wire objects, replay kinds, and declaration metadata. The frontend corpus proves its side of that bridge; the integrated wire corpus remains the serve slice's proof.
+- K2 provider dependencies: frozen Contracts `746b29d2` consumed as `93446717`; Persistence's header-only codec provider `48235fc1` consumed as `fa22a42c` (only additive includes conflicted). EngineCache owns forwarding the cached frontend value through the approved engine adapter.
 - Whole-program performance, durable fanout, native Windows build, real-model constrained generation, and frozen-candidate G4 are not asserted by this report.

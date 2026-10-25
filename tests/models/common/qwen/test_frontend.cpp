@@ -9,6 +9,7 @@
 #include "models/common/qwen/frontend/test_access.h"
 #include "models/common/qwen/frontend/tokenizer.h"
 #include "text/unicode.h"
+#include "runtime/contract/runtime_fingerprint.h"
 
 #include <nlohmann/json.hpp>
 
@@ -2255,6 +2256,92 @@ int test_custom_tool_template_and_output() {
     return failures;
 }
 
+int test_loaded_durable_frontend_identity() {
+    auto source = resources();
+    const auto frontend = make_frontend(source, false);
+    const auto identity = frontend.durable_identity();
+    const auto valid_digest = [](std::string_view value) {
+        return value.size() == 64 &&
+               std::all_of(value.begin(), value.end(), [](char c) {
+                   return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+               });
+    };
+    int failures = check(identity.template_sha256 == fi::sha256_hex(fi::sha256(source.chat_template_jinja)) &&
+                             identity.tokenizer_sha256 == fi::sha256_hex(fi::sha256(source.tokenizer_json)) &&
+                             valid_digest(identity.resources_sha256) &&
+                             identity.vision_preprocessing == "disabled" &&
+                             identity.parser_codec == "qwen-parser/1" &&
+                             identity.identity_codec == "qwen-identity/1",
+                         "loaded frontend identity did not bind actual resources and codec versions");
+    for (auto field : {&FrontendResources::tokenizer_json,
+                       &FrontendResources::tokenizer_config_json,
+                       &FrontendResources::generation_config_json,
+                       &FrontendResources::chat_template_jinja,
+                       &FrontendResources::preprocessor_config_json,
+                       &FrontendResources::video_preprocessor_config_json}) {
+        auto changed = source;
+        changed.*field += ' ';
+        const auto reloaded = make_frontend(changed, false);
+        failures += check(reloaded.durable_identity().resources_sha256 != identity.resources_sha256,
+                          "loaded resource inventory omitted a resource or its exact bytes");
+    }
+    const auto vision = make_frontend(source, true);
+    failures += check(valid_digest(vision.durable_identity().vision_preprocessing),
+                      "enabled Vision lacks a preprocessing identity");
+    auto changed_vision = source;
+    changed_vision.preprocessor_config_json += ' ';
+    const auto new_vision = make_frontend(changed_vision, true);
+    failures += check(new_vision.durable_identity().vision_preprocessing !=
+                          vision.durable_identity().vision_preprocessing,
+                      "Vision identity did not bind loaded preprocessing bytes");
+
+    struct TemporaryTemplate {
+        std::filesystem::path path = std::filesystem::temp_directory_path() /
+                                     ("ninfer-frontend-identity-" +
+                                      std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) +
+                                      ".jinja");
+        ~TemporaryTemplate() {
+            std::error_code error;
+            std::filesystem::remove(path, error);
+        }
+    } temporary;
+    const auto selected = source.chat_template_jinja + "\n";
+    {
+        std::ofstream file(temporary.path, std::ios::binary);
+        file << selected;
+    }
+    ninfer::models::qwen::FrontendOptions options;
+    options.vision_enabled = false;
+    options.chat_template_path = temporary.path;
+    auto overridden = make_frontend(source, options);
+    const auto selected_identity = overridden.durable_identity();
+    failures += check(selected_identity.template_sha256 == fi::sha256_hex(fi::sha256(selected)) &&
+                          selected_identity.template_sha256 != identity.template_sha256 &&
+                          selected_identity.resources_sha256 == identity.resources_sha256,
+                      "override identity used artifact template bytes or a file name");
+    {
+        std::ofstream file(temporary.path, std::ios::binary | std::ios::trunc);
+        file << selected << "\n";
+    }
+    const auto reloaded = make_frontend(source, options);
+    failures += check(reloaded.durable_identity().template_sha256 != selected_identity.template_sha256 &&
+                          overridden.durable_identity() == selected_identity,
+                      "loaded identity reopened a changed template path");
+    std::filesystem::remove(temporary.path);
+    source = {};
+    failures += check(overridden.durable_identity() == selected_identity &&
+                          frontend.durable_identity() == identity,
+                      "loaded identity borrowed resource storage or reopened a deleted path");
+    auto moved = std::move(overridden);
+    bool rejected = false;
+    try {
+        (void)overridden.durable_identity();
+    } catch (const std::logic_error&) { rejected = true; }
+    failures += check(rejected && moved.durable_identity() == selected_identity,
+                      "identity access did not preserve normal moved-from ownership checks");
+    return failures;
+}
+
 int test_reasoning_split(const Frontend& frontend) {
     ninfer::ChatMessage message;
     message.role = ninfer::ChatRole::User;
@@ -2859,6 +2946,7 @@ int main() {
     failures += test_structured_tool_output();
     failures += test_tool_output_atomic_fallback();
     failures += test_custom_tool_template_and_output();
+    failures += test_loaded_durable_frontend_identity();
     failures += test_tools_and_json_output();
     failures += test_reasoning_split(frontend);
     failures += test_thinking_budget_control(frontend);

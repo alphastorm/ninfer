@@ -1,9 +1,12 @@
 #include "models/common/qwen/frontend/frontend.h"
+#include "runtime/contract/runtime_fingerprint.h"
 
 #include "models/common/qwen/frontend/resources.h"
 #include "models/common/qwen/frontend/prepared_prompt.h"
+#include "models/common/qwen/prefix_identity.h"
 
 #include "models/common/qwen/frontend/chat_template.h"
+#include "models/common/qwen/frontend/digest.h"
 #include "models/common/qwen/frontend/media_cache.h"
 #include "models/common/qwen/frontend/processor.h"
 #include "models/common/qwen/frontend/test_access.h"
@@ -197,8 +200,70 @@ void validate_tokenizer_config(const FrontendResources& resources) {
     }
 }
 
+struct LoadedResourceIdentity {
+    std::string_view name;
+    std::uint64_t bytes = 0;
+    std::string sha256;
+};
+
+std::string resource_inventory_digest(std::string_view domain,
+                                      std::span<const LoadedResourceIdentity> resources) {
+    std::size_t size = domain.size() + 1;
+    for (const auto& resource : resources)
+        size += 3 * sizeof(std::uint64_t) + resource.name.size() + resource.sha256.size();
+    std::string framed;
+    framed.reserve(size);
+    framed.append(domain);
+    framed.push_back('\0');
+    const auto append_size = [&](std::uint64_t value) {
+        for (int shift = 56; shift >= 0; shift -= 8)
+            framed.push_back(static_cast<char>((value >> shift) & 0xffU));
+    };
+    for (const auto& resource : resources) {
+        append_size(resource.name.size());
+        framed.append(resource.name);
+        append_size(resource.bytes);
+        append_size(resource.sha256.size());
+        framed.append(resource.sha256);
+    }
+    return fi::sha256_hex(fi::sha256(framed));
+}
+
+void capture_loaded_identity(const FrontendResources& resources, bool vision_enabled,
+                              bool artifact_template_selected,
+                              runtime::DurableFrontendIdentity& identity) {
+    const auto resource = [](std::string_view name, std::string_view bytes) {
+        return LoadedResourceIdentity{.name = name,
+                                      .bytes = bytes.size(),
+                                      .sha256 = fi::sha256_hex(fi::sha256(bytes))};
+    };
+    const std::array<LoadedResourceIdentity, 6> inventory{{
+        resource("tokenizer.json", resources.tokenizer_json),
+        resource("tokenizer_config.json", resources.tokenizer_config_json),
+        resource("generation_config.json", resources.generation_config_json),
+        artifact_template_selected
+            ? LoadedResourceIdentity{.name = "chat_template.jinja",
+                                     .bytes = resources.chat_template_jinja.size(),
+                                     .sha256 = identity.template_sha256}
+            : resource("chat_template.jinja", resources.chat_template_jinja),
+        resource("preprocessor_config.json", resources.preprocessor_config_json),
+        resource("video_preprocessor_config.json", resources.video_preprocessor_config_json),
+    }};
+    identity.tokenizer_sha256 = inventory[0].sha256;
+    identity.resources_sha256 =
+        resource_inventory_digest("ninfer/qwen/frontend-resources/1", inventory);
+    identity.vision_preprocessing =
+        vision_enabled
+            ? resource_inventory_digest("ninfer/qwen/vision-preprocessing/1",
+                                        std::span(inventory).subspan(4))
+            : "disabled";
+    identity.parser_codec   = fi::kParserCodec;
+    identity.identity_codec = kIdentityCodec;
+}
+
 fi::CompiledChatTemplate compile_chat_template(const FrontendResources& resources,
-                                               const std::filesystem::path& override_path) {
+                                               const std::filesystem::path& override_path,
+                                               std::string& selected_sha256) {
     validate_tokenizer_config(resources);
     nlohmann::ordered_json tokens = nlohmann::ordered_json::object();
     const auto config             = nlohmann::ordered_json::parse(resources.tokenizer_config_json);
@@ -230,6 +295,7 @@ fi::CompiledChatTemplate compile_chat_template(const FrontendResources& resource
             throw std::invalid_argument("cannot read chat template: " + name);
         }
     }
+    selected_sha256 = fi::sha256_hex(fi::sha256(source));
     return fi::CompiledChatTemplate::resolve(source, std::move(name), std::move(tokens));
 }
 
@@ -519,7 +585,8 @@ class Frontend::Impl {
 public:
     Impl(const FrontendResources& resources, FrontendOptions options,
          ModelSamplingDefaults sampling_defaults)
-        : chat_template(compile_chat_template(resources, options.chat_template_path)),
+        : chat_template(
+              compile_chat_template(resources, options.chat_template_path, identity.template_sha256)),
           tokenizer(resources.tokenizer),
           processor(options.vision_enabled ? processor_options(resources) : fi::ProcessorOptions{}),
           vision_enabled(options.vision_enabled), max_context(options.max_context) {
@@ -575,8 +642,11 @@ public:
             }
         }
         thinking_control_tokens = std::make_shared<const std::vector<TokenId>>(std::move(encoded));
+        capture_loaded_identity(resources, options.vision_enabled, options.chat_template_path.empty(),
+                                identity);
     }
 
+    runtime::DurableFrontendIdentity identity;
     fi::CompiledChatTemplate chat_template;
     std::shared_ptr<const fi::Tokenizer> tokenizer;
     fi::ProcessorOptions processor;
@@ -662,6 +732,11 @@ Frontend::~Frontend()                              = default;
 
 const ModelSamplingDefaults& Frontend::sampling_defaults() const noexcept {
     return impl_->sampling;
+}
+
+const runtime::DurableFrontendIdentity& Frontend::durable_identity() const {
+    if (!impl_) { throw std::logic_error("frontend is empty"); }
+    return impl_->identity;
 }
 
 Frontend make_frontend(const FrontendResources& resources, FrontendOptions options,
