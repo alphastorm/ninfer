@@ -405,7 +405,11 @@ Use anchored directory handles or equivalent race-resistant root confinement.
 Never accept a path validated before an attacker-controlled replacement.
 
 `io::remove_tree(path)` is the required removal primitive for both files and
-directory trees. Every tombstone, quota-reclamation, quarantine and staging-cleanup
+directory trees. It returns true after removing the selected entry (including the
+POSIX pinned-parent fsync), false when the entry or an ancestor is missing, and
+throws on other faults. For removal only, a final symlink/reparse point is unlinked
+itself, never followed; ancestor links remain rejected. Every tombstone,
+quota-reclamation, quarantine and staging-cleanup
 removal uses its anchored no-follow traversal; no raw filesystem removal may bypass
 that boundary. A concurrent symlink/reparse-point substitution must never redirect
 removal outside the intended tree. All renames, including generation, quarantine
