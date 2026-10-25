@@ -1,6 +1,7 @@
 #include "serve/http_server.h"
 
 #include "serve/anthropic_messages.h"
+#include "serve/client_identity.h"
 #include "serve/http_transport.h"
 
 #include <atomic>
@@ -19,6 +20,7 @@ void HttpServer::handle_count_tokens(const httplib::Request& req, httplib::Respo
     try {
         const AnthropicCountTokensRequest request =
             parse_anthropic_count_tokens_request(parse_json_body(req));
+        require_authenticated_client_identity(request.generation, !options_.api_key.empty());
         const int input_tokens = service_->count_prompt_tokens(
             request.generation, [&req] { return client_disconnected(req); });
         res.set_content(make_anthropic_count_tokens_response(input_tokens), "application/json");

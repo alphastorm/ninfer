@@ -2,6 +2,7 @@
 #include "serve/generation_service.h"
 
 #include "product/media_acquire/acquire.h"
+#include "serve/client_identity.h"
 #include "serve/translate.h"
 
 #include <algorithm>
@@ -302,7 +303,8 @@ private:
 } // namespace
 
 GenerationService::GenerationService(ServeOptions options, StartupObserver startup_observer)
-    : options_(std::move(options)) {
+    : options_(std::move(options)),
+      principal_reuse_scope_(authenticated_principal_scope(options_.api_key)) {
     ninfer::EngineOptions engine_options;
     engine_options.artifact_path            = options_.artifact_path;
     engine_options.chat_template_path       = options_.chat_template_path;
@@ -357,12 +359,15 @@ PreparedRequest GenerationService::prepare(const GenerationRequest& request,
                                            GenerationConsumerMode consumer_mode,
                                            ninfer::GenerationObservationOptions observation,
                                            std::function<bool()> is_cancelled,
-                                           ContextCacheHints context_cache) const {
+                                           ContextCacheHints context_cache,
+                                           std::string_view checkpoint_tag) const {
+    apply_client_identity_cache_hints(request, !options_.api_key.empty(), context_cache);
+    context_cache.shared_reuse_scope = principal_reuse_scope_;
     return prepare_impl(request, consumer_mode, std::move(observation), std::move(is_cancelled),
                         std::move(context_cache),
                         options_.allow_prefix_reuse ? CacheParticipation::ReadWrite
                                                     : CacheParticipation::Disabled,
-                        DeadlinePolicy::ClientPendingTimeout);
+                        DeadlinePolicy::ClientPendingTimeout, checkpoint_tag);
 }
 
 PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request,
@@ -371,7 +376,8 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
                                                 std::function<bool()> is_cancelled,
                                                 ContextCacheHints context_cache,
                                                 CacheParticipation cache_participation,
-                                                DeadlinePolicy deadline_policy) const {
+                                                DeadlinePolicy deadline_policy,
+                                                std::string_view checkpoint_tag) const {
     PreparedRequest prepared;
     prepared.constraint_param               = request.constraint_param;
     for (const auto& tool : request.tools) prepared.tool_schema_params.push_back(tool.schema_param);
@@ -415,6 +421,9 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
             .cancellation = CancellationView(is_cancelled),
         };
         ninfer::PreparedPrompt prompt = engine_->prepare(std::move(input), control);
+        if (!checkpoint_tag.empty() && checkpoint_hooks_.set_checkpoint_tag) {
+            checkpoint_hooks_.set_checkpoint_tag(prompt, checkpoint_tag);
+        }
         check_preparation_control(prepared.lifetime->deadline, is_cancelled);
         prepared.enable_thinking = prompt.summary().starts_in_reasoning;
         if (!prepared.enable_thinking) {
@@ -450,6 +459,7 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
 
 int GenerationService::count_prompt_tokens(const GenerationRequest& request,
                                            std::function<bool()> is_cancelled) const {
+    require_authenticated_client_identity(request, !options_.api_key.empty());
     const bool request_has_media = request.media_item_count() != 0;
     if (request_has_media && !options_.enable_vision) {
         const std::invalid_argument error("Vision is disabled for this server");

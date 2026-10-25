@@ -2,7 +2,6 @@
 #include "text/json_input.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -222,7 +221,11 @@ bool optional_bool(const RequestJson& object, const char* key, bool fallback) {
 bool valid_tool_name(std::string_view name, std::size_t maximum_length) noexcept {
     if (name.empty() || name.size() > maximum_length) { return false; }
     for (const unsigned char character : name) {
-        if (std::isalnum(character) == 0 && character != '_' && character != '-') { return false; }
+        if (!((character >= 'a' && character <= 'z') ||
+              (character >= 'A' && character <= 'Z') ||
+              (character >= '0' && character <= '9') || character == '_' || character == '-')) {
+            return false;
+        }
     }
     return true;
 }

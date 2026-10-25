@@ -1,7 +1,11 @@
 #include "core/cpu/system.h"
 
 #include <hwloc.h>
+#ifdef _MSC_VER
+#include <intrin.h>
+#else
 #include <cpuid.h>
+#endif
 
 #include <algorithm>
 #include <cerrno>
@@ -46,6 +50,20 @@ CpuAffinity cpu_list(hwloc_const_bitmap_t bitmap) {
 bool data_cache(hwloc_obj_type_t type) {
     return type == HWLOC_OBJ_L1CACHE || type == HWLOC_OBJ_L2CACHE || type == HWLOC_OBJ_L3CACHE ||
            type == HWLOC_OBJ_L4CACHE || type == HWLOC_OBJ_L5CACHE;
+}
+
+void cpuid(unsigned leaf, unsigned subleaf, unsigned& eax, unsigned& ebx,
+           unsigned& ecx, unsigned& edx) noexcept {
+#ifdef _MSC_VER
+    int registers[4];
+    __cpuidex(registers, static_cast<int>(leaf), static_cast<int>(subleaf));
+    eax = static_cast<unsigned>(registers[0]);
+    ebx = static_cast<unsigned>(registers[1]);
+    ecx = static_cast<unsigned>(registers[2]);
+    edx = static_cast<unsigned>(registers[3]);
+#else
+    __cpuid_count(leaf, subleaf, eax, ebx, ecx, edx);
+#endif
 }
 
 } // namespace
@@ -180,20 +198,27 @@ CpuFeatures cpu_detail::usable_features(const FeatureRegisters& r) noexcept {
 CpuFeatures current_cpu_features() noexcept {
     cpu_detail::FeatureRegisters state;
     unsigned eax, ebx, ecx, edx;
-    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return {};
+    cpuid(0, 0, eax, ebx, ecx, edx);
+    const auto maximum_leaf = eax;
+    if (maximum_leaf < 1) return {};
+    cpuid(1, 0, eax, ebx, ecx, edx);
     state.leaf1_ecx = ecx;
     if ((ecx & ((1U << 26) | (1U << 27))) == ((1U << 26) | (1U << 27))) {
+#ifdef _MSC_VER
+        state.xcr0 = _xgetbv(0);
+#else
         unsigned low, high;
         asm volatile("xgetbv" : "=a"(low), "=d"(high) : "c"(0));
         state.xcr0 = (static_cast<std::uint64_t>(high) << 32) | low;
+#endif
     }
-    if (__get_cpuid_max(0, nullptr) >= 7) {
-        __cpuid_count(7, 0, eax, ebx, ecx, edx);
+    if (maximum_leaf >= 7) {
+        cpuid(7, 0, eax, ebx, ecx, edx);
         const auto max_subleaf = eax;
         state.leaf7_0_ebx      = ebx;
         state.leaf7_0_ecx      = ecx;
         if (max_subleaf >= 1) {
-            __cpuid_count(7, 1, eax, ebx, ecx, edx);
+            cpuid(7, 1, eax, ebx, ecx, edx);
             state.leaf7_1_eax = eax;
         }
     }
@@ -203,11 +228,13 @@ CpuFeatures current_cpu_features() noexcept {
 CpuIdentity current_cpu_identity() noexcept {
     CpuIdentity result;
     unsigned eax, ebx, ecx, edx;
-    __cpuid(0, eax, ebx, ecx, edx);
+    cpuid(0, 0, eax, ebx, ecx, edx);
+    const auto maximum_leaf = eax;
     std::memcpy(result.vendor.data(), &ebx, 4);
     std::memcpy(result.vendor.data() + 4, &edx, 4);
     std::memcpy(result.vendor.data() + 8, &ecx, 4);
-    if (!__get_cpuid(1, &eax, &ebx, &ecx, &edx)) return result;
+    if (maximum_leaf < 1) return result;
+    cpuid(1, 0, eax, ebx, ecx, edx);
     const auto family = (eax >> 8) & 15U;
     result.family     = family + (family == 15 ? (eax >> 20) & 255U : 0);
     result.model    = ((eax >> 4) & 15U) | ((family == 6 || family == 15) ? (eax >> 12) & 240U : 0);

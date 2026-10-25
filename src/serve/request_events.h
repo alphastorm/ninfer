@@ -16,6 +16,8 @@ struct RequestLogContext {
     std::string response_id;
     std::string protocol;
     std::string model;
+    std::optional<std::string> client_session_sha256;
+    std::optional<std::string> client_request_sha256;
     bool stream                             = false;
     std::size_t message_count               = 0;
     std::size_t media_item_count            = 0;
@@ -51,6 +53,8 @@ struct RequestRejectionLogContext {
     std::string response_id;
     std::string protocol;
     std::string model;
+    std::optional<std::string> client_session_sha256;
+    std::optional<std::string> client_request_sha256;
     bool stream                             = false;
     std::size_t message_count               = 0;
     std::size_t media_item_count            = 0;

@@ -84,7 +84,11 @@ parse_openai_responses_input_tokens_request(const RequestJson& body, const Reque
 OpenAIResponsesResolvedPrompt
 resolve_openai_responses_prompt(const OpenAIResponsesPromptRequest& request,
                                 OpenAIResponsesStore& store, std::optional<std::string> response_id,
-                                bool store_response);
+                                bool store_response,
+                                const OpenAIResponseRestoreCallback& restore = {});
+
+ApiError make_previous_response_not_found_error(const std::string& id);
+ApiError make_response_not_found_error(const std::string& id);
 
 BuiltOpenAIResponse make_openai_response_object(const std::string& id, std::int64_t created_at,
                                                 const OpenAIResponsesCreateRequest& request,

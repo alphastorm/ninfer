@@ -1,6 +1,7 @@
 #include "serve/http_server.h"
 
 #include "serve/http_transport.h"
+#include "serve/client_identity.h"
 #include "serve/openai_common.h"
 #include "serve/openai_responses.h"
 #include "serve/request_validation.h"
@@ -32,6 +33,9 @@ struct PendingResponseStorage {
     std::vector<Json> input_items;
     OpenAIResponseContext previous_context;
     std::string session_key;
+    std::optional<std::string> client_session_sha256;
+    std::optional<std::string> previous_response_id;
+    OpenAIResponsePublication publication;
     bool enabled = false;
 };
 
@@ -57,16 +61,6 @@ ApiError internal_error(const std::exception& exception) {
     return error;
 }
 
-ApiError response_not_found(const std::string& id) {
-    ApiError error;
-    error.status  = 404;
-    error.type    = "invalid_request_error";
-    error.param   = "response_id";
-    error.code    = "response_not_found";
-    error.message = "response '" + id + "' not found";
-    return error;
-}
-
 OpenAIResponseContext terminal_context(OpenAIResponseContext previous,
                                        std::vector<ChatTurn> input_turns,
                                        std::vector<ChatTurn> output_history) {
@@ -78,14 +72,21 @@ OpenAIResponseContext terminal_context(OpenAIResponseContext previous,
 void commit_stored_response(OpenAIResponsesStore& store, PendingResponseStorage pending,
                             std::string id, const Json& response,
                             std::vector<ChatTurn> output_history,
-                            std::optional<bool> preserve_thinking) {
+                            std::optional<bool> preserve_thinking,
+                            std::uint64_t publication_order) {
     if (!pending.enabled) { return; }
     if (pending.session_key.empty()) {
         throw std::logic_error("stored Response has no Engine session key");
     }
+    if (publication_order == 0) {
+        throw std::logic_error("stored Response has no Engine submission order");
+    }
     StoredOpenAIResponse stored;
     stored.id                = std::move(id);
     stored.session_key       = std::move(pending.session_key);
+    stored.client_session_sha256 = std::move(pending.client_session_sha256);
+    stored.previous_response_id = std::move(pending.previous_response_id);
+    stored.publication_order = publication_order;
     stored.response          = response;
     stored.input_items       = std::move(pending.input_items);
     stored.context           = terminal_context(std::move(pending.previous_context),
@@ -246,9 +247,13 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         RequestLimits limits;
         limits.default_max_tokens = options_.default_max_tokens;
         request = parse_openai_responses_create_request(parse_json_body(req), limits);
+        apply_client_session_header(req, !options_.api_key.empty(), request.prompt.generation);
+        resolve_client_session(request.prompt.generation, !options_.api_key.empty(),
+                                has_client_session_header(req));
+        require_authenticated_client_identity(request.prompt.generation, !options_.api_key.empty());
         validate_openai_model(request.prompt.model, public_model_id_);
         resolved = resolve_openai_responses_prompt(request.prompt, openai_responses_store_, id,
-                                                   request.store);
+                                                   request.store, checkpoints_.restore);
     } catch (const ApiException& exception) {
         write_openai_error(res, responses_error(exception.error()));
         return;
@@ -270,14 +275,21 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         .preserve_thinking_semantic_change = resolved.preserve_thinking_semantic_change,
     };
     PreparedRequest prepared;
+    OpenAIResponsePublication publication;
     try {
+        if (request.store) {
+            publication = OpenAIResponsePublication(openai_responses_store_, id,
+                                                      request.prompt.generation.client_session_sha256);
+        }
         prepared = service_->prepare(
             resolved.generation,
             request.stream ? GenerationConsumerMode::Streaming : GenerationConsumerMode::Aggregate,
             {.phase_timings = true,
              .scheduling    = scheduling_observer(req_id, metadata.http_request_id),
              .first_token   = first_token_observer()},
-            [&req] { return client_disconnected(req); }, std::move(resolved.cache_hints));
+            [&req] { return client_disconnected(req); }, std::move(resolved.cache_hints),
+            request.store && request.prompt.generation.client_session_sha256
+                ? std::string_view(id) : std::string_view{});
     } catch (const ApiException& exception) {
         const ApiError error = responses_error(exception.error());
         record_request_rejected(make_request_rejection_log_context(
@@ -335,11 +347,15 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         storage.input_turns      = std::move(request.prompt.input_turns);
         storage.input_items      = std::move(request.prompt.input_items);
         storage.previous_context = std::move(resolved.parent);
+        storage.client_session_sha256 = request.prompt.generation.client_session_sha256;
+        storage.previous_response_id = request.prompt.previous_response_id;
+        storage.publication = std::move(publication);
         if (resolved.session_key) { storage.session_key = std::move(*resolved.session_key); }
         storage.enabled = request.store;
         try {
             commit_stored_response(openai_responses_store_, std::move(storage), id, response->body,
-                                   std::move(response->output_history), prepared.preserve_thinking);
+                                   std::move(response->output_history), prepared.preserve_thinking,
+                                   outcome.metrics.engine_request_id);
         } catch (const ApiException& exception) {
             const ApiError error = responses_error(exception.error());
             lifecycle->response_failure(
@@ -369,6 +385,9 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
         stream->storage.input_turns      = std::move(request.prompt.input_turns);
         stream->storage.input_items      = std::move(request.prompt.input_items);
         stream->storage.previous_context = std::move(resolved.parent);
+        stream->storage.client_session_sha256 = request.prompt.generation.client_session_sha256;
+        stream->storage.previous_response_id = request.prompt.previous_response_id;
+        stream->storage.publication = std::move(publication);
         if (resolved.session_key) {
             stream->storage.session_key = std::move(*resolved.session_key);
         }
@@ -473,7 +492,8 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                     commit_stored_response(openai_responses_store_, std::move(stream->storage), id,
                                            finished->response.body,
                                            std::move(finished->response.output_history),
-                                           stream->prepared.preserve_thinking);
+                                           stream->prepared.preserve_thinking,
+                                           outcome.metrics.engine_request_id);
                 } catch (const ApiException& exception) {
                     const ApiError error = responses_error(exception.error());
                     lifecycle->response_failure(
@@ -526,9 +546,14 @@ void HttpServer::handle_response_input_tokens(const httplib::Request& req, httpl
         limits.default_max_tokens = options_.default_max_tokens;
         OpenAIResponsesPromptRequest request =
             parse_openai_responses_input_tokens_request(parse_json_body(req), limits);
+        apply_client_session_header(req, !options_.api_key.empty(), request.generation);
+        resolve_client_session(request.generation, !options_.api_key.empty(),
+                                has_client_session_header(req));
+        require_authenticated_client_identity(request.generation, !options_.api_key.empty());
         validate_openai_model(request.model, public_model_id_);
         OpenAIResponsesResolvedPrompt resolved =
-            resolve_openai_responses_prompt(request, openai_responses_store_, std::nullopt, false);
+            resolve_openai_responses_prompt(request, openai_responses_store_, std::nullopt, false,
+                                             checkpoints_.restore);
         const int tokens = service_->count_prompt_tokens(
             resolved.generation, [&req] { return client_disconnected(req); });
         res.set_content(make_openai_response_input_tokens_body(tokens), "application/json");
@@ -545,45 +570,55 @@ void HttpServer::handle_response_input_tokens(const httplib::Request& req, httpl
 void HttpServer::handle_response_get(const httplib::Request& req, httplib::Response& res) {
     try {
         validate_retrieve_query(req);
+        const std::string id = path_response_id(req);
+        const auto stored = openai_responses_store_.get_for_session(
+            id, parse_client_session_header(req, !options_.api_key.empty()));
+        if (!stored) {
+            write_openai_error(res, make_response_not_found_error(id));
+            return;
+        }
+        res.set_content(stored->response.dump(), "application/json");
     } catch (const ApiException& exception) {
         write_openai_error(res, exception.error());
-        return;
     }
-    const std::string id                                     = path_response_id(req);
-    const std::shared_ptr<const StoredOpenAIResponse> stored = openai_responses_store_.get(id);
-    if (!stored) {
-        write_openai_error(res, response_not_found(id));
-        return;
-    }
-    res.set_content(stored->response.dump(), "application/json");
 }
 
 void HttpServer::handle_response_delete(const httplib::Request& req, httplib::Response& res) {
-    const std::string id = path_response_id(req);
-    if (!openai_responses_store_.erase(id)) {
-        write_openai_error(res, response_not_found(id));
-        return;
-    }
-    res.set_content(Json{{"id", id}, {"object", "response.deleted"}, {"deleted", true}}.dump(),
-                    "application/json");
+    try {
+        const std::string id = path_response_id(req);
+        if (!openai_responses_store_.erase_for_session(
+                id, parse_client_session_header(req, !options_.api_key.empty()))) {
+            write_openai_error(res, make_response_not_found_error(id));
+            return;
+        }
+        res.set_content(Json{{"id", id}, {"object", "response.deleted"}, {"deleted", true}}.dump(),
+                        "application/json");
+    } catch (const ApiException& exception) { write_openai_error(res, exception.error()); }
 }
 
 void HttpServer::handle_response_input_items(const httplib::Request& req, httplib::Response& res) {
-    const std::string id                                     = path_response_id(req);
-    const std::shared_ptr<const StoredOpenAIResponse> stored = openai_responses_store_.get(id);
-    if (!stored) {
-        write_openai_error(res, response_not_found(id));
-        return;
-    }
     try {
+        const std::string id = path_response_id(req);
+        const auto stored = openai_responses_store_.get_for_session(
+            id, parse_client_session_header(req, !options_.api_key.empty()));
+        if (!stored) {
+            write_openai_error(res, make_response_not_found_error(id));
+            return;
+        }
         res.set_content(paginated_input_items(req, stored->input_items).dump(), "application/json");
     } catch (const ApiException& exception) { write_openai_error(res, exception.error()); }
 }
 
 void HttpServer::handle_response_cancel(const httplib::Request& req, httplib::Response& res) {
-    const std::string id = path_response_id(req);
-    if (!openai_responses_store_.get(id)) {
-        write_openai_error(res, response_not_found(id));
+    try {
+        const std::string id = path_response_id(req);
+        if (!openai_responses_store_.get_for_session(
+                id, parse_client_session_header(req, !options_.api_key.empty()))) {
+            write_openai_error(res, make_response_not_found_error(id));
+            return;
+        }
+    } catch (const ApiException& exception) {
+        write_openai_error(res, exception.error());
         return;
     }
     ApiError error;

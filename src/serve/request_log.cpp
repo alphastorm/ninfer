@@ -1,4 +1,5 @@
 #include "serve/request_log.h"
+#include "serve/server_identity.h"
 #include "product/constraint_observation.h"
 #include "product/logging/pretty_format.h"
 #include "product/speculative_options.h"
@@ -241,6 +242,12 @@ Json overrides_json(const ninfer::SamplingOverrides& overrides) {
     return result;
 }
 
+Json client_identity_json(const std::optional<std::string>& session,
+                           const std::optional<std::string>& request) {
+    return {{"session_sha256", session ? Json(*session) : Json(nullptr)},
+            {"request_sha256", request ? Json(*request) : Json(nullptr)}};
+}
+
 Json request_json(const RequestLogContext& context) {
     Json thinking_budget = nullptr;
     if (context.thinking_budget) { thinking_budget = *context.thinking_budget; }
@@ -249,6 +256,8 @@ Json request_json(const RequestLogContext& context) {
                 {"response_id", context.response_id},
                 {"protocol", context.protocol},
                 {"model", context.model},
+                {"client_identity", client_identity_json(context.client_session_sha256,
+                                                          context.client_request_sha256)},
                 {"stream", context.stream},
                 {"message_count", context.message_count},
                 {"media_item_count", context.media_item_count},
@@ -293,6 +302,8 @@ Json rejected_request_json(const RequestRejectionLogContext& context) {
                 {"response_id", context.response_id},
                 {"protocol", context.protocol},
                 {"model", context.model},
+                {"client_identity", client_identity_json(context.client_session_sha256,
+                                                          context.client_request_sha256)},
                 {"stream", context.stream},
                 {"message_count", context.message_count},
                 {"media_item_count", context.media_item_count},
@@ -531,6 +542,7 @@ std::string format_server_start_json(
     const ninfer::LoadSummary& load, const ninfer::MemorySummary& memory,
     const ServerLogEnvironment& environment, std::optional<std::uint64_t> artifact_size_bytes) {
     Json record = event_base(server_instance_id, timestamp, "server_start");
+    record["identity"] = server_identity_json(options, load);
 
     Json artifact_size = nullptr;
     if (artifact_size_bytes.has_value()) { artifact_size = *artifact_size_bytes; }
@@ -674,6 +686,76 @@ format_request_scheduling_json(const std::string& server_instance_id,
                  {"request_replayed_tokens", observation.request_replayed_tokens},
     };
     return record.dump();
+}
+
+std::string format_status_json(const ServeOptions& options,
+                               const ninfer::EngineOptions& engine,
+                               const std::string& public_model_id, const ninfer::LoadSummary& load,
+                               const ninfer::MemorySummary& memory,
+                               const ninfer::RuntimeStats& runtime, bool available) {
+    Json acceptance_ratio = nullptr;
+    if (runtime.speculative_draft_tokens != 0) {
+        acceptance_ratio = static_cast<double>(runtime.speculative_accepted_tokens) /
+                           static_cast<double>(runtime.speculative_draft_tokens);
+    }
+    Json tokens_per_round = nullptr;
+    if (runtime.speculative_rounds != 0) {
+        tokens_per_round = 1.0 + static_cast<double>(runtime.speculative_accepted_tokens) /
+                                     static_cast<double>(runtime.speculative_rounds);
+    }
+    return Json{
+        {"artifact_type", "ninfer_server_status"}, {"schema_version", 2},
+        {"status", available ? "ok" : "unavailable"}, {"identity", server_identity_json(options, load)},
+        {"runtime", {{"public_model_id", public_model_id}, {"max_context", engine.max_context},
+            {"kv_capacity_mode", kv_capacity_mode_name(memory.kv_capacity_mode)},
+            {"kv_capacity_tokens", memory.kv_capacity}, {"kv_cache", kv_cache_name(engine.kv_cache)},
+            {"speculative_backend", product::speculative_backend_name(engine.speculative.backend)},
+            {"speculative_draft_window", engine.speculative.draft_tokens},
+            {"proposal_head", proposal_head_name(engine.speculative.proposal_head)}}},
+        {"scheduler", {{"max_concurrency", engine.max_concurrency},
+            {"max_pending_requests", engine.max_pending_requests}, {"running", runtime.running_requests},
+            {"prefilling", runtime.prefilling_requests}, {"decode_ready", runtime.decode_ready_requests},
+            {"waiting", runtime.waiting_requests}, {"paused", runtime.paused_requests},
+            {"replaying", runtime.replaying_requests}, {"materializing", runtime.materializing_requests},
+            {"capture_pending", runtime.capture_pending_requests},
+            {"terminal_pending", runtime.terminal_pending_requests},
+            {"computed_prefill_tokens", runtime.computed_prefill_tokens},
+            {"committed_decode_tokens", runtime.committed_decode_tokens},
+            {"decode_rounds", runtime.decode_rounds}, {"decode_row_rounds", runtime.decode_row_rounds},
+            {"prefill_host_nanoseconds", runtime.host_work.prefill_host_ns},
+            {"prefill_device_wait_nanoseconds", runtime.host_work.prefill_device_wait_ns},
+            {"decode_host_nanoseconds", runtime.host_work.decode_host_ns},
+            {"decode_device_wait_nanoseconds", runtime.host_work.decode_device_wait_ns}}},
+        {"cache", {
+            {"device_state", {{"occupied", runtime.device_state_occupied_slots},
+                {"capacity", static_cast<std::uint64_t>(engine.max_concurrency) +
+                                 engine.context_cache.device_state_slots.value_or(0)}}},
+            {"host_state", {{"occupied", runtime.host_state_occupied_slots}, {"capacity", nullptr}}},
+            {"host_kv", {{"occupied_bytes", runtime.host_kv_occupied_bytes}, {"capacity_bytes", nullptr}}},
+            {"private_catalog", {{"occupied", runtime.private_catalog_occupied}, {"capacity", nullptr}}},
+            {"shared_catalog", {{"occupied", runtime.shared_catalog_occupied}, {"capacity", nullptr},
+                                {"active_references", nullptr}}},
+            {"reused_prompt_tokens", runtime.reused_prompt_tokens},
+            {"last_selection", {{"path", prefix_reuse_path_name(runtime.last_selected_reuse_path)},
+                                {"frontier_tokens", runtime.last_selected_frontier_tokens}}},
+            {"private_evictions", nullptr}, {"shared_evictions", nullptr},
+            {"last_materialization_predicted_nanoseconds", nullptr}}},
+        {"mtp", {{"rounds", runtime.speculative_rounds},
+            {"drafted_tokens", runtime.speculative_draft_tokens},
+            {"accepted_tokens", runtime.speculative_accepted_tokens},
+            {"fallback_steps", runtime.speculative_fallback_steps},
+            {"acceptance_ratio", std::move(acceptance_ratio)},
+            {"tokens_per_round", std::move(tokens_per_round)}}},
+        {"unavailable_fields", {
+            {"cache.private_catalog.capacity", "master catalog is resource-budgeted, not a fixed private-slot count"},
+            {"cache.shared_catalog.capacity", "master catalog is resource-budgeted, not a fixed shared-slot count"},
+            {"cache.host_state.capacity", "unified Host pool has no independently reserved State capacity"},
+            {"cache.host_kv.capacity_bytes", "unified Host pool has no independently reserved KV capacity"},
+            {"cache.shared_catalog.active_references", "master has no native shared-reader-count ledger"},
+            {"cache.private_evictions", "fork pressure-policy counters have no equivalent master counter"},
+            {"cache.shared_evictions", "fork pressure-policy counters have no equivalent master counter"},
+            {"cache.last_materialization_predicted_nanoseconds", "fork whole-materialization planner has no master equivalent"}}},
+    }.dump();
 }
 
 std::string format_request_start_json(const std::string& server_instance_id,
