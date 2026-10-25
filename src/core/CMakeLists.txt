@@ -23,9 +23,6 @@ endif()
 add_library(ninfer_sha256 STATIC sha256.cpp sha256_x86.cpp)
 ninfer_internal_includes(ninfer_sha256)
 
-add_library(ninfer_sha256 STATIC sha256.cpp sha256_x86.cpp)
-ninfer_internal_includes(ninfer_sha256)
-
 add_library(ninfer_core STATIC
   arena.cpp
   buffer.cpp
