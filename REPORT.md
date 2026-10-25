@@ -68,7 +68,14 @@ common/build.sh "$SOURCE" "$BUILD/native-sm89" \
 
 - Imported PortableCore's `ed99ff3f` compiler-neutral CPU expert changes as
   `53e847dd`: unreachable intrinsic, F16C scalar conversion and isolated MSVC ISA flags.
-  The two-profile Linux server/contract/ops build at this revision is in flight.
+  At this revision, Linux sm_89 linked the server and architecture contract
+  (427/427 incremental tasks), then completed its ops target batch. Linux sm_86
+  also linked the server and architecture contract (619/619 tasks). Both ops
+  target batches completed all 228 tasks; the driver reported
+  `C2_NATIVE_LINUX_COMPILE_PASS` and exit zero for both profiles.
+  The one-hour observer expired during the sm_86 ops links; the detached
+  build remained alive and the reattached observer obtained its actual completion.
+  This is intermediate-source evidence, not the final combined-candidate proof.
 - PortableCore's combined MSVC sm_89 build at `ed99ff3f` passed the former CPU
   compiler blockers, then failed at step 98/1289 after 101.566 seconds:
   `bf16_a16_tma_mma.cuh:116`, C2719 on the 128-byte-aligned descriptor parameter.
@@ -80,6 +87,14 @@ common/build.sh "$SOURCE" "$BUILD/native-sm89" \
   Its peak-RSS observation now uses the native Windows process working-set query
   on Windows and the unchanged `getrusage` path on Linux, allowing the direct
   DFlash2 loading check to compile without a POSIX-only header.
+- Combined MSVC sm_89 candidate `3d2a3df4` passed the unused-TMA declaration
+  boundary, then failed at 26/1161 tasks after 47.261 seconds: C2326 rejected
+  outer `constexpr` kernel aliases referenced inside token-slicing lambdas.
+  The observed instances were BF16 sliced-K and folded gated-residual Up.
+  These launch sites and the analogous native FP8/NVFP4 A16 sliced-K sites now
+  name the same kernel specialization directly inside the lambda; shared-memory
+  setup stays outside the loop. Schedules, arguments and arithmetic are unchanged.
+  The Blackwell-only NVFP4 A4 TMA launcher is outside the native build and unchanged.
 
 ### Native host-pool translation
 
