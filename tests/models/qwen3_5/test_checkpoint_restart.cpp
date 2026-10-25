@@ -14,6 +14,7 @@
 #include <fstream>
 #include <iostream>
 #include <map>
+#include <mutex>
 #include <stdexcept>
 #ifdef _WIN32
 #include <process.h>
@@ -81,11 +82,24 @@ private:
 };
 class Reader final : public ContinuationCheckpointReader {
 public:
-    explicit Reader(fs::path root, bool corrupt = false) : root_(std::move(root)), corrupt_(corrupt) {
+    explicit Reader(fs::path root, bool corrupt = false,
+                    DurableReason failure = DurableReason::None, bool fail_at_finish = false)
+        : root_(std::move(root)), corrupt_(corrupt), failure_(failure), fail_at_finish_(fail_at_finish) {
         for (const auto& item : read_json(root_ / "test-inventory.json")) {
             File file;
             file.descriptor = {item.at("path"), item.at("bytes"), item.at("sha256"), item.at("alignment")};
-            files_.emplace(file.descriptor.path, std::move(file));
+            auto source = std::make_shared<InputSource>(root_ / file.descriptor.path);
+            files_.emplace(item.at("path").get<std::string>(),
+                           InputFile(std::move(file), std::move(source)));
+        }
+    }
+    Reader(const Reader& previous)
+        : root_(previous.root_), corrupt_(previous.corrupt_), failure_(previous.failure_),
+          fail_at_finish_(previous.fail_at_finish_) {
+        for (const auto& [path, input] : previous.files_) {
+            File file;
+            file.descriptor = input.descriptor;
+            files_.emplace(path, InputFile(std::move(file), input.source));
         }
     }
     std::optional<std::uint64_t> file_size(std::string_view path) const override {
@@ -97,14 +111,22 @@ public:
         return found == files_.end() ? std::nullopt : std::optional(found->second.descriptor);
     }
     bool read_file(std::string_view path, std::uint64_t offset, std::span<std::byte> bytes) const override {
+        if (path != "engine/index.cbor" && failure_ != DurableReason::None && !fail_at_finish_)
+            return fail(failure_);
         auto found = files_.find(path);
-        if (found == files_.end()) return false;
+        if (found == files_.end()) return fail(DurableReason::PayloadSizeMismatch);
         auto& file = found->second;
         if (offset != file.consumed || offset > file.descriptor.bytes || bytes.size() > file.descriptor.bytes - offset)
-            return false;
-        std::ifstream stream(root_ / path, std::ios::binary); stream.seekg(offset);
+            return fail(DurableReason::PayloadSizeMismatch);
+        std::lock_guard guard(file.source->mutex);
+        auto& stream = file.source->stream;
+        if (!stream) return fail(DurableReason::IoUnavailable);
+        stream.clear();
+        stream.seekg(offset);
         stream.read(reinterpret_cast<char*>(bytes.data()), bytes.size());
-        if (!stream || stream.gcount() != static_cast<std::streamsize>(bytes.size())) return false;
+        if (stream.bad()) return fail(DurableReason::IoUnavailable);
+        if (stream.gcount() != static_cast<std::streamsize>(bytes.size()))
+            return fail(DurableReason::PayloadSizeMismatch);
         if (corrupt_ && path != "engine/index.cbor" && !bytes.empty()) bytes[0] ^= std::byte{1};
         file.hash.update(bytes); file.consumed += bytes.size();
         if (file.consumed == file.descriptor.bytes)
@@ -112,9 +134,18 @@ public:
         return true;
     }
     bool verify_complete() const override {
-        for (const auto& [path, file] : files_)
-            if (file.consumed != file.descriptor.bytes || file.actual != file.descriptor.sha256) return false;
+        if (failure_ != DurableReason::None && fail_at_finish_) return fail(failure_);
+        for (const auto& [path, file] : files_) {
+            if (file.consumed != file.descriptor.bytes) return fail(DurableReason::PayloadSizeMismatch);
+            if (file.actual != file.descriptor.sha256) return fail(DurableReason::PayloadDigestMismatch);
+        }
         return true;
+    }
+    DurableReason failure_reason() const noexcept override { return last_failure_; }
+    std::shared_ptr<const ContinuationCheckpointReader> fresh_reader() const override {
+        if (last_failure_ == DurableReason::PayloadDigestMismatch ||
+            last_failure_ == DurableReason::PayloadSizeMismatch) return {};
+        return std::make_shared<Reader>(*this);
     }
     DurableCheckpointSet index() const {
         const auto size = file_size("engine/index.cbor").value();
@@ -124,10 +155,24 @@ public:
         return q35::Program::decode_checkpoint_index(bytes, {});
     }
 private:
-    struct InputFile : File { std::string actual; InputFile(File value) : File(std::move(value)) {} };
+    bool fail(DurableReason reason) const noexcept { last_failure_ = reason; return false; }
+    struct InputSource {
+        explicit InputSource(const fs::path& path) : stream(path, std::ios::binary) {}
+        std::ifstream stream;
+        std::mutex mutex;
+    };
+    struct InputFile : File {
+        std::string actual;
+        std::shared_ptr<InputSource> source;
+        InputFile(File value, std::shared_ptr<InputSource> input)
+            : File(std::move(value)), source(std::move(input)) {}
+    };
     fs::path root_;
     mutable std::map<std::string, InputFile, std::less<>> files_;
     bool corrupt_;
+    DurableReason failure_;
+    bool fail_at_finish_;
+    mutable DurableReason last_failure_ = DurableReason::None;
 };
 void settle(DeviceContext& device, q35::Program& program, q35::ContextProgress& result) {
     for (int i = 0; i < 8; ++i) {
@@ -343,6 +388,20 @@ int main(int argc, char** argv) {
                 require(refused.state() == DurablePrepareState::Corrupt && !refused.valid(), "bad payload was not corruption");
             }
             require(program->physical_usage().occupied == empty.occupied, "corruption rollback leaked resources");
+            for (const auto failure : {DurableReason::IoUnavailable, DurableReason::PayloadSizeMismatch}) {
+                for (const bool finish : {false, true}) {
+                    Reader failed(root, false, failure, finish);
+                    const auto index = failed.index();
+                    auto refused = program->prepare_checkpoint_import(index, failed, {});
+                    require(!refused.valid() && refused.reason() == failure &&
+                            refused.state() == (failure == DurableReason::IoUnavailable
+                                ? DurablePrepareState::Unavailable : DurablePrepareState::Corrupt),
+                            "reader failure lost its retryable/corrupt classification");
+                    require(program->physical_usage().occupied == empty.occupied &&
+                            program->physical_usage().host_reserved_bytes == 0,
+                            "reader failure leaked unpublished reservations");
+                }
+            }
             {
                 Reader reader(root); const auto index = reader.index();
                 auto aborted = program->prepare_checkpoint_import(index, reader, {});
@@ -364,8 +423,15 @@ int main(int argc, char** argv) {
                         "Host capacity pressure was mistaken for corruption");
             }
             program.reset(); options.context_cache.host_capacity_bytes = 1ULL << 30; program = make_program();
-            Reader reader(root); const auto index = reader.index();
-            auto prepared = program->prepare_checkpoint_import(index, reader, {});
+            std::shared_ptr<const Reader> fresh;
+            {
+                Reader reader(root);
+                (void)reader.index();
+                fresh = std::static_pointer_cast<const Reader>(reader.fresh_reader());
+            }
+            require(static_cast<bool>(fresh), "fresh reader lost its pinned generation");
+            const auto index = fresh->index();
+            auto prepared = program->prepare_checkpoint_import(index, *fresh, {});
             require(prepared.valid(), "native final import refused");
             auto points = program->commit_import(std::move(prepared));
             require(points.size() == index.points.size(), "native commit lost checkpoint points");

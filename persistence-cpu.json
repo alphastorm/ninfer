@@ -1,0 +1,24 @@
+{
+  "schema": "ninfer-persistence-cpu-proof/1",
+  "source_commit": "25571c063cf753e78cf39e3cbf88f56a040725a8",
+  "image_sha256": "62a4feee8f308cde61095355ff11977986ecce388ad4f057c23014950b681326",
+  "ninja_steps": 42,
+  "linked_targets": [
+    "ninfer_context_store_test",
+    "ninfer_kv_history_test",
+    "ninfer_checkpoint_codec_test",
+    "ninfer_qwen3_5_checkpoint_restart_test",
+    "ninfer_qwen3_5_native_transactions_test",
+    "ninfer_qwen3_5_shared_prefix_real_test",
+    "ninfer_qwen3_5_grammar_real_test"
+  ],
+  "host_test": {
+    "name": "ninfer_checkpoint_codec_test",
+    "passed": true,
+    "test_seconds": 0.00,
+    "ctest_seconds": 0.03
+  },
+  "detached_wait_seconds": 304.39,
+  "gpu_tests_executed": false,
+  "completion_marker": "A2_CPU_PROOF_RESULT=PASS"
+}

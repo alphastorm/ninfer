@@ -27,6 +27,15 @@ struct Refusal {
 void check(bool value, DurableReason reason = DurableReason::InvalidIndex) {
     if (!value) throw Refusal{DurablePrepareState::Corrupt, reason};
 }
+void check_read(bool value, const ContinuationCheckpointReader& reader) {
+    if (value) return;
+    const auto reason = reader.failure_reason();
+    if (reason == DurableReason::IoUnavailable)
+        throw Refusal{DurablePrepareState::Unavailable, reason};
+    if (reason == DurableReason::None)
+        throw std::logic_error("checkpoint reader failed without a reason");
+    throw Refusal{DurablePrepareState::Corrupt, reason};
+}
 void capacity(bool value) {
     if (!value) throw Refusal{DurablePrepareState::CapacityRefused, DurableReason::Capacity};
 }
@@ -598,8 +607,8 @@ ImportReservation Program::prepare_checkpoint_import(const DurableCheckpointSet&
             return std::tie(a.file, a.offset) < std::tie(b.file, b.offset);
         });
         for (const auto& read : reads)
-            check(reader.read_file(set.payloads[read.file].path, read.offset, read.destination), DurableReason::PayloadDigestMismatch);
-        check(reader.verify_complete(), DurableReason::PayloadDigestMismatch);
+            check_read(reader.read_file(set.payloads[read.file].path, read.offset, read.destination), reader);
+        check_read(reader.verify_complete(), reader);
         for (auto image : images) p.state_store->complete_host_initialization(image);
         for (auto& pages : out->pages) pages.publish();
         for (const auto& saved : set.histories) {
