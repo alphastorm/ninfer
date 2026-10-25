@@ -44,9 +44,60 @@ The fork's no-declarations parser fixtures are expressed with explicit untyped t
 
 ## Verification
 
-Bounded secondary-lane builds corrected a public/internal `ChatMessage` lookup collision and marker-fixture designated-initializer ordering. At `9b59806e`, all four targets build and five of six selected tests pass: parser (0.03 s), tool constraints (0.07 s), tool schema oracle (0.58 s), JSON schema (0.05 s), JSON oracle (2.85 s). The frontend test identified a fixture-only ordering discrepancy: its expected custom declaration used sorted `json` while the actual template preserves `ordered_json`; fixed the expected declaration to preserve the same original field order. The changed frontend test and real-resource probe are next; the five unchanged passing tests will not be rerun. No CUDA compilation or tests ran on the workstation. Superseded queued primary-lane jobs were cancelled before execution when the lead opened the two-slot CPU lane.
+All required CPU corpus groups pass on the approved two-slot CPU lane, using a real detached Git clone, persistent incremental build, ccache, and the build helper's exclusive `flock` slot. Build image: `ov-build-env:master-64d10fbf-r2-cpu-local`; observed GCC 13.3.0 / CUDA compiler 13.1.115. Runtime containers mount the real driver with `--gpu --env CUDA_VISIBLE_DEVICES=`; these are CPU proofs, not GPU/model qualification.
 
-Planned targeted build/test targets: `ninfer_tool_call_parser_test`, `ninfer_qwen_frontend_test`, `ninfer_qwen_tool_constraints_test`, `ninfer_json_schema_test`, and the existing JSON/tool independent-schema oracles. No formatter, linter, project-wide suite, live server, port binding, or model run is part of this slice.
+| Test | Passing source | Time |
+|---|---|---|
+| `ninfer_tool_call_parser_test` | `9b59806eccde4b04081a877961f5ceaca441f2c8` | 0.03 s |
+| `ninfer_qwen_tool_constraints_test` | same | 0.07 s |
+| `ninfer_qwen_tool_schema_oracle_test` | same | 0.58 s |
+| `ninfer_json_schema_test` | same | 0.05 s |
+| `ninfer_json_schema_oracle_test` | same | 2.85 s |
+| `ninfer_qwen_frontend_test` | `395c486696769f3330a724f7078788a8ad7c5ca3` | 0.74 s |
+
+The first five passing tests were not rerun after the frontend-only fixture correction. The final frontend run also proves immutable loaded identity, exact custom-history wrapping, raw generated kind propagation, both non-strict output routes, marker parity, and existing preview/commit/continuation behavior.
+
+Resolved qualification failures: public/internal `ChatMessage` lookup collision (explicitly qualify `ninfer::ChatMessage`); marker-fixture aggregate field order (use declaration order); expected custom declaration reordered by sorted `json` (use the template's existing `ordered_json`). No production change was made to hide the latter fixture mismatch. The final detached operation exits `FRONTEND_QUALIFICATION_EXIT=0`. The Windows log reader could not decode Chinese output; the original UTF-8 log and JSON proof were retrieved directly without rerunning tests.
+
+Exact commands executed by the detached qualification script (variables denote the established source/build/helper/staging directories; private absolute locations are intentionally omitted):
+
+```sh
+export NINFER_BUILD_HOLDER=B3
+export NINFER_BUILD_ENV_IMAGE=ov-build-env:master-64d10fbf-r2-cpu-local
+export NINFER_BUILD_JOBS=12
+"$helper/build-wsl.sh" "$src" "$build" -- ninfer_tool_call_parser_test ninfer_qwen_frontend_test ninfer_qwen_tool_constraints_test ninfer_json_schema_test
+"$helper/run-in-env-wsl.sh" --gpu --env CUDA_VISIBLE_DEVICES= --mount "$src" --mount "$build" -- ctest --test-dir "$build" --output-on-failure -R '^(ninfer_tool_call_parser_test|ninfer_qwen_frontend_test|ninfer_qwen_tool_constraints_test|ninfer_json_schema_test|ninfer_json_schema_oracle_test|ninfer_qwen_tool_schema_oracle_test)$'
+```
+
+After the fixture-only correction, the same helper built only `ninfer_qwen_frontend_test` and CTest selected only `^ninfer_qwen_frontend_test$`. The independent real-resource comparison then ran:
+
+```sh
+"$helper/run-in-env-wsl.sh" --gpu --env CUDA_VISIBLE_DEVICES= --mount "$src" --mount "$build" --mount "$stage" -- python3 "$stage/frontend-golden-reference.py" "$build/tests/ninfer_qwen_frontend_test" "$src" "$stage/v3-resources" "$stage/frontend-golden-proof.json" "$(git -C "$src" rev-parse HEAD)"
+```
+
+Evidence files: `qualify-v3.log` (five passing corpus groups), `qualify-v4.log` (frontend pass and terminal success), `frontend-golden-proof.json` (exact resource hashes, rendered prompts, token IDs, independent reference comparisons, and template-epoch diff). No formatter, linter, project-wide suite, live server, port binding, or model run was performed. Superseded queued primary-lane jobs were cancelled before execution when the CPU lane opened.
+
+## Artifact prompt golden cause
+
+- Reported baseline failure is accepted without rerunning it: vanilla `64d10fbf` / published v3 artifact, `ninfer_qwen3_5_prefix_real_test`, thinking-prompt golden.
+- The 16/18 goldens originate at `d720e1cea6` (2026-07-15), in the old Qwen3.6 test path; the later move did not regenerate them.
+- Extracted published template: 9,712 bytes, SHA-256 `a497db9e663941e6f7a05307c2bafa8374c12e142ad1fbea6229888d41f1ab16`; byte-identical to maintained `tools/chat_templates/qwen3_8.jinja`. Actual tokenizer SHA-256: `0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3`.
+- Actual shared C++ Frontend `count_tokens()` and prepared token counts agree. Decoded prompt bytes match independent Python Jinja2 for all four comparisons: current thinking **58**, current no-thinking **18**, prior Qwen3.6 template with the same actual tokenizer **16/18**. Prior template SHA-256: `7145316bcc837ddc11971fb9fdca588971502e707b9e6df83af0e9b683b2bd39`.
+- Cause: stale model/template-epoch golden, not incorrect rendering or v2-to-v3 conversion. Infra separately proved all six frontend resources equal the shipped v2 resources; the upgrade itself did not introduce this preamble.
+- Only the thinking golden changes, 16 → 58, with an explanatory source comment and actual-count diagnostics. The no-thinking golden remains 18. The full real GPU prefix scenario is left to the integration gate; no GPU pass is asserted here.
+
+Exact rendered thinking diff (the additional system preamble accounts for all 42 tokens):
+
+```diff
+--- prior-qwen3_6
++++ published-v3-qwen3_8
+@@ -1,3 +1,5 @@
++<|im_start|>system
++Reasoning effort is set to xhigh. Please think carefully through the task, validate key assumptions, consider plausible alternatives, and prioritize correctness, consistency, and clarity in the final answer.<|im_end|>
+ <|im_start|>user
+ 你好，简单介绍一下你自己。<|im_end|>
+ <|im_start|>assistant
+```
 
 ## Remaining integration gates
 
