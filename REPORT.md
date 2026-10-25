@@ -2,25 +2,44 @@
 
 ## Qualification state
 
-- Branch `rebase/serve-restore`; serving source through `687a31d06` plus the direct-header and runner closures documented below. This is the Main-approved **source union, not an integration-qualified checkpoint**: integration `ec18847bf`, Serve `141839f8`, Frontend `8c3102905`, Store `550fe006`, corrected Store `202b17064` plus legacy/root closure `148384bda`, and the approved shared declarations.
+- **B2 acceptance PASS at exercised A3+B2 union `d693c6c7ca805cdb5a6ab4d7688ce600aa58f6b4`.** Authored branch `rebase/serve-restore` through `b44efcf5a9914c014fd6d5884d4f30c66ffff926` is the historical Main-approved source union, not the exact built proof input. Integrator3 requested this REPORT-only closure: no additional provider merge/rebase, no claim that the authored branch itself was GPU-built.
 - B2 host result at `5f8b2ac8bda4bd9eb91c65b2e7c2e06eafea314c`: **2/2 passed, zero failures/skips**, CTest **0.09 s**. `B2-HOST.json` records the exact evidence scope.
-- Static `ninfer_serve` archive compiled at `fd4a7e58f78094b480d79fd1a76d126aa015d3c0`: **637 Ninja edges, exit 0**. This precedes the rooted-queue signature change and is not a linked-server or GPU proof.
+- Shared A3+B2 CPU source `6a6bfa3db3ebfa9a63a4475dbc4f033e8e97f896`: production server linked, **12/12 scoped CTests passed, zero skips, 0.59 s**, including final B2 early-stop regression. This is EngineCache2-owned evidence, not a B2 rerun.
 - Corrected A1 source `148384bda50c0eac475ee6c77b245244df4934c1` separately passed **6/6 host targets**, zero failures/skips, **2.53 s** CTest. Its immutable [report](https://github.com/alphastorm/ninfer/blob/a20fcf74e/REPORT.md) remains standalone provider evidence, not a combined integration verdict.
-- **B2 acceptance remains open:** no complete four-boot production-path GPU receipt has been emitted. EngineCache3 owns retained partial proof; no new GPU job was submitted after the user's wrap-up request. B2 submitted no duplicate GPU job.
+- EngineCache4's changed-input lease `582334` passed **E2 plus all four production boots**, exit **0 / 201 s**, no leftover/unowned containers; four-boot phase **130 s**. Original content-safe receipt: `8e4d03d59f625eac87b37854c1e02e4b3361467c:receipts/engine-cache/serve-restore-582334.json`. B2 read that receipt; B2 submitted no duplicate GPU job.
+- Host runner source `1510dfdc392da6880fb1d5c3e2ba08cf4d403c36`: `python3 -B tests/test_serve_restore_runner.py` → **5 tests, OK, exit 0**. Integrator3 owns shared-CMake registration and integrated RC verification.
 - Frozen contract changes were approved by Main: typed Reader failure/fresh-reader access, pinned-reader reclaim oracle, `Unavailable` prepare/import states, explicit configured root for read-queue construction, refusal-only legacy-schema identification, and native victim validation before destructive reclaim. Shared declarations/docs remain integration/Contracts-owned.
-- RepoPrompt preservation baseline: `prep-v0-13-0-upstream-re-DF08C8`; final G4 review remains Main-owned. No release/tag/image publication or production service change was performed.
-- Serving closures beyond the original `37a2824a` input are `9f9f83ab4` (state docs/help), `1bab66130` (early-stop missing-provider refusal), `0dddecc83` (native progress owns pressure retry cadence), and `687a31d06` (Capacity remains Pending). The later peer-reported 12-host proof covers these, but not the direct-header or runner closures. No claim of completed B2 acceptance is made.
+- RepoPrompt preservation baseline: `prep-v0-13-0-upstream-re-DF08C8`; full integrated RC and G4 remain Integrator3/Main-owned. No release/tag/image publication or production service change was performed by B2.
 
-### Post-handoff qualification updates
+### Qualification boundaries and resolved failures
 
-- EngineCache2 reports a real `ninfer-serve` link and **12/12 scoped hosts passed, zero skips, 0.59 s**, at joint source `6a6bfa3db3ebfa9a63a4475dbc4f033e8e97f896`. Its final report/receipt are on `rebase/engine-cache` at `f0a54eb99f6d6c090a90d6a51eb84a26611524b3`: `REPORT.md`, `receipts/engine-cache/a3-host-6a6bfa3d.json`. This is peer-reported evidence, not a B2 rerun, and excludes the direct-span closure. EngineCache3 owns retained GPU evidence; Main owns continuation scheduling.
+- Shared CPU receipt remains at `f0a54eb99f6d6c090a90d6a51eb84a26611524b3:receipts/engine-cache/a3-host-6a6bfa3d.json`. Its source predates the direct-span and runner closures; final GPU evidence is attributed only to exact union `d693c6c7…`, never retroactively to this CPU input.
 - PortableCore2 reports the combined MSVC source `2a4266e30` fails because `generation_service.h` uses `std::span` without its direct header. B2 adds `<span>` explicitly; no compile rerun is claimed. Its reported incomplete `std::array` in public `types.h` and POSIX-only request-log test are outside this slice and remain integration-owned.
 - EngineCache3's real batch at `9e2261f92b9cbca8b44933e5064cbdd2978a9400` failed **before HTTP/save**, with `incomplete or invalid checkpoint runtime fingerprint v2`: its actual CMake cache and binary version declared `NINFER_UPSTREAM_BASE_SHA=unknown`. K2 correctly refused unknown provenance. The old driver's cleanup masked that first startup failure as a stop-acknowledgement failure; no shutdown report or restart receipt existed.
 - Corrected build input is `-DNINFER_UPSTREAM_BASE_SHA=64d10fbf9f8e6bfc79ab0570b94674c5b9997929`, not a fingerprint fallback or validator relaxation. The runner now rejects incomplete upstream-base provenance before starting a GPU child and preserves the first exception, chaining any cleanup failure. Actual argv attestation remains per boot; durable effective-config identity already excludes shutdown-report paths and the prefix-reuse policy switch.
-- Host-only regression at source `1510dfdc392da6880fb1d5c3e2ba08cf4d403c36`: `python3 -B tests/test_serve_restore_runner.py` → **5 tests, OK, exit 0** (reported 0.000 s). Methods cover valid/invalid provenance and primary-error preservation with successful or failed cleanup. This imports the corrected runner but does not execute its model-dependent Boot 3. Integrator3 accepted shared-CMake registration as `ninfer_serve_restore_runner_test`, labels `host`; no model or native-provider fakes enter production.
-- EngineCache3 reports the corrected-base continuation passed Boots 1/2: real restart hit **20,926 cached tokens**, byte-identical continuation assertions, authenticated/fsync explicit save (four points/four states, 2,164,056,150 payload bytes), and clean stops. Boot 3 then hit the shipped CLI refusal for root plus globally disabled prefix reuse. This is partial peer evidence, not a complete receipt.
-- Main's binding K5 ruling preserves that CLI refusal and its parser regression. Corrected Boot 3 starts a normally configured server, exercises actual startup warmup (`GenerationService::warmup`, `CacheParticipation::Disabled`), then a keyed `store:false` full-history request without a parent. It requires an explicitly reported zero cached-token count, an unretained probe ID returning 404, and the disk current pointer unchanged before/after requests and shutdown. Direct A3 request-policy coverage supplies the explicit K3 pre-reservation refusal proof; no HTTP cache-disable extension or parser relaxation is invented.
-- EngineCache3 separately reports native immutable-identity caching fix `12ae6ee3c157462f4dde009f59eacc47f88c1595`, not yet compiled/GPU-proven. The continuation combines that provider change with this corrected runner and actual-base configure input; passed E1/prefix/preemption evidence is not silently repeated or relabeled as the missing E2/four-boot proof.
+- Main's binding K5 ruling preserves root/global-`--no-prefix-reuse` CLI refusal and its parser regression. Corrected Boot 3 uses normal startup warmup (`CacheParticipation::Disabled`) and keyed `store:false`; it now passes with explicit zero cached tokens, unretained probe 404, unchanged current through shutdown. No HTTP cache-disable extension or parser relaxation was invented.
+- Native immutable-identity fix `12ae6ee3c157462f4dde009f59eacc47f88c1595` is compiled and GPU-qualified in `d693c6c7…`. Runner provenance/error closure `33ea3f13` is consumed as `fff4f17c`; Boot 3 fix `6e4cca2e` as `13e5172a7`; obsolete override removal `1510dfdc` as `d693c6c7c`. Final receipt commit is `8e4d03d59f625eac87b37854c1e02e4b3361467c`.
+- Earlier prefix/preemption/direct-adapter passes retain their exact-source evidence; unchanged E1/startup/prefix/preemption inputs were not repeated. Failed/partial receipts remain failure evidence, superseded only for the changed E2/four-boot gates.
+
+### Production receipt: PASS, actual serving path
+
+Both original receipts were read from the EngineCache lane; receipt ownership is not reassigned to B2.
+
+| Evidence | Observed result |
+|---|---|
+| Exercised source | `d693c6c7ca805cdb5a6ab4d7688ce600aa58f6b4` |
+| Binary SHA-256 | `1563599f6dfa599578bf53048aa0b2f2100cfab0316d57cfe5a38254ebf74e0f` |
+| Model artifact SHA-256 | `81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da` |
+| Short-session graceful stop | `saved=1`, `skipped=0`, `refused=0`, `complete=true` |
+| First keyed/no-parent restart | **20,926 cached tokens**; **27-byte identical** continuation, SHA-256 `5a2528e22c6a6603d5eeafd214223e57812a9da7174bc1a4445c8f9308f8344c` |
+| Explicit K7 save | `exported`, `reason=none`, `committed=true`, authenticated, `fsync`; **2,164,056,150 B**, **4 points / 4 states / 329 pages**, frontier/restored **20,993** |
+| Warmup/unretained request | Cached tokens **0**, unretained retrieve **404**, current unchanged |
+| Scoped and persisted deletion | Foreign/missing capability **404**; own retrieve/delete **200**; after restart deleted ancestor **404**, retained descendant **200** |
+| E2 overlap | **1/1 passed, zero failures/skips, 46.6706 s**; Pending preserves victim, publication permits reclaim, import returns while sibling decodes; restored C2 output equals fresh deterministic tokens |
+
+Original evidence at commit `8e4d03d59f625eac87b37854c1e02e4b3361467c`:
+`receipts/engine-cache/serve-restore-582334.json` and
+`receipts/engine-cache/a3-e2-582334.json`. Receipts contain counts, timings, hashes and relative names, not prompts, keys, raw session identifiers, UUIDs or private paths.
 
 ## Provider bindings
 
@@ -47,7 +66,7 @@ The serving adapter owns no native cache implementation. Native Program reservat
 - `commit_openai_response_restore` preserves exact native results, including `Unavailable/IoUnavailable`; store-local capacity, revision, active-publication and foreign-collision failures never invoke native commit.
 - Response deletion serializes disk invalidation plus RAM deletion with same-session saves from **before** snapshot capture through publication. The weak mutex table is retired on subsequent admission; no unbounded session tombstone table or global Engine lock is introduced. Store erase Conflict leaves RAM unchanged.
 - Explicit checkpoint POST returns the frozen `schema: "ninfer-durable-operation/1"` save receipt (`exported`, `reason=none`, `committed=true`, real counts, origin and `dir_sync`), not the old `state=available` save alias. Checkpoint status retains its schema-3 vocabulary. NativeOps migrated its consumer; Harness/ProductOps reported no affected save-receipt consumer in their assigned files.
-- `tests/test_serve_restore_real.py` exercises actual `ninfer-serve` processes and HTTP, not the tracer: final-save below the automatic threshold; first keyed/no-parent restart with at least 16K cached tokens and byte-identical continuation; restored-parent chaining; explicit K7 publication; scoped retrieve/delete; persisted ancestor deletion with a retained child; and warmup/unretained-request opt-out. It hashes the actual model/binary, reads clean binary source provenance, retains failed-run evidence privately and emits only content-safe counts/hashes on success. The complete four-boot receipt remains pending.
+- `tests/test_serve_restore_real.py` exercises actual `ninfer-serve` processes and HTTP, not the tracer: final-save below the automatic threshold; first keyed/no-parent restart with at least 16K cached tokens and byte-identical continuation; restored-parent chaining; explicit K7 publication; scoped retrieve/delete; persisted ancestor deletion with a retained child; and warmup/unretained-request opt-out. It hashes the actual model/binary, reads clean binary source provenance, retains failed-run evidence privately and emits only content-safe counts/hashes on success. All four boots passed at exact union `d693c6c7…`.
 
 ## K4 failure matrix
 
@@ -56,18 +75,18 @@ The serving adapter owns no native cache implementation. Native Program reservat
 | Payload corruption | A1 `test_transaction_restart_compatibility_and_corruption`, `test_post_verification_replacement_fails_closed` | PASS, streamed digest failure; no import, corrupt generation quarantined and prior immutable generation retained. Fake native payloads, real store/Reader/filesystem. |
 | Manifest corruption | A1 `test_v3_manifest_validation_and_publication_guard` | PASS, noncanonical/invalid v3 metadata rejected before import. |
 | Wrong MAC versus missing MAC under strict policy | A1 `test_manifest_origin_authentication`, `test_manifest_origin_compatibility_window` | PASS, wrong MAC is Corrupt; strict missing MAC is reversible OriginRequired with generation intact. |
-| Capacity refusal | B2 `native_refusal_matrix`, `store_refusal_matrix`; existing Responses atomic-store suite | PASS with deterministic native result fake and real Responses capacity checks; distinct CapacityRefused, old records/bytes intact, no unrelated DAG eviction. Does not prove native physical-pool admission. |
+| Capacity refusal | B2 `native_refusal_matrix`, `store_refusal_matrix`; real E2 at `d693c6c7…` | PASS: distinct CapacityRefused and unchanged Responses state in host tests; real 758,120,448 B Host pool preserves the victim while Pending, then admits import after verified save publication. No capacity quarantine. |
 | Fingerprint/identity mismatch and foreign collision | A1 KV-layout/fingerprint tests; B2 store-refusal matrix | PASS, clean refusal/no compatibility quarantine; foreign ID collision never invokes native commit. |
 | Legacy v2 root with strict policy and bad MAC | A1 `test_legacy_schema_bad_mac_is_refused_without_mutation`, qualified at `148384bda` | PASS, versions 0/1/2/-1, escaped schema key/whitespace and prior corruption mark: every root entry/content unchanged and no native payload import. Values below 3 are refusal-only before MAC; eligible generations remain MAC-gated. |
 | Transient filesystem/queue failure and retry | A1 `test_manifest_origin_transient_tag_failure_preserves_current`, `test_reader_failure_reasons_and_fresh_retries`; B2 native-refusal matrix | PASS, current preserved, typed IoUnavailable, fresh single-pass Reader after cause clears, no partial Responses publication. No sleep-based automatic retry. |
 | Partial stage/deferred write failure/crash-shaped restart | A1 transaction/restart and buffered deferred-failure tests; low-level commit-failure tests | PASS, interrupted staging is ignored and prior current remains usable. Deterministic crash-shaped filesystem state, not a production process-kill proof. |
-| Stale export epoch | A1 publication-guard fake | PASS, exact Stale/StalePublication and no current replacement. The real Engine epoch race is assigned to the combined A3 GPU batch; not yet exercised. |
+| Stale export epoch | A1 publication-guard fake; direct real adapter checks at `fff4f17c79db65e253384a310fa8515e580180cb` | PASS, exact Stale/StalePublication and no current replacement. `a3-e2-580588.json` explicitly records stale epoch rejection before callback; no unchanged rerun is claimed. |
 | Stale Responses revision/active publication | B2 store-refusal matrix and existing Responses suite | PASS, native commit not called; deletion/publication races preserve authoritative live state. |
 | Native semantic corruption quarantine | A1 `test_native_corruption_quarantine_is_generation_bound` | PASS, older generation cannot remove newer current; active Readers retain payload paths. Native semantic validation itself is A2/A3-owned. |
-| Warmup/cache-disabled import | B2 preserves injected PolicyDisabled; production binding occurs after warmup | Host propagation PASS; Main attributes explicit native pre-reservation policy proof to the direct A3 test. Corrected production Boot 3 warmup/unretained-request proof is pending. Global root plus `--no-prefix-reuse` remains a shipped CLI refusal, not the request-policy fixture. |
-| Successful production restart | Real runner registered as `ninfer_serve_restore_real_test` | PARTIAL peer result: Boots 1/2 passed with 20,926 cached tokens and exact continuation. Four-boot receipt pending corrected Boot 3 and final deletion/descendant restart. No tracer or host-fake result is substituted. |
-| Scoped retrieve/delete and fresh publication order | B2 success/namespace matrix and existing Responses suite | PASS host; peer Boot 2 passed real HTTP scope/deletion assertions. Final restart proving deleted ancestor absent and retained child present remains pending. |
-| Missing final-save provider on remembered stop | Extended `ninfer_http_server_stop_test` at `1bab66130` | Not separately rerun by B2; shared CPU proof is attributed above. Regression covers usable persistence-disabled remembered stop and refusal for an enabled root before providers attach. No Windows stop-event execution is claimed. |
+| Warmup/cache-disabled import | Host propagation; direct adapter at `fff4f17c…`; production Boot 3 at `d693c6c7…` | PASS: direct check refuses before Reader/reservation; real warmup/unretained request reports zero cache, unretained 404, unchanged current through stop. Global root plus `--no-prefix-reuse` remains a shipped CLI refusal. |
+| Successful production restart | Original `serve-restore-582334.json`, `production_path=true`, `tracer=false` | PASS, four boots: first keyed/no-parent restore hits 20,926 tokens, exact 27-byte continuation, committed authenticated/fsync save and successful managed final-save. |
+| Scoped retrieve/delete and fresh publication order | B2 host namespace/fresh-order matrix; original four-boot receipt | PASS host fresh-order checks and real scoped HTTP behavior; foreign/missing 404, own 200, deleted ancestor still 404 and retained descendant 200 after restart. |
+| Missing final-save provider on remembered stop | Extended `ninfer_http_server_stop_test` at `1bab66130`, included in shared 12/12 source `6a6bfa3d…` | PASS: persistence-disabled remembered stop remains usable; enabled root cannot acknowledge before providers attach. No Windows stop-event execution is claimed. |
 
 ## Exact exercised commands
 
@@ -98,8 +117,40 @@ Both batches used the approved detached launcher and supervised two-slot CPU hel
 
 The first source-union attempt at `99a6b0991` stopped during CMake configure: `ninfer_sha256` was declared twice after the provider union. No test ran. Integrator authorized removal of only the duplicate target (`3cd887d2c`); the changed-source host batch above then passed. The existing target and consumer links were preserved.
 
+### Final GPU batch, executed by EngineCache4
+
+Source is exactly `d693c6c7ca805cdb5a6ab4d7688ce600aa58f6b4`.
+`$ROOT` is the holder workspace, `$MODEL_DIR` / `$MODEL` the read-only model,
+`$PRIVATE` native-ext4 TMPDIR, and `$RECEIPTS` per-source evidence. The existing
+`engine-cache-e2.sh` runner was restricted to the two changed-input phases.
+No B2 GPU submission or repeat of unchanged passing scenarios occurred.
+
+```sh
+gpu-lease submit --holder E1 --label engine-cache-final-overlap-restart \
+  --priority 2 --minutes 15 -- bash engine-cache-e2.sh \
+  d693c6c7ca805cdb5a6ab4d7688ce600aa58f6b4
+gpu-lease wait 20261025T065709Z-E1-engine-cache-final-overlap-restart-582334 20
+
+export NINFER_BUILD_HOLDER=E1
+export NINFER_BUILD_ENV_IMAGE=ov-build-env:master-64d10fbf-r2
+"$COMMON/build.sh" "$SOURCE" "$BUILD" \
+  -DNINFER_UPSTREAM_BASE_SHA=64d10fbf9f8e6bfc79ab0570b94674c5b9997929 \
+  -- ninfer-serve ninfer_qwen3_5_durable_pressure_real_test
+"$COMMON/run-in-env.sh" --gpu --mount "$ROOT" --read-only-mount "$MODEL_DIR" \
+  --env "NINFER_TEST_ARTIFACT=$MODEL" --env NINFER_TEST_BACKEND=dflash2 \
+  --seccomp "$COMMON/ninfer_io_uring_seccomp.json" -- \
+  ctest --test-dir "$BUILD" --output-on-failure --timeout 600 \
+  --output-junit "$RECEIPTS/dflash2.xml" -R '^ninfer_qwen3_5_durable_pressure_real_test$'
+"$COMMON/run-in-env.sh" --gpu --mount "$ROOT" --read-only-mount "$MODEL_DIR" \
+  --env "TMPDIR=$PRIVATE" --seccomp "$COMMON/ninfer_io_uring_seccomp.json" -- \
+  python3 -B "$SOURCE/tests/test_serve_restore_real.py" \
+  --server "$BUILD/apps/ninfer-serve" --artifact "$MODEL" \
+  --artifact-sha256 81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da \
+  --port 18151 --receipt "$RECEIPTS/serve-restore.json"
+```
+
 ## Deliberately unclaimed and external requirements
 
-- Historical B2 CPU commands do not establish an A3 server link or GPU proof; later peer evidence above establishes only its stated scope. No complete integrated failure-matrix verdict, C2/32-GB release gate, native Windows/MSVC/DirectStorage execution, full CTest, performance claim, formatter/linter, or final review is claimed.
+- Historical B2 CPU commands do not establish an A3 server link or GPU proof; the separately attributed receipts do. This report closes the scoped B2 matrix and production restart, not the full integrated RC, C2/32-GB release gate, native Windows/MSVC/DirectStorage execution, full CTest, performance qualification, formatter/linter, or G4 review.
 - Main owns release-isolated **default** roots in product/container lifecycle tooling. NativeOps uses `session-checkpoints-v3`; the container host directory/mount must likewise be new rather than reusing the previous release's checkpoint root. B2 consumes only the explicitly configured root and performs no root auto-discovery or legacy migration.
 - Windows stop-event ACL/controller behavior and selected-GPU attestation remain their owning lane's proof. The production runner uses Linux SIGTERM through the same synchronous serving final-save callback; that is not a claim of Windows event execution.
