@@ -1,0 +1,133 @@
+{
+  "source": "64d10fbf",
+  "method": "SHA-256 of every unique tensor payload matched by its complete semantic reference set (bindings, fused parts, Use auxiliaries), plus geometry and resource comparison; object IDs, offsets and Use order are artifact-local presentation",
+  "upgrades": {
+    "production": {
+      "exit_code": 0,
+      "wall_seconds": 19.566
+    },
+    "native": {
+      "exit_code": 0,
+      "wall_seconds": 17.531
+    }
+  },
+  "files": {
+    "production_v2": {
+      "sha256": "0634abb07024221de141456cf04a42ab74b18bc38e1b781c6eb2e062a467eec3",
+      "bytes": 20437336576
+    },
+    "published_v3": {
+      "sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+      "bytes": 20437521664
+    },
+    "production_upgraded_v3": {
+      "sha256": "facba3bd318139c50899d4a0d74576837f73f0f498a461961467d56df10f4944",
+      "bytes": 20437571568
+    },
+    "native_v2": {
+      "sha256": "eec39564993d6e9c7d5e383382a760f093465c9d163ec9a1bd6b80199514bf3e",
+      "bytes": 18210531328
+    },
+    "native_upgraded_v3": {
+      "sha256": "5476dfd6b243332f1754a494469ba4a1c8206edba6518b61dba1e0f4338664e7",
+      "bytes": 18210749936
+    }
+  },
+  "tensors": {
+    "published_count": 1184,
+    "upgraded_count": 1184,
+    "published_only_references": [],
+    "upgraded_only_references": [],
+    "identical": 1184,
+    "different": [],
+    "geometry_differences": [],
+    "unique_published_tensors_hashed": 1184,
+    "unique_upgraded_tensors_hashed": 1184
+  },
+  "manifest_diff_fields": 6588,
+  "manifest_diff_top_level": [
+    "bindings",
+    "components",
+    "files",
+    "object_order",
+    "objects",
+    "provenance",
+    "uses"
+  ],
+  "resources": [
+    {
+      "reference": "components/text/resources/chat_template.jinja",
+      "published_sha256": "a497db9e663941e6f7a05307c2bafa8374c12e142ad1fbea6229888d41f1ab16",
+      "upgraded_sha256": "a497db9e663941e6f7a05307c2bafa8374c12e142ad1fbea6229888d41f1ab16",
+      "identical": true
+    },
+    {
+      "reference": "components/text/resources/generation_config.json",
+      "published_sha256": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+      "upgraded_sha256": "e70c136c1b78ddc1fb0905bac8e733a4dc448d4f852a5dd75143fffc70be550e",
+      "identical": true
+    },
+    {
+      "reference": "components/text/resources/tokenizer.json",
+      "published_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+      "upgraded_sha256": "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3",
+      "identical": true
+    },
+    {
+      "reference": "components/text/resources/tokenizer_config.json",
+      "published_sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+      "upgraded_sha256": "b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27",
+      "identical": true
+    },
+    {
+      "reference": "components/vision/resources/preprocessor_config.json",
+      "published_sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+      "upgraded_sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516",
+      "identical": true
+    },
+    {
+      "reference": "components/vision/resources/video_preprocessor_config.json",
+      "published_sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+      "upgraded_sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13",
+      "identical": true
+    }
+  ],
+  "chat_template": {
+    "identical": true,
+    "published_bytes": 9712,
+    "upgraded_bytes": 9712,
+    "published_sha256": "a497db9e663941e6f7a05307c2bafa8374c12e142ad1fbea6229888d41f1ab16",
+    "upgraded_sha256": "a497db9e663941e6f7a05307c2bafa8374c12e142ad1fbea6229888d41f1ab16"
+  },
+  "native_v3": {
+    "tensor_count": 1118,
+    "files": 1,
+    "validated_directory": true,
+    "components": [
+      "mtp",
+      "text",
+      "vision"
+    ],
+    "binding_prefixes": [
+      "mtp",
+      "proposal",
+      "text",
+      "vision"
+    ]
+  },
+  "wall_seconds": 86.675,
+  "recommendation": "published_v3",
+  "semantic_manifest_diff_fields": 6,
+  "semantic_manifest_diff_top_level": [
+    "files",
+    "provenance"
+  ],
+  "semantic_comparison_wall_seconds": 28.502,
+  "manifest_path_redactions": {
+    "method": "Absolute upstream converter source paths replaced by SHA-256 markers; semantic field identity preserved",
+    "counts": {
+      "manifest-field-diff.json": 3,
+      "semantic-manifest-field-diff.json": 3
+    }
+  }
+}

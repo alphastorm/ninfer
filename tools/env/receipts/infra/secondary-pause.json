@@ -1,0 +1,14 @@
+{
+  "scope": "Owner controller pause; OCR stays exited",
+  "paused_utc": "2026-10-25T04:33:00Z",
+  "gpu_info": "NVIDIA RTX PRO 6000 Blackwell Workstation Edition, 97887, 616.92",
+  "gpu_used_before_mib": 59867,
+  "restore_guard_pid": 12376,
+  "restore_guard_seconds": 7200,
+  "ocr_states": [
+    "exited",
+    "exited"
+  ],
+  "passed": true,
+  "gpu_used_after_mib": 910
+}

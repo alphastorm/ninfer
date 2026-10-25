@@ -1,0 +1,18 @@
+{
+  "image": "ov-build-env:master-64d10fbf-r2",
+  "reason": "stub isolated to configure/link; explicit Git and Python oracle dependencies",
+  "build": {
+    "exit_code": 0,
+    "wall_seconds": 49.582
+  },
+  "image_id": "sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
+  "gpu_device_smoke": {
+    "exit_code": 0,
+    "wall_seconds": 1.298
+  },
+  "cpu_oracles": {
+    "exit_code": 0,
+    "wall_seconds": 2.709
+  },
+  "promoted_default_tag": true
+}

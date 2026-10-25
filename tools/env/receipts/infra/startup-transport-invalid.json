@@ -1,0 +1,6 @@
+{
+  "scope": "Old host-network observer invalid, not a capacity refusal",
+  "container_internal_health_status": 200,
+  "internal_health_observation_applies_to": "the container running at the time of diagnosis, not assumed to be the first candidate",
+  "supersedes": "startup-budget.json from original external-observer job"
+}
