@@ -75,7 +75,10 @@ DurableCheckpointSet decode(std::span<const std::byte> bytes, const DurableLimit
     try {
         const auto* begin = reinterpret_cast<const std::uint8_t*>(bytes.data());
         const auto document = nlohmann::json::from_cbor(begin, begin + bytes.size());
-        require(document.at("format") == kDurableCheckpointSetFormat, "unsupported native index format");
+        const auto& format = document.at("format");
+        require(format.is_string() &&
+                    format.get_ref<const std::string&>() == kDurableCheckpointSetFormat,
+                "unsupported native index format");
         auto set = document.get<DurableCheckpointSet>();
         // Typed round-trip also rejects integer narrowing, floats, unknown keys, duplicate keys,
         // indefinite containers, tags, non-shortest integers and out-of-order map keys.
