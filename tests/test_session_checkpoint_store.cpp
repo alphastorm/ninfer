@@ -18,6 +18,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -2264,6 +2265,98 @@ int test_native_corruption_quarantine_is_generation_bound() {
     return failures;
 }
 
+int test_legacy_schema_bad_mac_is_refused_without_mutation() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    auto queue = std::make_shared<TestReadQueue>();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .origin_mac_key = std::string(32, static_cast<char>(0x42)),
+                                  .require_origin_auth = true,
+                                  .read_queue = queue});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) { return DurableExportResult{}; }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto saved = store.save(responses, fingerprint(), exporter, publish_fixture);
+    int failures = check(saved.has_value(), "strict legacy-schema fixture publishes");
+    if (!saved) { return failures; }
+    const auto root = stored_generation_root(temporary.path, responses, saved->generation);
+    const auto original_manifest = read_file_bytes(root / "manifest.json");
+    const auto original_mac = read_file_bytes(root / "manifest.mac");
+    const auto tree = [&] {
+        std::vector<std::pair<std::string, std::string>> entries;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(temporary.path)) {
+            std::string relative = entry.path().lexically_relative(temporary.path).generic_string();
+            if (entry.is_directory()) {
+                entries.emplace_back(relative + "/", "");
+            } else {
+                entries.emplace_back(std::move(relative), read_file_bytes(entry.path()));
+            }
+        }
+        std::sort(entries.begin(), entries.end());
+        return entries;
+    };
+    std::vector<std::string> legacy;
+    for (const int version : {0, 1, 2, -1}) {
+        auto manifest = nlohmann::json::parse(original_manifest);
+        manifest["schema_version"] = version;
+        legacy.push_back(manifest.dump());
+    }
+    auto escaped_key = legacy[2];
+    const auto key_position = escaped_key.rfind("\"schema_version\"");
+    escaped_key.replace(key_position, std::string_view("\"schema_version\"").size(),
+                         "\"\\u0073chema_version\"");
+    legacy.push_back(std::move(escaped_key));
+    legacy.push_back(" \n" + legacy[2]);
+    for (const auto& manifest : legacy) {
+        std::ofstream(root / "manifest.json", std::ios::binary | std::ios::trunc) << manifest;
+        std::ofstream(root / "manifest.mac", std::ios::binary | std::ios::trunc)
+            << std::string(64, '0');
+        const auto before = tree();
+        const auto submits = queue->submit_count;
+        const auto loaded = store.load(responses.client_session_sha256, fingerprint());
+        failures += check(loaded.state == SessionCheckpointLoadState::Incompatible &&
+                              loaded.reason == runtime::DurableReason::IncompatibleSchema &&
+                              !loaded.checkpoint &&
+                              store.status(responses.client_session_sha256, fingerprint())
+                                      .at("state") == "incompatible" &&
+                              queue->submit_count == submits && tree() == before,
+                          "legacy integer schema refuses before bad MAC without changing any root entry");
+    }
+
+    // A prior streaming fault must not bypass the schema-only guard on a later load.
+    std::ofstream(root / "manifest.json", std::ios::binary | std::ios::trunc) << original_manifest;
+    std::ofstream(root / "manifest.mac", std::ios::binary | std::ios::trunc) << original_mac;
+    auto live = store.load(responses.client_session_sha256, fingerprint());
+    if (!live.checkpoint) { return failures + check(false, "strict v3 fixture restores"); }
+    auto changed = payload;
+    changed.front() ^= std::byte{1};
+    {
+        std::ofstream file(root / "engine" / "state" / "0.bin",
+                            std::ios::binary | std::ios::trunc);
+        file.write(reinterpret_cast<const char*>(changed.data()),
+                    static_cast<std::streamsize>(changed.size()));
+    }
+    std::vector<std::byte> bytes(payload.size());
+    failures += check(!live.checkpoint->engine->read_file("engine/state/0.bin", 0, bytes),
+                      "legacy-guard retry fixture records a streamed integrity fault");
+    std::ofstream(root / "manifest.json", std::ios::binary | std::ios::trunc) << legacy[2];
+    std::ofstream(root / "manifest.mac", std::ios::binary | std::ios::trunc)
+        << std::string(64, '0');
+    const auto before = tree();
+    const auto refused = store.load(responses.client_session_sha256, fingerprint());
+    live.checkpoint.reset();
+    failures += check(refused.state == SessionCheckpointLoadState::Incompatible &&
+                          refused.reason == runtime::DurableReason::IncompatibleSchema &&
+                          tree() == before,
+                      "remembered corruption cannot quarantine a subsequently observed legacy envelope");
+    return failures;
+}
+
 int test_manifest_origin_transient_tag_failure_preserves_current() {
     // Council CR-20260831-originauth R2 (all three reviewers): a transient inability to
     // read manifest.mac is a filesystem fault, never forgery - load must report
@@ -2347,6 +2440,7 @@ int main() {
     failures += test_export_and_publication_callbacks_are_catalog_unlocked();
     failures += test_reader_failure_reasons_and_fresh_retries();
     failures += test_native_corruption_quarantine_is_generation_bound();
+    failures += test_legacy_schema_bad_mac_is_refused_without_mutation();
     failures += test_manifest_origin_transient_tag_failure_preserves_current();
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
