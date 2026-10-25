@@ -193,10 +193,11 @@ using Stream = std::unique_ptr<std::FILE, decltype(&std::fclose)>;
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
-template <class F> void rejects(F operation) {
+template <class F> void rejects(F operation,
+                                const char* message = "unsafe durable operation was accepted") {
     try { operation(); }
     catch (const std::exception&) { return; }
-    throw std::runtime_error("unsafe durable operation was accepted");
+    throw std::runtime_error(message);
 }
 struct Fixture {
     std::filesystem::path root;
@@ -347,21 +348,34 @@ void native_extended_paths(const std::filesystem::path& fixture) {
     require(root.native().starts_with(L"\\\\?\\") && root.native().size() - 4 > MAX_PATH &&
                 io::extended_local_path(root) == root,
             "extended local-drive spelling is not stable beyond MAX_PATH");
-    for (const auto* unsafe : {L"\\\\?\\UNC\\server\\share\\entry",
-                              L"\\\\.\\C:\\entry",
-                              L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\entry",
-                              L"\\\\?\\C:relative"}) {
-        rejects([&] { (void)io::extended_local_path(unsafe); });
-        rejects([&] { io::create_directories(unsafe); });
+    const std::filesystem::path ordinary_root(root.native().substr(4));
+    struct UnsafePath {
+        const wchar_t* value;
+        const char* message;
+    };
+    for (const auto& unsafe : {
+             UnsafePath{L"\\\\?\\UNC\\server\\share\\entry", "extended UNC namespace was accepted"},
+             UnsafePath{L"\\\\.\\C:\\entry", "Win32 device namespace was accepted"},
+             UnsafePath{L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\entry",
+                        "extended device namespace was accepted"},
+             UnsafePath{L"\\\\?\\C:relative", "extended drive-relative path was accepted"}}) {
+        rejects([&] { (void)io::extended_local_path(unsafe.value); }, unsafe.message);
+        rejects([&] { io::create_directories(unsafe.value); }, unsafe.message);
     }
-    for (const auto* unsafe : {L"..\\outside", L"payload:stream", L"trailing.", L"trailing "}) {
-        rejects([&] { (void)io::extended_local_path(root / unsafe); });
-        rejects([&] { io::create_directories(root / unsafe); });
+    for (const auto& unsafe : {
+             UnsafePath{L"..\\outside", "parent-traversal component was accepted"},
+             UnsafePath{L"payload:stream", "alternate-stream component was accepted"},
+             UnsafePath{L"trailing.", "trailing-dot component was accepted"},
+             UnsafePath{L"trailing ", "trailing-space component was accepted"}}) {
+        rejects([&] { (void)io::extended_local_path(root / unsafe.value); }, unsafe.message);
+        rejects([&] { io::create_directories(root / unsafe.value); }, unsafe.message);
+        rejects([&] { (void)io::extended_local_path(ordinary_root / unsafe.value); }, unsafe.message);
+        rejects([&] { io::create_directories(ordinary_root / unsafe.value); }, unsafe.message);
     }
     auto nul = (root / L"nul").native();
     nul.push_back(L'\0');
-    rejects([&] { (void)io::extended_local_path(nul); });
-    rejects([&] { io::create_directories(nul); });
+    rejects([&] { (void)io::extended_local_path(nul); }, "embedded NUL reached path normalization");
+    rejects([&] { io::create_directories(nul); }, "embedded NUL reached anchored directory creation");
     io::create_directories(root);
     native_pinned_destination(root);
     native_identity_guards(root);
