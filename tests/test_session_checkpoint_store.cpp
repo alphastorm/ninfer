@@ -22,6 +22,42 @@
 #include <utility>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+namespace {
+struct ParentFlushFault {
+    BY_HANDLE_FILE_INFORMATION identity{};
+    bool armed = false, fired = false;
+} parent_flush_fault;
+
+BOOL WINAPI checkpoint_flush(HANDLE handle) {
+    auto& fault = parent_flush_fault;
+    if (fault.armed) {
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (GetFileInformationByHandle(handle, &info) &&
+            (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+            info.dwVolumeSerialNumber == fault.identity.dwVolumeSerialNumber &&
+            info.nFileIndexHigh == fault.identity.nFileIndexHigh &&
+            info.nFileIndexLow == fault.identity.nFileIndexLow) {
+            fault.armed = false;
+            fault.fired = true;
+            SetLastError(ERROR_WRITE_FAULT);
+            return FALSE;
+        }
+    }
+    static const auto real_flush = reinterpret_cast<decltype(&FlushFileBuffers)>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "FlushFileBuffers"));
+    if (!real_flush) { std::terminate(); }
+    return real_flush(handle);
+}
+}
+// Interpose only the selected parent flush; the real OS performs the current rename.
+extern "C" BOOL (WINAPI* __imp_FlushFileBuffers)(HANDLE) = &checkpoint_flush;
+#endif
+
 namespace {
 
 using namespace ninfer;
@@ -2031,7 +2067,6 @@ int test_manifest_origin_compatibility_window() {
     return failures;
 }
 
-#ifndef _WIN32
 int test_quota_and_erase_refuse_ancestor_symlink_swaps() {
     TemporaryDirectory temporary;
     TemporaryDirectory outside;
@@ -2088,7 +2123,6 @@ int test_quota_and_erase_refuse_ancestor_symlink_swaps() {
                       "refused path mutations preserve the original current for retry");
     return failures;
 }
-#endif
 
 int test_v3_manifest_validation_and_publication_guard() {
     TemporaryDirectory temporary;
@@ -2276,6 +2310,66 @@ int test_schema_v3_and_stream_completion() {
                       "unfinished writer cannot publish over the prior current generation");
     return failures;
 }
+
+#ifdef _WIN32
+int test_current_parent_flush_failure_retains_visible_generation() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    const SessionCheckpointStoreOptions options{
+        .root = temporary.path, .disk_quota_bytes = 8ULL << 20,
+        .staging_bytes = 1ULL << 20, .read_queue = std::make_shared<TestReadQueue>()};
+    SessionCheckpointStore store(options);
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) { return DurableExportResult{}; }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                 .payload_bytes = payload.size()});
+    };
+    const auto first = store.save(responses, fingerprint(), exporter, publish_fixture);
+    if (!first) { return check(false, "parent-flush fixture did not publish"); }
+    const auto session_path = temporary.path / "sessions" / responses.client_session_sha256;
+    const HANDLE directory = CreateFileW(session_path.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (directory == INVALID_HANDLE_VALUE) {
+        return check(false, "parent-flush fixture directory did not open");
+    }
+    parent_flush_fault = {};
+    const bool inspected = GetFileInformationByHandle(directory, &parent_flush_fault.identity);
+    CloseHandle(directory);
+    if (!inspected) { return check(false, "parent-flush fixture identity unavailable"); }
+    runtime::CheckpointControl control;
+    control.session(responses.client_session_sha256)->tag = responses.latest_response_id;
+    runtime::SessionCheckpointSkipDetail skip;
+    const auto uncertain = store.save(responses, fingerprint(), exporter,
+        [&](runtime::DurableSessionEpoch epoch, const std::function<bool()>& commit) {
+            parent_flush_fault.armed = true;
+            const auto result = control.publish(responses.client_session_sha256,
+                                                responses.latest_response_id, epoch, commit);
+            parent_flush_fault.armed = false;
+            return result;
+        }, &skip);
+    int failures = check(parent_flush_fault.fired && !uncertain &&
+                             skip.durable_reason == runtime::DurableReason::IoUnavailable,
+                         "post-rename parent-flush failure must be unacknowledged I/O unavailability");
+    const auto visible = read_file_bytes(session_path / "current");
+    failures += check(!visible.empty() && visible != first->generation + "\n",
+                      "flush fault must occur after the real current replacement");
+    SessionCheckpointStore restarted(options);
+    auto reconciled = restarted.load(responses.client_session_sha256, fingerprint());
+    failures += check(reconciled.state == SessionCheckpointLoadState::Available &&
+                          reconciled.checkpoint &&
+                          reconciled.checkpoint->generation + "\n" == visible,
+                      "uncertain publication must retain the generation named by actual current");
+    if (reconciled.checkpoint) {
+        std::vector<std::byte> restored(payload.size());
+        failures += check(reconciled.checkpoint->engine->read_file("engine/state/0.bin", 0, restored) &&
+                              reconciled.checkpoint->engine->verify_complete() && restored == payload,
+                          "reconciled uncertain publication must retain its complete payload");
+    }
+    return failures;
+}
+#endif
 
 int test_export_and_publication_callbacks_are_catalog_unlocked() {
     TemporaryDirectory temporary;
@@ -2609,6 +2703,9 @@ int main(int argc, char** argv) {
         const std::string_view test = argv[1];
         if (test == "quota_stale") { return test_quota_stale_publication_preserves_unrelated_currents(); }
         if (test == "ordinary_corrupt") { return test_ordinary_pressure_preserves_same_size_corrupt_victim(); }
+#ifdef _WIN32
+        if (test == "current_flush") { return test_current_parent_flush_failure_retains_visible_generation(); }
+#endif
         return 2;
     }
     int failures = 0;
@@ -2637,11 +2734,12 @@ int main(int argc, char** argv) {
     failures += test_hmac_sha256_rfc4231_vectors();
     failures += test_manifest_origin_authentication();
     failures += test_manifest_origin_compatibility_window();
-#ifndef _WIN32
     failures += test_quota_and_erase_refuse_ancestor_symlink_swaps();
-#endif
     failures += test_v3_manifest_validation_and_publication_guard();
     failures += test_schema_v3_and_stream_completion();
+#ifdef _WIN32
+    failures += test_current_parent_flush_failure_retains_visible_generation();
+#endif
     failures += test_export_and_publication_callbacks_are_catalog_unlocked();
     failures += test_reader_failure_reasons_and_fresh_retries();
     failures += test_native_corruption_quarantine_is_generation_bound();

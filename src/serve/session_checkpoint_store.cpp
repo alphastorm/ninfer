@@ -2117,7 +2117,7 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         const std::filesystem::path current_staging = session / (".current-" + generation);
         write_synced(current_staging, generation + "\n");
         bool committed = false;
-        bool pointer_replaced = false;
+        bool pointer_may_be_visible = false;
         bool invoked = false;
         bool quota_refused = false;
         lock.unlock();
@@ -2130,8 +2130,12 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
                 quota_refused = true;
                 return false;
             }
+            // Windows replace_path can rename current and then fail its parent flush.
+            // The publication gate translates that exception to IoUnavailable, so a
+            // failed attempt must retain this generation for reconciliation by load().
+            // Before the attempt, stale/epoch/quota refusals still clean up normally.
+            pointer_may_be_visible = true;
             replace_path(current_staging, session / "current");
-            pointer_replaced = true;
             sync_directory(session);
             // First save also publishes the session directory itself.
             sync_directory(options_.root / "sessions");
@@ -2153,7 +2157,7 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         if (publication.state != runtime::DurableExportState::Exported ||
             publication.reason != runtime::DurableReason::None || !committed) {
             (void)remove_best_effort(current_staging);
-            if (!pointer_replaced) { (void)remove_best_effort(published); }
+            if (!pointer_may_be_visible) { (void)remove_best_effort(published); }
             if (skip != nullptr) {
                 skip->export_state = publication.state == runtime::DurableExportState::Stale
                                          ? runtime::DurableExportState::Stale

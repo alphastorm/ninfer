@@ -37,6 +37,12 @@ ninfer_add_test(ninfer_durable_file_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../io/test_durable_file.cpp"
   LIBRARIES ninfer_durable_io)
 set_tests_properties(ninfer_durable_file_test PROPERTIES LABELS "host")
+if(WIN32)
+  foreach(case IN ITEMS pinned-destination reparse-guard identity-guards directory-publication)
+    add_test(NAME ninfer_durable_file_${case}_test COMMAND ninfer_durable_file_test ${case})
+    set_tests_properties(ninfer_durable_file_${case}_test PROPERTIES LABELS "host;durable")
+  endforeach()
+endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_options(ninfer_durable_file_test PRIVATE "LINKER:--wrap=fsync")
 endif()

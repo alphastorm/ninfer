@@ -332,9 +332,11 @@ public:
 
     void atomic_replace_durable(const std::filesystem::path& source,
                                 const std::filesystem::path& destination) override {
-        if (!MoveFileExW(source.c_str(), destination.c_str(),
-                         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-            fail_windows("failed to durably publish checkpoint file", GetLastError());
+        try {
+            io::replace_path(source, destination);
+        } catch (const std::exception& error) {
+            throw CheckpointContractError(std::string("failed to durably publish checkpoint file: ") +
+                                          error.what());
         }
     }
 
