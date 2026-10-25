@@ -898,6 +898,10 @@ struct ConstraintObservation {
 enum class PrefixReusePath : std::uint8_t {
     Root,
     Checkpoint,
+    PrivateEndpoint,
+    PrivateInputReplay,
+    PrivateLongAnchor,
+    SharedStablePrefix,
 };
 
 enum class AdmissionFallbackReason : std::uint8_t {
@@ -1094,6 +1098,7 @@ struct RuntimeStats {
     std::uint64_t root_selections               = 0;
     std::uint64_t checkpoint_selections         = 0;
     std::uint64_t reused_prompt_tokens          = 0;
+    PrefixReusePath last_selected_reuse_path     = PrefixReusePath::Root;
     std::uint32_t last_selected_frontier_tokens = 0;
 
     std::uint64_t state_moves                 = 0;
