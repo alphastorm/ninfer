@@ -76,115 +76,18 @@ struct Handle {
     Handle(const Handle&) = delete;
 };
 
-void check_directory(HANDLE handle) {
-    FILE_ATTRIBUTE_TAG_INFO info{};
-    if (!GetFileInformationByHandleEx(handle, FileAttributeTagInfo, &info, sizeof(info)))
+BY_HANDLE_FILE_INFORMATION check_directory(HANDLE handle) {
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(handle, &info))
         fail_windows("inspect durable directory");
-    if (!(info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
-        (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
+    if (!(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+        (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT))
         fail_windows("durable directory is not a real directory", ERROR_CANT_ACCESS_FILE);
+    return info;
 }
 
-struct Parent {
-    std::filesystem::path path;
-    std::vector<Handle> pins;
-    std::span<const Handle> borrowed;
-
-    static bool same_component(const std::filesystem::path& a, const std::filesystem::path& b) {
-        return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
-    }
-
-    // A replacement's two walks share their common file objects. Reopening a write-capable
-    // destination directory would conflict with the deliberately denied write sharing.
-    Parent(const std::filesystem::path& directory, bool create, bool write_leaf = false,
-           const Parent* common = nullptr) {
-        path = directory.root_path();
-        bool prefix = common && same_component(path, common->path.root_path());
-        std::filesystem::path::iterator common_component;
-        if (prefix) {
-            borrowed = std::span(common->pins).first(1);
-            common_component = common->path.begin();
-            ++common_component; // Root name.
-            ++common_component; // Root separator.
-        } else {
-            pin(write_leaf && path == directory);
-        }
-        for (const auto& component : directory.relative_path()) {
-            if (component.empty()) continue;
-            path /= component;
-            if (create && !CreateDirectoryW(path.c_str(), nullptr) &&
-                GetLastError() != ERROR_ALREADY_EXISTS)
-                fail_windows("create durable directory");
-            if (prefix && common_component != common->path.end() &&
-                same_component(component, *common_component)) {
-                ++common_component;
-                borrowed = std::span(common->pins).first(borrowed.size() + 1);
-            } else {
-                prefix = false;
-                pin(write_leaf && path == directory);
-            }
-        }
-    }
-
-    HANDLE handle() const noexcept { return pins.empty() ? borrowed.back().value : pins.back().value; }
-
-    void pin(bool writable = false) {
-        // Deny write/delete sharing while resolving children: a checked directory cannot
-        // be renamed, replaced, or converted in place to a reparse point.
-        const DWORD access = writable ? GENERIC_READ | GENERIC_WRITE
-                                      : FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY;
-        const HANDLE handle = CreateFileW(path.c_str(), access,
-                                           FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                                           FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-                                           nullptr);
-        if (handle == INVALID_HANDLE_VALUE) fail_windows("open durable directory");
-        pins.emplace_back(handle);
-        check_directory(handle);
-    }
-};
-
-std::FILE* open_stream(const std::filesystem::path& input, bool write) {
-    const auto path = checked_path(input);
-    Parent parent(path.parent_path(), false);
-    // Readers keep an immutable file object, not its name, across POSIX-style replacement.
-    Handle file(CreateFileW(path.c_str(), write ? GENERIC_WRITE : GENERIC_READ,
-                            write ? 0 : (FILE_SHARE_READ | FILE_SHARE_DELETE), nullptr,
-                            write ? CREATE_NEW : OPEN_EXISTING,
-                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
-    if (file.value == INVALID_HANDLE_VALUE) fail_windows("open durable file");
-    FILE_ATTRIBUTE_TAG_INFO info{};
-    if (GetFileType(file.value) != FILE_TYPE_DISK)
-        fail_windows("durable file is not regular", ERROR_INVALID_DATA);
-    if (!GetFileInformationByHandleEx(file.value, FileAttributeTagInfo, &info, sizeof(info)))
-        fail_windows("inspect durable file");
-    if (info.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
-        fail_windows("durable file is not a regular file", ERROR_CANT_ACCESS_FILE);
-    const int descriptor = _open_osfhandle(reinterpret_cast<std::intptr_t>(file.value),
-                                          _O_BINARY | (write ? _O_WRONLY : _O_RDONLY));
-    if (descriptor < 0) fail_errno("attach durable file descriptor");
-    file.value = INVALID_HANDLE_VALUE; // The CRT owns the handle from this point.
-    auto* stream = _fdopen(descriptor, write ? "wb" : "rb");
-    if (!stream) {
-        const auto error = errno;
-        _close(descriptor);
-        fail_errno("open durable stream", error);
-    }
-    return stream;
-}
-
-void reject_reparse(const std::filesystem::path& path, bool allow_missing) {
-    const auto attributes = GetFileAttributesW(path.c_str());
-    if (attributes == INVALID_FILE_ATTRIBUTES) {
-        const auto error = GetLastError();
-        if (allow_missing && (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND)) return;
-        fail_windows("inspect durable replacement entry", error);
-    }
-    if (attributes & FILE_ATTRIBUTE_REPARSE_POINT)
-        fail_windows("durable replacement entry is a reparse point", ERROR_CANT_ACCESS_FILE);
-}
-
-// Win32 has no openat equivalent. Counted, single-component NT names keep deletion anchored
-// to the pinned directory even for reparse points, DOS device names and trailing-dot entries.
+// Win32 has no openat equivalent. All child lookups use one counted component relative
+// to a pinned directory, including creation and no-follow removal.
 struct DirectoryApi {
     using Create = NTSTATUS (NTAPI*)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK,
                                      PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
@@ -212,7 +115,8 @@ struct DirectoryApi {
 
     Handle open(HANDLE parent, std::wstring_view name,
                 ACCESS_MASK access = DELETE | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES |
-                                     SYNCHRONIZE, ULONG sharing = FILE_SHARE_READ) const {
+                                     SYNCHRONIZE, ULONG sharing = FILE_SHARE_READ,
+                ULONG disposition = 1, ULONG options = 0) const {
         if (name.empty() || name.size() > std::numeric_limits<USHORT>::max() / sizeof(wchar_t))
             throw std::invalid_argument("invalid anchored durable entry name");
         UNICODE_STRING text{};
@@ -225,11 +129,11 @@ struct DirectoryApi {
         attributes.Attributes = 0x40; // OBJ_CASE_INSENSITIVE, matching Win32 path lookup.
         IO_STATUS_BLOCK completion{};
         HANDLE handle = INVALID_HANDLE_VALUE;
-        constexpr ULONG open_existing = 1, synchronous_nonalert = 0x20,
+        constexpr ULONG directory = 1, synchronous_nonalert = 0x20,
                         open_reparse_point = 0x00200000;
-        const auto status = create(&handle, access,
-            &attributes, &completion, nullptr, 0, sharing,
-            open_existing, synchronous_nonalert | open_reparse_point, nullptr, 0);
+        const auto status = create(&handle, access, &attributes, &completion, nullptr,
+            options & directory ? FILE_ATTRIBUTE_DIRECTORY : FILE_ATTRIBUTE_NORMAL, sharing,
+            disposition, options | synchronous_nonalert | open_reparse_point, nullptr, 0);
         if (status < 0) {
             const auto code = error(status);
             if (code == ERROR_FILE_NOT_FOUND || code == ERROR_PATH_NOT_FOUND)
@@ -239,6 +143,140 @@ struct DirectoryApi {
         return Handle(handle);
     }
 };
+
+struct DirectoryPin {
+    Handle file;
+    DWORD volume, index_high, index_low;
+
+    explicit DirectoryPin(Handle&& opened) : file(std::move(opened)) {
+        const auto info = check_directory(file.value);
+        volume = info.dwVolumeSerialNumber;
+        index_high = info.nFileIndexHigh;
+        index_low = info.nFileIndexLow;
+    }
+
+    void recheck() const {
+        const auto info = check_directory(file.value);
+        if (info.dwVolumeSerialNumber != volume || info.nFileIndexHigh != index_high ||
+            info.nFileIndexLow != index_low)
+            fail_windows("durable directory identity changed", ERROR_CANT_ACCESS_FILE);
+    }
+};
+
+struct Parent {
+    std::filesystem::path path;
+    std::vector<DirectoryPin> pins;
+    std::span<const DirectoryPin> borrowed;
+
+    static bool same_component(const std::filesystem::path& a, const std::filesystem::path& b) {
+        return CompareStringOrdinal(a.c_str(), -1, b.c_str(), -1, TRUE) == CSTR_EQUAL;
+    }
+
+    // Share the common prefix's pins rather than reopening the same directory objects.
+    Parent(const std::filesystem::path& directory, bool create, bool write_leaf = false,
+           const Parent* common = nullptr) {
+        path = directory.root_path();
+        bool prefix = common && same_component(path, common->path.root_path());
+        std::filesystem::path::iterator common_component;
+        if (prefix) {
+            borrowed = std::span(common->pins).first(1);
+            common_component = common->path.begin();
+            ++common_component; // Root name.
+            ++common_component; // Root separator.
+        } else {
+            pin(write_leaf && path == directory, false);
+        }
+        for (const auto& component : directory.relative_path()) {
+            if (component.empty()) continue;
+            path /= component;
+            if (prefix && common_component != common->path.end() &&
+                same_component(component, *common_component)) {
+                ++common_component;
+                borrowed = std::span(common->pins).first(borrowed.size() + 1);
+            } else {
+                prefix = false;
+                pin(write_leaf && path == directory, create);
+            }
+        }
+    }
+
+    HANDLE handle() const noexcept {
+        return pins.empty() ? borrowed.back().file.value : pins.back().file.value;
+    }
+
+    void pin(bool writable, bool create) {
+        // FILE_ADD_FILE during rename requires WRITE sharing. Denying DELETE still
+        // prevents rename/delete/swap of every pinned ancestor; recheck in-place
+        // reparse conversion and the captured file identity before publication.
+        const DWORD access = (writable ? GENERIC_READ | GENERIC_WRITE
+                                      : FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY) | SYNCHRONIZE;
+        constexpr auto sharing = FILE_SHARE_READ | FILE_SHARE_WRITE;
+        if (pins.empty() && borrowed.empty()) {
+            Handle root(CreateFileW(path.c_str(), access, sharing, nullptr, OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
+            if (root.value == INVALID_HANDLE_VALUE) fail_windows("open durable filesystem root");
+            pins.emplace_back(std::move(root));
+        } else {
+            static const DirectoryApi api;
+            // FILE_DIRECTORY_FILE; FILE_OPEN_IF when creating, otherwise FILE_OPEN.
+            auto child = api.open(handle(), path.filename().native(), access, sharing,
+                                  create ? 3 : 1, 1);
+            if (child.value == INVALID_HANDLE_VALUE)
+                fail_windows("open durable directory", ERROR_PATH_NOT_FOUND);
+            pins.emplace_back(std::move(child));
+        }
+    }
+
+    void recheck(bool include_borrowed = true) const {
+        if (include_borrowed)
+            for (const auto& pin : borrowed) pin.recheck();
+        for (const auto& pin : pins) pin.recheck();
+    }
+};
+
+std::FILE* open_stream(const std::filesystem::path& input, bool write) {
+    const auto path = checked_path(input);
+    Parent parent(path.parent_path(), false);
+    static const DirectoryApi api;
+    // Readers retain an immutable file object across POSIX-style name replacement.
+    // FILE_CREATE is exclusive; FILE_NON_DIRECTORY_FILE rejects directory streams.
+    auto file = api.open(parent.handle(), path.filename().native(),
+                         (write ? GENERIC_WRITE : GENERIC_READ) | SYNCHRONIZE,
+                         write ? 0 : (FILE_SHARE_READ | FILE_SHARE_DELETE),
+                         write ? 2 : 1, 0x40);
+    if (file.value == INVALID_HANDLE_VALUE)
+        fail_windows("open durable file", ERROR_FILE_NOT_FOUND);
+    FILE_ATTRIBUTE_TAG_INFO info{};
+    if (GetFileType(file.value) != FILE_TYPE_DISK)
+        fail_windows("durable file is not regular", ERROR_INVALID_DATA);
+    if (!GetFileInformationByHandleEx(file.value, FileAttributeTagInfo, &info, sizeof(info)))
+        fail_windows("inspect durable file");
+    if (info.FileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))
+        fail_windows("durable file is not a regular file", ERROR_CANT_ACCESS_FILE);
+    const int descriptor = _open_osfhandle(reinterpret_cast<std::intptr_t>(file.value),
+                                          _O_BINARY | (write ? _O_WRONLY : _O_RDONLY));
+    if (descriptor < 0) fail_errno("attach durable file descriptor");
+    file.value = INVALID_HANDLE_VALUE; // The CRT owns the handle from this point.
+    auto* stream = _fdopen(descriptor, write ? "wb" : "rb");
+    if (!stream) {
+        const auto error = errno;
+        _close(descriptor);
+        fail_errno("open durable stream", error);
+    }
+    return stream;
+}
+
+void reject_reparse(HANDLE parent, const std::filesystem::path& name) {
+    static const DirectoryApi api;
+    auto file = api.open(parent, name.native(), FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE);
+    if (file.value == INVALID_HANDLE_VALUE) return;
+    FILE_ATTRIBUTE_TAG_INFO info{};
+    if (!GetFileInformationByHandleEx(file.value, FileAttributeTagInfo, &info, sizeof(info)))
+        fail_windows("inspect durable replacement entry");
+    if (info.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+        fail_windows("durable replacement entry is a reparse point", ERROR_CANT_ACCESS_FILE);
+}
 
 void mark_removed(HANDLE handle) {
     FILE_DISPOSITION_INFO disposition{TRUE};
@@ -478,8 +516,7 @@ void replace_path(const std::filesystem::path& source, const std::filesystem::pa
         fail_windows("durable replacement crosses volumes", ERROR_NOT_SAME_DEVICE);
     Parent to_parent(to.parent_path(), false, true);
     Parent from_parent(from.parent_path(), false, false, &to_parent);
-    reject_reparse(from, false);
-    reject_reparse(to, true);
+    reject_reparse(to_parent.handle(), to.filename());
     static const DirectoryApi api;
     auto file = api.open(from_parent.handle(), from.filename().native(),
                          GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE,
@@ -506,6 +543,8 @@ void replace_path(const std::filesystem::path& source, const std::filesystem::pa
     rename->FileNameLength = static_cast<DWORD>(name_bytes);
     std::memcpy(rename->FileName, leaf.c_str(), name_bytes);
     IO_STATUS_BLOCK completion{};
+    from_parent.recheck(false); // The destination walk owns every shared-prefix pin.
+    to_parent.recheck();
     const auto status = api.set(file.value, &completion, rename, static_cast<ULONG>(buffer.size()),
                                 static_cast<FILE_INFORMATION_CLASS>(65)); // FileRenameInformationEx.
     if (status < 0) fail_windows("replace anchored durable path", api.error(status));
