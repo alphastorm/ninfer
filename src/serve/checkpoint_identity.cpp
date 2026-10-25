@@ -99,8 +99,10 @@ Json fingerprint_json(const runtime::RuntimeFingerprintV2& v) {
 bool validate_session_checkpoint_runtime_fingerprint(const Json& value) noexcept {
     try {
         if (!fields(value, {"artifact_type", "schema_version", "build", "model", "frontend",
-                            "native_layout", "engine", "responses", "deployment"}) ||
-            value.at("artifact_type") != runtime::kRuntimeFingerprintArtifact ||
+                            "native_layout", "engine", "responses", "deployment"})) { return false; }
+        const auto& artifact_type = value.at("artifact_type");
+        if (!artifact_type.is_string() ||
+            artifact_type.get_ref<const std::string&>() != runtime::kRuntimeFingerprintArtifact ||
             !u32(value.at("schema_version")) ||
             value.at("schema_version") != runtime::kRuntimeFingerprintVersion) { return false; }
         const auto& b = value.at("build");
