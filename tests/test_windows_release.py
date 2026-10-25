@@ -536,6 +536,18 @@ class PrivateMarkerTests(unittest.TestCase):
         fixture = profile.replace(separator, b"/") + b"/vcpkg/tools/pkg-config"
         self.assertGreater(qualify_native.marker_findings(fixture, profile), 0)
 
+    def test_binary_home_prefixes_are_rejected_without_an_owner_component(self) -> None:
+        backslash = bytes((92,))
+        prefixes = (
+            backslash.join((b"C:", b"Users", b"")),
+            b"/".join((b"C:", b"Users", b"")),
+            b"/".join((b"", b"Users", b"")),
+            b"/".join((b"", b"home", b"")),
+        )
+        for prefix in prefixes:
+            with self.subTest(prefix=prefix):
+                self.assertGreater(qualify_native.marker_findings(prefix + b"\0"), 0)
+
     def test_binary_domain_rejects_all_home_spellings_and_known_hosts(self) -> None:
         backslash = bytes((92,))
         windows = backslash.join((b"C:", b"Users", b"private-owner", b"build"))

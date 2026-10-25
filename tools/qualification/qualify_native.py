@@ -469,6 +469,9 @@ def digest(label: str) -> str:
     return hashlib.sha256(f"ninfer-native-orchestrated-v1/{label}".encode()).hexdigest()
 
 
+HOME_PREFIX_PATTERN = re.compile(
+    rb"(?:[A-Za-z]:[\\/]+Users[\\/]+|[\\/](?:Users|home)[\\/]+)", re.IGNORECASE,
+)
 HOME_PATH_PATTERN = re.compile(
     rb"(?:(?P<drive>[A-Za-z]:)[\\/]+Users[\\/]+|[\\/](?P<unix>Users|home)[\\/]+)"
     rb"(?P<owner><[^>\x00\r\n]+>|[^\\/\x00\s\"'`<>]+)"
@@ -498,10 +501,10 @@ def marker_findings(
         re.split(rb"[\\/]+", marker.rstrip(b"\\/"))[-1].lower()
         for marker in markers if b"/" in marker or b"\\" in marker
     }
-    findings += sum(
-        not source or match["owner"].lower() in operators
-        for match in HOME_PATH_PATTERN.finditer(data)
-    )
+    if source:
+        findings += sum(match["owner"].lower() in operators for match in HOME_PATH_PATTERN.finditer(data))
+    else:
+        findings += len(HOME_PREFIX_PATTERN.findall(data))
     return findings + sum(
         len(pattern.findall(data)) for pattern in CREDENTIAL_PATTERNS
     )

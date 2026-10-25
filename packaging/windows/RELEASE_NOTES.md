@@ -107,7 +107,9 @@ Privacy qualification has two explicit domains. Shipped executable/DLL directori
 and both public/scratch payload archives reject every Windows user-profile spelling,
 macOS user-directory or Linux home-directory path, plus the known private host names
 and credential shapes. Forward separators and escaped Windows separators are covered;
-a zero result for only the original spelling is not sufficient.
+a zero result for only the original spelling is not sufficient. Bare forbidden root
+prefixes are rejected even when no owner component follows; source reference reporting
+retains its separate owner-aware interpretation.
 
 Source trees and source archives reject actual operator homes/hosts and credential
 shapes. Public upstream paths, placeholder examples and HTTP route examples are
