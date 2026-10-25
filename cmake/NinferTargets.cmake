@@ -4,6 +4,11 @@ function(ninfer_internal_includes target)
   target_include_directories(${target} PRIVATE
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/src)
+  if(CMAKE_CUDA_ARCHITECTURES STREQUAL "86")
+    target_compile_definitions(${target} PRIVATE NINFER_SM86=1)
+  elseif(CMAKE_CUDA_ARCHITECTURES STREQUAL "89")
+    target_compile_definitions(${target} PRIVATE NINFER_SM89=1)
+  endif()
 endfunction()
 
 function(ninfer_cuda_archive target)

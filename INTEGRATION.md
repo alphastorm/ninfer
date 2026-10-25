@@ -28,6 +28,25 @@ Read-only command for each candidate: `git merge-tree --write-tree --merge-base=
 
 Baseline inventory must distinguish failures, skips and missing prerequisites. `tests/models/qwen3_5/tests.cmake` registers 14 `gpu;real` cases. `loading_real` needs explicit `--artifact` (the environment variable alone skips); MoE/offload cases need a matching MoE artifact. The supplied dense v3 artifact does not by itself prove every registered model/component route.
 
+## Merge queue and conflict watchlist
+
+Queue: Contracts → DurableStore standalone backend/I/O → ServePort snapshot/identity → DurableStore snapshot-aware store → Frontend → KernelRoutes → EngineCache → Harness → PortableCore → ArchEnable → Persistence → dependent A3/B2/C3/E2 integration. Main approved provider-first ordering: every merged boundary must be independently green; a source-only merge is not a green checkpoint.
+
+Preflight after a pushed slice is announced: `git fetch origin`, then `git merge-tree --write-tree rebase/upstream-64d10fbf origin/rebase/<slice>`. Preflight writes Git objects only, never the integration working tree. The first fetch found no current-program slice branches beyond the integration base; `rebase/durable-4090-v041` is unrelated and excluded. DurableStore standalone `0789709d` preflight against `7fccec947` was clean (exit 0); not yet merged or built.
+
+| Boundary | Expected overlap / dependency | Disposition rule |
+|---|---|---|
+| Slice reports | Every slice adds root `REPORT.md` | Link each immutable slice commit's report from the merge log; do not silently overwrite another slice's evidence. |
+| Contracts ↔ DurableStore | New durable types, codecs and checkpoint I/O headers | Contracts declarations are authoritative; escalate contract deltas. |
+| DurableStore ↔ ServePort | Store tests require the new Responses snapshot/codec | Owners must identify the minimum prerequisite or split standalone backend work before queue admission. |
+| ServePort ↔ Frontend | Tool-name limit, validator and prompt-boundary behavior | ServePort owns serving files; Frontend owns shared Qwen parser/grammar; keep one authoritative limit. |
+| ServePort ↔ EngineCache | Private session isolation versus shared principal fanout | Main approved immutable private session reuse scope; shared stable/tool prefixes retain bearer-principal scope across sessions. No blanket shared-cache disable. |
+| EngineCache ↔ Persistence | Engine hooks, Program checkpoint APIs and pressure protection | Keep native API sole-owned by Persistence; merge dependent controls atomically. |
+| PortableCore ↔ shared callers | Wide arithmetic, file handles and read-completion error categories | Owner supplies exact caller migrations; preserve Linux behavior and error taxonomy. |
+| PortableCore ↔ ArchEnable | Platform/architecture gates, PDL and dependency targets | One compile-profile gate; family-local rejection paths; no fat binary. |
+| Harness ↔ Infra | Build provenance, archive manifest and Docker CMake inputs | Preserve clean-source attestation; no `.git` means neither clean nor dirty by inference. |
+| All sources/tests | Shared CMake manifests and CLI/config union | Integrator owns final wiring; never register missing files or advertise unsupported consumers. |
+
 ## Shared-file requests
 
 | Requester | Requested surface | Ownership / current state |
@@ -38,7 +57,7 @@ Baseline inventory must distinguish failures, skips and missing prerequisites. `
 | Persistence | `program/storage/durable_tracer.cpp` adjacent to `checkpoints.cpp` in `program_sources.cmake` | Exact slice-local insertion permitted for G1 build; integration owns merge disposition. Prefix-identity hook remains slice-owned and must become typed for final K1. |
 | EngineCache | `gpu_keep_warm_ms`, `--gpu-keep-warm-ms`, core source and test registration | Integration owns public option/CLI/CMake; EngineCache supplies exact entries. |
 | PortableCore | Root/core portability wiring; exact `Uint128` migrations in shared resources and serve options | `src/core/uint128.h` is PortableCore-owned; EngineCache owns engine arithmetic callers; integration owns shared callers. |
-| ArchEnable | Single `120a`, `89` or `86` architecture gate; propagated `NINFER_SM86`/`NINFER_SM89` definitions | Integration owns root gate; family-local source/stub gating remains ArchEnable-owned. |
+| ArchEnable | Single `120a`, `89` or `86` architecture gate; propagated `NINFER_SM86`/`NINFER_SM89` definitions | Root gate and existing `ninfer_internal_includes` compile-owner definitions applied; native support still awaits family-local gating and qualification. |
 | Harness | BuildInfo header/module, compile-owner verification, source registration and version consumers | New provenance files reserved to Harness; integration owns shared wiring/consumers. |
 
 ## Open prerequisites
@@ -48,3 +67,4 @@ Baseline inventory must distinguish failures, skips and missing prerequisites. `
 - Frontend starts when a worker slot becomes available; grammar-whitespace handoff is queued.
 - Exact requested declarations/source lists before shared edits; do not register nonexistent sources on the integration branch.
 - PortableCore and ArchEnable must land before adding native Windows architecture builds to the routine.
+- GPU selection remains numeric `--device`; no new engine UUID flag/field. Controller sets child `CUDA_DEVICE_ORDER=PCI_BUS_ID`, requires absent `CUDA_VISIBLE_DEVICES`, and attests the request-log GPU UUID. Tooling UUID arguments remain unchanged.
