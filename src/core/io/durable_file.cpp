@@ -212,7 +212,7 @@ struct DirectoryApi {
 
     Handle open(HANDLE parent, std::wstring_view name,
                 ACCESS_MASK access = DELETE | FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES |
-                                     SYNCHRONIZE) const {
+                                     SYNCHRONIZE, ULONG sharing = FILE_SHARE_READ) const {
         if (name.empty() || name.size() > std::numeric_limits<USHORT>::max() / sizeof(wchar_t))
             throw std::invalid_argument("invalid anchored durable entry name");
         UNICODE_STRING text{};
@@ -228,7 +228,7 @@ struct DirectoryApi {
         constexpr ULONG open_existing = 1, synchronous_nonalert = 0x20,
                         open_reparse_point = 0x00200000;
         const auto status = create(&handle, access,
-            &attributes, &completion, nullptr, 0, FILE_SHARE_READ,
+            &attributes, &completion, nullptr, 0, sharing,
             open_existing, synchronous_nonalert | open_reparse_point, nullptr, 0);
         if (status < 0) {
             const auto code = error(status);
@@ -482,7 +482,8 @@ void replace_path(const std::filesystem::path& source, const std::filesystem::pa
     reject_reparse(to, true);
     static const DirectoryApi api;
     auto file = api.open(from_parent.handle(), from.filename().native(),
-                         GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE);
+                         GENERIC_READ | GENERIC_WRITE | DELETE | SYNCHRONIZE,
+                         FILE_SHARE_READ | FILE_SHARE_DELETE);
     if (file.value == INVALID_HANDLE_VALUE)
         fail_windows("open durable replacement file", ERROR_FILE_NOT_FOUND);
     FILE_ATTRIBUTE_TAG_INFO attributes{};
