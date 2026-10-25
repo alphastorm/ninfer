@@ -142,9 +142,10 @@ DurableImportTarget target(Engine& engine, const std::string& session) {
 struct Oracle final : ReclaimableSessionOracle {
     std::shared_ptr<const Files> files;
     std::shared_ptr<const ContinuationCheckpointReader> pin_recoverable(
-        std::string_view session, std::string_view expected_tag) const override {
+        std::string_view session, std::string_view expected_tag) const noexcept override {
         if (session != b || expected_tag != tag) { return {}; }
-        return std::make_shared<Reader>(files);
+        try { return std::make_shared<Reader>(files); }
+        catch (...) { return {}; }
     }
 };
 struct Handler final : PressureCheckpointHandler {
@@ -272,7 +273,7 @@ void exercise(const char* artifact) {
     CheckpointEngineAccess::set_pressure_checkpoint_handler(engine, {});
     CheckpointEngineAccess::set_reclaimable_session_oracle(engine, {});
     require(engine.is_available(), "E2 made Engine unavailable");
-    std::cout << "E2 host_capacity=" << options.context_cache.host_capacity_bytes
+    std::cout << "E2 host_capacity=" << *options.context_cache.host_capacity_bytes
               << " resident_bytes=" << resident << " occupied_bytes=" << occupied
               << " prompt_tokens=" << prompt_tokens << " cached_tokens=" << continued.reused_prompt_tokens
               << " pending=" << handler->pending << " settled=" << handler->settled
