@@ -172,6 +172,11 @@ public:
     [[nodiscard]] std::unique_ptr<runtime::ContinuationCheckpointReadCompletion>
     submit(const std::filesystem::path& path,
            std::span<const runtime::ContinuationCheckpointReadRequest> requests) override {
+#ifdef _WIN32
+        if (path.native().find(L'/') != std::wstring::npos) {
+            throw std::runtime_error("checkpoint queue received non-native path separators");
+        }
+#endif
         ++submit_count;
         if (fail_submit) { throw std::runtime_error("injected checkpoint queue read failure"); }
         if (!overlaps && outstanding != 0) { ++overlap_violations; }
@@ -426,7 +431,7 @@ int test_protected_long_root_transaction() {
                       "protected long-root save failed before durable acknowledgement");
     if (!first) { return failures; }
     const auto state = stored_generation_root(root, responses, first->generation) /
-                       "engine/state/0.bin";
+                       "engine" / "state" / "0.bin";
     failures += check(state.native().size() - 4 > MAX_PATH &&
                           std::filesystem::file_size(state) == payload.size(),
                       "protected fixture did not exercise metadata beyond MAX_PATH");
@@ -928,7 +933,7 @@ int test_transaction_restart_compatibility_and_corruption() {
                       "checkpoint succeeds when the transient filesystem failure clears");
     retry.checkpoint.reset();
 
-    const std::filesystem::path corrupt_file = generation_root / "engine/state/0.bin";
+    const std::filesystem::path corrupt_file = generation_root / "engine" / "state" / "0.bin";
     std::fstream corrupt(corrupt_file, std::ios::in | std::ios::out | std::ios::binary);
     char byte = 0;
     corrupt.read(&byte, 1);
@@ -994,7 +999,7 @@ int test_active_reader_delete_and_gc() {
             std::filesystem::is_regular_file(session / "generations" / saved->generation /
                                              "responses.cbor") &&
             std::filesystem::is_regular_file(session / "generations" / saved->generation /
-                                             "engine/state/0.bin") &&
+                                             "engine" / "state" / "0.bin") &&
             store.status(responses.client_session_sha256, fingerprint()).at("state") == "available",
         "refused deletion reports conflict and preserves transcript and Engine state");
 
@@ -1184,7 +1189,8 @@ int test_store_wide_quota_across_sessions() {
     const std::string previous_current   = read_file_bytes(previous_session / "current");
     const std::string previous_manifest  = read_file_bytes(previous_generation / "manifest.json");
     const std::string previous_responses = read_file_bytes(previous_generation / "responses.cbor");
-    const std::string previous_engine = read_file_bytes(previous_generation / "engine/state/0.bin");
+    const std::string previous_engine =
+        read_file_bytes(previous_generation / "engine" / "state" / "0.bin");
 
     // Re-saving at the same size fits the tolerated publish transient and evicts nobody. A
     // successor that grows past it plans reclamation, but cleanup happens only after
@@ -1217,7 +1223,7 @@ int test_store_wide_quota_across_sessions() {
             std::filesystem::is_directory(deferred_tombstone) &&
             read_file_bytes(deferred_tombstone / "manifest.json") == previous_manifest &&
             read_file_bytes(deferred_tombstone / "responses.cbor") == previous_responses &&
-            read_file_bytes(deferred_tombstone / "engine/state/0.bin") == previous_engine &&
+            read_file_bytes(deferred_tombstone / "engine" / "state" / "0.bin") == previous_engine &&
             failure_store.status(first_session.client_session_sha256, fingerprint()).at("state") ==
                 "available" &&
             retained_generation_bytes(failure_temporary.path) ==
@@ -1418,10 +1424,10 @@ int test_ordinary_pressure_preserves_same_size_corrupt_victim() {
     }, publish_fixture);
     if (!saved) { return check(false, "pressure corruption fixture failed"); }
     auto bytes = read_file_bytes(stored_generation_root(temporary.path, responses, saved->generation) /
-                                 "engine/state/0.bin");
+                                 "engine" / "state" / "0.bin");
     bytes[bytes.size() / 2] ^= 1;
     std::ofstream(stored_generation_root(temporary.path, responses, saved->generation) /
-                  "engine/state/0.bin", std::ios::binary | std::ios::trunc) << bytes;
+                  "engine" / "state" / "0.bin", std::ios::binary | std::ios::trunc) << bytes;
     struct Oracle final : ReclaimableSessionOracle {
         SessionCheckpointStore& store;
         explicit Oracle(SessionCheckpointStore& value) : store(value) {}

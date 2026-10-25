@@ -40,6 +40,11 @@ namespace {
 
 std::filesystem::path checked_path(const std::filesystem::path& path) {
     if (path.empty()) throw std::invalid_argument("empty durable path");
+    // Win32 absolute-path conversion consumes a NUL-terminated string; reject embedded
+    // NULs before that conversion can discard the unsafe suffix.
+    if (path.native().find(std::filesystem::path::value_type{}) !=
+        std::filesystem::path::string_type::npos)
+        throw std::invalid_argument("durable path contains a NUL");
     const std::filesystem::path* input = &path;
 #ifdef _WIN32
     std::filesystem::path local;
@@ -68,13 +73,10 @@ std::filesystem::path checked_path(const std::filesystem::path& path) {
         throw std::invalid_argument("durable path requires a local drive");
     for (const auto& component : absolute.relative_path()) {
         const auto text = component.native();
-        if (text.find(L':') != std::wstring::npos || text.find(L'\0') != std::wstring::npos ||
+        if (text.find(L':') != std::wstring::npos ||
             (!text.empty() && (text.back() == L'.' || text.back() == L' ')))
             throw std::invalid_argument("durable path has an unsupported component");
     }
-#else
-    if (absolute.native().find('\0') != std::string::npos)
-        throw std::invalid_argument("durable path contains a NUL");
 #endif
     return absolute;
 }
