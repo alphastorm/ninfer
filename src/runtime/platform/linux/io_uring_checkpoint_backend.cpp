@@ -1997,10 +1997,11 @@ probe_io_uring_checkpoint_capability(const std::filesystem::path& root) noexcept
 
 std::shared_ptr<ContinuationCheckpointReadQueue>
 make_io_uring_checkpoint_read_queue(const std::filesystem::path& root) {
-    std::error_code error;
-    std::filesystem::create_directories(root, error);
-    if (error) {
-        throw CheckpointContractError("create io_uring checkpoint root: " + error.message());
+    try {
+        io::create_directories(root);
+    } catch (const std::exception& error) {
+        throw CheckpointContractError(std::string("create io_uring checkpoint root: ") +
+                                      error.what());
     }
     return std::make_shared<IoUringContinuationReadQueue>(root);
 }
