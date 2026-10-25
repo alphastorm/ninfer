@@ -270,7 +270,7 @@ ResourceReservation ProgramImpl::reserve_units(std::span<const ExecutionUnit> un
     std::array<UnitDemand, kMaximumConcurrency> demands{};
     std::array<UnitDemand, kMaximumConcurrency> coverage{};
     std::array<std::uint32_t, kMaximumConcurrency> old_main{}, old_backend{};
-    std::array<bool, kMaximumConcurrency> seen{};
+    std::array<bool, kMaximumConcurrency> seen{}, had_permit{};
     std::uint64_t main_needed = 0, backend_needed = 0;
     for (std::size_t index = 0; index < units.size(); ++index) {
         const auto& unit = units[index];
@@ -294,7 +294,9 @@ ResourceReservation ProgramImpl::reserve_units(std::span<const ExecutionUnit> un
                 request.permit->backend_frontier != demands[lane].backend_frontier) {
                 throw std::logic_error("an existing execution permit cannot be replaced");
             }
-            continue;
+            // A permit fixes execution coverage, not page writability. A newly retained
+            // prefix or reader can require tail COW before this already-admitted unit runs.
+            had_permit[lane] = true;
         }
         const auto main = text_kv_histories->write_pages(state.kv->text.handle(),
                                                          state.continuation.metadata.text_kv_valid,
@@ -327,7 +329,6 @@ ResourceReservation ProgramImpl::reserve_units(std::span<const ExecutionUnit> un
     try {
         for (const auto& unit : units) {
             const auto lane = ContractAccess::lane(unit.sequence).value;
-            if (requests[lane].permit) { continue; }
             auto& state = active_sequence(lane);
             added[lane] = true;
             text_kv_histories->reserve_growth(
@@ -353,7 +354,7 @@ ResourceReservation ProgramImpl::reserve_units(std::span<const ExecutionUnit> un
                 backend_kv_histories->reserve_growth(state.kv->backend->handle(),
                                                      old_backend[lane]);
             }
-            requests[lane].permit.reset();
+            if (!had_permit[lane]) requests[lane].permit.reset();
         }
         throw;
     }
