@@ -197,6 +197,11 @@ public:
     static void set_reclaimable_session_oracle(
         Engine&, std::shared_ptr<const ReclaimableSessionOracle>);
     static void notify_checkpoint_progress(Engine&) noexcept;
+    // Call after Responses publication, outside its mutex, with the latest stored endpoint.
+    static void response_stored(Engine&, std::string_view session_sha256,
+                               std::string_view tag) noexcept;
+    // Observed native/admission/publication progress; excludes service completion wakeups.
+    [[nodiscard]] static std::uint64_t checkpoint_progress(const Engine&) noexcept;
 
     static void set_checkpoint_tag(PreparedPrompt&, std::string_view tag);
     [[nodiscard]] static DurableSessionEpoch session_epoch(Engine&, std::string_view session_sha256);

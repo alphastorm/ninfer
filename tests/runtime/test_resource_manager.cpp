@@ -2046,6 +2046,25 @@ void test_pending_checkpoint_blocks_complete_destructive_plan() {
             "checkpoint progress did not unblock the complete release");
 }
 
+void test_abandoned_turn_preserves_committed_owner() {
+    Fixture f(128);
+    const Base old{.tokens = {1, 2}, .advice = {.session_key = 11, .reuse_scope = 11}};
+    const auto owner = f.begin(old);
+    const auto endpoint = f.program.add({1, 2}, {}, Role::Continuation);
+    f.cache.publish(f.program, owner, endpoint);
+    f.cache.set_checkpoint_identity(owner, "session", "stored");
+    f.cache.finish(f.program, owner, old, 1);
+    const Base next{.tokens = {1, 2, 3}, .advice = old.advice};
+    const auto child = f.begin(next, endpoint);
+    require(child != owner, "an unacknowledged turn took over the committed native owner");
+    f.cache.abandon(f.program, child);
+    bool pending = false;
+    const auto points = f.cache.session_points(f.program, "session", "stored", pending);
+    require(!pending && std::find(points.begin(), points.end(), endpoint) != points.end() &&
+                f.program.valid_checkpoint(endpoint),
+            "abandoned turn lost or relabelled the prior stored endpoint");
+}
+
 void test_import_publication_is_private_and_freshly_ordered() {
     Fixture f(128);
     const Base original{.tokens = {1, 2}, .advice = {.session_key = 11, .reuse_scope = 11,
@@ -2087,6 +2106,7 @@ void test_import_publication_is_private_and_freshly_ordered() {
 
 int main() {
     try {
+        test_abandoned_turn_preserves_committed_owner();
         test_pending_checkpoint_blocks_complete_destructive_plan();
         test_import_publication_is_private_and_freshly_ordered();
         test_demotion_competes_with_its_actual_host_recovery_loss();
