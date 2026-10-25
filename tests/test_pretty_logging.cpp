@@ -3,50 +3,111 @@
 
 #include <spdlog/logger.h>
 
+#ifdef _WIN32
+#include <fcntl.h>
+#include <io.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 #include <algorithm>
 #include <array>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <exception>
 #include <iostream>
 #include <regex>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 
 namespace {
+
+int stderr_descriptor() {
+#ifdef _WIN32
+    return ::_fileno(stderr);
+#else
+    return STDERR_FILENO;
+#endif
+}
+
+int create_pipe(int* descriptors) {
+#ifdef _WIN32
+    return ::_pipe(descriptors, 65536, _O_BINARY | _O_NOINHERIT);
+#else
+    return ::pipe(descriptors);
+#endif
+}
+
+int duplicate(int descriptor) {
+#ifdef _WIN32
+    return ::_dup(descriptor);
+#else
+    return ::dup(descriptor);
+#endif
+}
+
+int close_descriptor(int descriptor) {
+#ifdef _WIN32
+    return ::_close(descriptor);
+#else
+    return ::close(descriptor);
+#endif
+}
+
+void redirect_stderr(int source) {
+#ifdef _WIN32
+    if (::_dup2(source, stderr_descriptor()) < 0)
+        throw std::runtime_error(std::strerror(errno));
+    // spdlog's native sink uses the process standard handle, not just the CRT descriptor.
+    if (!SetStdHandle(STD_ERROR_HANDLE,
+                       reinterpret_cast<HANDLE>(::_get_osfhandle(stderr_descriptor()))))
+        throw std::system_error(static_cast<int>(GetLastError()), std::system_category(),
+                                "redirect native stderr");
+#else
+    if (::dup2(source, stderr_descriptor()) < 0)
+        throw std::runtime_error(std::strerror(errno));
+#endif
+}
 
 class StderrCapture {
 public:
     StderrCapture() {
-        if (::pipe(pipe_) != 0) { throw std::runtime_error(std::strerror(errno)); }
-        saved_ = ::dup(STDERR_FILENO);
-        if (saved_ < 0 || ::dup2(pipe_[1], STDERR_FILENO) < 0) {
-            throw std::runtime_error(std::strerror(errno));
-        }
-        ::close(pipe_[1]);
+        if (create_pipe(pipe_) != 0) { throw std::runtime_error(std::strerror(errno)); }
+        saved_ = duplicate(stderr_descriptor());
+        if (saved_ < 0) throw std::runtime_error(std::strerror(errno));
+        redirect_stderr(pipe_[1]);
+        close_descriptor(pipe_[1]);
         pipe_[1] = -1;
     }
 
     ~StderrCapture() {
         if (saved_ >= 0) {
-            (void)::dup2(saved_, STDERR_FILENO);
-            ::close(saved_);
+            try { redirect_stderr(saved_); } catch (...) { std::terminate(); }
+            close_descriptor(saved_);
         }
-        if (pipe_[0] >= 0) { ::close(pipe_[0]); }
+        if (pipe_[0] >= 0) { close_descriptor(pipe_[0]); }
     }
 
     std::string finish() {
         std::fflush(stderr);
-        if (::dup2(saved_, STDERR_FILENO) < 0) { throw std::runtime_error(std::strerror(errno)); }
-        ::close(saved_);
+        redirect_stderr(saved_);
+        close_descriptor(saved_);
         saved_ = -1;
 
         std::string output;
         std::array<char, 4096> buffer{};
         for (;;) {
-            const ssize_t count = ::read(pipe_[0], buffer.data(), buffer.size());
+#ifdef _WIN32
+            const auto count = ::_read(pipe_[0], buffer.data(), static_cast<unsigned>(buffer.size()));
+#else
+            const auto count = ::read(pipe_[0], buffer.data(), buffer.size());
+#endif
             if (count == 0) { break; }
             if (count < 0) {
                 if (errno == EINTR) { continue; }
@@ -54,7 +115,7 @@ public:
             }
             output.append(buffer.data(), static_cast<std::size_t>(count));
         }
-        ::close(pipe_[0]);
+        close_descriptor(pipe_[0]);
         pipe_[0] = -1;
         return output;
     }
