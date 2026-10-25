@@ -46,11 +46,12 @@ void run() {
     const auto directory = fixture.root / std::filesystem::path(u8"state-\u03bb") / "nested";
     io::create_directories(directory);
     io::create_directories(directory);
+    io::create_directories(directory / "." / "dot");
     const auto current = directory / "current";
     write(current, std::byte{7});
     rejects([&] { Stream forbidden(io::open_binary_write(current), &std::fclose); });
     {
-        Stream stream(io::open_binary_read(current), &std::fclose);
+        Stream stream(io::open_binary_read(directory / "." / "current"), &std::fclose);
         std::array<std::byte, 3> bytes{};
         io::read_exact(stream.get(), bytes);
         require(bytes == std::array{std::byte{7}, std::byte{7}, std::byte{7}},

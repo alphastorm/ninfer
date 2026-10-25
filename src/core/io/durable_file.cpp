@@ -35,9 +35,9 @@ namespace {
 std::filesystem::path checked_path(const std::filesystem::path& path) {
     if (path.empty()) throw std::invalid_argument("empty durable path");
     for (const auto& component : path.relative_path())
-        if (component == "." || component == "..")
+        if (component == "..")
             throw std::invalid_argument("durable path contains traversal components");
-    const auto absolute = std::filesystem::absolute(path);
+    const auto absolute = std::filesystem::absolute(path).lexically_normal();
 #ifdef _WIN32
     // The native store is local and same-volume. Device/UNC namespaces and alternate streams
     // are not part of its path contract.

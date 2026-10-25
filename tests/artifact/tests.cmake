@@ -2,6 +2,10 @@ ninfer_add_test(ninfer_artifact_reader_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_reader.cpp"
   LIBRARIES ninfer_artifact)
 
+add_test(NAME ninfer_artifact_file_io_test
+  COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/test_file_io.py")
+set_tests_properties(ninfer_artifact_file_io_test PROPERTIES TIMEOUT 30)
+
 ninfer_add_test(ninfer_artifact_backing_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_backing.cpp"
   LIBRARIES ninfer_artifact)
