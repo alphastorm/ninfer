@@ -1,0 +1,13 @@
+# Contracts (K0)
+
+- Branch: `rebase/contracts`; base: upstream `64d10fbf`. Scope: K1–K7 specification, three declaration headers, canonical/MAC fixtures and two host-only tests. No shared CMake/public API files edited.
+- `docs/durable/CONTRACTS.md`: outer schema 3 + native set/1 + fingerprint 2; release-isolated roots; canonical authenticated envelopes; deduplicated native tables; VisionItem inventory; exact layout/build identity; staged export and atomic restore; CLI mapping; file-I/O and error/status/ack contracts.
+- Headers: `src/runtime/contract/durable_checkpoint_set.h`, `durable_engine_api.h`, `runtime_fingerprint.h`. These are declarations/value types, not native/store/Engine implementations; implementation ownership remains Persistence/EngineCache/DurableStore/ServePort.
+- Lead-approved decisions: private immutable session scope + shared principal scope; mandatory `publish_export` gate separate from Engine execution lock; Windows file flush + write-through replacement, directory no-op acknowledged as `ntfs-write-through`; status schema 2 null whitelist, no fabricated required identity/counters.
+- Compatibility choice: assignment excludes host/cache admission capacities from fingerprint, overriding the planning note; effective-config digest hashes only the identity projection. Old fork-v2 generations are incompatible, never migrated or quarantined merely for age.
+- Fixtures: two synthetic canonical/authentication envelopes and matching MACs; RFC 4231 HMAC cases; POSIX/Windows publication acknowledgements. They are not a native import/restart corpus and contain only public test-key material.
+- Tests: `tests/test_durable_contracts.py` is the independent canonical/MAC oracle; `tests/test_durable_contract_headers.cpp` checks declaration traits and production nlohmann serialization against the same fixtures and integer/Unicode/control boundary vector.
+- Verification: pending the explicitly assigned priority-2 K0 lease build; no tests, builds, linters or formatters run locally. Final measured result will replace this entry.
+- Registration requested from Integrator: standalone C++ test with `src` and `third_party` include roots, fixture-directory argument; Python CTest invocation `Python3_EXECUTABLE -B tests/test_durable_contracts.py`. Headers need no link source registration.
+- Not claimed: production MAC/parser validation, native codec/import, Engine transaction implementation, crash/restart proof, Windows build/runtime, G1/G2 or full K4 failure matrix. Owning slices/integration supply those gates.
+- Provenance: derived from upstream/fork interfaces and approved RepoPrompt plan `prep-v0-13-0-upstream-re-DF08C8`; no community code copied. No publication/tag/release action performed.
