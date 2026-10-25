@@ -42,8 +42,8 @@ int test_fingerprint_v2() {
     f.model = {.artifact_sha256 = digest, .architecture = "Qwen3_5ForCausalLM",
                .model_id = "fixture", .weights_id = digest};
     f.frontend = {.template_sha256 = digest, .tokenizer_sha256 = digest, .resources_sha256 = digest,
-                  .vision_preprocessing = "disabled", .parser_codec = "qwen-tools/1",
-                  .identity_codec = "qwen-prefix/1"};
+                  .vision_preprocessing = "disabled", .parser_codec = "qwen-parser/1",
+                  .identity_codec = "qwen-identity/1"};
     f.native_layout = {.continuation_codec = "qwen3_5/1", .state_layout_sha256 = digest,
                        .state_bytes = 4096,
                        .pools = {{.pool_id = 0, .name = "main", .layout_sha256 = digest,
@@ -53,7 +53,7 @@ int test_fingerprint_v2() {
     f.engine = {.max_context = 131072, .kv_capacity = 131072, .kv_dtype = "bf16",
                 .max_concurrency = 2, .prefill_chunk = 1024, .speculative_backend = "dflash2",
                 .draft_window = 7, .proposal_head = "full", .use_cuda_graph = true};
-    f.responses.codec = "openai-responses/3";
+    f.responses.codec = "ninfer-responses-cbor/1";
     f.deployment.profile = "fixture";
     f.deployment.effective_config_sha256 = session_checkpoint_effective_config_sha256(f);
     const auto valid = session_checkpoint_runtime_fingerprint(f);
