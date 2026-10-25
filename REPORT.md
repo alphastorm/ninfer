@@ -30,6 +30,13 @@ public numerical matrix already covers both widths; graph replay now does too.
 Its separate bounded measurement and full fused-output fork comparison are
 required before accepting the route.
 
+Equal-output controls still have unequal draft acceptance (repo-002: 52 versus
+54 rounds for the same 333 tokens). The shortlist uses upstream's linear K-warp
+reduction versus the fork's pairwise reduction. A separate candidate restores
+the padded pairwise schedule only for physical U=7/14 draft extents; native
+dispatch remains unchanged. This numerical hypothesis needs its own controlled
+acceptance comparison, FP64/top-k test, and raw FP32 projection identity proof.
+
 ## Disposition
 
 - Tested runtime source: `9b391d513726b3ed7d60a80a95daa68cf9dacc97`, branch `rebase/kernel-routes`, upstream base `64d10fbf`.

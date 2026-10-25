@@ -407,7 +407,7 @@ int run_profile(const Profile& profile, DeviceBuffer& hidden,
 
     DeviceContext context;
     cuda_synchronize();
-    for (int graph_columns : {1,  8,  9,  16, 17, 24, 25, 32,  33,  48,  49, 64,
+    for (int graph_columns : {1, 7, 8, 9, 14, 16, 17, 24, 25, 32, 33, 48, 49, 64,
                               65, 80, 81, 88, 89, 96, 97, 112, 113, 120, 129}) {
         Tensor graph_hidden(hidden.span(), DType::BF16, {kHidden, graph_columns});
         Tensor graph_ids(ids.span(), DType::I32, {kTopK, graph_columns});
