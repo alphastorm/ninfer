@@ -90,6 +90,10 @@ std::vector<ChatTurn> normalize_call_graph(std::vector<ChatTurn> turns) {
                                      "' does not immediately follow its assistant call group");
             }
             const ToolCall& call = normalized.back().tool_calls[position->second];
+            if (result.tool_kind != call.kind) {
+                invalid_tool_history("tool output kind does not match call_id '" +
+                                     result.tool_call_id + "'");
+            }
             if (result.tool_result_name && *result.tool_result_name != call.name) {
                 invalid_tool_history("function_call_output identity does not match call_id '" +
                                      result.tool_call_id + "'");

@@ -95,7 +95,9 @@ std::string render_tool_definition(const ToolDefinition& tool) {
     if (tool.input_examples_json) {
         function["input_examples"] = Json::parse(*tool.input_examples_json);
     }
-    return Json{{"type", "function"}, {"function", std::move(function)}}.dump();
+    Json definition{{"type", "function"}, {"function", std::move(function)}};
+    if (tool.kind == ToolKind::Custom) { definition["x-ninfer-tool-kind"] = "custom"; }
+    return definition.dump();
 }
 
 } // namespace
@@ -199,7 +201,8 @@ ninfer::PromptInput to_prompt_input(const GenerationRequest& request,
         message.tool_call_id      = turn.tool_call_id;
         message.tool_calls.reserve(turn.tool_calls.size());
         for (const ToolCall& call : turn.tool_calls) {
-            message.tool_calls.push_back(ninfer::ToolCall{call.id, call.name, call.arguments_json});
+            message.tool_calls.push_back(ninfer::ToolCall{call.id, call.name, call.arguments_json,
+                                                          call.kind});
         }
 
         if (turn.role == ChatRole::Tool && turn.tool_result_is_error) {

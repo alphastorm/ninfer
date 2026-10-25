@@ -1195,6 +1195,128 @@ int test_tool_name_limits() {
     return failures;
 }
 
+int test_custom_tools_and_raw_replay() {
+    const std::string raw = "{\"taskId\":17}\nprint('ok')\n<xml> & \"quoted\"";
+    const Json custom_call{{"type", "custom_tool_call"}, {"id", "ctc_eval"},
+                           {"status", "completed"}, {"call_id", "call_eval"},
+                           {"name", "eval"}, {"input", raw}};
+    const Json custom_result{{"type", "custom_tool_call_output"}, {"call_id", "call_eval"},
+                             {"output", "ok"}};
+    const Json custom_tool{{"type", "custom"}, {"name", "eval"},
+                           {"description", "Evaluate one cell"},
+                           {"format", Json{{"type", "grammar"}, {"syntax", "lark"},
+                                           {"definition", "start: /.+/"}}}};
+    const Json user{{"role", "user"}, {"content", "run this cell"}};
+    Json body{{"model", "m"}, {"input", Json::array({user, custom_call, custom_result})},
+              {"tools", Json::array({custom_tool})}};
+    auto request = parse_openai_responses_create_request(body, limits());
+    int failures = 0;
+    failures += check(request.prompt.input_turns.size() == 3 &&
+                          request.prompt.input_turns[1].tool_calls[0].kind == ToolKind::Custom &&
+                          request.prompt.input_turns[1].tool_calls[0].arguments_json == raw &&
+                          request.prompt.input_turns[2].tool_kind == ToolKind::Custom &&
+                          request.prompt.input_items[1] == custom_call &&
+                          request.prompt.input_items[2].at("type") == "custom_tool_call_output" &&
+                          request.prompt.input_items[2].at("id").get<std::string>().starts_with("ctco_"),
+                      "OMP custom call/result replay lost raw text, kind or canonical wire identity");
+    failures += check(request.prompt.generation.tools[0].kind == ToolKind::Custom &&
+                          request.tools[0].at("type") == "custom" &&
+                          request.tools[0].at("format").at("syntax") == "lark",
+                      "custom declaration or prompt-guidance format was lost");
+    OpenAIResponsesStore store(8, 1ULL << 20);
+    const auto resolved = resolve_openai_responses_prompt(request.prompt, store, "resp_custom", true);
+    const auto prompt = to_prompt_input(resolved.generation, ResolvedPromptSemantics{}, {});
+    const auto definition = Json::parse(prompt.options.tool_jsons[0]);
+    failures += check(definition.at("type") == "function" &&
+                          definition.at("x-ninfer-tool-kind") == "custom" &&
+                          definition.at("function").at("parameters").at("properties").size() == 1 &&
+                          definition.at("function").at("parameters").at("properties").at("input").at("type") ==
+                              "string" &&
+                          definition.at("function").at("parameters").at("required") == Json::array({"input"}) &&
+                          prompt.messages[1].tool_calls[0].kind == ToolKind::Custom &&
+                          prompt.messages[1].tool_calls[0].arguments_json == raw,
+                      "custom definition bridge or raw public history wrapped input prematurely");
+
+    StoredOpenAIResponse parent;
+    parent.id = "resp_custom_parent";
+    parent.session_key = "custom-session";
+    parent.response = Json{{"id", parent.id}, {"object", "response"}};
+    parent.context = append_openai_response_context(
+        {}, {request.prompt.input_turns[0], request.prompt.input_turns[1]});
+    store.put(std::move(parent));
+    auto continuation = parse_openai_responses_create_request(
+        Json{{"model", "m"}, {"previous_response_id", "resp_custom_parent"},
+             {"input", Json::array({custom_result})}}, limits());
+    const auto continued = resolve_openai_responses_prompt(continuation.prompt, store, "resp_child", true);
+    failures += check(continued.generation.messages.size() == 3 &&
+                          continued.generation.messages[1].tool_calls[0].kind == ToolKind::Custom &&
+                          continued.generation.messages[1].tool_calls[0].arguments_json == raw &&
+                          continued.generation.messages[2].tool_kind == ToolKind::Custom,
+                      "previous_response_id lost a history-only custom contract");
+    auto wrong_kind = custom_result;
+    wrong_kind["type"] = "function_call_output";
+    continuation = parse_openai_responses_create_request(
+        Json{{"model", "m"}, {"previous_response_id", "resp_custom_parent"},
+             {"input", Json::array({wrong_kind})}}, limits());
+    failures += check(api_code([&] {
+                          (void)resolve_openai_responses_prompt(continuation.prompt, store, "resp_bad", true);
+                      }) == "invalid_tool_history", "custom call accepted a function-kind result");
+
+    auto outcome = sample_outcome();
+    outcome.text.clear();
+    outcome.reasoning.clear();
+    outcome.tool_calls = {ninfer::GeneratedToolCall{.name = "eval", .arguments_json = raw,
+                                                    .kind = ToolKind::Custom}};
+    const auto built = make_openai_response_object("resp_output", 1, request, {}, outcome);
+    const auto& output = built.body.at("output")[0];
+    failures += check(output.at("type") == "custom_tool_call" && output.at("input") == raw &&
+                          !output.contains("arguments") &&
+                          output.at("id").get<std::string>().starts_with("ctc_") &&
+                          built.output_history[0].tool_calls[0].kind == ToolKind::Custom &&
+                          built.output_history[0].tool_calls[0].arguments_json == raw,
+                      "aggregate custom output or stored history coerced raw input");
+    request.stream = true;
+    OpenAIResponsesEventStream stream("resp_stream", 1, request, {});
+    (void)stream.start();
+    const auto finished = stream.finish(outcome);
+    bool saw_delta = false, saw_done = false, saw_added = false, saw_item_done = false;
+    for (const auto& wire : finished.events_before_terminal) {
+        const auto event = parse_event(wire);
+        if (event.at("type") == "response.custom_tool_call_input.delta") {
+            saw_delta = event.at("delta") == raw;
+        } else if (event.at("type") == "response.custom_tool_call_input.done") {
+            saw_done = event.at("input") == raw && !event.contains("arguments");
+        } else if (event.at("type") == "response.output_item.added") {
+            saw_added = event.at("item").at("type") == "custom_tool_call" &&
+                        event.at("item").at("input") == "";
+        } else if (event.at("type") == "response.output_item.done") {
+            saw_item_done = event.at("item").at("type") == "custom_tool_call" &&
+                            event.at("item").at("input") == raw;
+        }
+    }
+    failures += check(saw_delta && saw_done && saw_added && saw_item_done &&
+                          parse_event(stream.terminal(finished.response)).at("response").at("output")[0].at("input") ==
+                              raw,
+                      "custom streaming item/input events or terminal response changed");
+    for (const auto& value : {std::string("123"), std::string("true"), std::string("{\"x\":1}"),
+                              std::string("\n\nnot JSON\n")}) {
+        body["input"][1]["input"] = value;
+        failures += check(parse_openai_responses_create_request(body, limits())
+                              .prompt.input_turns[1].tool_calls[0].arguments_json == value,
+                          "custom replay JSON-sniffed or trimmed raw input");
+    }
+    for (const auto& invalid_format : {
+            Json{{"type", "grammar"}, {"syntax", "peg"}, {"definition", "x"}},
+            Json{{"type", "grammar"}, {"syntax", "lark"}},
+            Json{{"type", "text"}, {"unexpected", true}}}) {
+        body["tools"][0]["format"] = invalid_format;
+        failures += check(api_error([&] {
+                          (void)parse_openai_responses_create_request(body, limits());
+                      }).status == 400, "unsupported or malformed custom format accepted");
+    }
+    return failures;
+}
+
 int test_scoped_restore_on_first_request() {
     const std::string session(64, 'a'), foreign(64, 'b');
     OpenAIResponsesStore disk_source(8, 1ULL << 20), live(8, 1ULL << 20);
@@ -1281,6 +1403,7 @@ int test_scoped_restore_on_first_request() {
 int main() {
     int failures = 0;
     failures += test_tool_name_limits();
+    failures += test_custom_tools_and_raw_replay();
     failures += test_scoped_restore_on_first_request();
     failures += test_constrained_decoding();
     failures += test_basic_request_and_resolution();

@@ -79,6 +79,8 @@ struct ContentPart {
     std::optional<CacheBoundary> cache_boundary_after;
 };
 
+using ToolKind = ninfer::ToolKind;
+
 struct ToolDefinition {
     std::string name;
     std::string description;
@@ -87,12 +89,14 @@ struct ToolDefinition {
     bool strict = false;
     std::optional<std::string> input_examples_json;
     std::optional<CacheBoundary> cache_boundary_after;
+    ToolKind kind = ToolKind::Function;
 };
 
 struct ToolCall {
     std::string id;
     std::string name;
-    std::string arguments_json;
+    std::string arguments_json; // Function: JSON object; Custom: opaque raw input.
+    ToolKind kind = ToolKind::Function;
 };
 
 using ToolChoiceMode = ninfer::ToolChoiceMode;
@@ -103,6 +107,7 @@ struct ChatTurn {
     std::vector<ContentPart> content; // ordered parts; may be empty when wire content is empty
     std::vector<ToolCall> tool_calls;
     std::string tool_call_id; // populated for role=tool
+    ToolKind tool_kind = ToolKind::Function;
     // Optional protocol assertion for a tool result. Call-graph normalization verifies it against
     // the function identified by tool_call_id before the Engine sees the history.
     std::optional<std::string> tool_result_name;
