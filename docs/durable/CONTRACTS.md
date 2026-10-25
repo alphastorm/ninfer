@@ -223,16 +223,30 @@ The public `Engine` API stays unchanged except integration-owned friendship.
   Engine worker work while holding it. Bulk hashing/writing precedes the gate.
 - `prepare_import(engine, target, Reader&, fingerprint, expected_stats, limits)`
   returns `Prepared` plus an owning transaction, or `CapacityRefused`, `Corrupt`,
-  `IdentityMismatch`, `PolicyDisabled`. Prepared is not visible success.
+  `IdentityMismatch`, `PolicyDisabled`, `Unavailable`. `Unavailable/IoUnavailable`
+  is a retryable read failure, never corruption: abort unpublished reservations,
+  preserve the generation, and publish no partial state. Prepared is not visible success.
 - `DurableEngineImport::commit()` returns `Imported`, `CapacityRefused`, `Corrupt`,
   `IdentityMismatch`, or `PolicyDisabled`. Commit rechecks the captured epoch/policy;
   stale publication maps to `IdentityMismatch/stale_publication`, never corruption.
   After native publication, no operation may fail. `abort()` is idempotent; destruction
   aborts uncommitted work after all outstanding writers retire.
 - `import_session(...)` is prepare→commit/abort convenience for non-Responses callers.
-  Responses MUST use K4, not the convenience path.
+  Responses MUST use K4, not the convenience path. `DurableImportState::Unavailable`
+  preserves a prepare-time `Unavailable/IoUnavailable` unchanged through this
+  convenience API and service restore callbacks; never coerce it to corruption.
 - Capture `session_epoch` before disk loading. Capture publication epoch from the
   submitted handle, not handler completion time. Tokens are runtime-only.
+
+The `fingerprint` argument is the trusted cached active `RuntimeFingerprintV2`
+collected by serving, never the untrusted parsed manifest object. Before producing
+import input, the store authenticates the manifest and exact-compares its complete
+v2 fingerprint against that active identity. Engine validates only the supplied
+engine/native-layout/frontend subset against its actual loaded state. Build,
+artifact and deployment identity remain the store/serving validation responsibility:
+do not fabricate missing hashes or rehash the model artifact on every restore.
+Non-Responses convenience callers must use the same authenticated complete-fingerprint
+store gate; they do not gain a bypass by calling the internal adapter directly.
 
 Program owns concrete move-only types, implemented beside native context ownership:
 
@@ -282,6 +296,15 @@ actual destination or immutable delivered chunk, not a separately reopened file;
 lengths/digests, no holes/overlaps and no in-flight writes. Failed verification
 prevents commit. A fresh attempt needs a fresh single-pass Reader. Store verification
 of responses/index bytes obeys the same rule. Bounds apply before allocation.
+
+Reader also exposes `virtual DurableReason failure_reason() const noexcept`.
+After a failed read or completion check, callers preserve that typed cause rather
+than treating every false result as corruption. `IoUnavailable` maps to
+`DurablePrepareState::Unavailable`: retryable, no quarantine, no partial publication.
+Verified size/digest mismatches report `PayloadSizeMismatch`/`PayloadDigestMismatch`
+and map to `Corrupt`, permitting quarantine of that generation. `None` denotes no
+recorded failure, not a substitute for an observed I/O error. A1 implements the
+accessor in concrete readers/fakes; native and Engine import layers propagate it.
 
 Import never bypasses `allow_prefix_reuse` or serving `CacheParticipation`:
 `Disabled`, startup warmup, or disabled cache gives `PolicyDisabled/cache_disabled`
@@ -462,8 +485,12 @@ the single spelling authority for reasons in diagnostics and receipts. Its `unkn
 fallback diagnoses an invalid enum value and is not a valid wire reason.
 `none` appears only with success. Store load states are `available`, `missing`,
 `incompatible`, `corrupt`, `unavailable`; export is `exported`, `refused`, `stale`;
-prepare is `prepared`; import is `imported`, `capacity_refused`, `corrupt`,
-`identity_mismatch`, `policy_disabled`. A prepared reservation is never an import ack.
+prepare is `prepared`, `capacity_refused`, `corrupt`, `identity_mismatch`,
+`policy_disabled`, `unavailable`; import is `imported`, `capacity_refused`, `corrupt`,
+`identity_mismatch`, `policy_disabled`, `unavailable`. A prepared reservation is never an import ack.
+Prepare/import `unavailable` with `io_unavailable` is retryable, preserves the generation,
+never quarantines it and cannot publish partial state; Reader `failure_reason()`
+is the source of that distinction from verified payload corruption.
 
 | Reason class | Stable reasons | Mutation / retry posture |
 |---|---|---|
