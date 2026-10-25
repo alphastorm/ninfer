@@ -15,6 +15,7 @@
 
 namespace ninfer::test {
 void materialization_cuda_errors(DeviceContext& device);
+void materialization_alignment_checks(std::optional<CudaExecutionView>);
 }
 
 namespace {
@@ -351,6 +352,7 @@ int main(int argc, char** argv) {
     try {
         if (argc == 2 && std::string_view(argv[1]) == "--cpu-only") {
             cpu_materialization();
+            ninfer::test::materialization_alignment_checks({});
             std::cout << "CPU-only tensor and resource materialization passed\n";
             return 0;
         }
@@ -371,6 +373,7 @@ int main(int argc, char** argv) {
             throw std::invalid_argument("expected [--artifact|--writer-fixture PATH]");
         }
         materialization(device);
+        ninfer::test::materialization_alignment_checks(device.transfer_view());
         registered_materialization(device);
         failure_and_host_only(device);
         ninfer::test::materialization_cuda_errors(device);
