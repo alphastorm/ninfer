@@ -2154,6 +2154,14 @@ def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
 
     # The server's cache-disabled startup warmup is real scheduler work. Measure a
     # fresh process before seeding; this phase may inherit earlier qualification traffic.
+    # Start is idempotent and preserves stopped-entry recovery before the strict restart.
+    run(
+        [
+            "powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+            str(controller), "-Action", "Start", "-StateRoot", str(state_root),
+        ],
+        timeout=900,
+    )
     restart_server()
     key = read_key(Path(release["api_key_file"]))
     base = f"http://{release['host']}:{release['port']}"

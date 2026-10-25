@@ -600,6 +600,7 @@ class RestartFixtureTests(unittest.TestCase):
         self, *, baseline: dict | None = None, restarted: dict | None = None,
         pids: tuple[int, int] = (101, 202), control_answer: str | None = None,
         flush_answer: str | None = None, control_cached: int = 1600, flush_cached: int = 1600,
+        entry_stopped: bool = False,
     ) -> tuple[dict, list, list]:
         baseline = copy.deepcopy(self.status() if baseline is None else baseline)
         restarted = copy.deepcopy(baseline if restarted is None else restarted)
@@ -621,14 +622,23 @@ class RestartFixtureTests(unittest.TestCase):
                                    state_root=str(root), model_id="unit-model")
             counters, listeners = iter((baseline, restarted)), iter(pids)
             save = json.loads((ROOT / "tests/fixtures/durable/ack-windows.json").read_text())
+            running = not entry_stopped
 
             def controller(_controller, _root, action):
+                nonlocal running
                 events.append(("controller", action))
-                return {"last_stop": {"mode": "stop-event", "outcome": "graceful", "forced": False}}
+                stop = {"mode": "stop-event" if running else "none",
+                        "outcome": "graceful" if running else "already_stopped", "forced": False}
+                running = True
+                return {"last_stop": stop}
 
             def run(command, **_kwargs):
+                nonlocal running
                 if any("Get-NetTCPConnection" in str(part) for part in command):
                     return SimpleNamespace(stdout=str(next(listeners)))
+                if "-Action" in command and command[command.index("-Action") + 1] == "Start":
+                    events.append(("controller", "Start"))
+                    running = True
                 return SimpleNamespace(stdout="")
 
             def request(_base, _key, method, route, body=None):
@@ -673,10 +683,18 @@ class RestartFixtureTests(unittest.TestCase):
                 self.assertEqual(receipt["counters_after_restart"], expected)
                 self.assertTrue(receipt["restart_counters_reset"])
                 self.assertNotEqual(receipt["old_pid"], receipt["new_pid"])
-                self.assertEqual(events[0], ("controller", "Restart"))
-                self.assertEqual(events[1], ("request", "GET", "/v1/ninfer/status"))
+                self.assertEqual(events[0], ("controller", "Start"))
+                self.assertEqual(events[1], ("controller", "Restart"))
+                self.assertEqual(events[2], ("request", "GET", "/v1/ninfer/status"))
                 self.assertEqual([event for event in events if event[0] == "controller"],
-                                 [("controller", "Restart"), ("controller", "Restart")])
+                                 [("controller", "Start"), ("controller", "Restart"),
+                                  ("controller", "Restart")])
+
+    def test_restart_preserves_idempotent_stopped_entry_before_cold_setup(self) -> None:
+        receipt, events, _ = self.restart_fixture(entry_stopped=True)
+        self.assertTrue(receipt["restart_counters_reset"])
+        self.assertEqual(events[:3], [("controller", "Start"), ("controller", "Restart"),
+                                     ("request", "GET", "/v1/ninfer/status")])
 
     def test_restart_refuses_drift_from_each_measured_counter(self) -> None:
         for section, field in (("scheduler", "computed_prefill_tokens"),
