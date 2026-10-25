@@ -66,7 +66,7 @@ def fixture(index):
     return "\n".join(lines)
 
 
-def bind_log(path, rows, started):
+def bind_log(path, rows, started, require_copy_counters=True):
     done = [r for r in records(path) if r.get("event") == "request_done"
             and r.get("timestamp_unix_ms", 0) >= started]
     used = set()
@@ -90,7 +90,7 @@ def bind_log(path, rows, started):
                                "ngram_drafted_tokens", "ngram_accepted_tokens")})
         if row["kind"] != "read" and not row["server"]["decode"]:
             raise RuntimeError("missing decode timing for " + row["id"])
-        if any(row["server"][key] is None for key in
+        if require_copy_counters and any(row["server"][key] is None for key in
                ("ngram_rounds", "ngram_drafted_tokens", "ngram_accepted_tokens")):
             raise RuntimeError("copy counters unavailable")
 
@@ -221,8 +221,9 @@ def run(args):
 
     # Bounded publication grace, not a repeat of any inference request.
     time.sleep(2)
-    bind_log(args.request_log, rows, started)
+    bind_log(args.request_log, rows, started, require_copy_counters=not args.reference)
     receipt = {"schema_version": 1, "experiment": "S1", "arm": args.arm,
+               "reference": args.reference,
                "copy_window": args.copy_window, "source_commit": args.source_commit,
                "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
                "artifact_sha256": args.artifact_sha256,
@@ -244,56 +245,73 @@ def compare(args):
     arms = [json.loads(path.read_text()) for path in args.receipts]
     if len(arms) != 4 or [a["copy_window"] for a in arms] != [0, 15, 15, 0]:
         raise ValueError("expected matched off/on/on/off arms")
+    baseline = json.loads(args.baseline.read_text())
+    if not baseline["reference"] or baseline["copy_window"] != 0 or any(a["reference"] for a in arms):
+        raise ValueError("expected a separate unmodified-base greedy reference")
     for field in ("binary_sha256", "artifact_sha256", "source_commit", "runner_sha256",
                   "probe_sha256", "qualification_sha256", "long_fixture_sha256", "shape"):
         if any(a[field] != arms[0][field] for a in arms):
             raise ValueError("arm identity mismatch: " + field)
+        if field not in ("binary_sha256", "source_commit") and baseline[field] != arms[0][field]:
+            raise ValueError("baseline fixture mismatch: " + field)
     indexes = [{r["id"]: r for r in a["requests"]} for a in arms]
-    if any(set(index) != set(indexes[0]) for index in indexes):
+    reference = {r["id"]: r for r in baseline["requests"]}
+    if any(set(index) != set(indexes[0]) for index in indexes) or set(reference) != set(indexes[0]):
         raise ValueError("arm request set mismatch")
     rows = []
     for case_id in indexes[0]:
         requests = [index[case_id] for index in indexes]
-        same_input = len({r["request_sha256"] for r in requests}) == 1
+        same_input = len({r["request_sha256"] for r in requests} |
+                         {reference[case_id]["request_sha256"]}) == 1
         same_output = len({r["output_sha256"] for r in requests}) == 1
         off_identical = requests[0]["output_sha256"] == requests[3]["output_sha256"]
+        baseline_equal = off_identical and requests[0]["output_sha256"] == reference[case_id]["output_sha256"]
         rates = [r["completion_tokens"] / r["server"]["decode"] if r["server"]["decode"] else None
                  for r in requests]
         change = None if None in rates else 100 * (statistics.median(rates[1:3]) /
                                                    statistics.median([rates[0], rates[3]]) - 1)
         rows.append({"id": case_id, "kind": requests[0]["kind"], "same_input": same_input,
                      "greedy_equal": same_output, "disabled_equal": off_identical,
+                     "baseline_disabled_equal": baseline_equal,
                      "decode_tok_s_abba": rates, "decode_change_percent": change,
                      "copy_proposed_abba": [r["server"]["ngram_drafted_tokens"] for r in requests],
                      "copy_accepted_abba": [r["server"]["ngram_accepted_tokens"] for r in requests]})
     groups = {}
-    for kind in ("edit", "explain", "role", "depth", "paired_copy", "paired_control",
+    for kind in ("read", "edit", "explain", "role", "depth", "paired_copy", "paired_control",
                  "constraint_copy", "constraint_control"):
         rates = []
         for arm in arms:
             selected = [r for r in arm["requests"] if r["kind"] == kind]
-            rates.append(sum(r["completion_tokens"] for r in selected) /
-                         sum(r["server"]["decode"] for r in selected))
+            seconds = sum(r["server"]["decode"] for r in selected)
+            rates.append(sum(r["completion_tokens"] for r in selected) / seconds if seconds else None)
         groups[kind] = {"weighted_decode_tok_s_abba": rates,
-                        "change_percent": 100 * (statistics.median(rates[1:3]) /
-                                                  statistics.median([rates[0], rates[3]]) - 1)}
+                        "change_percent": None if None in rates else
+                            100 * (statistics.median(rates[1:3]) /
+                                   statistics.median([rates[0], rates[3]]) - 1)}
     input_equal = all(r["same_input"] for r in rows)
-    output_equal = all(r["greedy_equal"] and r["disabled_equal"] for r in rows)
+    output_equal = all(r["greedy_equal"] and r["baseline_disabled_equal"] for r in rows)
     edit_exact = all(r.get("exact_edit", True) for a in arms for r in a["requests"])
     constraint_exact = all(a["mixed_constraint_exact"] for a in arms)
     copy_exercised = any(r["copy_accepted_abba"][1] > 0 for r in rows if r["kind"] == "edit")
     controls = [groups[k]["change_percent"] for k in
                 ("explain", "role", "depth", "paired_control", "constraint_control")]
+    if groups["read"]["change_percent"] is not None:
+        controls.append(groups["read"]["change_percent"])
     controls.extend(r["decode_change_percent"] for r in rows if r["kind"] == "depth")
     passed = input_equal and output_equal and edit_exact and constraint_exact and copy_exercised and \
         groups["edit"]["change_percent"] >= 15 and min(controls) >= -0.5
     write_receipt(args.receipt, {"schema_version": 1, "experiment": "S1", "recommendation": "go" if passed else "no-go",
         "binary_sha256": arms[0]["binary_sha256"], "source_commit": arms[0]["source_commit"],
+        "baseline_source_commit": baseline["source_commit"],
+        "baseline_binary_sha256": baseline["binary_sha256"],
+        "baseline_receipt": args.baseline.name,
         "arm_receipts": [p.name for p in args.receipts], "groups": groups, "requests": rows,
         "acceptance": {"edit_gain_min_percent": 15, "other_loss_max_percent": 0.5,
                        "matched_inputs": input_equal, "greedy_equal": output_equal,
+                       "baseline_disabled_equal": all(r["baseline_disabled_equal"] for r in rows),
                        "edits_exact": edit_exact, "accepted_copies_exercised": copy_exercised,
                        "mixed_constraint_exact": constraint_exact,
+                       "read_decode_measurable": groups["read"]["change_percent"] is not None,
                        "passed": passed},
         "scope": "One bounded ABBA experiment, not a powered statistical or release qualification.",
         "raw_content_included": False})
@@ -308,10 +326,13 @@ def main():
     for name in ("arm", "base-url", "source-commit", "artifact-sha256"):
         arm.add_argument("--" + name, required=True)
     arm.add_argument("--copy-window", type=int, choices=(0, 15), required=True)
+    arm.add_argument("--reference", action="store_true",
+                     help="Unmodified-base greedy reference; absent copy counters stay null.")
     for name in ("api-key-file", "probe", "qualification", "long-fixture", "request-log", "binary", "receipt"):
         arm.add_argument("--" + name, type=Path, required=True)
     summary = subs.add_parser("compare")
     summary.add_argument("receipts", type=Path, nargs=4)
+    summary.add_argument("--baseline", type=Path, required=True)
     summary.add_argument("--receipt", type=Path, required=True)
     args = parser.parse_args()
     return run(args) if args.command == "run" else compare(args)
