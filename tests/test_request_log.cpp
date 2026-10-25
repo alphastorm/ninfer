@@ -12,6 +12,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #if defined(_WIN32)
@@ -148,6 +149,7 @@ int main() {
     engine_options.max_concurrency                   = 2;
     engine_options.max_pending_requests              = options.max_pending_requests;
     engine_options.pending_timeout_ms                = options.pending_timeout_ms;
+    engine_options.gpu_keep_warm_ms                   = 25;
     engine_options.prefill_chunk                     = options.prefill_chunk;
     engine_options.kv_cache                          = options.kv_cache;
     engine_options.speculative                       = options.speculative;
@@ -236,6 +238,8 @@ int main() {
                           server.at("identity").at("target") == load.architecture &&
                           server.at("identity").at("model_id") == "deployment-alias",
                       "startup lifecycle identity lost actual build/deployment/model values");
+    failures += check(server.at("engine").at("gpu_keep_warm_ms") == 25,
+                      "startup log lost effective keep-warm interval");
     ninfer::RuntimeStats status_runtime;
     status_runtime.private_catalog_occupied = 3;
     status_runtime.shared_catalog_occupied = 4;
@@ -277,6 +281,17 @@ int main() {
     failures += check(Json::parse(format_status_json(options, engine_options, "deployment-alias",
                                                       load, memory, status_runtime, false)).at("status") ==
                           "unavailable", "unavailable Engine was reported healthy");
+    for (const auto& [path, name] : {
+            std::pair{ninfer::PrefixReusePath::PrivateEndpoint, "private_endpoint"},
+            std::pair{ninfer::PrefixReusePath::PrivateInputReplay, "private_input_replay"},
+            std::pair{ninfer::PrefixReusePath::PrivateLongAnchor, "private_long_anchor"},
+            std::pair{ninfer::PrefixReusePath::SharedStablePrefix, "shared_stable_prefix"}}) {
+        status_runtime.last_selected_reuse_path = path;
+        failures += check(Json::parse(format_status_json(options, engine_options, "deployment-alias",
+                                                          load, memory, status_runtime))
+                              .at("cache").at("last_selection").at("path") == name,
+                          "actual native checkpoint role string was lost");
+    }
     failures += check(server.at("artifact_type") == kRequestLogArtifactType,
                       "server record artifact type mismatch");
     failures += check(server.at("schema_version") == kRequestLogSchemaVersion,
