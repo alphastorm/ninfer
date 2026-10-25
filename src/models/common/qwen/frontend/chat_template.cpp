@@ -224,8 +224,10 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
                      {"function",
                       {{"name", call.name},
                        {"arguments",
-                        (call.arguments_json.empty() ? Json::object()
-                                                     : Json::parse(call.arguments_json))}}}});
+                        (call.kind == ToolKind::Custom
+                             ? Json{{"input", call.arguments_json}}
+                             : call.arguments_json.empty() ? Json::object()
+                                                           : Json::parse(call.arguments_json))}}}});
             }
         }
         if (!message.tool_call_id.empty()) value["tool_call_id"] = message.tool_call_id;
@@ -235,7 +237,9 @@ RenderedChat CompiledChatTemplate::render(const std::vector<ChatMessage>& messag
     if (!options.tool_jsons.empty()) {
         context["tools"] = Json::array();
         for (std::size_t i = 0; i < options.tool_jsons.size(); ++i) {
-            context["tools"].push_back(Json::parse(options.tool_jsons[i]));
+            auto declaration = Json::parse(options.tool_jsons[i]);
+            declaration.erase("x-ninfer-tool-kind");
+            context["tools"].push_back(std::move(declaration));
             tool_tags.push_back(tag("/tools/" + std::to_string(i)));
         }
     }

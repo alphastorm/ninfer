@@ -7,9 +7,12 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ninfer::models::qwen::frontend {
+
+inline constexpr std::string_view kParserCodec = "qwen-parser/1";
 
 // Immutable declarations and parameter codecs shared by the grammar builder and output decoder.
 struct ToolCallOutputContract {
@@ -47,6 +50,9 @@ struct ToolCallOutputContract {
         std::string schema_json;
         std::size_t declaration_index = 0;
         bool strict                   = false;
+        ToolKind kind                 = ToolKind::Function;
+        bool declared                 = true;
+        bool unambiguous              = true;
     };
 
     std::vector<Tool> tools;
@@ -56,7 +62,8 @@ struct ToolCallOutputContract {
 };
 
 [[nodiscard]] std::shared_ptr<const ToolCallOutputContract>
-build_tool_call_output_contract(std::span<const std::string> tool_jsons);
+build_tool_call_output_contract(std::span<const std::string> tool_jsons,
+                                std::span<const ChatMessage> messages = {});
 
 [[nodiscard]] std::shared_ptr<const ToolCallOutputContract>
 select_tool_call_contract(const std::shared_ptr<const ToolCallOutputContract>& declarations,

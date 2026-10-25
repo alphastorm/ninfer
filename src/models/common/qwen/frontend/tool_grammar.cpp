@@ -16,7 +16,9 @@ using Contract = ToolCallOutputContract;
 xgrammar::Grammar arguments(const Contract::Tool& tool) {
     try {
         std::string source;
-        if (tool.strict)
+        if (tool.kind == ToolKind::Custom)
+            source = R"({"type":"object","properties":{"input":{"type":"string"}},"required":["input"],"additionalProperties":false})";
+        else if (tool.strict)
             source = text::prepare_json_schema(tool.schema_json);
         else
             source = R"({"type":"object","additionalProperties":{"type":"string"}})";
@@ -57,10 +59,11 @@ xgrammar::Grammar build(const Contract& contract, const std::optional<OutputCons
     std::vector<int32_t> choices;
     std::optional<int32_t> basic_arguments;
     for (const auto& tool : contract.tools) {
-        const auto body = !tool.strict && basic_arguments
+        const bool basic = !tool.strict && tool.kind == ToolKind::Function;
+        const auto body = basic && basic_arguments
                               ? *basic_arguments
                               : xgrammar::SubGrammarAdder::Apply(&builder, arguments(tool));
-        if (!tool.strict) basic_arguments = body;
+        if (basic) basic_arguments = body;
         choices.push_back(builder.AddSequence(
             {builder.AddByteString("\n<function=" + tool.name + ">\n"), builder.AddRuleRef(body),
              builder.AddByteString("</function>\n</tool_call>")}));
@@ -94,7 +97,9 @@ compile_tool_grammar(text::GrammarCompiler& compiler, const Contract& contract,
                            "JSON constraints do not accept literal alternatives");
     if (body) identity["body"] = {{"kind", static_cast<int>(body->kind)}, {"source", body->source}};
     for (const auto& tool : contract.tools) {
-        Json entry{{"name", tool.name}, {"strict", tool.strict}};
+        Json entry{{"name", tool.name},
+                   {"strict", tool.strict},
+                   {"kind", static_cast<int>(tool.kind)}};
         if (tool.strict) {
             entry["schema"] = Json::parse(tool.schema_json);
             // Failed compilations are cached too, including their declaration error location.
