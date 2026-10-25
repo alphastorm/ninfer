@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/uint128.h"
 #include "runtime/contract/resources.h"
 #include "runtime/engine/context_cache/context_cost.h"
 #include "runtime/engine/context_cache/prefix_index.h"
@@ -90,6 +91,7 @@ public:
             for (const auto handle : index_.matches(program, base)) {
                 if (program.checkpoint_metadata(handle).frontier > maximum_frontier) { continue; }
                 for (const auto& owner : owners_) {
+                    if (owner.reuse_scope != base.context_cache().reuse_scope) { continue; }
                     const auto point =
                         std::find_if(owner.points.begin(), owner.points.end(),
                                      [&](const auto& p) { return p.handle == handle; });
@@ -99,6 +101,7 @@ public:
                         own_resume
                             ? *own_resume == owner.token
                             : !owner.active && owner.publication_order <= publication_order &&
+                                  (!owner.reuse_scope || advice.update_session_index) &&
                                   (!owner.session || (advice.update_session_index &&
                                                       advice.session_key == owner.session));
                     result.push_back(
@@ -111,7 +114,10 @@ public:
                          .ordinal           = owner.token});
                 }
                 for (const auto& shared : shared_) {
-                    if (shared.handle != handle) { continue; }
+                    if (shared.handle != handle ||
+                        shared.shared_reuse_scope != base.context_cache().shared_reuse_scope) {
+                        continue;
+                    }
                     result.push_back({.source       = Source{.checkpoint = handle},
                                       .shared_entry = shared.ordinal,
                                       .resume_owner = own_resume,
@@ -178,6 +184,11 @@ public:
         const auto selected = choice.source.checkpoint;
         if (selected && !program.valid_checkpoint(*selected)) { return false; }
         auto* owner = find_owner(choice.owner);
+        if (owner && owner->reuse_scope != base.context_cache().reuse_scope) { return false; }
+        if (const auto* shared = find_shared(choice.shared_entry);
+            shared && shared->shared_reuse_scope != base.context_cache().shared_reuse_scope) {
+            return false;
+        }
         if (choice.take_over && (!owner || owner->publication_order != choice.publication_order ||
                                  (owner->active && choice.resume_owner != choice.owner))) {
             choice.take_over = false;
@@ -295,7 +306,11 @@ public:
         std::uint32_t proven_frontier = 0;
         if (choice.resume_owner) {
             token = *choice.resume_owner;
-            if (!find_owner(token)) { throw std::logic_error("resume lost continuation owner"); }
+            const auto* owner = find_owner(token);
+            if (!owner || owner->reuse_scope != base.context_cache().reuse_scope ||
+                owner->shared_reuse_scope != base.context_cache().shared_reuse_scope) {
+                throw std::logic_error("resume lost continuation owner or cache scope");
+            }
         } else {
             if (choice.source.reused_tokens) {
                 const auto used_at = ++clock_;
@@ -322,7 +337,9 @@ public:
                 owners_.push_back({.token           = token,
                                    .priority        = priority,
                                    .proven_frontier = proven_frontier,
-                                   .retained_at     = ++clock_});
+                                   .retained_at     = ++clock_,
+                                   .reuse_scope     = base.context_cache().reuse_scope,
+                                   .shared_reuse_scope = base.context_cache().shared_reuse_scope});
             }
         }
         auto* owner              = find_owner(token);
@@ -342,13 +359,16 @@ public:
             return;
         }
         if (summary.role == CheckpointRole::SharedPrefix) {
+            const auto* owner = find_owner(token);
+            if (!owner) { throw std::logic_error("shared publication lost continuation owner"); }
             if (std::none_of(shared_.begin(), shared_.end(),
                              [&](const auto& entry) { return entry.handle == handle; })) {
                 shared_.push_back(
                     {.handle   = handle,
                      .ordinal  = ++ordinal_,
                      .priority = demand_priority(program.checkpoint_key(handle, summary.frontier)),
-                     .retained_at = ++clock_});
+                     .retained_at = ++clock_,
+                     .shared_reuse_scope = owner->shared_reuse_scope});
                 index_.insert(program, handle, summary.frontier);
             }
         } else {
@@ -402,11 +422,15 @@ public:
         if (advice.update_session_index && advice.session_key) {
             const auto newer = std::any_of(owners_.begin(), owners_.end(), [&](const auto& other) {
                 return other.token != token && other.session == advice.session_key &&
+                       other.reuse_scope == owner->reuse_scope &&
                        other.publication_order > publication_order;
             });
             if (!newer) {
                 for (auto& other : owners_) {
-                    if (other.session == advice.session_key) { other.session.reset(); }
+                    if (other.session == advice.session_key &&
+                        other.reuse_scope == owner->reuse_scope) {
+                        other.session.reset();
+                    }
                 }
                 owner->session = advice.session_key;
             }
@@ -821,6 +845,9 @@ private:
         std::uint64_t publication_order = 0;
         bool active                     = false;
         std::optional<SessionKey> session;
+        // The named binding can move; the original private and principal scopes cannot.
+        std::optional<SessionKey> reuse_scope;
+        std::optional<SessionKey> shared_reuse_scope;
         std::vector<Point> points;
     };
 
@@ -829,6 +856,7 @@ private:
         std::uint64_t ordinal;
         CacheRetentionPriority priority;
         std::uint64_t retained_at;
+        std::optional<SessionKey> shared_reuse_scope;
     };
 
     static bool contains(std::span<const Handle> handles, Handle handle) {
@@ -1182,9 +1210,9 @@ private:
             return left.priority.last_demand < right.priority.last_demand;
         }
         if (!left.priority.reused) {
-            const auto a = static_cast<unsigned __int128>(left.loss) * right.units;
-            const auto b = static_cast<unsigned __int128>(right.loss) * left.units;
-            if (a != b) { return a < b; }
+            const auto a = core::wide_multiply(left.loss, right.units);
+            const auto b = core::wide_multiply(right.loss, left.units);
+            if (a != b) { return core::wide_less(a, b); }
         }
         return left.order < right.order;
     }

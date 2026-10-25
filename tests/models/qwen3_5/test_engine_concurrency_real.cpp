@@ -150,6 +150,8 @@ void shared_readers_and_live_sibling(ninfer::Engine& engine) {
 
 class CancelAfterOutput final : public ninfer::OutputSink {
 public:
+    void start(ninfer::GenerationStart) override {}
+    void progress(ninfer::PromptProgress) override {}
     void timing(ninfer::GenerationTimingObservation timing) override {
         if (timing.generated_tokens) { output.store(true, std::memory_order_release); }
     }

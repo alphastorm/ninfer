@@ -1,0 +1,88 @@
+"""Exercise the startup gate against numeric receipts, not source-text wiring."""
+from __future__ import annotations
+
+import copy
+import importlib.util
+import json
+from pathlib import Path
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+SPEC = importlib.util.spec_from_file_location("engine_cache_gate", ROOT / "tools/smoke/engine_cache_gate.py")
+assert SPEC is not None and SPEC.loader is not None
+GATE = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(GATE)
+UUID = "GPU-00112233-4455-6677-8899-aabbccddeeff"
+
+
+def startup() -> dict:
+    return {"event": "server_start", "artifact": {"path": "/private/model.ninfer"},
+            "engine": {**GATE.SHAPE, "kv_capacity_mode": "auto", "kv_capacity": 140000,
+                       "context_cache": {"device_state_slots": 2}},
+            "environment": {"gpu_uuid": UUID, "total_device_memory_bytes": 32607 * GATE.MIB,
+                            "gpu_name": "RTX 5090"},
+            "memory": {"device_budget_bytes": 32000 * GATE.MIB,
+                       "runtime_reservation_bytes": 12000 * GATE.MIB,
+                       "cuda_graph_rebuild_estimate_bytes": 1024 * GATE.MIB,
+                       "available_after_startup_bytes": 256 * GATE.MIB}}
+
+
+class StartupGateTests(unittest.TestCase):
+    def test_accepts_attested_shape_and_only_exports_allowlisted_fields(self) -> None:
+        source = startup()
+        summary = GATE.validate_startup(source, source, UUID)
+        self.assertEqual(summary["engine"]["max_context"], 131072)
+        self.assertNotIn("artifact", summary)
+        self.assertNotIn("gpu_uuid", summary)
+        self.assertNotIn("/private/", json.dumps(summary))
+
+    def test_graph_reservation_growth_fails_even_if_the_server_is_healthy(self) -> None:
+        baseline = startup()
+        current = copy.deepcopy(baseline)
+        current["memory"]["cuda_graph_rebuild_estimate_bytes"] += 1
+        with self.assertRaisesRegex(GATE.GateError, "cuda_graph_reservation_growth"):
+            GATE.validate_startup(current, baseline, UUID)
+
+    def test_refused_context_or_wrong_shape_does_not_pass(self) -> None:
+        baseline = startup()
+        for field, value in (("max_concurrency", 1), ("max_context", 32768),
+                             ("speculative_draft_window", 3), ("vision", False),
+                             ("cuda_graph", False), ("kv_cache", "fp8")):
+            with self.subTest(field=field):
+                current = copy.deepcopy(baseline)
+                current["engine"][field] = value
+                with self.assertRaises(GATE.GateError):
+                    GATE.validate_startup(current, baseline, UUID)
+        current = copy.deepcopy(baseline)
+        current["engine"]["kv_capacity"] = 65536
+        with self.assertRaisesRegex(GATE.GateError, "logical_context_refused"):
+            GATE.validate_startup(current, baseline, UUID)
+
+    def test_device_attestation_and_budget_are_not_optional(self) -> None:
+        baseline = startup()
+        for field, value in (("gpu_uuid", "other"), ("total_device_memory_bytes", 48 << 30)):
+            current = copy.deepcopy(baseline)
+            current["environment"][field] = value
+            with self.subTest(field=field), self.assertRaises(GATE.GateError):
+                GATE.validate_startup(current, baseline, UUID)
+        current = copy.deepcopy(baseline)
+        current["memory"]["runtime_reservation_bytes"] = 33 << 30
+        with self.assertRaisesRegex(GATE.GateError, "runtime_reservation_exceeds_device_budget"):
+            GATE.validate_startup(current, baseline, UUID)
+
+    def test_requires_exactly_one_real_startup_record(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "events.jsonl"
+            path.write_text(json.dumps({"event": "request_done"}) + "\n")
+            with self.assertRaises(GATE.GateError):
+                GATE.startup_record(path)
+            path.write_text(json.dumps(startup()) + "\n")
+            self.assertEqual(GATE.startup_record(path)["event"], "server_start")
+            path.write_text((json.dumps(startup()) + "\n") * 2)
+            with self.assertRaises(GATE.GateError):
+                GATE.startup_record(path)
+
+
+if __name__ == "__main__":
+    unittest.main()

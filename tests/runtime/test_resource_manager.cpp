@@ -34,6 +34,8 @@ struct Base {
     struct Advice {
         bool update_session_index = true;
         std::optional<std::uint64_t> session_key;
+        std::optional<std::uint64_t> reuse_scope;
+        std::optional<std::uint64_t> shared_reuse_scope;
     };
 
     Key tokens;
@@ -969,6 +971,97 @@ void test_session_submission_order_controls_only_the_named_hint() {
             "an older late finish replaced the named hint or deleted anonymous history");
     require(!f.cache.retention(old_owner).reused && !f.cache.retention(new_owner).reused,
             "session publication manufactured a cache hit");
+}
+
+void test_private_scope_survives_named_binding_replacement() {
+    Fixture f(256);
+    const Base base{.tokens = {1, 2},
+                    .advice = {.session_key = 42, .reuse_scope = 42, .shared_reuse_scope = 7}};
+    const auto old_owner = f.begin(base);
+    const auto old = f.program.add(base.tokens, {}, Role::Continuation);
+    f.cache.publish(f.program, old_owner, old);
+    // Scope is established at adopt, before a streaming response publishes its named binding.
+    Base foreign = base;
+    foreign.advice.reuse_scope = 99;
+    foreign.advice.session_key = 99;
+    const auto denied = [&](const Base& input) {
+        const auto choices = f.cache.candidates(f.program, input);
+        return std::none_of(choices.begin(), choices.end(),
+                            [&](const auto& c) { return c.source.checkpoint.has_value(); });
+    };
+    require(denied(foreign), "active private owner exposed a foreign-session read");
+    f.cache.finish(f.program, old_owner, base, 10);
+    const auto newer_owner = f.begin(base);
+    const auto newer = f.program.add(base.tokens, {}, Role::Continuation);
+    f.cache.publish(f.program, newer_owner, newer);
+    f.cache.finish(f.program, newer_owner, base, 20);
+    require(denied(foreign) && denied(Base{.tokens = base.tokens}),
+            "new named binding made old private history anonymously readable");
+    auto transient = base;
+    transient.advice.update_session_index = false;
+    const auto old_choice = f.source(transient, old);
+    require(!old_choice.take_over && !old_choice.source.consume_source,
+            "store:false took over a historical private owner after its named hint moved");
+    const auto choices = f.cache.candidates(f.program, base);
+    require(choices.front().source.checkpoint == newer && choices.front().session_hint,
+            "scoped historical reads displaced the newest named endpoint");
+    auto stolen = f.source(base, old);
+    require(!f.cache.prepare_source(f.program, foreign, stolen),
+            "revalidating a source bypassed private scope isolation");
+}
+
+void test_principal_shared_fanout_and_warm_arrival() {
+    Fixture f(512);
+    const Base parent{.tokens = {1, 2, 3, 4},
+                      .advice = {.session_key = 1, .reuse_scope = 1, .shared_reuse_scope = 7}};
+    const auto root = f.begin(parent);
+    const auto shared = f.program.add({1, 2});
+    const auto private_point = f.program.add(parent.tokens, {}, Role::Continuation);
+    f.cache.publish(f.program, root, shared);
+    f.cache.publish(f.program, root, private_point);
+    f.cache.finish(f.program, root, parent, 1);
+
+    std::array<Base, 4> branches;
+    std::array<Fixture::Token, 4> owners;
+    std::array<Handle, 4> endpoints;
+    for (std::uint64_t row = 0; row < branches.size(); ++row) {
+        branches[row] = {.tokens = {1, 2, static_cast<std::uint32_t>(10 + row)},
+                         .advice = {.session_key = 10 + row, .reuse_scope = 10 + row,
+                                    .shared_reuse_scope = 7}};
+        auto choice = f.source(branches[row], shared);
+        require(choice.shared_entry != 0 && choice.owner == 0 && !choice.take_over,
+                "same-principal sibling could not fork the shared template across sessions");
+        f.cache.retain_source(f.program, 10 + row, choice);
+        owners[row] = f.cache.adopt(f.program, choice, branches[row], 10 + row);
+        endpoints[row] = f.program.add(branches[row].tokens, {}, Role::Continuation);
+        f.cache.publish(f.program, owners[row], endpoints[row]);
+    }
+    // A late fourth arrival must not inherit a live sibling's private owner or retire its source.
+    const Base arrival{.tokens = {1, 2, 10},
+                       .advice = {.session_key = 99, .reuse_scope = 99, .shared_reuse_scope = 7}};
+    const auto warm = f.cache.candidates(f.program, arrival);
+    require(warm.front().source.checkpoint == shared &&
+                std::none_of(warm.begin(), warm.end(), [&](const auto& c) {
+                    return c.source.checkpoint == endpoints[0];
+                }),
+            "warm arrival lost the shared base or borrowed a live sibling's private state");
+    for (std::size_t row = 0; row < branches.size(); ++row) {
+        f.cache.finish(f.program, owners[row], branches[row], 10 + row);
+        f.cache.release_source(f.program, 10 + row);
+    }
+    auto continuing = branches[1];
+    continuing.tokens.push_back(77);
+    const auto own = f.source(continuing, endpoints[1]);
+    require(own.owner == owners[1] && own.take_over && f.program.valid_checkpoint(shared),
+            "continuing one sibling lost its private owner or the common shared base");
+    Base other_principal = arrival;
+    other_principal.advice.shared_reuse_scope = 8;
+    const auto foreign = f.cache.candidates(f.program, other_principal);
+    require(foreign.size() == 1 && !foreign.front().source.checkpoint,
+            "shared prefix crossed a bearer-principal boundary");
+    const auto anonymous = f.cache.candidates(f.program, Base{.tokens = arrival.tokens});
+    require(anonymous.size() == 1 && !anonymous.front().source.checkpoint,
+            "principal-owned shared prefix became anonymously readable");
 }
 
 void test_reclaim_respects_native_lease_and_stops_host_eviction_at_capacity() {
@@ -1936,6 +2029,8 @@ int main() {
         test_waiting_owner_cannot_take_over_an_advanced_session();
         test_older_waiter_does_not_take_over_a_newer_catalog_version();
         test_session_submission_order_controls_only_the_named_hint();
+        test_private_scope_survives_named_binding_replacement();
+        test_principal_shared_fanout_and_warm_arrival();
         test_reclaim_respects_native_lease_and_stops_host_eviction_at_capacity();
         test_explicit_anchor_updates_remain_bounded_across_requests();
         test_forked_hot_records_do_not_bypass_the_soft_capacity_target();
