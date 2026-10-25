@@ -11,6 +11,7 @@ if(NOT CMAKE_CUDA_ARCHITECTURES MATCHES "^(120a|89|86)$")
     "'${CMAKE_CUDA_ARCHITECTURES}'")
 endif()
 
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
 project(ninfer LANGUAGES C CXX CUDA)
 
 # --- Global settings ---------------------------------------------------------

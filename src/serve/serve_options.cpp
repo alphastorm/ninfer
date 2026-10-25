@@ -82,7 +82,6 @@ std::string parse_stop_event_name(const char* text) {
     throw std::invalid_argument("--stop-event is only supported on Windows");
 #endif
 }
-
 int parse_nonnegative_int(const char* text, const char* label) {
     char* end        = nullptr;
     const long value = std::strtol(text, &end, 10);

@@ -66,6 +66,42 @@ enum class DurableReason : std::uint8_t {
     Cancelled
 };
 
+// Single spelling authority for bounded diagnostics and K7 receipts. "unknown" diagnoses an
+// invalid enum value; it is not an additional wire reason and MUST NOT enter a valid receipt.
+[[nodiscard]] constexpr std::string_view durable_reason_name(DurableReason reason) noexcept {
+    switch (reason) {
+    case DurableReason::None: return "none";
+    case DurableReason::StoreDisabled: return "store_disabled";
+    case DurableReason::CacheDisabled: return "cache_disabled";
+    case DurableReason::NoSessionRecords: return "no_session_records";
+    case DurableReason::EmptyTag: return "empty_tag";
+    case DurableReason::SessionNotIndexed: return "session_not_indexed";
+    case DurableReason::TransactionBusy: return "transaction_busy";
+    case DurableReason::TagMismatch: return "tag_mismatch";
+    case DurableReason::StalePublication: return "stale_publication";
+    case DurableReason::StaleRevision: return "stale_revision";
+    case DurableReason::UnsupportedCodec: return "unsupported_codec";
+    case DurableReason::IncompatibleSchema: return "incompatible_schema";
+    case DurableReason::FingerprintMismatch: return "fingerprint_mismatch";
+    case DurableReason::OriginRequired: return "origin_required";
+    case DurableReason::OriginKeyUnavailable: return "origin_key_unavailable";
+    case DurableReason::OriginMacMismatch: return "origin_mac_mismatch";
+    case DurableReason::InvalidManifest: return "invalid_manifest";
+    case DurableReason::InvalidIndex: return "invalid_index";
+    case DurableReason::PayloadSizeMismatch: return "payload_size_mismatch";
+    case DurableReason::PayloadDigestMismatch: return "payload_digest_mismatch";
+    case DurableReason::MetadataLimit: return "metadata_limit";
+    case DurableReason::StagingLimit: return "staging_limit";
+    case DurableReason::Capacity: return "capacity";
+    case DurableReason::Quota: return "quota";
+    case DurableReason::ForeignSessionCollision: return "foreign_session_collision";
+    case DurableReason::RequiredResponseMissing: return "required_response_missing";
+    case DurableReason::IoUnavailable: return "io_unavailable";
+    case DurableReason::DurabilityUnsupported: return "durability_unsupported";
+    case DurableReason::Cancelled: return "cancelled";
+    }
+    return "unknown";
+}
 struct DurableLimits {
     std::uint64_t staging_bytes = 256ULL << 20;
     std::uint64_t write_buffer_bytes = 6ULL << 30;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "runtime/contract/durable_engine_api.h"
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -41,7 +42,7 @@ class ContinuationCheckpointWriter {
 public:
     virtual ~ContinuationCheckpointWriter()                   = default;
     virtual bool write_file(std::string_view path, std::uint64_t offset, std::uint64_t total_bytes,
-                            std::span<const std::byte> bytes) = 0;
+                            std::span<const std::byte> bytes, std::uint32_t alignment) = 0;
     // Drain accepted writes and refuse incomplete or failed payloads before publication.
     [[nodiscard]] virtual bool finish() = 0;
 };
@@ -50,20 +51,14 @@ class ContinuationCheckpointReader {
 public:
     virtual ~ContinuationCheckpointReader() = default;
     [[nodiscard]] virtual std::optional<std::uint64_t> file_size(std::string_view path) const = 0;
+    [[nodiscard]] virtual std::optional<DurablePayload>
+    file_descriptor(std::string_view path) const = 0;
     virtual bool read_file(std::string_view path, std::uint64_t offset,
                            std::span<std::byte> destination) const                            = 0;
     // Import may commit only after every declared engine payload was consumed and verified.
     [[nodiscard]] virtual bool verify_complete() const = 0;
 };
 
-struct ContinuationCheckpointStats {
-    std::uint32_t frontier_tokens = 0;
-    std::uint32_t restored_tokens = 0;
-    std::uint64_t payload_bytes   = 0;
-
-    [[nodiscard]] friend constexpr bool operator==(ContinuationCheckpointStats,
-                                                   ContinuationCheckpointStats) noexcept = default;
-};
 
 // Names the first failed gate when a session checkpoint export is refused. The engine and the
 // serve layer surface this so a skipped save is diagnosable from one log line instead of a
@@ -372,6 +367,8 @@ struct ContinuationExportSkipDetail {
 };
 
 struct SessionCheckpointSkipDetail {
+    DurableExportState export_state = DurableExportState::Refused;
+    DurableReason durable_reason = DurableReason::None;
     SessionCheckpointSkipReason reason = SessionCheckpointSkipReason::None;
     // The store keeps ProgramRejected for legacy shutdown accounting, but must not erase
     // the engine gate that arrived first. The formatter reports both classifications.
