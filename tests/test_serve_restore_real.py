@@ -115,7 +115,7 @@ def main() -> int:
                 return error.code, json.load(error)
 
         class Server:
-            def __init__(self, epoch: int, extra: tuple[str, ...] = ()) -> None:
+            def __init__(self, epoch: int) -> None:
                 self.report = root / f"shutdown-{epoch}.json"
                 self.log = (root / f"server-{epoch}.log").open("wb")
                 argv = [str(args.server), str(args.artifact), "--host", "127.0.0.1", "--port", str(args.port),
@@ -127,7 +127,7 @@ def main() -> int:
                         "--kv-dtype", "bf16", "--spec", "dflash2", "--draft-tokens", "7", "--lm-head-draft",
                         "--session-checkpoint-dir", str(checkpoint_root), "--session-checkpoint-require-origin-auth",
                         "--session-checkpoint-min-tokens", "4294967295", "--shutdown-report", str(self.report),
-                        "--log-stats-interval-ms", "0", "--no-thinking", *extra]
+                        "--log-stats-interval-ms", "0", "--no-thinking"]
                 # Actual qualification argv, excluding only this self-referential digest.
                 # Authentication is file-based: no credential value enters the projection.
                 config_sha = hashlib.sha256(json.dumps(argv, separators=(",", ":")).encode()).hexdigest()
