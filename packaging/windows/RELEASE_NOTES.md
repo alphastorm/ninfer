@@ -37,6 +37,9 @@ event, waits for synchronous final saves, and accepts only a launch-bound
 schema-1 shutdown report with `complete=true` and no refused sessions. Skipped
 sessions are counted, not treated as failed saves. Restart qualification checks
 the real scheduler/reuse counters reset before continuing either saved session.
+Explicit saves must acknowledge `schema: "ninfer-durable-operation/1"` with
+authenticated, committed native publication and real coverage/counts; checkpoint
+status separately requires schema 3. Neither accepts the predecessor's envelope.
 Public qualification phase receipts hash host-route and incumbent-root bindings;
 restoration summaries expose a bounded failure reason and diagnostic digest, not
 raw operator errors. The local orchestration state retains its private write-ahead

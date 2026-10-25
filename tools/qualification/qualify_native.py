@@ -193,6 +193,22 @@ def host_context_mib(spec: dict[str, Any], *, state_images: int | None = None) -
     return format(Decimal(total_bytes) / Decimal(1 << 20), "f")
 
 
+def require_native_save_receipt(receipt: dict[str, Any]) -> None:
+    expected = {
+        "schema": "ninfer-durable-operation/1", "operation": "save", "state": "exported",
+        "reason": "none", "committed": True, "origin": "authenticated",
+        "dir_sync": "ntfs-write-through",
+    }
+    if any(receipt.get(key) != value for key, value in expected.items()) or receipt.get("committed") is not True:
+        raise LaneError("explicit session checkpoint lacks an authenticated native publication acknowledgement")
+    for field in ("frontier_tokens", "restored_tokens", "payload_bytes", "points", "states", "pages"):
+        value = receipt.get(field)
+        if type(value) is not int or value < (0 if field == "pages" else 1):
+            raise LaneError(f"explicit session checkpoint omitted its real {field} count")
+    if receipt["restored_tokens"] > receipt["frontier_tokens"]:
+        raise LaneError("explicit session checkpoint has invalid restored coverage")
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -1574,7 +1590,11 @@ def controller_status(controller: Path, state_root: Path, action: str, timeout: 
 
 def checkpoint_state(base: str, key: str, session: str) -> str:
     try:
-        return str(request_json(base, key, "GET", f"/v1/ninfer/checkpoints/{session}/status").get("state"))
+        status = request_json(base, key, "GET", f"/v1/ninfer/checkpoints/{session}/status")
+        if (status.get("artifact_type") != "ninfer_session_checkpoint_status" or
+                status.get("schema_version") != 3):
+            raise LaneError("checkpoint status does not describe the new schema-3 store")
+        return str(status.get("state"))
     except urllib.error.HTTPError as error:
         return f"http_{error.code}"
 
@@ -1611,12 +1631,8 @@ def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
     flush_session = digest("managed-stop-session")
     control_seed = seed(control_session, CHECKPOINT_MARKER, "seed")
     saved = request_json(base, key, "POST", "/v1/ninfer/checkpoints", {"session_sha256": control_session})
-    if (saved.get("operation") != "save" or saved.get("state") != "exported" or
-            saved.get("committed") is not True or saved.get("reason") != "none" or
-            saved.get("origin") != "authenticated" or saved.get("dir_sync") != "ntfs-write-through" or
-            int(saved.get("frontier_tokens", 0)) <= 0):
-        raise LaneError("explicit session checkpoint was not published")
-    if request_json(base, key, "GET", f"/v1/ninfer/checkpoints/{control_session}/status").get("state") != "available":
+    require_native_save_receipt(saved)
+    if checkpoint_state(base, key, control_session) != "available":
         raise LaneError("published session checkpoint did not become available")
     # The proof is that nothing published this session, and this cache root outlives the phase:
     # a generation an earlier run left behind is exactly the state the precondition denies. Own

@@ -364,6 +364,33 @@ class QualificationRestorationTests(unittest.TestCase):
                 self.assertRegex(receipt[field], "^[0-9a-f]{64}$")
             self.assertEqual(subject.state["found_incumbent"]["incumbent_state_root"], "C:/incumbent")
 
+    def test_native_save_receipt_matches_frozen_k7_fixture(self) -> None:
+        receipt = json.loads((ROOT / "tests/fixtures/durable/ack-windows.json").read_text())
+        qualify_native.require_native_save_receipt(receipt)
+        for field, value in (
+            ("schema", None), ("committed", 1), ("origin", "unauthenticated"),
+            ("dir_sync", "fsync"), ("state", "available"), ("payload_bytes", None),
+            ("restored_tokens", receipt["frontier_tokens"] + 1), ("points", False),
+        ):
+            broken = {**receipt, field: value}
+            with self.subTest(field=field), self.assertRaises(qualify_native.LaneError):
+                qualify_native.require_native_save_receipt(broken)
+        legacy = {key: value for key, value in receipt.items() if key != "schema"}
+        legacy["artifact_type"] = "ninfer-durable-operation/1"
+        with self.assertRaises(qualify_native.LaneError):
+            qualify_native.require_native_save_receipt(legacy)
+
+    def test_checkpoint_status_never_accepts_a_predecessor_schema(self) -> None:
+        status = {"artifact_type": "ninfer_session_checkpoint_status", "schema_version": 3,
+                  "state": "available"}
+        with patch.object(qualify_native, "request_json", return_value=status):
+            self.assertEqual(qualify_native.checkpoint_state("unused", "fixture", "session"), "available")
+        for version in (1, 2, None):
+            with self.subTest(version=version), patch.object(
+                qualify_native, "request_json", return_value={**status, "schema_version": version}
+            ), self.assertRaises(qualify_native.LaneError):
+                qualify_native.checkpoint_state("unused", "fixture", "session")
+
     def test_failed_found_state_write_never_reaches_stop(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             subject = self.orchestrator(Path(temporary))
