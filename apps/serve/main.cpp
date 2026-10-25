@@ -3,6 +3,7 @@
 #include "serve/generation_service.h"
 #include "serve/http_server.h"
 #include "serve/serve_options.h"
+#include "serve/stop_event.h"
 #include "ninfer/build_info.h"
 
 #include <spdlog/logger.h>
@@ -13,6 +14,7 @@
 #include <exception>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -61,6 +63,12 @@ int main(int argc, char** argv) {
 
     try {
         ninfer::serve::HttpServer server(options, logger);
+        // Install before model loading so a manager stop during startup is remembered.
+        // This watcher is destroyed (and joined) before its HTTP callback target.
+        std::optional<ninfer::serve::StopEventWatcher> stop_watcher;
+        if (!options.stop_event.empty()) {
+            stop_watcher.emplace(options.stop_event, [&server] { return server.stop(); });
+        }
         if (!server.bind()) {
             operational_log.bind_failure(options.host, options.port);
             return 1;
