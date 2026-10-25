@@ -6,6 +6,10 @@
 - Added an isolated two-client #414 regression at 65/257/513-token prefixes, cold and primed, requiring shared-prefix hits, actual multi-row decode and a healthy subsequent request. BF16 is the portable default; `NINFER_TEST_KV_DTYPE=fp8` selects the reported configuration. The native admitted-tail-reader regression now has an explicit standalone selector for red→green diagnosis; the complete suite still runs it.
 - Expanded candidate `25571c063cf753e78cf39e3cbf88f56a040725a8` compiled on the CPU lane: **42 Ninja steps**, all seven requested targets linked; codec CTest **PASS**, 0.00 seconds (0.03 seconds total). Detached wait observed 304.39 seconds, including queue/build time; not a GPU qualification.
 - Main-approved K3/K7 amendment: typed Reader `IoUnavailable` becomes native `Unavailable/IoUnavailable`, never corruption; digest/size mismatch remains `Corrupt`. Native import releases all unpublished reservations through existing RAII. Fake-reader cases cover read and final-verification failure at each classification; runtime execution is pending.
+- Amended candidate `465bccf926bad64ed28091a80e4ed3d858ad6b6d` compiled on the CPU lane: **42 Ninja steps**, seven targets linked; codec CTest **PASS**, 0.01 seconds (0.05 seconds total). Detached wait: 134.02 seconds. `persistence-cpu.json` retains both distinct-input builds.
+- Initial GPU proof job `20261025T031133Z-A2-persistence-proof-465bccf9-465786` exited 1 in **6 seconds** before compilation/test execution: CMake could not write the historical tracer build's `cmake.check_cache`. No GPU result follows; zero leftover/unowned containers. `persistence-environment-refusal.json` preserves the failure.
+- Changed-input retry `20261025T031554Z-A2-persistence-proof-465bccf9-r2-469146` uses a fresh caller-owned build directory, same source/artifacts, priority 2 and 30-minute cap. It builds the pre-fix native code once with identical regression fixtures, applies each isolated repair in order, then builds/runs the repaired native/D1/grammar/shared-prefix candidate. Outcome pending.
+- Main-approved native recoverability preflight: `validate_checkpoint_import` returns `CheckpointValidation` with `Validated`, `Unavailable`, `Corrupt` or `IdentityMismatch`, never `Prepared`. It shares exact metadata/layout/frontier/identity rebuilding with prepare, streams payloads through at most 4 MiB ordinary Host scratch, and verifies completion without native Host reservations or publication. The caller has already consumed `engine/index.cbor` and needs a fresh Reader for subsequent import. Tests validate under zero Host capacity, reject intact-schema native identity corruption and foreign layout, preserve transient I/O classification and assert unchanged native usage. This addition is not covered by the pinned `465bccf9` batch.
 - Base: upstream `64d10fbf`; branch `rebase/persistence`.
 - RepoPrompt preparation: `prep-v0-13-0-upstream-re-DF08C8`; export `oracle-plan-2026-10-24-174946-prep-v0-13-0-upstrea-1d64.md` (private, not committed).
 - G1 tracer re-expressed on `CheckpointStore::Lease`, `StateImageStore::ReadLease`, `ContextSnapshot`, `KVHistoryStore` and native sequence mapping/commit helpers. Full StateImage includes the DFlash2 ring; settled ring frontier is required.
@@ -41,6 +45,12 @@ Host directory arguments below use the RUNBOOK variables `A2_SCRIPT_ROOT`, `A2_W
 `CPU_COMMON`, `CPU_SOURCE` and `CPU_BUILD` denote the approved CPU lane's shared wrappers and holder-A2 Git source/build directories. Its source was detached at `0e64cc77`; the build wrapper held one of the two CPU slots and used 12 workers. No GPU model test or production-service change was performed on that lane.
 
 ```sh
+gpu-lease submit --holder A2 --label persistence-proof-465bccf9 --priority 2 --minutes 30 -- \
+  python3 "$A2_SCRIPT_ROOT/proof-r1.py" 465bccf926bad64ed28091a80e4ed3d858ad6b6d
+gpu-lease wait 20261025T031133Z-A2-persistence-proof-465bccf9-465786 120
+gpu-lease submit --holder A2 --label persistence-proof-465bccf9-r2 --priority 2 --minutes 30 -- \
+  python3 "$A2_SCRIPT_ROOT/proof-r2.py" 465bccf926bad64ed28091a80e4ed3d858ad6b6d
+gpu-lease wait 20261025T031554Z-A2-persistence-proof-465bccf9-r2-469146 120
 gpu-lease submit --holder A2 --label tracer-build-e442df4d --priority 2 --minutes 20 -- bash "$A2_SCRIPT_ROOT/build-e442df4d.sh"
 gpu-lease wait 20261025T010431Z-A2-tracer-build-e442df4d-210506 50
 cmake -S /src -B /build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=120a -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=OFF -DNINFER_BUILD_BENCHMARKS=OFF

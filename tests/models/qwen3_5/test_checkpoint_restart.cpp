@@ -422,6 +422,54 @@ int main(int argc, char** argv) {
                 require(refused.state() == DurablePrepareState::CapacityRefused,
                         "Host capacity pressure was mistaken for corruption");
             }
+            if (scenario == "terminal") {
+                const auto before = program->physical_usage();
+                {
+                    Reader reader(root); const auto index = reader.index();
+                    const auto validated = program->validate_checkpoint_import(index, reader, {});
+                    require(validated.state == q35::CheckpointValidationState::Validated &&
+                            validated.reason == DurableReason::None &&
+                            validated.stats.points == index.points.size(),
+                            "recoverability validation depended on Host admission capacity");
+                }
+                {
+                    Reader reader(root, true); const auto index = reader.index();
+                    const auto invalid = program->validate_checkpoint_import(index, reader, {});
+                    require(invalid.state == q35::CheckpointValidationState::Corrupt &&
+                            invalid.reason == DurableReason::PayloadDigestMismatch,
+                            "recoverability validation accepted corrupted payload bytes");
+                }
+                for (const bool finish : {false, true}) {
+                    Reader reader(root, false, DurableReason::IoUnavailable, finish);
+                    const auto index = reader.index();
+                    const auto unavailable = program->validate_checkpoint_import(index, reader, {});
+                    require(unavailable.state == q35::CheckpointValidationState::Unavailable &&
+                            unavailable.reason == DurableReason::IoUnavailable,
+                            "recoverability validation quarantined transient I/O");
+                }
+                {
+                    Reader reader(root); auto index = reader.index();
+                    // Toggle within the same CBOR integer width: schema/size remains valid,
+                    // but rebuilding the exact native identity must reject its shortlist.
+                    index.identities.front().shortlist_tag[0] ^= 1;
+                    require(program->validate_checkpoint_import(index, reader, {}).state ==
+                                q35::CheckpointValidationState::Corrupt &&
+                            program->prepare_checkpoint_import(index, reader, {}).state() ==
+                                DurablePrepareState::Corrupt,
+                            "native identity corruption was hidden by absent Host capacity");
+                }
+                {
+                    Reader reader(root); auto index = reader.index();
+                    index.native_codec = "unsupported-checkpoint-codec";
+                    const auto mismatch = program->validate_checkpoint_import(index, reader, {});
+                    require(mismatch.state == q35::CheckpointValidationState::IdentityMismatch &&
+                            mismatch.reason == DurableReason::FingerprintMismatch,
+                            "recoverability validation accepted a foreign native layout");
+                }
+                require(program->physical_usage().occupied == before.occupied &&
+                        program->physical_usage().host_reserved_bytes == before.host_reserved_bytes,
+                        "recoverability validation reserved or published native state");
+            }
             program.reset(); options.context_cache.host_capacity_bytes = 1ULL << 30; program = make_program();
             std::shared_ptr<const Reader> fresh;
             {

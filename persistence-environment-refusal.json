@@ -1,0 +1,17 @@
+{
+  "schema": "ninfer-persistence-environment-refusal/1",
+  "candidate": "465bccf926bad64ed28091a80e4ed3d858ad6b6d",
+  "pre_fix": "19043a4910513e59b188bf9a4a0e8623dc660200",
+  "image_sha256": "e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
+  "job": "20261025T031133Z-A2-persistence-proof-465bccf9-465786",
+  "exit": 1,
+  "job_seconds": 6,
+  "configure_seconds": 0.819,
+  "diagnostic": "CMake Error: Unable to open check cache file for write. /build/CMakeFiles/cmake.check_cache",
+  "log_sha256": "dca02f8c33193ca8adc7d79017ea82549386e8b331dedcef56837e39fe0ec41e",
+  "compilation_started": false,
+  "gpu_tests_executed": false,
+  "leftover_containers_stopped": 0,
+  "unowned_containers_left": 0,
+  "changed_input_for_retry": "Fresh caller-owned build directory instead of the historical tracer CMake cache"
+}
