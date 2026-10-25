@@ -343,7 +343,9 @@ void SessionCheckpointService::automatic_save(std::string_view session) noexcept
     try {
         const auto outcome = save_session(session);
         const bool settled = outcome.saved || outcome.covered ||
-            (!checkpoint_refusal_is_transient(outcome.skip) && outcome.skip.durable_reason != Reason::IoUnavailable);
+            (!checkpoint_refusal_is_transient(outcome.skip) &&
+             outcome.skip.durable_reason != Reason::IoUnavailable &&
+             outcome.skip.durable_reason != Reason::Capacity);
         if (outcome.saved) {
             receipt("save", "exported", Reason::None, true, outcome.saved->engine,
                     outcome.saved->origin_authenticated ? "authenticated" : "unauthenticated",
