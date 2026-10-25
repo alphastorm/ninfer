@@ -2031,7 +2031,6 @@ int test_manifest_origin_compatibility_window() {
     return failures;
 }
 
-#ifndef _WIN32
 int test_quota_and_erase_refuse_ancestor_symlink_swaps() {
     TemporaryDirectory temporary;
     TemporaryDirectory outside;
@@ -2088,7 +2087,6 @@ int test_quota_and_erase_refuse_ancestor_symlink_swaps() {
                       "refused path mutations preserve the original current for retry");
     return failures;
 }
-#endif
 
 int test_v3_manifest_validation_and_publication_guard() {
     TemporaryDirectory temporary;
@@ -2637,9 +2635,7 @@ int main(int argc, char** argv) {
     failures += test_hmac_sha256_rfc4231_vectors();
     failures += test_manifest_origin_authentication();
     failures += test_manifest_origin_compatibility_window();
-#ifndef _WIN32
     failures += test_quota_and_erase_refuse_ancestor_symlink_swaps();
-#endif
     failures += test_v3_manifest_validation_and_publication_guard();
     failures += test_schema_v3_and_stream_completion();
     failures += test_export_and_publication_callbacks_are_catalog_unlocked();
