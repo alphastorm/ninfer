@@ -425,8 +425,8 @@ int test_protected_long_root_transaction() {
     failures += check(first.has_value() && first->dir_sync == "ntfs-write-through",
                       "protected long-root save failed before durable acknowledgement");
     if (!first) { return failures; }
-    const auto state = store.session_path(responses.client_session_sha256) / "generations" /
-                       first->generation / "engine/state/0.bin";
+    const auto state = stored_generation_root(root, responses, first->generation) /
+                       "engine/state/0.bin";
     failures += check(state.native().size() - 4 > MAX_PATH &&
                           std::filesystem::file_size(state) == payload.size(),
                       "protected fixture did not exercise metadata beyond MAX_PATH");
