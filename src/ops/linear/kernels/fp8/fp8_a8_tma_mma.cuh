@@ -5,7 +5,9 @@
 #include "ops/common/numeric/math.h"
 
 #include "ops/linear/common/epilogue.cuh"
+#if !defined(NINFER_SM86)
 #include "ops/linear/kernels/fp8/fp8_a8_mma_common.cuh"
+#endif
 #include "ops/linear/kernels/fp8/fp8_operands.h"
 
 #include <cuda.h>
@@ -16,6 +18,18 @@
 
 namespace ninfer::ops::detail {
 
+#if defined(NINFER_SM89)
+template <class Schedule>
+struct Fp8Sm89MmaSchedule : Schedule {
+    static constexpr bool kTmaSwizzle = false;
+    static constexpr int kThreads = Schedule::kWarps * 32;
+    static constexpr int kSharedBytes = Schedule::kStorageBytes;
+};
+template <class Schedule, class Output, class Epilogue, class Rows>
+void launch_fp8_a8_mma(const Fp8A8Operands&, Output, Epilogue, cudaStream_t, Rows);
+#endif
+
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
 struct alignas(128) Fp8TmaDescriptors {
     CUtensorMap activation;
     CUtensorMap weight;
@@ -265,10 +279,17 @@ __global__ void fp8_a8_tma_split_k_reduce(Fp8A8Operands p, const float* partials
     }
 }
 
+#endif
+
 template <class Schedule, class Output, class Epilogue, class RowPolicy = Fp8IdentityRows>
 void launch_fp8_a8_tma_mma(const Fp8A8Operands& p, Output output, Epilogue epilogue,
                            cudaStream_t stream, float* partials = nullptr,
                            RowPolicy row_policy = {}) {
+#if defined(NINFER_SM86)
+    throw std::runtime_error("FP8 A8 execution requires an sm_89 or newer GPU");
+#elif defined(NINFER_SM89)
+    launch_fp8_a8_mma<Fp8Sm89MmaSchedule<Schedule>>(p, output, epilogue, stream, row_policy);
+#else
     validate_fp8_operands<Schedule>(p);
     if (p.rows % Schedule::kBlockRows || p.k % Schedule::kBlockK)
         throw std::invalid_argument("FP8 TMA requires complete row/K tiles");
@@ -322,6 +343,7 @@ void launch_fp8_a8_tma_mma(const Fp8A8Operands& p, Output output, Epilogue epilo
         else
             launch.template operator()<false, false>();
     });
+#endif
 }
 
 } // namespace ninfer::ops::detail
