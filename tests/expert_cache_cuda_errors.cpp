@@ -1,4 +1,5 @@
 #include "core/expert_cache.h"
+#include "cuda_interpose.h"
 
 #include <cuda_runtime.h>
 
@@ -19,29 +20,18 @@ Trace trace;
 } // namespace
 
 extern "C" {
-cudaError_t CUDARTAPI __real_cudaEventRecord(cudaEvent_t, cudaStream_t);
-cudaError_t CUDARTAPI __real_cudaMemcpyAsync(void*, const void*, std::size_t, cudaMemcpyKind,
-                                             cudaStream_t);
-cudaError_t CUDARTAPI __real_cudaMemcpyBatchAsync(void* const*, const void* const*,
-                                                  const std::size_t*, std::size_t,
-                                                  cudaMemcpyAttributes*, std::size_t*, std::size_t,
-                                                  cudaStream_t);
-cudaError_t CUDARTAPI __real_cudaStreamSynchronize(cudaStream_t);
-cudaError_t CUDARTAPI __real_cudaStreamWaitEvent(cudaStream_t, cudaEvent_t, unsigned);
-cudaError_t CUDARTAPI __real_cudaFree(void*);
-cudaError_t CUDARTAPI __real_cudaFreeHost(void*);
 
-cudaError_t CUDARTAPI __wrap_cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaEventRecord)(cudaEvent_t event, cudaStream_t stream) {
     if (trace.active && !trace.failed && trace.failure == Failure::CompletionEvent) {
         trace.failed = true;
         return cudaErrorInvalidResourceHandle;
     }
-    return __real_cudaEventRecord(event, stream);
+    return NINFER_TEST_CUDA_REAL(cudaEventRecord)(event, stream);
 }
 
-cudaError_t CUDARTAPI __wrap_cudaMemcpyAsync(void* to, const void* from, std::size_t bytes,
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaMemcpyAsync)(void* to, const void* from, std::size_t bytes,
                                              cudaMemcpyKind kind, cudaStream_t stream) {
-    const auto result = __real_cudaMemcpyAsync(to, from, bytes, kind, stream);
+    const auto result = NINFER_TEST_CUDA_REAL(cudaMemcpyAsync)(to, from, bytes, kind, stream);
     if (trace.active && result == cudaSuccess) {
         trace.pending = true;
         ++trace.copies;
@@ -49,7 +39,7 @@ cudaError_t CUDARTAPI __wrap_cudaMemcpyAsync(void* to, const void* from, std::si
     return result;
 }
 
-cudaError_t CUDARTAPI __wrap_cudaMemcpyBatchAsync(void* const* to, const void* const* from,
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaMemcpyBatchAsync)(void* const* to, const void* const* from,
                                                   const std::size_t* bytes, std::size_t count,
                                                   cudaMemcpyAttributes* attrs, std::size_t* indices,
                                                   std::size_t attr_count, cudaStream_t stream) {
@@ -58,7 +48,7 @@ cudaError_t CUDARTAPI __wrap_cudaMemcpyBatchAsync(void* const* to, const void* c
         return cudaErrorInvalidValue;
     }
     const auto result =
-        __real_cudaMemcpyBatchAsync(to, from, bytes, count, attrs, indices, attr_count, stream);
+        NINFER_TEST_CUDA_REAL(cudaMemcpyBatchAsync)(to, from, bytes, count, attrs, indices, attr_count, stream);
     if (trace.active && result == cudaSuccess) {
         trace.pending = true;
         ++trace.copies;
@@ -66,29 +56,29 @@ cudaError_t CUDARTAPI __wrap_cudaMemcpyBatchAsync(void* const* to, const void* c
     return result;
 }
 
-cudaError_t CUDARTAPI __wrap_cudaStreamSynchronize(cudaStream_t stream) {
-    const auto result = __real_cudaStreamSynchronize(stream);
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaStreamSynchronize)(cudaStream_t stream) {
+    const auto result = NINFER_TEST_CUDA_REAL(cudaStreamSynchronize)(stream);
     if (trace.active && result == cudaSuccess) { trace.pending = false; }
     return result;
 }
 
-cudaError_t CUDARTAPI __wrap_cudaStreamWaitEvent(cudaStream_t stream, cudaEvent_t event,
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaStreamWaitEvent)(cudaStream_t stream, cudaEvent_t event,
                                                  unsigned flags) {
     if (trace.active && !trace.failed && trace.failure == Failure::ConsumerWait) {
         trace.failed = true;
         return cudaErrorInvalidResourceHandle;
     }
-    return __real_cudaStreamWaitEvent(stream, event, flags);
+    return NINFER_TEST_CUDA_REAL(cudaStreamWaitEvent)(stream, event, flags);
 }
 
-cudaError_t CUDARTAPI __wrap_cudaFree(void* p) {
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaFree)(void* p) {
     if (trace.active && trace.pending) { trace.premature_free = true; }
-    return __real_cudaFree(p);
+    return NINFER_TEST_CUDA_REAL(cudaFree)(p);
 }
 
-cudaError_t CUDARTAPI __wrap_cudaFreeHost(void* p) {
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaFreeHost)(void* p) {
     if (trace.active && trace.pending) { trace.premature_free = true; }
-    return __real_cudaFreeHost(p);
+    return NINFER_TEST_CUDA_REAL(cudaFreeHost)(p);
 }
 }
 

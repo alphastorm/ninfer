@@ -1,6 +1,7 @@
 #include "artifact/binder.h"
 #include "artifact/materializer.h"
 #include "artifact/fixture.h"
+#include "cuda_interpose.h"
 
 #include <cuda_runtime.h>
 
@@ -61,51 +62,6 @@ struct AlignmentScope {
 };
 
 #ifdef _WIN32
-template <class Function>
-Function runtime_symbol(const char* name) {
-    const auto module = GetModuleHandleW(L"cudart64_13.dll");
-    const auto symbol = module ? GetProcAddress(module, name) : nullptr;
-    if (!symbol) throw std::runtime_error(std::string("missing CUDA runtime symbol: ") + name);
-    return reinterpret_cast<Function>(symbol);
-}
-
-#define WRAP(name) name
-#define REAL(name) real_##name
-
-cudaError_t CUDARTAPI real_cudaMalloc(void** pointer, std::size_t bytes) {
-    static const auto call = runtime_symbol<cudaError_t (CUDARTAPI *)(void**, std::size_t)>("cudaMalloc");
-    return call(pointer, bytes);
-}
-cudaError_t CUDARTAPI real_cudaMallocHost(void** pointer, std::size_t bytes) {
-    static const auto call = runtime_symbol<cudaError_t (CUDARTAPI *)(void**, std::size_t)>("cudaMallocHost");
-    return call(pointer, bytes);
-}
-cudaError_t CUDARTAPI real_cudaFree(void* pointer) {
-    static const auto call = runtime_symbol<cudaError_t (CUDARTAPI *)(void*)>("cudaFree");
-    return call(pointer);
-}
-cudaError_t CUDARTAPI real_cudaFreeHost(void* pointer) {
-    static const auto call = runtime_symbol<cudaError_t (CUDARTAPI *)(void*)>("cudaFreeHost");
-    return call(pointer);
-}
-cudaError_t CUDARTAPI real_cudaEventCreateWithFlags(cudaEvent_t* event, unsigned flags) {
-    static const auto call = runtime_symbol<cudaError_t (CUDARTAPI *)(cudaEvent_t*, unsigned)>("cudaEventCreateWithFlags");
-    return call(event, flags);
-}
-cudaError_t CUDARTAPI real_cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
-    static const auto call = runtime_symbol<cudaError_t (CUDARTAPI *)(cudaEvent_t, cudaStream_t)>("cudaEventRecord");
-    return call(event, stream);
-}
-cudaError_t CUDARTAPI real_cudaMemcpyAsync(void* target, const void* source, std::size_t bytes,
-                                          cudaMemcpyKind kind, cudaStream_t stream) {
-    static const auto call = runtime_symbol<cudaError_t (CUDARTAPI *)(void*, const void*, std::size_t, cudaMemcpyKind, cudaStream_t)>("cudaMemcpyAsync");
-    return call(target, source, bytes, kind, stream);
-}
-cudaError_t CUDARTAPI real_cudaStreamSynchronize(cudaStream_t stream) {
-    static const auto call = runtime_symbol<cudaError_t (CUDARTAPI *)(cudaStream_t)>("cudaStreamSynchronize");
-    return call(stream);
-}
-
 BOOL WINAPI alignment_query(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, void* info, DWORD bytes) {
     static const auto call = reinterpret_cast<decltype(&GetFileInformationByHandleEx)>(
         GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetFileInformationByHandleEx"));
@@ -121,9 +77,6 @@ BOOL WINAPI alignment_query(HANDLE file, FILE_INFO_BY_HANDLE_CLASS kind, void* i
     }
     return result;
 }
-#else
-#define WRAP(name) __wrap_##name
-#define REAL(name) __real_##name
 #endif
 
 } // namespace
@@ -136,15 +89,6 @@ extern "C" {
 BOOL (WINAPI* __imp_GetFileInformationByHandleEx)(HANDLE, FILE_INFO_BY_HANDLE_CLASS, void*, DWORD) =
     &alignment_query;
 #else
-cudaError_t CUDARTAPI __real_cudaMalloc(void**, std::size_t);
-cudaError_t CUDARTAPI __real_cudaMallocHost(void**, std::size_t);
-cudaError_t CUDARTAPI __real_cudaFree(void*);
-cudaError_t CUDARTAPI __real_cudaFreeHost(void*);
-cudaError_t CUDARTAPI __real_cudaEventCreateWithFlags(cudaEvent_t*, unsigned int);
-cudaError_t CUDARTAPI __real_cudaEventRecord(cudaEvent_t, cudaStream_t);
-cudaError_t CUDARTAPI __real_cudaMemcpyAsync(void*, const void*, std::size_t, cudaMemcpyKind,
-                                             cudaStream_t);
-cudaError_t CUDARTAPI __real_cudaStreamSynchronize(cudaStream_t);
 int __real_statx(int, const char*, int, unsigned, struct statx*) noexcept;
 
 int __wrap_statx(int descriptor, const char* path, int flags, unsigned mask,
@@ -159,14 +103,14 @@ int __wrap_statx(int descriptor, const char* path, int flags, unsigned mask,
 }
 #endif
 
-cudaError_t CUDARTAPI WRAP(cudaMalloc)(void** pointer, std::size_t bytes) {
-    const auto status = REAL(cudaMalloc)(pointer, bytes);
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaMalloc)(void** pointer, std::size_t bytes) {
+    const auto status = NINFER_TEST_CUDA_REAL(cudaMalloc)(pointer, bytes);
     if (active() && status == cudaSuccess) { ++trace.device_allocations; }
     return status;
 }
 
-cudaError_t CUDARTAPI WRAP(cudaMallocHost)(void** pointer, std::size_t bytes) {
-    const auto status = REAL(cudaMallocHost)(pointer, bytes + (alignment.shift_pinned ? 8192 : 0));
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaMallocHost)(void** pointer, std::size_t bytes) {
+    const auto status = NINFER_TEST_CUDA_REAL(cudaMallocHost)(pointer, bytes + (alignment.shift_pinned ? 8192 : 0));
     if (status == cudaSuccess && alignment.memory) {
         pinned_bytes += bytes;
         if (alignment.shift_pinned) {
@@ -181,14 +125,14 @@ cudaError_t CUDARTAPI WRAP(cudaMallocHost)(void** pointer, std::size_t bytes) {
     return status;
 }
 
-cudaError_t CUDARTAPI WRAP(cudaFree)(void* pointer) {
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaFree)(void* pointer) {
     if (active()) { trace.released_during_upload |= trace.upload_pending; }
-    const auto status = REAL(cudaFree)(pointer);
+    const auto status = NINFER_TEST_CUDA_REAL(cudaFree)(pointer);
     if (active() && status == cudaSuccess) { ++trace.device_releases; }
     return status;
 }
 
-cudaError_t CUDARTAPI WRAP(cudaFreeHost)(void* pointer) {
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaFreeHost)(void* pointer) {
     const auto found = std::find_if(pinned_views.begin(), pinned_views.end(),
                                     [&](const auto& entry) { return entry.first == pointer; });
     if (found != pinned_views.end()) {
@@ -196,32 +140,32 @@ cudaError_t CUDARTAPI WRAP(cudaFreeHost)(void* pointer) {
         pinned_views.erase(found);
     }
     if (active()) { trace.released_during_upload |= trace.upload_pending; }
-    const auto status = REAL(cudaFreeHost)(pointer);
+    const auto status = NINFER_TEST_CUDA_REAL(cudaFreeHost)(pointer);
     if (active() && status == cudaSuccess) { ++trace.host_releases; }
     return status;
 }
 
-cudaError_t CUDARTAPI WRAP(cudaEventCreateWithFlags)(cudaEvent_t* event, unsigned int flags) {
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaEventCreateWithFlags)(cudaEvent_t* event, unsigned int flags) {
     if (trace.failure == Failure::EventCreation && !trace.injected) {
         trace.injected = true;
         *event         = nullptr;
         return cudaErrorMemoryAllocation;
     }
-    return REAL(cudaEventCreateWithFlags)(event, flags);
+    return NINFER_TEST_CUDA_REAL(cudaEventCreateWithFlags)(event, flags);
 }
 
-cudaError_t CUDARTAPI WRAP(cudaEventRecord)(cudaEvent_t event, cudaStream_t stream) {
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaEventRecord)(cudaEvent_t event, cudaStream_t stream) {
     if (trace.failure == Failure::EventRecord && !trace.injected) {
         trace.injected = true;
         return cudaErrorInvalidResourceHandle;
     }
-    return REAL(cudaEventRecord)(event, stream);
+    return NINFER_TEST_CUDA_REAL(cudaEventRecord)(event, stream);
 }
 
-cudaError_t CUDARTAPI WRAP(cudaMemcpyAsync)(void* destination, const void* source,
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaMemcpyAsync)(void* destination, const void* source,
                                              std::size_t bytes, cudaMemcpyKind kind,
                                              cudaStream_t stream) {
-    const auto status = REAL(cudaMemcpyAsync)(destination, source, bytes, kind, stream);
+    const auto status = NINFER_TEST_CUDA_REAL(cudaMemcpyAsync)(destination, source, bytes, kind, stream);
     if (active() && status == cudaSuccess) {
         trace.upload_pending = true;
         ++trace.uploads;
@@ -229,8 +173,8 @@ cudaError_t CUDARTAPI WRAP(cudaMemcpyAsync)(void* destination, const void* sourc
     return status;
 }
 
-cudaError_t CUDARTAPI WRAP(cudaStreamSynchronize)(cudaStream_t stream) {
-    const auto status = REAL(cudaStreamSynchronize)(stream);
+cudaError_t CUDARTAPI NINFER_TEST_CUDA_WRAP(cudaStreamSynchronize)(cudaStream_t stream) {
+    const auto status = NINFER_TEST_CUDA_REAL(cudaStreamSynchronize)(stream);
     if (active() && status == cudaSuccess) { trace.upload_pending = false; }
     return status;
 }

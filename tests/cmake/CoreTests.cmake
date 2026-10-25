@@ -119,8 +119,10 @@ ninfer_add_test(ninfer_expert_cache_test
   LIBRARIES ninfer_core)
 set_tests_properties(ninfer_expert_cache_test PROPERTIES TIMEOUT 60)
 
+if(NOT WIN32)
 foreach(symbol IN ITEMS
     cudaEventRecord cudaMemcpyAsync cudaMemcpyBatchAsync cudaStreamSynchronize cudaStreamWaitEvent
     cudaFree cudaFreeHost)
   target_link_options(ninfer_expert_cache_test PRIVATE "LINKER:--wrap=${symbol}")
 endforeach()
+endif()
