@@ -17,9 +17,9 @@ struct Uint128 {
 }
 
 [[nodiscard]] constexpr Uint128 wide_multiply(std::uint64_t a, std::uint64_t b) noexcept {
-    const auto al = a & 0xffffffffULL, ah = a >> 32U;
-    const auto bl = b & 0xffffffffULL, bh = b >> 32U;
-    const auto ll = al * bl, lh = al * bh, hl = ah * bl, hh = ah * bh;
+    const std::uint64_t al = a & 0xffffffffULL, ah = a >> 32U;
+    const std::uint64_t bl = b & 0xffffffffULL, bh = b >> 32U;
+    const std::uint64_t ll = al * bl, lh = al * bh, hl = ah * bl, hh = ah * bh;
     const auto middle = (ll >> 32U) + (lh & 0xffffffffULL) + (hl & 0xffffffffULL);
     return {hh + (lh >> 32U) + (hl >> 32U) + (middle >> 32U),
             (middle << 32U) | (ll & 0xffffffffULL)};
