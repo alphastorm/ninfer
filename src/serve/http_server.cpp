@@ -677,6 +677,9 @@ void HttpServer::attach(GenerationService& service, SessionCheckpointCallbacks c
 
 bool HttpServer::listen() {
     if (stop_requested_.load(std::memory_order_acquire)) {
+        if (!options_.session_checkpoint_root.empty() && !checkpoints_.final_save) {
+            throw std::logic_error("session persistence final-save provider is not attached");
+        }
         return !checkpoints_.final_save || checkpoints_.final_save();
     }
     if (service_ == nullptr) { throw std::logic_error("HTTP generation service is not attached"); }

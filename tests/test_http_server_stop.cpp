@@ -19,6 +19,17 @@ int main() {
         std::cerr << "stop during model loading was lost\n";
         return 1;
     }
+    ninfer::serve::ServeOptions durable;
+    durable.session_checkpoint_root = "unopened-checkpoints";
+    ninfer::serve::HttpServer unbound_durable{durable};
+    (void)unbound_durable.stop();
+    bool refused = false;
+    try { (void)unbound_durable.listen(); }
+    catch (const std::logic_error&) { refused = true; }
+    if (!refused) {
+        std::cerr << "early stop acknowledged enabled persistence without a final-save provider\n";
+        return 1;
+    }
     std::cout << "http server stop tests passed\n";
     return 0;
 }
