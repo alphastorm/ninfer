@@ -117,4 +117,11 @@ CTest cases, not independent Ninja targets.
 | `k6-final.log` (private raw operator log) | `67268b9dca9a8137bfaec172a3a72ca2589223246220e2c6e255771c46e217a2` |
 | `k6-current-red.log` (private raw operator log) | `7535f868d3772c85d482aeb7d62038553e299713c29fffd2e24795a778c987fa` |
 
+## Native integration fixture correction
+
+- Integrated source `62bb6bcd` timed out `ninfer_file_test` on both architecture runs; the K6 standalone run had taken 20.00 s. No failing test was rerun for diagnosis.
+- Read-only inspection of both surviving timed-out fixtures showed length **4,294,971,515 B**, attributes `Archive`, `fsutil sparse queryflag` reporting **NOT sparse**, and `queryextents` reporting **0x100002 allocated clusters**. The fixture marked a newly created file sparse, then reopened it through truncating `std::ofstream`, clearing the sparse attribute and forcing a real >4 GiB allocation/zero fill.
+- `tests/io/test_file.cpp` now opens the already-created Windows sparse file with nontruncating binary `std::fstream(in | out)` and asserts `FILE_ATTRIBUTE_SPARSE_FILE` survives the write. The >4 GiB offset, payload, buffered/direct reads, EOF/move/alignment checks and 30-second timeout are unchanged. POSIX fixture creation is unchanged.
+- This test-only successor is handed to Integrator6 for the corrected integrated Windows run; the preceding K6 19/19 proof applies to `00d28edb6`, not to this later fixture edit.
+
 
