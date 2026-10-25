@@ -1,5 +1,7 @@
 # Persistence slice
 
+- Production cutover: removed both Engine tracer hooks, both Program tracer entrypoints, their native implementation, CMake registration and the experimental launcher. `NINFER_TRACER_*` no longer enables an alternative persistence path. G1 below remains historical tracer evidence, not production K3 qualification.
+- K3 signatures and `Program::checkpoint_layout()` are unchanged from `cc054663`; native and Engine-adapter runtime qualification remains pending. CMake/launcher removal authorized by Integrator; exact Engine-hook removal authorized by EngineCache.
 - Base: upstream `64d10fbf`; branch `rebase/persistence`.
 - RepoPrompt preparation: `prep-v0-13-0-upstream-re-DF08C8`; export `oracle-plan-2026-10-24-174946-prep-v0-13-0-upstrea-1d64.md` (private, not committed).
 - G1 tracer re-expressed on `CheckpointStore::Lease`, `StateImageStore::ReadLease`, `ContextSnapshot`, `KVHistoryStore` and native sequence mapping/commit helpers. Full StateImage includes the DFlash2 ring; settled ring frontier is required.

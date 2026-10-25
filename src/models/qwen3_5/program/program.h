@@ -475,9 +475,6 @@ public:
     [[nodiscard]] static runtime::DurableCheckpointSet decode_checkpoint_index(
         std::span<const std::byte>, const runtime::DurableLimits&);
     [[nodiscard]] runtime::DurableNativeLayout checkpoint_layout() const;
-    // Explicitly enabled restart feasibility probe; not a serving persistence contract.
-    void trace_export_checkpoint(CheckpointHandle checkpoint);
-    [[nodiscard]] std::optional<CheckpointHandle> trace_import_checkpoint(const RequestBasePlan&);
     [[nodiscard]] std::uint32_t checkpoint_recovery_frontier(CheckpointHandle retained,
                                                              const RequestBasePlan& base,
                                                              std::uint32_t target) const;
