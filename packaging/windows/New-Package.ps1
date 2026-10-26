@@ -142,17 +142,23 @@ $upstreamBaseSha = [string]$spec.source.upstream_base_sha
 $lineageBaseSha = [string]$spec.source.lineage_base_sha
 $cmakeCudaArchitecture = [string]$spec.gpu.cmake_cuda_architecture
 $assetStem = "$productPrefix-$releaseVersion-$platform"
-# The exact engine tuning is bound by hash into the build identity; the structural profile
-# every native lane ships - one authenticated request at a time, MTP, durable checkpoints, no
-# prompt disk cache - is asserted here.
+# The experimental Blackwell lane retains the container's DFlash2 K7/C2 shape;
+# the shipped Ampere/Ada lanes retain their MTP/C1 contract.
+$validSpeculation = if ($Lane -ceq 'rtx5090') {
+    [int]$config.engine.max_concurrency -eq 2 -and
+    [string]$config.speculative.backend -ceq 'dflash2' -and
+    [int]$config.speculative.draft_tokens -eq 7
+} else {
+    [int]$config.engine.max_concurrency -eq 1 -and
+    [string]$config.speculative.backend -ceq 'mtp' -and
+    [int]$config.speculative.draft_tokens -ge 1
+}
 if ($config.artifact_type -cne 'ninfer_windows_server_config' -or
     [int]$config.schema_version -ne 4 -or
     [string]$config.release_id -cne $releaseId -or
     [string]$config.deployment_profile -cne $deploymentProfile -or
-    [int]$config.engine.max_concurrency -ne 1 -or
+    -not $validSpeculation -or
     [int]$config.engine.admission_headroom_mib -lt 256 -or
-    [string]$config.speculative.backend -cne 'mtp' -or
-    [int]$config.speculative.draft_tokens -lt 1 -or
     -not [bool]$config.session_checkpoint.enabled -or
     $config.session_checkpoint.require_origin_auth -isnot [bool] -or
     -not $config.session_checkpoint.require_origin_auth -or

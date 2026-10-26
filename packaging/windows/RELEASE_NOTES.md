@@ -14,6 +14,23 @@ owner's 370 W default that release restores, the accepted prior-limit range
 ran at 300 W, so a package built from this specification needs a fresh RTX 3090
 qualification at 350 W before it can claim a hardware pass.
 
+## 2026-10-26 — Experimental RTX 5090 Windows shape (not a release)
+
+`lanes/rtx5090` describes a native `sm_120a` feasibility build, not a qualified
+component or a replacement for the container. It retains DFlash2 K=7, BF16 KV,
+131,072 context, 146,368 fixed KV tokens, two concurrent requests, vision,
+1,024-token prefill chunks and the container's 20,867.734375 MiB Host budget.
+The Host translation records the historical budget, not a measured DFlash2
+state-image size. Model bytes and schema-3 checkpoints are unchanged.
+
+The shared packager and installer accept that lane's DFlash2/C2 profile without
+loosening the shipped RTX 4090/3090 MTP/C1 shape. The controller passes DFlash2
+and the optimized proposal head explicitly. The existing qualification
+orchestrator's MTP pressure recipe is not an RTX 5090 acceptance procedure.
+Use isolated experiment roots; no managed installation or release promotion is
+implied. Native build, smoke and comparison evidence must establish whether
+all-native packaging is worthwhile before a release qualification is attempted.
+
 ## 2026-10-24 — Upstream-master native packages (qualification pending)
 
 The native component candidates are `v0.7.0-qwen38-4090-beta.2` and

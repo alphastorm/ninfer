@@ -1424,7 +1424,8 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertEqual(spec["product_prefix"], f"ninfer-{lane}-native")
                 gpu = spec["gpu"]
                 self.assertEqual(gpu["cuda_architecture"], "sm_" + gpu["cmake_cuda_architecture"])
-                self.assertEqual(gpu["compute_capability"].replace(".", ""), gpu["cmake_cuda_architecture"])
+                architecture = gpu["compute_capability"].replace(".", "")
+                self.assertEqual(gpu["cmake_cuda_architecture"], architecture + ("a" if lane == "rtx5090" else ""))
                 self.assertIn(number, gpu["name"])
                 self.assertEqual(spec["lifecycle"]["task_name"], f"NInfer-Qwen38-{number}-Native")
                 self.assertEqual(spec["lifecycle"]["state_root_name"], f"qwen38-{number}-native")
@@ -1448,14 +1449,21 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertEqual(config["listen"]["host"], "127.0.0.1")
                 self.assertEqual(config["listen"]["port"], spec["lifecycle"]["listen_port"])
                 self.assertEqual(config["authentication"]["mode"], "required-api-key-file")
-                self.assertEqual(config["engine"]["max_concurrency"], 1)
-                self.assertEqual(config["engine"]["kv_dtype"], "int8")
+                blackwell = lane == "rtx5090"
+                self.assertEqual(config["engine"]["max_concurrency"], 2 if blackwell else 1)
+                self.assertEqual(config["engine"]["kv_dtype"], "bf16" if blackwell else "int8")
                 keep_warm = config["engine"]["gpu_keep_warm_ms"]
                 self.assertIs(type(keep_warm), int)
                 self.assertTrue(0 <= keep_warm <= 2**31 - 1)
-                self.assertEqual(config["speculative"]["backend"], "mtp")
-                self.assertEqual(config["speculative"]["draft_tokens"], 3)
-                self.assertEqual(config["engine"]["admission_headroom_mib"], 640 if lane == "rtx4090" else 768)
+                self.assertEqual(config["speculative"]["backend"], "dflash2" if blackwell else "mtp")
+                self.assertEqual(config["speculative"]["draft_tokens"], 7 if blackwell else 3)
+                self.assertEqual(config["engine"]["admission_headroom_mib"], 768 if lane == "rtx3090" else 640)
+                if blackwell:
+                    self.assertEqual(spec["qualification"]["purpose"], "experimental-feasibility-only-not-a-release")
+                    self.assertEqual(config["engine"]["max_context"], 131072)
+                    self.assertEqual(config["engine"]["kv_capacity"], 146368)
+                    self.assertEqual(config["engine"]["prefill_chunk"], 1024)
+                    self.assertTrue(config["engine"]["vision"])
                 self.assertTrue(config["session_checkpoint"]["enabled"])
                 self.assertIs(config["session_checkpoint"]["require_origin_auth"], True)
                 self.assertGreaterEqual(config["context_cache"]["device_state_slots"], 1)
@@ -1570,6 +1578,61 @@ class PowerShellContractTests(unittest.TestCase):
             check=True, text=True, capture_output=True,
         )
         return json.loads(result.stdout)
+
+    def test_native_lane_speculation_guards_agree(self) -> None:
+        installer = (WINDOWS / "Install-Release.ps1").read_text()
+        packager = (WINDOWS / "New-Package.ps1").read_text()
+        package_guard = packager[packager.index("$validSpeculation ="):
+                                 packager.index("if ($config.artifact_type")]
+        functions = "\n".join(ps_function(installer, name) for name in (
+            "Assert-AllowedListenHost", "Assert-InstallerArchitectureContract"))
+        for lane_dir in LANES:
+            spec = qualify_native.ps_quote(str(lane_dir / "release-spec.json"))
+            config = qualify_native.ps_quote(str(lane_dir / "server-config.json"))
+            observed = self.invoke(f"""
+{functions}
+$Spec=Get-Content -Raw {spec}|ConvertFrom-Json
+$Config=Get-Content -Raw {config}|ConvertFrom-Json
+$Lane=[string]$Spec.lane
+$results=@()
+foreach($variant in @('valid','wrong-concurrency','wrong-backend','zero-drafts')){{
+  $Config=Get-Content -Raw {config}|ConvertFrom-Json
+  if($variant -ceq 'wrong-concurrency'){{$Config.engine.max_concurrency=3}}
+  if($variant -ceq 'wrong-backend'){{$Config.speculative.backend='dflash'}}
+  if($variant -ceq 'zero-drafts'){{$Config.speculative.draft_tokens=0}}
+  {package_guard}
+  $accepted=$true
+  try{{Assert-InstallerArchitectureContract $Spec $Config}}catch{{$accepted=$false}}
+  $results+=@{{package=[bool]$validSpeculation;installer=$accepted}}
+}}
+ConvertTo-Json -InputObject @($results) -Compress
+""")
+            self.assertEqual(observed, [
+                {"package": valid, "installer": valid} for valid in (True, False, False, False)
+            ], lane_dir.name)
+
+    def test_dflash2_controller_arguments_and_bounds(self) -> None:
+        controller = (WINDOWS / "Control-Release.ps1").read_text()
+        start = controller.index("$speculativeBackend =")
+        launch = controller[start:controller.index("# Both flags belong", start)]
+        observed = self.invoke(f"""
+$results=@()
+foreach($draft in @(0,7,16)){{
+  $config=@{{speculative=@{{backend='dflash2';draft_tokens=$draft}}}}
+  $serverArguments=[Collections.Generic.List[string]]::new()
+  $accepted=$true
+  try{{{launch}}}catch{{$accepted=$false}}
+  $results+=@{{accepted=$accepted;arguments=@($serverArguments.ToArray())}}
+}}
+ConvertTo-Json -InputObject @($results) -Depth 4 -Compress
+""")
+        self.assertEqual(observed, [
+            {"accepted": False, "arguments": []},
+            {"accepted": True, "arguments": [
+                "--spec", "dflash2", "--draft-tokens", "7", "--lm-head-draft",
+            ]},
+            {"accepted": False, "arguments": []},
+        ])
 
     def test_all_release_scripts_parse(self) -> None:
         paths = [WINDOWS / name for name in SHARED_SCRIPTS] + [ROOT / "tests/test_release_security.ps1"]
