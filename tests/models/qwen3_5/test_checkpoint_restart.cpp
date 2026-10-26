@@ -333,16 +333,16 @@ void fragment_identity(DeviceContext& device, q35::Program& program,
                        models::qwen::Frontend& frontend, const fs::path& directory) {
     require(!fs::exists(directory), "fragment identity directory already exists");
     fs::create_directories(directory);
-    const auto prompt = [&](bool continuation) {
-        auto prepared = frontend.prepare_tokens(std::vector<TokenId>(continuation ? 207 : 128, 198));
+    const auto prompt = [&] {
+        auto prepared = frontend.prepare_tokens(std::vector<TokenId>(207, 198));
         auto& data = const_cast<models::qwen::PreparedPromptData&>(
             models::qwen::PreparedPromptAccess::view(prepared));
-        data.identity.rewrite_execution_frontiers = continuation
-            ? std::vector<std::uint32_t>{128, 137, 143, 156, 179}
-            : std::vector<std::uint32_t>{128};
+        data.identity.rewrite_execution_frontiers = {128, 137, 143, 156, 179};
+        data.context_cache.opportunities.push_back({
+            .kind = PromptCacheMarkerKind::PrivateLongAnchor, .frontier = 128});
         return prepared;
     };
-    auto seed = generate(device, program, prompt(false), std::nullopt, true);
+    auto seed = generate(device, program, prompt(), std::nullopt, true);
     auto seed_export = program.prepare_checkpoint_export(seed.points, {});
     require(seed_export.state() == DurablePrepareState::Prepared, "identity seed export refused");
     Writer seed_writer(directory / "seed");
@@ -350,7 +350,7 @@ void fragment_identity(DeviceContext& device, q35::Program& program,
             "identity seed payload write refused");
     const auto& index = seed_export.index();
     const auto input = std::find_if(index.points.begin(), index.points.end(),
-        [](const auto& point) { return point.role == DurablePointRole::InputReplay; });
+        [](const auto& point) { return point.role == DurablePointRole::LongAnchor; });
     require(input != index.points.end() && input->frontier == 128,
             "identity seed did not capture the canonical chunk boundary");
     const auto source = seed.points.at(static_cast<std::size_t>(input - index.points.begin()));
@@ -368,11 +368,11 @@ void fragment_identity(DeviceContext& device, q35::Program& program,
         require(!result.empty(), "identity comparison has no native payloads");
         return result;
     };
-    auto resumed = generate(device, program, prompt(true), source, false);
+    auto resumed = generate(device, program, prompt(), source, false);
     require(resumed.reused == 128, "fragment identity did not resume its checkpoint");
     const auto resumed_payloads = payloads(resumed, "resumed");
     release(program, resumed.points);
-    auto cold = generate(device, program, prompt(true), std::nullopt, false);
+    auto cold = generate(device, program, prompt(), std::nullopt, false);
     require(cold.reused == 0, "fragment identity cold execution unexpectedly reused state");
     require(cold.tokens == resumed.tokens, "fragment traversal changed resumed/cold output tokens");
     require(payloads(cold, "cold") == resumed_payloads,

@@ -1227,6 +1227,11 @@ void TextContext::run_fragment_layers(Tensor& x, const Tensor& positions,
                 else
                     gdn_mix(block, fragment, compact, Phase::Prefill);
             }
+        });
+        // Do not let the dense FFN's weights evict the mixer between fragments.
+        // Token-local FFNs may run after every fragment has finished this mixer.
+        for_prefill_fragments(frontiers, begin, x.ne[1], [&](int offset, int tokens) {
+            Tensor fragment = x.slice(1, offset, tokens);
             {
                 nvtx::ScopedRange range(nvtx::Name::PrefillPostMixer,
                                         nvtx::Category::PostMixer, layer);
@@ -1444,7 +1449,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 const std::uint32_t alignment_begin =
                     multimodal != nullptr || text_prefill != nullptr
                         ? prompt_t0
-                        : static_cast<std::uint32_t>(t0);
+                        : static_cast<std::uint32_t>(t0 + offset);
                 const qwen3_5::MtpAlignmentWindow mtp_window = qwen3_5::plan_mtp_alignment_window(
                     alignment_tokens, alignment_begin, static_cast<std::uint32_t>(len));
                 const std::span<const int> alignment_ids =

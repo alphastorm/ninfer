@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run native checkpoint export/import in separate real model processes."""
+"""Compare fragment identity, then export/import in separate real model processes."""
 import os
 from pathlib import Path
 import subprocess
@@ -17,8 +17,9 @@ def main():
     backend = sys.argv[2] if len(sys.argv) == 3 else "dflash2"
     with tempfile.TemporaryDirectory(prefix="ninfer-checkpoint-restart-") as root:
         checkpoint = str(Path(root) / "checkpoint")
-        for stage in ("export", "import"):
-            result = subprocess.run([binary, stage, checkpoint, backend], check=False)
+        for stage in ("identity", "export", "import"):
+            destination = str(Path(root) / "identity") if stage == "identity" else checkpoint
+            result = subprocess.run([binary, stage, destination, backend], check=False)
             if result.returncode:
                 return result.returncode
     return 0
