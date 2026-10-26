@@ -137,6 +137,13 @@ shared-pool pressure, context, restart, rollback, security, client and benchmark
 fields are adapted from actual phase receipts; failed/missing evidence cannot
 become passing flags. A first-lineage rollback remains `not_applicable`, not passed.
 
+Shared-pool pressure failures retain their scratch checkpoint store, request log
+and drained stdout/stderr. A retained pressure root refuses a new attempt until
+an operator explicitly authorizes its cleanup; it is never silently freshened.
+Automatic scratch removal occurs only after a passing remote receipt and local
+validation of the canonical product protocol result. Transport failures,
+non-passing receipts and malformed protocol payloads preserve the evidence.
+
 Privacy qualification has two explicit domains. Shipped executable/DLL directories
 and both public/scratch payload archives reject every Windows user-profile spelling,
 macOS user-directory or Linux home-directory path, plus the known private host names

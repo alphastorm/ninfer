@@ -195,10 +195,16 @@ class MultiGpuHostTests(unittest.TestCase):
             state_root="C:/state", target_root="C:/qualification", gpu_uuid="GPU-00000000-0000-0000-0000-000000000001",
             lane=SimpleNamespace(model_id="model", spec=json.loads(
                 (WINDOWS / "lanes/rtx3090/release-spec.json").read_text())),
-            remote_json=lambda host, script, **kwargs: captured.append(script) or {"protocol": product_protocol_fixture()},
+            remote_json=lambda host, script, **kwargs: captured.append(script) or {
+                "status": "passed", "protocol": product_protocol_fixture()},
             config=SimpleNamespace(target="not-contacted", pressure_port=18201),
         )
-        qualify_native.Orchestrator.pressure_protocol(subject)
+        with patch.object(qualify_native, "remote_ps", return_value="") as cleanup:
+            qualify_native.Orchestrator.pressure_protocol(subject)
+        cleanup.assert_called_once()
+        self.assertEqual(cleanup.call_args.args[0], subject.config.target)
+        self.assertIn("Remove-Item -LiteralPath 'C:/qualification/pressure' -Recurse -Force",
+                      cleanup.call_args.args[1])
         self.assertIn(r"""'(\\*)"'""", captured[0])
         self.assertIn(r"'$1$1\"'", captured[0])
 
@@ -888,6 +894,62 @@ class ScratchQualificationTests(unittest.TestCase):
             with self.assertRaisesRegex(qualify_native.LaneError, "non-passing receipt"):
                 subject.phase("protocol", lambda: {"status": "failed"})
             self.assertEqual(subject.state["phases"]["protocol"]["status"], "failed")
+
+    def pressure_subject(self, response):
+        scripts = []
+
+        def remote_json(_host, script, **_kwargs):
+            scripts.append(script)
+            if isinstance(response, Exception):
+                raise response
+            return response
+
+        subject = SimpleNamespace(
+            state_root="C:/unit-state", target_root="C:/unit-stage", gpu_uuid="GPU-unit-fixture",
+            lane=SimpleNamespace(spec=self.spec, model_id="unit-model"),
+            config=SimpleNamespace(target="unit-target", pressure_port=18200),
+            remote_json=remote_json,
+        )
+        return subject, scripts
+
+    def test_pressure_transport_failure_preserves_store_and_drained_logs(self) -> None:
+        subject, scripts = self.pressure_subject(qualify_native.LaneError("unit transport failure"))
+        with patch.object(qualify_native, "remote_ps") as cleanup:
+            with self.assertRaisesRegex(qualify_native.LaneError, "unit transport failure"):
+                qualify_native.Orchestrator.pressure_protocol(subject)
+        cleanup.assert_not_called()
+        self.assertEqual(len(scripts), 1)
+        self.assertIn("pressure scratch already exists; preserve it until explicit operator cleanup", scripts[0])
+        self.assertNotIn("Remove-Item $scratch", scripts[0])
+        self.assertIn("$stdoutCopy.GetAwaiter().GetResult()", scripts[0])
+        self.assertIn("$stderrCopy.GetAwaiter().GetResult()", scripts[0])
+        self.assertIn("artifacts retained at", scripts[0])
+
+    def test_pressure_nonpassing_receipt_never_cleans_the_store(self) -> None:
+        subject, _ = self.pressure_subject({"status": "failed", "protocol": product_protocol_fixture()})
+        with patch.object(qualify_native, "remote_ps") as cleanup:
+            with self.assertRaisesRegex(qualify_native.LaneError, "logs and store are retained"):
+                qualify_native.Orchestrator.pressure_protocol(subject)
+        cleanup.assert_not_called()
+
+    def test_pressure_bad_canonical_payload_never_cleans_the_store(self) -> None:
+        protocol = product_protocol_fixture()
+        protocol["schema_version"] = 1
+        subject, _ = self.pressure_subject({"status": "passed", "protocol": protocol})
+        with patch.object(qualify_native, "remote_ps") as cleanup:
+            with self.assertRaises(qualify_native.LaneError):
+                qualify_native.Orchestrator.pressure_protocol(subject)
+        cleanup.assert_not_called()
+
+    def test_pressure_cleans_only_its_validated_successful_scratch(self) -> None:
+        receipt = {"status": "passed", "protocol": product_protocol_fixture()}
+        subject, scripts = self.pressure_subject(receipt)
+        with patch.object(qualify_native, "remote_ps", return_value="") as cleanup:
+            self.assertIs(qualify_native.Orchestrator.pressure_protocol(subject), receipt)
+        cleanup.assert_called_once()
+        self.assertEqual(cleanup.call_args.args[0], "unit-target")
+        self.assertIn("Remove-Item -LiteralPath 'C:/unit-stage/pressure'", cleanup.call_args.args[1])
+        self.assertNotIn("Remove-Item $scratch", scripts[0])
 
     def stage_fixture(self) -> tuple[dict, dict]:
         # Synthetic unit evidence exercises the adapter, not a native/GPU qualification.
