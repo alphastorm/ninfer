@@ -8,6 +8,29 @@
 #include <stdexcept>
 
 namespace ninfer::ops {
+
+WeightInput effective_weight_input(WeightInput input, NativePrefillPolicy profile) {
+    switch (profile) {
+    case NativePrefillPolicy::ArtifactUse:
+        return input;
+    case NativePrefillPolicy::Group64A8:
+        break;
+    default:
+        throw std::invalid_argument("invalid native prefill policy");
+    }
+    const bool eligible = input.weight.shape.size() == 2 && !input.weight.parts.empty() &&
+        std::all_of(input.weight.parts.begin(), input.weight.parts.end(), [](const auto& part) {
+            if (!part.parent) return false;
+            const auto& geometry = part.parent->geometry;
+            return geometry.layout == QuantLayout::RowSplit && geometry.group_size == 64 &&
+                   (geometry.format == QType::Q4_G64_FP16 ||
+                    geometry.format == QType::Q5_G64_FP16);
+        });
+    if (eligible && input.policy == LinearPolicy::A16Only)
+        input.policy = LinearPolicy::AllowA8;
+    return input;
+}
+
 namespace {
 
 void require(bool condition, const char* message) {
@@ -181,7 +204,7 @@ LinearProfile describe_linear_weight(std::span<const WeightInput> rows) {
 ProjectionProfile describe_projection_weights(std::span<const WeightInput> rows) {
     auto banks = projection_regions(rows, describe_single);
     if (banks.size() == 1) return {banks[0], {}};
-    banks[0].policy = banks[1].policy = LinearPolicy::A16Only;
+    banks[0].policy = banks[1].policy = common_policy(rows);
     return {banks[0], banks[1]};
 }
 
@@ -191,7 +214,7 @@ ProjectionWeights prepare_projection_weights(std::span<const WeightInput> rows) 
             return single(view, inputs);
         });
     if (banks.size() == 1) return banks[0];
-    return PairedProjectionWeights{banks[0].weight, banks[1].weight};
+    return PairedProjectionWeights{banks[0].weight, banks[1].weight, common_policy(rows)};
 }
 
 ProjectionWeights prepare_gdn_control_proj_weights(const WeightInput& a, const WeightInput& b) {

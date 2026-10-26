@@ -22,7 +22,8 @@ namespace ninfer::ops {
  *
  * Registered forms include BF16, Q8-G32/FP16, FP8 row-scale, NVFP4 block-scale and
  * paired Q4-G64/FP16 + Q5-G64/FP16. Single-parent activation permissions follow
- * LinearPolicy; paired forms use A16.
+ * LinearPolicy. Paired Q4/Q5 forms permit group64 A8 above 32 columns in the native
+ * group64-A8 build profile; other extents and the default profile retain A16.
  * Workspace is caller-owned, call-scoped and disjoint from all operands. The Op
  * allocates no hidden device memory, owns no persistent state and supports Graph replay.
  */

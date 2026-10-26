@@ -33,7 +33,9 @@ const LoadOptions& LoadPlan::options() const { return impl_->options; }
 
 ops::WeightInput LoadPlan::input(WeightUseId id) const {
     const auto& use = impl_->pending.at(id.parameter.index).uses.at(id.use_index);
-    return {impl_->geometry_views.at(id.parameter.index), use.policy, use.activation_input_divisor};
+    return ops::effective_weight_input(
+        {impl_->geometry_views.at(id.parameter.index), use.policy, use.activation_input_divisor},
+        impl_->options.native_prefill_policy);
 }
 
 ops::WeightInput LoadPlan::input(WeightId id) const {

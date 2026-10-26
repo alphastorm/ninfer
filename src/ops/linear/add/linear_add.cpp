@@ -3,6 +3,7 @@
 #include "ops/linear/add/dispatch.h"
 #include "ops/linear/add/fp8/dispatch.h"
 #include "ops/linear/add/nvfp4/dispatch.h"
+#include "ops/linear/kernels/group64_a8/launch.h"
 
 #include <stdexcept>
 
@@ -89,6 +90,12 @@ std::size_t linear_add_workspace_capacity_bytes(QType type, std::int32_t rows, s
         return detail::nvfp4_linear_add_workspace_capacity_bytes(rows, k, policy, first, last);
     (void)select_a16(type, rows, k, first);
     (void)select_a16(type, rows, k, last);
+#if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
+    if ((type == QType::Q4_G64_FP16 || type == QType::Q5_G64_FP16) &&
+        rows == 5120 && (k == 6144 || k == 17408) &&
+        detail::group64_a8::selected(policy, last))
+        return detail::group64_a8::workspace_bytes(k, last);
+#endif
     return 0;
 }
 
@@ -110,6 +117,12 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual, LinearPolicy
     if (w.qtype == QType::NVFP4)
         return detail::nvfp4_linear_add_dispatch(x, w, residual, policy, workspace,
                                                  execution.stream());
+#if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
+    if ((w.qtype == QType::Q4_G64_FP16 || w.qtype == QType::Q5_G64_FP16) &&
+        w.n == 5120 && (w.k == 6144 || w.k == 17408) &&
+        detail::group64_a8::selected(policy, x.ne[1]))
+        return detail::group64_a8::add(x, w, residual, workspace, execution.stream());
+#endif
     select_a16(w.qtype, w.n, w.k, x.ne[1])(x, w, residual, execution.stream());
 }
 

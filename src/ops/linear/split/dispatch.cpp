@@ -20,8 +20,8 @@ const SplitShape& select_split_shape(ProjectionProfile weights) {
     if (weights.second) {
         if (weights.first.qtype != QType::Q4_G64_FP16 ||
             weights.second->qtype != QType::Q5_G64_FP16 ||
-            weights.first.policy != LinearPolicy::A16Only)
-            throw std::invalid_argument("linear_split: paired weights require Q4/Q5 A16");
+            weights.first.policy != weights.second->policy)
+            throw std::invalid_argument("linear_split: paired Q4/Q5 weights require one policy");
         const std::array shapes{&kQ4Q5SplitN7168N7168K5120, &kQ4Q5SplitN4096N12288K5120};
         return match(shapes, weights);
     }

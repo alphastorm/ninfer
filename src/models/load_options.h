@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ninfer/types.h"
+#include "ninfer/ops/weight_input.h"
 
 #include <string_view>
 
@@ -11,6 +12,7 @@ struct LoadOptions {
     bool vision                    = false;
     SpeculativeBackend speculative = SpeculativeBackend::None;
     ProposalHead proposal_head     = ProposalHead::Full;
+    ops::NativePrefillPolicy native_prefill_policy = ops::NativePrefillPolicy::ArtifactUse;
 
     bool operator==(const LoadOptions&) const = default;
 
@@ -52,7 +54,12 @@ struct LoadOptions {
     return {.purpose       = options.purpose,
             .vision        = options.enable_vision,
             .speculative   = options.speculative.backend,
-            .proposal_head = options.speculative.proposal_head};
+            .proposal_head = options.speculative.proposal_head,
+#if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
+            .native_prefill_policy = ops::NativePrefillPolicy::Group64A8};
+#else
+            .native_prefill_policy = ops::NativePrefillPolicy::ArtifactUse};
+#endif
 }
 
 } // namespace ninfer::models

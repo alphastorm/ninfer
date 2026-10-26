@@ -35,6 +35,25 @@ int q5_a16_conformance() {
                                                                   .route_starts    = no_starts,
                                                                   .route_interiors = full,
                                                                   .full_output     = true});
+        using namespace ninfer::test::linear_add;
+        using ninfer::ops::LinearPolicy;
+        constexpr std::array<Invocation, 12> a8{{
+            {31, LinearPolicy::AllowA8, Arithmetic::A16},
+            {32, LinearPolicy::AllowA8, Arithmetic::A16},
+            {33, LinearPolicy::AllowA8, Arithmetic::A8, GraphReplay::OriginalZeroOriginal},
+            {127, LinearPolicy::AllowA8, Arithmetic::A8},
+            {128, LinearPolicy::AllowA8, Arithmetic::A8},
+            {129, LinearPolicy::AllowA8, Arithmetic::A8, GraphReplay::OriginalNegative},
+            {255, LinearPolicy::AllowA8, Arithmetic::A8},
+            {256, LinearPolicy::AllowA8, Arithmetic::A8},
+            {257, LinearPolicy::AllowA4, Arithmetic::A8},
+            {512, LinearPolicy::AllowA8, Arithmetic::A8},
+            {513, LinearPolicy::AllowA8, Arithmetic::A8, GraphReplay::OriginalZeroOriginal},
+            {1024, LinearPolicy::AllowA8, Arithmetic::A8},
+        }};
+        failures += run_cases("Q5 allow-A8 LinearAdd", WeightFormat::Q5G64F16S,
+                              {.n = 5120, .k = k, .seed = 509U, .invocations = a8,
+                               .fixture = FixturePattern::Hashed, .rows = Samples::Uniform32});
     }
     return failures;
 }

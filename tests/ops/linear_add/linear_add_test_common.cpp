@@ -530,11 +530,17 @@ int run_shape(std::string_view label, WeightFormat format, const ShapeCase& shap
     for (const auto t : conformance_tokens(shape)) {
         const bool graph = std::find(shape.graph_tokens.begin(), shape.graph_tokens.end(), t) !=
                            shape.graph_tokens.end();
+        const bool group64 = (format == WeightFormat::Q4G64F16S || format == WeightFormat::Q5G64F16S) &&
+                             shape.n == 5120 && (shape.k == 6144 || shape.k == 17408);
         invocations.push_back(Invocation{
             .tokens          = t,
             .graph           = graph ? GraphReplay::OriginalZeroOriginal : GraphReplay::None,
-            .graph_policy    = graph ? std::optional(ops::LinearPolicy::AllowA4) : std::nullopt,
-            .followup_policy = graph ? std::optional(ops::LinearPolicy::AllowA8) : std::nullopt,
+            .graph_policy    = graph ? std::optional(group64 ? ops::LinearPolicy::A16Only
+                                                              : ops::LinearPolicy::AllowA4)
+                                     : std::nullopt,
+            .followup_policy = graph ? std::optional(group64 ? ops::LinearPolicy::A16Only
+                                                              : ops::LinearPolicy::AllowA8)
+                                     : std::nullopt,
         });
     }
     return run_cases(label, format,

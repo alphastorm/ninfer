@@ -338,6 +338,61 @@ void cold_matrix_profile() {
             "cold matrix profile did not preserve the local NVFP4 matrix layout");
 }
 
+void native_prefill_policy() {
+    using ops::LinearPolicy;
+    using ops::NativePrefillPolicy;
+    for (const auto format : {QType::Q4_G64_FP16, QType::Q5_G64_FP16, QType::Q8_G32_FP16}) {
+        const auto geometry = weight_geometry(format, QuantLayout::RowSplit,
+                                              std::array<std::uint64_t, 2>{128, 5120});
+        std::vector<std::byte> bytes(geometry.bytes);
+        const WeightParent parent{geometry, Device::cpu(), bytes.data()};
+        const WeightView view{{128, 5120}, {{&parent, 0, geometry.elements}}};
+        for (const auto stored : {LinearPolicy::A16Only, LinearPolicy::AllowA8,
+                                  LinearPolicy::AllowA4}) {
+            const ops::WeightInput input{view, stored, 2.0F};
+            const auto original =
+                ops::effective_weight_input(input, NativePrefillPolicy::ArtifactUse);
+            const auto promoted =
+                ops::effective_weight_input(input, NativePrefillPolicy::Group64A8);
+            const auto expected = format != QType::Q8_G32_FP16 && stored == LinearPolicy::A16Only
+                                      ? LinearPolicy::AllowA8
+                                      : stored;
+            require(original.policy == stored && promoted.policy == expected &&
+                        promoted.activation_input_divisor == 2.0F &&
+                        &promoted.weight == &view && input.policy == stored,
+                    "native prefill changed stored Use, auxiliary, or ineligible policy");
+            const std::array inputs{promoted};
+            require(ops::describe_linear_weight(inputs).policy ==
+                        ops::prepare_linear_weight(promoted).policy,
+                    "native prefill planned and bound policies differ");
+        }
+        rejects<std::invalid_argument>(
+            [&] {
+                (void)ops::effective_weight_input({view},
+                                                  static_cast<NativePrefillPolicy>(255));
+            },
+            "invalid native prefill profile was accepted");
+    }
+    const auto q4_geometry = weight_geometry(QType::Q4_G64_FP16, QuantLayout::RowSplit,
+                                             std::array<std::uint64_t, 2>{128, 5120});
+    const auto q5_geometry = weight_geometry(QType::Q5_G64_FP16, QuantLayout::RowSplit,
+                                             std::array<std::uint64_t, 2>{128, 5120});
+    std::vector<std::byte> q4_bytes(q4_geometry.bytes), q5_bytes(q5_geometry.bytes);
+    const WeightParent q4{q4_geometry, Device::cpu(), q4_bytes.data()};
+    const WeightParent q5{q5_geometry, Device::cpu(), q5_bytes.data()};
+    const WeightView first{{128, 5120}, {{&q4, 0, q4_geometry.elements}}};
+    const WeightView second{{128, 5120}, {{&q5, 0, q5_geometry.elements}}};
+    for (const auto permission : {LinearPolicy::A16Only, LinearPolicy::AllowA8, LinearPolicy::AllowA4}) {
+        const std::array<ops::WeightInput, 2> inputs{{{first, LinearPolicy::AllowA4},
+                                                     {second, permission}}};
+        const auto planned = ops::describe_projection_weights(inputs);
+        const auto bound = ops::projection_profile(ops::prepare_projection_weights(inputs));
+        require(planned == bound && planned.first.policy == permission &&
+                    planned.second->policy == permission,
+                "paired projection failed to intersect planned/bound effective Uses");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -345,6 +400,7 @@ int main() {
         logical_data_and_instances();
         native_uses();
         cold_matrix_profile();
+        native_prefill_policy();
         invalid_model_data();
         std::cout << "model config, binding, resources and Use checks passed\n";
         return 0;

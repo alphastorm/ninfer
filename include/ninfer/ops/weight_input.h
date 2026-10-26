@@ -8,12 +8,21 @@
 
 namespace ninfer::ops {
 
+enum class NativePrefillPolicy : std::uint8_t {
+    ArtifactUse,
+    Group64A8,
+};
+
 // One mathematical use of a logical matrix. The model owns the view and its backing.
 struct WeightInput {
     const WeightView& weight;
     LinearPolicy policy = LinearPolicy::A16Only;
     std::optional<float> activation_input_divisor;
 };
+
+// Resolve once from the effective representation, before joining Uses. Description and
+// binding must pass the same immutable profile; this never mutates artifact metadata.
+[[nodiscard]] WeightInput effective_weight_input(WeightInput input, NativePrefillPolicy profile);
 
 [[nodiscard]] LinearProfile describe_linear_weight(std::span<const WeightInput> rows);
 [[nodiscard]] ProjectionProfile describe_projection_weights(std::span<const WeightInput> rows);
@@ -24,7 +33,7 @@ struct WeightInput {
 // Row order is supplied by the calling implementation, for example a Vision Q/K/V bank.
 [[nodiscard]] SingleProjectionWeight prepare_linear_weight(std::span<const WeightInput> rows);
 // Logical row concatenation backed by one or two consecutive native parent regions.
-// Paired regions use A16; the consuming Op owns format/shape/segmentation admission.
+// Paired regions intersect Uses; the consuming Op owns format/shape/segmentation admission.
 [[nodiscard]] ProjectionWeights prepare_projection_weights(std::span<const WeightInput> rows);
 [[nodiscard]] ProjectionWeights prepare_gdn_control_proj_weights(const WeightInput& a,
                                                                  const WeightInput& b);

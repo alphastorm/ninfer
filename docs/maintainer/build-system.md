@@ -18,6 +18,29 @@ The default configuration is Release. Ninja links and archives share the single-
 | `NINFER_BUILD_APPS` | ON | CLI, HTTP server and perplexity evaluator |
 | `BUILD_TESTING` | OFF | C++ tests and registered Python interoperability tests |
 | `NINFER_BUILD_BENCHMARKS` | OFF | Op, model, Engine and context-cost benchmarks |
+| `NINFER_NATIVE_PREFILL_GROUP64_A8` | OFF | Opt-in sm_86/sm_89 group64 integer-activation prefill |
+
+The native group64-A8 profile is a distinct numerical build profile, not a change to the artifact
+or its stored Use records. Loading resolves an effective activation permission identically for
+address-independent planning and bound operands: row-split Q4/Q5 group64 A16-only Uses become
+AllowA8; other Uses, geometry and auxiliaries remain unchanged. Paired projections use the
+intersection of their effective permissions. The profile is rejected for other architectures.
+
+Above 32 columns, the supported 27B Q5 residual projections, Q4 fused SwiGLU and paired Q4/Q5
+input projections quantize transient activations per token and 64-channel group, execute signed
+INT8 tensor-core products, and accumulate group-scaled results in FP32. FP32 activation scales
+avoid half-precision scale underflow. The paired input projections share one quantization;
+SwiGLU retains its fused FP32 nonlinear epilogue. T <= 32 and unsupported shapes keep their
+existing routes. Padding is explicitly written, output tails are masked, and weights are never
+repacked or persistently copied.
+
+Scratch is caller-owned and reported by the same layout helper used at execution:
+`round_up(T,512) * (K + 4*K/64)` bytes. This replaces (rather than adds to) the Q4 SwiGLU
+materialized-intermediate route where that route was selected. Model workspace and total VRAM
+depend on the complete planner; the formula is not a measured VRAM delta. OFF omits these CUDA
+translation units. Keep this option OFF for qualified profiles until matched throughput,
+independent Op-oracle, exact long-retrieval and powered output-quality gates pass; ON binaries
+must use a distinct `NINFER_BUILD_PROFILE` identity.
 
 Apps or tests enable the internal product support components: media acquisition, prompt input,
 logging and serving. This is one derived condition, not a separate user option. FFmpeg and libjpeg
