@@ -34,7 +34,12 @@ struct Fp8Sm89MmaSchedule : Schedule {
 #endif
 
 #if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+// Keep device parameter alignment without an over-aligned MSVC host-stub argument.
+#if defined(_MSC_VER) && !defined(__CUDA_ARCH__)
+struct Fp8TmaDescriptors {
+#else
 struct alignas(128) Fp8TmaDescriptors {
+#endif
     CUtensorMap activation;
     CUtensorMap weight;
 };
@@ -70,7 +75,7 @@ inline Fp8TmaSplitKPlan fp8_tma_split_k_plan(int tiles, int k) {
 
 inline CUtensorMap fp8_tma_map(const std::uint8_t* pointer, int rows, int k, int block_rows,
                                int block_k) {
-    CUtensorMap result{};
+    alignas(128) CUtensorMap result{};
     const std::uint64_t dimensions[]{static_cast<std::uint64_t>(k),
                                      static_cast<std::uint64_t>(rows)};
     const std::uint64_t strides[]{static_cast<std::uint64_t>(k)};

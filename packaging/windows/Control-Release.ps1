@@ -1163,6 +1163,15 @@ function Invoke-Run {
                 $serverArguments.Add($argument)
             }
         }
+        elseif ($speculativeBackend -ceq 'dflash2') {
+            if ($draftTokens -lt 1 -or $draftTokens -gt 15) {
+                throw 'DFlash2 draft tokens must be in [1,15]'
+            }
+            foreach ($argument in @('--spec', 'dflash2', '--draft-tokens', [string]$draftTokens,
+                                    '--lm-head-draft')) {
+                $serverArguments.Add($argument)
+            }
+        }
         else {
             throw "unsupported release speculative backend: $speculativeBackend"
         }
