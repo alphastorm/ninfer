@@ -148,6 +148,18 @@ private:
     T previous_;
 };
 
+template <class Function>
+void for_prefill_fragments(std::span<const std::uint32_t> frontiers, std::uint32_t begin,
+                          int tokens, Function&& function) {
+    int offset = 0;
+    for (const auto frontier : frontiers) {
+        const int end = static_cast<int>(frontier - begin);
+        function(offset, end - offset);
+        offset = end;
+    }
+    function(offset, tokens - offset);
+}
+
 } // namespace
 
 void DFlashFeatureSink::begin(const Tensor& value) {
@@ -218,12 +230,14 @@ void DFlashFeatureSink::capture_positions(const Tensor& source, CudaExecutionVie
                                cudaMemcpyDeviceToDevice, execution.stream()));
 }
 
-void DFlashFeatureSink::consume_prefill_chunk(std::int32_t tokens, bool rewrite_checkpoint) {
-    if (!consume_prefill || tokens != active_tokens) {
+void DFlashFeatureSink::consume_prefill_chunk(std::int32_t tokens, bool rewrite_checkpoint,
+                                             std::int32_t offset) {
+    if (!consume_prefill || offset < 0 || tokens <= 0 || offset > active_tokens ||
+        tokens > active_tokens - offset) {
         throw std::logic_error("DFlash prefill feature consumer is unavailable");
     }
-    Tensor feature_window  = features->slice(1, 0, tokens);
-    Tensor position_window = positions->slice(0, 0, tokens);
+    Tensor feature_window  = features->slice(1, offset, tokens);
+    Tensor position_window = positions->slice(0, offset, tokens);
     consume_prefill(feature_window, position_window, rewrite_checkpoint);
 }
 
@@ -1173,6 +1187,59 @@ void TextContext::run_layers(Tensor& x, Phase ph) {
 }
 
 template <class Tap>
+void TextContext::run_fragment_layers(Tensor& x, const Tensor& positions,
+                                      const Tensor& rope_positions, std::uint32_t begin,
+                                      std::span<const std::uint32_t> frontiers, Tap& tap) {
+    if (frontiers.empty()) {
+        run_layers(x, Phase::Prefill, tap);
+        return;
+    }
+    // Arithmetic boundaries remain fragment-local. Only traversal changes: no layer
+    // observes another layer's partial StateImage, and captures still end this call.
+    const auto source_slot = linear_state_source_slot_;
+    for (std::size_t layer = 0; layer < parameters_.text.layers.size(); ++layer) {
+        const auto& block = parameters_.text.layers[layer];
+        const bool full = config_.layer_types[layer] == MixerKind::FullAttention;
+        const auto compact = dimension(config_.compact_layer_indices[layer]);
+        nvtx::ScopedRange layer_range(
+            full ? nvtx::Name::PrefillLayerFull : nvtx::Name::PrefillLayerGdn,
+            full ? nvtx::Category::Attention : nvtx::Category::Gdn, layer);
+        for_prefill_fragments(frontiers, begin, x.ne[1], [&](int offset, int tokens) {
+            Tensor fragment = x.slice(1, offset, tokens);
+            Tensor fragment_positions = positions.slice(0, offset, tokens);
+            Tensor fragment_rope = rope_positions.slice(0, offset, tokens);
+            const auto visible = begin + static_cast<std::uint32_t>(offset + tokens);
+            const ops::CausalAttentionExecutionEnvelope envelope{visible, visible};
+            ScopedValue<const Tensor*> cache_scope(active_cache_positions_, &fragment_positions);
+            ScopedValue<const Tensor*> rope_scope(active_rope_positions_, &fragment_rope);
+            ScopedValue<const ops::CausalAttentionExecutionEnvelope*> envelope_scope(
+                active_causal_attention_envelope_, &envelope);
+            ScopedValue<std::int32_t> state_scope(
+                linear_state_source_slot_, offset == 0 ? source_slot
+                                                       : linear_state_destination_slot_);
+            {
+                nvtx::ScopedRange range(
+                    full ? nvtx::Name::PrefillAttention : nvtx::Name::PrefillGdn,
+                    full ? nvtx::Category::Attention : nvtx::Category::Gdn, layer);
+                auto scope = work_.scope();
+                if (full)
+                    attn_mix(block, fragment, compact, Phase::Prefill);
+                else
+                    gdn_mix(block, fragment, compact, Phase::Prefill);
+            }
+            {
+                nvtx::ScopedRange range(nvtx::Name::PrefillPostMixer,
+                                        nvtx::Category::PostMixer, layer);
+                auto scope = work_.scope();
+                post_mixer(block, fragment, static_cast<int>(layer));
+            }
+        });
+        if constexpr (Tap::enabled)
+            tap.capture_layer(static_cast<int>(layer), x, execution_);
+    }
+}
+
+template <class Tap>
 PrefillChunkResult
 TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_prefill,
                           const MultimodalPrefill* multimodal, Tap& tap, bool finalize_at_end) {
@@ -1242,6 +1309,12 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 multimodal->vision->prepare_chunk(prompt_t0, static_cast<std::uint32_t>(len));
             len = vision_chunk.length;
         }
+        const auto first_fragment = std::upper_bound(prefill_execution_frontiers_.begin(),
+                                                     prefill_execution_frontiers_.end(), prompt_t0);
+        const auto last_fragment = std::lower_bound(first_fragment,
+                                                    prefill_execution_frontiers_.end(),
+                                                    prompt_t0 + len);
+        const std::span<const std::uint32_t> fragments(first_fragment, last_fragment);
         // Vision has its own interval. The Program-owned pair measures this text chunk,
         // including MTP alignment or the draft feature consumer submitted below.
         if (prefill_gpu_timer_) { prefill_gpu_timer_->start(); }
@@ -1309,7 +1382,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                 ops::scatter(embeddings, indices_device, x, execution_);
             }
             if constexpr (Tap::enabled) { tap.begin(x); }
-            run_layers(x, Phase::Prefill, tap);
+            run_fragment_layers(x, positions, rope_positions, prompt_t0, fragments, tap);
             if constexpr (requires { tap.capture_positions(positions, execution_); }) {
                 tap.capture_positions(positions, execution_);
             }
@@ -1317,7 +1390,11 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             Tensor xf = prefill_hidden_.data != nullptr
                             ? matrix_window(prefill_hidden_, len)
                             : work_.alloc(DType::BF16, {dimension(config_.hidden_size), len});
-            ops::rmsnorm(x, *final_norm_, config_.rms_norm_eps, true, xf, execution_);
+            for_prefill_fragments(fragments, prompt_t0, len, [&](int offset, int tokens) {
+                Tensor input = x.slice(1, offset, tokens);
+                Tensor output = xf.slice(1, offset, tokens);
+                ops::rmsnorm(input, *final_norm_, config_.rms_norm_eps, true, output, execution_);
+            });
 
             if (is_last) {
                 Tensor last_xf = xf.slice(1, len - 1, 1);
@@ -1341,6 +1418,24 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             }
 
             if (prepare_mtp_prompt) {
+                const Tensor all_hidden = xf;
+                const Tensor all_positions = positions;
+                const Tensor all_rope_positions = rope_positions;
+                const auto group_begin = prompt_t0;
+                const int group_tokens = len;
+                const bool final_group = is_last;
+                for_prefill_fragments(fragments, group_begin, group_tokens,
+                                      [&](int offset, int len) {
+                auto fragment_scope = work_.scope();
+                Tensor xf = all_hidden.slice(1, offset, len);
+                Tensor positions = all_positions.slice(0, offset, len);
+                Tensor rope_positions = fragments.empty()
+                                            ? all_rope_positions
+                                            : all_rope_positions.slice(0, offset, len);
+                const auto prompt_t0 = group_begin + static_cast<std::uint32_t>(offset);
+                const bool is_last = final_group && offset + len == group_tokens;
+                const auto visible = prompt_t0 + static_cast<std::uint32_t>(len);
+                const ops::CausalAttentionExecutionEnvelope chunk_envelope{visible, visible};
                 const std::uint32_t alignment_tokens =
                     multimodal != nullptr ? static_cast<std::uint32_t>(multimodal->token_ids.size())
                     : text_prefill != nullptr
@@ -1419,6 +1514,7 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
                                       rope_positions, chunk_envelope, false, nullptr, nullptr,
                                       nullptr);
                 }
+                });
             }
 
             if (split_rel > 0 && t0 + len == split_rel &&
@@ -1434,8 +1530,12 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
         }
 
         if constexpr (requires { tap.consume_prefill_chunk(len, false); }) {
-            work_.reset();
-            tap.consume_prefill_chunk(len, split_rel > 0 && t0 + len == split_rel);
+            for_prefill_fragments(fragments, prompt_t0, len, [&](int offset, int tokens) {
+                work_.reset();
+                tap.consume_prefill_chunk(
+                    tokens, offset + tokens < len || (split_rel > 0 && t0 + len == split_rel),
+                    offset);
+            });
         }
 
         t0 += len;

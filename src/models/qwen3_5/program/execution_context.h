@@ -158,7 +158,8 @@ void target_accept(ExecutionCore&, Tensor& continuation_hidden_store, TargetVeri
                                                     std::span<const TokenId> ids,
                                                     std::uint32_t nominal_length,
                                                     std::optional<std::uint32_t> split_frontier,
-                                                    bool finalize_at_end);
+                                                    bool finalize_at_end,
+                                                    std::span<const std::uint32_t> frontiers = {});
 
 [[nodiscard]] PrefillChunkResult
 prefill_multimodal_chunk(PrefillContext& state, const qwen::PreparedPromptData& prompt,

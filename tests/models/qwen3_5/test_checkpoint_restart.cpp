@@ -328,14 +328,69 @@ models::qwen::PreparedPrompt continuation_prompt(models::qwen::Frontend& fronten
 void release(q35::Program& program, const std::vector<q35::CheckpointHandle>& points) {
     for (auto point : points) require(program.release_checkpoint(point), "checkpoint ownership leaked");
 }
+
+void fragment_identity(DeviceContext& device, q35::Program& program,
+                       models::qwen::Frontend& frontend, const fs::path& directory) {
+    require(!fs::exists(directory), "fragment identity directory already exists");
+    fs::create_directories(directory);
+    const auto prompt = [&](bool continuation) {
+        auto prepared = frontend.prepare_tokens(std::vector<TokenId>(continuation ? 207 : 128, 198));
+        auto& data = const_cast<models::qwen::PreparedPromptData&>(
+            models::qwen::PreparedPromptAccess::view(prepared));
+        data.identity.rewrite_execution_frontiers = continuation
+            ? std::vector<std::uint32_t>{128, 137, 143, 156, 179}
+            : std::vector<std::uint32_t>{128};
+        return prepared;
+    };
+    auto seed = generate(device, program, prompt(false), std::nullopt, true);
+    auto seed_export = program.prepare_checkpoint_export(seed.points, {});
+    require(seed_export.state() == DurablePrepareState::Prepared, "identity seed export refused");
+    Writer seed_writer(directory / "seed");
+    require(seed_export.write(seed_writer).state == DurableExportState::Exported,
+            "identity seed payload write refused");
+    const auto& index = seed_export.index();
+    const auto input = std::find_if(index.points.begin(), index.points.end(),
+        [](const auto& point) { return point.role == DurablePointRole::InputReplay; });
+    require(input != index.points.end() && input->frontier == 128,
+            "identity seed did not capture the canonical chunk boundary");
+    const auto source = seed.points.at(static_cast<std::size_t>(input - index.points.begin()));
+    const auto payloads = [&](const Generated& generated, const char* name) {
+        const auto root = directory / name;
+        fs::create_directories(root);
+        auto capture = program.prepare_checkpoint_export(generated.points, {});
+        require(capture.state() == DurablePrepareState::Prepared, "identity endpoint export refused");
+        Writer writer(root);
+        require(capture.write(writer).state == DurableExportState::Exported,
+                "identity endpoint payload write refused");
+        Json result = Json::array();
+        for (const auto& item : read_json(root / "test-inventory.json"))
+            if (item.at("path") != "engine/index.cbor") result.push_back(item);
+        require(!result.empty(), "identity comparison has no native payloads");
+        return result;
+    };
+    auto resumed = generate(device, program, prompt(true), source, false);
+    require(resumed.reused == 128, "fragment identity did not resume its checkpoint");
+    const auto resumed_payloads = payloads(resumed, "resumed");
+    release(program, resumed.points);
+    auto cold = generate(device, program, prompt(true), std::nullopt, false);
+    require(cold.reused == 0, "fragment identity cold execution unexpectedly reused state");
+    require(cold.tokens == resumed.tokens, "fragment traversal changed resumed/cold output tokens");
+    require(payloads(cold, "cold") == resumed_payloads,
+            "fragment traversal changed resumed/cold StateImage or KV payload bytes");
+    release(program, cold.points);
+    release(program, seed.points);
+    std::cout << "PASS fragment-identity reused=128 suffix=79 fragments=9,6,13,23,28"
+              << " output_tokens=" << cold.tokens.size()
+              << " native_payloads=" << resumed_payloads.size() << '\n';
+}
 } // namespace
 int main(int argc, char** argv) {
     const char* artifact = std::getenv("NINFER_TEST_ARTIFACT");
     if (!artifact || !*artifact) { std::cout << "SKIP: NINFER_TEST_ARTIFACT is required\n"; return 77; }
     try {
-        require(argc == 4, "usage: checkpoint_restart_test export|import DIRECTORY none|mtp|dflash2");
+        require(argc == 4, "usage: checkpoint_restart_test export|import|identity DIRECTORY none|mtp|dflash2");
         const std::string mode = argv[1], backend_name = argv[3];
-        require(mode == "export" || mode == "import", "invalid restart test mode");
+        require(mode == "export" || mode == "import" || mode == "identity", "invalid restart test mode");
         const auto backend = backend_name == "none" ? SpeculativeBackend::None :
             backend_name == "mtp" ? SpeculativeBackend::Mtp : SpeculativeBackend::DFlash2;
         require(backend_name == "none" || backend_name == "mtp" || backend_name == "dflash2", "invalid backend");
@@ -358,6 +413,10 @@ int main(int argc, char** argv) {
             return q35::create_program(parameters, std::move(planner).finalize(16), device, {});
         };
         auto program = make_program();
+        if (mode == "identity") {
+            fragment_identity(device, *program, frontend, directory);
+            return 0;
+        }
         const auto native_layout = program->checkpoint_layout();
         const auto decoded = [&](const std::vector<TokenId>& tokens) {
             std::string bytes;

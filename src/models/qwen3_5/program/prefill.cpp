@@ -27,19 +27,21 @@ DFlashFeatureSink make_dflash_prefill_sink(PrefillContext& state) {
     if (!state.execution.io.dflash_prefill || state.dflash_prefill_host_ingress == nullptr) {
         throw std::logic_error("DFlash prefill controls are unavailable");
     }
+    auto& frame = *state.execution.io.dflash_prefill;
+    // These bindings stay fixed until the text chunk retires. Do not overwrite the
+    // pinned ingress between fragment submissions while its H2D copy is pending.
+    *state.dflash_prefill_host_ingress = {
+        .append_count           = 0,
+        .state_destination_slot = state.state_destination_slot,
+        .full_kv_table_row      = state.dflash_kv_table_row,
+    };
+    CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, state.dflash_prefill_host_ingress,
+                               sizeof(qwen3_5::DFlashPrefillIngress), cudaMemcpyHostToDevice,
+                               state.execution.cuda.stream()));
     return dflash_feature_sink(
         state, [&state](const Tensor& features, const Tensor& positions, bool rewrite_checkpoint) {
             auto& frame = *state.execution.io.dflash_prefill;
-            // Target execution and draft append use the same chunk bindings. Decode may have
-            // used another compact row, or a checkpoint may have forked the destination slot.
-            *state.dflash_prefill_host_ingress = {
-                .append_count           = features.ne[1],
-                .state_destination_slot = state.state_destination_slot,
-                .full_kv_table_row      = state.dflash_kv_table_row,
-            };
-            CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, state.dflash_prefill_host_ingress,
-                                       sizeof(qwen3_5::DFlashPrefillIngress),
-                                       cudaMemcpyHostToDevice, state.execution.cuda.stream()));
+            ops::set_i32_scalar(frame.append_count, features.ne[1], state.execution.cuda);
             const auto exact = static_cast<std::uint32_t>(features.ne[1]);
             dflash_append_context(state, features, positions, frame.append_count,
                                   frame.state_destination_slot, frame.full_kv_table_row,
@@ -69,7 +71,8 @@ void configure_text_card(TextContext& card, const ExecutionCore& execution,
 PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const TokenId> ids,
                                       std::uint32_t nominal_length,
                                       std::optional<std::uint32_t> split_frontier,
-                                      bool finalize_at_end) {
+                                      bool finalize_at_end,
+                                      std::span<const std::uint32_t> frontiers) {
     TextContext card(state.execution.device, state.execution.parameters, state.execution.work,
                      state.text_cache, state.execution.linear_attention, state.execution.io,
                      state.execution.prefill_hidden, state.execution.prefill_chunk,
@@ -81,6 +84,7 @@ PrefillChunkResult prefill_text_chunk(PrefillContext& state, std::span<const Tok
     card.set_rewrite_checkpoint_hidden_output(state.rewrite_checkpoint_hidden);
     card.set_prefill_split_frontier(split_frontier ? static_cast<std::int64_t>(*split_frontier)
                                                    : -1);
+    card.set_prefill_execution_frontiers(frontiers);
     const std::span<const int> prompt(ids.data(), ids.size());
     if (state.dflash != nullptr) {
         DFlashFeatureSink sink = make_dflash_prefill_sink(state);
@@ -596,10 +600,14 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                               request.capture_groups[request.next_capture].frontier)
                         : std::nullopt;
                 std::optional<std::uint32_t> split_frontier = capture_frontier;
+                const bool layer_major =
+                    !staged.vision &&
+                    std::holds_alternative<DenseConfig>(parameters.model.config().text.ffn);
                 const auto rewrite_split                    = std::upper_bound(
                     staged.prompt.identity.rewrite_execution_frontiers.begin(),
                     staged.prompt.identity.rewrite_execution_frontiers.end(), staged.cursor);
-                if (rewrite_split != staged.prompt.identity.rewrite_execution_frontiers.end() &&
+                if (!layer_major &&
+                    rewrite_split != staged.prompt.identity.rewrite_execution_frontiers.end() &&
                     (!split_frontier || *rewrite_split < *split_frontier)) {
                     split_frontier = *rewrite_split;
                 }
@@ -616,7 +624,10 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                 } else {
                     result = execution::prefill_text_chunk(
                         schedule_state, std::span<const TokenId>(staged.prompt.token_ids),
-                        remaining, split_frontier, final_candidate);
+                        remaining, split_frontier, final_candidate,
+                        layer_major ? std::span<const std::uint32_t>(
+                                          staged.prompt.identity.rewrite_execution_frontiers)
+                                    : std::span<const std::uint32_t>{});
                 }
                 timing.include(result.timing);
                 timing.resume_post();

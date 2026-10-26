@@ -67,7 +67,8 @@ struct DFlashFeatureSink {
     void begin(const Tensor& value);
     void capture_layer(int layer, const Tensor& value, CudaExecutionView execution);
     void capture_positions(const Tensor& source, CudaExecutionView execution);
-    void consume_prefill_chunk(std::int32_t tokens, bool rewrite_checkpoint);
+    void consume_prefill_chunk(std::int32_t tokens, bool rewrite_checkpoint,
+                               std::int32_t offset = 0);
 };
 
 class TextContext {
@@ -100,6 +101,10 @@ public:
 
     void set_prefill_split_frontier(std::int64_t position) noexcept {
         prefill_split_frontier_ = position;
+    }
+
+    void set_prefill_execution_frontiers(std::span<const std::uint32_t> frontiers) noexcept {
+        prefill_execution_frontiers_ = frontiers;
     }
 
     void set_rewrite_checkpoint_hidden_output(Tensor* output) noexcept {
@@ -176,6 +181,10 @@ private:
     template <class Tap>
     void run_layers(Tensor& x, Phase phase, Tap& tap);
     template <class Tap>
+    void run_fragment_layers(Tensor& x, const Tensor& positions, const Tensor& rope_positions,
+                             std::uint32_t begin, std::span<const std::uint32_t> frontiers,
+                             Tap& tap);
+    template <class Tap>
     void target_verify_batch_impl(const Tensor& ids, const Tensor& cache_positions,
                                   const Tensor& rope_positions, const Tensor& valid_columns,
                                   const Tensor& kv_table_rows,
@@ -248,6 +257,7 @@ private:
     GdnStateAction gdn_state_action_          = GdnStateAction::UpdateInPlace;
     const GdnReplayRecords* replay_records_   = nullptr;
     std::int64_t prefill_split_frontier_      = -1;
+    std::span<const std::uint32_t> prefill_execution_frontiers_;
     Tensor* rewrite_checkpoint_hidden_output_ = nullptr;
     std::uint32_t mtp_proposal_extent_        = 0;
 

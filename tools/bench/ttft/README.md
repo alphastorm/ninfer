@@ -172,6 +172,16 @@ at least 32768, prefix reuse enabled), or override the built-in profile in `--pr
 Generated history makes cross-binary latency comparisons conditional on identical input/output
 bytes. Compare those bytes before attributing an A/B change to execution scheduling.
 
+Dense text prefill traverses consecutive arithmetic fragments layer-first, stopping at actual
+checkpoint capture boundaries. Each fragment retains its projection width, attention envelope,
+GDN update width and MTP/DFlash append width. This is not width concatenation: it changes
+weight locality and host retirement frequency without selecting a different arithmetic route.
+Vision and MoE retain fragment-first traversal. The checkpoint restart test's `identity`
+mode exercises a canonical 128-token prefix followed by five arithmetic fragments and compares
+resumed/cold output tokens plus canonical StateImage/KV payload hashes. Run its existing
+`export`/`import` modes separately to cover process restart; identity mode alone is not a
+durable-restore proof. Cross-binary checkpoint import remains forbidden by the build fingerprint.
+
 Raw runs retain the actual request payload and assembled output text for offline prefix analysis.
 After measurement, data URLs are deduplicated by SHA-256 under the adjacent
 `<sample>-media/` directory; the JSON retains each item's type, encoding and relative path.
