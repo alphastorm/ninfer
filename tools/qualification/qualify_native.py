@@ -1621,7 +1621,7 @@ $s=Get-Content (Join-Path $root 'state.json') -Raw | ConvertFrom-Json
 $r=$s.releases.PSObject.Properties[[string]$s.active_release].Value
 $c=Get-Content ([string]$r.config_file) -Raw | ConvertFrom-Json
 $scratch=Join-Path $stage 'pressure'
-if(Test-Path $scratch){{Remove-Item $scratch -Recurse -Force}}
+if(Test-Path $scratch){{throw 'pressure scratch already exists; preserve it until explicit operator cleanup'}}
 $checkpoints=Join-Path $scratch 'checkpoints'
 New-Item -ItemType Directory -Force -Path $checkpoints|Out-Null
 $port={self.config.pressure_port}
@@ -1694,7 +1694,7 @@ try{{
   $path=Join-Path ([string]$r.release_root) 'bin\\qualification\\agent_protocol.py'
   $out=Join-Path $stage 'evidence\\agent-protocol-pressure.json'
   &python $path --contract product --base-url ('http://'+[string]$r.host+':'+[string]$port) --model {ps_quote(self.lane.model_id)} --api-key-file ([string]$r.api_key_file) --expect-binary-sha256 ([string]$r.binary_sha256) --expect-model-artifact-sha256 ([string]$r.model_artifact_sha256) --expect-config-sha256 ([string]$r.config_sha256) --expect-deployment-profile ([string]$r.deployment_profile) 1>$out
-  if($LASTEXITCODE -ne 0){{throw ('protocol under shared Host pressure failed: '+((Get-Content $stderr -Tail 2) -join ' | '))}}
+  if($LASTEXITCODE -ne 0){{throw ('protocol under shared Host pressure failed; artifacts retained at '+$scratch)}}
   $v=Get-Content $out -Raw | ConvertFrom-Json
   [Console]::Out.WriteLine(([ordered]@{{status='passed';host_context_mib='{pressure_mib}';device_state_slots=[int]$c.context_cache.device_state_slots;sha256=(Get-FileHash $out -Algorithm SHA256).Hash.ToLowerInvariant();protocol=$v}}|ConvertTo-Json -Depth 16 -Compress))
 }}
@@ -1706,12 +1706,18 @@ finally{{
   }}finally{{
     if($null -ne $stdoutStream){{$stdoutStream.Dispose()}}
     if($null -ne $stderrStream){{$stderrStream.Dispose()}}
-    Remove-Item $scratch -Recurse -Force -ErrorAction SilentlyContinue
   }}
 }}
 """
         receipt = self.remote_json(self.config.target, script, timeout=1800)
+        if receipt.get("status") != "passed":
+            raise LaneError("pressure protocol did not pass; its logs and store are retained")
         require_product_protocol(receipt["protocol"])
+        # Do not discard evidence until the caller has validated the actual protocol result.
+        remote_ps(self.config.target, f"""
+$ErrorActionPreference='Stop'
+Remove-Item -LiteralPath {ps_quote(self.target_root + "/pressure")} -Recurse -Force
+""")
         return receipt
 
     def context(self) -> dict[str, Any]:
