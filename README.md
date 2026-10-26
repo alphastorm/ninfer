@@ -30,8 +30,8 @@ the weights again.
 
 NInfer requires x86-64 Linux, an NVIDIA GeForce RTX 5090, a CUDA toolkit supporting `sm_120a`,
 CMake 3.28 or newer, a C++20 host compiler, Ninja, `pkg-config`, FFmpeg development libraries
-(`libavformat`, `libavcodec`, `libavutil`, and `libswscale`), `hwloc >= 2.5`, `liburing >= 2.5`,
-and `libcurl >= 7.85`.
+(`libavformat`, `libavcodec`, `libavutil`, and `libswscale`), libjpeg, `hwloc >= 2.5`,
+`liburing >= 2.5`, and `libcurl >= 7.85`.
 CUDA 13.4 is the validated development toolkit; CMake does not impose a CUDA version floor.
 The build rejects CUDA architectures other than `sm_120a`.
 

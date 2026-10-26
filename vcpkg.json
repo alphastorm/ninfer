@@ -6,6 +6,7 @@
   "dependencies": [
     "curl",
     { "name": "ffmpeg", "features": ["zlib"] },
-    "hwloc"
+    "hwloc",
+    "libjpeg-turbo"
   ]
 }

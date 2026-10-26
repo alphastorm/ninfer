@@ -326,6 +326,9 @@ check matcher continuity through Snapshot/Replay and cancellation. `ninfer_gramm
 `ninfer_json_schema_test` cover CPU language semantics. `ninfer_json_schema_oracle_test` compares
 supported schemas with the independent Python `jsonschema` validator; install its dependency with
 `python3 -m pip install -r tests/text/requirements.txt` in the selected test environment.
+The host suites include the bounded-number and reasoning-to-JSON hardening cases from
+`hyz615/RUR1NINFER` commit `79d2296`, adapted to the current session transactions and schema
+capabilities rather than importing that fork's compiler or older schema restrictions.
 The sampling and speculative Op tests qualify masks against independent mathematical oracles.
 
 The capability-evaluation coordinator has its own environment and unittest entry point:

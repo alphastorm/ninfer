@@ -1,5 +1,9 @@
 # NInfer native Windows lanes
 
+The native dependency manifest includes libjpeg-turbo for the Pillow-compatible
+JPEG decoder. CMake resolves `JPEG::JPEG` explicitly; native runtime packaging
+continues to collect its transitive DLLs from the selected vcpkg installation.
+
 ## 2026-10-26 — RTX 3090 qualified power cap 350 W
 
 The RTX 3090 lane's managed GPU-owner lease now caps the card at 350 W instead of

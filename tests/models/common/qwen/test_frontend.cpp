@@ -2288,6 +2288,32 @@ int test_loaded_durable_frontend_identity() {
     const auto vision = make_frontend(source, true);
     failures += check(valid_digest(vision.durable_identity().vision_preprocessing),
                       "enabled Vision lacks a preprocessing identity");
+    const auto preprocessing_identity = [&](std::string_view domain) {
+        std::string framed(domain);
+        framed.push_back('\0');
+        const auto append_size = [&](std::uint64_t value) {
+            for (int shift = 56; shift >= 0; shift -= 8)
+                framed.push_back(static_cast<char>((value >> shift) & 0xffU));
+        };
+        const std::array<std::pair<std::string_view, std::string_view>, 2> inputs{{
+            {"preprocessor_config.json", source.preprocessor_config_json},
+            {"video_preprocessor_config.json", source.video_preprocessor_config_json},
+        }};
+        for (const auto& [name, bytes] : inputs) {
+            const auto digest = fi::sha256_hex(fi::sha256(bytes));
+            append_size(name.size());
+            framed.append(name);
+            append_size(bytes.size());
+            append_size(digest.size());
+            framed.append(digest);
+        }
+        return fi::sha256_hex(fi::sha256(framed));
+    };
+    failures += check(vision.durable_identity().vision_preprocessing ==
+                          preprocessing_identity("ninfer/qwen/vision-preprocessing/2") &&
+                          vision.durable_identity().vision_preprocessing !=
+                              preprocessing_identity("ninfer/qwen/vision-preprocessing/1"),
+                      "Pillow JPEG decoding retained the previous preprocessing identity");
     auto changed_vision = source;
     changed_vision.preprocessor_config_json += ' ';
     const auto new_vision = make_frontend(changed_vision, true);

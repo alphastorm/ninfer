@@ -199,6 +199,86 @@ void check_draft_lookahead() {
     session->confirm();
     require(allows(mask(*session), 3), "generation failed after rejected draft lookahead");
 }
+
+void check_json_reasoning_hardening() {
+    // Adapted from hyz615/RUR1NINFER 79d2296; exercise the current session transaction API.
+    std::vector<std::string> vocabulary;
+    for (int byte = 0; byte < 256; ++byte)
+        vocabulary.emplace_back(1, static_cast<char>(byte));
+    vocabulary.emplace_back();
+    vocabulary.emplace_back("</think>{");
+    vocabulary.emplace_back("</think>prose");
+    ninfer::text::GrammarCompiler compiler(std::move(vocabulary), {256}, 4 * 1024 * 1024);
+    const auto constraint = ninfer::OutputConstraint::json_object();
+    const std::string prefix = "reasoning with << overlap </thi";
+    auto reasoning = compiler.compile(constraint, "</think>", {});
+    consume(*reasoning, prefix);
+    const auto before = mask(*reasoning);
+    const std::string crossing = "nk>{\"ok\":true}";
+    std::vector<std::int32_t> drafts(crossing.begin(), crossing.end());
+    const auto words = reasoning->mask_words();
+    std::vector<std::uint32_t> lookahead(words * (drafts.size() + 1));
+    require(reasoning->masks(drafts, lookahead) == 0,
+            "reasoning-to-JSON lookahead reached a dead end");
+    for (std::size_t i = 0; i < drafts.size(); ++i)
+        require(lookahead[i * words + drafts[i] / 32] & (1u << (drafts[i] % 32)),
+                "reasoning-to-JSON lookahead masked a valid token");
+    require(!(lookahead[3 * words + 'p' / 32] & (1u << ('p' % 32))),
+            "reasoning grammar escaped into final prose");
+    require(lookahead[drafts.size() * words + 256 / 32] & (1u << (256 % 32)),
+            "reasoning-to-JSON bonus mask lost EOS");
+    require(mask(*reasoning) == before, "reasoning lookahead advanced the committed phase");
+    reasoning->accept(drafts);
+    reasoning->discard();
+    require(mask(*reasoning) == before, "discard advanced the reasoning-to-JSON boundary");
+    reasoning->accept(drafts);
+    reasoning->confirm();
+    require(allows(mask(*reasoning), 256), "confirmed reasoning-to-JSON output cannot stop");
+
+    const auto accepts = [&](std::string_view suffix) {
+        auto session = compiler.compile(constraint, "</think>", prefix);
+        for (unsigned char byte : suffix) {
+            if (!allows(mask(*session), byte)) return false;
+            session->accept(byte);
+            session->confirm();
+        }
+        return allows(mask(*session), 256);
+    };
+    require(accepts("nk>{}") && accepts("nk>\n\n{}"),
+            "split reasoning close rejected valid JSON or canonical whitespace");
+    require(!accepts("nk>plain text</think>{}"),
+            "a second reasoning close bypassed the first boundary");
+    auto mixed = compiler.compile(constraint, "</think>", {});
+    const auto mixed_mask = mask(*mixed);
+    require(allows(mixed_mask, 257) && !allows(mixed_mask, 258),
+            "single token spanning reasoning and content escaped JSON constraints");
+    const std::array<std::int32_t, 2> complete{257, '}'};
+    mixed->accept(complete);
+    mixed->confirm();
+    require(allows(mask(*mixed), 256), "cross-boundary JSON token did not complete");
+}
+
+void check_selected_token_violation() {
+    ninfer::text::GrammarCompiler compiler({"a", "b", "c", ""}, {3}, 1024 * 1024);
+    auto session = compile(compiler, "root ::= \"ab\"", {}, {});
+    auto sibling = compile(compiler, "root ::= \"ab\"", {}, {});
+    const auto initial = mask(*session);
+    bool rejected = false;
+    try {
+        session->accept(std::array<std::int32_t, 2>{0, 2});
+    } catch (const ninfer::text::GrammarViolation&) { rejected = true; }
+    require(rejected, "selected-token rejection did not use GrammarViolation");
+    session->discard();
+    require(mask(*session) == initial && mask(*sibling) == initial,
+            "rejected selected tokens damaged rollback or a sibling matcher");
+    session->accept(std::array<std::int32_t, 2>{0, 1});
+    session->confirm();
+    require(allows(mask(*session), 3), "generation failed after selected-token rollback");
+    session->accept(3);
+    session->confirm();
+    require(session->observation().terminated && mask(*sibling) == initial,
+            "selected-token recovery did not terminate independently");
+}
 } // namespace
 
 int main() {
@@ -207,6 +287,8 @@ int main() {
         check_counted_units();
         check_compiled_grammar_lifetime();
         check_draft_lookahead();
+        check_json_reasoning_hardening();
+        check_selected_token_violation();
         std::vector<std::string> vocab;
         for (int byte = 0; byte < 256; ++byte) { vocab.emplace_back(1, static_cast<char>(byte)); }
         vocab.emplace_back();                        // EOS
