@@ -61,6 +61,7 @@
     "This is startup and generation evidence, not the role-corpus performance gate, a powered quality screen, or 131072-token admission evidence.",
     "Memory-used measurements are post-request snapshots, not sampled peaks.",
     "Successful graph initialization and generation exercise the configured CUDA path; no per-kernel dynamic-shared-memory measurement was captured.",
+    "Source analysis corrected the initial 97 KiB premise: grouped-convolution projection uses one staging slot and peaks at 49664 bytes, above the 48 KiB static threshold and therefore requiring dynamic shared-memory opt-in. This is a source-derived requirement, not a measured kernel attribute.",
     "The prior base-startup-01 attempt rejected the removed --no-ui CLI option before model initialization; the corrected invocation is the evidence here.",
     "Historic fixed CUDA-graph reservation estimates are not applicable: this base measured 38 MiB retained calibration and zero rebuild reservation."
   ],
