@@ -1906,7 +1906,7 @@ private:
                         // Resident progress can release/unlock capacity. A root chunk's
                         // smaller initial allocation is not a reason to discard this source.
                         if (reservation.capacity_possible &&
-                            (!resident_empty() || (!restoring && !paused_.empty()))) {
+                            admission_capacity_progress_pending(restoring)) {
                             deferred = true;
                             break;
                         }

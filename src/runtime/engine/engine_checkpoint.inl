@@ -72,6 +72,10 @@
         }
     }
 
+    [[nodiscard]] bool admission_capacity_progress_pending(bool restoring) const {
+        return !resident_empty() || (!restoring && !paused_.empty());
+    }
+
     [[nodiscard]] DurableExportResult export_session(
         std::string_view digest, std::string_view tag, ContinuationCheckpointWriter& writer,
         const DurableLimits& limits) {
