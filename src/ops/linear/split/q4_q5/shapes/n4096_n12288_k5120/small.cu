@@ -12,6 +12,10 @@
 #include "ops/linear/kernels/q5/q5_simt_launch.cuh"
 #include "ops/linear/kernels/q5/q5_gemv_launch.cuh"
 #include "ops/linear/kernels/q5/q5_sliced_k_launch.cuh"
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+#include "ops/linear/kernels/small_t/q45_small_t_mma.cuh"
+#include "ops/linear/kernels/small_t/q5_a16_split2.cuh"
+#endif
 
 #include <cuda_bf16.h>
 
@@ -24,6 +28,68 @@ namespace {
 constexpr std::int32_t kValueRows = 6144;
 constexpr std::int32_t kHidden    = 5120;
 
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+template <class Output>
+void launch_native_q4(const Q4LinearOperands& op, Output output, cudaStream_t stream) {
+    const auto launch = [&]<int Columns, int KWarps, int Stages>() {
+        launch_q45_small_t_mma<SmallTMmaSchedule<SmallTFormat::Q4, kHidden, Columns, KWarps, Stages>>(
+            op, output, LinearIdentityEpilogue{}, stream);
+    };
+#if defined(NINFER_SM86)
+    if (op.tokens <= 4) return launch.template operator()<4, 8, 2>();
+    if (op.tokens <= 8) return launch.template operator()<8, 4, 2>();
+    if (op.tokens <= 16) return launch.template operator()<16, 4, 2>();
+    return launch.template operator()<32, 4, 1>();
+#else
+    if (op.tokens <= 8) return launch.template operator()<8, 8, 2>();
+    if (op.tokens <= 16) return launch.template operator()<16, 8, 1>();
+    return launch.template operator()<32, 8, 1>();
+#endif
+}
+
+template <class Output>
+void launch_native_q5(const Q5LinearOperands& op, Output output, cudaStream_t stream) {
+    const auto launch = [&]<int Columns, int KWarps, int Stages>() {
+        launch_q45_small_t_mma<SmallTMmaSchedule<SmallTFormat::Q5, kHidden, Columns, KWarps, Stages>>(
+            op, output, LinearIdentityEpilogue{}, stream);
+    };
+    if (op.tokens == 1)
+        return launch_q5_a16_split2<kHidden, 1>(op, output, LinearIdentityEpilogue{}, stream);
+#if defined(NINFER_SM86)
+    if (op.tokens == 2)
+        return launch_q5_a16_split2<kHidden, 2>(op, output, LinearIdentityEpilogue{}, stream);
+    if (op.tokens <= 4) return launch.template operator()<4, 8, 2>();
+    if (op.tokens <= 8) return launch.template operator()<8, 8, 2>();
+    if (op.tokens <= 14) return launch.template operator()<16, 8, 1>();
+    if (op.tokens <= 16) return launch.template operator()<16, 4, 2>();
+    return launch.template operator()<32, 4, 1>();
+#else
+    if (op.tokens == 2)
+        return launch_q5_a16_direct_simt<Q5A16DirectSimtSchedule<1, 2, 4, 4, 10, kHidden, true>>(
+            op, output, LinearIdentityEpilogue{}, stream);
+    if (op.tokens == 3)
+        return launch_q5_a16_split2<kHidden, 3>(op, output, LinearIdentityEpilogue{}, stream);
+    if (op.tokens <= 8) return launch.template operator()<8, 8, 2>();
+    if (op.tokens <= 16) return launch.template operator()<16, 8, 1>();
+    if (op.tokens <= 26) return launch.template operator()<32, 8, 1>();
+    return launch.template operator()<32, 4, 1>();
+#endif
+}
+
+void launch_native_parts(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
+                         const Tensor& qk, const Tensor& value, const Tensor& z,
+                         cudaStream_t stream) {
+    launch_native_q4(q4_linear_operands(x, qk_weight),
+        LinearBf16StridedOutput{static_cast<__nv_bfloat16*>(qk.data),
+            std::int64_t(qk.nb[1] / sizeof(__nv_bfloat16)), 0}, stream);
+    launch_native_q5(q5_linear_operands(x, value_z_weight),
+        LinearBf16SplitOutput2<kValueRows>{
+            {static_cast<__nv_bfloat16*>(value.data),
+             std::int64_t(value.nb[1] / sizeof(__nv_bfloat16)), 0},
+            {static_cast<__nv_bfloat16*>(z.data),
+             std::int64_t(z.nb[1] / sizeof(__nv_bfloat16)), 0}}, stream);
+}
+#else
 using SmallR8T4 = Q4A16SimtSchedule<8, 4, 1, 16, 2, Cache::ca, 1>;
 using SmallR8T8 = Q4A16SimtSchedule<8, 8, 1, 16, 2, Cache::ca, 1>;
 
@@ -247,17 +313,22 @@ void launch_t4_pdl(const Tensor& x, const Weight& qk_weight, const Weight& value
                                 static_cast<std::int64_t>(qk.nb[1] / sizeof(__nv_bfloat16)), 0},
         LinearIdentityEpilogue{}, stream);
 }
+#endif
 
 } // namespace
 
 void launch_parts(const Tensor& x, const Weight& qk_weight, const Weight& value_z_weight,
                   const Tensor& qk, const Tensor& value, const Tensor& z, cudaStream_t stream) {
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+    launch_native_parts(x, qk_weight, value_z_weight, qk, value, z, stream);
+#else
     if (x.ne[1] == 4) {
         launch_t4_pdl(x, qk_weight, value_z_weight, qk, value, z, stream);
         return;
     }
     launch_q4(x, qk_weight, qk, stream);
     launch_q5(x, value_z_weight, value, z, stream);
+#endif
 }
 
 void launch_small(const Tensor& x, const Weight& first, const Weight& second,

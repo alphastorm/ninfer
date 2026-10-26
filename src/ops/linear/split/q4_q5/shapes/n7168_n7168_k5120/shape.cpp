@@ -5,6 +5,9 @@ namespace {
 void launch(const Tensor& x, Weights weights, std::span<const Tensor> outputs, MemoryArena*,
             cudaStream_t stream) {
     bool small = x.ne[1] <= 12;
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+    small = x.ne[1] <= 32;
+#endif
 #if !defined(NINFER_SM86) && !defined(NINFER_SM89)
     small = small || x.ne[1] == 16;
 #endif

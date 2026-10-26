@@ -8,6 +8,9 @@
 #include "core/device.h" // CUDA_CHECK
 #include "ops/linear/kernels/q4/q4_instances.cuh"
 #include "ops/linear/kernels/q4/q4_sliced_k_launch.cuh"
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+#include "ops/linear/kernels/small_t/q45_small_t_mma.cuh"
+#endif
 
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -71,6 +74,7 @@ void launch_small_t_schedule(const Tensor& x, const Weight& w, Tensor& out, cuda
         Q4SwiGluSmallTEpilogue{}, stream, Q4SwiGluSmallTRows{});
 }
 
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
 template <int ActiveCols>
 void launch_small_t_active(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
     // Wider tiles are shared-memory limited before six CTAs can be resident.
@@ -92,6 +96,23 @@ constexpr auto make_small_t_launchers(std::index_sequence<Offsets...>) {
 }
 
 constexpr auto kSmallTLaunchers = make_small_t_launchers(std::make_index_sequence<4>{});
+#else
+struct NativeSwiGluRows {
+    static constexpr int kOutputRowsPerTile = 8;
+    __device__ __forceinline__ int weight_row(int tile, int local) const {
+        return tile * 8 + (local & 7) + (local >= 8 ? kIntermediate : 0);
+    }
+};
+
+template <int Columns, int KWarps, int Stages>
+void launch_native(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t stream) {
+    using Schedule = SmallTMmaSchedule<SmallTFormat::Q4, kK, Columns, KWarps, Stages>;
+    launch_q45_small_t_mma<Schedule>(
+        q4_linear_operands(x, w),
+        LinearBf16Output{static_cast<__nv_bfloat16*>(out.data), kIntermediate},
+        Q4SwiGluSmallTEpilogue{}, stream, NativeSwiGluRows{});
+}
+#endif
 
 __device__ __forceinline__ void q4_issue_pair_tile(uint4 (*__restrict__ s_code)[kVecsPerWarpTile],
                                                    uint4 (*__restrict__ s_scale)[2],
@@ -223,6 +244,19 @@ void launch_q4_swiglu_small_t_tiled(const Tensor& x, const Weight& w, Tensor& ou
     if (x.ne[1] < 2 || x.ne[1] > 32) {
         throw std::invalid_argument("Q4 LinearSwiGLU exact small-T requires T=2..32");
     }
+#if defined(NINFER_SM86)
+    if (x.ne[1] <= 5) return launch_native<8, 8, 2>(x, w, out, stream);
+    if (x.ne[1] <= 8) return launch_native<8, 4, 2>(x, w, out, stream);
+    if (x.ne[1] <= 10) return launch_native<16, 8, 1>(x, w, out, stream);
+    if (x.ne[1] <= 16) return launch_native<16, 4, 2>(x, w, out, stream);
+    return launch_native<32, 4, 1>(x, w, out, stream);
+#elif defined(NINFER_SM89)
+    if (x.ne[1] <= 8)
+        return launch_small_t_schedule<q4_instances::SlicedK5120T8PairwisePad16>(x, w, out, stream);
+    if (x.ne[1] <= 16) return launch_native<16, 8, 1>(x, w, out, stream);
+    if (x.ne[1] <= 24) return launch_native<24, 8, 1>(x, w, out, stream);
+    return launch_native<32, 4, 1>(x, w, out, stream);
+#else
 #if !defined(NINFER_SM86) && !defined(NINFER_SM89)
     if (x.ne[1] == 8)
         return launch_small_t_schedule<q4_instances::SlicedK5120T8PairwisePad16>(x, w, out, stream);
@@ -230,6 +264,7 @@ void launch_q4_swiglu_small_t_tiled(const Tensor& x, const Weight& w, Tensor& ou
         return launch_small_t_schedule<q4_instances::SlicedK5120T16PairwisePad16>(x, w, out, stream);
 #endif
     kSmallTLaunchers[static_cast<std::size_t>((x.ne[1] - 1) / 8)](x, w, out, stream);
+#endif
 }
 
 } // namespace ninfer::ops::detail

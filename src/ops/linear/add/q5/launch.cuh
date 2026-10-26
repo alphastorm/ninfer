@@ -5,8 +5,32 @@
 #include "ops/linear/kernels/q5/q5_mma_launch.cuh"
 #include "ops/linear/kernels/q5/q5_sliced_k_launch.cuh"
 #include "ops/linear/kernels/q5/q5_simt_launch.cuh"
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+#include "ops/linear/kernels/small_t/q45_small_t_mma.cuh"
+#include "ops/linear/kernels/small_t/q5_a16_split2.cuh"
+#endif
 
 namespace ninfer::ops::detail {
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+template <class Schedule>
+void launch_q5_add_native(const Tensor& x, const Weight& w, Tensor& residual, cudaStream_t stream) {
+    auto* data        = static_cast<__nv_bfloat16*>(residual.data);
+    const auto stride = std::int64_t(residual.nb[1] / sizeof(__nv_bfloat16));
+    launch_q45_small_t_mma<Schedule>(q5_linear_operands(x, w),
+                                    LinearBf16StridedOutput{data, stride, 0},
+                                    LinearResidualAddEpilogue{{data, stride, 0}}, stream);
+}
+
+template <int K, int Tokens>
+void launch_q5_add_split2(const Tensor& x, const Weight& w, Tensor& residual, cudaStream_t stream) {
+    auto* data        = static_cast<__nv_bfloat16*>(residual.data);
+    const auto stride = std::int64_t(residual.nb[1] / sizeof(__nv_bfloat16));
+    launch_q5_a16_split2<K, Tokens>(q5_linear_operands(x, w),
+                                    LinearBf16StridedOutput{data, stride, 0},
+                                    LinearResidualAddEpilogue{{data, stride, 0}}, stream);
+}
+#endif
+
 struct Q5LinearAddTileEpilogue {
     template <class Schedule, bool Full>
     __device__ __forceinline__ void

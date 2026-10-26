@@ -44,7 +44,8 @@ int verify_output_range(std::string_view label, const GuardedBf16Tensor& output,
                         std::int32_t weight_row_offset, const std::vector<float>& activation,
                         std::int32_t hidden, std::int32_t tokens,
                         const ReductionCriterion& criterion = kGdnInputProjA16Tolerance) {
-    const std::int32_t sample_count = tokens == 8 || tokens == 16 ? output_rows : 7;
+    const std::int32_t sample_count =
+        tokens == 8 || tokens == 16 ? output_rows : tokens <= 32 ? 31 : 7;
     const std::vector<double> actual =
         gather_rows(output.values(), full_rows, output_row_offset, output_rows, tokens,
                     sample_count);
@@ -182,18 +183,16 @@ int run_q4_q5() {
     DevicePackedWeight value_z_weight(
         quantized_weight::make_patterned_weight(QType::Q5_G64_FP16, 12288, kHidden, 419U));
     int failures = 0;
-    // Every route boundary and both of its neighbours: the Q4/Q5 column catalog hands 1..12 to the
-    // per-side small-column kernels (the K-split Q4 parent with the split4 Q5 side at 2..10 and the
-    // c4 SIMT Q5 side at 11..12), 13..32 to the 32x32 tile, 33..64 to the 32x64 tile, and 65 upward
-    // to the 64x128 tile that also supplies the 128-column tail slices. The Q4 K-split band (7..12)
-    // is not changed by this work; its two ends are covered by the same list.
-    for (const std::int32_t tokens : {1,  2,  3,  4,  5,  6,  7,  8,  9,   10,  11,  12,
-                                      13, 15, 16, 17, 32, 33, 64, 65, 127, 128, 129, 193}) {
+    // Every native small-column extent, plus the unchanged wide-route boundaries.
+    for (std::int32_t tokens = 1; tokens <= 32; ++tokens) {
+        failures += run_q4_q5_case(query_key, value_z_weight, tokens);
+    }
+    for (const std::int32_t tokens : {33, 64, 65, 127, 128, 129, 193}) {
         failures += run_q4_q5_case(query_key, value_z_weight, tokens);
     }
     // One captured replay per route, including both ends of the split4 band and a 128-column tail
     // slice (129 = 128 + 1).
-    for (const std::int32_t tokens : {7, 8, 9, 10, 12, 13, 15, 16, 17, 33, 65, 129}) {
+    for (const std::int32_t tokens : {4, 7, 8, 9, 10, 12, 13, 15, 16, 17, 32, 33, 65, 129}) {
         failures += run_q4_q5_graph_case(query_key, value_z_weight, tokens);
     }
     return failures;

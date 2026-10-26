@@ -19,6 +19,23 @@ void launch_wide_tail(const Tensor& x, const Weight& w, Tensor& residual, cudaSt
 } // namespace
 
 LinearAddLaunch select_q5_linear_add_n5120_k17408(std::int32_t tokens) {
+#if defined(NINFER_SM86)
+    if (tokens == 1) return launch_q5_add_split2<17408, 1>;
+    if (tokens == 2) return launch_q5_add_split2<17408, 2>;
+    if (tokens <= 4) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 17408, 4, 8, 2>>;
+    if (tokens <= 8) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 17408, 8, 8, 1>>;
+    if (tokens <= 14) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 17408, 16, 8, 1>>;
+    if (tokens <= 16) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 17408, 16, 4, 2>>;
+    if (tokens <= 32) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 17408, 32, 4, 1>>;
+#elif defined(NINFER_SM89)
+    if (tokens == 1)
+        return launch_q5_add_simt<Q5A16DirectSimtSchedule<1, 1, 2, 8, 16, 17408, true>>;
+    if (tokens <= 8) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 17408, 8, 8, 2>>;
+    if (tokens <= 16) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 17408, 16, 8, 1>>;
+    if (tokens == 17) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 17408, 32, 8, 1>>;
+    if (tokens <= 21) return launch_q5_add_sliced<q5_instances::SlicedR16T24W4S2>;
+    if (tokens <= 32) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 17408, 32, 4, 1>>;
+#else
     if (tokens == 1)
         return launch_q5_add_simt<Q5A16DirectSimtSchedule<1, 1, 2, 8, 16, 17408, true>>;
     if (tokens == 2)
@@ -42,6 +59,7 @@ LinearAddLaunch select_q5_linear_add_n5120_k17408(std::int32_t tokens) {
     if (tokens <= 16) return launch_q5_add_sliced<q5_instances::SlicedR16T16W4S2>;
     if (tokens <= 24) return launch_q5_add_sliced<q5_instances::SlicedR16T24W4S2>;
     if (tokens <= 32) return launch_q5_add_sliced<q5_instances::SlicedR32T32W4S2>;
+#endif
     if (tokens <= 48) return launch_q5_add_sliced<q5_instances::SlicedR32T24W4S2Pairwise>;
     if (tokens <= 64) return launch_q5_add_sliced<q5_instances::SlicedR32T32W4S1>;
     if (tokens <= 96) return launch_q5_add_sliced<q5_instances::SlicedR32T32W4S1>;
