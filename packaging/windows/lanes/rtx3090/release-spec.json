@@ -80,13 +80,13 @@
       "required_on_first_install": true,
       "bundled_default": "Control-GpuOwner.ps1",
       "state_protection_helper": "Protect-StateRoot.ps1",
-      "qualified_power_limit_w": 300,
+      "qualified_power_limit_w": 350,
       "owner_power_limit_w": 370,
       "prior_power_limit_range_w": [
         100,
         390
       ],
-      "managed_power_envelope_w": 301,
+      "managed_power_envelope_w": 351,
       "interactive_gpu_memory_threshold_bytes": 1073741824,
       "inherited_on_upgrade": true,
       "actions": [

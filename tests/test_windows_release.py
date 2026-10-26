@@ -1383,7 +1383,7 @@ class SharedLifecycleTreeTests(unittest.TestCase):
     def test_shared_scripts_carry_no_lane_literals(self) -> None:
         """One tree serves every lane: GPU names, architectures, power figures, release ids, and
         task names come from the lane specification, never from the scripts."""
-        forbidden = re.compile(r"3090|4090|5090|sm_8[69]|sm_120|\b(?:300|370|450)\s*W\b|omp-v0\.2|NInfer-Qwen38-[0-9]{4}")
+        forbidden = re.compile(r"3090|4090|5090|sm_8[69]|sm_120|\b(?:300|301|350|351|370|450)\s*W\b|omp-v0\.2|NInfer-Qwen38-[0-9]{4}")
         paths = [WINDOWS / name for name in SHARED_SCRIPTS] + [ROOT / "tools/smoke/agent_protocol.py"]
         for path in paths:
             text = path.read_text(encoding="utf-8")
@@ -1477,6 +1477,21 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertNotIn("persistent_cache", config)
                 self.assertNotIn("effort", config["reasoning"])
         self.assertEqual(len(models), 1, "every lane pins the same model artifact")
+
+    def test_rtx3090_lane_serves_at_the_approved_350_w_cap(self) -> None:
+        # Approved 2026-10-26: the managed GPU-owner lease caps the RTX 3090 at 350 W (was 300 W);
+        # the C1 qualification envelope keeps its 1 W sampling allowance above the cap, and the
+        # owner's 370 W default is still what release restores.
+        lane_dir = WINDOWS / "lanes/rtx3090"
+        lane = qualify_native.Lane(
+            "rtx3090", json.loads((lane_dir / "release-spec.json").read_text(encoding="utf-8")),
+            json.loads((lane_dir / "server-config.json").read_text(encoding="utf-8")),
+        )
+        self.assertEqual(lane.qualified_power_limit_w, 350)
+        self.assertEqual(lane.managed_power_envelope_w, 351.0)
+        self.assertEqual(lane.owner_power_limit_w, 370)
+        owner = lane.spec["lifecycle"]["gpu_owner_controller_protocol"]
+        self.assertEqual(owner["prior_power_limit_range_w"], [100, 390])
 
 
 class PackagedStatusTests(unittest.TestCase):

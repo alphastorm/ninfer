@@ -1,5 +1,15 @@
 # NInfer native Windows lanes
 
+## 2026-10-26 — RTX 3090 qualified power cap 350 W
+
+The RTX 3090 lane's managed GPU-owner lease now caps the card at 350 W instead of
+300 W (owner-approved). `qualified_power_limit_w` is 350 and the C1 qualification
+envelope `managed_power_envelope_w` is 351 W (the same 1 W sampling allowance). The
+owner's 370 W default that release restores, the accepted prior-limit range
+(100-390 W) and every RTX 4090 value are unchanged. The `beta.2` RTX 3090 qualification
+ran at 300 W, so a package built from this specification needs a fresh RTX 3090
+qualification at 350 W before it can claim a hardware pass.
+
 ## 2026-10-24 — Upstream-master native packages (qualification pending)
 
 The native component candidates are `v0.7.0-qwen38-4090-beta.2` and
