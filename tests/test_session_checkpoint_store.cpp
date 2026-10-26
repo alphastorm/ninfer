@@ -35,6 +35,7 @@ namespace {
 struct ParentFlushFault {
     BY_HANDLE_FILE_INFORMATION identity{};
     bool armed = false, fired = false;
+    DWORD error = ERROR_WRITE_FAULT;
 } parent_flush_fault;
 
 BOOL WINAPI checkpoint_flush(HANDLE handle) {
@@ -58,7 +59,7 @@ BOOL WINAPI checkpoint_flush(HANDLE handle) {
             info.nFileIndexLow == fault.identity.nFileIndexLow) {
             fault.armed = false;
             fault.fired = true;
-            SetLastError(ERROR_WRITE_FAULT);
+            SetLastError(fault.error);
             return FALSE;
         }
     }
@@ -2546,7 +2547,7 @@ int test_schema_v3_and_stream_completion() {
 }
 
 #ifdef _WIN32
-int test_current_parent_flush_failure_retains_visible_generation() {
+int test_current_parent_flush_failure_retains_visible_generation(DWORD error = ERROR_WRITE_FAULT) {
     TemporaryDirectory temporary;
     const auto responses = sample_snapshot();
     const auto payload = engine_payload();
@@ -2569,6 +2570,7 @@ int test_current_parent_flush_failure_retains_visible_generation() {
         return check(false, "parent-flush fixture directory did not open");
     }
     parent_flush_fault = {};
+    parent_flush_fault.error = error;
     const bool inspected = GetFileInformationByHandle(directory, &parent_flush_fault.identity);
     CloseHandle(directory);
     if (!inspected) { return check(false, "parent-flush fixture identity unavailable"); }
@@ -2589,14 +2591,15 @@ int test_current_parent_flush_failure_retains_visible_generation() {
             }, &skip);
         diagnostic = log.output.str();
     }
-    int failures = check(parent_flush_fault.fired && !uncertain &&
-                             skip.durable_reason == runtime::DurableReason::IoUnavailable,
-                         "post-rename parent-flush failure must be unacknowledged I/O unavailability");
+    const auto reason = error == ERROR_DISK_FULL || error == ERROR_HANDLE_DISK_FULL
+                            ? runtime::DurableReason::Capacity : runtime::DurableReason::IoUnavailable;
+    int failures = check(parent_flush_fault.fired && !uncertain && skip.durable_reason == reason,
+                         "post-rename parent-flush failure lost its unacknowledged failure reason");
     const auto failure = nlohmann::json::parse(diagnostic);
     failures += check(failure.at("operation") == "publish_current" &&
-                          failure.at("reason") == "io_unavailable" &&
+                          failure.at("reason") == runtime::durable_reason_name(reason) &&
                           failure.at("error_category") == "system" &&
-                          failure.at("error_code") == ERROR_WRITE_FAULT && failure.size() == 5,
+                          failure.at("error_code") == error && failure.size() == 5,
                       "current-publication diagnostic lost the underlying Win32 flush error");
     const auto visible = read_file_bytes(session_path / "current");
     failures += check(!visible.empty() && visible != first->generation + "\n",
@@ -2950,7 +2953,14 @@ int main(int argc, char** argv) {
         if (test == "quota_stale") { return test_quota_stale_publication_preserves_unrelated_currents(); }
         if (test == "ordinary_corrupt") { return test_ordinary_pressure_preserves_same_size_corrupt_victim(); }
 #if defined(_WIN32) || defined(__linux__)
-        if (test == "disk_full_capacity") { return test_disk_full_capacity_preserves_generation(); }
+        if (test == "disk_full_capacity") {
+            int failures = test_disk_full_capacity_preserves_generation();
+#ifdef _WIN32
+            failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_DISK_FULL);
+            failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_HANDLE_DISK_FULL);
+#endif
+            return failures;
+        }
 #endif
 #ifdef _WIN32
         if (test == "current_flush") { return test_current_parent_flush_failure_retains_visible_generation(); }
@@ -2993,6 +3003,8 @@ int main(int argc, char** argv) {
     failures += test_schema_v3_and_stream_completion();
 #ifdef _WIN32
     failures += test_current_parent_flush_failure_retains_visible_generation();
+    failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_DISK_FULL);
+    failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_HANDLE_DISK_FULL);
 #endif
     failures += test_export_and_publication_callbacks_are_catalog_unlocked();
     failures += test_reader_failure_reasons_and_fresh_retries();
