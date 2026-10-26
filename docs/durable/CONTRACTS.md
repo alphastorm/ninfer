@@ -95,6 +95,12 @@ K4 governs the guarded Responses-only restore and DELETE acknowledgement. A
 subsequent parent request replays the retained transcript; a new completed, stored
 turn can establish a normal native endpoint again.
 
+Disk-full write failures — POSIX `ENOSPC`, Win32 `ERROR_DISK_FULL` (112) and
+`ERROR_HANDLE_DISK_FULL` (39) — classify as `DurableReason::Capacity` (`capacity`,
+HTTP 409), not corruption. The failed save preserves the prior generation and
+DELETE survivors; no deletion is acknowledged without the required durable
+survivor publication. K7 records the storage-capacity automatic-retry limitation.
+
 ### Canonical JSON and MAC
 
 Canonical bytes are UTF-8 without BOM, trailing LF or insignificant whitespace.
@@ -741,7 +747,7 @@ to skip eviction-time victim generation/tag revalidation.
 | Race | `stale_publication`, `stale_revision`, `transaction_busy` | preserve newer state; retry only after observed progress |
 | Missing | `no_session_records`, `empty_tag`, `session_not_indexed`, `required_response_missing` | no mutation; no retry loop for absence |
 | Integrity | `origin_mac_mismatch`, `invalid_manifest`, `invalid_index`, `payload_size_mismatch`, `payload_digest_mismatch` | abort; quarantine verified corrupt generation only |
-| Admission | `metadata_limit`, `staging_limit`, `capacity`, `quota`, `foreign_session_collision` | old state intact; no unrelated eviction for DAG restore |
+| Capacity / admission | `metadata_limit`, `staging_limit`, `capacity`, `quota`, `foreign_session_collision` | old state intact; no unrelated eviction for DAG restore |
 | Availability | `origin_key_unavailable`, `io_unavailable`, `durability_unsupported`, `cancelled` | preserve generation; retry only after cause/progress changes |
 
 ### Wired cause-sensitive retries
@@ -753,9 +759,18 @@ unconditional retry loop. Each retry waits for observed progress matching its ca
 | Refusal or wait | Progress that may rearm it |
 |---|---|
 | `transaction_busy`, `tag_mismatch`, `stale_publication`, `stale_revision` | actual Engine or HTTP-publication progress |
-| `capacity` | actual Engine/admission progress |
+| `capacity` | actual Engine/admission progress, including storage-origin Capacity |
 | `io_unavailable` | successful storage progress |
 | HTTP response still publishing | HTTP-publication progress only; waiting consumes no save-attempt retry budget |
+
+**N9 storage-capacity retry limitation:** disk-full writes use K1's `Capacity`
+classification and HTTP 409 `capacity` response while preserving the prior
+generation and DELETE survivors. `AutomaticCheckpointResult` does not distinguish
+storage-origin Capacity from native-admission Capacity. The automatic-save
+coordinator therefore rearms either on the next observed Engine/admission progress,
+not on external disk reclamation. Reclaiming disk space alone does not trigger an
+automatic retry. An explicit client save after sufficient reclaim succeeds without
+waiting for that progress, subject to the unchanged publication and policy gates.
 
 Every completed coordinator task notifies the Engine, including retryable refusal.
 That completion wakeup is excluded from `checkpoint_progress` and cannot trigger
