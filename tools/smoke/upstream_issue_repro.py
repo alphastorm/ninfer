@@ -22,7 +22,7 @@ def post(url: str, payload: dict, timeout: float = 90):
 
 def payload(model: str, *, stream: bool, length: int, salt: int = 0) -> dict:
     return {"model": model, "stream": stream, "enable_thinking": False,
-            "max_tokens": 32768 if length > 256 else 256,
+            "max_tokens": 32768 if length > 256 else 1024,
             "temperature": 0, "messages": [{"role": "user", "content":
             f"Return a JSON string of lowercase letters. Request {salt}."}],
             "response_format": {"type": "json_schema", "json_schema": {
