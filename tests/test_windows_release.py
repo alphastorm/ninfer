@@ -195,10 +195,16 @@ class MultiGpuHostTests(unittest.TestCase):
             state_root="C:/state", target_root="C:/qualification", gpu_uuid="GPU-00000000-0000-0000-0000-000000000001",
             lane=SimpleNamespace(model_id="model", spec=json.loads(
                 (WINDOWS / "lanes/rtx3090/release-spec.json").read_text())),
-            remote_json=lambda host, script, **kwargs: captured.append(script) or {"protocol": product_protocol_fixture()},
+            remote_json=lambda host, script, **kwargs: captured.append(script) or {
+                "status": "passed", "protocol": product_protocol_fixture()},
             config=SimpleNamespace(target="not-contacted", pressure_port=18201),
         )
-        qualify_native.Orchestrator.pressure_protocol(subject)
+        with mock.patch.object(qualify_native, "remote_ps", return_value="") as cleanup:
+            qualify_native.Orchestrator.pressure_protocol(subject)
+        cleanup.assert_called_once()
+        self.assertEqual(cleanup.call_args.args[0], subject.config.target)
+        self.assertIn("Remove-Item -LiteralPath 'C:/qualification/pressure' -Recurse -Force",
+                      cleanup.call_args.args[1])
         self.assertIn(r"""'(\\*)"'""", captured[0])
         self.assertIn(r"'$1$1\"'", captured[0])
 
