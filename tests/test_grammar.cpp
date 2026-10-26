@@ -257,6 +257,28 @@ void check_json_reasoning_hardening() {
     mixed->confirm();
     require(allows(mask(*mixed), 256), "cross-boundary JSON token did not complete");
 }
+
+void check_selected_token_violation() {
+    ninfer::text::GrammarCompiler compiler({"a", "b", "c", ""}, {3}, 1024 * 1024);
+    auto session = compile(compiler, "root ::= \"ab\"", {}, {});
+    auto sibling = compile(compiler, "root ::= \"ab\"", {}, {});
+    const auto initial = mask(*session);
+    bool rejected = false;
+    try {
+        session->accept(std::array<std::int32_t, 2>{0, 2});
+    } catch (const ninfer::text::GrammarViolation&) { rejected = true; }
+    require(rejected, "selected-token rejection did not use GrammarViolation");
+    session->discard();
+    require(mask(*session) == initial && mask(*sibling) == initial,
+            "rejected selected tokens damaged rollback or a sibling matcher");
+    session->accept(std::array<std::int32_t, 2>{0, 1});
+    session->confirm();
+    require(allows(mask(*session), 3), "generation failed after selected-token rollback");
+    session->accept(3);
+    session->confirm();
+    require(session->observation().terminated && mask(*sibling) == initial,
+            "selected-token recovery did not terminate independently");
+}
 } // namespace
 
 int main() {
@@ -266,6 +288,7 @@ int main() {
         check_compiled_grammar_lifetime();
         check_draft_lookahead();
         check_json_reasoning_hardening();
+        check_selected_token_violation();
         std::vector<std::string> vocab;
         for (int byte = 0; byte < 256; ++byte) { vocab.emplace_back(1, static_cast<char>(byte)); }
         vocab.emplace_back();                        // EOS
