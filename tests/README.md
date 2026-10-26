@@ -294,6 +294,11 @@ Snapshot/Replay recovery and cancellation while paused or replaying; `NINFER_PRE
 selects `all`, `snapshot`, `replay`, `cancel-paused` or `cancel-replay`. Native transaction tests cover
 physical state/KV ownership, binding, capture, reclamation and abort; their positional backend is
 `none`, `mtp`, `dflash` or `dflash2`. Each backend requires an artifact containing that component.
+`ninfer_qwen3_5_checkpoint_reclaim_real_test` requires the DFlash2 artifact and checks a Host-only
+victim import under capacity pressure. Its release callback must observe exactly one complete
+native validation and two pins; pressure settlement independently validates and re-pins before
+release, so successful reclaim must total two complete validations and four pins. It also checks
+one fresh target reader on retry, preservation of an invalid victim, and exact cached continuation.
 Public-HTTP latency and output gaps are measured separately by the
 [TTFT campaign](../tools/bench/ttft/README.md).
 
