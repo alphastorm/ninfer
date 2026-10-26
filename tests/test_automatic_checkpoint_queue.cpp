@@ -1,5 +1,6 @@
 #include "serve/automatic_checkpoint_queue.h"
 #include "serve/session_checkpoint_store.h"
+#include "checkpoint_write_fault.h"
 
 #include <atomic>
 #include <array>
@@ -356,6 +357,32 @@ int durable_record_delete_preserves_survivors() {
                           "failed deletion lost prior durable authority");
     }
     const auto prior = *responses.snapshot_session(session);
+#if defined(_WIN32) || defined(__linux__)
+    bool capacity_threw = false, capacity_erased = false;
+    {
+        checkpoint_write_fault::Scope fault(ENOSPC);
+        try {
+            capacity_erased = responses.erase_for_session_durably("resp_child", session,
+                [&](const auto& survivors) {
+                    ninfer::runtime::SessionCheckpointSkipDetail skip;
+                    const auto saved = disk.save_responses(*survivors, fingerprint, &skip);
+                    refusal = skip.durable_reason;
+                    return saved.has_value();
+                }, &refusal, &prior);
+        } catch (...) { capacity_threw = true; }
+    }
+    failures += check(checkpoint_write_fault::fired != 0 && !capacity_threw && !capacity_erased &&
+                          refusal == Reason::Capacity && responses.size() == 2 &&
+                          responses.get_for_session("resp_parent", session) &&
+                          responses.get_for_session("resp_child", session),
+                      "disk-full DELETE lost capacity reason or changed live survivors");
+    {
+        const auto unchanged = disk.load(session, fingerprint, "resp_child");
+        failures += check(unchanged.state == SessionCheckpointLoadState::Available &&
+                              unchanged.checkpoint && unchanged.checkpoint->responses.records.size() == 2,
+                          "disk-full DELETE discarded prior durable survivors");
+    }
+#endif
     failures += check(responses.erase_for_session_durably("resp_parent", session,
         [&](const auto& survivors) { return survivors && save(*survivors).has_value(); }, &refusal, &prior),
         "ancestor deletion did not publish its survivor generation");

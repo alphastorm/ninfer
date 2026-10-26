@@ -3,6 +3,7 @@
 #include "runtime/engine/checkpoint_control.h"
 #include "serve/session_checkpoint_store.h"
 #include "serve/server_identity.h"
+#include "checkpoint_write_fault.h"
 
 #include <nlohmann/json.hpp>
 
@@ -37,6 +38,16 @@ struct ParentFlushFault {
 } parent_flush_fault;
 
 BOOL WINAPI checkpoint_flush(HANDLE handle) {
+    const auto disk_error = checkpoint_write_fault::windows_error.load();
+    if (disk_error) {
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (GetFileInformationByHandle(handle, &info) &&
+            !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            ++checkpoint_write_fault::fired;
+            SetLastError(disk_error);
+            return FALSE;
+        }
+    }
     auto& fault = parent_flush_fault;
     if (fault.armed) {
         BY_HANDLE_FILE_INFORMATION info{};
@@ -2033,6 +2044,92 @@ int test_buffered_deferred_failure_fails_before_publication() {
     return failures;
 }
 
+#if defined(_WIN32) || defined(__linux__)
+int test_disk_full_capacity_preserves_generation() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .origin_mac_key = std::string(32, 'k'),
+                                  .read_queue = std::make_shared<TestReadQueue>()});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) {
+            return DurableExportResult{.state = runtime::DurableExportState::Refused};
+        }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto baseline = store.save(responses, fingerprint(), exporter, publish_fixture);
+    if (!baseline) { return check(false, "disk-full baseline did not publish"); }
+    struct Fault {
+        int generic;
+        unsigned long windows;
+        runtime::DurableReason reason;
+    };
+    const Fault faults[] = {
+        {ENOSPC, 0, runtime::DurableReason::Capacity},
+        {EIO, 0, runtime::DurableReason::IoUnavailable},
+#ifdef _WIN32
+        {0, ERROR_DISK_FULL, runtime::DurableReason::Capacity},
+        {0, ERROR_HANDLE_DISK_FULL, runtime::DurableReason::Capacity},
+        {0, ERROR_ACCESS_DENIED, runtime::DurableReason::IoUnavailable},
+#endif
+    };
+    int failures = 0;
+    for (const auto& fault : faults) {
+        runtime::SessionCheckpointSkipDetail skip;
+        bool threw = false, published = false;
+        std::optional<SessionCheckpointSaveResult> saved;
+        std::string diagnostic;
+        {
+            CheckpointLogCapture log;
+            checkpoint_write_fault::Scope injection(0);
+            try {
+                saved = store.save(responses, fingerprint(),
+                    [&](ContinuationCheckpointWriter& writer) {
+                        // The Responses file is already durable. Fail in the native drain,
+                        // after enqueue acknowledgement, and deliberately return a coarse
+                        // exporter reason: it must not erase the first disk-capacity cause.
+                        checkpoint_write_fault::generic_error = fault.generic;
+                        checkpoint_write_fault::windows_error = fault.windows;
+                        (void)write_state_fixture(writer, payload);
+                        return DurableExportResult{.state = runtime::DurableExportState::Refused,
+                                                    .reason = runtime::DurableReason::IoUnavailable};
+                    },
+                    [&](runtime::DurableSessionEpoch epoch, const std::function<bool()>& commit) {
+                        published = true;
+                        return publish_fixture(epoch, commit);
+                    }, &skip);
+            } catch (...) { threw = true; }
+            diagnostic = log.output.str();
+        }
+        failures += check(checkpoint_write_fault::fired != 0 && !saved && !published &&
+                              skip.durable_reason == fault.reason &&
+                              (fault.reason != runtime::DurableReason::Capacity || !threw),
+                          "disk failure lost its exact reason or reached publication");
+        const auto record = nlohmann::json::parse(diagnostic);
+        failures += check(record.at("operation") == "payload_write" &&
+                              record.at("reason") == runtime::durable_reason_name(fault.reason) &&
+                              record.at("error_category") == (fault.generic ? "generic" : "system") &&
+                              record.at("error_code") == (fault.generic ? fault.generic : fault.windows),
+                          "disk-failure diagnostic lost its capacity classification or OS code");
+        auto loaded = store.load(responses.client_session_sha256, fingerprint());
+        failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+                              loaded.checkpoint && loaded.checkpoint->generation == baseline->generation,
+                          "disk-full refusal replaced or quarantined the prior generation");
+        if (loaded.checkpoint) {
+            std::vector<std::byte> bytes(payload.size());
+            failures += check(loaded.checkpoint->engine->read_file("engine/state/0.bin", 0, bytes) &&
+                                  loaded.checkpoint->engine->verify_complete() && bytes == payload,
+                              "disk-full refusal damaged the prior generation's payload");
+        }
+    }
+    return failures;
+}
+#endif
+
 
 int test_hmac_sha256_rfc4231_vectors() {
     int failures = 0;
@@ -2852,6 +2949,9 @@ int main(int argc, char** argv) {
         const std::string_view test = argv[1];
         if (test == "quota_stale") { return test_quota_stale_publication_preserves_unrelated_currents(); }
         if (test == "ordinary_corrupt") { return test_ordinary_pressure_preserves_same_size_corrupt_victim(); }
+#if defined(_WIN32) || defined(__linux__)
+        if (test == "disk_full_capacity") { return test_disk_full_capacity_preserves_generation(); }
+#endif
 #ifdef _WIN32
         if (test == "current_flush") { return test_current_parent_flush_failure_retains_visible_generation(); }
         if (test == "protected_long_root") { return test_protected_long_root_transaction(); }
@@ -2882,6 +2982,9 @@ int main(int argc, char** argv) {
     failures += test_post_verification_replacement_fails_closed();
     failures += test_buffered_write_backpressure_round_trips();
     failures += test_buffered_deferred_failure_fails_before_publication();
+#if defined(_WIN32) || defined(__linux__)
+    failures += test_disk_full_capacity_preserves_generation();
+#endif
     failures += test_hmac_sha256_rfc4231_vectors();
     failures += test_manifest_origin_authentication();
     failures += test_manifest_origin_compatibility_window();
