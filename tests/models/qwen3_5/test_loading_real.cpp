@@ -83,16 +83,16 @@ void check_mapped_embedding(const artifact::Reader& reader, const q35::Model& mo
                 : static_cast<std::int32_t>((std::uint64_t(i) * 2654435761U) % mapped.n);
         }
         DeviceBuffer input(device.device(), ids.size() * sizeof(ids[0]));
-        input.copy_from_host(ids.data(), input.bytes());
+        input.copy_from_host(ids.data(), input.size());
         DeviceBuffer actual(device.device(), std::size_t(mapped.k) * width * 2);
-        DeviceBuffer expected(device.device(), actual.bytes());
+        DeviceBuffer expected(device.device(), actual.size());
         Tensor tokens(input.span(), DType::I32, {width});
         Tensor output(actual.span(), DType::BF16, {mapped.k, width});
         Tensor oracle(expected.span(), DType::BF16, {mapped.k, width});
         ops::embedding(tokens, reference, oracle, device.execution_view());
         ops::embedding(tokens, mapped, output, device.execution_view());
         device.synchronize();
-        std::vector<std::byte> expected_bytes(expected.bytes()), actual_bytes(actual.bytes());
+        std::vector<std::byte> expected_bytes(expected.size()), actual_bytes(actual.size());
         expected.copy_to_host(expected_bytes.data(), expected_bytes.size());
         actual.copy_to_host(actual_bytes.data(), actual_bytes.size());
         require(actual_bytes == expected_bytes, "mapped embedding eager gather changed BF16 bytes");
