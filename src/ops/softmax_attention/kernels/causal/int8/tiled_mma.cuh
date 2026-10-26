@@ -11,7 +11,7 @@
 
 namespace ninfer::ops::detail {
 
-template <typename Geometry, typename Schedule, typename Metadata>
+template <typename Geometry, typename Schedule, typename Metadata, bool FullBlocks = false>
 __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
     const __nv_bfloat16* __restrict__ q, const std::int8_t* __restrict__ cache_k,
     const std::int8_t* __restrict__ cache_v, const __half* __restrict__ cache_k_scale,
@@ -72,11 +72,10 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
     const int tile_rows     = min(Br, tokens - q0);
     const int max_query_abs = base_pos + q0 + tile_rows - 1;
     const int key_blocks    = max_query_abs / Bc + 1;
-#if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
     // Full-key traversal follows sergiuszm/ninfer-4090 (Apache-2.0), 7f47a62282b8e9d3.
     // Interior blocks are visible to every row; preserve the ascending key order.
-    const int full_blocks = q0 + Br <= tokens ? min(key_blocks, (base_pos + q0 + 1) / Bc) : 0;
-#endif
+    const int full_blocks =
+        FullBlocks && q0 + Br <= tokens ? min(key_blocks, (base_pos + q0 + 1) / Bc) : 0;
 
     // Quantize Q cooperatively. One full warp rotates and encodes one D256 row at a time.
     for (int row = warp; row < Br; row += Schedule::kWarps) {
@@ -146,12 +145,12 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
         common::cp_commit();
     };
 
-#if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
-    if (full_blocks > 0) issue_kv_tile(0, std::true_type{});
-    else issue_kv_tile(0, std::false_type{});
-#else
-    issue_kv_tile(0, std::false_type{});
-#endif
+    if constexpr (FullBlocks) {
+        if (full_blocks > 0) issue_kv_tile(0, std::true_type{});
+        else issue_kv_tile(0, std::false_type{});
+    } else {
+        issue_kv_tile(0, std::false_type{});
+    }
     common::cp_wait<0>();
     __syncthreads();
 
@@ -190,13 +189,8 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
     float running_l0     = 0.0f;
     float running_l1     = 0.0f;
     const float scale_l2 = scale * Log2E;
-#if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
     auto process_block = [&](int kb, auto full_tag) {
         constexpr bool FullTile = decltype(full_tag)::value;
-#else
-    for (int kb = 0; kb < key_blocks; ++kb) {
-        constexpr bool FullTile = false;
-#endif
         const int k0 = kb * Bc;
         if (warp < ProducerWarps) {
             const int row_base = warp * 16;
@@ -359,12 +353,12 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
 
         const bool has_next = kb + 1 < key_blocks;
         if (has_next) {
-#if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
-            if (kb + 1 < full_blocks) issue_kv_tile((kb + 1) * Bc, std::true_type{});
-            else issue_kv_tile((kb + 1) * Bc, std::false_type{});
-#else
-            issue_kv_tile((kb + 1) * Bc, std::false_type{});
-#endif
+            if constexpr (FullBlocks) {
+                if (kb + 1 < full_blocks) issue_kv_tile((kb + 1) * Bc, std::true_type{});
+                else issue_kv_tile((kb + 1) * Bc, std::false_type{});
+            } else {
+                issue_kv_tile((kb + 1) * Bc, std::false_type{});
+            }
         }
 
         const int row_tile = warp % Schedule::kRowTiles;
@@ -403,13 +397,13 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
         }
         if (has_next) { common::cp_wait<0>(); }
         __syncthreads();
-#if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
     };
-    for (int kb = 0; kb < full_blocks; ++kb) process_block(kb, std::true_type{});
-    for (int kb = full_blocks; kb < key_blocks; ++kb) process_block(kb, std::false_type{});
-#else
+    if constexpr (FullBlocks) {
+        for (int kb = 0; kb < full_blocks; ++kb) process_block(kb, std::true_type{});
+        for (int kb = full_blocks; kb < key_blocks; ++kb) process_block(kb, std::false_type{});
+    } else {
+        for (int kb = 0; kb < key_blocks; ++kb) process_block(kb, std::false_type{});
     }
-#endif
 
     if (warp < ProducerWarps && lid == 0) {
         const int row0  = warp * 16 + gid;
