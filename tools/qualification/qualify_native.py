@@ -2276,13 +2276,13 @@ def internal_restart(args: argparse.Namespace) -> dict[str, Any]:
     return receipt
 
 
-def gpu_metrics(gpu_uuid: str) -> tuple[float, int, int, int]:
+def gpu_metrics(gpu_uuid: str) -> tuple[float, float, int, int]:
     rows = run(["nvidia-smi", "-i", gpu_uuid, "--query-gpu=power.draw,temperature.gpu,utilization.gpu,memory.used", "--format=csv,noheader,nounits"]).stdout.strip().splitlines()
     if len(rows) != 1:
         raise LaneError("selected GPU metrics returned more or fewer than one row")
     output = rows[0]
     values = [item.strip() for item in output.split(",")]
-    return float(values[0]), int(values[1]), int(values[2]), int(values[3])
+    return float(values[0]), float(values[1]), int(values[2]), int(values[3])
 
 
 def internal_benchmark(args: argparse.Namespace) -> dict[str, Any]:

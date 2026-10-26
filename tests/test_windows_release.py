@@ -246,6 +246,16 @@ class MultiGpuHostTests(unittest.TestCase):
             with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout=output)), self.assertRaises(qualify_native.LaneError):
                 qualify_native.gpu_metrics(uuid)
 
+    def test_gpu_metrics_preserves_fractional_temperature(self) -> None:
+        uuid = "GPU-00000000-0000-0000-0000-000000000001"
+        with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="100.5, 48.94, 99, 12000\n")) as run:
+            self.assertEqual(qualify_native.gpu_metrics(uuid), (100.5, 48.94, 99, 12000))
+        run.assert_called_once_with([
+            "nvidia-smi", "-i", uuid,
+            "--query-gpu=power.draw,temperature.gpu,utilization.gpu,memory.used",
+            "--format=csv,noheader,nounits",
+        ])
+
     def test_predecessors_emit_attributable_startup_gpu_identity(self) -> None:
         for commit in ("075d442e", "03f56e58"):
             with self.subTest(commit=commit):
