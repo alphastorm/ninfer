@@ -116,13 +116,19 @@ void packed_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
  * allocation, frontier, request identity, or commit authority. `execution` supplies the stream and
  * positive physical SM count used for launch and workspace planning; capacity queries must use the
  * same count as execution.
+ *
+ * Optional gate is contiguous BF16 with the output shape and follows the same non-overlap rules.
+ * It applies sigmoid_mul(gate, out) after rounding attention to BF16, including masked columns.
+ * The BF16 grouped route may fuse this epilogue without removing that intermediate rounding;
+ * other routes execute the same separate gate Op.
  */
 void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
                               const Tensor& positions, const Tensor& valid_columns,
                               const Tensor& kv_table_rows, AttentionHeadGeometry geometry,
                               float scale, PagedKVBatchLayerView cache,
                               CausalAttentionExecutionEnvelope envelope, MemoryArena& workspace,
-                              Tensor& out, CudaExecutionView execution);
+                              Tensor& out, CudaExecutionView execution,
+                              const Tensor* gate = nullptr);
 
 /**
  * Read-only single-sequence causal attention over an already populated cache.

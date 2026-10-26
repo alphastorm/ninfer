@@ -431,6 +431,9 @@ wait 后。其余 launch 保持 stream 顺序；MoE 分段 capture 不启用此 
 Text full-attention 的 D256/R64 query/key preparation 可合并 unit-offset RMSNorm 与 RoPE，
 但必须保留两者之间的 BF16 舍入和各自的 reduction/rotation 顺序。原有 Ops 作为 bit-identity
 reference；不匹配 fused geometry 的调用仍使用原有三次 launch。
+BF16 grouped attention merge 可接收 caller-owned gate，在原 attention BF16 舍入之后应用
+与独立 `sigmoid_mul` 相同的算术，包括 masked columns。Tiled/native/其他 KV codec 保留独立
+gate Op；gate 不改变 attention plan、workspace capacity、cache 写入或 reduction 顺序。
 
 MoE offload 使用分段 GPU Graph，控制线程负责 CPU contribution、缓存快照及传输交接。
 稳定缓存合并 mixer 与 MoE GPU 提交；恢复和流式加载时分开，保留 mixer 与上传重叠。

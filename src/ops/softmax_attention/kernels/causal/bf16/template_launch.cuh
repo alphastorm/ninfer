@@ -58,13 +58,17 @@ void launch_bf16_kv_grouped_mma(const CausalAttentionOperands& p, Bf16KvCacheVie
 template <class G, class S, bool MultiBatch, bool Masked, bool Writable>
 void launch_bf16_kv_merge(const CausalAttentionOperands& p, Bf16KvCacheView<Writable> cache,
                           Bf16KvPartition partition, CausalPartialView partials,
-                          cudaStream_t stream) {
+                          cudaStream_t stream, const __nv_bfloat16* gate = nullptr) {
     if (partition.capacity > S::kThreads)
         throw std::invalid_argument("BF16 merge capacity exceeds the reduction block");
     const dim3 grid(G::QHeads, common::div_up(G::kHeadDim, S::kDChunk), p.width * p.batch);
-    bf16_kv_merge_kernel<G, S, MultiBatch, Masked><<<grid, S::kThreads, 0, stream>>>(
-        partials.acc, partials.maximum, partials.sum, p.positions, cache.valid_columns, p.width,
-        p.batch, partition, p.out);
+    const auto launch = [&]<bool Gated>() {
+        bf16_kv_merge_kernel<G, S, MultiBatch, Masked, Gated><<<grid, S::kThreads, 0, stream>>>(
+            partials.acc, partials.maximum, partials.sum, p.positions, cache.valid_columns, p.width,
+            p.batch, partition, p.out, gate);
+    };
+    if (gate) launch.template operator()<true>();
+    else launch.template operator()<false>();
     CUDA_CHECK(cudaGetLastError());
 }
 

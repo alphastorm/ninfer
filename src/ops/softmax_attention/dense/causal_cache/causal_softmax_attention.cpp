@@ -1,4 +1,5 @@
 #include "ninfer/ops/softmax_attention.h"
+#include "ninfer/ops/sigmoid_mul.h"
 
 #include "core/layout.h"
 #include "ops/common/host/operands.h"
@@ -243,7 +244,7 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
                               const Tensor& kv_table_rows, AttentionHeadGeometry geometry,
                               float scale, PagedKVBatchLayerView cache,
                               CausalAttentionExecutionEnvelope envelope, MemoryArena& workspace,
-                              Tensor& out, CudaExecutionView execution) {
+                              Tensor& out, CudaExecutionView execution, const Tensor* gate) {
     if (workspace.device() != execution.device()) {
         throw std::invalid_argument(
             "causal_softmax_attention: workspace belongs to another device");
@@ -261,33 +262,38 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
     common::operand::shape(v, {kHeadDim, kv_heads, width, batch}, op, "v");
     common::operand::contiguous_nonnull(k, op, "k", execution.device());
     common::operand::contiguous_nonnull(v, op, "v", execution.device());
+    if (gate != nullptr) {
+        if (gate->dtype != DType::BF16) {
+            throw std::invalid_argument("causal_softmax_attention: gate must be BF16");
+        }
+        common::operand::shape(*gate, {kHeadDim, geometry.query_heads, width, batch}, op, "gate");
+        common::operand::contiguous_nonnull(*gate, op, "gate", execution.device());
+        if (common::operand::overlaps(common::operand::range(gate->data, gate->bytes(), op),
+                                      common::operand::range(out.data, out.bytes(), op))) {
+            throw std::invalid_argument("causal_softmax_attention: gate overlaps out");
+        }
+    }
 
     if (cache.storage == KvCacheStorage::BFloat16) {
         detail::bf16_kv_append_attention(q, k, v, positions, valid_columns, kv_table_rows, scale,
-                                         cache, envelope, workspace, out, execution);
+                                         cache, envelope, workspace, out, execution, gate);
         return;
     }
 
     if (cache.storage == KvCacheStorage::Fp8E4M3Row256) {
         detail::fp8_kv_append_attention(q, k, v, positions, valid_columns, kv_table_rows, scale,
                                         cache, envelope, workspace, out, execution);
-        return;
-    }
-
-    if (cache.storage == KvCacheStorage::Int8Group64) {
+    } else if (cache.storage == KvCacheStorage::Int8Group64) {
         detail::int8_kv_append_attention(q, k, v, positions, valid_columns, kv_table_rows, scale,
                                          cache, envelope, workspace, out, execution);
-        return;
-    }
-
-    if (cache.storage == KvCacheStorage::Nvfp4Group16) {
+    } else if (cache.storage == KvCacheStorage::Nvfp4Group16) {
         detail::nvfp4_kv_append_attention(q, k, v, positions, valid_columns, kv_table_rows, scale,
                                           cache, envelope, workspace, out, execution);
-        return;
+    } else {
+        detail::k8v4_kv_append_attention(q, k, v, positions, valid_columns, kv_table_rows, scale,
+                                         cache, envelope, workspace, out, execution);
     }
-
-    detail::k8v4_kv_append_attention(q, k, v, positions, valid_columns, kv_table_rows, scale, cache,
-                                     envelope, workspace, out, execution);
+    if (gate != nullptr) sigmoid_mul(*gate, out, execution);
 }
 
 void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,

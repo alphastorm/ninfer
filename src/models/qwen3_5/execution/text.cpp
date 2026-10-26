@@ -908,6 +908,9 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
         Tensor a_batch        = a.view({dimension(config_.attention->head_dim),
                                         dimension(config_.attention->num_attention_heads), width,
                                         active_sequence_batch_});
+        Tensor gate_batch = gate.view({dimension(config_.attention->head_dim),
+                                       dimension(config_.attention->num_attention_heads), width,
+                                       active_sequence_batch_});
         Tensor position_batch = cache_positions.view({width, active_sequence_batch_});
         const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
         ops::causal_softmax_attention(
@@ -917,7 +920,7 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
              dimension(config_.attention->num_key_value_heads)},
             static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
             batch_text_kv_.batch_layer_view(fidx), *active_causal_attention_envelope_, work_,
-            a_batch, execution_);
+            a_batch, execution_, &gate_batch);
     } else {
         ops::causal_softmax_attention(
             qn, kn, v, cache_positions, Tensor{}, kv_table_rows,
@@ -926,9 +929,8 @@ void TextContext::attn_mix(const BlockParameters& w, Tensor& x, int fidx, Phase 
              dimension(config_.attention->num_key_value_heads)},
             static_cast<float>(1.0 / std::sqrt(static_cast<double>(config_.attention->head_dim))),
             batch_text_kv_.batch_layer_view(fidx), *active_causal_attention_envelope_, work_, a,
-            execution_);
+            execution_, &gate);
     }
-    ops::sigmoid_mul(gate, a, execution_);
 
     ops::linear_add(a.view({dimension(config_.attention->query_width()), T}), p.output.weight, x,
                     p.output.policy, work_, execution_);
