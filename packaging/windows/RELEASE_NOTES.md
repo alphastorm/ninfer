@@ -144,6 +144,10 @@ Automatic scratch removal occurs only after a passing remote receipt and local
 validation of the canonical product protocol result. Transport failures,
 non-passing receipts and malformed protocol payloads preserve the evidence.
 
+The UUID-scoped C1 benchmark preserves fractional `power.draw` and
+`temperature.gpu` telemetry from `nvidia-smi`. Utilization and used-memory retain
+their integer units; maximum tracking and the power-envelope refusal are unchanged.
+
 Privacy qualification has two explicit domains. Shipped executable/DLL directories
 and both public/scratch payload archives reject every Windows user-profile spelling,
 macOS user-directory or Linux home-directory path, plus the known private host names
