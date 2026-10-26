@@ -60,18 +60,15 @@ void launch_native_q5(const Q5LinearOperands& op, Output output, cudaStream_t st
         return launch_q5_a16_split2<kHidden, 2>(op, output, LinearIdentityEpilogue{}, stream);
     if (op.tokens <= 4) return launch.template operator()<4, 8, 2>();
     if (op.tokens <= 8) return launch.template operator()<8, 8, 2>();
-    if (op.tokens <= 14) return launch.template operator()<16, 8, 1>();
+    if (op.tokens <= 13) return launch.template operator()<16, 8, 1>();
     if (op.tokens <= 16) return launch.template operator()<16, 4, 2>();
     return launch.template operator()<32, 4, 1>();
 #else
     if (op.tokens == 2)
-        return launch_q5_a16_direct_simt<Q5A16DirectSimtSchedule<1, 2, 4, 4, 10, kHidden, true>>(
-            op, output, LinearIdentityEpilogue{}, stream);
-    if (op.tokens == 3)
-        return launch_q5_a16_split2<kHidden, 3>(op, output, LinearIdentityEpilogue{}, stream);
+        return launch_q5_a16_split2<kHidden, 2>(op, output, LinearIdentityEpilogue{}, stream);
     if (op.tokens <= 8) return launch.template operator()<8, 8, 2>();
     if (op.tokens <= 16) return launch.template operator()<16, 8, 1>();
-    if (op.tokens <= 26) return launch.template operator()<32, 8, 1>();
+    if (op.tokens <= 28) return launch.template operator()<32, 8, 1>();
     return launch.template operator()<32, 4, 1>();
 #endif
 }

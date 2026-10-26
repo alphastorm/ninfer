@@ -20,15 +20,14 @@ void launch_wide_tail(const Tensor& x, const Weight& w, Tensor& residual, cudaSt
 
 LinearAddLaunch select_q5_linear_add_n5120_k6144(std::int32_t tokens) {
 #if defined(NINFER_SM86)
-    if (tokens == 1) return launch_q5_add_simt<Q5A16DirectSimtSchedule<1, 1, 2, 8, 16, 6144, true>>;
-    if (tokens == 2) return launch_q5_add_split2<6144, 2>;
+    if (tokens == 1) return launch_q5_add_split2<6144, 1>;
     if (tokens <= 4) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 6144, 4, 8, 2>>;
-    if (tokens <= 8) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 6144, 8, 8, 1>>;
-    if (tokens <= 13) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 6144, 16, 8, 1>>;
+    if (tokens <= 8) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 6144, 8, 4, 2>>;
+    if (tokens <= 10) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 6144, 16, 8, 1>>;
     if (tokens <= 16) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 6144, 16, 4, 2>>;
     if (tokens <= 32) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 6144, 32, 4, 1>>;
 #elif defined(NINFER_SM89)
-    if (tokens == 2) return launch_q5_add_split2<6144, 2>;
+    if (tokens == 1) return launch_q5_add_split2<6144, 1>;
     if (tokens <= 8) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 6144, 8, 8, 2>>;
     if (tokens <= 16) return launch_q5_add_native<SmallTMmaSchedule<SmallTFormat::Q5, 6144, 16, 8, 1>>;
     if (tokens <= 24) return launch_q5_add_sliced<q5_instances::SlicedR16T24W4S2>;

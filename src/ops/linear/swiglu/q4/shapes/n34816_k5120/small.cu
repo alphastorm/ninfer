@@ -114,6 +114,7 @@ void launch_native(const Tensor& x, const Weight& w, Tensor& out, cudaStream_t s
 }
 #endif
 
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
 __device__ __forceinline__ void q4_issue_pair_tile(uint4 (*__restrict__ s_code)[kVecsPerWarpTile],
                                                    uint4 (*__restrict__ s_scale)[2],
                                                    const std::uint8_t* __restrict__ gate_code_row,
@@ -225,6 +226,7 @@ __global__ void q4_linear_swiglu_gemv_pair_kernel(const __nv_bfloat16* __restric
     if (lane == 0) { out[out_row] = __float2bfloat16(common::silu(gate_acc) * up_acc); }
 }
 
+#endif
 } // namespace
 
 void launch_q4_swiglu_gemv_pair(const Tensor& x, const Weight& w, Tensor& out,
@@ -232,11 +234,15 @@ void launch_q4_swiglu_gemv_pair(const Tensor& x, const Weight& w, Tensor& out,
     if (w.n != kN || w.k != kK || w.padded_shape[1] != kK) {
         throw std::invalid_argument("q4 linear_swiglu GEMV requires weight [34816,5120]");
     }
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+    launch_native<8, 8, 2>(x, w, out, stream);
+#else
     const int grid = kIntermediate / kPairsPerBlock;
     q4_linear_swiglu_gemv_pair_kernel<<<grid, kBlockThreads, 0, stream>>>(
         static_cast<const __nv_bfloat16*>(x.data), static_cast<const std::uint8_t*>(w.qdata),
         static_cast<const std::uint8_t*>(w.scales), static_cast<__nv_bfloat16*>(out.data));
     CUDA_CHECK(cudaGetLastError());
+#endif
 }
 
 void launch_q4_swiglu_small_t_tiled(const Tensor& x, const Weight& w, Tensor& out,
@@ -251,8 +257,7 @@ void launch_q4_swiglu_small_t_tiled(const Tensor& x, const Weight& w, Tensor& ou
     if (x.ne[1] <= 16) return launch_native<16, 4, 2>(x, w, out, stream);
     return launch_native<32, 4, 1>(x, w, out, stream);
 #elif defined(NINFER_SM89)
-    if (x.ne[1] <= 8)
-        return launch_small_t_schedule<q4_instances::SlicedK5120T8PairwisePad16>(x, w, out, stream);
+    if (x.ne[1] <= 8) return launch_native<8, 8, 2>(x, w, out, stream);
     if (x.ne[1] <= 16) return launch_native<16, 8, 1>(x, w, out, stream);
     if (x.ne[1] <= 24) return launch_native<24, 8, 1>(x, w, out, stream);
     return launch_native<32, 4, 1>(x, w, out, stream);

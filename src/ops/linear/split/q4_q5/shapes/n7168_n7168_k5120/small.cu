@@ -35,18 +35,16 @@ void launch_native_q4(const Q4LinearOperands& op, Output output, cudaStream_t st
             op, output, LinearIdentityEpilogue{}, stream);
     };
 #if defined(NINFER_SM86)
-    if (op.tokens <= 5) return launch.template operator()<8, 8, 2>();
+    if (op.tokens == 1) return launch.template operator()<8, 8, 2>();
     if (op.tokens <= 8) return launch.template operator()<8, 4, 2>();
-    if (op.tokens <= 13) return launch.template operator()<16, 8, 1>();
+    if (op.tokens <= 12) return launch.template operator()<16, 8, 1>();
     if (op.tokens <= 16) return launch.template operator()<16, 4, 2>();
-    if (op.tokens <= 23) return launch.template operator()<24, 8, 1>();
+    if (op.tokens <= 24) return launch.template operator()<24, 8, 1>();
     return launch.template operator()<32, 4, 1>();
 #else
-    if (op.tokens <= 4) return launch.template operator()<4, 8, 2>();
     if (op.tokens <= 8) return launch.template operator()<8, 4, 2>();
-    if (op.tokens <= 11) return launch.template operator()<16, 8, 1>();
     if (op.tokens <= 16) return launch.template operator()<16, 4, 2>();
-    if (op.tokens <= 18) return launch.template operator()<32, 8, 1>();
+    if (op.tokens <= 20) return launch.template operator()<32, 8, 1>();
     return launch.template operator()<32, 4, 1>();
 #endif
 }
@@ -63,19 +61,17 @@ void launch_native_q5(const Q5LinearOperands& op, Output output, cudaStream_t st
     if (op.tokens == 2)
         return launch_q5_a16_split2<kHidden, 2>(op, output, LinearIdentityEpilogue{}, stream);
     if (op.tokens <= 8) return launch.template operator()<8, 8, 2>();
-    if (op.tokens <= 16) return launch.template operator()<16, 8, 1>();
-    if (op.tokens <= 20) return launch.template operator()<32, 8, 1>();
+    if (op.tokens <= 13) return launch.template operator()<16, 8, 1>();
+    if (op.tokens <= 16) return launch.template operator()<16, 4, 2>();
+    if (op.tokens <= 18) return launch.template operator()<32, 8, 1>();
     return launch.template operator()<32, 4, 1>();
 #else
     if (op.tokens == 2)
-        return launch_q5_a16_direct_simt<Q5A16DirectSimtSchedule<1, 2, 4, 4, 10, kHidden, true>>(
-            op, output, LinearIdentityEpilogue{}, stream);
-    if (op.tokens == 3)
-        return launch_q5_a16_split2<kHidden, 3>(op, output, LinearIdentityEpilogue{}, stream);
-    if (op.tokens == 4) return launch.template operator()<4, 8, 2>();
+        return launch_q5_a16_split2<kHidden, 2>(op, output, LinearIdentityEpilogue{}, stream);
+    if (op.tokens <= 4) return launch.template operator()<4, 8, 2>();
     if (op.tokens <= 8) return launch.template operator()<8, 8, 2>();
     if (op.tokens <= 16) return launch.template operator()<16, 8, 1>();
-    if (op.tokens <= 22) return launch.template operator()<32, 8, 1>();
+    if (op.tokens <= 23) return launch.template operator()<32, 8, 1>();
     return launch.template operator()<32, 4, 1>();
 #endif
 }
