@@ -16,6 +16,14 @@ struct InstanceInfo {
     std::string name;
 };
 
+// Parent addresses remain stable when this owner moves into Model. Mapped parents borrow
+// MaterializedArtifact's registered Host backing; converted parents borrow device.
+struct EffectiveWeightStorage {
+    DeviceBuffer device;
+    std::vector<WeightParent> parents;
+    artifact::MaterializationStats stats;
+};
+
 class ResolvedLoadPlan;
 
 class Model {
@@ -46,7 +54,7 @@ public:
     [[nodiscard]] const InstanceInfo& info() const noexcept { return info_; }
 
     [[nodiscard]] const artifact::MaterializationStats& storage_stats() const noexcept {
-        return backing_.stats();
+        return effective_.stats;
     }
 
 private:
@@ -54,10 +62,11 @@ private:
                                                     const StartupObserver*);
     Model(Config config, LoadOptions options, ModelWeights weights, std::vector<BoundWeight> bound,
           std::vector<ExpertBankSource> banks, qwen::FrontendResources resources, InstanceInfo info,
-          artifact::MaterializedArtifact backing);
+          artifact::MaterializedArtifact backing, EffectiveWeightStorage effective);
 
     // Destroy all borrowers before backing. The caller keeps DeviceContext alive through cleanup.
     artifact::MaterializedArtifact backing_;
+    EffectiveWeightStorage effective_;
     Config config_;
     LoadOptions options_;
     ModelWeights weights_;

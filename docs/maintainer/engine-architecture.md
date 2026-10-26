@@ -30,6 +30,25 @@ V3 artifact 保存配置、物理对象、逻辑参数 Binding、使用位置的
 Converter 负责源映射、量化或保值导入、融合存储、packing 和 layout 转换；loader 根据实际绑定
 验证、读取并上传原字节。相同架构和可处理的配置更换训练权重或组合已有表示，沿用同一模型代码。
 
+Native `sm_86`/`sm_89` DFlash2 has one fixed load-time recipe,
+`dflash2-gate-up-q4-mapped-embedding/1`. It converts only Q8 RowSplit parents used exclusively by
+draft MLP gate/up: exact Q8 G32 reconstruction to FP32, then the canonical `grouped_absmax`
+Q4 G64 encoder. Complete parents are converted once in bounded row tiles; aliases retain their
+logical ranges. Already non-Q8 inputs and all down/convolution projections are unchanged.
+Effective geometry exists before ModelProfile and feeds the same effective-policy resolver as
+bound Parameters. No choice depends on free VRAM. The original artifact identity remains intact;
+the recipe is part of the exact source/binary provenance required by K2, not permission to restore
+checkpoints from a different build.
+
+The same fit binds the target/draft shared token embedding to its registered Host allocation's
+CUDA address. Other uses of a tied parent retain their requested placement. Model owns registration
+and converted backing beyond every Parameter/Graph reader; no mapping or weight repacking occurs
+during execution. Startup counts actual converted Device capacity and registered Host capacity,
+not a credit against the original representation. Graph calibration and admission headroom are
+unchanged. The 131,072-token C1 fit profile explicitly selects zero extra Device state slots and
+retains Host context caching; logical StateImage geometry and schema 3 are unchanged. Additional
+slots remain explicit caller reservations, never silently trimmed to make admission pass.
+
 ```mermaid
 flowchart LR
     S["来源与 recipe"] --> C["Converter / Writer"]
