@@ -18,6 +18,14 @@ project(ninfer LANGUAGES C CXX CUDA)
 option(NINFER_BUILD_APPS "Build the NInfer CLI, server and perplexity evaluator" ON)
 option(BUILD_TESTING "Build NInfer tests" OFF)
 option(NINFER_BUILD_BENCHMARKS "Build NInfer benchmarks" OFF)
+# Native sm_86/sm_89 prefill: eligible Q4/Q5 weights use the Group64 A8 activation
+# policy. An explicit compile choice, never selected by the build-profile string.
+option(NINFER_NATIVE_PREFILL_GROUP64_A8 "Group64 A8 activation policy for native Q4/Q5 prefill" OFF)
+if(NINFER_NATIVE_PREFILL_GROUP64_A8 AND NOT CMAKE_CUDA_ARCHITECTURES MATCHES "^(86|89)$")
+  message(FATAL_ERROR
+    "NINFER_NATIVE_PREFILL_GROUP64_A8 requires CMAKE_CUDA_ARCHITECTURES 86 or 89; got "
+    "'${CMAKE_CUDA_ARCHITECTURES}'")
+endif()
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
