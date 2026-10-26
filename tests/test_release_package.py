@@ -215,7 +215,7 @@ _NATIVE_SUPPORT = {
     "packaging/windows/Control-Release.ps1": "# controller fixture\n",
     "packaging/windows/Control-GpuOwner.ps1": "# gpu owner fixture\n",
     "packaging/windows/Protect-StateRoot.ps1": "# state protection fixture\n",
-    "packaging/windows/agent_protocol.py": "# protocol fixture\n",
+    "tools/smoke/agent_protocol.py": "# protocol fixture\n",
     "packaging/windows/lanes/rtx3090/release-spec.json": '{"release_id":"fixture"}\n',
     "packaging/windows/RELEASE_NOTES.md": "Release notes fixture\n",
     "tools/smoke/serve_contract.py": "# smoke contract fixture\n",
