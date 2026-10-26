@@ -64,6 +64,7 @@ PROFILE_ARGS: dict[str, tuple[str, ...]] = {
         "--kv-capacity", 32768,
         "--max-concurrency", 1,
         "--prefill-chunk", 1024,
+        "--preserve-thinking",
         "--device-state-slots", 2,
         "--host-context-mib", 0,
     ),
