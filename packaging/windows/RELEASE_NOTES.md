@@ -148,6 +148,11 @@ The UUID-scoped C1 benchmark preserves fractional `power.draw` and
 `temperature.gpu` telemetry from `nvidia-smi`. Utilization and used-memory retain
 their integer units; maximum tracking and the power-envelope refusal are unchanged.
 
+Native admission waits within the existing pending-request timeout when an
+in-flight checkpoint export temporarily pins the device states needed for reclaim.
+Successful or failed export completion releases those pins before waking admission;
+durable coverage checks and protection of unsaved session progress are unchanged.
+
 Privacy qualification has two explicit domains. Shipped executable/DLL directories
 and both public/scratch payload archives reject every Windows user-profile spelling,
 macOS user-directory or Linux home-directory path, plus the known private host names
