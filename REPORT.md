@@ -1,12 +1,40 @@
-# Integration checkpoint state
+# EXP-098: native DFlash2 measurement
 
-- Branch `rebase/upstream-64d10fbf`; owner Integrator4. Green tag `rebase/ckpt-1` points to tested `732bc1452e6515b644a91e3d149e37d7c2a8640a`, not subsequent source edits. Exact content-safe proof: [integration-ckpt-1.json](integration-ckpt-1.json); registry/history: [INTEGRATION.md](INTEGRATION.md).
-- Persistence `d4e24475` integrated with newer frozen contract/backend/header/CMake corrections retained and duplicate SHA target removed. Lease `20261025T044408Z-int-persistence-732bc145-520685`: 483 build steps/201 s, host 60/60 in 9.77 s, dense plus KV 11/11 in 252.71 s, explicit Vision/DFlash2/optimized loader passed; exit 0/489 s, zero leftovers. Grammar passes unchanged in 21.9744 s.
-- Canonical published `81f924d4` shared MTP/fp8 passed on secondary GPU job `10880`: 12 clients, 1,862 reused tokens, 201 decode rounds/387 rows, six partial-tail clients, available=1. Rebuild 237 steps/653 s; terminal exit 0. Earlier `5476dfd6` result is supplementary only. Superseded queued lease `522084` exited 125/0 s without a test or leftovers.
-- Harness and `/checkpoints-v013` lifecycle are green at exact `ec927e574`: 321-step/2323 s secondary build, host60/60 including sorted whole-tool byte pins, lifecycle15/15, canonical MTP/fp8 and loader pass. Dense aggregate11/11 after prefix-only closeout at600 s passed495.35 s; initial239.294 s timeout remains in [integration-harness.json](integration-harness.json). No assertion was relaxed.
-- A3 `8e4d03d59` + B2 `2fa762cc` are green at `686732de3`/`rebase/ckpt-durable`: lease `587569`,274-step/139 s build, host65/65, dense11/11, loader/canonical MTP/fp8, E2 overlap37.0491 s, four production boots with20,926 cached tokens and27 byte-identical continuation bytes; exit0/613 s, zero leftovers. [Receipt](integration-durable.json). Root/global-no-reuse refusal unchanged. Runtime-base `35720754d` precedes RC; Main permits stage-only build+package inventory/static equivalence, default build deferred to cut workflows.
-- Final routes are integrated and green at `528b3da24673a7dca0a8af30d304bd1a487ef244`: lease `585010`, 196-step/156 s build, host 60/60, dense 11/11, loader/canonical MTP pass; eight operators plus causal BF16 attention pass, exit 0/811 s with no leftovers. [Receipt](integration-routes.json). Main separately accepts G2 at 342.150 versus 338.448 tok/s (101.09%, founder threshold 96%); provider depth/tail caveats remain.
-- **Council5090RC2 declared by Integrator5: `6d4d0a05aded2a1b353b8998e7b08b0f2fb34bff`.** Lease617648 exit0/794s,270-step/122s build,host66,dense11,loader/canonicalMTP,E2/fourboots,32GB/C2/strict authenticated profile,both PRODUCT smokes and package/25-flag inventory pass; separate exact CPU66/66 pass. [Complete RC2 receipt](integration-rc2.json). Archived server `9790a00467c4351929ab9a3e68347ab0436357a956f845efc5b4475f75718c55`; archive `52dd3be726a1ea05f81e142a11e75ac984359ecafdf42aeeb8c192356214b43d`. Pre-councilF04b proof/assets remain unchanged in integration-rc.json. Publication is Main-owned.
-- **Post-F2 native source `fc3208dbb9fe166f1dff1341a0a099057ae8a878` is compile/inventory green:** declared F2 merged with both portability fixes and its full authenticated replay-only guard. Linux86/89 pass64steps/179s each; MSVC86/89 pass149steps/86.90s and91.63s, all six exact-clean-source version checks and27 payload hashes per lane. [Post-F2 receipt](integration-native-rc2.json). Pre-F2 `rebase/ckpt-native` remains immutable atf9611dc2b with its original receipt; no native GPU, package/controller acceptance or publication claimed. Historical workflow repoint never enters natives.
+**Complete, receipt-only. No runtime, profile or package change.** Both cards completed matched MTP3 versus DFlash2 K=7 measurements on published v3 `81f924d4`, INT8-group64 KV, C1, low reasoning, temperature zero and no added reasoning-token headroom. The common KernelRoutes corpus contains 84 cases; each arm also ran all 504 EXP-085 redaction-subset prompts and 14 fresh-process determinism repeats. This is not the full multi-metric EXP-085 quality screen.
 
+## Measured result
 
+Each comparison uses the same binary and largest measured DFlash2 context on its card. Both role arms returned HTTP 200 for all 84 cases. Rates are server-reported decode measurements; weighted rate is total completion tokens divided by summed decode seconds, and median is over the 84 cases.
+
+| Measurement | RTX 4090 MTP3 → DFlash2 | RTX 3090 MTP3 → DFlash2 |
+|---|---:|---:|
+| Matched context / KV capacity | 94,144 | 92,672 |
+| Median decode tok/s | 144.10 → **187.80 (+30.32%)** | 80.81 → **112.08 (+38.70%)** |
+| Weighted decode tok/s | 137.43 → **164.81 (+19.92%)** | 77.35 → **97.82 (+26.46%)** |
+| Accepted / drafted tokens | 42,536 / 55,228 → 47,977 / 90,561 | 42,823 / 55,921 → 48,225 / 91,853 |
+| Acceptance rate | 77.02% → 52.98% | 76.58% → 52.50% |
+| Speculative rounds | 18,416 → 12,957 | 18,650 → 13,141 |
+| Completion tokens / round | 3.310 → 4.706 | 3.297 → 4.673 |
+| Decode milliseconds / round | 24.085 → 28.555 | 42.629 → 47.775 |
+| Sampled peak used VRAM, MiB | 21,496 → 22,918 | 21,340 → 22,794 |
+| Greedy output pairs byte-identical | **28 / 84** | **34 / 84** |
+
+Greedy equality hashes include content, reasoning and tool names/arguments, excluding transport IDs. They are output equality checks, not proof of token-level arithmetic equivalence. Full per-case, per-workload and p95 measurements are in [rtx4090-comparison.json](bench/measurements/exp098/rtx4090-comparison.json), [rtx3090-comparison.json](bench/measurements/exp098/rtx3090-comparison.json) and their bound arm receipts.
+
+## Fit and quality limits
+
+- **4090:** 94,144 tokens leaves **673,185,792 CUDA-free bytes**, just **2 MiB above the 640 MiB floor**. The adjacent 94,208-token configuration starts and decodes but falls **2 MiB below** that floor; 98,304 is rejected by the startup budget. The assignment's known-unfit 131,072 case was not rerun. [11-attempt receipt](bench/measurements/exp098/rtx4090-fit.json).
+- **3090:** 92,672 tokens leaves **806,354,944 CUDA-free bytes**, just **1 MiB above the 768 MiB floor**. The adjacent 92,736-token configuration starts and decodes but falls **1 MiB below** the floor; 92,800 and 131,072 are rejected by the startup budget. [12-attempt receipt](bench/measurements/exp098/rtx3090-fit.json).
+- Boundaries use 64-token pages, retain the lane's 2/4 extra device slots, 2048/1024 prefill and exact host budgets, and require a successful 64-token decode. These are conditional fit boundaries, **not full-context retrieval or durable/C2 qualification**. CUDA free memory determines the floor; NVML residency is separately reported and is not interchangeable with it.
+- **Both leak screens are invalid, not passes or established regressions.** All 504 prompts were scored in every arm. Errors exceed the five allowed: 4090 **10 → 16**, 3090 **13 → 15**. Fresh-process output mismatches also fail determinism: 4090 **8 → 7 of 14**, 3090 **8 → 6 of 14**. Raw leak totals are **526 → 532** and **523 → 524**, respectively; these do not establish non-inferiority. No failed sample was suppressed or rerun. The registered rule, validity failures and unqualified observations are preserved.
+
+## Recommendation
+
+**Keep MTP3 at 131,072 tokens for the next native default profile.** DFlash2 delivers useful measured throughput gains, especially on repository and work-log workloads, but sacrifices roughly 28–29% of context capacity, leaves only 1–2 MiB beyond the required headroom at its measured limit, and does not preserve most greedy outputs. More importantly, neither leak screen yields a valid quality verdict. These results justify a separately qualified, lower-context opt-in DFlash2 candidate, not replacing the native default or lowering its headroom; this experiment changes neither.
+
+## Provenance and restoration
+
+- Measured source: **`eecb437f99d21cbc7f48740694de3cd6e51d4421`**, with independently copied 27-file native sets. Server SHA256: 4090 **`13980848de039c065a30e663d3f78d2576b03afb03c91dbbb2ffb6066d93baf9`**; 3090 **`31ab5abeafa139a021134a6d8ff01143bc65dfd9e582905a86f5b1ee4d949d23`**. Model: **`81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da`**, **20,437,521,664 bytes**, hashed for each invocation.
+- Published source is `7a25cd72f490183e4113f1e84e68e36d653ddd28`. **The release lead attests that eecb437f and 7a25cd72 runtime binaries differ only by embedded provenance.** These receipts nevertheless bind the actually measured eecb437f binaries, not the published binary hashes.
+- The initial I6 grant was preempted after the complete 4090 MTP arm; subsequent runs used Main's post-acceptance grants. All four windows stayed below 150 minutes. Own protected native leases were released after each window; final observations show **450/370 W, zero owned servers, no own leases, both canonical tasks Ready**. Canonical installations, tasks and model roots were not modified. [Grant, invocation and restoration ledger](bench/measurements/exp098/operations.json).
+- Executed verification was the requested six fit/arm runs and two receipt reductions only: **no build, test suite, lint or formatter**. Harness: `tools/bench/run_exp098_native.py`; reducer: `tools/bench/compare_exp098_native.py`; [frozen protocol](bench/measurements/exp098/protocol.json). Public receipts contain counts, measurements and hashes, never prompt/output text or credentials. Exact private-path commands remain in the operator command log.
