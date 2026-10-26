@@ -37,22 +37,39 @@ def health(url: str) -> int:
 
 def prefix(url: str, model: str, concurrency: int) -> dict:
     counts = []
+    reused = []
     for round_number in range(4):
+        request = payload(model, stream=False, length=256, salt=round_number)
+        request["prompt_cache_options"] = {"mode": "explicit"}
+        request["messages"][0]["content"] = [{
+            "type": "text",
+            "text": f"Shared prefix {round_number}. " + "alpha " * (65 + 67 * round_number),
+            "prompt_cache_breakpoint": {"mode": "explicit"},
+        }, {"type": "text", "text": "Return a JSON string of lowercase letters."}]
+        # Retain a real shared source, rather than merely submitting equal uncached prompts.
+        with post(url, request) as response:
+            assert response.status == 200, (response.status, response.read().decode())
+            json.load(response)
         barrier = threading.Barrier(concurrency)
         def run(_):
             barrier.wait(timeout=10)
-            with post(url, payload(model, stream=False, length=256, salt=round_number)) as response:
+            with post(url, request) as response:
                 body = json.load(response)
                 assert response.status == 200 and "error" not in body, (response.status, body)
                 assert body["choices"][0]["finish_reason"] == "stop", body
                 content = json.loads(body["choices"][0]["message"]["content"])
                 assert isinstance(content, str) and len(content) == 256
-                return body["usage"]["completion_tokens"]
+                cached = body["usage"]["prompt_tokens_details"]["cached_tokens"]
+                assert cached > 0, "identical requests did not share their retained prefix"
+                return body["usage"]["completion_tokens"], cached
         with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
-            counts.extend(pool.map(run, range(concurrency)))
+            for generated, cached in pool.map(run, range(concurrency)):
+                counts.append(generated)
+                reused.append(cached)
         assert health(url) == 200
+    assert any(cached % 64 for cached in reused), "fixture never reused a partial tail page"
     return {"issue": 414, "requests": len(counts), "completion_tokens": counts,
-            "health": 200, "verdict": "not_reproduced"}
+            "reused_tokens": reused, "health": 200, "verdict": "not_reproduced"}
 
 
 def timeout(url: str, model: str, concurrency: int) -> dict:
