@@ -2741,6 +2741,14 @@ int run_small_prefill_cases(CudaExecutionView execution, KvCacheStorage storage)
                                 MappingPattern::Fragmented, cached_queries);
         failures += run_a3_case(execution, geometry, storage, {257, 8192, 16384, 1303u},
                                 MappingPattern::Offset, boundary_queries);
+        if (storage == KvCacheStorage::Int8Group64) {
+            // Unaligned starts cross fully visible key blocks and the causal boundary.
+            for (const int prefix : {63, 64, 65})
+                failures += run_a3_case(
+                    execution, geometry, storage,
+                    {257, prefix, static_cast<unsigned>(prefix + 257), 1310u + prefix},
+                    MappingPattern::Fragmented, boundary_queries);
+        }
         failures +=
             run_batch_case(execution, geometry, storage,
                            {65, {8191}, {17}, {0}, MappingPattern::Fragmented, 1304u}, 32768);

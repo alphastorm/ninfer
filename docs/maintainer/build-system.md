@@ -42,6 +42,12 @@ translation units. Keep this option OFF for qualified profiles until matched thr
 independent Op-oracle, exact long-retrieval and powered output-quality gates pass; ON binaries
 must use a distinct `NINFER_BUILD_PROFILE` identity.
 
+The same native prefill profile specializes INT8 causal attention's fully visible key blocks:
+staging, masking and probability guards are elided only before the causal boundary. Query
+rotation, key traversal order, FP32 accumulation, rounding and boundary/tail handling remain
+unchanged. The existing 128-register schedule is retained; no FP16 PV accumulation or paired
+producer reduction is enabled.
+
 Apps or tests enable the internal product support components: media acquisition, prompt input,
 logging and serving. This is one derived condition, not a separate user option. FFmpeg and libjpeg
 belong to model media decoding and remain required when apps are disabled. CMake discovers libjpeg
