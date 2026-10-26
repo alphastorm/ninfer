@@ -103,6 +103,11 @@ add_test(NAME ninfer_qwen3_5_agent_continuation_real_test
 set_tests_properties(ninfer_qwen3_5_agent_continuation_real_test PROPERTIES
   ENVIRONMENT "NINFER_PREFIX_REAL_SCENARIO=agent-continuation")
 
+add_test(NAME ninfer_qwen3_5_response_retirement_real_test
+  COMMAND ninfer_qwen3_5_prefix_real_test)
+set_tests_properties(ninfer_qwen3_5_response_retirement_real_test PROPERTIES
+  ENVIRONMENT "NINFER_PREFIX_REAL_SCENARIO=retirement")
+
 # A real-model test owns the single GPU while its artifact is resident.
 set(ninfer_qwen3_5_real_tests
   ninfer_qwen3_5_loading_real_test
@@ -111,6 +116,7 @@ set(ninfer_qwen3_5_real_tests
   ninfer_qwen3_5_prefix_real_test
   ninfer_qwen3_5_shared_prefix_real_test
   ninfer_qwen3_5_agent_continuation_real_test
+  ninfer_qwen3_5_response_retirement_real_test
   ninfer_qwen3_5_preemption_real_test
   ninfer_qwen3_5_grammar_real_test
   ninfer_qwen3_5_tools_real_test
