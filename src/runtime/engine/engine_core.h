@@ -1903,8 +1903,8 @@ private:
                         }
                     }
                     if (!reservation) {
-                        // Resident progress can release/unlock capacity. A root chunk's
-                        // smaller initial allocation is not a reason to discard this source.
+                        // Resident work or an off-lock export can release/unlock capacity.
+                        // Do not discard this source for a root chunk's smaller allocation.
                         if (reservation.capacity_possible &&
                             admission_capacity_progress_pending(restoring)) {
                             deferred = true;
@@ -2512,6 +2512,8 @@ private:
     std::mutex checkpoint_provider_mutex_;
     std::deque<std::function<void()>> checkpoint_commands_;
     std::unique_lock<std::mutex>* checkpoint_execution_lock_ = nullptr;
+    // Worker-owned: prepared export leases may outlive all resident requests.
+    std::size_t checkpoint_exports_in_flight_ = 0;
 
     mutable std::mutex execution_mutex_;
     mutable std::mutex queue_mutex_;

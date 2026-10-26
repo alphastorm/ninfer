@@ -261,6 +261,7 @@ class AdapterFixture {
     std::deque<std::function<void()>> checkpoint_commands_;
     std::thread worker_;
     std::unique_lock<std::mutex>* checkpoint_execution_lock_ = nullptr;
+    std::size_t checkpoint_exports_in_flight_ = 0;
     std::atomic<bool> admission_check_pending_{false};
     bool stopping_ = false;
     bool failed_ = false;
