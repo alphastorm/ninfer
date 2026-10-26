@@ -32,6 +32,16 @@
 #include <unordered_set>
 #include <utility>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 namespace ninfer::serve {
 void log_checkpoint_failure(std::string_view operation, runtime::DurableReason reason,
                             std::error_code code) noexcept {
@@ -84,6 +94,26 @@ public:
         : std::runtime_error(message), reason(cause) {}
     const runtime::DurableReason reason = runtime::DurableReason::IoUnavailable;
 };
+
+[[nodiscard]] runtime::DurableReason checkpoint_io_reason(std::error_code error) noexcept {
+    if (error == std::errc::no_space_on_device) { return runtime::DurableReason::Capacity; }
+#ifdef _WIN32
+    if (error.category() == std::system_category() &&
+        (error.value() == ERROR_DISK_FULL || error.value() == ERROR_HANDLE_DISK_FULL)) {
+        return runtime::DurableReason::Capacity;
+    }
+#endif
+    return runtime::DurableReason::IoUnavailable;
+}
+
+[[nodiscard]] runtime::DurableReason current_checkpoint_failure_reason() noexcept {
+    try {
+        if (const auto error = std::current_exception()) { std::rethrow_exception(error); }
+    } catch (const CheckpointUnavailable& error) { return error.reason; }
+    catch (const std::system_error& error) { return checkpoint_io_reason(error.code()); }
+    catch (...) {}
+    return runtime::DurableReason::IoUnavailable;
+}
 
 struct FileDescriptor {
     std::string path;
@@ -612,7 +642,7 @@ public:
     bool write_file(std::string_view path, std::uint64_t offset, std::uint64_t total_bytes,
                     std::span<const std::byte> bytes, std::uint32_t alignment) override {
         if (!path.starts_with("engine/") || path.size() == std::string_view("engine/").size()) {
-            failed_ = true;
+            record_failure();
             return false;
         }
         return write_impl(path, offset, total_bytes, bytes, alignment);
@@ -621,6 +651,14 @@ public:
     bool write_store_file(std::string_view path, std::uint64_t offset, std::uint64_t total_bytes,
                           std::span<const std::byte> bytes) {
         return write_impl(path, offset, total_bytes, bytes, 1);
+    }
+
+    // Native payload writes are drain-owned; save inspects their cause after finish() joins.
+    [[nodiscard]] runtime::DurableReason failure_reason() const noexcept { return failure_reason_; }
+
+    void record_failure(runtime::DurableReason reason = runtime::DurableReason::IoUnavailable) noexcept {
+        if (!failed_) { failure_reason_ = reason; }
+        failed_ = true;
     }
 
     [[nodiscard]] bool finish() override {
@@ -664,7 +702,7 @@ private:
             ((path == "engine/index.cbor" || path == "responses.cbor") &&
              (total_bytes > staging_limit_ || alignment != 1)) ||
             offset > total_bytes || bytes.size() > total_bytes - offset) {
-            failed_ = true;
+            record_failure();
             return false;
         }
         try {
@@ -675,7 +713,7 @@ private:
             State& state              = position->second;
             if (inserted) {
                 if (offset != 0 || states_.size() > 4096) {
-                    failed_ = true;
+                    record_failure();
                     return false;
                 }
                 state.total                             = total_bytes;
@@ -691,14 +729,14 @@ private:
 #endif
                 state.file = open_binary_write(destination);
                 if (state.file == nullptr) {
-                    failed_ = true;
+                    record_failure();
                     return false;
                 }
             }
             if (state.complete || state.total != total_bytes || state.written != offset ||
                 state.alignment != alignment ||
                 state.file == nullptr) {
-                failed_ = true;
+                record_failure();
                 return false;
             }
             io::write_exact(state.file, bytes);
@@ -707,10 +745,10 @@ private:
             if (state.written == state.total) {
                 flush_file(state.file);
                 if (std::fclose(state.file) != 0) {
-                    log_checkpoint_failure("payload_close", runtime::DurableReason::IoUnavailable,
-                                           {errno, std::generic_category()});
+                    const std::error_code error(errno, std::generic_category());
+                    record_failure(checkpoint_io_reason(error));
+                    log_checkpoint_failure("payload_close", failure_reason_, error);
                     state.file = nullptr;
-                    failed_    = true;
                     return false;
                 }
                 state.file     = nullptr;
@@ -719,8 +757,8 @@ private:
             }
             return true;
         } catch (...) {
-            log_checkpoint_failure("payload_write", runtime::DurableReason::IoUnavailable);
-            failed_ = true;
+            record_failure(current_checkpoint_failure_reason());
+            log_checkpoint_failure("payload_write", failure_reason_);
             return false;
         }
     }
@@ -743,6 +781,7 @@ private:
     std::set<std::filesystem::path> dirty_directories_;
 #endif
     bool failed_ = false;
+    runtime::DurableReason failure_reason_ = runtime::DurableReason::IoUnavailable;
 };
 
 // Owns each accepted chunk while a drain thread hashes and writes it (ninfer#34). K3 captures
@@ -816,6 +855,7 @@ public:
         try {
             return !failed_ && inner_.finish();
         } catch (...) {
+            inner_.record_failure(current_checkpoint_failure_reason());
             failed_ = true;
             return false;
         }
@@ -2018,18 +2058,18 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         return std::nullopt;
     }
     std::unique_lock lock(impl_->mutex);
-    io::create_directories(generations);
     const std::filesystem::path staging   = generations / (".staging-" + generation);
     const std::filesystem::path published = generations / generation;
-    (void)io::remove_tree(staging);
-    io::create_directories(staging);
 
     try {
+        io::create_directories(generations);
+        (void)io::remove_tree(staging);
+        io::create_directories(staging);
         const std::vector<std::byte> response_bytes =
             encode_response_store_snapshot(responses, options_.staging_bytes);
         DirectoryCheckpointWriter writer(staging, options_.staging_bytes);
         if (!writer.write_store_file("responses.cbor", 0, response_bytes.size(), response_bytes)) {
-            throw std::runtime_error("response checkpoint write failed");
+            throw CheckpointUnavailable(writer.failure_reason(), "response checkpoint write failed");
         }
         // K3 streams the leased native set off-lock. Drain all accepted copies before publishing;
         // neither backpressure nor finish may run under the Engine execution lock (ninfer#34).
@@ -2046,9 +2086,9 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         if (!buffered.finish()) {
             if (skip != nullptr) {
                 skip->export_state = runtime::DurableExportState::Refused;
-                skip->durable_reason = runtime::DurableReason::IoUnavailable;
+                skip->durable_reason = writer.failure_reason();
             }
-            throw std::runtime_error("checkpoint payload write failed");
+            throw CheckpointUnavailable(writer.failure_reason(), "checkpoint payload write failed");
         }
         lock.lock();
         if (exported.state != runtime::DurableExportState::Exported ||
@@ -2091,7 +2131,7 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         if (!writer.write_store_file(
                 "checksums.json", 0, checksum_text.size(),
                 std::as_bytes(std::span(checksum_text.data(), checksum_text.size())))) {
-            throw std::runtime_error("checkpoint checksum write failed");
+            throw CheckpointUnavailable(writer.failure_reason(), "checkpoint checksum write failed");
         }
         payloads = writer.files();
         if (!payloads) { throw std::runtime_error("checkpoint checksum set is incomplete"); }
@@ -2175,29 +2215,29 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         bool pointer_may_be_visible = false;
         bool invoked = false;
         bool quota_refused = false;
+        runtime::DurableReason publication_failure = runtime::DurableReason::None;
         lock.unlock();
         const auto publish_current = [&] {
             std::lock_guard publication_lock(impl_->mutex);
             if (invoked) { return false; }
             invoked = true;
-            if (!enforce_disk_quota_locked(options_, *impl_, published, session, previous_bytes,
-                                          total_bytes)) {
-                quota_refused = true;
-                return false;
-            }
-            // Windows replace_path can rename current and then fail its parent flush.
-            // The publication gate translates that exception to IoUnavailable, so a
-            // failed attempt must retain this generation for reconciliation by load().
-            // Before the attempt, stale/epoch/quota refusals still clean up normally.
-            pointer_may_be_visible = true;
             try {
+                if (!enforce_disk_quota_locked(options_, *impl_, published, session, previous_bytes,
+                                              total_bytes)) {
+                    quota_refused = true;
+                    return false;
+                }
+                // A post-rename flush can fail. Retain any possibly visible generation
+                // for reconciliation, independently of the classified failure reason.
+                pointer_may_be_visible = true;
                 replace_path(current_staging, session / "current");
                 sync_directory(session);
                 // First save also publishes the session directory itself.
                 sync_directory(options_.root / "sessions");
             } catch (...) {
-                // The epoch gate converts exceptions to IoUnavailable; retain the code first.
-                log_checkpoint_failure("publish_current", runtime::DurableReason::IoUnavailable);
+                // The epoch gate has a coarse exception result; preserve the original cause.
+                publication_failure = current_checkpoint_failure_reason();
+                log_checkpoint_failure("publish_current", publication_failure);
                 throw;
             }
             committed = true;
@@ -2225,6 +2265,8 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
                                          : runtime::DurableExportState::Refused;
                 skip->durable_reason =
                     quota_refused ? runtime::DurableReason::Quota :
+                    publication_failure != runtime::DurableReason::None
+                        ? publication_failure :
                     publication.reason != runtime::DurableReason::None
                         ? publication.reason
                         : publication.state == runtime::DurableExportState::Stale
@@ -2239,12 +2281,17 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
             .dir_sync = io::directory_sync_mode(),
             .origin_authenticated = !options_.origin_mac_key.empty()};
     } catch (...) {
+        const auto reason = current_checkpoint_failure_reason();
         if (!lock.owns_lock()) { lock.lock(); }
         (void)remove_best_effort(staging);
-        if (skip != nullptr && skip->durable_reason == runtime::DurableReason::None) {
+        if (skip != nullptr && (reason == runtime::DurableReason::Capacity ||
+                                skip->durable_reason == runtime::DurableReason::None)) {
             skip->export_state = runtime::DurableExportState::Refused;
-            skip->durable_reason = runtime::DurableReason::IoUnavailable;
+            skip->durable_reason = reason;
         }
+        // Capacity is an ordinary retryable refusal. Returning it through the existing
+        // skip channel preserves DELETE's 409/capacity path and its unmodified survivors.
+        if (reason == runtime::DurableReason::Capacity) { return std::nullopt; }
         throw;
     }
 }
