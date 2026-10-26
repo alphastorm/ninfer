@@ -1,4 +1,5 @@
 #pragma once
+#include "core/pdl.cuh"
 
 #include "ops/common/cuda/reduce.cuh"
 #include "ops/normalization/rmsnorm/kernel/epilogue.cuh"
@@ -80,6 +81,9 @@ __launch_bounds__(Block) __global__
     void rmsnorm_d128_bf16x2_kernel(const __nv_bfloat162* x, const __nv_bfloat162* weight,
                                     const __nv_bfloat162* z, __nv_bfloat162* out, std::int64_t rows,
                                     float eps) {
+    // Small single-wave producer (GDN gated output norm): a programmatic consumer may launch and
+    // stage its weights now; it still waits for this grid before reading out.
+    pdl::trigger_dependents();
     static_assert(Block % common::kWarpSize == 0);
     constexpr int kWarpsPerBlock = Block / common::kWarpSize;
     constexpr int kPairsPerRow   = 64;

@@ -4,6 +4,7 @@
 #include "ops/rope/rmsnorm/kernel.cuh"
 #include "ops/rope/rmsnorm/offset_kernel.cuh"
 #include "ops/common/host/operands.h"
+#include "ops/normalization/rmsnorm/operands.h"
 #include "core/device.h"
 
 #include <cmath>
@@ -129,6 +130,9 @@ void launch_offset_rope(const Tensor& positions, const Tensor& q, const Tensor& 
 bool fused_offset_rope_geometry(const Tensor& positions, int rotary_dim, float theta,
                                 const Tensor& q, const Tensor& k, const Tensor& q_norm_weight,
                                 const Tensor& k_norm_weight, const Tensor& qn, const Tensor& kn) {
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+    return false;
+#else
     const std::int32_t tokens = positions.ne[0];
     const bool heads = (q.ne[1] == 24 && k.ne[1] == 4) || (q.ne[1] == 16 && k.ne[1] == 2);
     const bool axes  = positions.ne[1] == 1 || positions.ne[1] == 3;
@@ -138,15 +142,18 @@ bool fused_offset_rope_geometry(const Tensor& positions, int rotary_dim, float t
     };
     return rotary_dim == 64 && theta == 1.0e7F && heads && axes && tokens >= 1 &&
            positions.dtype == DType::I32 && positions.ne[2] == 1 && positions.ne[3] == 1 &&
-           positions.is_contiguous() && row(q, q.ne[1]) && row(qn, q.ne[1]) &&
+           positions.is_contiguous() && common::operand::aligned(positions.data, 4) &&
+           row(q, q.ne[1]) && row(qn, q.ne[1]) &&
            row(k, k.ne[1]) && row(kn, k.ne[1]) && q_norm_weight.dtype == DType::BF16 &&
            k_norm_weight.dtype == DType::BF16 && q_norm_weight.numel() == 256 &&
-           k_norm_weight.numel() == 256 && common::operand::aligned(q_norm_weight.data, 4) &&
+           k_norm_weight.numel() == 256 && q_norm_weight.is_contiguous() &&
+           k_norm_weight.is_contiguous() && common::operand::aligned(q_norm_weight.data, 4) &&
            common::operand::aligned(k_norm_weight.data, 4) && !overlaps(qn, kn) &&
            !overlaps(qn, q) && !overlaps(qn, k) && !overlaps(kn, q) && !overlaps(kn, k) &&
            !overlaps(qn, positions) && !overlaps(kn, positions) && !overlaps(qn, q_norm_weight) &&
            !overlaps(qn, k_norm_weight) && !overlaps(kn, q_norm_weight) &&
            !overlaps(kn, k_norm_weight);
+#endif
 }
 
 } // namespace
@@ -154,6 +161,20 @@ bool fused_offset_rope_geometry(const Tensor& positions, int rotary_dim, float t
 void rmsnorm_offset_rope(const Tensor& positions, int rotary_dim, float theta, const Tensor& q,
                          const Tensor& k, const Tensor& q_norm_weight, const Tensor& k_norm_weight,
                          float eps, Tensor& qn, Tensor& kn, CudaExecutionView execution) {
+    (void)detail::rmsnorm::validate(q, q_norm_weight, nullptr, eps, qn,
+                                  detail::rmsnorm::Epilogue::Offset, execution,
+                                  "rmsnorm_offset_rope");
+    (void)detail::rmsnorm::validate(k, k_norm_weight, nullptr, eps, kn,
+                                  detail::rmsnorm::Epilogue::Offset, execution,
+                                  "rmsnorm_offset_rope");
+    common::operand::device(positions.device, execution.device(), "rmsnorm_offset_rope",
+                            "positions");
+    if (overlaps(qn, kn) || overlaps(qn, q) || overlaps(qn, k) || overlaps(kn, q) ||
+        overlaps(kn, k) || overlaps(qn, positions) || overlaps(kn, positions) ||
+        overlaps(qn, q_norm_weight) || overlaps(qn, k_norm_weight) ||
+        overlaps(kn, q_norm_weight) || overlaps(kn, k_norm_weight)) {
+        throw std::invalid_argument("rmsnorm_offset_rope: outputs overlap another operand");
+    }
     if (!fused_offset_rope_geometry(positions, rotary_dim, theta, q, k, q_norm_weight,
                                     k_norm_weight, qn, kn) ||
         !(eps > 0.0f) || !std::isfinite(eps)) {
@@ -162,7 +183,6 @@ void rmsnorm_offset_rope(const Tensor& positions, int rotary_dim, float theta, c
         rope(positions, rotary_dim, theta, qn, kn, execution);
         return;
     }
-    common::operand::device(q.device, execution.device(), "rmsnorm_offset_rope", "operands");
     const auto stream = execution.stream();
     const bool mrope  = positions.ne[1] == 3;
     if (q.ne[1] == 24) {

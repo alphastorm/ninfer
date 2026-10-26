@@ -425,6 +425,13 @@ Speculative unit 使用 Forward、Finish 两段 Graph，CPU 在两段之间准�
 forward 重叠；两段共享同一个资源预留和提交边界。
 长度档位限制资源范围；Program 不复制 Attention Op 私有 kernel 的分派边界。
 
+Dense decode capture 在显式 `ConsumerCaptureScope` 内允许 Q4/Q5/Q8 sliced-K consumer
+预取首个 immutable weight tile，再等待 producer；activation 读取及 output 写入都在 dependency
+wait 后。其余 launch 保持 stream 顺序；MoE 分段 capture 不启用此 scope。SM86/89 不使用 PDL。
+Text full-attention 的 D256/R64 query/key preparation 可合并 unit-offset RMSNorm 与 RoPE，
+但必须保留两者之间的 BF16 舍入和各自的 reduction/rotation 顺序。原有 Ops 作为 bit-identity
+reference；不匹配 fused geometry 的调用仍使用原有三次 launch。
+
 MoE offload 使用分段 GPU Graph，控制线程负责 CPU contribution、缓存快照及传输交接。
 稳定缓存合并 mixer 与 MoE GPU 提交；恢复和流式加载时分开，保留 mixer 与上传重叠。
 `models/common/moe/graph` 负责单层 GPU subset 图及 CPU/cache 交接；调用方提供 mixer、MoE 和

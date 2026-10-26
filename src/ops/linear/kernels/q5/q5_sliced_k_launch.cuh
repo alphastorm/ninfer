@@ -33,10 +33,12 @@ void launch_q5_a16_sliced_k_mma(const Q5LinearOperands& operands, Output output,
                                   0;
             const bool full_tokens = count % Schedule::kTokenCapacity == 0;
             const auto launch      = [&]<bool Full, bool FullTokens>() {
-                q5_a16_sliced_k_mma_kernel<Schedule, Full, FullTokens>
-                    <<<grid, Schedule::kThreads, 0, stream>>>(
-                        x, operands.codes, operands.high, operands.scales, output, epilogue,
-                        operands.rows, operands.k, count, operands.padded_k, offset, row_policy);
+                CUDA_CHECK(pdl::launch_consumer(
+                    {grid, dim3(Schedule::kThreads), 0, stream},
+                    q5_a16_sliced_k_mma_kernel<Schedule, Full, FullTokens, Output, Epilogue,
+                                               RowPolicy>,
+                    x, operands.codes, operands.high, operands.scales, output, epilogue,
+                    operands.rows, operands.k, count, operands.padded_k, offset, row_policy));
             };
             if (full && full_tokens)
                 launch.template operator()<true, true>();

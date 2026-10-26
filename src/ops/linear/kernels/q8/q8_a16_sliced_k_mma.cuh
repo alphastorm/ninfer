@@ -1,4 +1,5 @@
 #pragma once
+#include "core/pdl.cuh"
 #include "ops/common/numeric/convert.cuh"
 #include "ops/common/cuda/pipeline.cuh"
 
@@ -206,7 +207,10 @@ __device__ __forceinline__ void q8_a16_sliced_k_mma(Q8LinearOperands operands, O
         acc[ni][3] = 0.0f;
     }
 
+    // Weights are immutable: a programmatic launch stages them while its producer finishes.
+    // Every activation read and every output write follows the dependency wait.
     stage_codes(0, 0);
+    pdl::wait_for_dependencies();
     stage_x(0, 0);
     common::cp_commit();
     common::cp_wait<0>();
@@ -312,6 +316,8 @@ __device__ __forceinline__ void q8_a16_sliced_k_mma(Q8LinearOperands operands, O
         }
     }
 
+    // The weights have streamed; dependents may launch while this CTA reduces and stores.
+    pdl::trigger_dependents();
     __syncthreads();
     auto* partial = shared.partial;
     if ((k_split & 1) != 0) {

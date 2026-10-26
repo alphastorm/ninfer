@@ -31,9 +31,9 @@ void launch_q8_a16_sliced_k_mma(const Q8LinearOperands& operands, Output output,
                 constexpr auto kernel =
                     q8_a16_sliced_k_mma_kernel<Schedule, Full, Output, Epilogue, RowPolicy>;
                 const int shared = common::prepare_shared<Schedule::kSharedBytes, kernel>();
-                kernel<<<grid, Schedule::kThreads, shared, stream>>>(operands, output, epilogue,
-                                                                     row_policy, offset);
-                CUDA_CHECK(cudaGetLastError());
+                CUDA_CHECK(pdl::launch_consumer(
+                    {grid, dim3(Schedule::kThreads), static_cast<std::size_t>(shared), stream},
+                    kernel, operands, output, epilogue, row_policy, offset));
             };
             if (operands.rows % Schedule::kBlockRows == 0 && operands.k == operands.padded_k &&
                 operands.k % Schedule::kBlockK == 0)

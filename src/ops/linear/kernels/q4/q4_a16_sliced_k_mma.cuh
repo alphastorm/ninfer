@@ -1,4 +1,5 @@
 #pragma once
+#include "core/pdl.cuh"
 #include "ops/common/cuda/pipeline.cuh"
 
 #include "ops/common/cuda/memory.cuh"
@@ -75,7 +76,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void q4_a16_sli
     const int row_groups = (Schedule::kStaticK ? Schedule::kStaticK : padded_k) / 64;
     const int tiles      = (groups + W - 1) / W;
 
-    const auto stage_inputs = [&](int slot, int tile) {
+    const auto stage_weights = [&](int slot, int tile) {
         const int first_group = tile * W;
         for (int item = tid; item < R * W * 2; item += Schedule::kThreads) {
             const int half   = item & 1;
@@ -113,6 +114,9 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void q4_a16_sli
                                           scales + index * 2, valid ? 4 : 0);
             }
         }
+    };
+    const auto stage_activations = [&](int slot, int tile) {
+        const int first_group = tile * W;
         for (int item = lane; item < Schedule::kTokenCapacity * 8; item += 32) {
             const int token = item / 8;
             const int k8    = (item % 8) * 8;
@@ -125,17 +129,33 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void q4_a16_sli
                 &shared.staging.x[slot][warp][token][q4_sliced_k_swizzle(token, k8)], x + index,
                 valid ? 16 : 0);
         }
+    };
+    const auto stage_inputs = [&](int slot, int tile) {
+        stage_weights(slot, tile);
+        stage_activations(slot, tile);
         common::cp_commit();
     };
 
     float acc[MT][NT][4] = {};
+    // Weights are immutable: a programmatic launch stages them while its producer finishes.
+    // Every activation read and every output write follows the dependency wait.
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
 #pragma unroll
     for (int slot = 0; slot < S; ++slot) {
-        if (slot < tiles)
-            stage_inputs(slot, slot);
-        else
-            common::cp_commit();
+        if (slot < tiles) stage_inputs(slot, slot);
+        else common::cp_commit();
     }
+#else
+    if (tiles > 0) stage_weights(0, 0);
+    pdl::wait_for_dependencies();
+    if (tiles > 0) stage_activations(0, 0);
+    common::cp_commit();
+#pragma unroll
+    for (int slot = 1; slot < S; ++slot) {
+        if (slot < tiles) stage_inputs(slot, slot);
+        else common::cp_commit();
+    }
+#endif
     constexpr int kUnroll = Schedule::kStaticK ? (Schedule::kStaticK / 64 + W - 1) / W : 1;
 #pragma unroll kUnroll
     for (int tile = 0; tile < tiles; ++tile) {
@@ -195,6 +215,8 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void q4_a16_sli
             common::cp_commit();
         }
     }
+    // The weights have streamed; dependents may launch while this CTA reduces and stores.
+    pdl::trigger_dependents();
     common::cp_wait<0>();
     __syncthreads();
     constexpr bool kPairwise = Schedule::kReduction == Q4SlicedKReduction::Pairwise;

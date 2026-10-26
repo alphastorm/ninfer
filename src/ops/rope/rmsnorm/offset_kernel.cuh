@@ -72,12 +72,8 @@ __global__ __launch_bounds__((QHeads + KHeads) * 32) void rmsnorm_offset_rope_d2
 #pragma unroll
     for (int i = 1; i < kPairsPerLane; ++i) out[row_base + lane + i * common::kWarpSize] = normalized[i];
 
-    unsigned own_bits;
-    static_assert(sizeof(own_bits) == sizeof(__nv_bfloat162));
-    __builtin_memcpy(&own_bits, &normalized[0], sizeof(own_bits));
-    const unsigned partner_bits = __shfl_xor_sync(common::kFullWarpMask, own_bits, kHalfPair);
-    __nv_bfloat162 partner;
-    __builtin_memcpy(&partner, &partner_bits, sizeof(partner));
+    const __nv_bfloat162 partner =
+        __shfl_xor_sync(common::kFullWarpMask, normalized[0], kHalfPair);
     __syncthreads();
 
     const int rotary_pair = lane & (kHalfPair - 1);

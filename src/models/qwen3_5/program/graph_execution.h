@@ -4,6 +4,7 @@
 #include "models/qwen3_5/program/text_graph.h"
 
 #include "core/nvtx.h"
+#include "core/pdl_scope.h"
 
 #include <stdexcept>
 
@@ -33,6 +34,11 @@ void capture_graph(Context& state, DecodeGraphDefinition& definition, Body&& bod
         state.execution.text_graph->begin();
         body();
         state.execution.text_graph->finish();
+    } else if (state.execution.moe == nullptr) {
+        // Dense weights are immutable for the graph's lifetime: streaming GEMMs may stage them
+        // while the preceding kernel finishes (pdl::launch_consumer).
+        pdl::ConsumerCaptureScope consumers;
+        definition.capture(state.execution.cuda.stream(), body);
     } else {
         definition.capture(state.execution.cuda.stream(), body);
     }
