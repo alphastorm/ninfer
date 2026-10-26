@@ -27,6 +27,12 @@ std::size_t workspace_capacity(const ops::SingleProjectionWeight& weights, int f
     return ops::linear_split_workspace_capacity_bytes(weights, rows, first, last);
 }
 
+std::size_t workspace_capacity(const ops::PairedProjectionWeights& weights, int first, int last) {
+    const int tail = weights.second.n / 2;
+    const std::array rows{weights.first.n + tail, tail};
+    return ops::linear_split_workspace_capacity_bytes(weights, rows, first, last);
+}
+
 // This criterion belongs to the complete A16 GDN-input-projection Op.
 constexpr ReductionCriterion kGdnInputProjA16Tolerance{3.0e-3, 4.0e-3, 3.5e-3};
 // Q8 may reconstruct BF16 MMA operands from integer codes and FP16 scales.
