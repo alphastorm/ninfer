@@ -533,6 +533,7 @@ FinishResult ProgramImpl::finish(SequenceHandle handle) noexcept {
     out.speculative = std::move(request.speculative_stats);
     try {
         device.synchronize();
+        decode_tail_in_flight_ = false;
         if (request.publish_continuation) { out.checkpoint = detach_checkpoint(sequences[lane]); }
         clear_lane(sequences[lane], request);
         out.status = runtime::ConsumeStatus::Consumed;
@@ -548,6 +549,7 @@ AbortResult ProgramImpl::abort(SequenceHandle handle) noexcept {
     out.speculative = std::move(requests[lane].speculative_stats);
     try {
         device.synchronize();
+        decode_tail_in_flight_ = false;
     } catch (...) { return out; }
     if (context_operation_ && context_operation_->lane() == lane) { abort_context(); }
     clear_lane(sequences[lane], requests[lane]);
@@ -558,6 +560,7 @@ AbortResult ProgramImpl::abort(SequenceHandle handle) noexcept {
 void ProgramImpl::fail_all_cleanup() noexcept {
     try {
         device.synchronize();
+        decode_tail_in_flight_ = false;
     } catch (...) {}
     abort_context();
     pending_transaction_.reset();
@@ -568,5 +571,11 @@ void ProgramImpl::fail_all_cleanup() noexcept {
     }
     // Published checkpoints belong to Runtime or ResumeState. After readers settle, their
     // owners release them; clearing this directory here would invalidate those live owners.
+}
+
+void ProgramImpl::settle_decode_tail() {
+    if (!decode_tail_in_flight_) { return; }
+    device.synchronize();
+    decode_tail_in_flight_ = false;
 }
 } // namespace ninfer::models::qwen3_5::detail

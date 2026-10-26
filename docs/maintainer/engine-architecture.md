@@ -384,6 +384,12 @@ Frontend 的 boundary metadata 只描述 accepted span 内的相对位置；Engi
 Program 根据 base frontier 转为绝对位置，与 accepted token、State/KV 和 prefix digest 原子提交。
 Program commit 失败时，OutputSession preview 也不提交。
 
+推测 round 的 commit 在 compute stream 上排入 replay fold、hidden 修正和 token count 后不等待
+它们：后续 compute 工作按 stream 顺序在其后执行，host 可同时提交下一 round。Program 记录这一
+在途 tail；context operation 提交 transfer-stream 拷贝、finish/abort 观察或释放 native state、
+以及失败清理之前先结算它。终止 DFlash row 的 context append 经 pinned ingress 和 workspace，
+与丢弃 row 一样在 commit 内同步结算。
+
 Forced control 使用同一提交机制，token 由 Frontend 提供，不调用 sampler 或推进 sampling RNG。
 初次 admission 确立后，在任何输出 delta 前发布一次 `GenerationStart`；抢占恢复不重复发布它。
 最终 response 等待 terminal 资源及缓存 owner 结算完成。

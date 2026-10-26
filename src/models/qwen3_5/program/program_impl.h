@@ -437,6 +437,10 @@ public:
 
     std::optional<PendingTransaction> pending_transaction_;
     std::uint64_t next_transaction_id_ = 1;
+    // A committed speculative round may leave its replay fold, hidden correction and token
+    // counts queued on the compute stream. Later compute work is stream-ordered behind them;
+    // every host observation, transfer-stream copy, export or lane destruction settles first.
+    bool decode_tail_in_flight_ = false;
 
     struct BindOperation {
         static constexpr auto kind = ContextOperationKind::Bind;
@@ -549,6 +553,7 @@ public:
     [[nodiscard]] const SequenceState& active_sequence(std::uint32_t lane) const;
     void clear_lane(SequenceState&, RequestControl&) noexcept;
     void clear_execution_failure_lanes(std::span<const std::uint32_t>) noexcept;
+    void settle_decode_tail();
     [[nodiscard]] Tensor tail_hidden(const SequenceState&) const;
     [[nodiscard]] context::StateImageSelectors state_selectors(const SequenceState&) const;
     void complete_state_write(SequenceState&);
