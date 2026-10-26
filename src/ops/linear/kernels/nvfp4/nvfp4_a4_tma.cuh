@@ -393,8 +393,9 @@ void launch_nvfp4_a4_tma_mma(const Nvfp4A4Operands& p, Output output, Epilogue e
     common::for_each_token_slice(p.tokens, Schedule::kBlockTokens, [&](int offset, int count) {
         const dim3 grid(p.rows / Schedule::kBlockRows,
                         common::div_up(count, Schedule::kBlockTokens));
-        kernel<<<grid, Schedule::kThreads, bytes, stream>>>(descriptors, p.alpha, epilogue, output,
-                                                            offset + count, p.rows, p.k, offset);
+        nvfp4_a4_tma_kernel<Schedule, Epilogue, Output, Rows>
+            <<<grid, Schedule::kThreads, bytes, stream>>>(descriptors, p.alpha, epilogue, output,
+                                                         offset + count, p.rows, p.k, offset);
         CUDA_CHECK(cudaGetLastError());
     });
 }
