@@ -32,6 +32,7 @@ add_library(ninfer_core STATIC
   transfer.cpp
   transfer.cu
   device.cu
+  host_decode.cpp
   gpu_keep_warm.cu
   dtype.cpp
   nf4.cpp
@@ -56,3 +57,6 @@ target_include_directories(ninfer_core PRIVATE ${PROJECT_BINARY_DIR}/generated)
 ninfer_cuda_archive(ninfer_core)
 target_link_libraries(ninfer_core PUBLIC ninfer_cpu ${NINFER_CUDART_TARGET} CUDA::nvtx3 Threads::Threads)
 target_link_libraries(ninfer_core PRIVATE ${NINFER_URING_TARGET})
+if(WIN32)
+  target_link_libraries(ninfer_core PRIVATE winmm)
+endif()

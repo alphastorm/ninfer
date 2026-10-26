@@ -174,3 +174,4 @@ foreach(symbol IN ITEMS
   target_link_options(ninfer_expert_cache_test PRIVATE "LINKER:--wrap=${symbol}")
 endforeach()
 endif()
+include(${CMAKE_CURRENT_LIST_DIR}/HostDecodeTests.cmake)
