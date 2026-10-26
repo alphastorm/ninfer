@@ -6,6 +6,7 @@
 
 #include "core/arena.h"
 #include "core/buffer.h"
+#include "core/host_decode.h"
 #include "core/gdn_replay_records.h"
 #include "core/host_kv_arena.h"
 #include "ninfer/ops/gdn_replay.h"
@@ -354,6 +355,7 @@ public:
 
     const execution::Parameters& parameters;
     DeviceContext& device;
+    DecodeRoundWait decode_round_wait;
     const std::uint32_t capacity;
     const std::uint32_t kv_capacity;
     const std::uint32_t max_concurrency;

@@ -311,12 +311,13 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_ordinary_batch(
         mark_workspace_usage(workspace_plan.ordinary_round);
         execution::ordinary_decode_batch(schedule_state, static_cast<std::int32_t>(lanes.size()),
                                          envelope, executable);
+        decode_round_wait.submitted(device.stream());
         submit_range.reset();
         timing.begin_wait();
         {
             nvtx::ScopedRange wait_range(nvtx::Name::DecodeOrdinaryWait, nvtx::Category::Control,
                                          static_cast<std::uint64_t>(lanes.size()));
-            device.synchronize();
+            decode_round_wait.wait(device);
         }
         timing.end_wait();
 
@@ -501,12 +502,13 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_mtp_batch(
         schedule_state.execution.text_graph = nullptr;
         execution::mtp_decode_batch(schedule_state, batch, draft_window, envelopes, finish,
                                     execution::SpeculativePhase::Finish);
+        decode_round_wait.submitted(device.stream());
         submit_range.reset();
         timing.begin_wait();
         {
             nvtx::ScopedRange wait_range(nvtx::Name::DecodeMtpWait, nvtx::Category::Control,
                                          static_cast<std::uint64_t>(lanes.size()));
-            device.synchronize();
+            decode_round_wait.wait(device);
         }
         timing.end_wait();
 
@@ -746,12 +748,13 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
         execution::dflash_decode_batch(schedule_state, batch, draft_window, envelopes,
                                        target_envelope, finish,
                                        execution::SpeculativePhase::Finish);
+        decode_round_wait.submitted(device.stream());
         submit_range.reset();
         timing.begin_wait();
         {
             nvtx::ScopedRange wait_range(nvtx::Name::DecodeDFlashWait, nvtx::Category::Control,
                                          static_cast<std::uint64_t>(lanes.size()));
-            device.synchronize();
+            decode_round_wait.wait(device);
         }
         timing.end_wait();
 

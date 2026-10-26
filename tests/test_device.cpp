@@ -1,5 +1,6 @@
 #include "core/device.h"
 #include "core/buffer.h"
+#include "core/host_decode.h"
 #include "core/transfer.h"
 
 #include <cuda_runtime.h>
@@ -64,8 +65,10 @@ int main(int argc, char** argv) {
         }
         return fail("invalid sync setting did not fail before CUDA initialization");
     }
-    const unsigned int expected_flags =
-        argc == 2 ? static_cast<unsigned int>(std::stoul(argv[1])) : cudaDeviceScheduleSpin;
+    const bool round_wait = argc == 2 && std::string_view(argv[1]) == "--round-wait";
+    const unsigned int expected_flags = argc == 2 && !round_wait
+                                            ? static_cast<unsigned int>(std::stoul(argv[1]))
+                                            : cudaDeviceScheduleSpin;
     int count                   = 0;
     const cudaError_t count_err = cudaGetDeviceCount(&count);
     if (cuda_unavailable(count_err)) {
@@ -113,7 +116,21 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaMemsetAsync(device_value, 0x5a, sizeof(int), ctx.stream()));
     CUDA_CHECK(cudaMemcpyAsync(host_value, device_value, sizeof(int), cudaMemcpyDeviceToHost,
                                ctx.stream()));
-    ctx.synchronize();
+    if (round_wait) {
+        ninfer::DecodeRoundWait completion(ctx);
+        completion.submitted(ctx.stream());
+        completion.wait(ctx);
+        // The same event must be reusable; host reads must observe the second transfer.
+        CUDA_CHECK(cudaMemsetAsync(device_value, 0x5a, sizeof(int), ctx.stream()));
+        CUDA_CHECK(cudaMemcpyAsync(host_value, device_value, sizeof(int), cudaMemcpyDeviceToHost,
+                                   ctx.stream()));
+        completion.submitted(ctx.stream());
+        completion.wait(ctx);
+        if (cudaPeekAtLastError() != cudaSuccess)
+            return fail("round completion left a CUDA error pending");
+    } else {
+        ctx.synchronize();
+    }
     const bool transfer_complete = *host_value == 0x5a5a5a5a;
     CUDA_CHECK(cudaFreeHost(host_value));
     CUDA_CHECK(cudaFree(device_value));

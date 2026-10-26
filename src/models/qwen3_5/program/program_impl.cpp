@@ -26,7 +26,8 @@ static_assert(std::is_nothrow_move_assignable_v<SpeculativeStats>);
 
 ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const SequencePlanImpl& plan,
                          DeviceContext& device_in, const StartupObserver& startup_observer)
-    : parameters(parameters_in), device(device_in), capacity(plan.capacity),
+    : parameters(parameters_in), device(device_in), decode_round_wait(device_in),
+      capacity(plan.capacity),
       kv_capacity(plan.kv_capacity), max_concurrency(plan.max_concurrency),
       context_cache(plan.context_cache), prefill_chunk(plan.prefill_chunk),
       draft_window(plan.draft_window), speculative_backend(plan.speculative_backend),

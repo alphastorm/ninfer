@@ -360,6 +360,27 @@ The Engine-ready log reports the selected mode. Empty or unrecognized values, or
 the schedule, fail startup. This controls device scheduling (including stream synchronization);
 it does not override individual CUDA event creation flags.
 
+### Experimental host decode scheduling
+
+These process environment switches accept only `0` (the default) or `1`. They do not change
+arithmetic, accepted tokens, graph topology, or checkpoint formats. CUDA Graphs remain per round.
+
+| Variable | Enabled behavior |
+| --- | --- |
+| `NINFER_HOST_ROUND_POLL` | Record a reusable completion event after each Qwen3.5 decode round and busy-poll it instead of synchronizing the stream. |
+| `NINFER_HOST_ROUND_FLUSH` | Query the compute stream immediately after queuing each Qwen3.5 decode round to request submission without blocking. |
+| `NINFER_HOST_TIMER_1MS` | Native Windows worker lifetime: request a 1 ms timer period, balanced by `timeEndPeriod`. |
+| `NINFER_HOST_POWER_OPTOUT` | Native Windows worker lifetime: disable process execution-speed throttling, restoring the previous policy after the last worker. |
+| `NINFER_HOST_THREAD_PRIORITY` | Native Windows worker lifetime: use `THREAD_PRIORITY_HIGHEST` (not real-time), restoring the previous priority. |
+| `NINFER_HOST_PCORE_AFFINITY` | Native Windows worker lifetime: restrict the current CPU group/allowed mask to its highest efficiency-class cores; homogeneous CPUs are reported as not applicable. |
+
+The four Windows-only controls fail startup if enabled elsewhere or if Windows rejects their
+application. Settings are read at Program/worker construction, not per round. Polling and flushing
+are independently selectable; normal exception cleanup still synchronizes the stream. The existing
+CUDA scheduling default is already `spin`: event polling is an alternative API path, not a change
+from a blocking default. These controls require matched same-host measurements before promotion;
+none is currently recommended as a default. No switch changes HAGS, the power plan, drivers or BIOS.
+
 ## Context and memory
 
 The official artifacts have a native context limit of 262,144 tokens. The practical allocation

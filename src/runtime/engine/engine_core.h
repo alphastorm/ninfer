@@ -4,6 +4,7 @@
 
 #include "core/device.h"
 #include "core/gpu_keep_warm.h"
+#include "core/host_decode.h"
 #include "core/nvtx.h"
 #include "ninfer/types.h"
 #include "runtime/contract/execution.h"
@@ -115,8 +116,10 @@ public:
         std::promise<void> startup;
         std::future<void> started = startup.get_future();
         worker_                   = std::thread([this, startup = std::move(startup)]() mutable {
+            std::optional<DecodeHostPolicy> host_policy;
             try {
                 device_.bind_to_current_thread();
+                host_policy.emplace();
                 if (keep_warm_grace_.count() > 0) {
                     try {
                         keep_warm_.emplace(device_);
