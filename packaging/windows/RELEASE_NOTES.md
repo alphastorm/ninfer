@@ -2,8 +2,8 @@
 
 ## 2026-10-24 — Upstream-master native packages (qualification pending)
 
-The native component candidates are `v0.7.0-qwen38-4090-beta.1` and
-`v0.7.0-qwen38-3090-beta.1`. They use upstream master `64d10fbf`, the published
+The native component candidates are `v0.7.0-qwen38-4090-beta.2` and
+`v0.7.0-qwen38-3090-beta.2`. They use upstream master `64d10fbf`, the published
 model-format-v3 artifact `81f924d4`, and schema-4 release specifications/server configurations.
 Package-build receipts remain `hardware-pending`; only a completed qualification
 and restoration chain can establish a hardware pass.

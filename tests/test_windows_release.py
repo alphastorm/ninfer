@@ -1071,7 +1071,7 @@ class SharedLifecycleTreeTests(unittest.TestCase):
     def test_native_protocol_uses_canonical_product_smoke(self) -> None:
         options = SimpleNamespace(
             lane_dir="packaging/windows/lanes/rtx3090", lifecycle_dir="packaging/windows",
-            release_head_sha="f" * 40, release_notes=None, release_version="0.7.0-beta.1",
+            release_head_sha="f" * 40, release_notes=None, release_version="0.7.0-beta.2",
         )
         with patch.object(release_package, "read_committed_file", return_value=b"committed") as read:
             release_package.windows_support_files(options, ROOT, "payload")
