@@ -62,6 +62,14 @@ All-native release promotion remains withheld pending a same-5090 comparison
 and full output qualification. The later ordered S6/S7/S8 integration head needs
 its own build and qualification; these measurements bind the standalone build.
 
+The native build workstation subsequently failed a hardware stress check and
+reported a memory-corruption bugcheck. All native binaries produced there,
+including those built before the failure, and the measurements above are now
+**provisional diagnostic evidence only**, not qualification or integration-ready
+evidence. A stable-host deterministic double build with matching binary hashes,
+followed by the native gates, is required before those claims can be reinstated.
+The independent Linux SASS comparisons are unaffected.
+
 ## 2026-10-24 — Upstream-master native packages (qualification pending)
 
 The native component candidates are `v0.7.0-qwen38-4090-beta.2` and
