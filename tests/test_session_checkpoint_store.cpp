@@ -2112,7 +2112,8 @@ int test_disk_full_capacity_preserves_generation() {
                           "disk failure lost its exact reason or reached publication");
         const auto record = nlohmann::json::parse(diagnostic);
         failures += check(record.at("operation") == "payload_write" &&
-                              record.at("reason") == runtime::durable_reason_name(fault.reason) &&
+                              std::string_view(record.at("reason").get_ref<const std::string&>()) ==
+                                  runtime::durable_reason_name(fault.reason) &&
                               record.at("error_category") == (fault.generic ? "generic" : "system") &&
                               record.at("error_code") == (fault.generic ? fault.generic : fault.windows),
                           "disk-failure diagnostic lost its capacity classification or OS code");
@@ -2597,7 +2598,8 @@ int test_current_parent_flush_failure_retains_visible_generation(DWORD error = E
                          "post-rename parent-flush failure lost its unacknowledged failure reason");
     const auto failure = nlohmann::json::parse(diagnostic);
     failures += check(failure.at("operation") == "publish_current" &&
-                          failure.at("reason") == runtime::durable_reason_name(reason) &&
+                          std::string_view(failure.at("reason").get_ref<const std::string&>()) ==
+                              runtime::durable_reason_name(reason) &&
                           failure.at("error_category") == "system" &&
                           failure.at("error_code") == error && failure.size() == 5,
                       "current-publication diagnostic lost the underlying Win32 flush error");
