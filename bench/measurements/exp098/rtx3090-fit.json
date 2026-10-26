@@ -1,0 +1,803 @@
+{
+  "artifact_type": "ninfer_exp098_native_measurement",
+  "schema_version": 1,
+  "experiment": "EXP-098",
+  "lane": "rtx3090",
+  "mode": "fit",
+  "source_commit": "eecb437f99d21cbc7f48740694de3cd6e51d4421",
+  "binary_sha256": "31ab5abeafa139a021134a6d8ff01143bc65dfd9e582905a86f5b1ee4d949d23",
+  "model_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+  "model_bytes": 20437521664,
+  "runner_sha256": "56dc860e0a2bc6ab17a8b1cd26eb8c4ef4f93231e8eff31ea6da9a416cc31cd0",
+  "grant_id": "Main-S2-20261026-rtx3090-fit-mtp",
+  "grant_minutes": 20,
+  "lane_shape": {
+    "gpu": 1,
+    "port": 18218,
+    "headroom": 768,
+    "prefill": 1024,
+    "slots": 4,
+    "host_mib": "11715.734375"
+  },
+  "started_unix_s": 1793008139.373857,
+  "raw_prompts_outputs_or_secrets_included": false,
+  "fit_attempts": [
+    {
+      "label": "fit-131072",
+      "backend": "dflash2",
+      "context": 131072,
+      "before": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 29.34,
+        "power_w": 9.71
+      },
+      "ready": false,
+      "startup_wall_s": 2.3238583999918774,
+      "exit_code": 1,
+      "owned_server_stopped": true,
+      "after": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 34.88,
+        "power_w": 103.25
+      },
+      "sampled_peak_used_mib": 0.0,
+      "sampled_min_free_mib": 24325.0,
+      "vram_sample_count": 1,
+      "stderr_sha256": "b284e5c5517703350ebfad651dff2c8efc69e6cd4eb638a6b080c87f35715a32",
+      "diagnostic_categories": [
+        "startup_memory_budget"
+      ],
+      "usable_with_headroom": false
+    },
+    {
+      "label": "fit-65536",
+      "backend": "dflash2",
+      "context": 65536,
+      "before": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 34.91,
+        "power_w": 103.9
+      },
+      "ready": true,
+      "startup_wall_s": 14.744353999994928,
+      "engine": {
+        "device": 1,
+        "max_context": 65536,
+        "kv_capacity": 65536,
+        "max_concurrency": 1,
+        "prefill_chunk": 1024,
+        "kv_cache": "int8-group64",
+        "cuda_graph": true,
+        "speculative_backend": "dflash2",
+        "speculative_draft_window": 7,
+        "proposal_head": "full",
+        "context_cache": {
+          "device_state_slots": 4,
+          "enabled": true,
+          "host_capacity_bytes": 12284837888,
+          "total_device_state_slots": 5
+        }
+      },
+      "memory": {
+        "available_after_startup_bytes": 1724907520,
+        "available_after_weights_bytes": 5147459584,
+        "cuda_graph_calibration_increment_bytes": 39845888,
+        "cuda_graph_calibration_retained_bytes": 39845888,
+        "cuda_graph_prepare_increment_bytes": 0,
+        "cuda_graph_rebuild_estimate_bytes": 0,
+        "device_budget_bytes": 24468520960,
+        "host_context_capacity_bytes": 12284837888,
+        "host_context_occupied_bytes": 0,
+        "host_context_reserved_bytes": 0,
+        "host_kv_occupied_bytes": 0,
+        "host_state_occupied_slots": 0,
+        "kv_capacity_headroom_bytes": 805306368,
+        "kv_capacity_increment_bytes": 0,
+        "kv_payload_bytes": 2214592512,
+        "minimum_runtime_reservation_bytes": 3381473536,
+        "moe": null,
+        "planned_slack_bytes": 920833792,
+        "runtime_reservation_bytes": 3381473536,
+        "sequence": {
+          "capacity_bytes": 3277525248,
+          "peak_used_bytes": 3277525248,
+          "used_bytes": 3277525248
+        },
+        "startup_retained_bytes": 40623616,
+        "vision_workspace": null,
+        "weights": {
+          "capacity_bytes": 19320283648,
+          "peak_used_bytes": 19320283648,
+          "used_bytes": 19320283648
+        },
+        "workspace": {
+          "capacity_bytes": 103948288,
+          "peak_used_bytes": 103948288,
+          "used_bytes": 0
+        }
+      },
+      "ready_vram": {
+        "total_mib": 24576.0,
+        "used_mib": 21916.0,
+        "free_mib": 2410.0,
+        "temperature_c": 48.38,
+        "power_w": 173.55
+      },
+      "spare_after_headroom_bytes": 919601152,
+      "decode_probe": {
+        "completion_tokens": 64,
+        "output_sha256": "456780424dfa074e39092251f55340e7c8d734b4319417af1a83dfcfc7441506"
+      },
+      "exit_code": 1,
+      "owned_server_stopped": true,
+      "after": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 39.34,
+        "power_w": 175.35
+      },
+      "sampled_peak_used_mib": 21914.0,
+      "sampled_min_free_mib": 2412.0,
+      "vram_sample_count": 7,
+      "stderr_sha256": "1553f6bad1ee5a6e74bdeb539e0ef7832f8109f9ed002734c68221c181334de8",
+      "diagnostic_categories": [],
+      "usable_with_headroom": true
+    },
+    {
+      "label": "fit-98304",
+      "backend": "dflash2",
+      "context": 98304,
+      "before": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 39.34,
+        "power_w": 175.35
+      },
+      "ready": false,
+      "startup_wall_s": 2.108413299982203,
+      "exit_code": 1,
+      "owned_server_stopped": true,
+      "after": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 36.0,
+        "power_w": 105.66
+      },
+      "sampled_peak_used_mib": 0.0,
+      "sampled_min_free_mib": 24325.0,
+      "vram_sample_count": 1,
+      "stderr_sha256": "90c5f0c3b7b639cb106beb9aaa8692045825a5420ded51ecf40cc6b4e586108d",
+      "diagnostic_categories": [
+        "startup_memory_budget"
+      ],
+      "usable_with_headroom": false
+    },
+    {
+      "label": "fit-81920",
+      "backend": "dflash2",
+      "context": 81920,
+      "before": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 36.0,
+        "power_w": 105.66
+      },
+      "ready": true,
+      "startup_wall_s": 14.409748900012346,
+      "engine": {
+        "device": 1,
+        "max_context": 81920,
+        "kv_capacity": 81920,
+        "max_concurrency": 1,
+        "prefill_chunk": 1024,
+        "kv_cache": "int8-group64",
+        "cuda_graph": true,
+        "speculative_backend": "dflash2",
+        "speculative_draft_window": 7,
+        "proposal_head": "full",
+        "context_cache": {
+          "device_state_slots": 4,
+          "enabled": true,
+          "host_capacity_bytes": 12284837888,
+          "total_device_state_slots": 5
+        }
+      },
+      "memory": {
+        "available_after_startup_bytes": 1171259392,
+        "available_after_weights_bytes": 5147459584,
+        "cuda_graph_calibration_increment_bytes": 39845888,
+        "cuda_graph_calibration_retained_bytes": 39845888,
+        "cuda_graph_prepare_increment_bytes": 0,
+        "cuda_graph_rebuild_estimate_bytes": 0,
+        "device_budget_bytes": 24468520960,
+        "host_context_capacity_bytes": 12284837888,
+        "host_context_occupied_bytes": 0,
+        "host_context_reserved_bytes": 0,
+        "host_kv_occupied_bytes": 0,
+        "host_state_occupied_slots": 0,
+        "kv_capacity_headroom_bytes": 805306368,
+        "kv_capacity_increment_bytes": 0,
+        "kv_payload_bytes": 2768240640,
+        "minimum_runtime_reservation_bytes": 3935122688,
+        "moe": null,
+        "planned_slack_bytes": 367184640,
+        "runtime_reservation_bytes": 3935122688,
+        "sequence": {
+          "capacity_bytes": 3831174400,
+          "peak_used_bytes": 3831174400,
+          "used_bytes": 3831174400
+        },
+        "startup_retained_bytes": 40623616,
+        "vision_workspace": null,
+        "weights": {
+          "capacity_bytes": 19320283648,
+          "peak_used_bytes": 19320283648,
+          "used_bytes": 19320283648
+        },
+        "workspace": {
+          "capacity_bytes": 103948288,
+          "peak_used_bytes": 103948288,
+          "used_bytes": 0
+        }
+      },
+      "ready_vram": {
+        "total_mib": 24576.0,
+        "used_mib": 22444.0,
+        "free_mib": 1882.0,
+        "temperature_c": 49.97,
+        "power_w": 233.95
+      },
+      "spare_after_headroom_bytes": 365953024,
+      "decode_probe": {
+        "completion_tokens": 64,
+        "output_sha256": "456780424dfa074e39092251f55340e7c8d734b4319417af1a83dfcfc7441506"
+      },
+      "exit_code": 1,
+      "owned_server_stopped": true,
+      "after": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 39.81,
+        "power_w": 178.88
+      },
+      "sampled_peak_used_mib": 22444.0,
+      "sampled_min_free_mib": 1882.0,
+      "vram_sample_count": 7,
+      "stderr_sha256": "2430373f0bd66e845093a99cfd0b3d330f6ae0db3c7cecb7aa9d2358443124ae",
+      "diagnostic_categories": [],
+      "usable_with_headroom": true
+    },
+    {
+      "label": "fit-90112",
+      "backend": "dflash2",
+      "context": 90112,
+      "before": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 39.81,
+        "power_w": 178.88
+      },
+      "ready": true,
+      "startup_wall_s": 14.639628300006734,
+      "engine": {
+        "device": 1,
+        "max_context": 90112,
+        "kv_capacity": 90112,
+        "max_concurrency": 1,
+        "prefill_chunk": 1024,
+        "kv_cache": "int8-group64",
+        "cuda_graph": true,
+        "speculative_backend": "dflash2",
+        "speculative_draft_window": 7,
+        "proposal_head": "full",
+        "context_cache": {
+          "device_state_slots": 4,
+          "enabled": true,
+          "host_capacity_bytes": 12284837888,
+          "total_device_state_slots": 5
+        }
+      },
+      "memory": {
+        "available_after_startup_bytes": 894435328,
+        "available_after_weights_bytes": 5147459584,
+        "cuda_graph_calibration_increment_bytes": 39845888,
+        "cuda_graph_calibration_retained_bytes": 39845888,
+        "cuda_graph_prepare_increment_bytes": 0,
+        "cuda_graph_rebuild_estimate_bytes": 0,
+        "device_budget_bytes": 24468520960,
+        "host_context_capacity_bytes": 12284837888,
+        "host_context_occupied_bytes": 0,
+        "host_context_reserved_bytes": 0,
+        "host_kv_occupied_bytes": 0,
+        "host_state_occupied_slots": 0,
+        "kv_capacity_headroom_bytes": 805306368,
+        "kv_capacity_increment_bytes": 0,
+        "kv_payload_bytes": 3045064704,
+        "minimum_runtime_reservation_bytes": 4211947264,
+        "moe": null,
+        "planned_slack_bytes": 90360064,
+        "runtime_reservation_bytes": 4211947264,
+        "sequence": {
+          "capacity_bytes": 4107998976,
+          "peak_used_bytes": 4107998976,
+          "used_bytes": 4107998976
+        },
+        "startup_retained_bytes": 40623616,
+        "vision_workspace": null,
+        "weights": {
+          "capacity_bytes": 19320283648,
+          "peak_used_bytes": 19320283648,
+          "used_bytes": 19320283648
+        },
+        "workspace": {
+          "capacity_bytes": 103948288,
+          "peak_used_bytes": 103948288,
+          "used_bytes": 0
+        }
+      },
+      "ready_vram": {
+        "total_mib": 24576.0,
+        "used_mib": 22708.0,
+        "free_mib": 1618.0,
+        "temperature_c": 48.56,
+        "power_w": 194.68
+      },
+      "spare_after_headroom_bytes": 89128960,
+      "decode_probe": {
+        "completion_tokens": 64,
+        "output_sha256": "456780424dfa074e39092251f55340e7c8d734b4319417af1a83dfcfc7441506"
+      },
+      "exit_code": 1,
+      "owned_server_stopped": true,
+      "after": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 40.28,
+        "power_w": 174.04
+      },
+      "sampled_peak_used_mib": 22708.0,
+      "sampled_min_free_mib": 1618.0,
+      "vram_sample_count": 7,
+      "stderr_sha256": "a97bbfb2c83813486634187db392966621136021bedf9ad057389bfc39a14cbb",
+      "diagnostic_categories": [],
+      "usable_with_headroom": true
+    },
+    {
+      "label": "fit-94208",
+      "backend": "dflash2",
+      "context": 94208,
+      "before": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 40.28,
+        "power_w": 174.04
+      },
+      "ready": false,
+      "startup_wall_s": 2.0309313999896403,
+      "exit_code": 1,
+      "owned_server_stopped": true,
+      "after": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 36.91,
+        "power_w": 106.52
+      },
+      "sampled_peak_used_mib": 0.0,
+      "sampled_min_free_mib": 24325.0,
+      "vram_sample_count": 1,
+      "stderr_sha256": "efc851038c55ecedcfabe927c8254e97bd08927ec984ae83fdcc994bd80e8ca9",
+      "diagnostic_categories": [
+        "startup_memory_budget"
+      ],
+      "usable_with_headroom": false
+    },
+    {
+      "label": "fit-92160",
+      "backend": "dflash2",
+      "context": 92160,
+      "before": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 36.91,
+        "power_w": 106.52
+      },
+      "ready": true,
+      "startup_wall_s": 14.345220200018957,
+      "engine": {
+        "device": 1,
+        "max_context": 92160,
+        "kv_capacity": 92160,
+        "max_concurrency": 1,
+        "prefill_chunk": 1024,
+        "kv_cache": "int8-group64",
+        "cuda_graph": true,
+        "speculative_backend": "dflash2",
+        "speculative_draft_window": 7,
+        "proposal_head": "full",
+        "context_cache": {
+          "device_state_slots": 4,
+          "enabled": true,
+          "host_capacity_bytes": 12284837888,
+          "total_device_state_slots": 5
+        }
+      },
+      "memory": {
+        "available_after_startup_bytes": 825229312,
+        "available_after_weights_bytes": 5147459584,
+        "cuda_graph_calibration_increment_bytes": 39845888,
+        "cuda_graph_calibration_retained_bytes": 39845888,
+        "cuda_graph_prepare_increment_bytes": 0,
+        "cuda_graph_rebuild_estimate_bytes": 0,
+        "device_budget_bytes": 24468520960,
+        "host_context_capacity_bytes": 12284837888,
+        "host_context_occupied_bytes": 0,
+        "host_context_reserved_bytes": 0,
+        "host_kv_occupied_bytes": 0,
+        "host_state_occupied_slots": 0,
+        "kv_capacity_headroom_bytes": 805306368,
+        "kv_capacity_increment_bytes": 0,
+        "kv_payload_bytes": 3114270720,
+        "minimum_runtime_reservation_bytes": 4281153536,
+        "moe": null,
+        "planned_slack_bytes": 21153792,
+        "runtime_reservation_bytes": 4281153536,
+        "sequence": {
+          "capacity_bytes": 4177205248,
+          "peak_used_bytes": 4177205248,
+          "used_bytes": 4177205248
+        },
+        "startup_retained_bytes": 40623616,
+        "vision_workspace": null,
+        "weights": {
+          "capacity_bytes": 19320283648,
+          "peak_used_bytes": 19320283648,
+          "used_bytes": 19320283648
+        },
+        "workspace": {
+          "capacity_bytes": 103948288,
+          "peak_used_bytes": 103948288,
+          "used_bytes": 0
+        }
+      },
+      "ready_vram": {
+        "total_mib": 24576.0,
+        "used_mib": 22774.0,
+        "free_mib": 1552.0,
+        "temperature_c": 51.22,
+        "power_w": 240.17
+      },
+      "spare_after_headroom_bytes": 19922944,
+      "decode_probe": {
+        "completion_tokens": 64,
+        "output_sha256": "456780424dfa074e39092251f55340e7c8d734b4319417af1a83dfcfc7441506"
+      },
+      "exit_code": 1,
+      "owned_server_stopped": true,
+      "after": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 41.03,
+        "power_w": 202.95
+      },
+      "sampled_peak_used_mib": 22774.0,
+      "sampled_min_free_mib": 1552.0,
+      "vram_sample_count": 7,
+      "stderr_sha256": "527f2acd4d73b463e47c634a0b5a9ae60a3ca0f9a7ed986614057e00d214ece6",
+      "diagnostic_categories": [],
+      "usable_with_headroom": true
+    },
+    {
+      "label": "fit-93184",
+      "backend": "dflash2",
+      "context": 93184,
+      "before": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 40.41,
+        "power_w": 161.25
+      },
+      "ready": false,
+      "startup_wall_s": 12.996259600011399,
+      "exit_code": 1,
+      "owned_server_stopped": true,
+      "after": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 39.03,
+        "power_w": 138.92
+      },
+      "sampled_peak_used_mib": 19766.0,
+      "sampled_min_free_mib": 4560.0,
+      "vram_sample_count": 6,
+      "stderr_sha256": "fc2a65faeafcde1603b8094469e6c56d943aaf169b489ff7b237dee9491298a7",
+      "diagnostic_categories": [
+        "startup_memory_budget"
+      ],
+      "usable_with_headroom": false
+    },
+    {
+      "label": "fit-92672",
+      "backend": "dflash2",
+      "context": 92672,
+      "before": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 39.03,
+        "power_w": 138.92
+      },
+      "ready": true,
+      "startup_wall_s": 14.419402500003343,
+      "engine": {
+        "device": 1,
+        "max_context": 92672,
+        "kv_capacity": 92672,
+        "max_concurrency": 1,
+        "prefill_chunk": 1024,
+        "kv_cache": "int8-group64",
+        "cuda_graph": true,
+        "speculative_backend": "dflash2",
+        "speculative_draft_window": 7,
+        "proposal_head": "full",
+        "context_cache": {
+          "device_state_slots": 4,
+          "enabled": true,
+          "host_capacity_bytes": 12284837888,
+          "total_device_state_slots": 5
+        }
+      },
+      "memory": {
+        "available_after_startup_bytes": 806354944,
+        "available_after_weights_bytes": 5147459584,
+        "cuda_graph_calibration_increment_bytes": 39845888,
+        "cuda_graph_calibration_retained_bytes": 39845888,
+        "cuda_graph_prepare_increment_bytes": 0,
+        "cuda_graph_rebuild_estimate_bytes": 0,
+        "device_budget_bytes": 24468520960,
+        "host_context_capacity_bytes": 12284837888,
+        "host_context_occupied_bytes": 0,
+        "host_context_reserved_bytes": 0,
+        "host_kv_occupied_bytes": 0,
+        "host_state_occupied_slots": 0,
+        "kv_capacity_headroom_bytes": 805306368,
+        "kv_capacity_increment_bytes": 0,
+        "kv_payload_bytes": 3131572224,
+        "minimum_runtime_reservation_bytes": 4298455040,
+        "moe": null,
+        "planned_slack_bytes": 3852288,
+        "runtime_reservation_bytes": 4298455040,
+        "sequence": {
+          "capacity_bytes": 4194506752,
+          "peak_used_bytes": 4194506752,
+          "used_bytes": 4194506752
+        },
+        "startup_retained_bytes": 40623616,
+        "vision_workspace": null,
+        "weights": {
+          "capacity_bytes": 19320283648,
+          "peak_used_bytes": 19320283648,
+          "used_bytes": 19320283648
+        },
+        "workspace": {
+          "capacity_bytes": 103948288,
+          "peak_used_bytes": 103948288,
+          "used_bytes": 0
+        }
+      },
+      "ready_vram": {
+        "total_mib": 24576.0,
+        "used_mib": 22792.0,
+        "free_mib": 1534.0,
+        "temperature_c": 50.44,
+        "power_w": 229.9
+      },
+      "spare_after_headroom_bytes": 1048576,
+      "decode_probe": {
+        "completion_tokens": 64,
+        "output_sha256": "456780424dfa074e39092251f55340e7c8d734b4319417af1a83dfcfc7441506"
+      },
+      "exit_code": 1,
+      "owned_server_stopped": true,
+      "after": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 40.94,
+        "power_w": 187.9
+      },
+      "sampled_peak_used_mib": 22792.0,
+      "sampled_min_free_mib": 1534.0,
+      "vram_sample_count": 7,
+      "stderr_sha256": "1e48be685a4596ebc617c4a868f1b2fa2c7a470dc08cea2273ac546ef1f6b6b3",
+      "diagnostic_categories": [],
+      "usable_with_headroom": true
+    },
+    {
+      "label": "fit-92928",
+      "backend": "dflash2",
+      "context": 92928,
+      "before": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 40.94,
+        "power_w": 187.9
+      },
+      "ready": false,
+      "startup_wall_s": 13.129016099992441,
+      "exit_code": 1,
+      "owned_server_stopped": true,
+      "after": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 39.72,
+        "power_w": 130.99
+      },
+      "sampled_peak_used_mib": 19766.0,
+      "sampled_min_free_mib": 4560.0,
+      "vram_sample_count": 6,
+      "stderr_sha256": "d619fcf332eaac2809be65b451bdc74641ab2410fa164ea305526631bdf8a777",
+      "diagnostic_categories": [
+        "startup_memory_budget"
+      ],
+      "usable_with_headroom": false
+    },
+    {
+      "label": "fit-92800",
+      "backend": "dflash2",
+      "context": 92800,
+      "before": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 39.72,
+        "power_w": 130.99
+      },
+      "ready": false,
+      "startup_wall_s": 13.115245000022696,
+      "exit_code": 1,
+      "owned_server_stopped": true,
+      "after": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 39.66,
+        "power_w": 146.04
+      },
+      "sampled_peak_used_mib": 19766.0,
+      "sampled_min_free_mib": 4560.0,
+      "vram_sample_count": 6,
+      "stderr_sha256": "0149086148418e0bbb5bf737ea22ecc0cb4b761de2c117baabedd124167a0914",
+      "diagnostic_categories": [
+        "startup_memory_budget"
+      ],
+      "usable_with_headroom": false
+    },
+    {
+      "label": "fit-92736",
+      "backend": "dflash2",
+      "context": 92736,
+      "before": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 39.66,
+        "power_w": 146.04
+      },
+      "ready": true,
+      "startup_wall_s": 14.419388599984813,
+      "engine": {
+        "device": 1,
+        "max_context": 92736,
+        "kv_capacity": 92736,
+        "max_concurrency": 1,
+        "prefill_chunk": 1024,
+        "kv_cache": "int8-group64",
+        "cuda_graph": true,
+        "speculative_backend": "dflash2",
+        "speculative_draft_window": 7,
+        "proposal_head": "full",
+        "context_cache": {
+          "device_state_slots": 4,
+          "enabled": true,
+          "host_capacity_bytes": 12284837888,
+          "total_device_state_slots": 5
+        }
+      },
+      "memory": {
+        "available_after_startup_bytes": 804257792,
+        "available_after_weights_bytes": 5147459584,
+        "cuda_graph_calibration_increment_bytes": 39845888,
+        "cuda_graph_calibration_retained_bytes": 39845888,
+        "cuda_graph_prepare_increment_bytes": 0,
+        "cuda_graph_rebuild_estimate_bytes": 0,
+        "device_budget_bytes": 24468520960,
+        "host_context_capacity_bytes": 12284837888,
+        "host_context_occupied_bytes": 0,
+        "host_context_reserved_bytes": 0,
+        "host_kv_occupied_bytes": 0,
+        "host_state_occupied_slots": 0,
+        "kv_capacity_headroom_bytes": 805306368,
+        "kv_capacity_increment_bytes": 0,
+        "kv_payload_bytes": 3133734912,
+        "minimum_runtime_reservation_bytes": 4300617728,
+        "moe": null,
+        "planned_slack_bytes": 1689600,
+        "runtime_reservation_bytes": 4300617728,
+        "sequence": {
+          "capacity_bytes": 4196669440,
+          "peak_used_bytes": 4196669440,
+          "used_bytes": 4196669440
+        },
+        "startup_retained_bytes": 40623616,
+        "vision_workspace": null,
+        "weights": {
+          "capacity_bytes": 19320283648,
+          "peak_used_bytes": 19320283648,
+          "used_bytes": 19320283648
+        },
+        "workspace": {
+          "capacity_bytes": 103948288,
+          "peak_used_bytes": 103948288,
+          "used_bytes": 0
+        }
+      },
+      "ready_vram": {
+        "total_mib": 24576.0,
+        "used_mib": 22794.0,
+        "free_mib": 1532.0,
+        "temperature_c": 48.41,
+        "power_w": 200.82
+      },
+      "spare_after_headroom_bytes": -1048576,
+      "decode_probe": {
+        "completion_tokens": 64,
+        "output_sha256": "456780424dfa074e39092251f55340e7c8d734b4319417af1a83dfcfc7441506"
+      },
+      "exit_code": 1,
+      "owned_server_stopped": true,
+      "after": {
+        "total_mib": 24576.0,
+        "used_mib": 0.0,
+        "free_mib": 24325.0,
+        "temperature_c": 41.69,
+        "power_w": 186.32
+      },
+      "sampled_peak_used_mib": 22794.0,
+      "sampled_min_free_mib": 1532.0,
+      "vram_sample_count": 7,
+      "stderr_sha256": "bc16c0f50c78f1e1b3fdbf75d1c42e9d5898df362defa9f1afcf4e22ba86b861",
+      "diagnostic_categories": [
+        "post_startup_headroom_shortfall"
+      ],
+      "usable_with_headroom": false
+    }
+  ],
+  "status": "fit_boundary_measured",
+  "fitting_context": 92672,
+  "next_unfit_context": 92736,
+  "context_search_quantum_tokens": 64,
+  "context_search_upper_bound": 131072,
+  "upper_bound_prior": null,
+  "finished_unix_s": 1793008308.1183605
+}

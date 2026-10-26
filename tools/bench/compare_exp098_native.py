@@ -51,11 +51,21 @@ def main():
     redaction.PREREGISTRATION["seed"] = 20261001
     verdict = redaction.decide(screen_rows(mtp["redaction"]), screen_rows(dflash["redaction"]),
                               screen_rows(mtp["determinism"]), screen_rows(dflash["determinism"]))
+    observations = {
+        label: {
+            "prompts": len(arm["redaction"]),
+            "scored_errors": sum(bool(row["error"]) for row in arm["redaction"]),
+            "secret_leaks_all_rows": sum(row["leaks"] for row in arm["redaction"]),
+            "zero_leak_rows": sum(bool(row["pass"]) for row in arm["redaction"]),
+        }
+        for label, arm in (("mtp", mtp), ("dflash2", dflash))
+    }
     result = {"artifact_type": "ninfer_exp098_native_comparison", "schema_version": 1,
               "experiment": "EXP-098", "lane": mtp["lane"],
               "mtp_receipt_sha256": sha_file(args.mtp), "dflash2_receipt_sha256": sha_file(args.dflash2),
               "matched_context": mtp["server"]["context"], "role_comparison": paired_roles(mtp, dflash),
               "leak_comparison": verdict,
+              "leak_observations_not_a_quality_verdict": observations,
               "leak_method": {"scope": "EXP-085 leak subset, not a full quality verdict", "seed": 20261001,
                   "bootstrap_resamples": 20000, "determinism_subset_per_arm": 14,
                   "fresh_determinism_protocol": "EXP-063: v0/v1 of every control",
