@@ -1,3 +1,5 @@
+#include "ninfer/ops/rmsnorm.h"
+#include "ninfer/ops/rope.h"
 #include "ninfer/ops/rmsnorm_rope.h"
 #include "cuda_fixture.h"
 #include "core/buffer.h"
@@ -287,6 +289,74 @@ int run_single_case(int tokens, int first_position, std::uint32_t seed, bool gra
     return failures;
 }
 
+// rmsnorm_offset_rope must reproduce the three-Op composition bit for bit: its contract is that
+// composition, including the BF16 materialization between normalization and rotation.
+int run_offset_case(int query_heads, int key_heads, int tokens, int axes, int first_position,
+                    std::uint32_t seed, bool graph = false) {
+    constexpr int kTextDim  = 256;
+    const std::size_t q_count = static_cast<std::size_t>(kTextDim) * query_heads * tokens;
+    const std::size_t k_count = static_cast<std::size_t>(kTextDim) * key_heads * tokens;
+    const auto q_bits         = bf16_bits(make_bf16_values(q_count, seed, -6.0F, 6.0F));
+    const auto k_bits         = bf16_bits(make_bf16_values(k_count, seed + 1U, -6.0F, 6.0F));
+    const auto q_weight_bits  = bf16_bits(make_bf16_values(kTextDim, seed + 2U, -0.75F, 0.75F));
+    const auto k_weight_bits  = bf16_bits(make_bf16_values(kTextDim, seed + 3U, -0.75F, 0.75F));
+    std::vector<std::int32_t> positions(static_cast<std::size_t>(tokens) * axes);
+    for (int axis = 0; axis < axes; ++axis)
+        for (int token = 0; token < tokens; ++token)
+            positions[static_cast<std::size_t>(axis) * tokens + token] =
+                first_position + token + axis * 7;
+
+    DeviceBuffer q_device        = to_device(q_bits);
+    DeviceBuffer k_device        = to_device(k_bits);
+    DeviceBuffer q_weight_device = to_device(q_weight_bits);
+    DeviceBuffer k_weight_device = to_device(k_weight_bits);
+    DeviceBuffer position_device = to_device(positions);
+    GuardedDeviceBuffer qn_device(q_count * sizeof(std::uint16_t));
+    GuardedDeviceBuffer kn_device(k_count * sizeof(std::uint16_t));
+    DeviceBuffer q_reference_device(cuda_environment().context.device(),
+                                    q_count * sizeof(std::uint16_t));
+    DeviceBuffer k_reference_device(cuda_environment().context.device(),
+                                    k_count * sizeof(std::uint16_t));
+    Tensor q(q_device.span(), DType::BF16, {kTextDim, query_heads, tokens});
+    Tensor k(k_device.span(), DType::BF16, {kTextDim, key_heads, tokens});
+    Tensor q_weight(q_weight_device.span(), DType::BF16, {kTextDim});
+    Tensor k_weight(k_weight_device.span(), DType::BF16, {kTextDim});
+    Tensor position_tensor = axes == 1 ? Tensor(position_device.span(), DType::I32, {tokens})
+                                       : Tensor(position_device.span(), DType::I32, {tokens, axes});
+    Tensor qn(qn_device.span(), DType::BF16, {kTextDim, query_heads, tokens});
+    Tensor kn(kn_device.span(), DType::BF16, {kTextDim, key_heads, tokens});
+    Tensor q_reference(q_reference_device.span(), DType::BF16, {kTextDim, query_heads, tokens});
+    Tensor k_reference(k_reference_device.span(), DType::BF16, {kTextDim, key_heads, tokens});
+    constexpr float kTextEpsilon = 1.0e-6F;
+    execute(
+        [&](CudaExecutionView cuda) {
+            ops::rmsnorm(q, q_weight, kTextEpsilon, true, q_reference, cuda);
+            ops::rmsnorm(k, k_weight, kTextEpsilon, true, k_reference, cuda);
+            ops::rope(position_tensor, 64, 1.0e7F, q_reference, k_reference, cuda);
+            ops::rmsnorm_offset_rope(position_tensor, 64, 1.0e7F, q, k, q_weight, k_weight,
+                                     kTextEpsilon, qn, kn, cuda);
+        },
+        [](CudaExecutionView) {}, graph);
+
+    const std::string label = "rmsnorm_offset_rope Hq=" + std::to_string(query_heads) +
+                              " T=" + std::to_string(tokens) + " axes=" + std::to_string(axes) +
+                              " P=" + std::to_string(first_position) +
+                              " graph=" + std::to_string(graph);
+    int failures = verify_exact((label + " q bits").c_str(),
+                                from_device<std::uint16_t>(qn_device.data(), q_count),
+                                from_device<std::uint16_t>(q_reference_device, q_count));
+    failures += verify_exact((label + " k bits").c_str(),
+                             from_device<std::uint16_t>(kn_device.data(), k_count),
+                             from_device<std::uint16_t>(k_reference_device, k_count));
+    failures += qn_device.verify_guards(label + " qn guards");
+    failures += kn_device.verify_guards(label + " kn guards");
+    failures += verify_exact((label + " q input").c_str(),
+                             from_device<std::uint16_t>(q_device, q_count), q_bits);
+    failures += verify_exact((label + " k input").c_str(),
+                             from_device<std::uint16_t>(k_device, k_count), k_bits);
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -309,6 +379,16 @@ int main() {
     failures += run_single_case(64, 262'080, 0x2003U);
     failures += run_single_case(1024, 130'048, 0x2004U);
     failures += run_single_case(2048, 260'032, 0x2005U);
+    for (const int axes : {1, 3}) {
+        for (const int tokens : {1, 2, 8, 16, 64, 1024}) {
+            failures += run_offset_case(24, 4, tokens, axes, tokens == 1 ? 0 : 131'000 - tokens,
+                                        0x3000U + static_cast<std::uint32_t>(tokens * 4 + axes));
+            failures += run_offset_case(16, 2, tokens, axes, 4'093,
+                                        0x3800U + static_cast<std::uint32_t>(tokens * 4 + axes));
+        }
+    }
+    failures += run_offset_case(24, 4, 8, 1, 65'519, 0x3F01U, true);
+    failures += run_offset_case(24, 4, 16, 3, 262'000, 0x3F02U, true);
 
     if (failures != 0) {
         std::cerr << "rmsnorm_rope failures=" << failures << '\n';

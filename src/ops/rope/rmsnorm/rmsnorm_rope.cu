@@ -1,8 +1,12 @@
 #include "ninfer/ops/rmsnorm_rope.h"
+#include "ninfer/ops/rmsnorm.h"
+#include "ninfer/ops/rope.h"
 #include "ops/rope/rmsnorm/kernel.cuh"
+#include "ops/rope/rmsnorm/offset_kernel.cuh"
 #include "ops/common/host/operands.h"
 #include "core/device.h"
 
+#include <cmath>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -102,6 +106,80 @@ void rmsnorm_rope(const Tensor& positions, const Tensor& norm_weight, Tensor& x,
     require_tensor(positions, DType::I32, {tokens, 1, 1, 1}, "positions", execution.device());
     require_single_nonoverlap(positions, norm_weight, x);
     launch_fixed<false>(positions, nullptr, norm_weight, nullptr, x, tokens, stream);
+    CUDA_CHECK(cudaGetLastError());
+}
+
+namespace {
+
+template <detail::RopeKernelMode Mode, int QHeads, int KHeads>
+void launch_offset_rope(const Tensor& positions, const Tensor& q, const Tensor& k,
+                        const Tensor& q_norm_weight, const Tensor& k_norm_weight, float eps,
+                        Tensor& qn, Tensor& kn, cudaStream_t stream) {
+    const std::int32_t tokens = positions.ne[0];
+    detail::rmsnorm_offset_rope_d256_kernel<Mode, QHeads, KHeads>
+        <<<tokens, (QHeads + KHeads) * 32, 0, stream>>>(
+            static_cast<const std::int32_t*>(positions.data),
+            static_cast<const __nv_bfloat162*>(q.data), static_cast<const __nv_bfloat162*>(k.data),
+            static_cast<const __nv_bfloat162*>(q_norm_weight.data),
+            static_cast<const __nv_bfloat162*>(k_norm_weight.data),
+            static_cast<__nv_bfloat162*>(qn.data), static_cast<__nv_bfloat162*>(kn.data), tokens,
+            QHeads * 128, KHeads * 128, eps);
+}
+
+bool fused_offset_rope_geometry(const Tensor& positions, int rotary_dim, float theta,
+                                const Tensor& q, const Tensor& k, const Tensor& q_norm_weight,
+                                const Tensor& k_norm_weight, const Tensor& qn, const Tensor& kn) {
+    const std::int32_t tokens = positions.ne[0];
+    const bool heads = (q.ne[1] == 24 && k.ne[1] == 4) || (q.ne[1] == 16 && k.ne[1] == 2);
+    const bool axes  = positions.ne[1] == 1 || positions.ne[1] == 3;
+    const auto row   = [&](const Tensor& t, std::int32_t h) {
+        return t.dtype == DType::BF16 && t.ne[0] == 256 && t.ne[1] == h && t.ne[2] == tokens &&
+               t.ne[3] == 1 && t.is_contiguous() && common::operand::aligned(t.data, 4);
+    };
+    return rotary_dim == 64 && theta == 1.0e7F && heads && axes && tokens >= 1 &&
+           positions.dtype == DType::I32 && positions.ne[2] == 1 && positions.ne[3] == 1 &&
+           positions.is_contiguous() && row(q, q.ne[1]) && row(qn, q.ne[1]) &&
+           row(k, k.ne[1]) && row(kn, k.ne[1]) && q_norm_weight.dtype == DType::BF16 &&
+           k_norm_weight.dtype == DType::BF16 && q_norm_weight.numel() == 256 &&
+           k_norm_weight.numel() == 256 && common::operand::aligned(q_norm_weight.data, 4) &&
+           common::operand::aligned(k_norm_weight.data, 4) && !overlaps(qn, kn) &&
+           !overlaps(qn, q) && !overlaps(qn, k) && !overlaps(kn, q) && !overlaps(kn, k) &&
+           !overlaps(qn, positions) && !overlaps(kn, positions) && !overlaps(qn, q_norm_weight) &&
+           !overlaps(qn, k_norm_weight) && !overlaps(kn, q_norm_weight) &&
+           !overlaps(kn, k_norm_weight);
+}
+
+} // namespace
+
+void rmsnorm_offset_rope(const Tensor& positions, int rotary_dim, float theta, const Tensor& q,
+                         const Tensor& k, const Tensor& q_norm_weight, const Tensor& k_norm_weight,
+                         float eps, Tensor& qn, Tensor& kn, CudaExecutionView execution) {
+    if (!fused_offset_rope_geometry(positions, rotary_dim, theta, q, k, q_norm_weight,
+                                    k_norm_weight, qn, kn) ||
+        !(eps > 0.0f) || !std::isfinite(eps)) {
+        rmsnorm(q, q_norm_weight, eps, true, qn, execution);
+        rmsnorm(k, k_norm_weight, eps, true, kn, execution);
+        rope(positions, rotary_dim, theta, qn, kn, execution);
+        return;
+    }
+    common::operand::device(q.device, execution.device(), "rmsnorm_offset_rope", "operands");
+    const auto stream = execution.stream();
+    const bool mrope  = positions.ne[1] == 3;
+    if (q.ne[1] == 24) {
+        if (mrope)
+            launch_offset_rope<detail::RopeKernelMode::MropeD256R64, 24, 4>(
+                positions, q, k, q_norm_weight, k_norm_weight, eps, qn, kn, stream);
+        else
+            launch_offset_rope<detail::RopeKernelMode::D256R64, 24, 4>(
+                positions, q, k, q_norm_weight, k_norm_weight, eps, qn, kn, stream);
+    } else {
+        if (mrope)
+            launch_offset_rope<detail::RopeKernelMode::MropeD256R64, 16, 2>(
+                positions, q, k, q_norm_weight, k_norm_weight, eps, qn, kn, stream);
+        else
+            launch_offset_rope<detail::RopeKernelMode::D256R64, 16, 2>(
+                positions, q, k, q_norm_weight, k_norm_weight, eps, qn, kn, stream);
+    }
     CUDA_CHECK(cudaGetLastError());
 }
 

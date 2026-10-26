@@ -2,6 +2,7 @@
 
 #include "ninfer/ops/linear_split.h"
 #include "ninfer/ops/rope.h"
+#include "ninfer/ops/rmsnorm_rope.h"
 
 #include <stdexcept>
 
@@ -42,6 +43,15 @@ void text_rope(const Tensor& positions, const RopeConfig& config, Tensor& query,
                CudaExecutionView execution) {
     require_rope_axes(positions, config);
     ops::rope(positions, dimension(config.rotary_dim), config.rope_theta, query, key, execution);
+}
+
+void text_norm_rope(const Tensor& positions, const RopeConfig& config, const Tensor& query,
+                    const Tensor& key, const Tensor& query_norm, const Tensor& key_norm, float eps,
+                    Tensor& normalized_query, Tensor& normalized_key, CudaExecutionView execution) {
+    require_rope_axes(positions, config);
+    ops::rmsnorm_offset_rope(positions, dimension(config.rotary_dim), config.rope_theta, query, key,
+                             query_norm, key_norm, eps, normalized_query, normalized_key,
+                             execution);
 }
 
 } // namespace ninfer::models::qwen3_5::execution

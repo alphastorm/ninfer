@@ -36,4 +36,23 @@ void rmsnorm_rope(const Tensor& positions, const Tensor& q_norm_weight, const Te
 void rmsnorm_rope(const Tensor& positions, const Tensor& norm_weight, Tensor& x,
                   CudaExecutionView execution);
 
+/**
+ * Text full-attention query/key preparation: unit-offset RMSNorm materialized in BF16, then
+ * partial split-half RoPE over the first rotary_dim elements of each head.
+ *
+ * Results are bitwise identical to
+ *
+ *   rmsnorm(q, q_norm_weight, eps, true, qn); rmsnorm(k, k_norm_weight, eps, true, kn);
+ *   rope(positions, rotary_dim, theta, qn, kn).
+ *
+ * q/qn are BF16 [D,Hq,T], k/kn are BF16 [D,Hkv,T], the weights are BF16 [D], and positions is I32
+ * [T] or [T,3] with the same validity rules as those Ops. The D=256, rotary_dim=64, theta=1e7
+ * geometries with (Hq,Hkv) = (24,4) or (16,2) and contiguous operands run as one kernel; every
+ * other valid call issues the three Ops above. q, k, positions and weights remain unchanged; qn
+ * and kn are fully written and must not overlap any input or each other.
+ */
+void rmsnorm_offset_rope(const Tensor& positions, int rotary_dim, float theta, const Tensor& q,
+                         const Tensor& k, const Tensor& q_norm_weight, const Tensor& k_norm_weight,
+                         float eps, Tensor& qn, Tensor& kn, CudaExecutionView execution);
+
 } // namespace ninfer::ops
