@@ -365,7 +365,7 @@ void GrammarSession::accept(std::span<const std::int32_t> tokens) {
     WorkTimer timer(impl_->observed.timings_collected, impl_->observed.matcher_seconds);
     for (const auto token : tokens) {
         if (impl_->matcher.IsTerminated() || !impl_->matcher.AcceptToken(token))
-            throw std::logic_error("selected token violates the request grammar");
+            throw GrammarViolation();
         ++impl_->tentative;
     }
 }
