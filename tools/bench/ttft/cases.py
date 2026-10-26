@@ -385,6 +385,66 @@ def _anonymous_hot(context: CaseContext, corpus: Corpus) -> None:
     context.require_success(continuation)
 
 
+def _agent_warm_turn(context: CaseContext, corpus: Corpus) -> None:
+    # Keep the source independent of the checked-out documentation and of model output.
+    source = corpus.shape_messages("long-8k-16")
+    document = source[-1]["content"]
+    history = [
+        {"role": "system", "content": "You are a careful engineering assistant."},
+        {"role": "user", "content": (
+            "Read this reference material.\n\n" + document * 3
+            + document[:len(document) * 4 // 5]
+            + "\n\nReply with one word when you have read it."
+        )},
+    ]
+    context.notes["workload_shape"] = {
+        "nominal_context_tokens": 29000,
+        "source_corpus": "long-8k-16",
+        "source_repetitions": "3+4/5 characters",
+        "warm_turns": 3,
+        "output_limit": 160,
+        "thinking": True,
+        "eos_policy": "normal",
+    }
+    for turn in range(4):
+        request = chat_request(context.model, history, 160)
+        request.payload["enable_thinking"] = True
+        handle = context.start("source" if turn == 0 else f"warm-{turn}", request)
+        context.require_success(handle)
+        if turn == 3:
+            break
+        # output_text deliberately combines channels for throughput accounting. Replaying it
+        # as content would erase the template's reasoning boundaries and measure another path.
+        reply = {"role": "assistant", "content": "", "reasoning_content": ""}
+        result = handle.result
+        if result is None:
+            raise CaseExecutionError("warm-turn request has no completed protocol result")
+        for event in result.events:
+            if event.kind != "model_output":
+                continue
+            for choice in event.payload.get("choices", []):
+                delta = choice.get("delta", {})
+                for channel in ("content", "reasoning_content"):
+                    value = delta.get(channel)
+                    if isinstance(value, str):
+                        reply[channel] += value
+        context.require(
+            bool(reply["reasoning_content"]),
+            "assistant replay preserves a nonempty reasoning channel",
+            f"turn={turn}",
+        )
+        _mark_generated_input(context)
+        # A fresh list is required: prior ProtocolRequests retain their payload for analysis.
+        history = [*history, reply, {
+            "role": "user",
+            "content": (
+                f"Review section {turn + 1}.\n"
+                + "The request keeps its original projection and recurrent state boundaries. " * 25
+                + "\nReply with one word."
+            ),
+        }]
+
+
 def _state_probe(context: CaseContext, corpus: Corpus, label: str, turn: int) -> None:
     request = context.start(
         f"{label}{turn}", chat_request(context.model, corpus.state_messages(label, turn), 32)
@@ -1815,6 +1875,7 @@ _DEFINITIONS = (
     _definition("mixed-four-ordered", "openai_chat", "mixed-four", "workload", ("long-8k-16", "long-8k-independent-32", "short-32", "image-chart"), "Four legal heterogeneous arrivals submitted in observed Serve-acceptance order.", _mixed_four_ordered),
     _definition("mixed-four-concurrent", "openai_chat", "mixed-four", "workload", ("long-8k-16", "long-8k-independent-32", "short-32", "image-chart"), "The same heterogeneous requests released concurrently without an artificial order.", _mixed_four_concurrent),
     _definition("anonymous-hot-continuation", "openai_chat", "cache-hot", "private", ("long-8k-16",), "Anonymous full-history continuation.", _anonymous_hot),
+    _definition("agent-warm-turn-29k", "openai_chat", "agent-warm-turn", "private", ("long-8k-16",), "Three thinking-enabled full-assistant-history warm turns on an approximately 29K-token context.", _agent_warm_turn),
     _definition("session-hot-continuation", "openai_responses", "cache-hot", "session", ("long-8k-16",), "Named Responses session continuation.", _session_hot),
     _definition("session-alternating", "openai_responses", "cache-pressure-device", "session", ("long-8k-16",), "Alternating named sessions.", _session_alternating),
     _definition("session-alternating-64k-host-swap", "openai_responses", "cache-swap-64k-host", "resource", ("long-64k-32", "long-64k-independent-32"), "Two near-capacity sessions alternate through Host KV.", _session_alternating_64k_host_swap),

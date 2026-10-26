@@ -163,6 +163,42 @@ def test_generated_continuations_are_not_labelled_as_matching_fixed_work(run):
         assert continuation["previous_response_id"] == "resp_seed"
 
 
+def test_agent_warm_turn_preserves_reasoning_and_frozen_request_histories():
+    requests = []
+
+    def start(role, request):
+        requests.append(request)
+        payload = {"choices": [{"delta": {
+            "content": f"answer-{role}", "reasoning_content": f"reason-{role}",
+        }}]}
+        return SimpleNamespace(result=SimpleNamespace(events=[
+            SimpleNamespace(kind="accepted", payload=payload),
+            SimpleNamespace(kind="model_output", payload=payload),
+        ]))
+
+    context = SimpleNamespace(
+        model="test-model", notes={}, start=start, require_success=lambda _: None,
+        require=lambda condition, *_: condition or pytest.fail("missing reasoning"),
+    )
+    corpus = SimpleNamespace(shape_messages=lambda _: [
+        {"role": "user", "content": "0123456789"},
+    ])
+    definition = cases.get_case("agent-warm-turn-29k")
+    definition.run(context, corpus)
+    assert definition.profile == "agent-warm-turn"
+    assert len(requests) == 4
+    assert [len(request.payload["messages"]) for request in requests] == [2, 4, 6, 8]
+    assert all(request.payload["enable_thinking"] for request in requests)
+    assert all(request.payload["max_completion_tokens"] == 160 for request in requests)
+    assert "0123456789" * 3 + "01234567" in requests[0].payload["messages"][-1]["content"]
+    assert requests[1].payload["messages"][2] == {
+        "role": "assistant", "content": "answer-source", "reasoning_content": "reason-source",
+    }
+    assert requests[2].payload["messages"][4]["reasoning_content"] == "reason-warm-1"
+    assert context.notes["input_dependency"] == "generated"
+    assert context.notes["throughput_comparable"] is False
+
+
 def test_live_log_waits_for_complete_lines_and_ignores_warmup(tmp_path):
     path = tmp_path / "request.jsonl"
     paused = {"event": "request_scheduling", "transition": "paused", "request": {"http_request_id": "req-1"}}

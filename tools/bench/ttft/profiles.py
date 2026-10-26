@@ -59,6 +59,14 @@ PROFILE_ARGS: dict[str, tuple[str, ...]] = {
         "--device-state-slots", 2,
         "--host-context-mib", 0,
     ),
+    "agent-warm-turn": _args(
+        "--max-context", 32768,
+        "--kv-capacity", 32768,
+        "--max-concurrency", 1,
+        "--prefill-chunk", 1024,
+        "--device-state-slots", 2,
+        "--host-context-mib", 0,
+    ),
     "cache-state-working-set": _args(
         "--max-context", 32768,
         "--kv-capacity", 32768,

@@ -162,6 +162,16 @@ The raw client JSON owns external measurements. Structured logs own internal wor
 observations. Failed and interrupted campaigns retain their measurements and produce the same
 summary bundle.
 
+`agent-warm-turn-29k` measures three sequential full-history agent continuations with thinking
+enabled and a 160-token output cap. It replays content and reasoning in their original channels:
+combining those channels would remove the template boundaries under investigation. Its source
+is a deterministic expansion of the frozen 8K fixture; 29K is nominal, not a tokenizer assertion.
+Record observed prompt and computed-token counts from request diagnostics. Use the
+`agent-warm-turn` profile label with an independently managed production-shaped server (context
+at least 32768, prefix reuse enabled), or override the built-in profile in `--profile-config`.
+Generated history makes cross-binary latency comparisons conditional on identical input/output
+bytes. Compare those bytes before attributing an A/B change to execution scheduling.
+
 Raw runs retain the actual request payload and assembled output text for offline prefix analysis.
 After measurement, data URLs are deduplicated by SHA-256 under the adjacent
 `<sample>-media/` directory; the JSON retains each item's type, encoding and relative path.
