@@ -50,6 +50,9 @@ unchanged. The existing 128-register schedule is retained; no FP16 PV accumulati
 producer reduction is enabled. This attention route is intended to preserve output bytes;
 its evidence is separate from the output-changing A8 profile.
 
+The perplexity evaluator is an app target on both Linux and native Windows; its default output
+directory timestamps are UTC on both platforms.
+
 Apps or tests enable the internal product support components: media acquisition, prompt input,
 logging and serving. This is one derived condition, not a separate user option. FFmpeg and libjpeg
 belong to model media decoding and remain required when apps are disabled. CMake discovers libjpeg
