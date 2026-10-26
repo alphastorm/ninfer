@@ -1423,9 +1423,9 @@ TextContext::prefill_impl(std::span<const int> ids, const TextPrefill* text_pref
             }
 
             if (prepare_mtp_prompt) {
-                const Tensor all_hidden = xf;
-                const Tensor all_positions = positions;
-                const Tensor all_rope_positions = rope_positions;
+                const Tensor& all_hidden = xf;
+                const Tensor& all_positions = positions;
+                const Tensor& all_rope_positions = rope_positions;
                 const auto group_begin = prompt_t0;
                 const int group_tokens = len;
                 const bool final_group = is_last;

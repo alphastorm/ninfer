@@ -27,21 +27,25 @@ DFlashFeatureSink make_dflash_prefill_sink(PrefillContext& state) {
     if (!state.execution.io.dflash_prefill || state.dflash_prefill_host_ingress == nullptr) {
         throw std::logic_error("DFlash prefill controls are unavailable");
     }
-    auto& frame = *state.execution.io.dflash_prefill;
-    // These bindings stay fixed until the text chunk retires. Do not overwrite the
-    // pinned ingress between fragment submissions while its H2D copy is pending.
-    *state.dflash_prefill_host_ingress = {
-        .append_count           = 0,
-        .state_destination_slot = state.state_destination_slot,
-        .full_kv_table_row      = state.dflash_kv_table_row,
-    };
-    CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, state.dflash_prefill_host_ingress,
-                               sizeof(qwen3_5::DFlashPrefillIngress), cudaMemcpyHostToDevice,
-                               state.execution.cuda.stream()));
     return dflash_feature_sink(
-        state, [&state](const Tensor& features, const Tensor& positions, bool rewrite_checkpoint) {
+        state, [&state, initialized = false](const Tensor& features, const Tensor& positions,
+                                            bool rewrite_checkpoint) mutable {
             auto& frame = *state.execution.io.dflash_prefill;
-            ops::set_i32_scalar(frame.append_count, features.ne[1], state.execution.cuda);
+            if (!initialized) {
+                // Bind once: this pinned ingress must not be overwritten while its
+                // asynchronous H2D copy is pending between fragment submissions.
+                *state.dflash_prefill_host_ingress = {
+                    .append_count           = features.ne[1],
+                    .state_destination_slot = state.state_destination_slot,
+                    .full_kv_table_row      = state.dflash_kv_table_row,
+                };
+                CUDA_CHECK(cudaMemcpyAsync(frame.ingress.data, state.dflash_prefill_host_ingress,
+                                           sizeof(qwen3_5::DFlashPrefillIngress),
+                                           cudaMemcpyHostToDevice, state.execution.cuda.stream()));
+                initialized = true;
+            } else {
+                ops::set_i32_scalar(frame.append_count, features.ne[1], state.execution.cuda);
+            }
             const auto exact = static_cast<std::uint32_t>(features.ne[1]);
             dflash_append_context(state, features, positions, frame.append_count,
                                   frame.state_destination_slot, frame.full_kv_table_row,
