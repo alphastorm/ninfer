@@ -16,9 +16,149 @@
 #include <random>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <winioctl.h>
+
+namespace {
+enum class Mutation { None, Reparse, FileIndex, Volume };
+struct PublicationTrace {
+    bool active = false, mutated = false, delete_denied = false;
+    Mutation mutation = Mutation::None;
+    std::filesystem::path directory, redirect;
+    BY_HANDLE_FILE_INFORMATION identity{};
+    unsigned file_flushes = 0, parent_flushes = 0;
+} publication_trace;
+
+template <class Function> Function kernel_function(const char* name) {
+    const auto address = GetProcAddress(GetModuleHandleW(L"kernel32.dll"), name);
+    if (!address) throw std::runtime_error("missing native durable test API");
+    return reinterpret_cast<Function>(address);
+}
+
+void install_junction(const std::filesystem::path& directory,
+                      const std::filesystem::path& destination) {
+    struct MountPoint {
+        DWORD tag;
+        WORD bytes, reserved, substitute_offset, substitute_length, print_offset, print_length;
+        wchar_t names[1];
+    };
+    const auto substitute = L"\\??\\" + destination.native();
+    const auto substitute_bytes = substitute.size() * sizeof(wchar_t);
+    const auto print_bytes = destination.native().size() * sizeof(wchar_t);
+    std::vector<std::byte> buffer(offsetof(MountPoint, names) + substitute_bytes + print_bytes +
+                                  2 * sizeof(wchar_t));
+    auto* point = reinterpret_cast<MountPoint*>(buffer.data());
+    point->tag = IO_REPARSE_TAG_MOUNT_POINT;
+    point->bytes = static_cast<WORD>(buffer.size() - 8);
+    point->substitute_length = static_cast<WORD>(substitute_bytes);
+    point->print_offset = static_cast<WORD>(substitute_bytes + sizeof(wchar_t));
+    point->print_length = static_cast<WORD>(print_bytes);
+    std::memcpy(point->names, substitute.c_str(), substitute_bytes);
+    std::memcpy(reinterpret_cast<std::byte*>(point->names) + point->print_offset,
+                destination.c_str(), print_bytes);
+    const HANDLE handle = CreateFileW(directory.c_str(), GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (handle == INVALID_HANDLE_VALUE)
+        throw std::system_error(GetLastError(), std::system_category(), "open swap-test directory");
+    DWORD returned = 0;
+    const auto result = DeviceIoControl(handle, FSCTL_SET_REPARSE_POINT, buffer.data(),
+        static_cast<DWORD>(buffer.size()), nullptr, 0, &returned, nullptr);
+    const auto error = GetLastError();
+    CloseHandle(handle);
+    if (!result) throw std::system_error(error, std::system_category(), "install swap-test junction");
+}
+
+BOOL WINAPI inspect_directory(HANDLE handle, BY_HANDLE_FILE_INFORMATION* info) {
+    static const auto call =
+        kernel_function<decltype(&GetFileInformationByHandle)>("GetFileInformationByHandle");
+    const auto result = call(handle, info);
+    auto& trace = publication_trace;
+    if (result && trace.active && trace.file_flushes &&
+        info->dwVolumeSerialNumber == trace.identity.dwVolumeSerialNumber &&
+        info->nFileIndexHigh == trace.identity.nFileIndexHigh &&
+        info->nFileIndexLow == trace.identity.nFileIndexLow) {
+        if (trace.mutation == Mutation::FileIndex) {
+            info->nFileIndexLow ^= 1;
+            trace.mutated = true;
+        } else if (trace.mutation == Mutation::Volume) {
+            info->dwVolumeSerialNumber ^= 1;
+            trace.mutated = true;
+        }
+    }
+    return result;
+}
+
+BOOL WINAPI publication_flush(HANDLE handle) {
+    static const auto call = kernel_function<decltype(&FlushFileBuffers)>("FlushFileBuffers");
+    static const auto inspect =
+        kernel_function<decltype(&GetFileInformationByHandle)>("GetFileInformationByHandle");
+    const auto result = call(handle);
+    auto& trace = publication_trace;
+    if (result && trace.active) {
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!inspect(handle, &info)) throw std::runtime_error("inspect publication flush failed");
+        if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (trace.file_flushes != 1)
+                throw std::runtime_error("parent flush preceded staged-file flush");
+            ++trace.parent_flushes;
+        } else {
+            ++trace.file_flushes;
+            const HANDLE forbidden = CreateFileW(trace.directory.c_str(), DELETE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+            trace.delete_denied =
+                forbidden == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION;
+            if (forbidden != INVALID_HANDLE_VALUE) CloseHandle(forbidden);
+            if (trace.mutation == Mutation::Reparse) {
+                install_junction(trace.directory, trace.redirect);
+                trace.mutated = true;
+            }
+        }
+    }
+    return result;
+}
+
+struct PublicationScope {
+    explicit PublicationScope(const std::filesystem::path& directory,
+                              Mutation mutation = Mutation::None,
+                              const std::filesystem::path& redirect = {}) {
+        publication_trace = {};
+        const HANDLE handle = CreateFileW(directory.c_str(), FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (handle == INVALID_HANDLE_VALUE)
+            throw std::runtime_error("open publication trace directory failed");
+        const auto result = inspect_directory(handle, &publication_trace.identity);
+        CloseHandle(handle);
+        if (!result) throw std::runtime_error("capture publication trace identity failed");
+        publication_trace.directory = directory;
+        publication_trace.redirect = redirect;
+        publication_trace.mutation = mutation;
+        publication_trace.active = true;
+    }
+    ~PublicationScope() { publication_trace.active = false; }
+};
+}
+
+// Follow the native artifact-test IAT convention: only this executable interposes.
+// Every flush/query reaches the real OS; identity faults alter only the returned test data.
+extern "C" {
+BOOL (WINAPI* __imp_GetFileInformationByHandle)(HANDLE, BY_HANDLE_FILE_INFORMATION*) =
+    &inspect_directory;
+BOOL (WINAPI* __imp_FlushFileBuffers)(HANDLE) = &publication_flush;
+}
+#else
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -53,10 +193,11 @@ using Stream = std::unique_ptr<std::FILE, decltype(&std::fclose)>;
 void require(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
-template <class F> void rejects(F operation) {
+template <class F> void rejects(F operation,
+                                const char* message = "unsafe durable operation was accepted") {
     try { operation(); }
     catch (const std::exception&) { return; }
-    throw std::runtime_error("unsafe durable operation was accepted");
+    throw std::runtime_error(message);
 }
 struct Fixture {
     std::filesystem::path root;
@@ -80,6 +221,195 @@ void write(const std::filesystem::path& path, std::byte value) {
     io::flush_file(stream.get());
     require(std::fclose(stream.release()) == 0, "durable close failed");
 }
+
+void publish(const std::filesystem::path& from, const std::filesystem::path& to, const char* phase) {
+    try { io::replace_path(from, to); }
+    catch (const std::system_error& error) { throw std::system_error(error.code(), phase); }
+}
+
+void directory_publication(const std::filesystem::path& root) {
+    const auto generations = root / "generations", tombstones = root / ".tombstones";
+    const auto staging = generations / ".staging-generation", published = generations / "generation";
+    io::create_directories(staging / "nested");
+    io::create_directories(tombstones);
+    write(staging / "manifest", std::byte{31});
+    write(staging / "nested" / "payload", std::byte{37});
+    io::sync_directory(staging);
+    publish(staging, published, "same-parent directory publication");
+    require(!std::filesystem::exists(staging) && std::filesystem::is_directory(published),
+            "generation directory was not published");
+    const auto tombstone = tombstones / "generation";
+    publish(published, tombstone, "cross-parent directory tombstone");
+    require(!std::filesystem::exists(published) && std::filesystem::is_directory(tombstone),
+            "generation directory was not moved to its tombstone");
+    {
+        Stream manifest(io::open_binary_read(tombstone / "manifest"), &std::fclose);
+        Stream payload(io::open_binary_read(tombstone / "nested" / "payload"), &std::fclose);
+        std::array<std::byte, 3> bytes{};
+        io::read_exact(manifest.get(), bytes);
+        require(bytes == std::array{std::byte{31}, std::byte{31}, std::byte{31}},
+                "directory publication changed its manifest");
+        io::read_exact(payload.get(), bytes);
+        require(bytes == std::array{std::byte{37}, std::byte{37}, std::byte{37}},
+                "directory tombstone changed its nested payload");
+    }
+    require(io::remove_tree(tombstone), "generation tombstone cleanup failed");
+}
+
+#ifdef _WIN32
+void native_reparse_guard(const std::filesystem::path& root,
+                          const std::filesystem::path& outside) {
+    const auto parent = root / "swap-parent", staging = root / "swap-staging";
+    io::create_directories(parent);
+    write(staging, std::byte{21});
+    {
+        PublicationScope scope(parent, Mutation::Reparse, outside);
+        rejects([&] { publish(staging, parent / "escaped", "reparse-swap publication"); });
+        require(publication_trace.mutated && publication_trace.delete_denied &&
+                    publication_trace.file_flushes == 1 && publication_trace.parent_flushes == 0,
+                "publication did not refuse an in-place reparse swap after the staged-file flush");
+    }
+    require(std::filesystem::exists(staging) && !std::filesystem::exists(outside / "escaped"),
+            "refused reparse swap consumed staging or escaped its parent");
+    require(io::remove_tree(parent) && std::filesystem::exists(outside / "sentinel"),
+            "removing swapped parent followed the junction");
+    require(io::remove_tree(staging), "reparse-test staging cleanup failed");
+}
+
+void native_identity_guards(const std::filesystem::path& root) {
+    const auto parent = root / "identity-parent", source = root / "identity-source";
+    io::create_directories(parent);
+    io::create_directories(source / "nested");
+    const auto staging = source / "nested" / "staging";
+    write(staging, std::byte{21});
+    const auto current = parent / "current";
+    write(current, std::byte{41});
+    // Cover destination, unshared source ancestors and the borrowed common prefix.
+    for (const auto& pinned : {parent, source, source / "nested", root}) {
+        for (const auto mutation : {Mutation::FileIndex, Mutation::Volume}) {
+            {
+                PublicationScope scope(pinned, mutation);
+                rejects([&] { publish(staging, current, "identity-change publication"); });
+                require(publication_trace.mutated && publication_trace.delete_denied &&
+                            publication_trace.file_flushes == 1 &&
+                            publication_trace.parent_flushes == 0 &&
+                            std::filesystem::exists(staging),
+                        "publication did not re-check every pinned parent's identity");
+            }
+            Stream previous(io::open_binary_read(current), &std::fclose);
+            std::array<std::byte, 3> bytes{};
+            io::read_exact(previous.get(), bytes);
+            require(bytes == std::array{std::byte{41}, std::byte{41}, std::byte{41}},
+                    "refused publication changed the old current generation");
+        }
+    }
+    require(io::remove_tree(staging), "identity-test staging cleanup failed");
+}
+
+void native_pinned_destination(const std::filesystem::path& root) {
+    const auto source = root / "source", destination = root / "destination";
+    io::create_directories(source);
+    io::create_directories(destination);
+    const auto staging = source / "next", current = destination / "current";
+    write(staging, std::byte{53});
+    write(current, std::byte{47});
+    const HANDLE pin = CreateFileW(destination.c_str(), FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    require(pin != INVALID_HANDLE_VALUE, "independent destination pin failed");
+    try {
+        Stream previous(io::open_binary_read(current), &std::fclose);
+        {
+            PublicationScope scope(destination);
+            publish(staging, current, "replace into independently pinned destination");
+            require(publication_trace.delete_denied && publication_trace.file_flushes == 1 &&
+                        publication_trace.parent_flushes == 1,
+                    "pinned replacement did not retain deny-DELETE and flush ordering");
+        }
+        std::array<std::byte, 3> bytes{};
+        io::read_exact(previous.get(), bytes);
+        require(bytes == std::array{std::byte{47}, std::byte{47}, std::byte{47}},
+                "pinned replacement changed the old reader");
+        Stream published(io::open_binary_read(current), &std::fclose);
+        io::read_exact(published.get(), bytes);
+        require(bytes == std::array{std::byte{53}, std::byte{53}, std::byte{53}} &&
+                    !std::filesystem::exists(staging),
+                "pinned cross-parent replacement did not publish staging bytes");
+    } catch (...) {
+        CloseHandle(pin);
+        throw;
+    }
+    CloseHandle(pin);
+}
+
+void native_extended_paths(const std::filesystem::path& fixture) {
+    const auto root = io::extended_local_path(fixture / std::wstring(180, L'x') /
+                                               std::wstring(80, L'y'));
+    require(root.native().starts_with(L"\\\\?\\") && root.native().size() - 4 > MAX_PATH &&
+                io::extended_local_path(root) == root,
+            "extended local-drive spelling is not stable beyond MAX_PATH");
+    const std::filesystem::path ordinary_root(root.native().substr(4));
+    struct UnsafePath {
+        const wchar_t* value;
+        const char* message;
+    };
+    for (const auto& unsafe : {
+             UnsafePath{L"\\\\?\\UNC\\server\\share\\entry", "extended UNC namespace was accepted"},
+             UnsafePath{L"\\\\.\\C:\\entry", "Win32 device namespace was accepted"},
+             UnsafePath{L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolume1\\entry",
+                        "extended device namespace was accepted"},
+             UnsafePath{L"\\\\?\\C:relative", "extended drive-relative path was accepted"}}) {
+        rejects([&] { (void)io::extended_local_path(unsafe.value); }, unsafe.message);
+        rejects([&] { io::create_directories(unsafe.value); }, unsafe.message);
+    }
+    for (const auto& unsafe : {
+             UnsafePath{L"..\\outside", "parent-traversal component was accepted"},
+             UnsafePath{L"payload:stream", "alternate-stream component was accepted"},
+             UnsafePath{L"trailing.", "trailing-dot component was accepted"},
+             UnsafePath{L"trailing ", "trailing-space component was accepted"}}) {
+        rejects([&] { (void)io::extended_local_path(root / unsafe.value); }, unsafe.message);
+        rejects([&] { io::create_directories(root / unsafe.value); }, unsafe.message);
+        rejects([&] { (void)io::extended_local_path(ordinary_root / unsafe.value); }, unsafe.message);
+        rejects([&] { io::create_directories(ordinary_root / unsafe.value); }, unsafe.message);
+    }
+    auto nul = (root / L"nul").native();
+    nul.push_back(L'\0');
+    rejects([&] { (void)io::extended_local_path(nul); }, "embedded NUL reached path normalization");
+    rejects([&] { io::create_directories(nul); }, "embedded NUL reached anchored directory creation");
+    io::create_directories(root);
+    native_pinned_destination(root);
+    native_identity_guards(root);
+    const auto outside = fixture / "extended-outside";
+    io::create_directories(outside);
+    write(outside / "sentinel", std::byte{42});
+    native_reparse_guard(root, outside);
+    require(io::remove_tree(root), "extended anchored cleanup failed");
+}
+
+void native_case(std::string_view name) {
+    Fixture fixture;
+    if (name == "pinned-destination") {
+        native_pinned_destination(fixture.root);
+    } else if (name == "reparse-guard") {
+        const auto outside = fixture.root / "outside";
+        io::create_directories(outside);
+        write(outside / "sentinel", std::byte{42});
+        native_reparse_guard(fixture.root, outside);
+    } else if (name == "identity-guards") {
+        native_identity_guards(fixture.root);
+    } else if (name == "directory-publication") {
+        directory_publication(fixture.root);
+    } else if (name == "extended-paths") {
+        native_extended_paths(fixture.root);
+    } else {
+        throw std::invalid_argument("unknown native durable test case");
+    }
+    require(io::directory_sync_mode() == "ntfs-write-through", "wrong native directory policy");
+    // Standalone sync is deliberately a no-op, even for a missing or unsafe path.
+    io::sync_directory(fixture.root / "missing" / ".." / "not-opened");
+    std::cout << "OK durable file: " << name << " dir_sync=ntfs-write-through\n";
+}
+#endif
 
 #ifndef _WIN32
 void interrupted_stdio() {
@@ -154,11 +484,28 @@ void run() {
     const auto directory = fixture.root / std::filesystem::path(u8"state-\u03bb") / "nested";
     io::create_directories(directory);
     io::create_directories(directory);
+    io::create_directories(directory / "." / "dot");
+    const auto first_staging = directory / "first-staging", first = directory / "first";
+    write(first_staging, std::byte{5});
+    {
+#ifdef _WIN32
+        PublicationScope scope(directory);
+#endif
+        publish(first_staging, first, "first same-parent publication");
+#ifdef _WIN32
+        require(publication_trace.file_flushes == 1 && publication_trace.parent_flushes == 1 &&
+                    publication_trace.delete_denied,
+                "first publication did not preserve flush ordering and deny-DELETE pins");
+#endif
+    }
+    require(!std::filesystem::exists(first_staging) && std::filesystem::exists(first),
+            "first same-parent publication did not move staging");
+    directory_publication(fixture.root);
     const auto current = directory / "current";
     write(current, std::byte{7});
     rejects([&] { Stream forbidden(io::open_binary_write(current), &std::fclose); });
     {
-        Stream stream(io::open_binary_read(current), &std::fclose);
+        Stream stream(io::open_binary_read(directory / "." / "current"), &std::fclose);
         std::array<std::byte, 3> bytes{};
         io::read_exact(stream.get(), bytes);
         require(bytes == std::array{std::byte{7}, std::byte{7}, std::byte{7}},
@@ -168,7 +515,7 @@ void run() {
     const auto staging = directory / "staging";
     write(staging, std::byte{9});
     io::sync_directory(directory);
-    io::replace_path(staging, current);
+    publish(staging, current, "same-parent publication");
     io::sync_directory(directory);
     require(!std::filesystem::exists(staging), "atomic replace retained source");
     {
@@ -177,6 +524,32 @@ void run() {
         io::read_exact(stream.get(), bytes);
         require(bytes[0] == std::byte{9}, "atomic replace did not publish new bytes");
     }
+#ifdef _WIN32
+    // Publication must keep deny-DELETE parent pins, support a source below its destination
+    // parent, and leave an existing reader on its original generation (POSIX rename).
+    io::create_directories(directory / "stage-child");
+    write(directory / "stage-child" / "next", std::byte{13});
+    {
+        Stream previous(io::open_binary_read(current), &std::fclose);
+        publish(directory / "stage-child" / "next", current, "reader-preserving publication");
+        std::array<std::byte, 3> bytes{};
+        io::read_exact(previous.get(), bytes);
+        require(bytes[0] == std::byte{9}, "replacement changed an existing reader's generation");
+        Stream published(io::open_binary_read(current), &std::fclose);
+        io::read_exact(published.get(), bytes);
+        require(bytes[0] == std::byte{13}, "anchored replacement did not publish new generation");
+    }
+    io::create_directories(directory / "destination-child");
+    write(staging, std::byte{15});
+    publish(staging, directory / "destination-child" / "x", "single-character cross-parent publication");
+    require(!std::filesystem::exists(staging), "cross-parent replacement retained source");
+    {
+        Stream published(io::open_binary_read(directory / "destination-child" / "x"), &std::fclose);
+        std::array<std::byte, 3> bytes{};
+        io::read_exact(published.get(), bytes);
+        require(bytes[0] == std::byte{15}, "single-character replacement name was not published");
+    }
+#endif
     rejects([&] { Stream bad(io::open_binary_read(directory), &std::fclose); });
     rejects([&] { io::create_directories(directory / ".." / "escape"); });
     rejects([&] { Stream bad(io::open_binary_write(directory / ".." / "escape"), &std::fclose); });
@@ -198,6 +571,21 @@ void run() {
     rejects([&] { io::replace_path(staging, file_link); });
     require(std::filesystem::exists(staging), "rejected replacement consumed staging");
     write(outside / "sentinel", std::byte{42});
+    // Confined same-volume cross-parent moves above remain valid. A redirected parent
+    // or source link is not a valid cross-parent publication and must leave staging intact.
+    rejects([&] { io::replace_path(staging, link / "escaped"); });
+    rejects([&] { io::replace_path(link / "sentinel", directory / "escaped"); });
+    rejects([&] { io::replace_path(link, directory / "escaped"); });
+    rejects([&] { io::replace_path(file_link, directory / "escaped"); });
+    require(std::filesystem::exists(staging) && !std::filesystem::exists(outside / "escaped") &&
+                !std::filesystem::exists(directory / "escaped"),
+            "unsafe cross-parent publication consumed staging or escaped confinement");
+#ifdef _WIN32
+    native_reparse_guard(fixture.root, outside);
+    native_identity_guards(fixture.root);
+    native_pinned_destination(fixture.root);
+    native_extended_paths(fixture.root);
+#endif
     const auto garbage = fixture.root / "garbage";
     io::create_directories(garbage / "nested");
     write(garbage / "nested" / "payload", std::byte{17});
@@ -240,8 +628,17 @@ void run() {
 }
 } // namespace
 
-int main() {
-    try { run(); }
+int main(int argc, char** argv) {
+    try {
+#ifdef _WIN32
+        if (argc == 2) native_case(argv[1]);
+        else
+#endif
+        {
+            if (argc != 1) throw std::invalid_argument("unexpected durable test arguments");
+            run();
+        }
+    }
     catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
         return 1;

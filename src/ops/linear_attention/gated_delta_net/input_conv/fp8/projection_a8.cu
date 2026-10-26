@@ -19,7 +19,7 @@ void launch_projection(const Fp8A8Operands& operands, Output output, float* part
     if constexpr (S::kTmaSwizzle)
         launch_fp8_a8_tma_mma<S>(operands, output, LinearIdentityEpilogue{}, stream, partials);
     else
-        launch_fp8_a8_mma<S>(operands, output, LinearIdentityEpilogue{}, stream);
+        launch_fp8_a8_mma<S>(operands, output, LinearIdentityEpilogue{}, stream, Fp8IdentityRows{});
 }
 
 using Launcher = void (*)(const Fp8A8Operands&, Output, float*, cudaStream_t);

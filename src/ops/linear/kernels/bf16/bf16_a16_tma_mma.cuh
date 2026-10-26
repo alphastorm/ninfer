@@ -10,9 +10,26 @@
 #include <cuda.h>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 
 namespace ninfer::ops::detail {
 
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+// Ampere/Ada use the same MMA tiles with cp.async staging, not TMA producer warps.
+template <class Schedule>
+struct Bf16Sm8xMmaSchedule : Schedule {
+    static constexpr auto kSwizzle = Bf16MmaSwizzle::Xor64;
+    static constexpr int kThreads = Schedule::kWarpsRows * Schedule::kWarpsTokens * 32;
+    static constexpr int kSharedBytes = Schedule::kTensorBytes;
+};
+
+template <class Schedule, int Splits, class Output, class Epilogue>
+void launch_bf16_mma_partitions(const Bf16A16Operands&, Output, Epilogue, cudaStream_t);
+#endif
+
+struct Bf16ContiguousTmaWeightAccess;
+
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
 struct alignas(128) Bf16TmaDescriptors {
     CUtensorMap weight;
     CUtensorMap activation;
@@ -51,8 +68,6 @@ inline CUtensorMap bf16_tma_map(const __nv_bfloat16* pointer, int rows, int k, i
     }
     return result;
 }
-
-struct Bf16ContiguousTmaWeightAccess;
 
 template <class Schedule, class WeightAccess = Bf16ContiguousTmaWeightAccess>
 Bf16TmaDescriptors make_bf16_tma_descriptors(const Bf16A16Operands& p) {
@@ -164,11 +179,20 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocksPerSm) void bf16_a16_t
     bf16_finish_mma_tile<Schedule, FullTokens>(output, epilogue, storage, accum, row_begin,
                                                token_begin, rows, token_offset + count, warp, lane);
 }
+#endif
 
 template <class Schedule, int Splits = 1, class Output, class Epilogue,
           class WeightAccess = Bf16ContiguousTmaWeightAccess>
 void launch_bf16_a16_tma_mma(const Bf16A16Operands& p, Output output, Epilogue epilogue,
                              cudaStream_t stream) {
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+    if constexpr (std::is_same_v<WeightAccess, Bf16ContiguousTmaWeightAccess>) {
+        launch_bf16_mma_partitions<Bf16Sm8xMmaSchedule<Schedule>, Splits>(
+            p, output, epilogue, stream);
+    } else {
+        throw std::runtime_error("Striped TMA weight access requires an sm_120a GPU");
+    }
+#else
     static_assert(Splits >= 1 && Splits <= 32);
     if constexpr (Splits > 1) {
         if (p.k % (Schedule::kBlockK * Splits))
@@ -200,6 +224,7 @@ void launch_bf16_a16_tma_mma(const Bf16A16Operands& p, Output output, Epilogue e
         else
             launch.template operator()<false>();
     });
+#endif
 }
 
 } // namespace ninfer::ops::detail

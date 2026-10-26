@@ -17,7 +17,8 @@ __device__ __forceinline__ float2 decode_nvfp4_e2m1x2(std::uint8_t storage) {
 }
 
 __device__ __forceinline__ unsigned nvfp4_scaled_pair_bf16(std::uint8_t code, std::uint8_t scale) {
-#if __CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 2)
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89) && \
+    (__CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 2))
     // PTX 9.2 exposes native pair widening. E2M1 times a finite E4M3 scale needs
     // at most six significand bits, so the BF16 multiplication is exact.
     unsigned values, multiplier, result;
@@ -57,6 +58,18 @@ static_assert(alignof(Nvfp4QuantizedK16) == 8);
 
 __device__ __forceinline__ void
 pack_nvfp4_e2m1x16(const float2 (&values)[8], std::uint32_t& codes_lo, std::uint32_t& codes_hi) {
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+    codes_lo = 0;
+    codes_hi = 0;
+#pragma unroll
+    for (int pair = 0; pair < 8; ++pair) {
+        const auto code = __nv_cvt_float2_to_fp4x2(values[pair], __NV_E2M1, cudaRoundNearest);
+        if (pair < 4)
+            codes_lo |= static_cast<std::uint32_t>(code) << (pair * 8);
+        else
+            codes_hi |= static_cast<std::uint32_t>(code) << ((pair - 4) * 8);
+    }
+#else
     asm volatile("{\n"
                  ".reg .b8 b0;\n"
                  ".reg .b8 b1;\n"
@@ -82,6 +95,7 @@ pack_nvfp4_e2m1x16(const float2 (&values)[8], std::uint32_t& codes_lo, std::uint
                    "f"(values[2].x), "f"(values[2].y), "f"(values[3].x), "f"(values[3].y),
                    "f"(values[4].x), "f"(values[4].y), "f"(values[5].x), "f"(values[5].y),
                    "f"(values[6].x), "f"(values[6].y), "f"(values[7].x), "f"(values[7].y));
+#endif
 }
 
 // Calibrated activation profile, shared by BF16 inputs and FP32 MMA epilogues.

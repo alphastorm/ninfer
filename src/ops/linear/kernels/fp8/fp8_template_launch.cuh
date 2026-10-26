@@ -9,7 +9,9 @@
 #include "ops/linear/kernels/fp8/fp8_a16_simt.cuh"
 #include "ops/linear/kernels/fp8/fp8_a16_mma.cuh"
 #include "ops/linear/kernels/fp8/fp8_a16_sliced_k_mma.cuh"
+#if !defined(NINFER_SM86)
 #include "ops/linear/kernels/fp8/fp8_a8_mma.cuh"
+#endif
 #include "ops/linear/kernels/fp8/fp8_a8_tma_mma.cuh"
 
 namespace ninfer::ops::detail {
@@ -84,14 +86,18 @@ void launch_fp8_a16_sliced_k_mma(const Fp8A16Operands& p, Output output, Epilogu
     const int bytes       = common::prepare_shared<Schedule::kSharedBytes, kernel>();
     common::for_each_token_slice(p.tokens, capacity, [&](int offset, int count) {
         const dim3 grid(p.rows / Schedule::kBlockRows, common::div_up(count, capacity));
-        kernel<<<grid, Schedule::kThreads, bytes, stream>>>(p, output, epilogue, rows, offset);
+        fp8_a16_sliced_k_mma_kernel<Schedule, Output, Epilogue, Rows>
+            <<<grid, Schedule::kThreads, bytes, stream>>>(p, output, epilogue, rows, offset);
         CUDA_CHECK(cudaGetLastError());
     });
 }
 
-template <class Schedule, class Output, class Epilogue, class Rows = Fp8IdentityRows>
+template <class Schedule, class Output, class Epilogue, class Rows>
 void launch_fp8_a8_mma(const Fp8A8Operands& p, Output output, Epilogue epilogue,
-                       cudaStream_t stream, Rows rows = {}) {
+                       cudaStream_t stream, Rows rows) {
+#if defined(NINFER_SM86)
+    throw std::runtime_error("FP8 A8 execution requires an sm_89 or newer GPU");
+#else
     validate_fp8_operands<Schedule>(p);
     if (p.rows % Schedule::kBlockRows || p.k % Schedule::kBlockK ||
         p.k / Schedule::kBlockK < Schedule::kStages)
@@ -112,5 +118,6 @@ void launch_fp8_a8_mma(const Fp8A8Operands& p, Output output, Epilogue epilogue,
         else
             launch.template operator()<false>();
     });
+#endif
 }
 } // namespace ninfer::ops::detail

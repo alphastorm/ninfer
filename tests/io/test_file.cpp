@@ -5,7 +5,9 @@
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
 #include <windows.h>
 #include <winioctl.h>
 #endif
@@ -60,12 +62,23 @@ void run() {
     std::array<std::byte, 123> expected;
     for (std::size_t i = 0; i < expected.size(); ++i) expected[i] = std::byte(i);
     {
+#ifdef _WIN32
+        // Truncating the precreated file clears its NTFS sparse attribute and
+        // turns this offset fixture into a multi-gigabyte zero-fill workload.
+        std::fstream stream(path, std::ios::binary | std::ios::in | std::ios::out);
+#else
         std::ofstream stream(path, std::ios::binary);
+#endif
         stream.seekp(static_cast<std::streamoff>(offset));
         stream.write(reinterpret_cast<const char*>(expected.data()), expected.size());
         stream.close();
         require(bool(stream), "write sparse fixture failed");
     }
+#ifdef _WIN32
+    const DWORD attributes = GetFileAttributesW(path.c_str());
+    require(attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_SPARSE_FILE),
+            "writing sparse fixture cleared its sparse attribute");
+#endif
     ReadOnlyFile buffered(path);
     require(buffered.bytes() == offset + expected.size(), "file length lost high 32 bits");
     std::array<std::byte, 123> actual{};

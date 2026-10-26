@@ -1,0 +1,495 @@
+{
+  "schema": "ninfer-native-build/1",
+  "source_commit": "47ebc3824b8c32112458eb013e5d4bb20c8b98f6",
+  "architecture": "sm_89",
+  "exit_code": 0,
+  "wall_seconds": 88.5490075,
+  "ops_tests": 92,
+  "binaries": [
+    {
+      "name": "apps/ninfer-serve.exe",
+      "bytes": 322383360,
+      "sha256": "f7ec4d3426457bc5f9ccb706df369dfe032b94cd4a5e00a5dcfc8bcde8634c1d"
+    },
+    {
+      "name": "tests/ninfer_add_bias_test.exe",
+      "bytes": 313429504,
+      "sha256": "a7ae6c89778c0158997f969732d1785fb5db8e9031dad3708bac7bd0f0c0870c"
+    },
+    {
+      "name": "tests/ninfer_architecture_contract_test.exe",
+      "bytes": 52224,
+      "sha256": "34d1a445e485392a0e239ec1039e2716376e151021c5ae197b7c24c6d7558589"
+    },
+    {
+      "name": "tests/ninfer_argmax_test.exe",
+      "bytes": 313433088,
+      "sha256": "06f729487a766fb2a2d8a02ddddd0412abe1b9c298f2bdcc9dbdf6034b2e07c6"
+    },
+    {
+      "name": "tests/ninfer_artifact_materialization_test.exe",
+      "bytes": 414208,
+      "sha256": "550be0e46735fb0a545a66d4b0c11e580c8f8fb0f86e9dd23b86486d93f66498"
+    },
+    {
+      "name": "tests/ninfer_bench_fixtures_test.exe",
+      "bytes": 197632,
+      "sha256": "5d6de793673d557926719834c3eb96cd3dd8cf396e70ef37a4897424fd6749e7"
+    },
+    {
+      "name": "tests/ninfer_candidate_selector_test.exe",
+      "bytes": 313509376,
+      "sha256": "4e70438e07ce7d48e8dd7c25d90d35175ce63b482d857f70d1f66c0b7cad335c"
+    },
+    {
+      "name": "tests/ninfer_cast_test.exe",
+      "bytes": 313424896,
+      "sha256": "74787757cae822dc85026814475d2792271d428ae4f9148edfcac034333bf316"
+    },
+    {
+      "name": "tests/ninfer_causal_conv1d_silu_test.exe",
+      "bytes": 313523200,
+      "sha256": "74ecf52bf6696fda66774ebd925a0502ccd67635887e52286bf32c6e325beca2"
+    },
+    {
+      "name": "tests/ninfer_context_kv_materialize_test.exe",
+      "bytes": 313536512,
+      "sha256": "14b69a20ef6330d07086d28c0ef9952cf801b07afcf2226c0341864bf960aeec"
+    },
+    {
+      "name": "tests/ninfer_dynamic_grouped_conv_prepare_test.exe",
+      "bytes": 313482752,
+      "sha256": "cfa9593b4f630156fa391d9ba2faee718f4ad2235e58e6c3d2b458b421332325"
+    },
+    {
+      "name": "tests/ninfer_embedding_interpolate_add_test.exe",
+      "bytes": 313437696,
+      "sha256": "8db0878f10752c0de8f04ccb73212a8b520927eca052d9f49fe4327ec797309d"
+    },
+    {
+      "name": "tests/ninfer_embedding_test.exe",
+      "bytes": 313502720,
+      "sha256": "d300cd400c4ef2eea697d8b6ff7fb09dbc79ec58f028c6fb138a157c07ef6a2e"
+    },
+    {
+      "name": "tests/ninfer_expert_cache_test.exe",
+      "bytes": 178176,
+      "sha256": "c01df6ee55cf40781334f84ecb5a63614b2eca2aa50c6612789cc3681e55b601"
+    },
+    {
+      "name": "tests/ninfer_gated_delta_net_replay_record_test.exe",
+      "bytes": 313463808,
+      "sha256": "ba08167d29ee7309635fad9f900bc382f562c63de7691c8a21751908f102f46a"
+    },
+    {
+      "name": "tests/ninfer_gated_delta_net_test.exe",
+      "bytes": 313533440,
+      "sha256": "050149d5affa6e5ebd933f4957176daf3fa564b2d968784d6e24e8226e458d87"
+    },
+    {
+      "name": "tests/ninfer_gated_rmsnorm_test.exe",
+      "bytes": 313479680,
+      "sha256": "818471f3e8f20a59a683238e6a5b1b522e9464ce67014732979731199985a3b4"
+    },
+    {
+      "name": "tests/ninfer_gdn_control_proj_test.exe",
+      "bytes": 313605632,
+      "sha256": "d240ff326d5c1e14f38045a2b68f205985a08360bbd78effc681331f9e0eddbd"
+    },
+    {
+      "name": "tests/ninfer_gdn_control_test.exe",
+      "bytes": 313461760,
+      "sha256": "ced55ce5b69a7eea72acfcee7f92a7dbb40e6c9ee806e0bbef35f94df07e3a22"
+    },
+    {
+      "name": "tests/ninfer_gdn_input_proj_conv_record_test.exe",
+      "bytes": 313729536,
+      "sha256": "fd690d3c31483bfd353fe4eaf7e22823e85dca4b279789ceb936087b732aadba"
+    },
+    {
+      "name": "tests/ninfer_gdn_input_proj_conv_snapshot_test.exe",
+      "bytes": 313751552,
+      "sha256": "0b5e2994c14f010acfe9dfaf10200848b80c21ecb05f93a8f5e5c9e7a08e8d92"
+    },
+    {
+      "name": "tests/ninfer_gdn_norm_control_proj_test.exe",
+      "bytes": 313605632,
+      "sha256": "6162d3040cbfb29cb60aa9b40cfa4bc03e48291be312a6c997f86e60afd88b50"
+    },
+    {
+      "name": "tests/ninfer_gdn_replay_fold_test.exe",
+      "bytes": 313754624,
+      "sha256": "e30835ad404e4186682d134919d80070539051ca1c4c40068f395536f2b2d45d"
+    },
+    {
+      "name": "tests/ninfer_gelu_test.exe",
+      "bytes": 313428480,
+      "sha256": "f268343713c1a12ea56622b963619cb5263775e7de5265c4c64fda071a7436c6"
+    },
+    {
+      "name": "tests/ninfer_hc_combine_norm_test.exe",
+      "bytes": 313497088,
+      "sha256": "17c8ea18bed06408e9b1c817c53feba7887efa2974d478b1bbd1919872850e2a"
+    },
+    {
+      "name": "tests/ninfer_hc_combine_test.exe",
+      "bytes": 313497088,
+      "sha256": "00700d785c832f28e07a3c79afcaf193f2a9190423d8cfbf4df4e67f964a235e"
+    },
+    {
+      "name": "tests/ninfer_hc_expand_norm_test.exe",
+      "bytes": 313497088,
+      "sha256": "0f472eb7a86452bf4ede999f276c65bf6a8ea736361f36c896b6018d6e2b60dc"
+    },
+    {
+      "name": "tests/ninfer_hc_grouped_rmsnorm_test.exe",
+      "bytes": 313497088,
+      "sha256": "a30996d543692e59d31b9fd7af810818c3a19cf8c9d34e6c80c2127b4606b61e"
+    },
+    {
+      "name": "tests/ninfer_hc_mix_test.exe",
+      "bytes": 313517568,
+      "sha256": "bb6e40a2b07b6a11e9fa557096df2e7e207c46f2edf1f665cbbff63b1d126e53"
+    },
+    {
+      "name": "tests/ninfer_kimi_delta_attention_test.exe",
+      "bytes": 313531392,
+      "sha256": "5ffd45699a48536ad8dffd8ff13fac96bcfab7f3f6d506b1a06e776abcc59dce"
+    },
+    {
+      "name": "tests/ninfer_kv_cache_append_test.exe",
+      "bytes": 313567744,
+      "sha256": "b3bd6ba37326d44b12fe5253fc9d8107d90ce53c248d3c7ab41ae4b00ef04dd3"
+    },
+    {
+      "name": "tests/ninfer_l2norm_test.exe",
+      "bytes": 313431552,
+      "sha256": "1964ae613545702ba58b077c6066728a34ba58734eacd1a2dc59c9279509ea64"
+    },
+    {
+      "name": "tests/ninfer_layer_norm_test.exe",
+      "bytes": 313436160,
+      "sha256": "d44999e2d851eccd3fd1c3ab91e710b0f9291bc8ce20e28ebd196e708439fc0b"
+    },
+    {
+      "name": "tests/ninfer_linear_add_bf16_a16_test.exe",
+      "bytes": 313676288,
+      "sha256": "18cac99205953f61d47fd929ea6d8438de8c90bda6aa147ecdf7252f989de4cc"
+    },
+    {
+      "name": "tests/ninfer_linear_add_fp8_test.exe",
+      "bytes": 313672704,
+      "sha256": "9b9183a255d173b13d182f6f9136d26f9bf18adafa9fdfb4812103240a4b6a77"
+    },
+    {
+      "name": "tests/ninfer_linear_add_nvfp4_test.exe",
+      "bytes": 313670656,
+      "sha256": "4b2bd319c4d171511eeec1b65ebee604387f88dfacae897e1172a70cbf3368a3"
+    },
+    {
+      "name": "tests/ninfer_linear_add_q4_a16_test.exe",
+      "bytes": 313674752,
+      "sha256": "c4862c448fd8aaeaf0bfe6e9b4213d6e378f689d700fc946609324cce556c6af"
+    },
+    {
+      "name": "tests/ninfer_linear_add_q5_a16_test.exe",
+      "bytes": 313675264,
+      "sha256": "e20bae8fbb8bfb1c7b8c3dfe033b2d0cea5cccac9b7b71f740395688ba917a40"
+    },
+    {
+      "name": "tests/ninfer_linear_add_q8_a16_test.exe",
+      "bytes": 313680384,
+      "sha256": "503ebd029df277fae49b60c8333eea666f8d9581b48e3c54f4d0f645b14a3f8e"
+    },
+    {
+      "name": "tests/ninfer_linear_bf16_a16_test.exe",
+      "bytes": 313940992,
+      "sha256": "3d25e5459967b158bff857c1044b620fb721ee24191f6f33770acb50dcd0e72c"
+    },
+    {
+      "name": "tests/ninfer_linear_dynamic_grouped_conv_add_test.exe",
+      "bytes": 313479168,
+      "sha256": "8fa37901049ec04819c8482e0c5c236537946101b082c48daf0a044ea663da63"
+    },
+    {
+      "name": "tests/ninfer_linear_fp8_a16_test.exe",
+      "bytes": 313928704,
+      "sha256": "f55c8265dc08ef381242562a8ea364a8f180e86278f413b8ce36026ac04e4d78"
+    },
+    {
+      "name": "tests/ninfer_linear_fp8_a8_test.exe",
+      "bytes": 313923072,
+      "sha256": "363d89d852d47e0edfe0daebb21fcebdee80d5a3cc38079fe6328dd57ed75288"
+    },
+    {
+      "name": "tests/ninfer_linear_nvfp4_a16_test.exe",
+      "bytes": 313922560,
+      "sha256": "f122784e7187ac443f14d00660c6014a45e0c77827744752f1e92ea998a7c556"
+    },
+    {
+      "name": "tests/ninfer_linear_nvfp4_a4_test.exe",
+      "bytes": 313921536,
+      "sha256": "c4158855cc4390b5210826301cc0a1bc66a6e934638ee14d4f53087fefce4392"
+    },
+    {
+      "name": "tests/ninfer_linear_nvfp4_bank_test.exe",
+      "bytes": 314244096,
+      "sha256": "7bcedc5d13369aa27d973c8f3080fdc40e854697c29de1a78ea1cf5a931d53cb"
+    },
+    {
+      "name": "tests/ninfer_linear_pair_q8_a16_test.exe",
+      "bytes": 313518080,
+      "sha256": "1eb8795831146355803a5dc5042dc268f9746309e633c8074ea05e598712dc2a"
+    },
+    {
+      "name": "tests/ninfer_linear_q4_a16_test.exe",
+      "bytes": 313927168,
+      "sha256": "dfc6d5e38ef8098423175b492663cc4482191c3f6188edb331f4ae3c0ee9c912"
+    },
+    {
+      "name": "tests/ninfer_linear_q5_a16_test.exe",
+      "bytes": 313924096,
+      "sha256": "82fe77e0a9b143b41088e4d7b2994305560ea21a255c62d7f3c2e64dbf66a59b"
+    },
+    {
+      "name": "tests/ninfer_linear_q6_a16_test.exe",
+      "bytes": 313921024,
+      "sha256": "96735576b2920e085cb34f2210adcec19099509b259d876b75cae618631e25f4"
+    },
+    {
+      "name": "tests/ninfer_linear_q8_a16_test.exe",
+      "bytes": 313929728,
+      "sha256": "78a3ca2f727675d5830fcd2631bfb804caf0d6d604f4be56cbfe1205eb3ad9bc"
+    },
+    {
+      "name": "tests/ninfer_linear_split_multi_output_test.exe",
+      "bytes": 313669120,
+      "sha256": "c9b374ab16e34c1ae5c1ce91b30d0409fef9d6371ff9028a7c0f1b05ef128760"
+    },
+    {
+      "name": "tests/ninfer_linear_split_test.exe",
+      "bytes": 314031104,
+      "sha256": "c6103d6b7379ee8ec7feefede3bf77056c6e65d5be73dc3a27556d6d73821604"
+    },
+    {
+      "name": "tests/ninfer_linear_split_two_output_test.exe",
+      "bytes": 313660416,
+      "sha256": "fb60c02025c323441c5d3e842e63adf3bb2cb9dc5155a0ec40ebfffc4310366d"
+    },
+    {
+      "name": "tests/ninfer_linear_swiglu_fp8_test.exe",
+      "bytes": 313545216,
+      "sha256": "ce142b2534a57cdbb81e880744eae9b868ffe7b4371218f0ea84ad0b65e6bf59"
+    },
+    {
+      "name": "tests/ninfer_linear_swiglu_nvfp4_test.exe",
+      "bytes": 313545216,
+      "sha256": "7a2211d130f22e1414bfff61de6ca73673e11ab51baf8f596fea665499736bc4"
+    },
+    {
+      "name": "tests/ninfer_linear_swiglu_q4_a16_test.exe",
+      "bytes": 313538048,
+      "sha256": "a08beb7e4007fe08a9efed07d3d0e5075430295eb4bf74e813224593534c177a"
+    },
+    {
+      "name": "tests/ninfer_linear_swiglu_q8_a16_test.exe",
+      "bytes": 313539072,
+      "sha256": "dd0e86b49f6c17b041573990aec9f9f94ea129dd2fac3ce9e5e6887379bad489"
+    },
+    {
+      "name": "tests/ninfer_linear_topk_test.exe",
+      "bytes": 313489408,
+      "sha256": "e2ad8dbee5768abc610780b6bf0e89b0cd43d775359de89882d77abd94d62b4d"
+    },
+    {
+      "name": "tests/ninfer_moe_block_scaled_test.exe",
+      "bytes": 313414144,
+      "sha256": "cdcb2be109497fb9fb2d55b70ec504309b264d8b436b5a459d0de5ec4fe66543"
+    },
+    {
+      "name": "tests/ninfer_moe_cpu_groupwise_int_avx2_test.exe",
+      "bytes": 243712,
+      "sha256": "743a7e9d366bdd8caf88de72c5819b5284ac83b3dce5bfccf649929edede055c"
+    },
+    {
+      "name": "tests/ninfer_moe_cpu_groupwise_int_fma_test.exe",
+      "bytes": 243712,
+      "sha256": "67a863eeb4e9eaf18ba8554ad4539ecff8b08b61ab24de40d7982baa9502bdd6"
+    },
+    {
+      "name": "tests/ninfer_moe_cpu_groupwise_int_test.exe",
+      "bytes": 243712,
+      "sha256": "bdc720d69e7c8d7f54517fbe8ffec7831ef8d98d444b94df0042da99f755f036"
+    },
+    {
+      "name": "tests/ninfer_moe_cpu_nvfp4_avx2_test.exe",
+      "bytes": 228864,
+      "sha256": "3faea6bd67dbc6f35bac1a795fe9574e3a6af86eb459595c9f0e4fd690e4a0f2"
+    },
+    {
+      "name": "tests/ninfer_moe_cpu_nvfp4_fma_test.exe",
+      "bytes": 228864,
+      "sha256": "e02ffa4315dd33f2fc24b5363ff85e32830df9059e665dc64fc6ab164bad4a8b"
+    },
+    {
+      "name": "tests/ninfer_moe_cpu_nvfp4_test.exe",
+      "bytes": 228864,
+      "sha256": "3329bdaeaeea0b7e59efdf80cea3d588934fc1293c7dbadb6ed9b01b889905ff"
+    },
+    {
+      "name": "tests/ninfer_moe_test.exe",
+      "bytes": 313952768,
+      "sha256": "07f2342d2afca5392fb53f72a26aac7987e22bc3201172654d5427f48873adc3"
+    },
+    {
+      "name": "tests/ninfer_mtp_pack_test.exe",
+      "bytes": 313438720,
+      "sha256": "77ab696ef3b5cc0aacfa422fb35964dc757c816c88339d3b13fde80498c54054"
+    },
+    {
+      "name": "tests/ninfer_mtp_round_test.exe",
+      "bytes": 313446912,
+      "sha256": "a68211a0286b485a32d7b8f320bed0e6cfdb69ddcb1690fd5b446858f992a514"
+    },
+    {
+      "name": "tests/ninfer_ple_conv_test.exe",
+      "bytes": 313490944,
+      "sha256": "e85cabcf61beb4e8e0538af2dc39f3181d14bf32ef873b34f31a3319e64a1b53"
+    },
+    {
+      "name": "tests/ninfer_ple_disk_prepare_test.exe",
+      "bytes": 342528,
+      "sha256": "f21b7d9a4d00c398cbc915194fde60bc4cb3b82ff3ac1b78e19363d8a9368b29"
+    },
+    {
+      "name": "tests/ninfer_ple_gate_test.exe",
+      "bytes": 313501696,
+      "sha256": "6af7cdd478dc25458e250a932f1fa1368cc346cce6a8ff87419f97e33fb8ee5f"
+    },
+    {
+      "name": "tests/ninfer_ple_state_extract_test.exe",
+      "bytes": 313460224,
+      "sha256": "6debb42633868ef34ffaef6ab79e7d83672df556dfc044f0dd5c03d4d02ca5bc"
+    },
+    {
+      "name": "tests/ninfer_position_test.exe",
+      "bytes": 313436160,
+      "sha256": "f3d4f8f1dcecb3be2645cd2d50aa89dbcee81adf936c4c5db1db733901278704"
+    },
+    {
+      "name": "tests/ninfer_prepare_masked_block_test.exe",
+      "bytes": 313438208,
+      "sha256": "78ae338d72b30719702cdf72bc2b81291e31c0930dbccd34fd7a6fce0b140d61"
+    },
+    {
+      "name": "tests/ninfer_prepare_ragged_prefix_test.exe",
+      "bytes": 313455104,
+      "sha256": "f7fb94d2a988ed2dd5927297de2e8910e6188db3dbd2f6d740079c2b3ae26ff6"
+    },
+    {
+      "name": "tests/ninfer_qsa_indexer_test.exe",
+      "bytes": 313480704,
+      "sha256": "e5513fa61f5ab1f3d97f82d15029aac6de680e94070b99ee01d120cec26f88ca"
+    },
+    {
+      "name": "tests/ninfer_qsa_prepare_test.exe",
+      "bytes": 313555968,
+      "sha256": "7495255b0fda4004b83b7a9f914d5c34ee14bc593ead39dd5a1cc5bef596e2bb"
+    },
+    {
+      "name": "tests/ninfer_qsa_sparse_gqa_test.exe",
+      "bytes": 313538560,
+      "sha256": "36f8295ebddd006fcbf17733738e12fb785a61ca944a688e8bb3c760204b6619"
+    },
+    {
+      "name": "tests/ninfer_qsa_tail_extract_test.exe",
+      "bytes": 313484800,
+      "sha256": "77b884465886f86cbaa5e41fe45fd23e1d7e6ef3a5e380b86530a77d214887a6"
+    },
+    {
+      "name": "tests/ninfer_qwen3_5_loading_real_test.exe",
+      "bytes": 314390528,
+      "sha256": "172659ea5f41db92e59022c4a669d266b785178e10a6e56c732f3303f88ee4ca"
+    },
+    {
+      "name": "tests/ninfer_residual_add_test.exe",
+      "bytes": 313432064,
+      "sha256": "6d13718605a1eac2afa5a0577bc990921218332fc34dcce40674bb91a336063c"
+    },
+    {
+      "name": "tests/ninfer_rmsnorm_pack_tail_test.exe",
+      "bytes": 313452544,
+      "sha256": "2148cf25975759fdb741f12d1b2d2e8f48b854e966ff8c6535dbfbb44bc5678d"
+    },
+    {
+      "name": "tests/ninfer_rmsnorm_rope_test.exe",
+      "bytes": 313465344,
+      "sha256": "9dde15d583c5676960f70f1dd528d05d834a7f6a6599c3d44987d5aef7273c2b"
+    },
+    {
+      "name": "tests/ninfer_rmsnorm_test.exe",
+      "bytes": 313471488,
+      "sha256": "e99ca7e8a43aff6ce37e4e3ae6e0ce37298a18dde220d5c7e693621c5d3f48d2"
+    },
+    {
+      "name": "tests/ninfer_rope_test.exe",
+      "bytes": 313458688,
+      "sha256": "81dcfa7ae35155f0daf5d06066b9ee264703058ea8327a42afad2853c4987188"
+    },
+    {
+      "name": "tests/ninfer_sampling_test.exe",
+      "bytes": 313488384,
+      "sha256": "8dd0a253b4ffd289f1749ff8700783b06d5bd093f395579c576d512ef1062383"
+    },
+    {
+      "name": "tests/ninfer_scalar_test.exe",
+      "bytes": 313428992,
+      "sha256": "5ed57f728cdc858fe74f0649f9b6b4f33251ea8b65f1f22e11ed0aa62309740f"
+    },
+    {
+      "name": "tests/ninfer_scatter_bf16_batch_test.exe",
+      "bytes": 313453568,
+      "sha256": "a1bcf697ca93734d08af6865ab510e1009b4a81f35d2be7794fa3af71d13ff8f"
+    },
+    {
+      "name": "tests/ninfer_scatter_test.exe",
+      "bytes": 313480192,
+      "sha256": "54d0c686c21b65cd523c54192caa19d99d985ce77e3ce38e97b220f0d1ba7ec5"
+    },
+    {
+      "name": "tests/ninfer_sigmoid_mul_test.exe",
+      "bytes": 313433088,
+      "sha256": "74cfb55c67bc9ec4114573081f65a3a56fbce7855cd8cbaafcd72fb75edae071"
+    },
+    {
+      "name": "tests/ninfer_silu_mul_test.exe",
+      "bytes": 313436160,
+      "sha256": "4cda079c4206b7f0b9b909b9a15430fc8f396c0222881db30c4ea6a19d48dd79"
+    },
+    {
+      "name": "tests/ninfer_sliding_window_attention_test.exe",
+      "bytes": 313531392,
+      "sha256": "051e41d587c4a0ed397c601b53088e1bfae14e3cf1a2480904ab9ab273179bb1"
+    },
+    {
+      "name": "tests/ninfer_softmax_attention_test.exe",
+      "bytes": 314716160,
+      "sha256": "f43d1f0c01a1b059647fd3c740ee7bcbedc77f998189921a71702067805c8a53"
+    },
+    {
+      "name": "tests/ninfer_speculative_round_test.exe",
+      "bytes": 313565184,
+      "sha256": "5c1e01f9776ad46513802f40166e7342c1f312b8e84857403cc15d6f04c0db9d"
+    },
+    {
+      "name": "tests/ninfer_sum_contributions_test.exe",
+      "bytes": 313430528,
+      "sha256": "36cd42467d5ddb7e0ed7eba7835740860c3f8a6c079c74d9fd1bc3c020cc303c"
+    },
+    {
+      "name": "tests/ninfer_target_logprobs_test.exe",
+      "bytes": 313442304,
+      "sha256": "64913a98bed031462b1a1d88b7651c99e508b4c5926fb95f1c448f8e5f4ecd16"
+    }
+  ]
+}

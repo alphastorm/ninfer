@@ -1,7 +1,9 @@
+#include "core/io/durable_file.h"
 #include "core/sha256.h"
 #include "runtime/engine/checkpoint_control.h"
 #include "serve/session_checkpoint_store.h"
 #include "serve/server_identity.h"
+#include "checkpoint_write_fault.h"
 
 #include <nlohmann/json.hpp>
 
@@ -17,10 +19,59 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <sddl.h>
+namespace {
+struct ParentFlushFault {
+    BY_HANDLE_FILE_INFORMATION identity{};
+    bool armed = false, fired = false;
+    DWORD error = ERROR_WRITE_FAULT;
+} parent_flush_fault;
+
+BOOL WINAPI checkpoint_flush(HANDLE handle) {
+    const auto disk_error = checkpoint_write_fault::windows_error.load();
+    if (disk_error) {
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (GetFileInformationByHandle(handle, &info) &&
+            !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+            ++checkpoint_write_fault::fired;
+            SetLastError(disk_error);
+            return FALSE;
+        }
+    }
+    auto& fault = parent_flush_fault;
+    if (fault.armed) {
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (GetFileInformationByHandle(handle, &info) &&
+            (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+            info.dwVolumeSerialNumber == fault.identity.dwVolumeSerialNumber &&
+            info.nFileIndexHigh == fault.identity.nFileIndexHigh &&
+            info.nFileIndexLow == fault.identity.nFileIndexLow) {
+            fault.armed = false;
+            fault.fired = true;
+            SetLastError(fault.error);
+            return FALSE;
+        }
+    }
+    static const auto real_flush = reinterpret_cast<decltype(&FlushFileBuffers)>(
+        GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "FlushFileBuffers"));
+    if (!real_flush) { std::terminate(); }
+    return real_flush(handle);
+}
+}
+// Interpose only the selected parent flush; the real OS performs the current rename.
+extern "C" BOOL (WINAPI* __imp_FlushFileBuffers)(HANDLE) = &checkpoint_flush;
+#endif
 
 namespace {
 
@@ -30,10 +81,49 @@ using ninfer::runtime::DurableCheckpointStats;
 using ninfer::runtime::DurableExportResult;
 using ninfer::runtime::ContinuationCheckpointWriter;
 
+struct CheckpointLogCapture {
+    std::ostringstream output;
+    std::streambuf* previous = std::clog.rdbuf(output.rdbuf());
+    ~CheckpointLogCapture() { std::clog.rdbuf(previous); }
+};
+
 int check(bool condition, const std::string& message) {
     if (condition) { return 0; }
     std::cerr << "FAIL: " << message << '\n';
     return 1;
+}
+
+int test_checkpoint_failure_diagnostics_are_content_safe() {
+    constexpr std::string_view private_text = "private-path origin-secret response-content";
+    const auto capture = [&](const std::function<void()>& fail) {
+        CheckpointLogCapture log;
+        try { fail(); }
+        catch (...) {
+            log_checkpoint_failure("test_operation", runtime::DurableReason::IoUnavailable);
+        }
+        return log.output.str();
+    };
+    int failures = 0;
+    for (const auto* category : {&std::system_category(), &std::generic_category()}) {
+        const auto text = capture([&] {
+            throw std::system_error(5, *category, std::string(private_text));
+        });
+        const auto value = nlohmann::json::parse(text);
+        failures += check(value.size() == 5 && value.at("schema") == "ninfer-checkpoint-io-error/1" &&
+                              value.at("operation") == "test_operation" &&
+                              value.at("reason") == "io_unavailable" && value.at("error_code") == 5 &&
+                              value.at("error_category") ==
+                                  (category == &std::system_category() ? "system" : "generic") &&
+                              text.find(private_text) == std::string::npos,
+                          "checkpoint diagnostic lost OS code or exposed exception content");
+    }
+    const auto unknown = nlohmann::json::parse(capture([&] {
+        throw std::runtime_error(std::string(private_text));
+    }));
+    failures += check(unknown.at("error_category") == "unavailable" &&
+                          unknown.at("error_code").is_null() && unknown.size() == 5,
+                      "non-system checkpoint failure invented an OS error code");
+    return failures;
 }
 
 class TemporaryDirectory {
@@ -42,12 +132,21 @@ public:
         const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
         path             = std::filesystem::temp_directory_path() /
                            ("ninfer-checkpoint-test-" + std::to_string(stamp));
+#ifdef _WIN32
+        // Fixture inspections must not introduce their own MAX_PATH failures when the
+        // complete host suite is run with an installed-layout-length TEMP root.
+        path = io::extended_local_path(path);
+#endif
         std::filesystem::create_directories(path);
     }
 
     ~TemporaryDirectory() {
+#ifdef _WIN32
+        try { (void)io::remove_tree(path); } catch (...) {}
+#else
         std::error_code error;
         std::filesystem::remove_all(path, error);
+#endif
     }
 
     std::filesystem::path path;
@@ -85,6 +184,11 @@ public:
     [[nodiscard]] std::unique_ptr<runtime::ContinuationCheckpointReadCompletion>
     submit(const std::filesystem::path& path,
            std::span<const runtime::ContinuationCheckpointReadRequest> requests) override {
+#ifdef _WIN32
+        if (path.native().find(L'/') != std::wstring::npos) {
+            throw std::runtime_error("checkpoint queue received non-native path separators");
+        }
+#endif
         ++submit_count;
         if (fail_submit) { throw std::runtime_error("injected checkpoint queue read failure"); }
         if (!overlaps && outstanding != 0) { ++overlap_violations; }
@@ -293,6 +397,86 @@ bool write_state_fixture(ContinuationCheckpointWriter& writer,
     return writer.write_file("engine/index.cbor", 0, 0, {}, 1) &&
            write_chunked(writer, "engine/state/0.bin", bytes);
 }
+
+#ifdef _WIN32
+// This explicitly named host case requires an elevated administrator or SYSTEM token,
+// matching the protected native service root rather than weakening its ACL for the test.
+int test_protected_long_root_transaction() {
+    TemporaryDirectory temporary;
+    auto root = temporary.path / L"protected";
+    if (root.native().size() < 155) {
+        root += std::wstring(155 - root.native().size(), L'x');
+    }
+    PSECURITY_DESCRIPTOR raw = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)", SDDL_REVISION_1, &raw, nullptr)) {
+        throw std::system_error(GetLastError(), std::system_category(),
+                                "create protected checkpoint test descriptor");
+    }
+    const std::unique_ptr<void, decltype(&LocalFree)> descriptor(raw, LocalFree);
+    SECURITY_ATTRIBUTES security{sizeof(SECURITY_ATTRIBUTES), raw, FALSE};
+    if (!CreateDirectoryW(root.c_str(), &security)) {
+        throw std::system_error(GetLastError(), std::system_category(),
+                                "create protected checkpoint test root");
+    }
+    // Supply the ordinary spelling used by the native launcher, not an already-fixed input.
+    const std::filesystem::path ordinary_root(root.native().substr(4));
+    int failures = check(ordinary_root.native().size() >= 151,
+                         "protected checkpoint root does not reproduce installed path depth");
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    auto queue = std::make_shared<TestReadQueue>();
+    SessionCheckpointStore store({.root = ordinary_root,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .origin_mac_key = std::string(32, 'k'),
+                                  .read_queue = queue});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) -> DurableExportResult {
+        if (!write_state_fixture(writer, payload)) {
+            return {.state = runtime::DurableExportState::Refused};
+        }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto first = store.save(responses, fingerprint(), exporter, publish_fixture);
+    failures += check(first.has_value() && first->dir_sync == "ntfs-write-through",
+                      "protected long-root save failed before durable acknowledgement");
+    if (!first) { return failures; }
+    const auto state = stored_generation_root(root, responses, first->generation) /
+                       "engine" / "state" / "0.bin";
+    failures += check(state.native().size() - 4 > MAX_PATH &&
+                          std::filesystem::file_size(state) == payload.size(),
+                      "protected fixture did not exercise metadata beyond MAX_PATH");
+    {
+        SessionCheckpointStore restarted({.root = ordinary_root,
+                                          .disk_quota_bytes = 8ULL << 20,
+                                          .staging_bytes = 1ULL << 20,
+                                          .origin_mac_key = std::string(32, 'k'),
+                                          .read_queue = queue});
+        auto loaded = restarted.load(responses.client_session_sha256, fingerprint(),
+                                     responses.latest_response_id);
+        failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+                              loaded.checkpoint.has_value(),
+                          "protected long-root restart did not load the published generation");
+        if (!loaded.checkpoint) { return failures; }
+        std::vector<std::byte> bytes(payload.size());
+        failures += check(loaded.checkpoint->engine->read_file("engine/state/0.bin", 0, bytes) &&
+                              loaded.checkpoint->engine->verify_complete() && bytes == payload &&
+                              queue->submit_count != 0 && queue->outstanding == 0,
+                          "protected long-root payload stream did not verify byte-exactly");
+    }
+    const auto second = store.save(responses, fingerprint(), exporter, publish_fixture);
+    failures += check(second && second->generation != first->generation &&
+                          second->dir_sync == "ntfs-write-through",
+                      "protected long-root resave failed current-pointer replacement");
+    failures += check(store.erase(responses.client_session_sha256) ==
+                          SessionCheckpointEraseResult::Erased &&
+                          store.status(responses.client_session_sha256, fingerprint()).at("state") ==
+                              "missing",
+                      "protected long-root erase left an available checkpoint");
+    return failures;
+}
+#endif
 
 int test_sha256_streaming() {
     const std::string input = "abc";
@@ -761,7 +945,7 @@ int test_transaction_restart_compatibility_and_corruption() {
                       "checkpoint succeeds when the transient filesystem failure clears");
     retry.checkpoint.reset();
 
-    const std::filesystem::path corrupt_file = generation_root / "engine/state/0.bin";
+    const std::filesystem::path corrupt_file = generation_root / "engine" / "state" / "0.bin";
     std::fstream corrupt(corrupt_file, std::ios::in | std::ios::out | std::ios::binary);
     char byte = 0;
     corrupt.read(&byte, 1);
@@ -827,7 +1011,7 @@ int test_active_reader_delete_and_gc() {
             std::filesystem::is_regular_file(session / "generations" / saved->generation /
                                              "responses.cbor") &&
             std::filesystem::is_regular_file(session / "generations" / saved->generation /
-                                             "engine/state/0.bin") &&
+                                             "engine" / "state" / "0.bin") &&
             store.status(responses.client_session_sha256, fingerprint()).at("state") == "available",
         "refused deletion reports conflict and preserves transcript and Engine state");
 
@@ -1017,7 +1201,8 @@ int test_store_wide_quota_across_sessions() {
     const std::string previous_current   = read_file_bytes(previous_session / "current");
     const std::string previous_manifest  = read_file_bytes(previous_generation / "manifest.json");
     const std::string previous_responses = read_file_bytes(previous_generation / "responses.cbor");
-    const std::string previous_engine = read_file_bytes(previous_generation / "engine/state/0.bin");
+    const std::string previous_engine =
+        read_file_bytes(previous_generation / "engine" / "state" / "0.bin");
 
     // Re-saving at the same size fits the tolerated publish transient and evicts nobody. A
     // successor that grows past it plans reclamation, but cleanup happens only after
@@ -1050,7 +1235,7 @@ int test_store_wide_quota_across_sessions() {
             std::filesystem::is_directory(deferred_tombstone) &&
             read_file_bytes(deferred_tombstone / "manifest.json") == previous_manifest &&
             read_file_bytes(deferred_tombstone / "responses.cbor") == previous_responses &&
-            read_file_bytes(deferred_tombstone / "engine/state/0.bin") == previous_engine &&
+            read_file_bytes(deferred_tombstone / "engine" / "state" / "0.bin") == previous_engine &&
             failure_store.status(first_session.client_session_sha256, fingerprint()).at("state") ==
                 "available" &&
             retained_generation_bytes(failure_temporary.path) ==
@@ -1251,10 +1436,10 @@ int test_ordinary_pressure_preserves_same_size_corrupt_victim() {
     }, publish_fixture);
     if (!saved) { return check(false, "pressure corruption fixture failed"); }
     auto bytes = read_file_bytes(stored_generation_root(temporary.path, responses, saved->generation) /
-                                 "engine/state/0.bin");
+                                 "engine" / "state" / "0.bin");
     bytes[bytes.size() / 2] ^= 1;
     std::ofstream(stored_generation_root(temporary.path, responses, saved->generation) /
-                  "engine/state/0.bin", std::ios::binary | std::ios::trunc) << bytes;
+                  "engine" / "state" / "0.bin", std::ios::binary | std::ios::trunc) << bytes;
     struct Oracle final : ReclaimableSessionOracle {
         SessionCheckpointStore& store;
         explicit Oracle(SessionCheckpointStore& value) : store(value) {}
@@ -1860,6 +2045,93 @@ int test_buffered_deferred_failure_fails_before_publication() {
     return failures;
 }
 
+#if defined(_WIN32) || defined(__linux__)
+int test_disk_full_capacity_preserves_generation() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .origin_mac_key = std::string(32, 'k'),
+                                  .read_queue = std::make_shared<TestReadQueue>()});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) {
+            return DurableExportResult{.state = runtime::DurableExportState::Refused};
+        }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto baseline = store.save(responses, fingerprint(), exporter, publish_fixture);
+    if (!baseline) { return check(false, "disk-full baseline did not publish"); }
+    struct Fault {
+        int generic;
+        unsigned long windows;
+        runtime::DurableReason reason;
+    };
+    const Fault faults[] = {
+        {ENOSPC, 0, runtime::DurableReason::Capacity},
+        {EIO, 0, runtime::DurableReason::IoUnavailable},
+#ifdef _WIN32
+        {0, ERROR_DISK_FULL, runtime::DurableReason::Capacity},
+        {0, ERROR_HANDLE_DISK_FULL, runtime::DurableReason::Capacity},
+        {0, ERROR_ACCESS_DENIED, runtime::DurableReason::IoUnavailable},
+#endif
+    };
+    int failures = 0;
+    for (const auto& fault : faults) {
+        runtime::SessionCheckpointSkipDetail skip;
+        bool threw = false, published = false;
+        std::optional<SessionCheckpointSaveResult> saved;
+        std::string diagnostic;
+        {
+            CheckpointLogCapture log;
+            checkpoint_write_fault::Scope injection(0);
+            try {
+                saved = store.save(responses, fingerprint(),
+                    [&](ContinuationCheckpointWriter& writer) {
+                        // The Responses file is already durable. Fail in the native drain,
+                        // after enqueue acknowledgement, and deliberately return a coarse
+                        // exporter reason: it must not erase the first disk-capacity cause.
+                        checkpoint_write_fault::generic_error = fault.generic;
+                        checkpoint_write_fault::windows_error = fault.windows;
+                        (void)write_state_fixture(writer, payload);
+                        return DurableExportResult{.state = runtime::DurableExportState::Refused,
+                                                    .reason = runtime::DurableReason::IoUnavailable};
+                    },
+                    [&](runtime::DurableSessionEpoch epoch, const std::function<bool()>& commit) {
+                        published = true;
+                        return publish_fixture(epoch, commit);
+                    }, &skip);
+            } catch (...) { threw = true; }
+            diagnostic = log.output.str();
+        }
+        failures += check(checkpoint_write_fault::fired != 0 && !saved && !published &&
+                              skip.durable_reason == fault.reason &&
+                              (fault.reason != runtime::DurableReason::Capacity || !threw),
+                          "disk failure lost its exact reason or reached publication");
+        const auto record = nlohmann::json::parse(diagnostic);
+        failures += check(record.at("operation") == "payload_write" &&
+                              std::string_view(record.at("reason").get_ref<const std::string&>()) ==
+                                  runtime::durable_reason_name(fault.reason) &&
+                              record.at("error_category") == (fault.generic ? "generic" : "system") &&
+                              record.at("error_code") == (fault.generic ? fault.generic : fault.windows),
+                          "disk-failure diagnostic lost its capacity classification or OS code");
+        auto loaded = store.load(responses.client_session_sha256, fingerprint());
+        failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+                              loaded.checkpoint && loaded.checkpoint->generation == baseline->generation,
+                          "disk-full refusal replaced or quarantined the prior generation");
+        if (loaded.checkpoint) {
+            std::vector<std::byte> bytes(payload.size());
+            failures += check(loaded.checkpoint->engine->read_file("engine/state/0.bin", 0, bytes) &&
+                                  loaded.checkpoint->engine->verify_complete() && bytes == payload,
+                              "disk-full refusal damaged the prior generation's payload");
+        }
+    }
+    return failures;
+}
+#endif
+
 
 int test_hmac_sha256_rfc4231_vectors() {
     int failures = 0;
@@ -2031,7 +2303,6 @@ int test_manifest_origin_compatibility_window() {
     return failures;
 }
 
-#ifndef _WIN32
 int test_quota_and_erase_refuse_ancestor_symlink_swaps() {
     TemporaryDirectory temporary;
     TemporaryDirectory outside;
@@ -2088,7 +2359,6 @@ int test_quota_and_erase_refuse_ancestor_symlink_swaps() {
                       "refused path mutations preserve the original current for retry");
     return failures;
 }
-#endif
 
 int test_v3_manifest_validation_and_publication_guard() {
     TemporaryDirectory temporary;
@@ -2276,6 +2546,81 @@ int test_schema_v3_and_stream_completion() {
                       "unfinished writer cannot publish over the prior current generation");
     return failures;
 }
+
+#ifdef _WIN32
+int test_current_parent_flush_failure_retains_visible_generation(DWORD error = ERROR_WRITE_FAULT) {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    const SessionCheckpointStoreOptions options{
+        .root = temporary.path, .disk_quota_bytes = 8ULL << 20,
+        .staging_bytes = 1ULL << 20, .read_queue = std::make_shared<TestReadQueue>()};
+    SessionCheckpointStore store(options);
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) { return DurableExportResult{}; }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                 .payload_bytes = payload.size()});
+    };
+    const auto first = store.save(responses, fingerprint(), exporter, publish_fixture);
+    if (!first) { return check(false, "parent-flush fixture did not publish"); }
+    const auto session_path = temporary.path / "sessions" / responses.client_session_sha256;
+    const HANDLE directory = CreateFileW(session_path.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (directory == INVALID_HANDLE_VALUE) {
+        return check(false, "parent-flush fixture directory did not open");
+    }
+    parent_flush_fault = {};
+    parent_flush_fault.error = error;
+    const bool inspected = GetFileInformationByHandle(directory, &parent_flush_fault.identity);
+    CloseHandle(directory);
+    if (!inspected) { return check(false, "parent-flush fixture identity unavailable"); }
+    runtime::CheckpointControl control;
+    control.session(responses.client_session_sha256)->tag = responses.latest_response_id;
+    runtime::SessionCheckpointSkipDetail skip;
+    std::optional<SessionCheckpointSaveResult> uncertain;
+    std::string diagnostic;
+    {
+        CheckpointLogCapture log;
+        uncertain = store.save(responses, fingerprint(), exporter,
+            [&](runtime::DurableSessionEpoch epoch, const std::function<bool()>& commit) {
+                parent_flush_fault.armed = true;
+                const auto result = control.publish(responses.client_session_sha256,
+                                                    responses.latest_response_id, epoch, commit);
+                parent_flush_fault.armed = false;
+                return result;
+            }, &skip);
+        diagnostic = log.output.str();
+    }
+    const auto reason = error == ERROR_DISK_FULL || error == ERROR_HANDLE_DISK_FULL
+                            ? runtime::DurableReason::Capacity : runtime::DurableReason::IoUnavailable;
+    int failures = check(parent_flush_fault.fired && !uncertain && skip.durable_reason == reason,
+                         "post-rename parent-flush failure lost its unacknowledged failure reason");
+    const auto failure = nlohmann::json::parse(diagnostic);
+    failures += check(failure.at("operation") == "publish_current" &&
+                          std::string_view(failure.at("reason").get_ref<const std::string&>()) ==
+                              runtime::durable_reason_name(reason) &&
+                          failure.at("error_category") == "system" &&
+                          failure.at("error_code") == error && failure.size() == 5,
+                      "current-publication diagnostic lost the underlying Win32 flush error");
+    const auto visible = read_file_bytes(session_path / "current");
+    failures += check(!visible.empty() && visible != first->generation + "\n",
+                      "flush fault must occur after the real current replacement");
+    SessionCheckpointStore restarted(options);
+    auto reconciled = restarted.load(responses.client_session_sha256, fingerprint());
+    failures += check(reconciled.state == SessionCheckpointLoadState::Available &&
+                          reconciled.checkpoint &&
+                          reconciled.checkpoint->generation + "\n" == visible,
+                      "uncertain publication must retain the generation named by actual current");
+    if (reconciled.checkpoint) {
+        std::vector<std::byte> restored(payload.size());
+        failures += check(reconciled.checkpoint->engine->read_file("engine/state/0.bin", 0, restored) &&
+                              reconciled.checkpoint->engine->verify_complete() && restored == payload,
+                          "reconciled uncertain publication must retain its complete payload");
+    }
+    return failures;
+}
+#endif
 
 int test_export_and_publication_callbacks_are_catalog_unlocked() {
     TemporaryDirectory temporary;
@@ -2609,9 +2954,24 @@ int main(int argc, char** argv) {
         const std::string_view test = argv[1];
         if (test == "quota_stale") { return test_quota_stale_publication_preserves_unrelated_currents(); }
         if (test == "ordinary_corrupt") { return test_ordinary_pressure_preserves_same_size_corrupt_victim(); }
+#if defined(_WIN32) || defined(__linux__)
+        if (test == "disk_full_capacity") {
+            int failures = test_disk_full_capacity_preserves_generation();
+#ifdef _WIN32
+            failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_DISK_FULL);
+            failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_HANDLE_DISK_FULL);
+#endif
+            return failures;
+        }
+#endif
+#ifdef _WIN32
+        if (test == "current_flush") { return test_current_parent_flush_failure_retains_visible_generation(); }
+        if (test == "protected_long_root") { return test_protected_long_root_transaction(); }
+#endif
         return 2;
     }
     int failures = 0;
+    failures += test_checkpoint_failure_diagnostics_are_content_safe();
     failures += test_quota_stale_publication_preserves_unrelated_currents();
     failures += test_ordinary_pressure_preserves_same_size_corrupt_victim();
     failures += test_replay_only_survivors_are_durable_without_native_authority();
@@ -2634,14 +2994,20 @@ int main(int argc, char** argv) {
     failures += test_post_verification_replacement_fails_closed();
     failures += test_buffered_write_backpressure_round_trips();
     failures += test_buffered_deferred_failure_fails_before_publication();
+#if defined(_WIN32) || defined(__linux__)
+    failures += test_disk_full_capacity_preserves_generation();
+#endif
     failures += test_hmac_sha256_rfc4231_vectors();
     failures += test_manifest_origin_authentication();
     failures += test_manifest_origin_compatibility_window();
-#ifndef _WIN32
     failures += test_quota_and_erase_refuse_ancestor_symlink_swaps();
-#endif
     failures += test_v3_manifest_validation_and_publication_guard();
     failures += test_schema_v3_and_stream_completion();
+#ifdef _WIN32
+    failures += test_current_parent_flush_failure_retains_visible_generation();
+    failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_DISK_FULL);
+    failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_HANDLE_DISK_FULL);
+#endif
     failures += test_export_and_publication_callbacks_are_catalog_unlocked();
     failures += test_reader_failure_reasons_and_fresh_retries();
     failures += test_native_corruption_quarantine_is_generation_bound();

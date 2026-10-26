@@ -23,6 +23,10 @@ void validate_options(const EngineOptions& options) {
     if (options.max_context == 0) {
         throw std::invalid_argument("Engine max_context must be nonzero");
     }
+    if (options.admission_headroom_bytes &&
+        *options.admission_headroom_bytes < kMinimumAdmissionHeadroomBytes) {
+        throw std::invalid_argument("Engine admission headroom must be at least 256 MiB");
+    }
     switch (options.kv_capacity.mode) {
     case KvCapacityMode::Explicit:
         if (options.kv_capacity.explicit_tokens == 0) {
@@ -120,8 +124,9 @@ ConstructedModel construct_model(EngineOptions& options, DeviceContext& device) 
     const auto start   = Clock::now();
     const auto initial = device_memory_snapshot(device.device());
     const auto limit   = device_budget(initial.free_bytes);
-    const auto headroom =
-        std::max(kDefaultKvCapacityHeadroomBytes, options.kv_capacity.automatic_headroom_bytes);
+    const auto headroom = std::max(
+        options.admission_headroom_bytes.value_or(kDefaultKvCapacityHeadroomBytes),
+        options.kv_capacity.automatic_headroom_bytes);
     StartupMemoryBudget budget(initial, limit, headroom);
     StartupPhaseScope inspect(options.startup_observer, StartupPhase::ArtifactInspect);
     artifact::Reader reader(options.artifact_path);

@@ -439,6 +439,8 @@ int run_shape(std::string_view label, ActivationCompute activation_compute,
                 }
             }
         } catch (const std::exception& error) {
+            if (activation_compute != ActivationCompute::A16 &&
+                report_excluded_path(case_label, error.what())) continue;
             std::cerr << case_label << ": unexpected exception: " << error.what() << '\n';
             ++failures;
         }

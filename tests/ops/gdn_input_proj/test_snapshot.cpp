@@ -1041,6 +1041,7 @@ int run_nvfp4() {
     int failures = 0;
     failures += run_nvfp4_case(parent, 1, ops::LinearPolicy::A16Only, 2);
     failures += run_nvfp4_case(parent, 3, ops::LinearPolicy::AllowA4, 4);
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
     failures += run_nvfp4_case(parent, 4, ops::LinearPolicy::AllowA4, 5);
     failures += run_nvfp4_case(parent, 17, ops::LinearPolicy::AllowA4, 0);
     failures += run_nvfp4_case(parent, 1024, ops::LinearPolicy::AllowA4, 1025);
@@ -1076,6 +1077,12 @@ int run_nvfp4() {
                 ninfer::test::cuda_environment().default_execution);
         });
     failures += parent.verify_preserved("batched NVFP4 parent weight");
+#else
+    for (int tokens : {4, 17, 1024})
+        failures += run_nvfp4_case(parent, tokens, ops::LinearPolicy::A16Only, 0);
+    std::cout << "EXCLUDED GDN snapshot NVFP4 A4"
+                 " (refusal checked by architecture_contract)\n";
+#endif
     return failures;
 }
 
@@ -1211,10 +1218,17 @@ int run_fp8() {
     failures += run_fp8_case(parent, 10, ops::LinearPolicy::A16Only, 11);
     failures += run_fp8_case(parent, 11, ops::LinearPolicy::A16Only, 12);
     failures += run_fp8_case(parent, 16, ops::LinearPolicy::AllowA8, 17);
+#if !defined(NINFER_SM86)
     failures += run_fp8_case(parent, 17, ops::LinearPolicy::AllowA8, 1);
     failures += run_fp8_case(parent, 257, ops::LinearPolicy::AllowA8, 258);
     failures += run_fp8_case(parent, 512, ops::LinearPolicy::AllowA8, 513);
     failures += run_fp8_case(parent, 1025, ops::LinearPolicy::AllowA8, 1026);
+#else
+    for (int tokens : {17, 257, 512, 1025})
+        failures += run_fp8_case(parent, tokens, ops::LinearPolicy::A16Only, 0);
+    std::cout << "EXCLUDED GDN snapshot FP8 A8"
+                 " (refusal checked by architecture_contract)\n";
+#endif
 
     const auto run_batched = [&](std::int32_t width, std::int32_t batch,
                                  std::vector<std::int32_t> valid_columns, std::uint32_t seed) {
@@ -1250,7 +1264,9 @@ int run_fp8() {
             });
     };
     failures += run_batched(4, 2, {4, 2}, 937U);
+#if !defined(NINFER_SM86)
     failures += run_batched(16, 8, {16, 13, 11, 7, 5, 3, 2, 1}, 941U);
+#endif
     failures += parent.verify_preserved("batched FP8 parent weight");
     return failures;
 }

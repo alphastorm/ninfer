@@ -6,14 +6,17 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <random>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 namespace ninfer::test::artifact_fixture {
@@ -46,12 +49,12 @@ struct Fixture {
     std::vector<std::byte> payload;
 
     Fixture() : payload(1344) {
-        auto pattern = (std::filesystem::temp_directory_path() / "ninfer-artifact-XXXXXX").string();
-        std::vector<char> buffer(pattern.begin(), pattern.end());
-        buffer.push_back('\0');
-        const char* path = ::mkdtemp(buffer.data());
-        if (!path) { throw std::runtime_error("cannot create fixture directory"); }
-        directory = path;
+        std::random_device random;
+        for (;;) {
+            directory = std::filesystem::temp_directory_path() /
+                        ("ninfer-artifact-" + std::to_string(random()));
+            if (std::filesystem::create_directory(directory)) break;
+        }
         entry     = directory / "model.ninfer";
         root      = {
             {"components",
@@ -138,6 +141,9 @@ struct Fixture {
             header[16]      = std::byte{0x71};
             const auto path = i == 0 ? entry : directory / record.at("path").get<std::string>();
             std::ofstream file(path, std::ios::binary | std::ios::trunc);
+            if (!file)
+                throw std::system_error(errno, std::generic_category(),
+                                        "open artifact fixture part " + std::to_string(i));
             file.exceptions(std::ios::badbit | std::ios::failbit);
             file.write(reinterpret_cast<const char*>(header.data()), header.size());
             if (i == 0) { file.write(text.data(), static_cast<std::streamsize>(text.size())); }

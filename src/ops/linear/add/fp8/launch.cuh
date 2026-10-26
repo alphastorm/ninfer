@@ -53,6 +53,7 @@ void launch_fp8_add_a8(const Tensor& x, const Weight& w, Tensor& out, Fp8A8Works
                                         scratch.partials);
     else
         launch_fp8_a8_mma<Instance>(p, LinearBf16Output{data, w.n},
-                                    LinearResidualAddEpilogue{{data, w.n}}, stream);
+                                    LinearResidualAddEpilogue{{data, w.n}}, stream,
+                                    Fp8IdentityRows{});
 }
 } // namespace ninfer::ops::detail

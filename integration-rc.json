@@ -1,15 +1,18 @@
 {
   "schema": "ninfer-integration-rc/1",
-  "source": "12ff96e000db77a9f4b0c95942b38170d031e0eb",
+  "source": "04b603aae4e9ce3c26f4175cf808180c0f05b5fe",
   "release_version": "v0.7.0",
-  "passed": false,
-  "job": "20261025T074546Z-int-rc-12ff96e0-590220",
-  "job_exit": 1,
-  "elapsed_seconds": 622,
+  "product_version": "v0.13.0",
+  "passed": true,
+  "job": "20261025T081620Z-int-rc-04b603aa-594573",
+  "exit": 0,
+  "elapsed_seconds": 817,
+  "leftover_containers": 0,
+  "unowned_containers": 0,
   "image": "sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
   "build": {
     "steps": 172,
-    "seconds": 111,
+    "seconds": 109,
     "exit": 0
   },
   "phases": [
@@ -24,327 +27,327 @@
         {
           "name": "ninfer_public_api_test",
           "status": "passed",
-          "seconds": 0.00237012
+          "seconds": 0.00270675
         },
         {
           "name": "ninfer_checkpoint_io_contract_test",
           "status": "passed",
-          "seconds": 0.00323033
+          "seconds": 0.00306832
         },
         {
           "name": "ninfer_direct_storage_checkpoint_backend_test",
           "status": "passed",
-          "seconds": 0.00261858
+          "seconds": 0.00323383
         },
         {
           "name": "ninfer_io_uring_checkpoint_backend_test",
           "status": "passed",
-          "seconds": 1.3914
+          "seconds": 1.32241
         },
         {
           "name": "ninfer_uint128_test",
           "status": "passed",
-          "seconds": 0.00233556
+          "seconds": 0.00231091
         },
         {
           "name": "ninfer_uint128_exact_test",
           "status": "passed",
-          "seconds": 0.0452161
+          "seconds": 0.0454036
         },
         {
           "name": "ninfer_durable_file_test",
           "status": "passed",
-          "seconds": 0.0780945
+          "seconds": 0.0783153
         },
         {
           "name": "ninfer_file_test",
           "status": "passed",
-          "seconds": 0.00334803
+          "seconds": 0.00368061
         },
         {
           "name": "ninfer_cpu_system_test",
           "status": "passed",
-          "seconds": 0.0163782
+          "seconds": 0.0164129
         },
         {
           "name": "ninfer_cpu_task_pool_test",
           "status": "passed",
-          "seconds": 0.0367646
+          "seconds": 0.0377282
         },
         {
           "name": "ninfer_cpu_executor_test",
           "status": "passed",
-          "seconds": 0.0636234
+          "seconds": 0.0627596
         },
         {
           "name": "ninfer_read_queue_test",
           "status": "passed",
-          "seconds": 0.00528975
+          "seconds": 0.00576839
         },
         {
           "name": "ninfer_gdn_replay_records_test",
           "status": "passed",
-          "seconds": 0.0022913
+          "seconds": 0.00335506
         },
         {
           "name": "ninfer_host_timing_test",
           "status": "passed",
-          "seconds": 0.00214454
+          "seconds": 0.00219569
         },
         {
           "name": "ninfer_jinja_test",
           "status": "passed",
-          "seconds": 0.00525406
+          "seconds": 0.00588845
         },
         {
           "name": "ninfer_chat_templates_test",
           "status": "passed",
-          "seconds": 0.171218
+          "seconds": 0.178834
         },
         {
           "name": "ninfer_weight_bank_test",
           "status": "passed",
-          "seconds": 0.0022625
+          "seconds": 0.00222552
         },
         {
           "name": "ninfer_artifact_reader_test",
           "status": "passed",
-          "seconds": 0.00461039
+          "seconds": 0.00483188
         },
         {
           "name": "ninfer_artifact_backing_test",
           "status": "passed",
-          "seconds": 0.0045091
+          "seconds": 0.00456908
         },
         {
           "name": "ninfer_artifact_cpu_materialization_test",
           "status": "passed",
-          "seconds": 0.00443743
+          "seconds": 0.00480591
         },
         {
           "name": "ninfer_scheduler_test",
           "status": "passed",
-          "seconds": 0.00237096
+          "seconds": 0.00226177
         },
         {
           "name": "ninfer_engine_cache_gate_test",
           "status": "passed",
-          "seconds": 0.0637405
+          "seconds": 0.0736271
         },
         {
           "name": "ninfer_engine_options_test",
           "status": "passed",
-          "seconds": 0.0329758
+          "seconds": 0.0931759
         },
         {
           "name": "ninfer_engine_checkpoint_control_test",
           "status": "passed",
-          "seconds": 0.00282072
+          "seconds": 0.00283849
         },
         {
           "name": "ninfer_durable_contract_headers_test",
           "status": "passed",
-          "seconds": 0.00324262
+          "seconds": 0.00349749
         },
         {
           "name": "ninfer_durable_contracts_test",
           "status": "passed",
-          "seconds": 0.0407792
+          "seconds": 0.0397934
         },
         {
           "name": "ninfer_context_cost_test",
           "status": "passed",
-          "seconds": 0.00352426
+          "seconds": 0.00347552
         },
         {
           "name": "ninfer_resource_manager_test",
           "status": "passed",
-          "seconds": 0.00441718
+          "seconds": 0.00432764
         },
         {
           "name": "ninfer_kv_capacity_test",
           "status": "passed",
-          "seconds": 0.00217083
+          "seconds": 0.00237815
         },
         {
           "name": "ninfer_sampling_defaults_test",
           "status": "passed",
-          "seconds": 0.00254264
+          "seconds": 0.00251323
         },
         {
           "name": "ninfer_grammar_test",
           "status": "passed",
-          "seconds": 0.0138235
+          "seconds": 0.0129203
         },
         {
           "name": "ninfer_regex_choice_test",
           "status": "passed",
-          "seconds": 0.00662115
+          "seconds": 0.00667909
         },
         {
           "name": "ninfer_regex_choice_oracle_test",
           "status": "passed",
-          "seconds": 0.0719002
+          "seconds": 0.0735613
         },
         {
           "name": "ninfer_json_schema_test",
           "status": "passed",
-          "seconds": 0.0276649
+          "seconds": 0.0311336
         },
         {
           "name": "ninfer_json_schema_oracle_test",
           "status": "passed",
-          "seconds": 2.12762
+          "seconds": 2.14368
         },
         {
           "name": "ninfer_media_decode_test",
           "status": "passed",
-          "seconds": 0.0227234
+          "seconds": 0.0286185
         },
         {
           "name": "ninfer_prompt_input_test",
           "status": "passed",
-          "seconds": 0.00562251
+          "seconds": 0.00600735
         },
         {
           "name": "ninfer_pretty_logging_test",
           "status": "passed",
-          "seconds": 0.00286028
+          "seconds": 0.00309069
         },
         {
           "name": "ninfer_perplexity_evaluation_test",
           "status": "passed",
-          "seconds": 0.00219946
+          "seconds": 0.00180182
         },
         {
           "name": "ninfer_cli_options_test",
           "status": "passed",
-          "seconds": 0.00239488
+          "seconds": 0.0022824
         },
         {
           "name": "ninfer_openai_schema_test",
           "status": "passed",
-          "seconds": 0.0318352
+          "seconds": 0.0345477
         },
         {
           "name": "ninfer_openai_responses_test",
           "status": "passed",
-          "seconds": 0.00480429
+          "seconds": 0.00457096
         },
         {
           "name": "ninfer_openai_responses_store_test",
           "status": "passed",
-          "seconds": 0.0235754
+          "seconds": 0.0239075
         },
         {
           "name": "ninfer_session_checkpoint_service_test",
           "status": "passed",
-          "seconds": 0.00272481
+          "seconds": 0.00283243
         },
         {
           "name": "ninfer_serve_restore_runner_test",
           "status": "passed",
-          "seconds": 0.0551843
+          "seconds": 0.0543308
         },
         {
           "name": "ninfer_session_checkpoint_store_test",
           "status": "passed",
-          "seconds": 5.16523
+          "seconds": 5.01356
         },
         {
           "name": "ninfer_automatic_checkpoint_queue_test",
           "status": "passed",
-          "seconds": 0.00235932
+          "seconds": 0.00283043
         },
         {
           "name": "ninfer_checkpoint_policy_test",
           "status": "passed",
-          "seconds": 0.00187283
+          "seconds": 0.00223179
         },
         {
           "name": "ninfer_anthropic_schema_test",
           "status": "passed",
-          "seconds": 0.00340218
+          "seconds": 0.00397486
         },
         {
           "name": "ninfer_serve_options_test",
           "status": "passed",
-          "seconds": 0.00314745
+          "seconds": 0.0032101
         },
         {
           "name": "ninfer_request_log_test",
           "status": "passed",
-          "seconds": 0.0301839
+          "seconds": 0.0341859
         },
         {
           "name": "ninfer_metrics_test",
           "status": "passed",
-          "seconds": 0.00293297
+          "seconds": 0.00288592
         },
         {
           "name": "ninfer_http_error_handler_test",
           "status": "passed",
-          "seconds": 0.0322531
+          "seconds": 0.0323617
         },
         {
           "name": "ninfer_http_server_stop_test",
           "status": "passed",
-          "seconds": 0.0356107
+          "seconds": 0.0365566
         },
         {
           "name": "ninfer_stop_event_test",
           "status": "passed",
-          "seconds": 0.00196046
+          "seconds": 0.00184406
         },
         {
           "name": "ninfer_http_transport_test",
           "status": "passed",
-          "seconds": 0.00409247
+          "seconds": 0.00386509
         },
         {
           "name": "ninfer_bench_support_test",
           "status": "passed",
-          "seconds": 0.00275783
+          "seconds": 0.00280937
         },
         {
           "name": "ninfer_context_cost_measure_test",
           "status": "passed",
-          "seconds": 0.00258062
+          "seconds": 0.00282336
         },
         {
           "name": "ninfer_qwen3_5_loading_test",
           "status": "passed",
-          "seconds": 0.00774974
+          "seconds": 0.0084535
         },
         {
           "name": "ninfer_qwen3_5_state_image_layout_test",
           "status": "passed",
-          "seconds": 0.00232202
+          "seconds": 0.00244408
         },
         {
           "name": "ninfer_qwen_frontend_test",
           "status": "passed",
-          "seconds": 0.911922
+          "seconds": 0.913676
         },
         {
           "name": "ninfer_qwen_tool_constraints_test",
           "status": "passed",
-          "seconds": 0.0373949
+          "seconds": 0.0352407
         },
         {
           "name": "ninfer_qwen_tool_schema_oracle_test",
           "status": "passed",
-          "seconds": 0.165593
+          "seconds": 0.160614
         },
         {
           "name": "ninfer_checkpoint_codec_test",
           "status": "passed",
-          "seconds": 0.00356405
+          "seconds": 0.00327026
         },
         {
           "name": "ninfer_tool_call_parser_test",
           "status": "passed",
-          "seconds": 0.0103014
+          "seconds": 0.00945044
         }
       ]
     },
@@ -359,57 +362,57 @@
         {
           "name": "ninfer_qwen3_5_native_transactions_test",
           "status": "passed",
-          "seconds": 17.4684
+          "seconds": 17.2465
         },
         {
           "name": "ninfer_qwen3_5_prefix_real_test",
           "status": "passed",
-          "seconds": 93.0291
+          "seconds": 93.0209
         },
         {
           "name": "ninfer_qwen3_5_preemption_real_test",
           "status": "passed",
-          "seconds": 41.563
+          "seconds": 41.9744
         },
         {
           "name": "ninfer_qwen3_5_grammar_real_test",
           "status": "passed",
-          "seconds": 22.6189
+          "seconds": 22.8124
         },
         {
           "name": "ninfer_qwen3_5_tools_real_test",
           "status": "passed",
-          "seconds": 19.4014
+          "seconds": 19.5728
         },
         {
           "name": "ninfer_qwen3_5_score_real_test",
           "status": "passed",
-          "seconds": 11.9363
+          "seconds": 11.7757
         },
         {
           "name": "ninfer_qwen3_5_vision_workspace_test",
           "status": "passed",
-          "seconds": 10.3822
+          "seconds": 10.4723
         },
         {
           "name": "ninfer_qwen3_5_dflash2_real_test",
           "status": "passed",
-          "seconds": 27.4137
+          "seconds": 30.2931
         },
         {
           "name": "ninfer_qwen3_5_dflash_prefill_real_test",
           "status": "passed",
-          "seconds": 12.3189
+          "seconds": 12.4535
         },
         {
           "name": "ninfer_qwen3_5_agent_continuation_real_test",
           "status": "passed",
-          "seconds": 13.1318
+          "seconds": 12.7834
         },
         {
           "name": "ninfer_kv_history_test",
           "status": "passed",
-          "seconds": 0.223592
+          "seconds": 0.226292
         }
       ]
     },
@@ -418,272 +421,1303 @@
       "tests": [
         {
           "name": "ninfer_qwen3_5_durable_pressure_real_test",
-          "seconds": 36.3733,
+          "seconds": 29.4234,
           "passed": true
         }
       ]
     }
   ],
   "loader_exit": 0,
-  "shared_mtp_exit": 0,
+  "shared_mtp": {
+    "exit": 0,
+    "summary": "PASS shared-prefix backend=mtp kv=fp8 clients=12 reused_tokens=1786 decode_rounds=202 decode_rows=388 partial_tail_clients=6 available=1"
+  },
   "production_restart": {
-    "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
     "artifact_type": "ninfer-serve-restore-proof/1",
-    "binary_sha256": "d0b2ecc3827ca2fa5d6252b8b2d93f06e779a607b28259dfe0ddb08798d6bb15",
-    "first_stop": {
-      "complete": true,
-      "refused": 0,
-      "saved": 1,
-      "skipped": 0
-    },
-    "isolation": {
-      "deleted_after_restart": 404,
-      "descendant_after_restart": 200,
-      "foreign_delete": 404,
-      "foreign_retrieve": 404,
-      "missing_capability_retrieve": 404,
-      "own_delete": 200,
-      "own_retrieve": 200
-    },
-    "passed": true,
-    "policy_disabled": {
-      "cached_input_tokens": 0,
-      "current_unchanged": true,
-      "mode": "startup_warmup_and_unretained_request",
-      "unretained_retrieve_status": 404
-    },
+    "binary_sha256": "48d736aae65a7b2edfb8c4cfea547b97af1671e0e443d78499ba4b66833d3232",
+    "source": "04b603aae4e9ce3c26f4175cf808180c0f05b5fe",
+    "upstream_base_sha": "64d10fbf9f8e6bfc79ab0570b94674c5b9997929",
+    "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
     "production_path": true,
+    "tracer": false,
+    "first_stop": {
+      "saved": 1,
+      "skipped": 0,
+      "refused": 0,
+      "complete": true
+    },
     "restart": {
-      "byte_identical": true,
       "cached_input_tokens": 20926,
       "continuation_bytes": 27,
       "continuation_sha256": "5a2528e22c6a6603d5eeafd214223e57812a9da7174bc1a4445c8f9308f8344c",
+      "byte_identical": true,
       "first_keyed_request_without_parent": true
     },
     "save": {
+      "state": "exported",
+      "reason": "none",
       "committed": true,
+      "origin": "authenticated",
       "dir_sync": "fsync",
       "frontier_tokens": 20993,
-      "origin": "authenticated",
-      "pages": 329,
+      "restored_tokens": 20993,
       "payload_bytes": 2164056150,
       "points": 4,
-      "reason": "none",
-      "restored_tokens": 20993,
-      "state": "exported",
-      "states": 4
+      "states": 4,
+      "pages": 329
     },
-    "source": "12ff96e000db77a9f4b0c95942b38170d031e0eb",
-    "tracer": false,
-    "upstream_base_sha": "64d10fbf9f8e6bfc79ab0570b94674c5b9997929"
+    "policy_disabled": {
+      "mode": "startup_warmup_and_unretained_request",
+      "cached_input_tokens": 0,
+      "unretained_retrieve_status": 404,
+      "current_unchanged": true
+    },
+    "isolation": {
+      "foreign_retrieve": 404,
+      "foreign_delete": 404,
+      "missing_capability_retrieve": 404,
+      "own_retrieve": 200,
+      "own_delete": 200,
+      "deleted_after_restart": 404,
+      "descendant_after_restart": 200
+    },
+    "passed": true
   },
-  "startup_failure": {
-    "reason": "cuda_graph_reservation_growth",
-    "comparisons": [
+  "product_shape": {
+    "artifact_type": "ninfer_engine_cache_gate",
+    "schema_version": 1,
+    "source_commit": "04b603aae4e9ce3c26f4175cf808180c0f05b5fe",
+    "baseline_sha256": "d39d3cd17dbe5155ca881c4636bbdabf5dd5ec86691b705c20a6e2bdc2ac1245",
+    "shape": {
+      "max_context": 131072,
+      "max_concurrency": 2,
+      "prefill_chunk": 1024,
+      "kv_cache": "bf16",
+      "speculative_backend": "dflash2",
+      "speculative_draft_window": 7,
+      "proposal_head": "optimized",
+      "cuda_graph": true,
+      "vision": true
+    },
+    "idle_seconds": 12,
+    "arms": [
       {
-        "field": "cuda_graph_rebuild_estimate_bytes",
-        "actual": 0,
-        "baseline": 0,
-        "delta": 0
+        "gpu_keep_warm_ms": 0,
+        "startup": {
+          "engine": {
+            "max_context": 131072,
+            "max_concurrency": 2,
+            "prefill_chunk": 1024,
+            "kv_cache": "bf16",
+            "speculative_backend": "dflash2",
+            "speculative_draft_window": 7,
+            "proposal_head": "optimized",
+            "cuda_graph": true,
+            "vision": true,
+            "kv_capacity_mode": "auto",
+            "kv_capacity": 146368
+          },
+          "memory": {
+            "device_budget_bytes": 32429309952,
+            "minimum_runtime_reservation_bytes": 10343649793,
+            "runtime_reservation_bytes": 11346088449,
+            "cuda_graph_rebuild_estimate_bytes": 0,
+            "cuda_graph_prepare_increment_bytes": 0,
+            "cuda_graph_calibration_increment_bytes": 33554432,
+            "cuda_graph_calibration_retained_bytes": 33554432,
+            "startup_retained_bytes": 33786880,
+            "available_after_startup_bytes": 1074790400,
+            "kv_capacity_headroom_bytes": 1073741824,
+            "kv_payload_bytes": 9592373248,
+            "host_context_capacity_bytes": 21881405440
+          },
+          "startup_gate": {
+            "minimum_headroom_bytes": 805306368,
+            "maximum_headroom_loss_bytes": 33554432,
+            "maximum_graph_growth_bytes": 67108864,
+            "baseline_headroom_bytes": 1072693248,
+            "baseline_graph_bytes": {
+              "cuda_graph_rebuild_estimate_bytes": 0,
+              "cuda_graph_calibration_increment_bytes": 31457280,
+              "cuda_graph_calibration_retained_bytes": 31457280,
+              "startup_retained_bytes": 31689728
+            },
+            "graph_deltas_bytes": {
+              "cuda_graph_rebuild_estimate_bytes": 0,
+              "cuda_graph_calibration_increment_bytes": 2097152,
+              "cuda_graph_calibration_retained_bytes": 2097152,
+              "startup_retained_bytes": 2097152
+            }
+          },
+          "total_device_memory_bytes": 34162343936
+        },
+        "idle_ttft": [
+          {
+            "label": "idle sample 0",
+            "ttft_s": 0.7478448809997644,
+            "total_s": 0.8526088479848113,
+            "input_tokens": 1849,
+            "output_tokens": 32,
+            "cached_tokens": 0,
+            "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "reasoning_text_sha256": "7deaec8db3012714b6aaad83392789eec78b0ab1308cfa24367ded32aae6d421"
+          },
+          {
+            "label": "idle sample 1",
+            "ttft_s": 0.7287547099986114,
+            "total_s": 0.8335194280080032,
+            "input_tokens": 1849,
+            "output_tokens": 32,
+            "cached_tokens": 0,
+            "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "reasoning_text_sha256": "e340513a8f00c02a1ce938dc2da458f128ca2c267fbf730f70370099e9d13d98"
+          },
+          {
+            "label": "idle sample 2",
+            "ttft_s": 0.820907029992668,
+            "total_s": 0.9405913809896447,
+            "input_tokens": 1849,
+            "output_tokens": 32,
+            "cached_tokens": 0,
+            "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "reasoning_text_sha256": "89fbf89bcdc63c92062d7b054360ad4787fbb1280dffe3ed06462f87468ce600"
+          }
+        ],
+        "median_idle_ttft_s": 0.7478448809997644,
+        "c2_siblings": {
+          "decode_row_rounds": 87,
+          "decode_rounds": 70,
+          "requests": [
+            {
+              "label": "fanout seed",
+              "ttft_s": 0.6063975070137531,
+              "total_s": 0.6962643880106043,
+              "input_tokens": 1848,
+              "output_tokens": 32,
+              "cached_tokens": 0,
+              "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "reasoning_text_sha256": "26d78447cc5c62b5b52b7f2577b56d8a70f5f4fa0f9fa99904de6c6df39f7a3d"
+            },
+            {
+              "label": "long sibling",
+              "ttft_s": 1.353403023997089,
+              "total_s": 3.1136895759846084,
+              "input_tokens": 3690,
+              "output_tokens": 192,
+              "cached_tokens": 1843,
+              "output_text_sha256": "905dc403ce70fbe5b303bf263e303cf3abc4cf5d67e3a63bd5408cb5b7bc7582",
+              "reasoning_text_sha256": "594dac0f0d6da92d2edb28d5c4b5be4a6289c7589874c615074fbf8d9a17609a"
+            },
+            {
+              "label": "short sibling",
+              "ttft_s": 1.2792905370006338,
+              "total_s": 1.552248141990276,
+              "input_tokens": 3690,
+              "output_tokens": 48,
+              "cached_tokens": 1879,
+              "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "reasoning_text_sha256": "d5a4754ef6db79fdf1407fd9af7ebc4ec2cff31387760af78cc9e272e952799e"
+            },
+            {
+              "label": "continue short sibling",
+              "ttft_s": 0.738591636007186,
+              "total_s": 0.8774573160044383,
+              "input_tokens": 5549,
+              "output_tokens": 16,
+              "cached_tokens": 3737,
+              "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "reasoning_text_sha256": "a4f26d9706d2fdd3b6da57b4d436b42c813c11085091dad2238d70bc7da8f924"
+            }
+          ],
+          "short_completed_before_long": true,
+          "continuation_started_before_long_completed": true
+        }
       },
       {
-        "field": "cuda_graph_calibration_increment_bytes",
-        "actual": 33554432,
-        "baseline": 31457280,
-        "delta": 2097152
-      },
-      {
-        "field": "cuda_graph_calibration_retained_bytes",
-        "actual": 33554432,
-        "baseline": 31457280,
-        "delta": 2097152
-      },
-      {
-        "field": "startup_retained_bytes",
-        "actual": 33786880,
-        "baseline": 31689728,
-        "delta": 2097152
+        "gpu_keep_warm_ms": 60000,
+        "startup": {
+          "engine": {
+            "max_context": 131072,
+            "max_concurrency": 2,
+            "prefill_chunk": 1024,
+            "kv_cache": "bf16",
+            "speculative_backend": "dflash2",
+            "speculative_draft_window": 7,
+            "proposal_head": "optimized",
+            "cuda_graph": true,
+            "vision": true,
+            "kv_capacity_mode": "auto",
+            "kv_capacity": 146368
+          },
+          "memory": {
+            "device_budget_bytes": 32429309952,
+            "minimum_runtime_reservation_bytes": 10343649793,
+            "runtime_reservation_bytes": 11346088449,
+            "cuda_graph_rebuild_estimate_bytes": 0,
+            "cuda_graph_prepare_increment_bytes": 0,
+            "cuda_graph_calibration_increment_bytes": 33554432,
+            "cuda_graph_calibration_retained_bytes": 33554432,
+            "startup_retained_bytes": 33786880,
+            "available_after_startup_bytes": 1074790400,
+            "kv_capacity_headroom_bytes": 1073741824,
+            "kv_payload_bytes": 9592373248,
+            "host_context_capacity_bytes": 21881405440
+          },
+          "startup_gate": {
+            "minimum_headroom_bytes": 805306368,
+            "maximum_headroom_loss_bytes": 33554432,
+            "maximum_graph_growth_bytes": 67108864,
+            "baseline_headroom_bytes": 1072693248,
+            "baseline_graph_bytes": {
+              "cuda_graph_rebuild_estimate_bytes": 0,
+              "cuda_graph_calibration_increment_bytes": 31457280,
+              "cuda_graph_calibration_retained_bytes": 31457280,
+              "startup_retained_bytes": 31689728
+            },
+            "graph_deltas_bytes": {
+              "cuda_graph_rebuild_estimate_bytes": 0,
+              "cuda_graph_calibration_increment_bytes": 2097152,
+              "cuda_graph_calibration_retained_bytes": 2097152,
+              "startup_retained_bytes": 2097152
+            }
+          },
+          "total_device_memory_bytes": 34162343936
+        },
+        "idle_ttft": [
+          {
+            "label": "idle sample 0",
+            "ttft_s": 0.5794430070091039,
+            "total_s": 0.6842886350059416,
+            "input_tokens": 1849,
+            "output_tokens": 32,
+            "cached_tokens": 0,
+            "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "reasoning_text_sha256": "7deaec8db3012714b6aaad83392789eec78b0ab1308cfa24367ded32aae6d421"
+          },
+          {
+            "label": "idle sample 1",
+            "ttft_s": 0.5865310529770795,
+            "total_s": 0.6921624289825559,
+            "input_tokens": 1849,
+            "output_tokens": 32,
+            "cached_tokens": 0,
+            "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "reasoning_text_sha256": "e340513a8f00c02a1ce938dc2da458f128ca2c267fbf730f70370099e9d13d98"
+          },
+          {
+            "label": "idle sample 2",
+            "ttft_s": 0.5861250330053736,
+            "total_s": 0.7059649410075508,
+            "input_tokens": 1849,
+            "output_tokens": 32,
+            "cached_tokens": 0,
+            "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "reasoning_text_sha256": "89fbf89bcdc63c92062d7b054360ad4787fbb1280dffe3ed06462f87468ce600"
+          }
+        ],
+        "median_idle_ttft_s": 0.5861250330053736,
+        "c2_siblings": {
+          "decode_row_rounds": 87,
+          "decode_rounds": 70,
+          "requests": [
+            {
+              "label": "fanout seed",
+              "ttft_s": 0.6071700470056385,
+              "total_s": 0.6970298200030811,
+              "input_tokens": 1848,
+              "output_tokens": 32,
+              "cached_tokens": 0,
+              "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "reasoning_text_sha256": "26d78447cc5c62b5b52b7f2577b56d8a70f5f4fa0f9fa99904de6c6df39f7a3d"
+            },
+            {
+              "label": "long sibling",
+              "ttft_s": 1.3518807210202795,
+              "total_s": 3.111929681006586,
+              "input_tokens": 3690,
+              "output_tokens": 192,
+              "cached_tokens": 1843,
+              "output_text_sha256": "905dc403ce70fbe5b303bf263e303cf3abc4cf5d67e3a63bd5408cb5b7bc7582",
+              "reasoning_text_sha256": "594dac0f0d6da92d2edb28d5c4b5be4a6289c7589874c615074fbf8d9a17609a"
+            },
+            {
+              "label": "short sibling",
+              "ttft_s": 1.2772809110174421,
+              "total_s": 1.5504530320176855,
+              "input_tokens": 3690,
+              "output_tokens": 48,
+              "cached_tokens": 1879,
+              "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "reasoning_text_sha256": "d5a4754ef6db79fdf1407fd9af7ebc4ec2cff31387760af78cc9e272e952799e"
+            },
+            {
+              "label": "continue short sibling",
+              "ttft_s": 0.7387133440061007,
+              "total_s": 0.8774561260070186,
+              "input_tokens": 5549,
+              "output_tokens": 16,
+              "cached_tokens": 3737,
+              "output_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "reasoning_text_sha256": "a4f26d9706d2fdd3b6da57b4d436b42c813c11085091dad2238d70bc7da8f924"
+            }
+          ],
+          "short_completed_before_long": true,
+          "continuation_started_before_long_completed": true
+        }
       }
     ],
-    "actual_memory": {
-      "available_after_startup_bytes": 1074790400,
-      "available_after_weights_bytes": 12456034304,
-      "cuda_graph_calibration_increment_bytes": 33554432,
-      "cuda_graph_calibration_retained_bytes": 33554432,
-      "cuda_graph_prepare_increment_bytes": 0,
-      "cuda_graph_rebuild_estimate_bytes": 0,
-      "device_budget_bytes": 32429309952,
-      "host_context_capacity_bytes": 21881405440,
-      "host_context_occupied_bytes": 0,
-      "host_context_reserved_bytes": 0,
-      "host_kv_occupied_bytes": 0,
-      "host_state_occupied_slots": 0,
-      "kv_capacity_headroom_bytes": 1073741824,
-      "kv_capacity_increment_bytes": 4194304,
-      "kv_payload_bytes": 9592373248,
-      "minimum_runtime_reservation_bytes": 10343649793,
-      "moe": null,
-      "planned_slack_bytes": 2649599,
-      "runtime_reservation_bytes": 11346088449,
-      "sequence": {
-        "capacity_bytes": 10479440384,
-        "peak_used_bytes": 10479440384,
-        "used_bytes": 10479440384
+    "passed": true,
+    "binary_sha256": "48d736aae65a7b2edfb8c4cfea547b97af1671e0e443d78499ba4b66833d3232",
+    "median_idle_ttft_ratio_on_over_off": 0.7837521495390943
+  },
+  "exact_product_profile": {
+    "schema": "ninfer-integration-product-profile/1",
+    "source": "04b603aae4e9ce3c26f4175cf808180c0f05b5fe",
+    "profile_sha256": "64e1f629fd94f8a486998664f7fece81d24785e63bf4d9cd2362b1c605226c1d",
+    "binary_sha256": "48d736aae65a7b2edfb8c4cfea547b97af1671e0e443d78499ba4b66833d3232",
+    "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+    "checkpoint_mount_target": "/checkpoints-v013",
+    "passed": true,
+    "startup": {
+      "engine": {
+        "max_context": 131072,
+        "max_concurrency": 2,
+        "prefill_chunk": 1024,
+        "kv_cache": "bf16",
+        "speculative_backend": "dflash2",
+        "speculative_draft_window": 7,
+        "proposal_head": "optimized",
+        "cuda_graph": true,
+        "vision": true,
+        "kv_capacity_mode": "auto",
+        "kv_capacity": 146368
       },
-      "startup_retained_bytes": 33786880,
-      "vision_workspace": {
-        "aggregate_prompt_tokens": 32768,
-        "encode_peak_bytes": 866648065,
-        "general_capacity_bytes": 121830240,
-        "handoff_active_bytes": 0,
-        "handoff_capacity_bytes": 167772160,
-        "handoff_offset_bytes": 150994944,
-        "handoff_peak_bytes": 0,
-        "max_item_tokens": 16384
+      "memory": {
+        "device_budget_bytes": 32429309952,
+        "minimum_runtime_reservation_bytes": 10343649793,
+        "runtime_reservation_bytes": 11346088449,
+        "cuda_graph_rebuild_estimate_bytes": 0,
+        "cuda_graph_prepare_increment_bytes": 0,
+        "cuda_graph_calibration_increment_bytes": 33554432,
+        "cuda_graph_calibration_retained_bytes": 33554432,
+        "startup_retained_bytes": 33786880,
+        "available_after_startup_bytes": 1074790400,
+        "kv_capacity_headroom_bytes": 1073741824,
+        "kv_payload_bytes": 9592373248,
+        "host_context_capacity_bytes": 21881405440
       },
-      "weights": {
-        "capacity_bytes": 19973043200,
-        "peak_used_bytes": 19973043200,
-        "used_bytes": 19973043200
+      "startup_gate": {
+        "minimum_headroom_bytes": 805306368,
+        "maximum_headroom_loss_bytes": 33554432,
+        "maximum_graph_growth_bytes": 67108864,
+        "baseline_headroom_bytes": 1072693248,
+        "baseline_graph_bytes": {
+          "cuda_graph_rebuild_estimate_bytes": 0,
+          "cuda_graph_calibration_increment_bytes": 31457280,
+          "cuda_graph_calibration_retained_bytes": 31457280,
+          "startup_retained_bytes": 31689728
+        },
+        "graph_deltas_bytes": {
+          "cuda_graph_rebuild_estimate_bytes": 0,
+          "cuda_graph_calibration_increment_bytes": 2097152,
+          "cuda_graph_calibration_retained_bytes": 2097152,
+          "startup_retained_bytes": 2097152
+        }
       },
-      "workspace": {
-        "capacity_bytes": 866648065,
-        "peak_used_bytes": 121830240,
-        "used_bytes": 0
-      }
+      "total_device_memory_bytes": 34162343936
     },
-    "baseline_memory": {
-      "available_after_startup_bytes": 1072693248,
-      "available_after_weights_bytes": 12456034304,
-      "cuda_graph_calibration_increment_bytes": 31457280,
-      "cuda_graph_calibration_retained_bytes": 31457280,
-      "cuda_graph_prepare_increment_bytes": 0,
-      "cuda_graph_rebuild_estimate_bytes": 0,
-      "device_budget_bytes": 32429309952,
-      "host_context_capacity_bytes": 21881405440,
-      "host_context_occupied_bytes": 0,
-      "host_context_reserved_bytes": 0,
-      "host_kv_occupied_bytes": 0,
-      "host_state_occupied_slots": 0,
-      "kv_capacity_headroom_bytes": 1073741824,
-      "kv_capacity_increment_bytes": 4194304,
-      "kv_payload_bytes": 9596567552,
-      "minimum_runtime_reservation_bytes": 10343649793,
-      "moe": null,
-      "planned_slack_bytes": 552447,
-      "runtime_reservation_bytes": 11350282753,
-      "sequence": {
-        "capacity_bytes": 10483634688,
-        "peak_used_bytes": 10483634688,
-        "used_bytes": 10483634688
-      },
-      "startup_retained_bytes": 31689728,
-      "vision_workspace": {
-        "aggregate_prompt_tokens": 32768,
-        "encode_peak_bytes": 866648065,
-        "general_capacity_bytes": 121830240,
-        "handoff_active_bytes": 0,
-        "handoff_capacity_bytes": 167772160,
-        "handoff_offset_bytes": 150994944,
-        "handoff_peak_bytes": 0,
-        "max_item_tokens": 16384
-      },
-      "weights": {
-        "capacity_bytes": 19973043200,
-        "peak_used_bytes": 19973043200,
-        "used_bytes": 19973043200
-      },
-      "workspace": {
-        "capacity_bytes": 866648065,
-        "peak_used_bytes": 121830240,
-        "used_bytes": 0
-      }
+    "gpu_keep_warm_ms": 60000,
+    "device_state_slots": 2,
+    "server_exit": 0,
+    "shutdown": {
+      "artifact_type": "ninfer_serve_shutdown_report",
+      "complete": true,
+      "refused": 0
     }
   },
-  "startup_disposition": {
-    "policy_amended_by": "Main",
-    "recorded_metrics_reevaluation": "integration-startup-policy.json",
-    "new_exact_source_batch_required": true
+  "product_smokes": {
+    "schema": "ninfer-integration-smokes/1",
+    "source": "04b603aae4e9ce3c26f4175cf808180c0f05b5fe",
+    "binary_sha256": "48d736aae65a7b2edfb8c4cfea547b97af1671e0e443d78499ba4b66833d3232",
+    "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+    "config_sha256": "c488b247d8fbc8ef015677f220b8a6b7900a009600a3cafe069bd30368718aa3",
+    "commands": [
+      {
+        "label": "serve_contract",
+        "exit": 0,
+        "seconds": 0.716,
+        "log_sha256": "0024b54204dddb601ed3e925016209f52dab0ae42f7c17234c2060009f992579"
+      },
+      {
+        "label": "agent_product",
+        "exit": 0,
+        "seconds": 3.524,
+        "log_sha256": "1bdeb1d3189677cabfdf0cb7768bd8758dd1e5a3c8320c6cf641a588bfce5adc"
+      }
+    ],
+    "passed": true,
+    "server_exit": 0
   },
-  "independent_product_smokes": {
-    "job": "20261025T075746Z-int-inventory-12ff96e0-592335",
+  "package_inventory": {
+    "schema": "ninfer-integration-rc-package/1",
+    "source": "04b603aae4e9ce3c26f4175cf808180c0f05b5fe",
+    "package": {
+      "artifact_type": "ninfer_local_release_receipt",
+      "asset": {
+        "name": "ninfer-qwen38-rtx5090-v0.7.0-linux-x86_64-cuda13.1.tar.gz",
+        "sha256": "ede7a6c95bf0a4950b7703fd46e8d085afe208818d808421368f7bd80bdb6944"
+      },
+      "build_profile": "rtx5090",
+      "checksums": "ninfer-qwen38-rtx5090-v0.7.0-linux-x86_64-cuda13.1.SHA256SUMS",
+      "patch_stack_sha": "04b603aae4e9ce3c26f4175cf808180c0f05b5fe",
+      "platform": "linux-x86_64-cuda13.1",
+      "release_version": "v0.7.0",
+      "sbom": {
+        "format": "SPDX-2.3",
+        "name": "ninfer-qwen38-rtx5090-v0.7.0-linux-x86_64-cuda13.1.spdx.json",
+        "sha256": "de8a9e65194e4732a82c5cdd0b542e67b6407f1b311a38714e47114d426dc0fc"
+      },
+      "schema_version": 1,
+      "source_date_epoch": 1792916171,
+      "source_dirty": false,
+      "upstream_base_sha": "64d10fbf9f8e6bfc79ab0570b94674c5b9997929"
+    },
+    "build_identity": {
+      "artifact_type": "ninfer_release_build_identity",
+      "binaries": {
+        "ninfer": "6804dd1977bac5b7d852686fae0bd41096a3c8c1892ab09d3da90ef6269134a1",
+        "ninfer-serve": "48d736aae65a7b2edfb8c4cfea547b97af1671e0e443d78499ba4b66833d3232"
+      },
+      "build_profile": "rtx5090",
+      "build_type": "Release",
+      "cuda_architecture": "120a",
+      "cuda_compiler": "NVIDIA-13.1.115",
+      "cuda_toolkit": "13.1.115",
+      "cxx_compiler": "GNU-13.3.0",
+      "patch_stack_sha": "04b603aae4e9ce3c26f4175cf808180c0f05b5fe",
+      "platform": "linux-x86_64-cuda13.1",
+      "release_version": "v0.7.0",
+      "schema_version": 1,
+      "source_dirty": false,
+      "upstream_base_sha": "64d10fbf9f8e6bfc79ab0570b94674c5b9997929"
+    },
+    "component_tags": [
+      "v0.7.0-qwen38-5090-beta.1",
+      "v0.7.0-qwen38-5090-source.1",
+      "v0.7.0-qwen38-5090-runtime-beta.1"
+    ],
+    "assets": [
+      {
+        "name": "ninfer-qwen38-rtx5090-v0.7.0-linux-x86_64-cuda13.1.tar.gz",
+        "bytes": 547027462,
+        "sha256": "ede7a6c95bf0a4950b7703fd46e8d085afe208818d808421368f7bd80bdb6944"
+      },
+      {
+        "name": "ninfer-qwen38-rtx5090-v0.7.0-linux-x86_64-cuda13.1.spdx.json",
+        "bytes": 3596,
+        "sha256": "de8a9e65194e4732a82c5cdd0b542e67b6407f1b311a38714e47114d426dc0fc"
+      },
+      {
+        "name": "ninfer-qwen38-rtx5090-v0.7.0-linux-x86_64-cuda13.1.SHA256SUMS",
+        "bytes": 348,
+        "sha256": "3e5a52e035bbdda5f0fd33665bf24edcfc9652bc698d605e1f9167671aec4a56"
+      },
+      {
+        "name": "runtime-source-04b603aa.tar.gz",
+        "bytes": 12225267,
+        "sha256": "98a33db050c6145eae02bdc1c126180be34e62acde9fdb5550976ffcacbd4e95"
+      }
+    ],
+    "cli": {
+      "help_sha256": "0e03d34c9dc4e46b3399fc9edda358defdd3be0b16286f3380eef2331bf957ed",
+      "profile_release": "v0.13.0",
+      "profile_sha256": "64e1f629fd94f8a486998664f7fece81d24785e63bf4d9cd2362b1c605226c1d",
+      "accepted_flags": [
+        "--host",
+        "--port",
+        "--model-id",
+        "--binary-sha256",
+        "--artifact-sha256",
+        "--config-sha256",
+        "--deployment-profile",
+        "--max-context",
+        "--kv-capacity",
+        "--prefill-chunk",
+        "--kv-dtype",
+        "--max-concurrency",
+        "--pending-timeout-ms",
+        "--spec",
+        "--draft-tokens",
+        "--lm-head-draft",
+        "--vision",
+        "--preserve-thinking",
+        "--session-checkpoint-dir",
+        "--session-checkpoint-quota-mib",
+        "--session-checkpoint-staging-mib",
+        "--device-state-slots",
+        "--host-context-mib",
+        "--gpu-keep-warm-ms"
+      ],
+      "obsolete_omitted_controls": [
+        "--max-private-continuations"
+      ],
+      "translations": {
+        "--host-state-slots": "--host-context-mib",
+        "--host-kv-mib": "--host-context-mib"
+      },
+      "host_context_mib": "20867.734375",
+      "checkpoint_mount_target": "/checkpoints-v013"
+    },
+    "published": false
+  },
+  "transferred_assets_sha256_verified": true,
+  "smoke_contract_distinction": {
+    "product_missing_parent": "previous_response_not_found",
+    "vanilla_missing_parent": "response_not_found",
+    "public_vanilla_proof": "Harness provider; not rerun against product"
+  },
+  "publication_inputs": {
+    "source_commit": "04b603aae4e9ce3c26f4175cf808180c0f05b5fe",
+    "release_tag": "v0.7.0-qwen38-5090-beta.1",
+    "binary_asset": "ninfer-qwen38-rtx5090-v0.7.0-linux-x86_64-cuda13.1.tar.gz",
+    "binary_sha256": "ede7a6c95bf0a4950b7703fd46e8d085afe208818d808421368f7bd80bdb6944",
+    "base_image": null
+  },
+  "runtime_base_proof": "integration-runtime-base.json",
+  "durable_checkpoint": "686732de3dcbedf4254c68b647ffd24fb5fc816d",
+  "historical_candidate": {
+    "schema": "ninfer-integration-rc/1",
+    "source": "12ff96e000db77a9f4b0c95942b38170d031e0eb",
+    "release_version": "v0.7.0",
+    "passed": false,
+    "job": "20261025T074546Z-int-rc-12ff96e0-590220",
     "job_exit": 1,
-    "elapsed_seconds": 26,
-    "serve_contract": {
-      "exit": 0,
-      "seconds": 0.767
+    "elapsed_seconds": 622,
+    "image": "sha256:e7f34ca2f41ecea14da5cce0b2a30cae6b0877e3b3eb371bd92d103bca1121f1",
+    "build": {
+      "steps": 172,
+      "seconds": 111,
+      "exit": 0
     },
-    "agent_product": {
-      "exit": 1,
-      "seconds": 3.326,
-      "error": "same-session repeat did not select a private continuation"
+    "phases": [
+      {
+        "phase": "host",
+        "counts": {
+          "passed": 65,
+          "failed": 0,
+          "skipped": 0
+        },
+        "tests": [
+          {
+            "name": "ninfer_public_api_test",
+            "status": "passed",
+            "seconds": 0.00237012
+          },
+          {
+            "name": "ninfer_checkpoint_io_contract_test",
+            "status": "passed",
+            "seconds": 0.00323033
+          },
+          {
+            "name": "ninfer_direct_storage_checkpoint_backend_test",
+            "status": "passed",
+            "seconds": 0.00261858
+          },
+          {
+            "name": "ninfer_io_uring_checkpoint_backend_test",
+            "status": "passed",
+            "seconds": 1.3914
+          },
+          {
+            "name": "ninfer_uint128_test",
+            "status": "passed",
+            "seconds": 0.00233556
+          },
+          {
+            "name": "ninfer_uint128_exact_test",
+            "status": "passed",
+            "seconds": 0.0452161
+          },
+          {
+            "name": "ninfer_durable_file_test",
+            "status": "passed",
+            "seconds": 0.0780945
+          },
+          {
+            "name": "ninfer_file_test",
+            "status": "passed",
+            "seconds": 0.00334803
+          },
+          {
+            "name": "ninfer_cpu_system_test",
+            "status": "passed",
+            "seconds": 0.0163782
+          },
+          {
+            "name": "ninfer_cpu_task_pool_test",
+            "status": "passed",
+            "seconds": 0.0367646
+          },
+          {
+            "name": "ninfer_cpu_executor_test",
+            "status": "passed",
+            "seconds": 0.0636234
+          },
+          {
+            "name": "ninfer_read_queue_test",
+            "status": "passed",
+            "seconds": 0.00528975
+          },
+          {
+            "name": "ninfer_gdn_replay_records_test",
+            "status": "passed",
+            "seconds": 0.0022913
+          },
+          {
+            "name": "ninfer_host_timing_test",
+            "status": "passed",
+            "seconds": 0.00214454
+          },
+          {
+            "name": "ninfer_jinja_test",
+            "status": "passed",
+            "seconds": 0.00525406
+          },
+          {
+            "name": "ninfer_chat_templates_test",
+            "status": "passed",
+            "seconds": 0.171218
+          },
+          {
+            "name": "ninfer_weight_bank_test",
+            "status": "passed",
+            "seconds": 0.0022625
+          },
+          {
+            "name": "ninfer_artifact_reader_test",
+            "status": "passed",
+            "seconds": 0.00461039
+          },
+          {
+            "name": "ninfer_artifact_backing_test",
+            "status": "passed",
+            "seconds": 0.0045091
+          },
+          {
+            "name": "ninfer_artifact_cpu_materialization_test",
+            "status": "passed",
+            "seconds": 0.00443743
+          },
+          {
+            "name": "ninfer_scheduler_test",
+            "status": "passed",
+            "seconds": 0.00237096
+          },
+          {
+            "name": "ninfer_engine_cache_gate_test",
+            "status": "passed",
+            "seconds": 0.0637405
+          },
+          {
+            "name": "ninfer_engine_options_test",
+            "status": "passed",
+            "seconds": 0.0329758
+          },
+          {
+            "name": "ninfer_engine_checkpoint_control_test",
+            "status": "passed",
+            "seconds": 0.00282072
+          },
+          {
+            "name": "ninfer_durable_contract_headers_test",
+            "status": "passed",
+            "seconds": 0.00324262
+          },
+          {
+            "name": "ninfer_durable_contracts_test",
+            "status": "passed",
+            "seconds": 0.0407792
+          },
+          {
+            "name": "ninfer_context_cost_test",
+            "status": "passed",
+            "seconds": 0.00352426
+          },
+          {
+            "name": "ninfer_resource_manager_test",
+            "status": "passed",
+            "seconds": 0.00441718
+          },
+          {
+            "name": "ninfer_kv_capacity_test",
+            "status": "passed",
+            "seconds": 0.00217083
+          },
+          {
+            "name": "ninfer_sampling_defaults_test",
+            "status": "passed",
+            "seconds": 0.00254264
+          },
+          {
+            "name": "ninfer_grammar_test",
+            "status": "passed",
+            "seconds": 0.0138235
+          },
+          {
+            "name": "ninfer_regex_choice_test",
+            "status": "passed",
+            "seconds": 0.00662115
+          },
+          {
+            "name": "ninfer_regex_choice_oracle_test",
+            "status": "passed",
+            "seconds": 0.0719002
+          },
+          {
+            "name": "ninfer_json_schema_test",
+            "status": "passed",
+            "seconds": 0.0276649
+          },
+          {
+            "name": "ninfer_json_schema_oracle_test",
+            "status": "passed",
+            "seconds": 2.12762
+          },
+          {
+            "name": "ninfer_media_decode_test",
+            "status": "passed",
+            "seconds": 0.0227234
+          },
+          {
+            "name": "ninfer_prompt_input_test",
+            "status": "passed",
+            "seconds": 0.00562251
+          },
+          {
+            "name": "ninfer_pretty_logging_test",
+            "status": "passed",
+            "seconds": 0.00286028
+          },
+          {
+            "name": "ninfer_perplexity_evaluation_test",
+            "status": "passed",
+            "seconds": 0.00219946
+          },
+          {
+            "name": "ninfer_cli_options_test",
+            "status": "passed",
+            "seconds": 0.00239488
+          },
+          {
+            "name": "ninfer_openai_schema_test",
+            "status": "passed",
+            "seconds": 0.0318352
+          },
+          {
+            "name": "ninfer_openai_responses_test",
+            "status": "passed",
+            "seconds": 0.00480429
+          },
+          {
+            "name": "ninfer_openai_responses_store_test",
+            "status": "passed",
+            "seconds": 0.0235754
+          },
+          {
+            "name": "ninfer_session_checkpoint_service_test",
+            "status": "passed",
+            "seconds": 0.00272481
+          },
+          {
+            "name": "ninfer_serve_restore_runner_test",
+            "status": "passed",
+            "seconds": 0.0551843
+          },
+          {
+            "name": "ninfer_session_checkpoint_store_test",
+            "status": "passed",
+            "seconds": 5.16523
+          },
+          {
+            "name": "ninfer_automatic_checkpoint_queue_test",
+            "status": "passed",
+            "seconds": 0.00235932
+          },
+          {
+            "name": "ninfer_checkpoint_policy_test",
+            "status": "passed",
+            "seconds": 0.00187283
+          },
+          {
+            "name": "ninfer_anthropic_schema_test",
+            "status": "passed",
+            "seconds": 0.00340218
+          },
+          {
+            "name": "ninfer_serve_options_test",
+            "status": "passed",
+            "seconds": 0.00314745
+          },
+          {
+            "name": "ninfer_request_log_test",
+            "status": "passed",
+            "seconds": 0.0301839
+          },
+          {
+            "name": "ninfer_metrics_test",
+            "status": "passed",
+            "seconds": 0.00293297
+          },
+          {
+            "name": "ninfer_http_error_handler_test",
+            "status": "passed",
+            "seconds": 0.0322531
+          },
+          {
+            "name": "ninfer_http_server_stop_test",
+            "status": "passed",
+            "seconds": 0.0356107
+          },
+          {
+            "name": "ninfer_stop_event_test",
+            "status": "passed",
+            "seconds": 0.00196046
+          },
+          {
+            "name": "ninfer_http_transport_test",
+            "status": "passed",
+            "seconds": 0.00409247
+          },
+          {
+            "name": "ninfer_bench_support_test",
+            "status": "passed",
+            "seconds": 0.00275783
+          },
+          {
+            "name": "ninfer_context_cost_measure_test",
+            "status": "passed",
+            "seconds": 0.00258062
+          },
+          {
+            "name": "ninfer_qwen3_5_loading_test",
+            "status": "passed",
+            "seconds": 0.00774974
+          },
+          {
+            "name": "ninfer_qwen3_5_state_image_layout_test",
+            "status": "passed",
+            "seconds": 0.00232202
+          },
+          {
+            "name": "ninfer_qwen_frontend_test",
+            "status": "passed",
+            "seconds": 0.911922
+          },
+          {
+            "name": "ninfer_qwen_tool_constraints_test",
+            "status": "passed",
+            "seconds": 0.0373949
+          },
+          {
+            "name": "ninfer_qwen_tool_schema_oracle_test",
+            "status": "passed",
+            "seconds": 0.165593
+          },
+          {
+            "name": "ninfer_checkpoint_codec_test",
+            "status": "passed",
+            "seconds": 0.00356405
+          },
+          {
+            "name": "ninfer_tool_call_parser_test",
+            "status": "passed",
+            "seconds": 0.0103014
+          }
+        ]
+      },
+      {
+        "phase": "real",
+        "counts": {
+          "passed": 11,
+          "failed": 0,
+          "skipped": 0
+        },
+        "tests": [
+          {
+            "name": "ninfer_qwen3_5_native_transactions_test",
+            "status": "passed",
+            "seconds": 17.4684
+          },
+          {
+            "name": "ninfer_qwen3_5_prefix_real_test",
+            "status": "passed",
+            "seconds": 93.0291
+          },
+          {
+            "name": "ninfer_qwen3_5_preemption_real_test",
+            "status": "passed",
+            "seconds": 41.563
+          },
+          {
+            "name": "ninfer_qwen3_5_grammar_real_test",
+            "status": "passed",
+            "seconds": 22.6189
+          },
+          {
+            "name": "ninfer_qwen3_5_tools_real_test",
+            "status": "passed",
+            "seconds": 19.4014
+          },
+          {
+            "name": "ninfer_qwen3_5_score_real_test",
+            "status": "passed",
+            "seconds": 11.9363
+          },
+          {
+            "name": "ninfer_qwen3_5_vision_workspace_test",
+            "status": "passed",
+            "seconds": 10.3822
+          },
+          {
+            "name": "ninfer_qwen3_5_dflash2_real_test",
+            "status": "passed",
+            "seconds": 27.4137
+          },
+          {
+            "name": "ninfer_qwen3_5_dflash_prefill_real_test",
+            "status": "passed",
+            "seconds": 12.3189
+          },
+          {
+            "name": "ninfer_qwen3_5_agent_continuation_real_test",
+            "status": "passed",
+            "seconds": 13.1318
+          },
+          {
+            "name": "ninfer_kv_history_test",
+            "status": "passed",
+            "seconds": 0.223592
+          }
+        ]
+      },
+      {
+        "phase": "overlap",
+        "tests": [
+          {
+            "name": "ninfer_qwen3_5_durable_pressure_real_test",
+            "seconds": 36.3733,
+            "passed": true
+          }
+        ]
+      }
+    ],
+    "loader_exit": 0,
+    "shared_mtp_exit": 0,
+    "production_restart": {
+      "artifact_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+      "artifact_type": "ninfer-serve-restore-proof/1",
+      "binary_sha256": "d0b2ecc3827ca2fa5d6252b8b2d93f06e779a607b28259dfe0ddb08798d6bb15",
+      "first_stop": {
+        "complete": true,
+        "refused": 0,
+        "saved": 1,
+        "skipped": 0
+      },
+      "isolation": {
+        "deleted_after_restart": 404,
+        "descendant_after_restart": 200,
+        "foreign_delete": 404,
+        "foreign_retrieve": 404,
+        "missing_capability_retrieve": 404,
+        "own_delete": 200,
+        "own_retrieve": 200
+      },
+      "passed": true,
+      "policy_disabled": {
+        "cached_input_tokens": 0,
+        "current_unchanged": true,
+        "mode": "startup_warmup_and_unretained_request",
+        "unretained_retrieve_status": 404
+      },
+      "production_path": true,
+      "restart": {
+        "byte_identical": true,
+        "cached_input_tokens": 20926,
+        "continuation_bytes": 27,
+        "continuation_sha256": "5a2528e22c6a6603d5eeafd214223e57812a9da7174bc1a4445c8f9308f8344c",
+        "first_keyed_request_without_parent": true
+      },
+      "save": {
+        "committed": true,
+        "dir_sync": "fsync",
+        "frontier_tokens": 20993,
+        "origin": "authenticated",
+        "pages": 329,
+        "payload_bytes": 2164056150,
+        "points": 4,
+        "reason": "none",
+        "restored_tokens": 20993,
+        "state": "exported",
+        "states": 4
+      },
+      "source": "12ff96e000db77a9f4b0c95942b38170d031e0eb",
+      "tracer": false,
+      "upstream_base_sha": "64d10fbf9f8e6bfc79ab0570b94674c5b9997929"
     },
-    "server_exit": 0,
+    "startup_failure": {
+      "reason": "cuda_graph_reservation_growth",
+      "comparisons": [
+        {
+          "field": "cuda_graph_rebuild_estimate_bytes",
+          "actual": 0,
+          "baseline": 0,
+          "delta": 0
+        },
+        {
+          "field": "cuda_graph_calibration_increment_bytes",
+          "actual": 33554432,
+          "baseline": 31457280,
+          "delta": 2097152
+        },
+        {
+          "field": "cuda_graph_calibration_retained_bytes",
+          "actual": 33554432,
+          "baseline": 31457280,
+          "delta": 2097152
+        },
+        {
+          "field": "startup_retained_bytes",
+          "actual": 33786880,
+          "baseline": 31689728,
+          "delta": 2097152
+        }
+      ],
+      "actual_memory": {
+        "available_after_startup_bytes": 1074790400,
+        "available_after_weights_bytes": 12456034304,
+        "cuda_graph_calibration_increment_bytes": 33554432,
+        "cuda_graph_calibration_retained_bytes": 33554432,
+        "cuda_graph_prepare_increment_bytes": 0,
+        "cuda_graph_rebuild_estimate_bytes": 0,
+        "device_budget_bytes": 32429309952,
+        "host_context_capacity_bytes": 21881405440,
+        "host_context_occupied_bytes": 0,
+        "host_context_reserved_bytes": 0,
+        "host_kv_occupied_bytes": 0,
+        "host_state_occupied_slots": 0,
+        "kv_capacity_headroom_bytes": 1073741824,
+        "kv_capacity_increment_bytes": 4194304,
+        "kv_payload_bytes": 9592373248,
+        "minimum_runtime_reservation_bytes": 10343649793,
+        "moe": null,
+        "planned_slack_bytes": 2649599,
+        "runtime_reservation_bytes": 11346088449,
+        "sequence": {
+          "capacity_bytes": 10479440384,
+          "peak_used_bytes": 10479440384,
+          "used_bytes": 10479440384
+        },
+        "startup_retained_bytes": 33786880,
+        "vision_workspace": {
+          "aggregate_prompt_tokens": 32768,
+          "encode_peak_bytes": 866648065,
+          "general_capacity_bytes": 121830240,
+          "handoff_active_bytes": 0,
+          "handoff_capacity_bytes": 167772160,
+          "handoff_offset_bytes": 150994944,
+          "handoff_peak_bytes": 0,
+          "max_item_tokens": 16384
+        },
+        "weights": {
+          "capacity_bytes": 19973043200,
+          "peak_used_bytes": 19973043200,
+          "used_bytes": 19973043200
+        },
+        "workspace": {
+          "capacity_bytes": 866648065,
+          "peak_used_bytes": 121830240,
+          "used_bytes": 0
+        }
+      },
+      "baseline_memory": {
+        "available_after_startup_bytes": 1072693248,
+        "available_after_weights_bytes": 12456034304,
+        "cuda_graph_calibration_increment_bytes": 31457280,
+        "cuda_graph_calibration_retained_bytes": 31457280,
+        "cuda_graph_prepare_increment_bytes": 0,
+        "cuda_graph_rebuild_estimate_bytes": 0,
+        "device_budget_bytes": 32429309952,
+        "host_context_capacity_bytes": 21881405440,
+        "host_context_occupied_bytes": 0,
+        "host_context_reserved_bytes": 0,
+        "host_kv_occupied_bytes": 0,
+        "host_state_occupied_slots": 0,
+        "kv_capacity_headroom_bytes": 1073741824,
+        "kv_capacity_increment_bytes": 4194304,
+        "kv_payload_bytes": 9596567552,
+        "minimum_runtime_reservation_bytes": 10343649793,
+        "moe": null,
+        "planned_slack_bytes": 552447,
+        "runtime_reservation_bytes": 11350282753,
+        "sequence": {
+          "capacity_bytes": 10483634688,
+          "peak_used_bytes": 10483634688,
+          "used_bytes": 10483634688
+        },
+        "startup_retained_bytes": 31689728,
+        "vision_workspace": {
+          "aggregate_prompt_tokens": 32768,
+          "encode_peak_bytes": 866648065,
+          "general_capacity_bytes": 121830240,
+          "handoff_active_bytes": 0,
+          "handoff_capacity_bytes": 167772160,
+          "handoff_offset_bytes": 150994944,
+          "handoff_peak_bytes": 0,
+          "max_item_tokens": 16384
+        },
+        "weights": {
+          "capacity_bytes": 19973043200,
+          "peak_used_bytes": 19973043200,
+          "used_bytes": 19973043200
+        },
+        "workspace": {
+          "capacity_bytes": 866648065,
+          "peak_used_bytes": 121830240,
+          "used_bytes": 0
+        }
+      }
+    },
+    "startup_disposition": {
+      "policy_amended_by": "Main",
+      "recorded_metrics_reevaluation": "integration-startup-policy.json",
+      "new_exact_source_batch_required": true
+    },
+    "independent_product_smokes": {
+      "job": "20261025T075746Z-int-inventory-12ff96e0-592335",
+      "job_exit": 1,
+      "elapsed_seconds": 26,
+      "serve_contract": {
+        "exit": 0,
+        "seconds": 0.767
+      },
+      "agent_product": {
+        "exit": 1,
+        "seconds": 3.326,
+        "error": "same-session repeat did not select a private continuation"
+      },
+      "server_exit": 0,
+      "leftover_containers": 0,
+      "unowned_containers": 0
+    },
+    "private_repeat_diagnostics": {
+      "client_source": "4f95d8577d41db5aaa8be81f14c1a3f8ee143e0d",
+      "runtime_unchanged": true,
+      "assertions_unchanged": true,
+      "isolated_request_sent": false,
+      "arms": [
+        {
+          "job": "20261025T080659Z-int-private-repeat-12ff96e0-593199",
+          "device_extra_slots": 1,
+          "device_state_capacity": 2,
+          "device_state_occupied": [
+            2,
+            2
+          ],
+          "host_state_occupied": [
+            31,
+            33
+          ],
+          "job_exit": 1,
+          "seconds": 26
+        },
+        {
+          "job": "20261025T080833Z-int-private-repeat-slots2-12ff96e0-593478",
+          "device_extra_slots": 2,
+          "device_state_capacity": 3,
+          "device_state_occupied": [
+            3,
+            3
+          ],
+          "host_state_occupied": [
+            30,
+            32
+          ],
+          "job_exit": 1,
+          "seconds": 26
+        }
+      ],
+      "common_observations": {
+        "selection_paths": [
+          "root",
+          "root"
+        ],
+        "selection_frontiers": [
+          0,
+          0
+        ],
+        "reused_prompt_tokens": [
+          463,
+          463
+        ],
+        "computed_prefill_tokens": [
+          682,
+          700
+        ],
+        "committed_decode_tokens": [
+          112,
+          113
+        ],
+        "private_catalog_occupied": [
+          10,
+          11
+        ],
+        "shared_catalog_occupied": [
+          13,
+          14
+        ],
+        "pending_work": false
+      },
+      "disposition": "Engine owner confirms ROOT is a legal cost-first choice; an 18-token prompt cannot guarantee private reuse. Product extra slots alone do not close the fixture. The meaningful repeated user-history fixture below passes unchanged private assertions without a runtime priority change.",
+      "changed_fixture_proof": {
+        "client_source": "eae2b74e4f31b79d2f71949bc78f4cf0b180443d",
+        "job": "20261025T081426Z-int-private-repeat-long-12ff96e0-594061",
+        "exit": 0,
+        "seconds": 27,
+        "device_extra_slots": 2,
+        "prompt_tokens": 1623,
+        "completion_tokens": 3,
+        "repeat_path": "private_input_replay",
+        "repeat_frontier_tokens": 1614,
+        "reused_prompt_tokens": [
+          463,
+          2077
+        ],
+        "computed_prefill_tokens": [
+          2287,
+          2296
+        ],
+        "committed_decode_tokens": [
+          113,
+          115
+        ],
+        "host_state_occupied": [
+          30,
+          30
+        ],
+        "isolated_request_sent": false,
+        "host_unit_tests": 16,
+        "host_unit_exit": 0,
+        "full_product_battery_required_on_final_source": true
+      }
+    },
+    "remaining": [
+      "new_amended_source_full_inventory",
+      "exact_profile_startup",
+      "product_smokes",
+      "package_inventory"
+    ],
     "leftover_containers": 0,
     "unowned_containers": 0
   },
-  "private_repeat_diagnostics": {
-    "client_source": "4f95d8577d41db5aaa8be81f14c1a3f8ee143e0d",
-    "runtime_unchanged": true,
-    "assertions_unchanged": true,
-    "isolated_request_sent": false,
-    "arms": [
-      {
-        "job": "20261025T080659Z-int-private-repeat-12ff96e0-593199",
-        "device_extra_slots": 1,
-        "device_state_capacity": 2,
-        "device_state_occupied": [2, 2],
-        "host_state_occupied": [31, 33],
-        "job_exit": 1,
-        "seconds": 26
-      },
-      {
-        "job": "20261025T080833Z-int-private-repeat-slots2-12ff96e0-593478",
-        "device_extra_slots": 2,
-        "device_state_capacity": 3,
-        "device_state_occupied": [3, 3],
-        "host_state_occupied": [30, 32],
-        "job_exit": 1,
-        "seconds": 26
-      }
-    ],
-    "common_observations": {
-      "selection_paths": ["root", "root"],
-      "selection_frontiers": [0, 0],
-      "reused_prompt_tokens": [463, 463],
-      "computed_prefill_tokens": [682, 700],
-      "committed_decode_tokens": [112, 113],
-      "private_catalog_occupied": [10, 11],
-      "shared_catalog_occupied": [13, 14],
-      "pending_work": false
-    },
-    "disposition": "Engine owner confirms ROOT is a legal cost-first choice; an 18-token prompt cannot guarantee private reuse. Product extra slots alone do not close the fixture. The meaningful repeated user-history fixture below passes unchanged private assertions without a runtime priority change.",
-    "changed_fixture_proof": {
-      "client_source": "eae2b74e4f31b79d2f71949bc78f4cf0b180443d",
-      "job": "20261025T081426Z-int-private-repeat-long-12ff96e0-594061",
-      "exit": 0,
-      "seconds": 27,
-      "device_extra_slots": 2,
-      "prompt_tokens": 1623,
-      "completion_tokens": 3,
-      "repeat_path": "private_input_replay",
-      "repeat_frontier_tokens": 1614,
-      "reused_prompt_tokens": [463, 2077],
-      "computed_prefill_tokens": [2287, 2296],
-      "committed_decode_tokens": [113, 115],
-      "host_state_occupied": [30, 30],
-      "isolated_request_sent": false,
-      "host_unit_tests": 16,
-      "host_unit_exit": 0,
-      "full_product_battery_required_on_final_source": true
-    }
-  },
-  "remaining": [
-    "new_amended_source_full_inventory",
-    "exact_profile_startup",
-    "product_smokes",
-    "package_inventory"
-  ],
-  "leftover_containers": 0,
-  "unowned_containers": 0
+  "published": false
 }

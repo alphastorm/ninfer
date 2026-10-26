@@ -1,3 +1,5 @@
-target_sources(ninfer_ops PRIVATE
-  "${CMAKE_CURRENT_LIST_DIR}/nvfp4_a4.cu"
-)
+if(CMAKE_CUDA_ARCHITECTURES STREQUAL "120a")
+  target_sources(ninfer_ops PRIVATE "${CMAKE_CURRENT_LIST_DIR}/nvfp4_a4.cu")
+else()
+  target_sources(ninfer_ops PRIVATE "${CMAKE_CURRENT_LIST_DIR}/unsupported_arch.cpp")
+endif()

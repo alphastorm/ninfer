@@ -269,6 +269,7 @@ SessionCheckpointService::SaveOutcome SessionCheckpointService::save_session(
     } catch (...) {
         outcome.skip.export_state = runtime::DurableExportState::Refused;
         if (outcome.skip.durable_reason == Reason::None) { outcome.skip.durable_reason = Reason::IoUnavailable; }
+        log_checkpoint_failure("save_session", outcome.skip.durable_reason);
     }
     outcome.tag = std::move(snapshot->latest_response_id);
     return outcome;
@@ -321,6 +322,7 @@ SessionCheckpointEraseResult SessionCheckpointService::erase(std::string_view se
         return result;
     }
     catch (...) {
+        log_checkpoint_failure("erase_session", Reason::IoUnavailable);
         throw ApiException({.status = 503, .type = "server_error",
             .message = "checkpoint storage is unavailable", .code = "io_unavailable"});
     }
@@ -332,10 +334,12 @@ bool SessionCheckpointService::erase_response(const std::string& id, const std::
     Reason refusal = Reason::None;
     bool erased = false;
     if (!responses_.get_for_session(id, session)) { return false; }
+    std::string_view operation = "delete_load_prior";
     try {
         auto prior = store_.load(session, fingerprint_json_);
         if (prior.state != SessionCheckpointLoadState::Available &&
             prior.state != SessionCheckpointLoadState::Missing) {
+            refusal = prior.reason;
             throw std::runtime_error("checkpoint deletion cannot verify prior survivors");
         }
         erased = responses_.erase_for_session_durably(id, session,
@@ -343,6 +347,7 @@ bool SessionCheckpointService::erase_response(const std::string& id, const std::
                 if (!survivors) {
                     // erase must not conflict with this operation's own prior-generation pin.
                     if (prior.checkpoint) { prior.checkpoint->engine.reset(); }
+                    operation = "delete_erase_session";
                     const auto result = store_.erase(session);
                     if (result == SessionCheckpointEraseResult::Conflict) {
                         refusal = Reason::TransactionBusy;
@@ -352,6 +357,7 @@ bool SessionCheckpointService::erase_response(const std::string& id, const std::
                 }
                 runtime::SessionCheckpointSkipDetail skip;
                 const auto& tag = survivors->latest_response_id;
+                operation = "delete_save_survivors";
                 auto saved = survivors->replay_only
                     ? store_.save_responses(*survivors, fingerprint_json_, &skip)
                     : store_.save(*survivors, fingerprint_json_,
@@ -366,6 +372,7 @@ bool SessionCheckpointService::erase_response(const std::string& id, const std::
                     // DELETE never promises that an older native endpoint still resides in
                     // cache. Preserve shipped success semantics through authenticated replay.
                     survivors->replay_only = true;
+                    operation = "delete_save_replay_survivors";
                     saved = store_.save_responses(*survivors, fingerprint_json_, &skip);
                 }
                 if (!saved) { refusal = skip.durable_reason; return false; }
@@ -375,6 +382,7 @@ bool SessionCheckpointService::erase_response(const std::string& id, const std::
             }, &refusal, prior.checkpoint ? &prior.checkpoint->responses : nullptr);
     }
     catch (...) {
+        log_checkpoint_failure(operation, refusal == Reason::None ? Reason::IoUnavailable : refusal);
         throw ApiException({.status = 503, .type = "server_error",
             .message = "checkpoint storage is unavailable", .code = "io_unavailable"});
     }

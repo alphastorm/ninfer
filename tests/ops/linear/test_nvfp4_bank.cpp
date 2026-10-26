@@ -58,6 +58,12 @@ int check_bank(Operation operation, int n, int k) {
     }
     int failures = 0;
     for (const auto policy : {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA4}) {
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+        if (policy == ops::LinearPolicy::AllowA4) {
+            std::cout << "EXCLUDED NVFP4 bank A4 (refusal checked by architecture_contract)\n";
+            continue;
+        }
+#endif
         for (const int tokens :
              {1, policy == ops::LinearPolicy::A16Only ? (swiglu ? 16 : 129) : 257}) {
             // +/-6 is exact in the A4 activation representation with divisor 1.

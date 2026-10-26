@@ -1,0 +1,444 @@
+[CmdletBinding()]
+param(
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Container })]
+    [string]$SourceRoot,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$NInferExecutable,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$ServerExecutable,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$BenchmarkExecutable,
+
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^[0-9a-f]{40}$')]
+    [string]$ReleaseHeadSha,
+
+    [ValidatePattern('^[0-9a-f]{40}$')]
+    [string]$RuntimeSourceSha = $ReleaseHeadSha,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateNotNullOrEmpty()]
+    [string[]]$RuntimeFile,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$DependencySbomTool,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$VcpkgResolved,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$CudaInventory,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$ThirdPartyInventory,
+
+    [Parameter(Mandatory = $true)]
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$RuntimeInventory,
+
+    [Parameter(Mandatory = $true)]
+    [ValidatePattern('^rtx[0-9]{4}$')]
+    [string]$Lane,
+
+    [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })]
+    [string]$ServerConfig,
+
+    [string]$PythonExecutable = 'python3',
+
+    [Nullable[Int64]]$SourceDateEpoch,
+
+    [string]$OutputDirectory = (Join-Path $PSScriptRoot 'out')
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+$laneDirectory = Join-Path (Join-Path $PSScriptRoot 'lanes') $Lane
+if (-not (Test-Path -LiteralPath (Join-Path $laneDirectory 'release-spec.json') -PathType Leaf)) {
+    throw "unknown native lane: $Lane"
+}
+if (-not $ServerConfig) { $ServerConfig = Join-Path $laneDirectory 'server-config.json' }
+
+function Read-JsonFile([string]$Path) {
+    return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+}
+
+function Get-LowerSha256([string]$Path) {
+    return (Get-FileHash -Algorithm SHA256 -LiteralPath $Path).Hash.ToLowerInvariant()
+}
+
+function Get-TarCommand {
+    $command = Get-Command tar.exe -ErrorAction SilentlyContinue
+    if ($null -eq $command) { $command = Get-Command tar -ErrorAction SilentlyContinue }
+    if ($null -eq $command) { throw 'the operating-system tar command is required' }
+    return $command.Source
+}
+
+function Assert-AllowedListenHost([object]$Spec, [object]$Config) {
+    $expected = @('loopback', 'tailscale-ipv4')
+    foreach ($classes in @(@($Spec.network.allowed_listen_host_classes), @($Config.listen.allowed_host_classes))) {
+        if ($classes.Count -ne $expected.Count -or
+            [string]::Join(',', @($classes)) -cne [string]::Join(',', $expected)) {
+            throw 'server configuration must remain loopback/Tailscale-only'
+        }
+    }
+    if ([string]$Spec.network.authentication -cne 'required-api-key-file' -or
+        [string]$Config.authentication.mode -cne 'required-api-key-file') {
+        throw 'server configuration must require API-key-file authentication'
+    }
+    $address = $null
+    if (-not [Net.IPAddress]::TryParse([string]$Config.listen.host, [ref]$address) -or
+        $address.AddressFamily -ne [Net.Sockets.AddressFamily]::InterNetwork) {
+        throw 'server listen host must be an IPv4 loopback or Tailscale address'
+    }
+    $bytes = $address.GetAddressBytes()
+    if ($bytes[0] -ne 127 -and
+        -not ($bytes[0] -eq 100 -and $bytes[1] -ge 64 -and $bytes[1] -le 127)) {
+        throw 'server listen host must be an IPv4 loopback or Tailscale address'
+    }
+}
+
+$source = (Resolve-Path -LiteralPath $SourceRoot).Path
+$ninfer = (Resolve-Path -LiteralPath $NInferExecutable).Path
+$server = (Resolve-Path -LiteralPath $ServerExecutable).Path
+$benchmark = (Resolve-Path -LiteralPath $BenchmarkExecutable).Path
+$configPath = (Resolve-Path -LiteralPath $ServerConfig).Path
+$packageTool = Join-Path $source 'tools/release/package.py'
+if (-not (Test-Path -LiteralPath $packageTool -PathType Leaf)) {
+    throw 'source tree does not contain tools/release/package.py'
+}
+
+$spec = Read-JsonFile (Join-Path $laneDirectory 'release-spec.json')
+$config = Read-JsonFile $configPath
+if ($spec.artifact_type -cne 'ninfer_windows_release_spec' -or
+    [int]$spec.schema_version -ne 4 -or
+    [string]$spec.lane -cne $Lane -or
+    [string]$spec.gpu.cuda_architecture -cne ('sm_' + [string]$spec.gpu.cmake_cuda_architecture) -or
+    [string]$spec.model.revision -cnotmatch '^[0-9a-f]{40}$' -or
+    [string]$spec.model.sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+    [Int64]$spec.model.bytes -le 0 -or
+    [string]$spec.source.upstream_base_sha -cnotmatch '^[0-9a-f]{40}$' -or
+    [string]$spec.source.lineage_base_sha -cnotmatch '^[0-9a-f]{40}$') {
+    throw 'release specification immutable identity mismatch'
+}
+$releaseId = [string]$spec.release_id
+$releaseVersion = 'v' + [string]$spec.release_version
+$deploymentProfile = [string]$spec.deployment_profile
+$buildProfile = [string]$spec.build_profile
+$platform = [string]$spec.platform
+$productPrefix = [string]$spec.product_prefix
+$upstreamBaseSha = [string]$spec.source.upstream_base_sha
+$lineageBaseSha = [string]$spec.source.lineage_base_sha
+$cmakeCudaArchitecture = [string]$spec.gpu.cmake_cuda_architecture
+$assetStem = "$productPrefix-$releaseVersion-$platform"
+# The exact engine tuning is bound by hash into the build identity; the structural profile
+# every native lane ships - one authenticated request at a time, MTP, durable checkpoints, no
+# prompt disk cache - is asserted here.
+if ($config.artifact_type -cne 'ninfer_windows_server_config' -or
+    [int]$config.schema_version -ne 4 -or
+    [string]$config.release_id -cne $releaseId -or
+    [string]$config.deployment_profile -cne $deploymentProfile -or
+    [int]$config.engine.max_concurrency -ne 1 -or
+    [int]$config.engine.admission_headroom_mib -lt 256 -or
+    [string]$config.speculative.backend -cne 'mtp' -or
+    [int]$config.speculative.draft_tokens -lt 1 -or
+    -not [bool]$config.session_checkpoint.enabled -or
+    $config.session_checkpoint.require_origin_auth -isnot [bool] -or
+    -not $config.session_checkpoint.require_origin_auth -or
+    [int]$config.session_checkpoint.staging_mib -le 0 -or
+    [int]$config.context_cache.device_state_slots -lt 1 -or
+    [string]$config.context_cache.host_context_mib -cnotmatch '^[0-9]+(?:\.[0-9]+)?$' -or
+    [decimal]$config.context_cache.host_context_mib -le 0 -or
+    $null -ne $config.context_cache.PSObject.Properties['host_state_slots'] -or
+    $null -ne $config.context_cache.PSObject.Properties['host_kv_mib'] -or
+    $null -ne $config.context_cache.PSObject.Properties['max_private_continuations'] -or
+    $null -ne $config.PSObject.Properties['persistent_cache'] -or
+    $null -ne $config.reasoning.PSObject.Properties['effort']) {
+    throw 'server configuration is not an authenticated native lane profile'
+}
+# Every package this script builds declares keep-warm explicitly, 0 included; the controller
+# reads a missing field as off only for releases packaged before the field existed.
+$gpuKeepWarm = $config.engine.PSObject.Properties['gpu_keep_warm_ms']
+if ($null -eq $gpuKeepWarm -or -not ($gpuKeepWarm.Value -is [int] -or $gpuKeepWarm.Value -is [long]) -or
+    $gpuKeepWarm.Value -lt 0 -or $gpuKeepWarm.Value -gt [int]::MaxValue) {
+    throw 'server configuration must declare engine.gpu_keep_warm_ms as an integer in [0, 2147483647]'
+}
+Assert-AllowedListenHost $spec $config
+$expectedConfigSha256 = Get-LowerSha256 $configPath
+
+$runtimePaths = [Collections.Generic.List[string]]::new()
+$runtimeNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+foreach ($file in $RuntimeFile) {
+    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "runtime DLL does not exist: $file" }
+    $resolved = (Resolve-Path -LiteralPath $file).Path
+    $name = [IO.Path]::GetFileName($resolved)
+    if ([IO.Path]::GetExtension($name) -ine '.dll' -or -not $runtimeNames.Add($name)) {
+        throw "runtime dependency is not a unique app-local DLL: $name"
+    }
+    $runtimePaths.Add($resolved)
+}
+if ($runtimePaths.Count -eq 0) { throw 'at least one app-local runtime DLL is required' }
+
+$output = [IO.Path]::GetFullPath($OutputDirectory)
+if (Test-Path -LiteralPath $output) { throw "package output directory already exists: $output" }
+$outputParent = Split-Path -Parent $output
+New-Item -ItemType Directory -Force -Path $outputParent | Out-Null
+$stage = Join-Path $outputParent ('.ninfer-windows-package-' + [Guid]::NewGuid().ToString('N'))
+$packageOutput = Join-Path $stage 'published'
+$inspection = Join-Path $stage 'inspection'
+New-Item -ItemType Directory -Path $stage, $inspection | Out-Null
+
+try {
+    $arguments = [Collections.Generic.List[string]]::new()
+    foreach ($argument in @(
+            $packageTool,
+            '--source', $source,
+            '--ninfer', $ninfer,
+            '--ninfer-serve', $server,
+            '--ninfer-bench', $benchmark,
+            '--output-dir', $packageOutput,
+            '--release-version', $releaseVersion,
+            '--platform', $platform,
+            '--upstream-base-sha', $upstreamBaseSha,
+            '--release-head-sha', $ReleaseHeadSha,
+            '--runtime-source-sha', $RuntimeSourceSha,
+            '--build-profile', $buildProfile,
+            '--lineage-base-sha', $lineageBaseSha,
+            '--product-prefix', $productPrefix,
+            '--cuda-architecture', $cmakeCudaArchitecture,
+            '--lane-dir', "packaging/windows/lanes/$Lane",
+            '--release-notes', 'packaging/windows/RELEASE_NOTES.md',
+            '--sbom-namespace', 'https://github.com/alphastorm/ninfer/releases',
+            '--sbom-package-name', ('NInfer native ' + [string]$spec.gpu.name),
+            '--windows-server-config', $configPath
+        )) {
+        $arguments.Add([string]$argument)
+    }
+    if ($null -ne $SourceDateEpoch) {
+        $arguments.Add('--source-date-epoch')
+        $arguments.Add([string]$SourceDateEpoch)
+    }
+    foreach ($runtime in $runtimePaths) {
+        $arguments.Add('--runtime-dependency')
+        $arguments.Add($runtime)
+    }
+
+    $packageOutputLines = @(& $PythonExecutable @arguments 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "package.py failed: $([string]::Join([Environment]::NewLine, @($packageOutputLines | ForEach-Object { [string]$_ })))"
+    }
+    $packageReceipt = [string]::Join([Environment]::NewLine, @($packageOutputLines | ForEach-Object { [string]$_ })) | ConvertFrom-Json
+    if ($packageReceipt.artifact_type -cne 'ninfer_local_release_receipt' -or
+        [int]$packageReceipt.schema_version -ne 2 -or
+        [string]$packageReceipt.release_version -cne $releaseVersion -or
+        [string]$packageReceipt.platform -cne $platform -or
+        [string]$packageReceipt.upstream_base_sha -cne $upstreamBaseSha -or
+        [string]$packageReceipt.lineage_base_sha -cne $lineageBaseSha -or
+        [string]$packageReceipt.patch_stack_sha -cne $RuntimeSourceSha -or
+        [string]$packageReceipt.package_source_sha -cne $ReleaseHeadSha -or
+        [string]$packageReceipt.build_profile -cne $buildProfile -or
+        [string]$packageReceipt.cuda_architecture -cne $cmakeCudaArchitecture) {
+        throw 'package.py receipt identity mismatch'
+    }
+
+    $packagePath = Join-Path $packageOutput ([string]$packageReceipt.binary_asset.name)
+    if ([IO.Path]::GetFileName($packagePath) -cne "$assetStem.tar.gz" -or
+        (Get-LowerSha256 $packagePath) -cne [string]$packageReceipt.binary_asset.sha256) {
+        throw 'package.py binary asset identity mismatch'
+    }
+    $tar = Get-TarCommand
+    & $tar '-xzf' $packagePath '-C' $inspection
+    if ($LASTEXITCODE -ne 0) { throw 'failed to inspect generated package' }
+    $roots = @(Get-ChildItem -LiteralPath $inspection -Directory)
+    if ($roots.Count -ne 1 -or $roots[0].Name -cne $assetStem) {
+        throw 'generated package root identity mismatch'
+    }
+    $payload = $roots[0].FullName
+    $identity = Read-JsonFile (Join-Path $payload 'build-identity.json')
+    $packagedSpec = Read-JsonFile (Join-Path $payload 'release-spec.json')
+    $packagedConfig = Read-JsonFile (Join-Path $payload 'server-config.json')
+    if ([string]$identity.patch_stack_sha -cne $RuntimeSourceSha -or
+        [string]$identity.lineage_base_sha -cne $lineageBaseSha -or
+        [string]$identity.build_profile -cne $buildProfile -or
+        [string]$identity.cuda_architecture -cne $cmakeCudaArchitecture -or
+        [string]$identity.configuration_sha256 -cne $expectedConfigSha256 -or
+        (Get-LowerSha256 (Join-Path $payload 'server-config.json')) -cne $expectedConfigSha256 -or
+        [string]$packagedSpec.release_id -cne $releaseId -or
+        [string]$packagedConfig.deployment_profile -cne $deploymentProfile) {
+        throw 'generated package contents are not bound to the release identity'
+    }
+    foreach ($name in @('ninfer.exe', 'ninfer-serve.exe', 'ninfer_bench.exe')) {
+        if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $payload 'bin') $name) -PathType Leaf)) {
+            throw "generated package omitted binary: $name"
+        }
+    }
+    foreach ($runtimeName in $runtimeNames) {
+        if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $payload 'bin') $runtimeName) -PathType Leaf)) {
+            throw "generated package omitted app-local DLL: $runtimeName"
+        }
+    }
+    foreach ($name in @('Install-Release.ps1', 'Control-Release.ps1', 'Control-GpuOwner.ps1', 'Protect-StateRoot.ps1', 'SHA256SUMS.txt', 'VERSION', 'RELEASE_NOTES.md')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $payload $name) -PathType Leaf)) {
+            throw "generated package omitted lifecycle asset: $name"
+        }
+    }
+    foreach ($name in @('agent_protocol.py', 'serve_contract.py')) {
+        if (-not (Test-Path -LiteralPath (Join-Path (Join-Path $payload 'smoke') $name) -PathType Leaf)) {
+            throw "generated package omitted smoke asset: $name"
+        }
+    }
+
+    $dependencyName = "$assetStem.cdx.json"
+    $dependencyPath = Join-Path $packageOutput $dependencyName
+    $dependencyArguments = @(
+        $DependencySbomTool, '--package-dir', $payload, '--source-dir', $source,
+        '--source-commit', $RuntimeSourceSha, '--vcpkg-lock', $VcpkgResolved,
+        '--cuda-inventory', $CudaInventory, '--third-party-inventory', $ThirdPartyInventory,
+        '--runtime-inventory', $RuntimeInventory,
+        '--output', $dependencyPath
+    )
+    $dependencyLines = @(& $PythonExecutable @dependencyArguments 2>&1)
+    if ($LASTEXITCODE -ne 0) {
+        throw "dependency SBOM generation failed: $([string]::Join([Environment]::NewLine, @($dependencyLines | ForEach-Object { [string]$_ })))"
+    }
+    $dependencyBom = Read-JsonFile $dependencyPath
+    if ([string]$dependencyBom.bomFormat -cne 'CycloneDX' -or
+        [string]$dependencyBom.specVersion -cne '1.5' -or
+        [string]$dependencyBom.metadata.component.version -cne $RuntimeSourceSha) {
+        throw 'dependency SBOM does not bind the exact native runtime'
+    }
+    $runtimeHashes = @($dependencyBom.metadata.component.hashes | Where-Object { [string]$_.alg -ceq 'SHA-256' })
+    if ($runtimeHashes.Count -ne 1 -or
+        [string]$runtimeHashes[0].content -cne [string]$identity.binaries.'ninfer-serve') {
+        throw 'dependency SBOM runtime binary hash mismatch'
+    }
+
+    foreach ($name in @('Install-Release.ps1', 'Control-Release.ps1', 'Control-GpuOwner.ps1', 'Protect-StateRoot.ps1')) {
+        Copy-Item -LiteralPath (Join-Path $payload $name) -Destination (Join-Path $packageOutput $name)
+    }
+
+    $checksumsPath = Join-Path $packageOutput 'SHA256SUMS'
+    $lf = [string][char]10
+    $buildReceipt = [ordered]@{
+        artifact_type = 'ninfer_windows_package_build_receipt'
+        schema_version = 2
+        release_id = $releaseId
+        release_version = $releaseVersion.Substring(1)
+        deployment_profile = $deploymentProfile
+        build_profile = $buildProfile
+        upstream_base_sha = $upstreamBaseSha
+        lineage_base_sha = $lineageBaseSha
+        patch_stack_sha = $RuntimeSourceSha
+        runtime_source_sha = $RuntimeSourceSha
+        package_source_sha = $ReleaseHeadSha
+        cuda_architecture = [string]$spec.gpu.cuda_architecture
+        lane = $Lane
+        binaries = [ordered]@{
+            ninfer_sha256 = [string]$identity.binaries.ninfer
+            server_sha256 = [string]$identity.binaries.'ninfer-serve'
+            benchmark_sha256 = [string]$identity.binaries.ninfer_bench
+        }
+        config_sha256 = [string]$identity.configuration_sha256
+        model_sha256 = [string]$spec.model.sha256
+        source_archive = [ordered]@{
+            name = [string]$packageReceipt.source_archive.name
+            sha256 = Get-LowerSha256 (Join-Path $packageOutput ([string]$packageReceipt.source_archive.name))
+            bytes = [Int64](Get-Item -LiteralPath (Join-Path $packageOutput ([string]$packageReceipt.source_archive.name))).Length
+        }
+        sbom = [ordered]@{
+            name = [string]$packageReceipt.sbom.name
+            sha256 = [string]$packageReceipt.sbom.sha256
+            format = 'SPDX-2.3'
+        }
+        dependency_sbom = [ordered]@{
+            name = $dependencyName
+            sha256 = Get-LowerSha256 $dependencyPath
+            format = 'CycloneDX-1.5'
+            runtime_source_sha = $RuntimeSourceSha
+            generator_sha256 = Get-LowerSha256 $DependencySbomTool
+            inputs = [ordered]@{
+                vcpkg_manifest_sha256 = Get-LowerSha256 (Join-Path $source 'vcpkg.json')
+                vcpkg_resolved_sha256 = Get-LowerSha256 $VcpkgResolved
+                cuda_inventory_sha256 = Get-LowerSha256 $CudaInventory
+                third_party_inventory_sha256 = Get-LowerSha256 $ThirdPartyInventory
+                runtime_inventory_sha256 = Get-LowerSha256 $RuntimeInventory
+            }
+        }
+        package = [ordered]@{
+            filename = [IO.Path]::GetFileName($packagePath)
+            sha256 = Get-LowerSha256 $packagePath
+            bytes = [Int64](Get-Item -LiteralPath $packagePath).Length
+        }
+        checksums = [ordered]@{
+            filename = 'SHA256SUMS'
+            role = 'closed-outer-distribution-set'
+            entries = 10
+            line_ending = 'LF'
+        }
+        support_assets = [ordered]@{
+            installer_sha256 = Get-LowerSha256 (Join-Path $packageOutput 'Install-Release.ps1')
+            controller_sha256 = Get-LowerSha256 (Join-Path $packageOutput 'Control-Release.ps1')
+            gpu_owner_controller_sha256 = Get-LowerSha256 (Join-Path $packageOutput 'Control-GpuOwner.ps1')
+            state_protection_sha256 = Get-LowerSha256 (Join-Path $packageOutput 'Protect-StateRoot.ps1')
+        }
+        qualification_status = 'hardware-pending'
+        qualification_status_authority = 'immutable-pre-hardware-package-build'
+        qualification_summary_artifact_type = [string]$spec.qualification.summary_artifact_type
+        secret_values_recorded = 0
+    }
+    [IO.File]::WriteAllText(
+        (Join-Path $packageOutput 'package-build-receipt.json'),
+        (($buildReceipt | ConvertTo-Json -Depth 12) + $lf),
+        [Text.UTF8Encoding]::new($false)
+    )
+
+    $expectedChecksumNames = @(
+        'Control-GpuOwner.ps1',
+        'Control-Release.ps1',
+        'Install-Release.ps1',
+        'Protect-StateRoot.ps1',
+        [IO.Path]::GetFileName($packagePath),
+        [string]$packageReceipt.source_archive.name,
+        [string]$packageReceipt.sbom.name,
+        $dependencyName,
+        [string]$packageReceipt.checksums,
+        'package-build-receipt.json'
+    )
+    [Array]::Sort($expectedChecksumNames, [StringComparer]::Ordinal)
+    $checksumNames = @(
+        Get-ChildItem -LiteralPath $packageOutput -File |
+            ForEach-Object { $_.Name }
+    )
+    [Array]::Sort($checksumNames, [StringComparer]::Ordinal)
+    if ([string]::Join($lf, $checksumNames) -cne
+        [string]::Join($lf, $expectedChecksumNames)) {
+        throw 'outer checksum asset set is incomplete, duplicated, or contains an unclassified file'
+    }
+    $checksumLines = foreach ($name in $checksumNames) {
+        "$(Get-LowerSha256 (Join-Path $packageOutput $name))  $name"
+    }
+    [IO.File]::WriteAllText(
+        $checksumsPath,
+        ([string]::Join($lf, $checksumLines) + $lf),
+        [Text.Encoding]::ASCII
+    )
+
+    Move-Item -LiteralPath $packageOutput -Destination $output
+    Write-Output ($buildReceipt | ConvertTo-Json -Depth 12 -Compress)
+}
+finally {
+    if (Test-Path -LiteralPath $stage) {
+        Remove-Item -LiteralPath $stage -Recurse -Force
+    }
+}

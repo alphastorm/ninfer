@@ -72,6 +72,11 @@
         }
     }
 
+    [[nodiscard]] bool admission_capacity_progress_pending(bool restoring) const {
+        return !resident_empty() || (!restoring && !paused_.empty()) ||
+               checkpoint_exports_in_flight_ != 0;
+    }
+
     [[nodiscard]] DurableExportResult export_session(
         std::string_view digest, std::string_view tag, ContinuationCheckpointWriter& writer,
         const DurableLimits& limits) {
@@ -86,6 +91,7 @@
             using Lease = decltype(instance_.program->prepare_checkpoint_export(
                 std::span<const Checkpoint>{}, limits));
             std::optional<Lease> lease;
+            bool prepared_export = false;
             DurableExportResult result;
             checkpoint_call([&] {
                 if (failed_) { result.reason = DurableReason::IoUnavailable; return; }
@@ -105,9 +111,25 @@
                     return;
                 }
                 lease.emplace(instance_.program->prepare_checkpoint_export(points, limits));
+                prepared_export = lease->state() == DurablePrepareState::Prepared;
+                if (prepared_export) { ++checkpoint_exports_in_flight_; }
                 result.reason = lease->reason();
             });
             if (!lease) { return result; }
+            const auto release_export = [&] {
+                checkpoint_call([&] {
+                    // Native readers can pin every idle Device image while the writer
+                    // runs off-lock. Retire them before advertising usable capacity.
+                    lease.reset();
+                    if (prepared_export) {
+                        prepared_export = false;
+                        --checkpoint_exports_in_flight_;
+                        scheduler_.capacity_released();
+                        request_admission_check();
+                        queue_cv_.notify_all();
+                    }
+                });
+            };
             try {
                 // Inline worker saves use the same off-execution-lock writer boundary as an
                 // external control caller. The immutable lease alone owns copied content.
@@ -125,10 +147,10 @@
                 }
                 if (execution) { execution->lock(); }
             } catch (...) {
-                checkpoint_call([&] { lease.reset(); });
+                release_export();
                 throw;
             }
-            checkpoint_call([&] { lease.reset(); });
+            release_export();
             return result;
         }
     }

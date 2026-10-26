@@ -27,7 +27,11 @@ target_sources(ninfer_ops PRIVATE
 )
 include("${CMAKE_CURRENT_LIST_DIR}/routed_swiglu/cpu/sources.cmake")
 
-target_sources(ninfer_nvfp4_non_rdc PRIVATE
-  "${CMAKE_CURRENT_LIST_DIR}/kernels/cuda/block_scaled/nvfp4/launch.cu"
-  "${CMAKE_CURRENT_LIST_DIR}/kernels/cuda/block_scaled/fp8/launch.cu"
-)
+if(TARGET ninfer_nvfp4_non_rdc)
+  target_sources(ninfer_nvfp4_non_rdc PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/kernels/cuda/block_scaled/nvfp4/launch.cu"
+    "${CMAKE_CURRENT_LIST_DIR}/kernels/cuda/block_scaled/fp8/launch.cu"
+  )
+else()
+  target_sources(ninfer_ops PRIVATE "${CMAKE_CURRENT_LIST_DIR}/kernels/cuda/block_scaled/unsupported_arch.cpp")
+endif()

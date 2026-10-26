@@ -16,12 +16,18 @@
 #include <string>
 #include <string_view>
 #include <span>
+#include <system_error>
 #include <vector>
 
 namespace ninfer::serve {
 inline constexpr std::uint32_t kSessionCheckpointSchemaVersion =
     runtime::kDurableSessionSchemaVersion;
 inline constexpr std::string_view kResponseStoreSnapshotCodec = "ninfer-responses-cbor/1";
+
+// Server-log diagnostic only. Operation is a fixed developer label, never a path/session/content.
+// An omitted code is extracted from the active exception, without logging exception.what().
+void log_checkpoint_failure(std::string_view operation, runtime::DurableReason reason,
+                            std::error_code code = {}) noexcept;
 
 struct SessionCheckpointStoreOptions {
     std::filesystem::path root;
