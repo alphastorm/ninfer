@@ -31,6 +31,14 @@ Use isolated experiment roots; no managed installation or release promotion is
 implied. Native build, smoke and comparison evidence must establish whether
 all-native packaging is worthwhile before a release qualification is attempted.
 
+The MSVC host stub cannot take 128-byte-aligned TMA aggregates by value. BF16,
+FP8 and NVFP4 descriptor types therefore retain explicit alignment in device
+compilation and on non-MSVC hosts, while Windows host aggregates use the CUDA
+header's host alignment. Encoder-local storage remains explicitly aligned.
+This does not replace TMA with another kernel or add descriptor allocations.
+`ninfer_tma_descriptor_abi_test` checks real TMA transfers through each production
+descriptor type, both directly and through a CUDA graph, on `sm_120a`.
+
 ## 2026-10-24 — Upstream-master native packages (qualification pending)
 
 The native component candidates are `v0.7.0-qwen38-4090-beta.2` and

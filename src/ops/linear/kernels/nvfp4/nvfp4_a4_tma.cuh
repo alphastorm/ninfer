@@ -21,7 +21,13 @@
 
 namespace ninfer::ops::detail {
 
+// MSVC cannot pass an over-aligned aggregate by value in the CUDA host stub.
+// Device parameter space still requires 128-byte-aligned tensor maps.
+#if defined(_MSC_VER) && !defined(__CUDA_ARCH__)
+struct Nvfp4A4TmaDescriptors {
+#else
 struct alignas(128) Nvfp4A4TmaDescriptors {
+#endif
     CUtensorMap a_codes;
     CUtensorMap b_codes;
     CUtensorMap a_scales;
@@ -41,7 +47,7 @@ nvfp4_make_tma_2d(void* address, CUtensorMapDataType data_type, std::uint64_t co
                   std::uint64_t rows, std::uint64_t row_stride_bytes, std::uint32_t box_columns,
                   std::uint32_t box_rows, CUtensorMapSwizzle swizzle, const char* operation,
                   CUtensorMapL2promotion l2_promotion = CU_TENSOR_MAP_L2_PROMOTION_NONE) {
-    CUtensorMap map{};
+    alignas(128) CUtensorMap map{};
     const std::uint64_t global_dim[]     = {columns, rows};
     const std::uint64_t global_stride[]  = {row_stride_bytes};
     const std::uint32_t box_dim[]        = {box_columns, box_rows};
