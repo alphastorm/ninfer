@@ -681,16 +681,16 @@ function Assert-InstallerArchitectureContract([object]$Spec, [object]$Config) {
         [string]$Spec.lifecycle.state_root_name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
         throw 'release specification immutable build identity mismatch'
     }
-    # Keep experimental Blackwell DFlash2/C2 separate from shipped MTP/C1 lanes.
-    $validSpeculation = if ([string]$Spec.lane -ceq 'rtx5090') {
-        [int]$Config.engine.max_concurrency -eq 2 -and
-        [string]$Config.speculative.backend -ceq 'dflash2' -and
-        [int]$Config.speculative.draft_tokens -eq 7
-    } else {
-        [int]$Config.engine.max_concurrency -eq 1 -and
-        [string]$Config.speculative.backend -ceq 'mtp' -and
-        [int]$Config.speculative.draft_tokens -ge 1
-    }
+    # Lane-specific runtime policy lives in the immutable release specification.
+    $validSpeculation = $null -ne $Spec.PSObject.Properties['runtime_shape'] -and
+        [int]$Spec.runtime_shape.max_concurrency -gt 0 -and
+        [int]$Config.engine.max_concurrency -eq [int]$Spec.runtime_shape.max_concurrency -and
+        -not [string]::IsNullOrWhiteSpace([string]$Spec.runtime_shape.speculative_backend) -and
+        [string]$Config.speculative.backend -ceq [string]$Spec.runtime_shape.speculative_backend -and
+        [int]$Spec.runtime_shape.draft_tokens.min -ge 1 -and
+        [int]$Config.speculative.draft_tokens -ge [int]$Spec.runtime_shape.draft_tokens.min -and
+        ($null -eq $Spec.runtime_shape.draft_tokens.max -or
+         [int]$Config.speculative.draft_tokens -le [int]$Spec.runtime_shape.draft_tokens.max)
     if ([string]$Config.deployment_profile -cne [string]$Spec.deployment_profile -or
         -not $validSpeculation -or
         [int]$Config.engine.admission_headroom_mib -lt 256 -or

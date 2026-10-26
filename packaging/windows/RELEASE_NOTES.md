@@ -24,7 +24,10 @@ The Host translation records the historical budget, not a measured DFlash2
 state-image size. Model bytes and schema-3 checkpoints are unchanged.
 
 The shared packager and installer accept that lane's DFlash2/C2 profile without
-loosening the shipped RTX 4090/3090 MTP/C1 shape. The controller passes DFlash2
+loosening the shipped RTX 4090/3090 MTP/C1 shape. Each lane's immutable
+`runtime_shape` declares concurrency, speculative backend and draft-token bounds;
+shared lifecycle scripts select no policy from a GPU name or lane-number literal.
+An absent runtime policy is refused. The controller passes DFlash2
 and the optimized proposal head explicitly. The existing qualification
 orchestrator's MTP pressure recipe is not an RTX 5090 acceptance procedure.
 Use isolated experiment roots; no managed installation or release promotion is

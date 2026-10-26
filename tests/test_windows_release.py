@@ -1450,6 +1450,11 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertEqual(config["listen"]["port"], spec["lifecycle"]["listen_port"])
                 self.assertEqual(config["authentication"]["mode"], "required-api-key-file")
                 blackwell = lane == "rtx5090"
+                self.assertEqual(spec["runtime_shape"], {
+                    "max_concurrency": 2 if blackwell else 1,
+                    "speculative_backend": "dflash2" if blackwell else "mtp",
+                    "draft_tokens": {"min": 7 if blackwell else 1, "max": 7 if blackwell else None},
+                })
                 self.assertEqual(config["engine"]["max_concurrency"], 2 if blackwell else 1)
                 self.assertEqual(config["engine"]["kv_dtype"], "bf16" if blackwell else "int8")
                 keep_warm = config["engine"]["gpu_keep_warm_ms"]
@@ -1595,11 +1600,27 @@ $Spec=Get-Content -Raw {spec}|ConvertFrom-Json
 $Config=Get-Content -Raw {config}|ConvertFrom-Json
 $Lane=[string]$Spec.lane
 $results=@()
-foreach($variant in @('valid','wrong-concurrency','wrong-backend','zero-drafts')){{
+foreach($variant in @('valid','wrong-concurrency','wrong-backend','zero-drafts',
+                     'below-minimum','above-maximum','metadata-shape','missing-policy')){{
+  $Spec=Get-Content -Raw {spec}|ConvertFrom-Json
   $Config=Get-Content -Raw {config}|ConvertFrom-Json
   if($variant -ceq 'wrong-concurrency'){{$Config.engine.max_concurrency=3}}
   if($variant -ceq 'wrong-backend'){{$Config.speculative.backend='dflash'}}
   if($variant -ceq 'zero-drafts'){{$Config.speculative.draft_tokens=0}}
+  if($variant -ceq 'below-minimum'){{$Config.speculative.draft_tokens=$Spec.runtime_shape.draft_tokens.min-1}}
+  if($variant -ceq 'above-maximum'){{
+    $Config.speculative.draft_tokens=if($null -eq $Spec.runtime_shape.draft_tokens.max){{99}}else{{$Spec.runtime_shape.draft_tokens.max+1}}
+  }}
+  if($variant -ceq 'metadata-shape'){{
+    $Spec.runtime_shape.max_concurrency=3
+    $Spec.runtime_shape.speculative_backend='dflash2'
+    $Spec.runtime_shape.draft_tokens.min=5
+    $Spec.runtime_shape.draft_tokens.max=5
+    $Config.engine.max_concurrency=3
+    $Config.speculative.backend='dflash2'
+    $Config.speculative.draft_tokens=5
+  }}
+  if($variant -ceq 'missing-policy'){{$Spec.PSObject.Properties.Remove('runtime_shape')}}
   {package_guard}
   $accepted=$true
   try{{Assert-InstallerArchitectureContract $Spec $Config}}catch{{$accepted=$false}}
@@ -1608,7 +1629,8 @@ foreach($variant in @('valid','wrong-concurrency','wrong-backend','zero-drafts')
 ConvertTo-Json -InputObject @($results) -Compress
 """)
             self.assertEqual(observed, [
-                {"package": valid, "installer": valid} for valid in (True, False, False, False)
+                {"package": valid, "installer": valid}
+                for valid in (True, False, False, False, False, lane_dir.name != "rtx5090", True, False)
             ], lane_dir.name)
 
     def test_dflash2_controller_arguments_and_bounds(self) -> None:

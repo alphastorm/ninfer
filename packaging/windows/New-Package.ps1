@@ -142,17 +142,16 @@ $upstreamBaseSha = [string]$spec.source.upstream_base_sha
 $lineageBaseSha = [string]$spec.source.lineage_base_sha
 $cmakeCudaArchitecture = [string]$spec.gpu.cmake_cuda_architecture
 $assetStem = "$productPrefix-$releaseVersion-$platform"
-# The experimental Blackwell lane retains the container's DFlash2 K7/C2 shape;
-# the shipped Ampere/Ada lanes retain their MTP/C1 contract.
-$validSpeculation = if ($Lane -ceq 'rtx5090') {
-    [int]$config.engine.max_concurrency -eq 2 -and
-    [string]$config.speculative.backend -ceq 'dflash2' -and
-    [int]$config.speculative.draft_tokens -eq 7
-} else {
-    [int]$config.engine.max_concurrency -eq 1 -and
-    [string]$config.speculative.backend -ceq 'mtp' -and
-    [int]$config.speculative.draft_tokens -ge 1
-}
+# Lane-specific runtime policy lives in the immutable release specification.
+$validSpeculation = $null -ne $spec.PSObject.Properties['runtime_shape'] -and
+    [int]$spec.runtime_shape.max_concurrency -gt 0 -and
+    [int]$config.engine.max_concurrency -eq [int]$spec.runtime_shape.max_concurrency -and
+    -not [string]::IsNullOrWhiteSpace([string]$spec.runtime_shape.speculative_backend) -and
+    [string]$config.speculative.backend -ceq [string]$spec.runtime_shape.speculative_backend -and
+    [int]$spec.runtime_shape.draft_tokens.min -ge 1 -and
+    [int]$config.speculative.draft_tokens -ge [int]$spec.runtime_shape.draft_tokens.min -and
+    ($null -eq $spec.runtime_shape.draft_tokens.max -or
+     [int]$config.speculative.draft_tokens -le [int]$spec.runtime_shape.draft_tokens.max)
 if ($config.artifact_type -cne 'ninfer_windows_server_config' -or
     [int]$config.schema_version -ne 4 -or
     [string]$config.release_id -cne $releaseId -or
