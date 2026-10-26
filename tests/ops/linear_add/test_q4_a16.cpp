@@ -24,6 +24,20 @@ int main() {
                                         .route_starts    = {},
                                         .route_interiors = full_tokens,
                                         .full_output     = true});
+        using ninfer::ops::LinearPolicy;
+        constexpr std::array<Invocation, 8> a8{{
+            {31, LinearPolicy::AllowA8, Arithmetic::A16},
+            {32, LinearPolicy::AllowA8, Arithmetic::A16},
+            {33, LinearPolicy::AllowA8, Arithmetic::A8, GraphReplay::OriginalZeroOriginal},
+            {128, LinearPolicy::AllowA8, Arithmetic::A8},
+            {129, LinearPolicy::AllowA8, Arithmetic::A8, GraphReplay::OriginalNegative},
+            {257, LinearPolicy::AllowA4, Arithmetic::A8},
+            {513, LinearPolicy::AllowA8, Arithmetic::A8, GraphReplay::OriginalZeroOriginal},
+            {1024, LinearPolicy::AllowA8, Arithmetic::A8},
+        }};
+        failures += run_cases("Q4 allow-A8 LinearAdd", WeightFormat::Q4G64F16S,
+                              {.n = 5120, .k = 6144, .seed = 519U, .invocations = a8,
+                               .fixture = FixturePattern::Hashed, .rows = Samples::Uniform32});
         return failures;
     });
 }

@@ -117,13 +117,14 @@ void linear_add(const Tensor& x, const Weight& w, Tensor& residual, LinearPolicy
     if (w.qtype == QType::NVFP4)
         return detail::nvfp4_linear_add_dispatch(x, w, residual, policy, workspace,
                                                  execution.stream());
+    const auto a16 = select_a16(w.qtype, w.n, w.k, x.ne[1]);
 #if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
     if ((w.qtype == QType::Q4_G64_FP16 || w.qtype == QType::Q5_G64_FP16) &&
         w.n == 5120 && (w.k == 6144 || w.k == 17408) &&
         detail::group64_a8::selected(policy, x.ne[1]))
         return detail::group64_a8::add(x, w, residual, workspace, execution.stream());
 #endif
-    select_a16(w.qtype, w.n, w.k, x.ne[1])(x, w, residual, execution.stream());
+    a16(x, w, residual, execution.stream());
 }
 
 void linear_add(const Tensor& x, const Weight& w, Tensor& residual, MemoryArena& workspace,

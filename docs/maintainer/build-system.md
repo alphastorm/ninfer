@@ -26,7 +26,7 @@ address-independent planning and bound operands: row-split Q4/Q5 group64 A16-onl
 AllowA8; other Uses, geometry and auxiliaries remain unchanged. Paired projections use the
 intersection of their effective permissions. The profile is rejected for other architectures.
 
-Above 32 columns, the supported 27B Q5 residual projections, Q4 fused SwiGLU and paired Q4/Q5
+Above 32 columns, the supported 27B Q4/Q5 residual projections, Q4 fused SwiGLU and paired Q4/Q5
 input projections quantize transient activations per token and 64-channel group, execute signed
 INT8 tensor-core products, and accumulate group-scaled results in FP32. FP32 activation scales
 avoid half-precision scale underflow. The paired input projections share one quantization;
