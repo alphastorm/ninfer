@@ -49,6 +49,7 @@ struct CommitDecision {
     std::uint32_t accepted_tokens = 0;
     bool terminal                 = false;
     bool cancelled                = false;
+    // A native mask dead end or a frontend preview rejection. Both release only this row.
     bool failed                   = false;
     // Copied unchanged from the corresponding OutputDecision; still relative to this row's
     // accepted span.

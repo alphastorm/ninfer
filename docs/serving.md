@@ -192,6 +192,8 @@ active tools; GBNF, choice and regex require no active tools or `tool_choice:"no
 Output constraints reject custom stops. OpenAI errors use
 `invalid_grammar` for invalid grammars and `constraint_dead_end` for a reachable prefix without a
 legal next token. Anthropic reports these through its `invalid_request_error` envelope.
+An internal sampled-token/matcher disagreement fails only the affected request with an internal
+error; it does not make the Engine unavailable or discard healthy rows in the same batch.
 The `grammar` and `guided_*` aliases are not accepted.
 
 Constrained responses include a NInfer `constraint` observation. `branch` is `undecided`, `content`,
@@ -1231,6 +1233,9 @@ CPU/media preparation and completed model results whose response has not yet bee
 capacity returns HTTP 429 with code `server_overloaded`. The absolute
 `--pending-timeout-ms` deadline starts before preparation, covers media acquisition and Engine FIFO
 waiting, and returns HTTP 503 with code `request_queue_timeout` if admission does not occur in time.
+Streaming handlers wait for initial materialization before committing SSE headers, so queued
+timeouts use the same HTTP error status as non-streaming requests. Start/progress/output events
+remain available after this wait; post-start generation errors still use the protocol's SSE error.
 Once admitted, a request may pause for resource pressure without restarting this initial-admission
 deadline. Fresh requests enter in FIFO order with a bounded bypass allowance when an earlier request
 cannot fit. There is no admission ETA or unbounded overflow queue.

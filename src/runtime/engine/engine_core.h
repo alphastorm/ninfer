@@ -13,6 +13,7 @@
 #include "runtime/engine/scheduler.h"
 #include "runtime/engine/generation_budget.h"
 #include "runtime/engine/prefix_reuse_path.h"
+#include "text/grammar.h"
 
 #include <algorithm>
 #include <array>
@@ -177,6 +178,13 @@ public:
 
         Submission(const Submission&)            = delete;
         Submission& operator=(const Submission&) = delete;
+
+        void wait_until_started(const CancellationView& cancellation) {
+            if (owner_ == nullptr || request_ == nullptr) {
+                throw std::logic_error("concurrent submission is empty");
+            }
+            owner_->wait_for_start(request_, cancellation);
+        }
 
         GenerationResult wait(OutputSink* sink, const CancellationView& cancellation) {
             if (owner_ == nullptr || request_ == nullptr) {
@@ -462,6 +470,29 @@ private:
     };
 
     void publish_runtime_stats();
+
+    void wait_for_start(const std::shared_ptr<Request>& request,
+                        const CancellationView& cancellation) {
+        try {
+            for (;;) {
+                if (cancellation.requested()) {
+                    throw RequestError(RequestErrorKind::Cancelled,
+                                       "inference request cancelled while waiting for admission");
+                }
+                std::unique_lock lock(request->mutex);
+                request->cv.wait_for(lock, std::chrono::milliseconds(10), [&] {
+                    return request->started || request->response_done;
+                });
+                if (request->error) { std::rethrow_exception(request->error); }
+                if (request->started || request->response_done) { return; }
+            }
+        } catch (...) {
+            request->cancelled.store(true, std::memory_order_release);
+            request_admission_check();
+            queue_cv_.notify_one();
+            throw;
+        }
+    }
 
     GenerationResult wait_for_request(std::shared_ptr<Request> request, OutputSink* sink,
                                       const CancellationView& cancellation) {
@@ -1040,6 +1071,7 @@ private:
         std::array<std::size_t, kMaximumConcurrency> generated_sizes{};
         std::array<bool, kMaximumConcurrency> cancelled{};
         std::array<bool, kMaximumConcurrency> failed{};
+        std::array<std::exception_ptr, kMaximumConcurrency> preview_errors{};
         bool generated_staged = false;
         std::array<std::shared_ptr<Request>, kMaximumConcurrency> terminal_requests{};
         std::array<std::uint32_t, kMaximumConcurrency> terminal_lanes{};
@@ -1090,8 +1122,17 @@ private:
                     finish_reasons[row] = FinishReason::Cancelled;
                     continue;
                 }
-                const OutputDecision decision = request->output.preview_model(
-                    row_tokens, request->budget->remaining(), request->budget->limit_reason());
+                OutputDecision decision;
+                try {
+                    decision = request->output.preview_model(
+                        row_tokens, request->budget->remaining(), request->budget->limit_reason());
+                } catch (const text::GrammarViolation&) {
+                    request->output.discard_preview();
+                    preview_errors[row] = std::current_exception();
+                    failed[row] = true;
+                    decisions[row] = CommitDecision{.terminal = true, .failed = true};
+                    continue;
+                }
                 if (decision.accepted_tokens == 0 || decision.accepted_tokens > count ||
                     (!decision.finished() && decision.accepted_tokens != count) ||
                     (decision.finished() && decision.continuation != ContinuationAction::Decode) ||
@@ -1209,9 +1250,12 @@ private:
                 const auto& request          = slots_[lane];
                 const std::uint32_t accepted = decisions[row].accepted_tokens;
                 if (failed[row]) {
-                    complete_error(request, std::make_exception_ptr(
-                                                RequestError(RequestErrorKind::ConstraintDeadEnd,
-                                                             "grammar has no valid next token")));
+                    complete_error(
+                        request, preview_errors[row]
+                                     ? preview_errors[row]
+                                     : std::make_exception_ptr(
+                                           RequestError(RequestErrorKind::ConstraintDeadEnd,
+                                                        "grammar has no valid next token")));
                     remove_completed_slot(lane);
                     continue;
                 }
@@ -1531,6 +1575,13 @@ private:
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
             slots_[control.destination.value] = request;
             materializing_.reset();
+            if (!control.resumed) {
+                {
+                    std::lock_guard lock(request->mutex);
+                    request->started = true;
+                }
+                request->cv.notify_one();
+            }
             boundary = begin_host_phase();
         } else if (context_owner_) {
             const auto request = context_owner_;
@@ -2191,8 +2242,38 @@ private:
                 const std::span<const TokenId> tokens =
                     std::span<const TokenId>(membership.tokens)
                         .subspan(row * membership.row_stride, membership.row_stride);
-                const OutputDecision decision =
-                    request->output.preview_control(tokens, request->budget->remaining());
+                OutputDecision decision;
+                try {
+                    decision =
+                        request->output.preview_control(tokens, request->budget->remaining());
+                } catch (const text::GrammarViolation&) {
+                    const auto error = std::current_exception();
+                    // No forced tokens have reached Program yet. Roll back every tentative
+                    // preview, retire only the rejected row, then rebuild the surviving batch.
+                    rollback_generated();
+                    const auto rejected = request;
+                    auto aborted = instance_.program->abort(*rejected->sequence);
+                    if (aborted.status != ConsumeStatus::Consumed) {
+                        throw std::logic_error("grammar-rejected control row could not be retired");
+                    }
+                    rejected->generation_timings = aborted.timings;
+                    rejected->speculative_stats = std::move(aborted.speculative);
+                    remove_completed_slot(lane);
+                    complete_error(rejected, error);
+                    ControlMembership remaining;
+                    remaining.row_stride = membership.row_stride;
+                    for (std::size_t other = 0; other < membership.size; ++other) {
+                        if (other == row) { continue; }
+                        remaining.lanes[remaining.size] = membership.lanes[other];
+                        remaining.sequences[remaining.size++] = membership.sequences[other];
+                        const auto first = membership.tokens.begin() + other * membership.row_stride;
+                        remaining.tokens.insert(remaining.tokens.end(), first,
+                                                first + membership.row_stride);
+                    }
+                    if (!remaining.empty()) { run_control_batch(remaining); }
+                    publish_runtime_stats();
+                    return;
+                }
                 if (decision.accepted_tokens != membership.row_stride || decision.finished() ||
                     decision.continuation != ContinuationAction::Decode ||
                     (decision.prefix_execution_split_after &&

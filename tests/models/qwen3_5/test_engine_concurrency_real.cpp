@@ -193,6 +193,39 @@ void checkpoint_failure_classification(ninfer::Engine& engine) {
             "adapter failed to classify invalid native CBOR as Corrupt");
 }
 
+struct StartCountingSink final : ninfer::OutputSink {
+    unsigned starts = 0;
+    void start(ninfer::GenerationStart) override { ++starts; }
+    void progress(ninfer::PromptProgress) override {}
+    void timing(ninfer::GenerationTimingObservation) override {}
+    void publish(ninfer::OutputDelta) override {}
+};
+
+void admission_wait(ninfer::Engine& engine) {
+    for (const auto outputs : {0U, 4U}) {
+        StartCountingSink sink;
+        auto handle = engine.submit(engine.prepare_tokens({198, 1003, 198}),
+                                    request(outputs, false), ninfer::OutputConsumerMode::Streaming);
+        handle.wait_until_started();
+        handle.wait_until_started();
+        require(static_cast<bool>(handle) && sink.starts == 0,
+                "admission wait consumed the handle or delivered output");
+        complete(handle.wait(&sink), outputs);
+        require(sink.starts == (outputs ? 1U : 0U),
+                "admission wait consumed or duplicated the generation-start event");
+    }
+    auto cancelled = engine.submit(engine.prepare_tokens({198, 1004, 198}), request(128, false));
+    bool observed = false;
+    try {
+        cancelled.wait_until_started(ninfer::CancellationView([] { return true; }));
+    } catch (const ninfer::RequestError& error) {
+        observed = error.kind() == ninfer::RequestErrorKind::Cancelled;
+    }
+    require(observed && cancelled.wait().finish_reason == ninfer::FinishReason::Cancelled,
+            "admission cancellation lost its handle or failed to cancel the request");
+    settled(engine);
+}
+
 void pending_timeout(ninfer::Engine& engine) {
     require(engine.options().pending_timeout_ms == 30000, "shipped 30 s pending default changed");
     std::mutex mutex;
@@ -227,16 +260,28 @@ void pending_timeout(ninfer::Engine& engine) {
     // execution_mutex_ and may wait behind decode; it is not a live-lane barrier.
     require(engine.runtime_stats().running_requests == 2,
             "timeout fixture did not hold both execution lanes");
-    auto waiting = engine.submit(engine.prepare_tokens({198, 1002, 198}), request(2, false),
-                                 ninfer::OutputConsumerMode::Aggregate, {},
-                                 Clock::now() + std::chrono::milliseconds(20));
-    bool timed_out = false;
-    try {
-        (void)waiting.wait();
-    } catch (const ninfer::RequestError& error) {
-        timed_out = error.kind() == ninfer::RequestErrorKind::QueueTimeout;
+    for (const auto mode : {ninfer::OutputConsumerMode::Aggregate,
+                           ninfer::OutputConsumerMode::Streaming}) {
+        auto waiting = engine.submit(engine.prepare_tokens({198, 1002, 198}), request(2, false),
+                                     mode, {}, Clock::now() + std::chrono::milliseconds(20));
+        bool timed_out = false;
+        try {
+            waiting.wait_until_started();
+        } catch (const ninfer::RequestError& error) {
+            timed_out = error.kind() == ninfer::RequestErrorKind::QueueTimeout;
+        }
+        require(timed_out && static_cast<bool>(waiting),
+                "queued admission wait ignored its deadline or consumed the handle");
+        StartCountingSink sink;
+        timed_out = false;
+        try {
+            (void)waiting.wait(mode == ninfer::OutputConsumerMode::Streaming ? &sink : nullptr);
+        } catch (const ninfer::RequestError& error) {
+            timed_out = error.kind() == ninfer::RequestErrorKind::QueueTimeout;
+        }
+        require(timed_out && sink.starts == 0,
+                "queued failure was lost or published a generation-start event");
     }
-    require(timed_out, "queued deadline was ignored while both lanes decoded");
     for (auto& result : active) { complete(result.get(), 1024); }
     settled(engine);
 }
@@ -366,11 +411,20 @@ int main() {
             require(std::string_view(backend) == "none", "NINFER_TEST_BACKEND must be none or dflash2");
         }
         ninfer::Engine engine(options);
+        if (const char* scenario = std::getenv("NINFER_CONCURRENCY_SCENARIO")) {
+            require(std::string_view(scenario) == "admission", "unknown concurrency scenario");
+            pending_timeout(engine);
+            admission_wait(engine);
+            require(engine.is_available(), "admission regression made the engine unavailable");
+            std::cout << "OK admission wait: aggregate/stream timeout, events, immediate, cancellation\n";
+            return 0;
+        }
         checkpoint_policy_refusal(engine);
         checkpoint_failure_classification(engine);
         checkpoint_epoch_refusal(engine);
         inflight_bound(engine);
         pending_timeout(engine);
+        admission_wait(engine);
         shared_readers_and_live_sibling(engine);
         cancellation(engine);
         require(engine.is_available(), "C2 regressions made the engine unavailable");

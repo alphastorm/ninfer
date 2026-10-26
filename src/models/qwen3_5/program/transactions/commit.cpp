@@ -409,7 +409,7 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
             pending_kinds[row]                      = candidate.kind;
             const runtime::CommitDecision& decision = decisions[row];
             if ((decision.cancelled && decision.failed) ||
-                (!decision.cancelled && decision.failed != constraint_failed[row]) ||
+                (!decision.cancelled && constraint_failed[row] && !decision.failed) ||
                 ((decision.cancelled || decision.failed) &&
                  (decision.accepted_tokens != 0 || !decision.terminal)) ||
                 (!(decision.cancelled || decision.failed) &&
