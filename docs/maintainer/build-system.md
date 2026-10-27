@@ -43,7 +43,8 @@ independent Op-oracle, exact long-retrieval and powered output-quality gates pas
 must use a distinct `NINFER_BUILD_PROFILE` identity.
 
 Independently of the A8 option, native INT8 causal attention specializes fully visible key
-blocks for widths 1024 and 2048. Short and irregular widths retain the masked traversal.
+blocks for unmasked rows of widths 1024 and 2048. Ragged rows and other widths retain the
+original masked kernel rather than a refactored instance of the specialized traversal.
 Staging, masking and probability guards are elided only before the causal boundary. Query
 rotation, key traversal order, FP32 accumulation, rounding and boundary/tail handling remain
 unchanged. The existing 128-register schedule is retained; no FP16 PV accumulation or paired

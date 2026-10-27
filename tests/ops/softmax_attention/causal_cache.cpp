@@ -2751,6 +2751,13 @@ int run_small_prefill_cases(CudaExecutionView execution, KvCacheStorage storage)
                         {width, prefix, static_cast<unsigned>(prefix + width), 1310u + prefix},
                         MappingPattern::Fragmented, queries);
             }
+            // Fixed-width ragged calls retain zeroed tails as device lengths change.
+            failures += run_batch_case(
+                execution, geometry, storage,
+                {1024, {127}, {33}, {0}, MappingPattern::Fragmented, 1350u, true});
+            failures += run_batch_case(
+                execution, geometry, storage,
+                {2048, {127}, {0}, {0}, MappingPattern::Fragmented, 1351u, true});
         }
         failures +=
             run_batch_case(execution, geometry, storage,

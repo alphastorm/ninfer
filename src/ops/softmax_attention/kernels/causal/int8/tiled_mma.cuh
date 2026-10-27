@@ -7,11 +7,10 @@
 #include "ops/softmax_attention/kernels/causal/int8/schedule.cuh"
 #include "ops/softmax_attention/kernels/causal/epilogue.cuh"
 #include "ops/softmax_attention/kernels/softmax.cuh"
-#include <type_traits>
 
 namespace ninfer::ops::detail {
 
-template <typename Geometry, typename Schedule, typename Metadata, bool FullBlocks = false>
+template <typename Geometry, typename Schedule, typename Metadata>
 __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
     const __nv_bfloat16* __restrict__ q, const std::int8_t* __restrict__ cache_k,
     const std::int8_t* __restrict__ cache_v, const __half* __restrict__ cache_k_scale,
@@ -72,10 +71,6 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
     const int tile_rows     = min(Br, tokens - q0);
     const int max_query_abs = base_pos + q0 + tile_rows - 1;
     const int key_blocks    = max_query_abs / Bc + 1;
-    // Full-key traversal follows sergiuszm/ninfer-4090 (Apache-2.0), 7f47a62282b8e9d3.
-    // Interior blocks are visible to every row; preserve the ascending key order.
-    const int full_blocks =
-        FullBlocks && q0 + Br <= tokens ? min(key_blocks, (base_pos + q0 + 1) / Bc) : 0;
 
     // Quantize Q cooperatively. One full warp rotates and encodes one D256 row at a time.
     for (int row = warp; row < Br; row += Schedule::kWarps) {
@@ -107,14 +102,13 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
     }
     __syncthreads();
 
-    auto issue_kv_tile = [&](int tile_k0, auto full_tag) {
-        constexpr bool FullTile = decltype(full_tag)::value;
+    auto issue_kv_tile = [&](int tile_k0) {
         const int physical_page = block_table[tile_k0 >> kv::kPageShift];
         for (int key_l = tid; key_l < Bc; key_l += Schedule::kThreads) {
             const int key = tile_k0 + key_l;
             __half* kd    = &k_scale_s[key_l * Groups];
             __half* vd    = &v_scale_s[key_l * Groups];
-            if (FullTile || key <= max_query_abs) {
+            if (key <= max_query_abs) {
                 const std::int64_t off = kv::Int8G64Layout<Geometry::KVHeads>::scale_offset(
                     physical_page, kv_head, 0, key & kv::kPageMask);
                 common::cp_async<8>(kd, &cache_k_scale[off]);
@@ -132,7 +126,7 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
             const int key   = tile_k0 + key_l;
             std::int8_t* kd = &k_i8[(key_l * DB16 + common::swizzle_xor_64(key_l, dc * 8)) * 2];
             std::int8_t* vd = &v_i8[key_l * D + d];
-            if (FullTile || key <= max_query_abs) {
+            if (key <= max_query_abs) {
                 const std::int64_t off = kv::Int8G64Layout<Geometry::KVHeads>::code_offset(
                     physical_page, kv_head, d, key & kv::kPageMask);
                 common::cp_async<16, Cache::cg>(kd, &cache_k[off]);
@@ -145,12 +139,7 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
         common::cp_commit();
     };
 
-    if constexpr (FullBlocks) {
-        if (full_blocks > 0) issue_kv_tile(0, std::true_type{});
-        else issue_kv_tile(0, std::false_type{});
-    } else {
-        issue_kv_tile(0, std::false_type{});
-    }
+    issue_kv_tile(0);
     common::cp_wait<0>();
     __syncthreads();
 
@@ -189,8 +178,7 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
     float running_l0     = 0.0f;
     float running_l1     = 0.0f;
     const float scale_l2 = scale * Log2E;
-    auto process_block = [&](int kb, auto full_tag) {
-        constexpr bool FullTile = decltype(full_tag)::value;
+    for (int kb = 0; kb < key_blocks; ++kb) {
         const int k0 = kb * Bc;
         if (warp < ProducerWarps) {
             const int row_base = warp * 16;
@@ -272,7 +260,7 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
             for (int nt = 0; nt < QKNt; ++nt) {
                 const int key0 = k0 + nt * 8 + 2 * lid;
                 const int key1 = key0 + 1;
-                if (!FullTile && !full_score_tile) {
+                if (!full_score_tile) {
                     score[nt][0] = key0 <= qabs0 ? score[nt][0] : -CUDART_INF_F;
                     score[nt][1] = key1 <= qabs0 ? score[nt][1] : -CUDART_INF_F;
                     score[nt][2] = key0 <= qabs1 ? score[nt][2] : -CUDART_INF_F;
@@ -300,16 +288,16 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
             for (int nt = 0; nt < QKNt; ++nt) {
                 const int col0  = nt * 8 + 2 * lid;
                 const int col1  = col0 + 1;
-                const float p00 = (FullTile || score[nt][0] > -CUDART_INF_F)
+                const float p00 = score[nt][0] > -CUDART_INF_F
                                       ? causal_exp_scaled(score[nt][0], nm0_scaled, scale_l2)
                                       : 0.0f;
-                const float p01 = (FullTile || score[nt][1] > -CUDART_INF_F)
+                const float p01 = score[nt][1] > -CUDART_INF_F
                                       ? causal_exp_scaled(score[nt][1], nm0_scaled, scale_l2)
                                       : 0.0f;
-                const float p10 = (FullTile || score[nt][2] > -CUDART_INF_F)
+                const float p10 = score[nt][2] > -CUDART_INF_F
                                       ? causal_exp_scaled(score[nt][2], nm1_scaled, scale_l2)
                                       : 0.0f;
-                const float p11 = (FullTile || score[nt][3] > -CUDART_INF_F)
+                const float p11 = score[nt][3] > -CUDART_INF_F
                                       ? causal_exp_scaled(score[nt][3], nm1_scaled, scale_l2)
                                       : 0.0f;
                 bl0 += p00 + p01;
@@ -338,7 +326,7 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
                 const int d     = dc * 8;
                 const int key   = k0 + key_l;
                 __half* dst     = &v_f16[key_l * D + common::swizzle_xor_64(key_l, d)];
-                if (FullTile || key <= max_query_abs) {
+                if (key <= max_query_abs) {
                     const int grp = d >> 6;
                     __half vs     = __float2half_rn(0.0f);
                     if ((lane & 7) == 0) { vs = v_scale_s[key_l * Groups + grp]; }
@@ -352,14 +340,7 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
         __syncthreads();
 
         const bool has_next = kb + 1 < key_blocks;
-        if (has_next) {
-            if constexpr (FullBlocks) {
-                if (kb + 1 < full_blocks) issue_kv_tile((kb + 1) * Bc, std::true_type{});
-                else issue_kv_tile((kb + 1) * Bc, std::false_type{});
-            } else {
-                issue_kv_tile((kb + 1) * Bc, std::false_type{});
-            }
-        }
+        if (has_next) { issue_kv_tile((kb + 1) * Bc); }
 
         const int row_tile = warp % Schedule::kRowTiles;
         const int d_slice  = warp / Schedule::kRowTiles;
@@ -397,12 +378,6 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
         }
         if (has_next) { common::cp_wait<0>(); }
         __syncthreads();
-    };
-    if constexpr (FullBlocks) {
-        for (int kb = 0; kb < full_blocks; ++kb) process_block(kb, std::true_type{});
-        for (int kb = full_blocks; kb < key_blocks; ++kb) process_block(kb, std::false_type{});
-    } else {
-        for (int kb = 0; kb < key_blocks; ++kb) process_block(kb, std::false_type{});
     }
 
     if (warp < ProducerWarps && lid == 0) {
