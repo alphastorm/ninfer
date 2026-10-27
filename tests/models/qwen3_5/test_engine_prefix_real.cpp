@@ -1844,6 +1844,7 @@ int exercise_response_retirement(const char* artifact) {
     }
 
     auto impossible = fixed_output(1, false);
+    impossible.stop.include_model_defaults = true;
     // This valid GBNF character class excludes every Unicode scalar: admission succeeds,
     // then the model's first-token mask has no legal token and the resident row must fail.
     impossible.constraint =
