@@ -30,6 +30,7 @@ foreach(op IN LISTS ninfer_op_tests)
 endforeach()
 
 include("${CMAKE_CURRENT_LIST_DIR}/linear_topk/tests.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/tma/tests.cmake")
 
 ninfer_add_op_test(ninfer_candidate_selector_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_candidate_selector.cpp"

@@ -256,7 +256,11 @@ CausalScoring always uses eager execution.
 Without `NINFER_TEST_ARTIFACT`, CTest marks these real Engine tests as skipped. Real-artifact targets
 carry the `real` label and `RUN_SERIAL` so CTest runs them alone. Run directly invoked GPU
 integration tests serially. `NINFER_PREFIX_REAL_SCENARIO` selects a focused prefix scenario such as
-`vision`, `late-instructions` or `concurrent`; the default is `all`. These integration checks
+`vision`, `late-instructions`, `concurrent` or `retirement`; the default is `all`. The registered
+`ninfer_qwen3_5_response_retirement_real_test` checks immediate live membership and cumulative
+statistics after successful, resident-cancelled and admitted constraint-dead-end `wait()` calls.
+The failure fixture uses valid but unsatisfiable GBNF, checks that no tokens are committed,
+and verifies a subsequent healthy request. These integration checks
 use behavior and state accounting rather than another numerical path's generated tokens as a golden.
 
 The `attention` scenario checks the selected KV type, chunked prefill, concurrent Graph decode
@@ -294,6 +298,11 @@ Snapshot/Replay recovery and cancellation while paused or replaying; `NINFER_PRE
 selects `all`, `snapshot`, `replay`, `cancel-paused` or `cancel-replay`. Native transaction tests cover
 physical state/KV ownership, binding, capture, reclamation and abort; their positional backend is
 `none`, `mtp`, `dflash` or `dflash2`. Each backend requires an artifact containing that component.
+`ninfer_qwen3_5_checkpoint_reclaim_real_test` requires the DFlash2 artifact and checks a Host-only
+victim import under capacity pressure. Its release callback must observe exactly one complete
+native validation and two pins; pressure settlement independently validates and re-pins before
+release, so successful reclaim must total two complete validations and four pins. It also checks
+one fresh target reader on retry, preservation of an invalid victim, and exact cached continuation.
 Public-HTTP latency and output gaps are measured separately by the
 [TTFT campaign](../tools/bench/ttft/README.md).
 
@@ -321,6 +330,9 @@ check matcher continuity through Snapshot/Replay and cancellation. `ninfer_gramm
 `ninfer_json_schema_test` cover CPU language semantics. `ninfer_json_schema_oracle_test` compares
 supported schemas with the independent Python `jsonschema` validator; install its dependency with
 `python3 -m pip install -r tests/text/requirements.txt` in the selected test environment.
+The host suites include the bounded-number and reasoning-to-JSON hardening cases from
+`hyz615/RUR1NINFER` commit `79d2296`, adapted to the current session transactions and schema
+capabilities rather than importing that fork's compiler or older schema restrictions.
 The sampling and speculative Op tests qualify masks against independent mathematical oracles.
 
 The capability-evaluation coordinator has its own environment and unittest entry point:

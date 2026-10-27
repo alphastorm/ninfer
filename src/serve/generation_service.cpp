@@ -486,6 +486,11 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
             }
         }
         prepared.sampling   = prepared.generation.resolved_sampling();
+        if (consumer_mode == GenerationConsumerMode::Streaming) {
+            // A queued failure must still be an HTTP error, not a successful SSE response.
+            // The subsequent run() retains every start/progress/output event.
+            prepared.generation.wait_until_started(CancellationView(is_cancelled));
+        }
     } catch (const ApiException&) { throw; } catch (const ninfer::RequestError& exception) {
         throw_request_error(exception, request.constraint_param, prepared.tool_schema_params);
     } catch (const std::invalid_argument& exception) {

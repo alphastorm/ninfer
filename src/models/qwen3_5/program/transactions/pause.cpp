@@ -182,6 +182,7 @@ bool ProgramImpl::start_pause(SequenceHandle handle, bool save_snapshot,
                 tx.discard_snapshot = true;
             }
         }
+        settle_decode_tail();
         migration.submit();
         return true;
     } catch (...) {

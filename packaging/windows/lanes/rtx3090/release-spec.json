@@ -2,12 +2,20 @@
   "artifact_type": "ninfer_windows_release_spec",
   "schema_version": 4,
   "lane": "rtx3090",
-  "release_id": "qwen38-3090-native-v0.7.0-beta.2",
-  "release_version": "0.7.0-beta.2",
-  "deployment_profile": "qwen38-3090-native-v0.7.0-beta.2",
-  "build_profile": "native-v0.7.0-beta.2-rtx3090",
+  "release_id": "qwen38-3090-native-v0.7.0-beta.3",
+  "release_version": "0.7.0-beta.3",
+  "deployment_profile": "qwen38-3090-native-v0.7.0-beta.3",
+  "build_profile": "native-v0.7.0-beta.3-rtx3090",
   "platform": "windows-x86_64-cuda13.3-rtx3090",
   "product_prefix": "ninfer-rtx3090-native",
+  "runtime_shape": {
+    "max_concurrency": 1,
+    "speculative_backend": "mtp",
+    "draft_tokens": {
+      "min": 1,
+      "max": null
+    }
+  },
   "gpu": {
     "name": "NVIDIA GeForce RTX 3090",
     "class": "rtx-3090",
@@ -80,13 +88,13 @@
       "required_on_first_install": true,
       "bundled_default": "Control-GpuOwner.ps1",
       "state_protection_helper": "Protect-StateRoot.ps1",
-      "qualified_power_limit_w": 300,
+      "qualified_power_limit_w": 350,
       "owner_power_limit_w": 370,
       "prior_power_limit_range_w": [
         100,
         390
       ],
-      "managed_power_envelope_w": 301,
+      "managed_power_envelope_w": 351,
       "interactive_gpu_memory_threshold_bytes": 1073741824,
       "inherited_on_upgrade": true,
       "actions": [

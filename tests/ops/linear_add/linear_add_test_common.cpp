@@ -2,7 +2,9 @@
 #include "cuda_fixture.h"
 
 #include "core/decode_graph.h"
+#include "core/pdl_scope.h"
 #include "core/device.h"
+#include "ninfer/ops/sigmoid_mul.h"
 #include "ops/direct_bf16_weight.h"
 #include "ops/linear_common.h"
 #include "ops/op_tester.h"
@@ -386,9 +388,14 @@ int run_cases(std::string_view label, WeightFormat format, const InvocationCase&
             }
             cuda_synchronize();
             verify("eager");
+            const auto eager_bits =
+                from_device<std::uint16_t>(output.data(), output.bytes() / sizeof(std::uint16_t));
             if (invocation.graph != GraphReplay::None) {
                 DecodeGraphDefinition definition;
                 DecodeGraphExecutable graph;
+                // Streaming consumers become programmatic dependents inside this scope, as in the
+                // Qwen3.5 dense decode graphs; replay must reproduce the eager bytes.
+                pdl::ConsumerCaptureScope consumers;
                 definition.capture(device.stream(), [&] {
                     ops::linear_add(input, weight, residual_out,
                                     invocation.graph_policy.value_or(
@@ -428,10 +435,52 @@ int run_cases(std::string_view label, WeightFormat format, const InvocationCase&
                         failures += verify_zero_input(case_label + " " + stage, output, residual);
                     } else {
                         verify(stage, negative);
+                        if (!negative && !invocation.graph_policy)
+                            failures += verify_exact(
+                                (case_label + " " + stage + " eager bytes").c_str(),
+                                from_device<std::uint16_t>(output.data(),
+                                                           output.bytes() / sizeof(std::uint16_t)),
+                                eager_bits);
                     }
                 }
                 if (invocation.graph == GraphReplay::OriginalNegative) {
                     device_activation.copy_from_host(activation.data(), device_activation.bytes());
+                }
+                if (t <= 16 && (format == WeightFormat::Q4G64F16S ||
+                                format == WeightFormat::Q5G64F16S ||
+                                format == WeightFormat::Q8G32F16S)) {
+                    // The producer triggers before writing its output. Consumers may preload
+                    // immutable weights, but must wait before reading the gated activation.
+                    GuardedDeviceBuffer gated(input.bytes());
+                    Tensor gated_input(gated.span(), DType::BF16, {shape.k, t});
+                    const auto chain = [&] {
+                        ops::sigmoid_mul(input, gated_input, device.execution_view());
+                        ops::linear_add(gated_input, weight, residual_out,
+                                        ops::LinearPolicy::A16Only, workspace,
+                                        device.execution_view());
+                    };
+                    gated.copy_from_host(activation.data(), gated.bytes());
+                    output.copy_from_host(residual.data(), output.bytes());
+                    chain();
+                    device.synchronize();
+                    const auto expected = from_device<std::uint16_t>(
+                        output.data(), output.bytes() / sizeof(std::uint16_t));
+                    DecodeGraphDefinition chained_definition;
+                    DecodeGraphExecutable chained_graph;
+                    chained_definition.capture(device.stream(), chain);
+                    chained_graph.instantiate(chained_definition);
+                    for (int replay = 0; replay < 2; ++replay) {
+                        gated.copy_from_host(activation.data(), gated.bytes());
+                        output.copy_from_host(residual.data(), output.bytes());
+                        chained_graph.launch(device.stream());
+                        device.synchronize();
+                        failures += verify_exact(
+                            (case_label + " PDL producer-consumer bytes").c_str(),
+                            from_device<std::uint16_t>(output.data(),
+                                                       output.bytes() / sizeof(std::uint16_t)),
+                            expected);
+                    }
+                    failures += gated.verify_guards(case_label);
                 }
             }
             if (invocation.followup_policy) {
@@ -481,11 +530,17 @@ int run_shape(std::string_view label, WeightFormat format, const ShapeCase& shap
     for (const auto t : conformance_tokens(shape)) {
         const bool graph = std::find(shape.graph_tokens.begin(), shape.graph_tokens.end(), t) !=
                            shape.graph_tokens.end();
+        const bool group64 = (format == WeightFormat::Q4G64F16S || format == WeightFormat::Q5G64F16S) &&
+                             shape.n == 5120 && (shape.k == 6144 || shape.k == 17408);
         invocations.push_back(Invocation{
             .tokens          = t,
             .graph           = graph ? GraphReplay::OriginalZeroOriginal : GraphReplay::None,
-            .graph_policy    = graph ? std::optional(ops::LinearPolicy::AllowA4) : std::nullopt,
-            .followup_policy = graph ? std::optional(ops::LinearPolicy::AllowA8) : std::nullopt,
+            .graph_policy    = graph ? std::optional(group64 ? ops::LinearPolicy::A16Only
+                                                              : ops::LinearPolicy::AllowA4)
+                                     : std::nullopt,
+            .followup_policy = graph ? std::optional(group64 ? ops::LinearPolicy::A16Only
+                                                              : ops::LinearPolicy::AllowA8)
+                                     : std::nullopt,
         });
     }
     return run_cases(label, format,

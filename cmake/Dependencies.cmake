@@ -1,5 +1,6 @@
 find_package(CUDAToolkit REQUIRED)
 find_package(Threads REQUIRED)
+find_package(JPEG REQUIRED)
 
 if(WIN32)
   # Use one CUDA runtime in libraries and CUDA-language executables alike.

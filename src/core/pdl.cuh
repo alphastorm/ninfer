@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/pdl_scope.h"
+
 #include <cuda_runtime.h>
 
 #include <cstddef>
@@ -36,6 +38,30 @@ launch_dependent(const LaunchConfig& launch, void (*kernel)(KernelArgs...), Call
     config.numAttrs         = 1;
 #endif
 
+    return cudaLaunchKernelEx(&config, kernel, std::forward<CallArgs>(args)...);
+}
+
+// Launches a kernel that implements the streaming-consumer protocol: it may stage immutable
+// weights before wait_for_dependencies(), touches nothing else before it, and triggers its own
+// dependents only after its K loop. Inside a ConsumerCaptureScope on a capturing stream the launch
+// becomes a programmatic dependent of the preceding kernel; otherwise it is stream-serialized.
+template <class... KernelArgs, class... CallArgs>
+[[nodiscard]] inline cudaError_t
+launch_consumer(const LaunchConfig& launch, void (*kernel)(KernelArgs...), CallArgs&&... args) {
+#if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+    if (ConsumerCaptureScope::active()) {
+        cudaStreamCaptureStatus status = cudaStreamCaptureStatusNone;
+        const cudaError_t query        = cudaStreamIsCapturing(launch.stream, &status);
+        if (query != cudaSuccess) return query;
+        if (status == cudaStreamCaptureStatusActive)
+            return launch_dependent(launch, kernel, std::forward<CallArgs>(args)...);
+    }
+#endif
+    cudaLaunchConfig_t config{};
+    config.gridDim          = launch.grid;
+    config.blockDim         = launch.block;
+    config.dynamicSmemBytes = launch.dynamic_smem_bytes;
+    config.stream           = launch.stream;
     return cudaLaunchKernelEx(&config, kernel, std::forward<CallArgs>(args)...);
 }
 

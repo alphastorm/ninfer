@@ -936,6 +936,7 @@ bool ProgramImpl::start_demote(const ContextDemotion& quote) {
 
     context_operation_.emplace(std::move(transaction));
     try {
+        settle_decode_tail();
         context_operation_->migration.submit();
     } catch (...) {
         abort_context();

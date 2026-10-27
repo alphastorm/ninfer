@@ -13,6 +13,7 @@
 #include "runtime/engine/scheduler.h"
 #include "runtime/engine/generation_budget.h"
 #include "runtime/engine/prefix_reuse_path.h"
+#include "text/grammar.h"
 
 #include <algorithm>
 #include <array>
@@ -177,6 +178,13 @@ public:
 
         Submission(const Submission&)            = delete;
         Submission& operator=(const Submission&) = delete;
+
+        void wait_until_started(const CancellationView& cancellation) {
+            if (owner_ == nullptr || request_ == nullptr) {
+                throw std::logic_error("concurrent submission is empty");
+            }
+            owner_->wait_for_start(request_, cancellation);
+        }
 
         GenerationResult wait(OutputSink* sink, const CancellationView& cancellation) {
             if (owner_ == nullptr || request_ == nullptr) {
@@ -462,6 +470,29 @@ private:
     };
 
     void publish_runtime_stats();
+
+    void wait_for_start(const std::shared_ptr<Request>& request,
+                        const CancellationView& cancellation) {
+        try {
+            for (;;) {
+                if (cancellation.requested()) {
+                    throw RequestError(RequestErrorKind::Cancelled,
+                                       "inference request cancelled while waiting for admission");
+                }
+                std::unique_lock lock(request->mutex);
+                request->cv.wait_for(lock, std::chrono::milliseconds(10), [&] {
+                    return request->started || request->response_done;
+                });
+                if (request->error) { std::rethrow_exception(request->error); }
+                if (request->started || request->response_done) { return; }
+            }
+        } catch (...) {
+            request->cancelled.store(true, std::memory_order_release);
+            request_admission_check();
+            queue_cv_.notify_one();
+            throw;
+        }
+    }
 
     GenerationResult wait_for_request(std::shared_ptr<Request> request, OutputSink* sink,
                                       const CancellationView& cancellation) {
@@ -783,7 +814,8 @@ private:
         request->cv.notify_one();
     }
 
-    void complete_success(const std::shared_ptr<Request>& request, FinishReason reason) {
+    [[nodiscard]] GenerationResult finalize_success(const std::shared_ptr<Request>& request,
+                                                    FinishReason reason) {
         HostPhaseMeasurement completion = begin_host_phase();
         if (request->preemption_count) {
             observe_scheduling(request, GenerationSchedulingTransition::Terminal);
@@ -857,6 +889,10 @@ private:
         finish_engine_phase(completion, EngineHostPhase::CommitOutput);
         result.engine_timing       = request->host_timing.public_snapshot();
         result.first_output_timing = request->first_output_timing;
+        return result;
+    }
+
+    void deliver_success(const std::shared_ptr<Request>& request, GenerationResult&& result) {
         {
             std::lock_guard lock(request->mutex);
             if (request->response_done) { return; }
@@ -865,6 +901,18 @@ private:
         }
         if (mark_completed(request)) { release_reserved_capacity(); }
         request->cv.notify_one();
+    }
+
+    void complete_success(const std::shared_ptr<Request>& request, FinishReason reason) {
+        deliver_success(request, finalize_success(request, reason));
+    }
+
+    void retire_completed_slot(std::uint32_t lane, const std::shared_ptr<Request>& request,
+                               FinishReason reason) {
+        GenerationResult result = finalize_success(request, reason);
+        remove_completed_slot(lane);
+        publish_runtime_stats();
+        deliver_success(request, std::move(result));
     }
 
     void complete_cancelled(const std::shared_ptr<Request>& request) {
@@ -947,21 +995,18 @@ private:
             request->terminal_reason.reset();
 
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
-            complete_success(request, reason);
-            remove_completed_slot(lane);
+            retire_completed_slot(lane, request, reason);
             boundary = begin_host_phase();
             changed  = true;
         }
-        if (changed) { publish_runtime_stats(); }
         return changed;
     }
 
     void cancel_active_requests(const std::array<bool, kMaximumConcurrency>& cancelled_at_boundary,
                                 HostPhaseMeasurement& boundary) {
         if (instance_.program->has_context_operation()) { return; }
-        bool changed = false;
         for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
-            const auto& request = slots_[lane];
+            const auto request = slots_[lane];
             if (request == nullptr || !cancelled_at_boundary[lane]) { continue; }
             if (request->capture_pending) { continue; }
             if (!request->sequence || !request->lane || request->lane->value != lane) {
@@ -973,12 +1018,9 @@ private:
             request->speculative_stats  = std::move(aborted.speculative);
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
             append_output(request, request->output.commit_preview());
-            complete_success(request, FinishReason::Cancelled);
-            remove_completed_slot(lane);
+            retire_completed_slot(lane, request, FinishReason::Cancelled);
             boundary = begin_host_phase();
-            changed  = true;
         }
-        if (changed) { publish_runtime_stats(); }
     }
 
     [[nodiscard]] bool expire_pending_requests() {
@@ -1040,6 +1082,7 @@ private:
         std::array<std::size_t, kMaximumConcurrency> generated_sizes{};
         std::array<bool, kMaximumConcurrency> cancelled{};
         std::array<bool, kMaximumConcurrency> failed{};
+        std::array<std::exception_ptr, kMaximumConcurrency> preview_errors{};
         bool generated_staged = false;
         std::array<std::shared_ptr<Request>, kMaximumConcurrency> terminal_requests{};
         std::array<std::uint32_t, kMaximumConcurrency> terminal_lanes{};
@@ -1090,8 +1133,17 @@ private:
                     finish_reasons[row] = FinishReason::Cancelled;
                     continue;
                 }
-                const OutputDecision decision = request->output.preview_model(
-                    row_tokens, request->budget->remaining(), request->budget->limit_reason());
+                OutputDecision decision;
+                try {
+                    decision = request->output.preview_model(
+                        row_tokens, request->budget->remaining(), request->budget->limit_reason());
+                } catch (const text::GrammarViolation&) {
+                    request->output.discard_preview();
+                    preview_errors[row] = std::current_exception();
+                    failed[row] = true;
+                    decisions[row] = CommitDecision{.terminal = true, .failed = true};
+                    continue;
+                }
                 if (decision.accepted_tokens == 0 || decision.accepted_tokens > count ||
                     (!decision.finished() && decision.accepted_tokens != count) ||
                     (decision.finished() && decision.continuation != ContinuationAction::Decode) ||
@@ -1209,10 +1261,16 @@ private:
                 const auto& request          = slots_[lane];
                 const std::uint32_t accepted = decisions[row].accepted_tokens;
                 if (failed[row]) {
-                    complete_error(request, std::make_exception_ptr(
-                                                RequestError(RequestErrorKind::ConstraintDeadEnd,
-                                                             "grammar has no valid next token")));
+                    const auto rejected = request;
+                    const auto error =
+                        preview_errors[row]
+                            ? preview_errors[row]
+                            : std::make_exception_ptr(
+                                  RequestError(RequestErrorKind::ConstraintDeadEnd,
+                                               "grammar has no valid next token"));
                     remove_completed_slot(lane);
+                    publish_runtime_stats();
+                    complete_error(rejected, error);
                     continue;
                 }
                 if (!cancelled[row]) { request->budget->commit(accepted); }
@@ -1261,15 +1319,15 @@ private:
         } catch (...) {
             phase.finish();
             for (std::size_t index = 0; index < terminal_count; ++index) {
-                complete_success(terminal_requests[index], terminal_reasons[index]);
-                remove_completed_slot(terminal_lanes[index]);
+                retire_completed_slot(terminal_lanes[index], terminal_requests[index],
+                                      terminal_reasons[index]);
             }
             throw;
         }
         phase.finish();
         for (std::size_t index = 0; index < terminal_count; ++index) {
-            complete_success(terminal_requests[index], terminal_reasons[index]);
-            remove_completed_slot(terminal_lanes[index]);
+            retire_completed_slot(terminal_lanes[index], terminal_requests[index],
+                                  terminal_reasons[index]);
         }
     }
 
@@ -1531,6 +1589,13 @@ private:
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
             slots_[control.destination.value] = request;
             materializing_.reset();
+            if (!control.resumed) {
+                {
+                    std::lock_guard lock(request->mutex);
+                    request->started = true;
+                }
+                request->cv.notify_one();
+            }
             boundary = begin_host_phase();
         } else if (context_owner_) {
             const auto request = context_owner_;
@@ -2191,8 +2256,38 @@ private:
                 const std::span<const TokenId> tokens =
                     std::span<const TokenId>(membership.tokens)
                         .subspan(row * membership.row_stride, membership.row_stride);
-                const OutputDecision decision =
-                    request->output.preview_control(tokens, request->budget->remaining());
+                OutputDecision decision;
+                try {
+                    decision =
+                        request->output.preview_control(tokens, request->budget->remaining());
+                } catch (const text::GrammarViolation&) {
+                    const auto error = std::current_exception();
+                    // No forced tokens have reached Program yet. Roll back every tentative
+                    // preview, retire only the rejected row, then rebuild the surviving batch.
+                    rollback_generated();
+                    const auto rejected = request;
+                    auto aborted = instance_.program->abort(*rejected->sequence);
+                    if (aborted.status != ConsumeStatus::Consumed) {
+                        throw std::logic_error("grammar-rejected control row could not be retired");
+                    }
+                    rejected->generation_timings = aborted.timings;
+                    rejected->speculative_stats = std::move(aborted.speculative);
+                    remove_completed_slot(lane);
+                    complete_error(rejected, error);
+                    ControlMembership remaining;
+                    remaining.row_stride = membership.row_stride;
+                    for (std::size_t other = 0; other < membership.size; ++other) {
+                        if (other == row) { continue; }
+                        remaining.lanes[remaining.size] = membership.lanes[other];
+                        remaining.sequences[remaining.size++] = membership.sequences[other];
+                        const auto first = membership.tokens.begin() + other * membership.row_stride;
+                        remaining.tokens.insert(remaining.tokens.end(), first,
+                                                first + membership.row_stride);
+                    }
+                    if (!remaining.empty()) { run_control_batch(remaining); }
+                    publish_runtime_stats();
+                    return;
+                }
                 if (decision.accepted_tokens != membership.row_stride || decision.finished() ||
                     decision.continuation != ContinuationAction::Decode ||
                     (decision.prefix_execution_split_after &&

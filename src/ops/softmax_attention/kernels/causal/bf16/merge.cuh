@@ -3,6 +3,8 @@
 #include "ops/softmax_attention/kernels/causal/bf16/tile_io.cuh"
 #include "ops/softmax_attention/kernels/causal/bf16/partition.h"
 #include "ops/softmax_attention/kernels/softmax.cuh"
+#include "ops/common/numeric/math.cuh"
+#include "core/pdl.cuh"
 
 namespace ninfer::ops::detail {
 
@@ -37,13 +39,25 @@ bf16_kv_merge_statistics(const float* partial_m, const float* partial_l, int q_h
     return total;
 }
 
-template <typename Geometry, class Schedule, bool MultiBatch, bool Masked>
+template <bool Gated>
+__device__ __forceinline__ __nv_bfloat16 bf16_kv_merge_output(
+    float value, const __nv_bfloat16* gate, std::int64_t index) {
+    const auto rounded = __float2bfloat16(value);
+    if constexpr (Gated) {
+        return __float2bfloat16_rn(__bfloat162float(rounded) *
+                                  common::sigmoid(__bfloat162float(gate[index])));
+    }
+    return rounded;
+}
+
+template <typename Geometry, class Schedule, bool MultiBatch, bool Masked, bool Gated = false>
 __launch_bounds__(Schedule::kThreads) __global__
     void bf16_kv_merge_kernel(const float* partial_acc, const float* partial_m,
                               const float* partial_l, const std::int32_t* positions,
                               const std::int32_t* valid_columns, std::int32_t tokens,
                               std::int32_t batch_size, Bf16KvPartition partition,
-                              __nv_bfloat16* out) {
+                              __nv_bfloat16* out, const __nv_bfloat16* gate = nullptr) {
+    pdl::trigger_dependents();
     const int split_count = partition.capacity;
     constexpr int DChunk  = Schedule::kDChunk;
     static_assert(DChunk <= Geometry::kHeadDim);
@@ -70,9 +84,10 @@ __launch_bounds__(Schedule::kThreads) __global__
     if constexpr (Masked) {
         const int absolute_column = token;
         if (absolute_column >= live_columns) {
-            if (tid < DChunk && d_start + tid < Geometry::kHeadDim)
-                out[causal_q_index<Geometry>(q_head, d_start + tid, output_column)] =
-                    __float2bfloat16(0.0f);
+            if (tid < DChunk && d_start + tid < Geometry::kHeadDim) {
+                const auto index = causal_q_index<Geometry>(q_head, d_start + tid, output_column);
+                out[index] = bf16_kv_merge_output<Gated>(0.0f, gate, index);
+            }
             return;
         }
     }
@@ -105,7 +120,8 @@ __launch_bounds__(Schedule::kThreads) __global__
     }
 
     const float value = (head_l > 0.0f) ? numerator / head_l : 0.0f;
-    out[causal_q_index<Geometry>(q_head, d, output_column)] = __float2bfloat16(value);
+    const auto index = causal_q_index<Geometry>(q_head, d, output_column);
+    out[index] = bf16_kv_merge_output<Gated>(value, gate, index);
 }
 
 } // namespace ninfer::ops::detail

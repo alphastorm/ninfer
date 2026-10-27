@@ -1,0 +1,31 @@
+{
+  "artifact_type": "ninfer_p14_native_dflash2_grouped_convolution_test",
+  "schema_version": 1,
+  "source_commit": "7a25cd72f490183e4113f1e84e68e36d653ddd28",
+  "target": "ninfer_linear_dynamic_grouped_conv_add_test",
+  "coverage": {
+    "input_rows": [4096, 17408],
+    "width_interval_inclusive": [2, 16],
+    "batch_interval_inclusive": [1, 8],
+    "eager_shapes_per_card": 240,
+    "graph_width_batch_pairs_per_input_shape": [[3, 3], [13, 5], [11, 7], [14, 6], [15, 6], [16, 8]],
+    "replays_per_graph_shape": 2,
+    "checks": ["independent projection and residual oracle", "output and scratch guards", "exact workspace use", "input and weight preservation"],
+    "relative_l2_limit": 0.0032,
+    "gross_absolute_limit": 0.001,
+    "gross_relative_limit": 0.002
+  },
+  "shared_memory": {
+    "maximum_grouped_projection_bytes_source_derived": 49664,
+    "static_threshold_bytes": 49152,
+    "requires_dynamic_opt_in": true,
+    "initial_97_kib_claim": "retracted: staging count is one; the next template parameter is minimum blocks per SM",
+    "runtime_kernel_attribute_measurement": false
+  },
+  "results": [
+    {"job_id": "smem-86", "lane": "rtx3090", "cuda_architecture": "86", "binary_sha256": "e8095bf4dcc932530222821dc1cbb5968da515634cdd1b2ca335e3a86d23ba2d", "exit_code": 0, "elapsed_seconds": 4.2376235, "output": "OK linear_dynamic_grouped_conv_add"},
+    {"job_id": "smem-89", "lane": "rtx4090", "cuda_architecture": "89", "binary_sha256": "525b9cbee3ccd6cc73892b74a9108b8b672fe7832f795c820fc045f9916fc13b", "exit_code": 0, "elapsed_seconds": 4.1886672, "output": "OK linear_dynamic_grouped_conv_add"}
+  ],
+  "limitations": ["This is operator correctness and dynamic-shared-memory launch evidence, not end-to-end performance or quality qualification.", "The first test invocation stopped before GPU execution because a handoff transposed the architecture-to-hash mapping; authoritative per-architecture build receipts corrected the mapping without weakening the hash guard."],
+  "raw_prompts_outputs_or_secrets_included": false
+}

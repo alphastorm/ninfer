@@ -29,6 +29,13 @@ namespace ninfer::models::qwen3_5::loading {
                                       const std::string& component);
 void bind_dflash2(Bindings& bindings, DraftWeights& weights, const DraftConfig& config,
                   const TextConfig& target);
+// Native DFlash2 gate/up recipe: decode Q8 G32 to FP32, then grouped_absmax Q4 G64.
+// Spans contain complete padded RowSplit rows; logical K alone selects the quantized values.
+void requantize_draft_mlp_rows(std::uint64_t columns, std::uint64_t rows,
+                               std::span<const std::byte> source_codes,
+                               std::span<const std::byte> source_scales,
+                               std::span<std::byte> target_codes,
+                               std::span<std::byte> target_scales);
 [[nodiscard]] ProposalWeights bind_proposal(Bindings& bindings, const artifact::Proposal& proposal,
                                             const TextConfig& target, const LoadOptions& options,
                                             std::uint32_t public_tokens);

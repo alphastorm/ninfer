@@ -234,6 +234,7 @@ struct RequestRecord {
     std::vector<StreamEvent> events;
     GenerationResult result;
     std::exception_ptr error;
+    bool started           = false; // Sticky initial materialization completion, guarded by mutex.
     bool response_done     = false;
     bool consumer_released = false;
     bool capacity_released = false;

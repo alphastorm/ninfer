@@ -30,6 +30,25 @@ V3 artifact 保存配置、物理对象、逻辑参数 Binding、使用位置的
 Converter 负责源映射、量化或保值导入、融合存储、packing 和 layout 转换；loader 根据实际绑定
 验证、读取并上传原字节。相同架构和可处理的配置更换训练权重或组合已有表示，沿用同一模型代码。
 
+Native `sm_86`/`sm_89` DFlash2 has one fixed load-time recipe,
+`dflash2-gate-up-q4-mapped-embedding/1`. It converts only Q8 RowSplit parents used exclusively by
+draft MLP gate/up: exact Q8 G32 reconstruction to FP32, then the canonical `grouped_absmax`
+Q4 G64 encoder. Complete parents are converted once in bounded row tiles; aliases retain their
+logical ranges. Already non-Q8 inputs and all down/convolution projections are unchanged.
+Effective geometry exists before ModelProfile and feeds the same effective-policy resolver as
+bound Parameters. No choice depends on free VRAM. The original artifact identity remains intact;
+the recipe is part of the exact source/binary provenance required by K2, not permission to restore
+checkpoints from a different build.
+
+The same fit binds the target/draft shared token embedding to its registered Host allocation's
+CUDA address. Other uses of a tied parent retain their requested placement. Model owns registration
+and converted backing beyond every Parameter/Graph reader; no mapping or weight repacking occurs
+during execution. Startup counts actual converted Device capacity and registered Host capacity,
+not a credit against the original representation. Graph calibration and admission headroom are
+unchanged. The 131,072-token C1 fit profile explicitly selects zero extra Device state slots and
+retains Host context caching; logical StateImage geometry and schema 3 are unchanged. Additional
+slots remain explicit caller reservations, never silently trimmed to make admission pass.
+
 ```mermaid
 flowchart LR
     S["来源与 recipe"] --> C["Converter / Writer"]
@@ -384,6 +403,12 @@ Frontend 的 boundary metadata 只描述 accepted span 内的相对位置；Engi
 Program 根据 base frontier 转为绝对位置，与 accepted token、State/KV 和 prefix digest 原子提交。
 Program commit 失败时，OutputSession preview 也不提交。
 
+推测 round 的 commit 在 compute stream 上排入 replay fold、hidden 修正和 token count 后不等待
+它们：后续 compute 工作按 stream 顺序在其后执行，host 可同时提交下一 round。Program 记录这一
+在途 tail；context operation 提交 transfer-stream 拷贝、finish/abort 观察或释放 native state、
+以及失败清理之前先结算它。终止 DFlash row 的 context append 经 pinned ingress 和 workspace，
+与丢弃 row 一样在 commit 内同步结算。
+
 Forced control 使用同一提交机制，token 由 Frontend 提供，不调用 sampler 或推进 sampling RNG。
 初次 admission 确立后，在任何输出 delta 前发布一次 `GenerationStart`；抢占恢复不重复发布它。
 最终 response 等待 terminal 资源及缓存 owner 结算完成。
@@ -391,7 +416,9 @@ Forced control 使用同一提交机制，token 由 Frontend 提供，不调用 
 ## 6. 结束、取消与失败
 
 成功结束时，Program 将可保留 continuation 交给 ResourceManager，或释放 sequence；ResourceManager
-更新私有 owner、共享索引和 session，然后 Engine 释放 lane、完成 response。
+更新私有 owner、共享索引和 session，然后 Engine 完成结果、释放 lane、发布不再包含该请求的
+runtime statistics，最后完成 response。成功结束和 resident 取消使用相同顺序；`wait()` 返回后
+读取的统计不得仍将该请求计入 live membership。
 
 取消在 worker 边界生效：Waiting 直接结束；绑定或传输中的请求先结算/中止事务；resident 请求在
 GPU unit 稳定后 abort；paused 请求释放 ResumeState 及相关 owner。取消不改写 in-flight mapping，
@@ -416,6 +443,16 @@ Op 拥有声明执行范围内的 Graph 更新兼容性，Program 在启动时�
 Speculative unit 使用 Forward、Finish 两段 Graph，CPU 在两段之间准备约束 mask，并可与 target
 forward 重叠；两段共享同一个资源预留和提交边界。
 长度档位限制资源范围；Program 不复制 Attention Op 私有 kernel 的分派边界。
+
+Dense decode capture 在显式 `ConsumerCaptureScope` 内允许 Q4/Q5/Q8 sliced-K consumer
+预取首个 immutable weight tile，再等待 producer；activation 读取及 output 写入都在 dependency
+wait 后。其余 launch 保持 stream 顺序；MoE 分段 capture 不启用此 scope。SM86/89 不使用 PDL。
+Text full-attention 的 D256/R64 query/key preparation 可合并 unit-offset RMSNorm 与 RoPE，
+但必须保留两者之间的 BF16 舍入和各自的 reduction/rotation 顺序。原有 Ops 作为 bit-identity
+reference；不匹配 fused geometry 的调用仍使用原有三次 launch。
+BF16 grouped attention merge 可接收 caller-owned gate，在原 attention BF16 舍入之后应用
+与独立 `sigmoid_mul` 相同的算术，包括 masked columns。Tiled/native/其他 KV codec 保留独立
+gate Op；gate 不改变 attention plan、workspace capacity、cache 写入或 reduction 顺序。
 
 MoE offload 使用分段 GPU Graph，控制线程负责 CPU contribution、缓存快照及传输交接。
 稳定缓存合并 mixer 与 MoE GPU 提交；恢复和流式加载时分开，保留 mixer 与上传重叠。

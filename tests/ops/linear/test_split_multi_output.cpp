@@ -92,7 +92,9 @@ int run_target_projection_case(DevicePackedWeight& parent, DevicePackedWeight* g
         value(kvrows, tokens);
     Tensor x(input.span(), DType::BF16, {hidden, tokens}), q = query.tensor(), g = gate.tensor(),
                                                            k = key.tensor(), v = value.tensor();
-    const auto capacity = dual ? 0
+    const auto capacity = dual ? ops::linear_split_workspace_capacity_bytes(
+                                   ops::PairedProjectionWeights{parent.view(), gate_value->view(), policy},
+                                   std::array{qrows, kvrows, qrows, kvrows}, tokens, tokens)
                                : workspace_capacity(QType::FP8_E4M3FN_ROW_BF16, 14336, hidden,
                                                     policy, tokens, tokens);
     GuardedDeviceBuffer scratch(std::max<std::size_t>(capacity, 1));
@@ -134,7 +136,8 @@ int run_target_projection_case(DevicePackedWeight& parent, DevicePackedWeight* g
         cuda_synchronize(device.stream());
         const bool a8 =
             policy == ops::LinearPolicy::AllowA8 || policy == ops::LinearPolicy::AllowA4;
-        const auto criterion     = dual ? kAttnInputProjA16Tolerance
+        const auto criterion     = dual ? (capacity ? kAttnInputProjA8Tolerance
+                                                    : kAttnInputProjA16Tolerance)
                                    : a8 ? kAttnInputProjA8Tolerance
                                         : kFp8AttnInputProjA16Tolerance;
         const int sample_count   = dual && (tokens == 8 || tokens == 16)
@@ -155,8 +158,8 @@ int run_target_projection_case(DevicePackedWeight& parent, DevicePackedWeight* g
                                   kvrows, activation, hidden, tokens, criterion, sample_count);
         failures += verify_preserved("attn input" + suffix, input, activation_bits);
         failures += scratch.verify_guards(suffix);
-        if (workspace.used() != 0 || workspace.peak_used() > capacity) {
-            std::cerr << "attention projection workspace exceeds query or leaks a scope\n";
+        if (workspace.used() != 0 || workspace.peak_used() != capacity) {
+            std::cerr << "attention projection workspace differs from query or leaks a scope\n";
             ++failures;
         }
     }
@@ -187,6 +190,9 @@ int run_q4_q5() {
                   192, 193})
         failures +=
             run_target_projection_case(query_key, &gate_value, t, ops::LinearPolicy::A16Only, true);
+    for (int t : {31, 32, 33, 127, 128, 129, 255, 256, 257, 512, 513, 1024})
+        failures += run_target_projection_case(query_key, &gate_value, t,
+                                               ops::LinearPolicy::AllowA8, true);
     return failures;
 }
 

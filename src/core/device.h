@@ -84,6 +84,9 @@ struct DeviceContext {
     const char* sync_mode() const;
     // Waits for the owned compute stream, not the transfer or borrowed streams.
     void synchronize() const;
+    // Submits queued compute-stream work without waiting for it: a batched driver model (WDDM,
+    // the WSL2 GPU path) may otherwise hold a launch until the next blocking call or launch.
+    void flush() const;
 
 private:
     Device device_;

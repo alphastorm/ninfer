@@ -5,7 +5,9 @@
 #include "ops/linear/swiglu/nvfp4/dispatch.h"
 #include "ops/linear/swiglu/dispatch.h"
 #include "ops/common/host/operands.h"
+#include "ops/linear/kernels/group64_a8/launch.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <stdexcept>
 
@@ -39,8 +41,16 @@ std::size_t linear_swiglu_workspace_capacity_bytes(QType qtype, std::int32_t gat
         return 0;
     }
     if (qtype == QType::Q4_G64_FP16) {
-        return detail::q4_linear_swiglu_capacity_workspace_bytes(gate_up_rows, input_rows,
-                                                                 min_tokens, max_tokens);
+        auto bytes = detail::q4_linear_swiglu_capacity_workspace_bytes(
+            gate_up_rows, input_rows, min_tokens, max_tokens);
+#if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
+        if (detail::group64_a8::selected(policy, max_tokens)) {
+            bytes = min_tokens > 32 ? 0 : detail::q4_linear_swiglu_capacity_workspace_bytes(
+                gate_up_rows, input_rows, min_tokens, 32);
+            bytes = std::max(bytes, detail::group64_a8::workspace_bytes(input_rows, max_tokens));
+        }
+#endif
+        return bytes;
     }
     if (qtype == QType::NVFP4) {
         return detail::nvfp4_linear_swiglu_workspace_capacity_bytes(policy, min_tokens, max_tokens);
@@ -114,6 +124,10 @@ void linear_swiglu(const Tensor& x, const Weight& gate_up_weight, Tensor& out, L
         detail::select_q8_linear_swiglu(gate_up_weight.n, gate_up_weight.k,
                                         t)(x, gate_up_weight, out, execution.stream());
     } else {
+#if defined(NINFER_NATIVE_PREFILL_GROUP64_A8)
+        if (detail::group64_a8::selected(policy, t))
+            return detail::group64_a8::swiglu(x, gate_up_weight, out, ws, execution.stream());
+#endif
         detail::q4_linear_swiglu_dispatch(x, gate_up_weight, out, ws, execution);
     }
 }

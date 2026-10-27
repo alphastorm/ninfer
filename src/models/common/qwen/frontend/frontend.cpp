@@ -254,7 +254,7 @@ void capture_loaded_identity(const FrontendResources& resources, bool vision_ena
         resource_inventory_digest("ninfer/qwen/frontend-resources/1", inventory);
     identity.vision_preprocessing =
         vision_enabled
-            ? resource_inventory_digest("ninfer/qwen/vision-preprocessing/1",
+            ? resource_inventory_digest("ninfer/qwen/vision-preprocessing/2",
                                         std::span(inventory).subspan(4))
             : "disabled";
     identity.parser_codec   = fi::kParserCodec;

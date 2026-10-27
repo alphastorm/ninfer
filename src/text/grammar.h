@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -18,6 +19,12 @@ class Grammar;
 namespace ninfer::text {
 
 [[nodiscard]] RequestErrorKind constraint_error_kind(OutputConstraintKind kind);
+
+// A sampled token disagreed with this request's matcher, not with shared model state.
+class GrammarViolation final : public std::logic_error {
+public:
+    GrammarViolation() : std::logic_error("selected token violates the request grammar") {}
+};
 
 // One immutable vocabulary/compiler per model; one transactional matcher per request.
 class GrammarSession {

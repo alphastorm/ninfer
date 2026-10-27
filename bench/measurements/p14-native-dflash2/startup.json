@@ -1,0 +1,69 @@
+{
+  "artifact_type": "ninfer_p14_native_dflash2_startup_probe",
+  "schema_version": 1,
+  "job_id": "base-startup-02",
+  "source_commit": "7a25cd72f490183e4113f1e84e68e36d653ddd28",
+  "model_sha256": "81f924d440c27261d820c19a9f8d45794c5aee410f8a68bd358133fa8c0375da",
+  "configuration": {
+    "speculative_backend": "dflash2",
+    "draft_tokens": 7,
+    "proposal_head": "full",
+    "max_context": 65536,
+    "kv_capacity": 65536,
+    "kv_dtype": "int8",
+    "max_concurrency": 1,
+    "prefill_chunk": 1024,
+    "extra_device_state_slots": 0,
+    "admission_headroom_mib": 1024,
+    "cuda_graph": true,
+    "gpu_keep_warm_ms": 60000,
+    "temperature": 0
+  },
+  "shared_observations": {
+    "prompt_tokens": 68,
+    "completion_tokens": 256,
+    "weights_capacity_bytes": 19320283648,
+    "kv_payload_bytes": 2214592512,
+    "workspace_capacity_bytes": 103948288,
+    "runtime_reservation_bytes": 2597884160,
+    "cuda_graph_calibration_increment_bytes": 39845888,
+    "cuda_graph_calibration_retained_bytes": 39845888,
+    "cuda_graph_rebuild_estimate_bytes": 0,
+    "cuda_graph_prepare_increment_bytes": 0
+  },
+  "cards": [
+    {
+      "lane": "rtx4090",
+      "cuda_architecture": "89",
+      "binary_sha256": "cfc3e06649f5e539397963556f7e5459592d0d5ee7ae330a622cd5f43c356251",
+      "build_profile": "native-v0.7.0-beta.2-rtx4090",
+      "driver_version": "621.01",
+      "power_limit_w": 450,
+      "requested_restore_power_limit_w": 450,
+      "status": "started_and_served",
+      "available_after_startup_bytes": 2197815296,
+      "post_request_memory_used_mib": 21462
+    },
+    {
+      "lane": "rtx3090",
+      "cuda_architecture": "86",
+      "binary_sha256": "cdd24c5efcbdb414770e819598c3619f53970faa3e3fe1c7ad7e42b362c9b790",
+      "build_profile": "native-v0.7.0-beta.2-rtx3090",
+      "driver_version": "621.01",
+      "power_limit_w": 350,
+      "requested_restore_power_limit_w": 370,
+      "status": "started_and_served",
+      "available_after_startup_bytes": 2507145216,
+      "post_request_memory_used_mib": 21170
+    }
+  ],
+  "limitations": [
+    "This is startup and generation evidence, not the role-corpus performance gate, a powered quality screen, or 131072-token admission evidence.",
+    "Memory-used measurements are post-request snapshots, not sampled peaks.",
+    "Successful graph initialization and generation exercise the configured CUDA path; no per-kernel dynamic-shared-memory measurement was captured.",
+    "Source analysis corrected the initial 97 KiB premise: grouped-convolution projection uses one staging slot and peaks at 49664 bytes, above the 48 KiB static threshold and therefore requiring dynamic shared-memory opt-in. This is a source-derived requirement, not a measured kernel attribute.",
+    "The prior base-startup-01 attempt rejected the removed --no-ui CLI option before model initialization; the corrected invocation is the evidence here.",
+    "Historic fixed CUDA-graph reservation estimates are not applicable: this base measured 38 MiB retained calibration and zero rebuild reservation."
+  ],
+  "raw_prompts_outputs_or_secrets_included": false
+}

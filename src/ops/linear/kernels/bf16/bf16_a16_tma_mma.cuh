@@ -30,7 +30,12 @@ void launch_bf16_mma_partitions(const Bf16A16Operands&, Output, Epilogue, cudaSt
 struct Bf16ContiguousTmaWeightAccess;
 
 #if !defined(NINFER_SM86) && !defined(NINFER_SM89)
+// Keep device parameter alignment without an over-aligned MSVC host-stub argument.
+#if defined(_MSC_VER) && !defined(__CUDA_ARCH__)
+struct Bf16TmaDescriptors {
+#else
 struct alignas(128) Bf16TmaDescriptors {
+#endif
     CUtensorMap weight;
     CUtensorMap activation;
 };
@@ -40,7 +45,7 @@ inline CUtensorMap bf16_tma_map(const __nv_bfloat16* pointer, int rows, int k, i
                                 int block_k) {
     // Factor K into 64-element sectors. The contiguous 128-byte dimension matches the
     // hardware swizzle while the next box dimension permits larger K tiles without repacking.
-    CUtensorMap result{};
+    alignas(128) CUtensorMap result{};
     std::uint64_t dimensions[]{64, static_cast<std::uint64_t>(k / 64),
                                static_cast<std::uint64_t>(rows)};
     std::uint64_t strides[]{128, static_cast<std::uint64_t>(k) * 2};

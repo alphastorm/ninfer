@@ -133,7 +133,7 @@ CommitResult Program::commit(PendingBatch&& batch,
         const auto produced =
             batch.counts_.empty() ? 1U : static_cast<std::uint32_t>(batch.counts_[row]);
         const auto& d = decisions[row];
-        if ((d.cancelled && d.failed) || (d.failed && !p.pending_failed[row]) ||
+        if ((d.cancelled && d.failed) ||
             ((d.cancelled || d.failed)
                  ? (!d.terminal || d.accepted_tokens != 0)
                  : (d.accepted_tokens == 0 || d.accepted_tokens > produced ||

@@ -2,6 +2,8 @@
 #include "artifact/fixture.h"
 #include "artifact/formats.h"
 #include "models/qwen3_5/load.h"
+#include "models/qwen3_5/load/bindings.h"
+#include "ops/quantized_weight.h"
 
 #include <algorithm>
 #include <array>
@@ -338,6 +340,197 @@ void cold_matrix_profile() {
             "cold matrix profile did not preserve the local NVFP4 matrix layout");
 }
 
+void native_prefill_policy() {
+    using ops::LinearPolicy;
+    using ops::NativePrefillPolicy;
+    for (const auto format : {QType::Q4_G64_FP16, QType::Q5_G64_FP16, QType::Q8_G32_FP16}) {
+        const auto geometry = weight_geometry(format, QuantLayout::RowSplit,
+                                              std::array<std::uint64_t, 2>{128, 5120});
+        std::vector<std::byte> bytes(geometry.bytes);
+        const WeightParent parent{geometry, Device::cpu(), bytes.data()};
+        const WeightView view{{128, 5120}, {{&parent, 0, geometry.elements}}};
+        for (const auto stored : {LinearPolicy::A16Only, LinearPolicy::AllowA8,
+                                  LinearPolicy::AllowA4}) {
+            const ops::WeightInput input{view, stored, 2.0F};
+            const auto original =
+                ops::effective_weight_input(input, NativePrefillPolicy::ArtifactUse);
+            const auto promoted =
+                ops::effective_weight_input(input, NativePrefillPolicy::Group64A8);
+            const auto expected = format != QType::Q8_G32_FP16 && stored == LinearPolicy::A16Only
+                                      ? LinearPolicy::AllowA8
+                                      : stored;
+            require(original.policy == stored && promoted.policy == expected &&
+                        promoted.activation_input_divisor == 2.0F &&
+                        &promoted.weight == &view && input.policy == stored,
+                    "native prefill changed stored Use, auxiliary, or ineligible policy");
+            const std::array inputs{promoted};
+            require(ops::describe_linear_weight(inputs).policy ==
+                        ops::prepare_linear_weight(promoted).policy,
+                    "native prefill planned and bound policies differ");
+        }
+        rejects<std::invalid_argument>(
+            [&] {
+                (void)ops::effective_weight_input({view},
+                                                  static_cast<NativePrefillPolicy>(255));
+            },
+            "invalid native prefill profile was accepted");
+    }
+    const auto q4_geometry = weight_geometry(QType::Q4_G64_FP16, QuantLayout::RowSplit,
+                                             std::array<std::uint64_t, 2>{128, 5120});
+    const auto q5_geometry = weight_geometry(QType::Q5_G64_FP16, QuantLayout::RowSplit,
+                                             std::array<std::uint64_t, 2>{128, 5120});
+    std::vector<std::byte> q4_bytes(q4_geometry.bytes), q5_bytes(q5_geometry.bytes);
+    const WeightParent q4{q4_geometry, Device::cpu(), q4_bytes.data()};
+    const WeightParent q5{q5_geometry, Device::cpu(), q5_bytes.data()};
+    const WeightView first{{128, 5120}, {{&q4, 0, q4_geometry.elements}}};
+    const WeightView second{{128, 5120}, {{&q5, 0, q5_geometry.elements}}};
+    for (const auto permission : {LinearPolicy::A16Only, LinearPolicy::AllowA8, LinearPolicy::AllowA4}) {
+        const std::array<ops::WeightInput, 2> inputs{{{first, LinearPolicy::AllowA4},
+                                                     {second, permission}}};
+        const auto planned = ops::describe_projection_weights(inputs);
+        const auto bound = ops::projection_profile(ops::prepare_projection_weights(inputs));
+        require(planned == bound && planned.first.policy == permission &&
+                    planned.second->policy == permission,
+                "paired projection failed to intersect planned/bound effective Uses");
+    }
+}
+
+void draft_gate_up_requantization() {
+    namespace oracle = ninfer::test::quantized_weight;
+    for (const auto columns : {1, 31, 32, 33, 63, 64, 65, 127, 128, 129, 5120}) {
+        constexpr int rows = 5;
+        std::vector<float> values(rows * columns);
+        for (int row = 0; row < rows; ++row) {
+            for (int column = 0; column < columns; ++column) {
+                const auto signed_code = (column * 73 + row * 19) % 255 - 127;
+                values[row * columns + column] = row == 0 ? 0.0F
+                    : row == 1 ? std::ldexp(float(signed_code), -24)
+                    : row == 2 ? float(signed_code) * 0.5F
+                    : row == 3 ? float(signed_code) * 0.0078125F
+                               : std::sin(float(column)) * 13.0F;
+            }
+        }
+        const auto source = oracle::pack_q8_g32_row_split(values, rows, columns);
+        const auto expected = oracle::pack_q4_row_split(source.dequant, rows, columns);
+        const auto bytes = std::as_bytes(std::span(source.payload));
+        std::vector<std::byte> codes(expected.code_plane_bytes + 2, std::byte{0xa5});
+        std::vector<std::byte> scales(expected.scale_plane_bytes + 2, std::byte{0x5a});
+        q35::loading::requantize_draft_mlp_rows(
+            columns, rows, bytes.first(source.code_plane_bytes),
+            bytes.subspan(source.scale_plane_offset, source.scale_plane_bytes),
+            std::span(codes).subspan(1, expected.code_plane_bytes),
+            std::span(scales).subspan(1, expected.scale_plane_bytes));
+        const auto reference = std::as_bytes(std::span(expected.payload));
+        require(std::equal(codes.begin() + 1, codes.end() - 1, reference.begin()) &&
+                    std::equal(scales.begin() + 1, scales.end() - 1,
+                               reference.begin() + expected.scale_plane_offset),
+                "draft Q8->Q4 differs from independent grouped_absmax oracle");
+        require(codes.front() == std::byte{0xa5} && codes.back() == std::byte{0xa5} &&
+                    scales.front() == std::byte{0x5a} && scales.back() == std::byte{0x5a},
+                "draft conversion changed guards");
+    }
+    std::vector<std::byte> codes(128), scales(8), target(64), target_scales(4);
+    const auto convert = [&] {
+        q35::loading::requantize_draft_mlp_rows(128, 1, codes, scales, target, target_scales);
+    };
+    codes[0] = std::byte{0x80};
+    rejects(convert, "draft conversion accepted forbidden Q8 -128");
+    codes[0] = std::byte{1};
+    rejects(convert, "draft conversion accepted nonzero code with zero scale");
+    scales[1] = std::byte{0x80};
+    rejects(convert, "draft conversion accepted negative-zero scale");
+    scales[1] = std::byte{0x7c};
+    rejects(convert, "draft conversion accepted infinite scale");
+    scales[0] = std::byte{0xff};
+    scales[1] = std::byte{0x7b};
+    codes[0] = std::byte{127};
+    rejects(convert, "draft conversion silently clipped an overflowing Q4 scale");
+}
+
+void native_draft_plan() {
+    ModelFixture fixture;
+    fixture.file.root["components"]["dflash2"] = {
+        {"target", "text"},
+        {"config", {{"architectures", {"DFlash2DraftModel"}}, {"model_type", "qwen3"},
+                    {"intermediate_size", 24}, {"num_attention_heads", 2},
+                    {"num_key_value_heads", 1}, {"head_dim", 8}, {"num_hidden_layers", 1},
+                    {"max_position_embeddings", 128}, {"rms_norm_eps", 1e-6},
+                    {"rope_parameters", {{"rope_theta", 10000}}},
+                    {"layer_types", {"full_attention"}},
+                    {"dflash_config", {{"target_layer_ids", {0}}, {"mask_token_id", 256},
+                                       {"conv_kernel_size", 3}, {"conv_group_size", 32},
+                                       {"selector_rank", 8}, {"selector_top_k", 16}}}}}};
+    fixture.parameter("dflash2/feature_projection", {128, 128}, "dflash2/target_features");
+    fixture.parameter("dflash2/context_norm", {128});
+    fixture.parameter("dflash2/final_norm", {128});
+    fixture.use("text/output_head", "dflash2/final_hidden");
+    const std::string p = "dflash2/layers/0/";
+    fixture.parameter(p + "input_norm", {128});
+    fixture.parameter(p + "post_attention_norm", {128});
+    fixture.parameter(p + "attention/query", {16, 128}, p + "query_projection_input");
+    fixture.parameter(p + "attention/key", {8, 128}, p + "query_projection_input");
+    fixture.parameter(p + "attention/value", {8, 128}, p + "query_projection_input");
+    fixture.parameter(p + "attention/context_key", {8, 128}, "dflash2/context_input");
+    fixture.parameter(p + "attention/context_value", {8, 128}, "dflash2/context_input");
+    fixture.parameter(p + "attention/query_norm", {8});
+    fixture.parameter(p + "attention/key_norm", {8});
+    fixture.parameter(p + "attention/output", {128, 16}, p + "attention_output");
+    fixture.tensor("draft-gate-up", {48, 128}, QType::Q8_G32_FP16, QuantLayout::RowSplit);
+    for (int i = 0; i < 2; ++i) {
+        const auto name = p + "mlp/" + (i ? "up" : "gate");
+        fixture.file.root["bindings"][name] = {
+            {"parts", Json::array({{{"object", "draft-gate-up"},
+                                    {"range", {i * 24 * 128, (i + 1) * 24 * 128}}}})}};
+        fixture.use(name, p + "mlp_input");
+        fixture.file.root["uses"].back()["activation_policy"] = "A16Only";
+    }
+    fixture.tensor("draft-down", {128, 24}, QType::Q8_G32_FP16, QuantLayout::RowSplit);
+    fixture.file.root["bindings"][p + "mlp/down"] = {{"object", "draft-down"}};
+    fixture.use(p + "mlp/down", p + "mlp_product");
+    for (const std::string name : {"attention_conv", "mlp_conv"}) {
+        fixture.parameter(p + name + "/base_kernel", {2, 3, 128});
+        fixture.parameter(p + name + "/kernel_projection", {24, 128}, p + name + "_input");
+    }
+    fixture.parameter("dflash2/candidate_selector/hidden_projection", {8, 128},
+                       "dflash2/final_hidden");
+    fixture.parameter("dflash2/candidate_selector/predecessor_codebook", {272, 8});
+    fixture.parameter("dflash2/candidate_selector/successor_codebook", {272, 8});
+    fixture.file.root["files"][0]["payload_bytes"] = fixture.file.payload.size();
+    fixture.file.write();
+    artifact::Reader reader(fixture.file.entry);
+    auto plan = q35::plan_load(reader, {.speculative = SpeculativeBackend::DFlash2,
+                                       .native_prefill_policy = ops::NativePrefillPolicy::Group64A8});
+    const auto& mlp = plan.weights().draft->layers[0].mlp;
+    const auto gate = plan.input(mlp.gate), up = plan.input(mlp.up);
+    const auto& parent = *gate.weight.parts.front().parent;
+    require(&parent == up.weight.parts.front().parent &&
+                gate.weight.parts.front().end == up.weight.parts.front().begin,
+            "draft effective plan lost shared gate/up parent or logical ranges");
+    require(plan.input(mlp.down).weight.parts.front().parent->geometry.format == QType::Q8_G32_FP16,
+            "draft fit changed the Q8-only down projection");
+    const auto storage = plan.placement(Device::cuda(0), Device::cuda(0));
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+    require(parent.geometry.format == QType::Q4_G64_FP16 &&
+                gate.policy == ops::LinearPolicy::AllowA8 &&
+                plan.converted_device_bytes() == parent.geometry.bytes,
+            "effective Q4 geometry did not precede policy or capacity planning");
+    const auto gate_up = reader.find("draft-gate-up");
+    for (const auto& item : storage.device_objects)
+        require(item.object != gate_up, "original Q8 draft parent was still reserved on Device");
+    require(storage.registered_host_objects.size() == 1 &&
+                storage.registered_host_objects.front().object == reader.find("embedding-storage"),
+            "mapped embedding did not reserve pinned Host backing");
+#else
+    require(parent.geometry.format == QType::Q8_G32_FP16 &&
+                gate.policy == ops::LinearPolicy::A16Only && !plan.converted_device_bytes() &&
+                storage.registered_host_objects.empty(),
+            "native fit changed a non-native build");
+#endif
+    require(plan.device_capacity_bytes(Device::cuda(0), Device::cuda(0)) ==
+                storage.device_capacity_bytes + plan.converted_device_bytes(),
+            "startup omitted effective draft backing");
+}
+
 } // namespace
 
 int main() {
@@ -345,6 +538,9 @@ int main() {
         logical_data_and_instances();
         native_uses();
         cold_matrix_profile();
+        native_prefill_policy();
+        draft_gate_up_requantization();
+        native_draft_plan();
         invalid_model_data();
         std::cout << "model config, binding, resources and Use checks passed\n";
         return 0;

@@ -2,8 +2,11 @@
 #include "artifact/binder.h"
 #include "artifact/fixture.h"
 #include "artifact/reader.h"
+#include "core/decode_graph.h"
 #include "models/qwen3_5/load.h"
+#include "ninfer/ops/embedding.h"
 #include "ninfer/ops/linear_split.h"
+#include "ops/quantized_weight.h"
 
 #include <cuda_runtime.h>
 
@@ -36,6 +39,130 @@ struct Sample {
     std::uint64_t offset;
     std::vector<std::byte> bytes;
 };
+
+void check_mapped_embedding(const artifact::Reader& reader, const q35::Model& model,
+                             DeviceContext& device) {
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+    if (!model.options().dflash2()) return;
+    const auto& bound = model.weight(model.weights().text.token_embedding);
+    const auto mapped = native_weight(bound.view);
+    const auto region = contiguous_weight_region(bound.view);
+    const auto& parent = *region.parent;
+    cudaPointerAttributes attributes{};
+    CUDA_CHECK(cudaPointerGetAttributes(&attributes, parent.data));
+    require(attributes.type == cudaMemoryTypeHost && attributes.devicePointer == parent.data,
+            "native DFlash2 embedding is not CUDA-mapped pinned Host storage");
+    require(bound.source_objects.size() == 1,
+            "mapped embedding proof requires its native contiguous parent");
+    const auto object = reader.find(bound.source_objects.front());
+    const auto offset = reader.directory().tensor(object).offset;
+    DeviceBuffer resident(device.device(), parent.geometry.bytes);
+    std::vector<std::byte> source(1024 * 1024), received(source.size());
+    const auto compare_payload = [&](bool upload) {
+        for (std::size_t begin = 0; begin < parent.geometry.bytes; begin += source.size()) {
+            const auto count = std::min(source.size(), parent.geometry.bytes - begin);
+            reader.read_into(offset + begin, std::span(source).first(count));
+            CUDA_CHECK(cudaMemcpy(received.data(), parent.data + begin, count,
+                                  cudaMemcpyDeviceToHost));
+            require(std::equal(source.begin(), source.begin() + count, received.begin()),
+                    "mapped embedding payload is not byte-identical to the artifact");
+            if (upload) resident.copy_from_host(source.data(), count, begin);
+        }
+    };
+    compare_payload(true);
+    const WeightParent reference_parent{parent.geometry, device.device(),
+                                        static_cast<const std::byte*>(resident.data()),
+                                        parent.weight_divisors};
+    const WeightView reference_view{bound.view.shape,
+                                    {{&reference_parent, region.begin, region.end}}};
+    const auto reference = native_weight(reference_view);
+    for (const auto width : {1, 4, 8, 1024}) {
+        std::vector<std::int32_t> ids(width);
+        for (int i = 0; i < width; ++i) {
+            ids[i] = i == 0 ? mapped.n - 1 : i == 1 ? 0
+                : static_cast<std::int32_t>((std::uint64_t(i) * 2654435761U) % mapped.n);
+        }
+        DeviceBuffer input(device.device(), ids.size() * sizeof(ids[0]));
+        input.copy_from_host(ids.data(), input.size());
+        DeviceBuffer actual(device.device(), std::size_t(mapped.k) * width * 2);
+        DeviceBuffer expected(device.device(), actual.size());
+        Tensor tokens(input.span(), DType::I32, {width});
+        Tensor output(actual.span(), DType::BF16, {mapped.k, width});
+        Tensor oracle(expected.span(), DType::BF16, {mapped.k, width});
+        ops::embedding(tokens, reference, oracle, device.execution_view());
+        ops::embedding(tokens, mapped, output, device.execution_view());
+        device.synchronize();
+        std::vector<std::byte> expected_bytes(expected.size()), actual_bytes(actual.size());
+        expected.copy_to_host(expected_bytes.data(), expected_bytes.size());
+        actual.copy_to_host(actual_bytes.data(), actual_bytes.size());
+        require(actual_bytes == expected_bytes, "mapped embedding eager gather changed BF16 bytes");
+        DecodeGraphDefinition definition;
+        definition.capture(device.stream(), [&] {
+            ops::embedding(tokens, mapped, output, device.execution_view());
+        });
+        DecodeGraphExecutable graph;
+        graph.instantiate(definition);
+        for (int replay = 0; replay < 2; ++replay) {
+            actual.fill(0xa5);
+            graph.launch(device.stream());
+            device.synchronize();
+            actual.copy_to_host(actual_bytes.data(), actual_bytes.size());
+            require(actual_bytes == expected_bytes,
+                    "mapped embedding graph replay changed BF16 gather bytes");
+        }
+    }
+    compare_payload(false);
+    std::cout << "mapped embedding byte identity and eager/graph widths1,4,8,1024 passed\n";
+#else
+    (void)reader;
+    (void)model;
+    (void)device;
+#endif
+}
+
+void sample_converted(const artifact::Reader& reader, const q35::LoadPlan& plan,
+                       std::map<std::string, std::vector<Sample>>& samples,
+                       std::uint64_t& expected_h2d) {
+    if (!plan.converted_device_bytes()) return;
+    namespace oracle = ninfer::test::quantized_weight;
+    std::set<std::size_t> parents;
+    for (const auto& layer : plan.weights().draft->layers) {
+        for (const auto id : {layer.mlp.gate, layer.mlp.up}) {
+            for (const auto& part : plan.parameter(id).binding.parts) {
+                const auto& source = reader.geometry(part.object);
+                if (source.format != QType::Q8_G32_FP16 ||
+                    !parents.insert(part.object.index).second) continue;
+                const auto target = weight_geometry(QType::Q4_G64_FP16, QuantLayout::RowSplit,
+                                                      source.shape);
+                const auto& object = reader.directory().tensor(part.object);
+                expected_h2d += target.code_bytes + target.scale_bytes;
+                const auto single = weight_geometry(QType::Q8_G32_FP16, QuantLayout::RowSplit,
+                    std::array<std::uint64_t, 2>{1, source.shape[1]});
+                for (const auto row : {std::uint64_t(0), source.shape[0] / 2, source.shape[0] - 1}) {
+                    std::vector<std::uint8_t> encoded(single.bytes);
+                    auto bytes = std::as_writable_bytes(std::span(encoded));
+                    reader.read_into(object.offset + row * source.code_bytes_per_row,
+                                     bytes.first(single.code_bytes));
+                    reader.read_into(object.offset + source.scale_offset +
+                                         row * source.scale_row_bytes,
+                                     bytes.subspan(single.scale_offset, single.scale_bytes));
+                    const auto decoded = oracle::decode_row_split_lowbit(
+                        encoded, 1, static_cast<int>(source.shape[1]),
+                        static_cast<int>(source.padded_columns), QType::Q8_G32_FP16);
+                    const auto expected = oracle::pack_q4_row_split(
+                        decoded, 1, static_cast<int>(source.shape[1]));
+                    const auto expected_bytes = std::as_bytes(std::span(expected.payload));
+                    samples[object.id].push_back({
+                        row * target.code_bytes_per_row,
+                        {expected_bytes.begin(), expected_bytes.begin() + expected.code_plane_bytes}});
+                    samples[object.id].push_back({
+                        target.scale_offset + row * target.scale_row_bytes,
+                        {expected_bytes.begin() + expected.scale_plane_offset, expected_bytes.end()}});
+                }
+            }
+        }
+    }
+}
 
 void check_selection(const q35::LoadPlan& plan, const LoadOptions& options) {
     const auto& weights = plan.weights();
@@ -291,6 +418,7 @@ int main(int argc, char** argv) {
         std::unique_ptr<q35::Model> model;
         std::map<std::string, std::vector<Sample>> samples;
         std::uint64_t expected_h2d = 0;
+        std::uint64_t expected_device_bytes = 0;
         {
             artifact::Reader reader(path);
             auto logical = q35::plan_load(reader, options);
@@ -303,11 +431,15 @@ int main(int argc, char** argv) {
                 std::cout << path.filename().string() << ": Host binding passed, architecture="
                           << architecture_name(plan.logical().config().text.architecture)
                           << " V=" << plan.logical().resources().public_token_count
-                          << " device_bytes=" << plan.materialization().device_capacity_bytes
+                          << " device_bytes=" << plan.logical().device_capacity_bytes(
+                                 Device::cuda(0), host_experts ? Device::cpu() : Device::cuda(0))
                           << '\n';
                 return 0;
             }
             const auto& placement = plan.materialization();
+            expected_device_bytes = placement.device_capacity_bytes +
+                                    plan.logical().converted_device_bytes();
+            sample_converted(reader, plan.logical(), samples, expected_h2d);
             for (const auto& item : placement.device_objects) { expected_h2d += item.region.bytes; }
             auto parents = placement.device_objects;
             parents.insert(parents.end(), placement.ordinary_host_objects.begin(),
@@ -330,10 +462,14 @@ int main(int argc, char** argv) {
             }
             device = std::make_unique<DeviceContext>();
             model  = q35::materialize_model(std::move(plan), *device);
+            check_mapped_embedding(reader, *model, *device);
         }
+        require(model->storage_stats().device_capacity_bytes == expected_device_bytes,
+                "effective weight Device accounting differs from startup planning");
         require(model->storage_stats().h2d_bytes == expected_h2d,
                 "H2D did not cover all selected parent bytes");
         std::set<const WeightParent*> visited;
+        std::set<std::string> visited_objects;
         std::size_t draft_weights = 0;
         for (const auto& weight : model->weight_data()) {
             const bool draft_weight =
@@ -348,6 +484,7 @@ int main(int argc, char** argv) {
             for (std::size_t i = 0; i < weight.view.parts.size(); ++i) {
                 const auto* parent = weight.view.parts[i].parent;
                 if (!visited.insert(parent).second) { continue; }
+                visited_objects.insert(weight.source_objects[i]);
                 for (const auto& sample : samples.at(weight.source_objects[i])) {
                     std::vector<std::byte> received(sample.bytes.size());
                     if (parent->device == Device::cpu()) {
@@ -357,11 +494,11 @@ int main(int argc, char** argv) {
                                               received.size(), cudaMemcpyDeviceToHost));
                     }
                     require(received == sample.bytes,
-                            "resident parent differs from original v3 bytes");
+                            "resident parent differs from stored bytes or effective recipe oracle");
                 }
             }
         }
-        require(visited.size() == samples.size(),
+        require(visited_objects.size() == samples.size(),
                 "some resident parents are not reachable from model weights");
         check_native_inputs(*model);
         const auto ids = model->resources().tokenizer->encode("Hello");

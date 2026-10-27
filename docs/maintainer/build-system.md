@@ -18,11 +18,47 @@ The default configuration is Release. Ninja links and archives share the single-
 | `NINFER_BUILD_APPS` | ON | CLI, HTTP server and perplexity evaluator |
 | `BUILD_TESTING` | OFF | C++ tests and registered Python interoperability tests |
 | `NINFER_BUILD_BENCHMARKS` | OFF | Op, model, Engine and context-cost benchmarks |
+| `NINFER_NATIVE_PREFILL_GROUP64_A8` | OFF | Opt-in sm_86/sm_89 group64 integer-activation prefill |
+
+The native group64-A8 profile is a distinct numerical build profile, not a change to the artifact
+or its stored Use records. Loading resolves an effective activation permission identically for
+address-independent planning and bound operands: row-split Q4/Q5 group64 A16-only Uses become
+AllowA8; other Uses, geometry and auxiliaries remain unchanged. Paired projections use the
+intersection of their effective permissions. The profile is rejected for other architectures.
+
+Above 32 columns, the supported 27B Q4/Q5 residual projections, Q4 fused SwiGLU and paired Q4/Q5
+input projections quantize transient activations per token and 64-channel group, execute signed
+INT8 tensor-core products, and accumulate group-scaled results in FP32. FP32 activation scales
+avoid half-precision scale underflow. The paired input projections share one quantization;
+SwiGLU retains its fused FP32 nonlinear epilogue. T <= 32 and unsupported shapes keep their
+existing routes. Padding is explicitly written, output tails are masked, and weights are never
+repacked or persistently copied.
+
+Scratch is caller-owned and reported by the same layout helper used at execution:
+`round_up(T,512) * (K + 4*K/64)` bytes. This replaces (rather than adds to) the Q4 SwiGLU
+materialized-intermediate route where that route was selected. Model workspace and total VRAM
+depend on the complete planner; the formula is not a measured VRAM delta. OFF omits these CUDA
+translation units. Keep this option OFF for qualified profiles until matched throughput,
+independent Op-oracle, exact long-retrieval and powered output-quality gates pass; ON binaries
+must use a distinct `NINFER_BUILD_PROFILE` identity.
+
+Independently of the A8 option, native INT8 causal attention specializes fully visible key
+blocks for unmasked rows of widths 1024 and 2048. Ragged rows and other widths retain the
+original masked kernel rather than a refactored instance of the specialized traversal.
+Staging, masking and probability guards are elided only before the causal boundary. Query
+rotation, key traversal order, FP32 accumulation, rounding and boundary/tail handling remain
+unchanged. The existing 128-register schedule is retained; no FP16 PV accumulation or paired
+producer reduction is enabled. This attention route is intended to preserve output bytes;
+its evidence is separate from the output-changing A8 profile.
+
+The perplexity evaluator is an app target on both Linux and native Windows; its default output
+directory timestamps are UTC on both platforms.
 
 Apps or tests enable the internal product support components: media acquisition, prompt input,
-logging and serving. This is one derived condition, not a separate user option. FFmpeg belongs
-to model media decoding and remains required when apps are disabled. Curl and spdlog are needed
-only for product support. A Python 3 interpreter is found when tests are configured. The larger Python
+logging and serving. This is one derived condition, not a separate user option. FFmpeg and libjpeg
+belong to model media decoding and remain required when apps are disabled. CMake discovers libjpeg
+as `JPEG::JPEG`; the native Windows manifest supplies it through `libjpeg-turbo`.
+Curl and spdlog are needed only for product support. A Python 3 interpreter is found when tests are configured. The larger Python
 pytest suites and conversion/evaluation scripts run separately from CMake and CTest.
 
 CUDA 13.4 and Python 3.11 describe the maintained environment, not configuration version gates.

@@ -290,6 +290,7 @@ BindingReservation ProgramImpl::start_binding(const RequestBasePlan& base, runti
         case StateBindingAction::Split:
             break;
         }
+        settle_decode_tail();
         migration.submit();
         request.lifecycle = Lifecycle::Binding;
         return result;

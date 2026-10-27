@@ -32,6 +32,9 @@ public:
     [[nodiscard]] ops::WeightInput input(WeightId) const;
     [[nodiscard]] ops::WeightInput input(WeightUseId) const;
     [[nodiscard]] artifact::MaterializationPlan placement(Device cuda, Device main_experts) const;
+    // Includes effective draft backing, which is not an encoded artifact placement.
+    [[nodiscard]] std::size_t device_capacity_bytes(Device cuda, Device main_experts) const;
+    [[nodiscard]] std::size_t converted_device_bytes() const;
     [[nodiscard]] const ModelWeights& weights() const;
     [[nodiscard]] const qwen::FrontendResources& resources() const;
     [[nodiscard]] std::span<const moe::BankDescription> expert_banks() const;

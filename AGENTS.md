@@ -22,6 +22,11 @@ Do not derive requirements from another deployment or trust model.
 Model data is immutable; every Program owns its mutable state and device allocations. The loader
 validates, uploads, and binds the stored representation; actual Parameters and Ops determine
 execution support, without a whole-artifact capability registry.
+The native `sm_86`/`sm_89` DFlash2 fit is one explicit load-time exception: draft MLP gate/up
+Q8 parents become Q4 using the versioned recipe in the architecture contract, before profile
+description or placement. Target token embeddings use stable mapped pinned Host backing.
+Down projections and other weights retain their stored representation. Effective geometry feeds
+the common activation-policy resolver; no execution-time conversion or second policy path is allowed.
 Runtime owns execution and publication policy; product/serving own input acquisition and protocol
 translation. Model code does not acquire media or own transport.
 

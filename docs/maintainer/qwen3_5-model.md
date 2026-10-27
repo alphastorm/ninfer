@@ -266,6 +266,14 @@ merge-aligned dimensions, normalizes RGB and packs BF16 patch rows. Each row con
 `3 * 2 * 16 * 16 = 1536` values in the defined channel/temporal/spatial order. Images repeat their
 frame to supply the temporal pair.
 
+JPEG images use libjpeg with integer slow DCT and fancy chroma upsampling, matching Pillow's
+RGB8 decode before resize. Grayscale and CMYK JPEGs are converted to RGB8, and EXIF orientation
+is applied to both inspected geometry and decoded pixels. Other image formats and sampled
+video frames use FFmpeg. The media host test checks exact Pillow reference bytes, all eight
+EXIF orientations, truncated JPEGs, decoding budgets and cancellation.
+The Vision preprocessing identity uses the `ninfer/qwen/vision-preprocessing/2` domain for
+these decoding semantics; it must not alias checkpoints prepared by the earlier FFmpeg JPEG path.
+
 The official Vision towers have depth 27, hidden width 1152, intermediate width 4304 and 16 heads
 of dimension 72. The learned position table is a 48×48 grid. Patch projection and interpolated
 position addition precede the transformer stack. Each block performs:

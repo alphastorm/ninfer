@@ -1,4 +1,5 @@
 #pragma once
+#include "core/pdl.cuh"
 
 #include "ops/common/numeric/math.cuh"
 #include "ops/common/numeric/convert.cuh"
@@ -12,6 +13,9 @@ __global__ __launch_bounds__(Threads) void norm_simt_kernel(
     const __nv_bfloat16* x, const __nv_bfloat16* nw, const __nv_bfloat16* aw,
     const __nv_bfloat16* bw, const float* alog, const float* bias, __nv_bfloat16* h, float* g,
     float* beta, int tokens, float eps) {
+    // Small single-wave producer: let a programmatic consumer (the next projection) launch and
+    // stage its weights now; it still waits for this grid before reading h.
+    pdl::trigger_dependents();
     constexpr int D = 5120, H = 48, Warps = Threads / 32;
     const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5, head = blockIdx.x,
               first = blockIdx.y * Tile;

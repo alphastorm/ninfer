@@ -384,6 +384,11 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                          device.execution_view());
         }
 
+        // The host waits for this tail only when it must: a terminal DFlash row appends its
+        // context through the pinned DFlash ingress and the Program workspace, which the next
+        // submission rewrites, and a discarded row releases its lane below.
+        bool settle = std::any_of(discarded.begin(), discarded.end(),
+                                  [](std::uint8_t value) { return value != 0; });
         if (is_masked_draft_backend(speculative_backend)) {
             std::array<std::uint32_t, kMaximumConcurrency> append_lanes{};
             std::array<std::uint32_t, kMaximumConcurrency> append_starts{};
@@ -403,16 +408,27 @@ runtime::ExecutionTiming ProgramImpl::resolve_pending_raw(
                     std::span<const std::uint32_t>(append_lanes.data(), append_size),
                     std::span<const std::uint32_t>(append_starts.data(), append_size),
                     std::span<const std::uint32_t>(append_counts.data(), append_size));
+                settle = true;
             }
         }
 
-        timing.begin_wait();
-        device.synchronize();
-        timing.end_wait();
+        if (settle) {
+            timing.begin_wait();
+            device.synchronize();
+            timing.end_wait();
+        } else {
+            // The fold, hidden correction and token counts read only device memory and kernel
+            // arguments, and later compute work is stream-ordered behind them. The host commits
+            // and submits the next round while they run; settle_decode_tail() drains them before
+            // any host observation, transfer-stream copy, export or lane destruction.
+            device.flush();
+        }
+        decode_tail_in_flight_ = !settle;
         work.reset();
     } catch (...) {
         try {
             device.synchronize();
+            decode_tail_in_flight_ = false;
         } catch (...) {}
         work.reset();
         clear_execution_failure_lanes(lanes);

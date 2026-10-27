@@ -184,6 +184,7 @@ bool ProgramImpl::start_capture(SequenceHandle handle) {
             migration.add_state_group(*state_store, state_images->storage(),
                                       state.continuation.image, state_images->dflash_local_group());
         }
+        settle_decode_tail();
         migration.submit();
         return true;
     } catch (...) {

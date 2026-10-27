@@ -51,6 +51,9 @@ public:
     [[nodiscard]] explicit operator bool() const noexcept;
     [[nodiscard]] const ResolvedSamplingParameters& resolved_sampling() const noexcept;
 
+    // Wait for initial materialization without consuming the handle or output events.
+    // Repeatable; do not call concurrently with wait() on the same handle.
+    void wait_until_started(const CancellationView& cancellation = {});
     GenerationResult wait(OutputSink* sink = nullptr, const CancellationView& cancellation = {});
 
 private:

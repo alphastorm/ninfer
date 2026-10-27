@@ -3,6 +3,7 @@
 #include "core/paged_kv_cache.h"
 #include "ninfer/ops/kv_cache_append.h"
 #include "ninfer/ops/softmax_attention.h"
+#include "ninfer/ops/sigmoid_mul.h"
 #include "ops/op_tester.h"
 #include "ops/softmax_attention/oracle.h"
 
@@ -2149,6 +2150,41 @@ int run_batch_case(CudaExecutionView execution, const Geometry& geometry, KvCach
         failures += verify_attention(label, bf16_bits_to_double(output), reference,
                                      attention_criterion(storage));
         failures += verify_invalid_columns_zero(label, output, geometry, width, valid);
+        if (storage == KvCacheStorage::BFloat16) {
+            const auto gate_bits = to_bf16_bits(
+                make_bf16_values(q.size(), test_case.seed + 71U, -20.0f, 20.0f));
+            GuardedDeviceBuffer gate_buffer(gate_bits.size() * sizeof(std::uint16_t));
+            gate_buffer.copy_from_host(gate_bits.data(), gate_buffer.bytes());
+            Tensor gate(gate_buffer.span(), DType::BF16,
+                         {kHeadDim, geometry.q_heads, width, batch});
+            // Reference keeps the materialized BF16 attention result between the two Ops.
+            ops::sigmoid_mul(gate, tout, execution);
+            cuda_synchronize(execution.stream());
+            const auto gated_reference = copy_from_guarded<std::uint16_t>(dout, q.size());
+            const auto gated_launch = [&] {
+                ops::causal_softmax_attention(
+                    tq, tk, tv, tp, masked ? tvalid : Tensor{}, tlanes, op_geometry(geometry),
+                    kAttentionScale, cache.view(), envelope, workspace, tout, execution, &gate);
+            };
+            gated_launch();
+            cuda_synchronize(execution.stream());
+            failures += verify_exact((label + " gated eager bytes").c_str(),
+                                      copy_from_guarded<std::uint16_t>(dout, q.size()),
+                                      gated_reference);
+            DecodeGraphDefinition gated_definition;
+            DecodeGraphExecutable gated_graph;
+            gated_definition.capture(execution.stream(), gated_launch);
+            gated_graph.instantiate(gated_definition);
+            for (int replay = 0; replay < 2; ++replay) {
+                dout.fill(0xff);
+                gated_graph.launch(execution.stream());
+                cuda_synchronize(execution.stream());
+                failures += verify_exact((label + " gated graph bytes").c_str(),
+                                          copy_from_guarded<std::uint16_t>(dout, q.size()),
+                                          gated_reference);
+            }
+            failures += verify_input(label + " gate unchanged", gate_buffer, gate_bits);
+        }
         failures += cache.verify(label, expected);
         failures += cache.verify_untouched(label, before, positions, lanes, valid, width);
         if (control) {
@@ -2317,6 +2353,10 @@ int run_batch_cases(CudaExecutionView execution, KvCacheStorage storage) {
     failures += run_batch_case(execution, kGeometries[0], storage,
                                {16, {0}, {1}, {0}, MappingPattern::Fragmented, 1502u});
     if (storage == KvCacheStorage::BFloat16) {
+        for (const auto& geometry : kGeometries)
+            failures += run_batch_case(
+                execution, geometry, storage,
+                {257, {0}, {1}, {0}, MappingPattern::Fragmented, 1503u});
         failures += run_batch_case(execution, kGeometries[0], storage,
                                    {16, {49}, {7}, {0}, MappingPattern::Identity, 500u});
         failures +=
@@ -2701,6 +2741,24 @@ int run_small_prefill_cases(CudaExecutionView execution, KvCacheStorage storage)
                                 MappingPattern::Fragmented, cached_queries);
         failures += run_a3_case(execution, geometry, storage, {257, 8192, 16384, 1303u},
                                 MappingPattern::Offset, boundary_queries);
+        if (storage == KvCacheStorage::Int8Group64) {
+            // Unaligned starts cross fully visible key blocks and the causal boundary.
+            for (const int width : {257, 1024, 2048}) {
+                const std::array<int, 4> queries{0, 63, 64, width - 1};
+                for (const int prefix : {0, 63, 64, 65})
+                    failures += run_a3_case(
+                        execution, geometry, storage,
+                        {width, prefix, static_cast<unsigned>(prefix + width), 1310u + prefix},
+                        MappingPattern::Fragmented, queries);
+            }
+            // Fixed-width ragged calls retain zeroed tails as device lengths change.
+            failures += run_batch_case(
+                execution, geometry, storage,
+                {1024, {127}, {33}, {0}, MappingPattern::Fragmented, 1350u, true});
+            failures += run_batch_case(
+                execution, geometry, storage,
+                {2048, {127}, {0}, {0}, MappingPattern::Fragmented, 1351u, true});
+        }
         failures +=
             run_batch_case(execution, geometry, storage,
                            {65, {8191}, {17}, {0}, MappingPattern::Fragmented, 1304u}, 32768);

@@ -1,3 +1,4 @@
+#include "core/pdl.cuh"
 #include "ninfer/ops/sigmoid_mul.h"
 #include "ops/common/cuda/memory.cuh"
 #include "ops/common/numeric/convert.cuh"
@@ -37,6 +38,9 @@ __global__ void sigmoid_mul_scalar_kernel(const __nv_bfloat16* gate, __nv_bfloat
 __launch_bounds__(256) __global__
     void sigmoid_mul_bf16x8_kernel(const common::Bf16x8Pack* gate, common::Bf16x8Pack* x,
                                    std::int64_t packs) {
+    // Small producer: a programmatic consumer may launch and stage its weights now; it still
+    // waits for this grid before reading x.
+    pdl::trigger_dependents();
     const std::int64_t start  = blockIdx.x * static_cast<std::int64_t>(blockDim.x) + threadIdx.x;
     const std::int64_t stride = static_cast<std::int64_t>(gridDim.x) * blockDim.x;
     for (std::int64_t i = start; i < packs; i += stride) {

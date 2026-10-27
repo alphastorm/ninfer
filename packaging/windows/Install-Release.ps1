@@ -681,13 +681,19 @@ function Assert-InstallerArchitectureContract([object]$Spec, [object]$Config) {
         [string]$Spec.lifecycle.state_root_name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
         throw 'release specification immutable build identity mismatch'
     }
-    # The exact engine tuning is bound by hash into the build identity; the structural profile
-    # every native lane ships is asserted here.
+    # Lane-specific runtime policy lives in the immutable release specification.
+    $validSpeculation = $null -ne $Spec.PSObject.Properties['runtime_shape'] -and
+        [int]$Spec.runtime_shape.max_concurrency -gt 0 -and
+        [int]$Config.engine.max_concurrency -eq [int]$Spec.runtime_shape.max_concurrency -and
+        -not [string]::IsNullOrWhiteSpace([string]$Spec.runtime_shape.speculative_backend) -and
+        [string]$Config.speculative.backend -ceq [string]$Spec.runtime_shape.speculative_backend -and
+        [int]$Spec.runtime_shape.draft_tokens.min -ge 1 -and
+        [int]$Config.speculative.draft_tokens -ge [int]$Spec.runtime_shape.draft_tokens.min -and
+        ($null -eq $Spec.runtime_shape.draft_tokens.max -or
+         [int]$Config.speculative.draft_tokens -le [int]$Spec.runtime_shape.draft_tokens.max)
     if ([string]$Config.deployment_profile -cne [string]$Spec.deployment_profile -or
-        [int]$Config.engine.max_concurrency -ne 1 -or
+        -not $validSpeculation -or
         [int]$Config.engine.admission_headroom_mib -lt 256 -or
-        [string]$Config.speculative.backend -cne 'mtp' -or
-        [int]$Config.speculative.draft_tokens -lt 1 -or
         -not [bool]$Config.session_checkpoint.enabled -or
         $Config.session_checkpoint.require_origin_auth -isnot [bool] -or
         -not $Config.session_checkpoint.require_origin_auth -or

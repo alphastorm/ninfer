@@ -142,17 +142,22 @@ $upstreamBaseSha = [string]$spec.source.upstream_base_sha
 $lineageBaseSha = [string]$spec.source.lineage_base_sha
 $cmakeCudaArchitecture = [string]$spec.gpu.cmake_cuda_architecture
 $assetStem = "$productPrefix-$releaseVersion-$platform"
-# The exact engine tuning is bound by hash into the build identity; the structural profile
-# every native lane ships - one authenticated request at a time, MTP, durable checkpoints, no
-# prompt disk cache - is asserted here.
+# Lane-specific runtime policy lives in the immutable release specification.
+$validSpeculation = $null -ne $spec.PSObject.Properties['runtime_shape'] -and
+    [int]$spec.runtime_shape.max_concurrency -gt 0 -and
+    [int]$config.engine.max_concurrency -eq [int]$spec.runtime_shape.max_concurrency -and
+    -not [string]::IsNullOrWhiteSpace([string]$spec.runtime_shape.speculative_backend) -and
+    [string]$config.speculative.backend -ceq [string]$spec.runtime_shape.speculative_backend -and
+    [int]$spec.runtime_shape.draft_tokens.min -ge 1 -and
+    [int]$config.speculative.draft_tokens -ge [int]$spec.runtime_shape.draft_tokens.min -and
+    ($null -eq $spec.runtime_shape.draft_tokens.max -or
+     [int]$config.speculative.draft_tokens -le [int]$spec.runtime_shape.draft_tokens.max)
 if ($config.artifact_type -cne 'ninfer_windows_server_config' -or
     [int]$config.schema_version -ne 4 -or
     [string]$config.release_id -cne $releaseId -or
     [string]$config.deployment_profile -cne $deploymentProfile -or
-    [int]$config.engine.max_concurrency -ne 1 -or
+    -not $validSpeculation -or
     [int]$config.engine.admission_headroom_mib -lt 256 -or
-    [string]$config.speculative.backend -cne 'mtp' -or
-    [int]$config.speculative.draft_tokens -lt 1 -or
     -not [bool]$config.session_checkpoint.enabled -or
     $config.session_checkpoint.require_origin_auth -isnot [bool] -or
     -not $config.session_checkpoint.require_origin_auth -or

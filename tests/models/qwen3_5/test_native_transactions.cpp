@@ -1739,8 +1739,39 @@ public:
         expect_empty("snapshot fact fixture leaked physical resources");
     }
 
-    void grammar_row_failure() {
+    void prefix_replay_crosses_page() {
+        // #419: an 8-token retained prefix must reserve the full [8,65) replay,
+        // not just the checkpoint frontier. Main KV pages hold 64 tokens here.
+        auto seed = request(8, true);
+        const auto original = bind(seed);
+        reserve(original, q35::ExecutionUnitKind::Prefill);
+        auto begin = program_.advance_prefill(original);
+        require(begin.complete && begin.pending, "short prefix did not reach its input boundary");
+        const std::array<runtime::CommitDecision, 1> accepted{{{.accepted_tokens = 1}}};
+        const auto committed = program_.commit(std::move(*begin.pending), accepted);
+        require(committed.capture_ready[0], "short prefix did not offer its input checkpoint");
+        const auto point = capture(original, 8, runtime::CheckpointRole::InputReplay);
+        require(program_.abort(original).status == runtime::ConsumeStatus::Consumed,
+                "short prefix owner did not retire");
+        auto longer = request(65, true);
+        const auto source = program_.inspect_source(longer, point);
+        require(source && source->reused_tokens == 8 &&
+                    static_cast<bool>(program_.start_binding(longer, {1}, *source)),
+                "page-crossing replay did not select the 8-token prefix");
+        const auto bound = settle();
+        require(bound.sequence.has_value(), "page-crossing replay did not bind");
+        finish_prefill(*bound.sequence, 57, true);
+        const auto finished = program_.finish(*bound.sequence);
+        require(finished.checkpoint && program_.release_checkpoint(*finished.checkpoint) &&
+                    program_.release_checkpoint(point),
+                "page-crossing replay retained checkpoints");
+        expect_empty("page-crossing replay leaked reservations");
+        std::cout << "OK prefix replay [8,65) crosses 64-token page\n";
+    }
+
+    void grammar_row_failure(bool native_dead_end = true) {
         struct Masks final : runtime::TokenMaskProvider {
+            bool dead_end = true;
             void uploaded(std::size_t, std::size_t) noexcept override {}
 
             bool constrained(std::size_t row) const noexcept override { return row == 0; }
@@ -1750,9 +1781,10 @@ public:
                 std::fill(words.begin(), words.end(), 0);
                 const auto stride = words.size() / (drafts.size() + 1);
                 for (std::size_t col = 0; col <= drafts.size(); ++col) words[col * stride] = 1;
-                return 1; // The first predicted position is a real dead end.
+                return dead_end ? 1 : 0;
             }
         } masks;
+        masks.dead_end = native_dead_end;
 
         auto base        = request(32);
         const auto first = bind(base, 0);
@@ -1766,8 +1798,10 @@ public:
         require(static_cast<bool>(program_.reserve_units(units)), "grammar mixed unit reservation");
         const std::array<runtime::RoundBudget, 2> budgets{{{1}, {1}}};
         auto pending = program_.decode(members, budgets, nullptr, &masks);
-        require(pending.constraint_failed(0) && !pending.constraint_failed(1),
+        require(pending.constraint_failed(0) == native_dead_end && !pending.constraint_failed(1),
                 "grammar failure lost its row");
+        // #399: Runtime can reject a sampled token even when the native mask had
+        // legal candidates. That row must be discarded without releasing its sibling.
         const std::array<runtime::CommitDecision, 2> decisions{
             {{.terminal = true, .failed = true}, {.accepted_tokens = 1}}};
         auto committed = program_.commit(std::move(pending), decisions);
@@ -1777,6 +1811,7 @@ public:
         require(program_.abort(second).status == runtime::ConsumeStatus::Consumed,
                 "healthy row was released by another row's grammar error");
         expect_empty("grammar row failure leaked physical resources");
+        std::cout << "OK grammar row failure native_dead_end=" << native_dead_end << '\n';
     }
 
 private:
@@ -2092,11 +2127,18 @@ int main(int argc, char** argv) {
         auto plan    = std::move(planner).finalize(16);
         auto program = q35::create_program(parameters, std::move(plan), device, {});
         if (const char* scenario = std::getenv("NINFER_NATIVE_TRANSACTION_SCENARIO")) {
-            require(std::string_view(scenario) == "admitted-tail-reader",
-                    "unknown native transaction scenario");
             Fixture fixture(device, *program, frontend);
-            fixture.admitted_unit_acquires_tail_reader();
-            std::cout << "OK admitted_unit_acquires_tail_reader\n";
+            if (std::string_view(scenario) == "admitted-tail-reader") {
+                fixture.admitted_unit_acquires_tail_reader();
+                std::cout << "OK admitted_unit_acquires_tail_reader\n";
+            } else if (std::string_view(scenario) == "prefix-replay-page") {
+                fixture.prefix_replay_crosses_page();
+            } else if (std::string_view(scenario) == "grammar-row-failure") {
+                fixture.grammar_row_failure();
+                fixture.grammar_row_failure(false);
+            } else {
+                throw std::invalid_argument("unknown native transaction scenario");
+            }
             return 0;
         }
         {
@@ -2118,7 +2160,9 @@ int main(int argc, char** argv) {
             fixture.demotion_holder_changes();
             fixture.batched_physical_demotions();
             fixture.physical_facts();
+            fixture.prefix_replay_crosses_page();
             fixture.grammar_row_failure();
+            fixture.grammar_row_failure(false);
         }
         program.reset();
         options.kv_capacity    = KvCapacityPolicy::explicit_capacity(kCapacity);

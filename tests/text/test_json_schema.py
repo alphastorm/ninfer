@@ -316,6 +316,26 @@ class SchemaContracts(unittest.TestCase):
                 expected.append(valid)
             self.assertEqual(report["accepted"], expected, (schema, values, report, expected))
 
+    def test_hyz615_bounded_number_hardening(self):
+        # hyz615/RUR1NINFER 79d2296 cases, checked against an independent validator.
+        # Our compiler also supports the tiny/large intervals rejected by that older fork.
+        self.run_cases([
+            ({"type": "number", "minimum": 0, "maximum": 10},
+             [i / 16 for i in range(-80, 241)]),
+            ({"type": "number", "exclusiveMinimum": -0.25, "exclusiveMaximum": 0.25},
+             [-0.25, -0.249999, 0, 0.249999, 0.25, 100]),
+            ({"type": "integer", "minimum": -2, "exclusiveMaximum": 3},
+             list(range(-10, 11)) + [1.5]),
+            ({"type": "number", "minimum": 0.000001, "maximum": 0.000002},
+             [0, 0.000001, 0.0000015, 0.000002, 0.000003]),
+            ({"type": "number", "minimum": 0.0000001, "maximum": 0.0000002},
+             [0, 0.0000001, 0.00000015, 0.0000002, 0.0000003]),
+            ({"type": "number", "minimum": 1e30}, [0, 1e29, 1e30, 1e31]),
+            ({"$ref": "#/$defs/a~1b",
+              "$defs": {"a/b": {"const": 1}, "a~1b": {"const": 2}}}, [1, 2]),
+            ({"anyOf": [{}], "type": "object"}, [{}, {"ok": True}, [], 0, None]),
+        ])
+
     def test_source_number_precision(self):
         sources = [
             ('{"type":"number","minimum":0.10000000000000001}', "/minimum"),
@@ -362,6 +382,7 @@ class SchemaContracts(unittest.TestCase):
     def test_rejections_and_diagnostics(self):
         cases = [
             ({"$schema": 7}, "/$schema"),
+            ({"type": "number", "minimum": "0"}, "/minimum"),
             ({"type": "array", "prefixItems": []}, "/prefixItems"),
             ({"type": "array", "prefixItems": [7]}, "/prefixItems/0"),
             ({"type": "array", "items": [{"type": "string"}]}, "/items"),
@@ -422,6 +443,8 @@ class SchemaContracts(unittest.TestCase):
             },
             False,
             {"const": "x", "type": "integer"},
+            {"oneOf": [{}, {}]},
+            {"type": "integer", "minimum": 3, "maximum": 2},
             {"$ref": "#"},
             {"type": "object", "properties": {"x": False}, "required": ["x"]},
             {"anyOf": [False, {"type": "integer", "minimum": 2, "maximum": 1}]},

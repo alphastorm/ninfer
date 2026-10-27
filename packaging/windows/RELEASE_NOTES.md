@@ -1,5 +1,75 @@
 # NInfer native Windows lanes
 
+The native dependency manifest includes libjpeg-turbo for the Pillow-compatible
+JPEG decoder. CMake resolves `JPEG::JPEG` explicitly; native runtime packaging
+continues to collect its transitive DLLs from the selected vcpkg installation.
+
+## 2026-10-26 — RTX 3090 qualified power cap 350 W
+
+The RTX 3090 lane's managed GPU-owner lease now caps the card at 350 W instead of
+300 W (owner-approved). `qualified_power_limit_w` is 350 and the C1 qualification
+envelope `managed_power_envelope_w` is 351 W (the same 1 W sampling allowance). The
+owner's 370 W default that release restores, the accepted prior-limit range
+(100-390 W) and every RTX 4090 value are unchanged. The `beta.2` RTX 3090 qualification
+ran at 300 W, so a package built from this specification needs a fresh RTX 3090
+qualification at 350 W before it can claim a hardware pass.
+
+## 2026-10-26 — Experimental RTX 5090 Windows shape (not a release)
+
+`lanes/rtx5090` describes a native `sm_120a` feasibility build, not a qualified
+component or a replacement for the container. It retains DFlash2 K=7, BF16 KV,
+131,072 context, 146,368 fixed KV tokens, two concurrent requests, vision,
+1,024-token prefill chunks and the container's 20,867.734375 MiB Host budget.
+The Host translation records the historical budget, not a measured DFlash2
+state-image size. Model bytes and schema-3 checkpoints are unchanged.
+
+The shared packager and installer accept that lane's DFlash2/C2 profile without
+loosening the shipped RTX 4090/3090 MTP/C1 shape. Each lane's immutable
+`runtime_shape` declares concurrency, speculative backend and draft-token bounds;
+shared lifecycle scripts select no policy from a GPU name or lane-number literal.
+An absent runtime policy is refused. The controller passes DFlash2
+and the optimized proposal head explicitly. The existing qualification
+orchestrator's MTP pressure recipe is not an RTX 5090 acceptance procedure.
+Use isolated experiment roots; no managed installation or release promotion is
+implied. Native build, smoke and comparison evidence must establish whether
+all-native packaging is worthwhile before a release qualification is attempted.
+
+The MSVC host stub cannot take 128-byte-aligned TMA aggregates by value. BF16,
+FP8 and NVFP4 descriptor types therefore retain explicit alignment in device
+compilation and on non-MSVC hosts, while Windows host aggregates use the CUDA
+header's host alignment. Encoder-local storage remains explicitly aligned.
+This does not replace TMA with another kernel or add descriptor allocations.
+`ninfer_tma_descriptor_abi_test` checks real TMA transfers through each production
+descriptor type, both directly and through a CUDA graph, on `sm_120a`.
+
+The standalone feasibility build `92a9995e` compiled with MSVC 19.44 / CUDA
+13.3.73 and passed the full-shape smoke on an RTX PRO 6000 Blackwell (96 GB,
+driver 616.92, 600 W). This is **not an RTX 5090 result**: the actual-card lease
+was not acquired. The 4,541-fresh-token / 1,024-output-token C1 run measured
+461.95 decode tokens/s and 4,108.50 prefill tokens/s, with 31,382 MiB ready/peak
+device usage. Real TMA descriptor loads passed directly and through CUDA graphs
+for BF16, FP8 and NVFP4; the three affected Linux sm_120a shape translation units
+produced byte-identical SASS against the base.
+
+The separate Nsight-instrumented PRO 6000 C1/C2 workload measured 1.186 s C1
+TTFT and 2.167/2.356 s C2 TTFT. Its round-boundary GPU idle median was 560.17 us;
+in-round `cudaGraphLaunch` CPU time averaged 283.24 us. These different-host,
+instrumented numbers do not establish an improvement over the container.
+Authenticated schema-3 checkpoints passed two cold-process exact-key restores
+through DirectStorage 1.3: the initial 3.531 GB payload save took 35.24 s, and
+restore-plus-continuation requests took 17.62/26.94 s (restart/load time excluded).
+All-native release promotion remains withheld pending a same-5090 comparison
+and full output qualification. The later ordered S6/S7/S8 integration head needs
+its own build and qualification; these measurements bind the standalone build.
+
+The native build workstation subsequently failed a hardware stress check and
+reported a memory-corruption bugcheck. All native binaries produced there,
+including those built before the failure, and the measurements above are now
+**provisional diagnostic evidence only**, not qualification or integration-ready
+evidence. A stable-host deterministic double build with matching binary hashes,
+followed by the native gates, is required before those claims can be reinstated.
+The independent Linux SASS comparisons are unaffected.
+
 ## 2026-10-24 — Upstream-master native packages (qualification pending)
 
 The native component candidates are `v0.7.0-qwen38-4090-beta.2` and

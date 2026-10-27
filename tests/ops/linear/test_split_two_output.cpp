@@ -27,6 +27,12 @@ std::size_t workspace_capacity(const ops::SingleProjectionWeight& weights, int f
     return ops::linear_split_workspace_capacity_bytes(weights, rows, first, last);
 }
 
+std::size_t workspace_capacity(const ops::PairedProjectionWeights& weights, int first, int last) {
+    const int tail = weights.second.n / 2;
+    const std::array rows{weights.first.n + tail, tail};
+    return ops::linear_split_workspace_capacity_bytes(weights, rows, first, last);
+}
+
 // This criterion belongs to the complete A16 GDN-input-projection Op.
 constexpr ReductionCriterion kGdnInputProjA16Tolerance{3.0e-3, 4.0e-3, 3.5e-3};
 // Q8 may reconstruct BF16 MMA operands from integer codes and FP16 scales.
@@ -55,10 +61,13 @@ int verify_output_range(std::string_view label, const GuardedBf16Tensor& output,
 }
 
 int run_q4_q5_case(DevicePackedWeight& query_key, DevicePackedWeight& value_z_weight,
-                   std::int32_t tokens) {
+                   std::int32_t tokens, ops::LinearPolicy policy = ops::LinearPolicy::A16Only) {
+    const ops::PairedProjectionWeights weights{query_key.view(), value_z_weight.view(), policy};
+    const auto capacity = workspace_capacity(weights, tokens, tokens);
     ninfer::DeviceBuffer projection_workspace_storage(
-        ninfer::test::cuda_environment().context.device(), 256);
+        ninfer::test::cuda_environment().context.device(), std::max<std::size_t>(capacity, 256));
     MemoryArena projection_workspace(projection_workspace_storage.span());
+    const auto& tolerance = capacity ? kFp8GdnInputProjA8Tolerance : kGdnInputProjA16Tolerance;
     constexpr std::int32_t kHidden      = 5120;
     constexpr std::int32_t kQkRows      = 4096;
     constexpr std::int32_t kValueRows   = 6144;
@@ -72,33 +81,38 @@ int run_q4_q5_case(DevicePackedWeight& query_key, DevicePackedWeight& value_z_we
     Tensor x(device_activation.span(), DType::BF16, {kHidden, tokens});
     Tensor output   = qkv.tensor();
     Tensor z_output = z.tensor();
-    ops::linear_split(x, ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()},
+    ops::linear_split(x, weights,
                       std::array{output, z_output}, projection_workspace,
                       ninfer::test::cuda_environment().default_execution);
     cuda_synchronize();
 
-    const std::string suffix = " Q4/Q5 A16 T=" + std::to_string(tokens);
+    const std::string suffix = " Q4/Q5 " + std::string(capacity ? "A8" : "A16") +
+                               " T=" + std::to_string(tokens);
     int failures             = qkv.verify_guards("gdn qkv" + suffix);
     failures += z.verify_guards("gdn z" + suffix);
     failures += qkv.verify_fully_written("gdn qkv" + suffix);
     failures += z.verify_fully_written("gdn z" + suffix);
     failures += verify_output_range("gdn qk" + suffix, qkv, kRows, 0, kQkRows, query_key.host, 0,
-                                    activation, kHidden, tokens);
+                                    activation, kHidden, tokens, tolerance);
     failures += verify_output_range("gdn value" + suffix, qkv, kRows, kQkRows, kValueRows,
-                                    value_z_weight.host, 0, activation, kHidden, tokens);
+                                    value_z_weight.host, 0, activation, kHidden, tokens, tolerance);
     failures += verify_output_range("gdn z" + suffix, z, kZRows, 0, kZRows, value_z_weight.host,
-                                    kValueRows, activation, kHidden, tokens);
+                                    kValueRows, activation, kHidden, tokens, tolerance);
     failures += verify_preserved("gdn x" + suffix, device_activation, activation_bits);
     failures += query_key.verify_preserved("gdn query/key weight" + suffix);
     failures += value_z_weight.verify_preserved("gdn value/z weight" + suffix);
+    if (projection_workspace.used() || projection_workspace.peak_used() != capacity) ++failures;
     return failures;
 }
 
 int run_q4_q5_graph_case(DevicePackedWeight& query_key, DevicePackedWeight& value_z_weight,
-                         std::int32_t tokens) {
+                         std::int32_t tokens, ops::LinearPolicy policy = ops::LinearPolicy::A16Only) {
+    const ops::PairedProjectionWeights weights{query_key.view(), value_z_weight.view(), policy};
+    const auto capacity = workspace_capacity(weights, tokens, tokens);
     ninfer::DeviceBuffer projection_workspace_storage(
-        ninfer::test::cuda_environment().context.device(), 256);
+        ninfer::test::cuda_environment().context.device(), std::max<std::size_t>(capacity, 256));
     MemoryArena projection_workspace(projection_workspace_storage.span());
+    const auto& tolerance = capacity ? kFp8GdnInputProjA8Tolerance : kGdnInputProjA16Tolerance;
     constexpr std::int32_t kHidden    = 5120;
     constexpr std::int32_t kQkRows    = 4096;
     constexpr std::int32_t kValueRows = 6144;
@@ -118,7 +132,7 @@ int run_q4_q5_graph_case(DevicePackedWeight& query_key, DevicePackedWeight& valu
     Tensor output     = qkv.tensor();
     Tensor z_output   = z.tensor();
     const auto launch = [&](CudaExecutionView cuda) {
-        ops::linear_split(x, ops::PairedProjectionWeights{query_key.view(), value_z_weight.view()},
+        ops::linear_split(x, weights,
                           std::array{output, z_output}, projection_workspace, cuda);
     };
     launch(stream_execution);
@@ -139,14 +153,15 @@ int run_q4_q5_graph_case(DevicePackedWeight& query_key, DevicePackedWeight& valu
         bad += qkv.verify_fully_written(std::string("gdn qkv") + std::string(tag));
         bad += z.verify_fully_written(std::string("gdn z") + std::string(tag));
         bad += verify_output_range(std::string("gdn qk") + std::string(tag), qkv, kRows, 0, kQkRows,
-                                   query_key.host, 0, expected, kHidden, tokens);
+                                   query_key.host, 0, expected, kHidden, tokens, tolerance);
         bad += verify_output_range(std::string("gdn value") + std::string(tag), qkv, kRows, kQkRows,
-                                   kValueRows, value_z_weight.host, 0, expected, kHidden, tokens);
+                                   kValueRows, value_z_weight.host, 0, expected, kHidden, tokens, tolerance);
         bad += verify_output_range(std::string("gdn z") + std::string(tag), z, kZRows, 0, kZRows,
-                                   value_z_weight.host, kValueRows, expected, kHidden, tokens);
+                                   value_z_weight.host, kValueRows, expected, kHidden, tokens, tolerance);
         return bad;
     };
-    const std::string suffix = " Q4/Q5 A16 graph T=" + std::to_string(tokens);
+    const std::string suffix = " Q4/Q5 " + std::string(capacity ? "A8" : "A16") +
+                               " graph T=" + std::to_string(tokens);
     qkv.repaint(stream);
     z.repaint(stream);
     CUDA_CHECK(cudaGraphLaunch(executable, stream));
@@ -172,6 +187,7 @@ int run_q4_q5_graph_case(DevicePackedWeight& query_key, DevicePackedWeight& valu
     failures += verify_preserved("gdn x" + suffix, device_activation, activation_bits);
     failures += query_key.verify_preserved("gdn query/key weight" + suffix);
     failures += value_z_weight.verify_preserved("gdn value/z weight" + suffix);
+    if (projection_workspace.used() || projection_workspace.peak_used() != capacity) ++failures;
     return failures;
 }
 
@@ -195,6 +211,10 @@ int run_q4_q5() {
     // slice (129 = 128 + 1).
     for (const std::int32_t tokens : {7, 8, 9, 10, 12, 13, 15, 16, 17, 33, 65, 129}) {
         failures += run_q4_q5_graph_case(query_key, value_z_weight, tokens);
+    }
+    for (const int tokens : {31, 32, 33, 127, 128, 129, 255, 256, 257, 512, 513, 1024}) {
+        failures += run_q4_q5_case(query_key, value_z_weight, tokens, ops::LinearPolicy::AllowA8);
+        failures += run_q4_q5_graph_case(query_key, value_z_weight, tokens, ops::LinearPolicy::AllowA4);
     }
     return failures;
 }

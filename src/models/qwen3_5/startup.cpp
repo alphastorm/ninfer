@@ -9,10 +9,10 @@ namespace {
 WeightPlacement describe_placement(const LoadPlan& source, const execution::ModelProfile& profile,
                                    Device device, const EngineOptions& options) {
     WeightPlacement out;
-    out.resident_bytes = source.placement(device, device).device_capacity_bytes;
+    out.resident_bytes = source.device_capacity_bytes(device, device);
     auto offload       = detail::describe_moe_plan(source, profile, options.moe);
     if (source.config().text.architecture != Architecture::Qwen3_5Moe) return out;
-    out.fixed_bytes = source.placement(device, Device::cpu()).device_capacity_bytes;
+    out.fixed_bytes = source.device_capacity_bytes(device, Device::cpu());
     out.offload     = std::move(offload);
     for (const auto& bank : source.expert_banks())
         out.banks.push_back({bank.gate_up.layout, bank.down.layout, true});

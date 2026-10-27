@@ -1071,7 +1071,7 @@ class SharedLifecycleTreeTests(unittest.TestCase):
     def test_native_protocol_uses_canonical_product_smoke(self) -> None:
         options = SimpleNamespace(
             lane_dir="packaging/windows/lanes/rtx3090", lifecycle_dir="packaging/windows",
-            release_head_sha="f" * 40, release_notes=None, release_version="0.7.0-beta.2",
+            release_head_sha="f" * 40, release_notes=None, release_version="0.7.0-beta.3",
         )
         with patch.object(release_package, "read_committed_file", return_value=b"committed") as read:
             release_package.windows_support_files(options, ROOT, "payload")
@@ -1383,7 +1383,7 @@ class SharedLifecycleTreeTests(unittest.TestCase):
     def test_shared_scripts_carry_no_lane_literals(self) -> None:
         """One tree serves every lane: GPU names, architectures, power figures, release ids, and
         task names come from the lane specification, never from the scripts."""
-        forbidden = re.compile(r"3090|4090|5090|sm_8[69]|sm_120|\b(?:300|370|450)\s*W\b|omp-v0\.2|NInfer-Qwen38-[0-9]{4}")
+        forbidden = re.compile(r"3090|4090|5090|sm_8[69]|sm_120|\b(?:300|301|350|351|370|450)\s*W\b|omp-v0\.2|NInfer-Qwen38-[0-9]{4}")
         paths = [WINDOWS / name for name in SHARED_SCRIPTS] + [ROOT / "tools/smoke/agent_protocol.py"]
         for path in paths:
             text = path.read_text(encoding="utf-8")
@@ -1424,7 +1424,8 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertEqual(spec["product_prefix"], f"ninfer-{lane}-native")
                 gpu = spec["gpu"]
                 self.assertEqual(gpu["cuda_architecture"], "sm_" + gpu["cmake_cuda_architecture"])
-                self.assertEqual(gpu["compute_capability"].replace(".", ""), gpu["cmake_cuda_architecture"])
+                architecture = gpu["compute_capability"].replace(".", "")
+                self.assertEqual(gpu["cmake_cuda_architecture"], architecture + ("a" if lane == "rtx5090" else ""))
                 self.assertIn(number, gpu["name"])
                 self.assertEqual(spec["lifecycle"]["task_name"], f"NInfer-Qwen38-{number}-Native")
                 self.assertEqual(spec["lifecycle"]["state_root_name"], f"qwen38-{number}-native")
@@ -1448,14 +1449,26 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertEqual(config["listen"]["host"], "127.0.0.1")
                 self.assertEqual(config["listen"]["port"], spec["lifecycle"]["listen_port"])
                 self.assertEqual(config["authentication"]["mode"], "required-api-key-file")
-                self.assertEqual(config["engine"]["max_concurrency"], 1)
-                self.assertEqual(config["engine"]["kv_dtype"], "int8")
+                blackwell = lane == "rtx5090"
+                self.assertEqual(spec["runtime_shape"], {
+                    "max_concurrency": 2 if blackwell else 1,
+                    "speculative_backend": "dflash2" if blackwell else "mtp",
+                    "draft_tokens": {"min": 7 if blackwell else 1, "max": 7 if blackwell else None},
+                })
+                self.assertEqual(config["engine"]["max_concurrency"], 2 if blackwell else 1)
+                self.assertEqual(config["engine"]["kv_dtype"], "bf16" if blackwell else "int8")
                 keep_warm = config["engine"]["gpu_keep_warm_ms"]
                 self.assertIs(type(keep_warm), int)
                 self.assertTrue(0 <= keep_warm <= 2**31 - 1)
-                self.assertEqual(config["speculative"]["backend"], "mtp")
-                self.assertEqual(config["speculative"]["draft_tokens"], 3)
-                self.assertEqual(config["engine"]["admission_headroom_mib"], 640 if lane == "rtx4090" else 768)
+                self.assertEqual(config["speculative"]["backend"], "dflash2" if blackwell else "mtp")
+                self.assertEqual(config["speculative"]["draft_tokens"], 7 if blackwell else 3)
+                self.assertEqual(config["engine"]["admission_headroom_mib"], 768 if lane == "rtx3090" else 640)
+                if blackwell:
+                    self.assertEqual(spec["qualification"]["purpose"], "experimental-feasibility-only-not-a-release")
+                    self.assertEqual(config["engine"]["max_context"], 131072)
+                    self.assertEqual(config["engine"]["kv_capacity"], 146368)
+                    self.assertEqual(config["engine"]["prefill_chunk"], 1024)
+                    self.assertTrue(config["engine"]["vision"])
                 self.assertTrue(config["session_checkpoint"]["enabled"])
                 self.assertIs(config["session_checkpoint"]["require_origin_auth"], True)
                 self.assertGreaterEqual(config["context_cache"]["device_state_slots"], 1)
@@ -1477,6 +1490,21 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertNotIn("persistent_cache", config)
                 self.assertNotIn("effort", config["reasoning"])
         self.assertEqual(len(models), 1, "every lane pins the same model artifact")
+
+    def test_rtx3090_lane_serves_at_the_approved_350_w_cap(self) -> None:
+        # Approved 2026-10-26: the managed GPU-owner lease caps the RTX 3090 at 350 W (was 300 W);
+        # the C1 qualification envelope keeps its 1 W sampling allowance above the cap, and the
+        # owner's 370 W default is still what release restores.
+        lane_dir = WINDOWS / "lanes/rtx3090"
+        lane = qualify_native.Lane(
+            "rtx3090", json.loads((lane_dir / "release-spec.json").read_text(encoding="utf-8")),
+            json.loads((lane_dir / "server-config.json").read_text(encoding="utf-8")),
+        )
+        self.assertEqual(lane.qualified_power_limit_w, 350)
+        self.assertEqual(lane.managed_power_envelope_w, 351.0)
+        self.assertEqual(lane.owner_power_limit_w, 370)
+        owner = lane.spec["lifecycle"]["gpu_owner_controller_protocol"]
+        self.assertEqual(owner["prior_power_limit_range_w"], [100, 390])
 
 
 class PackagedStatusTests(unittest.TestCase):
@@ -1555,6 +1583,78 @@ class PowerShellContractTests(unittest.TestCase):
             check=True, text=True, capture_output=True,
         )
         return json.loads(result.stdout)
+
+    def test_native_lane_speculation_guards_agree(self) -> None:
+        installer = (WINDOWS / "Install-Release.ps1").read_text()
+        packager = (WINDOWS / "New-Package.ps1").read_text()
+        package_guard = packager[packager.index("$validSpeculation ="):
+                                 packager.index("if ($config.artifact_type")]
+        functions = "\n".join(ps_function(installer, name) for name in (
+            "Assert-AllowedListenHost", "Assert-InstallerArchitectureContract"))
+        for lane_dir in LANES:
+            spec = qualify_native.ps_quote(str(lane_dir / "release-spec.json"))
+            config = qualify_native.ps_quote(str(lane_dir / "server-config.json"))
+            observed = self.invoke(f"""
+{functions}
+$Spec=Get-Content -Raw {spec}|ConvertFrom-Json
+$Config=Get-Content -Raw {config}|ConvertFrom-Json
+$Lane=[string]$Spec.lane
+$results=@()
+foreach($variant in @('valid','wrong-concurrency','wrong-backend','zero-drafts',
+                     'below-minimum','above-maximum','metadata-shape','missing-policy')){{
+  $Spec=Get-Content -Raw {spec}|ConvertFrom-Json
+  $Config=Get-Content -Raw {config}|ConvertFrom-Json
+  if($variant -ceq 'wrong-concurrency'){{$Config.engine.max_concurrency=3}}
+  if($variant -ceq 'wrong-backend'){{$Config.speculative.backend='dflash'}}
+  if($variant -ceq 'zero-drafts'){{$Config.speculative.draft_tokens=0}}
+  if($variant -ceq 'below-minimum'){{$Config.speculative.draft_tokens=$Spec.runtime_shape.draft_tokens.min-1}}
+  if($variant -ceq 'above-maximum'){{
+    $Config.speculative.draft_tokens=if($null -eq $Spec.runtime_shape.draft_tokens.max){{99}}else{{$Spec.runtime_shape.draft_tokens.max+1}}
+  }}
+  if($variant -ceq 'metadata-shape'){{
+    $Spec.runtime_shape.max_concurrency=3
+    $Spec.runtime_shape.speculative_backend='dflash2'
+    $Spec.runtime_shape.draft_tokens.min=5
+    $Spec.runtime_shape.draft_tokens.max=5
+    $Config.engine.max_concurrency=3
+    $Config.speculative.backend='dflash2'
+    $Config.speculative.draft_tokens=5
+  }}
+  if($variant -ceq 'missing-policy'){{$Spec.PSObject.Properties.Remove('runtime_shape')}}
+  {package_guard}
+  $accepted=$true
+  try{{Assert-InstallerArchitectureContract $Spec $Config}}catch{{$accepted=$false}}
+  $results+=@{{package=[bool]$validSpeculation;installer=$accepted}}
+}}
+ConvertTo-Json -InputObject @($results) -Compress
+""")
+            self.assertEqual(observed, [
+                {"package": valid, "installer": valid}
+                for valid in (True, False, False, False, False, lane_dir.name != "rtx5090", True, False)
+            ], lane_dir.name)
+
+    def test_dflash2_controller_arguments_and_bounds(self) -> None:
+        controller = (WINDOWS / "Control-Release.ps1").read_text()
+        start = controller.index("$speculativeBackend =")
+        launch = controller[start:controller.index("# Both flags belong", start)]
+        observed = self.invoke(f"""
+$results=@()
+foreach($draft in @(0,7,16)){{
+  $config=@{{speculative=@{{backend='dflash2';draft_tokens=$draft}}}}
+  $serverArguments=[Collections.Generic.List[string]]::new()
+  $accepted=$true
+  try{{{launch}}}catch{{$accepted=$false}}
+  $results+=@{{accepted=$accepted;arguments=@($serverArguments.ToArray())}}
+}}
+ConvertTo-Json -InputObject @($results) -Depth 4 -Compress
+""")
+        self.assertEqual(observed, [
+            {"accepted": False, "arguments": []},
+            {"accepted": True, "arguments": [
+                "--spec", "dflash2", "--draft-tokens", "7", "--lm-head-draft",
+            ]},
+            {"accepted": False, "arguments": []},
+        ])
 
     def test_all_release_scripts_parse(self) -> None:
         paths = [WINDOWS / name for name in SHARED_SCRIPTS] + [ROOT / "tests/test_release_security.ps1"]

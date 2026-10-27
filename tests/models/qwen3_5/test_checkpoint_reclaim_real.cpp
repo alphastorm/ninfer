@@ -287,8 +287,16 @@ int main() {
         auto target_trace = std::make_shared<Trace>();
         Reader accepted(exported.archive, target_trace);
         const auto restored = import_set(engine, target, tag, accepted, identity, saved.stats);
-        require(restored.state == DurableImportState::Imported && oracle->pins == 2 &&
-                trace->verified_sets == 1 && trace->bytes == saved.stats.payload_bytes &&
+        std::cout << "reclaim ordering: state=" << static_cast<unsigned>(restored.state)
+                  << " reason=" << static_cast<unsigned>(restored.reason)
+                  << " pins=" << oracle->pins << " verified_sets=" << trace->verified_sets
+                  << " verified_bytes=" << trace->bytes << " payload_bytes=" << saved.stats.payload_bytes
+                  << " releases=" << guard->calls << " verified_before_release=" << guard->verified_before_release
+                  << " target_fresh_readers=" << target_trace->fresh_readers << '\n';
+        // Import preflight proves the victim before ReleaseGuard runs (checked above).
+        // The pressure settlement then independently proves it again before releasing it.
+        require(restored.state == DurableImportState::Imported && oracle->pins == 4 &&
+                trace->verified_sets == 2 && trace->bytes == 2 * saved.stats.payload_bytes &&
                 guard->calls == 1 && guard->verified_before_release && target_trace->fresh_readers == 1,
                 "actual Engine reclaim did not verify, re-pin, release and retry in order");
         Writer absent;
