@@ -258,7 +258,9 @@ carry the `real` label and `RUN_SERIAL` so CTest runs them alone. Run directly i
 integration tests serially. `NINFER_PREFIX_REAL_SCENARIO` selects a focused prefix scenario such as
 `vision`, `late-instructions`, `concurrent` or `retirement`; the default is `all`. The registered
 `ninfer_qwen3_5_response_retirement_real_test` checks immediate live membership and cumulative
-statistics after successful and resident-cancelled `wait()` calls. These integration checks
+statistics after successful, resident-cancelled and admitted constraint-dead-end `wait()` calls.
+The failure fixture uses valid but unsatisfiable GBNF, checks that no tokens are committed,
+and verifies a subsequent healthy request. These integration checks
 use behavior and state accounting rather than another numerical path's generated tokens as a golden.
 
 The `attention` scenario checks the selected KV type, chunked prefill, concurrent Graph decode

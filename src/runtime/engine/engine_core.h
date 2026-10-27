@@ -1261,13 +1261,16 @@ private:
                 const auto& request          = slots_[lane];
                 const std::uint32_t accepted = decisions[row].accepted_tokens;
                 if (failed[row]) {
-                    complete_error(
-                        request, preview_errors[row]
-                                     ? preview_errors[row]
-                                     : std::make_exception_ptr(
-                                           RequestError(RequestErrorKind::ConstraintDeadEnd,
-                                                        "grammar has no valid next token")));
+                    const auto rejected = request;
+                    const auto error =
+                        preview_errors[row]
+                            ? preview_errors[row]
+                            : std::make_exception_ptr(
+                                  RequestError(RequestErrorKind::ConstraintDeadEnd,
+                                               "grammar has no valid next token"));
                     remove_completed_slot(lane);
+                    publish_runtime_stats();
+                    complete_error(rejected, error);
                     continue;
                 }
                 if (!cancelled[row]) { request->budget->commit(accepted); }

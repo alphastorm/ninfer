@@ -1842,6 +1842,35 @@ int exercise_response_retirement(const char* artifact) {
             return 1;
         }
     }
+
+    auto impossible = fixed_output(1, false);
+    // This valid GBNF character class excludes every Unicode scalar: admission succeeds,
+    // then the model's first-token mask has no legal token and the resident row must fail.
+    impossible.constraint =
+        ninfer::OutputConstraint::grammar(R"(root ::= [^\u0000-\U0010FFFF])");
+    const auto generated_before_failures = engine.runtime_stats().generated_tokens;
+    for (std::uint32_t iteration = 0; iteration < 64; ++iteration) {
+        auto handle = engine.submit(
+            engine.prepare_tokens({248045, 846, 198, 5834, 248046, 198}), impossible);
+        handle.wait_until_started();
+        bool rejected = false;
+        try {
+            (void)handle.wait();
+        } catch (const ninfer::RequestError& error) {
+            rejected = error.kind() == ninfer::RequestErrorKind::ConstraintDeadEnd;
+        }
+        if (!rejected || !engine.is_available() || check_settled() ||
+            engine.runtime_stats().generated_tokens != generated_before_failures) {
+            std::cerr << "failed response preceded lane retirement or changed token statistics\n";
+            return 1;
+        }
+    }
+    const auto recovered = engine.generate(
+        engine.prepare_tokens({248045, 846, 198, 5834, 248046, 198}), fixed_output(1, false));
+    if (recovered.finish_reason != ninfer::FinishReason::OutputLimit ||
+        recovered.generated_token_ids.size() != 1 || check_settled()) {
+        return 1;
+    }
     return 0;
 }
 
