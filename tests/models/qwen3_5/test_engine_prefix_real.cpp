@@ -1853,7 +1853,8 @@ int exercise_response_retirement(const char* artifact) {
     for (std::uint32_t iteration = 0; iteration < 64; ++iteration) {
         auto handle = engine.submit(
             engine.prepare_tokens({248045, 846, 198, 5834, 248046, 198}), impossible);
-        handle.wait_until_started();
+        // ConstraintDeadEnd is emitted only by resident-row commit, proving admission.
+        // Waiting for start separately can race with that already-completed failure.
         bool rejected = false;
         try {
             (void)handle.wait();
