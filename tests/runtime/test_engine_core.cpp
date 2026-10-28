@@ -195,6 +195,8 @@ struct Prompt {
     Script script        = Script::Complete;
     std::uint32_t tokens = 4;
     std::shared_ptr<PublicationGate> observed;
+    // A durable session turn publishes its completed continuation as a checkpoint.
+    bool publish_continuation = false;
 };
 
 struct SessionKey {
@@ -472,8 +474,9 @@ struct ReclaimPlan {
 
 // Scripted native ownership: lanes hold sequences, one context operation is in flight at a time,
 // and every sequence is released exactly once by commit, finish, abort or its context operation.
-// Each change a checkpoint operation answers for (an import reserved, committed or aborted, an
-// export lease retired) arms the publication gate.
+// Durable session turns publish their completed continuations as checkpoints. Each change a
+// checkpoint operation answers for (an import reserved, committed or aborted, an export lease
+// retired) arms the publication gate.
 class Program {
 public:
     using ContextResources = Resources;
@@ -491,7 +494,7 @@ public:
             .requested_output_tokens = options.requested_output_tokens,
             .effective_output_tokens = options.requested_output_tokens,
             .effective_limit_reason  = FinishReason::OutputLimit,
-            .publish_continuation    = false,
+            .publish_continuation    = prompt.publish_continuation,
         };
         events_.record([](Events::State& state) { ++state.planned; });
         return Plan(prompt.script, summary, std::move(prompt.observed));
@@ -522,7 +525,8 @@ public:
         operation_ = Operation{.kind          = ContextKind::Bind,
                                .lane          = lane.value,
                                .script        = base.script(),
-                               .prompt_tokens = base.summary().prompt_tokens};
+                               .prompt_tokens = base.summary().prompt_tokens,
+                               .publish       = base.summary().publish_continuation};
         if (base.script() == Script::HoldBinding) {
             events_.record([](Events::State& state) { state.binding_held = true; });
         }
@@ -547,7 +551,8 @@ public:
             lane = Lane{.active        = true,
                         .script        = operation.script,
                         .epoch         = next_epoch_++,
-                        .prompt_tokens = operation.prompt_tokens};
+                        .prompt_tokens = operation.prompt_tokens,
+                        .publish       = operation.publish};
             progress.published = true;
             progress.sequence  = Sequence{operation.lane, lane.epoch};
             events_.record([](Events::State& state) { ++state.bound; });
@@ -645,7 +650,13 @@ public:
     }
 
     [[nodiscard]] FinishResult finish(Sequence sequence) noexcept {
-        return {.status = release(sequence)};
+        FinishResult result;
+        if (sequence.lane < lanes_.size() && lanes_[sequence.lane].active &&
+            lanes_[sequence.lane].epoch == sequence.epoch && lanes_[sequence.lane].publish) {
+            result.checkpoint = publish_checkpoint(lanes_[sequence.lane].prompt_tokens);
+        }
+        result.status = release(sequence);
+        return result;
     }
 
     [[nodiscard]] AbortResult abort(Sequence sequence) noexcept {
@@ -885,6 +896,7 @@ private:
         Script script               = Script::Complete;
         std::uint64_t epoch         = 0;
         std::uint32_t prompt_tokens = 0;
+        bool publish                = false;
     };
 
     struct Operation {
@@ -892,6 +904,7 @@ private:
         std::uint32_t lane          = 0;
         Script script               = Script::Complete;
         std::uint32_t prompt_tokens = 0;
+        bool publish                = false;
     };
 
     struct Record {
@@ -1156,6 +1169,16 @@ public:
         options.execution.requested_output_tokens = output_tokens;
         return core_->submit(std::move(prompt), summary, 0.0, std::move(options),
                              ninfer::OutputConsumerMode::Aggregate, {}, pending_deadline);
+    }
+
+    // A turn of the durable session: its completed continuation becomes a named checkpoint owner.
+    [[nodiscard]] Submission submit_turn(Script script, const std::string& tag) {
+        Prompt prompt{.script = script, .publish_continuation = true};
+        const ninfer::PromptSummary summary{.prompt_tokens = prompt.tokens};
+        rt::ResolvedRequestOptions options;
+        options.execution.requested_output_tokens = 1;
+        return core_->submit(std::move(prompt), summary, 0.0, std::move(options),
+                             ninfer::OutputConsumerMode::Aggregate, {}, {}, kSession, tag);
     }
 
     // Waits as an HTTP handler would, then reads runtime statistics before anything else runs.
@@ -1461,6 +1484,35 @@ void durable_export_release() {
     require_durable(stats, {.catalog = 1, .host = 1}, "durable export lease retirement");
 }
 
+// An older turn that completes after a newer turn was acknowledged can never become the session's
+// committed endpoint. It is not named for the session, so saving it reports absence instead of a
+// retryable tag race; a newer unacknowledged turn keeps its name and the acknowledged endpoint
+// stays exportable.
+void late_turn_after_acknowledgement() {
+    Harness harness(2, true);
+    auto older = harness.submit_turn(Script::Stall, "turn-1");
+    harness.events().await([](const Events::State& state) { return state.bound == 1; },
+                           "the older turn's binding");
+    auto acknowledged = harness.submit_turn(Script::Complete, "turn-2");
+    require_finished(harness.await(acknowledged), FinishReason::OutputLimit, "acknowledged turn");
+    harness.core().response_stored(kSession, "turn-2");
+    auto newer = harness.submit_turn(Script::Complete, "turn-3");
+    require_finished(harness.await(newer), FinishReason::OutputLimit, "newer turn");
+    harness.release_stalls();
+    require_finished(harness.await(older), FinishReason::OutputLimit, "older turn");
+    const auto late = harness.save("turn-1");
+    require(late.state == rt::DurableExportState::Refused &&
+                late.reason == rt::DurableReason::SessionNotIndexed,
+            "an older turn completing after a newer acknowledgement stayed named for its session");
+    const auto unacknowledged = harness.save("turn-3");
+    require(unacknowledged.state == rt::DurableExportState::Stale &&
+                unacknowledged.reason == rt::DurableReason::TagMismatch,
+            "a newer unacknowledged turn lost its durable name");
+    require(harness.save("turn-2").state == rt::DurableExportState::Exported,
+            "the acknowledged endpoint stopped being exportable");
+    (void)harness.observed_stats();
+}
+
 } // namespace
 
 int main() {
@@ -1484,6 +1536,7 @@ int main() {
         Case{"durable_import_commit", durable_import_commit},
         Case{"durable_import_abort", durable_import_abort},
         Case{"durable_export_release", durable_export_release},
+        Case{"late_turn_after_acknowledgement", late_turn_after_acknowledgement},
     };
     int failures = 0;
     for (const auto& test : cases) {

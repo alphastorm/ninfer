@@ -1016,8 +1016,15 @@ private:
                 if (request->checkpoint_gate) {
                     publication = std::unique_lock(request->checkpoint_gate->mutex);
                 }
-                resources_.set_checkpoint_identity(request->continuation_owner,
-                    request->checkpoint_session, request->checkpoint_tag);
+                // A turn older than the session's committed endpoint can never become it:
+                // like supersede_durable, leave it unnamed in ordinary cache policy.
+                const bool superseded =
+                    request->checkpoint_gate &&
+                    request->publication_order < request->checkpoint_gate->committed_order;
+                if (!superseded) {
+                    resources_.set_checkpoint_identity(request->continuation_owner,
+                        request->checkpoint_session, request->checkpoint_tag);
+                }
                 resources_.finish(*instance_.program, request->continuation_owner,
                                   *request->base_plan, request->publication_order);
             }

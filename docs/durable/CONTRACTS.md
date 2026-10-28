@@ -362,6 +362,8 @@ native endpoint. Acknowledging a newer endpoint, or committing an import,
 supersedes every older owner named for the session: its tag can never again be
 saved or proven recoverable, so it loses its durable session/tag and returns to
 ordinary cache policy instead of naming a pressure or restore victim that never settles.
+An older turn that completes after that is superseded at completion and is never named;
+a save of its tag therefore reports `Refused(session_not_indexed)`.
 
 `PressureCheckpointVictim::reason` is runtime-only `DurableReason`, default `None`;
 it is not a manifest field or a new serialized enum ordinal. Existing

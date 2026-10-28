@@ -272,11 +272,12 @@ while waiting, materializing, resident, pausing or paused, control-grammar rejec
 dead end and Engine failure) becomes observable only after runtime statistics stop counting the
 request, that an isolated capacity miss, fresh or restoring, refuses only that request with
 `Unavailable`, and that a durable import prepare, commit or abort and an export lease retirement
-return only after statistics include their catalog and Host-occupancy change. After the observed
-request's planning state is released, or a checkpoint operation changes native state, the next
-statistics publication waits until the observer has read statistics, so a result delivered before
-publication fails deterministically. Run it with
-`ctest --test-dir build -R '^ninfer_engine_core_test$' --output-on-failure`.
+return only after statistics include their catalog and Host-occupancy change. It also checks that a
+session turn completing after a newer turn was acknowledged is not named for the session, while a
+newer unacknowledged turn keeps its name. After the observed request's planning state is released,
+or a checkpoint operation changes native state, the next statistics publication waits until the
+observer has read statistics, so a result delivered before publication fails deterministically.
+Run it with `ctest --test-dir build -R '^ninfer_engine_core_test$' --output-on-failure`.
 
 The `attention` scenario checks the selected KV type, chunked prefill, concurrent Graph decode
 across a resource tier, prefix continuation, and workspace bounds:
