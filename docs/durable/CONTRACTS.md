@@ -709,8 +709,12 @@ handle-anchored core replacement and its post-replacement parent flush. The coun
 pathname-rename finding applies to the frozen v0.13.0 Linux candidate, not that
 native core. K6Windows follow-up `4c8ee39ac5bfa8077ece12c4b8856130d5f2497c`
 routes `WindowsCheckpointFileSystem::atomic_replace_durable` through the same
-`io::replace_path` primitive, retaining its `CheckpointContractError` boundary
-instead of the remaining pathname-based `MoveFileExW` helper.
+`io::replace_path` primitive instead of the remaining pathname-based `MoveFileExW`
+helper. Its failures, like the DirectStorage read queue's anchored payload open and
+root creation, propagate as the `io::` primitive's `std::system_error` with the OS
+code. The legacy backend's and read queue's own Win32 call failures also throw
+`std::system_error`, while DirectStorage HRESULT and contract violations remain
+`CheckpointContractError`.
 Source presence is not Windows execution or crash-durability evidence; native
 qualification must separately exercise the publication path. Successful
 Windows publication acknowledges `dir_sync: "ntfs-write-through"`; POSIX publication
