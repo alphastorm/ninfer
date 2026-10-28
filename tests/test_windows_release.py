@@ -498,6 +498,42 @@ try{Assert-AppLocalDlls (Copy-InstalledRelease ([string]$state.active_release) $
 @{'Install-Release'=$outcome}|ConvertTo-Json -Compress
 """
 
+OWNER_CONTROLLER_STUB = """param([string]$Action, [string]$StateRoot, [string]$GpuUuid,
+      [int]$QualifiedPowerLimitW = 0, [int]$PriorPowerLimitMinW = 100, [int]$PriorPowerLimitMaxW = 1000)
+Add-Content -LiteralPath (Join-Path $PSScriptRoot 'owner.log') -Value $Action
+if ($Action -ceq 'status') {
+    [ordered]@{ schema_version = 1; gpu_uuid = $GpuUuid; gpu_pci_bus_id = '%s'; paused = $false } | ConvertTo-Json -Compress
+}
+""" % SYNTHETIC_GPU_PCI
+
+# A start whose server never became ready: the task launches a live stand-in server and publishes
+# its runtime record, readiness fails, and the stop either ends that server or leaves it running.
+# Win32_Process reports the release's server image for the stand-in, as it would on Windows.
+FAILED_START = """function Acquire-GpuOwnerLease { }
+function Wait-Ready { throw 'release did not become ready' }
+$runtimePath=Join-Path $StateRoot 'runtime.json'
+$global:server=$null
+function Start-ScheduledTask {
+  $global:server=Start-Process -FilePath ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) -ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 120') -PassThru
+  [IO.File]::WriteAllText($runtimePath,([ordered]@{artifact_type='ninfer_windows_runtime_state';schema_version=2;release_id=[string]$state.active_release;pid=$global:server.Id;start_time_utc_ticks=$global:server.StartTime.ToUniversalTime().Ticks}|ConvertTo-Json))
+}
+function Get-CimInstance { [pscustomobject]@{ExecutablePath=[string]$release.server_executable} }
+function Stop-ManagedProcess {
+  if($StopOutcome -ceq 'survived'){throw 'owned server process did not stop'}
+  $global:server.Kill();$global:server.WaitForExit();Remove-Item -LiteralPath $runtimePath
+}
+try{
+  $failure=$null
+  try{Start-ManagedRelease}catch{$failure=$_.Exception.Message}
+  [ordered]@{
+    start_failed=$null -ne $failure
+    lease_held=Test-Path -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json')
+    owner_actions=@(if(Test-Path -LiteralPath $OwnerLog){Get-Content -LiteralPath $OwnerLog})
+  }|ConvertTo-Json -Compress
+}
+finally{if($null -ne $global:server -and -not $global:server.HasExited){$global:server.Kill()}}
+"""
+
 
 class MultiGpuHostTests(unittest.TestCase):
     def test_no_unindexed_gpu_queries_or_sets(self) -> None:
@@ -2562,6 +2598,34 @@ foreach($suffix in @('missing','inspection')){{
                 for check, passed in intact.items():
                     self.assertNotEqual(outcome[check], passed, check)
                     self.assertIn(named, outcome[check], check)
+
+    def test_a_failed_start_keeps_the_gpu_owner_leased_while_its_server_runs(self) -> None:
+        """The installer rollback's quiescence rule, in the controller: a start whose server
+        never became ready restores the GPU owner only once that server is gone. Restoring it
+        under a server that survived the stop would lift the safe cap the server still runs at."""
+        for stop_outcome, expected in (
+                ("survived", {"start_failed": True, "lease_held": True, "owner_actions": []}),
+                ("stopped", {"start_failed": True, "lease_held": False, "owner_actions": ["start", "status"]})):
+            with self.subTest(stop=stop_outcome), tempfile.TemporaryDirectory() as directory:
+                release = installed_release(Path(directory))
+                owner = release.root / "gpu-owner" / "Control-GpuOwner.ps1"
+                owner.parent.mkdir()
+                owner.write_text(OWNER_CONTROLLER_STUB, encoding="utf-8")
+                owner_sha256 = hashlib.sha256(owner.read_bytes()).hexdigest()
+                state_path = release.root / "state.json"
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                state["gpu_owner"] = {"controller_path": str(owner), "controller_sha256": owner_sha256,
+                                      "state_root": str(release.root / "gpu-owner-state")}
+                state_path.write_text(json.dumps(state), encoding="utf-8")
+                (release.root / "gpu-owner-lease.json").write_text(json.dumps({
+                    "artifact_type": "ninfer_gpu_owner_lease", "schema_version": 1,
+                    "release_id": state["active_release"], "controller_sha256": owner_sha256,
+                    "prior_paused": False, "phase": "released"}), encoding="utf-8")
+                observed = self.invoke(
+                    ps_assignments(StateRoot=release.root, StopOutcome=stop_outcome,
+                                   OwnerLog=owner.parent / "owner.log")
+                    + ps_definitions(WINDOWS / "Control-Release.ps1") + LAUNCH_PREAMBLE + FAILED_START)
+                self.assertEqual(observed, expected)
 
 
 if __name__ == "__main__":

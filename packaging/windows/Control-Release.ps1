@@ -451,6 +451,11 @@ function Restore-GpuOwnerLease {
     $lease = Get-GpuOwnerLease
     if ($null -eq $lease) { return }
     $state = Get-State
+    # The lease is handed back only once no server it was taken for still runs: restoring the
+    # owner under a live server lifts the safe cap that server runs at, and the claim is lost.
+    if ($null -ne (Get-OwnedProcess (Get-RuntimeState) (Get-Release $state ([string]$state.active_release)))) {
+        throw 'the GPU-owner lease stays held while the release server still runs'
+    }
     $owner = Get-GpuOwner $state
     if ($null -eq $owner -or
         [string]$lease.controller_sha256 -cne [string]$owner.controller_sha256) {
