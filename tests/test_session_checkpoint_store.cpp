@@ -2139,6 +2139,80 @@ int test_disk_full_capacity_preserves_generation() {
     }
     return failures;
 }
+
+// omp-ninfer#89 L6: manifest, MAC and current-pointer writes carry the OS code of a failed
+// close, so a disk-full close is the ordinary Capacity refusal and any other error stays a
+// thrown IoUnavailable system_error. Each failure precedes the current rename, so neither
+// the attempted generation nor its pointer file may remain (L8).
+int test_metadata_close_failure_keeps_os_classification() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .origin_mac_key = std::string(32, 'k'),
+                                  .read_queue = std::make_shared<TestReadQueue>()});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) {
+            return DurableExportResult{.state = runtime::DurableExportState::Refused};
+        }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto baseline = store.save(responses, fingerprint(), exporter, publish_fixture);
+    if (!baseline) { return check(false, "metadata-close baseline did not publish"); }
+    const auto session = temporary.path / "sessions" / responses.client_session_sha256;
+    struct Fault {
+        const char* file;
+        int error;
+        runtime::DurableReason reason;
+    };
+    const Fault faults[] = {
+        {"manifest.json", ENOSPC, runtime::DurableReason::Capacity},
+        {"manifest.mac", ENOSPC, runtime::DurableReason::Capacity},
+        {".current-", ENOSPC, runtime::DurableReason::Capacity},
+        {"manifest.json", EIO, runtime::DurableReason::IoUnavailable},
+        {".current-", EIO, runtime::DurableReason::IoUnavailable},
+    };
+    int failures = 0;
+    for (const auto& fault : faults) {
+        runtime::SessionCheckpointSkipDetail skip;
+        std::optional<SessionCheckpointSaveResult> saved;
+        std::error_code thrown;
+        bool threw_other = false;
+        unsigned refused_closes = 0;
+        {
+            checkpoint_write_fault::CloseScope injection(fault.error, fault.file);
+            try {
+                saved = store.save(responses, fingerprint(), exporter, publish_fixture, &skip);
+            } catch (const std::system_error& error) {
+                thrown = error.code();
+            } catch (...) { threw_other = true; }
+            refused_closes = checkpoint_write_fault::fired;
+        }
+        const std::string label =
+            std::string(fault.file) + " close errno " + std::to_string(fault.error);
+        const bool capacity = fault.reason == runtime::DurableReason::Capacity;
+        failures += check(refused_closes == 1 && !saved && !threw_other &&
+                              skip.durable_reason == fault.reason &&
+                              (capacity ? !thrown
+                                        : thrown == std::error_code(fault.error,
+                                                                    std::generic_category())),
+                          label + " lost the OS classification of the failed close");
+        failures += check(entry_names(session / "generations") ==
+                                  std::vector<std::string>{baseline->generation} &&
+                              entry_names(session) ==
+                                  std::vector<std::string>{"current", "generations"},
+                          label + " left the unpublished generation or its pointer file");
+        const auto loaded = store.load(responses.client_session_sha256, fingerprint());
+        failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+                              loaded.checkpoint &&
+                              loaded.checkpoint->generation == baseline->generation,
+                          label + " replaced the published generation");
+    }
+    return failures;
+}
 #endif
 
 // omp-ninfer#89 L8: only the current-pointer rename makes a generation visible. A failure
@@ -3039,6 +3113,7 @@ int main(int argc, char** argv) {
 #if defined(_WIN32) || defined(__linux__)
         if (test == "disk_full_capacity") {
             int failures = test_disk_full_capacity_preserves_generation();
+            failures += test_metadata_close_failure_keeps_os_classification();
 #ifdef _WIN32
             failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_DISK_FULL);
             failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_HANDLE_DISK_FULL);
@@ -3078,6 +3153,7 @@ int main(int argc, char** argv) {
     failures += test_buffered_deferred_failure_fails_before_publication();
 #if defined(_WIN32) || defined(__linux__)
     failures += test_disk_full_capacity_preserves_generation();
+    failures += test_metadata_close_failure_keeps_os_classification();
 #endif
     failures += test_pointer_rename_attempt_decides_generation_retention();
     failures += test_hmac_sha256_rfc4231_vectors();

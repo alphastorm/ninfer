@@ -466,11 +466,30 @@ void interrupted_stdio() {
     require(writer.bytes == reader.bytes && writer.interrupted && !std::ferror(output.get()),
             "EINTR write did not complete and clear the stream error");
 }
+
+// A failed close carries its OS code; the checkpoint store classifies ENOSPC as Capacity.
+void failed_stdio_close() {
+    const cookie_io_functions_t functions{.close = [](void*) -> int {
+        errno = ENOSPC;
+        return -1;
+    }};
+    std::FILE* const stream = ::fopencookie(nullptr, "w", functions);
+    require(stream != nullptr, "create failing close stream failed");
+    try {
+        io::close_file(stream);
+    } catch (const std::system_error& error) {
+        require(error.code() == std::error_code(ENOSPC, std::generic_category()),
+                "failed close lost its OS code");
+        return;
+    }
+    throw std::runtime_error("failed close was accepted");
+}
 #endif
 
 void run() {
 #ifndef _WIN32
     interrupted_stdio();
+    failed_stdio_close();
 #endif
     Fixture fixture;
 #ifndef _WIN32

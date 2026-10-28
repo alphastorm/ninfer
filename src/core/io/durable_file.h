@@ -22,10 +22,16 @@ namespace ninfer::io {
 [[nodiscard]] std::FILE* open_binary_write(const std::filesystem::path& path);
 [[nodiscard]] std::FILE* open_binary_read(const std::filesystem::path& path);
 void create_directories(const std::filesystem::path& path);
+// OS-reported stream errors throw std::system_error with the OS code. The Windows CRT maps
+// Win32 errors onto errno lossily (ERROR_HANDLE_DISK_FULL becomes EINVAL), so a failing CRT
+// call reports the Win32 code it recorded and errno only when it recorded none.
 void read_exact(std::FILE* file, std::span<std::byte> bytes);
 void write_exact(std::FILE* file, std::span<const std::byte> bytes);
 // Flushes stdio and fsync/FlushFileBuffers. No durability acknowledgement precedes this.
 void flush_file(std::FILE* file);
+// Releases the stream even when closing fails; a failed close, including a deferred write
+// error, throws.
+void close_file(std::FILE* file);
 // Source and destination parents are pinned, with no symlink/reparse traversal. Cross-volume
 // moves fail rather than copy. Windows flushes the staged file, renames relative to the
 // pinned destination with NtSetInformationFile(FileRenameInformationEx), then flushes that

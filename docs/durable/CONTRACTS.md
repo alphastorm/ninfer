@@ -97,9 +97,15 @@ turn can establish a normal native endpoint again.
 
 Disk-full write failures — POSIX `ENOSPC`, Win32 `ERROR_DISK_FULL` (112) and
 `ERROR_HANDLE_DISK_FULL` (39) — classify as `DurableReason::Capacity` (`capacity`,
-HTTP 409), not corruption. The failed save preserves the prior generation and
-DELETE survivors; no deletion is acknowledged without the required durable
-survivor publication. K7 records the storage-capacity automatic-retry limitation.
+HTTP 409), not corruption. This holds at every save-path I/O site, for payloads and
+for `manifest.json`, `manifest.mac` and the temporary current pointer alike: file
+creation, write, flush, close (including a deferred write error reported by close),
+directory sync and rename all fail with `std::system_error` carrying the OS code.
+A failing Windows CRT stream call reports the Win32 code the CRT recorded, because
+its errno mapping turns `ERROR_HANDLE_DISK_FULL` into `EINVAL`. The failed save
+preserves the prior generation and DELETE survivors; no deletion is acknowledged
+without the required durable survivor publication. K7 records the storage-capacity
+automatic-retry limitation.
 
 ### Canonical JSON and MAC
 

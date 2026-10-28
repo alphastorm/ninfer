@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -469,6 +470,22 @@ bool remove_entry(int parent, const char* name) {
     return true;
 }
 #endif
+
+// Clear both CRT error records before a stream call so a failure reports only its own cause;
+// the Win32 record survives the lossy errno mapping described in durable_file.h.
+void reset_stream_error() noexcept {
+    errno = 0;
+#ifdef _WIN32
+    _doserrno = 0;
+#endif
+}
+
+[[noreturn]] void fail_stream(const char* operation, int error) {
+#ifdef _WIN32
+    if (const DWORD native = _doserrno) fail_windows(operation, native);
+#endif
+    fail_errno(operation, error ? error : EIO);
+}
 } // namespace
 
 #ifdef _WIN32
@@ -489,13 +506,13 @@ void create_directories(const std::filesystem::path& path) {
 void read_exact(std::FILE* file, std::span<std::byte> bytes) {
     if (!file) throw std::invalid_argument("null durable read stream");
     while (!bytes.empty()) {
-        errno = 0;
+        reset_stream_error();
         const auto count = std::fread(bytes.data(), 1, bytes.size(), file);
         const auto error = errno;
         bytes = bytes.subspan(count);
         if (std::ferror(file)) {
             if (error == EINTR) { std::clearerr(file); continue; }
-            fail_errno("read durable stream", error ? error : EIO);
+            fail_stream("read durable stream", error);
         }
         if (!count) throw std::runtime_error("durable stream ended before its declared size");
     }
@@ -504,13 +521,13 @@ void read_exact(std::FILE* file, std::span<std::byte> bytes) {
 void write_exact(std::FILE* file, std::span<const std::byte> bytes) {
     if (!file) throw std::invalid_argument("null durable write stream");
     while (!bytes.empty()) {
-        errno = 0;
+        reset_stream_error();
         const auto count = std::fwrite(bytes.data(), 1, bytes.size(), file);
         const auto error = errno;
         bytes = bytes.subspan(count);
         if (std::ferror(file)) {
             if (error == EINTR) { std::clearerr(file); continue; }
-            fail_errno("write durable stream", error ? error : EIO);
+            fail_stream("write durable stream", error);
         }
         if (!count) fail_errno("write durable stream", EIO);
     }
@@ -518,7 +535,8 @@ void write_exact(std::FILE* file, std::span<const std::byte> bytes) {
 
 void flush_file(std::FILE* file) {
     if (!file) throw std::invalid_argument("null durable flush stream");
-    if (std::fflush(file)) fail_errno("flush durable stream");
+    reset_stream_error();
+    if (std::fflush(file)) fail_stream("flush durable stream", errno);
 #ifdef _WIN32
     const auto handle = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(file)));
     if (handle == INVALID_HANDLE_VALUE) fail_errno("get durable stream handle");
@@ -526,6 +544,12 @@ void flush_file(std::FILE* file) {
 #else
     sync_descriptor(::fileno(file), "sync durable file");
 #endif
+}
+
+void close_file(std::FILE* file) {
+    if (!file) throw std::invalid_argument("null durable close stream");
+    reset_stream_error();
+    if (std::fclose(file)) fail_stream("close durable stream", errno);
 }
 
 void sync_directory(const std::filesystem::path& path) {

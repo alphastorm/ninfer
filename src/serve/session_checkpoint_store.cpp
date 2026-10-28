@@ -66,6 +66,7 @@ void log_checkpoint_failure(std::string_view operation, runtime::DurableReason r
 namespace {
 
 using Clock = std::chrono::system_clock;
+using io::close_file;
 using io::flush_file;
 using io::open_binary_read;
 using io::open_binary_write;
@@ -311,21 +312,18 @@ struct FileDescriptor {
     return component_has_byte;
 }
 
+// Every failure, including a deferred write error reported by close, carries the OS code, so
+// a disk-full manifest, MAC or current pointer classifies as Capacity like payload writes.
 void write_synced(const std::filesystem::path& path, std::span<const std::byte> bytes) {
-    std::FILE* file = open_binary_write(path);
-    if (file == nullptr) { throw std::runtime_error("checkpoint file creation failed"); }
+    std::FILE* const file = open_binary_write(path);
     try {
         io::write_exact(file, bytes);
         flush_file(file);
-        if (std::fclose(file) != 0) {
-            file = nullptr;
-            throw std::runtime_error("checkpoint file close failed");
-        }
-        file = nullptr;
     } catch (...) {
-        if (file != nullptr) { std::fclose(file); }
+        std::fclose(file);
         throw;
     }
+    close_file(file);
 }
 
 void write_synced(const std::filesystem::path& path, std::string_view bytes) {
@@ -365,9 +363,10 @@ void write_synced(const std::filesystem::path& path, std::string_view bytes) {
         std::fclose(file);
         throw CheckpointUnavailable("checkpoint file read failed");
     }
-    if (std::fclose(file) != 0) {
-        log_checkpoint_failure("metadata_close", runtime::DurableReason::IoUnavailable,
-                               {errno, std::generic_category()});
+    try {
+        close_file(file);
+    } catch (const std::system_error&) {
+        log_checkpoint_failure("metadata_close", runtime::DurableReason::IoUnavailable);
         throw CheckpointUnavailable("checkpoint file close failed");
     }
     return bytes;
@@ -467,18 +466,18 @@ void require_payload_shape(const std::filesystem::path& root, const std::string&
          !error && iterator != end; iterator.increment(error)) {
         if (!iterator->is_regular_file(error) || error) { continue; }
         const std::uintmax_t size = iterator->file_size(error);
-        if (error || size > std::numeric_limits<std::uint64_t>::max() - total) {
-            if (error) {
-                log_checkpoint_failure("directory_entry_size", runtime::DurableReason::IoUnavailable,
-                                       error);
-            }
+        if (error) {
+            log_checkpoint_failure("directory_entry_size", checkpoint_io_reason(error), error);
+            throw std::system_error(error, "checkpoint directory entry size is unavailable");
+        }
+        if (size > std::numeric_limits<std::uint64_t>::max() - total) {
             throw std::overflow_error("checkpoint directory byte count overflowed");
         }
         total += static_cast<std::uint64_t>(size);
     }
     if (error) {
-        log_checkpoint_failure("directory_scan", runtime::DurableReason::IoUnavailable, error);
-        throw std::runtime_error("checkpoint directory scan failed");
+        log_checkpoint_failure("directory_scan", checkpoint_io_reason(error), error);
+        throw std::system_error(error, "checkpoint directory scan failed");
     }
     return total;
 }
@@ -728,10 +727,6 @@ private:
                 }
 #endif
                 state.file = open_binary_write(destination);
-                if (state.file == nullptr) {
-                    record_failure();
-                    return false;
-                }
             }
             if (state.complete || state.total != total_bytes || state.written != offset ||
                 state.alignment != alignment ||
@@ -744,14 +739,13 @@ private:
             state.written += static_cast<std::uint64_t>(bytes.size());
             if (state.written == state.total) {
                 flush_file(state.file);
-                if (std::fclose(state.file) != 0) {
-                    const std::error_code error(errno, std::generic_category());
-                    record_failure(checkpoint_io_reason(error));
-                    log_checkpoint_failure("payload_close", failure_reason_, error);
-                    state.file = nullptr;
+                try {
+                    close_file(std::exchange(state.file, nullptr));
+                } catch (...) {
+                    record_failure(current_checkpoint_failure_reason());
+                    log_checkpoint_failure("payload_close", failure_reason_);
                     return false;
                 }
-                state.file     = nullptr;
                 state.complete = true;
                 state.digest   = crypto::sha256_hex(state.hasher.finish());
             }
@@ -1169,7 +1163,7 @@ void account_bytes(std::uint64_t& used, std::uint64_t bytes) {
     std::error_code error;
     if (!std::filesystem::is_directory(generations, error)) {
         if (error && error != std::errc::no_such_file_or_directory) {
-            throw std::runtime_error("checkpoint generation scan failed");
+            throw std::system_error(error, "checkpoint generation scan failed");
         }
         return 0;
     }
@@ -1236,7 +1230,7 @@ void account_bytes(std::uint64_t& used, std::uint64_t bytes) {
         std::error_code error;
         if (!std::filesystem::is_directory(generations, error)) {
             if (error && error != std::errc::no_such_file_or_directory) {
-                throw std::runtime_error("checkpoint generation scan failed");
+                throw std::system_error(error, "checkpoint generation scan failed");
             }
             continue;
         }
@@ -1300,7 +1294,7 @@ void account_bytes(std::uint64_t& used, std::uint64_t bytes) {
             root / (stem + "--" + stamp + "-" + std::to_string(attempt));
         std::error_code error;
         const bool exists = std::filesystem::exists(candidate, error);
-        if (error) { throw std::runtime_error("checkpoint tombstone lookup failed"); }
+        if (error) { throw std::system_error(error, "checkpoint tombstone lookup failed"); }
         if (!exists) { return candidate; }
     }
     throw std::runtime_error("checkpoint tombstone namespace is exhausted");
