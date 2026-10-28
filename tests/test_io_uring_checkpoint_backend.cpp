@@ -23,6 +23,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -45,6 +46,25 @@ bool throws_checkpoint(const std::function<void()>& action) {
         action();
     } catch (const CheckpointContractError&) { return true; }
     return false;
+}
+
+// A refused storage operation: an OS failure carrying its code, or a contract refusal such as a
+// short transfer, which reports none.
+bool throws_refusal(const std::function<void()>& action) {
+    try {
+        action();
+    } catch (const CheckpointContractError&) { return true; } catch (const std::system_error&) {
+        return true;
+    }
+    return false;
+}
+
+// The OS code a failed operation carried; empty when it threw no std::system_error.
+std::error_code thrown_system_code(const std::function<void()>& action) {
+    try {
+        action();
+    } catch (const std::system_error& error) { return error.code(); } catch (...) {}
+    return {};
 }
 
 std::string thrown_checkpoint_message(const std::function<void()>& action) {
@@ -247,8 +267,16 @@ int test_unavailable_capability() {
         probe_io_uring_checkpoint_capability(missing);
     failures += check(!missing_capability.available && !missing_capability.reason.empty(),
                       "a missing checkpoint root must report an explicit unavailable capability");
-    failures += check(throws_checkpoint([&] { IoUringCheckpointBackend backend(missing); }),
-                      "backend construction must fail when storage capability is unavailable");
+    failures += check(thrown_system_code([&] { IoUringCheckpointBackend backend(missing); }) ==
+                          std::errc::no_such_file_or_directory,
+                      "backend construction on a missing root lost its OS error code");
+    // Root creation fails before the read queue needs io_uring, so this runs on every host.
+    const std::filesystem::path file_root = parent.path() / "file-root";
+    std::ofstream(file_root) << "not a directory";
+    failures += check(thrown_system_code([&] {
+                          (void)make_io_uring_checkpoint_read_queue(file_root / "checkpoints");
+                      }) == std::errc::not_a_directory,
+                      "read-queue root creation under a file lost its OS error code");
 
     if (std::filesystem::is_directory("/dev/shm")) {
         std::string pattern = "/dev/shm/ninfer-io-uring-unavailable-XXXXXX";
@@ -412,7 +440,7 @@ int test_partial_failure_cleanup() {
     bool failed = false;
     {
         ScopedFileSizeLimit limit(4096);
-        failed = throws_checkpoint(
+        failed = throws_refusal(
             [&] { backend.stage(checkpoint.manifest, checkpoint.payloads, checkpoint.key); });
     }
     failures += check(failed, "an asynchronous short/failed payload write must fail stage");
@@ -435,9 +463,9 @@ int test_partial_submit_failure_poison_and_recovery() {
     {
         IoUringCheckpointBackend backend(root.path());
         io_uring_checkpoint_test_fail_next_submitted_batch();
-        const std::string first_failure = thrown_checkpoint_message(
+        const std::error_code first_failure = thrown_system_code(
             [&] { backend.stage(checkpoint.manifest, checkpoint.payloads, checkpoint.key); });
-        failures += check(first_failure.find("io_uring_enter submit") != std::string::npos,
+        failures += check(first_failure == std::errc::io_error,
                           "partial submit failure lost the originating EIO");
         const std::string poisoned_failure = thrown_checkpoint_message(
             [&] { backend.stage(checkpoint.manifest, checkpoint.payloads, checkpoint.key); });
@@ -467,8 +495,9 @@ int test_commit_failure_preserves_prior_generation() {
     if (blocker_fd < 0) { throw std::runtime_error(std::strerror(errno)); }
     ::close(blocker_fd);
 
-    failures += check(throws_checkpoint([&] { backend.commit(candidate.key); }),
-                      "a manifest-publication failure must fail commit");
+    failures += check(thrown_system_code([&] { backend.commit(candidate.key); }) ==
+                          std::errc::file_exists,
+                      "a manifest-publication failure must fail commit with its OS error code");
     backend.abort(candidate.key);
     failures += check(count_prefixed_entries(root.path(), ".stage-") == 0 &&
                           count_prefixed_entries(root.path(), "generation-") == 1 &&
@@ -526,8 +555,9 @@ int test_marker_fsync_failure_does_not_lock_out_root() {
         save(backend, current);
         backend.stage(candidate.manifest, candidate.payloads, candidate.key);
         io_uring_checkpoint_test_fail_publication_marker_fsync();
-        failures += check(throws_checkpoint([&] { backend.commit(candidate.key); }),
-                          "publication-marker fsync fault did not fail commit");
+        failures += check(thrown_system_code([&] { backend.commit(candidate.key); }) ==
+                              std::errc::io_error,
+                          "publication-marker fsync fault did not fail commit with its EIO");
         backend.abort(candidate.key);
     }
     failures += check(!std::filesystem::exists(root.path() / ".publication-uncertain"),
@@ -656,18 +686,54 @@ int test_continuation_read_queue() {
     const auto actual = payload_path(root, checkpoint);
     const auto alias = root.path() / "payload-alias";
     std::filesystem::create_directory_symlink(actual.parent_path(), alias);
-    failures += check(throws_checkpoint([&] {
+    failures += check(thrown_system_code([&] {
                           (void)queue->submit(alias / actual.filename(), std::span(&request, 1));
-                      }),
+                      }) == std::errc::not_a_directory,
                       "io_uring continuation queue followed an intermediate symlink");
     TempDirectory outside;
     const auto root_alias = root.path() / "root-alias";
     std::filesystem::create_directory_symlink(outside.path(), root_alias);
-    failures += check(throws_checkpoint([&] {
+    failures += check(thrown_system_code([&] {
                           (void)make_io_uring_checkpoint_read_queue(root_alias / "not-created");
-                      }) &&
+                      }) == std::errc::not_a_directory &&
                           !std::filesystem::exists(outside.path() / "not-created"),
                       "queue factory must not create directories through a root ancestor symlink");
+    return failures;
+}
+
+// The store logs a native_payload_read failure with the code the queue reports: an open
+// failure on the caller's thread and a ring failure on the read worker, which wait() rethrows,
+// both keep it.
+int test_read_queue_failures_keep_os_codes() {
+    TempDirectory root;
+    // Two direct-I/O chunks, which the read worker submits as one batch.
+    const std::vector<std::byte> bytes(4U * 1024U * 1024U + 1U);
+    const std::filesystem::path payload = root.path() / "payload";
+    {
+        std::ofstream output(payload, std::ios::binary);
+        output.write(reinterpret_cast<const char*>(bytes.data()),
+                     static_cast<std::streamsize>(bytes.size()));
+        if (!output) { throw std::runtime_error("failed to write the read-queue payload"); }
+    }
+    const std::shared_ptr<ContinuationCheckpointReadQueue> queue =
+        make_io_uring_checkpoint_read_queue(root.path());
+    std::vector<std::byte> restored(bytes.size());
+    const ContinuationCheckpointReadRequest request{.file_offset = 0, .destination = restored};
+
+    int failures = check(thrown_system_code([&] {
+                             (void)queue->submit(root.path() / "missing-payload",
+                                                 std::span(&request, 1));
+                         }) == std::errc::no_such_file_or_directory,
+                         "a missing checkpoint payload open lost its OS error code");
+
+    io_uring_checkpoint_test_fail_next_submitted_batch();
+    const std::unique_ptr<ContinuationCheckpointReadCompletion> completion =
+        queue->submit(payload, std::span(&request, 1));
+    if (!completion) {
+        return failures + check(false, "io_uring continuation queue returned no completion");
+    }
+    failures += check(thrown_system_code([&] { completion->wait(); }) == std::errc::io_error,
+                      "a failed read submission lost its OS error code across the read worker");
     return failures;
 }
 
@@ -753,6 +819,7 @@ int main() {
         failures += test_truncation_and_oversize_rejection();
         failures += test_expected_allocation_bound();
         failures += test_continuation_read_queue();
+        failures += test_read_queue_failures_keep_os_codes();
         failures += test_zfs_wsl_missing_and_large_dio_alignment();
         if (failures == 0) {
             const char* environment =

@@ -16,7 +16,8 @@ ownership contracts are defined in [Engine architecture](../docs/maintainer/engi
   opt-in real Engine integration;
 - `ops/` — semantic Op qualification with independent mathematical or state-transition oracles;
   Linear and fused Linear suites are separated by their supported weight/activation paths;
-- `runtime/` — scheduler fairness, cache resource policy, capacity and context-cost calculations;
+- `runtime/` — scheduler fairness, cache resource policy, capacity and context-cost calculations,
+  and host-native EngineCore response retirement, admission refusal and checkpoint publication;
 - `cpu/` — topology/ISA, bounded task admission, bound collectives, publication and shutdown;
 - `io/` — bounded direct reads, partial submission, completion, wakeup and borrowed-buffer lifetime;
 - `models/qwen4_exp/` — native bank binding, state/page-group layouts and transfers, plus PLE
@@ -263,6 +264,21 @@ The failure fixture uses valid but unsatisfiable GBNF, checks that no tokens are
 and verifies a subsequent healthy request. These integration checks
 use behavior and state accounting rather than another numerical path's generated tokens as a golden.
 
+`ninfer_engine_core_test` runs the production EngineCore worker, Scheduler, ResourceManager, durable
+checkpoint adapter and response delivery against a scripted host contract, without a GPU, artifact
+or CUDA work; on a GPU-less host, linker-wrapped CUDA runtime entry points present the one device
+DeviceContext binds. It checks that every terminal response (completion, queue expiry, cancellation
+while waiting, materializing, resident, pausing or paused, control-grammar rejection, constraint
+dead end and Engine failure) becomes observable only after runtime statistics stop counting the
+request, that an isolated capacity miss, fresh or restoring, refuses only that request with
+`Unavailable`, and that a durable import prepare, commit or abort and an export lease retirement
+return only after statistics include their catalog and Host-occupancy change. It also checks that a
+session turn completing after a newer turn was acknowledged is not named for the session, while a
+newer unacknowledged turn keeps its name. After the observed request's planning state is released,
+or a checkpoint operation changes native state, the next statistics publication waits until the
+observer has read statistics, so a result delivered before publication fails deterministically.
+Run it with `ctest --test-dir build -R '^ninfer_engine_core_test$' --output-on-failure`.
+
 The `attention` scenario checks the selected KV type, chunked prefill, concurrent Graph decode
 across a resource tier, prefix continuation, and workspace bounds:
 
@@ -305,6 +321,11 @@ release, so successful reclaim must total two complete validations and four pins
 one fresh target reader on retry, preservation of an invalid victim, and exact cached continuation.
 Public-HTTP latency and output gaps are measured separately by the
 [TTFT campaign](../tools/bench/ttft/README.md).
+
+On Linux, `ninfer_session_checkpoint_service_real_test` builds the durable-serving checkpoint
+service on `NINFER_TEST_ARTIFACT`, refuses the close of its staged shutdown report, and requires
+`final_save()` to fail without publishing the report, then to publish it normally. Durable serving
+rejects dirty build provenance, so it needs a clean-source build.
 
 `ninfer_qwen3_5_tools_real_test [none|mtp|dflash|dflash2] [graph|eager|basic|snapshot|replay|cancel] [concurrency]`
 uses `NINFER_TEST_ARTIFACT` for strict tools, thinking, raw continuation, mixed batches, and

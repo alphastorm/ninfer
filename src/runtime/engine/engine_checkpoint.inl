@@ -52,6 +52,8 @@
             const auto state = checkpoints_.session(digest);
             std::lock_guard lock(state->mutex);
             state->stored(std::string(tag), order);
+            // Also clears an older owner that completed after a newer acknowledgement.
+            resources_.supersede_durable(digest, state->committed_order);
         });
         request_admission_check();
         queue_cv_.notify_all();
@@ -97,17 +99,21 @@
                 if (failed_) { result.reason = DurableReason::IoUnavailable; return; }
                 const auto gate = checkpoints_.session(digest);
                 std::lock_guard lock(gate->mutex);
-                result.captured_epoch = gate->epoch;
-                if (gate->tag != tag) {
-                    result.state = DurableExportState::Stale;
-                    result.reason = DurableReason::TagMismatch;
-                    return;
-                }
+                // The captured token keeps this gate until the caller's publication recheck.
+                result.captured_epoch = {gate->epoch.value, gate};
+                // Absence is native: an evicted endpoint is not indexed whether or not its
+                // session's gate was retired since. A resident endpoint other than the
+                // acknowledged one is a tag mismatch.
                 bool pending = false;
                 const auto points = resources_.session_points(*instance_.program, digest, tag, pending);
                 if (points.empty()) {
                     result.reason = pending ? DurableReason::TransactionBusy
                                             : DurableReason::SessionNotIndexed;
+                    return;
+                }
+                if (gate->tag != tag) {
+                    result.state = DurableExportState::Stale;
+                    result.reason = DurableReason::TagMismatch;
                     return;
                 }
                 lease.emplace(instance_.program->prepare_checkpoint_export(points, limits));
@@ -117,7 +123,7 @@
             });
             if (!lease) { return result; }
             const auto release_export = [&] {
-                checkpoint_call([&] {
+                checkpoint_change([&] {
                     // Native readers can pin every idle Device image while the writer
                     // runs off-lock. Retire them before advertising usable capacity.
                     lease.reset();
@@ -174,13 +180,16 @@
             struct Pending {
                 std::optional<Reservation> native;
                 DurableImportTarget target;
+                // The gate that validated the epoch; commit rechecks under this same gate.
+                std::shared_ptr<CheckpointControl::Session> gate;
                 std::size_t count = 0;
             };
             auto pending = std::make_shared<Pending>();
             pending->target = target;
             PreparedEngineCheckpoint result;
             const auto oracle = checkpoints_.oracle();
-            checkpoint_call([&] {
+            // Reclaimed victims and a prepared reservation change catalog and Host occupancy.
+            checkpoint_change([&] {
                 if (failed_) {
                     result.state = DurablePrepareState::Unavailable;
                     result.reason = DurableReason::IoUnavailable;
@@ -194,6 +203,7 @@
                         return;
                     }
                 }
+                pending->gate = gate;
                 // Fixed initial membership bounds the retry budget. Later arrivals do not
                 // make a restore an unbounded eviction loop. Every victim lease survives
                 // all attempts, even after its resident points have been reclaimed.
@@ -285,16 +295,15 @@
             try {
                 result.abort = [this, pending] {
                     if (!pending->native) { return; }
-                    checkpoint_call([&] { pending->native.reset(); });
+                    checkpoint_change([&] { pending->native.reset(); });
                 };
                 result.commit = [this, pending]() -> DurableImportResult {
-                    return checkpoint_call([&]() -> DurableImportResult {
+                    return checkpoint_change([&]() -> DurableImportResult {
                         if (!pending->native) {
                             return {.state = DurableImportState::PolicyDisabled,
                                     .reason = DurableReason::Cancelled};
                         }
                         const auto& target = pending->target;
-                        const auto gate = checkpoints_.session(target.session_sha256);
                         // Allocate every policy/index replacement before native publication.
                         auto publication = resources_.prepare_import_publication(
                             checkpoint_key("http:" + target.session_sha256),
@@ -314,7 +323,7 @@
                             if (!next_publication_order_) { throw std::overflow_error("publication order exhausted"); }
                             order = next_publication_order_++;
                         }
-                        if (!checkpoints_.commit_import(gate, target.expected_epoch, tag, order, [&] {
+                        if (!checkpoints_.commit_import(pending->gate, target.expected_epoch, tag, order, [&] {
                             auto handles = instance_.program->commit_import(std::move(*pending->native));
                             pending->native.reset();
                             resources_.publish_import(*instance_.program, std::move(publication), handles, order);
@@ -329,7 +338,7 @@
                     });
                 };
             } catch (...) {
-                checkpoint_call([&] { pending->native.reset(); });
+                checkpoint_change([&] { pending->native.reset(); });
                 throw;
             }
             return result;
@@ -337,6 +346,32 @@
     }
 
 private:
+    // Runs a checkpoint operation that changes catalog entries or physical occupancy. As with a
+    // terminal response, its result or exception reaches the caller only after the published
+    // runtime statistics include that change.
+    template <class Function>
+    auto checkpoint_change(Function&& function) -> std::invoke_result_t<Function> {
+        return checkpoint_call([&]() -> std::invoke_result_t<Function> {
+            using Core = std::remove_pointer_t<decltype(this)>;
+            const struct Publication {
+                Core& core;
+                ~Publication() { core.publish_checkpoint_change(); }
+            } publication{*this};
+            return std::forward<Function>(function)();
+        });
+    }
+    // A committed import or a retired lease cannot be undone, so a failed publication still
+    // returns the operation's result. The worker then fails the Engine with that failure, as it
+    // does after a failed terminal-response publication.
+    void publish_checkpoint_change() noexcept {
+        try {
+            publish_runtime_stats();
+        } catch (...) {
+            if (!checkpoint_publication_failure_) {
+                checkpoint_publication_failure_ = std::current_exception();
+            }
+        }
+    }
     DurableReason validate_pressure_checkpoint(const ContinuationCheckpointReader& reader) {
         using Program = typename ModelContract::Program;
         const DurableLimits limits;
@@ -361,6 +396,12 @@ private:
             commands.swap(checkpoint_commands_);
         }
         for (auto& command : commands) { command(); }
+        // Every worker turn starts here. Gates that finished requests, operations and dropped
+        // tokens left behind retire once no native owner names their session; native
+        // ownership is only stable on this worker.
+        checkpoints_.retire_unowned([&](std::string_view digest) {
+            return resources_.holds_durable_session(digest);
+        });
     }
     bool checkpoint_pressure(std::span<PressureCheckpointVictim> victims) {
         if (victims.empty()) { return true; }

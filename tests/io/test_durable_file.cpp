@@ -223,8 +223,17 @@ void write(const std::filesystem::path& path, std::byte value) {
 }
 
 void publish(const std::filesystem::path& from, const std::filesystem::path& to, const char* phase) {
-    try { io::replace_path(from, to); }
+    bool attempted = false;
+    try { io::replace_path(from, to, &attempted); }
     catch (const std::system_error& error) { throw std::system_error(error.code(), phase); }
+    require(attempted, "completed replacement did not report its rename attempt");
+}
+
+// A refused replacement fails before its rename: no attempt is reported and no name changes.
+void refuses_before_rename(const std::filesystem::path& from, const std::filesystem::path& to) {
+    bool attempted = false;
+    rejects([&] { io::replace_path(from, to, &attempted); });
+    require(!attempted, "refused replacement reported a rename attempt");
 }
 
 void directory_publication(const std::filesystem::path& root) {
@@ -264,7 +273,7 @@ void native_reparse_guard(const std::filesystem::path& root,
     write(staging, std::byte{21});
     {
         PublicationScope scope(parent, Mutation::Reparse, outside);
-        rejects([&] { publish(staging, parent / "escaped", "reparse-swap publication"); });
+        refuses_before_rename(staging, parent / "escaped");
         require(publication_trace.mutated && publication_trace.delete_denied &&
                     publication_trace.file_flushes == 1 && publication_trace.parent_flushes == 0,
                 "publication did not refuse an in-place reparse swap after the staged-file flush");
@@ -289,7 +298,7 @@ void native_identity_guards(const std::filesystem::path& root) {
         for (const auto mutation : {Mutation::FileIndex, Mutation::Volume}) {
             {
                 PublicationScope scope(pinned, mutation);
-                rejects([&] { publish(staging, current, "identity-change publication"); });
+                refuses_before_rename(staging, current);
                 require(publication_trace.mutated && publication_trace.delete_denied &&
                             publication_trace.file_flushes == 1 &&
                             publication_trace.parent_flushes == 0 &&
@@ -457,11 +466,30 @@ void interrupted_stdio() {
     require(writer.bytes == reader.bytes && writer.interrupted && !std::ferror(output.get()),
             "EINTR write did not complete and clear the stream error");
 }
+
+// A failed close carries its OS code; the checkpoint store classifies ENOSPC as Capacity.
+void failed_stdio_close() {
+    const cookie_io_functions_t functions{.close = [](void*) -> int {
+        errno = ENOSPC;
+        return -1;
+    }};
+    std::FILE* const stream = ::fopencookie(nullptr, "w", functions);
+    require(stream != nullptr, "create failing close stream failed");
+    try {
+        io::close_file(stream);
+    } catch (const std::system_error& error) {
+        require(error.code() == std::error_code(ENOSPC, std::generic_category()),
+                "failed close lost its OS code");
+        return;
+    }
+    throw std::runtime_error("failed close was accepted");
+}
 #endif
 
 void run() {
 #ifndef _WIN32
     interrupted_stdio();
+    failed_stdio_close();
 #endif
     Fixture fixture;
 #ifndef _WIN32
@@ -568,18 +596,28 @@ void run() {
     rejects([&] { Stream bad(io::open_binary_read(file_link), &std::fclose); });
     rejects([&] { Stream bad(io::open_binary_write(file_link), &std::fclose); });
     write(staging, std::byte{11});
-    rejects([&] { io::replace_path(staging, file_link); });
+    refuses_before_rename(staging, file_link);
     require(std::filesystem::exists(staging), "rejected replacement consumed staging");
     write(outside / "sentinel", std::byte{42});
     // Confined same-volume cross-parent moves above remain valid. A redirected parent
     // or source link is not a valid cross-parent publication and must leave staging intact.
-    rejects([&] { io::replace_path(staging, link / "escaped"); });
-    rejects([&] { io::replace_path(link / "sentinel", directory / "escaped"); });
-    rejects([&] { io::replace_path(link, directory / "escaped"); });
-    rejects([&] { io::replace_path(file_link, directory / "escaped"); });
+    refuses_before_rename(staging, link / "escaped");
+    refuses_before_rename(link / "sentinel", directory / "escaped");
+    refuses_before_rename(link, directory / "escaped");
+    refuses_before_rename(file_link, directory / "escaped");
     require(std::filesystem::exists(staging) && !std::filesystem::exists(outside / "escaped") &&
                 !std::filesystem::exists(directory / "escaped"),
             "unsafe cross-parent publication consumed staging or escaped confinement");
+#ifndef _WIN32
+    // A rename call that fails is still an attempt: callers keep anything it may have named.
+    io::create_directories(directory / "occupied" / "child");
+    io::create_directories(directory / "moving");
+    bool attempted = false;
+    rejects([&] { io::replace_path(directory / "moving", directory / "occupied", &attempted); });
+    require(attempted && std::filesystem::is_directory(directory / "moving") &&
+                std::filesystem::is_directory(directory / "occupied" / "child"),
+            "failed rename call was not reported as an attempt");
+#endif
 #ifdef _WIN32
     native_reparse_guard(fixture.root, outside);
     native_identity_guards(fixture.root);

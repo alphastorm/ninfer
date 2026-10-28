@@ -70,7 +70,9 @@ struct VideoInfo {
 // Exact display geometry without RGB conversion. Image probing decodes the first displayed frame
 // so codec crop and orientation match decode_image(). Video probing walks the selected frame
 // sequence so frame-count, truncation, pixel-budget, crop, and sampling semantics match
-// decode_video(), but it does not materialize RGB frames.
+// decode_video(), but it does not materialize RGB frames. A video's duration is its declared
+// duration, or total_frames / fps when the container declares none; max_video_duration_seconds
+// bounds it either way.
 ImageInfo inspect_image(std::span<const std::uint8_t> bytes, const Policy& policy);
 VideoInfo inspect_video(std::span<const std::uint8_t> bytes, const Policy& policy,
                         double target_fps, int min_frames, int max_frames);

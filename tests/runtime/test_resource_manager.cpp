@@ -7,6 +7,7 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -2102,6 +2103,85 @@ void test_import_publication_is_private_and_freshly_ordered() {
             "older request finish replaced the restored session hint");
 }
 
+// Each completed turn keeps its own named owner until HTTP storage acknowledges a newer
+// endpoint. A superseded tag can never be saved or proven recoverable again.
+void test_acknowledged_endpoint_supersedes_older_named_owner() {
+    using namespace ninfer::runtime;
+    Fixture f(128);
+    const Base first{.tokens = {1, 2}, .advice = {.session_key = 11, .reuse_scope = 11}};
+    const auto older = f.begin(first);
+    const auto older_endpoint = f.program.add({1, 2}, {}, Role::Continuation);
+    f.cache.publish(f.program, older, older_endpoint);
+    f.cache.set_checkpoint_identity(older, "session", "turn-1");
+    f.cache.finish(f.program, older, first, f.next_order);
+    const Base second{.tokens = {1, 2, 3}, .advice = first.advice};
+    const auto newer = f.begin(second, older_endpoint);
+    const auto newer_endpoint = f.program.add({1, 2, 3}, {}, Role::Continuation);
+    f.cache.publish(f.program, newer, newer_endpoint);
+    f.cache.set_checkpoint_identity(newer, "session", "turn-2");
+    f.cache.finish(f.program, newer, second, f.next_order);
+    // Like the production handler, settle no named victim: a save of a tag other than the
+    // session's latest stored response never succeeds.
+    std::vector<std::string> asked;
+    f.cache.set_release_guard([&](std::span<PressureCheckpointVictim> victims) {
+        for (const auto& victim : victims) { asked.push_back(victim.checkpoint_tag); }
+        return victims.empty();
+    });
+    require(!f.cache.erase(f.program, older_endpoint) && f.program.valid_checkpoint(older_endpoint) &&
+                asked == std::vector<std::string>{"turn-1"},
+            "an unacknowledged turn released the committed endpoint without a save");
+    f.cache.supersede_durable("session", f.cache.completed_checkpoint_order("session", "turn-2"));
+    bool pending = false;
+    const auto victims = f.cache.durable_victims("restoring");
+    require(victims.size() == 1 && victims.front().tag == "turn-2" &&
+                f.cache.completed_checkpoint_order("session", "turn-1") == 0 &&
+                f.cache.session_points(f.program, "session", "turn-1", pending).empty(),
+            "the acknowledged endpoint left its predecessor named for the session");
+    asked.clear();
+    require(f.cache.erase(f.program, older_endpoint) && !f.program.valid_checkpoint(older_endpoint) &&
+                asked.empty(),
+            "a superseded owner still required a save that can never settle");
+    const auto committed = f.cache.session_points(f.program, "session", "turn-2", pending);
+    require(!pending && committed.size() == 1 && committed.front() == newer_endpoint,
+            "superseding the predecessor disturbed the committed endpoint");
+}
+
+void test_import_publication_supersedes_prior_named_owner() {
+    Fixture f(128);
+    const Base original{.tokens = {1, 2}, .advice = {.session_key = 11, .reuse_scope = 11}};
+    const auto old = f.begin(original);
+    const auto predecessor = f.program.add({1, 2}, {}, Role::Continuation);
+    f.cache.publish(f.program, old, predecessor);
+    f.cache.set_checkpoint_identity(old, "session", "old-turn");
+    f.cache.finish(f.program, old, original, f.next_order);
+    auto prepared = f.cache.prepare_import_publication(11, std::nullopt, "session", "restored", 1);
+    const auto endpoint = f.program.add({1, 2, 3}, {}, Role::Continuation);
+    const std::array imported{endpoint};
+    f.cache.publish_import(f.program, std::move(prepared), imported, f.next_order + 1);
+    bool pending = false;
+    const auto victims = f.cache.durable_victims("restoring");
+    require(victims.size() == 1 && victims.front().tag == "restored" &&
+                f.cache.session_points(f.program, "session", "old-turn", pending).empty() &&
+                f.program.valid_checkpoint(predecessor),
+            "an imported endpoint left the replaced owner named for its session");
+}
+
+// The Engine keeps a session's publication gate exactly while some owner still names it.
+void test_named_owner_holds_its_session_until_released() {
+    Fixture f(128);
+    const Base base{.tokens = {1, 2}, .advice = {.session_key = 11, .reuse_scope = 11}};
+    const auto owner = f.begin(base);
+    const auto endpoint = f.program.add({1, 2}, {}, Role::Continuation);
+    f.cache.publish(f.program, owner, endpoint);
+    require(!f.cache.holds_durable_session("session"), "an unnamed owner held a durable session");
+    f.cache.set_checkpoint_identity(owner, "session", "turn");
+    f.cache.finish(f.program, owner, base, f.next_order);
+    require(f.cache.holds_durable_session("session") && !f.cache.holds_durable_session("other"),
+            "a named owner did not hold exactly its own session");
+    require(f.cache.erase(f.program, endpoint) && !f.cache.holds_durable_session("session"),
+            "a released owner still held its session");
+}
+
 } // namespace
 
 int main() {
@@ -2109,6 +2189,9 @@ int main() {
         test_abandoned_turn_preserves_committed_owner();
         test_pending_checkpoint_blocks_complete_destructive_plan();
         test_import_publication_is_private_and_freshly_ordered();
+        test_acknowledged_endpoint_supersedes_older_named_owner();
+        test_import_publication_supersedes_prior_named_owner();
+        test_named_owner_holds_its_session_until_released();
         test_demotion_competes_with_its_actual_host_recovery_loss();
         test_adjacent_kv_demotions_share_one_submission();
         test_kv_demotion_batch_stops_at_an_intervening_delete();

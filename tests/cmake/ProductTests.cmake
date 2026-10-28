@@ -54,8 +54,20 @@ if(TARGET ninfer-serve)
     LABELS "gpu;real;durable" SKIP_RETURN_CODE 77 TIMEOUT 900 RUN_SERIAL TRUE)
 endif()
 
+# The close fault uses the Linux link-time stdio wrappers shared with the store tests.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  ninfer_add_test(ninfer_session_checkpoint_service_real_test
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_session_checkpoint_service_real.cpp"
+    LIBRARIES ninfer_serve)
+  target_link_options(ninfer_session_checkpoint_service_real_test PRIVATE
+    "LINKER:--wrap=fflush" "LINKER:--wrap=fclose")
+  set_tests_properties(ninfer_session_checkpoint_service_real_test PROPERTIES
+    LABELS "gpu;real;durable" SKIP_RETURN_CODE 77 TIMEOUT 300 RUN_SERIAL TRUE)
+endif()
+
 ninfer_add_test(ninfer_session_checkpoint_store_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_session_checkpoint_store.cpp"
+  NEEDS_SOURCE_DIR
   LIBRARIES ninfer_session_checkpoint_store)
 if(WIN32)
   target_link_libraries(ninfer_session_checkpoint_store_test PRIVATE advapi32)
@@ -70,10 +82,13 @@ if(WIN32)
 endif()
 ninfer_add_test(ninfer_automatic_checkpoint_queue_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_automatic_checkpoint_queue.cpp"
+  NEEDS_SOURCE_DIR
   LIBRARIES ninfer_session_checkpoint_store)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  target_link_options(ninfer_session_checkpoint_store_test PRIVATE "LINKER:--wrap=fflush")
-  target_link_options(ninfer_automatic_checkpoint_queue_test PRIVATE "LINKER:--wrap=fflush")
+  target_link_options(ninfer_session_checkpoint_store_test PRIVATE
+    "LINKER:--wrap=fflush" "LINKER:--wrap=fclose")
+  target_link_options(ninfer_automatic_checkpoint_queue_test PRIVATE
+    "LINKER:--wrap=fflush" "LINKER:--wrap=fclose")
 endif()
 if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
   add_test(NAME ninfer_session_checkpoint_store_capacity_test

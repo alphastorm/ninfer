@@ -270,7 +270,8 @@ JPEG images use libjpeg with integer slow DCT and fancy chroma upsampling, match
 RGB8 decode before resize. Grayscale and CMYK JPEGs are converted to RGB8, and EXIF orientation
 is applied to both inspected geometry and decoded pixels. Other image formats and sampled
 video frames use FFmpeg. The media host test checks exact Pillow reference bytes, all eight
-EXIF orientations, truncated JPEGs, decoding budgets and cancellation.
+EXIF orientations, truncated JPEGs, out-of-range container rotation and timing metadata,
+decoding budgets and cancellation.
 The Vision preprocessing identity uses the `ninfer/qwen/vision-preprocessing/2` domain for
 these decoding semantics; it must not alias checkpoints prepared by the earlier FFmpeg JPEG path.
 
