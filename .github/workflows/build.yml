@@ -85,6 +85,7 @@ jobs:
         run: |
           python3 -m unittest discover -s tests -p 'test_sm120_*.py'
           python3 -m unittest discover -s tests -p 'test_release_package.py'
+          python3 -m unittest discover -s tests -p 'test_windows_release.py'
           python3 -m unittest discover -s tests -p 'test_lifecycle_container.py'
           python3 -m unittest discover -s tests -p 'test_agent_protocol.py'
           /usr/bin/python3 -m pytest -q tests/bench/ttft/test_measurements.py tests/test_serve_corpus.py
