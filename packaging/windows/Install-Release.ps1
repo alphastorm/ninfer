@@ -727,6 +727,29 @@ function Set-TransactionFlag([object]$Transaction, [string]$Name) {
     Write-InstallTransaction $Transaction
 }
 
+# A transaction owns, and its rollback deletes, only what it created. Each directory is created
+# exclusively and recorded as a cleanup target only once it exists, so a refused install never
+# selects a tree that was already there.
+function New-TransactionDirectory([object]$Transaction, [string]$Field, [string]$Path) {
+    New-Item -ItemType Directory -Path $Path | Out-Null
+    Set-ObjectProperty $Transaction $Field $Path
+    Write-InstallTransaction $Transaction
+}
+
+function New-CandidateDirectories(
+    [object]$Transaction,
+    [string]$ReleaseRoot,
+    [string]$SecretDirectory,
+    [string]$CacheRoot
+) {
+    if (Test-Path -LiteralPath $ReleaseRoot) { throw 'release instance is already installed' }
+    if (Test-Path -LiteralPath $SecretDirectory) { throw 'release secret instance is already installed' }
+    if (Test-Path -LiteralPath $CacheRoot) { throw 'release cache instance is already installed' }
+    New-TransactionDirectory $Transaction 'release_root' $ReleaseRoot
+    New-TransactionDirectory $Transaction 'secret_directory' $SecretDirectory
+    New-TransactionDirectory $Transaction 'cache_root' $CacheRoot
+}
+
 function Convert-CommandOutputToJson([object[]]$Output, [string]$Label) {
     $lines = @($Output | ForEach-Object { [string]$_ })
     if ($lines.Count -eq 0) { throw "$Label returned no JSON" }
@@ -1071,7 +1094,7 @@ try {
         updated_utc = [DateTime]::UtcNow.ToString('o')
         journal_path = $journalPath
         state_root = $StateRoot
-        stage_path = $stage
+        stage_path = $null
         instance_id = $null
         release_root = $null
         secret_directory = $null
@@ -1098,7 +1121,7 @@ try {
         }
     }
     Write-InstallTransaction $transaction
-    New-Item -ItemType Directory -Path $stage | Out-Null
+    New-TransactionDirectory $transaction 'stage_path' $stage
     Write-InstallEvent 'install_started' 'Started durable installer transaction' ([ordered]@{
             operation_id = $operationId
             journal_path = $journalPath
@@ -1254,9 +1277,6 @@ try {
         }
 
         Set-ObjectProperty $transaction 'instance_id' $instanceId
-        Set-ObjectProperty $transaction 'release_root' $releaseRoot
-        Set-ObjectProperty $transaction 'secret_directory' $secretDirectory
-        Set-ObjectProperty $transaction 'cache_root' $cacheRoot
 
         $sourceModelItem = Get-Item -LiteralPath $sourceModel
         if (($sourceModelItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -1271,11 +1291,7 @@ try {
         }
         Set-TransactionPhase $transaction 'model_reference_verified'
 
-        if (Test-Path -LiteralPath $releaseRoot) { throw 'release instance is already installed' }
-        if (Test-Path -LiteralPath $secretDirectory) { throw 'release secret instance is already installed' }
-        if (Test-Path -LiteralPath $cacheRoot) { throw 'release cache instance is already installed' }
-
-        New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
+        New-CandidateDirectories $transaction $releaseRoot $secretDirectory $cacheRoot
         $configRoot = Join-Path $releaseRoot 'config'
         $logsRoot = Join-Path $releaseRoot 'logs'
         $candidateReceiptsRoot = Join-Path $releaseRoot 'receipts'
@@ -1321,10 +1337,8 @@ try {
         }
         $payloadResidue = @(Get-ChildItem -LiteralPath $payload -Force)
         if ($payloadResidue.Count -ne 0) { throw 'release package contains an unclassified candidate-root entry' }
-        New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
         Set-TransactionPhase $transaction 'candidate_layout_created'
 
-        New-Item -ItemType Directory -Path $secretDirectory | Out-Null
         $installedKey = Join-Path $secretDirectory 'api-key.txt'
         Copy-Item -LiteralPath $apiKeySource -Destination $installedKey
         Assert-OneLineSecret $installedKey

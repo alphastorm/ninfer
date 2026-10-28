@@ -375,6 +375,41 @@ catch{$outcome.completed=$false;$outcome.failure=$_.Exception.Message}
 $outcome|ConvertTo-Json -Compress
 """
 
+# A refused or completed creation of the candidate's directories, then the rollback of what the
+# transaction recorded, in one fresh state root per scenario.
+CANDIDATE_CREATION = """Set-StrictMode -Version Latest
+function Write-InstallEvent { }
+$observed=[ordered]@{}
+foreach($scenario in @($Scenarios -split ';')){
+  $StateRoot=Join-Path $Directory $scenario
+  $transaction=[pscustomobject][ordered]@{
+    artifact_type='ninfer_windows_install_transaction';schema_version=1;status='in_progress'
+    operation_id=$Operation;phase='model_reference_verified';started_utc='2026-10-28T00:00:00Z';updated_utc=$null
+    journal_path=(Join-Path $StateRoot 'journal.json');state_root=$StateRoot;stage_path=$null;instance_id=$Instance
+    release_root=$null;secret_directory=$null;cache_root=$null
+    task_name=$null;task_existed=$false;task_was_running=$false;task_xml_path=$null
+    reentry_policy='repair-required-before-install';snapshots=[pscustomobject]@{}
+    flags=[pscustomobject][ordered]@{incumbent_touched=$false;owner_controller_touched=$false;state_helpers_touched=$false;controller_touched=$false;state_activated=$false;task_touched=$false}
+  }
+  Write-InstallTransaction $transaction
+  $refused=$false
+  try{
+    New-TransactionDirectory $transaction 'stage_path' (Join-Path $StateRoot ('staging-'+$Operation))
+    New-CandidateDirectories $transaction (Join-Path (Join-Path $StateRoot 'releases') $Instance) (Join-Path (Join-Path $StateRoot 'secrets') $Instance) (Join-Path (Join-Path $StateRoot 'cache') $Instance)
+  }
+  catch{$refused=$true}
+  $journal=Get-Content -Raw -LiteralPath $transaction.journal_path|ConvertFrom-Json
+  $cleanup=@(Invoke-InstallTransactionRollback $transaction (Join-Path $StateRoot 'state.json') (Join-Path $StateRoot 'Control-Release.ps1') (Join-Path $StateRoot 'Control-GpuOwner.ps1') 'rollback')
+  $observed[$scenario]=[ordered]@{
+    refused=$refused
+    recorded=@(foreach($field in @('stage_path','release_root','secret_directory','cache_root')){if($null -ne $journal.$field){$field}})
+    deleted=@($cleanup|ForEach-Object{[string]$_.kind})
+  }
+}
+$observed|ConvertTo-Json -Compress -Depth 4
+"""
+
+
 class MultiGpuHostTests(unittest.TestCase):
     def test_no_unindexed_gpu_queries_or_sets(self) -> None:
         sources = {path: (ROOT / path).read_text(encoding="utf-8") for path in GPU_SCAN_FILES}
@@ -2358,6 +2393,42 @@ foreach($suffix in @('missing','inspection')){{
                 "candidate_targets": [False] * 4, "incumbent_trees": True, "candidate_lease": False,
                 "log": ["task:register", "incumbent:Start"],
             })
+
+    def test_a_refused_install_never_deletes_a_tree_it_did_not_create(self) -> None:
+        """alphastorm/omp-ninfer#89 L7: an install refused over an unregistered same-instance tree
+        (or a staging directory that already existed) rolls back without deleting it; a transaction
+        records, and its rollback deletes, exactly the directories it created."""
+        operation = "7" * 32
+        instance = "qwen38-3090-native-v0.7.0-beta.3-" + "d" * 12
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            existing = {
+                "unregistered-release": base / "unregistered-release" / "releases" / instance,
+                "unregistered-secret": base / "unregistered-secret" / "secrets" / instance,
+                "existing-stage": base / "existing-stage" / f"staging-{operation}",
+                "fresh": base / "fresh" / "releases" / ("qwen38-3090-native-v0.7.0-beta.2-" + "b" * 12),
+            }
+            for tree in existing.values():
+                tree.mkdir(parents=True)
+                (tree / "operator-data.bin").write_bytes(b"not created by this transaction")
+            observed = self.invoke(
+                ps_assignments(Directory=base, Scenarios=";".join(existing), Operation=operation, Instance=instance)
+                + ps_definitions(WINDOWS / "Install-Release.ps1") + CANDIDATE_CREATION)
+            refused = {"refused": True, "recorded": ["stage_path"], "deleted": ["package_stage"]}
+            self.assertEqual(observed, {
+                "unregistered-release": refused,
+                "unregistered-secret": refused,
+                "existing-stage": {"refused": True, "recorded": [], "deleted": []},
+                "fresh": {"refused": False,
+                          "recorded": ["stage_path", "release_root", "secret_directory", "cache_root"],
+                          "deleted": ["candidate_release", "candidate_secret", "candidate_cache", "package_stage"]},
+            })
+            for scenario, tree in existing.items():
+                with self.subTest(scenario=scenario):
+                    self.assertEqual((tree / "operator-data.bin").read_bytes(), b"not created by this transaction")
+                    created = [base / scenario / kind / instance for kind in ("releases", "secrets", "cache")]
+                    created.append(base / scenario / f"staging-{operation}")
+                    self.assertEqual([path for path in created if path.exists() and path != tree], [])
 
 
 if __name__ == "__main__":
