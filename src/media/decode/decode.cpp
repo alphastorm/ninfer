@@ -268,12 +268,16 @@ public:
 
     [[nodiscard]] AVStream* stream() const noexcept { return stream_; }
 
+    // Declared duration in seconds: the stream's when it has one, otherwise the container's; 0
+    // when that value is not positive, including a NaN product from a degenerate time base.
     [[nodiscard]] double duration_seconds() const noexcept {
+        double seconds = 0.0;
         if (stream_->duration > 0) {
-            return static_cast<double>(stream_->duration) * av_q2d(stream_->time_base);
+            seconds = static_cast<double>(stream_->duration) * av_q2d(stream_->time_base);
+        } else if (format_->duration > 0) {
+            seconds = static_cast<double>(format_->duration) / AV_TIME_BASE;
         }
-        if (format_->duration > 0) { return static_cast<double>(format_->duration) / AV_TIME_BASE; }
-        return 0.0;
+        return seconds > 0.0 ? seconds : 0.0;
     }
 
     template <typename Callback>
@@ -399,21 +403,30 @@ private:
     std::uint64_t max_decoded_pixels_ = 0;
 };
 
+// Whole degrees in [0, 360). Rotation metadata may hold any number; an angle that is not finite
+// or rounds outside int carries no rotation, like any angle that is not a quarter turn.
+int normalized_rotation(double degrees) {
+    const double rounded = std::nearbyint(degrees);
+    if (!(rounded >= std::numeric_limits<int>::min() &&
+          rounded <= std::numeric_limits<int>::max())) {
+        return 0;
+    }
+    const int whole = static_cast<int>(rounded) % 360;
+    return whole < 0 ? whole + 360 : whole;
+}
+
 int rotation_of(const AVStream* stream) {
     int rotation                 = 0;
     const AVDictionaryEntry* tag = av_dict_get(stream->metadata, "rotate", nullptr, 0);
-    if (tag != nullptr) {
-        rotation = static_cast<int>(std::nearbyint(std::strtod(tag->value, nullptr)));
-    }
+    if (tag != nullptr) { rotation = normalized_rotation(std::strtod(tag->value, nullptr)); }
     const AVPacketSideData* side =
         av_packet_side_data_get(stream->codecpar->coded_side_data,
                                 stream->codecpar->nb_coded_side_data, AV_PKT_DATA_DISPLAYMATRIX);
     if (side != nullptr && side->size >= 9 * sizeof(std::int32_t)) {
-        rotation = static_cast<int>(std::nearbyint(
-            -av_display_rotation_get(reinterpret_cast<const std::int32_t*>(side->data))));
+        // A singular matrix has no rotation angle (NaN).
+        rotation = normalized_rotation(
+            -av_display_rotation_get(reinterpret_cast<const std::int32_t*>(side->data)));
     }
-    rotation %= 360;
-    if (rotation < 0) { rotation += 360; }
     if (rotation == 89 || rotation == 91) { rotation = 90; }
     if (rotation == 179 || rotation == 181) { rotation = 180; }
     if (rotation == 269 || rotation == 271) { rotation = 270; }
@@ -462,12 +475,16 @@ int count_frames(std::span<const std::uint8_t> input, const Policy& policy) {
 
 std::vector<int> sample_indices(int total, double source_fps, double target_fps, int min_frames,
                                 int max_frames) {
-    if (total <= 0 || source_fps <= 0.0 || target_fps <= 0.0 || min_frames <= 0 ||
+    if (total <= 0 || !(std::isfinite(source_fps) && source_fps > 0.0) ||
+        !(std::isfinite(target_fps) && target_fps > 0.0) || min_frames <= 0 ||
         max_frames < min_frames) {
         throw std::invalid_argument("invalid video sampling configuration");
     }
-    int count = static_cast<int>(static_cast<double>(total) / source_fps * target_fps);
-    count     = std::min({std::max(count, min_frames), max_frames, total});
+    // A low source frame rate can request more samples than int holds: clamp before converting.
+    const int limit     = std::min(max_frames, total);
+    const double wanted = static_cast<double>(total) / source_fps * target_fps;
+    int count           = wanted < static_cast<double>(limit) ? static_cast<int>(wanted) : limit;
+    count               = std::min(std::max(count, min_frames), limit);
     std::vector<int> indices(static_cast<std::size_t>(count));
     if (count == 1) {
         indices[0] = 0;
@@ -484,31 +501,46 @@ struct VideoPlan {
     int total_frames   = 0;
     int minimum_frames = 0;
     double fps         = 0.0;
-    double duration    = 0.0;
+    double duration    = 0.0; // declared, or total_frames / fps when none is declared
     int orientation    = 1;
     std::vector<int> indices;
 };
+
+void check_video_duration(double seconds, const Policy& policy) {
+    if (seconds > policy.max_video_duration_seconds) {
+        throw Error(ErrorKind::BudgetExceeded, "video duration exceeds processor limit");
+    }
+}
 
 VideoPlan make_video_plan(std::span<const std::uint8_t> bytes, const Policy& policy,
                           double target_fps, int min_frames, int max_frames) {
     Decoder probe(bytes, policy.max_decoded_pixels);
     VideoPlan plan;
-    plan.fps          = fps_of(probe.stream());
-    plan.total_frames = probe.stream()->nb_frames > 0 &&
-                                probe.stream()->nb_frames <= std::numeric_limits<int>::max()
-                            ? static_cast<int>(probe.stream()->nb_frames)
-                            : 0;
-    plan.duration     = probe.duration_seconds();
-    if (plan.total_frames == 0 && plan.duration > 0.0) {
-        plan.total_frames = static_cast<int>(std::nearbyint(plan.duration * plan.fps));
-    }
-    if (plan.duration > policy.max_video_duration_seconds) {
-        throw Error(ErrorKind::BudgetExceeded, "video duration exceeds processor limit");
+    plan.fps      = fps_of(probe.stream());
+    plan.duration = probe.duration_seconds();
+    check_video_duration(plan.duration, policy);
+    const std::int64_t reported_frames = probe.stream()->nb_frames;
+    if (reported_frames > 0 && reported_frames <= std::numeric_limits<int>::max()) {
+        plan.total_frames = static_cast<int>(reported_frames);
+    } else if (plan.duration > 0.0) {
+        // A duration within budget still estimates more frames than int holds at a high enough
+        // frame rate: bound the estimate before converting it.
+        const double estimated = std::nearbyint(plan.duration * plan.fps);
+        if (!(estimated <= static_cast<double>(policy.max_video_source_frames))) {
+            throw Error(ErrorKind::BudgetExceeded,
+                        "video source frame count exceeds processor limit");
+        }
+        plan.total_frames = static_cast<int>(estimated);
     }
     if (plan.total_frames == 0) { plan.total_frames = count_frames(bytes, policy); }
     if (plan.total_frames == 0) { throw_invalid_media("video contains no decoded frame"); }
     if (plan.total_frames > policy.max_video_source_frames) {
         throw Error(ErrorKind::BudgetExceeded, "video source frame count exceeds processor limit");
+    }
+    if (plan.duration == 0.0) {
+        // Without a declared duration the frames span total_frames / fps, under the same budget.
+        plan.duration = static_cast<double>(plan.total_frames) / plan.fps;
+        check_video_duration(plan.duration, policy);
     }
     plan.indices = sample_indices(plan.total_frames, plan.fps, target_fps, min_frames, max_frames);
     const std::uint64_t coded_pixels =
@@ -609,9 +641,8 @@ VideoInfo inspect_video(std::span<const std::uint8_t> bytes, const Policy& polic
     out.total_frames   = plan.total_frames;
     out.sampled_frames = scan.sampled_frames;
     out.fps            = plan.fps;
-    out.duration =
-        plan.duration > 0.0 ? plan.duration : static_cast<double>(plan.total_frames) / plan.fps;
-    out.indices = std::move(plan.indices);
+    out.duration       = plan.duration;
+    out.indices        = std::move(plan.indices);
     return out;
 }
 
@@ -647,8 +678,7 @@ Video decode_video(std::span<const std::uint8_t> bytes, const Policy& policy, do
     Video out;
     out.total_frames = plan.total_frames;
     out.fps          = plan.fps;
-    out.duration =
-        plan.duration > 0.0 ? plan.duration : static_cast<double>(plan.total_frames) / plan.fps;
+    out.duration     = plan.duration;
     out.frames.reserve(plan.indices.size());
     const VideoScan scan = scan_video(
         bytes, policy, plan, [&](Decoder& decoder, const AVFrame* frame, int orientation) {

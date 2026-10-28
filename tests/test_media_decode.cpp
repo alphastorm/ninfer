@@ -1,10 +1,12 @@
 #include "media/decode/decode.h"
+#include "fixtures/media/containers.h"
 #include "fixtures/media/jpeg.h"
 
 #include <array>
 #include <cctype>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -232,6 +234,141 @@ void test_jpeg_errors() {
     expect_image(encoded, fixture.width, fixture.height, decode_base64(fixture.rgb), fixture.name);
 }
 
+// Container tests wrap the 17x10 rgb_420 JPEG as MJPEG frames.
+struct MjpegFrame {
+    std::vector<std::uint8_t> jpeg;
+    int width  = 0;
+    int height = 0;
+};
+
+MjpegFrame mjpeg_frame() {
+    const auto& fixture = jpeg_fixtures::cases[0];
+    return {decode_base64(fixture.encoded), fixture.width, fixture.height};
+}
+
+std::vector<std::uint8_t> matroska_video(const container_fixtures::Matroska& spec) {
+    const MjpegFrame frame = mjpeg_frame();
+    return container_fixtures::matroska(spec, frame.jpeg, frame.width, frame.height);
+}
+
+std::vector<std::uint8_t> quicktime_video(const container_fixtures::QuickTime& spec) {
+    const MjpegFrame frame = mjpeg_frame();
+    return container_fixtures::quicktime(spec, frame.jpeg, frame.width, frame.height);
+}
+
+void expect_display_geometry(std::span<const std::uint8_t> bytes, int width, int height,
+                             std::string_view name) {
+    using namespace ninfer::media::decode;
+    const ImageInfo image_info = inspect_image(bytes, {});
+    const Image image          = decode_image(bytes, {});
+    const VideoInfo video_info = inspect_video(bytes, {}, 2.0, 4, 16);
+    const Video video          = decode_video(bytes, {}, 2.0, 4, 16);
+    if (image_info.width != width || image_info.height != height || image.width != width ||
+        image.height != height || video_info.width != width || video_info.height != height ||
+        video.width != width || video.height != height) {
+        throw std::runtime_error(std::string(name) + ": display geometry mismatch");
+    }
+}
+
+// Rotation metadata is untrusted: a tag can hold any number and a display matrix can be
+// singular. Angles that round into int reduce modulo a turn; angles that are not finite or
+// round outside int carry no rotation.
+void test_video_rotation_metadata() {
+    const MjpegFrame frame = mjpeg_frame();
+    struct Tag {
+        std::string_view value;
+        bool quarter_turn;
+    };
+    constexpr std::array<Tag, 9> tags = {{
+        {"90", true},
+        {"2147483610", true},      // 360 * 5965232 + 90, the largest int reducing to 90
+        {"1546188226650", false},  // 360 * 2^32 + 90, beyond int
+        {"-1546188226650", false}, // beyond int
+        {"1e300", false},
+        {"1e999", false}, // overflows to infinity
+        {"inf", false},
+        {"-inf", false},
+        {"nan", false},
+    }};
+    for (const Tag& tag : tags) {
+        const auto bytes = matroska_video(
+            {.duration = 1000.0, .default_duration = 1'000'000'000, .rotate = tag.value});
+        expect_display_geometry(bytes, tag.quarter_turn ? frame.height : frame.width,
+                                tag.quarter_turn ? frame.width : frame.height,
+                                "rotate tag " + std::string(tag.value));
+    }
+    expect_display_geometry(
+        quicktime_video({.matrix = {0, 0x10000, 0, -0x10000, 0, 0, 0, 0, 0x40000000}}),
+        frame.height, frame.width, "quarter-turn display matrix");
+    expect_display_geometry(quicktime_video({.matrix = {}}), frame.width, frame.height,
+                            "singular display matrix");
+}
+
+void expect_video_error(std::span<const std::uint8_t> bytes,
+                        ninfer::media::decode::ErrorKind kind, std::string_view name) {
+    for (const bool inspect : {false, true}) {
+        try {
+            if (inspect) {
+                (void)ninfer::media::decode::inspect_video(bytes, {}, 2.0, 4, 16);
+            } else {
+                (void)ninfer::media::decode::decode_video(bytes, {}, 2.0, 4, 16);
+            }
+        } catch (const ninfer::media::decode::Error& error) {
+            if (error.kind() == kind) { continue; }
+            throw std::runtime_error(std::string(name) + ": incorrect media error category");
+        }
+        throw std::runtime_error(std::string(name) + ": over-budget video was accepted");
+    }
+}
+
+// Without a declared duration a video spans total_frames / fps, and the duration budget bounds
+// that span as it bounds a declared one. Each file holds one frame lasting DefaultDuration and
+// no segment Duration.
+void test_video_inferred_duration() {
+    using namespace ninfer::media::decode;
+    const auto accepted  = matroska_video({.default_duration = 512'000'000'000});
+    const VideoInfo info = inspect_video(accepted, {}, 2.0, 4, 16);
+    const Video video    = decode_video(accepted, {}, 2.0, 4, 16);
+    if (info.total_frames != 1 || info.fps != 1.0 / 512.0 || info.duration != 512.0 ||
+        video.duration != info.duration) {
+        throw std::runtime_error("inferred video duration mismatch");
+    }
+    expect_video_error(matroska_video({.default_duration = 1'024'000'000'000}),
+                       ErrorKind::BudgetExceeded, "1024 s inferred duration");
+}
+
+// A declared duration must pass the budget before it estimates a frame count, and the estimate
+// is bounded before conversion even when that duration is within budget.
+void test_video_frame_estimate() {
+    using ninfer::media::decode::ErrorKind;
+    // With 1 ns ticks and no DefaultDuration, FFmpeg reports the 1e9 Hz tick rate as the frame
+    // rate, so a 3 s duration estimates 3e9 frames.
+    expect_video_error(matroska_video({.timestamp_scale = 1, .duration = 3e9}),
+                       ErrorKind::BudgetExceeded, "3e9 estimated frames");
+    // 1e6 s at about 3e4 fps exceeds the duration budget before 3e10 frames are estimated.
+    expect_video_error(matroska_video({.duration = 1e9, .default_duration = 33'334}),
+                       ErrorKind::BudgetExceeded, "1e6 s declared duration");
+}
+
+// A frame rate near 1 / INT_MAX asks for far more samples than int holds; sampling clamps to the
+// available frames before converting. Sampling rates must be finite.
+void test_video_sample_count() {
+    using namespace ninfer::media::decode;
+    const auto bytes = quicktime_video(
+        {.timescale = 1, .duration = 1, .sample_delta = 2'147'483'647, .frames = 3});
+    const VideoInfo info               = inspect_video(bytes, {}, 2.0, 4, 16);
+    const Video video                  = decode_video(bytes, {}, 2.0, 4, 16);
+    const std::vector<int> every_frame = {0, 1, 2};
+    if (info.total_frames != 3 || info.sampled_frames != 3 || info.indices != every_frame ||
+        video.indices != every_frame || video.frames.size() != every_frame.size()) {
+        throw std::runtime_error("low-rate video sampling mismatch");
+    }
+    try {
+        (void)inspect_video(bytes, {}, std::numeric_limits<double>::quiet_NaN(), 4, 16);
+        throw std::runtime_error("NaN video sampling rate was accepted");
+    } catch (const std::invalid_argument&) {}
+}
+
 } // namespace
 
 int main() {
@@ -240,6 +377,10 @@ int main() {
         test_jpeg_references();
         test_jpeg_orientation();
         test_jpeg_errors();
+        test_video_rotation_metadata();
+        test_video_inferred_duration();
+        test_video_frame_estimate();
+        test_video_sample_count();
         std::cout << "ok\n";
         return 0;
     } catch (const std::exception& error) {
