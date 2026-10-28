@@ -96,11 +96,19 @@ public:
     const runtime::DurableReason reason = runtime::DurableReason::IoUnavailable;
 };
 
+// Disk-full and quota exhaustion both refuse space to this save: Capacity, not I/O failure.
 [[nodiscard]] runtime::DurableReason checkpoint_io_reason(std::error_code error) noexcept {
     if (error == std::errc::no_space_on_device) { return runtime::DurableReason::Capacity; }
 #ifdef _WIN32
     if (error.category() == std::system_category() &&
-        (error.value() == ERROR_DISK_FULL || error.value() == ERROR_HANDLE_DISK_FULL)) {
+        (error.value() == ERROR_DISK_FULL || error.value() == ERROR_HANDLE_DISK_FULL ||
+         error.value() == ERROR_DISK_QUOTA_EXCEEDED)) {
+        return runtime::DurableReason::Capacity;
+    }
+#else
+    // std::errc names no quota condition; POSIX reports the errno in either category.
+    if (error.value() == EDQUOT && (error.category() == std::generic_category() ||
+                                    error.category() == std::system_category())) {
         return runtime::DurableReason::Capacity;
     }
 #endif

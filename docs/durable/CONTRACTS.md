@@ -95,9 +95,11 @@ K4 governs the guarded Responses-only restore and DELETE acknowledgement. A
 subsequent parent request replays the retained transcript; a new completed, stored
 turn can establish a normal native endpoint again.
 
-Disk-full write failures — POSIX `ENOSPC`, Win32 `ERROR_DISK_FULL` (112) and
-`ERROR_HANDLE_DISK_FULL` (39) — classify as `DurableReason::Capacity` (`capacity`,
-HTTP 409), not corruption. This holds at every save-path I/O site, for payloads and
+Disk-full and filesystem-quota write failures — POSIX `ENOSPC` and `EDQUOT`, Win32
+`ERROR_DISK_FULL` (112), `ERROR_HANDLE_DISK_FULL` (39) and `ERROR_DISK_QUOTA_EXCEEDED`
+(1295) — classify as `DurableReason::Capacity` (`capacity`, HTTP 409), not corruption.
+A filesystem quota is not the store's own `--session-checkpoint-quota-mib` limit, which
+refuses with `quota`. This holds at every save-path I/O site, for payloads and
 for `manifest.json`, `manifest.mac` and the temporary current pointer alike: file
 creation, write, flush, close (including a deferred write error reported by close),
 directory sync and rename all fail with `std::system_error` carrying the OS code.
@@ -779,8 +781,8 @@ unconditional retry loop. Each retry waits for observed progress matching its ca
 | `io_unavailable` | successful storage progress |
 | HTTP response still publishing | HTTP-publication progress only; waiting consumes no save-attempt retry budget |
 
-**N9 storage-capacity retry limitation:** disk-full writes use K1's `Capacity`
-classification and HTTP 409 `capacity` response while preserving the prior
+**N9 storage-capacity retry limitation:** disk-full and filesystem-quota writes use
+K1's `Capacity` classification and HTTP 409 `capacity` response while preserving the prior
 generation and DELETE survivors. `AutomaticCheckpointResult` does not distinguish
 storage-origin Capacity from native-admission Capacity. The automatic-save
 coordinator therefore rearms either on the next observed Engine/admission progress,

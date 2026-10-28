@@ -2080,10 +2080,14 @@ int test_disk_full_capacity_preserves_generation() {
     };
     const Fault faults[] = {
         {ENOSPC, 0, runtime::DurableReason::Capacity},
+#ifndef _WIN32
+        {EDQUOT, 0, runtime::DurableReason::Capacity},
+#endif
         {EIO, 0, runtime::DurableReason::IoUnavailable},
 #ifdef _WIN32
         {0, ERROR_DISK_FULL, runtime::DurableReason::Capacity},
         {0, ERROR_HANDLE_DISK_FULL, runtime::DurableReason::Capacity},
+        {0, ERROR_DISK_QUOTA_EXCEEDED, runtime::DurableReason::Capacity},
         {0, ERROR_ACCESS_DENIED, runtime::DurableReason::IoUnavailable},
 #endif
     };
@@ -2141,9 +2145,9 @@ int test_disk_full_capacity_preserves_generation() {
 }
 
 // omp-ninfer#89 L6: manifest, MAC and current-pointer writes carry the OS code of a failed
-// close, so a disk-full close is the ordinary Capacity refusal and any other error stays a
-// thrown IoUnavailable system_error. Each failure precedes the current rename, so neither
-// the attempted generation nor its pointer file may remain (L8).
+// close, so a disk-full or quota-exhausted close is the ordinary Capacity refusal and any
+// other error stays a thrown IoUnavailable system_error. Each failure precedes the current
+// rename, so neither the attempted generation nor its pointer file may remain (L8).
 int test_metadata_close_failure_keeps_os_classification() {
     TemporaryDirectory temporary;
     const auto responses = sample_snapshot();
@@ -2172,6 +2176,9 @@ int test_metadata_close_failure_keeps_os_classification() {
         {"manifest.json", ENOSPC, runtime::DurableReason::Capacity},
         {"manifest.mac", ENOSPC, runtime::DurableReason::Capacity},
         {".current-", ENOSPC, runtime::DurableReason::Capacity},
+#ifndef _WIN32
+        {"manifest.json", EDQUOT, runtime::DurableReason::Capacity},
+#endif
         {"manifest.json", EIO, runtime::DurableReason::IoUnavailable},
         {".current-", EIO, runtime::DurableReason::IoUnavailable},
     };
@@ -2748,7 +2755,8 @@ int test_current_parent_flush_failure_retains_visible_generation(DWORD error = E
             }, &skip);
         diagnostic = log.output.str();
     }
-    const auto reason = error == ERROR_DISK_FULL || error == ERROR_HANDLE_DISK_FULL
+    const auto reason = error == ERROR_DISK_FULL || error == ERROR_HANDLE_DISK_FULL ||
+                                error == ERROR_DISK_QUOTA_EXCEEDED
                             ? runtime::DurableReason::Capacity : runtime::DurableReason::IoUnavailable;
     int failures = check(parent_flush_fault.fired && !uncertain && skip.durable_reason == reason,
                          "post-rename parent-flush failure lost its unacknowledged failure reason");
@@ -3117,6 +3125,7 @@ int main(int argc, char** argv) {
 #ifdef _WIN32
             failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_DISK_FULL);
             failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_HANDLE_DISK_FULL);
+            failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_DISK_QUOTA_EXCEEDED);
 #endif
             return failures;
         }
@@ -3166,6 +3175,7 @@ int main(int argc, char** argv) {
     failures += test_current_parent_flush_failure_retains_visible_generation();
     failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_DISK_FULL);
     failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_HANDLE_DISK_FULL);
+    failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_DISK_QUOTA_EXCEEDED);
 #endif
     failures += test_export_and_publication_callbacks_are_catalog_unlocked();
     failures += test_reader_failure_reasons_and_fresh_retries();
