@@ -2295,6 +2295,47 @@ int test_pointer_rename_attempt_decides_generation_retention() {
     return failures;
 }
 
+// A quarantine requested while the save lease still pins its just-published generation only
+// detaches current; the lease finishes it on release. That release follows the save's
+// return, so the lease owns the generation name instead of borrowing the save's.
+int test_save_lease_finishes_quarantine_requested_after_publication() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .read_queue = std::make_shared<TestReadQueue>()});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) { return DurableExportResult{}; }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto generations =
+        temporary.path / "sessions" / responses.client_session_sha256 / "generations";
+    std::string published;
+    bool deferred = false;
+    const auto saved = store.save(responses, fingerprint(), exporter,
+        [&](runtime::DurableSessionEpoch epoch, const std::function<bool()>& commit) {
+            const auto result = publish_fixture(epoch, commit);
+            // Corruption evidence for the generation current now names, while the lease pins it.
+            const auto names = entry_names(generations);
+            published = names.size() == 1 ? names.front() : std::string();
+            deferred = store.quarantine(responses.client_session_sha256, published,
+                                        runtime::DurableReason::PayloadDigestMismatch) &&
+                       store.status(responses.client_session_sha256, fingerprint())
+                               .at("state") == "missing" &&
+                       entry_names(generations) == std::vector<std::string>{published};
+            return result;
+        });
+    int failures = check(saved && saved->generation == published && deferred,
+                         "pinned published generation did not defer its quarantine");
+    const auto names = entry_names(generations);
+    failures += check(names.size() == 1 && names.front().starts_with(published + ".corrupt-"),
+                      "save lease release skipped the quarantine deferred for its generation");
+    return failures;
+}
+
 
 int test_hmac_sha256_rfc4231_vectors() {
     int failures = 0;
@@ -3165,6 +3206,7 @@ int main(int argc, char** argv) {
     failures += test_metadata_close_failure_keeps_os_classification();
 #endif
     failures += test_pointer_rename_attempt_decides_generation_retention();
+    failures += test_save_lease_finishes_quarantine_requested_after_publication();
     failures += test_hmac_sha256_rfc4231_vectors();
     failures += test_manifest_origin_authentication();
     failures += test_manifest_origin_compatibility_window();

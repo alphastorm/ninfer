@@ -1074,20 +1074,21 @@ namespace {
 
 // Preserve the store's single-flight save/quota semantics without making an Engine worker wait
 // for a save which may itself need that worker. Catalog ownership is never held across callbacks.
+// The lease owns the session path and generation name it pins: its release, after the save has
+// handed its result back, still finishes a quarantine requested for that generation meanwhile.
 class CheckpointSaveLease {
 public:
-    CheckpointSaveLease(SessionCheckpointStore::Impl& owner,
-                        const std::filesystem::path& session, std::string_view digest,
-                        const std::string& generation)
-        : owner_(owner), session_(session), generation_(generation) {
+    CheckpointSaveLease(SessionCheckpointStore::Impl& owner, std::filesystem::path session,
+                        std::string_view digest, std::string generation)
+        : owner_(owner), session_(std::move(session)), generation_(std::move(generation)) {
         std::lock_guard lock(owner_.mutex);
         if (owner_.save_in_progress) { return; }
         std::string staging_key;
-        staging_key.reserve(digest.size() + 10 + generation.size());
-        staging_key.append(digest).append("/.staging-").append(generation);
+        staging_key.reserve(digest.size() + 10 + generation_.size());
+        staging_key.append(digest).append("/.staging-").append(generation_);
         std::string published_key;
-        published_key.reserve(digest.size() + 1 + generation.size());
-        published_key.append(digest).append("/").append(generation);
+        published_key.reserve(digest.size() + 1 + generation_.size());
+        published_key.append(digest).append("/").append(generation_);
         const auto staging = owner_.active_generations.emplace(std::move(staging_key), 1).first;
         const std::string* staging_reference = &staging->first;
         try {
@@ -1127,11 +1128,13 @@ public:
     CheckpointSaveLease(const CheckpointSaveLease&) = delete;
     CheckpointSaveLease& operator=(const CheckpointSaveLease&) = delete;
     [[nodiscard]] bool admitted() const noexcept { return staging_key_ != nullptr; }
+    [[nodiscard]] const std::filesystem::path& session() const noexcept { return session_; }
+    [[nodiscard]] const std::string& generation() const noexcept { return generation_; }
 
 private:
     SessionCheckpointStore::Impl& owner_;
-    const std::filesystem::path& session_;
-    const std::string& generation_;
+    const std::filesystem::path session_;
+    const std::string generation_;
     const std::string* staging_key_ = nullptr;
     const std::string* published_key_ = nullptr;
 };
@@ -2046,12 +2049,10 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         if (skip != nullptr) { skip->durable_reason = runtime::DurableReason::UnsupportedCodec; }
         return std::nullopt;
     }
-    const std::filesystem::path session     = session_path(responses.client_session_sha256);
-    const std::filesystem::path generations = session / "generations";
     const std::uint64_t ordinal = impl_->sequence.fetch_add(1, std::memory_order_relaxed);
-    std::string generation =
-        std::to_string(unix_milliseconds()) + "-" + std::to_string(ordinal);
-    CheckpointSaveLease save_lease(*impl_, session, responses.client_session_sha256, generation);
+    CheckpointSaveLease save_lease(
+        *impl_, session_path(responses.client_session_sha256), responses.client_session_sha256,
+        std::to_string(unix_milliseconds()) + "-" + std::to_string(ordinal));
     if (!save_lease.admitted()) {
         if (skip != nullptr) {
             skip->reason = runtime::SessionCheckpointSkipReason::TransactionBusy;
@@ -2059,6 +2060,9 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         }
         return std::nullopt;
     }
+    const std::filesystem::path& session    = save_lease.session();
+    const std::string& generation           = save_lease.generation();
+    const std::filesystem::path generations = session / "generations";
     std::unique_lock lock(impl_->mutex);
     const std::filesystem::path staging   = generations / (".staging-" + generation);
     const std::filesystem::path published = generations / generation;
@@ -2290,7 +2294,7 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         }
 
         return SessionCheckpointSaveResult{
-            .generation = std::move(generation), .engine = *engine, .bytes = total_bytes,
+            .generation = generation, .engine = *engine, .bytes = total_bytes,
             .dir_sync = io::directory_sync_mode(),
             .origin_authenticated = !options_.origin_mac_key.empty()};
     } catch (...) {
