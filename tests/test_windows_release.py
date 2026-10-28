@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import base64
 from decimal import Decimal
+import hashlib
 import importlib.util
 import io
 import inspect
@@ -106,6 +107,432 @@ def product_protocol_fixture() -> dict:
         "authenticated_session_identity": True, "same_session_reuse_path": "private_input_replay",
         "isolated_session_reuse_path": "root",
     }
+
+
+# v0.7.0-qwen38-3090-beta.2, the RTX 3090 lane omp-ninfer v0.13.1 shipped: its installed lifecycle
+# scripts and its GPU-owner policy are the predecessor state later releases install over.
+PREDECESSOR_3090 = "7a25cd72f490183e4113f1e84e68e36d653ddd28"
+SYNTHETIC_GPU_UUID = "GPU-00000000-0000-4000-8000-000000003090"
+SYNTHETIC_GPU_PCI = "00000000:65:00.0"
+# The protected-state ACLs are Windows-only and are qualified on Windows hosts. These scenarios
+# exercise lifecycle decisions, so the helper's entry points only create and accept their roots.
+PROTECTED_STATE_STUB = """function Initialize-NInferProtectedStateRoot([string]$Path) {
+    New-Item -ItemType Directory -Force -Path $Path | Out-Null
+    return [IO.Path]::GetFullPath($Path)
+}
+function Assert-NInferProtectedStateRoot([string]$Path) { }
+function Assert-NInferProtectedStateTree([string]$Path) { }
+"""
+
+
+def committed_bytes(commit: str, path: str) -> bytes:
+    return subprocess.run(["git", "show", f"{commit}:{path}"], cwd=ROOT, capture_output=True,
+                          check=True).stdout
+
+
+def ps_assignments(**values: object) -> str:
+    return "".join(f"${name}={qualify_native.ps_quote(str(value))}\n" for name, value in values.items())
+
+
+def ps_definitions(path: Path) -> str:
+    """PowerShell that defines every top-level function of one script without running its body."""
+    return (
+        "foreach($definition in [Management.Automation.Language.Parser]::ParseFile("
+        f"{qualify_native.ps_quote(str(path))},[ref]$null,[ref]$null).FindAll("
+        "{param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$false))"
+        "{. ([scriptblock]::Create($definition.Extent.Text))}\n"
+    )
+
+
+def install_script(source: bytes, destination: Path) -> str:
+    """Place one lifecycle script beside the protected-state helper it loads; return its SHA-256."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(source)
+    (destination.parent / "Protect-StateRoot.ps1").write_text(PROTECTED_STATE_STUB, encoding="utf-8")
+    return hashlib.sha256(source).hexdigest()
+
+
+def synthetic_nvidia_smi(program_files: Path, power_limit_w: int) -> Path:
+    """nvidia-smi for one card at the Program Files location the GPU-owner controller trusts. It
+    answers only UUID-bound commands and keeps the card's power limit in a file it returns."""
+    tool = program_files / "NVIDIA Corporation" / "NVSMI" / "nvidia-smi.exe"
+    tool.parent.mkdir(parents=True)
+    limit = tool.parent / "power-limit"
+    limit.write_text(f"{power_limit_w}\n", encoding="ascii")
+    tool.write_text(
+        "#!/bin/sh\n"
+        'limit="$(dirname "$0")/power-limit"\n'
+        f'[ "$1" = -i ] && [ "$2" = {SYNTHETIC_GPU_UUID} ] || {{ echo "unbound: $*" >&2; exit 9; }}\n'
+        'case "$3" in\n'
+        f"  --query-gpu=uuid,pci.bus_id) echo '{SYNTHETIC_GPU_UUID}, {SYNTHETIC_GPU_PCI}' ;;\n"
+        '  --query-gpu=power.limit) echo "$(cat "$limit").00" ;;\n'
+        "  --query-gpu=memory.used) echo 186 ;;\n"
+        '  -pl) echo "$4" > "$limit" ;;\n'
+        '  *) echo "unexpected nvidia-smi command: $*" >&2; exit 9 ;;\n'
+        "esac\n",
+        encoding="ascii",
+    )
+    tool.chmod(0o755)
+    return limit
+
+
+def running_predecessor_3090(directory: Path) -> SimpleNamespace:
+    """A state root as the v0.13.1 RTX 3090 lane leaves it before its controller takes the GPU
+    owner: the beta.2 lifecycle controllers installed and hash-bound by the lifecycle state, and
+    the card at the owner's own power limit. Only fields the stop and status read are recorded."""
+    spec = json.loads(committed_bytes(PREDECESSOR_3090, "packaging/windows/lanes/rtx3090/release-spec.json"))
+    policy = spec["lifecycle"]["gpu_owner_controller_protocol"]
+    root = directory / spec["lifecycle"]["state_root_name"]
+    program_files = directory / "Program Files"
+    power_limit = synthetic_nvidia_smi(program_files, policy["owner_power_limit_w"])
+    install_script(committed_bytes(PREDECESSOR_3090, "packaging/windows/Control-Release.ps1"),
+                   root / "Control-Release.ps1")
+    owner_controller = root / "gpu-owner" / "Control-GpuOwner.ps1"
+    owner_sha256 = install_script(
+        committed_bytes(PREDECESSOR_3090, "packaging/windows/Control-GpuOwner.ps1"), owner_controller)
+    instance = f"{spec['release_id']}-{PREDECESSOR_3090[:12]}"
+    release_root = root / "releases" / instance
+    record = {
+        "release_root": str(release_root),
+        "server_executable": str(release_root / "bin" / "ninfer-serve.exe"),
+        "gpu_uuid": SYNTHETIC_GPU_UUID, "gpu_name": spec["gpu"]["name"], "gpu_pci_bus_id": SYNTHETIC_GPU_PCI,
+        "deployment_profile": spec["deployment_profile"], "build_profile": spec["build_profile"],
+        "cuda_architecture": spec["gpu"]["cuda_architecture"],
+        "upstream_base_sha": spec["source"]["upstream_base_sha"],
+        "lineage_base_sha": spec["source"]["lineage_base_sha"], "patch_stack_sha": PREDECESSOR_3090,
+        "model_artifact_sha256": spec["model"]["sha256"],
+        "managed_stop": spec["lifecycle"]["managed_stop"],
+        "graceful_stop_timeout_seconds": spec["lifecycle"]["graceful_stop_timeout_seconds"],
+    }
+    for field in ("ninfer_sha256", "binary_sha256", "benchmark_sha256", "package_sha256",
+                  "inner_checksums_sha256", "config_sha256"):
+        record[field] = hashlib.sha256(field.encode()).hexdigest()
+    state = {
+        "artifact_type": "ninfer_windows_lifecycle_state", "schema_version": 4,
+        "task_name": spec["lifecycle"]["task_name"],
+        "prepared_release": None, "active_release": instance, "previous_release": None,
+        "gpu_owner": {
+            "controller_path": str(owner_controller), "controller_sha256": owner_sha256,
+            "state_root": str(root / "gpu-owner-state"),
+            "qualified_power_limit_w": policy["qualified_power_limit_w"],
+            "prior_power_limit_range_w": policy["prior_power_limit_range_w"],
+        },
+        "releases": {instance: record},
+    }
+    (root / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    return SimpleNamespace(root=root, program_files=program_files, power_limit=power_limit, policy=policy)
+
+
+# The predecessor's own controller takes the GPU owner exactly as its launches do. A pause the
+# owner already held when the lane launched is the one the lane's stop hands back.
+PREDECESSOR_ACQUIRES_OWNER = """Set-StrictMode -Version Latest
+$env:ProgramFiles=$ProgramFiles
+if($PausedBeforeLaunch -ceq 'True'){
+  $owner=(Get-Content -Raw -LiteralPath (Join-Path $StateRoot 'state.json')|ConvertFrom-Json).gpu_owner
+  & ([string]$owner.controller_path) -Action stop -StateRoot ([string]$owner.state_root) -GpuUuid $Gpu -QualifiedPowerLimitW ([int]$owner.qualified_power_limit_w) -PriorPowerLimitMinW ([int]$owner.prior_power_limit_range_w[0]) -PriorPowerLimitMaxW ([int]$owner.prior_power_limit_range_w[1])|Out-Null
+}
+Acquire-GpuOwnerLease
+'{}'
+"""
+
+# The installer's GPU-owner handoff, from validation before anything changes through the
+# incumbent's managed stop, followed by the successor acquiring the card under its own policy.
+UPGRADE_HANDOFF = """Set-StrictMode -Version Latest
+$env:ProgramFiles=$ProgramFiles
+function Write-InstallEvent { }
+# The incumbent's stop finds its wrapper already gone; the task API is Windows-only.
+function Get-ScheduledTask { }
+function Get-ScheduledTaskInfo { }
+$controllerPath=Join-Path $StateRoot 'Control-Release.ps1'
+$ownerStateRoot=Join-Path $StateRoot 'gpu-owner-state'
+function Get-OwnerObservation {
+  $lease=Join-Path $ownerStateRoot 'lease.json'
+  [ordered]@{
+    power_limit_w=[int](Get-Content -Raw -LiteralPath $PowerLimit).Trim()
+    owner_lease_cap_w=if(Test-Path -LiteralPath $lease){[int](Get-Content -Raw -LiteralPath $lease|ConvertFrom-Json).qualified_power_limit_w}else{$null}
+    release_lease=Test-Path -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json')
+  }
+}
+$oldState=Get-Content -Raw -LiteralPath (Join-Path $StateRoot 'state.json')|ConvertFrom-Json
+$selectedGpu=[pscustomobject]@{uuid=$Gpu;pci_bus_id=$GpuPci}
+$successorProtocol=(Get-Content -Raw -LiteralPath $SuccessorSpec|ConvertFrom-Json).lifecycle.gpu_owner_controller_protocol
+$successorPolicy=Get-GpuOwnerPolicyArguments $successorProtocol $Gpu
+$transaction=[pscustomobject]@{journal_path=$Journal;updated_utc=$null;flags=[pscustomobject]@{incumbent_touched=$false}}
+$observed=[ordered]@{held=Get-OwnerObservation}
+Assert-GpuOwnerUpgradeReady $oldState $true $Bundle $successorPolicy $selectedGpu
+$observed.validated=Get-OwnerObservation
+$observed.handoff_refusal=$null
+try{Stop-IncumbentForUpgrade $transaction $Bundle $successorPolicy $selectedGpu}
+catch{$observed.handoff_refusal=$_.Exception.Message}
+$observed.retired=Get-OwnerObservation
+$observed.incumbent_touched=[bool]$transaction.flags.incumbent_touched
+if($null -eq $observed.handoff_refusal){
+  & $Bundle -Action stop -StateRoot $ownerStateRoot @successorPolicy|Out-Null
+  $observed.successor=Get-OwnerObservation
+}
+$observed|ConvertTo-Json -Compress -Depth 4
+"""
+
+CANDIDATE_CONTROLLER_STUB = """param([string]$Action, [string]$StateRoot)
+Add-Content -LiteralPath (Join-Path $StateRoot 'controller.log') -Value "candidate:$Action"
+if ($Action -ceq 'Stop') {
+    if (Test-Path -LiteralPath (Join-Path $StateRoot 'candidate-stop.fault')) { throw 'owned server process did not stop' }
+    # A managed stop restores the GPU owner and retires the lease the candidate holds.
+    Remove-Item -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json') -Force -ErrorAction SilentlyContinue
+}
+"""
+INCUMBENT_CONTROLLER_STUB = """param([string]$Action, [string]$StateRoot)
+Add-Content -LiteralPath (Join-Path $StateRoot 'controller.log') -Value "incumbent:$Action"
+"""
+
+
+def interrupted_upgrade(directory: Path) -> SimpleNamespace:
+    """An upgrade that activated and started its candidate, as its journal and files record it:
+    every replaced lifecycle file snapshotted, the candidate active and holding the GPU-owner
+    lease, and the incumbent's trees beside the candidate's. Controllers log what they are asked."""
+    root = directory / "qwen38-3090-native"
+    operation = "5" * 32
+    candidate = "qwen38-3090-native-v0.7.0-beta.3-" + "c" * 12
+    incumbent = "qwen38-3090-native-v0.7.0-beta.2-" + "b" * 12
+    transaction_root = root / "receipts" / "install-transactions" / operation
+    snapshots = transaction_root / "snapshots"
+    snapshots.mkdir(parents=True)
+    for kind in ("releases", "secrets", "cache"):
+        for release in (candidate, incumbent):
+            (root / kind / release).mkdir(parents=True)
+            (root / kind / release / "content.bin").write_bytes(release.encode())
+    stage = root / f"staging-{operation}"
+    (stage / "payload").mkdir(parents=True)
+
+    def lifecycle(active: str, previous: str | None) -> str:
+        return json.dumps({"artifact_type": "ninfer_windows_lifecycle_state", "schema_version": 4,
+                           "task_name": "NInfer-Qwen38-3090-Native", "prepared_release": None,
+                           "active_release": active, "previous_release": previous})
+
+    (root / "state.json").write_text(lifecycle(candidate, incumbent), encoding="utf-8")
+    (snapshots / "state.bin").write_text(lifecycle(incumbent, None), encoding="utf-8")
+    (root / "Control-Release.ps1").write_text(CANDIDATE_CONTROLLER_STUB, encoding="utf-8")
+    (snapshots / "controller.bin").write_text(INCUMBENT_CONTROLLER_STUB, encoding="utf-8")
+    for path, name in ((root / "gpu-owner" / "Control-GpuOwner.ps1", "owner-controller"),
+                       (root / "Protect-StateRoot.ps1", "state-helper"),
+                       (root / "gpu-owner" / "Protect-StateRoot.ps1", "owner-state-helper")):
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(f"# candidate {name}\n", encoding="utf-8")
+        (snapshots / f"{name}.bin").write_text(f"# incumbent {name}\n", encoding="utf-8")
+    (snapshots / "scheduled-task.xml").write_text("<Task>incumbent</Task>", encoding="utf-8")
+    (root / "gpu-owner-lease.json").write_text(json.dumps({
+        "artifact_type": "ninfer_gpu_owner_lease", "schema_version": 1, "release_id": candidate,
+        "controller_sha256": "c" * 64, "prior_paused": False, "phase": "released",
+    }), encoding="utf-8")
+    journal = transaction_root / "journal.json"
+    journal.write_text(json.dumps({
+        "artifact_type": "ninfer_windows_install_transaction", "schema_version": 1,
+        "status": "in_progress", "operation_id": operation, "phase": "candidate_activated",
+        "started_utc": "2026-10-28T00:00:00Z", "updated_utc": "2026-10-28T00:00:00Z",
+        "journal_path": str(journal), "state_root": str(root), "stage_path": str(stage),
+        "instance_id": candidate, "release_root": str(root / "releases" / candidate),
+        "secret_directory": str(root / "secrets" / candidate),
+        "cache_root": str(root / "cache" / candidate),
+        "task_name": "NInfer-Qwen38-3090-Native", "task_existed": True, "task_was_running": True,
+        "task_xml_path": str(snapshots / "scheduled-task.xml"),
+        "reentry_policy": "repair-required-before-install",
+        "snapshots": {
+            field: {"exists": True, "backup_path": str(snapshots / f"{name}.bin")}
+            for field, name in (("state", "state"), ("controller", "controller"),
+                                ("owner_controller", "owner-controller"), ("state_helper", "state-helper"),
+                                ("owner_state_helper", "owner-state-helper"))
+        },
+        "flags": {flag: True for flag in ("incumbent_touched", "owner_controller_touched",
+                                          "state_helpers_touched", "controller_touched",
+                                          "state_activated", "task_touched")},
+    }), encoding="utf-8")
+    return SimpleNamespace(
+        root=root, journal=journal, snapshots=snapshots, candidate=candidate, incumbent=incumbent,
+        candidate_targets=[root / "releases" / candidate, root / "secrets" / candidate,
+                           root / "cache" / candidate, stage],
+        incumbent_trees=[root / kind / incumbent for kind in ("releases", "secrets", "cache")],
+    )
+
+
+# One rollback or repair attempt over a journal, as the installer runs it. Progress lines and the
+# Windows task and process APIs are stand-ins: task registration is logged, and Win32_Process
+# reports exactly the images listed in $LiveImages.
+ROLLBACK_ATTEMPT = """Set-StrictMode -Version Latest
+$statePath=Join-Path $StateRoot 'state.json'
+$controllerPath=Join-Path $StateRoot 'Control-Release.ps1'
+$ownerControllerPath=Join-Path (Join-Path $StateRoot 'gpu-owner') 'Control-GpuOwner.ps1'
+$stateHelperPath=Join-Path $StateRoot 'Protect-StateRoot.ps1'
+$ownerStateHelperPath=Join-Path (Join-Path $StateRoot 'gpu-owner') 'Protect-StateRoot.ps1'
+$controllerLog=Join-Path $StateRoot 'controller.log'
+function Write-InstallEvent { }
+function Register-ScheduledTask { Add-Content -LiteralPath $controllerLog -Value 'task:register' }
+function Unregister-ScheduledTask { Add-Content -LiteralPath $controllerLog -Value 'task:unregister' }
+function Get-CimInstance { foreach($image in @($LiveImages -split ';'|Where-Object{$_})){[pscustomobject]@{ProcessId=4242;ExecutablePath=$image}} }
+$transaction=Get-Content -Raw -LiteralPath $Journal|ConvertFrom-Json
+$outcome=[ordered]@{completed=$true;failure=$null}
+try{Invoke-InstallTransactionRollback $transaction $statePath $controllerPath $ownerControllerPath $Mode|Out-Null}
+catch{$outcome.completed=$false;$outcome.failure=$_.Exception.Message}
+$outcome|ConvertTo-Json -Compress
+"""
+
+# A refused or completed creation of the candidate's directories, then the rollback of what the
+# transaction recorded, in one fresh state root per scenario.
+CANDIDATE_CREATION = """Set-StrictMode -Version Latest
+function Write-InstallEvent { }
+$observed=[ordered]@{}
+foreach($scenario in @($Scenarios -split ';')){
+  $StateRoot=Join-Path $Directory $scenario
+  $transaction=[pscustomobject][ordered]@{
+    artifact_type='ninfer_windows_install_transaction';schema_version=1;status='in_progress'
+    operation_id=$Operation;phase='model_reference_verified';started_utc='2026-10-28T00:00:00Z';updated_utc=$null
+    journal_path=(Join-Path $StateRoot 'journal.json');state_root=$StateRoot;stage_path=$null;instance_id=$Instance
+    release_root=$null;secret_directory=$null;cache_root=$null
+    task_name=$null;task_existed=$false;task_was_running=$false;task_xml_path=$null
+    reentry_policy='repair-required-before-install';snapshots=[pscustomobject]@{}
+    flags=[pscustomobject][ordered]@{incumbent_touched=$false;owner_controller_touched=$false;state_helpers_touched=$false;controller_touched=$false;state_activated=$false;task_touched=$false}
+  }
+  Write-InstallTransaction $transaction
+  $refused=$false
+  try{
+    New-TransactionDirectory $transaction 'stage_path' (Join-Path $StateRoot ('staging-'+$Operation))
+    New-CandidateDirectories $transaction (Join-Path (Join-Path $StateRoot 'releases') $Instance) (Join-Path (Join-Path $StateRoot 'secrets') $Instance) (Join-Path (Join-Path $StateRoot 'cache') $Instance)
+  }
+  catch{$refused=$true}
+  $journal=Get-Content -Raw -LiteralPath $transaction.journal_path|ConvertFrom-Json
+  $cleanup=@(Invoke-InstallTransactionRollback $transaction (Join-Path $StateRoot 'state.json') (Join-Path $StateRoot 'Control-Release.ps1') (Join-Path $StateRoot 'Control-GpuOwner.ps1') 'rollback')
+  $observed[$scenario]=[ordered]@{
+    refused=$refused
+    recorded=@(foreach($field in @('stage_path','release_root','secret_directory','cache_root')){if($null -ne $journal.$field){$field}})
+    deleted=@($cleanup|ForEach-Object{[string]$_.kind})
+  }
+}
+$observed|ConvertTo-Json -Compress -Depth 4
+"""
+
+
+def installed_release(directory: Path) -> SimpleNamespace:
+    """One RTX 3090 release laid out as Install-Release.ps1 leaves it: the closed bin set, the
+    package's inner manifest retained in receipts and bound to the record by its hash, the
+    lane's own server configuration, and an external pinned model."""
+    lane = WINDOWS / "lanes" / "rtx3090"
+    spec = json.loads((lane / "release-spec.json").read_text(encoding="utf-8"))
+    root = directory / spec["lifecycle"]["state_root_name"]
+    instance = f"{spec['release_id']}-{'a' * 12}"
+    release = root / "releases" / instance
+    bin_dir = release / "bin"
+    for path in (bin_dir / "lifecycle", bin_dir / "qualification", release / "config",
+                 release / "logs", release / "receipts", root / "cache" / instance,
+                 root / "secrets" / instance, directory / "models"):
+        path.mkdir(parents=True)
+    payload = {name: f"synthetic {name}".encode() for name in (
+        "ninfer.exe", "ninfer-serve.exe", "ninfer_bench.exe", "cudart64_13.dll", "dstorage.dll")}
+    for name, content in payload.items():
+        (bin_dir / name).write_bytes(content)
+    config = (lane / "server-config.json").read_bytes()
+    (release / "config" / "server-config.json").write_bytes(config)
+    listed = {**{f"bin/{name}": content for name, content in payload.items()}, "server-config.json": config}
+    manifest = "".join(f"{hashlib.sha256(content).hexdigest()}  {name}\n"
+                       for name, content in sorted(listed.items())).encode("ascii")
+    (release / "receipts" / "SHA256SUMS.txt").write_bytes(manifest)
+    (root / "secrets" / instance / "api-key.txt").write_text("k" * 32 + "\n", encoding="ascii")
+    model = directory / "models" / "model.ninfer"
+    model.write_bytes(b"synthetic model")
+    digest = {name: hashlib.sha256(content).hexdigest() for name, content in payload.items()}
+    record = {
+        "release_root": str(release), "server_executable": str(bin_dir / "ninfer-serve.exe"),
+        "model_artifact": str(model), "model_reference": "external-pinned-read-only",
+        "config_file": str(release / "config" / "server-config.json"),
+        "cache_root": str(root / "cache" / instance), "receipts_root": str(release / "receipts"),
+        "api_key_file": str(root / "secrets" / instance / "api-key.txt"),
+        "host": "127.0.0.1", "port": spec["lifecycle"]["listen_port"],
+        "deployment_profile": spec["deployment_profile"], "build_profile": spec["build_profile"],
+        "cuda_architecture": spec["gpu"]["cuda_architecture"],
+        "upstream_base_sha": spec["source"]["upstream_base_sha"],
+        "lineage_base_sha": spec["source"]["lineage_base_sha"], "patch_stack_sha": "a" * 40,
+        "ninfer_sha256": digest["ninfer.exe"], "binary_sha256": digest["ninfer-serve.exe"],
+        "benchmark_sha256": digest["ninfer_bench.exe"], "package_sha256": "e" * 64,
+        "inner_checksums_sha256": hashlib.sha256(manifest).hexdigest(),
+        "config_sha256": hashlib.sha256(config).hexdigest(),
+        "model_artifact_sha256": spec["model"]["sha256"], "model_bytes": model.stat().st_size,
+        # The launch compares the file's own .NET timestamps; LAUNCH_PREAMBLE records them.
+        "model_creation_utc_ticks": 0, "model_last_write_utc_ticks": 0,
+        "gpu_index": 0, "gpu_uuid": SYNTHETIC_GPU_UUID, "gpu_name": spec["gpu"]["name"],
+        "gpu_pci_bus_id": SYNTHETIC_GPU_PCI, "installed_utc": "2026-10-28T00:00:00Z",
+        "managed_stop": spec["lifecycle"]["managed_stop"],
+        "graceful_stop_timeout_seconds": spec["lifecycle"]["graceful_stop_timeout_seconds"],
+    }
+    (root / "state.json").write_text(json.dumps({
+        "artifact_type": "ninfer_windows_lifecycle_state", "schema_version": 4,
+        "task_name": spec["lifecycle"]["task_name"], "prepared_release": None,
+        "active_release": instance, "previous_release": None, "gpu_owner": None,
+        "releases": {instance: record},
+    }), encoding="utf-8")
+    return SimpleNamespace(root=root, release=release, bin=bin_dir, manifest=manifest)
+
+
+# Start and Run on an installed release, up to the point where a launch first changes the card.
+# The Windows-only probes they consult before ownership answer as on an idle host: the bound card
+# is at ordinal 0, the listen port is free, and no wrapper from an earlier launch is running.
+LAUNCH_PREAMBLE = """Set-StrictMode -Version Latest
+function Assert-SelectedGpuIdentity { 0 }
+function Get-NetTCPConnection { }
+function Get-ScheduledTask { }
+$statePath=Join-Path $StateRoot 'state.json'
+$state=Get-Content -Raw -LiteralPath $statePath|ConvertFrom-Json
+$release=$state.releases.PSObject.Properties[[string]$state.active_release].Value
+$model=Get-Item -LiteralPath ([string]$release.model_artifact)
+$release.model_creation_utc_ticks=$model.CreationTimeUtc.Ticks
+$release.model_last_write_utc_ticks=$model.LastWriteTimeUtc.Ticks
+[IO.File]::WriteAllText($statePath,($state|ConvertTo-Json -Depth 10))
+"""
+LAUNCH_GATES = """function Acquire-GpuOwnerLease { throw 'ownership-acquisition-reached' }
+$outcome=[ordered]@{}
+foreach($launch in @('Start-ManagedRelease','Invoke-Run')){
+  try{& $launch;$outcome[$launch]='returned'}catch{$outcome[$launch]=$_.Exception.Message}
+}
+$outcome|ConvertTo-Json -Compress
+"""
+# The installer's re-install of the active instance re-verifies the installed release it found.
+ALREADY_INSTALLED_CHECK = """$outcome='verified'
+try{Assert-AppLocalDlls (Copy-InstalledRelease ([string]$state.active_release) $release)}catch{$outcome=$_.Exception.Message}
+@{'Install-Release'=$outcome}|ConvertTo-Json -Compress
+"""
+
+OWNER_CONTROLLER_STUB = """param([string]$Action, [string]$StateRoot, [string]$GpuUuid,
+      [int]$QualifiedPowerLimitW = 0, [int]$PriorPowerLimitMinW = 100, [int]$PriorPowerLimitMaxW = 1000)
+Add-Content -LiteralPath (Join-Path $PSScriptRoot 'owner.log') -Value $Action
+if ($Action -ceq 'status') {
+    [ordered]@{ schema_version = 1; gpu_uuid = $GpuUuid; gpu_pci_bus_id = '%s'; paused = $false } | ConvertTo-Json -Compress
+}
+""" % SYNTHETIC_GPU_PCI
+
+# A start whose server never became ready: the task launches a live stand-in server and publishes
+# its runtime record, readiness fails, and the stop either ends that server or leaves it running.
+# Win32_Process reports the release's server image for the stand-in, as it would on Windows.
+FAILED_START = """function Acquire-GpuOwnerLease { }
+function Wait-Ready { throw 'release did not become ready' }
+$runtimePath=Join-Path $StateRoot 'runtime.json'
+$global:server=$null
+function Start-ScheduledTask {
+  $global:server=Start-Process -FilePath ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) -ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 120') -PassThru
+  [IO.File]::WriteAllText($runtimePath,([ordered]@{artifact_type='ninfer_windows_runtime_state';schema_version=2;release_id=[string]$state.active_release;pid=$global:server.Id;start_time_utc_ticks=$global:server.StartTime.ToUniversalTime().Ticks}|ConvertTo-Json))
+}
+function Get-CimInstance { [pscustomobject]@{ExecutablePath=[string]$release.server_executable} }
+function Stop-ManagedProcess {
+  if($StopOutcome -ceq 'survived'){throw 'owned server process did not stop'}
+  $global:server.Kill();$global:server.WaitForExit();Remove-Item -LiteralPath $runtimePath
+}
+try{
+  $failure=$null
+  try{Start-ManagedRelease}catch{$failure=$_.Exception.Message}
+  [ordered]@{
+    start_failed=$null -ne $failure
+    lease_held=Test-Path -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json')
+    owner_actions=@(if(Test-Path -LiteralPath $OwnerLog){Get-Content -LiteralPath $OwnerLog})
+  }|ConvertTo-Json -Compress
+}
+finally{if($null -ne $global:server -and -not $global:server.HasExited){$global:server.Kill()}}
+"""
 
 
 class MultiGpuHostTests(unittest.TestCase):
@@ -1580,8 +2007,10 @@ class PowerShellContractTests(unittest.TestCase):
         result = subprocess.run(
             [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
              "$ErrorActionPreference='Stop';\n" + script],
-            check=True, text=True, capture_output=True,
+            text=True, capture_output=True,
         )
+        if result.returncode != 0:
+            self.fail(f"PowerShell exited {result.returncode}: {result.stderr.strip()}")
         return json.loads(result.stdout)
 
     def test_native_lane_speculation_guards_agree(self) -> None:
@@ -1951,6 +2380,252 @@ foreach($suffix in @('missing','inspection')){{
             self.assertEqual((bin_dir / "cudart64_13.dll").read_bytes(), b"selected-cuda")
             self.assertEqual((bin_dir / "vcruntime140.dll").read_bytes(), b"selected-crt")
             self.assertEqual((bin_dir / "libtransitive.dll").read_bytes(), b"transitive-dependency")
+
+    @unittest.skipIf(sys.platform == "win32", "the synthetic nvidia-smi is a POSIX shell script")
+    def test_upgrade_retires_the_running_incumbent_lease_before_the_successor_policy(self) -> None:
+        """alphastorm/omp-ninfer#94: a running v0.13.1 RTX 3090 lane holds the GPU owner under the
+        beta.2 policy, and its successor caps the card differently. The installer judges that lease
+        under the incumbent's own policy and hash-bound controller, lets the incumbent's managed stop
+        retire it, and only then applies the successor's policy, which takes the card at its cap.
+        A lease the stop hands back to an owner pause that predates the lane stays the
+        predecessor's, and the successor's policy refuses it before replacing anything."""
+        successor_spec = WINDOWS / "lanes/rtx3090/release-spec.json"
+        successor_cap = json.loads(successor_spec.read_text(encoding="utf-8"))[
+            "lifecycle"]["gpu_owner_controller_protocol"]["qualified_power_limit_w"]
+        for paused_before_launch in (False, True):
+            with self.subTest(paused_before_launch=paused_before_launch), \
+                    tempfile.TemporaryDirectory() as directory:
+                lane = running_predecessor_3090(Path(directory))
+                bundle = Path(directory) / "package" / "Control-GpuOwner.ps1"
+                install_script((WINDOWS / "Control-GpuOwner.ps1").read_bytes(), bundle)
+                values = {"StateRoot": lane.root, "ProgramFiles": lane.program_files,
+                          "Gpu": SYNTHETIC_GPU_UUID, "GpuPci": SYNTHETIC_GPU_PCI}
+                self.invoke(ps_assignments(PausedBeforeLaunch=paused_before_launch, **values)
+                            + ps_definitions(lane.root / "Control-Release.ps1") + PREDECESSOR_ACQUIRES_OWNER)
+                observed = self.invoke(
+                    ps_assignments(SuccessorSpec=successor_spec, Bundle=bundle, PowerLimit=lane.power_limit,
+                                   Journal=Path(directory) / "journal.json", **values)
+                    + ps_definitions(WINDOWS / "Install-Release.ps1") + UPGRADE_HANDOFF)
+                cap = lane.policy["qualified_power_limit_w"]
+                self.assertNotEqual(cap, successor_cap)
+                held = {"power_limit_w": cap, "owner_lease_cap_w": cap, "release_lease": True}
+                self.assertEqual(observed["held"], held)
+                self.assertEqual(observed["validated"], held)
+                self.assertTrue(observed["incumbent_touched"])
+                if paused_before_launch:
+                    self.assertIsNotNone(observed["handoff_refusal"])
+                    self.assertEqual(observed["retired"], {
+                        "power_limit_w": cap, "owner_lease_cap_w": cap, "release_lease": False})
+                else:
+                    self.assertIsNone(observed["handoff_refusal"])
+                    self.assertEqual(observed["retired"], {
+                        "power_limit_w": lane.policy["owner_power_limit_w"], "owner_lease_cap_w": None,
+                        "release_lease": False})
+                    self.assertEqual(observed["successor"], {
+                        "power_limit_w": successor_cap, "owner_lease_cap_w": successor_cap,
+                        "release_lease": False})
+
+    def rollback_attempt(self, upgrade: SimpleNamespace, mode: str, live_images: tuple[Path, ...] = ()) -> dict:
+        return self.invoke(
+            ps_assignments(StateRoot=upgrade.root, Journal=upgrade.journal, Mode=mode,
+                           LiveImages=";".join(str(image) for image in live_images))
+            + ps_definitions(WINDOWS / "Install-Release.ps1") + ROLLBACK_ATTEMPT)
+
+    @staticmethod
+    def upgrade_observation(upgrade: SimpleNamespace) -> dict:
+        log = upgrade.root / "controller.log"
+        controller = (upgrade.root / "Control-Release.ps1").read_text(encoding="utf-8")
+        return {
+            "status": json.loads(upgrade.journal.read_text(encoding="utf-8"))["status"],
+            "active_release": json.loads((upgrade.root / "state.json").read_text(encoding="utf-8"))["active_release"],
+            "controller": "candidate" if controller == CANDIDATE_CONTROLLER_STUB else "incumbent",
+            "candidate_targets": [path.exists() for path in upgrade.candidate_targets],
+            "incumbent_trees": all(path.exists() for path in upgrade.incumbent_trees),
+            "candidate_lease": (upgrade.root / "gpu-owner-lease.json").exists(),
+            "log": log.read_text(encoding="utf-8").split() if log.exists() else [],
+        }
+
+    def test_rollback_keeps_a_candidate_that_did_not_stop_until_repair_stops_it(self) -> None:
+        """alphastorm/omp-ninfer#89 L3: a candidate whose Stop failed may still run, so the rollback
+        restores, deletes, and releases nothing it could be using and does not restart the
+        incumbent beside it; the lifecycle keeps naming the candidate, and the repair re-attempts
+        that Stop for the same instance before completing the rollback."""
+        with tempfile.TemporaryDirectory() as directory:
+            upgrade = interrupted_upgrade(Path(directory))
+            fault = upgrade.root / "candidate-stop.fault"
+            fault.touch()
+            self.assertFalse(self.rollback_attempt(upgrade, "rollback")["completed"])
+            self.assertEqual(self.upgrade_observation(upgrade), {
+                "status": "repair_required", "active_release": upgrade.candidate, "controller": "candidate",
+                "candidate_targets": [True] * 4, "incumbent_trees": True, "candidate_lease": True,
+                "log": ["candidate:Stop"],
+            })
+            fault.unlink()
+            self.assertTrue(self.rollback_attempt(upgrade, "repair")["completed"])
+            self.assertEqual(self.upgrade_observation(upgrade), {
+                "status": "repaired", "active_release": upgrade.incumbent, "controller": "incumbent",
+                "candidate_targets": [False] * 4, "incumbent_trees": True, "candidate_lease": False,
+                "log": ["candidate:Stop", "candidate:Stop", "task:register", "incumbent:Start"],
+            })
+
+    def test_rollback_withholds_cleanup_until_the_lifecycle_is_restored(self) -> None:
+        """alphastorm/omp-ninfer#89 L3: the candidate stopped, but its lifecycle state could not be
+        restored, so the state still names it. Its trees stay and the incumbent is not started
+        against that state; the repair stops the named candidate again, restores, then cleans."""
+        with tempfile.TemporaryDirectory() as directory:
+            upgrade = interrupted_upgrade(Path(directory))
+            snapshot = upgrade.snapshots / "state.bin"
+            withheld = snapshot.with_name("state.bin.unavailable")
+            snapshot.rename(withheld)
+            self.assertFalse(self.rollback_attempt(upgrade, "rollback")["completed"])
+            self.assertEqual(self.upgrade_observation(upgrade), {
+                "status": "repair_required", "active_release": upgrade.candidate, "controller": "incumbent",
+                "candidate_targets": [True] * 4, "incumbent_trees": True, "candidate_lease": False,
+                "log": ["candidate:Stop", "task:register"],
+            })
+            withheld.rename(snapshot)
+            self.assertTrue(self.rollback_attempt(upgrade, "repair")["completed"])
+            self.assertEqual(self.upgrade_observation(upgrade), {
+                "status": "repaired", "active_release": upgrade.incumbent, "controller": "incumbent",
+                "candidate_targets": [False] * 4, "incumbent_trees": True, "candidate_lease": False,
+                "log": ["candidate:Stop", "task:register", "incumbent:Stop", "task:register", "incumbent:Start"],
+            })
+
+    def test_repair_keeps_every_tree_while_a_candidate_process_still_runs(self) -> None:
+        """A repair inherits what an earlier rollback left. The predecessor rollback restored the
+        incumbent's lifecycle and deleted the candidate's lease even when the candidate did not
+        stop, so the state no longer names a candidate that may still run. A process executing
+        from the candidate's release root keeps every tree, and the incumbent stays down."""
+        with tempfile.TemporaryDirectory() as directory:
+            upgrade = interrupted_upgrade(Path(directory))
+            shutil.copyfile(upgrade.snapshots / "state.bin", upgrade.root / "state.json")
+            shutil.copyfile(upgrade.snapshots / "controller.bin", upgrade.root / "Control-Release.ps1")
+            (upgrade.root / "gpu-owner-lease.json").unlink()
+            journal = json.loads(upgrade.journal.read_text(encoding="utf-8"))
+            journal.update(status="repair_required", phase="rollback_incomplete",
+                           diagnostics=["candidate stop: owned server process did not stop"])
+            upgrade.journal.write_text(json.dumps(journal), encoding="utf-8")
+            server = upgrade.root / "releases" / upgrade.candidate / "bin" / "ninfer-serve.exe"
+            self.assertFalse(self.rollback_attempt(upgrade, "repair", live_images=(server,))["completed"])
+            self.assertEqual(self.upgrade_observation(upgrade), {
+                "status": "repair_required", "active_release": upgrade.incumbent, "controller": "incumbent",
+                "candidate_targets": [True] * 4, "incumbent_trees": True, "candidate_lease": False,
+                "log": [],
+            })
+            self.assertTrue(self.rollback_attempt(upgrade, "repair")["completed"])
+            self.assertEqual(self.upgrade_observation(upgrade), {
+                "status": "repaired", "active_release": upgrade.incumbent, "controller": "incumbent",
+                "candidate_targets": [False] * 4, "incumbent_trees": True, "candidate_lease": False,
+                "log": ["task:register", "incumbent:Start"],
+            })
+
+    def test_a_refused_install_never_deletes_a_tree_it_did_not_create(self) -> None:
+        """alphastorm/omp-ninfer#89 L7: an install refused over an unregistered same-instance tree
+        (or a staging directory that already existed) rolls back without deleting it; a transaction
+        records, and its rollback deletes, exactly the directories it created."""
+        operation = "7" * 32
+        instance = "qwen38-3090-native-v0.7.0-beta.3-" + "d" * 12
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            existing = {
+                "unregistered-release": base / "unregistered-release" / "releases" / instance,
+                "unregistered-secret": base / "unregistered-secret" / "secrets" / instance,
+                "existing-stage": base / "existing-stage" / f"staging-{operation}",
+                "fresh": base / "fresh" / "releases" / ("qwen38-3090-native-v0.7.0-beta.2-" + "b" * 12),
+            }
+            for tree in existing.values():
+                tree.mkdir(parents=True)
+                (tree / "operator-data.bin").write_bytes(b"not created by this transaction")
+            observed = self.invoke(
+                ps_assignments(Directory=base, Scenarios=";".join(existing), Operation=operation, Instance=instance)
+                + ps_definitions(WINDOWS / "Install-Release.ps1") + CANDIDATE_CREATION)
+            refused = {"refused": True, "recorded": ["stage_path"], "deleted": ["package_stage"]}
+            self.assertEqual(observed, {
+                "unregistered-release": refused,
+                "unregistered-secret": refused,
+                "existing-stage": {"refused": True, "recorded": [], "deleted": []},
+                "fresh": {"refused": False,
+                          "recorded": ["stage_path", "release_root", "secret_directory", "cache_root"],
+                          "deleted": ["candidate_release", "candidate_secret", "candidate_cache", "package_stage"]},
+            })
+            for scenario, tree in existing.items():
+                with self.subTest(scenario=scenario):
+                    self.assertEqual((tree / "operator-data.bin").read_bytes(), b"not created by this transaction")
+                    created = [base / scenario / kind / instance for kind in ("releases", "secrets", "cache")]
+                    created.append(base / scenario / f"staging-{operation}")
+                    self.assertEqual([path for path in created if path.exists() and path != tree], [])
+
+    def test_launches_refuse_app_local_dll_drift_before_ownership(self) -> None:
+        """alphastorm/omp-ninfer#89 (G4 council): Start and the scheduled Run hold bin/*.dll to the
+        package manifest the install retained and bound to the record by hash. A DLL replaced,
+        planted, or removed after install, or a manifest rewritten to match a replacement, is
+        refused before either launch changes the card, and an install that finds the release
+        already active refuses to report it intact; an intact release passes all three."""
+
+        def replace(release: SimpleNamespace) -> None:
+            (release.bin / "cudart64_13.dll").write_bytes(b"replaced after install")
+
+        def rewrite_manifest(release: SimpleNamespace) -> None:
+            replace(release)
+            digest = hashlib.sha256(b"replaced after install").hexdigest()
+            manifest = (release.release / "receipts" / "SHA256SUMS.txt")
+            manifest.write_text("".join(
+                f"{digest}  bin/cudart64_13.dll\n" if line.endswith("  bin/cudart64_13.dll") else line + "\n"
+                for line in manifest.read_text(encoding="ascii").splitlines()), encoding="ascii")
+
+        intact = {"Start-ManagedRelease": "ownership-acquisition-reached",
+                  "Invoke-Run": "ownership-acquisition-reached", "Install-Release": "verified"}
+        cases = {
+            "intact": (lambda release: None, None),
+            "replaced": (replace, "cudart64_13.dll"),
+            "planted": (lambda release: (release.bin / "version.dll").write_bytes(b"planted"), "version.dll"),
+            "removed": (lambda release: (release.bin / "dstorage.dll").unlink(), "dstorage.dll"),
+            "manifest rewritten": (rewrite_manifest, "manifest"),
+        }
+        for case, (mutate, named) in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                release = installed_release(Path(directory))
+                mutate(release)
+                outcome = self.invoke(ps_assignments(StateRoot=release.root)
+                                      + ps_definitions(WINDOWS / "Control-Release.ps1")
+                                      + LAUNCH_PREAMBLE + LAUNCH_GATES)
+                outcome.update(self.invoke(ps_assignments(StateRoot=release.root)
+                                           + ps_definitions(WINDOWS / "Install-Release.ps1")
+                                           + LAUNCH_PREAMBLE + ALREADY_INSTALLED_CHECK))
+                if named is None:
+                    self.assertEqual(outcome, intact)
+                    continue
+                for check, passed in intact.items():
+                    self.assertNotEqual(outcome[check], passed, check)
+                    self.assertIn(named, outcome[check], check)
+
+    def test_a_failed_start_keeps_the_gpu_owner_leased_while_its_server_runs(self) -> None:
+        """The installer rollback's quiescence rule, in the controller: a start whose server
+        never became ready restores the GPU owner only once that server is gone. Restoring it
+        under a server that survived the stop would lift the safe cap the server still runs at."""
+        for stop_outcome, expected in (
+                ("survived", {"start_failed": True, "lease_held": True, "owner_actions": []}),
+                ("stopped", {"start_failed": True, "lease_held": False, "owner_actions": ["start", "status"]})):
+            with self.subTest(stop=stop_outcome), tempfile.TemporaryDirectory() as directory:
+                release = installed_release(Path(directory))
+                owner = release.root / "gpu-owner" / "Control-GpuOwner.ps1"
+                owner.parent.mkdir()
+                owner.write_text(OWNER_CONTROLLER_STUB, encoding="utf-8")
+                owner_sha256 = hashlib.sha256(owner.read_bytes()).hexdigest()
+                state_path = release.root / "state.json"
+                state = json.loads(state_path.read_text(encoding="utf-8"))
+                state["gpu_owner"] = {"controller_path": str(owner), "controller_sha256": owner_sha256,
+                                      "state_root": str(release.root / "gpu-owner-state")}
+                state_path.write_text(json.dumps(state), encoding="utf-8")
+                (release.root / "gpu-owner-lease.json").write_text(json.dumps({
+                    "artifact_type": "ninfer_gpu_owner_lease", "schema_version": 1,
+                    "release_id": state["active_release"], "controller_sha256": owner_sha256,
+                    "prior_paused": False, "phase": "released"}), encoding="utf-8")
+                observed = self.invoke(
+                    ps_assignments(StateRoot=release.root, StopOutcome=stop_outcome,
+                                   OwnerLog=owner.parent / "owner.log")
+                    + ps_definitions(WINDOWS / "Control-Release.ps1") + LAUNCH_PREAMBLE + FAILED_START)
+                self.assertEqual(observed, expected)
 
 
 if __name__ == "__main__":

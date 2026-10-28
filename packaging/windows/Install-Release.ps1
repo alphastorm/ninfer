@@ -280,14 +280,6 @@ function Get-TransactionCleanupTargets([object]$Transaction) {
             [pscustomobject]@{ kind = [string]$descriptor.kind; path = $path }
         }
     }
-    $leasePath = Join-Path $StateRoot 'gpu-owner-lease.json'
-    if ((Test-Path -LiteralPath $leasePath -PathType Leaf) -and
-        -not [string]::IsNullOrWhiteSpace([string]$Transaction.instance_id)) {
-        $lease = Read-JsonFile $leasePath
-        if ([string]$lease.release_id -ceq [string]$Transaction.instance_id) {
-            [pscustomobject]@{ kind = 'gpu_owner_lease'; path = $leasePath }
-        }
-    }
 }
 
 function Remove-InstallTreeStreaming([object]$Target) {
@@ -300,10 +292,9 @@ function Remove-InstallTreeStreaming([object]$Target) {
     $filesDeleted = 0
     $directoriesDeleted = 0
     if (Test-Path -LiteralPath $path -PathType Leaf) {
-        Remove-Item -LiteralPath $path -Force
-        $filesDeleted = 1
+        throw "transaction cleanup target is no longer the directory the transaction created: $path"
     }
-    elseif (Test-Path -LiteralPath $path -PathType Container) {
+    if (Test-Path -LiteralPath $path -PathType Container) {
         $files = @(Get-ChildItem -LiteralPath $path -File -Recurse -Force)
         foreach ($file in $files) {
             if ($filesDeleted -lt 32 -or ($filesDeleted % 128) -eq 0) {
@@ -597,6 +588,43 @@ function Assert-PayloadChecksums([string]$PayloadRoot) {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant()
 }
 
+# The server loads the DLLs beside its executable ahead of any system location, so an installed
+# release is intact only while bin/*.dll still matches the package manifest its install retained
+# in receipts and bound to the release record by hash: none replaced, removed, or planted.
+function Assert-AppLocalDlls([object]$Release) {
+    $manifestPath = Join-Path ([string]$Release.receipts_root) 'SHA256SUMS.txt'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant() -cne
+            [string]$Release.inner_checksums_sha256) {
+        throw 'retained package manifest no longer matches its recorded identity'
+    }
+    $expected = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($line in [IO.File]::ReadAllLines($manifestPath, [Text.Encoding]::ASCII)) {
+        if ($line -cnotmatch '^([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._/-]*)$') {
+            throw 'retained package manifest contains a malformed entry'
+        }
+        $digest = [string]$Matches[1]
+        if ([string]$Matches[2] -notmatch '^bin/([^/]+\.dll)$') { continue }
+        $name = [string]$Matches[1]
+        if ($expected.ContainsKey($name)) { throw "retained package manifest lists an app-local DLL twice: $name" }
+        $expected[$name] = $digest
+    }
+    $present = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($file in @(Get-ChildItem -LiteralPath (Join-Path ([string]$Release.release_root) 'bin') -File -Force)) {
+        if ([IO.Path]::GetExtension($file.Name) -ine '.dll') { continue }
+        if (-not $expected.ContainsKey($file.Name)) {
+            throw "app-local DLL is not in the retained package manifest: $($file.Name)"
+        }
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant() -cne $expected[$file.Name]) {
+            throw "app-local DLL $($file.Name) SHA-256 mismatch"
+        }
+        [void]$present.Add($file.Name)
+    }
+    foreach ($name in $expected.Keys) {
+        if (-not $present.Contains($name)) { throw "app-local DLL is missing: $name" }
+    }
+}
+
 function Register-ReleaseTask([string]$TaskName, [string]$ControllerPath) {
     $quotedController = '"' + $ControllerPath.Replace('"', '""') + '"'
     $quotedState = '"' + $StateRoot.Replace('"', '""') + '"'
@@ -736,10 +764,143 @@ function Set-TransactionFlag([object]$Transaction, [string]$Name) {
     Write-InstallTransaction $Transaction
 }
 
+# A transaction owns, and its rollback deletes, only what it created. Each directory is created
+# exclusively and recorded as a cleanup target only once it exists, so a refused install never
+# selects a tree that was already there.
+function New-TransactionDirectory([object]$Transaction, [string]$Field, [string]$Path) {
+    New-Item -ItemType Directory -Path $Path | Out-Null
+    Set-ObjectProperty $Transaction $Field $Path
+    Write-InstallTransaction $Transaction
+}
+
+function New-CandidateDirectories(
+    [object]$Transaction,
+    [string]$ReleaseRoot,
+    [string]$SecretDirectory,
+    [string]$CacheRoot
+) {
+    if (Test-Path -LiteralPath $ReleaseRoot) { throw 'release instance is already installed' }
+    if (Test-Path -LiteralPath $SecretDirectory) { throw 'release secret instance is already installed' }
+    if (Test-Path -LiteralPath $CacheRoot) { throw 'release cache instance is already installed' }
+    New-TransactionDirectory $Transaction 'release_root' $ReleaseRoot
+    New-TransactionDirectory $Transaction 'secret_directory' $SecretDirectory
+    New-TransactionDirectory $Transaction 'cache_root' $CacheRoot
+}
+
 function Convert-CommandOutputToJson([object[]]$Output, [string]$Label) {
     $lines = @($Output | ForEach-Object { [string]$_ })
     if ($lines.Count -eq 0) { throw "$Label returned no JSON" }
     return ([string]::Join([Environment]::NewLine, $lines) | ConvertFrom-Json)
+}
+
+# The arguments an owner record's policy hands its GPU-owner controller, mapped as the release
+# controller maps them, so the installer judges the owner exactly as the lifecycle acts on it.
+function Get-GpuOwnerPolicyArguments([object]$Owner, [string]$GpuUuid) {
+    $arguments = @{ GpuUuid = $GpuUuid }
+    $limit = $Owner.PSObject.Properties['qualified_power_limit_w']
+    if ($null -ne $limit -and $null -ne $limit.Value) {
+        $arguments['QualifiedPowerLimitW'] = [int]$limit.Value
+    }
+    $range = $Owner.PSObject.Properties['prior_power_limit_range_w']
+    if ($null -ne $range -and $null -ne $range.Value) {
+        $arguments['PriorPowerLimitMinW'] = [int]$range.Value[0]
+        $arguments['PriorPowerLimitMaxW'] = [int]$range.Value[1]
+    }
+    return $arguments
+}
+
+# A GPU-owner controller's status under one policy must attest the selected card. The owner
+# refuses a live lease under any policy but the one that wrote it, so the policy asked is always
+# the one holding the owner at that moment.
+function Assert-GpuOwnerAttestation([string]$ControllerPath, [hashtable]$Policy, [object]$SelectedGpu) {
+    $output = @(& $ControllerPath -Action status -StateRoot $ownerStateRoot @Policy)
+    $status = Convert-CommandOutputToJson $output 'GPU-owner controller status'
+    if ($null -eq $status.PSObject.Properties['paused'] -or $status.paused -isnot [bool]) {
+        throw 'GPU-owner controller status must expose a paused boolean'
+    }
+    if ($null -eq $status.PSObject.Properties['gpu_uuid'] -or
+        [string]$status.gpu_uuid -cne [string]$SelectedGpu.uuid -or
+        $null -eq $status.PSObject.Properties['gpu_pci_bus_id'] -or
+        [string]$status.gpu_pci_bus_id -cne [string]$SelectedGpu.pci_bus_id) {
+        throw 'GPU-owner controller status does not attest the selected UUID and PCI identity'
+    }
+}
+
+# Before anything changes, the GPU owner is judged under the policy that holds it. A running
+# incumbent holds it under its own lifecycle's policy, through the hash-bound controller that
+# lifecycle recorded: a successor policy capping the card differently refuses that lease, and
+# only the incumbent's managed stop, which needs exactly that controller, retires it. Without a
+# running incumbent the successor's policy is the one that acts next.
+function Assert-GpuOwnerUpgradeReady(
+    [object]$OldState,
+    [bool]$IncumbentRunning,
+    [string]$SuccessorController,
+    [hashtable]$SuccessorPolicy,
+    [object]$SelectedGpu
+) {
+    if (-not $IncumbentRunning) {
+        Assert-GpuOwnerAttestation $SuccessorController $SuccessorPolicy $SelectedGpu
+        return
+    }
+    $property = $OldState.PSObject.Properties['gpu_owner']
+    $owner = if ($null -eq $property) { $null } else { $property.Value }
+    if ($null -eq $owner) { throw 'running release has no GPU-owner record; stop it before upgrading' }
+    foreach ($field in @('controller_path', 'controller_sha256', 'state_root')) {
+        if ($null -eq $owner.PSObject.Properties[$field] -or [string]::IsNullOrWhiteSpace([string]$owner.$field)) {
+            throw "running release GPU-owner record is missing field: $field"
+        }
+    }
+    if (-not [string]::Equals([IO.Path]::GetFullPath([string]$owner.state_root),
+                              [IO.Path]::GetFullPath($ownerStateRoot), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'running release GPU-owner state root is outside the managed release root'
+    }
+    $controller = [string]$owner.controller_path
+    if (-not (Test-Path -LiteralPath $controller -PathType Leaf) -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $controller).Hash.ToLowerInvariant() -cne [string]$owner.controller_sha256) {
+        throw 'running release GPU-owner controller no longer matches its recorded identity'
+    }
+    if (-not (Get-Command -Name $controller).Parameters.ContainsKey('GpuUuid')) {
+        throw 'legacy unscoped GPU-owner wrapper is running; establish safe quiescence before upgrade'
+    }
+    Assert-GpuOwnerAttestation $controller (Get-GpuOwnerPolicyArguments $owner ([string]$SelectedGpu.uuid)) $SelectedGpu
+}
+
+# Stop the running incumbent with its own controller, whose managed stop retires its GPU-owner
+# lease under its own policy; only then does the successor's policy judge the owner. A lease the
+# stop hands back to an earlier owner pause stays the incumbent's, and the successor refuses it
+# here, before either controller is replaced.
+function Stop-IncumbentForUpgrade(
+    [object]$Transaction,
+    [string]$SuccessorController,
+    [hashtable]$SuccessorPolicy,
+    [object]$SelectedGpu
+) {
+    Set-TransactionFlag $Transaction 'incumbent_touched'
+    & $controllerPath -Action Stop -StateRoot $StateRoot | Out-Null
+    Assert-GpuOwnerAttestation $SuccessorController $SuccessorPolicy $SelectedGpu
+}
+
+# The candidate is quiescent once nothing it launched can still run. While the lifecycle state
+# names it active it may be running, and its own controller stops it, restoring the GPU owner and
+# retiring the lease it holds; a stop that fails leaves that state in place, so a repair re-attempts
+# the same stop for the same instance. Whatever the state names, no process may still execute
+# from the candidate's release root. The rollback itself never removes a GPU-owner lease.
+function Assert-TransactionCandidateQuiescent([object]$Transaction, [string]$StatePath, [string]$ControllerPath) {
+    if (-not (Get-TransactionFlag $Transaction 'state_activated')) { return }
+    if ((Test-Path -LiteralPath $StatePath -PathType Leaf) -and
+        [string](Read-JsonFile $StatePath).active_release -ceq [string]$Transaction.instance_id) {
+        & $ControllerPath -Action Stop -StateRoot $StateRoot | Out-Null
+    }
+    $releaseRoot = [string]$Transaction.release_root
+    if (-not [string]::IsNullOrWhiteSpace($releaseRoot)) {
+        $running = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Where-Object {
+                -not [string]::IsNullOrWhiteSpace([string]$_.ExecutablePath) -and
+                (Test-PathWithinRoot ([string]$_.ExecutablePath) $releaseRoot)
+            } | ForEach-Object { [string]$_.ProcessId })
+        if ($running.Count -ne 0) {
+            throw "candidate processes still run from its release root: $([string]::Join(', ', $running))"
+        }
+    }
 }
 
 function Invoke-InstallTransactionRollback(
@@ -756,66 +917,65 @@ function Invoke-InstallTransactionRollback(
             phase = [string]$Transaction.phase
         })
 
-    if ((Get-TransactionFlag $Transaction 'state_activated') -and
-        (Test-Path -LiteralPath $ControllerPath -PathType Leaf) -and
-        (Test-Path -LiteralPath $StatePath -PathType Leaf)) {
-        try {
-            $activeState = Read-JsonFile $StatePath
-            if ([string]$activeState.active_release -ceq [string]$Transaction.instance_id) {
-                & $ControllerPath -Action Stop -StateRoot $StateRoot | Out-Null
-            }
+    # Nothing is restored, deleted, or restarted until the candidate is proven quiescent: one that
+    # may still run keeps the lifecycle state, controller, trees, and lease that stop it.
+    try { Assert-TransactionCandidateQuiescent $Transaction $StatePath $ControllerPath }
+    catch { $failures.Add("candidate quiescence: $(Get-BoundedDiagnostic $_.Exception.Message)") }
+    if ($failures.Count -eq 0) {
+        if (Get-TransactionFlag $Transaction 'state_activated') {
+            try { Restore-PersistedFileSnapshot $StatePath $Transaction.snapshots.state }
+            catch { $failures.Add("state restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
         }
-        catch { $failures.Add("candidate stop: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-    }
-    if (Get-TransactionFlag $Transaction 'state_activated') {
-        try { Restore-PersistedFileSnapshot $StatePath $Transaction.snapshots.state }
-        catch { $failures.Add("state restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-    }
-    if (Get-TransactionFlag $Transaction 'controller_touched') {
-        try { Restore-PersistedFileSnapshot $ControllerPath $Transaction.snapshots.controller }
-        catch { $failures.Add("controller restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-    }
-    if (Get-TransactionFlag $Transaction 'task_touched') {
-        try {
-            $taskXml = if ([bool]$Transaction.task_existed) {
-                Get-Content -LiteralPath ([string]$Transaction.task_xml_path) -Raw -Encoding UTF8
-            }
-            else {
-                $null
-            }
-            Restore-ReleaseTask ([string]$Transaction.task_name) ([bool]$Transaction.task_existed) $taskXml
+        if (Get-TransactionFlag $Transaction 'controller_touched') {
+            try { Restore-PersistedFileSnapshot $ControllerPath $Transaction.snapshots.controller }
+            catch { $failures.Add("controller restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
         }
-        catch { $failures.Add("task restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-    }
-    if (Get-TransactionFlag $Transaction 'owner_controller_touched') {
-        try { Restore-PersistedFileSnapshot $OwnerControllerPath $Transaction.snapshots.owner_controller }
-        catch { $failures.Add("GPU-owner controller restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-    }
-    if (Get-TransactionFlag $Transaction 'state_helpers_touched') {
-        try { Restore-PersistedFileSnapshot $stateHelperPath $Transaction.snapshots.state_helper }
-        catch { $failures.Add("state helper restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-        try { Restore-PersistedFileSnapshot $ownerStateHelperPath $Transaction.snapshots.owner_state_helper }
-        catch { $failures.Add("GPU-owner state helper restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-    }
-
-    $cleanupTargets = @(Get-TransactionCleanupTargets $Transaction)
-    Write-InstallEvent 'cleanup_inventory' 'Enumerated interrupted install cleanup targets' ([ordered]@{
-            operation_id = [string]$Transaction.operation_id
-            target_count = $cleanupTargets.Count
-            targets = @($cleanupTargets | ForEach-Object { [string]$_.kind })
-        })
-    foreach ($target in $cleanupTargets) {
-        try {
-            $cleanupActions.Add((Remove-InstallTreeStreaming $target))
+        if (Get-TransactionFlag $Transaction 'task_touched') {
+            try {
+                $taskXml = if ([bool]$Transaction.task_existed) {
+                    Get-Content -LiteralPath ([string]$Transaction.task_xml_path) -Raw -Encoding UTF8
+                }
+                else {
+                    $null
+                }
+                Restore-ReleaseTask ([string]$Transaction.task_name) ([bool]$Transaction.task_existed) $taskXml
+            }
+            catch { $failures.Add("task restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
         }
-        catch {
-            $failures.Add("$([string]$target.kind) cleanup: $(Get-BoundedDiagnostic $_.Exception.Message)")
+        if (Get-TransactionFlag $Transaction 'owner_controller_touched') {
+            try { Restore-PersistedFileSnapshot $OwnerControllerPath $Transaction.snapshots.owner_controller }
+            catch { $failures.Add("GPU-owner controller restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
+        }
+        if (Get-TransactionFlag $Transaction 'state_helpers_touched') {
+            try { Restore-PersistedFileSnapshot $stateHelperPath $Transaction.snapshots.state_helper }
+            catch { $failures.Add("state helper restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
+            try { Restore-PersistedFileSnapshot $ownerStateHelperPath $Transaction.snapshots.owner_state_helper }
+            catch { $failures.Add("GPU-owner state helper restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
         }
     }
 
-    if (Get-TransactionFlag $Transaction 'incumbent_touched') {
-        try { & $ControllerPath -Action Start -StateRoot $StateRoot | Out-Null }
-        catch { $failures.Add("incumbent restart: $(Get-BoundedDiagnostic $_.Exception.Message)") }
+    # The candidate's trees are deleted, and the incumbent restarted, only over the restored
+    # lifecycle: against a state that still names the candidate, the restart would launch it.
+    if ($failures.Count -eq 0) {
+        $cleanupTargets = @(Get-TransactionCleanupTargets $Transaction)
+        Write-InstallEvent 'cleanup_inventory' 'Enumerated interrupted install cleanup targets' ([ordered]@{
+                operation_id = [string]$Transaction.operation_id
+                target_count = $cleanupTargets.Count
+                targets = @($cleanupTargets | ForEach-Object { [string]$_.kind })
+            })
+        foreach ($target in $cleanupTargets) {
+            try {
+                $cleanupActions.Add((Remove-InstallTreeStreaming $target))
+            }
+            catch {
+                $failures.Add("$([string]$target.kind) cleanup: $(Get-BoundedDiagnostic $_.Exception.Message)")
+            }
+        }
+
+        if (Get-TransactionFlag $Transaction 'incumbent_touched') {
+            try { & $ControllerPath -Action Start -StateRoot $StateRoot | Out-Null }
+            catch { $failures.Add("incumbent restart: $(Get-BoundedDiagnostic $_.Exception.Message)") }
+        }
     }
 
     $cleanupArray = @($cleanupActions | ForEach-Object { $_ })
@@ -971,7 +1131,7 @@ try {
         updated_utc = [DateTime]::UtcNow.ToString('o')
         journal_path = $journalPath
         state_root = $StateRoot
-        stage_path = $stage
+        stage_path = $null
         instance_id = $null
         release_root = $null
         secret_directory = $null
@@ -998,7 +1158,7 @@ try {
         }
     }
     Write-InstallTransaction $transaction
-    New-Item -ItemType Directory -Path $stage | Out-Null
+    New-TransactionDirectory $transaction 'stage_path' $stage
     Write-InstallEvent 'install_started' 'Started durable installer transaction' ([ordered]@{
             operation_id = $operationId
             journal_path = $journalPath
@@ -1053,17 +1213,6 @@ try {
         $ownerProtocol = $spec.lifecycle.gpu_owner_controller_protocol
         $ownerRecord['qualified_power_limit_w'] = if ($null -eq $ownerProtocol.qualified_power_limit_w) { $null } else { [int]$ownerProtocol.qualified_power_limit_w }
         $ownerRecord['prior_power_limit_range_w'] = @([int]$ownerProtocol.prior_power_limit_range_w[0], [int]$ownerProtocol.prior_power_limit_range_w[1])
-        $ownerStatusOutput = @(& $ownerControllerSource -Action status -StateRoot $ownerStateRoot -GpuUuid $selectedGpu.uuid -QualifiedPowerLimitW ([int]$ownerRecord.qualified_power_limit_w) -PriorPowerLimitMinW $ownerRecord.prior_power_limit_range_w[0] -PriorPowerLimitMaxW $ownerRecord.prior_power_limit_range_w[1])
-        $ownerStatus = Convert-CommandOutputToJson $ownerStatusOutput 'GPU-owner controller status'
-        if ($null -eq $ownerStatus.PSObject.Properties['paused'] -or $ownerStatus.paused -isnot [bool]) {
-            throw 'GPU-owner controller status must expose a paused boolean'
-        }
-        if ($null -eq $ownerStatus.PSObject.Properties['gpu_uuid'] -or
-            [string]$ownerStatus.gpu_uuid -cne [string]$selectedGpu.uuid -or
-            $null -eq $ownerStatus.PSObject.Properties['gpu_pci_bus_id'] -or
-            [string]$ownerStatus.gpu_pci_bus_id -cne [string]$selectedGpu.pci_bus_id) {
-            throw 'GPU-owner controller status does not attest the selected UUID and PCI identity'
-        }
         $expectedPackageName = [string]$spec.product_prefix + '-v' + [string]$spec.release_version + '-' + [string]$spec.platform + '.tar.gz'
         if ([IO.Path]::GetFileName($package) -cne $expectedPackageName) { throw 'release package filename does not match its specification' }
         if ((Split-Path -Leaf $StateRoot) -cne [string]$spec.lifecycle.state_root_name) { throw 'state root does not match the lane specification' }
@@ -1080,10 +1229,6 @@ try {
         $taskXmlPath = $null
         if ($oldTaskExisted) {
             $oldTaskWasRunning = [string]$oldTask.State -ceq 'Running'
-            $oldOwner = $oldState.gpu_owner
-            if ($oldTaskWasRunning -and -not (Get-Command -Name ([string]$oldOwner.controller_path)).Parameters.ContainsKey('GpuUuid')) {
-                throw 'legacy unscoped GPU-owner wrapper is running; establish safe quiescence before upgrade'
-            }
             $taskXmlPath = Join-Path $snapshotRoot 'scheduled-task.xml'
             [IO.File]::WriteAllText(
                 $taskXmlPath,
@@ -1091,6 +1236,8 @@ try {
                 [Text.UTF8Encoding]::new($false)
             )
         }
+        $successorOwnerPolicy = Get-GpuOwnerPolicyArguments ([pscustomobject]$ownerRecord) ([string]$selectedGpu.uuid)
+        Assert-GpuOwnerUpgradeReady $oldState $oldTaskWasRunning $ownerControllerSource $successorOwnerPolicy $selectedGpu
         Set-ObjectProperty $transaction 'task_name' $taskName
         Set-ObjectProperty $transaction 'task_existed' $oldTaskExisted
         Set-ObjectProperty $transaction 'task_was_running' $oldTaskWasRunning
@@ -1138,6 +1285,7 @@ try {
                     [string]$existing.config_sha256) {
                 throw 'already-installed release files no longer match their recorded identity'
             }
+            Assert-AppLocalDlls $existing
             if (-not $NoStart) {
                 & $controllerPath -Action Start -StateRoot $StateRoot | Out-Null
             }
@@ -1167,9 +1315,6 @@ try {
         }
 
         Set-ObjectProperty $transaction 'instance_id' $instanceId
-        Set-ObjectProperty $transaction 'release_root' $releaseRoot
-        Set-ObjectProperty $transaction 'secret_directory' $secretDirectory
-        Set-ObjectProperty $transaction 'cache_root' $cacheRoot
 
         $sourceModelItem = Get-Item -LiteralPath $sourceModel
         if (($sourceModelItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -1184,11 +1329,7 @@ try {
         }
         Set-TransactionPhase $transaction 'model_reference_verified'
 
-        if (Test-Path -LiteralPath $releaseRoot) { throw 'release instance is already installed' }
-        if (Test-Path -LiteralPath $secretDirectory) { throw 'release secret instance is already installed' }
-        if (Test-Path -LiteralPath $cacheRoot) { throw 'release cache instance is already installed' }
-
-        New-Item -ItemType Directory -Force -Path $releaseRoot | Out-Null
+        New-CandidateDirectories $transaction $releaseRoot $secretDirectory $cacheRoot
         $configRoot = Join-Path $releaseRoot 'config'
         $logsRoot = Join-Path $releaseRoot 'logs'
         $candidateReceiptsRoot = Join-Path $releaseRoot 'receipts'
@@ -1234,10 +1375,8 @@ try {
         }
         $payloadResidue = @(Get-ChildItem -LiteralPath $payload -Force)
         if ($payloadResidue.Count -ne 0) { throw 'release package contains an unclassified candidate-root entry' }
-        New-Item -ItemType Directory -Force -Path $cacheRoot | Out-Null
         Set-TransactionPhase $transaction 'candidate_layout_created'
 
-        New-Item -ItemType Directory -Path $secretDirectory | Out-Null
         $installedKey = Join-Path $secretDirectory 'api-key.txt'
         Copy-Item -LiteralPath $apiKeySource -Destination $installedKey
         Assert-OneLineSecret $installedKey
@@ -1310,10 +1449,10 @@ try {
         }
 
         # Release the incumbent with its original controller and hash-bound owner before
-        # replacing either. A live outer lease belongs to those exact controller bytes.
+        # replacing either. A live outer lease belongs to those exact controller bytes and their
+        # policy; the successor's policy judges the owner only once that stop retired it.
         if ($oldTaskWasRunning) {
-            Set-TransactionFlag $transaction 'incumbent_touched'
-            & $controllerPath -Action Stop -StateRoot $StateRoot | Out-Null
+            Stop-IncumbentForUpgrade $transaction $ownerControllerSource $successorOwnerPolicy $selectedGpu
         }
 
         Set-TransactionFlag $transaction 'state_helpers_touched'

@@ -264,6 +264,38 @@ function Assert-CandidateLayout([object]$Release, [string]$ReleaseId) {
     }
 }
 
+# The server loads the DLLs beside its executable ahead of any system location. Install accepted
+# them only inside the package's closed inner manifest, which it retains in receipts bound to the
+# release record by hash; every launch holds bin/*.dll to that manifest again, so a DLL
+# replaced, removed, or planted after install never loads.
+function Assert-AppLocalDlls([object]$Release) {
+    $manifestPath = Join-Path ([string]$Release.receipts_root) 'SHA256SUMS.txt'
+    Assert-FileHash $manifestPath ([string]$Release.inner_checksums_sha256) 'retained package manifest'
+    $expected = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($line in [IO.File]::ReadAllLines($manifestPath, [Text.Encoding]::ASCII)) {
+        if ($line -cnotmatch '^([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._/-]*)$') {
+            throw 'retained package manifest contains a malformed entry'
+        }
+        $digest = [string]$Matches[1]
+        if ([string]$Matches[2] -notmatch '^bin/([^/]+\.dll)$') { continue }
+        $name = [string]$Matches[1]
+        if ($expected.ContainsKey($name)) { throw "retained package manifest lists an app-local DLL twice: $name" }
+        $expected[$name] = $digest
+    }
+    $present = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($file in @(Get-ChildItem -LiteralPath (Join-Path ([string]$Release.release_root) 'bin') -File -Force)) {
+        if ([IO.Path]::GetExtension($file.Name) -ine '.dll') { continue }
+        if (-not $expected.ContainsKey($file.Name)) {
+            throw "app-local DLL is not in the retained package manifest: $($file.Name)"
+        }
+        Assert-FileHash $file.FullName $expected[$file.Name] "app-local DLL $($file.Name)"
+        [void]$present.Add($file.Name)
+    }
+    foreach ($name in $expected.Keys) {
+        if (-not $present.Contains($name)) { throw "app-local DLL is missing: $name" }
+    }
+}
+
 function Assert-SelectedGpuIdentity([object]$Release) {
     foreach ($field in @('gpu_uuid', 'gpu_name')) {
         if ($null -eq $Release.PSObject.Properties[$field]) {
@@ -419,6 +451,11 @@ function Restore-GpuOwnerLease {
     $lease = Get-GpuOwnerLease
     if ($null -eq $lease) { return }
     $state = Get-State
+    # The lease is handed back only once no server it was taken for still runs: restoring the
+    # owner under a live server lifts the safe cap that server runs at, and the claim is lost.
+    if ($null -ne (Get-OwnedProcess (Get-RuntimeState) (Get-Release $state ([string]$state.active_release)))) {
+        throw 'the GPU-owner lease stays held while the release server still runs'
+    }
     $owner = Get-GpuOwner $state
     if ($null -eq $owner -or
         [string]$lease.controller_sha256 -cne [string]$owner.controller_sha256) {
@@ -1001,6 +1038,7 @@ function Start-ManagedRelease {
     Assert-FileHash (Join-Path (Join-Path ([string]$release.release_root) 'bin') 'ninfer.exe') ([string]$release.ninfer_sha256) 'CLI executable'
     Assert-FileHash ([string]$release.server_executable) ([string]$release.binary_sha256) 'server executable'
     Assert-FileHash (Join-Path (Join-Path ([string]$release.release_root) 'bin') 'ninfer_bench.exe') ([string]$release.benchmark_sha256) 'benchmark executable'
+    Assert-AppLocalDlls $release
     Assert-InstalledModelIdentity $release
     Assert-FileHash ([string]$release.config_file) ([string]$release.config_sha256) 'server config'
     Assert-SelectedGpuIdentity $release | Out-Null
@@ -1088,6 +1126,7 @@ function Invoke-Run {
         Assert-FileHash (Join-Path (Join-Path ([string]$release.release_root) 'bin') 'ninfer.exe') ([string]$release.ninfer_sha256) 'CLI executable'
         Assert-FileHash ([string]$release.server_executable) ([string]$release.binary_sha256) 'server executable'
         Assert-FileHash (Join-Path (Join-Path ([string]$release.release_root) 'bin') 'ninfer_bench.exe') ([string]$release.benchmark_sha256) 'benchmark executable'
+        Assert-AppLocalDlls $release
         Assert-InstalledModelIdentity $release
         $resolvedGpuIndex = Assert-SelectedGpuIdentity $release
         Assert-FileHash ([string]$release.config_file) ([string]$release.config_sha256) 'server config'
