@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import base64
 from decimal import Decimal
+import hashlib
 import importlib.util
 import io
 import inspect
@@ -107,6 +108,170 @@ def product_protocol_fixture() -> dict:
         "isolated_session_reuse_path": "root",
     }
 
+
+# v0.7.0-qwen38-3090-beta.2, the RTX 3090 lane omp-ninfer v0.13.1 shipped: its installed lifecycle
+# scripts and its GPU-owner policy are the predecessor state later releases install over.
+PREDECESSOR_3090 = "7a25cd72f490183e4113f1e84e68e36d653ddd28"
+SYNTHETIC_GPU_UUID = "GPU-00000000-0000-4000-8000-000000003090"
+SYNTHETIC_GPU_PCI = "00000000:65:00.0"
+# The protected-state ACLs are Windows-only and are qualified on Windows hosts. These scenarios
+# exercise lifecycle decisions, so the helper's entry points only create and accept their roots.
+PROTECTED_STATE_STUB = """function Initialize-NInferProtectedStateRoot([string]$Path) {
+    New-Item -ItemType Directory -Force -Path $Path | Out-Null
+    return [IO.Path]::GetFullPath($Path)
+}
+function Assert-NInferProtectedStateRoot([string]$Path) { }
+function Assert-NInferProtectedStateTree([string]$Path) { }
+"""
+
+
+def committed_bytes(commit: str, path: str) -> bytes:
+    return subprocess.run(["git", "show", f"{commit}:{path}"], cwd=ROOT, capture_output=True,
+                          check=True).stdout
+
+
+def ps_assignments(**values: object) -> str:
+    return "".join(f"${name}={qualify_native.ps_quote(str(value))}\n" for name, value in values.items())
+
+
+def ps_definitions(path: Path) -> str:
+    """PowerShell that defines every top-level function of one script without running its body."""
+    return (
+        "foreach($definition in [Management.Automation.Language.Parser]::ParseFile("
+        f"{qualify_native.ps_quote(str(path))},[ref]$null,[ref]$null).FindAll("
+        "{param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$false))"
+        "{. ([scriptblock]::Create($definition.Extent.Text))}\n"
+    )
+
+
+def install_script(source: bytes, destination: Path) -> str:
+    """Place one lifecycle script beside the protected-state helper it loads; return its SHA-256."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(source)
+    (destination.parent / "Protect-StateRoot.ps1").write_text(PROTECTED_STATE_STUB, encoding="utf-8")
+    return hashlib.sha256(source).hexdigest()
+
+
+def synthetic_nvidia_smi(program_files: Path, power_limit_w: int) -> Path:
+    """nvidia-smi for one card at the Program Files location the GPU-owner controller trusts. It
+    answers only UUID-bound commands and keeps the card's power limit in a file it returns."""
+    tool = program_files / "NVIDIA Corporation" / "NVSMI" / "nvidia-smi.exe"
+    tool.parent.mkdir(parents=True)
+    limit = tool.parent / "power-limit"
+    limit.write_text(f"{power_limit_w}\n", encoding="ascii")
+    tool.write_text(
+        "#!/bin/sh\n"
+        'limit="$(dirname "$0")/power-limit"\n'
+        f'[ "$1" = -i ] && [ "$2" = {SYNTHETIC_GPU_UUID} ] || {{ echo "unbound: $*" >&2; exit 9; }}\n'
+        'case "$3" in\n'
+        f"  --query-gpu=uuid,pci.bus_id) echo '{SYNTHETIC_GPU_UUID}, {SYNTHETIC_GPU_PCI}' ;;\n"
+        '  --query-gpu=power.limit) echo "$(cat "$limit").00" ;;\n'
+        "  --query-gpu=memory.used) echo 186 ;;\n"
+        '  -pl) echo "$4" > "$limit" ;;\n'
+        '  *) echo "unexpected nvidia-smi command: $*" >&2; exit 9 ;;\n'
+        "esac\n",
+        encoding="ascii",
+    )
+    tool.chmod(0o755)
+    return limit
+
+
+def running_predecessor_3090(directory: Path) -> SimpleNamespace:
+    """A state root as the v0.13.1 RTX 3090 lane leaves it before its controller takes the GPU
+    owner: the beta.2 lifecycle controllers installed and hash-bound by the lifecycle state, and
+    the card at the owner's own power limit. Only fields the stop and status read are recorded."""
+    spec = json.loads(committed_bytes(PREDECESSOR_3090, "packaging/windows/lanes/rtx3090/release-spec.json"))
+    policy = spec["lifecycle"]["gpu_owner_controller_protocol"]
+    root = directory / spec["lifecycle"]["state_root_name"]
+    program_files = directory / "Program Files"
+    power_limit = synthetic_nvidia_smi(program_files, policy["owner_power_limit_w"])
+    install_script(committed_bytes(PREDECESSOR_3090, "packaging/windows/Control-Release.ps1"),
+                   root / "Control-Release.ps1")
+    owner_controller = root / "gpu-owner" / "Control-GpuOwner.ps1"
+    owner_sha256 = install_script(
+        committed_bytes(PREDECESSOR_3090, "packaging/windows/Control-GpuOwner.ps1"), owner_controller)
+    instance = f"{spec['release_id']}-{PREDECESSOR_3090[:12]}"
+    release_root = root / "releases" / instance
+    record = {
+        "release_root": str(release_root),
+        "server_executable": str(release_root / "bin" / "ninfer-serve.exe"),
+        "gpu_uuid": SYNTHETIC_GPU_UUID, "gpu_name": spec["gpu"]["name"], "gpu_pci_bus_id": SYNTHETIC_GPU_PCI,
+        "deployment_profile": spec["deployment_profile"], "build_profile": spec["build_profile"],
+        "cuda_architecture": spec["gpu"]["cuda_architecture"],
+        "upstream_base_sha": spec["source"]["upstream_base_sha"],
+        "lineage_base_sha": spec["source"]["lineage_base_sha"], "patch_stack_sha": PREDECESSOR_3090,
+        "model_artifact_sha256": spec["model"]["sha256"],
+        "managed_stop": spec["lifecycle"]["managed_stop"],
+        "graceful_stop_timeout_seconds": spec["lifecycle"]["graceful_stop_timeout_seconds"],
+    }
+    for field in ("ninfer_sha256", "binary_sha256", "benchmark_sha256", "package_sha256",
+                  "inner_checksums_sha256", "config_sha256"):
+        record[field] = hashlib.sha256(field.encode()).hexdigest()
+    state = {
+        "artifact_type": "ninfer_windows_lifecycle_state", "schema_version": 4,
+        "task_name": spec["lifecycle"]["task_name"],
+        "prepared_release": None, "active_release": instance, "previous_release": None,
+        "gpu_owner": {
+            "controller_path": str(owner_controller), "controller_sha256": owner_sha256,
+            "state_root": str(root / "gpu-owner-state"),
+            "qualified_power_limit_w": policy["qualified_power_limit_w"],
+            "prior_power_limit_range_w": policy["prior_power_limit_range_w"],
+        },
+        "releases": {instance: record},
+    }
+    (root / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    return SimpleNamespace(root=root, program_files=program_files, power_limit=power_limit, policy=policy)
+
+
+# The predecessor's own controller takes the GPU owner exactly as its launches do. A pause the
+# owner already held when the lane launched is the one the lane's stop hands back.
+PREDECESSOR_ACQUIRES_OWNER = """Set-StrictMode -Version Latest
+$env:ProgramFiles=$ProgramFiles
+if($PausedBeforeLaunch -ceq 'True'){
+  $owner=(Get-Content -Raw -LiteralPath (Join-Path $StateRoot 'state.json')|ConvertFrom-Json).gpu_owner
+  & ([string]$owner.controller_path) -Action stop -StateRoot ([string]$owner.state_root) -GpuUuid $Gpu -QualifiedPowerLimitW ([int]$owner.qualified_power_limit_w) -PriorPowerLimitMinW ([int]$owner.prior_power_limit_range_w[0]) -PriorPowerLimitMaxW ([int]$owner.prior_power_limit_range_w[1])|Out-Null
+}
+Acquire-GpuOwnerLease
+'{}'
+"""
+
+# The installer's GPU-owner handoff, from validation before anything changes through the
+# incumbent's managed stop, followed by the successor acquiring the card under its own policy.
+UPGRADE_HANDOFF = """Set-StrictMode -Version Latest
+$env:ProgramFiles=$ProgramFiles
+function Write-InstallEvent { }
+# The incumbent's stop finds its wrapper already gone; the task API is Windows-only.
+function Get-ScheduledTask { }
+function Get-ScheduledTaskInfo { }
+$controllerPath=Join-Path $StateRoot 'Control-Release.ps1'
+$ownerStateRoot=Join-Path $StateRoot 'gpu-owner-state'
+function Get-OwnerObservation {
+  $lease=Join-Path $ownerStateRoot 'lease.json'
+  [ordered]@{
+    power_limit_w=[int](Get-Content -Raw -LiteralPath $PowerLimit).Trim()
+    owner_lease_cap_w=if(Test-Path -LiteralPath $lease){[int](Get-Content -Raw -LiteralPath $lease|ConvertFrom-Json).qualified_power_limit_w}else{$null}
+    release_lease=Test-Path -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json')
+  }
+}
+$oldState=Get-Content -Raw -LiteralPath (Join-Path $StateRoot 'state.json')|ConvertFrom-Json
+$selectedGpu=[pscustomobject]@{uuid=$Gpu;pci_bus_id=$GpuPci}
+$successorProtocol=(Get-Content -Raw -LiteralPath $SuccessorSpec|ConvertFrom-Json).lifecycle.gpu_owner_controller_protocol
+$successorPolicy=Get-GpuOwnerPolicyArguments $successorProtocol $Gpu
+$transaction=[pscustomobject]@{journal_path=$Journal;updated_utc=$null;flags=[pscustomobject]@{incumbent_touched=$false}}
+$observed=[ordered]@{held=Get-OwnerObservation}
+Assert-GpuOwnerUpgradeReady $oldState $true $Bundle $successorPolicy $selectedGpu
+$observed.validated=Get-OwnerObservation
+$observed.handoff_refusal=$null
+try{Stop-IncumbentForUpgrade $transaction $Bundle $successorPolicy $selectedGpu}
+catch{$observed.handoff_refusal=$_.Exception.Message}
+$observed.retired=Get-OwnerObservation
+$observed.incumbent_touched=[bool]$transaction.flags.incumbent_touched
+if($null -eq $observed.handoff_refusal){
+  & $Bundle -Action stop -StateRoot $ownerStateRoot @successorPolicy|Out-Null
+  $observed.successor=Get-OwnerObservation
+}
+$observed|ConvertTo-Json -Compress -Depth 4
+"""
 
 class MultiGpuHostTests(unittest.TestCase):
     def test_no_unindexed_gpu_queries_or_sets(self) -> None:
@@ -1580,8 +1745,10 @@ class PowerShellContractTests(unittest.TestCase):
         result = subprocess.run(
             [POWERSHELL, "-NoProfile", "-NonInteractive", "-Command",
              "$ErrorActionPreference='Stop';\n" + script],
-            check=True, text=True, capture_output=True,
+            text=True, capture_output=True,
         )
+        if result.returncode != 0:
+            self.fail(f"PowerShell exited {result.returncode}: {result.stderr.strip()}")
         return json.loads(result.stdout)
 
     def test_native_lane_speculation_guards_agree(self) -> None:
@@ -1951,6 +2118,50 @@ foreach($suffix in @('missing','inspection')){{
             self.assertEqual((bin_dir / "cudart64_13.dll").read_bytes(), b"selected-cuda")
             self.assertEqual((bin_dir / "vcruntime140.dll").read_bytes(), b"selected-crt")
             self.assertEqual((bin_dir / "libtransitive.dll").read_bytes(), b"transitive-dependency")
+
+    @unittest.skipIf(sys.platform == "win32", "the synthetic nvidia-smi is a POSIX shell script")
+    def test_upgrade_retires_the_running_incumbent_lease_before_the_successor_policy(self) -> None:
+        """alphastorm/omp-ninfer#94: a running v0.13.1 RTX 3090 lane holds the GPU owner under the
+        beta.2 policy, and its successor caps the card differently. The installer judges that lease
+        under the incumbent's own policy and hash-bound controller, lets the incumbent's managed stop
+        retire it, and only then applies the successor's policy, which takes the card at its cap.
+        A lease the stop hands back to an owner pause that predates the lane stays the
+        predecessor's, and the successor's policy refuses it before replacing anything."""
+        successor_spec = WINDOWS / "lanes/rtx3090/release-spec.json"
+        successor_cap = json.loads(successor_spec.read_text(encoding="utf-8"))[
+            "lifecycle"]["gpu_owner_controller_protocol"]["qualified_power_limit_w"]
+        for paused_before_launch in (False, True):
+            with self.subTest(paused_before_launch=paused_before_launch), \
+                    tempfile.TemporaryDirectory() as directory:
+                lane = running_predecessor_3090(Path(directory))
+                bundle = Path(directory) / "package" / "Control-GpuOwner.ps1"
+                install_script((WINDOWS / "Control-GpuOwner.ps1").read_bytes(), bundle)
+                values = {"StateRoot": lane.root, "ProgramFiles": lane.program_files,
+                          "Gpu": SYNTHETIC_GPU_UUID, "GpuPci": SYNTHETIC_GPU_PCI}
+                self.invoke(ps_assignments(PausedBeforeLaunch=paused_before_launch, **values)
+                            + ps_definitions(lane.root / "Control-Release.ps1") + PREDECESSOR_ACQUIRES_OWNER)
+                observed = self.invoke(
+                    ps_assignments(SuccessorSpec=successor_spec, Bundle=bundle, PowerLimit=lane.power_limit,
+                                   Journal=Path(directory) / "journal.json", **values)
+                    + ps_definitions(WINDOWS / "Install-Release.ps1") + UPGRADE_HANDOFF)
+                cap = lane.policy["qualified_power_limit_w"]
+                self.assertNotEqual(cap, successor_cap)
+                held = {"power_limit_w": cap, "owner_lease_cap_w": cap, "release_lease": True}
+                self.assertEqual(observed["held"], held)
+                self.assertEqual(observed["validated"], held)
+                self.assertTrue(observed["incumbent_touched"])
+                if paused_before_launch:
+                    self.assertIsNotNone(observed["handoff_refusal"])
+                    self.assertEqual(observed["retired"], {
+                        "power_limit_w": cap, "owner_lease_cap_w": cap, "release_lease": False})
+                else:
+                    self.assertIsNone(observed["handoff_refusal"])
+                    self.assertEqual(observed["retired"], {
+                        "power_limit_w": lane.policy["owner_power_limit_w"], "owner_lease_cap_w": None,
+                        "release_lease": False})
+                    self.assertEqual(observed["successor"], {
+                        "power_limit_w": successor_cap, "owner_lease_cap_w": successor_cap,
+                        "release_lease": False})
 
 
 if __name__ == "__main__":

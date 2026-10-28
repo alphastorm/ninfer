@@ -742,6 +742,93 @@ function Convert-CommandOutputToJson([object[]]$Output, [string]$Label) {
     return ([string]::Join([Environment]::NewLine, $lines) | ConvertFrom-Json)
 }
 
+# The arguments an owner record's policy hands its GPU-owner controller, mapped as the release
+# controller maps them, so the installer judges the owner exactly as the lifecycle acts on it.
+function Get-GpuOwnerPolicyArguments([object]$Owner, [string]$GpuUuid) {
+    $arguments = @{ GpuUuid = $GpuUuid }
+    $limit = $Owner.PSObject.Properties['qualified_power_limit_w']
+    if ($null -ne $limit -and $null -ne $limit.Value) {
+        $arguments['QualifiedPowerLimitW'] = [int]$limit.Value
+    }
+    $range = $Owner.PSObject.Properties['prior_power_limit_range_w']
+    if ($null -ne $range -and $null -ne $range.Value) {
+        $arguments['PriorPowerLimitMinW'] = [int]$range.Value[0]
+        $arguments['PriorPowerLimitMaxW'] = [int]$range.Value[1]
+    }
+    return $arguments
+}
+
+# A GPU-owner controller's status under one policy must attest the selected card. The owner
+# refuses a live lease under any policy but the one that wrote it, so the policy asked is always
+# the one holding the owner at that moment.
+function Assert-GpuOwnerAttestation([string]$ControllerPath, [hashtable]$Policy, [object]$SelectedGpu) {
+    $output = @(& $ControllerPath -Action status -StateRoot $ownerStateRoot @Policy)
+    $status = Convert-CommandOutputToJson $output 'GPU-owner controller status'
+    if ($null -eq $status.PSObject.Properties['paused'] -or $status.paused -isnot [bool]) {
+        throw 'GPU-owner controller status must expose a paused boolean'
+    }
+    if ($null -eq $status.PSObject.Properties['gpu_uuid'] -or
+        [string]$status.gpu_uuid -cne [string]$SelectedGpu.uuid -or
+        $null -eq $status.PSObject.Properties['gpu_pci_bus_id'] -or
+        [string]$status.gpu_pci_bus_id -cne [string]$SelectedGpu.pci_bus_id) {
+        throw 'GPU-owner controller status does not attest the selected UUID and PCI identity'
+    }
+}
+
+# Before anything changes, the GPU owner is judged under the policy that holds it. A running
+# incumbent holds it under its own lifecycle's policy, through the hash-bound controller that
+# lifecycle recorded: a successor policy capping the card differently refuses that lease, and
+# only the incumbent's managed stop, which needs exactly that controller, retires it. Without a
+# running incumbent the successor's policy is the one that acts next.
+function Assert-GpuOwnerUpgradeReady(
+    [object]$OldState,
+    [bool]$IncumbentRunning,
+    [string]$SuccessorController,
+    [hashtable]$SuccessorPolicy,
+    [object]$SelectedGpu
+) {
+    if (-not $IncumbentRunning) {
+        Assert-GpuOwnerAttestation $SuccessorController $SuccessorPolicy $SelectedGpu
+        return
+    }
+    $property = $OldState.PSObject.Properties['gpu_owner']
+    $owner = if ($null -eq $property) { $null } else { $property.Value }
+    if ($null -eq $owner) { throw 'running release has no GPU-owner record; stop it before upgrading' }
+    foreach ($field in @('controller_path', 'controller_sha256', 'state_root')) {
+        if ($null -eq $owner.PSObject.Properties[$field] -or [string]::IsNullOrWhiteSpace([string]$owner.$field)) {
+            throw "running release GPU-owner record is missing field: $field"
+        }
+    }
+    if (-not [string]::Equals([IO.Path]::GetFullPath([string]$owner.state_root),
+                              [IO.Path]::GetFullPath($ownerStateRoot), [StringComparison]::OrdinalIgnoreCase)) {
+        throw 'running release GPU-owner state root is outside the managed release root'
+    }
+    $controller = [string]$owner.controller_path
+    if (-not (Test-Path -LiteralPath $controller -PathType Leaf) -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $controller).Hash.ToLowerInvariant() -cne [string]$owner.controller_sha256) {
+        throw 'running release GPU-owner controller no longer matches its recorded identity'
+    }
+    if (-not (Get-Command -Name $controller).Parameters.ContainsKey('GpuUuid')) {
+        throw 'legacy unscoped GPU-owner wrapper is running; establish safe quiescence before upgrade'
+    }
+    Assert-GpuOwnerAttestation $controller (Get-GpuOwnerPolicyArguments $owner ([string]$SelectedGpu.uuid)) $SelectedGpu
+}
+
+# Stop the running incumbent with its own controller, whose managed stop retires its GPU-owner
+# lease under its own policy; only then does the successor's policy judge the owner. A lease the
+# stop hands back to an earlier owner pause stays the incumbent's, and the successor refuses it
+# here, before either controller is replaced.
+function Stop-IncumbentForUpgrade(
+    [object]$Transaction,
+    [string]$SuccessorController,
+    [hashtable]$SuccessorPolicy,
+    [object]$SelectedGpu
+) {
+    Set-TransactionFlag $Transaction 'incumbent_touched'
+    & $controllerPath -Action Stop -StateRoot $StateRoot | Out-Null
+    Assert-GpuOwnerAttestation $SuccessorController $SuccessorPolicy $SelectedGpu
+}
+
 function Invoke-InstallTransactionRollback(
     [object]$Transaction,
     [string]$StatePath,
@@ -1053,17 +1140,6 @@ try {
         $ownerProtocol = $spec.lifecycle.gpu_owner_controller_protocol
         $ownerRecord['qualified_power_limit_w'] = if ($null -eq $ownerProtocol.qualified_power_limit_w) { $null } else { [int]$ownerProtocol.qualified_power_limit_w }
         $ownerRecord['prior_power_limit_range_w'] = @([int]$ownerProtocol.prior_power_limit_range_w[0], [int]$ownerProtocol.prior_power_limit_range_w[1])
-        $ownerStatusOutput = @(& $ownerControllerSource -Action status -StateRoot $ownerStateRoot -GpuUuid $selectedGpu.uuid -QualifiedPowerLimitW ([int]$ownerRecord.qualified_power_limit_w) -PriorPowerLimitMinW $ownerRecord.prior_power_limit_range_w[0] -PriorPowerLimitMaxW $ownerRecord.prior_power_limit_range_w[1])
-        $ownerStatus = Convert-CommandOutputToJson $ownerStatusOutput 'GPU-owner controller status'
-        if ($null -eq $ownerStatus.PSObject.Properties['paused'] -or $ownerStatus.paused -isnot [bool]) {
-            throw 'GPU-owner controller status must expose a paused boolean'
-        }
-        if ($null -eq $ownerStatus.PSObject.Properties['gpu_uuid'] -or
-            [string]$ownerStatus.gpu_uuid -cne [string]$selectedGpu.uuid -or
-            $null -eq $ownerStatus.PSObject.Properties['gpu_pci_bus_id'] -or
-            [string]$ownerStatus.gpu_pci_bus_id -cne [string]$selectedGpu.pci_bus_id) {
-            throw 'GPU-owner controller status does not attest the selected UUID and PCI identity'
-        }
         $expectedPackageName = [string]$spec.product_prefix + '-v' + [string]$spec.release_version + '-' + [string]$spec.platform + '.tar.gz'
         if ([IO.Path]::GetFileName($package) -cne $expectedPackageName) { throw 'release package filename does not match its specification' }
         if ((Split-Path -Leaf $StateRoot) -cne [string]$spec.lifecycle.state_root_name) { throw 'state root does not match the lane specification' }
@@ -1080,10 +1156,6 @@ try {
         $taskXmlPath = $null
         if ($oldTaskExisted) {
             $oldTaskWasRunning = [string]$oldTask.State -ceq 'Running'
-            $oldOwner = $oldState.gpu_owner
-            if ($oldTaskWasRunning -and -not (Get-Command -Name ([string]$oldOwner.controller_path)).Parameters.ContainsKey('GpuUuid')) {
-                throw 'legacy unscoped GPU-owner wrapper is running; establish safe quiescence before upgrade'
-            }
             $taskXmlPath = Join-Path $snapshotRoot 'scheduled-task.xml'
             [IO.File]::WriteAllText(
                 $taskXmlPath,
@@ -1091,6 +1163,8 @@ try {
                 [Text.UTF8Encoding]::new($false)
             )
         }
+        $successorOwnerPolicy = Get-GpuOwnerPolicyArguments ([pscustomobject]$ownerRecord) ([string]$selectedGpu.uuid)
+        Assert-GpuOwnerUpgradeReady $oldState $oldTaskWasRunning $ownerControllerSource $successorOwnerPolicy $selectedGpu
         Set-ObjectProperty $transaction 'task_name' $taskName
         Set-ObjectProperty $transaction 'task_existed' $oldTaskExisted
         Set-ObjectProperty $transaction 'task_was_running' $oldTaskWasRunning
@@ -1310,10 +1384,10 @@ try {
         }
 
         # Release the incumbent with its original controller and hash-bound owner before
-        # replacing either. A live outer lease belongs to those exact controller bytes.
+        # replacing either. A live outer lease belongs to those exact controller bytes and their
+        # policy; the successor's policy judges the owner only once that stop retired it.
         if ($oldTaskWasRunning) {
-            Set-TransactionFlag $transaction 'incumbent_touched'
-            & $controllerPath -Action Stop -StateRoot $StateRoot | Out-Null
+            Stop-IncumbentForUpgrade $transaction $ownerControllerSource $successorOwnerPolicy $selectedGpu
         }
 
         Set-TransactionFlag $transaction 'state_helpers_touched'
