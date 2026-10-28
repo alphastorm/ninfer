@@ -109,6 +109,11 @@ preserves the prior generation and DELETE survivors; no deletion is acknowledged
 without the required durable survivor publication. K7 records the storage-capacity
 automatic-retry limitation.
 
+Store usage accounting fails closed. The same scan supplies total usage and each
+reclamation candidate's bytes, so no substitute size is safe for an entry whose
+status or size cannot be read: the scan fails with that OS code and the save is
+refused instead of being measured against an undercount.
+
 ### Canonical JSON and MAC
 
 Canonical bytes are UTF-8 without BOM, trailing LF or insignificant whitespace.

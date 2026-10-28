@@ -2336,6 +2336,52 @@ int test_save_lease_finishes_quarantine_requested_after_publication() {
     return failures;
 }
 
+// directory_bytes supplies both store usage and each reclamation candidate's bytes, so no
+// substitute size is safe for an entry whose status cannot be determined. Quota accounting
+// fails closed with the OS code instead of skipping the entry; saving resumes once it can.
+int test_unmeasurable_generation_entry_fails_quota_closed() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .read_queue = std::make_shared<TestReadQueue>()});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) { return DurableExportResult{}; }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto baseline = store.save(responses, fingerprint(), exporter, publish_fixture);
+    if (!baseline) { return check(false, "unmeasurable-entry baseline did not publish"); }
+    const auto root = stored_generation_root(temporary.path, responses, baseline->generation);
+    // The link exists, but the status of what it names cannot be determined.
+    std::filesystem::create_symlink("loop", root / "loop");
+    std::error_code scanned;
+    try {
+        store.collect_garbage();
+    } catch (const std::system_error& error) { scanned = error.code(); }
+#ifdef _WIN32
+    const bool reported = scanned && scanned.category() == std::system_category();
+#else
+    const bool reported = scanned == std::errc::too_many_symbolic_link_levels;
+#endif
+    int failures = check(reported, "quota scan skipped an entry whose status is unavailable");
+    bool refused = false;
+    std::optional<SessionCheckpointSaveResult> successor;
+    try {
+        successor = store.save(responses, fingerprint(), exporter, publish_fixture);
+    } catch (const std::system_error&) { refused = true; }
+    failures += check(refused && !successor &&
+                          entry_names(root.parent_path()) ==
+                              std::vector<std::string>{baseline->generation},
+                      "save published over a store whose usage it could not measure");
+    std::filesystem::remove(root / "loop");
+    failures += check(store.save(responses, fingerprint(), exporter, publish_fixture).has_value(),
+                      "measurable store did not resume saving");
+    return failures;
+}
+
 
 int test_hmac_sha256_rfc4231_vectors() {
     int failures = 0;
@@ -3207,6 +3253,7 @@ int main(int argc, char** argv) {
 #endif
     failures += test_pointer_rename_attempt_decides_generation_retention();
     failures += test_save_lease_finishes_quarantine_requested_after_publication();
+    failures += test_unmeasurable_generation_entry_fails_quota_closed();
     failures += test_hmac_sha256_rfc4231_vectors();
     failures += test_manifest_origin_authentication();
     failures += test_manifest_origin_compatibility_window();

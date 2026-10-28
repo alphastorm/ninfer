@@ -465,6 +465,8 @@ void require_payload_shape(const std::filesystem::path& root, const std::string&
     }
 }
 
+// Quota usage and every reclamation candidate's bytes come from this scan. No substitute size
+// is safe for both, so an entry that cannot be measured fails the scan with its OS code.
 [[nodiscard]] std::uint64_t directory_bytes(const std::filesystem::path& path) {
     std::error_code error;
     std::uint64_t total = 0;
@@ -472,7 +474,12 @@ void require_payload_shape(const std::filesystem::path& root, const std::string&
              iterator(path, std::filesystem::directory_options::none, error),
          end;
          !error && iterator != end; iterator.increment(error)) {
-        if (!iterator->is_regular_file(error) || error) { continue; }
+        const bool regular = iterator->is_regular_file(error);
+        if (error) {
+            log_checkpoint_failure("directory_entry_status", checkpoint_io_reason(error), error);
+            throw std::system_error(error, "checkpoint directory entry status is unavailable");
+        }
+        if (!regular) { continue; }
         const std::uintmax_t size = iterator->file_size(error);
         if (error) {
             log_checkpoint_failure("directory_entry_size", checkpoint_io_reason(error), error);
