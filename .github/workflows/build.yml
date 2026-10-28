@@ -75,6 +75,8 @@ jobs:
             ninfer_grammar_test ninfer_json_schema_test ninfer_regex_choice_test \
             ninfer_durable_file_test ninfer_session_checkpoint_store_test \
             ninfer_automatic_checkpoint_queue_test \
+            src/serve/CMakeFiles/ninfer_serve.dir/session_checkpoint_service.cpp.o \
+            tests/CMakeFiles/ninfer_session_checkpoint_service_real_test.dir/test_session_checkpoint_service_real.cpp.o \
             src/ops/CMakeFiles/ninfer_ops.dir/linear/kernels/q4/q4_a16_sliced_k_mma.cu.o \
             src/ops/CMakeFiles/ninfer_ops.dir/linear/swiglu/q4/shapes/n34816_k5120/small.cu.o
       - name: Run only GPU-free CTest contracts
