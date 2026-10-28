@@ -588,6 +588,43 @@ function Assert-PayloadChecksums([string]$PayloadRoot) {
     return (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant()
 }
 
+# The server loads the DLLs beside its executable ahead of any system location, so an installed
+# release is intact only while bin/*.dll still matches the package manifest its install retained
+# in receipts and bound to the release record by hash: none replaced, removed, or planted.
+function Assert-AppLocalDlls([object]$Release) {
+    $manifestPath = Join-Path ([string]$Release.receipts_root) 'SHA256SUMS.txt'
+    if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf) -or
+        (Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant() -cne
+            [string]$Release.inner_checksums_sha256) {
+        throw 'retained package manifest no longer matches its recorded identity'
+    }
+    $expected = [Collections.Generic.Dictionary[string, string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($line in [IO.File]::ReadAllLines($manifestPath, [Text.Encoding]::ASCII)) {
+        if ($line -cnotmatch '^([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._/-]*)$') {
+            throw 'retained package manifest contains a malformed entry'
+        }
+        $digest = [string]$Matches[1]
+        if ([string]$Matches[2] -notmatch '^bin/([^/]+\.dll)$') { continue }
+        $name = [string]$Matches[1]
+        if ($expected.ContainsKey($name)) { throw "retained package manifest lists an app-local DLL twice: $name" }
+        $expected[$name] = $digest
+    }
+    $present = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($file in @(Get-ChildItem -LiteralPath (Join-Path ([string]$Release.release_root) 'bin') -File -Force)) {
+        if ([IO.Path]::GetExtension($file.Name) -ine '.dll') { continue }
+        if (-not $expected.ContainsKey($file.Name)) {
+            throw "app-local DLL is not in the retained package manifest: $($file.Name)"
+        }
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $file.FullName).Hash.ToLowerInvariant() -cne $expected[$file.Name]) {
+            throw "app-local DLL $($file.Name) SHA-256 mismatch"
+        }
+        [void]$present.Add($file.Name)
+    }
+    foreach ($name in $expected.Keys) {
+        if (-not $present.Contains($name)) { throw "app-local DLL is missing: $name" }
+    }
+}
+
 function Register-ReleaseTask([string]$TaskName, [string]$ControllerPath) {
     $quotedController = '"' + $ControllerPath.Replace('"', '""') + '"'
     $quotedState = '"' + $StateRoot.Replace('"', '""') + '"'
@@ -1248,6 +1285,7 @@ try {
                     [string]$existing.config_sha256) {
                 throw 'already-installed release files no longer match their recorded identity'
             }
+            Assert-AppLocalDlls $existing
             if (-not $NoStart) {
                 & $controllerPath -Action Start -StateRoot $StateRoot | Out-Null
             }

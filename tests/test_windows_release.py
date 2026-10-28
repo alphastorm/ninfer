@@ -410,6 +410,95 @@ $observed|ConvertTo-Json -Compress -Depth 4
 """
 
 
+def installed_release(directory: Path) -> SimpleNamespace:
+    """One RTX 3090 release laid out as Install-Release.ps1 leaves it: the closed bin set, the
+    package's inner manifest retained in receipts and bound to the record by its hash, the
+    lane's own server configuration, and an external pinned model."""
+    lane = WINDOWS / "lanes" / "rtx3090"
+    spec = json.loads((lane / "release-spec.json").read_text(encoding="utf-8"))
+    root = directory / spec["lifecycle"]["state_root_name"]
+    instance = f"{spec['release_id']}-{'a' * 12}"
+    release = root / "releases" / instance
+    bin_dir = release / "bin"
+    for path in (bin_dir / "lifecycle", bin_dir / "qualification", release / "config",
+                 release / "logs", release / "receipts", root / "cache" / instance,
+                 root / "secrets" / instance, directory / "models"):
+        path.mkdir(parents=True)
+    payload = {name: f"synthetic {name}".encode() for name in (
+        "ninfer.exe", "ninfer-serve.exe", "ninfer_bench.exe", "cudart64_13.dll", "dstorage.dll")}
+    for name, content in payload.items():
+        (bin_dir / name).write_bytes(content)
+    config = (lane / "server-config.json").read_bytes()
+    (release / "config" / "server-config.json").write_bytes(config)
+    listed = {**{f"bin/{name}": content for name, content in payload.items()}, "server-config.json": config}
+    manifest = "".join(f"{hashlib.sha256(content).hexdigest()}  {name}\n"
+                       for name, content in sorted(listed.items())).encode("ascii")
+    (release / "receipts" / "SHA256SUMS.txt").write_bytes(manifest)
+    (root / "secrets" / instance / "api-key.txt").write_text("k" * 32 + "\n", encoding="ascii")
+    model = directory / "models" / "model.ninfer"
+    model.write_bytes(b"synthetic model")
+    digest = {name: hashlib.sha256(content).hexdigest() for name, content in payload.items()}
+    record = {
+        "release_root": str(release), "server_executable": str(bin_dir / "ninfer-serve.exe"),
+        "model_artifact": str(model), "model_reference": "external-pinned-read-only",
+        "config_file": str(release / "config" / "server-config.json"),
+        "cache_root": str(root / "cache" / instance), "receipts_root": str(release / "receipts"),
+        "api_key_file": str(root / "secrets" / instance / "api-key.txt"),
+        "host": "127.0.0.1", "port": spec["lifecycle"]["listen_port"],
+        "deployment_profile": spec["deployment_profile"], "build_profile": spec["build_profile"],
+        "cuda_architecture": spec["gpu"]["cuda_architecture"],
+        "upstream_base_sha": spec["source"]["upstream_base_sha"],
+        "lineage_base_sha": spec["source"]["lineage_base_sha"], "patch_stack_sha": "a" * 40,
+        "ninfer_sha256": digest["ninfer.exe"], "binary_sha256": digest["ninfer-serve.exe"],
+        "benchmark_sha256": digest["ninfer_bench.exe"], "package_sha256": "e" * 64,
+        "inner_checksums_sha256": hashlib.sha256(manifest).hexdigest(),
+        "config_sha256": hashlib.sha256(config).hexdigest(),
+        "model_artifact_sha256": spec["model"]["sha256"], "model_bytes": model.stat().st_size,
+        # The launch compares the file's own .NET timestamps; LAUNCH_PREAMBLE records them.
+        "model_creation_utc_ticks": 0, "model_last_write_utc_ticks": 0,
+        "gpu_index": 0, "gpu_uuid": SYNTHETIC_GPU_UUID, "gpu_name": spec["gpu"]["name"],
+        "gpu_pci_bus_id": SYNTHETIC_GPU_PCI, "installed_utc": "2026-10-28T00:00:00Z",
+        "managed_stop": spec["lifecycle"]["managed_stop"],
+        "graceful_stop_timeout_seconds": spec["lifecycle"]["graceful_stop_timeout_seconds"],
+    }
+    (root / "state.json").write_text(json.dumps({
+        "artifact_type": "ninfer_windows_lifecycle_state", "schema_version": 4,
+        "task_name": spec["lifecycle"]["task_name"], "prepared_release": None,
+        "active_release": instance, "previous_release": None, "gpu_owner": None,
+        "releases": {instance: record},
+    }), encoding="utf-8")
+    return SimpleNamespace(root=root, release=release, bin=bin_dir, manifest=manifest)
+
+
+# Start and Run on an installed release, up to the point where a launch first changes the card.
+# The Windows-only probes they consult before ownership answer as on an idle host: the bound card
+# is at ordinal 0, the listen port is free, and no wrapper from an earlier launch is running.
+LAUNCH_PREAMBLE = """Set-StrictMode -Version Latest
+function Assert-SelectedGpuIdentity { 0 }
+function Get-NetTCPConnection { }
+function Get-ScheduledTask { }
+$statePath=Join-Path $StateRoot 'state.json'
+$state=Get-Content -Raw -LiteralPath $statePath|ConvertFrom-Json
+$release=$state.releases.PSObject.Properties[[string]$state.active_release].Value
+$model=Get-Item -LiteralPath ([string]$release.model_artifact)
+$release.model_creation_utc_ticks=$model.CreationTimeUtc.Ticks
+$release.model_last_write_utc_ticks=$model.LastWriteTimeUtc.Ticks
+[IO.File]::WriteAllText($statePath,($state|ConvertTo-Json -Depth 10))
+"""
+LAUNCH_GATES = """function Acquire-GpuOwnerLease { throw 'ownership-acquisition-reached' }
+$outcome=[ordered]@{}
+foreach($launch in @('Start-ManagedRelease','Invoke-Run')){
+  try{& $launch;$outcome[$launch]='returned'}catch{$outcome[$launch]=$_.Exception.Message}
+}
+$outcome|ConvertTo-Json -Compress
+"""
+# The installer's re-install of the active instance re-verifies the installed release it found.
+ALREADY_INSTALLED_CHECK = """$outcome='verified'
+try{Assert-AppLocalDlls (Copy-InstalledRelease ([string]$state.active_release) $release)}catch{$outcome=$_.Exception.Message}
+@{'Install-Release'=$outcome}|ConvertTo-Json -Compress
+"""
+
+
 class MultiGpuHostTests(unittest.TestCase):
     def test_no_unindexed_gpu_queries_or_sets(self) -> None:
         sources = {path: (ROOT / path).read_text(encoding="utf-8") for path in GPU_SCAN_FILES}
@@ -2429,6 +2518,50 @@ foreach($suffix in @('missing','inspection')){{
                     created = [base / scenario / kind / instance for kind in ("releases", "secrets", "cache")]
                     created.append(base / scenario / f"staging-{operation}")
                     self.assertEqual([path for path in created if path.exists() and path != tree], [])
+
+    def test_launches_refuse_app_local_dll_drift_before_ownership(self) -> None:
+        """alphastorm/omp-ninfer#89 (G4 council): Start and the scheduled Run hold bin/*.dll to the
+        package manifest the install retained and bound to the record by hash. A DLL replaced,
+        planted, or removed after install, or a manifest rewritten to match a replacement, is
+        refused before either launch changes the card, and an install that finds the release
+        already active refuses to report it intact; an intact release passes all three."""
+
+        def replace(release: SimpleNamespace) -> None:
+            (release.bin / "cudart64_13.dll").write_bytes(b"replaced after install")
+
+        def rewrite_manifest(release: SimpleNamespace) -> None:
+            replace(release)
+            digest = hashlib.sha256(b"replaced after install").hexdigest()
+            manifest = (release.release / "receipts" / "SHA256SUMS.txt")
+            manifest.write_text("".join(
+                f"{digest}  bin/cudart64_13.dll\n" if line.endswith("  bin/cudart64_13.dll") else line + "\n"
+                for line in manifest.read_text(encoding="ascii").splitlines()), encoding="ascii")
+
+        intact = {"Start-ManagedRelease": "ownership-acquisition-reached",
+                  "Invoke-Run": "ownership-acquisition-reached", "Install-Release": "verified"}
+        cases = {
+            "intact": (lambda release: None, None),
+            "replaced": (replace, "cudart64_13.dll"),
+            "planted": (lambda release: (release.bin / "version.dll").write_bytes(b"planted"), "version.dll"),
+            "removed": (lambda release: (release.bin / "dstorage.dll").unlink(), "dstorage.dll"),
+            "manifest rewritten": (rewrite_manifest, "manifest"),
+        }
+        for case, (mutate, named) in cases.items():
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                release = installed_release(Path(directory))
+                mutate(release)
+                outcome = self.invoke(ps_assignments(StateRoot=release.root)
+                                      + ps_definitions(WINDOWS / "Control-Release.ps1")
+                                      + LAUNCH_PREAMBLE + LAUNCH_GATES)
+                outcome.update(self.invoke(ps_assignments(StateRoot=release.root)
+                                           + ps_definitions(WINDOWS / "Install-Release.ps1")
+                                           + LAUNCH_PREAMBLE + ALREADY_INSTALLED_CHECK))
+                if named is None:
+                    self.assertEqual(outcome, intact)
+                    continue
+                for check, passed in intact.items():
+                    self.assertNotEqual(outcome[check], passed, check)
+                    self.assertIn(named, outcome[check], check)
 
 
 if __name__ == "__main__":
