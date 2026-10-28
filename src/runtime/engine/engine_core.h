@@ -2057,13 +2057,11 @@ private:
             }
             if (admission_check_pending_.load(std::memory_order_acquire)) { return true; }
             if (resident_empty()) {
-                throw std::logic_error("isolated request cannot reserve its first legal unit after "
-                                       "context reclamation: state=" +
-                                       std::to_string(shortage.state_slots) + ", kv_pool=" +
-                                       (shortage.first_kv_deficit()
-                                            ? std::to_string(shortage.first_kv_deficit()->index)
-                                            : "none") +
-                                       ", host_bytes=" + std::to_string(shortage.host_bytes));
+                if (!shortage.state_slots && !shortage.first_kv_deficit() && !shortage.host_bytes) {
+                    throw std::logic_error("isolated request has no valid binding source");
+                }
+                refuse_isolated_request(request, restoring, shortage);
+                return true;
             }
             if (restoring) {
                 scheduler_.restoration_blocked();
@@ -2071,6 +2069,32 @@ private:
             }
         }
         return false;
+    }
+
+    // Nothing resident, paused or exported can release the capacity this isolated request's first
+    // legal unit needs. Refusing it leaves the Engine as a queue expiry (fresh) or a paused
+    // cancellation (restore) would; the Engine stays available for requests that fit.
+    void refuse_isolated_request(const std::shared_ptr<Request>& request, bool restoring,
+                                 const ContextResources& shortage) {
+        auto error = std::make_exception_ptr(RequestError(
+            RequestErrorKind::Unavailable,
+            "isolated request cannot reserve its first legal unit after context reclamation: "
+            "state=" +
+                std::to_string(shortage.state_slots) + ", kv_pool=" +
+                (shortage.first_kv_deficit() ? std::to_string(shortage.first_kv_deficit()->index)
+                                             : "none") +
+                ", host_bytes=" + std::to_string(shortage.host_bytes)));
+        if (restoring) {
+            std::erase(paused_, request);
+            request->suspended.reset();
+            scheduler_.capacity_released();
+        } else {
+            std::lock_guard lock(queue_mutex_);
+            std::erase(pending_, request);
+        }
+        request_admission_check();
+        finalize_error(request);
+        publish_and_deliver(request, std::move(error));
     }
 
     void observe_scheduling(const std::shared_ptr<Request>& request,

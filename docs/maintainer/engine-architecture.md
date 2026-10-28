@@ -426,10 +426,13 @@ membership 并释放其规划状态，再发布统计，最后才使结果或错
 GPU unit 稳定后 abort；paused 请求释放 ResumeState 及相关 owner。取消不改写 in-flight mapping，
 已提交输出不回退。
 
-Queue timeout、overload、输入超限和 request 无法表示属于请求级拒绝。Handle generation/owner
-错误、PendingBatch membership 错误、物理 mutation 无法稳定 commit/abort，以及完整性或 adoption
-不变量损坏会使 Engine 失败。Cleanup 先结束未决上下文和模型事务，再释放 resident/paused 资源与
-缓存并发布统计，最后完成全部 response。内部状态损坏不能解释成 cache miss。
+Queue timeout、overload、输入超限和 request 无法表示属于请求级拒绝。没有 resident、paused 或
+在途 export 能够释放容量时，孤立请求回收后仍取不到首个合法单元同样是请求级拒绝：Engine 以
+`Unavailable` 拒绝该 fresh 或恢复中的请求，所留状态与队列超时或 paused 取消相同，Engine 保持
+可用。Handle generation/owner 错误、PendingBatch membership 错误、物理 mutation 无法稳定
+commit/abort，以及完整性或 adoption 不变量损坏会使 Engine 失败。Cleanup 先结束未决上下文和
+模型事务，再释放 resident/paused 资源与缓存并发布统计，最后完成全部 response。内部状态损坏
+不能解释成 cache miss。
 
 ## 7. 物理执行与 CUDA Graph
 

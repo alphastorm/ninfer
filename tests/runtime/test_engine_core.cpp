@@ -165,9 +165,10 @@ enum class Script : std::uint8_t {
     ControlRejected, // The first token requests target control; its preview violates grammar.
     DeadEnd,         // The first token's constraint mask has no legal token.
     DecodeFailure,   // Decode raises an internal error that fails the Engine.
+    IsolatedMiss,    // The first legal unit never fits although total capacity could hold it.
     Pressure,        // Stall; its unit cannot be reserved while a victim is active.
     VictimHold,      // Stall; its pause stays in flight until cancellation aborts it.
-    VictimPause,     // Stall; its pause publishes Replay state.
+    VictimPause,     // Stall; its pause publishes Replay state, whose restore never fits.
 };
 
 [[nodiscard]] bool stalls(Script script) noexcept {
@@ -490,11 +491,15 @@ public:
     }
 
     [[nodiscard]] BindingReservation start_binding(const Plan& base, rt::LaneId lane,
-                                                   const Source& source, Resume* = nullptr,
+                                                   const Source& source, Resume* resume = nullptr,
                                                    UnitKind = UnitKind::Decode,
                                                    std::uint32_t = 1) {
         require(!operation_ && !lanes_.at(lane.value).active && !source.checkpoint,
                 "scripted binding overlaps native ownership");
+        if (base.script() == Script::IsolatedMiss ||
+            (resume != nullptr && base.script() == Script::VictimPause)) {
+            return {.capacity_possible = true, .shortage = {.kv_page_groups = {1}}};
+        }
         operation_ = Operation{.kind          = ContextKind::Bind,
                                .lane          = lane.value,
                                .script        = base.script(),
@@ -1113,6 +1118,35 @@ void engine_failure() {
     (void)require_error<std::logic_error>(harness.await(waiting), "engine failure queue");
 }
 
+void isolated_admission_refusal() {
+    Harness harness(1);
+    auto request = harness.submit(Script::IsolatedMiss, 1, true);
+    const auto outcome = harness.await(request);
+    require_request_error(outcome, RequestErrorKind::Unavailable, "isolated capacity miss");
+    require_membership(outcome.stats, {}, "isolated capacity miss");
+    require(harness.core().is_available(), "isolated capacity miss failed the Engine");
+    auto next = harness.submit(Script::Complete, 1);
+    require_finished(harness.await(next), FinishReason::OutputLimit,
+                     "request after an isolated capacity miss");
+}
+
+void isolated_restore_refusal() {
+    Harness harness(2);
+    auto pressure = harness.submit(Script::Pressure, 1);
+    auto request  = harness.submit(Script::VictimPause, 1, true);
+    harness.events().await([](const Events::State& state) { return state.paused; },
+                           "the published pause");
+    harness.release_stalls();
+    const auto outcome = harness.await(request);
+    require_request_error(outcome, RequestErrorKind::Unavailable, "isolated restore miss");
+    require_membership(outcome.stats, {}, "isolated restore miss");
+    require(harness.core().is_available(), "isolated restore miss failed the Engine");
+    require_finished(harness.await(pressure), FinishReason::OutputLimit, "pause requester");
+    auto next = harness.submit(Script::Complete, 1);
+    require_finished(harness.await(next), FinishReason::OutputLimit,
+                     "request after an isolated restore miss");
+}
+
 } // namespace
 
 int main() {
@@ -1131,6 +1165,8 @@ int main() {
         Case{"control_rejection", control_rejection},
         Case{"constraint_dead_end", constraint_dead_end},
         Case{"engine_failure", engine_failure},
+        Case{"isolated_admission_refusal", isolated_admission_refusal},
+        Case{"isolated_restore_refusal", isolated_restore_refusal},
     };
     int failures = 0;
     for (const auto& test : cases) {

@@ -17,7 +17,7 @@ ownership contracts are defined in [Engine architecture](../docs/maintainer/engi
 - `ops/` — semantic Op qualification with independent mathematical or state-transition oracles;
   Linear and fused Linear suites are separated by their supported weight/activation paths;
 - `runtime/` — scheduler fairness, cache resource policy, capacity and context-cost calculations,
-  and host-native EngineCore response retirement;
+  and host-native EngineCore response retirement and admission refusal;
 - `cpu/` — topology/ISA, bounded task admission, bound collectives, publication and shutdown;
 - `io/` — bounded direct reads, partial submission, completion, wakeup and borrowed-buffer lifetime;
 - `models/qwen4_exp/` — native bank binding, state/page-group layouts and transfers, plus PLE
@@ -269,7 +269,8 @@ response delivery against a scripted host contract, without a GPU, artifact or C
 GPU-less host, linker-wrapped CUDA runtime entry points present the one device DeviceContext binds.
 It checks that every terminal response (completion, queue expiry, cancellation while waiting,
 materializing, resident, pausing or paused, control-grammar rejection, constraint dead end and
-Engine failure) becomes observable only after runtime statistics stop counting the request.
+Engine failure) becomes observable only after runtime statistics stop counting the request, and
+that an isolated capacity miss, fresh or restoring, refuses only that request with `Unavailable`.
 The first statistics publication after the observed request's planning state is released waits
 until that request's consumer has read statistics, so delivery before publication fails
 deterministically. Run it with `ctest --test-dir build -R '^ninfer_engine_core_test$' --output-on-failure`.
