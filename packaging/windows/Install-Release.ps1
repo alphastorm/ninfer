@@ -280,14 +280,6 @@ function Get-TransactionCleanupTargets([object]$Transaction) {
             [pscustomobject]@{ kind = [string]$descriptor.kind; path = $path }
         }
     }
-    $leasePath = Join-Path $StateRoot 'gpu-owner-lease.json'
-    if ((Test-Path -LiteralPath $leasePath -PathType Leaf) -and
-        -not [string]::IsNullOrWhiteSpace([string]$Transaction.instance_id)) {
-        $lease = Read-JsonFile $leasePath
-        if ([string]$lease.release_id -ceq [string]$Transaction.instance_id) {
-            [pscustomobject]@{ kind = 'gpu_owner_lease'; path = $leasePath }
-        }
-    }
 }
 
 function Remove-InstallTreeStreaming([object]$Target) {
@@ -300,10 +292,9 @@ function Remove-InstallTreeStreaming([object]$Target) {
     $filesDeleted = 0
     $directoriesDeleted = 0
     if (Test-Path -LiteralPath $path -PathType Leaf) {
-        Remove-Item -LiteralPath $path -Force
-        $filesDeleted = 1
+        throw "transaction cleanup target is no longer the directory the transaction created: $path"
     }
-    elseif (Test-Path -LiteralPath $path -PathType Container) {
+    if (Test-Path -LiteralPath $path -PathType Container) {
         $files = @(Get-ChildItem -LiteralPath $path -File -Recurse -Force)
         foreach ($file in $files) {
             if ($filesDeleted -lt 32 -or ($filesDeleted % 128) -eq 0) {
@@ -829,6 +820,29 @@ function Stop-IncumbentForUpgrade(
     Assert-GpuOwnerAttestation $SuccessorController $SuccessorPolicy $SelectedGpu
 }
 
+# The candidate is quiescent once nothing it launched can still run. While the lifecycle state
+# names it active it may be running, and its own controller stops it, restoring the GPU owner and
+# retiring the lease it holds; a stop that fails leaves that state in place, so a repair re-attempts
+# the same stop for the same instance. Whatever the state names, no process may still execute
+# from the candidate's release root. The rollback itself never removes a GPU-owner lease.
+function Assert-TransactionCandidateQuiescent([object]$Transaction, [string]$StatePath, [string]$ControllerPath) {
+    if (-not (Get-TransactionFlag $Transaction 'state_activated')) { return }
+    if ((Test-Path -LiteralPath $StatePath -PathType Leaf) -and
+        [string](Read-JsonFile $StatePath).active_release -ceq [string]$Transaction.instance_id) {
+        & $ControllerPath -Action Stop -StateRoot $StateRoot | Out-Null
+    }
+    $releaseRoot = [string]$Transaction.release_root
+    if (-not [string]::IsNullOrWhiteSpace($releaseRoot)) {
+        $running = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Where-Object {
+                -not [string]::IsNullOrWhiteSpace([string]$_.ExecutablePath) -and
+                (Test-PathWithinRoot ([string]$_.ExecutablePath) $releaseRoot)
+            } | ForEach-Object { [string]$_.ProcessId })
+        if ($running.Count -ne 0) {
+            throw "candidate processes still run from its release root: $([string]::Join(', ', $running))"
+        }
+    }
+}
+
 function Invoke-InstallTransactionRollback(
     [object]$Transaction,
     [string]$StatePath,
@@ -843,66 +857,65 @@ function Invoke-InstallTransactionRollback(
             phase = [string]$Transaction.phase
         })
 
-    if ((Get-TransactionFlag $Transaction 'state_activated') -and
-        (Test-Path -LiteralPath $ControllerPath -PathType Leaf) -and
-        (Test-Path -LiteralPath $StatePath -PathType Leaf)) {
-        try {
-            $activeState = Read-JsonFile $StatePath
-            if ([string]$activeState.active_release -ceq [string]$Transaction.instance_id) {
-                & $ControllerPath -Action Stop -StateRoot $StateRoot | Out-Null
-            }
+    # Nothing is restored, deleted, or restarted until the candidate is proven quiescent: one that
+    # may still run keeps the lifecycle state, controller, trees, and lease that stop it.
+    try { Assert-TransactionCandidateQuiescent $Transaction $StatePath $ControllerPath }
+    catch { $failures.Add("candidate quiescence: $(Get-BoundedDiagnostic $_.Exception.Message)") }
+    if ($failures.Count -eq 0) {
+        if (Get-TransactionFlag $Transaction 'state_activated') {
+            try { Restore-PersistedFileSnapshot $StatePath $Transaction.snapshots.state }
+            catch { $failures.Add("state restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
         }
-        catch { $failures.Add("candidate stop: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-    }
-    if (Get-TransactionFlag $Transaction 'state_activated') {
-        try { Restore-PersistedFileSnapshot $StatePath $Transaction.snapshots.state }
-        catch { $failures.Add("state restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-    }
-    if (Get-TransactionFlag $Transaction 'controller_touched') {
-        try { Restore-PersistedFileSnapshot $ControllerPath $Transaction.snapshots.controller }
-        catch { $failures.Add("controller restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-    }
-    if (Get-TransactionFlag $Transaction 'task_touched') {
-        try {
-            $taskXml = if ([bool]$Transaction.task_existed) {
-                Get-Content -LiteralPath ([string]$Transaction.task_xml_path) -Raw -Encoding UTF8
-            }
-            else {
-                $null
-            }
-            Restore-ReleaseTask ([string]$Transaction.task_name) ([bool]$Transaction.task_existed) $taskXml
+        if (Get-TransactionFlag $Transaction 'controller_touched') {
+            try { Restore-PersistedFileSnapshot $ControllerPath $Transaction.snapshots.controller }
+            catch { $failures.Add("controller restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
         }
-        catch { $failures.Add("task restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-    }
-    if (Get-TransactionFlag $Transaction 'owner_controller_touched') {
-        try { Restore-PersistedFileSnapshot $OwnerControllerPath $Transaction.snapshots.owner_controller }
-        catch { $failures.Add("GPU-owner controller restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-    }
-    if (Get-TransactionFlag $Transaction 'state_helpers_touched') {
-        try { Restore-PersistedFileSnapshot $stateHelperPath $Transaction.snapshots.state_helper }
-        catch { $failures.Add("state helper restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-        try { Restore-PersistedFileSnapshot $ownerStateHelperPath $Transaction.snapshots.owner_state_helper }
-        catch { $failures.Add("GPU-owner state helper restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-    }
-
-    $cleanupTargets = @(Get-TransactionCleanupTargets $Transaction)
-    Write-InstallEvent 'cleanup_inventory' 'Enumerated interrupted install cleanup targets' ([ordered]@{
-            operation_id = [string]$Transaction.operation_id
-            target_count = $cleanupTargets.Count
-            targets = @($cleanupTargets | ForEach-Object { [string]$_.kind })
-        })
-    foreach ($target in $cleanupTargets) {
-        try {
-            $cleanupActions.Add((Remove-InstallTreeStreaming $target))
+        if (Get-TransactionFlag $Transaction 'task_touched') {
+            try {
+                $taskXml = if ([bool]$Transaction.task_existed) {
+                    Get-Content -LiteralPath ([string]$Transaction.task_xml_path) -Raw -Encoding UTF8
+                }
+                else {
+                    $null
+                }
+                Restore-ReleaseTask ([string]$Transaction.task_name) ([bool]$Transaction.task_existed) $taskXml
+            }
+            catch { $failures.Add("task restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
         }
-        catch {
-            $failures.Add("$([string]$target.kind) cleanup: $(Get-BoundedDiagnostic $_.Exception.Message)")
+        if (Get-TransactionFlag $Transaction 'owner_controller_touched') {
+            try { Restore-PersistedFileSnapshot $OwnerControllerPath $Transaction.snapshots.owner_controller }
+            catch { $failures.Add("GPU-owner controller restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
+        }
+        if (Get-TransactionFlag $Transaction 'state_helpers_touched') {
+            try { Restore-PersistedFileSnapshot $stateHelperPath $Transaction.snapshots.state_helper }
+            catch { $failures.Add("state helper restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
+            try { Restore-PersistedFileSnapshot $ownerStateHelperPath $Transaction.snapshots.owner_state_helper }
+            catch { $failures.Add("GPU-owner state helper restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
         }
     }
 
-    if (Get-TransactionFlag $Transaction 'incumbent_touched') {
-        try { & $ControllerPath -Action Start -StateRoot $StateRoot | Out-Null }
-        catch { $failures.Add("incumbent restart: $(Get-BoundedDiagnostic $_.Exception.Message)") }
+    # The candidate's trees are deleted, and the incumbent restarted, only over the restored
+    # lifecycle: against a state that still names the candidate, the restart would launch it.
+    if ($failures.Count -eq 0) {
+        $cleanupTargets = @(Get-TransactionCleanupTargets $Transaction)
+        Write-InstallEvent 'cleanup_inventory' 'Enumerated interrupted install cleanup targets' ([ordered]@{
+                operation_id = [string]$Transaction.operation_id
+                target_count = $cleanupTargets.Count
+                targets = @($cleanupTargets | ForEach-Object { [string]$_.kind })
+            })
+        foreach ($target in $cleanupTargets) {
+            try {
+                $cleanupActions.Add((Remove-InstallTreeStreaming $target))
+            }
+            catch {
+                $failures.Add("$([string]$target.kind) cleanup: $(Get-BoundedDiagnostic $_.Exception.Message)")
+            }
+        }
+
+        if (Get-TransactionFlag $Transaction 'incumbent_touched') {
+            try { & $ControllerPath -Action Start -StateRoot $StateRoot | Out-Null }
+            catch { $failures.Add("incumbent restart: $(Get-BoundedDiagnostic $_.Exception.Message)") }
+        }
     }
 
     $cleanupArray = @($cleanupActions | ForEach-Object { $_ })

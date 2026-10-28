@@ -273,6 +273,108 @@ if($null -eq $observed.handoff_refusal){
 $observed|ConvertTo-Json -Compress -Depth 4
 """
 
+CANDIDATE_CONTROLLER_STUB = """param([string]$Action, [string]$StateRoot)
+Add-Content -LiteralPath (Join-Path $StateRoot 'controller.log') -Value "candidate:$Action"
+if ($Action -ceq 'Stop') {
+    if (Test-Path -LiteralPath (Join-Path $StateRoot 'candidate-stop.fault')) { throw 'owned server process did not stop' }
+    # A managed stop restores the GPU owner and retires the lease the candidate holds.
+    Remove-Item -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json') -Force -ErrorAction SilentlyContinue
+}
+"""
+INCUMBENT_CONTROLLER_STUB = """param([string]$Action, [string]$StateRoot)
+Add-Content -LiteralPath (Join-Path $StateRoot 'controller.log') -Value "incumbent:$Action"
+"""
+
+
+def interrupted_upgrade(directory: Path) -> SimpleNamespace:
+    """An upgrade that activated and started its candidate, as its journal and files record it:
+    every replaced lifecycle file snapshotted, the candidate active and holding the GPU-owner
+    lease, and the incumbent's trees beside the candidate's. Controllers log what they are asked."""
+    root = directory / "qwen38-3090-native"
+    operation = "5" * 32
+    candidate = "qwen38-3090-native-v0.7.0-beta.3-" + "c" * 12
+    incumbent = "qwen38-3090-native-v0.7.0-beta.2-" + "b" * 12
+    transaction_root = root / "receipts" / "install-transactions" / operation
+    snapshots = transaction_root / "snapshots"
+    snapshots.mkdir(parents=True)
+    for kind in ("releases", "secrets", "cache"):
+        for release in (candidate, incumbent):
+            (root / kind / release).mkdir(parents=True)
+            (root / kind / release / "content.bin").write_bytes(release.encode())
+    stage = root / f"staging-{operation}"
+    (stage / "payload").mkdir(parents=True)
+
+    def lifecycle(active: str, previous: str | None) -> str:
+        return json.dumps({"artifact_type": "ninfer_windows_lifecycle_state", "schema_version": 4,
+                           "task_name": "NInfer-Qwen38-3090-Native", "prepared_release": None,
+                           "active_release": active, "previous_release": previous})
+
+    (root / "state.json").write_text(lifecycle(candidate, incumbent), encoding="utf-8")
+    (snapshots / "state.bin").write_text(lifecycle(incumbent, None), encoding="utf-8")
+    (root / "Control-Release.ps1").write_text(CANDIDATE_CONTROLLER_STUB, encoding="utf-8")
+    (snapshots / "controller.bin").write_text(INCUMBENT_CONTROLLER_STUB, encoding="utf-8")
+    for path, name in ((root / "gpu-owner" / "Control-GpuOwner.ps1", "owner-controller"),
+                       (root / "Protect-StateRoot.ps1", "state-helper"),
+                       (root / "gpu-owner" / "Protect-StateRoot.ps1", "owner-state-helper")):
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(f"# candidate {name}\n", encoding="utf-8")
+        (snapshots / f"{name}.bin").write_text(f"# incumbent {name}\n", encoding="utf-8")
+    (snapshots / "scheduled-task.xml").write_text("<Task>incumbent</Task>", encoding="utf-8")
+    (root / "gpu-owner-lease.json").write_text(json.dumps({
+        "artifact_type": "ninfer_gpu_owner_lease", "schema_version": 1, "release_id": candidate,
+        "controller_sha256": "c" * 64, "prior_paused": False, "phase": "released",
+    }), encoding="utf-8")
+    journal = transaction_root / "journal.json"
+    journal.write_text(json.dumps({
+        "artifact_type": "ninfer_windows_install_transaction", "schema_version": 1,
+        "status": "in_progress", "operation_id": operation, "phase": "candidate_activated",
+        "started_utc": "2026-10-28T00:00:00Z", "updated_utc": "2026-10-28T00:00:00Z",
+        "journal_path": str(journal), "state_root": str(root), "stage_path": str(stage),
+        "instance_id": candidate, "release_root": str(root / "releases" / candidate),
+        "secret_directory": str(root / "secrets" / candidate),
+        "cache_root": str(root / "cache" / candidate),
+        "task_name": "NInfer-Qwen38-3090-Native", "task_existed": True, "task_was_running": True,
+        "task_xml_path": str(snapshots / "scheduled-task.xml"),
+        "reentry_policy": "repair-required-before-install",
+        "snapshots": {
+            field: {"exists": True, "backup_path": str(snapshots / f"{name}.bin")}
+            for field, name in (("state", "state"), ("controller", "controller"),
+                                ("owner_controller", "owner-controller"), ("state_helper", "state-helper"),
+                                ("owner_state_helper", "owner-state-helper"))
+        },
+        "flags": {flag: True for flag in ("incumbent_touched", "owner_controller_touched",
+                                          "state_helpers_touched", "controller_touched",
+                                          "state_activated", "task_touched")},
+    }), encoding="utf-8")
+    return SimpleNamespace(
+        root=root, journal=journal, snapshots=snapshots, candidate=candidate, incumbent=incumbent,
+        candidate_targets=[root / "releases" / candidate, root / "secrets" / candidate,
+                           root / "cache" / candidate, stage],
+        incumbent_trees=[root / kind / incumbent for kind in ("releases", "secrets", "cache")],
+    )
+
+
+# One rollback or repair attempt over a journal, as the installer runs it. Progress lines and the
+# Windows task and process APIs are stand-ins: task registration is logged, and Win32_Process
+# reports exactly the images listed in $LiveImages.
+ROLLBACK_ATTEMPT = """Set-StrictMode -Version Latest
+$statePath=Join-Path $StateRoot 'state.json'
+$controllerPath=Join-Path $StateRoot 'Control-Release.ps1'
+$ownerControllerPath=Join-Path (Join-Path $StateRoot 'gpu-owner') 'Control-GpuOwner.ps1'
+$stateHelperPath=Join-Path $StateRoot 'Protect-StateRoot.ps1'
+$ownerStateHelperPath=Join-Path (Join-Path $StateRoot 'gpu-owner') 'Protect-StateRoot.ps1'
+$controllerLog=Join-Path $StateRoot 'controller.log'
+function Write-InstallEvent { }
+function Register-ScheduledTask { Add-Content -LiteralPath $controllerLog -Value 'task:register' }
+function Unregister-ScheduledTask { Add-Content -LiteralPath $controllerLog -Value 'task:unregister' }
+function Get-CimInstance { foreach($image in @($LiveImages -split ';'|Where-Object{$_})){[pscustomobject]@{ProcessId=4242;ExecutablePath=$image}} }
+$transaction=Get-Content -Raw -LiteralPath $Journal|ConvertFrom-Json
+$outcome=[ordered]@{completed=$true;failure=$null}
+try{Invoke-InstallTransactionRollback $transaction $statePath $controllerPath $ownerControllerPath $Mode|Out-Null}
+catch{$outcome.completed=$false;$outcome.failure=$_.Exception.Message}
+$outcome|ConvertTo-Json -Compress
+"""
+
 class MultiGpuHostTests(unittest.TestCase):
     def test_no_unindexed_gpu_queries_or_sets(self) -> None:
         sources = {path: (ROOT / path).read_text(encoding="utf-8") for path in GPU_SCAN_FILES}
@@ -2162,6 +2264,100 @@ foreach($suffix in @('missing','inspection')){{
                     self.assertEqual(observed["successor"], {
                         "power_limit_w": successor_cap, "owner_lease_cap_w": successor_cap,
                         "release_lease": False})
+
+    def rollback_attempt(self, upgrade: SimpleNamespace, mode: str, live_images: tuple[Path, ...] = ()) -> dict:
+        return self.invoke(
+            ps_assignments(StateRoot=upgrade.root, Journal=upgrade.journal, Mode=mode,
+                           LiveImages=";".join(str(image) for image in live_images))
+            + ps_definitions(WINDOWS / "Install-Release.ps1") + ROLLBACK_ATTEMPT)
+
+    @staticmethod
+    def upgrade_observation(upgrade: SimpleNamespace) -> dict:
+        log = upgrade.root / "controller.log"
+        controller = (upgrade.root / "Control-Release.ps1").read_text(encoding="utf-8")
+        return {
+            "status": json.loads(upgrade.journal.read_text(encoding="utf-8"))["status"],
+            "active_release": json.loads((upgrade.root / "state.json").read_text(encoding="utf-8"))["active_release"],
+            "controller": "candidate" if controller == CANDIDATE_CONTROLLER_STUB else "incumbent",
+            "candidate_targets": [path.exists() for path in upgrade.candidate_targets],
+            "incumbent_trees": all(path.exists() for path in upgrade.incumbent_trees),
+            "candidate_lease": (upgrade.root / "gpu-owner-lease.json").exists(),
+            "log": log.read_text(encoding="utf-8").split() if log.exists() else [],
+        }
+
+    def test_rollback_keeps_a_candidate_that_did_not_stop_until_repair_stops_it(self) -> None:
+        """alphastorm/omp-ninfer#89 L3: a candidate whose Stop failed may still run, so the rollback
+        restores, deletes, and releases nothing it could be using and does not restart the
+        incumbent beside it; the lifecycle keeps naming the candidate, and the repair re-attempts
+        that Stop for the same instance before completing the rollback."""
+        with tempfile.TemporaryDirectory() as directory:
+            upgrade = interrupted_upgrade(Path(directory))
+            fault = upgrade.root / "candidate-stop.fault"
+            fault.touch()
+            self.assertFalse(self.rollback_attempt(upgrade, "rollback")["completed"])
+            self.assertEqual(self.upgrade_observation(upgrade), {
+                "status": "repair_required", "active_release": upgrade.candidate, "controller": "candidate",
+                "candidate_targets": [True] * 4, "incumbent_trees": True, "candidate_lease": True,
+                "log": ["candidate:Stop"],
+            })
+            fault.unlink()
+            self.assertTrue(self.rollback_attempt(upgrade, "repair")["completed"])
+            self.assertEqual(self.upgrade_observation(upgrade), {
+                "status": "repaired", "active_release": upgrade.incumbent, "controller": "incumbent",
+                "candidate_targets": [False] * 4, "incumbent_trees": True, "candidate_lease": False,
+                "log": ["candidate:Stop", "candidate:Stop", "task:register", "incumbent:Start"],
+            })
+
+    def test_rollback_withholds_cleanup_until_the_lifecycle_is_restored(self) -> None:
+        """alphastorm/omp-ninfer#89 L3: the candidate stopped, but its lifecycle state could not be
+        restored, so the state still names it. Its trees stay and the incumbent is not started
+        against that state; the repair stops the named candidate again, restores, then cleans."""
+        with tempfile.TemporaryDirectory() as directory:
+            upgrade = interrupted_upgrade(Path(directory))
+            snapshot = upgrade.snapshots / "state.bin"
+            withheld = snapshot.with_name("state.bin.unavailable")
+            snapshot.rename(withheld)
+            self.assertFalse(self.rollback_attempt(upgrade, "rollback")["completed"])
+            self.assertEqual(self.upgrade_observation(upgrade), {
+                "status": "repair_required", "active_release": upgrade.candidate, "controller": "incumbent",
+                "candidate_targets": [True] * 4, "incumbent_trees": True, "candidate_lease": False,
+                "log": ["candidate:Stop", "task:register"],
+            })
+            withheld.rename(snapshot)
+            self.assertTrue(self.rollback_attempt(upgrade, "repair")["completed"])
+            self.assertEqual(self.upgrade_observation(upgrade), {
+                "status": "repaired", "active_release": upgrade.incumbent, "controller": "incumbent",
+                "candidate_targets": [False] * 4, "incumbent_trees": True, "candidate_lease": False,
+                "log": ["candidate:Stop", "task:register", "incumbent:Stop", "task:register", "incumbent:Start"],
+            })
+
+    def test_repair_keeps_every_tree_while_a_candidate_process_still_runs(self) -> None:
+        """A repair inherits what an earlier rollback left. The predecessor rollback restored the
+        incumbent's lifecycle and deleted the candidate's lease even when the candidate did not
+        stop, so the state no longer names a candidate that may still run. A process executing
+        from the candidate's release root keeps every tree, and the incumbent stays down."""
+        with tempfile.TemporaryDirectory() as directory:
+            upgrade = interrupted_upgrade(Path(directory))
+            shutil.copyfile(upgrade.snapshots / "state.bin", upgrade.root / "state.json")
+            shutil.copyfile(upgrade.snapshots / "controller.bin", upgrade.root / "Control-Release.ps1")
+            (upgrade.root / "gpu-owner-lease.json").unlink()
+            journal = json.loads(upgrade.journal.read_text(encoding="utf-8"))
+            journal.update(status="repair_required", phase="rollback_incomplete",
+                           diagnostics=["candidate stop: owned server process did not stop"])
+            upgrade.journal.write_text(json.dumps(journal), encoding="utf-8")
+            server = upgrade.root / "releases" / upgrade.candidate / "bin" / "ninfer-serve.exe"
+            self.assertFalse(self.rollback_attempt(upgrade, "repair", live_images=(server,))["completed"])
+            self.assertEqual(self.upgrade_observation(upgrade), {
+                "status": "repair_required", "active_release": upgrade.incumbent, "controller": "incumbent",
+                "candidate_targets": [True] * 4, "incumbent_trees": True, "candidate_lease": False,
+                "log": [],
+            })
+            self.assertTrue(self.rollback_attempt(upgrade, "repair")["completed"])
+            self.assertEqual(self.upgrade_observation(upgrade), {
+                "status": "repaired", "active_release": upgrade.incumbent, "controller": "incumbent",
+                "candidate_targets": [False] * 4, "incumbent_trees": True, "candidate_lease": False,
+                "log": ["task:register", "incumbent:Start"],
+            })
 
 
 if __name__ == "__main__":
