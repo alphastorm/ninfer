@@ -641,6 +641,8 @@ removal uses its anchored no-follow traversal; no raw filesystem removal may byp
 that boundary. A concurrent symlink/reparse-point substitution must never redirect
 removal outside the intended tree. All renames, including generation, quarantine
 and current-pointer moves, use `io::replace_path` under the same confinement policy.
+`replace_path` reports when it attempts the rename system call; a failure before that
+attempt changed neither name.
 This lead-approved extension adds no dependency and does not change which generations
 the store is authorized to reclaim. PortableCore owns the primitive; DurableStore
 owns caller migration and the symlink-swap regression.
@@ -662,9 +664,13 @@ Publication order:
    platform policy, then acknowledge. Old generations remain until safe quota cleanup.
 5. Cleanup after acknowledged publication is best effort; never report a committed
    save as failed solely because later garbage collection failed. A failure before
-   publication preserves the prior current. A failure after pointer replace but before
-   durability acknowledgement reports unavailable/unacknowledged; reconciliation reads
-   actual current and does not claim rollback that did not happen.
+   publication preserves the prior current. Until `io::replace_path` reports its
+   current-rename attempt, current is provably untouched, so the failed save also
+   removes its temporary pointer and its renamed generation rather than leaving a
+   stale generation for quota cleanup. From that attempt on, including a failed rename
+   call or a Windows post-rename parent flush, the generation is retained and the save
+   stays unacknowledged with its classified reason; reconciliation reads actual current
+   and does not claim rollback that did not happen.
 
 **POSIX:** fsync each file, same-filesystem rename for atomic replace, fsync relevant
 directories. Acknowledgement `dir_sync: "fsync"`.

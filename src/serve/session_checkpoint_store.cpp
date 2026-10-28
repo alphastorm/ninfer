@@ -2060,6 +2060,20 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
     std::unique_lock lock(impl_->mutex);
     const std::filesystem::path staging   = generations / (".staging-" + generation);
     const std::filesystem::path published = generations / generation;
+    const std::filesystem::path current_staging = session / (".current-" + generation);
+    // Only the current-pointer rename makes this generation visible. Every failure exit runs
+    // this cleanup under the catalog lock. Until replace_path reports that rename attempt,
+    // current is provably untouched, so the renamed generation and its pointer file go too.
+    // From the attempt on (Windows can fail its post-rename parent flush) the generation is
+    // retained for load() reconciliation. A failed generation rename does not prove that the
+    // destination belongs to this save, so that destination is never removed.
+    bool generation_renamed     = false;
+    bool pointer_may_be_visible = false;
+    const auto discard_unpublished = [&]() noexcept {
+        (void)remove_best_effort(staging);
+        (void)remove_best_effort(current_staging);
+        if (generation_renamed && !pointer_may_be_visible) { (void)remove_best_effort(published); }
+    };
 
     try {
         io::create_directories(generations);
@@ -2094,7 +2108,7 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         if (exported.state != runtime::DurableExportState::Exported ||
             exported.reason != runtime::DurableReason::None ||
             (!replay_only && !valid_checkpoint_stats(exported.stats))) {
-            (void)remove_best_effort(staging);
+            discard_unpublished();
             if (skip != nullptr) {
                 if (exported.state == runtime::DurableExportState::Exported) {
                     skip->export_state = runtime::DurableExportState::Refused;
@@ -2198,7 +2212,7 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         if (total_bytes > options_.disk_quota_bytes ||
             !enforce_disk_quota_locked(options_, *impl_, staging, session, previous_bytes,
                                       total_bytes)) {
-            (void)remove_best_effort(staging);
+            discard_unpublished();
             if (skip != nullptr) {
                 skip->export_state = runtime::DurableExportState::Refused;
                 skip->reason = runtime::SessionCheckpointSkipReason::QuotaExceeded;
@@ -2208,11 +2222,10 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         }
 
         replace_path(staging, published);
+        generation_renamed = true;
         sync_directory(generations);
-        const std::filesystem::path current_staging = session / (".current-" + generation);
         write_synced(current_staging, generation + "\n");
         bool committed = false;
-        bool pointer_may_be_visible = false;
         bool invoked = false;
         bool quota_refused = false;
         runtime::DurableReason publication_failure = runtime::DurableReason::None;
@@ -2227,10 +2240,9 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
                     quota_refused = true;
                     return false;
                 }
-                // A post-rename flush can fail. Retain any possibly visible generation
-                // for reconciliation, independently of the classified failure reason.
-                pointer_may_be_visible = true;
-                replace_path(current_staging, session / "current");
+                // replace_path marks its rename attempt: an earlier failure discards this
+                // generation, while a failure from the attempt on retains it.
+                replace_path(current_staging, session / "current", &pointer_may_be_visible);
                 sync_directory(session);
                 // First save also publishes the session directory itself.
                 sync_directory(options_.root / "sessions");
@@ -2257,8 +2269,7 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         lock.lock();
         if (publication.state != runtime::DurableExportState::Exported ||
             publication.reason != runtime::DurableReason::None || !committed) {
-            (void)remove_best_effort(current_staging);
-            if (!pointer_may_be_visible) { (void)remove_best_effort(published); }
+            discard_unpublished();
             if (skip != nullptr) {
                 skip->export_state = publication.state == runtime::DurableExportState::Stale
                                          ? runtime::DurableExportState::Stale
@@ -2283,7 +2294,7 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
     } catch (...) {
         const auto reason = current_checkpoint_failure_reason();
         if (!lock.owns_lock()) { lock.lock(); }
-        (void)remove_best_effort(staging);
+        discard_unpublished();
         if (skip != nullptr && (reason == runtime::DurableReason::Capacity ||
                                 skip->durable_reason == runtime::DurableReason::None)) {
             skip->export_state = runtime::DurableExportState::Refused;

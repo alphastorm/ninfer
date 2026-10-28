@@ -370,6 +370,15 @@ std::string read_file_bytes(const std::filesystem::path& path) {
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
 }
 
+std::vector<std::string> entry_names(const std::filesystem::path& directory) {
+    std::vector<std::string> names;
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        names.push_back(entry.path().filename().string());
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
 [[nodiscard]] std::filesystem::path
 stored_generation_root(const std::filesystem::path& root, const OpenAIResponseStoreSnapshot& responses,
                        const std::string& generation) {
@@ -2132,6 +2141,79 @@ int test_disk_full_capacity_preserves_generation() {
 }
 #endif
 
+// omp-ninfer#89 L8: only the current-pointer rename makes a generation visible. A failure
+// replace_path reports before attempting that rename leaves current untouched, so the save
+// discards the attempted generation and its pointer file at once rather than leaving a stale
+// generation for quota pressure. Once the rename was attempted the generation is retained
+// for reconciliation.
+int test_pointer_rename_attempt_decides_generation_retention() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .read_queue = std::make_shared<TestReadQueue>()});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) { return DurableExportResult{}; }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto baseline = store.save(responses, fingerprint(), exporter, publish_fixture);
+    if (!baseline) { return check(false, "pointer-rename baseline did not publish"); }
+    const auto session = temporary.path / "sessions" / responses.client_session_sha256;
+    runtime::CheckpointControl control;
+    control.session(responses.client_session_sha256)->tag = responses.latest_response_id;
+    // The real epoch gate turns a publication exception into Refused/IoUnavailable.
+    const auto gate = [&](std::function<void()> before_commit) {
+        return [&, before_commit](runtime::DurableSessionEpoch epoch,
+                                  const std::function<bool()>& commit) {
+            before_commit();
+            return control.publish(responses.client_session_sha256, responses.latest_response_id,
+                                   epoch, commit);
+        };
+    };
+    int failures = 0;
+
+    // The staged pointer vanishes, so replace_path refuses its source before any rename.
+    runtime::SessionCheckpointSkipDetail refused_skip;
+    const auto refused = store.save(responses, fingerprint(), exporter, gate([&] {
+        for (const auto& name : entry_names(session)) {
+            if (name.starts_with(".current-")) { std::filesystem::remove(session / name); }
+        }
+    }), &refused_skip);
+    failures += check(!refused && refused_skip.durable_reason == runtime::DurableReason::IoUnavailable,
+                      "pre-rename publication failure was acknowledged or lost its reason");
+    failures += check(entry_names(session / "generations") ==
+                              std::vector<std::string>{baseline->generation} &&
+                          entry_names(session) == std::vector<std::string>{"current", "generations"},
+                      "pre-rename publication failure retained the unpublished generation");
+    {
+        const auto loaded = store.load(responses.client_session_sha256, fingerprint());
+        failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+                              loaded.checkpoint &&
+                              loaded.checkpoint->generation == baseline->generation,
+                          "pre-rename publication failure changed the published generation");
+    }
+
+    // An occupied directory named current makes the attempted rename itself fail.
+    std::filesystem::remove(session / "current");
+    std::filesystem::create_directories(session / "current" / "occupied");
+    const auto before = entry_names(session / "generations");
+    runtime::SessionCheckpointSkipDetail attempted_skip;
+    const auto attempted = store.save(responses, fingerprint(), exporter, gate([] {}),
+                                      &attempted_skip);
+    const auto retained = entry_names(session / "generations");
+    failures += check(!attempted &&
+                          attempted_skip.durable_reason == runtime::DurableReason::IoUnavailable &&
+                          retained.size() == before.size() + 1 &&
+                          std::includes(retained.begin(), retained.end(), before.begin(),
+                                        before.end()) &&
+                          entry_names(session) == std::vector<std::string>{"current", "generations"},
+                      "attempted current rename did not retain its possibly visible generation");
+    return failures;
+}
+
 
 int test_hmac_sha256_rfc4231_vectors() {
     int failures = 0;
@@ -2997,6 +3079,7 @@ int main(int argc, char** argv) {
 #if defined(_WIN32) || defined(__linux__)
     failures += test_disk_full_capacity_preserves_generation();
 #endif
+    failures += test_pointer_rename_attempt_decides_generation_retention();
     failures += test_hmac_sha256_rfc4231_vectors();
     failures += test_manifest_origin_authentication();
     failures += test_manifest_origin_compatibility_window();

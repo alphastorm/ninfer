@@ -33,7 +33,11 @@ void flush_file(std::FILE* file);
 // directory payloads must already be flushed by the caller. Parent pins share READ/WRITE but
 // deny DELETE; every pinned identity and reparse attribute is rechecked before the rename.
 // The native policy requires NTFS on Windows 10 1709 or newer.
-void replace_path(const std::filesystem::path& source, const std::filesystem::path& destination);
+// A supplied rename_attempted becomes true immediately before the rename system call and is
+// never cleared. A failure that leaves it false changed neither name; once it is true the
+// destination may name the source even though the call throws.
+void replace_path(const std::filesystem::path& source, const std::filesystem::path& destination,
+                  bool* rename_attempted = nullptr);
 // Removes a regular file, final link, or complete directory tree through anchored handles.
 // Ancestor links are rejected; final links are unlinked, never traversed. Returns false if
 // missing, otherwise true after deletion (and POSIX parent fsync). Other failures throw.

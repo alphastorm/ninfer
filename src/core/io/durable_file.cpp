@@ -545,7 +545,8 @@ std::string_view directory_sync_mode() noexcept {
 #endif
 }
 
-void replace_path(const std::filesystem::path& source, const std::filesystem::path& destination) {
+void replace_path(const std::filesystem::path& source, const std::filesystem::path& destination,
+                  bool* rename_attempted) {
     const auto from = checked_path(source), to = checked_path(destination);
 #ifdef _WIN32
     if (!Parent::same_component(from.root_name(), to.root_name()))
@@ -581,6 +582,7 @@ void replace_path(const std::filesystem::path& source, const std::filesystem::pa
     IO_STATUS_BLOCK completion{};
     from_parent.recheck(false); // The destination walk owns every shared-prefix pin.
     to_parent.recheck();
+    if (rename_attempted) *rename_attempted = true;
     const auto status = api.set(file.value, &completion, rename, static_cast<ULONG>(buffer.size()),
                                 static_cast<FILE_INFORMATION_CLASS>(65)); // FileRenameInformationEx.
     if (status < 0) fail_windows("replace anchored durable path", api.error(status));
@@ -589,6 +591,7 @@ void replace_path(const std::filesystem::path& source, const std::filesystem::pa
     Parent from_parent(from.parent_path(), false), to_parent(to.parent_path(), false);
     reject_symlink(from_parent.directory.value, from.filename(), false);
     reject_symlink(to_parent.directory.value, to.filename(), true);
+    if (rename_attempted) *rename_attempted = true;
     if (::renameat(from_parent.directory.value, from.filename().c_str(),
                     to_parent.directory.value, to.filename().c_str()))
         fail_errno("replace durable path");
