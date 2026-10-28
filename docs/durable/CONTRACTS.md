@@ -752,9 +752,15 @@ permitted only through the same confined/no-follow traversal and complete delive
 hash accounting; changed bytes fail final verification before import commit. Hashing
 a separate reopened descriptor instead of delivered bytes is forbidden.
 Optional io_uring accelerates reads without changing verification, EOF/error semantics
-or lifetime. The store rejects a missing or unavailable selected native read queue
-as `Unavailable/IoUnavailable`: retryable, no quarantine and no fallback. It does
-not silently substitute a buffered/direct reader or skip authentication.
+or lifetime. As in the DirectStorage queue, its anchored payload open and root creation
+propagate the `io::` primitive's `std::system_error`. The Linux queue's and
+`IoUringCheckpointBackend`'s own failed system calls and I/O completions also throw
+`std::system_error` with the errno, so `native_payload_read` diagnostics carry it.
+Short transfers, contract violations and a backend poisoned by uncertain publication
+remain `CheckpointContractError`. The store rejects a missing or unavailable selected
+native read queue as `Unavailable/IoUnavailable`: retryable, no quarantine and no
+fallback. It does not silently substitute a buffered/direct reader or skip
+authentication.
 No new dependency is authorized by this contract.
 
 ## K7 — result, error and receipt taxonomy

@@ -98,9 +98,9 @@ constexpr long kPlan9SuperMagic   = 0x01021997;
 constexpr long kFuseSuperMagic    = 0x65735546;
 constexpr long kOverlaySuperMagic = 0x794c7630;
 
+// errno failures carry their code, as io:: failures do, for checkpoint I/O classification.
 [[noreturn]] void throw_system_error(std::string_view operation, int error) {
-    throw CheckpointContractError(std::string(operation) + ": " +
-                                  std::error_code(error, std::generic_category()).message());
+    throw std::system_error(error, std::generic_category(), std::string(operation));
 }
 
 [[noreturn]] void throw_last_error(std::string_view operation) {
@@ -361,15 +361,16 @@ public:
 
     void fsync(int fd, std::string_view context) {
 #if defined(NINFER_IO_URING_TESTING)
+        // Injected faults fail as a completed fsync reporting EIO would.
         if (context == "io_uring fsync checkpoint publication marker" &&
             fail_publication_marker_fsync.exchange(false, std::memory_order_acq_rel)) {
-            throw CheckpointContractError("injected checkpoint publication marker failure");
+            throw_system_error(context, EIO);
         }
         if ((context == "io_uring fsync checkpoint manifest publication" ||
              context == "io_uring fsync checkpoint manifest rollback") &&
             fail_publication_fsyncs.load(std::memory_order_acquire) > 0) {
             fail_publication_fsyncs.fetch_sub(1, std::memory_order_acq_rel);
-            throw CheckpointContractError("injected checkpoint publication fsync failure");
+            throw_system_error(context, EIO);
         }
 #endif
         const std::int32_t result = execute_one(RingRequest{IORING_OP_FSYNC, fd, 0, nullptr, 0, 0});
@@ -1820,13 +1821,10 @@ public:
         // K6 resolves every parent using anchored no-follow directory handles.
         // Duplicating the verified descriptor pins these exact bytes for this batch;
         // enabling O_DIRECT does not reopen the pathname or change the reader contract.
+        // io::open_binary_read's std::system_error carries the OS code to the caller unchanged.
         const auto close_file = [](std::FILE* file) { std::fclose(file); };
-        std::unique_ptr<std::FILE, decltype(close_file)> stream(nullptr, close_file);
-        try {
-            stream.reset(io::open_binary_read(path));
-        } catch (const std::exception& error) {
-            throw CheckpointContractError(std::string("open checkpoint payload: ") + error.what());
-        }
+        std::unique_ptr<std::FILE, decltype(close_file)> stream(io::open_binary_read(path),
+                                                                close_file);
         UniqueFd file(::fcntl(::fileno(stream.get()), F_DUPFD_CLOEXEC, 0));
         if (!file) { throw_last_error("open io_uring checkpoint payload"); }
         const int flags = ::fcntl(file.get(), F_GETFL);
@@ -1997,12 +1995,7 @@ probe_io_uring_checkpoint_capability(const std::filesystem::path& root) noexcept
 
 std::shared_ptr<ContinuationCheckpointReadQueue>
 make_io_uring_checkpoint_read_queue(const std::filesystem::path& root) {
-    try {
-        io::create_directories(root);
-    } catch (const std::exception& error) {
-        throw CheckpointContractError(std::string("create io_uring checkpoint root: ") +
-                                      error.what());
-    }
+    io::create_directories(root);
     return std::make_shared<IoUringContinuationReadQueue>(root);
 }
 
