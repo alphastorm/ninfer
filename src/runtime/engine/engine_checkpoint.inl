@@ -52,6 +52,8 @@
             const auto state = checkpoints_.session(digest);
             std::lock_guard lock(state->mutex);
             state->stored(std::string(tag), order);
+            // Also clears an older owner that completed after a newer acknowledgement.
+            resources_.supersede_durable(digest, state->committed_order);
         });
         request_admission_check();
         queue_cv_.notify_all();

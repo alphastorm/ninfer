@@ -116,6 +116,19 @@ public:
         return order;
     }
 
+    // An acknowledged or imported endpoint at `order` supersedes every older owner named for the
+    // same session. Their tags can never again be exported or proven recoverable, so they return
+    // to ordinary cache policy instead of naming victims whose save or recovery proof never
+    // settles.
+    void supersede_durable(std::string_view digest, std::uint64_t order) noexcept {
+        for (auto& owner : owners_) {
+            if (owner.durable_session == digest && owner.publication_order < order) {
+                owner.durable_session.clear();
+                owner.checkpoint_tag.clear();
+            }
+        }
+    }
+
     [[nodiscard]] std::vector<Handle> session_points(
         const Program& program, std::string_view digest, std::string_view tag,
         bool& pending) const {
@@ -1039,6 +1052,8 @@ public:
                 prior.session.reset();
             }
         }
+        // The imported endpoint is the session's committed one from this order on.
+        supersede_durable(owner.durable_session, order);
         owners_.push_back(std::move(owner));
     }
 
