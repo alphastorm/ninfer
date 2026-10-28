@@ -1,9 +1,11 @@
 // Host-native EngineCore lifecycle contracts. A scripted model contract drives the production
-// Engine worker, Scheduler, ResourceManager and response delivery without a GPU, artifact or
-// CUDA work. Native physical behavior belongs to the model's own transaction tests.
+// Engine worker, Scheduler, ResourceManager, durable checkpoint adapter and response delivery
+// without a GPU, artifact or CUDA work. Native physical behavior belongs to the model's own
+// transaction tests.
 #include "runtime/engine/engine_core.h"
 
 #include "cuda_interpose.h"
+#include "runtime/contract/continuation_checkpoint.h"
 #include "runtime/engine/context_cache/context_cost.h"
 #include "text/grammar.h"
 
@@ -80,8 +82,14 @@ constexpr TokenId kGeneratedToken     = 7;
 constexpr TokenId kControlToken       = 11;
 constexpr std::uint32_t kPrefillChunk = 1024;
 constexpr std::uint32_t kPageGroups   = 64;
-// A publication that correctly precedes its response is held this long, while no consumer can
-// return; a response delivered first is read by its consumer within this interval.
+// Every scripted checkpoint, import reservation destination and staged export copy occupies
+// this much counted Host memory.
+constexpr std::size_t kCheckpointHostBytes = 4096;
+constexpr std::size_t kHostCapacityBytes   = 1U << 20;
+constexpr std::uint32_t kDurableFrontier   = 4;
+constexpr auto kSession                    = "session";
+// A publication that correctly precedes its result is held this long, while no observer can
+// return; a result delivered first is read by its observer within this interval.
 constexpr auto kPublicationHold = 500ms;
 constexpr auto kEventTimeout    = 10s;
 
@@ -89,20 +97,21 @@ void require(bool condition, const std::string& message) {
     if (!condition) { throw std::runtime_error(message); }
 }
 
-// The observed request's planning state is released immediately before it becomes terminal.
-// The next statistics publication then waits until that request's consumer has read statistics.
-// A response delivered before publication lets its consumer read the earlier snapshot.
+// An observed change arms the gate: the observed request's planning state is released immediately
+// before it becomes terminal, or a checkpoint operation changes native state. The next statistics
+// publication then waits until the observer has read statistics. A result delivered before
+// publication lets its observer read the earlier snapshot.
 class PublicationGate {
 public:
-    void planning_retired() {
+    void changed() {
         std::lock_guard lock(mutex_);
-        retired_ = true;
+        armed_         = true;
+        consumer_read_ = false;
     }
 
     void hold_publication() {
         std::unique_lock lock(mutex_);
-        if (!retired_ || released_) { return; }
-        released_ = true;
+        if (!std::exchange(armed_, false)) { return; }
         (void)read_.wait_for(lock, kPublicationHold, [&] { return consumer_read_; });
     }
 
@@ -117,8 +126,7 @@ public:
 private:
     std::mutex mutex_;
     std::condition_variable read_;
-    bool retired_       = false;
-    bool released_      = false;
+    bool armed_         = false;
     bool consumer_read_ = false;
 };
 
@@ -214,7 +222,7 @@ public:
     Plan& operator=(const Plan&)     = delete;
 
     ~Plan() {
-        if (observed_) { observed_->planning_retired(); }
+        if (observed_) { observed_->changed(); }
     }
 
     [[nodiscard]] Script script() const noexcept { return script_; }
@@ -432,7 +440,7 @@ struct Release {
     Resources released;
 };
 
-// The scripted contract never publishes a checkpoint, so every catalog plan is empty.
+// No scripted scenario reclaims a checkpoint, so every catalog plan is empty.
 struct ReclaimPlan {
     struct Batch {
         bool append(const Demotion&) { return false; }
@@ -453,8 +461,19 @@ struct ReclaimPlan {
     }
 };
 
+// What the one-point scripted session checkpoint restores; an import's expected statistics.
+[[nodiscard]] rt::DurableCheckpointStats durable_stats() noexcept {
+    return {.frontier_tokens = kDurableFrontier,
+            .restored_tokens = kDurableFrontier,
+            .payload_bytes   = 1,
+            .points          = 1,
+            .states          = 1};
+}
+
 // Scripted native ownership: lanes hold sequences, one context operation is in flight at a time,
 // and every sequence is released exactly once by commit, finish, abort or its context operation.
+// Each change a checkpoint operation answers for (an import reserved, committed or aborted, an
+// export lease retired) arms the publication gate.
 class Program {
 public:
     using ContextResources = Resources;
@@ -641,12 +660,18 @@ public:
     [[nodiscard]] PhysicalUsage physical_usage() const noexcept {
         gate_->hold_publication();
         PhysicalUsage usage;
-        usage.capacity = {.state_slots = ninfer::kMaximumConcurrency,
-                          .kv_page_groups = {kPageGroups}};
+        usage.capacity = {.state_slots    = ninfer::kMaximumConcurrency,
+                          .kv_page_groups = {kPageGroups},
+                          .host_bytes     = kHostCapacityBytes};
         for (const auto& lane : lanes_) {
             usage.occupied.state_slots += lane.active ? 1U : 0U;
             usage.occupied.kv_page_groups[0] += lane.active ? 1U : 0U;
         }
+        const auto checkpoints = static_cast<std::size_t>(std::count_if(
+            records_.begin(), records_.end(), [](const Record& record) { return record.valid; }));
+        usage.host_reserved_bytes = reserved_points_ * kCheckpointHostBytes;
+        usage.occupied.host_bytes =
+            (checkpoints + staged_exports_) * kCheckpointHostBytes + usage.host_reserved_bytes;
         return usage;
     }
 
@@ -686,16 +711,27 @@ public:
 
     void skip_capture(Sequence) {}
 
-    [[nodiscard]] bool valid_checkpoint(Checkpoint) const noexcept { return false; }
-
-    [[nodiscard]] bool release_checkpoint(Checkpoint) noexcept { return false; }
-
-    [[nodiscard]] Metadata checkpoint_metadata(Checkpoint) const {
-        throw std::logic_error("scripted Program has no checkpoints");
+    [[nodiscard]] bool valid_checkpoint(Checkpoint checkpoint) const noexcept {
+        return checkpoint.index < records_.size() && records_[checkpoint.index].valid;
     }
 
-    [[nodiscard]] std::uint64_t checkpoint_key(Checkpoint, std::uint32_t) const {
-        throw std::logic_error("scripted Program has no checkpoints");
+    // Like native checkpoint storage, a record pinned by an export lease cannot be erased.
+    [[nodiscard]] bool release_checkpoint(Checkpoint checkpoint) noexcept {
+        if (!valid_checkpoint(checkpoint) || records_[checkpoint.index].pins != 0) { return false; }
+        records_[checkpoint.index].valid = false;
+        return true;
+    }
+
+    [[nodiscard]] Metadata checkpoint_metadata(Checkpoint checkpoint) const {
+        const auto& record = live_record(checkpoint);
+        return {.frontier = record.frontier, .leased = record.pins != 0};
+    }
+
+    // Distinct checkpoints never share a prefix key, so no request reuses another's checkpoint.
+    [[nodiscard]] std::uint64_t checkpoint_key(Checkpoint checkpoint,
+                                               std::uint32_t position) const {
+        (void)live_record(checkpoint);
+        return (std::uint64_t{checkpoint.index} << 32U) | position;
     }
 
     [[nodiscard]] Resources checkpoint_footprint(std::span<const Checkpoint>) const { return {}; }
@@ -729,6 +765,120 @@ public:
 
     void reset_memory_peaks() noexcept {}
 
+    // Host-only import destinations held until commit consumes or destruction releases them.
+    class ImportReservation {
+    public:
+        ImportReservation(Program& program, std::uint32_t points) noexcept
+            : program_(&program), points_(points) {}
+
+        ImportReservation(ImportReservation&& other) noexcept
+            : program_(std::exchange(other.program_, nullptr)), points_(other.points_) {}
+
+        ImportReservation& operator=(ImportReservation&&) = delete;
+
+        ~ImportReservation() {
+            if (program_ != nullptr) { program_->release_reservation(points_); }
+        }
+
+        [[nodiscard]] rt::DurablePrepareState state() const noexcept {
+            return rt::DurablePrepareState::Prepared;
+        }
+
+        [[nodiscard]] rt::DurableReason reason() const noexcept { return rt::DurableReason::None; }
+
+        [[nodiscard]] rt::DurableCheckpointStats stats() const noexcept { return durable_stats(); }
+
+    private:
+        friend class Program;
+        Program* program_     = nullptr;
+        std::uint32_t points_ = 0;
+    };
+
+    // Pins its checkpoints and stages their copy in counted Host memory until it retires.
+    class ExportLease {
+    public:
+        ExportLease(Program& program, std::span<const Checkpoint> points)
+            : program_(&program), points_(points.begin(), points.end()) {
+            for (const auto point : points_) { ++program.live_record(point).pins; }
+            ++program.staged_exports_;
+        }
+
+        ExportLease(ExportLease&& other) noexcept
+            : program_(std::exchange(other.program_, nullptr)), points_(std::move(other.points_)) {}
+
+        ExportLease& operator=(ExportLease&&) = delete;
+
+        ~ExportLease() {
+            if (program_ != nullptr) { program_->retire_export(points_); }
+        }
+
+        [[nodiscard]] rt::DurablePrepareState state() const noexcept {
+            return rt::DurablePrepareState::Prepared;
+        }
+
+        [[nodiscard]] rt::DurableReason reason() const noexcept { return rt::DurableReason::None; }
+
+        // Runs off the worker and reads only the copy this lease staged.
+        [[nodiscard]] rt::DurableExportResult write(rt::ContinuationCheckpointWriter& writer) {
+            const std::array<std::byte, 1> index{};
+            if (!writer.write_file("engine/index.cbor", 0, index.size(), index, 1) ||
+                !writer.finish()) {
+                return {.reason = rt::DurableReason::IoUnavailable};
+            }
+            return {.state = rt::DurableExportState::Exported, .stats = durable_stats()};
+        }
+
+    private:
+        Program* program_ = nullptr;
+        std::vector<Checkpoint> points_;
+    };
+
+    [[nodiscard]] rt::DurableNativeLayout checkpoint_layout() const { return {}; }
+
+    [[nodiscard]] static rt::DurableCheckpointSet
+    decode_checkpoint_index(std::span<const std::byte>, const rt::DurableLimits&) {
+        rt::DurableCheckpointSet set;
+        set.points.resize(1);
+        return set;
+    }
+
+    struct ImportValidation {
+        enum class State : std::uint8_t { Validated } state = State::Validated;
+        rt::DurableReason reason = rt::DurableReason::None;
+    };
+
+    [[nodiscard]] ImportValidation validate_checkpoint_import(const rt::DurableCheckpointSet&,
+                                                              const rt::ContinuationCheckpointReader&,
+                                                              const rt::DurableLimits&) const {
+        return {};
+    }
+
+    [[nodiscard]] ImportReservation prepare_checkpoint_import(const rt::DurableCheckpointSet& set,
+                                                              const rt::ContinuationCheckpointReader&,
+                                                              const rt::DurableLimits&) {
+        const auto points = static_cast<std::uint32_t>(set.points.size());
+        reserved_points_ += points;
+        gate_->changed();
+        return ImportReservation(*this, points);
+    }
+
+    [[nodiscard]] std::vector<Checkpoint> commit_import(ImportReservation&& reservation) {
+        require(reservation.program_ == this, "scripted import reservation is foreign or consumed");
+        reservation.program_ = nullptr;
+        reserved_points_ -= reservation.points_;
+        std::vector<Checkpoint> handles;
+        for (std::uint32_t point = 0; point < reservation.points_; ++point) {
+            handles.push_back(publish_checkpoint(kDurableFrontier));
+        }
+        gate_->changed();
+        return handles;
+    }
+
+    [[nodiscard]] ExportLease prepare_checkpoint_export(std::span<const Checkpoint> points,
+                                                        const rt::DurableLimits&) {
+        return ExportLease(*this, points);
+    }
+
 private:
     struct Lane {
         bool active                 = false;
@@ -743,6 +893,38 @@ private:
         Script script               = Script::Complete;
         std::uint32_t prompt_tokens = 0;
     };
+
+    struct Record {
+        std::uint32_t frontier = 0;
+        std::uint32_t pins     = 0;
+        bool valid             = false;
+    };
+
+    [[nodiscard]] Checkpoint publish_checkpoint(std::uint32_t frontier) noexcept {
+        records_.push_back({.frontier = frontier, .valid = true});
+        return {static_cast<std::uint32_t>(records_.size() - 1)};
+    }
+
+    [[nodiscard]] Record& live_record(Checkpoint checkpoint) {
+        require(valid_checkpoint(checkpoint), "checkpoint handle is not live");
+        return records_[checkpoint.index];
+    }
+
+    [[nodiscard]] const Record& live_record(Checkpoint checkpoint) const {
+        require(valid_checkpoint(checkpoint), "checkpoint handle is not live");
+        return records_[checkpoint.index];
+    }
+
+    void release_reservation(std::uint32_t points) noexcept {
+        reserved_points_ -= points;
+        gate_->changed();
+    }
+
+    void retire_export(std::span<const Checkpoint> points) noexcept {
+        for (const auto point : points) { --records_[point.index].pins; }
+        --staged_exports_;
+        gate_->changed();
+    }
 
     [[nodiscard]] const Lane& live(Sequence sequence) const {
         const auto& lane = lanes_.at(sequence.lane);
@@ -766,6 +948,10 @@ private:
     std::array<Lane, ninfer::kMaximumConcurrency> lanes_{};
     std::optional<Operation> operation_;
     std::uint64_t next_epoch_ = 1;
+    // Index 0 never names a checkpoint.
+    std::vector<Record> records_{Record{}};
+    std::size_t reserved_points_ = 0;
+    std::size_t staged_exports_  = 0;
 };
 
 using Published = std::vector<ninfer::OutputDelta>;
@@ -900,14 +1086,61 @@ struct Outcome {
     ninfer::RuntimeStats stats;
 };
 
+// The serving store's authenticated Reader for the one-point scripted session checkpoint.
+class IndexReader final : public rt::ContinuationCheckpointReader {
+public:
+    [[nodiscard]] std::optional<std::uint64_t> file_size(std::string_view path) const override {
+        return path == "engine/index.cbor" ? std::optional<std::uint64_t>(1) : std::nullopt;
+    }
+
+    [[nodiscard]] std::optional<rt::DurablePayload> file_descriptor(std::string_view) const override {
+        return std::nullopt;
+    }
+
+    bool read_file(std::string_view, std::uint64_t, std::span<std::byte> destination) const override {
+        std::fill(destination.begin(), destination.end(), std::byte{});
+        return true;
+    }
+
+    [[nodiscard]] bool verify_complete() const override { return true; }
+
+    [[nodiscard]] rt::DurableReason failure_reason() const noexcept override {
+        return rt::DurableReason::None;
+    }
+
+    [[nodiscard]] std::shared_ptr<const rt::ContinuationCheckpointReader>
+    fresh_reader() const override {
+        return std::make_shared<IndexReader>();
+    }
+};
+
+class NullWriter final : public rt::ContinuationCheckpointWriter {
+public:
+    bool write_file(std::string_view, std::uint64_t, std::uint64_t, std::span<const std::byte>,
+                    std::uint32_t) override {
+        return true;
+    }
+
+    [[nodiscard]] bool finish() override { return true; }
+};
+
+// Aborts an uncommitted restore on the worker, as destroying DurableEngineImport does.
+struct Restore {
+    rt::PreparedEngineCheckpoint prepared;
+
+    ~Restore() {
+        if (prepared.abort) { prepared.abort(); }
+    }
+};
+
 class Harness {
 public:
-    explicit Harness(std::uint32_t concurrency) {
+    explicit Harness(std::uint32_t concurrency, bool context_cache = false) {
         instance_.program = std::make_unique<Program>(events_, gate_);
         ninfer::EngineOptions options;
         options.max_concurrency       = concurrency;
         options.max_context           = 64;
-        options.context_cache.enabled = false;
+        options.context_cache.enabled = context_cache;
         core_.emplace(instance_, device(), options, rt::generic_context_machine_cost_model());
     }
 
@@ -936,6 +1169,32 @@ public:
         outcome.stats = core_->runtime_stats();
         gate_->consumer_read();
         return outcome;
+    }
+
+    // Reads runtime statistics right after a checkpoint operation returned, as an HTTP status
+    // reader would.
+    [[nodiscard]] ninfer::RuntimeStats observed_stats() {
+        const auto stats = core_->runtime_stats();
+        gate_->consumer_read();
+        return stats;
+    }
+
+    // Prepares a restore of the durable session's stored checkpoint, as the checkpoint service
+    // does after loading it from disk.
+    [[nodiscard]] Restore prepare_restore() {
+        const IndexReader reader;
+        const rt::DurableImportTarget target{.session_sha256      = kSession,
+                                             .expected_tag        = "restored",
+                                             .expected_epoch      = core_->session_epoch(kSession),
+                                             .allow_prefix_reuse  = true,
+                                             .cache_participation = true};
+        return {core_->prepare_import(target, reader, {}, durable_stats(), {})};
+    }
+
+    // Exports a durable session endpoint, as the checkpoint service does before publishing it.
+    [[nodiscard]] rt::DurableExportResult save(const std::string& tag) {
+        NullWriter writer;
+        return core_->export_session(kSession, tag, writer, {});
     }
 
     void release_stalls() { events_.stall_released.store(true); }
@@ -1001,6 +1260,23 @@ void require_request_error(const Outcome& outcome, RequestErrorKind kind,
                            const std::string& label) {
     require(require_error<RequestError>(outcome, label).kind() == kind,
             label + " failed with an unexpected request error kind");
+}
+
+// Counted durable checkpoint state, in kCheckpointHostBytes units of Host memory.
+struct Durable {
+    std::uint32_t catalog = 0;
+    std::size_t host      = 0; // occupied, reserved destinations included
+    std::size_t reserved  = 0;
+};
+
+void require_durable(const ninfer::RuntimeStats& stats, Durable expected, const std::string& label) {
+    require(stats.private_catalog_occupied == expected.catalog &&
+                stats.host_context_occupied_bytes == expected.host * kCheckpointHostBytes &&
+                stats.host_context_reserved_bytes == expected.reserved * kCheckpointHostBytes,
+            label + " result preceded its statistics: catalog=" +
+                std::to_string(stats.private_catalog_occupied) +
+                " host_occupied=" + std::to_string(stats.host_context_occupied_bytes) +
+                " host_reserved=" + std::to_string(stats.host_context_reserved_bytes));
 }
 
 void completed_response() {
@@ -1147,6 +1423,44 @@ void isolated_restore_refusal() {
                      "request after an isolated restore miss");
 }
 
+void durable_import_commit() {
+    Harness harness(1, true);
+    auto restore = harness.prepare_restore();
+    require(restore.prepared.state == rt::DurablePrepareState::Prepared,
+            "durable restore was not prepared");
+    require_durable(harness.observed_stats(), {.host = 1, .reserved = 1},
+                    "durable import reservation");
+    const auto committed = restore.prepared.commit();
+    const auto stats     = harness.observed_stats();
+    require(committed.state == rt::DurableImportState::Imported, "durable restore did not commit");
+    require_durable(stats, {.catalog = 1, .host = 1}, "durable import commit");
+}
+
+void durable_import_abort() {
+    Harness harness(1, true);
+    auto restore = harness.prepare_restore();
+    require(restore.prepared.state == rt::DurablePrepareState::Prepared,
+            "durable restore was not prepared");
+    (void)harness.observed_stats();
+    restore.prepared.abort();
+    require_durable(harness.observed_stats(), {}, "durable import abort");
+}
+
+void durable_export_release() {
+    Harness harness(1, true);
+    auto restore = harness.prepare_restore();
+    require(restore.prepared.state == rt::DurablePrepareState::Prepared,
+            "durable restore was not prepared");
+    (void)harness.observed_stats();
+    require(restore.prepared.commit().state == rt::DurableImportState::Imported,
+            "durable restore did not commit");
+    (void)harness.observed_stats();
+    const auto saved = harness.save("restored");
+    const auto stats = harness.observed_stats();
+    require(saved.state == rt::DurableExportState::Exported, "durable save was not exported");
+    require_durable(stats, {.catalog = 1, .host = 1}, "durable export lease retirement");
+}
+
 } // namespace
 
 int main() {
@@ -1167,6 +1481,9 @@ int main() {
         Case{"engine_failure", engine_failure},
         Case{"isolated_admission_refusal", isolated_admission_refusal},
         Case{"isolated_restore_refusal", isolated_restore_refusal},
+        Case{"durable_import_commit", durable_import_commit},
+        Case{"durable_import_abort", durable_import_abort},
+        Case{"durable_export_release", durable_export_release},
     };
     int failures = 0;
     for (const auto& test : cases) {

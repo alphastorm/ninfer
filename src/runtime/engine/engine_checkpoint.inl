@@ -123,7 +123,7 @@
             });
             if (!lease) { return result; }
             const auto release_export = [&] {
-                checkpoint_call([&] {
+                checkpoint_change([&] {
                     // Native readers can pin every idle Device image while the writer
                     // runs off-lock. Retire them before advertising usable capacity.
                     lease.reset();
@@ -188,7 +188,8 @@
             pending->target = target;
             PreparedEngineCheckpoint result;
             const auto oracle = checkpoints_.oracle();
-            checkpoint_call([&] {
+            // Reclaimed victims and a prepared reservation change catalog and Host occupancy.
+            checkpoint_change([&] {
                 if (failed_) {
                     result.state = DurablePrepareState::Unavailable;
                     result.reason = DurableReason::IoUnavailable;
@@ -294,10 +295,10 @@
             try {
                 result.abort = [this, pending] {
                     if (!pending->native) { return; }
-                    checkpoint_call([&] { pending->native.reset(); });
+                    checkpoint_change([&] { pending->native.reset(); });
                 };
                 result.commit = [this, pending]() -> DurableImportResult {
-                    return checkpoint_call([&]() -> DurableImportResult {
+                    return checkpoint_change([&]() -> DurableImportResult {
                         if (!pending->native) {
                             return {.state = DurableImportState::PolicyDisabled,
                                     .reason = DurableReason::Cancelled};
@@ -337,7 +338,7 @@
                     });
                 };
             } catch (...) {
-                checkpoint_call([&] { pending->native.reset(); });
+                checkpoint_change([&] { pending->native.reset(); });
                 throw;
             }
             return result;
@@ -345,6 +346,32 @@
     }
 
 private:
+    // Runs a checkpoint operation that changes catalog entries or physical occupancy. As with a
+    // terminal response, its result or exception reaches the caller only after the published
+    // runtime statistics include that change.
+    template <class Function>
+    auto checkpoint_change(Function&& function) -> std::invoke_result_t<Function> {
+        return checkpoint_call([&]() -> std::invoke_result_t<Function> {
+            using Core = std::remove_pointer_t<decltype(this)>;
+            const struct Publication {
+                Core& core;
+                ~Publication() { core.publish_checkpoint_change(); }
+            } publication{*this};
+            return std::forward<Function>(function)();
+        });
+    }
+    // A committed import or a retired lease cannot be undone, so a failed publication still
+    // returns the operation's result. The worker then fails the Engine with that failure, as it
+    // does after a failed terminal-response publication.
+    void publish_checkpoint_change() noexcept {
+        try {
+            publish_runtime_stats();
+        } catch (...) {
+            if (!checkpoint_publication_failure_) {
+                checkpoint_publication_failure_ = std::current_exception();
+            }
+        }
+    }
     DurableReason validate_pressure_checkpoint(const ContinuationCheckpointReader& reader) {
         using Program = typename ModelContract::Program;
         const DurableLimits limits;

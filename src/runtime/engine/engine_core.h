@@ -2481,6 +2481,11 @@ private:
             }
             bool executed = false;
             try {
+                // A checkpoint operation whose statistics publication failed has already
+                // returned its result; that failure now fails the Engine.
+                if (checkpoint_publication_failure_) {
+                    std::rethrow_exception(std::exchange(checkpoint_publication_failure_, nullptr));
+                }
                 set_host_work_class(HostWorkClass::Control);
                 auto boundary = begin_host_phase();
                 (void)expire_pending_requests();
@@ -2669,6 +2674,8 @@ private:
     std::unique_lock<std::mutex>* checkpoint_execution_lock_ = nullptr;
     // Worker-owned: prepared export leases may outlive all resident requests.
     std::size_t checkpoint_exports_in_flight_ = 0;
+    // Worker-owned: raised at the start of the next worker turn.
+    std::exception_ptr checkpoint_publication_failure_;
 
     mutable std::mutex execution_mutex_;
     mutable std::mutex queue_mutex_;

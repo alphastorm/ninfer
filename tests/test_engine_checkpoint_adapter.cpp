@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <exception>
 #include <future>
 #include <iostream>
 #include <limits>
@@ -271,6 +272,7 @@ class AdapterFixture {
     std::thread worker_;
     std::unique_lock<std::mutex>* checkpoint_execution_lock_ = nullptr;
     std::size_t checkpoint_exports_in_flight_ = 0;
+    std::exception_ptr checkpoint_publication_failure_;
     std::atomic<bool> admission_check_pending_{false};
     bool stopping_ = false;
     bool failed_ = false;
@@ -284,6 +286,8 @@ class AdapterFixture {
         admission_check_pending_.store(true);
         ++admission_notifications_;
     }
+    // Runtime statistics publication belongs to the EngineCore harness, not this fixture.
+    void publish_runtime_stats() {}
 #include "runtime/engine/engine_checkpoint.inl"
 public:
     AdapterFixture() = default;

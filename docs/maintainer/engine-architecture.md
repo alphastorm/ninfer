@@ -422,6 +422,11 @@ runtime statistics，最后完成 response。每个终态 response 都使用这�
 membership 并释放其规划状态，再发布统计，最后才使结果或错误可见；`wait()` 返回后读取的统计
 不得仍将该请求计入 live membership。
 
+Durable checkpoint 操作使用同一顺序：import 的 prepare（回收 victim、预留 Host 目的地）、commit
+与 abort，以及 export lease 退役，先完成 Native 与目录变更，再发布包含该变更的 runtime
+statistics，最后才把结果或异常交给调用方。已提交的 import 和已退役的 lease 不可撤销，所以统计
+发布失败时仍返回该结果，worker 随后以该失败使 Engine 失败。
+
 取消在 worker 边界生效：Waiting 直接结束；绑定或传输中的请求先结算/中止事务；resident 请求在
 GPU unit 稳定后 abort；paused 请求释放 ResumeState 及相关 owner。取消不改写 in-flight mapping，
 已提交输出不回退。
