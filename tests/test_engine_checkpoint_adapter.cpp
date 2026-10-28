@@ -13,6 +13,8 @@
 #include <mutex>
 #include <span>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 #include <thread>
 #include <type_traits>
 #include <utility>
@@ -184,6 +186,7 @@ struct ExportResources {
     }
     std::vector<Victim> durable_victims(std::string_view) const { return {}; }
     bool release_durable_victim(ExportProgram&, const Victim&) { return false; }
+    bool holds_durable_session(std::string_view digest) const { return owners.contains(digest); }
 };
 
 struct ExportContract : Contract {
@@ -247,6 +250,12 @@ struct ReleaseWriter {
     ~ReleaseWriter() { writer.release(); }
 };
 
+struct NullWriter final : ContinuationCheckpointWriter {
+    bool write_file(std::string_view, std::uint64_t, std::uint64_t, std::span<const std::byte>,
+                    std::uint32_t) override { return true; }
+    bool finish() override { return true; }
+};
+
 template <class ModelContract>
 class AdapterFixture {
     using Checkpoint = int;
@@ -307,23 +316,43 @@ public:
     auto on_worker(Function&& function) {
         return checkpoint_call(std::forward<Function>(function));
     }
-    void restore(std::string session) {
+    // Restore whose epoch was captured before its disk load; None means Imported.
+    DurableReason restore_captured(const std::string& session, DurableSessionEpoch captured) {
         IndexReader reader;
         DurableImportTarget target{.session_sha256 = session, .expected_tag = "turn",
-            .expected_epoch = session_epoch(session), .allow_prefix_reuse = true,
+            .expected_epoch = std::move(captured), .allow_prefix_reuse = true,
             .cache_participation = true};
         auto prepared = prepare_import(target, reader, {}, checkpoint_stats(), {});
-        require(prepared.state == DurablePrepareState::Prepared && prepared.commit,
-                "actual adapter did not prepare the Host-only import");
-        require(prepared.commit().state == DurableImportState::Imported,
-                "actual adapter did not publish the Host-only import");
+        if (prepared.state != DurablePrepareState::Prepared || !prepared.commit) {
+            return prepared.reason;
+        }
+        const auto committed = prepared.commit();
+        return committed.state == DurableImportState::Imported ? DurableReason::None
+                                                               : committed.reason;
     }
+    void restore(std::string session) {
+        require(restore_captured(session, session_epoch(session)) == DurableReason::None,
+                "actual adapter did not prepare and publish the Host-only import");
+    }
+    DurableSessionEpoch lookup(const std::string& session) { return session_epoch(session); }
+    // An Engine submission takes the session gate on its caller thread before queueing.
+    void submit(const std::string& session, std::uint64_t order) {
+        const auto gate = checkpoints_.session(session);
+        std::lock_guard lock(gate->mutex);
+        gate->submitted(order);
+    }
+    void evict(const std::string& session) {
+        on_worker([&] { resources_.owners.erase(session); });
+    }
+    void turn() { on_worker([] {}); }
+    std::size_t gates() const { return checkpoints_.gate_count(); }
     void complete_first_resume() {
         on_worker([&] { instance_.program->complete_first_resume(resources_.owners.at("first").points); });
     }
-    DurableExportResult save(ContinuationCheckpointWriter& writer) {
-        return export_session("first", "turn", writer, {});
+    DurableExportResult save(const std::string& session, ContinuationCheckpointWriter& writer) {
+        return export_session(session, "turn", writer, {});
     }
+    DurableExportResult save(ContinuationCheckpointWriter& writer) { return save("first", writer); }
     bool isolated_admission() {
         return on_worker([&] {
             if (instance_.program->reserve_after_lossless_reclaim()) { return true; }
@@ -443,6 +472,66 @@ void paused_request_settles_by_native_replay() {
         throw std::runtime_error("completed response bypassed its HTTP publication guard");
     }
 }
+
+void unseen_sessions_leave_bounded_gates() {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    NullWriter writer;
+    bool absent = true;
+    for (std::size_t i = 0; i < 16 * CheckpointControl::kGateSweepFloor; ++i) {
+        // A restore lookup whose disk load finds nothing, then a save of a session this
+        // Engine never cached. Each save is also a worker turn.
+        (void)core.lookup("missing-" + std::to_string(i));
+        const auto save = core.save("uncached-" + std::to_string(i), writer);
+        absent &= save.state == DurableExportState::Refused &&
+                  save.reason == DurableReason::SessionNotIndexed;
+    }
+    require(core.gates() <= CheckpointControl::kGateSweepFloor,
+            "unseen sessions permanently retained Engine publication gates");
+    require(absent, "a never-cached session was not reported as absent");
+}
+
+void evicted_session_gate_retires_and_resident_one_stays() {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    core.restore("evicted");
+    core.restore("resident");
+    NullWriter writer;
+    require(core.save("evicted", writer).state == DurableExportState::Exported,
+            "fixture endpoint was not exportable before eviction");
+    core.evict("evicted");
+    for (std::size_t i = 0; i < 4 * CheckpointControl::kGateSweepFloor; ++i) {
+        (void)core.lookup("missing-" + std::to_string(i));
+        core.turn();
+    }
+    require(core.gates() <= CheckpointControl::kGateSweepFloor,
+            "lookups and worker turns left an unbounded gate table");
+    require(core.lookup("evicted").value == 0, "an evicted session kept its publication gate");
+    const auto evicted = core.save("evicted", writer);
+    require(evicted.state == DurableExportState::Refused &&
+                evicted.reason == DurableReason::SessionNotIndexed,
+            "a retired gate turned an evicted endpoint into a tag race");
+    require(core.save("resident", writer).state == DurableExportState::Exported,
+            "a sweep dropped the committed endpoint of a resident session");
+}
+
+void restore_lookup_pins_its_gate_through_sweeps() {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    // Both restores capture their epochs before their disk loads. During the loads a turn
+    // runs on one session, and unrelated lookups and worker turns sweep idle gates.
+    const auto interrupted = core.lookup("interrupted");
+    const auto quiet = core.lookup("quiet");
+    core.submit("interrupted", 7);
+    for (std::size_t i = 0; i < 4 * CheckpointControl::kGateSweepFloor; ++i) {
+        (void)core.lookup("missing-" + std::to_string(i));
+        core.turn();
+    }
+    require(core.restore_captured("interrupted", interrupted) == DurableReason::StalePublication,
+            "a restore published over a turn that ran during its disk load");
+    require(core.restore_captured("quiet", quiet) == DurableReason::None,
+            "gate sweeps invalidated a restore with no intervening turn");
+}
 }
 
 int main() {
@@ -452,6 +541,9 @@ int main() {
         {"export_writer_exception", [] { isolated_import_waits_for_export(true); }},
         {"overlapping_exports", overlapping_exports_retain_progress_until_last_release},
         {"genuine_capacity", genuine_capacity_and_unprepared_export_do_not_defer},
+        {"unseen_session_gates", unseen_sessions_leave_bounded_gates},
+        {"evicted_session_gate", evicted_session_gate_retires_and_resident_one_stays},
+        {"restore_gate_pin", restore_lookup_pins_its_gate_through_sweeps},
     };
     unsigned failures = 0;
     for (const auto& [name, run] : cases) {

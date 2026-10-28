@@ -288,7 +288,9 @@ The public `Engine` API stays unchanged except integration-owned friendship.
   flags and a Reader's mere existence never supply this authority.
 - `export_session(engine, digest, expected_tag, Writer&, limits)` returns
   `Exported`, `Refused(reason)`, or `Stale`, with `captured_epoch` on success.
-  No silent retry against a different tag.
+  No silent retry against a different tag. A tag with no native owner is
+  `Refused(session_not_indexed)` whether or not the session's gate was retired;
+  only a resident endpoint other than the acknowledged one is `Stale(tag_mismatch)`.
 - `publish_export(engine, digest, tag, expected_epoch, commit_callback)` is mandatory
   for live saves. Under the same per-session publication gate used by submission,
   finish and import epoch changes, it rechecks tag/epoch and invokes only the final
@@ -312,7 +314,12 @@ The public `Engine` API stays unchanged except integration-owned friendship.
   preserves a prepare-time `Unavailable/IoUnavailable` unchanged through this
   convenience API and service restore callbacks; never coerce it to corruption.
 - Capture `session_epoch` before disk loading. Capture publication epoch from the
-  submitted handle, not handler completion time. Tokens are runtime-only.
+  submitted handle, not handler completion time. Tokens are runtime-only and compare
+  by value. A token from `session_epoch` or `export_session` also retains its session's
+  publication gate until its last copy is destroyed, so the later recheck and
+  publication serialize on that same gate. The Engine retires a gate only when no
+  request, operation or token holds it and no native owner names its session; session
+  churn, including restore lookups that find nothing, leaves no per-session gate behind.
 - `make_read_queue(Engine&, const std::filesystem::path& root)` receives the
   configured checkpoint root from serving. The factory preserves no-follow
   anchoring; an untrusted manifest never supplies or substitutes this root.
@@ -880,7 +887,6 @@ is recorded in K6.
 | `claude-mythos-R4` | Close the frozen Windows source/K6 mismatch with anchored rename, reparse/identity checks and native regression evidence. |
 | `daybreak-blue-R4` | Bind runtime-image workflow base-image selection to the selected source's runtime-base receipt, not only repository/digest syntax. |
 | `gemini-argon-R3` | Qualify the native pin-sharing and replacement policy instead of carrying the frozen candidate's deny-WRITE/pathname behavior. |
-| `gpt-astra-R2` | Bound Engine per-session publication-gate retention through lifecycle-safe retirement; source shows retention under session churn, not an executed memory-exhaustion proof. |
 | `gpt-astra-R3` | Prove the native handle-anchored replacement's post-rename parent flush and truthful `ntfs-write-through` acknowledgement; standalone directory no-op is not that flush. |
 
 Closed live-lineage rollback findings, rejected publication-permission claims and

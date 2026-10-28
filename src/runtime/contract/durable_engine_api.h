@@ -115,9 +115,16 @@ struct DurableLimits {
 };
 
 // Runtime-only compare-and-publish token; never persisted or reused across Engine lifetimes.
+// Tokens compare by value. A token captured from the Engine also retains that session's
+// publication gate, so the restore or save holding it rechecks and publishes under the same
+// gate; the Engine retires a gate only after every such token is gone.
 struct DurableSessionEpoch {
     std::uint64_t value = 0;
-    friend bool operator==(DurableSessionEpoch, DurableSessionEpoch) = default;
+    std::shared_ptr<const void> gate;
+    friend bool operator==(const DurableSessionEpoch& left,
+                           const DurableSessionEpoch& right) noexcept {
+        return left.value == right.value;
+    }
 };
 
 struct DurableExportResult {

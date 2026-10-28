@@ -73,14 +73,14 @@ jobs:
             ninfer_public_api_test ninfer_cpu_system_test ninfer_cpu_task_pool_test \
             ninfer_cpu_executor_test ninfer_context_cost_measure_test ninfer_jinja_test \
             ninfer_grammar_test ninfer_json_schema_test ninfer_regex_choice_test \
-            ninfer_resource_manager_test \
+            ninfer_engine_checkpoint_control_test ninfer_engine_checkpoint_adapter_test ninfer_resource_manager_test \
             src/ops/CMakeFiles/ninfer_ops.dir/linear/kernels/q4/q4_a16_sliced_k_mma.cu.o \
             src/ops/CMakeFiles/ninfer_ops.dir/linear/swiglu/q4/shapes/n34816_k5120/small.cu.o
       - name: Run only GPU-free CTest contracts
         shell: bash
         run: |
           ctest --test-dir build --output-on-failure \
-            -R '^ninfer_(public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|resource_manager)_test$'
+            -R '^ninfer_(public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|engine_checkpoint_(control|adapter)|resource_manager)_test$'
       - name: Run ported host-only tooling tests
         shell: bash
         run: |

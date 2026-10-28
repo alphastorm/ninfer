@@ -5,6 +5,8 @@
 #include <future>
 #include <iostream>
 #include <stdexcept>
+#include <string>
+#include <string_view>
 
 namespace {
 using namespace ninfer::runtime;
@@ -145,6 +147,74 @@ void queued_expiry_preserves_committed_tag() {
             "queued expiry changed the prior savable endpoint");
     stored_completion_order(*state);
 }
+
+void unseen_session_churn_is_bounded() {
+    CheckpointControl control;
+    for (std::size_t i = 0; i < 64 * CheckpointControl::kGateSweepFloor; ++i) {
+        // A restore lookup that finds no checkpoint, and a publication for a session this
+        // Engine never ran. Neither leaves anything a later operation could serialize on.
+        (void)control.epoch("missing-" + std::to_string(i));
+        const auto never_ran = control.publish("unsaved-" + std::to_string(i), "turn", {},
+                                               [] { return true; });
+        require(never_ran.state == DurableExportState::Stale, "unknown session published a save");
+    }
+    require(control.gate_count() <= CheckpointControl::kGateSweepFloor,
+            "unseen session lookups permanently retained publication gates");
+}
+
+void held_gate_keeps_serializing_through_sweeps() {
+    CheckpointControl control;
+    control.session("held")->tag = "turn";
+    std::promise<void> entered;
+    std::promise<void> release;
+    auto released = release.get_future();
+    std::atomic<bool> disk_published = false;
+    std::promise<const void*> publishing_gate;
+    auto publication = std::async(std::launch::async, [&] {
+        const auto token = control.epoch("held");
+        publishing_gate.set_value(token.gate.get());
+        return control.publish("held", "turn", token, [&] {
+            entered.set_value();
+            released.wait();
+            disk_published = true;
+            return true;
+        });
+    });
+    // Declared after the publication so a failure releases it before its future joins.
+    struct Release {
+        std::promise<void>& promise;
+        bool done = false;
+        void operator()() {
+            if (!done) { done = true; promise.set_value(); }
+        }
+        ~Release() { (*this)(); }
+    } unblock{release};
+    const auto held = publishing_gate.get_future().get();
+    require(entered.get_future().wait_for(10s) == std::future_status::ready,
+            "fixture publication did not reach its current-pointer callback");
+    // Unrelated lookups and worker sweeps that find no native owner for any session.
+    for (std::size_t i = 0; i < 4 * CheckpointControl::kGateSweepFloor; ++i) {
+        (void)control.epoch("missing-" + std::to_string(i));
+        control.retire_unowned([](std::string_view) { return false; });
+    }
+    // Looking the gate up does not lock it; the publication still holds its mutex.
+    const bool same_gate = static_cast<const void*>(control.session("held").get()) == held;
+    std::promise<void> restoring;
+    auto restore = std::async(std::launch::async, [&] {
+        const auto gate = control.session("held");
+        restoring.set_value();
+        std::string tag = "restored";
+        return control.commit_import(gate, {}, tag, 9, [&] {
+            require(disk_published, "restore serialized on a different gate than the publication");
+        });
+    });
+    restoring.get_future().get();
+    unblock();
+    const bool exported = publication.get().state == DurableExportState::Exported;
+    const bool restored = restore.get();
+    require(same_gate, "a sweep retired a gate while a publication held it");
+    require(exported && restored, "publication and restore of one session did not both complete");
+}
 } // namespace
 
 int main() {
@@ -154,7 +224,10 @@ int main() {
         publication_and_restore_share_one_gate();
         publication_failure_is_not_acknowledged();
         queued_expiry_preserves_committed_tag();
-        std::cout << "ok: checkpoint coordination, handler lifetime, restore publication, stale epoch\n";
+        unseen_session_churn_is_bounded();
+        held_gate_keeps_serializing_through_sweeps();
+        std::cout << "ok: checkpoint coordination, handler lifetime, restore publication, stale epoch,"
+                     " bounded gate retirement\n";
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';

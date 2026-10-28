@@ -17,8 +17,15 @@ namespace ninfer::runtime {
 
 // This gate is independent of Program execution. A disk publisher may hold it only for
 // current-pointer replacement and sync; it must never wait for a worker operation here.
+// A session's gate lives while a request, an in-flight operation or a captured epoch token holds
+// it, or while a native owner still names the session. It is retired only after all of those
+// end, so a later lookup never splits that session's serialization across two gates.
 class CheckpointControl {
 public:
+    // Smallest table that is swept. A sweep runs once the table has doubled since the previous
+    // one, which keeps retirement amortized O(1) per created gate.
+    static constexpr std::size_t kGateSweepFloor = 64;
+
     struct Session {
         std::mutex mutex;
         DurableSessionEpoch epoch;
@@ -35,6 +42,11 @@ public:
             committed_order = order;
             ++epoch.value;
         }
+        // No submission, acknowledgement or import has reached this gate: it holds nothing an
+        // absent session lacks, and no native owner can name its session.
+        [[nodiscard]] bool pristine() const noexcept {
+            return epoch.value == 0 && tag.empty() && committed_order == 0;
+        }
     };
 
     [[nodiscard]] std::shared_ptr<Session> session(std::string_view digest) {
@@ -42,15 +54,39 @@ public:
         if (const auto entry = sessions_.find(digest); entry != sessions_.end()) {
             return entry->second;
         }
+        // Any thread may retire idle pristine gates, such as those of missing restore lookups.
+        if (sessions_.size() >= pristine_sweep_at_) {
+            sweep_locked(pristine_sweep_at_, [](std::string_view, const Session& state) {
+                return !state.pristine();
+            });
+        }
         auto state = std::make_shared<Session>();
         sessions_.emplace(std::string(digest), state);
         return state;
     }
 
+    // The returned token retains this gate until its last copy is destroyed.
     [[nodiscard]] DurableSessionEpoch epoch(std::string_view digest) {
-        const auto state = session(digest);
+        auto state = session(digest);
         std::lock_guard lock(state->mutex);
-        return state->epoch;
+        return {state->epoch.value, state};
+    }
+
+    // Worker-only, once per worker turn. Once the table has doubled since its previous sweep,
+    // retires every gate that nothing holds and whose session `owned` reports no native owner
+    // still names. Retained committed tags and epochs matter only to such owners.
+    template <class Owned>
+    void retire_unowned(const Owned& owned) {
+        std::lock_guard lock(mutex_);
+        if (sessions_.size() < owned_sweep_at_) { return; }
+        sweep_locked(owned_sweep_at_, [&](std::string_view digest, const Session&) {
+            return owned(digest);
+        });
+    }
+
+    [[nodiscard]] std::size_t gate_count() const {
+        std::lock_guard lock(mutex_);
+        return sessions_.size();
     }
 
     [[nodiscard]] DurablePublicationResult publish(
@@ -167,8 +203,21 @@ private:
             return DurableReason::None;
         } catch (...) { return DurableReason::IoUnavailable; }
     }
-    std::mutex mutex_;
+    // A gate whose table entry is its only owner has no holder that could lock it, recheck its
+    // epoch or publish under it. The lock only orders this read after the last holder's writes.
+    template <class Retain>
+    void sweep_locked(std::size_t& sweep_at, const Retain& retain) {
+        std::erase_if(sessions_, [&](const auto& entry) {
+            if (entry.second.use_count() != 1) { return false; }
+            std::lock_guard gate(entry.second->mutex);
+            return !retain(std::string_view(entry.first), *entry.second);
+        });
+        sweep_at = std::max(kGateSweepFloor, 2 * sessions_.size());
+    }
+    mutable std::mutex mutex_;
     std::map<std::string, std::shared_ptr<Session>, std::less<>> sessions_;
+    std::size_t pristine_sweep_at_ = kGateSweepFloor;
+    std::size_t owned_sweep_at_ = kGateSweepFloor;
     std::atomic<std::shared_ptr<PressureCheckpointHandler>> handler_;
     std::atomic<std::shared_ptr<const ReclaimableSessionOracle>> oracle_;
     std::atomic<std::uint64_t> progress_{1};

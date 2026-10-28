@@ -129,6 +129,11 @@ public:
         }
     }
 
+    [[nodiscard]] bool holds_durable_session(std::string_view digest) const noexcept {
+        return std::any_of(owners_.begin(), owners_.end(),
+                           [&](const auto& owner) { return owner.durable_session == digest; });
+    }
+
     [[nodiscard]] std::vector<Handle> session_points(
         const Program& program, std::string_view digest, std::string_view tag,
         bool& pending) const {

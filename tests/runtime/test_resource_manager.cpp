@@ -2166,6 +2166,22 @@ void test_import_publication_supersedes_prior_named_owner() {
             "an imported endpoint left the replaced owner named for its session");
 }
 
+// The Engine keeps a session's publication gate exactly while some owner still names it.
+void test_named_owner_holds_its_session_until_released() {
+    Fixture f(128);
+    const Base base{.tokens = {1, 2}, .advice = {.session_key = 11, .reuse_scope = 11}};
+    const auto owner = f.begin(base);
+    const auto endpoint = f.program.add({1, 2}, {}, Role::Continuation);
+    f.cache.publish(f.program, owner, endpoint);
+    require(!f.cache.holds_durable_session("session"), "an unnamed owner held a durable session");
+    f.cache.set_checkpoint_identity(owner, "session", "turn");
+    f.cache.finish(f.program, owner, base, f.next_order);
+    require(f.cache.holds_durable_session("session") && !f.cache.holds_durable_session("other"),
+            "a named owner did not hold exactly its own session");
+    require(f.cache.erase(f.program, endpoint) && !f.cache.holds_durable_session("session"),
+            "a released owner still held its session");
+}
+
 } // namespace
 
 int main() {
@@ -2175,6 +2191,7 @@ int main() {
         test_import_publication_is_private_and_freshly_ordered();
         test_acknowledged_endpoint_supersedes_older_named_owner();
         test_import_publication_supersedes_prior_named_owner();
+        test_named_owner_holds_its_session_until_released();
         test_demotion_competes_with_its_actual_host_recovery_loss();
         test_adjacent_kv_demotions_share_one_submission();
         test_kv_demotion_batch_stops_at_an_intervening_delete();
