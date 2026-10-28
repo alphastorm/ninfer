@@ -311,7 +311,7 @@ int durable_record_delete_preserves_survivors() {
     } cleanup{root};
     const std::string session(64, 'd');
     nlohmann::json manifest;
-    std::ifstream(std::filesystem::path(__FILE__).parent_path() / "fixtures/durable/manifest-text.json")
+    std::ifstream(std::filesystem::path(NINFER_SOURCE_DIR) / "tests/fixtures/durable/manifest-text.json")
         >> manifest;
     const auto fingerprint = manifest.at("runtime_fingerprint");
     SessionCheckpointStoreOptions options{.root = root, .origin_mac_key = std::string(32, 'k'),

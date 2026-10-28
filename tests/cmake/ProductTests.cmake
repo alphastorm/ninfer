@@ -56,6 +56,7 @@ endif()
 
 ninfer_add_test(ninfer_session_checkpoint_store_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_session_checkpoint_store.cpp"
+  NEEDS_SOURCE_DIR
   LIBRARIES ninfer_session_checkpoint_store)
 if(WIN32)
   target_link_libraries(ninfer_session_checkpoint_store_test PRIVATE advapi32)
@@ -70,6 +71,7 @@ if(WIN32)
 endif()
 ninfer_add_test(ninfer_automatic_checkpoint_queue_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_automatic_checkpoint_queue.cpp"
+  NEEDS_SOURCE_DIR
   LIBRARIES ninfer_session_checkpoint_store)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_options(ninfer_session_checkpoint_store_test PRIVATE

@@ -296,8 +296,8 @@ void refresh_config_digest(nlohmann::json& value) {
 
 nlohmann::json fingerprint(std::string artifact = "artifact-sha-a") {
     static const auto fixture = [] {
-        std::ifstream input(std::filesystem::path(__FILE__).parent_path() /
-                            "fixtures/durable/manifest-text.json", std::ios::binary);
+        std::ifstream input(std::filesystem::path(NINFER_SOURCE_DIR) /
+                            "tests/fixtures/durable/manifest-text.json", std::ios::binary);
         nlohmann::json manifest;
         input >> manifest;
         return manifest.at("runtime_fingerprint");
