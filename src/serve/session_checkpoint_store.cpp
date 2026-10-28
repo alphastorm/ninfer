@@ -66,6 +66,7 @@ void log_checkpoint_failure(std::string_view operation, runtime::DurableReason r
 namespace {
 
 using Clock = std::chrono::system_clock;
+using io::close_file;
 using io::flush_file;
 using io::open_binary_read;
 using io::open_binary_write;
@@ -95,11 +96,19 @@ public:
     const runtime::DurableReason reason = runtime::DurableReason::IoUnavailable;
 };
 
+// Disk-full and quota exhaustion both refuse space to this save: Capacity, not I/O failure.
 [[nodiscard]] runtime::DurableReason checkpoint_io_reason(std::error_code error) noexcept {
     if (error == std::errc::no_space_on_device) { return runtime::DurableReason::Capacity; }
 #ifdef _WIN32
     if (error.category() == std::system_category() &&
-        (error.value() == ERROR_DISK_FULL || error.value() == ERROR_HANDLE_DISK_FULL)) {
+        (error.value() == ERROR_DISK_FULL || error.value() == ERROR_HANDLE_DISK_FULL ||
+         error.value() == ERROR_DISK_QUOTA_EXCEEDED)) {
+        return runtime::DurableReason::Capacity;
+    }
+#else
+    // std::errc names no quota condition; POSIX reports the errno in either category.
+    if (error.value() == EDQUOT && (error.category() == std::generic_category() ||
+                                    error.category() == std::system_category())) {
         return runtime::DurableReason::Capacity;
     }
 #endif
@@ -311,21 +320,18 @@ struct FileDescriptor {
     return component_has_byte;
 }
 
+// Every failure, including a deferred write error reported by close, carries the OS code, so
+// a disk-full manifest, MAC or current pointer classifies as Capacity like payload writes.
 void write_synced(const std::filesystem::path& path, std::span<const std::byte> bytes) {
-    std::FILE* file = open_binary_write(path);
-    if (file == nullptr) { throw std::runtime_error("checkpoint file creation failed"); }
+    std::FILE* const file = open_binary_write(path);
     try {
         io::write_exact(file, bytes);
         flush_file(file);
-        if (std::fclose(file) != 0) {
-            file = nullptr;
-            throw std::runtime_error("checkpoint file close failed");
-        }
-        file = nullptr;
     } catch (...) {
-        if (file != nullptr) { std::fclose(file); }
+        std::fclose(file);
         throw;
     }
+    close_file(file);
 }
 
 void write_synced(const std::filesystem::path& path, std::string_view bytes) {
@@ -365,9 +371,10 @@ void write_synced(const std::filesystem::path& path, std::string_view bytes) {
         std::fclose(file);
         throw CheckpointUnavailable("checkpoint file read failed");
     }
-    if (std::fclose(file) != 0) {
-        log_checkpoint_failure("metadata_close", runtime::DurableReason::IoUnavailable,
-                               {errno, std::generic_category()});
+    try {
+        close_file(file);
+    } catch (const std::system_error&) {
+        log_checkpoint_failure("metadata_close", runtime::DurableReason::IoUnavailable);
         throw CheckpointUnavailable("checkpoint file close failed");
     }
     return bytes;
@@ -458,6 +465,8 @@ void require_payload_shape(const std::filesystem::path& root, const std::string&
     }
 }
 
+// Quota usage and every reclamation candidate's bytes come from this scan. No substitute size
+// is safe for both, so an entry that cannot be measured fails the scan with its OS code.
 [[nodiscard]] std::uint64_t directory_bytes(const std::filesystem::path& path) {
     std::error_code error;
     std::uint64_t total = 0;
@@ -465,20 +474,25 @@ void require_payload_shape(const std::filesystem::path& root, const std::string&
              iterator(path, std::filesystem::directory_options::none, error),
          end;
          !error && iterator != end; iterator.increment(error)) {
-        if (!iterator->is_regular_file(error) || error) { continue; }
+        const bool regular = iterator->is_regular_file(error);
+        if (error) {
+            log_checkpoint_failure("directory_entry_status", checkpoint_io_reason(error), error);
+            throw std::system_error(error, "checkpoint directory entry status is unavailable");
+        }
+        if (!regular) { continue; }
         const std::uintmax_t size = iterator->file_size(error);
-        if (error || size > std::numeric_limits<std::uint64_t>::max() - total) {
-            if (error) {
-                log_checkpoint_failure("directory_entry_size", runtime::DurableReason::IoUnavailable,
-                                       error);
-            }
+        if (error) {
+            log_checkpoint_failure("directory_entry_size", checkpoint_io_reason(error), error);
+            throw std::system_error(error, "checkpoint directory entry size is unavailable");
+        }
+        if (size > std::numeric_limits<std::uint64_t>::max() - total) {
             throw std::overflow_error("checkpoint directory byte count overflowed");
         }
         total += static_cast<std::uint64_t>(size);
     }
     if (error) {
-        log_checkpoint_failure("directory_scan", runtime::DurableReason::IoUnavailable, error);
-        throw std::runtime_error("checkpoint directory scan failed");
+        log_checkpoint_failure("directory_scan", checkpoint_io_reason(error), error);
+        throw std::system_error(error, "checkpoint directory scan failed");
     }
     return total;
 }
@@ -728,10 +742,6 @@ private:
                 }
 #endif
                 state.file = open_binary_write(destination);
-                if (state.file == nullptr) {
-                    record_failure();
-                    return false;
-                }
             }
             if (state.complete || state.total != total_bytes || state.written != offset ||
                 state.alignment != alignment ||
@@ -744,14 +754,13 @@ private:
             state.written += static_cast<std::uint64_t>(bytes.size());
             if (state.written == state.total) {
                 flush_file(state.file);
-                if (std::fclose(state.file) != 0) {
-                    const std::error_code error(errno, std::generic_category());
-                    record_failure(checkpoint_io_reason(error));
-                    log_checkpoint_failure("payload_close", failure_reason_, error);
-                    state.file = nullptr;
+                try {
+                    close_file(std::exchange(state.file, nullptr));
+                } catch (...) {
+                    record_failure(current_checkpoint_failure_reason());
+                    log_checkpoint_failure("payload_close", failure_reason_);
                     return false;
                 }
-                state.file     = nullptr;
                 state.complete = true;
                 state.digest   = crypto::sha256_hex(state.hasher.finish());
             }
@@ -1072,20 +1081,21 @@ namespace {
 
 // Preserve the store's single-flight save/quota semantics without making an Engine worker wait
 // for a save which may itself need that worker. Catalog ownership is never held across callbacks.
+// The lease owns the session path and generation name it pins: its release, after the save has
+// handed its result back, still finishes a quarantine requested for that generation meanwhile.
 class CheckpointSaveLease {
 public:
-    CheckpointSaveLease(SessionCheckpointStore::Impl& owner,
-                        const std::filesystem::path& session, std::string_view digest,
-                        const std::string& generation)
-        : owner_(owner), session_(session), generation_(generation) {
+    CheckpointSaveLease(SessionCheckpointStore::Impl& owner, std::filesystem::path session,
+                        std::string_view digest, std::string generation)
+        : owner_(owner), session_(std::move(session)), generation_(std::move(generation)) {
         std::lock_guard lock(owner_.mutex);
         if (owner_.save_in_progress) { return; }
         std::string staging_key;
-        staging_key.reserve(digest.size() + 10 + generation.size());
-        staging_key.append(digest).append("/.staging-").append(generation);
+        staging_key.reserve(digest.size() + 10 + generation_.size());
+        staging_key.append(digest).append("/.staging-").append(generation_);
         std::string published_key;
-        published_key.reserve(digest.size() + 1 + generation.size());
-        published_key.append(digest).append("/").append(generation);
+        published_key.reserve(digest.size() + 1 + generation_.size());
+        published_key.append(digest).append("/").append(generation_);
         const auto staging = owner_.active_generations.emplace(std::move(staging_key), 1).first;
         const std::string* staging_reference = &staging->first;
         try {
@@ -1125,11 +1135,13 @@ public:
     CheckpointSaveLease(const CheckpointSaveLease&) = delete;
     CheckpointSaveLease& operator=(const CheckpointSaveLease&) = delete;
     [[nodiscard]] bool admitted() const noexcept { return staging_key_ != nullptr; }
+    [[nodiscard]] const std::filesystem::path& session() const noexcept { return session_; }
+    [[nodiscard]] const std::string& generation() const noexcept { return generation_; }
 
 private:
     SessionCheckpointStore::Impl& owner_;
-    const std::filesystem::path& session_;
-    const std::string& generation_;
+    const std::filesystem::path session_;
+    const std::string generation_;
     const std::string* staging_key_ = nullptr;
     const std::string* published_key_ = nullptr;
 };
@@ -1169,7 +1181,7 @@ void account_bytes(std::uint64_t& used, std::uint64_t bytes) {
     std::error_code error;
     if (!std::filesystem::is_directory(generations, error)) {
         if (error && error != std::errc::no_such_file_or_directory) {
-            throw std::runtime_error("checkpoint generation scan failed");
+            throw std::system_error(error, "checkpoint generation scan failed");
         }
         return 0;
     }
@@ -1236,7 +1248,7 @@ void account_bytes(std::uint64_t& used, std::uint64_t bytes) {
         std::error_code error;
         if (!std::filesystem::is_directory(generations, error)) {
             if (error && error != std::errc::no_such_file_or_directory) {
-                throw std::runtime_error("checkpoint generation scan failed");
+                throw std::system_error(error, "checkpoint generation scan failed");
             }
             continue;
         }
@@ -1300,7 +1312,7 @@ void account_bytes(std::uint64_t& used, std::uint64_t bytes) {
             root / (stem + "--" + stamp + "-" + std::to_string(attempt));
         std::error_code error;
         const bool exists = std::filesystem::exists(candidate, error);
-        if (error) { throw std::runtime_error("checkpoint tombstone lookup failed"); }
+        if (error) { throw std::system_error(error, "checkpoint tombstone lookup failed"); }
         if (!exists) { return candidate; }
     }
     throw std::runtime_error("checkpoint tombstone namespace is exhausted");
@@ -2044,12 +2056,10 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         if (skip != nullptr) { skip->durable_reason = runtime::DurableReason::UnsupportedCodec; }
         return std::nullopt;
     }
-    const std::filesystem::path session     = session_path(responses.client_session_sha256);
-    const std::filesystem::path generations = session / "generations";
     const std::uint64_t ordinal = impl_->sequence.fetch_add(1, std::memory_order_relaxed);
-    std::string generation =
-        std::to_string(unix_milliseconds()) + "-" + std::to_string(ordinal);
-    CheckpointSaveLease save_lease(*impl_, session, responses.client_session_sha256, generation);
+    CheckpointSaveLease save_lease(
+        *impl_, session_path(responses.client_session_sha256), responses.client_session_sha256,
+        std::to_string(unix_milliseconds()) + "-" + std::to_string(ordinal));
     if (!save_lease.admitted()) {
         if (skip != nullptr) {
             skip->reason = runtime::SessionCheckpointSkipReason::TransactionBusy;
@@ -2057,9 +2067,26 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         }
         return std::nullopt;
     }
+    const std::filesystem::path& session    = save_lease.session();
+    const std::string& generation           = save_lease.generation();
+    const std::filesystem::path generations = session / "generations";
     std::unique_lock lock(impl_->mutex);
     const std::filesystem::path staging   = generations / (".staging-" + generation);
     const std::filesystem::path published = generations / generation;
+    const std::filesystem::path current_staging = session / (".current-" + generation);
+    // Only the current-pointer rename makes this generation visible. Every failure exit runs
+    // this cleanup under the catalog lock. Until replace_path reports that rename attempt,
+    // current is provably untouched, so the renamed generation and its pointer file go too.
+    // From the attempt on (Windows can fail its post-rename parent flush) the generation is
+    // retained for load() reconciliation. A failed generation rename does not prove that the
+    // destination belongs to this save, so that destination is never removed.
+    bool generation_renamed     = false;
+    bool pointer_may_be_visible = false;
+    const auto discard_unpublished = [&]() noexcept {
+        (void)remove_best_effort(staging);
+        (void)remove_best_effort(current_staging);
+        if (generation_renamed && !pointer_may_be_visible) { (void)remove_best_effort(published); }
+    };
 
     try {
         io::create_directories(generations);
@@ -2094,7 +2121,7 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         if (exported.state != runtime::DurableExportState::Exported ||
             exported.reason != runtime::DurableReason::None ||
             (!replay_only && !valid_checkpoint_stats(exported.stats))) {
-            (void)remove_best_effort(staging);
+            discard_unpublished();
             if (skip != nullptr) {
                 if (exported.state == runtime::DurableExportState::Exported) {
                     skip->export_state = runtime::DurableExportState::Refused;
@@ -2198,7 +2225,7 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         if (total_bytes > options_.disk_quota_bytes ||
             !enforce_disk_quota_locked(options_, *impl_, staging, session, previous_bytes,
                                       total_bytes)) {
-            (void)remove_best_effort(staging);
+            discard_unpublished();
             if (skip != nullptr) {
                 skip->export_state = runtime::DurableExportState::Refused;
                 skip->reason = runtime::SessionCheckpointSkipReason::QuotaExceeded;
@@ -2208,11 +2235,10 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         }
 
         replace_path(staging, published);
+        generation_renamed = true;
         sync_directory(generations);
-        const std::filesystem::path current_staging = session / (".current-" + generation);
         write_synced(current_staging, generation + "\n");
         bool committed = false;
-        bool pointer_may_be_visible = false;
         bool invoked = false;
         bool quota_refused = false;
         runtime::DurableReason publication_failure = runtime::DurableReason::None;
@@ -2227,10 +2253,9 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
                     quota_refused = true;
                     return false;
                 }
-                // A post-rename flush can fail. Retain any possibly visible generation
-                // for reconciliation, independently of the classified failure reason.
-                pointer_may_be_visible = true;
-                replace_path(current_staging, session / "current");
+                // replace_path marks its rename attempt: an earlier failure discards this
+                // generation, while a failure from the attempt on retains it.
+                replace_path(current_staging, session / "current", &pointer_may_be_visible);
                 sync_directory(session);
                 // First save also publishes the session directory itself.
                 sync_directory(options_.root / "sessions");
@@ -2257,8 +2282,7 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         lock.lock();
         if (publication.state != runtime::DurableExportState::Exported ||
             publication.reason != runtime::DurableReason::None || !committed) {
-            (void)remove_best_effort(current_staging);
-            if (!pointer_may_be_visible) { (void)remove_best_effort(published); }
+            discard_unpublished();
             if (skip != nullptr) {
                 skip->export_state = publication.state == runtime::DurableExportState::Stale
                                          ? runtime::DurableExportState::Stale
@@ -2277,13 +2301,13 @@ SessionCheckpointStore::save_impl(const OpenAIResponseStoreSnapshot& responses,
         }
 
         return SessionCheckpointSaveResult{
-            .generation = std::move(generation), .engine = *engine, .bytes = total_bytes,
+            .generation = generation, .engine = *engine, .bytes = total_bytes,
             .dir_sync = io::directory_sync_mode(),
             .origin_authenticated = !options_.origin_mac_key.empty()};
     } catch (...) {
         const auto reason = current_checkpoint_failure_reason();
         if (!lock.owns_lock()) { lock.lock(); }
-        (void)remove_best_effort(staging);
+        discard_unpublished();
         if (skip != nullptr && (reason == runtime::DurableReason::Capacity ||
                                 skip->durable_reason == runtime::DurableReason::None)) {
             skip->export_state = runtime::DurableExportState::Refused;

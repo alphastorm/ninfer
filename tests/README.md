@@ -322,6 +322,11 @@ one fresh target reader on retry, preservation of an invalid victim, and exact c
 Public-HTTP latency and output gaps are measured separately by the
 [TTFT campaign](../tools/bench/ttft/README.md).
 
+On Linux, `ninfer_session_checkpoint_service_real_test` builds the durable-serving checkpoint
+service on `NINFER_TEST_ARTIFACT`, refuses the close of its staged shutdown report, and requires
+`final_save()` to fail without publishing the report, then to publish it normally. Durable serving
+rejects dirty build provenance, so it needs a clean-source build.
+
 `ninfer_qwen3_5_tools_real_test [none|mtp|dflash|dflash2] [graph|eager|basic|snapshot|replay|cancel] [concurrency]`
 uses `NINFER_TEST_ARTIFACT` for strict tools, thinking, raw continuation, mixed batches, and
 call/result prefix reuse, and required-tool → JSON continuation with committed constraint observations.

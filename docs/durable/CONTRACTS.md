@@ -95,11 +95,24 @@ K4 governs the guarded Responses-only restore and DELETE acknowledgement. A
 subsequent parent request replays the retained transcript; a new completed, stored
 turn can establish a normal native endpoint again.
 
-Disk-full write failures — POSIX `ENOSPC`, Win32 `ERROR_DISK_FULL` (112) and
-`ERROR_HANDLE_DISK_FULL` (39) — classify as `DurableReason::Capacity` (`capacity`,
-HTTP 409), not corruption. The failed save preserves the prior generation and
-DELETE survivors; no deletion is acknowledged without the required durable
-survivor publication. K7 records the storage-capacity automatic-retry limitation.
+Disk-full and filesystem-quota write failures — POSIX `ENOSPC` and `EDQUOT`, Win32
+`ERROR_DISK_FULL` (112), `ERROR_HANDLE_DISK_FULL` (39) and `ERROR_DISK_QUOTA_EXCEEDED`
+(1295) — classify as `DurableReason::Capacity` (`capacity`, HTTP 409), not corruption.
+A filesystem quota is not the store's own `--session-checkpoint-quota-mib` limit, which
+refuses with `quota`. This holds at every save-path I/O site, for payloads and
+for `manifest.json`, `manifest.mac` and the temporary current pointer alike: file
+creation, write, flush, close (including a deferred write error reported by close),
+directory sync and rename all fail with `std::system_error` carrying the OS code.
+A failing Windows CRT stream call reports the Win32 code the CRT recorded, because
+its errno mapping turns `ERROR_HANDLE_DISK_FULL` into `EINVAL`. The failed save
+preserves the prior generation and DELETE survivors; no deletion is acknowledged
+without the required durable survivor publication. K7 records the storage-capacity
+automatic-retry limitation.
+
+Store usage accounting fails closed. The same scan supplies total usage and each
+reclamation candidate's bytes, so no substitute size is safe for an entry whose
+status or size cannot be read: the scan fails with that OS code and the save is
+refused instead of being measured against an undercount.
 
 ### Canonical JSON and MAC
 
@@ -653,6 +666,8 @@ removal uses its anchored no-follow traversal; no raw filesystem removal may byp
 that boundary. A concurrent symlink/reparse-point substitution must never redirect
 removal outside the intended tree. All renames, including generation, quarantine
 and current-pointer moves, use `io::replace_path` under the same confinement policy.
+`replace_path` reports when it attempts the rename system call; a failure before that
+attempt changed neither name.
 This lead-approved extension adds no dependency and does not change which generations
 the store is authorized to reclaim. PortableCore owns the primitive; DurableStore
 owns caller migration and the symlink-swap regression.
@@ -674,9 +689,13 @@ Publication order:
    platform policy, then acknowledge. Old generations remain until safe quota cleanup.
 5. Cleanup after acknowledged publication is best effort; never report a committed
    save as failed solely because later garbage collection failed. A failure before
-   publication preserves the prior current. A failure after pointer replace but before
-   durability acknowledgement reports unavailable/unacknowledged; reconciliation reads
-   actual current and does not claim rollback that did not happen.
+   publication preserves the prior current. Until `io::replace_path` reports its
+   current-rename attempt, current is provably untouched, so the failed save also
+   removes its temporary pointer and its renamed generation rather than leaving a
+   stale generation for quota cleanup. From that attempt on, including a failed rename
+   call or a Windows post-rename parent flush, the generation is retained and the save
+   stays unacknowledged with its classified reason; reconciliation reads actual current
+   and does not claim rollback that did not happen.
 
 **POSIX:** fsync each file, same-filesystem rename for atomic replace, fsync relevant
 directories. Acknowledgement `dir_sync: "fsync"`.
@@ -709,8 +728,12 @@ handle-anchored core replacement and its post-replacement parent flush. The coun
 pathname-rename finding applies to the frozen v0.13.0 Linux candidate, not that
 native core. K6Windows follow-up `4c8ee39ac5bfa8077ece12c4b8856130d5f2497c`
 routes `WindowsCheckpointFileSystem::atomic_replace_durable` through the same
-`io::replace_path` primitive, retaining its `CheckpointContractError` boundary
-instead of the remaining pathname-based `MoveFileExW` helper.
+`io::replace_path` primitive instead of the remaining pathname-based `MoveFileExW`
+helper. Its failures, like the DirectStorage read queue's anchored payload open and
+root creation, propagate as the `io::` primitive's `std::system_error` with the OS
+code. The legacy backend's and read queue's own Win32 call failures also throw
+`std::system_error`, while DirectStorage HRESULT and contract violations remain
+`CheckpointContractError`.
 Source presence is not Windows execution or crash-durability evidence; native
 qualification must separately exercise the publication path. Successful
 Windows publication acknowledges `dir_sync: "ntfs-write-through"`; POSIX publication
@@ -775,8 +798,8 @@ unconditional retry loop. Each retry waits for observed progress matching its ca
 | `io_unavailable` | successful storage progress |
 | HTTP response still publishing | HTTP-publication progress only; waiting consumes no save-attempt retry budget |
 
-**N9 storage-capacity retry limitation:** disk-full writes use K1's `Capacity`
-classification and HTTP 409 `capacity` response while preserving the prior
+**N9 storage-capacity retry limitation:** disk-full and filesystem-quota writes use
+K1's `Capacity` classification and HTTP 409 `capacity` response while preserving the prior
 generation and DELETE survivors. `AutomaticCheckpointResult` does not distinguish
 storage-origin Capacity from native-admission Capacity. The automatic-save
 coordinator therefore rearms either on the next observed Engine/admission progress,

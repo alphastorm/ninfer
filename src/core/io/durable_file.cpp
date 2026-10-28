@@ -5,6 +5,7 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -469,6 +470,22 @@ bool remove_entry(int parent, const char* name) {
     return true;
 }
 #endif
+
+// Clear both CRT error records before a stream call so a failure reports only its own cause;
+// the Win32 record survives the lossy errno mapping described in durable_file.h.
+void reset_stream_error() noexcept {
+    errno = 0;
+#ifdef _WIN32
+    _doserrno = 0;
+#endif
+}
+
+[[noreturn]] void fail_stream(const char* operation, int error) {
+#ifdef _WIN32
+    if (const DWORD native = _doserrno) fail_windows(operation, native);
+#endif
+    fail_errno(operation, error ? error : EIO);
+}
 } // namespace
 
 #ifdef _WIN32
@@ -489,13 +506,13 @@ void create_directories(const std::filesystem::path& path) {
 void read_exact(std::FILE* file, std::span<std::byte> bytes) {
     if (!file) throw std::invalid_argument("null durable read stream");
     while (!bytes.empty()) {
-        errno = 0;
+        reset_stream_error();
         const auto count = std::fread(bytes.data(), 1, bytes.size(), file);
         const auto error = errno;
         bytes = bytes.subspan(count);
         if (std::ferror(file)) {
             if (error == EINTR) { std::clearerr(file); continue; }
-            fail_errno("read durable stream", error ? error : EIO);
+            fail_stream("read durable stream", error);
         }
         if (!count) throw std::runtime_error("durable stream ended before its declared size");
     }
@@ -504,13 +521,13 @@ void read_exact(std::FILE* file, std::span<std::byte> bytes) {
 void write_exact(std::FILE* file, std::span<const std::byte> bytes) {
     if (!file) throw std::invalid_argument("null durable write stream");
     while (!bytes.empty()) {
-        errno = 0;
+        reset_stream_error();
         const auto count = std::fwrite(bytes.data(), 1, bytes.size(), file);
         const auto error = errno;
         bytes = bytes.subspan(count);
         if (std::ferror(file)) {
             if (error == EINTR) { std::clearerr(file); continue; }
-            fail_errno("write durable stream", error ? error : EIO);
+            fail_stream("write durable stream", error);
         }
         if (!count) fail_errno("write durable stream", EIO);
     }
@@ -518,7 +535,8 @@ void write_exact(std::FILE* file, std::span<const std::byte> bytes) {
 
 void flush_file(std::FILE* file) {
     if (!file) throw std::invalid_argument("null durable flush stream");
-    if (std::fflush(file)) fail_errno("flush durable stream");
+    reset_stream_error();
+    if (std::fflush(file)) fail_stream("flush durable stream", errno);
 #ifdef _WIN32
     const auto handle = reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(file)));
     if (handle == INVALID_HANDLE_VALUE) fail_errno("get durable stream handle");
@@ -526,6 +544,12 @@ void flush_file(std::FILE* file) {
 #else
     sync_descriptor(::fileno(file), "sync durable file");
 #endif
+}
+
+void close_file(std::FILE* file) {
+    if (!file) throw std::invalid_argument("null durable close stream");
+    reset_stream_error();
+    if (std::fclose(file)) fail_stream("close durable stream", errno);
 }
 
 void sync_directory(const std::filesystem::path& path) {
@@ -545,7 +569,8 @@ std::string_view directory_sync_mode() noexcept {
 #endif
 }
 
-void replace_path(const std::filesystem::path& source, const std::filesystem::path& destination) {
+void replace_path(const std::filesystem::path& source, const std::filesystem::path& destination,
+                  bool* rename_attempted) {
     const auto from = checked_path(source), to = checked_path(destination);
 #ifdef _WIN32
     if (!Parent::same_component(from.root_name(), to.root_name()))
@@ -581,6 +606,7 @@ void replace_path(const std::filesystem::path& source, const std::filesystem::pa
     IO_STATUS_BLOCK completion{};
     from_parent.recheck(false); // The destination walk owns every shared-prefix pin.
     to_parent.recheck();
+    if (rename_attempted) *rename_attempted = true;
     const auto status = api.set(file.value, &completion, rename, static_cast<ULONG>(buffer.size()),
                                 static_cast<FILE_INFORMATION_CLASS>(65)); // FileRenameInformationEx.
     if (status < 0) fail_windows("replace anchored durable path", api.error(status));
@@ -589,6 +615,7 @@ void replace_path(const std::filesystem::path& source, const std::filesystem::pa
     Parent from_parent(from.parent_path(), false), to_parent(to.parent_path(), false);
     reject_symlink(from_parent.directory.value, from.filename(), false);
     reject_symlink(to_parent.directory.value, to.filename(), true);
+    if (rename_attempted) *rename_attempted = true;
     if (::renameat(from_parent.directory.value, from.filename().c_str(),
                     to_parent.directory.value, to.filename().c_str()))
         fail_errno("replace durable path");

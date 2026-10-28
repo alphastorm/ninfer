@@ -76,13 +76,17 @@ jobs:
             ninfer_media_decode_test \
             ninfer_engine_core_test \
             ninfer_engine_checkpoint_control_test ninfer_engine_checkpoint_adapter_test ninfer_resource_manager_test \
+            ninfer_durable_file_test ninfer_session_checkpoint_store_test \
+            ninfer_automatic_checkpoint_queue_test \
+            src/serve/CMakeFiles/ninfer_serve.dir/session_checkpoint_service.cpp.o \
+            tests/CMakeFiles/ninfer_session_checkpoint_service_real_test.dir/test_session_checkpoint_service_real.cpp.o \
             src/ops/CMakeFiles/ninfer_ops.dir/linear/kernels/q4/q4_a16_sliced_k_mma.cu.o \
             src/ops/CMakeFiles/ninfer_ops.dir/linear/swiglu/q4/shapes/n34816_k5120/small.cu.o
       - name: Run only GPU-free CTest contracts
         shell: bash
         run: |
           ctest --test-dir build --output-on-failure \
-            -R '^ninfer_(public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|engine_core|engine_checkpoint_(control|adapter)|resource_manager)_test$'
+            -R '^ninfer_(public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|engine_core|engine_checkpoint_(control|adapter)|resource_manager|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue)_test$'
       - name: Run ported host-only tooling tests
         shell: bash
         run: |

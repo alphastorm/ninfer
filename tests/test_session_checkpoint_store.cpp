@@ -296,8 +296,8 @@ void refresh_config_digest(nlohmann::json& value) {
 
 nlohmann::json fingerprint(std::string artifact = "artifact-sha-a") {
     static const auto fixture = [] {
-        std::ifstream input(std::filesystem::path(__FILE__).parent_path() /
-                            "fixtures/durable/manifest-text.json", std::ios::binary);
+        std::ifstream input(std::filesystem::path(NINFER_SOURCE_DIR) /
+                            "tests/fixtures/durable/manifest-text.json", std::ios::binary);
         nlohmann::json manifest;
         input >> manifest;
         return manifest.at("runtime_fingerprint");
@@ -368,6 +368,15 @@ std::uint64_t retained_generation_bytes(const std::filesystem::path& root) {
 std::string read_file_bytes(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+std::vector<std::string> entry_names(const std::filesystem::path& directory) {
+    std::vector<std::string> names;
+    for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+        names.push_back(entry.path().filename().string());
+    }
+    std::sort(names.begin(), names.end());
+    return names;
 }
 
 [[nodiscard]] std::filesystem::path
@@ -2071,10 +2080,14 @@ int test_disk_full_capacity_preserves_generation() {
     };
     const Fault faults[] = {
         {ENOSPC, 0, runtime::DurableReason::Capacity},
+#ifndef _WIN32
+        {EDQUOT, 0, runtime::DurableReason::Capacity},
+#endif
         {EIO, 0, runtime::DurableReason::IoUnavailable},
 #ifdef _WIN32
         {0, ERROR_DISK_FULL, runtime::DurableReason::Capacity},
         {0, ERROR_HANDLE_DISK_FULL, runtime::DurableReason::Capacity},
+        {0, ERROR_DISK_QUOTA_EXCEEDED, runtime::DurableReason::Capacity},
         {0, ERROR_ACCESS_DENIED, runtime::DurableReason::IoUnavailable},
 #endif
     };
@@ -2130,7 +2143,244 @@ int test_disk_full_capacity_preserves_generation() {
     }
     return failures;
 }
+
+// omp-ninfer#89 L6: manifest, MAC and current-pointer writes carry the OS code of a failed
+// close, so a disk-full or quota-exhausted close is the ordinary Capacity refusal and any
+// other error stays a thrown IoUnavailable system_error. Each failure precedes the current
+// rename, so neither the attempted generation nor its pointer file may remain (L8).
+int test_metadata_close_failure_keeps_os_classification() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .origin_mac_key = std::string(32, 'k'),
+                                  .read_queue = std::make_shared<TestReadQueue>()});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) {
+            return DurableExportResult{.state = runtime::DurableExportState::Refused};
+        }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto baseline = store.save(responses, fingerprint(), exporter, publish_fixture);
+    if (!baseline) { return check(false, "metadata-close baseline did not publish"); }
+    const auto session = temporary.path / "sessions" / responses.client_session_sha256;
+    struct Fault {
+        const char* file;
+        int error;
+        runtime::DurableReason reason;
+    };
+    const Fault faults[] = {
+        {"manifest.json", ENOSPC, runtime::DurableReason::Capacity},
+        {"manifest.mac", ENOSPC, runtime::DurableReason::Capacity},
+        {".current-", ENOSPC, runtime::DurableReason::Capacity},
+#ifndef _WIN32
+        {"manifest.json", EDQUOT, runtime::DurableReason::Capacity},
 #endif
+        {"manifest.json", EIO, runtime::DurableReason::IoUnavailable},
+        {".current-", EIO, runtime::DurableReason::IoUnavailable},
+    };
+    int failures = 0;
+    for (const auto& fault : faults) {
+        runtime::SessionCheckpointSkipDetail skip;
+        std::optional<SessionCheckpointSaveResult> saved;
+        std::error_code thrown;
+        bool threw_other = false;
+        unsigned refused_closes = 0;
+        {
+            checkpoint_write_fault::CloseScope injection(fault.error, fault.file);
+            try {
+                saved = store.save(responses, fingerprint(), exporter, publish_fixture, &skip);
+            } catch (const std::system_error& error) {
+                thrown = error.code();
+            } catch (...) { threw_other = true; }
+            refused_closes = checkpoint_write_fault::fired;
+        }
+        const std::string label =
+            std::string(fault.file) + " close errno " + std::to_string(fault.error);
+        const bool capacity = fault.reason == runtime::DurableReason::Capacity;
+        failures += check(refused_closes == 1 && !saved && !threw_other &&
+                              skip.durable_reason == fault.reason &&
+                              (capacity ? !thrown
+                                        : thrown == std::error_code(fault.error,
+                                                                    std::generic_category())),
+                          label + " lost the OS classification of the failed close");
+        failures += check(entry_names(session / "generations") ==
+                                  std::vector<std::string>{baseline->generation} &&
+                              entry_names(session) ==
+                                  std::vector<std::string>{"current", "generations"},
+                          label + " left the unpublished generation or its pointer file");
+        const auto loaded = store.load(responses.client_session_sha256, fingerprint());
+        failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+                              loaded.checkpoint &&
+                              loaded.checkpoint->generation == baseline->generation,
+                          label + " replaced the published generation");
+    }
+    return failures;
+}
+#endif
+
+// omp-ninfer#89 L8: only the current-pointer rename makes a generation visible. A failure
+// replace_path reports before attempting that rename leaves current untouched, so the save
+// discards the attempted generation and its pointer file at once rather than leaving a stale
+// generation for quota pressure. Once the rename was attempted the generation is retained
+// for reconciliation.
+int test_pointer_rename_attempt_decides_generation_retention() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .read_queue = std::make_shared<TestReadQueue>()});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) { return DurableExportResult{}; }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto baseline = store.save(responses, fingerprint(), exporter, publish_fixture);
+    if (!baseline) { return check(false, "pointer-rename baseline did not publish"); }
+    const auto session = temporary.path / "sessions" / responses.client_session_sha256;
+    runtime::CheckpointControl control;
+    control.session(responses.client_session_sha256)->tag = responses.latest_response_id;
+    // The real epoch gate turns a publication exception into Refused/IoUnavailable.
+    const auto gate = [&](std::function<void()> before_commit) {
+        return [&, before_commit](runtime::DurableSessionEpoch epoch,
+                                  const std::function<bool()>& commit) {
+            before_commit();
+            return control.publish(responses.client_session_sha256, responses.latest_response_id,
+                                   epoch, commit);
+        };
+    };
+    int failures = 0;
+
+    // The staged pointer vanishes, so replace_path refuses its source before any rename.
+    runtime::SessionCheckpointSkipDetail refused_skip;
+    const auto refused = store.save(responses, fingerprint(), exporter, gate([&] {
+        for (const auto& name : entry_names(session)) {
+            if (name.starts_with(".current-")) { std::filesystem::remove(session / name); }
+        }
+    }), &refused_skip);
+    failures += check(!refused && refused_skip.durable_reason == runtime::DurableReason::IoUnavailable,
+                      "pre-rename publication failure was acknowledged or lost its reason");
+    failures += check(entry_names(session / "generations") ==
+                              std::vector<std::string>{baseline->generation} &&
+                          entry_names(session) == std::vector<std::string>{"current", "generations"},
+                      "pre-rename publication failure retained the unpublished generation");
+    {
+        const auto loaded = store.load(responses.client_session_sha256, fingerprint());
+        failures += check(loaded.state == SessionCheckpointLoadState::Available &&
+                              loaded.checkpoint &&
+                              loaded.checkpoint->generation == baseline->generation,
+                          "pre-rename publication failure changed the published generation");
+    }
+
+    // An occupied directory named current makes the attempted rename itself fail.
+    std::filesystem::remove(session / "current");
+    std::filesystem::create_directories(session / "current" / "occupied");
+    const auto before = entry_names(session / "generations");
+    runtime::SessionCheckpointSkipDetail attempted_skip;
+    const auto attempted = store.save(responses, fingerprint(), exporter, gate([] {}),
+                                      &attempted_skip);
+    const auto retained = entry_names(session / "generations");
+    failures += check(!attempted &&
+                          attempted_skip.durable_reason == runtime::DurableReason::IoUnavailable &&
+                          retained.size() == before.size() + 1 &&
+                          std::includes(retained.begin(), retained.end(), before.begin(),
+                                        before.end()) &&
+                          entry_names(session) == std::vector<std::string>{"current", "generations"},
+                      "attempted current rename did not retain its possibly visible generation");
+    return failures;
+}
+
+// A quarantine requested while the save lease still pins its just-published generation only
+// detaches current; the lease finishes it on release. That release follows the save's
+// return, so the lease owns the generation name instead of borrowing the save's.
+int test_save_lease_finishes_quarantine_requested_after_publication() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .read_queue = std::make_shared<TestReadQueue>()});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) { return DurableExportResult{}; }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto generations =
+        temporary.path / "sessions" / responses.client_session_sha256 / "generations";
+    std::string published;
+    bool deferred = false;
+    const auto saved = store.save(responses, fingerprint(), exporter,
+        [&](runtime::DurableSessionEpoch epoch, const std::function<bool()>& commit) {
+            const auto result = publish_fixture(epoch, commit);
+            // Corruption evidence for the generation current now names, while the lease pins it.
+            const auto names = entry_names(generations);
+            published = names.size() == 1 ? names.front() : std::string();
+            deferred = store.quarantine(responses.client_session_sha256, published,
+                                        runtime::DurableReason::PayloadDigestMismatch) &&
+                       store.status(responses.client_session_sha256, fingerprint())
+                               .at("state") == "missing" &&
+                       entry_names(generations) == std::vector<std::string>{published};
+            return result;
+        });
+    int failures = check(saved && saved->generation == published && deferred,
+                         "pinned published generation did not defer its quarantine");
+    const auto names = entry_names(generations);
+    failures += check(names.size() == 1 && names.front().starts_with(published + ".corrupt-"),
+                      "save lease release skipped the quarantine deferred for its generation");
+    return failures;
+}
+
+// directory_bytes supplies both store usage and each reclamation candidate's bytes, so no
+// substitute size is safe for an entry whose status cannot be determined. Quota accounting
+// fails closed with the OS code instead of skipping the entry; saving resumes once it can.
+int test_unmeasurable_generation_entry_fails_quota_closed() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    SessionCheckpointStore store({.root = temporary.path,
+                                  .disk_quota_bytes = 8ULL << 20,
+                                  .staging_bytes = 1ULL << 20,
+                                  .read_queue = std::make_shared<TestReadQueue>()});
+    const auto exporter = [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) { return DurableExportResult{}; }
+        return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                  .payload_bytes = payload.size()});
+    };
+    const auto baseline = store.save(responses, fingerprint(), exporter, publish_fixture);
+    if (!baseline) { return check(false, "unmeasurable-entry baseline did not publish"); }
+    const auto root = stored_generation_root(temporary.path, responses, baseline->generation);
+    // The link exists, but the status of what it names cannot be determined.
+    std::filesystem::create_symlink("loop", root / "loop");
+    std::error_code scanned;
+    try {
+        store.collect_garbage();
+    } catch (const std::system_error& error) { scanned = error.code(); }
+#ifdef _WIN32
+    const bool reported = scanned && scanned.category() == std::system_category();
+#else
+    const bool reported = scanned == std::errc::too_many_symbolic_link_levels;
+#endif
+    int failures = check(reported, "quota scan skipped an entry whose status is unavailable");
+    bool refused = false;
+    std::optional<SessionCheckpointSaveResult> successor;
+    try {
+        successor = store.save(responses, fingerprint(), exporter, publish_fixture);
+    } catch (const std::system_error&) { refused = true; }
+    failures += check(refused && !successor &&
+                          entry_names(root.parent_path()) ==
+                              std::vector<std::string>{baseline->generation},
+                      "save published over a store whose usage it could not measure");
+    std::filesystem::remove(root / "loop");
+    failures += check(store.save(responses, fingerprint(), exporter, publish_fixture).has_value(),
+                      "measurable store did not resume saving");
+    return failures;
+}
 
 
 int test_hmac_sha256_rfc4231_vectors() {
@@ -2592,7 +2842,8 @@ int test_current_parent_flush_failure_retains_visible_generation(DWORD error = E
             }, &skip);
         diagnostic = log.output.str();
     }
-    const auto reason = error == ERROR_DISK_FULL || error == ERROR_HANDLE_DISK_FULL
+    const auto reason = error == ERROR_DISK_FULL || error == ERROR_HANDLE_DISK_FULL ||
+                                error == ERROR_DISK_QUOTA_EXCEEDED
                             ? runtime::DurableReason::Capacity : runtime::DurableReason::IoUnavailable;
     int failures = check(parent_flush_fault.fired && !uncertain && skip.durable_reason == reason,
                          "post-rename parent-flush failure lost its unacknowledged failure reason");
@@ -2957,9 +3208,11 @@ int main(int argc, char** argv) {
 #if defined(_WIN32) || defined(__linux__)
         if (test == "disk_full_capacity") {
             int failures = test_disk_full_capacity_preserves_generation();
+            failures += test_metadata_close_failure_keeps_os_classification();
 #ifdef _WIN32
             failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_DISK_FULL);
             failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_HANDLE_DISK_FULL);
+            failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_DISK_QUOTA_EXCEEDED);
 #endif
             return failures;
         }
@@ -2996,7 +3249,11 @@ int main(int argc, char** argv) {
     failures += test_buffered_deferred_failure_fails_before_publication();
 #if defined(_WIN32) || defined(__linux__)
     failures += test_disk_full_capacity_preserves_generation();
+    failures += test_metadata_close_failure_keeps_os_classification();
 #endif
+    failures += test_pointer_rename_attempt_decides_generation_retention();
+    failures += test_save_lease_finishes_quarantine_requested_after_publication();
+    failures += test_unmeasurable_generation_entry_fails_quota_closed();
     failures += test_hmac_sha256_rfc4231_vectors();
     failures += test_manifest_origin_authentication();
     failures += test_manifest_origin_compatibility_window();
@@ -3007,6 +3264,7 @@ int main(int argc, char** argv) {
     failures += test_current_parent_flush_failure_retains_visible_generation();
     failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_DISK_FULL);
     failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_HANDLE_DISK_FULL);
+    failures += test_current_parent_flush_failure_retains_visible_generation(ERROR_DISK_QUOTA_EXCEEDED);
 #endif
     failures += test_export_and_publication_callbacks_are_catalog_unlocked();
     failures += test_reader_failure_reasons_and_fresh_retries();

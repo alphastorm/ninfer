@@ -263,6 +263,43 @@ int test_native_read_queue_root_confinement() {
     return failures;
 }
 
+// The legacy backend's publication keeps io::replace_path's OS code: a failed commit throws
+// std::system_error, which checkpoint I/O classification reads, and the committed checkpoint
+// stays authoritative.
+int test_native_publication_failure_keeps_os_code() {
+    TemporaryDirectory root(L"ninfer-directstorage-publication");
+    DirectStorageCheckpointConfig config;
+    config.directory       = root.path();
+    config.lock_timeout_ms = 250;
+    config.io_timeout_ms   = 30'000;
+    auto backend         = make_direct_storage_checkpoint_backend(config);
+    const Fixture first  = fixture(20);
+    const Fixture second = fixture(21);
+    backend->stage(first.manifest, first.payloads, first.key);
+    backend->commit(first.key);
+    backend->stage(second.manifest, second.payloads, second.key);
+    // Without its staged manifest, the publishing replacement has no source to rename.
+    for (const auto& entry :
+         std::filesystem::directory_iterator(root.path() / ".ninfer-checkpoint-staging-v1")) {
+        if (entry.path().filename().wstring().ends_with(L".manifest.stage")) {
+            std::filesystem::remove(entry.path());
+        }
+    }
+    std::error_code published;
+    try {
+        backend->commit(second.key);
+    } catch (const std::system_error& error) {
+        published = error.code();
+    } catch (const std::exception&) {}
+    backend->abort(second.key);
+    int failures =
+        check(published == std::error_code(ERROR_FILE_NOT_FOUND, std::system_category()),
+              "native publication failure lost its Win32 error code");
+    failures += check(image_matches(backend->load(first.expectation), first),
+                      "failed native publication displaced the committed checkpoint");
+    return failures;
+}
+
 } // namespace
 
 int main() {
@@ -272,6 +309,7 @@ int main() {
         failures += test_native_lock_timeout();
         failures += test_native_reparse_staging_rejection();
         failures += test_native_read_queue_root_confinement();
+        failures += test_native_publication_failure_keeps_os_code();
         if (failures == 0) {
             std::cout << "Windows DirectStorage native checkpoint tests passed\n";
             return 0;

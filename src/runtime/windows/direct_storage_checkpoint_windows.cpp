@@ -31,6 +31,7 @@
 #    include <span>
 #    include <sstream>
 #    include <string>
+#    include <system_error>
 #    include <utility>
 #    include <vector>
 
@@ -41,14 +42,18 @@ using Microsoft::WRL::ComPtr;
 
 constexpr std::size_t kWindowsIoChunkBytes = 32ULL << 20;
 
-[[noreturn]] void fail_windows(const std::string& operation, std::uint64_t code) {
-    std::ostringstream message;
-    message << operation << " (0x" << std::hex << code << ')';
-    throw CheckpointContractError(message.str());
+// Win32 failures carry their code, as io:: failures do, for checkpoint I/O classification.
+[[noreturn]] void fail_windows(const std::string& operation, DWORD code) {
+    throw std::system_error(static_cast<int>(code), std::system_category(), operation);
 }
 
+// D3D12, DXGI and DirectStorage report HRESULTs, not Win32 error codes.
 void require_hresult(HRESULT result, const std::string& operation) {
-    if (FAILED(result)) { fail_windows(operation, static_cast<std::uint32_t>(result)); }
+    if (FAILED(result)) {
+        std::ostringstream message;
+        message << operation << " (0x" << std::hex << static_cast<std::uint32_t>(result) << ')';
+        throw CheckpointContractError(message.str());
+    }
 }
 
 void require_cuda(cudaError_t result, const std::string& operation) {
@@ -164,13 +169,15 @@ public:
     void ensure_directory(const std::filesystem::path& path) override {
         std::error_code error;
         std::filesystem::create_directories(path, error);
+        if (error) { throw std::system_error(error, "failed to create checkpoint directory"); }
         const DWORD attributes = GetFileAttributesW(path.c_str());
-        if (error || attributes == INVALID_FILE_ATTRIBUTES ||
-            (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            fail_windows("failed to inspect checkpoint directory", GetLastError());
+        }
+        if ((attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
             (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
             throw CheckpointContractError(
-                "failed to create checkpoint directory: " +
-                (error ? error.message() : std::string("not a plain directory")));
+                "failed to create checkpoint directory: not a plain directory");
         }
     }
 
@@ -187,13 +194,11 @@ public:
         for (std::filesystem::directory_iterator iterator(path, error), end; iterator != end;
              iterator.increment(error)) {
             if (error) {
-                throw CheckpointContractError("failed to enumerate checkpoint directory: " +
-                                              error.message());
+                throw std::system_error(error, "failed to enumerate checkpoint directory");
             }
             const std::filesystem::file_status status = iterator->symlink_status(error);
             if (error) {
-                throw CheckpointContractError("failed to inspect checkpoint directory entry: " +
-                                              error.message());
+                throw std::system_error(error, "failed to inspect checkpoint directory entry");
             }
             if (std::filesystem::is_regular_file(status) || std::filesystem::is_symlink(status)) {
                 if (predicate == nullptr || !predicate(iterator->path())) { continue; }
@@ -204,10 +209,7 @@ public:
                 files.push_back(iterator->path());
             }
         }
-        if (error) {
-            throw CheckpointContractError("failed to enumerate checkpoint directory: " +
-                                          error.message());
-        }
+        if (error) { throw std::system_error(error, "failed to enumerate checkpoint directory"); }
         return files;
     }
 
@@ -330,14 +332,10 @@ public:
         }
     }
 
+    // io::replace_path's std::system_error carries the OS code to the caller unchanged.
     void atomic_replace_durable(const std::filesystem::path& source,
                                 const std::filesystem::path& destination) override {
-        try {
-            io::replace_path(source, destination);
-        } catch (const std::exception& error) {
-            throw CheckpointContractError(std::string("failed to durably publish checkpoint file: ") +
-                                          error.what());
-        }
+        io::replace_path(source, destination);
     }
 
     bool remove_file(const std::filesystem::path& path) noexcept override {
@@ -581,12 +579,8 @@ public:
         // Resolve all parents without reparse traversal and hold the resulting file
         // against replacement while DirectStorage opens its native source object.
         const auto close_file = [](std::FILE* file) { std::fclose(file); };
-        std::unique_ptr<std::FILE, decltype(close_file)> pinned(nullptr, close_file);
-        try {
-            pinned.reset(io::open_binary_read(path));
-        } catch (const std::exception& error) {
-            throw CheckpointContractError(std::string("open checkpoint payload: ") + error.what());
-        }
+        std::unique_ptr<std::FILE, decltype(close_file)> pinned(io::open_binary_read(path),
+                                                                close_file);
         const HANDLE pinned_handle =
             reinterpret_cast<HANDLE>(_get_osfhandle(_fileno(pinned.get())));
         BY_HANDLE_FILE_INFORMATION expected{};
@@ -674,12 +668,7 @@ private:
 std::shared_ptr<ContinuationCheckpointReadQueue>
 make_direct_storage_checkpoint_read_queue(const std::filesystem::path& root,
                                           std::uint32_t timeout_ms) {
-    try {
-        io::create_directories(root);
-    } catch (const std::exception& error) {
-        throw CheckpointContractError(std::string("create DirectStorage checkpoint root: ") +
-                                      error.what());
-    }
+    io::create_directories(root);
     return std::make_shared<WindowsDirectStorageReadQueue>(root, timeout_ms);
 }
 
