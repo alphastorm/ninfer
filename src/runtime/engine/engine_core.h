@@ -793,7 +793,17 @@ private:
         request->base_plan.reset();
     }
 
-    void complete_error(const std::shared_ptr<Request>& request, std::exception_ptr error) {
+    // A terminal response stays staged until its request has left live membership and the
+    // statistics that no longer count it are published.
+    using TerminalResponse = std::variant<GenerationResult, std::exception_ptr>;
+
+    struct RetiredResponse {
+        std::shared_ptr<Request> request;
+        TerminalResponse response;
+    };
+
+    // Retires request-owned planning and execution state ahead of an error response.
+    void finalize_error(const std::shared_ptr<Request>& request) {
         if (request->preemption_count) {
             observe_scheduling(request, GenerationSchedulingTransition::Terminal);
         }
@@ -804,14 +814,6 @@ private:
         request->lane.reset();
         request->budget.reset();
         request->terminal_reason.reset();
-        {
-            std::lock_guard lock(request->mutex);
-            if (request->response_done) { return; }
-            request->error         = std::move(error);
-            request->response_done = true;
-        }
-        if (mark_completed(request)) { release_reserved_capacity(); }
-        request->cv.notify_one();
     }
 
     [[nodiscard]] GenerationResult finalize_success(const std::shared_ptr<Request>& request,
@@ -892,43 +894,73 @@ private:
         return result;
     }
 
-    void deliver_success(const std::shared_ptr<Request>& request, GenerationResult&& result) {
+    [[nodiscard]] GenerationResult finalize_cancelled(const std::shared_ptr<Request>& request) {
+        (void)request->output.preview_terminal(FinishReason::Cancelled);
+        append_output(request, request->output.commit_preview());
+        return finalize_success(request, FinishReason::Cancelled);
+    }
+
+    void deliver(const std::shared_ptr<Request>& request, TerminalResponse&& response) {
         {
             std::lock_guard lock(request->mutex);
             if (request->response_done) { return; }
-            request->result        = std::move(result);
+            if (auto* error = std::get_if<std::exception_ptr>(&response)) {
+                request->error = std::move(*error);
+            } else {
+                request->result = std::move(std::get<GenerationResult>(response));
+            }
             request->response_done = true;
         }
         if (mark_completed(request)) { release_reserved_capacity(); }
         request->cv.notify_one();
     }
 
-    void complete_success(const std::shared_ptr<Request>& request, FinishReason reason) {
-        deliver_success(request, finalize_success(request, reason));
+    // Every request has already left live membership. Statistics that no longer count them are
+    // published before any response becomes observable; a failed publication still answers them.
+    void publish_and_deliver(std::span<RetiredResponse> retired) {
+        try {
+            publish_runtime_stats();
+        } catch (...) {
+            for (auto& [request, response] : retired) { deliver(request, std::move(response)); }
+            throw;
+        }
+        for (auto& [request, response] : retired) { deliver(request, std::move(response)); }
+    }
+
+    void publish_and_deliver(const std::shared_ptr<Request>& request,
+                             TerminalResponse&& response) {
+        RetiredResponse retired{request, std::move(response)};
+        publish_and_deliver({&retired, 1});
     }
 
     void retire_completed_slot(std::uint32_t lane, const std::shared_ptr<Request>& request,
                                FinishReason reason) {
         GenerationResult result = finalize_success(request, reason);
         remove_completed_slot(lane);
-        publish_runtime_stats();
-        deliver_success(request, std::move(result));
+        publish_and_deliver(request, std::move(result));
     }
 
-    void complete_cancelled(const std::shared_ptr<Request>& request) {
-        (void)request->output.preview_terminal(FinishReason::Cancelled);
-        append_output(request, request->output.commit_preview());
-        complete_success(request, FinishReason::Cancelled);
+    void retire_failed_slot(std::uint32_t lane, const std::shared_ptr<Request>& request,
+                            std::exception_ptr error) {
+        finalize_error(request);
+        remove_completed_slot(lane);
+        publish_and_deliver(request, std::move(error));
     }
 
-    void complete_detached_cancelled(const std::shared_ptr<Request>& request) {
+    // The request has already left live membership. A failed cancellation answers it with that
+    // failure, after publication, before the failure ends the Engine.
+    void retire_detached_cancelled(const std::shared_ptr<Request>& request) {
+        RetiredResponse retired{request, {}};
+        std::exception_ptr failure;
         try {
-            complete_cancelled(request);
+            retired.response = finalize_cancelled(request);
         } catch (...) {
-            const std::exception_ptr error = std::current_exception();
-            complete_error(request, error);
-            throw;
+            failure = std::current_exception();
+            finalize_error(request);
+            retired.response = failure;
         }
+        publish_and_deliver({&retired, 1});
+        if (failure) { std::rethrow_exception(failure); }
     }
 
     void remove_completed_slot(std::uint32_t lane) {
@@ -1024,43 +1056,44 @@ private:
     }
 
     [[nodiscard]] bool expire_pending_requests() {
-        std::vector<std::shared_ptr<Request>> cancelled;
-        std::vector<std::shared_ptr<Request>> expired;
+        // Cancelled entries stage their committed output; expired entries stage a queue timeout.
+        std::vector<RetiredResponse> retired;
         bool have_pending = false;
         {
             std::lock_guard lock(queue_mutex_);
             const auto now = Clock::now();
             for (auto it = pending_.begin(); it != pending_.end();) {
-                if ((*it)->cancelled.load(std::memory_order_acquire)) {
-                    cancelled.push_back(*it);
-                    it = pending_.erase(it);
-                } else if (now >= (*it)->deadline) {
-                    expired.push_back(*it);
-                    it = pending_.erase(it);
-                } else {
+                const bool cancelled = (*it)->cancelled.load(std::memory_order_acquire);
+                if (!cancelled && now < (*it)->deadline) {
                     ++it;
+                    continue;
                 }
+                retired.push_back({*it, cancelled ? TerminalResponse{}
+                                                  : TerminalResponse{std::exception_ptr{}}});
+                it = pending_.erase(it);
             }
             have_pending = !pending_.empty();
         }
-        try {
-            for (const auto& request : cancelled) { complete_detached_cancelled(request); }
-            for (const auto& request : expired) {
-                complete_error(request,
-                               std::make_exception_ptr(RequestError(
-                                   RequestErrorKind::QueueTimeout,
-                                   "inference request expired while waiting for admission")));
+        if (retired.empty()) { return have_pending; }
+        // A failed cancellation answers that request and every later one with the failure, which
+        // then ends the Engine.
+        std::exception_ptr failure;
+        for (auto& [request, response] : retired) {
+            if (!failure && std::holds_alternative<GenerationResult>(response)) {
+                try {
+                    response = finalize_cancelled(request);
+                    continue;
+                } catch (...) { failure = std::current_exception(); }
             }
-        } catch (...) {
-            const std::exception_ptr error = std::current_exception();
-            for (const auto& request : cancelled) { complete_error(request, error); }
-            for (const auto& request : expired) { complete_error(request, error); }
-            throw;
+            finalize_error(request);
+            response = failure ? failure
+                               : std::make_exception_ptr(RequestError(
+                                     RequestErrorKind::QueueTimeout,
+                                     "inference request expired while waiting for admission"));
         }
-        if (!cancelled.empty() || !expired.empty()) {
-            request_admission_check();
-            publish_runtime_stats();
-        }
+        request_admission_check();
+        publish_and_deliver(retired);
+        if (failure) { std::rethrow_exception(failure); }
         return have_pending;
     }
 
@@ -1262,15 +1295,12 @@ private:
                 const std::uint32_t accepted = decisions[row].accepted_tokens;
                 if (failed[row]) {
                     const auto rejected = request;
-                    const auto error =
-                        preview_errors[row]
-                            ? preview_errors[row]
-                            : std::make_exception_ptr(
-                                  RequestError(RequestErrorKind::ConstraintDeadEnd,
-                                               "grammar has no valid next token"));
-                    remove_completed_slot(lane);
-                    publish_runtime_stats();
-                    complete_error(rejected, error);
+                    retire_failed_slot(lane, rejected,
+                                       preview_errors[row]
+                                           ? preview_errors[row]
+                                           : std::make_exception_ptr(RequestError(
+                                                 RequestErrorKind::ConstraintDeadEnd,
+                                                 "grammar has no valid next token")));
                     continue;
                 }
                 if (!cancelled[row]) { request->budget->commit(accepted); }
@@ -1533,10 +1563,10 @@ private:
             const auto control  = std::move(*materializing_);
             const auto& request = control.request;
             if (!progress.published) {
-                complete_detached_cancelled(request);
                 materializing_.reset();
                 scheduler_.capacity_released();
                 request_admission_check();
+                retire_detached_cancelled(request);
                 return true;
             }
             auto carried = progress.private_points;
@@ -1607,9 +1637,9 @@ private:
                     request->lane.reset();
                     request->sequence.reset();
                     context_owner_.reset();
-                    complete_detached_cancelled(request);
                     scheduler_.capacity_released();
                     request_admission_check();
+                    retire_detached_cancelled(request);
                     boundary = begin_host_phase();
                     return true;
                 }
@@ -2272,8 +2302,7 @@ private:
                     }
                     rejected->generation_timings = aborted.timings;
                     rejected->speculative_stats = std::move(aborted.speculative);
-                    remove_completed_slot(lane);
-                    complete_error(rejected, error);
+                    retire_failed_slot(lane, rejected, error);
                     ControlMembership remaining;
                     remaining.row_stride = membership.row_stride;
                     for (std::size_t other = 0; other < membership.size; ++other) {
@@ -2285,7 +2314,6 @@ private:
                                                 first + membership.row_stride);
                     }
                     if (!remaining.empty()) { run_control_batch(remaining); }
-                    publish_runtime_stats();
                     return;
                 }
                 if (decision.accepted_tokens != membership.row_stride || decision.finished() ||
@@ -2338,7 +2366,8 @@ private:
     }
 
     // The worker holds execution_mutex_ across the failing operation and this cleanup, so no
-    // Program introspection can observe a partially cleared physical state.
+    // Program introspection can observe a partially cleared physical state. Every request leaves
+    // live membership before statistics are published, and only then are responses observable.
     void fail_all_locked(std::exception_ptr error) noexcept {
         std::deque<std::shared_ptr<Request>> pending;
         {
@@ -2355,21 +2384,28 @@ private:
         admission_decision_.reset();
         for (auto& decision : capture_decisions_) { decision.reset(); }
         context_owner_.reset();
-        for (auto& request : paused_) {
+        std::vector<std::shared_ptr<Request>> paused;
+        paused.swap(paused_);
+        for (const auto& request : paused) {
             request->suspended.reset();
-            complete_error(request, error);
+            finalize_error(request);
         }
-        paused_.clear();
         resources_.release_all(*instance_.program);
-        for (std::uint32_t lane = 0; lane < max_concurrency_; ++lane) {
-            if (slots_[lane] != nullptr) {
-                complete_error(slots_[lane], error);
-                slots_[lane].reset();
-            }
+        std::array<std::shared_ptr<Request>, kMaximumConcurrency> resident{};
+        resident.swap(slots_);
+        for (const auto& request : resident) {
+            if (request != nullptr) { finalize_error(request); }
         }
-        if (materializing_request != nullptr) { complete_error(materializing_request, error); }
-        for (const auto& request : pending) { complete_error(request, error); }
+        if (materializing_request != nullptr) { finalize_error(materializing_request); }
+        for (const auto& request : pending) { finalize_error(request); }
         publish_runtime_stats();
+        const auto answer = [&](const std::shared_ptr<Request>& request) {
+            if (request != nullptr) { deliver(request, TerminalResponse{error}); }
+        };
+        for (const auto& request : paused) { answer(request); }
+        for (const auto& request : resident) { answer(request); }
+        answer(materializing_request);
+        for (const auto& request : pending) { answer(request); }
     }
 
     void idle_wait(std::unique_lock<std::mutex>& lock) {
@@ -2444,8 +2480,8 @@ private:
                     }
                     request->suspended.reset();
                     it = paused_.erase(it);
-                    complete_detached_cancelled(request);
                     scheduler_.capacity_released();
+                    retire_detached_cancelled(request);
                 }
                 const bool recovering =
                     std::any_of(slots_.begin(), slots_.end(),

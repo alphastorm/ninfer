@@ -17,6 +17,20 @@ ninfer_add_test(ninfer_engine_checkpoint_adapter_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_checkpoint_adapter.cpp"
   LIBRARIES ninfer_core Threads::Threads)
 set_tests_properties(ninfer_engine_checkpoint_adapter_test PROPERTIES LABELS "host")
+ninfer_add_test(ninfer_engine_core_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_engine_core.cpp"
+  LIBRARIES ninfer_runtime_support ninfer_core Threads::Threads)
+# DeviceContext only binds the Engine worker; the test presents one device to the linked CUDA
+# runtime so a GPU-less host runs the production EngineCore without CUDA work.
+ninfer_cuda_test_interposition(ninfer_engine_core_test ninfer_runtime_support)
+if(NOT WIN32)
+  foreach(symbol IN ITEMS cudaGetDeviceCount cudaSetDevice cudaSetDeviceFlags
+      cudaGetDeviceProperties cudaGetDeviceProperties_v2 cudaStreamCreateWithFlags
+      cudaStreamDestroy)
+    target_link_options(ninfer_engine_core_test PRIVATE "LINKER:--wrap=${symbol}")
+  endforeach()
+endif()
+set_tests_properties(ninfer_engine_core_test PROPERTIES LABELS "host" TIMEOUT 120)
 add_executable(ninfer_durable_contract_headers_test
   "${CMAKE_CURRENT_LIST_DIR}/../test_durable_contract_headers.cpp")
 ninfer_test_includes(ninfer_durable_contract_headers_test)

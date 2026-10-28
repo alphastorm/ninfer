@@ -417,8 +417,10 @@ Forced control 使用同一提交机制，token 由 Frontend 提供，不调用 
 
 成功结束时，Program 将可保留 continuation 交给 ResourceManager，或释放 sequence；ResourceManager
 更新私有 owner、共享索引和 session，然后 Engine 完成结果、释放 lane、发布不再包含该请求的
-runtime statistics，最后完成 response。成功结束和 resident 取消使用相同顺序；`wait()` 返回后
-读取的统计不得仍将该请求计入 live membership。
+runtime statistics，最后完成 response。每个终态 response 都使用这一顺序：成功、取消、请求级
+拒绝或失败以及 Engine 失败，都先让请求离开 waiting、materializing、resident、pausing 或 paused
+membership 并释放其规划状态，再发布统计，最后才使结果或错误可见；`wait()` 返回后读取的统计
+不得仍将该请求计入 live membership。
 
 取消在 worker 边界生效：Waiting 直接结束；绑定或传输中的请求先结算/中止事务；resident 请求在
 GPU unit 稳定后 abort；paused 请求释放 ResumeState 及相关 owner。取消不改写 in-flight mapping，
@@ -427,7 +429,7 @@ GPU unit 稳定后 abort；paused 请求释放 ResumeState 及相关 owner。取
 Queue timeout、overload、输入超限和 request 无法表示属于请求级拒绝。Handle generation/owner
 错误、PendingBatch membership 错误、物理 mutation 无法稳定 commit/abort，以及完整性或 adoption
 不变量损坏会使 Engine 失败。Cleanup 先结束未决上下文和模型事务，再释放 resident/paused 资源与
-缓存，最后完成全部 response。内部状态损坏不能解释成 cache miss。
+缓存并发布统计，最后完成全部 response。内部状态损坏不能解释成 cache miss。
 
 ## 7. 物理执行与 CUDA Graph
 
