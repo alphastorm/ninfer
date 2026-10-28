@@ -54,6 +54,17 @@ if(TARGET ninfer-serve)
     LABELS "gpu;real;durable" SKIP_RETURN_CODE 77 TIMEOUT 900 RUN_SERIAL TRUE)
 endif()
 
+# The close fault uses the Linux link-time stdio wrappers shared with the store tests.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  ninfer_add_test(ninfer_session_checkpoint_service_real_test
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_session_checkpoint_service_real.cpp"
+    LIBRARIES ninfer_serve)
+  target_link_options(ninfer_session_checkpoint_service_real_test PRIVATE
+    "LINKER:--wrap=fflush" "LINKER:--wrap=fclose")
+  set_tests_properties(ninfer_session_checkpoint_service_real_test PROPERTIES
+    LABELS "gpu;real;durable" SKIP_RETURN_CODE 77 TIMEOUT 300 RUN_SERIAL TRUE)
+endif()
+
 ninfer_add_test(ninfer_session_checkpoint_store_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_session_checkpoint_store.cpp"
   NEEDS_SOURCE_DIR

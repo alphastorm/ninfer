@@ -488,7 +488,8 @@ bool SessionCheckpointService::write_shutdown_report(const ShutdownCheckpointSum
         std::unique_ptr<std::FILE, decltype(close)> file(io::open_binary_write(temporary), close);
         io::write_exact(file.get(), std::as_bytes(std::span(text.data(), text.size())));
         io::flush_file(file.get());
-        file.reset();
+        // A failed close, including a deferred write error, must not acknowledge the report.
+        io::close_file(file.release());
         io::replace_path(temporary, path);
         io::sync_directory(path.parent_path());
         return true;
