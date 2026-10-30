@@ -579,6 +579,9 @@ std::string format_server_start_json(
                                                           {"peak_staging_bytes", load.peak_staging_bytes},
                                                           {"device_object_count", load.device_object_count},
                                                           {"host_object_count", load.host_object_count},
+                                                          {"effective_weights",
+                                                           {{"converted_device_bytes", load.effective_weights.converted_device_bytes},
+                                                            {"host_mapped_bytes", load.effective_weights.host_mapped_bytes}}},
                                                           {"load_seconds", load.load_seconds},
                                                           {"upload_seconds", load.upload_seconds}};
     const ninfer::ContextCacheOptions& cache       = engine_options.context_cache;
@@ -706,6 +709,8 @@ std::string format_status_json(const ServeOptions& options,
     return Json{
         {"artifact_type", "ninfer_server_status"}, {"schema_version", 2},
         {"status", available ? "ok" : "unavailable"}, {"identity", server_identity_json(options, load)},
+        {"effective_weights", {{"converted_device_bytes", load.effective_weights.converted_device_bytes},
+                               {"host_mapped_bytes", load.effective_weights.host_mapped_bytes}}},
         {"runtime", {{"public_model_id", public_model_id}, {"max_context", engine.max_context},
             {"kv_capacity_mode", kv_capacity_mode_name(memory.kv_capacity_mode)},
             {"kv_capacity_tokens", memory.kv_capacity}, {"kv_cache", kv_cache_name(engine.kv_cache)},

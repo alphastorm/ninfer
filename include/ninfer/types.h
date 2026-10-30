@@ -1164,6 +1164,11 @@ struct ContextCostSummary {
     std::filesystem::path preset_path;
 };
 
+struct EffectiveWeightSummary {
+    std::uint64_t converted_device_bytes = 0;
+    std::uint64_t host_mapped_bytes      = 0;
+};
+
 struct LoadSummary {
     std::string architecture;
     std::string model_name;
@@ -1178,6 +1183,7 @@ struct LoadSummary {
     std::size_t device_object_count    = 0;
     std::size_t host_object_count      = 0;
     ContextCostSummary context_cost;
+    EffectiveWeightSummary effective_weights;
 };
 
 } // namespace ninfer

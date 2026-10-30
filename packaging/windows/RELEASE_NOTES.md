@@ -32,6 +32,10 @@ Host context remains an exact translation of the predecessor Host KV budget plus
 The DFlash2 state-image size must be re-measured on the final build, and the exact
 shipping configuration must pass the native context, restart, quality and performance
 gates before promotion. Package-build receipts remain `hardware-pending`.
+Startup JSON reports `artifact.effective_weights.converted_device_bytes` and
+`artifact.effective_weights.host_mapped_bytes`; status exposes the same
+`effective_weights` object. Qualification of this model's native DFlash2 fit must
+observe both counts greater than zero rather than assume the conversion/mapping ran.
 
 Upgrade with the candidate's `Install-Release.ps1` into the existing lane state
 root. The installer stops the incumbent through its own controller and retains the

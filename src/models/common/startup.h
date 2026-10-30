@@ -10,6 +10,7 @@ struct WeightPlacement {
     std::size_t fixed_bytes = 0;
     std::optional<moe::Plan> offload;
     std::vector<ExpertBankCacheSpec> banks;
+    EffectiveWeightSummary effective_weights;
 };
 
 template <class SequencePlan>

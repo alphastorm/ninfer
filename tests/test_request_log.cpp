@@ -174,6 +174,7 @@ int main() {
     load.peak_staging_bytes   = 128;
     load.device_object_count  = 42;
     load.host_object_count    = 6;
+    load.effective_weights    = {.converted_device_bytes = 512, .host_mapped_bytes = 1024};
     load.context_cost         = {
                 .transfer_source   = ninfer::ContextCostPresetSource::External,
                 .prefill_source    = ninfer::ContextCostPresetSource::CompiledDefault,
@@ -240,6 +241,9 @@ int main() {
                       "startup lifecycle identity lost actual build/deployment/model values");
     failures += check(server.at("engine").at("gpu_keep_warm_ms") == 25,
                       "startup log lost effective keep-warm interval");
+    failures += check(server.at("artifact").at("effective_weights") ==
+                          Json{{"converted_device_bytes", 512}, {"host_mapped_bytes", 1024}},
+                      "startup log lost effective converted/mapped weight bytes");
     ninfer::RuntimeStats status_runtime;
     status_runtime.private_catalog_occupied = 3;
     status_runtime.shared_catalog_occupied = 4;
@@ -254,6 +258,8 @@ int main() {
     status_runtime.last_selected_frontier_tokens = 128;
     const auto status = Json::parse(format_status_json(options, engine_options, "deployment-alias",
                                                        load, memory, status_runtime));
+    failures += check(status.at("effective_weights") == server.at("artifact").at("effective_weights"),
+                      "status lost effective converted/mapped weight bytes");
     failures += check(status.at("artifact_type") == "ninfer_server_status" &&
                           status.at("schema_version") == 2 && status.at("status") == "ok" &&
                           status.at("runtime").at("public_model_id") == "deployment-alias" &&

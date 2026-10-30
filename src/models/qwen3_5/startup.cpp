@@ -10,6 +10,7 @@ WeightPlacement describe_placement(const LoadPlan& source, const execution::Mode
                                    Device device, const EngineOptions& options) {
     WeightPlacement out;
     out.resident_bytes = source.device_capacity_bytes(device, device);
+    out.effective_weights = {source.converted_device_bytes(), source.host_mapped_bytes()};
     auto offload       = detail::describe_moe_plan(source, profile, options.moe);
     if (source.config().text.architecture != Architecture::Qwen3_5Moe) return out;
     out.fixed_bytes = source.device_capacity_bytes(device, Device::cpu());

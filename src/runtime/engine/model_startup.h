@@ -295,6 +295,7 @@ build_model(const artifact::Reader& reader, EngineOptions& options, DeviceContex
     summary.device_object_count = stats.device_object_count;
     summary.host_object_count   = stats.host_object_count;
     summary.context_cost        = std::move(context_cost.summary);
+    summary.effective_weights   = weights.effective_weights;
     return {std::move(instance), std::move(summary), std::move(context_cost.model)};
 }
 

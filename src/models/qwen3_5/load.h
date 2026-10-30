@@ -35,6 +35,7 @@ public:
     // Includes effective draft backing, which is not an encoded artifact placement.
     [[nodiscard]] std::size_t device_capacity_bytes(Device cuda, Device main_experts) const;
     [[nodiscard]] std::size_t converted_device_bytes() const;
+    [[nodiscard]] std::size_t host_mapped_bytes() const;
     [[nodiscard]] const ModelWeights& weights() const;
     [[nodiscard]] const qwen::FrontendResources& resources() const;
     [[nodiscard]] std::span<const moe::BankDescription> expert_banks() const;

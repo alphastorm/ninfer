@@ -433,6 +433,8 @@ int main(int argc, char** argv) {
                           << " V=" << plan.logical().resources().public_token_count
                           << " device_bytes=" << plan.logical().device_capacity_bytes(
                                  Device::cuda(0), host_experts ? Device::cpu() : Device::cuda(0))
+                          << " converted_device_bytes=" << plan.logical().converted_device_bytes()
+                          << " host_mapped_bytes=" << plan.logical().host_mapped_bytes()
                           << '\n';
                 return 0;
             }

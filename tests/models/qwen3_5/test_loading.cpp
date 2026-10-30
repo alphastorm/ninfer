@@ -200,6 +200,12 @@ void logical_data_and_instances() {
                 "incomplete selected Vision was accepted");
         rejects([&] { (void)q35::plan_load(reader, {.speculative = SpeculativeBackend::Mtp}); },
                 "absent MTP was accepted");
+        require(plan.converted_device_bytes() == 0 && plan.host_mapped_bytes() == 0,
+                "ordinary loading reported native DFlash2 effective backing");
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+        rejects([&] { (void)q35::plan_load(reader, {.speculative = SpeculativeBackend::DFlash2}); },
+                "DFlash2 accepted a missing draft component");
+#endif
 
         const auto resolved = q35::resolve_load(std::move(plan), Device::cuda(0));
         return resolved.materialization().device_capacity_bytes;
@@ -497,38 +503,55 @@ void native_draft_plan() {
     fixture.parameter("dflash2/candidate_selector/successor_codebook", {272, 8});
     fixture.file.root["files"][0]["payload_bytes"] = fixture.file.payload.size();
     fixture.file.write();
-    artifact::Reader reader(fixture.file.entry);
-    auto plan = q35::plan_load(reader, {.speculative = SpeculativeBackend::DFlash2,
-                                       .native_prefill_policy = ops::NativePrefillPolicy::Group64A8});
-    const auto& mlp = plan.weights().draft->layers[0].mlp;
-    const auto gate = plan.input(mlp.gate), up = plan.input(mlp.up);
-    const auto& parent = *gate.weight.parts.front().parent;
-    require(&parent == up.weight.parts.front().parent &&
-                gate.weight.parts.front().end == up.weight.parts.front().begin,
-            "draft effective plan lost shared gate/up parent or logical ranges");
-    require(plan.input(mlp.down).weight.parts.front().parent->geometry.format == QType::Q8_G32_FP16,
-            "draft fit changed the Q8-only down projection");
-    const auto storage = plan.placement(Device::cuda(0), Device::cuda(0));
+    {
+        artifact::Reader reader(fixture.file.entry);
+        auto plan = q35::plan_load(reader, {
+            .speculative = SpeculativeBackend::DFlash2,
+            .native_prefill_policy = ops::NativePrefillPolicy::Group64A8,
+        });
+        const auto& mlp = plan.weights().draft->layers[0].mlp;
+        const auto gate = plan.input(mlp.gate), up = plan.input(mlp.up);
+        const auto& parent = *gate.weight.parts.front().parent;
+        require(&parent == up.weight.parts.front().parent &&
+                    gate.weight.parts.front().end == up.weight.parts.front().begin,
+                "draft effective plan lost shared gate/up parent or logical ranges");
+        require(plan.input(mlp.down).weight.parts.front().parent->geometry.format == QType::Q8_G32_FP16,
+                "draft fit changed the Q8-only down projection");
+        const auto storage = plan.placement(Device::cuda(0), Device::cuda(0));
 #if defined(NINFER_SM86) || defined(NINFER_SM89)
-    require(parent.geometry.format == QType::Q4_G64_FP16 &&
-                gate.policy == ops::LinearPolicy::AllowA8 &&
-                plan.converted_device_bytes() == parent.geometry.bytes,
-            "effective Q4 geometry did not precede policy or capacity planning");
-    const auto gate_up = reader.find("draft-gate-up");
-    for (const auto& item : storage.device_objects)
-        require(item.object != gate_up, "original Q8 draft parent was still reserved on Device");
-    require(storage.registered_host_objects.size() == 1 &&
-                storage.registered_host_objects.front().object == reader.find("embedding-storage"),
-            "mapped embedding did not reserve pinned Host backing");
+        require(parent.geometry.format == QType::Q4_G64_FP16 &&
+                    gate.policy == ops::LinearPolicy::AllowA8 &&
+                    plan.converted_device_bytes() == parent.geometry.bytes,
+                "effective Q4 geometry did not precede policy or capacity planning");
+        const auto gate_up = reader.find("draft-gate-up");
+        for (const auto& item : storage.device_objects)
+            require(item.object != gate_up, "original Q8 draft parent was still reserved on Device");
+        require(storage.registered_host_objects.size() == 1 &&
+                    storage.registered_host_objects.front().object == reader.find("embedding-storage") &&
+                    plan.host_mapped_bytes() == reader.geometry(reader.find("embedding-storage")).bytes,
+                "mapped embedding did not reserve pinned Host backing");
+        require(storage.ordinary_host_objects.empty(),
+                "mapped embedding was placed in CPU-only rather than CudaTransfer storage");
+        for (const auto& item : storage.registered_host_objects)
+            require(item.object != gate_up, "converted draft parent was still reserved on Host");
 #else
-    require(parent.geometry.format == QType::Q8_G32_FP16 &&
-                gate.policy == ops::LinearPolicy::A16Only && !plan.converted_device_bytes() &&
-                storage.registered_host_objects.empty(),
-            "native fit changed a non-native build");
+        require(parent.geometry.format == QType::Q8_G32_FP16 &&
+                    gate.policy == ops::LinearPolicy::A16Only && !plan.converted_device_bytes() &&
+                    !plan.host_mapped_bytes() && storage.registered_host_objects.empty(),
+                "native fit changed a non-native build");
 #endif
-    require(plan.device_capacity_bytes(Device::cuda(0), Device::cuda(0)) ==
-                storage.device_capacity_bytes + plan.converted_device_bytes(),
-            "startup omitted effective draft backing");
+        require(plan.device_capacity_bytes(Device::cuda(0), Device::cuda(0)) ==
+                    storage.device_capacity_bytes + plan.converted_device_bytes(),
+                "startup omitted effective draft backing");
+    }
+#if defined(NINFER_SM86) || defined(NINFER_SM89)
+    fixture.file.root["bindings"]["text/layers/0/mlp/gate"] =
+        fixture.file.root["bindings"][p + "mlp/gate"];
+    fixture.file.write();
+    artifact::Reader shared(fixture.file.entry);
+    rejects([&] { (void)q35::plan_load(shared, {.speculative = SpeculativeBackend::DFlash2}); },
+            "native draft conversion accepted a parent shared with an unconverted parameter");
+#endif
 }
 
 } // namespace

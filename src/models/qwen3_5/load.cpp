@@ -24,6 +24,7 @@ struct LoadPlan::Impl {
     bool mapped_embedding = false;
     std::vector<LayoutRegion> converted_regions;
     std::size_t converted_bytes = 0;
+    std::size_t mapped_bytes = 0;
 
     bool converted(artifact::ObjectHandle object) const {
         return !converted_regions.empty() && converted_regions[object.index].bytes != 0;
@@ -126,6 +127,9 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
     out->geometry_parents.resize(reader.directory().objects.size());
 #if defined(NINFER_SM86) || defined(NINFER_SM89)
     if (options.dflash2()) {
+        if (!out->weights.draft) {
+            throw artifact::ArtifactError("DFlash2 requires the artifact's draft component");
+        }
         out->converted_regions.resize(reader.directory().objects.size());
         out->mapped_embedding = true;
         std::vector<bool> gate_up(out->pending.size());
@@ -161,6 +165,14 @@ LoadPlan plan_load(const artifact::Reader& reader, LoadOptions options) {
             }
         }
         out->converted_bytes = converted.finish();
+        for (const auto& part :
+             out->pending[out->weights.text.token_embedding.index].reference.binding.parts) {
+            auto& geometry = out->geometry_parents[part.object.index].geometry;
+            if (geometry.elements) continue; // Count each mapped physical parent once.
+            geometry = reader.geometry(part.object);
+            out->mapped_bytes = artifact::checked_add(out->mapped_bytes, geometry.bytes,
+                                                       "host-mapped embedding capacity");
+        }
     }
 #endif
     for (const auto& pending : out->pending) {
@@ -238,6 +250,8 @@ std::size_t LoadPlan::device_capacity_bytes(Device cuda, Device main_experts) co
 }
 
 std::size_t LoadPlan::converted_device_bytes() const { return impl_->converted_bytes; }
+
+std::size_t LoadPlan::host_mapped_bytes() const { return impl_->mapped_bytes; }
 
 ResolvedLoadPlan resolve_load(LoadPlan&& plan, Device cuda, std::optional<Device> main_experts) {
     if (!plan.impl_) throw artifact::ArtifactError("load plan was already consumed");
