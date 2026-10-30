@@ -1,0 +1,631 @@
+{
+  "schema_version": 1,
+  "qualification": false,
+  "source_base": "752dd887be6a9cdb2da6217f3b664b3c03ed33ae",
+  "s1_source": "e1c2f66fcbb29c77ed6f794adfcb721b04f099ce",
+  "script_sha256": "dac2a509917ae2069351758d9c2e043b43166b28faceb1810389d59af36db610",
+  "format_checks": {
+    "signed_decode_cases": 384,
+    "k_permutation_cardinality": 64,
+    "zero_and_nearest_even": "pass",
+    "q5_int32_group_dot_bound": 130048,
+    "q4_int32_group_dot_bound": 65024
+  },
+  "witnesses": {
+    "s1_warp_count": {
+      "k": 5120,
+      "nonzero_k": [
+        0,
+        256,
+        512
+      ],
+      "q": [
+        1,
+        1,
+        1
+      ],
+      "x": [
+        1.0,
+        5.960464477539063e-08,
+        -1.0
+      ],
+      "scale": 1.0,
+      "fp64": 5.960464477539063e-08,
+      "w4": 0.0,
+      "w8": 5.960464477539063e-08,
+      "w4_bf16": 0,
+      "w8_bf16": 13184,
+      "claim": "exact inter-group arithmetic witness, GPU confirmation pending"
+    },
+    "group64_outlier": {
+      "x": "[448] + [1]*63",
+      "q": "[0] + [1]*63",
+      "scale": 1.0,
+      "fp64": 63.0,
+      "a8": 0.0,
+      "erased_nonzero": 63,
+      "peak_code": 127,
+      "activation_scale": 3.5275590419769287,
+      "claim": "INT8 scale granularity, not E4M3 saturation"
+    }
+  },
+  "representative_rows": [
+    {
+      "k": 5120,
+      "format": "Q4_G64",
+      "fixture": "synthetic_bf16",
+      "reference": "FP64 on stored BF16 activations and FP16 group scales",
+      "limitation": "W4/W8 models round FP64 group dots once; not tensor-core emulation",
+      "errors": {
+        "w4": {
+          "rows": 16,
+          "max_abs": 5.983514711260796e-06,
+          "relative_l2": 5.8312037657462555e-08,
+          "max_relative": 2.6114514620189102e-06,
+          "mean_relative": 3.5522705106210613e-07,
+          "bf16_different_from_reference": 0
+        },
+        "w8": {
+          "rows": 16,
+          "max_abs": 1.1794152669608593e-05,
+          "relative_l2": 9.96884593503132e-08,
+          "max_relative": 3.139555917780699e-06,
+          "mean_relative": 4.648358242598353e-07,
+          "bf16_different_from_reference": 0
+        },
+        "linear_w8": {
+          "rows": 16,
+          "max_abs": 1.0225805453956127e-05,
+          "relative_l2": 8.800642578204384e-08,
+          "max_relative": 2.2499223216169083e-06,
+          "mean_relative": 2.956921537378802e-07,
+          "bf16_different_from_reference": 0
+        },
+        "a8": {
+          "rows": 16,
+          "max_abs": 1.278029564069584,
+          "relative_l2": 0.009439080666300309,
+          "max_relative": 0.11624427647624908,
+          "mean_relative": 0.030316334205993452,
+          "bf16_different_from_reference": 13
+        }
+      },
+      "w4_w8_fp32_different": 11,
+      "w4_w8_bf16_different": 0,
+      "a8_erased_nonzero_activations": 35308
+    },
+    {
+      "k": 5120,
+      "format": "Q4_G64",
+      "fixture": "one_448_outlier_per_group",
+      "reference": "FP64 on stored BF16 activations and FP16 group scales",
+      "limitation": "W4/W8 models round FP64 group dots once; not tensor-core emulation",
+      "errors": {
+        "w4": {
+          "rows": 16,
+          "max_abs": 0.0002542732981964946,
+          "relative_l2": 1.1382400225277304e-07,
+          "max_relative": 1.0627119300134823e-06,
+          "mean_relative": 1.8754565992106245e-07,
+          "bf16_different_from_reference": 0
+        },
+        "w8": {
+          "rows": 16,
+          "max_abs": 9.580294135957956e-05,
+          "relative_l2": 8.71220331009378e-08,
+          "max_relative": 1.0558156812788068e-06,
+          "mean_relative": 1.784060481390447e-07,
+          "bf16_different_from_reference": 0
+        },
+        "linear_w8": {
+          "rows": 16,
+          "max_abs": 0.0001825941726565361,
+          "relative_l2": 9.052171270022658e-08,
+          "max_relative": 5.850317676582982e-07,
+          "mean_relative": 1.2093199527664665e-07,
+          "bf16_different_from_reference": 0
+        },
+        "a8": {
+          "rows": 16,
+          "max_abs": 13.856661568279378,
+          "relative_l2": 0.009865881704090276,
+          "max_relative": 0.09927685547279515,
+          "mean_relative": 0.019552714200123014,
+          "bf16_different_from_reference": 16
+        }
+      },
+      "w4_w8_fp32_different": 10,
+      "w4_w8_bf16_different": 0,
+      "a8_erased_nonzero_activations": 60150
+    },
+    {
+      "k": 5120,
+      "format": "Q5_G64",
+      "fixture": "synthetic_bf16",
+      "reference": "FP64 on stored BF16 activations and FP16 group scales",
+      "limitation": "W4/W8 models round FP64 group dots once; not tensor-core emulation",
+      "errors": {
+        "w4": {
+          "rows": 16,
+          "max_abs": 2.1187239326536655e-05,
+          "relative_l2": 9.757681073801229e-08,
+          "max_relative": 4.708680769084857e-06,
+          "mean_relative": 4.1797502994652804e-07,
+          "bf16_different_from_reference": 0
+        },
+        "w8": {
+          "rows": 16,
+          "max_abs": 3.5629491321742535e-05,
+          "relative_l2": 1.4658577871815217e-07,
+          "max_relative": 2.073587133852998e-06,
+          "mean_relative": 3.468962144924094e-07,
+          "bf16_different_from_reference": 0
+        },
+        "linear_w8": {
+          "rows": 16,
+          "max_abs": 3.5629491321742535e-05,
+          "relative_l2": 1.3052735236185917e-07,
+          "max_relative": 1.9519720215836804e-06,
+          "mean_relative": 2.370664258607575e-07,
+          "bf16_different_from_reference": 0
+        },
+        "a8": {
+          "rows": 16,
+          "max_abs": 2.6900901632616296,
+          "relative_l2": 0.011197200392634768,
+          "max_relative": 0.27981806588831754,
+          "mean_relative": 0.047526485094596845,
+          "bf16_different_from_reference": 12
+        },
+        "split2": {
+          "rows": 16,
+          "max_abs": 3.7427060306072235e-05,
+          "relative_l2": 1.7385795779543959e-07,
+          "max_relative": 3.860897281217625e-06,
+          "mean_relative": 6.534431214902454e-07,
+          "bf16_different_from_reference": 0
+        }
+      },
+      "w4_w8_fp32_different": 12,
+      "w4_w8_bf16_different": 0,
+      "a8_erased_nonzero_activations": 35145
+    },
+    {
+      "k": 5120,
+      "format": "Q5_G64",
+      "fixture": "one_448_outlier_per_group",
+      "reference": "FP64 on stored BF16 activations and FP16 group scales",
+      "limitation": "W4/W8 models round FP64 group dots once; not tensor-core emulation",
+      "errors": {
+        "w4": {
+          "rows": 16,
+          "max_abs": 0.00023054075427353382,
+          "relative_l2": 8.877834802500176e-08,
+          "max_relative": 1.441285700522536e-06,
+          "mean_relative": 1.9880621521194112e-07,
+          "bf16_different_from_reference": 0
+        },
+        "w8": {
+          "rows": 16,
+          "max_abs": 0.00024877756368368864,
+          "relative_l2": 9.21927293955832e-08,
+          "max_relative": 2.8298265631879895e-06,
+          "mean_relative": 3.581671245801347e-07,
+          "bf16_different_from_reference": 0
+        },
+        "linear_w8": {
+          "rows": 16,
+          "max_abs": 0.0002680734032765031,
+          "relative_l2": 9.365913191049994e-08,
+          "max_relative": 1.267718092689354e-06,
+          "mean_relative": 2.4361827932562123e-07,
+          "bf16_different_from_reference": 0
+        },
+        "a8": {
+          "rows": 16,
+          "max_abs": 29.90444711362943,
+          "relative_l2": 0.010036763670215314,
+          "max_relative": 0.13946521820234317,
+          "mean_relative": 0.025654000165067768,
+          "bf16_different_from_reference": 11
+        },
+        "split2": {
+          "rows": 16,
+          "max_abs": 0.0005122140282765031,
+          "relative_l2": 1.593517193281454e-07,
+          "max_relative": 1.441285700522536e-06,
+          "mean_relative": 3.5635624357864524e-07,
+          "bf16_different_from_reference": 0
+        }
+      },
+      "w4_w8_fp32_different": 13,
+      "w4_w8_bf16_different": 0,
+      "a8_erased_nonzero_activations": 59781
+    },
+    {
+      "k": 6144,
+      "format": "Q4_G64",
+      "fixture": "synthetic_bf16",
+      "reference": "FP64 on stored BF16 activations and FP16 group scales",
+      "limitation": "W4/W8 models round FP64 group dots once; not tensor-core emulation",
+      "errors": {
+        "w4": {
+          "rows": 16,
+          "max_abs": 1.0422896593809128e-05,
+          "relative_l2": 5.6865312008752974e-08,
+          "max_relative": 2.1460309241476297e-07,
+          "mean_relative": 4.633103284445047e-08,
+          "bf16_different_from_reference": 0
+        },
+        "w8": {
+          "rows": 16,
+          "max_abs": 1.2635719031095505e-05,
+          "relative_l2": 9.358187395528692e-08,
+          "max_relative": 1.7424826579458043e-07,
+          "mean_relative": 8.636696288490582e-08,
+          "bf16_different_from_reference": 0
+        },
+        "linear_w8": {
+          "rows": 16,
+          "max_abs": 1.0667135939002037e-05,
+          "relative_l2": 8.100513944950967e-08,
+          "max_relative": 1.7424826579458043e-07,
+          "mean_relative": 6.810781660126418e-08,
+          "bf16_different_from_reference": 0
+        },
+        "a8": {
+          "rows": 16,
+          "max_abs": 0.8442772242706269,
+          "relative_l2": 0.0077241515533372366,
+          "max_relative": 0.025020956100906967,
+          "mean_relative": 0.010240752897896301,
+          "bf16_different_from_reference": 14
+        }
+      },
+      "w4_w8_fp32_different": 10,
+      "w4_w8_bf16_different": 0,
+      "a8_erased_nonzero_activations": 42335
+    },
+    {
+      "k": 6144,
+      "format": "Q4_G64",
+      "fixture": "one_448_outlier_per_group",
+      "reference": "FP64 on stored BF16 activations and FP16 group scales",
+      "limitation": "W4/W8 models round FP64 group dots once; not tensor-core emulation",
+      "errors": {
+        "w4": {
+          "rows": 16,
+          "max_abs": 0.00012106390204280615,
+          "relative_l2": 6.281465195571722e-08,
+          "max_relative": 2.6650422763423156e-06,
+          "mean_relative": 3.1227003688209196e-07,
+          "bf16_different_from_reference": 0
+        },
+        "w8": {
+          "rows": 16,
+          "max_abs": 0.00019903911743313074,
+          "relative_l2": 7.234435058775039e-08,
+          "max_relative": 6.939538613316261e-07,
+          "mean_relative": 1.2429197278022523e-07,
+          "bf16_different_from_reference": 0
+        },
+        "linear_w8": {
+          "rows": 16,
+          "max_abs": 0.00019903911743313074,
+          "relative_l2": 6.759982376835177e-08,
+          "max_relative": 1.0704290015111384e-06,
+          "mean_relative": 1.6807222505217643e-07,
+          "bf16_different_from_reference": 0
+        },
+        "a8": {
+          "rows": 16,
+          "max_abs": 13.298040052759461,
+          "relative_l2": 0.0072099922699789005,
+          "max_relative": 0.435832510182266,
+          "mean_relative": 0.03731665705511551,
+          "bf16_different_from_reference": 14
+        }
+      },
+      "w4_w8_fp32_different": 8,
+      "w4_w8_bf16_different": 0,
+      "a8_erased_nonzero_activations": 71889
+    },
+    {
+      "k": 6144,
+      "format": "Q5_G64",
+      "fixture": "synthetic_bf16",
+      "reference": "FP64 on stored BF16 activations and FP16 group scales",
+      "limitation": "W4/W8 models round FP64 group dots once; not tensor-core emulation",
+      "errors": {
+        "w4": {
+          "rows": 16,
+          "max_abs": 2.3512402549386024e-05,
+          "relative_l2": 7.784889368698082e-08,
+          "max_relative": 2.1775407188435483e-06,
+          "mean_relative": 2.546298034180878e-07,
+          "bf16_different_from_reference": 0
+        },
+        "w8": {
+          "rows": 16,
+          "max_abs": 1.893867738544941e-05,
+          "relative_l2": 5.002112055226558e-08,
+          "max_relative": 5.946827522722981e-07,
+          "mean_relative": 1.3009212723035562e-07,
+          "bf16_different_from_reference": 0
+        },
+        "linear_w8": {
+          "rows": 16,
+          "max_abs": 2.3512402549386024e-05,
+          "relative_l2": 7.449454478181335e-08,
+          "max_relative": 1.7796041975845774e-06,
+          "mean_relative": 2.3229033926935228e-07,
+          "bf16_different_from_reference": 0
+        },
+        "a8": {
+          "rows": 16,
+          "max_abs": 2.449554405058734,
+          "relative_l2": 0.007385291490205457,
+          "max_relative": 0.07273366955297328,
+          "mean_relative": 0.017649782867785575,
+          "bf16_different_from_reference": 14
+        },
+        "split2": {
+          "rows": 16,
+          "max_abs": 6.471504457294941e-05,
+          "relative_l2": 1.75418977826716e-07,
+          "max_relative": 2.9689697021291737e-06,
+          "mean_relative": 6.009453187569755e-07,
+          "bf16_different_from_reference": 0
+        }
+      },
+      "w4_w8_fp32_different": 11,
+      "w4_w8_bf16_different": 0,
+      "a8_erased_nonzero_activations": 42254
+    },
+    {
+      "k": 6144,
+      "format": "Q5_G64",
+      "fixture": "one_448_outlier_per_group",
+      "reference": "FP64 on stored BF16 activations and FP16 group scales",
+      "limitation": "W4/W8 models round FP64 group dots once; not tensor-core emulation",
+      "errors": {
+        "w4": {
+          "rows": 16,
+          "max_abs": 0.00015971623361110687,
+          "relative_l2": 6.409194227200257e-08,
+          "max_relative": 6.301267702166002e-07,
+          "mean_relative": 1.384207385092722e-07,
+          "bf16_different_from_reference": 0
+        },
+        "w8": {
+          "rows": 16,
+          "max_abs": 0.00020352320279926062,
+          "relative_l2": 8.861621789039056e-08,
+          "max_relative": 1.00798684970225e-06,
+          "mean_relative": 1.599402187097422e-07,
+          "bf16_different_from_reference": 0
+        },
+        "linear_w8": {
+          "rows": 16,
+          "max_abs": 0.0002456372603774071,
+          "relative_l2": 1.0561735982545774e-07,
+          "max_relative": 1.00798684970225e-06,
+          "mean_relative": 1.7836440490734382e-07,
+          "bf16_different_from_reference": 0
+        },
+        "a8": {
+          "rows": 16,
+          "max_abs": 34.81473491154611,
+          "relative_l2": 0.01397766888306008,
+          "max_relative": 0.04744929111947831,
+          "mean_relative": 0.020842133546185297,
+          "bf16_different_from_reference": 16
+        },
+        "split2": {
+          "rows": 16,
+          "max_abs": 0.0004781814059242606,
+          "relative_l2": 2.0961881641505105e-07,
+          "max_relative": 2.3682831358505885e-06,
+          "mean_relative": 5.070954796078809e-07,
+          "bf16_different_from_reference": 0
+        }
+      },
+      "w4_w8_fp32_different": 13,
+      "w4_w8_bf16_different": 0,
+      "a8_erased_nonzero_activations": 72346
+    },
+    {
+      "k": 17408,
+      "format": "Q4_G64",
+      "fixture": "synthetic_bf16",
+      "reference": "FP64 on stored BF16 activations and FP16 group scales",
+      "limitation": "W4/W8 models round FP64 group dots once; not tensor-core emulation",
+      "errors": {
+        "w4": {
+          "rows": 16,
+          "max_abs": 4.964147228747606e-05,
+          "relative_l2": 3.525941843882238e-07,
+          "max_relative": 3.254882274242006e-06,
+          "mean_relative": 6.702897200392954e-07,
+          "bf16_different_from_reference": 0
+        },
+        "w8": {
+          "rows": 16,
+          "max_abs": 2.695806324481964e-05,
+          "relative_l2": 1.4731218905851088e-07,
+          "max_relative": 1.3083195353314203e-06,
+          "mean_relative": 2.624481545357025e-07,
+          "bf16_different_from_reference": 0
+        },
+        "linear_w8": {
+          "rows": 16,
+          "max_abs": 2.055964432656765e-05,
+          "relative_l2": 1.5404070302017625e-07,
+          "max_relative": 7.614764429575299e-07,
+          "mean_relative": 2.4564445832876064e-07,
+          "bf16_different_from_reference": 0
+        },
+        "a8": {
+          "rows": 16,
+          "max_abs": 3.4482424426823854,
+          "relative_l2": 0.0181521819391733,
+          "max_relative": 0.1077623730943735,
+          "mean_relative": 0.031655817707826536,
+          "bf16_different_from_reference": 15
+        }
+      },
+      "w4_w8_fp32_different": 15,
+      "w4_w8_bf16_different": 0,
+      "a8_erased_nonzero_activations": 119575
+    },
+    {
+      "k": 17408,
+      "format": "Q4_G64",
+      "fixture": "one_448_outlier_per_group",
+      "reference": "FP64 on stored BF16 activations and FP16 group scales",
+      "limitation": "W4/W8 models round FP64 group dots once; not tensor-core emulation",
+      "errors": {
+        "w4": {
+          "rows": 16,
+          "max_abs": 0.00046424497850239277,
+          "relative_l2": 8.754981518989056e-08,
+          "max_relative": 1.989681999561863e-06,
+          "mean_relative": 3.1396440546188895e-07,
+          "bf16_different_from_reference": 0
+        },
+        "w8": {
+          "rows": 16,
+          "max_abs": 0.00023279280867427588,
+          "relative_l2": 5.010982619874607e-08,
+          "max_relative": 1.743686317361896e-06,
+          "mean_relative": 2.6751109114620236e-07,
+          "bf16_different_from_reference": 0
+        },
+        "linear_w8": {
+          "rows": 16,
+          "max_abs": 0.00026536290533840656,
+          "relative_l2": 6.098149071380632e-08,
+          "max_relative": 2.254478744909022e-06,
+          "mean_relative": 2.9555884073270627e-07,
+          "bf16_different_from_reference": 0
+        },
+        "a8": {
+          "rows": 16,
+          "max_abs": 30.214555023470894,
+          "relative_l2": 0.005902005864189793,
+          "max_relative": 0.3113939209003058,
+          "mean_relative": 0.03834751640334565,
+          "bf16_different_from_reference": 11
+        }
+      },
+      "w4_w8_fp32_different": 13,
+      "w4_w8_bf16_different": 0,
+      "a8_erased_nonzero_activations": 204201
+    },
+    {
+      "k": 17408,
+      "format": "Q5_G64",
+      "fixture": "synthetic_bf16",
+      "reference": "FP64 on stored BF16 activations and FP16 group scales",
+      "limitation": "W4/W8 models round FP64 group dots once; not tensor-core emulation",
+      "errors": {
+        "w4": {
+          "rows": 16,
+          "max_abs": 5.539506673812866e-05,
+          "relative_l2": 1.0709018334621348e-07,
+          "max_relative": 3.769497085496593e-06,
+          "mean_relative": 4.325500092029134e-07,
+          "bf16_different_from_reference": 0
+        },
+        "w8": {
+          "rows": 16,
+          "max_abs": 7.74043146520853e-05,
+          "relative_l2": 1.302477932549541e-07,
+          "max_relative": 3.769497085496593e-06,
+          "mean_relative": 5.185506306908569e-07,
+          "bf16_different_from_reference": 0
+        },
+        "linear_w8": {
+          "rows": 16,
+          "max_abs": 5.3544528782367706e-05,
+          "relative_l2": 1.0525878880785201e-07,
+          "max_relative": 2.990754984175441e-06,
+          "mean_relative": 3.8376241902722854e-07,
+          "bf16_different_from_reference": 0
+        },
+        "a8": {
+          "rows": 16,
+          "max_abs": 3.5567011373350397,
+          "relative_l2": 0.007178382717116142,
+          "max_relative": 0.3655053811850989,
+          "mean_relative": 0.03515134545924861,
+          "bf16_different_from_reference": 12
+        },
+        "split2": {
+          "rows": 16,
+          "max_abs": 8.591264486312866e-05,
+          "relative_l2": 1.505324569076187e-07,
+          "max_relative": 5.8461426890196655e-06,
+          "mean_relative": 8.90936569966505e-07,
+          "bf16_different_from_reference": 0
+        }
+      },
+      "w4_w8_fp32_different": 11,
+      "w4_w8_bf16_different": 0,
+      "a8_erased_nonzero_activations": 119342
+    },
+    {
+      "k": 17408,
+      "format": "Q5_G64",
+      "fixture": "one_448_outlier_per_group",
+      "reference": "FP64 on stored BF16 activations and FP16 group scales",
+      "limitation": "W4/W8 models round FP64 group dots once; not tensor-core emulation",
+      "errors": {
+        "w4": {
+          "rows": 16,
+          "max_abs": 0.0005808676360175014,
+          "relative_l2": 1.694634332864153e-07,
+          "max_relative": 6.7733176916388195e-06,
+          "mean_relative": 7.116192310637612e-07,
+          "bf16_different_from_reference": 0
+        },
+        "w8": {
+          "rows": 16,
+          "max_abs": 0.0003811910282820463,
+          "relative_l2": 1.1581440483168512e-07,
+          "max_relative": 1.1990768572604475e-06,
+          "mean_relative": 3.3866860207055373e-07,
+          "bf16_different_from_reference": 0
+        },
+        "linear_w8": {
+          "rows": 16,
+          "max_abs": 0.0005032613407820463,
+          "relative_l2": 1.2230273750205282e-07,
+          "max_relative": 4.893418428521081e-06,
+          "mean_relative": 5.836546252219387e-07,
+          "bf16_different_from_reference": 0
+        },
+        "a8": {
+          "rows": 16,
+          "max_abs": 52.476363952388056,
+          "relative_l2": 0.010365122908002932,
+          "max_relative": 0.3860978055090444,
+          "mean_relative": 0.03936334067891686,
+          "bf16_different_from_reference": 14
+        },
+        "split2": {
+          "rows": 16,
+          "max_abs": 0.001384305884130299,
+          "relative_l2": 3.559273079439275e-07,
+          "max_relative": 1.993261253346299e-05,
+          "mean_relative": 1.7192619320068404e-06,
+          "bf16_different_from_reference": 0
+        }
+      },
+      "w4_w8_fp32_different": 12,
+      "w4_w8_bf16_different": 0,
+      "a8_erased_nonzero_activations": 204298
+    }
+  ],
+  "policy": "S1 remains unadmitted; native Group64 A8 remains off; no runtime change"
+}
