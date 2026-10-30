@@ -297,6 +297,14 @@ D256 Main/MTP profile 的单 token/head 物理 payload 为：
 | FP8-E4M3FN-row256 | 256 B + 2 B | 256 B + 2 B | 516 B |
 | NVFP4-G16 | 128 B + 16 B | 128 B + 16 B | 288 B |
 | K8V4 | 256 B + 2 B | 128 B + 16 B | 402 B |
+| RK4V4 | 128 B + 8 B | 128 B + 16 B | 280 B |
+
+RK4V4 uses the append contract's H256/Lloyd-Max G64 key codec and signed INT4 G32
+values, not E8. Both scale planes are FP16. Its durable storage identity is
+`rk4v4_h256_lloyd_g64_s4_g32_v1`; native-layout and engine fingerprints refuse
+cross-format restores before importing any payload. Existing format identifiers and
+plane bytes are unchanged. Qwen3.8-27B's 16 full-attention layers and 4 KV heads use
+17,920 bytes/token; a 64-token physical page group uses 1,146,880 bytes.
 
 K/V 的 code 和 scale planes 具有各自的 dtype、leading extent 和 group size；它们仍共享 page-group
 identity、frontier 和 lifetime。Capacity curve、Device/Host replica、continuation transfer 和 memory

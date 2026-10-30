@@ -301,7 +301,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--prefill-chunk N` | text-prefill chunk; positive multiple of 128 | `1024`; CPU expert offload: `4096` |
 | `--max-new N` | requested output-token limit | `128` |
 | `--device N` | CUDA device index | `0` |
-| `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
+| `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4\|rk4v4` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |
@@ -367,6 +367,11 @@ on one RTX 5090 depends on the selected artifact, media workload, output budget,
 The artifact describes its model configuration and weight representations;
 `--kv-dtype` independently selects runtime KV storage. The prepared prompt must fit
 `--max-context`; generation stops at the remaining context capacity when necessary.
+`rk4v4` is the opt-in D256 Qwen3.5-family native format: H256-rotated Lloyd-Max
+4-bit G64 keys and unrotated signed 4-bit G32 values, both with FP16 scales.
+Qwen3.8-27B uses 17,920 bytes/token (INT8: 33,792). It does not change the BF16
+default, the DFlash2 drafter's BF16 local cache, or Qwen4 sparse-attention formats.
+Context capacity is a measured fit decision, not a promise that every 24 GB artifact fits 262K.
 `--kv-capacity N` controls the shared physical Main Text KV pool independently and is rounded up to
 the 64-token page size. Startup plans the selected weights and complete enabled runtime layout
 from artifact metadata before allocating their backing. With resident weights,

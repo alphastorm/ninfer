@@ -932,7 +932,7 @@ The table lists executable defaults. The startup example selects a long-context 
 | `--session-checkpoint-require-origin-auth` | reject imports without a valid origin MAC; requires a configured root and an API key of at least 32 characters | disabled; new saves still authenticated |
 | `--stop-event NAME` | Windows manager-minted `Global\NInfer-Serve-Stop-<32 lowercase hex>` or `Local\NInfer-Serve-Stop-<32 lowercase hex>` event; rejected off Windows | disabled |
 | `--shutdown-report FILE` | final durable-save acknowledgement destination | unset |
-| `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4` | KV-cache storage | `bf16` |
+| `--kv-dtype bf16\|int8\|fp8\|nvfp4\|k8v4\|rk4v4` | KV-cache storage | `bf16` |
 | `--spec mtp\|dflash\|dflash2` | speculative backend | off |
 | `--draft-tokens N` | MTP `1..5`; DFlash/DFlash2 `1..15` | unset |
 | `--lm-head-draft` | optimized proposal head | off |

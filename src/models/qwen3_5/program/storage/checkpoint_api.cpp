@@ -60,6 +60,7 @@ const char* kv_type(KvCacheStorage value) {
     case KvCacheStorage::BFloat16: return "bf16";
     case KvCacheStorage::Int8Group64: return "int8_group64";
     case KvCacheStorage::Fp8E4M3Row256: return "fp8_e4m3_row256";
+    case KvCacheStorage::Rk4V4: return "rk4v4_h256_lloyd_g64_s4_g32_v1";
     case KvCacheStorage::Nvfp4Group16:
     case KvCacheStorage::Fp8KeyNvfp4Value:
         throw Refusal{DurablePrepareState::PolicyDisabled, DurableReason::UnsupportedCodec};

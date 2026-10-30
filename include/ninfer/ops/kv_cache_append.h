@@ -52,6 +52,16 @@ struct KVCacheAppendPrefixExecutionEnvelope {
  * vector occupies 128 code bytes plus 16 scale bytes. K8V4 uses the existing 256-byte row-scaled
  * FP8 K code plus one FP16 scale, and the 144-byte NVFP4 representation for V.
  *
+ * RK4V4 rotates K by H256/16, then encodes each G64 group using its RMS and Gaussian
+ * Lloyd-Max boundaries {0.25825,0.52245,0.79960,1.09930,1.43715,1.84355,2.40080}.
+ * The nibble is sign*8+magnitude; decoded integer levels are {6,18,31,44,58,75,96,127}
+ * with that sign. Scale is FP16_RNE(sum(x*code)/sum(code*code)); zero groups have zero
+ * scale and index zero. Products/additions are FP32 RN, reduced as a warp XOR butterfly
+ * over pairs (lane,lane+32), offsets 16,8,4,2,1; RMS uses RN sqrt(sum(x*x)/64).
+ * Values are unrotated signed INT4 G32: FP16_RNE(absmax/7), represented-scale reciprocal,
+ * RN-even codes clamped to [-7,7]. Adjacent dimensions occupy low/high nibbles.
+ * D256 K uses 128+8 bytes, V uses 128+16 bytes. This is not the E8 codec.
+ *
  * INT8 and FP8 apply the fixed normalized D256 Hadamard preparation to K; NVFP4 and K8V4 apply it
  * to both K and V. Every transform is evaluated in FP32 from represented BF16 source values. The
  * paired Q and output interpretation belongs to the causal softmax_attention contract. Transform

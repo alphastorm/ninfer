@@ -174,6 +174,7 @@ KvCacheStorage parse_kv_dtype(const char* text) {
     if (value == "fp8") { return KvCacheStorage::Fp8E4M3Row256; }
     if (value == "nvfp4") { return KvCacheStorage::Nvfp4Group16; }
     if (value == "k8v4") { return KvCacheStorage::Fp8KeyNvfp4Value; }
+    if (value == "rk4v4") { return KvCacheStorage::Rk4V4; }
     throw std::invalid_argument("invalid kv-dtype: " + value);
 }
 
@@ -205,7 +206,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--session-checkpoint-dir DIR] [--session-checkpoint-quota-mib N] "
            "[--session-checkpoint-staging-mib N] [--session-checkpoint-write-buffer-mib N] "
            "[--session-checkpoint-min-tokens N] [--session-checkpoint-require-origin-auth] "
-           "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
+           "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
            "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "

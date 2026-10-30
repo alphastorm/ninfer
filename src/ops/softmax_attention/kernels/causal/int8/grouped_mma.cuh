@@ -2,6 +2,7 @@
 #include "ops/common/quant/integer.cuh"
 #include "ops/kv_cache/kernels/hadamard.cuh"
 #include "ops/kv_cache/kernels/layout.cuh"
+#include "ops/kv_cache/kernels/write/rk4v4.cuh"
 #include "ops/softmax_attention/kernels/causal/tile_io.cuh"
 #include "ops/softmax_attention/kernels/causal/operands.h"
 #include "ops/softmax_attention/kernels/causal/int8/schedule.cuh"
@@ -14,7 +15,7 @@ namespace ninfer::ops::detail {
 // Native INT8 QK accumulates each G64 group in INT32, then applies Q/K scales in FP32.
 // PV dequantizes represented V to FP16 and accumulates in FP32.
 template <class Geometry, class Schedule, bool MultiBatch, bool Masked, class CacheInput,
-          bool ParallelQueries = false>
+          bool ParallelQueries = false, bool Packed = false>
 __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) __global__
     void int8_kv_grouped_mma_kernel(
         const __nv_bfloat16* q, CacheInput input, const std::int32_t* pos,
@@ -39,6 +40,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) __global__
     constexpr int DB16                 = D / 2;
     constexpr int Threads              = Wc * 32;
     constexpr int Groups               = kv::kInt8Groups;
+    constexpr int ValueGroups          = Packed ? 8 : Groups;
     constexpr int GroupKc              = kv::kInt8Group / 32;
     constexpr int QKKs                 = D / 32;
     constexpr int QKNt                 = Bc / 8;
@@ -75,7 +77,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) __global__
     __shared__ __align__(16) __half p_s[Br * Bc];
     __shared__ float alpha_s[Br];
     __shared__ __align__(16) __half k_scale_s[Bc * Groups];
-    __shared__ __align__(16) __half v_scale_s[Bc * Groups];
+    __shared__ __align__(16) __half v_scale_s[Bc * ValueGroups];
 
     static_assert(!ParallelQueries || !CacheInput::writes_cache);
     const int kv_head      = ParallelQueries ? blockIdx.x % Geometry::KVHeads : blockIdx.x;
@@ -180,6 +182,11 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) __global__
             const float kv1    = k_out[1];
             const float vv0    = __bfloat162float(input.v[src0]);
             const float vv1    = __bfloat162float(input.v[src1]);
+            if constexpr (Packed) {
+                kv::rk4_store_group<Geometry::KVHeads>(
+                    cache_k_i8, cache_v_i8, cache_k_scale, cache_v_scale,
+                    physical_page, kv_head, page_offset, grp, lane, kv0, kv1, vv0, vv1);
+            } else {
             float kamax        = fmaxf(fabsf(kv0), fabsf(kv1));
             float vamax        = fmaxf(fabsf(vv0), fabsf(vv1));
             kamax              = common::warp_max(kamax, FullMask);
@@ -203,6 +210,7 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) __global__
                     physical_page, kv_head, grp, page_offset);
                 cache_k_scale[so] = k_quant.scale;
                 cache_v_scale[so] = v_quant.scale;
+            }
             }
         }
         __syncthreads();
@@ -288,10 +296,19 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) __global__
                 const std::int64_t off = kv::Int8G64Layout<Geometry::KVHeads>::scale_offset(
                     physical_page, kv_head, 0, key & kv::kPageMask);
                 common::cp_async<8>(&k_scale_s[key_l * Groups], &cache_k_scale[off]);
-                common::cp_async<8>(&v_scale_s[key_l * Groups], &cache_v_scale[off]);
+                if constexpr (Packed) {
+                    const auto vo = kv::page_major_offset<8, Geometry::KVHeads>(
+                        physical_page, kv_head, key & kv::kPageMask, 0);
+                    common::cp_async<16>(&v_scale_s[key_l * ValueGroups], &cache_v_scale[vo]);
+                } else {
+                    common::cp_async<8>(&v_scale_s[key_l * Groups], &cache_v_scale[off]);
+                }
             } else {
                 common::store_vec(&k_scale_s[key_l * Groups], make_int2(0, 0));
-                common::store_vec(&v_scale_s[key_l * Groups], make_int2(0, 0));
+                if constexpr (Packed)
+                    common::store_vec(&v_scale_s[key_l * ValueGroups], make_int4(0, 0, 0, 0));
+                else
+                    common::store_vec(&v_scale_s[key_l * Groups], make_int2(0, 0));
             }
         }
 #pragma unroll 1
@@ -304,8 +321,16 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) __global__
                 const std::int64_t off = kv::Int8G64Layout<Geometry::KVHeads>::code_offset(
                     physical_page, kv_head, d, key & kv::kPageMask);
                 std::int8_t* dst = &k_i8[key_l * D + common::swizzle_xor_64(key_l, dc * 8) * 2];
-                common::cp_async<16>(dst, &cache_k_i8[off]);
-                common::cp_async<16>(&v_i8[key_l * D + d], &cache_v_i8[off]);
+                if constexpr (Packed) {
+                    const auto packed = kv::page_major_offset<128, Geometry::KVHeads>(
+                        physical_page, kv_head, key & kv::kPageMask, d / 2);
+                    common::store_vec(dst, kv::rk4_expand16<true>(&cache_k_i8[packed]));
+                    common::store_vec(&v_i8[key_l * D + d],
+                                      kv::rk4_expand16<false>(&cache_v_i8[packed]));
+                } else {
+                    common::cp_async<16>(dst, &cache_k_i8[off]);
+                    common::cp_async<16>(&v_i8[key_l * D + d], &cache_v_i8[off]);
+                }
             } else {
                 std::int8_t* dst = &k_i8[key_l * D + common::swizzle_xor_64(key_l, dc * 8) * 2];
                 common::store_vec(dst, make_int4(0, 0, 0, 0));
@@ -474,10 +499,13 @@ __launch_bounds__(Schedule::kThreads, Schedule::kMinBlocks) __global__
                 const int key   = k0 + key_l;
                 __half* dst     = &v_f16[key_l * D + common::swizzle_xor_64(key_l, d)];
                 if (key >= split_start && key < split_end) {
-                    const int grp = d >> 6;
+                    constexpr int ScaleLanes = Packed ? 4 : 8;
+                    const int grp = d / (Packed ? 32 : 64);
                     float vs      = 0.0f;
-                    if ((lane & 7) == 0) { vs = __half2float(v_scale_s[key_l * Groups + grp]); }
-                    vs                = __shfl_sync(FullMask, vs, grp * 8);
+                    if ((lane & (ScaleLanes - 1)) == 0) {
+                        vs = __half2float(v_scale_s[key_l * ValueGroups + grp]);
+                    }
+                    vs                = __shfl_sync(FullMask, vs, grp * ScaleLanes);
                     const int2 raw    = common::load_vec<int2>(&v_i8[key_l * D + d]);
                     const auto* codes = reinterpret_cast<const std::int8_t*>(&raw);
                     int4 values;
