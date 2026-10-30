@@ -54,6 +54,7 @@ also check their permitted read footprints under Compute Sanitizer initcheck.
 
 `ninfer_qwen3_5_head_logits_test` is GPU-free and checks BF16 defaults, scalar/ordinary/MTP/
 DFlash2 dtype plumbing, exact K7/C2 persistent-byte deltas and scoring-tile accounting.
+It includes the actual startup planner's tile helper through the header-only JSON dependency.
 `ninfer_cli_options_test` and `ninfer_serve_options_test` cover `--fp32-head-logits` parsing.
 These run in the bounded host CI lanes (serving options in the native lane).
 
