@@ -207,7 +207,7 @@ std::string serve_usage_text(const char* argv0) {
            "[--session-checkpoint-min-tokens N] [--session-checkpoint-require-origin-auth] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
-           "[--vision] [--no-cuda-graph] [--no-prefix-reuse] "
+           "[--vision] [--no-cuda-graph] [--fp32-head-logits] [--no-prefix-reuse] "
            "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
            "[--cors] "
            "[--temperature F] [--top-p F] [--top-k N] [--min-p F] [--presence-penalty F] "
@@ -230,6 +230,7 @@ std::string serve_usage_text(const char* argv0) {
            "       --vision enables media and loads the fixed Vision GPU allocations\n"
            "       --prefill-chunk requires a positive multiple of 128; defaults to 1024, or "
            "4096 with CPU expert offload\n"
+           "       --fp32-head-logits keeps Qwen3.5-family target logits in FP32 (default off)\n"
            "       startup defaults to " +
            std::to_string(kDefaultKvCapacityHeadroomBytes / (1024ULL * 1024ULL)) +
            " MiB of planning headroom for both explicit and automatic KV capacity\n"
@@ -475,6 +476,8 @@ ServeOptions parse_serve_options(int argc, char** argv) {
             options.enable_vision = true;
         } else if (arg == "--no-cuda-graph") {
             options.use_cuda_graph = false;
+        } else if (arg == "--fp32-head-logits") {
+            options.fp32_head_logits = true;
         } else if (arg == "--no-prefix-reuse") {
             options.allow_prefix_reuse = false;
         } else if (arg == "--lm-head-draft") {

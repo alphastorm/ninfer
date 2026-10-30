@@ -1578,6 +1578,7 @@ class SharedLifecycleTreeTests(unittest.TestCase):
             "--stop-event": "if ([string]$stopPlan.mode -ceq 'stop-event') {",
             "--shutdown-report": "if ([string]$stopPlan.mode -ceq 'stop-event') {",
             "--gpu-keep-warm-ms": "if ($gpuKeepWarmMs -gt 0) {",
+            "--fp32-head-logits": "if ($fp32HeadLogits) {",
         }
         controller = (WINDOWS / "Control-Release.ps1").read_text(encoding="utf-8")
         start = controller.index("$serverArguments =")
@@ -1626,6 +1627,11 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         self.assertIn("PSObject.Properties['gpu_keep_warm_ms']", body)
         self.assertIn("if ($null -eq $property) { return", body)
         self.assertEqual(controller[start:end].count("Get-GpuKeepWarmMs $config"), 1)
+        fp32 = ps_function(controller, "Get-Fp32HeadLogits")
+        self.assertIn("PSObject.Properties['fp32_head_logits']", fp32)
+        self.assertIn("if ($null -eq $property) { return $false }", fp32)
+        self.assertIn("$property.Value -isnot [bool]", fp32)
+        self.assertEqual(controller[start:end].count("Get-Fp32HeadLogits $config"), 1)
         context = ps_function(controller, "Add-ContextArguments")
         current, legacy = context.split("elseif ([int]$Config.schema_version -eq 3)")
         self.assertIn("if ([int]$Config.schema_version -eq 4)", current)
@@ -2092,6 +2098,21 @@ class PowerShellContractTests(unittest.TestCase):
             self.fail(f"PowerShell exited {result.returncode}: {result.stderr.strip()}")
         return json.loads(result.stdout)
 
+    def test_fp32_head_option_is_strictly_boolean_and_opt_in(self) -> None:
+        controller = (WINDOWS / "Control-Release.ps1").read_text()
+        function = ps_function(controller, "Get-Fp32HeadLogits")
+        observed = self.invoke(function + """
+Set-StrictMode -Version Latest
+$result=@()
+foreach($json in @('{"engine":{}}','{"engine":{"fp32_head_logits":false}}',
+                  '{"engine":{"fp32_head_logits":true}}','{"engine":{"fp32_head_logits":"false"}}',
+                  '{"engine":{"fp32_head_logits":1}}','{"engine":{"fp32_head_logits":null}}')){
+  try{$result+=@(Get-Fp32HeadLogits ($json|ConvertFrom-Json))}catch{$result+=@('rejected')}
+}
+ConvertTo-Json -InputObject @($result) -Compress
+""")
+        self.assertEqual(observed, [False, False, True, "rejected", "rejected", "rejected"])
+
     def test_native_lane_runtime_contract_twins(self) -> None:
         installer = (WINDOWS / "Install-Release.ps1").read_text()
         packager = (WINDOWS / "New-Package.ps1").read_text()
@@ -2221,6 +2242,11 @@ class PowerShellContractTests(unittest.TestCase):
                     case(f"keep-warm-{value}", [("config.engine.gpu_keep_warm_ms", value)])
                 case("zero-keep-warm", [("config.engine.gpu_keep_warm_ms", 0)], accepted=True)
                 case("maximum-keep-warm", [("config.engine.gpu_keep_warm_ms", 2**31 - 1)], accepted=True)
+                for value in (None, 0, 1, "true", "false", [], {}):
+                    case(f"fp32-head-{type(value).__name__}-{value}",
+                         [("config.engine.fp32_head_logits", value)])
+                case("fp32-head-on", [("config.engine.fp32_head_logits", True)], accepted=True)
+                case("fp32-head-off", [("config.engine.fp32_head_logits", False)], accepted=True)
             with tempfile.TemporaryDirectory() as directory:
                 inputs = Path(directory) / "runtime-contract-cases.json"
                 inputs.write_text(json.dumps(cases))

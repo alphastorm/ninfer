@@ -32,6 +32,13 @@ int check(bool condition, const char* message) {
 
 int main() {
     int failures = 0;
+    failures += check(!parse({"ninfer", "model.ninfer", "--prompt", "hello"}).fp32_head_logits,
+                      "FP32 head logits must default off");
+    failures += check(
+        parse({"ninfer", "model.ninfer", "--prompt", "hello", "--fp32-head-logits"}).fp32_head_logits,
+        "FP32 head logits opt-in was lost");
+    failures += check(ninfer::cli::usage_text("ninfer").find("--fp32-head-logits") != std::string::npos,
+                      "CLI help omits FP32 head logits");
     failures +=
         check(parse({"ninfer", "model.ninfer", "--prompt", "hello", "--prefill-chunk", "8192"})
                       .prefill_chunk == 8192,

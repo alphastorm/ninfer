@@ -212,14 +212,16 @@ PersistentLayout persistent_layout(const SequencePlanImpl& plan) {
                                          .batch_capacity = plan.max_concurrency,
                                          .draft_window   = plan.draft_window,
                                          .backend        = plan.speculative_backend,
-                                         .causal_scoring = plan.causal_scoring});
+                                         .causal_scoring = plan.causal_scoring,
+                                         .logits_dtype   = plan.logits_dtype});
     out.prefill_hidden =
         add_tensor(builder, DType::BF16, {dimension(config.hidden_size), effective_prefill_chunk},
                    "step prefill hidden");
     if (plan.causal_scoring) {
         out.score_hidden =
             add_tensor(builder, DType::BF16,
-                       {dimension(config.hidden_size), static_cast<std::int32_t>(kCausalScoreTile)},
+                       {dimension(config.hidden_size),
+                        static_cast<std::int32_t>(causal_score_tile(plan.logits_dtype))},
                        "causal score hidden staging");
     }
     qwen3_5::complete_round_state_layout(builder, out.round);
@@ -355,7 +357,9 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 scratch(layout, bytes);
             }
         }
-        if (!plan.causal_scoring) { linear_scratch(layout, profile.text.output_head, first, last); }
+        if (!plan.causal_scoring && plan.logits_dtype == DType::BF16) {
+            linear_scratch(layout, profile.text.output_head, first, last);
+        }
     };
     const auto mtp_post_mixer = [&](WorkspaceLayoutBuilder& layout, int first, int last) {
         linear_scratch(layout, profile.mtp->output, first, last);
@@ -454,11 +458,13 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
 
     if (plan.causal_scoring) {
         WorkspaceLayoutBuilder causal_score;
-        matrix(causal_score, DType::BF16, dimension(config.vocab_size),
-               static_cast<std::int32_t>(kCausalScoreTile));
-        matrix(causal_score, DType::I32, 1, static_cast<std::int32_t>(kCausalScoreTile));
-        matrix(causal_score, DType::FP32, 1, static_cast<std::int32_t>(kCausalScoreTile));
-        linear_scratch(causal_score, profile.text.output_head, 1, kCausalScoreTile);
+        const auto tile = static_cast<std::int32_t>(causal_score_tile(plan.logits_dtype));
+        matrix(causal_score, plan.logits_dtype, dimension(config.vocab_size), tile);
+        matrix(causal_score, DType::I32, 1, tile);
+        matrix(causal_score, DType::FP32, 1, tile);
+        if (plan.logits_dtype == DType::BF16) {
+            linear_scratch(causal_score, profile.text.output_head, 1, tile);
+        }
         out.causal_score = finish(causal_score);
     }
 
@@ -833,6 +839,7 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->features             = inputs.features;
     impl->use_cuda_graph       = inputs.use_cuda_graph;
     impl->causal_scoring       = inputs.causal_scoring;
+    impl->logits_dtype         = inputs.logits_dtype;
     impl->multiprocessor_count = inputs.multiprocessor_count;
     impl->context_cache        = inputs.context_cache;
     impl->kv_storage           = inputs.kv_storage;
@@ -876,6 +883,7 @@ make_sequence_planner_impl(std::shared_ptr<const execution::ModelProfile> profil
         .features             = models::load_options(options),
         .use_cuda_graph       = options.use_cuda_graph,
         .causal_scoring       = options.purpose == EnginePurpose::CausalScoring,
+        .logits_dtype         = options.fp32_head_logits ? DType::FP32 : DType::BF16,
         .multiprocessor_count = device.multiprocessor_count(),
         .context_cache        = options.context_cache,
     };

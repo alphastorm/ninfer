@@ -155,6 +155,7 @@ int main() {
     engine_options.speculative                       = options.speculative;
     engine_options.enable_vision                     = options.enable_vision;
     engine_options.use_cuda_graph                    = options.use_cuda_graph;
+    engine_options.fp32_head_logits                  = true;
     engine_options.context_cache.device_state_slots  = 2;
     engine_options.context_cache.host_capacity_bytes = 64ULL << 20;
 
@@ -241,6 +242,8 @@ int main() {
                       "startup lifecycle identity lost actual build/deployment/model values");
     failures += check(server.at("engine").at("gpu_keep_warm_ms") == 25,
                       "startup log lost effective keep-warm interval");
+    failures += check(server.at("engine").at("fp32_head_logits") == true,
+                      "startup log lost the effective FP32 head choice");
     failures += check(server.at("artifact").at("effective_weights") ==
                           Json{{"converted_device_bytes", 512}, {"host_mapped_bytes", 1024}},
                       "startup log lost effective converted/mapped weight bytes");

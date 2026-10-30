@@ -366,6 +366,7 @@ public:
     const bool vision_enabled;
     const bool use_cuda_graph;
     const bool causal_scoring;
+    const DType logits_dtype;
     const std::size_t kv_payload_bytes;
     std::optional<GraphMemorySummary> graph_memory;
     const WorkspacePlan workspace_plan;

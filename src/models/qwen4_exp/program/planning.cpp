@@ -52,6 +52,8 @@ moe::Plan describe_moe_plan(const execution::ModelProfile& p, const MoeOptions& 
 namespace {
 EngineOptions options(const execution::ModelProfile& profile, const EngineOptions& supplied) {
     auto o = supplied;
+    if (o.fp32_head_logits)
+        throw std::invalid_argument("FP32 head logits are supported only by the Qwen3.5 family");
     if (load_options(o) != profile.options || o.max_concurrency == 0 ||
         o.max_concurrency > kMaximumConcurrency || !o.max_context ||
         o.max_context > profile.config.text.max_context)

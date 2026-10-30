@@ -241,7 +241,7 @@ Exact validated object equality is required; missing/extra/unknown fields fail c
 | `frontend` | `template_sha256` (effective content), `tokenizer_sha256`, `resources_sha256`, `vision_preprocessing` (digest or `disabled`), `parser_codec`, `identity_codec` |
 | `native_layout` | `continuation_codec`, `state_layout_sha256`, `state_bytes`, ordered `pools` |
 | pool layout | `pool_id`, `name`, `layout_sha256`, `storage_type`, `layers`, `tokens_per_page`, `kv_heads`, `head_dim`, `page_bytes`, `host_serialization_stride` |
-| `engine` | `max_context`, resolved `kv_capacity` in tokens, `kv_dtype`, `max_concurrency`, `prefill_chunk`, `speculative_backend`, `draft_window`, `proposal_head`, `enable_vision`, `use_cuda_graph` |
+| `engine` | `max_context`, resolved `kv_capacity` in tokens, `kv_dtype`, `max_concurrency`, `prefill_chunk`, `speculative_backend`, `draft_window`, `proposal_head`, `enable_vision`, `use_cuda_graph`, `fp32_head_logits` |
 | `responses` | `codec` |
 | `deployment` | `profile`, `effective_config_sha256` |
 

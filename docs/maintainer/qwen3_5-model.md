@@ -222,7 +222,15 @@ the current all-device capability or the MoE formula above.
 
 Text prefill gathers embedding columns, replaces media placeholders with Vision outputs, and runs
 the configured blocks in chunks. It preserves state and positions across chunks. Final offset
-RMSNorm and the full output head produce the target distribution. Ordinary decode repeats this
+RMSNorm and the full output head produce the target distribution. By default its logits remain
+BF16. `EngineOptions::fp32_head_logits` / `--fp32-head-logits` opts into unrounded FP32 target
+logits for scalar prefill, ordinary decode, MTP and DFlash/DFlash2 verification, and causal
+scoring. Linear's A16 kernels write FP32 directly; sampling, argmax, speculative acceptance and
+target logprobs read that dtype without downcasting. Proposal heads keep their BF16 choice;
+MTP prefill reuses the leading BF16 half of step scratch. RoundState's exact tensor layouts
+drive persistent reservation and fit accounting, including graph calibration. Causal scoring
+uses 512 rather than 1024 columns with FP32 logits to keep its logits tile byte ceiling.
+Ordinary decode repeats this
 schedule for one new token. CUDA Graph replay uses the same selected model implementation.
 
 MTP is a one-layer predictor conditioned on a final-normalized target hidden state h_t and the

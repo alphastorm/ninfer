@@ -50,6 +50,21 @@ For segmented projection, run the original 2560-input suite and the migrated two
 the default checks all five. QSA tail, prepare, indexer and sparse-GQA partial-initialization cases
 also check their permitted read footprints under Compute Sanitizer initcheck.
 
+## Opt-in FP32 head logits
+
+`ninfer_qwen3_5_head_logits_test` is GPU-free and checks BF16 defaults, scalar/ordinary/MTP/
+DFlash2 dtype plumbing, exact K7/C2 persistent-byte deltas and scoring-tile accounting.
+`ninfer_cli_options_test` and `ninfer_serve_options_test` cover `--fp32-head-logits` parsing.
+These run in the bounded host CI lanes (serving options in the native lane).
+
+`ninfer_fp32_logits_test` needs a GPU. It checks all seven supported head formats against an
+independent FP64 projection oracle at T=1,2,7,8,9,16,17,24,32,33,65, plus unrounded near-tie
+argmax, single/multi-block sampling, causal logprobs, and MTP/DFlash2 acceptance at batch 2.
+It uses the existing A16 projection error criterion, not a relaxed FP32-specific threshold.
+Run `ctest --test-dir build --output-on-failure -R '^ninfer_fp32_logits_test$'` on each native
+card before any output/performance adoption screen. No real-model quality or speed claim follows
+from this Op test.
+
 ## Build and run
 
 Select a Python environment with the dependencies for the tests first. The maintained environment

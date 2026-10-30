@@ -741,6 +741,7 @@ def stage_lane_qualification(state: dict[str, Any], summary: dict[str, Any], lan
             )},
             "concurrency": configuration["engine"]["max_concurrency"],
             "gpu_keep_warm_ms": configuration["engine"].get("gpu_keep_warm_ms", 0),
+            "fp32_head_logits": configuration["engine"].get("fp32_head_logits", False),
             "device_state_slots": configuration["context_cache"]["device_state_slots"],
             "host_context_mib": configuration["context_cache"]["host_context_mib"],
             "host_context_bytes": lane.spec["host_context_translation"]["host_context_bytes"],
@@ -1662,6 +1663,11 @@ $serverArguments=@(
   '--spec',[string]$c.speculative.backend,'--draft-tokens',[string]$c.speculative.draft_tokens,'--lm-head-draft')
 $keepWarm=$c.engine.PSObject.Properties['gpu_keep_warm_ms']
 if($null -ne $keepWarm -and [int]$keepWarm.Value -gt 0){{$serverArguments+=@('--gpu-keep-warm-ms',[string]$keepWarm.Value)}}
+$fp32Head=$c.engine.PSObject.Properties['fp32_head_logits']
+if($null -ne $fp32Head){{
+  if($fp32Head.Value -isnot [bool]){{throw 'engine.fp32_head_logits must be a boolean'}}
+  if($fp32Head.Value){{$serverArguments+=@('--fp32-head-logits')}}
+}}
 $stdout=Join-Path $scratch 'stdout.log'
 $stderr=Join-Path $scratch 'stderr.log'
 $startInfo=[Diagnostics.ProcessStartInfo]::new()

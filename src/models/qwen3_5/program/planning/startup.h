@@ -24,6 +24,11 @@ namespace ninfer::models::qwen3_5::detail {
 using TensorLayout                              = TensorRegion;
 inline constexpr std::uint32_t kCausalScoreTile = 1024;
 
+// Keep the logits tile's byte ceiling when retaining the head's FP32 sums.
+[[nodiscard]] constexpr std::uint32_t causal_score_tile(DType logits) noexcept {
+    return logits == DType::FP32 ? kCausalScoreTile / 2 : kCausalScoreTile;
+}
+
 struct DFlashPersistentLayout {
     std::optional<qwen3_5::PagedKVCacheLayout> full;
     TensorLayout prefill_features;
@@ -76,6 +81,7 @@ struct SequencePlanningInputs {
     models::LoadOptions features;
     bool use_cuda_graph               = true;
     bool causal_scoring               = false;
+    DType logits_dtype                = DType::BF16;
     std::int32_t multiprocessor_count = 0;
     ContextCacheOptions context_cache;
 };
@@ -95,6 +101,7 @@ struct SequencePlanImpl {
     models::LoadOptions features;
     bool use_cuda_graph               = true;
     bool causal_scoring               = false;
+    DType logits_dtype                = DType::BF16;
     std::int32_t multiprocessor_count = 0;
     ContextCacheOptions context_cache;
     PersistentLayout persistent;

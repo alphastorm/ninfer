@@ -325,6 +325,7 @@ int main(int argc, char** argv) {
         engine_options.speculative        = cli.speculative;
         engine_options.enable_vision      = cli.enable_vision;
         engine_options.use_cuda_graph     = cli.use_cuda_graph;
+        engine_options.fp32_head_logits   = cli.fp32_head_logits;
         // One CLI invocation owns exactly one request and needs neither history nor pause
         // storage, so select those resource capacities explicitly.
         engine_options.context_cache.enabled             = false;

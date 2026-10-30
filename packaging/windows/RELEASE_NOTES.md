@@ -4,6 +4,20 @@ The native dependency manifest includes libjpeg-turbo for the Pillow-compatible
 JPEG decoder. CMake resolves `JPEG::JPEG` explicitly; native runtime packaging
 continues to collect its transitive DLLs from the selected vcpkg installation.
 
+## 2026-10-30 — Opt-in FP32 target-head logits (qualification pending)
+
+`--fp32-head-logits` / optional boolean `engine.fp32_head_logits` retains Qwen3.5-family
+target vocabulary logits in FP32. It defaults off, including when older rollback configurations
+omit the field; no lane profile is changed. Sampling, argmax, MTP/DFlash2 verification acceptance
+and causal scoring consume the selected dtype directly. Proposal heads keep BF16 semantics.
+Native packaging and launch reject non-boolean values; durable identity binds the choice.
+
+At vocabulary 248320, verify width 8 and concurrency 2, FP32 target logits reserve 15,892,480
+bytes (+7,946,240 over BF16). Including scalar step logits increases persistent reservation by
+8,442,880 bytes. The normal exact layout/graph calibration/admission path accounts for those
+bytes. Adoption requires same-binary ON/OFF native quality, acceptance, byte-divergence and speed
+evidence; the existing headroom and release gates are unchanged.
+
 ## 2026-10-29 — Native component 0.8.0-beta.1 (qualification pending)
 
 The RTX 3090 candidate switches from MTP3 to DFlash2 K=7, with one concurrent

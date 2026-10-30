@@ -24,6 +24,7 @@ struct RoundStateSpec {
     std::uint32_t draft_window   = 0;
     SpeculativeBackend backend   = SpeculativeBackend::None;
     bool causal_scoring          = false;
+    DType logits_dtype           = DType::BF16;
 };
 
 struct PrefillRoundHost {
