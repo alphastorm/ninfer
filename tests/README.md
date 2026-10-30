@@ -315,10 +315,10 @@ NINFER_TEST_SPECULATIVE=mtp NINFER_TEST_BATCH=2 \
   ./build/tests/ninfer_qwen3_5_prefix_real_test
 ```
 
-KV choices are `bf16`, `int8`, `fp8`, `nvfp4`, and `k8v4`; backend choices are `none`, `mtp`,
+KV choices are `bf16`, `int8`, `fp8`, `nvfp4`, `k8v4`, and `rk4v4`; backend choices are `none`, `mtp`,
 `dflash`, and `dflash2`, requiring an artifact with the selected component. Batch defaults to 2;
 `NINFER_TEST_DRAFT_TOKENS` overrides the default MTP3 or DFlash7 block. The DFlash2-specific
-integration executable also accepts all five KV names as its fifth positional argument and rejects
+integration executable also accepts all six KV names as its fifth positional argument and rejects
 unknown names.
 
 Continuation and pressure recovery have dedicated entries:
@@ -485,7 +485,7 @@ NINFER_TEST_ARTIFACT=out/qwen3_8_27b_nvfp4.ninfer \
 ```
 
 Arguments are K, Graph enabled, optimized head enabled, maximum B, target KV (`bf16`, `int8`,
-`fp8`, `nvfp4`, or `k8v4`), Vision enabled, and extra Device StateImage slots. Defaults are
+`fp8`, `nvfp4`, `k8v4`, or `rk4v4`), Vision enabled, and extra Device StateImage slots. Defaults are
 `15 1 1 8 bf16 0 3`. Run GPU integration tests serially. The individual Op suites remain the
 numerical/state-transition oracle; the fixed Engine fixture does not define bit parity across
 arbitrary floating-point routes.

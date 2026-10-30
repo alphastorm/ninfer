@@ -1,6 +1,7 @@
 #include "core/paged_kv_storage.h"
 #include "ops/kv_cache/kernels/rk4v4.cuh"
 #include "ops/rk4v4_reference.h"
+#include "kv_cache_storage.h"
 #include <array>
 #include <cstring>
 #include <iostream>
@@ -60,6 +61,7 @@ int main() {
         constexpr int codebook[] = {6,18,31,44,58,75,96,127,-6,-18,-31,-44,-58,-75,-96,-127};
         for (int i = 0; i < 16; ++i) require(codec::rk4_key_code(i) == codebook[i], "signed codebook");
         const auto packed = paged_kv_storage_layout(KvCacheStorage::Rk4V4, 256);
+        require(test::parse_kv_cache_storage("rk4v4") == KvCacheStorage::Rk4V4, "integration KV selector");
         require(packed.key.physical_bytes() == 136 && packed.value.physical_bytes() == 144, "packed row sizes");
         require(packed.physical_bytes_per_token_head()*64 == 17920, "27B packed bytes/token");
         require(packed.physical_bytes_per_token_head()*64*262144 == 4697620480ULL, "262K packed capacity");

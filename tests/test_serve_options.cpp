@@ -308,6 +308,9 @@ int main() {
     const ServeOptions k8v4 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "k8v4"});
     failures += check(k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value,
                       "--kv-dtype k8v4 did not select asymmetric K8V4 KV");
+    const auto rk4v4 = parse({"ninfer-serve", "model.ninfer", "--kv-dtype", "rk4v4"});
+    failures += check(rk4v4.kv_cache == ninfer::KvCacheStorage::Rk4V4,
+                      "--kv-dtype rk4v4 did not select packed native KV");
     const std::string kv_help = serve_usage_text("ninfer-serve");
     failures += check(kv_help.find("nvfp4") != std::string::npos &&
                           kv_help.find("k8v4") != std::string::npos,
