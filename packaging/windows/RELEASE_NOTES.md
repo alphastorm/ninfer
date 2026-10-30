@@ -24,14 +24,18 @@ installation reject schema-4 release specifications, missing fit/proposal policy
 and configurations that disagree with the specification. The untouched experimental
 RTX 5090 Windows specification remains schema 4 and cannot be built by this packager.
 
-Host context remains an exact translation of the predecessor Host KV budget plus
-24 native state images of 153,954,304 bytes each: 12,284,837,888 bytes
-(11,715.734375 MiB) on the RTX 3090 and 15,506,063,360 bytes
-(14,787.734375 MiB) on the RTX 4090. The P14 RTX 3090 DFlash2 fit proof used
-16,384 MiB instead; that run does not qualify this shipping Host budget.
-The DFlash2 state-image size must be re-measured on the final build, and the exact
-shipping configuration must pass the native context, restart, quality and performance
-gates before promotion. Package-build receipts remain `hardware-pending`.
+Host context is an exact translation of the predecessor Host KV budget plus
+24 native state images. The 2026-10-30 RTX 3090 schema-3 checkpoint measured a
+195,897,344-byte DFlash2 image, including 40 MiB of local draft KV absent from MTP3.
+Its retained 8,192 MiB Host KV budget therefore translates to 13,291,470,848 bytes
+(`12675.734375` MiB) exactly, replacing the inherited MTP3 image-size constant.
+The RTX 4090 retains its 153,954,304-byte MTP3 image and 15,506,063,360-byte
+(14,787.734375 MiB) Host budget. A GPU-free layout test computes both native lanes'
+image sizes from the pinned artifact config and packaged speculative backend.
+The P14 RTX 3090 DFlash2 fit proof used 16,384 MiB instead; neither that run nor
+the failed pre-correction fit qualifies the corrected shipping Host budget.
+The exact shipping configuration must pass the native context, restart, quality
+and performance gates before promotion. Package-build receipts remain `hardware-pending`.
 Startup JSON reports `artifact.effective_weights.converted_device_bytes` and
 `artifact.effective_weights.host_mapped_bytes`; status exposes the same
 `effective_weights` object. Qualification of this model's native DFlash2 fit must
@@ -132,9 +136,10 @@ Public profiles retain port 18082; port-only scratch rehearsals have their own
 config bytes, hashes and provenance and do not replace the public identity.
 
 Master's `--host-context-mib` replaces the fork's separate Host KV/State pools.
-The layout-aware translation preserves the old Host KV budget plus 24 MTP
+The historical MTP-only translation preserved the old Host KV budget plus 24 MTP
 StateImages of 153,954,304 bytes each: 15,506,063,360 bytes (14,787.734375 MiB) on
 the RTX 4090, and 12,284,837,888 bytes (11,715.734375 MiB) on the RTX 3090.
+The component 0.8.0-beta.1 DFlash2 correction above supersedes the RTX 3090 value.
 These are exact byte translations, not new smaller-host qualifications. Device
 state slots remain extra capacity beyond the active lane (2/4 respectively).
 Master owns its catalog/retention policy; obsolete private-slot limits are not

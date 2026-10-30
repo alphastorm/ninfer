@@ -1984,6 +1984,19 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertNotIn("effort", config["reasoning"])
         self.assertEqual(len(models), 1, "every lane pins the same model artifact")
 
+    def test_rtx3090_dflash2_host_budget_uses_the_measured_native_state_image(self) -> None:
+        lane_dir = WINDOWS / "lanes/rtx3090"
+        spec = json.loads((lane_dir / "release-spec.json").read_text(encoding="utf-8"))
+        config = json.loads((lane_dir / "server-config.json").read_text(encoding="utf-8"))
+        self.assertEqual(spec["host_context_translation"], {
+            "predecessor_host_kv_mib": 8192,
+            "predecessor_host_state_slots": 24,
+            "native_state_image_bytes": 195897344,
+            "host_context_bytes": 13291470848,
+        })
+        self.assertEqual(config["context_cache"]["host_context_mib"], "12675.734375")
+        self.assertEqual(qualify_native.host_context_mib(spec), "12675.734375")
+
     def test_rtx3090_lane_serves_at_the_approved_350_w_cap(self) -> None:
         # Approved 2026-10-26: the managed GPU-owner lease caps the RTX 3090 at 350 W (was 300 W);
         # the C1 qualification envelope keeps its 1 W sampling allowance above the cap, and the

@@ -32,7 +32,7 @@
   },
   "context_cache": {
     "device_state_slots": 0,
-    "host_context_mib": "11715.734375"
+    "host_context_mib": "12675.734375"
   },
   "speculative": {
     "backend": "dflash2",

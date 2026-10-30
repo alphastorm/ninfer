@@ -21,7 +21,9 @@ ninfer_add_test(ninfer_qwen3_5_state_image_test
 
 ninfer_add_test(ninfer_qwen3_5_state_image_layout_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_state_image_layout.cpp"
-  LIBRARIES ninfer_engine ninfer_core)
+          "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/state/state_image.cpp"
+  NEEDS_SOURCE_DIR
+  LIBRARIES ninfer_core ninfer::json)
 
 ninfer_add_test(ninfer_qwen3_5_native_transactions_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_native_transactions.cpp"

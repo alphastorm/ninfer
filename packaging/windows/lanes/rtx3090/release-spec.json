@@ -48,8 +48,8 @@
   "host_context_translation": {
     "predecessor_host_kv_mib": 8192,
     "predecessor_host_state_slots": 24,
-    "native_state_image_bytes": 153954304,
-    "host_context_bytes": 12284837888
+    "native_state_image_bytes": 195897344,
+    "host_context_bytes": 13291470848
   },
   "package_identity": {
     "binding": "supplied-by-New-Package.ps1",
