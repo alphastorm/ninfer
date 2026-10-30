@@ -81,6 +81,9 @@ constexpr std::string_view kPublicationUncertain = ".publication-uncertain";
 #if defined(NINFER_IO_URING_TESTING)
 std::atomic<bool> fail_next_submitted_batch{false};
 std::atomic<bool> fail_next_completion_key{false};
+std::atomic<bool> fail_next_handle_allocation{false};
+std::atomic<bool> pause_read_worker{false};
+thread_local IoUringCheckpointTeardownEvidence* teardown_evidence = nullptr;
 std::atomic<bool> fail_submit_followup{false};
 std::atomic<bool> fail_publication_marker_fsync{false};
 std::atomic<int> fail_publication_fsyncs{0};
@@ -123,6 +126,11 @@ int submit_io_uring(int ring_fd, unsigned submissions) {
 #endif
     const int result =
         static_cast<int>(::syscall(SYS_io_uring_enter, ring_fd, submissions, 0U, 0U, nullptr, 0U));
+#if defined(NINFER_IO_URING_TESTING)
+    if (teardown_evidence != nullptr && result > 0) {
+        teardown_evidence->accepted += static_cast<unsigned>(result);
+    }
+#endif
     return result;
 }
 
@@ -302,6 +310,12 @@ public:
             sqe.len                    = request.length;
             sqe.fsync_flags            = request.fsync_flags;
             sqe.user_data              = batch_tag | (index + 1U);
+#if defined(NINFER_IO_URING_TESTING)
+            // A real timeout holds the following regular-file read in the kernel.
+            if (teardown_evidence != nullptr && index == 0) {
+                sqe.flags = IOSQE_IO_HARDLINK;
+            }
+#endif
             sq_array_[(tail + static_cast<std::uint32_t>(index)) & *sq_mask_] = sqe_index;
             results[index] = std::numeric_limits<std::int32_t>::min();
         }
@@ -321,6 +335,13 @@ public:
             }
             submitted += static_cast<std::size_t>(result);
         }
+#if defined(NINFER_IO_URING_TESTING)
+        if (teardown_evidence != nullptr) {
+            teardown_evidence->pending_at_failure =
+                teardown_evidence->accepted - teardown_evidence->retired;
+            throw_system_error("injected failure with delayed read accepted", EIO);
+        }
+#endif
 
         std::array<bool, kRequestedRingEntries> observed{};
         std::size_t completed = 0;
@@ -348,6 +369,9 @@ public:
                 observed[index] = true;
                 results[index]  = cqe.res;
                 ++completed;
+#if defined(NINFER_IO_URING_TESTING)
+                if (teardown_evidence != nullptr) { ++teardown_evidence->retired; }
+#endif
                 ++cq_head;
             }
             std::atomic_ref(*cq_head_).store(cq_head, std::memory_order_release);
@@ -1182,6 +1206,50 @@ void io_uring_checkpoint_test_fail_next_completion_key() noexcept {
     fail_next_completion_key.store(true, std::memory_order_release);
 }
 
+void io_uring_checkpoint_test_fail_next_handle_allocation() noexcept {
+    fail_next_handle_allocation.store(true, std::memory_order_release);
+}
+
+void io_uring_checkpoint_test_pause_worker(bool paused) noexcept {
+    pause_read_worker.store(paused, std::memory_order_release);
+    pause_read_worker.notify_all();
+}
+
+IoUringCheckpointTeardownEvidence
+io_uring_checkpoint_test_delayed_teardown(const std::filesystem::path& path) {
+    UniqueFd file(::open(path.c_str(), O_RDONLY | O_CLOEXEC));
+    if (!file) { throw_last_error("open delayed teardown payload"); }
+    NativeIoUring ring;
+    ring.initialize();
+    std::array<std::byte, 4096> buffer{};
+    __kernel_timespec delay{0, 250'000'000};
+    const std::array requests{
+        RingRequest{IORING_OP_TIMEOUT, -1, 0, &delay, 1, 0},
+        RingRequest{IORING_OP_READ, file.get(), 0, buffer.data(), buffer.size(), 0},
+    };
+    std::array<std::int32_t, 2> results{};
+    IoUringCheckpointTeardownEvidence evidence;
+    teardown_evidence = &evidence;
+    try {
+        ring.execute(requests, results);
+    } catch (const std::system_error& error) {
+        teardown_evidence = nullptr;
+        if (error.code() != std::errc::io_error) { throw; }
+    } catch (...) {
+        teardown_evidence = nullptr;
+        throw;
+    }
+    teardown_evidence = nullptr;
+    // Reuse the destination after failure, but keep the allocation mapped so a late
+    // kernel write is observable without depending on a userspace sanitizer.
+    buffer.fill(std::byte{0x37});
+    std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    evidence.poisoned_buffer_unchanged =
+        std::all_of(buffer.begin(), buffer.end(),
+                    [](std::byte value) { return value == std::byte{0x37}; });
+    return evidence;
+}
+
 void io_uring_checkpoint_test_fail_publication_and_rollback_fsync() noexcept {
     fail_publication_fsyncs.store(2, std::memory_order_release);
 }
@@ -1882,6 +1950,11 @@ public:
             void wait() override { shared_->wait(); }
             std::shared_ptr<PendingCheckpointRead> shared_;
         };
+#if defined(NINFER_IO_URING_TESTING)
+        if (fail_next_handle_allocation.exchange(false, std::memory_order_acq_rel)) {
+            throw std::bad_alloc();
+        }
+#endif
         return std::make_unique<Handle>(std::move(completion));
     }
 
@@ -1915,6 +1988,9 @@ private:
             }
             if (!error) {
                 try {
+#if defined(NINFER_IO_URING_TESTING)
+                    pause_read_worker.wait(true, std::memory_order_acquire);
+#endif
                     execute(*job);
                 } catch (...) {
                     error = std::current_exception();
