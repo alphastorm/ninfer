@@ -67,6 +67,7 @@ private:
 
 #if defined(NINFER_IO_URING_TESTING)
 void io_uring_checkpoint_test_fail_next_submitted_batch() noexcept;
+void io_uring_checkpoint_test_fail_next_completion_key() noexcept;
 void io_uring_checkpoint_test_fail_publication_and_rollback_fsync() noexcept;
 void io_uring_checkpoint_test_fail_publication_marker_fsync() noexcept;
 // Zero/zero models filesystems such as ZFS and WSL kernels that omit STATX_DIOALIGN.

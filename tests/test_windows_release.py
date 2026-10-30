@@ -146,6 +146,13 @@ def ps_definitions(path: Path) -> str:
 
 def install_script(source: bytes, destination: Path) -> str:
     """Place one lifecycle script beside the protected-state helper it loads; return its SHA-256."""
+    # Linux has no Windows System folder: Join-Path would reject its empty value before the
+    # real controller reaches our synthetic Program Files nvidia-smi. Keep that fallback and
+    # all ownership behavior intact, but resolve the first probe within the fixture as well.
+    source = source.replace(
+        b"([Environment]::GetFolderPath('System'))",
+        b"(Join-Path $env:ProgramFiles 'synthetic-system')",
+    )
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(source)
     (destination.parent / "Protect-StateRoot.ps1").write_text(PROTECTED_STATE_STUB, encoding="utf-8")
@@ -2276,6 +2283,13 @@ try{{Resolve-LifecycleTaskName $spec $canonical 'C3'|Out-Null}}catch{{$refused++
 $path='{log_path}'
 $uuid='GPU-00000000-0000-0000-0000-000000000001'
 $encoding=[Text.UTF8Encoding]::new($false)
+# Linux filesystems without birth time expose a changing ctime as CreationTimeUtc.
+# Model the Windows creation identity while keeping all JSONL writes and reads real.
+$logCreation=[DateTime]::new(2026,1,1,0,0,0,[DateTimeKind]::Utc)
+function Get-Item([string]$LiteralPath){{
+  if($LiteralPath -cne $path){{throw 'unexpected metadata path'}}
+  [pscustomobject]@{{CreationTimeUtc=$logCreation}}
+}}
 $record=[ordered]@{{artifact_type='ninfer_serve_request_log';schema_version=30;event='server_start';server_instance_id='serve-4242-1';environment=@{{gpu_uuid=$uuid;device=0;gpu_name='Synthetic adapter'}}}}
 $historical=($record|ConvertTo-Json -Compress)+"`n"
 [IO.File]::WriteAllText($path,$historical,$encoding)

@@ -78,6 +78,7 @@ jobs:
             ninfer_engine_checkpoint_control_test ninfer_engine_checkpoint_adapter_test ninfer_resource_manager_test \
             ninfer_durable_file_test ninfer_session_checkpoint_store_test \
             ninfer_automatic_checkpoint_queue_test ninfer_io_uring_checkpoint_backend_test \
+            ninfer_io_uring_checkpoint_read_queue_test \
             src/serve/CMakeFiles/ninfer_serve.dir/session_checkpoint_service.cpp.o \
             tests/CMakeFiles/ninfer_session_checkpoint_service_real_test.dir/test_session_checkpoint_service_real.cpp.o \
             src/ops/CMakeFiles/ninfer_ops.dir/linear/kernels/q4/q4_a16_sliced_k_mma.cu.o \
@@ -86,7 +87,7 @@ jobs:
         shell: bash
         run: |
           ctest --test-dir build --output-on-failure \
-            -R '^ninfer_(public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|engine_core|engine_checkpoint_(control|adapter)|resource_manager|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue|io_uring_checkpoint_backend)_test$'
+            -R '^ninfer_(public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|engine_core|engine_checkpoint_(control|adapter)|resource_manager|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue|io_uring_checkpoint_(backend|read_queue))_test$'
       - name: Run ported host-only tooling tests
         shell: bash
         run: |
@@ -95,6 +96,9 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_lifecycle_container.py'
           python3 -m unittest discover -s tests -p 'test_agent_protocol.py'
           /usr/bin/python3 -m pytest -q tests/bench/ttft/test_measurements.py tests/test_serve_corpus.py
+      - name: Run portable Windows lifecycle release contracts
+        shell: bash
+        run: python3 -m unittest discover -s tests -p 'test_windows_release.py' -v
       - name: Cache statistics
         if: always()
         run: ccache --show-stats
@@ -142,8 +146,8 @@ jobs:
       # test runs on the leased host with the real driver and no visible devices,
       # not against a runtime driver stub on this GPU-less runner.
 
-  windows-configure:
-    name: Windows MSVC configure-only (PortableCore manifest required)
+  windows:
+    name: Windows MSVC platform and DirectStorage compile / host contracts
     runs-on: windows-2022
     timeout-minutes: 60
     steps:
@@ -151,24 +155,12 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Detect portable dependency contract
-        id: portable
-        shell: pwsh
-        run: |
-          if (Test-Path vcpkg.json) {
-            'ready=true' >> $env:GITHUB_OUTPUT
-          } else {
-            'ready=false' >> $env:GITHUB_OUTPUT
-            Write-Output '::notice::Windows configure waits for the PortableCore vcpkg manifest to land.'
-          }
       - name: Cache Windows dependency binaries
-        if: steps.portable.outputs.ready == 'true'
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: ~/AppData/Local/vcpkg/archives
           key: vcpkg-windows-${{ hashFiles('vcpkg.json') }}
       - name: Install official CUDA 13.1 compiler components
-        if: steps.portable.outputs.ready == 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -176,8 +168,7 @@ jobs:
           Invoke-WebRequest -Uri 'https://developer.download.nvidia.com/compute/cuda/13.1.1/network_installers/cuda_13.1.1_windows_network.exe' -OutFile $installer
           $process = Start-Process $installer -Wait -PassThru -ArgumentList '-s nvcc_13.1 cudart_13.1 crt_13.1 nvvm_13.1 nvtx_13.1 thrust_13.1 cuda_profiler_api_13.1'
           if ($process.ExitCode -ne 0) { throw "CUDA installer failed: $($process.ExitCode)" }
-      - name: Configure MSVC and pinned vcpkg (no GPU execution)
-        if: steps.portable.outputs.ready == 'true'
+      - name: Configure and compile Windows-only C++ (no GPU execution)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -197,5 +188,18 @@ jobs:
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES=120a `
             "-DCMAKE_TOOLCHAIN_FILE=$vcpkg/scripts/buildsystems/vcpkg.cmake" -DVCPKG_TARGET_TRIPLET=x64-windows `
             -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=ON -DNINFER_BUILD_BENCHMARKS=OFF `
-            -DNINFER_BUILD_PROFILE=ci-windows-configure "-DNINFER_UPSTREAM_BASE_SHA=$base"
+            -DNINFER_BUILD_PROFILE=ci-windows-platform "-DNINFER_UPSTREAM_BASE_SHA=$base"
           if ($LASTEXITCODE -ne 0) { throw 'Windows MSVC configure failed' }
+          cmake --build build --parallel 2 --target ninfer_core ninfer_cpu `
+            ninfer_checkpoint_directstorage_windows ninfer_direct_storage_checkpoint_windows_test `
+            ninfer_checkpoint_io_contract_test ninfer_direct_storage_checkpoint_backend_test `
+            ninfer_durable_file_test ninfer_session_checkpoint_store_test ninfer_automatic_checkpoint_queue_test `
+            src/serve/CMakeFiles/ninfer_serve.dir/stop_event.cpp.obj `
+            src/serve/CMakeFiles/ninfer_serve.dir/session_checkpoint_service.cpp.obj
+          if ($LASTEXITCODE -ne 0) { throw 'Windows platform C++ compile failed' }
+      - name: Run GPU-free Windows checkpoint and quota contracts
+        shell: pwsh
+        run: |
+          ctest --test-dir build --output-on-failure `
+            -R '^ninfer_(checkpoint_io_contract|direct_storage_checkpoint_backend|durable_file(_(pinned-destination|reparse-guard|identity-guards|directory-publication|extended-paths))?|session_checkpoint_store(_(current_flush|capacity))?|automatic_checkpoint_queue)_test$'
+          if ($LASTEXITCODE -ne 0) { throw 'Windows host contracts failed' }
