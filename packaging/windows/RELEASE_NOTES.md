@@ -4,6 +4,41 @@ The native dependency manifest includes libjpeg-turbo for the Pillow-compatible
 JPEG decoder. CMake resolves `JPEG::JPEG` explicitly; native runtime packaging
 continues to collect its transitive DLLs from the selected vcpkg installation.
 
+## 2026-10-30 — Native installer recovery and ownership
+
+Directory cleanup intent is journaled before creation under the installer lock,
+after refusing pre-existing paths. Repair can therefore remove an interrupted
+candidate and allow same-instance reinstall even when interruption lands directly
+after directory creation; incumbent trees remain excluded from cleanup.
+
+Managed Stop now fails on a launch-bound incomplete or refused final-save report.
+The runtime attribution, report and candidate checkpoint/cache trees are retained;
+repeating rollback or repair does not reinterpret the stopped process as permission
+to discard those trees. Reconciliation of the retained candidate state is required
+before destructive rollback. This is containment, not recovery of unsaved sessions.
+
+The wrapper publishes launch intent before spawning its child, and retains
+`runtime.json` until managed Stop retires it. Failed child termination retains
+attribution and the GPU-owner lease. Stop, owner restoration and a new launch
+also census the release executable: a live child without usable PID attribution
+fails closed instead of returning the card to its prior power cap. Such a child
+requires operator-confirmed exit; image matching alone never authorizes adoption
+or termination of an unknown process.
+
+A non-running incumbent with an inner GPU-owner lease is refused before controller
+replacement. Reconcile it through its original managed Stop first. This restriction
+does not require stopping an ordinary running RTX 3090 lane before upgrade:
+the installer already stops that lane under its own hash-bound owner policy,
+including across a qualified-cap change (alphastorm/ninfer#48).
+
+Portable PowerShell fixtures cover the actual v0.14.0 beta.3 controller/specification
+at 350→350 W as well as the older beta.2 300→350 W transition. The distinct inner
+`prior_paused=true` equal-cap case preserves the earlier outer pause and its recorded
+370 W prior setting; it is not inferred from `outer.paused=true`. Windows API stubs
+do not establish Task Scheduler child survival, real termination-denial behaviour,
+or actual process-death interruption of directory creation. Those boundaries require
+the preregistered supported-Windows rehearsal before a hardware claim.
+
 ## 2026-10-29 — Native component 0.8.0-beta.1 (qualification pending)
 
 The RTX 3090 candidate switches from MTP3 to DFlash2 K=7, with one concurrent
