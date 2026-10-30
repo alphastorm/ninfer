@@ -88,22 +88,22 @@ window change genuinely changes physical work without a new engine knob.
 
 ### Quantitative window sensitivities
 
-Original4090 K7 per-position acceptance is `[225,165,122,89,62,40,29]`;
-isolated4090 and3090 are `[197,157,121,87,68,55,47]`. Both sum732 across291
-rounds and produce the same recorded normalized K7 output hash. Preserve this
-histogram discrepancy; do not silently select the more favorable one.
+Original4090, isolated4090 and3090 K7 per-position acceptance is
+`[197,157,121,87,68,55,47]`, summing732 across291 rounds. Match each raw
+`request_done` uniquely to its case receipt by decode duration: counters alone
+are nonunique across cases and can incorrectly select another request's histogram.
 
 Counterfactual truncation at K predicts `Y(K)=1+sum(position[0:K])/291` **if**
 all earlier proposals/decisions stayed unchanged. Relative to the isolated K7
 ratio `r=0.945090`, floor0.95 requires round-cost reduction
 `1-r*(Y(K)/Y(7))/0.95`:
 
-| K | Width | Yield from two histograms | Required round-cost saving | Isolated-based max ms/round |
+| K | Width | Counterfactual yield | Required round-cost saving | Isolated-based max ms/round |
 |---|---:|---:|---:|---:|
-| 6 | 7 | 3.353952–3.415808 | 3.34–5.09% | 26.097079 |
-| 5 | 6 | 3.164948–3.278351 | 7.23–10.44% | 24.626445 |
-| 4 | 5 | 2.931271–3.065292 | 13.26–17.05% | not selected |
-| 3 | 4 | 2.632302–2.759450 | 21.91–25.51% | measured failed |
+| 6 | 7 | 3.353952 | 5.09% | 26.097079 |
+| 5 | 6 | 3.164948 | 10.44% | 24.626445 |
+| 4 | 5 | 2.931271 | 17.05% | not selected |
+| 3 | 4 | 2.632302 | 25.51% | measured failed |
 
 These are sensitivities, **not measured predictions or confidence intervals**.
 K3 provides real counterevidence: actual yield2.643411, actual24.145198ms/round;

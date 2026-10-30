@@ -34,13 +34,13 @@
         "output_sha256": "bbe977b90f4a6fec611543b42449168b13ed6f3d6635486ed615f06ee8c4d76d",
         "arm": "1-B",
         "accepted_per_position": [
-          225,
-          165,
-          122,
-          89,
-          62,
-          40,
-          29
+          197,
+          157,
+          121,
+          87,
+          68,
+          55,
+          47
         ],
         "fallback_steps": 0,
         "accepted_per_round": 2.515463917525773,
@@ -56,13 +56,13 @@
         "output_sha256": "bbe977b90f4a6fec611543b42449168b13ed6f3d6635486ed615f06ee8c4d76d",
         "arm": "2-B",
         "accepted_per_position": [
-          225,
-          165,
-          122,
-          89,
-          62,
-          40,
-          29
+          197,
+          157,
+          121,
+          87,
+          68,
+          55,
+          47
         ],
         "fallback_steps": 0,
         "accepted_per_round": 2.515463917525773,
@@ -485,74 +485,30 @@
     {
       "k": 6,
       "width": 7,
-      "effects": [
-        {
-          "scope": "4090",
-          "truncated_emitted_per_round": 3.415807560137457,
-          "retained_yield_fraction": 0.9716520039100685,
-          "required_round_cost_reduction": 0.03336976584387952
-        },
-        {
-          "scope": "4090-isolated",
-          "truncated_emitted_per_round": 3.3539518900343643,
-          "retained_yield_fraction": 0.9540566959921799,
-          "required_round_cost_reduction": 0.05087413628131421
-        }
-      ]
+      "truncated_emitted_per_round": 3.3539518900343643,
+      "retained_yield_fraction": 0.9540566959921799,
+      "required_round_cost_reduction": 0.05087413628131421
     },
     {
       "k": 5,
       "width": 6,
-      "effects": [
-        {
-          "scope": "4090",
-          "truncated_emitted_per_round": 3.2783505154639174,
-          "retained_yield_fraction": 0.9325513196480938,
-          "required_round_cost_reduction": 0.07226836681595683
-        },
-        {
-          "scope": "4090-isolated",
-          "truncated_emitted_per_round": 3.1649484536082473,
-          "retained_yield_fraction": 0.9002932551319648,
-          "required_round_cost_reduction": 0.10435971261792054
-        }
-      ]
+      "truncated_emitted_per_round": 3.1649484536082473,
+      "retained_yield_fraction": 0.9002932551319648,
+      "required_round_cost_reduction": 0.10435971261792054
     },
     {
       "k": 4,
       "width": 5,
-      "effects": [
-        {
-          "scope": "4090",
-          "truncated_emitted_per_round": 3.0652920962199315,
-          "retained_yield_fraction": 0.8719452590420333,
-          "required_round_cost_reduction": 0.13256119832267643
-        },
-        {
-          "scope": "4090-isolated",
-          "truncated_emitted_per_round": 2.9312714776632305,
-          "retained_yield_fraction": 0.833822091886608,
-          "required_round_cost_reduction": 0.17048733427045193
-        }
-      ]
+      "truncated_emitted_per_round": 2.9312714776632305,
+      "retained_yield_fraction": 0.833822091886608,
+      "required_round_cost_reduction": 0.17048733427045193
     },
     {
       "k": 3,
       "width": 4,
-      "effects": [
-        {
-          "scope": "4090",
-          "truncated_emitted_per_round": 2.759450171821306,
-          "retained_yield_fraction": 0.7849462365591398,
-          "required_round_cost_reduction": 0.21911058548554851
-        },
-        {
-          "scope": "4090-isolated",
-          "truncated_emitted_per_round": 2.6323024054982818,
-          "retained_yield_fraction": 0.7487781036168133,
-          "required_round_cost_reduction": 0.25509179138472005
-        }
-      ]
+      "truncated_emitted_per_round": 2.6323024054982818,
+      "retained_yield_fraction": 0.7487781036168133,
+      "required_round_cost_reduction": 0.25509179138472005
     }
   ],
   "formulae": {
@@ -566,7 +522,7 @@
     "The large counts supplied for log-024 are whole-suite 108-case totals, not that case.",
     "Accepted drafts/round excludes the correction or bonus token.",
     "All round times are amortized decode durations, not separately measured CUDA kernel times.",
-    "Original and isolated K7 histograms differ despite equal accepted totals and normalized output hashes; retain both.",
+    "Raw request_done rows are matched uniquely by decode duration to the case receipt; aggregate counters alone are nonunique across cases.",
     "Truncated histogram estimates assume unchanged proposals and target decisions; DFlash2 noncausal draft and T-dependent target arithmetic invalidate a guarantee.",
     "Historical K3 is measured failed, not a candidate for repeat-to-pass.",
     "No K5 or K6 measurements; no per-width verify timings.",
