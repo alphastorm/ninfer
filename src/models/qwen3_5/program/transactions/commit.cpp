@@ -425,9 +425,17 @@ CommitResult ProgramImpl::commit(PendingBatch&& pending,
             terminal[row]                = decision.terminal ? 1U : 0U;
             discarded[row]               = (decision.cancelled || decision.failed) ? 1U : 0U;
             prefix_execution_splits[row] = decision.prefix_execution_split_after;
+        }
+        for (std::size_t row = 0; row < row_count; ++row) {
+            const std::uint32_t lane = lanes[row];
+            auto& request           = requests[lane];
+            if (pending_kinds[row] == PendingKind::Speculative) {
+                request.speculative_stats.observe_round(request.pending.drafted,
+                                                        request.pending.accepted_drafts);
+            }
             if (discarded[row]) {
-                timings[row]     = requests[lane].timings;
-                speculative[row] = std::move(requests[lane].speculative_stats);
+                timings[row]     = request.timings;
+                speculative[row] = std::move(request.speculative_stats);
             }
         }
 

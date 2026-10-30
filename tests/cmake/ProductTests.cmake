@@ -115,7 +115,9 @@ ninfer_add_test(ninfer_request_log_test
 
 ninfer_add_test(ninfer_metrics_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_metrics.cpp"
-  LIBRARIES ninfer_serve)
+          ${PROJECT_SOURCE_DIR}/src/serve/metrics.cpp
+  LIBRARIES ninfer::json Threads::Threads)
+set_tests_properties(ninfer_metrics_test PROPERTIES LABELS "host")
 
 ninfer_add_test(ninfer_http_error_handler_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_http_error_handler.cpp"

@@ -2,6 +2,10 @@ ninfer_add_test(ninfer_scheduler_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_scheduler.cpp"
   LIBRARIES ninfer_runtime_support)
 
+ninfer_add_test(ninfer_speculative_metrics_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_speculative_metrics.cpp")
+set_tests_properties(ninfer_speculative_metrics_test PROPERTIES LABELS "host")
+
 add_test(NAME ninfer_engine_cache_gate_test
   COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/../test_engine_cache_gate.py")
 

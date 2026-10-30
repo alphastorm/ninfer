@@ -20,6 +20,7 @@ class logger;
 
 namespace ninfer::serve {
 
+// Optional request observations may be added without changing existing schema-30 fields.
 inline constexpr int kRequestLogSchemaVersion        = 30;
 inline constexpr const char* kRequestLogArtifactType = "ninfer_serve_request_log";
 

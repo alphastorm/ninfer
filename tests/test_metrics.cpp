@@ -25,12 +25,17 @@ int main() {
     RuntimeStats baseline;
     baseline.generated_tokens         = 4;
     baseline.speculative_draft_tokens = 3;
+    baseline.speculative_accepted_tokens = 1;
+    baseline.speculative_attempted_per_position = {1, 1, 1};
+    baseline.speculative_accepted_per_position  = {1, 0, 0};
     Metrics metrics;
     metrics.configure("custom\"model\\name\nline", options, memory, baseline);
     RuntimeStats running = baseline;
     running.generated_tokens += 5;
     running.speculative_draft_tokens += 6;
-    running.speculative_accepted_tokens = 3;
+    running.speculative_accepted_tokens += 3;
+    running.speculative_attempted_per_position = {4, 3, 2};
+    running.speculative_accepted_per_position  = {3, 1, 0};
     running.running_requests            = 1;
     running.host_context_occupied_bytes = 4096;
     running.host_context_reserved_bytes = 1024;
@@ -43,6 +48,21 @@ int main() {
           "live generated count must exclude startup warmup");
     check(live.find("ninfer_spec_decode_draft_tokens_total 6\n") != std::string::npos,
           "speculative work must be observable before request completion");
+    check(live.find("# TYPE ninfer_spec_decode_position_tokens_total counter\n") !=
+                  std::string::npos &&
+              live.find("ninfer_spec_decode_position_tokens_total{position=\"0\","
+                        "kind=\"attempted\"} 3\n") != std::string::npos &&
+              live.find("ninfer_spec_decode_position_tokens_total{position=\"1\","
+                        "kind=\"attempted\"} 2\n") != std::string::npos &&
+              live.find("ninfer_spec_decode_position_tokens_total{position=\"2\","
+                        "kind=\"attempted\"} 1\n") != std::string::npos &&
+              live.find("ninfer_spec_decode_position_tokens_total{position=\"0\","
+                        "kind=\"accepted\"} 2\n") != std::string::npos &&
+              live.find("ninfer_spec_decode_position_tokens_total{position=\"1\","
+                        "kind=\"accepted\"} 1\n") != std::string::npos &&
+              live.find("ninfer_spec_decode_position_tokens_total{position=\"2\","
+                        "kind=\"accepted\"} 0\n") != std::string::npos,
+          "position counters must render attempted/accepted kinds and exclude warmup");
     check(live.find("ninfer_time_to_first_token_seconds_count 1\n") != std::string::npos &&
               live.find("ninfer_requests_total{outcome=\"completed\"} 0\n") != std::string::npos,
           "TTFT must be visible before completion");
@@ -106,5 +126,19 @@ int main() {
               constrained.find("ninfer_constraint_mask_upload_bytes_total 128\n") !=
                   std::string::npos,
           "interrupted complete constraint lost its state or actual work");
+    RuntimeStats dflash;
+    dflash.speculative_attempted_per_position = {2, 2, 2, 1, 1, 1, 1};
+    dflash.speculative_accepted_per_position  = {1, 1, 1, 0, 0, 0, 0};
+    Metrics without_warmup;
+    without_warmup.configure("dflash2", options, memory, {});
+    const auto seven = without_warmup.render(dflash, true);
+    check(seven.find("ninfer_spec_decode_position_tokens_total{position=\"6\","
+                     "kind=\"attempted\"} 1\n") != std::string::npos &&
+              seven.find("ninfer_spec_decode_position_tokens_total{position=\"6\","
+                         "kind=\"accepted\"} 0\n") != std::string::npos,
+          "K7 must render its final position when the warmup baseline has no positions");
+    check(without_warmup.render({}, true).find(
+              "ninfer_spec_decode_position_tokens_total{position=") == std::string::npos,
+          "ordinary decoding must not fabricate speculative position series");
     return failures == 0 ? 0 : 1;
 }

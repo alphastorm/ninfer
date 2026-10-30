@@ -76,6 +76,12 @@ and later batches without writing their destinations, and allow recovery through
 Like `ninfer_io_uring_checkpoint_backend_test`, it returns 77 when the runner cannot provide
 native io_uring/O_DIRECT on the selected root (`NINFER_CHECKPOINT_TEST_ROOT` can select it).
 
+Both bounded Linux workflows build and run `ninfer_speculative_metrics_test` and
+`ninfer_metrics_test` without GPU work. They cover MTP K3 and DFlash2 K7 position-count sums,
+fallbacks, position-zero rejection, shortened windows, allocation-free round observation, and
+Prometheus rendering with warmup subtraction. `ninfer_request_log_test`, also in the native
+compile workflow, checks the additive schema-30 `speculative.attempted_per_position` field.
+
 The same Linux job runs `python3 -m unittest discover -s tests -p 'test_windows_release.py' -v`
 with PowerShell. These lifecycle contracts use synthetic GPU/task fixtures, not a native GPU.
 The Windows job compiles `ninfer_core`, the DirectStorage backend and its native test, the

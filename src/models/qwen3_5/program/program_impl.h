@@ -80,9 +80,11 @@ enum class PendingKind : std::uint8_t { None, Begin, Ordinary, Speculative };
 struct PendingCandidate {
     PendingKind kind = PendingKind::None;
     Continuation base;
-    std::uint32_t base_S        = 0;
-    std::uint32_t prompt_tokens = 0;
-    std::uint32_t produced      = 0;
+    std::uint32_t base_S          = 0;
+    std::uint32_t prompt_tokens   = 0;
+    std::uint32_t produced        = 0;
+    std::uint32_t drafted         = 0;
+    std::uint32_t accepted_drafts = 0;
 };
 enum class Lifecycle : std::uint8_t {
     Empty,
