@@ -51,6 +51,11 @@ ninfer_add_test(ninfer_resource_manager_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_resource_manager.cpp"
   LIBRARIES ninfer_runtime_support)
 
+ninfer_add_test(ninfer_checkpoint_owner_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_checkpoint_owner.cpp"
+  LIBRARIES ninfer_runtime_support)
+set_tests_properties(ninfer_checkpoint_owner_test PROPERTIES LABELS "host" TIMEOUT 30)
+
 ninfer_add_test(ninfer_kv_capacity_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_kv_capacity.cpp"
   LIBRARIES ninfer_runtime_support)
