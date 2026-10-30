@@ -62,11 +62,58 @@ int main() {
                       "owned weights were included in opaque retained storage");
     failures += check(ninfer::device_memory_growth({8000, 12000}, {8100, 12000}) == -100,
                       "negative memory growth wrapped to a large unsigned estimate");
-    failures += check(budget.fits({2100, 12000}) && !budget.fits({1900, 12000}),
+    failures += check(budget.fits({2500, 12000}) && !budget.fits({1900, 12000}),
                       "actual startup footprint did not obey the Device budget");
+    failures += check(!budget.fits({2499, 12000}),
+                      "final startup accepted a one-byte configured headroom deficit");
     const ninfer::runtime::StartupMemoryBudget physical({3000, 12000}, 8000, 500);
     failures += check(physical.available({2000, 12000}) == 1500,
                       "physical availability did not bound the configured budget");
+    failures += check(physical.fits({500, 12000}) && !physical.fits({499, 12000}),
+                      "final startup accepted a physical headroom deficit");
+
+    // Native DFlash2 has one shared KV pool, not max_context per active lane.
+    // Format is an input byte stride: INT8 and rk4v4, including their scale planes.
+    constexpr std::size_t mib = 1ULL << 20;
+    constexpr std::size_t state_image = 195897344;
+    for (const std::size_t bytes_per_token : {33792ULL, 17920ULL}) {
+        for (const std::size_t headroom : {768 * mib, 640 * mib}) {
+            for (const std::uint32_t concurrency : {1U, 2U}) {
+                const std::uint32_t context = bytes_per_token == 33792 ? 131072 : 262144;
+                const std::uint32_t minimum_pages = context / 64;
+                // The caller supplies its *complete* measured/planned non-KV
+                // reservation, including per-request scratch and graph backing.
+                const std::size_t non_kv = (concurrency + 2) * state_image + 256 * mib;
+                const ninfer::runtime::SequenceCapacityCurve native{
+                    .primary_page_tokens = 64,
+                    .minimum_primary_page_groups = minimum_pages,
+                    .maximum_primary_page_groups = concurrency * minimum_pages,
+                    .minimum_device_reservation_bytes = non_kv + context * bytes_per_token,
+                    .bytes_per_additional_primary_page_group = 64 * bytes_per_token,
+                };
+                const auto available = native.minimum_device_reservation_bytes + headroom;
+                const auto fit = ninfer::runtime::resolve_kv_capacity(
+                    ninfer::KvCapacityPolicy::automatic(headroom), native, available);
+                failures += check(fit.resolved_tokens == context &&
+                                      fit.planned_slack_bytes == headroom,
+                                  "native shared pool multiplied capacity or spent its reserve");
+                bool refused = false;
+                try {
+                    (void)ninfer::runtime::resolve_kv_capacity(
+                        ninfer::KvCapacityPolicy::automatic(headroom), native, available - 1);
+                } catch (const std::invalid_argument&) { refused = true; }
+                failures += check(refused, "native fit accepted a one-byte reserve deficit");
+                if (concurrency == 2) {
+                    const auto expanded = ninfer::runtime::resolve_kv_capacity(
+                        ninfer::KvCapacityPolicy::automatic(headroom), native,
+                        available + 3 * native.bytes_per_additional_primary_page_group - 1);
+                    failures += check(expanded.resolved_tokens == context + 2 * 64 &&
+                                          expanded.planned_slack_bytes >= headroom,
+                                      "native C2 auto pool did not use the actual KV byte stride");
+                }
+            }
+        }
+    }
 
     if (failures == 0) { std::cout << "ok\n"; }
     return failures == 0 ? 0 : 1;
