@@ -6,6 +6,11 @@ ninfer_add_test(ninfer_qwen3_5_loading_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_loading.cpp"
   LIBRARIES ninfer_model_loading)
 
+ninfer_add_test(ninfer_qwen3_5_dflash_window_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_dflash_window.cpp"
+          "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/round_buffers.cpp"
+  LIBRARIES ninfer_core)
+
 ninfer_add_test(ninfer_qwen3_5_runtime_mechanisms_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_runtime_mechanisms.cpp"
   LIBRARIES ninfer_engine ninfer_core)
