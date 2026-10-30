@@ -224,7 +224,9 @@ struct Program {
 
     bool release_checkpoint(Handle handle) {
         auto& content = contents.at(handle.index);
-        if (!content.alive || !content.evictable || content.release_blocked) { return false; }
+        if (!content.alive || !content.evictable || content.leased || content.release_blocked) {
+            return false;
+        }
         content.alive = false;
         released.push_back(handle);
         return true;
@@ -775,7 +777,8 @@ void test_rewind_evaluation_preserves_sources_until_binding() {
     auto choice = f.source(rewritten, replay);
     require(f.cache.prepare_source(f.program, rewritten, choice), "rewind source became invalid");
     require(f.program.valid_checkpoint(endpoint) && f.program.valid_checkpoint(deeper) &&
-                choice.source.retired_points == std::vector<Handle>({endpoint, deeper}) &&
+                !choice.take_over && !choice.source.consume_source &&
+                !choice.source.take_private && choice.source.retired_points.empty() &&
                 f.program.valid_checkpoint(replay) && f.program.valid_checkpoint(anchor) &&
                 f.program.valid_checkpoint(leased) && f.program.valid_checkpoint(shared) &&
                 !f.cache.retention(owner).reused,
@@ -787,10 +790,15 @@ void test_rewind_evaluation_preserves_sources_until_binding() {
     require(f.cache.prepare_source(f.program, rewritten, early),
             "anchor rewind source became invalid");
     require(f.program.valid_checkpoint(replay) && f.program.valid_checkpoint(anchor) &&
-                early.source.retired_points == std::vector<Handle>({replay, endpoint, deeper}) &&
+                !early.take_over && early.source.retired_points.empty() &&
                 f.program.valid_checkpoint(leased) && f.program.valid_checkpoint(shared) &&
                 early.source.private_points == std::vector<Handle>{anchor},
             "anchor rewind retained a deeper input replay or released its leased history");
+    f.program.contents[leased.index].leased = false;
+    choice = f.source(rewritten, replay);
+    require(choice.take_over &&
+                choice.source.retired_points == std::vector<Handle>({endpoint, deeper, leased}),
+            "retired reader prevented ordinary rewind retirement");
 }
 
 void test_waiting_source_survives_catalog_replacement_and_transfers_ownership() {

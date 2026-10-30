@@ -331,6 +331,17 @@ public:
                                  (owner->active && choice.resume_owner != choice.owner))) {
             choice.take_over = false;
         }
+        // Supersession clears the durable name, not an in-flight export's Native leases.
+        // A rewind would drop uncarried points when adopt replaces this owner's catalog.
+        // Fork independently until its readers retire; excluding leased retirement victims
+        // below alone cannot make that later ownership replacement safe.
+        if (choice.take_over &&
+            std::any_of(owner->points.begin(), owner->points.end(), [&](const auto& point) {
+                return program.valid_checkpoint(point.handle) &&
+                       program.checkpoint_metadata(point.handle).leased;
+            })) {
+            choice.take_over = false;
+        }
         std::vector<Handle> retired;
         if (choice.take_over && selected && owner) {
             const auto frontier = program.checkpoint_metadata(*selected).frontier;

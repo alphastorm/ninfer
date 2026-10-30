@@ -54,6 +54,13 @@ Runtime 从 Program 查询真实占用和可释放量。逻辑记录可以共享
 一个 Engine 控制线程推进策略、事务和引用结算。Program 拥有自己的可变 state、workspace、
 context stores 和 CUDA Graph，不与其他 Program 共享可变分配。
 
+已确认的新终点可以清除旧 owner 的 durable session/tag，但不会结束正在导出的 Native
+reader lease。只要旧 owner 还有 leased 检查点，新请求就只能独立 Fork，不能接管该 owner；
+否则较浅锚点的绑定虽跳过 leased 退休候选，随后 catalog replacement 仍会丢弃更深终点的
+最后引用并错误地调用 Native erase。reader 结束后恢复普通接管和回收，不新增延迟释放队列。
+GPU-free `ninfer_checkpoint_owner_test` 使用真实 `CheckpointStore::Lease` 覆盖导入、终点
+supersession、兄弟分叉、取消和 reader 退休；此规则与 DFlash2、MTP 或具体 GPU 架构无关。
+
 <a id="capacity"></a>
 ## 3. 容量与执行许可
 

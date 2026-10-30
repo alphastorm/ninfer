@@ -233,16 +233,20 @@ void fork_after_resume(bool imported, bool pin_anchor) {
 } // namespace
 
 int main() {
-    try {
-        for (const bool imported : {true, false}) {
-            for (const bool pin_anchor : {true, false}) {
+    unsigned failures = 0;
+    for (const bool imported : {true, false}) {
+        for (const bool pin_anchor : {true, false}) {
+            try {
                 fork_after_resume(imported, pin_anchor);
+                std::cout << (imported ? "superseded import" : "unnamed owner")
+                          << (pin_anchor ? " / full export" : " / endpoint reader") << ": passed\n";
+            } catch (const std::exception& error) {
+                ++failures;
+                std::cerr << (imported ? "superseded import" : "unnamed owner")
+                          << (pin_anchor ? " / full export" : " / endpoint reader")
+                          << ": " << error.what() << '\n';
             }
         }
-        std::cout << "checkpoint owner contracts passed (4 lease/supersession cases)\n";
-        return 0;
-    } catch (const std::exception& error) {
-        std::cerr << error.what() << '\n';
-        return 1;
     }
+    return failures ? 1 : 0;
 }
