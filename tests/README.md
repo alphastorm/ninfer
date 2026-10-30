@@ -69,6 +69,20 @@ After building, `ctest --preset dev` runs the same CTest suite. See
 
 The chat-template reference test uses Python Jinja2.
 
+The bounded Linux job in `.github/workflows/build.yml` builds and runs the GPU-free
+`ninfer_io_uring_checkpoint_read_queue_test`. It checks that partial submission and invalid
+completion attribution make a closed ring unavailable, preserve the original failure for queued
+and later batches without writing their destinations, and allow recovery through a new queue.
+Like `ninfer_io_uring_checkpoint_backend_test`, it returns 77 when the runner cannot provide
+native io_uring/O_DIRECT on the selected root (`NINFER_CHECKPOINT_TEST_ROOT` can select it).
+
+The same Linux job runs `python3 -m unittest discover -s tests -p 'test_windows_release.py' -v`
+with PowerShell. These lifecycle contracts use synthetic GPU/task fixtures, not a native GPU.
+The Windows job compiles `ninfer_core`, the DirectStorage backend and its native test, the
+Windows stop-event and checkpoint-service objects, and the host checkpoint/quota tests; only
+GPU-free checkpoint, durable-file and quota CTests execute there. This is Windows compilation
+coverage, not DirectStorage/GPU qualification or an sm_86/sm_89 runtime build.
+
 PLE reading foundations run with
 `ctest --test-dir build -R 'ninfer_(nf4|read_queue|artifact_backing|ple_(disk|upload))' --output-on-failure`.
 The NF4 oracle uses exact Python fractions. The PLE fixture includes a row split across three files.

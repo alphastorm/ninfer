@@ -80,6 +80,7 @@ constexpr std::string_view kPublicationUncertain = ".publication-uncertain";
 
 #if defined(NINFER_IO_URING_TESTING)
 std::atomic<bool> fail_next_submitted_batch{false};
+std::atomic<bool> fail_next_completion_key{false};
 std::atomic<bool> fail_submit_followup{false};
 std::atomic<bool> fail_publication_marker_fsync{false};
 std::atomic<int> fail_publication_fsyncs{0};
@@ -329,12 +330,18 @@ public:
                 std::atomic_ref(*cq_tail_).load(std::memory_order_acquire);
             while (cq_head != cq_tail && completed < requests.size()) {
                 const io_uring_cqe& cqe = cqes_[cq_head & *cq_mask_];
-                if ((cqe.user_data >> 32U) != batch_id || (cqe.user_data & 0xffffffffULL) == 0 ||
-                    (cqe.user_data & 0xffffffffULL) > requests.size()) {
+                std::uint64_t key = cqe.user_data;
+#if defined(NINFER_IO_URING_TESTING)
+                if (fail_next_completion_key.exchange(false, std::memory_order_acq_rel)) {
+                    key = 0;
+                }
+#endif
+                if ((key >> 32U) != batch_id || (key & 0xffffffffULL) == 0 ||
+                    (key & 0xffffffffULL) > requests.size()) {
                     throw CheckpointContractError("io_uring returned an unknown completion key");
                 }
                 const std::size_t index =
-                    static_cast<std::size_t>((cqe.user_data & 0xffffffffULL) - 1U);
+                    static_cast<std::size_t>((key & 0xffffffffULL) - 1U);
                 if (observed[index]) {
                     throw CheckpointContractError("io_uring returned a duplicate completion");
                 }
@@ -1171,6 +1178,10 @@ void io_uring_checkpoint_test_fail_next_submitted_batch() noexcept {
     fail_next_submitted_batch.store(true, std::memory_order_release);
 }
 
+void io_uring_checkpoint_test_fail_next_completion_key() noexcept {
+    fail_next_completion_key.store(true, std::memory_order_release);
+}
+
 void io_uring_checkpoint_test_fail_publication_and_rollback_fsync() noexcept {
     fail_publication_fsyncs.store(2, std::memory_order_release);
 }
@@ -1797,7 +1808,9 @@ public:
         if (worker_.joinable()) { worker_.join(); }
     }
 
-    [[nodiscard]] bool available() const noexcept override { return true; }
+    [[nodiscard]] bool available() const noexcept override {
+        return !failed_.load(std::memory_order_acquire);
+    }
 
     [[nodiscard]] bool overlaps_batches() const noexcept override { return true; }
 
@@ -1805,11 +1818,18 @@ public:
         return "io_uring-odirect";
     }
 
-    [[nodiscard]] std::string_view unavailable_reason() const noexcept override { return {}; }
+    [[nodiscard]] std::string_view unavailable_reason() const noexcept override {
+        return available() ? std::string_view{}
+                           : "io_uring checkpoint read queue failed; recreate the queue";
+    }
 
     [[nodiscard]] std::unique_ptr<ContinuationCheckpointReadCompletion>
     submit(const std::filesystem::path& path,
            std::span<const ContinuationCheckpointReadRequest> requests) override {
+        if (!available()) {
+            std::lock_guard lock(mutex_);
+            ensure_accepting();
+        }
         if (requests.empty()) {
             throw CheckpointContractError("io_uring checkpoint read batch is empty");
         }
@@ -1851,9 +1871,7 @@ public:
                                                                   requests);
         {
             std::lock_guard lock(mutex_);
-            if (stopping_) {
-                throw CheckpointContractError("io_uring checkpoint read queue is stopping");
-            }
+            ensure_accepting();
             queue_.push_back(completion);
         }
         pending_.notify_one();
@@ -1868,6 +1886,13 @@ public:
     }
 
 private:
+    void ensure_accepting() const {
+        if (failure_) { std::rethrow_exception(failure_); }
+        if (stopping_) {
+            throw CheckpointContractError("io_uring checkpoint read queue is stopping");
+        }
+    }
+
     struct Chunk {
         std::size_t request = 0;
         std::size_t copied  = 0;
@@ -1879,17 +1904,27 @@ private:
     void serve() noexcept {
         for (;;) {
             std::shared_ptr<PendingCheckpointRead> job;
+            std::exception_ptr error;
             {
                 std::unique_lock lock(mutex_);
                 pending_.wait(lock, [&] { return stopping_ || !queue_.empty(); });
                 if (queue_.empty()) { return; }
                 job = std::move(queue_.front());
                 queue_.pop_front();
+                error = failure_;
             }
-            std::exception_ptr error;
-            try {
-                execute(*job);
-            } catch (...) { error = std::current_exception(); }
+            if (!error) {
+                try {
+                    execute(*job);
+                } catch (...) {
+                    error = std::current_exception();
+                    if (!ring_.available()) {
+                        std::lock_guard lock(mutex_);
+                        failure_ = error;
+                        failed_.store(true, std::memory_order_release);
+                    }
+                }
+            }
             job->finish(std::move(error));
         }
     }
@@ -1968,6 +2003,8 @@ private:
     std::mutex mutex_;
     std::condition_variable pending_;
     std::deque<std::shared_ptr<PendingCheckpointRead>> queue_;
+    std::exception_ptr failure_;
+    std::atomic<bool> failed_{false};
     bool stopping_ = false;
     std::thread worker_;
 };

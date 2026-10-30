@@ -25,6 +25,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     PRIVATE NINFER_IO_URING_TESTING=1)
   set_tests_properties(ninfer_io_uring_checkpoint_backend_test
     PROPERTIES LABELS "host" SKIP_RETURN_CODE 77)
+  ninfer_add_test(ninfer_io_uring_checkpoint_read_queue_test
+    SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_io_uring_checkpoint_read_queue.cpp"
+            ${PROJECT_SOURCE_DIR}/src/runtime/platform/linux/io_uring_checkpoint_backend.cpp
+    LIBRARIES ninfer_checkpoint_contract ninfer_durable_io)
+  target_compile_definitions(ninfer_io_uring_checkpoint_read_queue_test
+    PRIVATE NINFER_IO_URING_TESTING=1)
+  set_tests_properties(ninfer_io_uring_checkpoint_read_queue_test
+    PROPERTIES LABELS "host" SKIP_RETURN_CODE 77 TIMEOUT 60)
 endif()
 ninfer_add_test(ninfer_uint128_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../cpu/test_uint128.cpp")
