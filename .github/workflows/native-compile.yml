@@ -64,8 +64,8 @@ jobs:
             -DNINFER_BUILD_PROFILE=ci-sm${{ matrix.arch }} -DNINFER_UPSTREAM_BASE_SHA="$(git rev-parse 64d10fbf)"
       # The serve dependency closure compiles the complete native runtime, including
       # qwen3_5/load.cpp's SM86/SM89 DFlash2 seam and all linear/small-T kernels.
-      # Bound the build to this app and GPU-free tests, not every test/benchmark.
-      - name: Build serve app, native runtime and GPU-free test targets
+      # Bound the build to this app and selected regressions, not every test/benchmark.
+      - name: Build serve app, native runtime and regression targets
         shell: bash
         run: |
           set -euo pipefail
@@ -77,13 +77,14 @@ jobs:
             ninfer_engine_core_test \
             ninfer_engine_checkpoint_control_test ninfer_engine_checkpoint_adapter_test ninfer_resource_manager_test \
             ninfer_durable_file_test ninfer_session_checkpoint_store_test \
-            ninfer_automatic_checkpoint_queue_test ninfer_io_uring_checkpoint_backend_test
-      # Do not execute ninfer-serve: it links the driver ABI and requires a GPU host.
+            ninfer_automatic_checkpoint_queue_test ninfer_io_uring_checkpoint_backend_test \
+            ninfer_qwen3_5_loading_test ninfer_request_log_test ninfer_linear_split_two_output_test
+      # Do not execute ninfer-serve or the numerical Op test: they require a GPU host.
       - name: Run only GPU-free CTest contracts
         shell: bash
         run: |
           ctest --test-dir build --output-on-failure --no-tests=error \
-            -R '^ninfer_(public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|memory|http_transport|engine_core|engine_checkpoint_(control|adapter)|resource_manager|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue|io_uring_checkpoint_backend)_test$'
+            -R '^ninfer_(public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|memory|http_transport|qwen3_5_loading|request_log|engine_core|engine_checkpoint_(control|adapter)|resource_manager|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue|io_uring_checkpoint_backend)_test$'
       - name: Cache statistics
         if: always()
         run: ccache --show-stats
