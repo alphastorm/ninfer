@@ -4,6 +4,11 @@ ninfer_test_includes(ninfer_linear_test_support)
 ninfer_op_oracle_options(ninfer_linear_test_support)
 target_link_libraries(ninfer_linear_test_support PUBLIC ninfer_ops)
 
+ninfer_add_op_test(ninfer_fp32_logits_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_fp32_logits.cpp"
+  LIBRARIES ninfer_linear_test_support)
+set_tests_properties(ninfer_fp32_logits_test PROPERTIES LABELS "ops;gpu" TIMEOUT 300)
+
 ninfer_add_op_test(ninfer_linear_q4_a16_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_q4_a16.cpp"
   LIBRARIES ninfer_linear_test_support)

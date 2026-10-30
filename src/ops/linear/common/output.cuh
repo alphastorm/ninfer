@@ -8,6 +8,15 @@
 
 namespace ninfer::ops::detail {
 
+struct LinearFp32Output {
+    float* data;
+    std::int32_t rows;
+
+    __device__ __forceinline__ void store(int row, int token, float value) const {
+        data[static_cast<std::int64_t>(token) * rows + row] = value;
+    }
+};
+
 // Coordinates are logical output rows and tokens of the complete call, including
 // when a launcher splits the CUDA grid into several launches.
 struct LinearBf16Output {

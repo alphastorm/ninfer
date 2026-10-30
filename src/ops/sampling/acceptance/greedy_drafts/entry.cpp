@@ -47,7 +47,8 @@ void speculative_accept_greedy_drafts(const Tensor& target_tokens, const Tensor&
     }
     common::operand::tensor(target_tokens, DType::I32, {k + 1, batch}, 1, op, "target_tokens",
                             execution.device());
-    common::operand::dtype(logits, DType::BF16, op, "logits");
+    if (logits.dtype != DType::BF16 && logits.dtype != DType::FP32)
+        throw std::invalid_argument("speculative_accept_greedy_drafts: logits must be BF16 or FP32");
     common::operand::contiguous_nonnull(logits, op, "logits", execution.device());
     if (logits.ne[0] <= 0 || logits.ne[1] != k + 1 || logits.ne[2] != batch || logits.ne[3] != 1) {
         throw std::invalid_argument(

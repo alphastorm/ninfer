@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <type_traits>
 
 namespace ninfer::ops::sampling_detail {
 using namespace common;
@@ -179,9 +180,9 @@ speculative_sparse_warp_accept(Workspace workspace, const int* drafts, const int
                                   licensed_counts, accepted);
 }
 
-template <class S>
+template <class S, typename Logit>
 __launch_bounds__(S::kSamplerBlock) __global__ void speculative_sampling_partial_topk_kernel(
-    const __nv_bfloat16* logits, const std::int32_t* drafts, const std::int32_t* current_extents,
+    const Logit* logits, const std::int32_t* drafts, const std::int32_t* current_extents,
     const SamplingConfig* configs, std::int32_t token_domain, std::int32_t physical_rows,
     std::int32_t cols, std::int32_t k, Workspace workspace, std::size_t workspace_row_stride) {
     const int row     = static_cast<int>(blockIdx.z);
@@ -210,21 +211,23 @@ __launch_bounds__(S::kSamplerBlock) __global__ void speculative_sampling_partial
     const std::int64_t base        = (static_cast<std::int64_t>(row) * cols + col) * physical_rows;
     const std::int32_t* row_drafts = drafts + row * k;
     const int tile_start           = partial * S::kSamplerPartialTileItems;
-    if (!penalties) {
-        unsigned int keys[S::kSamplerItemsPerThread];
+    if constexpr (std::is_same_v<Logit, __nv_bfloat16>) {
+        if (!penalties) {
+            unsigned int keys[S::kSamplerItemsPerThread];
 #pragma unroll
-        for (int item = 0; item < S::kSamplerItemsPerThread; ++item) {
-            const int tile_index = item * blockDim.x + threadIdx.x;
-            const int v          = tile_start + tile_index;
-            keys[item]           = (v < token_domain &&
-                          (!cfg.mask.words ||
-                           (cfg.mask.words[col * cfg.mask.stride + v / 32] & (1u << (v % 32)))))
-                                       ? sampling_bf16_tile_sort_key<S>(logits[base + v], tile_index)
-                                       : 0u;
+            for (int item = 0; item < S::kSamplerItemsPerThread; ++item) {
+                const int tile_index = item * blockDim.x + threadIdx.x;
+                const int v          = tile_start + tile_index;
+                keys[item] = (v < token_domain &&
+                              (!cfg.mask.words ||
+                               (cfg.mask.words[col * cfg.mask.stride + v / 32] & (1u << (v % 32)))))
+                                 ? sampling_bf16_tile_sort_key<S>(logits[base + v], tile_index)
+                                 : 0u;
+            }
+            sampling_store_bf16_tile_topk<S>(keys, cap, tile_start, workspace, col, partial,
+                                             topk_storage.bf16);
+            return;
         }
-        sampling_store_bf16_tile_topk<S>(keys, cap, tile_start, workspace, col, partial,
-                                         topk_storage.bf16);
-        return;
     }
 
     unsigned long long keys[S::kSamplerItemsPerThread];
@@ -235,9 +238,9 @@ __launch_bounds__(S::kSamplerBlock) __global__ void speculative_sampling_partial
     for (int item = 0; item < S::kSamplerItemsPerThread; ++item) {
         const int v = tile_start + item * blockDim.x + threadIdx.x;
         if (v < token_domain) {
-            const __nv_bfloat16 raw = logits[base + v];
+            const float raw        = static_cast<float>(logits[base + v]);
             keys[item]              = score_id_order_key(
-                sampling_adjusted_logit(__bfloat162float(raw), v, cfg, row_drafts, col), v);
+                sampling_adjusted_logit(raw, v, cfg, row_drafts, col), v);
         } else {
             keys[item] = 0ull;
         }

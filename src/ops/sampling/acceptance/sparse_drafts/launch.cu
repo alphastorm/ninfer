@@ -17,7 +17,8 @@ __global__ __launch_bounds__(256) void speculative_accept_sparse_warp_greedy_ker
 }
 } // namespace
 
-void launch(const Tensor& target_tokens, const Tensor& logits, const Tensor& drafts,
+template <typename Logit>
+void launch_typed(const Tensor& target_tokens, const Tensor& logits, const Tensor& drafts,
             const Tensor& candidate_ids, const Tensor& proposal_q, const Tensor& current_extents,
             Tensor& round_lengths, Tensor& round_anchors, Tensor& licensed_tokens,
             Tensor& licensed_counts, Tensor& accepted_drafts, std::int32_t token_domain,
@@ -44,7 +45,7 @@ void launch(const Tensor& target_tokens, const Tensor& logits, const Tensor& dra
                             static_cast<unsigned int>(cols), static_cast<unsigned int>(batch));
     speculative_sampling_partial_topk_kernel<Schedule>
         <<<partial_grid, Schedule::kSamplerBlock, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(logits.data),
+            static_cast<const Logit*>(logits.data),
             static_cast<const std::int32_t*>(drafts.data),
             static_cast<const std::int32_t*>(current_extents.data), configs, token_domain,
             logits.ne[0], cols, k, scratch, layout.bytes);
@@ -68,6 +69,24 @@ void launch(const Tensor& target_tokens, const Tensor& logits, const Tensor& dra
             partial_blocks, groups, scratch, layout.bytes);
 
     CUDA_CHECK(cudaGetLastError());
+}
+
+void launch(const Tensor& target_tokens, const Tensor& logits, const Tensor& drafts,
+            const Tensor& candidate_ids, const Tensor& proposal_q, const Tensor& current_extents,
+            Tensor& round_lengths, Tensor& round_anchors, Tensor& licensed_tokens,
+            Tensor& licensed_counts, Tensor& accepted_drafts, std::int32_t token_domain,
+            const SamplingConfig* configs, const Plan& plan, MemorySpan workspace,
+            cudaStream_t stream) {
+    if (logits.dtype == DType::FP32)
+        launch_typed<float>(target_tokens, logits, drafts, candidate_ids, proposal_q,
+                            current_extents, round_lengths, round_anchors, licensed_tokens,
+                            licensed_counts, accepted_drafts, token_domain, configs, plan,
+                            workspace, stream);
+    else
+        launch_typed<__nv_bfloat16>(target_tokens, logits, drafts, candidate_ids, proposal_q,
+                                    current_extents, round_lengths, round_anchors, licensed_tokens,
+                                    licensed_counts, accepted_drafts, token_domain, configs, plan,
+                                    workspace, stream);
 }
 
 } // namespace ninfer::ops::sparse_drafts_detail

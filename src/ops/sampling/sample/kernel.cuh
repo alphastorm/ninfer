@@ -5,9 +5,9 @@
 namespace ninfer::ops::sampling_detail {
 using namespace common;
 
-template <class S>
+template <class S, typename Logit>
 __launch_bounds__(S::kSamplerBlock) __global__
-    void sample_row_kernel(const __nv_bfloat16* logits, std::int32_t* out,
+    void sample_row_kernel(const Logit* logits, std::int32_t* out,
                            const SamplingConfig* configs, const std::int32_t* logical_positions,
                            std::int32_t purpose, std::int32_t token_domain,
                            std::int32_t physical_rows) {
@@ -26,7 +26,7 @@ __launch_bounds__(S::kSamplerBlock) __global__
         const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f;
         if (!penalties && cfg.mask.words == nullptr) {
             for (int v = tid; v < token_domain; v += blockDim.x) {
-                const float x = __bfloat162float(logits[base + v]);
+                const float x = static_cast<float>(logits[base + v]);
                 if (score_id_better(x, v, bv, bi)) {
                     bv = x;
                     bi = v;
@@ -34,7 +34,7 @@ __launch_bounds__(S::kSamplerBlock) __global__
             }
         } else {
             for (int v = tid; v < token_domain; v += blockDim.x) {
-                const float x = sampling_adjusted_logit(__bfloat162float(logits[base + v]), v, cfg);
+                const float x = sampling_adjusted_logit(static_cast<float>(logits[base + v]), v, cfg);
                 if (score_id_better(x, v, bv, bi)) {
                     bv = x;
                     bi = v;
@@ -91,9 +91,9 @@ __launch_bounds__(S::kSamplerBlock) __global__
     if (cfg.token_counts != nullptr) { atomicAdd(&cfg.token_counts[picked], 1); }
 }
 
-template <class S>
+template <class S, typename Logit>
 __launch_bounds__(S::kSamplerBlock) __global__
-    void sampling_partial_topk_kernel(const __nv_bfloat16* logits, const SamplingConfig* cfg_ptr,
+    void sampling_partial_topk_kernel(const Logit* logits, const SamplingConfig* cfg_ptr,
                                       std::int32_t token_domain, std::int32_t physical_rows,
                                       Workspace workspace) {
     const int col            = static_cast<int>(blockIdx.y);
@@ -114,7 +114,7 @@ __launch_bounds__(S::kSamplerBlock) __global__
     for (int item = 0; item < S::kSamplerItemsPerThread; ++item) {
         const int v = tile_start + item * blockDim.x + threadIdx.x;
         if (v < token_domain) {
-            const float raw = __bfloat162float(logits[base + v]);
+            const float raw = static_cast<float>(logits[base + v]);
             const float x =
                 (penalties || cfg.mask.words) ? sampling_adjusted_logit(raw, v, cfg) : raw;
             keys[item] = score_id_order_key(x, v);

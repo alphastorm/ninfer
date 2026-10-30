@@ -4,9 +4,9 @@
 
 namespace ninfer::ops::sampling_detail {
 
-template <class S>
+template <class S, typename Logit>
 __launch_bounds__(S::kSamplerBlock) __global__ void speculative_accept_greedy_drafts_kernel(
-    const std::int32_t* target_tokens, const __nv_bfloat16* logits, const std::int32_t* drafts,
+    const std::int32_t* target_tokens, const Logit* logits, const std::int32_t* drafts,
     const std::int32_t* current_extents, std::int32_t* lengths, std::int32_t* anchors,
     std::int32_t* licensed_tokens, std::int32_t* licensed_counts, std::int32_t* accepted,
     const SamplingConfig* configs, std::int32_t token_domain, std::int32_t physical_rows,
@@ -20,7 +20,7 @@ __launch_bounds__(S::kSamplerBlock) __global__ void speculative_accept_greedy_dr
     const std::int32_t* row_targets = target_tokens + row * cols;
     const std::int32_t* row_drafts  = drafts + row * k;
     std::int32_t* row_tokens        = licensed_tokens + row * cols;
-    const __nv_bfloat16* row_logits =
+    const Logit* row_logits =
         logits + static_cast<std::int64_t>(row) * cols * physical_rows;
     const bool penalties = cfg.presence_penalty != 0.0f || cfg.frequency_penalty != 0.0f;
 
@@ -62,7 +62,7 @@ __launch_bounds__(S::kSamplerBlock) __global__ void speculative_accept_greedy_dr
             float best_value        = -CUDART_INF_F;
             int best_index          = INT_MAX;
             for (int v = tid; v < token_domain; v += blockDim.x) {
-                const float value = sampling_adjusted_logit(__bfloat162float(row_logits[base + v]),
+                const float value = sampling_adjusted_logit(static_cast<float>(row_logits[base + v]),
                                                             v, cfg, row_drafts, i);
                 if (score_id_better(value, v, best_value, best_index)) {
                     best_value = value;
