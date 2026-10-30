@@ -127,8 +127,8 @@ class Lane:
             config = json.loads(run(["git", "show", f"{head}:{lane_dir}/server-config.json"], cwd=source_root).stdout)
         except LaneError as error:
             raise LaneError(f"lane {name} is not committed at {head[:8]}: {error}") from error
-        if spec.get("artifact_type") != "ninfer_windows_release_spec" or spec.get("schema_version") != 4:
-            raise LaneError("release specification is not a schema 4 native lane spec")
+        if spec.get("artifact_type") != "ninfer_windows_release_spec" or spec.get("schema_version") != 5:
+            raise LaneError("release specification is not a schema 5 native lane spec")
         if config.get("schema_version") != 4 or spec.get("lane") != name or config.get("release_id") != spec.get("release_id"):
             raise LaneError("lane specification and server configuration disagree")
         declared_mib = str(config.get("context_cache", {}).get("host_context_mib", ""))
@@ -728,7 +728,11 @@ def stage_lane_qualification(state: dict[str, Any], summary: dict[str, Any], lan
     }
     return {
         "artifact_type": "ninfer_windows_release_qualification", "schema_version": 1, "status": "passed",
-        "qualified_utc": summary["qualified_utc"], "release_id": lane.release_id, "profile": "MTP3",
+        "qualified_utc": summary["qualified_utc"], "release_id": lane.release_id,
+        "profile": (f"MTP{configuration['speculative']['draft_tokens']}"
+                    if configuration["speculative"]["backend"] == "mtp"
+                    else f"DFlash2-K{configuration['speculative']['draft_tokens']}"),
+        "runtime_shape": lane.spec["runtime_shape"],
         "identity": identity,
         "configuration": {
             "public_model_id": lane.model_id,
@@ -1655,7 +1659,7 @@ $serverArguments=@(
   '--session-checkpoint-staging-mib',[string]$c.session_checkpoint.staging_mib,
   '--session-checkpoint-require-origin-auth',
   '--request-log-jsonl',$requestLog,'--log-stats-interval-ms','0','--preserve-thinking',
-  '--spec','mtp','--draft-tokens',[string]$c.speculative.draft_tokens,'--lm-head-draft')
+  '--spec',[string]$c.speculative.backend,'--draft-tokens',[string]$c.speculative.draft_tokens,'--lm-head-draft')
 $keepWarm=$c.engine.PSObject.Properties['gpu_keep_warm_ms']
 if($null -ne $keepWarm -and [int]$keepWarm.Value -gt 0){{$serverArguments+=@('--gpu-keep-warm-ms',[string]$keepWarm.Value)}}
 $stdout=Join-Path $scratch 'stdout.log'
@@ -1867,6 +1871,7 @@ if($calls.Count -ne 1 -or $calls[0].name -cne 'read' -or $results.Count -lt 1 -o
             "model_sha256": package_receipt["model_sha256"],
             "server_binary_sha256": package_receipt["binaries"]["server_sha256"],
             "configuration_sha256": package_receipt["config_sha256"],
+            "runtime_shape": self.lane.spec["runtime_shape"],
             "support_assets": package_receipt["support_assets"],
             "runtime_dlls": build.get("runtime_dlls", []),
             "evidence": evidence,

@@ -1197,7 +1197,7 @@ function Invoke-Run {
             if ($draftTokens -lt 1 -or $draftTokens -gt 5) {
                 throw 'MTP draft tokens must be in [1,5]'
             }
-            foreach ($argument in @('--spec', 'mtp', '--draft-tokens', [string]$draftTokens,
+            foreach ($argument in @('--spec', $speculativeBackend, '--draft-tokens', [string]$draftTokens,
                                     '--lm-head-draft')) {
                 $serverArguments.Add($argument)
             }
@@ -1206,7 +1206,7 @@ function Invoke-Run {
             if ($draftTokens -lt 1 -or $draftTokens -gt 15) {
                 throw 'DFlash2 draft tokens must be in [1,15]'
             }
-            foreach ($argument in @('--spec', 'dflash2', '--draft-tokens', [string]$draftTokens,
+            foreach ($argument in @('--spec', $speculativeBackend, '--draft-tokens', [string]$draftTokens,
                                     '--lm-head-draft')) {
                 $serverArguments.Add($argument)
             }

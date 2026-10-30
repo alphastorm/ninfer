@@ -667,7 +667,89 @@ function Assert-AllowedListenHost([object]$Spec, [object]$Config) {
     }
 }
 
+function Assert-NativeLaneRuntimeContract([object]$Spec, [object]$Config) {
+    if ([int]$Spec.schema_version -ne 5) {
+        throw 'release specification schema must be 5'
+    }
+    if ($null -eq $Spec.PSObject.Properties['runtime_shape'] -or
+        $null -eq $Spec.runtime_shape.PSObject.Properties['fit']) {
+        throw 'release specification must declare runtime_shape.fit'
+    }
+    $shape = $Spec.runtime_shape
+    $fit = $shape.fit
+    $validSpeculation = [int]$shape.max_concurrency -gt 0 -and
+        [int]$Config.engine.max_concurrency -eq [int]$shape.max_concurrency -and
+        @('mtp', 'dflash2') -ccontains [string]$shape.speculative_backend -and
+        [string]$Config.speculative.backend -ceq [string]$shape.speculative_backend -and
+        [int]$shape.draft_tokens.min -ge 1 -and
+        [int]$Config.speculative.draft_tokens -ge [int]$shape.draft_tokens.min -and
+        ($null -eq $shape.draft_tokens.max -or
+         [int]$Config.speculative.draft_tokens -le [int]$shape.draft_tokens.max) -and
+        ([string]$shape.speculative_backend -cne 'dflash2' -or
+         ($null -ne $shape.draft_tokens.max -and
+          [int]$shape.draft_tokens.min -eq [int]$shape.draft_tokens.max))
+    $proposal = $shape.PSObject.Properties['proposal']
+    $configProposal = $Config.speculative.PSObject.Properties['proposal']
+    $validProposal = $null -ne $proposal -and
+        -not [string]::IsNullOrWhiteSpace([string]$proposal.Value) -and
+        $(if ([string]$proposal.Value -ceq 'artifact-default') {
+            $null -eq $configProposal
+        } else {
+            $null -ne $configProposal -and [string]$configProposal.Value -ceq [string]$proposal.Value
+        })
+    $validFit = ($fit.device_state_slots -is [int] -or $fit.device_state_slots -is [long]) -and
+        $fit.device_state_slots -ge 0 -and
+        ($Config.context_cache.device_state_slots -is [int] -or
+         $Config.context_cache.device_state_slots -is [long]) -and
+        $Config.context_cache.device_state_slots -eq $fit.device_state_slots -and
+        ($fit.admission_headroom_mib -is [int] -or $fit.admission_headroom_mib -is [long]) -and
+        $fit.admission_headroom_mib -ge 256 -and
+        ($Config.engine.admission_headroom_mib -is [int] -or
+         $Config.engine.admission_headroom_mib -is [long]) -and
+        $Config.engine.admission_headroom_mib -eq $fit.admission_headroom_mib
+    $nativeSeam = [string]$shape.speculative_backend -ceq 'dflash2' -and
+        @('86', '89') -ccontains [string]$Spec.gpu.cmake_cuda_architecture
+    $expectedFormat = if ($nativeSeam) { 'Q4_G64_FP16' } else { 'artifact' }
+    $expectedResidency = if ($nativeSeam) { 'host-mapped' } else { 'device' }
+    $validFit = $validFit -and
+        [string]$fit.draft_mlp_device_format -ceq $expectedFormat -and
+        [string]$fit.token_embedding_residency -ceq $expectedResidency
+    $translation = $Spec.host_context_translation
+    $hostContextBytes = [decimal]$translation.predecessor_host_kv_mib * 1048576 +
+        [decimal]$translation.predecessor_host_state_slots * [decimal]$translation.native_state_image_bytes
+    # A PowerShell string-to-[decimal] cast rounds through Double; parse exact MiB text instead.
+    $hostContextMib = [decimal]::Parse([string]$Config.context_cache.host_context_mib,
+                                      [Globalization.CultureInfo]::InvariantCulture)
+    if ($Config.artifact_type -cne 'ninfer_windows_server_config' -or
+        [int]$Config.schema_version -ne 4 -or
+        [string]$Config.release_id -cne [string]$Spec.release_id -or
+        [string]$Config.deployment_profile -cne [string]$Spec.deployment_profile -or
+        -not $validSpeculation -or -not $validProposal -or -not $validFit -or
+        [decimal]$translation.host_context_bytes -ne $hostContextBytes -or
+        [string]$Config.context_cache.host_context_mib -cnotmatch '^[0-9]+(?:\.[0-9]+)?$' -or
+        $hostContextMib -le 0 -or
+        $hostContextMib * 1048576 -ne $hostContextBytes -or
+        -not [bool]$Config.session_checkpoint.enabled -or
+        $Config.session_checkpoint.require_origin_auth -isnot [bool] -or
+        -not $Config.session_checkpoint.require_origin_auth -or
+        [int]$Config.session_checkpoint.staging_mib -le 0 -or
+        $null -ne $Config.context_cache.PSObject.Properties['host_state_slots'] -or
+        $null -ne $Config.context_cache.PSObject.Properties['host_kv_mib'] -or
+        $null -ne $Config.context_cache.PSObject.Properties['max_private_continuations'] -or
+        $null -ne $Config.PSObject.Properties['persistent_cache'] -or
+        $null -ne $Config.reasoning.PSObject.Properties['effort']) {
+        throw 'server configuration is not an authenticated native lane profile'
+    }
+    # Every new package declares keep-warm explicitly, including zero.
+    $gpuKeepWarm = $Config.engine.PSObject.Properties['gpu_keep_warm_ms']
+    if ($null -eq $gpuKeepWarm -or -not ($gpuKeepWarm.Value -is [int] -or $gpuKeepWarm.Value -is [long]) -or
+        $gpuKeepWarm.Value -lt 0 -or $gpuKeepWarm.Value -gt [int]::MaxValue) {
+        throw 'server configuration must declare engine.gpu_keep_warm_ms as an integer in [0, 2147483647]'
+    }
+}
+
 function Assert-InstallerArchitectureContract([object]$Spec, [object]$Config) {
+    Assert-NativeLaneRuntimeContract $Spec $Config
     $expectedRoots = @('bin', 'config', 'logs', 'receipts')
     $actualRoots = @($Spec.lifecycle.candidate_root_directories)
     if ($actualRoots.Count -ne $expectedRoots.Count) {
@@ -708,33 +790,6 @@ function Assert-InstallerArchitectureContract([object]$Spec, [object]$Config) {
         [string]$Spec.source.lineage_base_sha -cnotmatch '^[0-9a-f]{40}$' -or
         [string]$Spec.lifecycle.state_root_name -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') {
         throw 'release specification immutable build identity mismatch'
-    }
-    # Lane-specific runtime policy lives in the immutable release specification.
-    $validSpeculation = $null -ne $Spec.PSObject.Properties['runtime_shape'] -and
-        [int]$Spec.runtime_shape.max_concurrency -gt 0 -and
-        [int]$Config.engine.max_concurrency -eq [int]$Spec.runtime_shape.max_concurrency -and
-        -not [string]::IsNullOrWhiteSpace([string]$Spec.runtime_shape.speculative_backend) -and
-        [string]$Config.speculative.backend -ceq [string]$Spec.runtime_shape.speculative_backend -and
-        [int]$Spec.runtime_shape.draft_tokens.min -ge 1 -and
-        [int]$Config.speculative.draft_tokens -ge [int]$Spec.runtime_shape.draft_tokens.min -and
-        ($null -eq $Spec.runtime_shape.draft_tokens.max -or
-         [int]$Config.speculative.draft_tokens -le [int]$Spec.runtime_shape.draft_tokens.max)
-    if ([string]$Config.deployment_profile -cne [string]$Spec.deployment_profile -or
-        -not $validSpeculation -or
-        [int]$Config.engine.admission_headroom_mib -lt 256 -or
-        -not [bool]$Config.session_checkpoint.enabled -or
-        $Config.session_checkpoint.require_origin_auth -isnot [bool] -or
-        -not $Config.session_checkpoint.require_origin_auth -or
-        [int]$Config.session_checkpoint.staging_mib -le 0 -or
-        [int]$Config.context_cache.device_state_slots -lt 1 -or
-        [string]$Config.context_cache.host_context_mib -cnotmatch '^[0-9]+(?:\.[0-9]+)?$' -or
-        [decimal]$Config.context_cache.host_context_mib -le 0 -or
-        $null -ne $Config.context_cache.PSObject.Properties['host_state_slots'] -or
-        $null -ne $Config.context_cache.PSObject.Properties['host_kv_mib'] -or
-        $null -ne $Config.context_cache.PSObject.Properties['max_private_continuations'] -or
-        $null -ne $Config.PSObject.Properties['persistent_cache'] -or
-        $null -ne $Config.reasoning.PSObject.Properties['effort']) {
-        throw 'release server configuration is not an authenticated native lane profile'
     }
 }
 
@@ -1184,7 +1239,7 @@ try {
         Assert-InstallerArchitectureContract $spec $config
         $configSha = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $payload 'server-config.json')).Hash.ToLowerInvariant()
         if ($spec.artifact_type -cne 'ninfer_windows_release_spec' -or
-            [int]$spec.schema_version -ne 4 -or
+            [int]$spec.schema_version -ne 5 -or
             $config.artifact_type -cne 'ninfer_windows_server_config' -or
             [int]$config.schema_version -ne 4 -or
             $config.release_id -cne $spec.release_id -or

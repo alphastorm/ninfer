@@ -4,6 +4,43 @@ The native dependency manifest includes libjpeg-turbo for the Pillow-compatible
 JPEG decoder. CMake resolves `JPEG::JPEG` explicitly; native runtime packaging
 continues to collect its transitive DLLs from the selected vcpkg installation.
 
+## 2026-10-29 — Native component 0.8.0-beta.1 (qualification pending)
+
+The RTX 3090 candidate switches from MTP3 to DFlash2 K=7, with one concurrent
+request, INT8 KV and a 131,072-token context ceiling. Its 24 GB fit uses zero
+extra device state slots, 768 MiB admission headroom, load-time Q8-to-Q4
+(`Q4_G64_FP16`) conversion of draft MLP gate/up weights and host-mapped token
+embeddings. The conversion and mapping apply only to DFlash2 on `sm_86`/`sm_89`;
+other weights retain their artifact representation. The RTX 4090 is rebuilt
+from the same source with its existing MTP3 fit: two extra device state slots,
+640 MiB admission headroom and artifact-format, device-resident weights.
+Both lanes identify component `0.8.0-beta.1`, with lineage base `752dd887`.
+The published model artifact, keep-warm settings and GPU-owner policies are unchanged.
+
+Release specifications are now schema 5; server configurations remain schema 4.
+`runtime_shape.fit` binds device state slots, admission headroom, draft MLP format
+and embedding residency to the selected backend/architecture. Packaging and
+installation reject schema-4 release specifications, missing fit/proposal policy,
+and configurations that disagree with the specification. The untouched experimental
+RTX 5090 Windows specification remains schema 4 and cannot be built by this packager.
+
+Host context remains an exact translation of the predecessor Host KV budget plus
+24 native state images of 153,954,304 bytes each: 12,284,837,888 bytes
+(11,715.734375 MiB) on the RTX 3090 and 15,506,063,360 bytes
+(14,787.734375 MiB) on the RTX 4090. The P14 RTX 3090 DFlash2 fit proof used
+16,384 MiB instead; that run does not qualify this shipping Host budget.
+The DFlash2 state-image size must be re-measured on the final build, and the exact
+shipping configuration must pass the native context, restart, quality and performance
+gates before promotion. Package-build receipts remain `hardware-pending`.
+
+Upgrade with the candidate's `Install-Release.ps1` into the existing lane state
+root. The installer stops the incumbent through its own controller and retains the
+previous release for `Control-Release.ps1 -Action Rollback`; package and cache roots
+remain isolated by release. **RTX 3090 MTP durable sessions do not carry across the
+DFlash2 upgrade.** Start new sessions after upgrading. The incumbent's checkpoint
+root is preserved for rollback, never imported into DFlash2. Qualification must
+exercise upgrade and exact rollback to the `v0.7.0-beta.3` incumbent.
+
 ## 2026-10-26 — RTX 3090 qualified power cap 350 W
 
 The RTX 3090 lane's managed GPU-owner lease now caps the card at 350 W instead of

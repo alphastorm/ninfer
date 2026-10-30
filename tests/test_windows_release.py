@@ -615,7 +615,7 @@ class MultiGpuHostTests(unittest.TestCase):
         harness = (ROOT / "tools/qualification/qualify_native.py").read_text()
         for contract in ("--gpu-uuid", "-GpuUuid {ps_quote(self.gpu_uuid)}",
                          "GpuUuid={ps_quote(self.gpu_uuid)}", "'--device',[string]$gpuIndex",
-                         "'--spec','mtp','--draft-tokens',[string]$c.speculative.draft_tokens,'--lm-head-draft'",
+                         "'--spec',[string]$c.speculative.backend,'--draft-tokens',[string]$c.speculative.draft_tokens,'--lm-head-draft'",
                          "EnvironmentVariables['CUDA_DEVICE_ORDER']='PCI_BUS_ID'",
                          "pressure server_start GPU UUID mismatch", 'gpu_metrics(release["gpu_uuid"])'):
             self.assertIn(contract, harness)
@@ -949,6 +949,8 @@ class QualificationRestorationTests(unittest.TestCase):
         subject = self.orchestrator(directory)
         subject.lane.spec["deployment_profile"] = "candidate-profile"
         subject.lane.spec["gpu"]["cuda_architecture"] = "sm_86"
+        subject.lane.spec["runtime_shape"] = json.loads(
+            (WINDOWS / "lanes/rtx3090/release-spec.json").read_text())["runtime_shape"]
         subject.state["phases"] = {
             name: {"status": "passed", "receipt": {}, "receipt_sha256": "fixture"}
             for name in qualify_native.PHASES if name not in {"receipt", "restore"}
@@ -982,6 +984,7 @@ class QualificationRestorationTests(unittest.TestCase):
             pending = subject.phase("receipt", subject.receipt)
             summary_path = Path(temporary) / "qualification-summary.json"
             self.assertEqual(pending["status"], "restore-pending")
+            self.assertEqual(pending["runtime_shape"], subject.lane.spec["runtime_shape"])
             self.assertEqual(json.loads(summary_path.read_text())["status"], "restore-pending")
             self.assertIsNone(pending["qualified_utc"])
 
@@ -1469,7 +1472,21 @@ class ScratchQualificationTests(unittest.TestCase):
         self.assertEqual(staged["scratch_equivalence"]["observed_identity"]["config_sha256"], "e" * 64)
         self.assertFalse(staged["scratch_equivalence"]["public_package_executed"])
         self.assertEqual(staged["deterministic_gates"]["rollback"], "not_applicable")
+        self.assertEqual(staged["profile"], "MTP3")
+        self.assertEqual(staged["runtime_shape"], self.spec["runtime_shape"])
         self.assertNotIn("GPU-private", json.dumps(staged))
+
+    def test_stage_adapter_records_dflash2_runtime_shape_and_fit(self) -> None:
+        self.spec = json.loads((WINDOWS / "lanes/rtx3090/release-spec.json").read_text())
+        self.config = json.loads((WINDOWS / "lanes/rtx3090/server-config.json").read_text())
+        self.lane = qualify_native.Lane("rtx3090", self.spec, self.config)
+        state, summary = self.stage_fixture()
+        staged = qualify_native.stage_lane_qualification(state, summary, self.lane)
+        self.assertEqual(staged["profile"], "DFlash2-K7")
+        self.assertEqual(staged["runtime_shape"], self.spec["runtime_shape"])
+        self.assertEqual(staged["configuration"]["speculative_backend"], "dflash2")
+        self.assertEqual(staged["configuration"]["speculative_draft_tokens"], 7)
+        self.assertEqual(staged["runtime_shape"]["fit"]["device_state_slots"], 0)
 
     def test_stage_adapter_refuses_missing_failed_or_misbound_evidence(self) -> None:
         for damage in (
@@ -1837,6 +1854,28 @@ class SharedLifecycleTreeTests(unittest.TestCase):
 
 
 class LaneSpecificationTests(unittest.TestCase):
+    def test_qualification_accepts_schema_5_and_refuses_frozen_schema_4(self) -> None:
+        for lane_dir in LANES:
+            spec = json.loads((lane_dir / "release-spec.json").read_text())
+            config = json.loads((lane_dir / "server-config.json").read_text())
+            with self.subTest(lane=lane_dir.name), patch.object(
+                qualify_native, "run", side_effect=[
+                    SimpleNamespace(stdout=json.dumps(spec)), SimpleNamespace(stdout=json.dumps(config)),
+                ],
+            ):
+                if spec["schema_version"] == 5:
+                    self.assertEqual(qualify_native.Lane.load(ROOT, lane_dir.name, "HEAD").spec, spec)
+                else:
+                    with self.assertRaisesRegex(qualify_native.LaneError, "schema 5 native lane spec"):
+                        qualify_native.Lane.load(ROOT, lane_dir.name, "HEAD")
+            spec["schema_version"] = 4
+            with self.subTest(lane=lane_dir.name, schema=4), patch.object(
+                qualify_native, "run", side_effect=[
+                    SimpleNamespace(stdout=json.dumps(spec)), SimpleNamespace(stdout=json.dumps(config)),
+                ],
+            ), self.assertRaisesRegex(qualify_native.LaneError, "schema 5 native lane spec"):
+                qualify_native.Lane.load(ROOT, lane_dir.name, "HEAD")
+
     def test_every_lane_declares_a_consistent_identity(self) -> None:
         self.assertGreaterEqual(len(LANES), 2)
         models = set()
@@ -1848,7 +1887,8 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertRegex(lane, r"^rtx[0-9]{4}$")
                 number = lane[3:]
                 self.assertEqual(spec["artifact_type"], "ninfer_windows_release_spec")
-                self.assertEqual(spec["schema_version"], 4)
+                blackwell = lane == "rtx5090"
+                self.assertEqual(spec["schema_version"], 4 if blackwell else 5)
                 self.assertEqual(spec["lane"], lane)
                 version = spec["release_version"]
                 self.assertEqual(spec["release_id"], f"qwen38-{number}-native-v{version}")
@@ -1883,19 +1923,34 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertEqual(config["listen"]["host"], "127.0.0.1")
                 self.assertEqual(config["listen"]["port"], spec["lifecycle"]["listen_port"])
                 self.assertEqual(config["authentication"]["mode"], "required-api-key-file")
-                blackwell = lane == "rtx5090"
-                self.assertEqual(spec["runtime_shape"], {
+                dflash2 = lane != "rtx4090"
+                expected_shape = {
                     "max_concurrency": 2 if blackwell else 1,
-                    "speculative_backend": "dflash2" if blackwell else "mtp",
-                    "draft_tokens": {"min": 7 if blackwell else 1, "max": 7 if blackwell else None},
-                })
+                    "speculative_backend": "dflash2" if dflash2 else "mtp",
+                    "draft_tokens": {"min": 7 if dflash2 else 1, "max": 7 if dflash2 else None},
+                }
+                if not blackwell:
+                    self.assertEqual(version, "0.8.0-beta.1")
+                    self.assertEqual(spec["source"]["lineage_base_sha"],
+                                     "752dd887be6a9cdb2da6217f3b664b3c03ed33ae")
+                    expected_shape.update({
+                        "proposal": "artifact-default",
+                        "fit": {
+                            "device_state_slots": 0 if dflash2 else 2,
+                            "admission_headroom_mib": 768 if dflash2 else 640,
+                            "draft_mlp_device_format": "Q4_G64_FP16" if dflash2 else "artifact",
+                            "token_embedding_residency": "host-mapped" if dflash2 else "device",
+                        },
+                    })
+                    self.assertNotIn("proposal", config["speculative"])
+                self.assertEqual(spec["runtime_shape"], expected_shape)
                 self.assertEqual(config["engine"]["max_concurrency"], 2 if blackwell else 1)
                 self.assertEqual(config["engine"]["kv_dtype"], "bf16" if blackwell else "int8")
                 keep_warm = config["engine"]["gpu_keep_warm_ms"]
                 self.assertIs(type(keep_warm), int)
                 self.assertTrue(0 <= keep_warm <= 2**31 - 1)
-                self.assertEqual(config["speculative"]["backend"], "dflash2" if blackwell else "mtp")
-                self.assertEqual(config["speculative"]["draft_tokens"], 7 if blackwell else 3)
+                self.assertEqual(config["speculative"]["backend"], "dflash2" if dflash2 else "mtp")
+                self.assertEqual(config["speculative"]["draft_tokens"], 7 if dflash2 else 3)
                 self.assertEqual(config["engine"]["admission_headroom_mib"], 768 if lane == "rtx3090" else 640)
                 if blackwell:
                     self.assertEqual(spec["qualification"]["purpose"], "experimental-feasibility-only-not-a-release")
@@ -1905,7 +1960,11 @@ class LaneSpecificationTests(unittest.TestCase):
                     self.assertTrue(config["engine"]["vision"])
                 self.assertTrue(config["session_checkpoint"]["enabled"])
                 self.assertIs(config["session_checkpoint"]["require_origin_auth"], True)
-                self.assertGreaterEqual(config["context_cache"]["device_state_slots"], 1)
+                if blackwell:
+                    self.assertGreaterEqual(config["context_cache"]["device_state_slots"], 1)
+                else:
+                    self.assertEqual(config["context_cache"]["device_state_slots"],
+                                     expected_shape["fit"]["device_state_slots"])
                 translation = spec["host_context_translation"]
                 full_bytes = ((translation["predecessor_host_kv_mib"] << 20) +
                               24 * translation["native_state_image_bytes"])
@@ -2020,76 +2079,219 @@ class PowerShellContractTests(unittest.TestCase):
             self.fail(f"PowerShell exited {result.returncode}: {result.stderr.strip()}")
         return json.loads(result.stdout)
 
-    def test_native_lane_speculation_guards_agree(self) -> None:
+    def test_native_lane_runtime_contract_twins(self) -> None:
         installer = (WINDOWS / "Install-Release.ps1").read_text()
         packager = (WINDOWS / "New-Package.ps1").read_text()
-        package_guard = packager[packager.index("$validSpeculation ="):
-                                 packager.index("if ($config.artifact_type")]
-        functions = "\n".join(ps_function(installer, name) for name in (
-            "Assert-AllowedListenHost", "Assert-InstallerArchitectureContract"))
+        name = "Assert-NativeLaneRuntimeContract"
+        package_guard = ps_function(packager, name).strip()
+        install_guard = ps_function(installer, name).strip()
+        self.assertEqual(package_guard, install_guard, "packager/installer policy bodies diverged")
+        architecture = ps_function(installer, "Assert-InstallerArchitectureContract")
+        self.assertTrue(architecture.split("{", 1)[1].lstrip().startswith(
+            "Assert-NativeLaneRuntimeContract $Spec $Config"))
+        self.assertIn("Assert-NativeLaneRuntimeContract $spec $config", packager)
+        functions = "\n".join(ps_function(installer, function) for function in (
+            name, "Assert-AllowedListenHost", "Assert-InstallerArchitectureContract"))
         for lane_dir in LANES:
-            spec = qualify_native.ps_quote(str(lane_dir / "release-spec.json"))
-            config = qualify_native.ps_quote(str(lane_dir / "server-config.json"))
-            observed = self.invoke(f"""
+            spec = json.loads((lane_dir / "release-spec.json").read_text())
+            config = json.loads((lane_dir / "server-config.json").read_text())
+            cases = []
+
+            def case(label, changes=(), accepted=False):
+                candidate = {"spec": copy.deepcopy(spec), "config": copy.deepcopy(config)}
+                for path, value in changes:
+                    target = candidate
+                    for key in path.split(".")[:-1]:
+                        target = target[key]
+                    key = path.split(".")[-1]
+                    if value is None:
+                        target.pop(key)
+                    else:
+                        target[key] = value
+                cases.append({"name": label, **candidate, "accepted": accepted})
+
+            if spec["schema_version"] == 4:
+                case("frozen-schema-4")
+            else:
+                case("valid", accepted=True)
+                case("schema-4", [("spec.schema_version", 4)])
+                case("missing-policy", [("spec.runtime_shape", None)])
+                case("missing-fit", [("spec.runtime_shape.fit", None)])
+                case("wrong-concurrency", [("config.engine.max_concurrency", 3)])
+                case("wrong-backend", [("config.speculative.backend", "dflash")])
+                case("unknown-backend", [("config.speculative.backend", "dflash"),
+                                         ("spec.runtime_shape.speculative_backend", "dflash")])
+                case("backend-case", [("config.speculative.backend", "DFLASH2")])
+                case("zero-drafts", [("config.speculative.draft_tokens", 0)])
+                bounds = spec["runtime_shape"]["draft_tokens"]
+                case("below-minimum", [("config.speculative.draft_tokens", bounds["min"] - 1)])
+                case("above-maximum", [("config.speculative.draft_tokens",
+                                       99 if bounds["max"] is None else bounds["max"] + 1)],
+                     accepted=bounds["max"] is None)
+                fixed_dflash = [
+                    ("spec.runtime_shape.max_concurrency", 3),
+                    ("spec.runtime_shape.speculative_backend", "dflash2"),
+                    ("spec.runtime_shape.draft_tokens.min", 5),
+                    ("spec.runtime_shape.draft_tokens.max", 5),
+                    ("spec.runtime_shape.fit.device_state_slots", 0),
+                    ("spec.runtime_shape.fit.draft_mlp_device_format", "Q4_G64_FP16"),
+                    ("spec.runtime_shape.fit.token_embedding_residency", "host-mapped"),
+                    ("config.engine.max_concurrency", 3), ("config.speculative.backend", "dflash2"),
+                    ("config.speculative.draft_tokens", 5),
+                    ("config.context_cache.device_state_slots", 0),
+                ]
+                case("metadata-shape", fixed_dflash, accepted=True)
+                case("variable-dflash", fixed_dflash + [("spec.runtime_shape.draft_tokens.max", 7)])
+                unbounded = {"min": 5, "max": None}
+                case("unbounded-dflash", fixed_dflash + [("spec.runtime_shape.draft_tokens", unbounded)])
+                case("missing-proposal", [("spec.runtime_shape.proposal", None)])
+                case("unexpected-proposal", [("config.speculative.proposal", "optimized")])
+                explicit = [("spec.runtime_shape.proposal", "optimized"),
+                            ("config.speculative.proposal", "optimized")]
+                case("explicit-proposal", explicit, accepted=True)
+                case("different-proposal", explicit + [("config.speculative.proposal", "full")])
+                case("proposal-case", explicit + [("config.speculative.proposal", "Optimized")])
+                for field, low, good in (("device_state_slots", -1, 0),
+                                         ("admission_headroom_mib", 255, 768)):
+                    prefix = "context_cache" if field == "device_state_slots" else "engine"
+                    spec_field = f"spec.runtime_shape.fit.{field}"
+                    config_field = f"config.{prefix}.{field}"
+                    case(f"{field}-below-floor", [(spec_field, low), (config_field, low)])
+                    case(f"{field}-mismatch", [(config_field, good + 1)])
+                    for value in (str(good), float(good), False):
+                        case(f"{field}-spec-{type(value).__name__}", [(spec_field, value),
+                                                                    (config_field, good)])
+                        case(f"{field}-config-{type(value).__name__}", [(spec_field, good),
+                                                                      (config_field, value)])
+                case("wrong-format", [("spec.runtime_shape.fit.draft_mlp_device_format", "Q8_G32_FP16")])
+                case("wrong-residency", [("spec.runtime_shape.fit.token_embedding_residency", "host")])
+                nonnative = fixed_dflash + [
+                    ("spec.gpu.cmake_cuda_architecture", "90"),
+                    ("spec.gpu.cuda_architecture", "sm_90"),
+                    ("spec.runtime_shape.fit.draft_mlp_device_format", "artifact"),
+                    ("spec.runtime_shape.fit.token_embedding_residency", "device"),
+                ]
+                case("other-architecture", nonnative, accepted=True)
+                case("other-architecture-native-fit", nonnative + [
+                    ("spec.runtime_shape.fit.draft_mlp_device_format", "Q4_G64_FP16"),
+                    ("spec.runtime_shape.fit.token_embedding_residency", "host-mapped")])
+                case("mtp-native-fit", [
+                    ("spec.runtime_shape.speculative_backend", "mtp"),
+                    ("config.speculative.backend", "mtp"),
+                    ("spec.runtime_shape.fit.draft_mlp_device_format", "Q4_G64_FP16"),
+                    ("spec.runtime_shape.fit.token_embedding_residency", "host-mapped")])
+                translation = spec["host_context_translation"]
+                case("translation-mismatch", [("spec.host_context_translation.host_context_bytes",
+                                               translation["host_context_bytes"] + 1)])
+                case("budget-mismatch", [("config.context_cache.host_context_mib", "16384")])
+                case("one-byte-budget-mismatch", [
+                    ("config.context_cache.host_context_mib",
+                     str(Decimal(translation["host_context_bytes"] + 1) / (1 << 20))),
+                ])
+                total = translation["host_context_bytes"] + translation["predecessor_host_state_slots"]
+                case("derived-budget", [
+                    ("spec.host_context_translation.native_state_image_bytes",
+                     translation["native_state_image_bytes"] + 1),
+                    ("spec.host_context_translation.host_context_bytes", total),
+                    ("config.context_cache.host_context_mib", str(Decimal(total) / (1 << 20))),
+                ], accepted=True)
+                for field in ("host_state_slots", "host_kv_mib", "max_private_continuations"):
+                    case(f"forbidden-{field}", [(f"config.context_cache.{field}", 1)])
+                case("forbidden-persistent-cache", [("config.persistent_cache", {})])
+                case("forbidden-effort", [("config.reasoning.effort", "low")])
+                case("disabled-checkpoints", [("config.session_checkpoint.enabled", False)])
+                case("missing-origin-auth", [("config.session_checkpoint.require_origin_auth", None)])
+                case("false-origin-auth", [("config.session_checkpoint.require_origin_auth", False)])
+                case("string-origin-auth", [("config.session_checkpoint.require_origin_auth", "true")])
+                case("zero-staging", [("config.session_checkpoint.staging_mib", 0)])
+                for value in (None, -1, "60000", 2**31, 1.5, True):
+                    case(f"keep-warm-{value}", [("config.engine.gpu_keep_warm_ms", value)])
+                case("zero-keep-warm", [("config.engine.gpu_keep_warm_ms", 0)], accepted=True)
+                case("maximum-keep-warm", [("config.engine.gpu_keep_warm_ms", 2**31 - 1)], accepted=True)
+            with tempfile.TemporaryDirectory() as directory:
+                inputs = Path(directory) / "runtime-contract-cases.json"
+                inputs.write_text(json.dumps(cases))
+                observed = self.invoke(f"""
+Set-StrictMode -Version Latest
 {functions}
-$Spec=Get-Content -Raw {spec}|ConvertFrom-Json
-$Config=Get-Content -Raw {config}|ConvertFrom-Json
-$Lane=[string]$Spec.lane
+$packageGuard={{ {package_guard}; Assert-NativeLaneRuntimeContract $args[0] $args[1] }}
 $results=@()
-foreach($variant in @('valid','wrong-concurrency','wrong-backend','zero-drafts',
-                     'below-minimum','above-maximum','metadata-shape','missing-policy')){{
-  $Spec=Get-Content -Raw {spec}|ConvertFrom-Json
-  $Config=Get-Content -Raw {config}|ConvertFrom-Json
-  if($variant -ceq 'wrong-concurrency'){{$Config.engine.max_concurrency=3}}
-  if($variant -ceq 'wrong-backend'){{$Config.speculative.backend='dflash'}}
-  if($variant -ceq 'zero-drafts'){{$Config.speculative.draft_tokens=0}}
-  if($variant -ceq 'below-minimum'){{$Config.speculative.draft_tokens=$Spec.runtime_shape.draft_tokens.min-1}}
-  if($variant -ceq 'above-maximum'){{
-    $Config.speculative.draft_tokens=if($null -eq $Spec.runtime_shape.draft_tokens.max){{99}}else{{$Spec.runtime_shape.draft_tokens.max+1}}
-  }}
-  if($variant -ceq 'metadata-shape'){{
-    $Spec.runtime_shape.max_concurrency=3
-    $Spec.runtime_shape.speculative_backend='dflash2'
-    $Spec.runtime_shape.draft_tokens.min=5
-    $Spec.runtime_shape.draft_tokens.max=5
-    $Config.engine.max_concurrency=3
-    $Config.speculative.backend='dflash2'
-    $Config.speculative.draft_tokens=5
-  }}
-  if($variant -ceq 'missing-policy'){{$Spec.PSObject.Properties.Remove('runtime_shape')}}
-  {package_guard}
-  $accepted=$true
-  try{{Assert-InstallerArchitectureContract $Spec $Config}}catch{{$accepted=$false}}
-  $results+=@{{package=[bool]$validSpeculation;installer=$accepted}}
+foreach($case in (Get-Content -Raw {qualify_native.ps_quote(str(inputs))}|ConvertFrom-Json)){{
+  $packaged=$true;$installed=$true;$packageError='';$installError=''
+  try{{& $packageGuard $case.spec $case.config}}catch{{$packaged=$false;$packageError=$_.Exception.Message}}
+  try{{Assert-InstallerArchitectureContract $case.spec $case.config}}catch{{$installed=$false;$installError=$_.Exception.Message}}
+  $results+=@{{name=$case.name;package=$packaged;installer=$installed;package_error=$packageError;installer_error=$installError}}
 }}
 ConvertTo-Json -InputObject @($results) -Compress
 """)
-            self.assertEqual(observed, [
-                {"package": valid, "installer": valid}
-                for valid in (True, False, False, False, False, lane_dir.name != "rtx5090", True, False)
-            ], lane_dir.name)
+            for result, candidate in zip(observed, cases, strict=True):
+                with self.subTest(lane=lane_dir.name, case=candidate["name"]):
+                    self.assertEqual(result["name"], candidate["name"])
+                    self.assertEqual(result["package"], candidate["accepted"], result)
+                    self.assertEqual(result["installer"], candidate["accepted"], result)
+                    self.assertEqual(result["package_error"], result["installer_error"], result)
+                    if "schema-4" in candidate["name"]:
+                        self.assertEqual(result["installer_error"], "release specification schema must be 5")
 
-    def test_dflash2_controller_arguments_and_bounds(self) -> None:
+    def test_controller_speculation_arguments_and_bounds(self) -> None:
         controller = (WINDOWS / "Control-Release.ps1").read_text()
         start = controller.index("$speculativeBackend =")
         launch = controller[start:controller.index("# Both flags belong", start)]
         observed = self.invoke(f"""
 $results=@()
-foreach($draft in @(0,7,16)){{
-  $config=@{{speculative=@{{backend='dflash2';draft_tokens=$draft}}}}
+foreach($backend in @('mtp','dflash2')){{
+ foreach($draft in @(0,3,7,16)){{
+  $config=@{{speculative=@{{backend=$backend;draft_tokens=$draft}}}}
   $serverArguments=[Collections.Generic.List[string]]::new()
   $accepted=$true
   try{{{launch}}}catch{{$accepted=$false}}
   $results+=@{{accepted=$accepted;arguments=@($serverArguments.ToArray())}}
+ }}
 }}
 ConvertTo-Json -InputObject @($results) -Depth 4 -Compress
 """)
+        expected = []
+        for backend, maximum in (("mtp", 5), ("dflash2", 15)):
+            for draft in (0, 3, 7, 16):
+                valid = 1 <= draft <= maximum
+                expected.append({"accepted": valid, "arguments": [
+                    "--spec", backend, "--draft-tokens", str(draft), "--lm-head-draft",
+                ] if valid else []})
+        self.assertEqual(observed, expected)
+
+    def test_qualification_launcher_backend_and_window_follow_config(self) -> None:
+        fixture = ScratchQualificationTests()
+        fixture.setUp()
+        subject, scripts = fixture.pressure_subject(qualify_native.LaneError("capture only"))
+        with self.assertRaisesRegex(qualify_native.LaneError, "capture only"):
+            qualify_native.Orchestrator.pressure_protocol(subject)
+        script = scripts[0]
+        start = script.index("$serverArguments=@(")
+        launch = script[start:script.index("$keepWarm=", start)]
+        configs = [
+            json.loads((WINDOWS / f"lanes/{lane}/server-config.json").read_text())
+            for lane in ("rtx3090", "rtx4090")
+        ]
+        observed = self.invoke(f"""
+$results=@()
+foreach($c in (ConvertFrom-Json {qualify_native.ps_quote(json.dumps(configs))})){{
+  $r=@{{model_artifact='model.ninfer';host='127.0.0.1';api_key_file='key';
+        binary_sha256='binary';model_artifact_sha256='artifact';config_sha256='config';
+        deployment_profile='profile'}}
+  $gpuIndex=0;$port=18200;$checkpoints='checkpoints';$requestLog='requests.jsonl'
+  {launch}
+  $backendIndex=[Array]::IndexOf($serverArguments,'--spec')
+  $draftIndex=[Array]::IndexOf($serverArguments,'--draft-tokens')
+  $results+=@{{backend=$serverArguments[$backendIndex+1];
+               draft_tokens=[int]$serverArguments[$draftIndex+1];
+               optimized=($serverArguments -contains '--lm-head-draft')}}
+}}
+ConvertTo-Json -InputObject @($results) -Compress
+""")
         self.assertEqual(observed, [
-            {"accepted": False, "arguments": []},
-            {"accepted": True, "arguments": [
-                "--spec", "dflash2", "--draft-tokens", "7", "--lm-head-draft",
-            ]},
-            {"accepted": False, "arguments": []},
+            {"backend": config["speculative"]["backend"],
+             "draft_tokens": config["speculative"]["draft_tokens"], "optimized": True}
+            for config in configs
         ])
 
     def test_all_release_scripts_parse(self) -> None:

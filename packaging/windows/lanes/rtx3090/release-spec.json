@@ -1,19 +1,26 @@
 {
   "artifact_type": "ninfer_windows_release_spec",
-  "schema_version": 4,
+  "schema_version": 5,
   "lane": "rtx3090",
-  "release_id": "qwen38-3090-native-v0.7.0-beta.3",
-  "release_version": "0.7.0-beta.3",
-  "deployment_profile": "qwen38-3090-native-v0.7.0-beta.3",
-  "build_profile": "native-v0.7.0-beta.3-rtx3090",
+  "release_id": "qwen38-3090-native-v0.8.0-beta.1",
+  "release_version": "0.8.0-beta.1",
+  "deployment_profile": "qwen38-3090-native-v0.8.0-beta.1",
+  "build_profile": "native-v0.8.0-beta.1-rtx3090",
   "platform": "windows-x86_64-cuda13.3-rtx3090",
   "product_prefix": "ninfer-rtx3090-native",
   "runtime_shape": {
     "max_concurrency": 1,
-    "speculative_backend": "mtp",
+    "speculative_backend": "dflash2",
     "draft_tokens": {
-      "min": 1,
-      "max": null
+      "min": 7,
+      "max": 7
+    },
+    "proposal": "artifact-default",
+    "fit": {
+      "device_state_slots": 0,
+      "admission_headroom_mib": 768,
+      "draft_mlp_device_format": "Q4_G64_FP16",
+      "token_embedding_residency": "host-mapped"
     }
   },
   "gpu": {
@@ -27,7 +34,7 @@
   "source": {
     "repository": "https://github.com/alphastorm/ninfer",
     "upstream_base_sha": "64d10fbf9f8e6bfc79ab0570b94674c5b9997929",
-    "lineage_base_sha": "64d10fbf9f8e6bfc79ab0570b94674c5b9997929",
+    "lineage_base_sha": "752dd887be6a9cdb2da6217f3b664b3c03ed33ae",
     "release_head_binding": "exact-descendant-supplied-at-package-build"
   },
   "model": {
