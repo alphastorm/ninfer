@@ -113,6 +113,11 @@ Native 跨 Replay chunk 持有尚未物化的真实 reservation；到达旧 fron
 一个请求可以暂时独占大部分 KV。回收可选缓存并暂停其他请求后，唯一请求仍无法取得合法单元时，
 Engine 报告容量合同错误，不等待不存在的释放者。
 
+绑定完成时，请求必须留在 Engine 的 materializing 成员中，直到 catalog 接纳、来源引用释放和
+sequence 校验全部成功，再交给 resident 槽。中途异常由 Engine 失败路径回传给同一个请求；
+不能先移走请求所有权，否则请求既不在 pending 队列中，也收不到失败通知，pending timeout
+无法结束这次等待。GPU-free `ninfer_engine_core_test` 覆盖绑定交接失败及孤立 State 槽不足。
+
 <a id="checkpoints"></a>
 ## 4. 续接记录与完整检查点
 

@@ -170,10 +170,12 @@ enum class Script : std::uint8_t {
     Complete,        // One prefill chunk; the first committed token reaches the output limit.
     Stall,           // Prefill makes no progress until released, then completes.
     HoldBinding,     // Binding stays in flight until cancellation aborts it.
+    InvalidBinding,  // Binding publishes without a sequence; Engine must deliver its error.
     ControlRejected, // The first token requests target control; its preview violates grammar.
     DeadEnd,         // The first token's constraint mask has no legal token.
     DecodeFailure,   // Decode raises an internal error that fails the Engine.
     IsolatedMiss,    // The first legal unit never fits although total capacity could hold it.
+    StateSlotMiss,   // No Device state can be reclaimed for an isolated request.
     Pressure,        // Stall; its unit cannot be reserved while a victim is active.
     VictimHold,      // Stall; its pause stays in flight until cancellation aborts it.
     VictimPause,     // Stall; its pause publishes Replay state, whose restore never fits.
@@ -522,6 +524,9 @@ public:
             (resume != nullptr && base.script() == Script::VictimPause)) {
             return {.capacity_possible = true, .shortage = {.kv_page_groups = {1}}};
         }
+        if (base.script() == Script::StateSlotMiss) {
+            return {.capacity_possible = true, .shortage = {.state_slots = 1}};
+        }
         operation_ = Operation{.kind          = ContextKind::Bind,
                                .lane          = lane.value,
                                .script        = base.script(),
@@ -554,7 +559,9 @@ public:
                         .prompt_tokens = operation.prompt_tokens,
                         .publish       = operation.publish};
             progress.published = true;
-            progress.sequence  = Sequence{operation.lane, lane.epoch};
+            if (operation.script != Script::InvalidBinding) {
+                progress.sequence = Sequence{operation.lane, lane.epoch};
+            }
             events_.record([](Events::State& state) { ++state.bound; });
             return progress;
         }
@@ -1357,6 +1364,17 @@ void materializing_cancellation() {
     require_membership(outcome.stats, {}, "materializing cancellation");
 }
 
+void materializing_failure() {
+    Harness harness(1);
+    auto request = harness.submit(Script::InvalidBinding, 1, true);
+    const auto outcome = harness.await(request);
+    require(std::string(require_error<std::logic_error>(outcome, "materializing failure").what()) ==
+                "binding completed without a native sequence",
+            "materializing failure did not deliver the binding error");
+    require_membership(outcome.stats, {}, "materializing failure");
+    require(!harness.core().is_available(), "invalid binding left the Engine available");
+}
+
 void pausing_cancellation() {
     Harness harness(2);
     auto pressure = harness.submit(Script::Pressure, 1);
@@ -1446,6 +1464,21 @@ void isolated_restore_refusal() {
                      "request after an isolated restore miss");
 }
 
+void isolated_state_slot_refusal() {
+    Harness harness(1);
+    auto request = harness.submit(Script::StateSlotMiss, 1, true);
+    const auto outcome = harness.await(request);
+    require_request_error(outcome, RequestErrorKind::Unavailable, "isolated state slot miss");
+    require(std::string(require_error<RequestError>(outcome, "isolated state slot miss").what())
+                .find("state=1") != std::string::npos,
+            "state slot refusal did not identify the missing resource");
+    require_membership(outcome.stats, {}, "isolated state slot miss");
+    require(harness.core().is_available(), "isolated state slot miss failed the Engine");
+    auto next = harness.submit(Script::Complete, 1);
+    require_finished(harness.await(next), FinishReason::OutputLimit,
+                     "request after an isolated state slot miss");
+}
+
 void durable_import_commit() {
     Harness harness(1, true);
     auto restore = harness.prepare_restore();
@@ -1526,6 +1559,7 @@ int main() {
         Case{"waiting_cancellation", waiting_cancellation},
         Case{"waiting_expiry", waiting_expiry},
         Case{"materializing_cancellation", materializing_cancellation},
+        Case{"materializing_failure", materializing_failure},
         Case{"pausing_cancellation", pausing_cancellation},
         Case{"paused_cancellation", paused_cancellation},
         Case{"control_rejection", control_rejection},
@@ -1533,6 +1567,7 @@ int main() {
         Case{"engine_failure", engine_failure},
         Case{"isolated_admission_refusal", isolated_admission_refusal},
         Case{"isolated_restore_refusal", isolated_restore_refusal},
+        Case{"isolated_state_slot_refusal", isolated_state_slot_refusal},
         Case{"durable_import_commit", durable_import_commit},
         Case{"durable_import_abort", durable_import_abort},
         Case{"durable_export_release", durable_export_release},

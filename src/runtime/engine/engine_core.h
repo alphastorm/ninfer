@@ -1567,8 +1567,11 @@ private:
             owner->speculative_stats  = std::move(progress.request_speculative);
         }
         if (materializing_) {
-            const auto control  = std::move(*materializing_);
-            const auto& request = control.request;
+            // Keep the request reachable by fail_all_locked until adoption and the
+            // resident handoff succeed. Moving it out here loses the error recipient
+            // if catalog adoption, source release or sequence validation throws.
+            const auto& control = *materializing_;
+            const auto request  = control.request;
             if (!progress.published) {
                 materializing_.reset();
                 scheduler_.capacity_released();
@@ -1625,8 +1628,9 @@ private:
             }
             finish_engine_phase(boundary, EngineHostPhase::Boundary);
             slots_[control.destination.value] = request;
+            const bool resumed = control.resumed;
             materializing_.reset();
-            if (!control.resumed) {
+            if (!resumed) {
                 {
                     std::lock_guard lock(request->mutex);
                     request->started = true;
