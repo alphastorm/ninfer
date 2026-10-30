@@ -28,7 +28,9 @@ __launch_bounds__(BlockSize) __global__
          row += BlockSize) {
         local_max = fmaxf(local_max, static_cast<float>(logits[base + row]));
     }
-    const float maximum = block_max_broadcast<BlockSize>(local_max);
+    __shared__ float warp_maxima[BlockSize / kWarpSize];
+    __shared__ float shared_maximum;
+    const float maximum = block_max_broadcast<BlockSize>(local_max, warp_maxima, shared_maximum);
 
     float local_sum = 0.0f;
     for (std::int32_t row = static_cast<std::int32_t>(threadIdx.x); row < valid_rows;

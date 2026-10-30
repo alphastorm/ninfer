@@ -61,6 +61,8 @@ These run in the bounded host CI lanes (serving options in the native lane).
 independent FP64 projection oracle at T=1,2,7,8,9,16,17,24,32,33,65, plus unrounded near-tie
 argmax, single/multi-block sampling, causal logprobs, and MTP/DFlash2 acceptance at batch 2.
 It uses the existing A16 projection error criterion, not a relaxed FP32-specific threshold.
+The native CI closure also device-links both dtype instantiations: reduction shared scratch is
+kernel-owned, not helper-static storage pooled across unrelated kernels by CUDA RDC linking.
 Run `ctest --test-dir build --output-on-failure -R '^ninfer_fp32_logits_test$'` on each native
 card before any output/performance adoption screen. No real-model quality or speed claim follows
 from this Op test.

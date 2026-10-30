@@ -83,7 +83,9 @@ __launch_bounds__(kArgmaxBlock) __global__
         }
     }
 
-    block_reduce_argmax(best_value, best_index);
+    __shared__ float warp_values[16];
+    __shared__ std::int32_t warp_indices[16];
+    block_reduce_argmax(best_value, best_index, warp_values, warp_indices);
     if (threadIdx.x != 0 || best_index == INT32_MAX) { return; }
 
     int current = out[t];
