@@ -585,11 +585,157 @@ int run_fp8() {
 
 } // namespace
 
-int main() {
+namespace {
+
+// Explicit diagnostic mode: unlike the conformance suite, M3 requires exact output bytes.
+// Keep it opt-in because existing routes intentionally use different reduction trees at T=1
+// and verify widths. A failing M3 is evidence, never an excuse to relax the conformance gate.
+int run_native_numerics() {
+    constexpr int hidden = 5120, max_tokens = 64, qkv_rows = 10240, z_rows = 6144;
+    auto packed = quantized_weight::make_patterned_weight(QType::Q4_G64_FP16, 4096, hidden, 1501U);
+    // An exact reduction-order witness in row zero. Every nonzero group dot has only one
+    // product, eliminating dependence on the tensor core's internal summation order.
+    std::fill_n(packed.payload.begin(), hidden / 2, std::uint8_t{0});
+    for (const int k : {0, 256, 512}) packed.payload[k / 2] = 1;
+    for (int group = 0; group < hidden / 64; ++group) {
+        packed.payload[packed.scale_plane_offset + group * 2] = 0;
+        packed.payload[packed.scale_plane_offset + group * 2 + 1] = 0x3c; // FP16 1
+    }
+    DevicePackedWeight qk(std::move(packed));
+    DevicePackedWeight vz(
+        quantized_weight::make_patterned_weight(QType::Q5_G64_FP16, 12288, hidden, 1503U));
+    auto activation = make_bf16_activation(hidden, max_tokens, 1505U);
+    std::fill_n(activation.begin(), hidden, 0.0F);
+    activation[0] = 1.0F;
+    activation[256] = 0x1p-24F;
+    activation[512] = -1.0F;
+    const auto input_bits = bf16_bits(activation);
+    using Bits = std::array<std::vector<std::uint16_t>, 2>;
+    int failures = 0;
+    const auto compare_bits = [&](const Bits& actual, const Bits& expected, int tokens,
+                                  const char* metric, const char* policy) {
+        for (int output = 0; output < 2; ++output) {
+            std::size_t different = 0;
+            int max_ulp = 0;
+            const auto ordered = [](std::uint16_t bits) {
+                const int magnitude = bits & 0x7fff;
+                return (bits & 0x8000) ? 0x8000 - magnitude : 0x8000 + magnitude;
+            };
+            for (std::size_t i = 0; i < actual[output].size(); ++i) {
+                if (actual[output][i] != expected[output][i]) ++different;
+                max_ulp = std::max(max_ulp, std::abs(ordered(actual[output][i]) -
+                                                  ordered(expected[output][i])));
+            }
+            std::cout << "NATIVE_NUMERICS metric=" << metric << " policy=" << policy
+                      << " T=" << tokens << " output=" << output
+                      << " words=" << actual[output].size() << " different=" << different
+                      << " max_bf16_ulp=" << max_ulp << '\n';
+            if (different != 0) ++failures;
+        }
+    };
+    for (const auto policy : {ops::LinearPolicy::A16Only, ops::LinearPolicy::AllowA8}) {
+        const char* policy_name = policy == ops::LinearPolicy::A16Only ? "a16" : "allow-a8";
+        const ops::PairedProjectionWeights weights{qk.view(), vz.view(), policy};
+        const auto capture = [&](int tokens, int first, bool repeat) {
+            const auto begin = input_bits.begin() + static_cast<std::size_t>(first) * hidden;
+            std::vector<std::uint16_t> source(begin, begin + std::size_t(tokens) * hidden);
+            DeviceBuffer input = to_device(source);
+            GuardedBf16Tensor qkv(qkv_rows, tokens), z(z_rows, tokens);
+            Tensor x(input.span(), DType::BF16, {hidden, tokens});
+            Tensor y = qkv.tensor(), zz = z.tensor();
+            const auto capacity = workspace_capacity(weights, tokens, tokens);
+            GuardedDeviceBuffer scratch(std::max<std::size_t>(capacity, 256));
+            MemoryArena workspace(scratch.span());
+            DeviceContext device;
+            const auto launch = [&] {
+                ops::linear_split(x, weights, std::array{y, zz}, workspace, device.execution_view());
+            };
+            const auto read = [&] {
+                cuda_synchronize();
+                failures += qkv.verify_guards("native numerics qkv");
+                failures += z.verify_guards("native numerics z");
+                failures += qkv.verify_fully_written("native numerics qkv");
+                failures += z.verify_fully_written("native numerics z");
+                failures += scratch.verify_guards("native numerics workspace");
+                if (workspace.used() || workspace.peak_used() != capacity) ++failures;
+                return Bits{qkv.bits(), z.bits()};
+            };
+            launch();
+            Bits result = read();
+            if (repeat) {
+                const auto& tolerance = capacity ? kFp8GdnInputProjA8Tolerance
+                                                 : kGdnInputProjA16Tolerance;
+                std::vector<float> columns(activation.begin(),
+                                           activation.begin() + std::size_t(tokens) * hidden);
+                const auto verify = [&](const char* label, const GuardedBf16Tensor& output,
+                                         int full_rows, int offset, int count,
+                                         const quantized_weight::PackedWeight& weight,
+                                         int weight_offset) {
+                    return compare(label, gather_rows(output.values(), full_rows, offset, count,
+                                                       tokens, 31),
+                                   projection_oracle(weight, weight_offset, count, columns,
+                                                     hidden, tokens, 31), tolerance);
+                };
+                failures += verify("native numerics qk", qkv, qkv_rows, 0, 4096, qk.host, 0);
+                failures += verify("native numerics value", qkv, qkv_rows, 4096, 6144, vz.host, 0);
+                failures += verify("native numerics z", z, z_rows, 0, 6144, vz.host, 6144);
+                std::cout << "NATIVE_NUMERICS metric=dispatch policy=" << policy_name
+                          << " T=" << tokens << " a8_workspace_bytes=" << capacity
+                          << " witness_bf16=" << result[0][0] << '\n';
+                for (int replay = 0; replay < 2; ++replay) {
+                    qkv.repaint(device.stream());
+                    z.repaint(device.stream());
+                    launch();
+                    compare_bits(read(), result, tokens, "M4-eager", policy_name);
+                }
+                DecodeGraphDefinition definition;
+                DecodeGraphExecutable graph;
+                definition.capture(device.stream(), launch);
+                graph.instantiate(definition);
+                for (int replay = 0; replay < 2; ++replay) {
+                    qkv.repaint(device.stream());
+                    z.repaint(device.stream());
+                    graph.launch(device.stream());
+                    compare_bits(read(), result, tokens, "M4-graph", policy_name);
+                }
+            }
+            failures += verify_preserved("native numerics input", input, source);
+            return result;
+        };
+        Bits singles;
+        for (int j = 0; j < max_tokens; ++j) {
+            auto column = capture(1, j, false);
+            for (int output = 0; output < 2; ++output)
+                singles[output].insert(singles[output].end(), column[output].begin(),
+                                       column[output].end());
+        }
+        for (const int tokens : {1, 2, 4, 7, 8, 9, 16, 64}) {
+            const auto batched = capture(tokens, 0, true);
+            Bits expected;
+            for (int output = 0; output < 2; ++output)
+                expected[output].assign(singles[output].begin(),
+                                       singles[output].begin() + batched[output].size());
+            compare_bits(batched, expected, tokens, "M3", policy_name);
+        }
+    }
+    failures += qk.verify_preserved("native numerics qk weight");
+    failures += vz.verify_preserved("native numerics value/z weight");
+    return failures;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    const bool numerics = argc == 2 && std::string(argv[1]) == "--native-numerics-only";
+    if (argc != 1 && !numerics) {
+        std::cerr << "usage: ninfer_linear_split_two_output_test [--native-numerics-only]\n";
+        return 2;
+    }
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
     }
+    if (numerics) return run_native_numerics() == 0 ? 0 : 1;
 
     int failures = 0;
     failures += run_q4_q5();
