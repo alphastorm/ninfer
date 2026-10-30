@@ -2146,14 +2146,47 @@ class PowerShellContractTests(unittest.TestCase):
                     ("spec.runtime_shape.speculative_backend", "dflash2"),
                     ("spec.runtime_shape.draft_tokens.min", 5),
                     ("spec.runtime_shape.draft_tokens.max", 5),
-                    ("spec.runtime_shape.fit.device_state_slots", 0),
+                    ("spec.runtime_shape.fit.device_state_slots", 2),
                     ("spec.runtime_shape.fit.draft_mlp_device_format", "Q4_G64_FP16"),
                     ("spec.runtime_shape.fit.token_embedding_residency", "host-mapped"),
                     ("config.engine.max_concurrency", 3), ("config.speculative.backend", "dflash2"),
                     ("config.speculative.draft_tokens", 5),
-                    ("config.context_cache.device_state_slots", 0),
+                    ("config.context_cache.device_state_slots", 2),
+                    ("config.engine.pending_timeout_ms", 180000),
                 ]
                 case("metadata-shape", fixed_dflash, accepted=True)
+                # C2 keeps one shared Host budget and KV pool; only the execution
+                # lanes, extra Device images and pending deadline change.
+                c2 = [
+                    ("spec.runtime_shape.max_concurrency", 2),
+                    ("config.engine.max_concurrency", 2),
+                    ("spec.runtime_shape.fit.device_state_slots", 2),
+                    ("config.context_cache.device_state_slots", 2),
+                    ("config.engine.pending_timeout_ms", 180000),
+                ]
+                for storage in ("int8", "rk4v4"):
+                    case(f"c2-{storage}", c2 + [("config.engine.kv_dtype", storage)], accepted=True)
+                for slots in (0, 1):
+                    case(f"c2-insufficient-images-{slots}", c2 + [
+                        ("spec.runtime_shape.fit.device_state_slots", slots),
+                        ("config.context_cache.device_state_slots", slots),
+                    ])
+                floor = 768 if lane_dir.name == "rtx3090" else 640
+                case("c2-headroom-below-card-floor", c2 + [
+                    ("spec.runtime_shape.fit.admission_headroom_mib", floor - 1),
+                    ("config.engine.admission_headroom_mib", floor - 1),
+                ])
+                for timeout in (None, 0, 30000, 179999, "180000", 180000.0, True, 2**31):
+                    case(f"c2-pending-timeout-{timeout}", c2 + [
+                        ("config.engine.pending_timeout_ms", timeout),
+                    ])
+                case("c2-longer-pending-timeout", c2 + [
+                    ("config.engine.pending_timeout_ms", 240000),
+                ], accepted=True)
+                case("c2-host-budget-not-per-request", c2 + [
+                    ("config.context_cache.host_context_mib",
+                     str(Decimal(config["context_cache"]["host_context_mib"]) * 2)),
+                ])
                 case("variable-dflash", fixed_dflash + [("spec.runtime_shape.draft_tokens.max", 7)])
                 unbounded = {"min": 5, "max": None}
                 case("unbounded-dflash", fixed_dflash + [("spec.runtime_shape.draft_tokens", unbounded)])

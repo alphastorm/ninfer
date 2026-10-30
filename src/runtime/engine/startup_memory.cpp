@@ -21,7 +21,8 @@ std::size_t StartupMemoryBudget::available(DeviceMemorySnapshot current) const {
 
 bool StartupMemoryBudget::fits(DeviceMemorySnapshot current) const noexcept {
     const auto consumed = device_memory_growth(initial_, current);
-    return consumed <= static_cast<std::int64_t>(limit_);
+    return current.free_bytes >= headroom_ &&
+           consumed <= static_cast<std::int64_t>(limit_ - headroom_);
 }
 
 std::int64_t StartupMemoryBudget::retained(DeviceMemorySnapshot current,

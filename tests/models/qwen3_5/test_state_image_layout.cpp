@@ -1,4 +1,7 @@
 #include "core/layout.h"
+#include "core/gdn_replay_records.h"
+#include "models/qwen3_5/program/round_buffers.h"
+#include "models/qwen3_5/state/decoder_state.h"
 #include "models/qwen3_5/state/state_image.h"
 
 #include <nlohmann/json.hpp>
@@ -120,6 +123,73 @@ void test_packaged_native_state_images() {
                label + "computed native state image is " +
                    std::to_string(layout.images.image_stride) + " bytes, specification declares " +
                    std::to_string(expected));
+        // Extra images are not active lanes and do not multiply the shared Host budget.
+        spec.slot_count = 4; // C2 + two reusable Device images
+        ninfer::LayoutBuilder c2_builder;
+        const auto c2 = q36::plan_state_image_device_pool(c2_builder, spec);
+        expect(c2.images.image_stride == expected &&
+                   c2.images.storage.bytes == 4 * expected,
+               label + "C2 reserves four complete images without changing image geometry");
+        const auto& translation = release.at("host_context_translation");
+        expect(translation.at("host_context_bytes").get<std::uint64_t>() ==
+                   translation.at("predecessor_host_kv_mib").get<std::uint64_t>() * (1ULL << 20) +
+                       translation.at("predecessor_host_state_slots").get<std::uint64_t>() *
+                           c2.images.image_stride,
+               label + "Host KV and state images form one shared budget at C2");
+    }
+}
+
+void test_native_c2_layouts() {
+    const auto fixture = read_json(std::filesystem::path(NINFER_SOURCE_DIR) /
+                                   "tests/fixtures/qwen3_8_27b_config.json");
+    const auto& text = fixture.at("components").at("text").at("config");
+    const auto dim = [&](const char* name) { return text.at(name).get<std::int32_t>(); };
+    const auto linear_layers = static_cast<std::int32_t>(
+        std::count(text.at("layer_types").begin(), text.at("layer_types").end(), "linear_attention"));
+    std::size_t previous_replay = 0;
+    std::size_t previous_kv = 0;
+    for (const std::uint32_t batch : {1U, 2U}) {
+        ninfer::LayoutBuilder round_builder;
+        auto round = q36::begin_round_state_layout(
+            round_builder, {.hidden = dim("hidden_size"), .output_rows = dim("vocab_size"),
+                            .batch_capacity = batch, .draft_window = 7,
+                            .backend = ninfer::SpeculativeBackend::DFlash2});
+        q36::complete_round_state_layout(round_builder, round);
+        expect(round.dflash_decode->target_logits.region.bytes ==
+                   std::size_t(dim("vocab_size")) * 8 * batch * sizeof(std::uint16_t),
+               "native verify logits reserve width eight for every request");
+        expect(round.dflash_decode->target_hidden.region.bytes ==
+                   std::size_t(dim("hidden_size")) * 8 * batch * sizeof(std::uint16_t),
+               "native verify hidden reserves width eight for every request");
+        ninfer::LayoutBuilder replay_builder;
+        const auto replay = ninfer::plan_gdn_replay_records(replay_builder, {
+            .layers = linear_layers, .record_capacity = static_cast<std::int32_t>(batch), .width = 8,
+            .conv_channels = 2 * dim("linear_num_key_heads") * dim("linear_key_head_dim") +
+                             dim("linear_num_value_heads") * dim("linear_value_head_dim"),
+            .qk_heads = dim("linear_num_key_heads"), .value_heads = dim("linear_num_value_heads"),
+            .key_dim = dim("linear_key_head_dim"), .value_dim = dim("linear_value_head_dim"),
+        });
+        if (batch == 2) {
+            expect(replay.payload_bytes() == 2 * previous_replay,
+                   "C2 reserves two independent width-eight GDN replay records");
+        }
+        previous_replay = replay.payload_bytes();
+        ninfer::LayoutBuilder kv_builder;
+        const auto decoder = q36::plan_decoder_state(kv_builder, {
+            .full_attention_layers = static_cast<std::uint32_t>(
+                std::count(text.at("layer_types").begin(), text.at("layer_types").end(), "full_attention")),
+            .capacity = 131072, .kv_heads = dim("num_key_value_heads"),
+            .attention_head_dim = dim("head_dim"), .kv_storage = ninfer::KvCacheStorage::Int8Group64,
+            .kv_table_rows = static_cast<std::int32_t>(batch),
+            .text_physical_page_groups = 131072 / ninfer::kPagedKVPageSize,
+        });
+        expect(decoder.kv_payload_bytes() == 131072ULL * 33792,
+               "native INT8 pool includes scale planes in its byte stride");
+        if (batch == 2) {
+            expect(decoder.kv_payload_bytes() == previous_kv,
+                   "C2 execution table rows do not duplicate the shared KV payload");
+        }
+        previous_kv = decoder.kv_payload_bytes();
     }
 }
 
@@ -143,6 +213,7 @@ int main() {
            "Device capacity uses full image stride");
     try {
         test_packaged_native_state_images();
+        test_native_c2_layouts();
     } catch (const std::exception& error) {
         expect(false, error.what());
     }

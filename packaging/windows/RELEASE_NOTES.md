@@ -4,6 +4,33 @@ The native dependency manifest includes libjpeg-turbo for the Pillow-compatible
 JPEG decoder. CMake resolves `JPEG::JPEG` explicitly; native runtime packaging
 continues to collect its transitive DLLs from the selected vcpkg installation.
 
+## 2026-10-30 — Native C2 fit policy (qualification pending)
+
+Schema-5 native profiles can select two concurrent requests with one shared KV
+pool and one shared Host context budget. Concurrent `sm_86`/`sm_89` profiles must
+reserve at least two **extra** Device state images, in addition to their active
+lanes, retain at least 768/640 MiB admission headroom respectively, and declare an
+integer pending timeout of at least 180,000 ms. Existing C1 profile files and their
+30,000 ms pending timeout are unchanged. INT8 and rk4v4 use the same capacity
+planner; the KV byte stride comes from the selected storage layout, not a second
+per-request pool or a fixed INT8 assumption.
+
+DFlash2 K7 reserves width-eight verify/round buffers and GDN replay records for
+each active request; the shared workspace already plans the maximum batch.
+Four Device images at C2 cost `4 * 195897344 = 783589376` bytes. The Host
+translation remains `predecessor_host_kv_mib * 1048576 + 24 * state_image_bytes`,
+independent of concurrency. DFlash2 therefore needs 13,291,470,848 Host bytes on
+the 3090 and 16,512,696,320 on the 4090; retaining the 4090 MTP3 fallback retains
+its existing smaller image and Host translation instead.
+
+Final startup admission now checks the same headroom reserve as capacity planning,
+including physical free memory after graph initialization. An unexpectedly large
+final allocation can no longer consume that reserve and still publish a ready
+Program. This applies to all architectures, including the RTX 5090; existing
+bounded replan/refusal behavior is unchanged. Capacity and layout host tests do
+not qualify actual two-request long-context fit, throughput, pause/restore or
+true-cold durability. Those require fresh GPU receipts before promoting profiles.
+
 ## 2026-10-29 — Native component 0.8.0-beta.1 (qualification pending)
 
 The RTX 3090 candidate switches from MTP3 to DFlash2 K=7, with one concurrent
