@@ -1,0 +1,89 @@
+name: Native Linux compile and host contracts
+
+on:
+  push:
+    branches: ['rebase/**']
+    paths-ignore: [REPORT.md]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-compile-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-native:
+    name: Linux CUDA 13.1 / sm_${{ matrix.arch }} / serve and host tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: ['89', '86']
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
+      CCACHE_BASEDIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 2G
+      CUDA_PATH: /usr/local/cuda-13.1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install CUDA toolkit from NVIDIA apt repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 3 --output "$RUNNER_TEMP/cuda-keyring.deb" \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i "$RUNNER_TEMP/cuda-keyring.deb"
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cuda-toolkit-13-1 \
+            cmake ninja-build ccache pkg-config libhwloc-dev liburing-dev \
+            libavformat-dev libavcodec-dev libavutil-dev libswscale-dev libjpeg-dev libcurl4-openssl-dev \
+            python3-jinja2 python3-jsonschema python3-pytest
+          echo "$CUDA_PATH/bin" >> "$GITHUB_PATH"
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: .cache/ccache
+          key: ccache-${{ runner.os }}-cuda13.1-sm${{ matrix.arch }}-${{ github.sha }}
+          restore-keys: ccache-${{ runner.os }}-cuda13.1-sm${{ matrix.arch }}-
+      - name: Configure current source with verified provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CUDA_ARCHITECTURES=${{ matrix.arch }} -DCMAKE_CUDA_COMPILER="$CUDA_PATH/bin/nvcc" \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CUDA_COMPILER_LAUNCHER=ccache \
+            -DPython3_EXECUTABLE=/usr/bin/python3 \
+            -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=ON -DNINFER_BUILD_BENCHMARKS=OFF \
+            -DNINFER_BUILD_PROFILE=ci-sm${{ matrix.arch }} -DNINFER_UPSTREAM_BASE_SHA="$(git rev-parse 64d10fbf)"
+      # The serve dependency closure compiles the complete native runtime, including
+      # qwen3_5/load.cpp's SM86/SM89 DFlash2 seam and all linear/small-T kernels.
+      # Bound the build to this app and GPU-free tests, not every test/benchmark.
+      - name: Build serve app, native runtime and GPU-free test targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build --parallel 2 --target ninfer_core ninfer-serve \
+            ninfer_public_api_test ninfer_cpu_system_test ninfer_cpu_task_pool_test \
+            ninfer_cpu_executor_test ninfer_context_cost_measure_test ninfer_jinja_test \
+            ninfer_grammar_test ninfer_json_schema_test ninfer_regex_choice_test \
+            ninfer_media_decode_test \
+            ninfer_engine_core_test \
+            ninfer_engine_checkpoint_control_test ninfer_engine_checkpoint_adapter_test ninfer_resource_manager_test \
+            ninfer_durable_file_test ninfer_session_checkpoint_store_test \
+            ninfer_automatic_checkpoint_queue_test ninfer_io_uring_checkpoint_backend_test
+      # Do not execute ninfer-serve: it links the driver ABI and requires a GPU host.
+      - name: Run only GPU-free CTest contracts
+        shell: bash
+        run: |
+          ctest --test-dir build --output-on-failure --no-tests=error \
+            -R '^ninfer_(public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|engine_core|engine_checkpoint_(control|adapter)|resource_manager|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue|io_uring_checkpoint_backend)_test$'
+      - name: Cache statistics
+        if: always()
+        run: ccache --show-stats
