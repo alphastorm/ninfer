@@ -77,7 +77,7 @@ jobs:
             ninfer_qwen3_5_dflash_window_test \
             ninfer_qwen3_5_state_image_layout_test \
             ninfer_rk4v4_codec_test \
-            ninfer_engine_core_test \
+            ninfer_engine_core_test ninfer_kv_capacity_test \
             ninfer_speculative_metrics_test ninfer_metrics_test \
             ninfer_engine_checkpoint_control_test ninfer_engine_checkpoint_adapter_test ninfer_resource_manager_test \
             ninfer_checkpoint_owner_test \
@@ -95,7 +95,7 @@ jobs:
         shell: bash
         run: |
           ctest --test-dir build --output-on-failure \
-            -R '^ninfer_(rk4v4_codec|public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|qwen3_5_(dflash_window|state_image_layout)|engine_core|speculative_metrics|metrics|engine_checkpoint_(control|adapter)|resource_manager|checkpoint_owner|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue|io_uring_checkpoint_(backend|read_queue))_test$'
+            -R '^ninfer_(rk4v4_codec|public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|qwen3_5_(dflash_window|state_image_layout)|engine_core|kv_capacity|speculative_metrics|metrics|engine_checkpoint_(control|adapter)|resource_manager|checkpoint_owner|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue|io_uring_checkpoint_(backend|read_queue))_test$'
       - name: Run ported host-only tooling tests
         shell: bash
         run: |

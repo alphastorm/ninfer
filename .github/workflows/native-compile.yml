@@ -74,7 +74,7 @@ jobs:
             ninfer_cpu_executor_test ninfer_context_cost_measure_test ninfer_jinja_test \
             ninfer_grammar_test ninfer_json_schema_test ninfer_regex_choice_test \
             ninfer_media_decode_test ninfer_memory_test ninfer_http_transport_test \
-            ninfer_engine_core_test \
+            ninfer_engine_core_test ninfer_kv_capacity_test \
             ninfer_speculative_metrics_test ninfer_metrics_test \
             ninfer_engine_checkpoint_control_test ninfer_engine_checkpoint_adapter_test ninfer_resource_manager_test \
             ninfer_checkpoint_owner_test \
@@ -88,7 +88,7 @@ jobs:
         shell: bash
         run: |
           ctest --test-dir build --output-on-failure --no-tests=error \
-            -R '^ninfer_(rk4v4_codec|public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|memory|http_transport|qwen3_5_(loading|state_image_layout)|request_log|engine_core|speculative_metrics|metrics|engine_checkpoint_(control|adapter)|resource_manager|checkpoint_owner|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue|io_uring_checkpoint_backend)_test$'
+            -R '^ninfer_(rk4v4_codec|public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|memory|http_transport|qwen3_5_(loading|state_image_layout)|request_log|engine_core|kv_capacity|speculative_metrics|metrics|engine_checkpoint_(control|adapter)|resource_manager|checkpoint_owner|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue|io_uring_checkpoint_backend)_test$'
       - name: Cache statistics
         if: always()
         run: ccache --show-stats

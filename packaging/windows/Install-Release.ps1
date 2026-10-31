@@ -714,6 +714,17 @@ function Assert-NativeLaneRuntimeContract([object]$Spec, [object]$Config) {
     $validFit = $validFit -and
         [string]$fit.draft_mlp_device_format -ceq $expectedFormat -and
         [string]$fit.token_embedding_residency -ceq $expectedResidency
+    if ([int]$shape.max_concurrency -gt 1 -and
+        @('86', '89') -ccontains [string]$Spec.gpu.cmake_cuda_architecture) {
+        # Extra images are additional to active lanes. KV and Host capacity stay shared.
+        $headroomFloor = if ([string]$Spec.gpu.cmake_cuda_architecture -ceq '86') { 768 } else { 640 }
+        $pendingTimeout = $Config.engine.PSObject.Properties['pending_timeout_ms']
+        $validFit = $validFit -and $fit.device_state_slots -ge 2 -and
+            $fit.admission_headroom_mib -ge $headroomFloor -and
+            $null -ne $pendingTimeout -and
+            ($pendingTimeout.Value -is [int] -or $pendingTimeout.Value -is [long]) -and
+            $pendingTimeout.Value -ge 180000 -and $pendingTimeout.Value -le [int]::MaxValue
+    }
     $translation = $Spec.host_context_translation
     $hostContextBytes = [decimal]$translation.predecessor_host_kv_mib * 1048576 +
         [decimal]$translation.predecessor_host_state_slots * [decimal]$translation.native_state_image_bytes

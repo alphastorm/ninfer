@@ -22,6 +22,8 @@ ninfer_add_test(ninfer_qwen3_5_state_image_test
 ninfer_add_test(ninfer_qwen3_5_state_image_layout_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_state_image_layout.cpp"
           "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/state/state_image.cpp"
+          "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/state/decoder_state.cpp"
+          "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/round_buffers.cpp"
   NEEDS_SOURCE_DIR
   LIBRARIES ninfer_core ninfer::json)
 
