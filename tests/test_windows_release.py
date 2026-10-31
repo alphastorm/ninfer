@@ -2130,6 +2130,7 @@ ConvertTo-Json -InputObject @($result) -Compress
             spec = json.loads((lane_dir / "release-spec.json").read_text())
             config = json.loads((lane_dir / "server-config.json").read_text())
             cases = []
+            missing = object()
 
             def case(label, changes=(), accepted=False):
                 candidate = {"spec": copy.deepcopy(spec), "config": copy.deepcopy(config)}
@@ -2138,7 +2139,7 @@ ConvertTo-Json -InputObject @($result) -Compress
                     for key in path.split(".")[:-1]:
                         target = target[key]
                     key = path.split(".")[-1]
-                    if value is None:
+                    if value is missing:
                         target.pop(key)
                     else:
                         target[key] = value
@@ -2149,8 +2150,8 @@ ConvertTo-Json -InputObject @($result) -Compress
             else:
                 case("valid", accepted=True)
                 case("schema-4", [("spec.schema_version", 4)])
-                case("missing-policy", [("spec.runtime_shape", None)])
-                case("missing-fit", [("spec.runtime_shape.fit", None)])
+                case("missing-policy", [("spec.runtime_shape", missing)])
+                case("missing-fit", [("spec.runtime_shape.fit", missing)])
                 case("wrong-concurrency", [("config.engine.max_concurrency", 3)])
                 case("wrong-backend", [("config.speculative.backend", "dflash")])
                 case("unknown-backend", [("config.speculative.backend", "dflash"),
@@ -2178,7 +2179,7 @@ ConvertTo-Json -InputObject @($result) -Compress
                 case("variable-dflash", fixed_dflash + [("spec.runtime_shape.draft_tokens.max", 7)])
                 unbounded = {"min": 5, "max": None}
                 case("unbounded-dflash", fixed_dflash + [("spec.runtime_shape.draft_tokens", unbounded)])
-                case("missing-proposal", [("spec.runtime_shape.proposal", None)])
+                case("missing-proposal", [("spec.runtime_shape.proposal", missing)])
                 case("unexpected-proposal", [("config.speculative.proposal", "optimized")])
                 explicit = [("spec.runtime_shape.proposal", "optimized"),
                             ("config.speculative.proposal", "optimized")]
@@ -2234,11 +2235,12 @@ ConvertTo-Json -InputObject @($result) -Compress
                 case("forbidden-persistent-cache", [("config.persistent_cache", {})])
                 case("forbidden-effort", [("config.reasoning.effort", "low")])
                 case("disabled-checkpoints", [("config.session_checkpoint.enabled", False)])
-                case("missing-origin-auth", [("config.session_checkpoint.require_origin_auth", None)])
+                case("missing-origin-auth", [("config.session_checkpoint.require_origin_auth", missing)])
                 case("false-origin-auth", [("config.session_checkpoint.require_origin_auth", False)])
                 case("string-origin-auth", [("config.session_checkpoint.require_origin_auth", "true")])
                 case("zero-staging", [("config.session_checkpoint.staging_mib", 0)])
-                for value in (None, -1, "60000", 2**31, 1.5, True):
+                case("missing-keep-warm", [("config.engine.gpu_keep_warm_ms", missing)])
+                for value in (-1, "60000", 2**31, 1.5, True):
                     case(f"keep-warm-{value}", [("config.engine.gpu_keep_warm_ms", value)])
                 case("zero-keep-warm", [("config.engine.gpu_keep_warm_ms", 0)], accepted=True)
                 case("maximum-keep-warm", [("config.engine.gpu_keep_warm_ms", 2**31 - 1)], accepted=True)

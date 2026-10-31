@@ -57,6 +57,7 @@ DFlash2 dtype plumbing, exact K7/C2 persistent-byte deltas and scoring-tile acco
 It includes the actual startup planner's tile helper through the header-only JSON dependency.
 `ninfer_cli_options_test` and `ninfer_serve_options_test` cover `--fp32-head-logits` parsing.
 These run in the bounded host CI lanes (serving options in the native lane).
+The Windows packaging contract distinguishes an explicitly null option from an omitted field.
 
 `ninfer_fp32_logits_test` needs a GPU. It checks all seven supported head formats against an
 independent FP64 projection oracle at T=1,2,7,8,9,16,17,24,32,33,65, plus unrounded near-tie
