@@ -9,7 +9,7 @@
   "platform": "windows-x86_64-cuda13.3-rtx3090",
   "product_prefix": "ninfer-rtx3090-native",
   "runtime_shape": {
-    "max_concurrency": 1,
+    "max_concurrency": 2,
     "speculative_backend": "dflash2",
     "draft_tokens": {
       "min": 7,
@@ -17,7 +17,7 @@
     },
     "proposal": "artifact-default",
     "fit": {
-      "device_state_slots": 0,
+      "device_state_slots": 2,
       "admission_headroom_mib": 768,
       "draft_mlp_device_format": "Q4_G64_FP16",
       "token_embedding_residency": "host-mapped"
@@ -46,10 +46,10 @@
     "format_version": 3
   },
   "host_context_translation": {
-    "predecessor_host_kv_mib": 8192,
+    "predecessor_host_kv_mib": 16384,
     "predecessor_host_state_slots": 24,
     "native_state_image_bytes": 195897344,
-    "host_context_bytes": 13291470848
+    "host_context_bytes": 21881405440
   },
   "package_identity": {
     "binding": "supplied-by-New-Package.ps1",

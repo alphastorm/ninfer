@@ -1479,7 +1479,7 @@ class ScratchQualificationTests(unittest.TestCase):
         self.assertEqual(staged["scratch_equivalence"]["observed_identity"]["config_sha256"], "e" * 64)
         self.assertFalse(staged["scratch_equivalence"]["public_package_executed"])
         self.assertEqual(staged["deterministic_gates"]["rollback"], "not_applicable")
-        self.assertEqual(staged["profile"], "MTP3")
+        self.assertEqual(staged["profile"], "DFlash2-K7")
         self.assertEqual(staged["runtime_shape"], self.spec["runtime_shape"])
         self.assertNotIn("GPU-private", json.dumps(staged))
 
@@ -1493,7 +1493,8 @@ class ScratchQualificationTests(unittest.TestCase):
         self.assertEqual(staged["runtime_shape"], self.spec["runtime_shape"])
         self.assertEqual(staged["configuration"]["speculative_backend"], "dflash2")
         self.assertEqual(staged["configuration"]["speculative_draft_tokens"], 7)
-        self.assertEqual(staged["runtime_shape"]["fit"]["device_state_slots"], 0)
+        self.assertEqual(staged["runtime_shape"]["max_concurrency"], 2)
+        self.assertEqual(staged["runtime_shape"]["fit"]["device_state_slots"], 2)
 
     def test_stage_adapter_refuses_missing_failed_or_misbound_evidence(self) -> None:
         for damage in (
@@ -1936,11 +1937,11 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertEqual(config["listen"]["host"], "127.0.0.1")
                 self.assertEqual(config["listen"]["port"], spec["lifecycle"]["listen_port"])
                 self.assertEqual(config["authentication"]["mode"], "required-api-key-file")
-                dflash2 = lane != "rtx4090"
+                concurrency = 1 if lane == "rtx4090" else 2
                 expected_shape = {
-                    "max_concurrency": 2 if blackwell else 1,
-                    "speculative_backend": "dflash2" if dflash2 else "mtp",
-                    "draft_tokens": {"min": 7 if dflash2 else 1, "max": 7 if dflash2 else None},
+                    "max_concurrency": concurrency,
+                    "speculative_backend": "dflash2",
+                    "draft_tokens": {"min": 7, "max": 7},
                 }
                 if not blackwell:
                     self.assertEqual(version, "0.8.0-beta.1")
@@ -1949,28 +1950,39 @@ class LaneSpecificationTests(unittest.TestCase):
                     expected_shape.update({
                         "proposal": "artifact-default",
                         "fit": {
-                            "device_state_slots": 0 if dflash2 else 2,
-                            "admission_headroom_mib": 768 if dflash2 else 640,
-                            "draft_mlp_device_format": "Q4_G64_FP16" if dflash2 else "artifact",
-                            "token_embedding_residency": "host-mapped" if dflash2 else "device",
+                            "device_state_slots": 2,
+                            "admission_headroom_mib": 768 if lane == "rtx3090" else 640,
+                            "draft_mlp_device_format": "Q4_G64_FP16",
+                            "token_embedding_residency": "host-mapped",
                         },
                     })
                     self.assertNotIn("proposal", config["speculative"])
                 self.assertEqual(spec["runtime_shape"], expected_shape)
-                self.assertEqual(config["engine"]["max_concurrency"], 2 if blackwell else 1)
+                self.assertEqual(config["engine"]["max_concurrency"], concurrency)
                 self.assertEqual(config["engine"]["kv_dtype"], "bf16" if blackwell else "int8")
                 keep_warm = config["engine"]["gpu_keep_warm_ms"]
                 self.assertIs(type(keep_warm), int)
                 self.assertTrue(0 <= keep_warm <= 2**31 - 1)
-                self.assertEqual(config["speculative"]["backend"], "dflash2" if dflash2 else "mtp")
-                self.assertEqual(config["speculative"]["draft_tokens"], 7 if dflash2 else 3)
+                self.assertEqual(config["speculative"]["backend"], "dflash2")
+                self.assertEqual(config["speculative"]["draft_tokens"], 7)
                 self.assertEqual(config["engine"]["admission_headroom_mib"], 768 if lane == "rtx3090" else 640)
+                self.assertEqual(config["engine"]["max_context"], 131072)
+                self.assertEqual(config["engine"]["kv_capacity"], 146368 if blackwell else 131072)
+                self.assertEqual(config["engine"]["prefill_chunk"], 1024)
                 if blackwell:
                     self.assertEqual(spec["qualification"]["purpose"], "experimental-feasibility-only-not-a-release")
-                    self.assertEqual(config["engine"]["max_context"], 131072)
-                    self.assertEqual(config["engine"]["kv_capacity"], 146368)
-                    self.assertEqual(config["engine"]["prefill_chunk"], 1024)
                     self.assertTrue(config["engine"]["vision"])
+                else:
+                    self.assertEqual(config["engine"]["pending_timeout_ms"], 180000 if lane == "rtx3090" else 30000)
+                    self.assertEqual(config["engine"]["max_pending_requests"], 16)
+                    self.assertEqual(keep_warm, 0 if lane == "rtx3090" else 60000)
+                    self.assertFalse(config["engine"].get("fp32_head_logits", False))
+                    self.assertEqual(spec["qualification"]["status"], "hardware-pending")
+                    if lane == "rtx4090":
+                        self.assertEqual(owner["owner_power_limit_w"], 450)
+                        self.assertIsNone(owner["qualified_power_limit_w"])
+                        self.assertIsNone(owner["managed_power_envelope_w"])
+                        self.assertEqual(config["runtime_host"]["minimum_runtime_memory_mib"], 32768)
                 self.assertTrue(config["session_checkpoint"]["enabled"])
                 self.assertIs(config["session_checkpoint"]["require_origin_auth"], True)
                 if blackwell:
@@ -1997,18 +2009,23 @@ class LaneSpecificationTests(unittest.TestCase):
                 self.assertNotIn("effort", config["reasoning"])
         self.assertEqual(len(models), 1, "every lane pins the same model artifact")
 
-    def test_rtx3090_dflash2_host_budget_uses_the_measured_native_state_image(self) -> None:
-        lane_dir = WINDOWS / "lanes/rtx3090"
-        spec = json.loads((lane_dir / "release-spec.json").read_text(encoding="utf-8"))
-        config = json.loads((lane_dir / "server-config.json").read_text(encoding="utf-8"))
-        self.assertEqual(spec["host_context_translation"], {
-            "predecessor_host_kv_mib": 8192,
-            "predecessor_host_state_slots": 24,
-            "native_state_image_bytes": 195897344,
-            "host_context_bytes": 13291470848,
-        })
-        self.assertEqual(config["context_cache"]["host_context_mib"], "12675.734375")
-        self.assertEqual(qualify_native.host_context_mib(spec), "12675.734375")
+    def test_native_dflash2_host_budgets_use_the_measured_state_image(self) -> None:
+        for lane, host_kv_mib, host_bytes, host_mib in (
+            ("rtx3090", 16384, 21881405440, "20867.734375"),
+            ("rtx4090", 11264, 16512696320, "15747.734375"),
+        ):
+            with self.subTest(lane=lane):
+                lane_dir = WINDOWS / "lanes" / lane
+                spec = json.loads((lane_dir / "release-spec.json").read_text(encoding="utf-8"))
+                config = json.loads((lane_dir / "server-config.json").read_text(encoding="utf-8"))
+                self.assertEqual(spec["host_context_translation"], {
+                    "predecessor_host_kv_mib": host_kv_mib,
+                    "predecessor_host_state_slots": 24,
+                    "native_state_image_bytes": 195897344,
+                    "host_context_bytes": host_bytes,
+                })
+                self.assertEqual(config["context_cache"]["host_context_mib"], host_mib)
+                self.assertEqual(qualify_native.host_context_mib(spec), host_mib)
 
     def test_rtx3090_lane_serves_at_the_approved_350_w_cap(self) -> None:
         # Approved 2026-10-26: the managed GPU-owner lease caps the RTX 3090 at 350 W (was 300 W);
@@ -2226,8 +2243,8 @@ ConvertTo-Json -InputObject @($result) -Compress
                 case("explicit-proposal", explicit, accepted=True)
                 case("different-proposal", explicit + [("config.speculative.proposal", "full")])
                 case("proposal-case", explicit + [("config.speculative.proposal", "Optimized")])
-                for field, low, good in (("device_state_slots", -1, 0),
-                                         ("admission_headroom_mib", 255, 768)):
+                for field, low, good in (("device_state_slots", -1, 2),
+                                         ("admission_headroom_mib", 255, floor)):
                     prefix = "context_cache" if field == "device_state_slots" else "engine"
                     spec_field = f"spec.runtime_shape.fit.{field}"
                     config_field = f"config.{prefix}.{field}"

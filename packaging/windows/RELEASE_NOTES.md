@@ -91,14 +91,20 @@ evidence; the existing headroom and release gates are unchanged.
 
 ## 2026-10-29 — Native component 0.8.0-beta.1 (qualification pending)
 
-The RTX 3090 candidate switches from MTP3 to DFlash2 K=7, with one concurrent
-request, INT8 KV and a 131,072-token context ceiling. Its 24 GB fit uses zero
-extra device state slots, 768 MiB admission headroom, load-time Q8-to-Q4
-(`Q4_G64_FP16`) conversion of draft MLP gate/up weights and host-mapped token
-embeddings. The conversion and mapping apply only to DFlash2 on `sm_86`/`sm_89`;
-other weights retain their artifact representation. The RTX 4090 is rebuilt
-from the same source with its existing MTP3 fit: two extra device state slots,
-640 MiB admission headroom and artifact-format, device-resident weights.
+Both native candidates select DFlash2 K=7 with artifact-default proposal,
+INT8 KV, a 131,072-token context ceiling and 1,024-token prefill chunks.
+The RTX 3090 selects I18 pre-screen tuple F2c: two requests in flight sharing
+one 131,072-token KV pool, two extra device state slots, 768 MiB admission
+headroom and a 180,000 ms pending timeout. Its serving cap remains 350 W.
+The RTX 4090 selects tuple D1: one request in flight, two extra device state
+slots, 640 MiB admission headroom and the unchanged 30,000 ms pending timeout.
+Its owner policy remains 450 W with no qualified serving cap declared.
+
+Both 24 GB fits use load-time Q8-to-Q4 (`Q4_G64_FP16`) conversion of draft MLP
+gate/up weights and host-mapped token embeddings. The conversion and mapping
+apply only to DFlash2 on `sm_86`/`sm_89`; other weights retain their artifact
+representation. RTX 4090 DFlash2 pre-screens used 1,024-token prefill chunks,
+not the predecessor profile's 2,048.
 Both lanes identify component `0.8.0-beta.1`, with lineage base `752dd887`.
 The published model artifact, keep-warm settings and GPU-owner policies are unchanged.
 
@@ -109,27 +115,37 @@ installation reject schema-4 release specifications, missing fit/proposal policy
 and configurations that disagree with the specification. The untouched experimental
 RTX 5090 Windows specification remains schema 4 and cannot be built by this packager.
 
-Host context is an exact translation of the predecessor Host KV budget plus
-24 native state images. The 2026-10-30 RTX 3090 schema-3 checkpoint measured a
-195,897,344-byte DFlash2 image, including 40 MiB of local draft KV absent from MTP3.
-Its retained 8,192 MiB Host KV budget therefore translates to 13,291,470,848 bytes
-(`12675.734375` MiB) exactly, replacing the inherited MTP3 image-size constant.
-The RTX 4090 retains its 153,954,304-byte MTP3 image and 15,506,063,360-byte
-(14,787.734375 MiB) Host budget. A GPU-free layout test computes both native lanes'
-image sizes from the pinned artifact config and packaged speculative backend.
-The P14 RTX 3090 DFlash2 fit proof used 16,384 MiB instead; neither that run nor
-the failed pre-correction fit qualifies the corrected shipping Host budget.
-The exact shipping configuration must pass the native context, restart, quality
-and performance gates before promotion. Package-build receipts remain `hardware-pending`.
+Host context is one shared budget, not a per-request allocation. Both lanes
+use 24 native DFlash2 state images of 195,897,344 bytes each, including 40 MiB
+of local draft KV absent from MTP3. The RTX 3090 increases the Host KV portion
+from 8,192 to 16,384 MiB, giving 21,881,405,440 bytes (`20867.734375` MiB)
+exactly. The RTX 4090 retains its 11,264 MiB Host KV portion but adopts the
+larger DFlash2 images, giving 16,512,696,320 bytes (`15747.734375` MiB).
+Its 32,768 MiB runtime host floor is unchanged. A GPU-free layout test computes
+both native lanes' image sizes from the pinned artifact config and packaged
+speculative backend.
+
+I18 includes checkpoint-owner takeover fixes, release of Device State residency
+before durable export, and admission liveness while checkpoint exports hold pins.
+It also includes io_uring lifetime fixes, installer residual-state containment
+and recovery fixes, and per-position speculative acceptance metrics. These source
+fixes and the I18 GPU pre-screens do not establish N16 release qualification.
+GPU qualification remains pending until the exact N16 profiles pass the native
+context, restart, quality, performance and lifecycle gates before promotion.
+Package-build receipts remain `hardware-pending`.
 Startup JSON reports `artifact.effective_weights.converted_device_bytes` and
 `artifact.effective_weights.host_mapped_bytes`; status exposes the same
 `effective_weights` object. Qualification of this model's native DFlash2 fit must
 observe both counts greater than zero rather than assume the conversion/mapping ran.
 
+rk4v4 KV and FP32 target-head logits are present in the engine but remain opt-in,
+unqualified and off in both release profiles. RTX 4090 C2 is not selected or
+qualified for this release.
+
 Upgrade with the candidate's `Install-Release.ps1` into the existing lane state
 root. The installer stops the incumbent through its own controller and retains the
 previous release for `Control-Release.ps1 -Action Rollback`; package and cache roots
-remain isolated by release. **RTX 3090 MTP durable sessions do not carry across the
+remain isolated by release. **MTP durable sessions on either native lane do not carry across the
 DFlash2 upgrade.** Start new sessions after upgrading. The incumbent's checkpoint
 root is preserved for rollback, never imported into DFlash2. Qualification must
 exercise upgrade and exact rollback to the `v0.7.0-beta.3` incumbent.

@@ -10,17 +10,17 @@
   "product_prefix": "ninfer-rtx4090-native",
   "runtime_shape": {
     "max_concurrency": 1,
-    "speculative_backend": "mtp",
+    "speculative_backend": "dflash2",
     "draft_tokens": {
-      "min": 1,
-      "max": null
+      "min": 7,
+      "max": 7
     },
     "proposal": "artifact-default",
     "fit": {
       "device_state_slots": 2,
       "admission_headroom_mib": 640,
-      "draft_mlp_device_format": "artifact",
-      "token_embedding_residency": "device"
+      "draft_mlp_device_format": "Q4_G64_FP16",
+      "token_embedding_residency": "host-mapped"
     }
   },
   "gpu": {
@@ -48,8 +48,8 @@
   "host_context_translation": {
     "predecessor_host_kv_mib": 11264,
     "predecessor_host_state_slots": 24,
-    "native_state_image_bytes": 153954304,
-    "host_context_bytes": 15506063360
+    "native_state_image_bytes": 195897344,
+    "host_context_bytes": 16512696320
   },
   "package_identity": {
     "binding": "supplied-by-New-Package.ps1",

@@ -20,7 +20,7 @@
     "max_context": 131072,
     "kv_capacity": 131072,
     "admission_headroom_mib": 640,
-    "prefill_chunk": 2048,
+    "prefill_chunk": 1024,
     "kv_dtype": "int8",
     "max_concurrency": 1,
     "max_pending_requests": 16,
@@ -32,11 +32,11 @@
   },
   "context_cache": {
     "device_state_slots": 2,
-    "host_context_mib": "14787.734375"
+    "host_context_mib": "15747.734375"
   },
   "speculative": {
-    "backend": "mtp",
-    "draft_tokens": 3
+    "backend": "dflash2",
+    "draft_tokens": 7
   },
   "reasoning": {
     "thinking": true,
@@ -58,6 +58,6 @@
   },
   "runtime_host": {
     "minimum_runtime_memory_mib": 32768,
-    "reason": "The shared Host budget preserves the predecessor's 11264 MiB KV budget plus 24 native MTP StateImages of 153954304 bytes each: 15506063360 bytes exactly. State/KV/in-flight storage now share that budget; the 32768 MiB host floor is retained. Native startup and restore qualification remain required; this byte-equivalent translation does not qualify a smaller host."
+    "reason": "The shared Host budget preserves the predecessor's 11264 MiB KV budget plus 24 native DFlash2 StateImages of 195897344 bytes each: 16512696320 bytes exactly. State/KV/in-flight storage now share that budget; the 32768 MiB host floor is retained. Native startup and restore qualification remain required; this byte-equivalent translation does not qualify a smaller host."
   }
 }
