@@ -1,5 +1,14 @@
 # NInfer native Windows lanes
 
+Concurrent residents now wait for in-flight checkpoint export leases when the
+next execution unit cannot reclaim their pinned cache resources. Other rows whose
+units fit can still run. Export retirement releases the pins and wakes admission;
+temporary disk-export pressure no longer fails the engine with “oldest resident
+cannot obtain its legal unit.” This shared Engine fix applies to every GPU lane,
+not only the native C2 profiles. A host-worker regression covers the held lease,
+an independently runnable sibling and completion after pin retirement; long-pair
+GPU qualification remains required.
+
 The native dependency manifest includes libjpeg-turbo for the Pillow-compatible
 JPEG decoder. CMake resolves `JPEG::JPEG` explicitly; native runtime packaging
 continues to collect its transitive DLLs from the selected vcpkg installation.
