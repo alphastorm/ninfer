@@ -1,5 +1,5 @@
-// GPU-free execution of the real StateImageStore. Only CUDA allocation/copy/stream entry
-// points are interposed; ownership, reservations, epochs and replica publication are native.
+// GPU-free execution of the real StateImageStore. CUDA entry points are interposed;
+// ownership, reservations, epochs and replica publication are native.
 #include "core/device.h"
 #include "cuda_interpose.h"
 #include "models/common/context/state_store.h"
@@ -17,7 +17,7 @@
 #include <vector>
 
 namespace {
-std::size_t copies = 0, synchronizations = 0, fail_copy = 0;
+std::size_t copies = 0, synchronizations = 0, fail_copy = 0, error_strings = 0;
 }
 
 // Expand CUDA's versioned API aliases before the Linux linker-wrap token is formed.
@@ -25,7 +25,6 @@ std::size_t copies = 0, synchronizations = 0, fail_copy = 0;
 
 extern "C" {
 cudaError_t CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaGetDeviceCount)(int* count) {
-    std::cerr << "cudaGetDeviceCount\n";
     *count = 1;
     return cudaSuccess;
 }
@@ -36,13 +35,11 @@ cudaError_t CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaGetDevice)(int* device) {
 cudaError_t CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaSetDevice)(int) { return cudaSuccess; }
 cudaError_t CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaSetDeviceFlags)(unsigned) { return cudaSuccess; }
 cudaError_t CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaGetDeviceProperties)(cudaDeviceProp* props, int) {
-    std::cerr << "cudaGetDeviceProperties\n";
     *props = {};
     return cudaSuccess;
 }
 cudaError_t CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaStreamCreateWithFlags)(cudaStream_t* stream,
                                                                                 unsigned) {
-    std::cerr << "cudaStreamCreateWithFlags\n";
     static std::array<unsigned char, 2> streams{};
     static std::size_t created = 0;
     *stream = reinterpret_cast<cudaStream_t>(&streams[created++ % streams.size()]);
@@ -50,26 +47,28 @@ cudaError_t CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaStreamCreateWithFlags)(cudaSt
 }
 cudaError_t CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaStreamDestroy)(cudaStream_t) { return cudaSuccess; }
 cudaError_t CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaMallocHost)(void** memory, std::size_t bytes) {
-    std::cerr << "cudaMallocHost " << bytes << '\n';
     *memory = ::operator new(bytes, std::align_val_t{256}, std::nothrow);
     return *memory ? cudaSuccess : cudaErrorMemoryAllocation;
 }
 cudaError_t CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaFreeHost)(void* memory) {
-    std::cerr << "cudaFreeHost\n";
     ::operator delete(memory, std::align_val_t{256});
     return cudaSuccess;
 }
 cudaError_t CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaMemcpyAsync)(void* to, const void* from,
     std::size_t bytes, cudaMemcpyKind, cudaStream_t) {
-    std::cerr << "cudaMemcpyAsync " << copies + 1 << " fail=" << fail_copy << '\n';
     if (++copies == fail_copy) return cudaErrorInvalidValue;
     std::memcpy(to, from, bytes);
     return cudaSuccess;
 }
 cudaError_t CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaStreamSynchronize)(cudaStream_t) {
-    std::cerr << "cudaStreamSynchronize\n";
     ++synchronizations;
     return cudaSuccess;
+}
+// Error formatting is part of the interposed CUDA boundary too: the injected copy error
+// must throw through native transfer code without entering an uninitialized Windows runtime.
+const char* CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaGetErrorString)(cudaError_t) {
+    ++error_strings;
+    return "injected host-test CUDA copy failure";
 }
 }
 
@@ -204,6 +203,7 @@ void failure_recovery(DeviceContext& device) {
     }
     f.unchanged_device_sources();
     const auto before_sync = synchronizations;
+    const auto before_errors = error_strings;
     fail_copy = copies + 2;
     bool failed = false;
     try {
@@ -212,7 +212,7 @@ void failure_recovery(DeviceContext& device) {
         failed = true;
     }
     fail_copy = 0;
-    require(failed && synchronizations > before_sync,
+    require(failed && error_strings == before_errors + 1 && synchronizations > before_sync,
             "partial enqueue failure settles submitted copies before reservation rollback");
     f.unchanged_device_sources();
     require(f.images.prepare_host_export(f.sources, device.transfer_view()) &&
@@ -223,13 +223,9 @@ void failure_recovery(DeviceContext& device) {
 
 int main() {
     try {
-        std::cerr << "RUN GPU-free DeviceContext\n";
         ninfer::DeviceContext device;
-        std::cerr << "RUN export-leased fork\n";
         export_leased_fork(device);
-        std::cerr << "RUN existing Host replica\n";
         existing_host_replica(device);
-        std::cerr << "RUN failure recovery\n";
         failure_recovery(device);
         std::cout << "PASS export State readers release execution slots without changing bytes\n";
         return 0;
