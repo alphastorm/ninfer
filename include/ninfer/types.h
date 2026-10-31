@@ -876,7 +876,22 @@ struct SpeculativeStats {
     std::uint64_t drafted_tokens  = 0;
     std::uint64_t accepted_tokens = 0;
     std::uint64_t fallback_steps  = 0;
+    std::vector<std::uint64_t> attempted_per_position;
     std::vector<std::uint64_t> accepted_per_position;
+
+    // Native verification facts, recorded once at the commit decision even if publication
+    // truncates or discards the output. Position storage is fixed at request installation.
+    void observe_round(std::uint32_t drafted, std::uint32_t accepted) noexcept {
+        if (drafted == 0) {
+            ++fallback_steps;
+            return;
+        }
+        ++rounds;
+        drafted_tokens += drafted;
+        accepted_tokens += accepted;
+        for (std::uint32_t i = 0; i < drafted; ++i) { ++attempted_per_position[i]; }
+        for (std::uint32_t i = 0; i < accepted; ++i) { ++accepted_per_position[i]; }
+    }
 };
 
 struct ThinkingBudgetStats {
@@ -1083,6 +1098,8 @@ struct RuntimeStats {
     std::uint64_t speculative_draft_tokens    = 0;
     std::uint64_t speculative_accepted_tokens = 0;
     std::uint64_t speculative_fallback_steps  = 0;
+    std::vector<std::uint64_t> speculative_attempted_per_position;
+    std::vector<std::uint64_t> speculative_accepted_per_position;
     // Initial prompt tokens evaluated by prefill. Reused checkpoint-prefix tokens and replay
     // recomputation are excluded; replayed_tokens separately counts that additional model work.
     std::uint64_t computed_prefill_tokens = 0;

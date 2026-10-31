@@ -198,6 +198,22 @@ std::string Metrics::render(const RuntimeStats& stats, bool ready) const {
             "Draft tokens accepted by native verification.");
     COUNTER(speculative_fallback_steps, "spec_decode_fallback_steps_total",
             "Speculative fallback steps without drafts.");
+    header("spec_decode_position_tokens_total", "counter",
+           "Native attempted and accepted draft tokens by zero-based position.");
+    for (std::size_t i = 0; i < stats.speculative_attempted_per_position.size(); ++i) {
+        const auto attempted_baseline = i < baseline_.speculative_attempted_per_position.size()
+                                            ? baseline_.speculative_attempted_per_position[i]
+                                            : 0;
+        const auto accepted_baseline = i < baseline_.speculative_accepted_per_position.size()
+                                           ? baseline_.speculative_accepted_per_position[i]
+                                           : 0;
+        out << "ninfer_spec_decode_position_tokens_total{position=\"" << i
+            << "\",kind=\"attempted\"} "
+            << stats.speculative_attempted_per_position[i] - attempted_baseline << '\n';
+        out << "ninfer_spec_decode_position_tokens_total{position=\"" << i
+            << "\",kind=\"accepted\"} "
+            << stats.speculative_accepted_per_position.at(i) - accepted_baseline << '\n';
+    }
     GAUGE(device_state_occupied_slots, "device_state_used_slots",
           "Occupied device StateImage slots.");
     gauge("device_state_capacity_slots",

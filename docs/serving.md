@@ -1085,7 +1085,9 @@ in append mode and flushes every event, so successive model or MTP blocks may sh
 file. The parent directory must already exist. Failure to open the file aborts startup; the log path
 is also rejected if it resolves to the model artifact.
 
-Every line is one `ninfer_serve_request_log` schema-v29 JSON object. All events carry
+Every line is one `ninfer_serve_request_log` schema-v30 JSON object. Additive optional request
+observations do not change this version when existing fields and their meanings are unchanged;
+readers may ignore these observations and older schema-v30 lines may omit them. All events carry
 `timestamp_unix_ms` and a process-unique `server_instance_id`; request IDs are monotonic only within
 that server instance. Successful request-start records include request-scoped acquisition,
 media-preprocessing wall/work, tokenizer, cache hit/miss/single-flight, and payload-size fields;
@@ -1117,7 +1119,16 @@ rejection/error records rather than successful constraint outcomes.
 
 `request_done.timings_seconds` contains `prepare`, `ttft`, `vision`, `prefill`, `decode`, and `total`
 as full-precision JSON numbers. Its `speculative` object contains `backend`, `draft_window`, `rounds`,
-`drafted_tokens`, `accepted_tokens`, `fallback_steps`, and `accepted_per_position`. Rates can be
+`drafted_tokens`, `accepted_tokens`, `fallback_steps`, `accepted_per_position`, and the additive
+optional `attempted_per_position`. For Qwen3.5 MTP and DFlash/DFlash2, each zero-based position
+counts native verification attempts and accepts at the commit decision, including work whose
+output is truncated or discarded. All proposed positions count as attempted even when
+position zero rejects. A zero-draft fallback increments only `fallback_steps`. Each array has
+`draft_window` entries; its sum equals `drafted_tokens` or `accepted_tokens`, respectively.
+The non-speculative backend uses empty arrays. The live Prometheus counter
+`ninfer_spec_decode_position_tokens_total` (labels `position="0"`, `kind="attempted"` or
+`kind="accepted"`) exposes the
+same native work across requests, excluding startup warmup like the existing totals. Rates can be
 derived downstream from raw token counts and seconds instead of rounded stderr strings.
 `generation.scheduling` records preemptions, snapshot/replay restores, replayed tokens, paused time
 and request-owned transfer bytes. Replay rebuilds committed state without adding new output usage.

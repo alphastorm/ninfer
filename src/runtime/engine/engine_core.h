@@ -96,6 +96,8 @@ public:
             throw std::invalid_argument("Engine core bounds are invalid");
         }
         cumulative_stats_.context_transfers.kv.resize(instance_.program->kv_pools().size());
+        cumulative_stats_.speculative_attempted_per_position.resize(options.speculative.draft_tokens);
+        cumulative_stats_.speculative_accepted_per_position.resize(options.speculative.draft_tokens);
         for (const auto& pool : instance_.program->kv_pools()) {
             cumulative_stats_.kv_pools.push_back(
                 {pool.id.index, std::string(pool.label), 0, pool.device_page_groups});
@@ -1266,11 +1268,18 @@ private:
             const auto& request  = slots_[lane_indices[row]];
             auto& observed       = request->speculative_stats;
             const auto& counters = committed.rows[row].speculative_counters;
+            // Each row commits at most one verification round. Its attempts and accepts are
+            // prefixes, so scalar deltas publish position counters without copying request vectors.
+            const auto drafted  = counters.drafted_tokens - observed.drafted_tokens;
+            const auto accepted = counters.accepted_tokens - observed.accepted_tokens;
+            for (std::size_t i = 0;
+                 i < cumulative_stats_.speculative_attempted_per_position.size(); ++i) {
+                cumulative_stats_.speculative_attempted_per_position[i] += i < drafted;
+                cumulative_stats_.speculative_accepted_per_position[i] += i < accepted;
+            }
             cumulative_stats_.speculative_rounds += counters.rounds - observed.rounds;
-            cumulative_stats_.speculative_draft_tokens +=
-                counters.drafted_tokens - observed.drafted_tokens;
-            cumulative_stats_.speculative_accepted_tokens +=
-                counters.accepted_tokens - observed.accepted_tokens;
+            cumulative_stats_.speculative_draft_tokens += drafted;
+            cumulative_stats_.speculative_accepted_tokens += accepted;
             cumulative_stats_.speculative_fallback_steps +=
                 counters.fallback_steps - observed.fallback_steps;
             observed.rounds          = counters.rounds;
