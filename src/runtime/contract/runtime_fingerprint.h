@@ -81,6 +81,7 @@ struct DurableEngineIdentity {
     std::string proposal_head;
     bool enable_vision = false;
     bool use_cuda_graph = false;
+    bool fp32_head_logits = false;
     friend bool operator==(const DurableEngineIdentity&, const DurableEngineIdentity&) = default;
 };
 

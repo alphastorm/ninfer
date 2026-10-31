@@ -752,6 +752,10 @@ function Assert-NativeLaneRuntimeContract([object]$Spec, [object]$Config) {
         throw 'server configuration is not an authenticated native lane profile'
     }
     # Every new package declares keep-warm explicitly, including zero.
+    $fp32Head = $Config.engine.PSObject.Properties['fp32_head_logits']
+    if ($null -ne $fp32Head -and $fp32Head.Value -isnot [bool]) {
+        throw 'server configuration engine.fp32_head_logits must be a boolean'
+    }
     $gpuKeepWarm = $Config.engine.PSObject.Properties['gpu_keep_warm_ms']
     if ($null -eq $gpuKeepWarm -or -not ($gpuKeepWarm.Value -is [int] -or $gpuKeepWarm.Value -is [long]) -or
         $gpuKeepWarm.Value -lt 0 -or $gpuKeepWarm.Value -gt [int]::MaxValue) {

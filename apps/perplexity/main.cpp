@@ -49,6 +49,7 @@ struct Options {
     int device                          = 0;
     ninfer::KvCacheStorage kv           = ninfer::KvCacheStorage::Fp8E4M3Row256;
     bool quick                          = false;
+    bool fp32_head_logits               = false;
     ninfer::product::LogLevel log_level = ninfer::product::LogLevel::Info;
 };
 
@@ -57,6 +58,7 @@ std::string usage_text() {
            "(--corpus <manifest.json> [--quick] | --text <utf8-file>)\n"
            "       [--context N] [--stride N] [--device N]\n"
            "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4] [--output <directory>]\n"
+           "       [--fp32-head-logits] (Qwen3.5-family target logits; default off)\n"
            "       [--log-level trace|debug|info|warning|error|critical|off]\n";
 }
 
@@ -95,6 +97,8 @@ Options parse_options(int argc, char** argv) {
             out.text = std::filesystem::path(value("--text"));
         } else if (option == "--quick") {
             out.quick = true;
+        } else if (option == "--fp32-head-logits") {
+            out.fp32_head_logits = true;
         } else if (option == "--context") {
             out.context = parse_integer<std::uint32_t>(value("--context"), "context");
         } else if (option == "--stride") {
@@ -223,6 +227,7 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
     engine_options.device           = options.device;
     engine_options.max_context      = options.context;
     engine_options.kv_cache         = options.kv;
+    engine_options.fp32_head_logits = options.fp32_head_logits;
     engine_options.startup_observer = startup_log.observer();
     ninfer::Engine engine(std::move(engine_options));
     const ninfer::LoadSummary load = engine.load_summary();
@@ -394,7 +399,8 @@ int run(const Options& options, const std::shared_ptr<spdlog::logger>& logger,
           {"context_tokens", options.context},
           {"stride_tokens", options.stride},
           {"prefill_chunk_tokens", engine.memory_summary().prefill_chunk},
-          {"score_tile_tokens", 1024},
+          {"score_tile_tokens", options.fp32_head_logits ? 512 : 1024},
+          {"fp32_head_logits", options.fp32_head_logits},
           {"kv_dtype", kv_name(options.kv)}}},
         {"timing",
          {{"load_seconds", load.load_seconds},

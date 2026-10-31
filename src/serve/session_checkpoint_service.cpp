@@ -65,7 +65,8 @@ runtime::RuntimeFingerprintV2 startup_fingerprint(Engine& engine, const ServeOpt
         .speculative_backend = product::speculative_backend_name(effective.speculative.backend),
         .draft_window = effective.speculative.draft_tokens,
         .proposal_head = effective.speculative.proposal_head == ProposalHead::Optimized ? "optimized" : "full",
-        .enable_vision = effective.enable_vision, .use_cuda_graph = effective.use_cuda_graph};
+        .enable_vision = effective.enable_vision, .use_cuda_graph = effective.use_cuda_graph,
+        .fp32_head_logits = effective.fp32_head_logits};
     value.responses.codec = kResponseStoreSnapshotCodec;
     value.deployment.profile = options.deployment_profile;
     value.deployment.effective_config_sha256 = session_checkpoint_effective_config_sha256(value);

@@ -221,6 +221,11 @@ int main() {
     failures +=
         check(!defaults.preserve_thinking, "thinking history is unexpectedly preserved by default");
     failures += check(!defaults.enable_vision, "Vision is not disabled by default");
+    failures += check(!defaults.fp32_head_logits, "FP32 head logits must default off");
+    failures += check(parse({"ninfer-serve", "model.ninfer", "--fp32-head-logits"}).fp32_head_logits,
+                      "FP32 head logits opt-in was lost");
+    failures += check(serve_usage_text("ninfer-serve").find("--fp32-head-logits") != std::string::npos,
+                      "serve help omits FP32 head logits");
     failures += check(defaults.request_log_jsonl.empty(),
                       "request JSONL logging is not disabled by default");
     failures += check(defaults.context_cost_presets.empty(),

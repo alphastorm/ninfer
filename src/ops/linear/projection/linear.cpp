@@ -1,5 +1,6 @@
 #include "core/weight.h"
 #include "ninfer/ops/linear.h"
+#include "ops/linear/projection/fp32.h"
 
 #include "ops/linear/projection/bf16/bf16_dispatch.h"
 #include "ops/linear/projection/fp8/fp8_dispatch.h"
@@ -52,8 +53,9 @@ void validate_linear_semantics(const Tensor& x, const Weight& w, const Tensor& o
         out.device != execution.device()) {
         throw std::invalid_argument("linear: operands must belong to the execution device");
     }
-    if (x.dtype != DType::BF16 || out.dtype != DType::BF16) {
-        throw std::invalid_argument("linear: x/out must be BF16");
+    if (x.dtype != DType::BF16 ||
+        (out.dtype != DType::BF16 && out.dtype != DType::FP32)) {
+        throw std::invalid_argument("linear: x must be BF16 and out must be BF16 or FP32");
     }
     (void)checked_numel(x, "x");
     (void)checked_numel(out, "out");
@@ -80,6 +82,11 @@ void validate_linear_semantics(const Tensor& x, const Weight& w, const Tensor& o
 
 void dispatch_linear(const Tensor& x, const Weight& w, Tensor& out, LinearPolicy policy,
                      MemoryArena* workspace, cudaStream_t stream) {
+    if (out.dtype == DType::FP32) {
+        if (!linear_writes_fp32(w.qtype))
+            throw std::invalid_argument("linear: weight format cannot write FP32");
+        return detail::linear_fp32(x, w, out, stream);
+    }
     switch (w.qtype) {
     case QType::Q4_G64_FP16:
         detail::q4_dispatch(x, w, out, policy, stream);

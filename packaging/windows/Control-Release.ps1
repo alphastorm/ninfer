@@ -35,6 +35,15 @@ function Get-GpuKeepWarmMs([object]$Config) {
     return [int]$value
 }
 
+function Get-Fp32HeadLogits([object]$Config) {
+    $property = $Config.engine.PSObject.Properties['fp32_head_logits']
+    if ($null -eq $property) { return $false }
+    if ($property.Value -isnot [bool]) {
+        throw 'release server config engine.fp32_head_logits must be a boolean'
+    }
+    return $property.Value
+}
+
 function Add-ContextArguments([Collections.Generic.List[string]]$Arguments, [object]$Config) {
     if ([int]$Config.schema_version -eq 4) {
         # Master uses one shared Host byte budget. Never reinterpret the fork's slot/KV
@@ -1201,6 +1210,10 @@ function Invoke-Run {
             $serverArguments.Add($argument)
         }
         Add-ContextArguments $serverArguments $config
+        $fp32HeadLogits = Get-Fp32HeadLogits $config
+        if ($fp32HeadLogits) {
+            $serverArguments.Add('--fp32-head-logits')
+        }
         if (-not [bool]$config.engine.cuda_graph) { $serverArguments.Add('--no-cuda-graph') }
         if (-not [bool]$config.engine.prefix_reuse) { $serverArguments.Add('--no-prefix-reuse') }
         if (-not [bool]$config.reasoning.thinking) { $serverArguments.Add('--no-thinking') }

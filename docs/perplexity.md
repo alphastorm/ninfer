@@ -5,6 +5,11 @@ It uses the artifact's tokenizer, Text model, selected Main KV representation, f
 and main output head. It is an offline evaluator, not a serving endpoint or a logits-export API.
 Only Text weights and resources are loaded; Vision and speculative components are not required.
 
+The Qwen3.5 family accepts `--fp32-head-logits` (default off). It computes causal logprobs from
+the head's FP32 sums instead of BF16-rounded logits. The scoring tile changes from 1024 to 512
+columns to retain its logits byte ceiling, and the report records both the flag and tile width.
+This changes the represented scoring inputs, so compare runs only with the choice recorded.
+
 ## Run the fixed corpus
 
 The repository includes `ninfer-ppl-1m-v1`, a fixed set of 16 independent UTF-8 streams covering

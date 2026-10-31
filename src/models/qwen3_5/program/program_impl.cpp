@@ -32,7 +32,8 @@ ProgramImpl::ProgramImpl(const execution::Parameters& parameters_in, const Seque
       draft_window(plan.draft_window), speculative_backend(plan.speculative_backend),
       kv_storage(plan.kv_storage), proposal_head(plan.proposal_head),
       vision_enabled(plan.features.vision), use_cuda_graph(plan.use_cuda_graph),
-      causal_scoring(plan.causal_scoring), kv_payload_bytes(plan.persistent.kv_payload_bytes),
+      causal_scoring(plan.causal_scoring), logits_dtype(plan.logits_dtype),
+      kv_payload_bytes(plan.persistent.kv_payload_bytes),
       workspace_plan(plan.workspace), persistent(device.device(), plan.persistent.bytes),
       workspace_storage(device.device(), plan.workspace.capacity),
       work(workspace_storage.span().subspan(0, plan.workspace.general_capacity)),
@@ -326,8 +327,9 @@ std::vector<float> ProgramImpl::causal_score(qwen::PreparedPromptData&& prompt,
 
     std::vector<float> output;
     output.reserve(token_count_size - first_target);
+    const auto score_tile = causal_score_tile(logits_dtype);
     std::vector<TokenId> staged_targets;
-    staged_targets.reserve(kCausalScoreTile);
+    staged_targets.reserve(score_tile);
     std::uint32_t staged_columns = 0;
 
     try {
@@ -346,14 +348,14 @@ std::vector<float> ProgramImpl::causal_score(qwen::PreparedPromptData&& prompt,
 
         const auto flush = [&] {
             if (staged_columns == 0) { return; }
-            if (staged_columns != staged_targets.size() || staged_columns > kCausalScoreTile) {
+            if (staged_columns != staged_targets.size() || staged_columns > score_tile) {
                 throw std::logic_error("causal score staging has an invalid shape");
             }
             work.reset();
             mark_workspace_usage(workspace_plan.causal_score);
             const auto columns = static_cast<std::int32_t>(staged_columns);
             Tensor logits      = work.alloc(
-                DType::BF16, {dimension(parameters.model.config().text.vocab_size), columns});
+                logits_dtype, {dimension(parameters.model.config().text.vocab_size), columns});
             Tensor target_ids        = work.alloc(DType::I32, {columns});
             Tensor logprobs          = work.alloc(DType::FP32, {columns});
             Tensor hidden            = score_hidden->slice(1, 0, columns);
@@ -407,7 +409,7 @@ std::vector<float> ProgramImpl::causal_score(qwen::PreparedPromptData&& prompt,
             std::uint32_t selected = std::max(chunk_begin, scored_predictor_begin);
             while (selected < cursor) {
                 const std::uint32_t available = cursor - selected;
-                const std::uint32_t room      = kCausalScoreTile - staged_columns;
+                const std::uint32_t room      = score_tile - staged_columns;
                 const std::uint32_t count     = std::min(available, room);
                 Tensor source =
                     prefill_hidden.slice(1, static_cast<std::int32_t>(selected - chunk_begin),
@@ -421,7 +423,7 @@ std::vector<float> ProgramImpl::causal_score(qwen::PreparedPromptData&& prompt,
                 }
                 selected += count;
                 staged_columns += count;
-                if (staged_columns == kCausalScoreTile) { flush(); }
+                if (staged_columns == score_tile) { flush(); }
             }
         }
         flush();

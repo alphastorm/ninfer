@@ -18,6 +18,14 @@ NINFER_VRAM_BUDGET_MIB=16384 ./build/apps/ninfer out/qwen3_6_35b_a3b.ninfer \
 resident models and 4096 for CPU expert offload. Serving and offline scoring use the same Engine
 defaults. See [expert execution](maintainer/expert-weight-cache.md) for ownership and scheduling.
 
+`--fp32-head-logits` is an opt-in startup choice for the Qwen3.5 family. It retains the target
+vocabulary head's FP32 sums for sampling, argmax, MTP/DFlash2 acceptance and causal logprobs.
+It is **off by default**; omitted flags keep BF16 target logits and existing proposal heads.
+It is independent of the KV dtype and `--lm-head-draft`. Qwen4Exp rejects it.
+The exact logits buffers participate in normal startup fit accounting. At vocabulary 248320,
+verify width 8 and concurrency 2, the target buffer is 15,892,480 bytes instead of 7,946,240;
+including step logits adds 8,442,880 persistent bytes. No profile enables it automatically.
+
 Qwen3.8-Flash-Next uses Qwen4Exp Text/Vision/MTP. CUDA Graph decode is enabled by default:
 
 ```bash
@@ -307,6 +315,7 @@ The table lists executable defaults. The examples above select FP8 KV and MTP3.
 | `--lm-head-draft` | optimized proposal head | off |
 | `--vision` | enable image/video input and load Vision GPU allocations | off |
 | `--no-cuda-graph` | disable CUDA Graph decode | graphs on |
+| `--fp32-head-logits` | retain Qwen3.5-family target logits in FP32; proposal heads unchanged | off |
 | `--chat-template FILE` | use a local Jinja template | artifact template |
 | `--no-thinking` | disable thinking | template default |
 | `--thinking-budget N` | positive model-origin thinking-token cap; omitted means unlimited | unset |

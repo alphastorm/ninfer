@@ -88,7 +88,8 @@ Json fingerprint_json(const runtime::RuntimeFingerprintV2& v) {
             {"prefill_chunk", v.engine.prefill_chunk},
             {"speculative_backend", v.engine.speculative_backend}, {"draft_window", v.engine.draft_window},
             {"proposal_head", v.engine.proposal_head}, {"enable_vision", v.engine.enable_vision},
-            {"use_cuda_graph", v.engine.use_cuda_graph}}},
+            {"use_cuda_graph", v.engine.use_cuda_graph},
+            {"fp32_head_logits", v.engine.fp32_head_logits}}},
         {"responses", {{"codec", v.responses.codec}}},
         {"deployment", {{"profile", v.deployment.profile},
             {"effective_config_sha256", v.deployment.effective_config_sha256}}},
@@ -149,13 +150,14 @@ bool validate_session_checkpoint_runtime_fingerprint(const Json& value) noexcept
         const auto& e = value.at("engine");
         if (!fields(e, {"max_context", "kv_capacity", "kv_dtype", "max_concurrency", "prefill_chunk",
                         "speculative_backend", "draft_window", "proposal_head", "enable_vision",
-                        "use_cuda_graph"}) || !u32(e.at("max_context"), true) ||
+                        "use_cuda_graph", "fp32_head_logits"}) || !u32(e.at("max_context"), true) ||
             !u32(e.at("kv_capacity"), true) || !u32(e.at("max_concurrency"), true) ||
             !u32(e.at("prefill_chunk"), true) || !u32(e.at("draft_window")) ||
             !named(e.at("kv_dtype"), {"bf16", "int8", "fp8", "k8v4", "rk4v4"}) ||
             !named(e.at("speculative_backend"), {"none", "mtp", "dflash", "dflash2"}) ||
             !named(e.at("proposal_head"), {"full", "optimized"}) ||
-            !e.at("enable_vision").is_boolean() || !e.at("use_cuda_graph").is_boolean()) { return false; }
+            !e.at("enable_vision").is_boolean() || !e.at("use_cuda_graph").is_boolean() ||
+            !e.at("fp32_head_logits").is_boolean()) { return false; }
         if ((e.at("speculative_backend") == "none") != (e.at("draft_window") == 0)) { return false; }
         if (e.at("enable_vision").get<bool>() ? !hex(f.at("vision_preprocessing"))
                                               : f.at("vision_preprocessing") != "disabled") { return false; }

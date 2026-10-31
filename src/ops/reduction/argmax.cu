@@ -21,16 +21,17 @@ namespace {
 inline constexpr int kArgmaxBlock          = 512;
 inline constexpr int kArgmaxItemsPerThread = 1;
 
+template <typename Logit>
 __launch_bounds__(kArgmaxBlock) __global__
-    void argmax_kernel(const __nv_bfloat16* logits, std::int32_t* out, std::int32_t valid_rows,
+    void argmax_kernel(const Logit* logits, std::int32_t* out, std::int32_t valid_rows,
                        std::int32_t physical_rows) {
     const std::int32_t t    = static_cast<std::int32_t>(blockIdx.x);
     const std::int64_t base = static_cast<std::int64_t>(t) * physical_rows;
 
-    float best_value        = __bfloat162float(logits[base]);
+    float best_value        = static_cast<float>(logits[base]);
     std::int32_t best_index = 0;
     for (std::int32_t v = static_cast<std::int32_t>(threadIdx.x); v < valid_rows; v += blockDim.x) {
-        const float value = __bfloat162float(logits[base + v]);
+        const float value = static_cast<float>(logits[base + v]);
         if (score_id_better(value, v, best_value, best_index)) {
             best_value = value;
             best_index = v;
@@ -59,8 +60,9 @@ __launch_bounds__(kArgmaxBlock) __global__
     if (threadIdx.x == 0) { out[t] = indices[0]; }
 }
 
+template <typename Logit>
 __launch_bounds__(kArgmaxBlock) __global__
-    void argmax_tiled_atomic_kernel(const __nv_bfloat16* logits, std::int32_t* out,
+    void argmax_tiled_atomic_kernel(const Logit* logits, std::int32_t* out,
                                     std::int32_t valid_rows, std::int32_t physical_rows) {
     const std::int32_t t    = static_cast<std::int32_t>(blockIdx.y);
     const std::int64_t base = static_cast<std::int64_t>(t) * physical_rows;
@@ -73,7 +75,7 @@ __launch_bounds__(kArgmaxBlock) __global__
     for (int item = 0; item < kArgmaxItemsPerThread; ++item) {
         const std::int32_t v = tile_start + threadIdx.x + item * blockDim.x;
         if (v < valid_rows) {
-            const float value = __bfloat162float(logits[base + v]);
+            const float value = static_cast<float>(logits[base + v]);
             if (score_id_better(value, v, best_value, best_index)) {
                 best_value = value;
                 best_index = v;
@@ -81,12 +83,14 @@ __launch_bounds__(kArgmaxBlock) __global__
         }
     }
 
-    block_reduce_argmax(best_value, best_index);
+    __shared__ float warp_values[16];
+    __shared__ std::int32_t warp_indices[16];
+    block_reduce_argmax(best_value, best_index, warp_values, warp_indices);
     if (threadIdx.x != 0 || best_index == INT32_MAX) { return; }
 
     int current = out[t];
     while (true) {
-        const float current_value = __bfloat162float(logits[base + current]);
+        const float current_value = static_cast<float>(logits[base + current]);
         if (!score_id_better(best_value, best_index, current_value, current)) { break; }
         const int observed = atomicCAS(reinterpret_cast<int*>(out + t), current, best_index);
         if (observed == current) { break; }
@@ -112,9 +116,11 @@ int select_tiled_block(std::int32_t physical_rows, std::int32_t valid_rows, std:
     return kArgmaxBlock;
 }
 
+template <typename Logit>
 void argmax_tiled_atomic_launch(const Tensor& logits, Tensor& out, std::int32_t valid_rows,
                                 int block, cudaStream_t stream);
 
+template <typename Logit>
 void argmax_launch(const Tensor& logits, Tensor& out, std::int32_t valid_rows,
                    cudaStream_t stream) {
     const std::int32_t physical_rows = logits.ne[0];
@@ -125,16 +131,17 @@ void argmax_launch(const Tensor& logits, Tensor& out, std::int32_t valid_rows,
     const int tiled_blocks   = div_up(valid_rows, kTileElems);
     if (tiled_blocks < 2) {
         argmax_kernel<<<static_cast<unsigned int>(t_count), kArgmaxBlock, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(logits.data), static_cast<std::int32_t*>(out.data),
+            static_cast<const Logit*>(logits.data), static_cast<std::int32_t*>(out.data),
             valid_rows, physical_rows);
         CUDA_CHECK(cudaGetLastError());
         return;
     }
 
-    argmax_tiled_atomic_launch(logits, out, valid_rows,
+    argmax_tiled_atomic_launch<Logit>(logits, out, valid_rows,
                                select_tiled_block(physical_rows, valid_rows, t_count), stream);
 }
 
+template <typename Logit>
 void argmax_tiled_atomic_launch(const Tensor& logits, Tensor& out, std::int32_t valid_rows,
                                 int block, cudaStream_t stream) {
     const std::int32_t physical_rows = logits.ne[0];
@@ -149,7 +156,7 @@ void argmax_tiled_atomic_launch(const Tensor& logits, Tensor& out, std::int32_t 
         const dim3 grid(static_cast<unsigned int>(tiled_blocks),
                         static_cast<unsigned int>(token_count));
         argmax_tiled_atomic_kernel<<<grid, block, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(logits_slice.data),
+            static_cast<const Logit*>(logits_slice.data),
             static_cast<std::int32_t*>(out_slice.data), valid_rows, physical_rows);
         CUDA_CHECK(cudaGetLastError());
     });
@@ -160,7 +167,9 @@ void argmax_tiled_atomic_launch(const Tensor& logits, Tensor& out, std::int32_t 
 void argmax(const Tensor& logits, Tensor& out, std::int32_t valid_rows,
             CudaExecutionView execution) {
     const auto stream = execution.stream();
-    if (logits.dtype != DType::BF16) { throw std::invalid_argument("argmax: logits must be BF16"); }
+    if (logits.dtype != DType::BF16 && logits.dtype != DType::FP32) {
+        throw std::invalid_argument("argmax: logits must be BF16 or FP32");
+    }
     if (out.dtype != DType::I32) { throw std::invalid_argument("argmax: out must be I32"); }
 
     const std::int64_t logits_n = common::operand::numel(logits, "argmax");
@@ -193,7 +202,10 @@ void argmax(const Tensor& logits, Tensor& out, std::int32_t valid_rows,
         throw std::invalid_argument("argmax: logits/out data must be non-null");
     }
 
-    argmax_launch(logits, out, valid_rows, stream);
+    if (logits.dtype == DType::FP32)
+        argmax_launch<float>(logits, out, valid_rows, stream);
+    else
+        argmax_launch<__nv_bfloat16>(logits, out, valid_rows, stream);
 }
 
 } // namespace ninfer::ops

@@ -6,7 +6,8 @@ namespace ninfer::ops::greedy_drafts_detail {
 using namespace sampling_detail;
 using namespace common;
 
-void launch(const Tensor& target_tokens, const Tensor& logits, const Tensor& drafts,
+template <typename Logit>
+void launch_typed(const Tensor& target_tokens, const Tensor& logits, const Tensor& drafts,
             const Tensor& current_extents, Tensor& lengths, Tensor& anchors,
             Tensor& licensed_tokens, Tensor& licensed_counts, Tensor& accepted,
             std::int32_t token_domain, const SamplingConfig* configs, const Plan& plan,
@@ -19,7 +20,7 @@ void launch(const Tensor& target_tokens, const Tensor& logits, const Tensor& dra
         speculative_accept_greedy_drafts_kernel<Schedule>
             <<<batch, Schedule::kSamplerBlock, 0, stream>>>(
                 static_cast<const std::int32_t*>(target_tokens.data),
-                static_cast<const __nv_bfloat16*>(logits.data),
+                static_cast<const Logit*>(logits.data),
                 static_cast<const std::int32_t*>(drafts.data),
                 static_cast<const std::int32_t*>(current_extents.data),
                 static_cast<std::int32_t*>(lengths.data), static_cast<std::int32_t*>(anchors.data),
@@ -37,7 +38,7 @@ void launch(const Tensor& target_tokens, const Tensor& logits, const Tensor& dra
                             static_cast<unsigned int>(cols), static_cast<unsigned int>(batch));
     speculative_sampling_partial_topk_kernel<Schedule>
         <<<partial_grid, Schedule::kSamplerBlock, 0, stream>>>(
-            static_cast<const __nv_bfloat16*>(logits.data),
+            static_cast<const Logit*>(logits.data),
             static_cast<const std::int32_t*>(drafts.data),
             static_cast<const std::int32_t*>(current_extents.data), configs, token_domain,
             physical_rows, cols, drafts.ne[0], scratch, layout.bytes);
@@ -56,6 +57,21 @@ void launch(const Tensor& target_tokens, const Tensor& logits, const Tensor& dra
             static_cast<std::int32_t*>(accepted.data), configs, token_domain, cols, partial_blocks,
             groups, scratch, layout.bytes);
     CUDA_CHECK(cudaGetLastError());
+}
+
+void launch(const Tensor& target_tokens, const Tensor& logits, const Tensor& drafts,
+            const Tensor& current_extents, Tensor& lengths, Tensor& anchors,
+            Tensor& licensed_tokens, Tensor& licensed_counts, Tensor& accepted,
+            std::int32_t token_domain, const SamplingConfig* configs, const Plan& plan,
+            MemorySpan workspace, cudaStream_t stream) {
+    if (logits.dtype == DType::FP32)
+        launch_typed<float>(target_tokens, logits, drafts, current_extents, lengths, anchors,
+                            licensed_tokens, licensed_counts, accepted, token_domain, configs,
+                            plan, workspace, stream);
+    else
+        launch_typed<__nv_bfloat16>(target_tokens, logits, drafts, current_extents, lengths, anchors,
+                                    licensed_tokens, licensed_counts, accepted, token_domain,
+                                    configs, plan, workspace, stream);
 }
 
 } // namespace ninfer::ops::greedy_drafts_detail

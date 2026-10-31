@@ -75,6 +75,7 @@ jobs:
             ninfer_grammar_test ninfer_json_schema_test ninfer_regex_choice_test \
             ninfer_media_decode_test \
             ninfer_qwen3_5_dflash_window_test \
+            ninfer_qwen3_5_head_logits_test ninfer_cli_options_test \
             ninfer_qwen3_5_state_image_layout_test \
             ninfer_rk4v4_codec_test \
             ninfer_engine_core_test ninfer_kv_capacity_test \
@@ -86,6 +87,7 @@ jobs:
             ninfer_io_uring_checkpoint_read_queue_test \
             src/serve/CMakeFiles/ninfer_serve.dir/session_checkpoint_service.cpp.o \
             tests/CMakeFiles/ninfer_session_checkpoint_service_real_test.dir/test_session_checkpoint_service_real.cpp.o \
+            src/ops/CMakeFiles/ninfer_ops.dir/linear/projection/fp32.cu.o \
             src/ops/CMakeFiles/ninfer_ops.dir/linear/kernels/q4/q4_a16_sliced_k_mma.cu.o \
             src/ops/CMakeFiles/ninfer_ops.dir/kv_cache/kernels/write.cu.o \
             src/ops/CMakeFiles/ninfer_ops.dir/softmax_attention/dense/causal_cache/int8/launch.cu.o \
@@ -95,7 +97,7 @@ jobs:
         shell: bash
         run: |
           ctest --test-dir build --output-on-failure \
-            -R '^ninfer_(rk4v4_codec|public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|qwen3_5_(dflash_window|state_image_layout)|engine_core|kv_capacity|speculative_metrics|metrics|engine_checkpoint_(control|adapter)|resource_manager|checkpoint_owner|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue|io_uring_checkpoint_(backend|read_queue|handle-allocation|teardown))_test$'
+            -R '^ninfer_(rk4v4_codec|public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|qwen3_5_(dflash_window|head_logits|state_image_layout)|cli_options|engine_core|kv_capacity|speculative_metrics|metrics|engine_checkpoint_(control|adapter)|resource_manager|checkpoint_owner|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue|io_uring_checkpoint_(backend|read_queue|handle-allocation|teardown))_test$'
       - name: Run ported host-only tooling tests
         shell: bash
         run: |
@@ -202,6 +204,7 @@ jobs:
             ninfer_checkpoint_directstorage_windows ninfer_direct_storage_checkpoint_windows_test `
             ninfer_checkpoint_io_contract_test ninfer_direct_storage_checkpoint_backend_test `
             ninfer_durable_file_test ninfer_session_checkpoint_store_test ninfer_automatic_checkpoint_queue_test `
+            ninfer_qwen3_5_head_logits_test ninfer_cli_options_test `
             src/serve/CMakeFiles/ninfer_serve.dir/stop_event.cpp.obj `
             src/serve/CMakeFiles/ninfer_serve.dir/session_checkpoint_service.cpp.obj
           if ($LASTEXITCODE -ne 0) { throw 'Windows platform C++ compile failed' }
@@ -209,5 +212,5 @@ jobs:
         shell: pwsh
         run: |
           ctest --test-dir build --output-on-failure `
-            -R '^ninfer_(checkpoint_io_contract|direct_storage_checkpoint_backend|durable_file(_(pinned-destination|reparse-guard|identity-guards|directory-publication|extended-paths))?|session_checkpoint_store(_(current_flush|capacity))?|automatic_checkpoint_queue)_test$'
+            -R '^ninfer_(checkpoint_io_contract|direct_storage_checkpoint_backend|durable_file(_(pinned-destination|reparse-guard|identity-guards|directory-publication|extended-paths))?|session_checkpoint_store(_(current_flush|capacity))?|automatic_checkpoint_queue|qwen3_5_head_logits|cli_options)_test$'
           if ($LASTEXITCODE -ne 0) { throw 'Windows host contracts failed' }

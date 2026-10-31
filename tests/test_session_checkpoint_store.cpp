@@ -905,6 +905,13 @@ int test_transaction_restart_compatibility_and_corruption() {
     failures += check(wrong_fingerprint.state == SessionCheckpointLoadState::Incompatible &&
                           !wrong_fingerprint.checkpoint,
                       "runtime/model fingerprint mismatch is a cache miss");
+    auto fp32_identity = fingerprint();
+    fp32_identity["engine"]["fp32_head_logits"] = true;
+    refresh_config_digest(fp32_identity);
+    failures += check(
+        restarted.load(responses.client_session_sha256, fp32_identity).state ==
+            SessionCheckpointLoadState::Incompatible,
+        "same-binary FP32 head option mismatch must not reuse native checkpoints");
     const nlohmann::json incompatible = restarted.status(responses.client_session_sha256, wrong);
     failures += check(incompatible.at("state") == "incompatible",
                       "status distinguishes incompatible from corrupt");

@@ -180,6 +180,8 @@ struct EngineOptions {
     std::uint32_t media_preprocess_threads = 0;
     bool enable_vision                     = false;
     bool use_cuda_graph                    = true;
+    // Qwen3.5-family target vocabulary logits retain FP32 sums. Proposal heads are unchanged.
+    bool fp32_head_logits                  = false;
     ContextCacheOptions context_cache;
     ContextCostOptions context_cost;
     StartupObserver startup_observer;

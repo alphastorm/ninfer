@@ -57,7 +57,8 @@ void speculative_accept_sparse_drafts(const Tensor& target_tokens, const Tensor&
     }
     common::operand::tensor(target_tokens, DType::I32, {columns, batch}, 1, op, "target_tokens",
                             execution.device());
-    common::operand::tensor(logits, DType::BF16, {kSparsePhysicalRows, columns, batch}, 1, op,
+    common::operand::tensor(logits, logits.dtype == DType::FP32 ? DType::FP32 : DType::BF16,
+                            {kSparsePhysicalRows, columns, batch}, 1, op,
                             "logits", execution.device());
     common::operand::tensor(drafts, DType::I32, {k, batch}, 1, op, "drafts", execution.device());
     common::operand::tensor(candidate_ids, DType::I32, {kSparseCandidates, k, batch}, 1, op,

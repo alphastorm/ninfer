@@ -15,9 +15,9 @@ namespace {
 
 inline constexpr int kTargetLogprobsBlock = 256;
 
-template <int BlockSize>
+template <int BlockSize, typename Logit>
 __launch_bounds__(BlockSize) __global__
-    void target_logprobs_kernel(const __nv_bfloat16* logits, const std::int32_t* target_ids,
+    void target_logprobs_kernel(const Logit* logits, const std::int32_t* target_ids,
                                 float* output, std::int32_t valid_rows,
                                 std::int32_t physical_rows) {
     const std::int32_t column = static_cast<std::int32_t>(blockIdx.x);
@@ -26,19 +26,21 @@ __launch_bounds__(BlockSize) __global__
     float local_max = -CUDART_INF_F;
     for (std::int32_t row = static_cast<std::int32_t>(threadIdx.x); row < valid_rows;
          row += BlockSize) {
-        local_max = fmaxf(local_max, __bfloat162float(logits[base + row]));
+        local_max = fmaxf(local_max, static_cast<float>(logits[base + row]));
     }
-    const float maximum = block_max_broadcast<BlockSize>(local_max);
+    __shared__ float warp_maxima[BlockSize / kWarpSize];
+    __shared__ float shared_maximum;
+    const float maximum = block_max_broadcast<BlockSize>(local_max, warp_maxima, shared_maximum);
 
     float local_sum = 0.0f;
     for (std::int32_t row = static_cast<std::int32_t>(threadIdx.x); row < valid_rows;
          row += BlockSize) {
-        local_sum += expf(__bfloat162float(logits[base + row]) - maximum);
+        local_sum += expf(static_cast<float>(logits[base + row]) - maximum);
     }
     __shared__ float warp_sums[BlockSize / kWarpSize];
     const float sum = block_reduce_sum<BlockSize>(local_sum, warp_sums);
     if (threadIdx.x == 0) {
-        const float target = __bfloat162float(logits[base + target_ids[column]]);
+        const float target = static_cast<float>(logits[base + target_ids[column]]);
         output[column]     = target - maximum - logf(sum);
     }
 }
@@ -46,10 +48,15 @@ __launch_bounds__(BlockSize) __global__
 void target_logprobs_launch(const Tensor& logits, const Tensor& target_ids, std::int32_t valid_rows,
                             Tensor& output, cudaStream_t stream) {
     const auto columns = static_cast<unsigned int>(logits.ne[1]);
-    target_logprobs_kernel<kTargetLogprobsBlock><<<columns, kTargetLogprobsBlock, 0, stream>>>(
-        static_cast<const __nv_bfloat16*>(logits.data),
-        static_cast<const std::int32_t*>(target_ids.data), static_cast<float*>(output.data),
-        valid_rows, logits.ne[0]);
+    const auto launch = [&]<typename Logit>() {
+        target_logprobs_kernel<kTargetLogprobsBlock><<<columns, kTargetLogprobsBlock, 0, stream>>>(
+            static_cast<const Logit*>(logits.data), static_cast<const std::int32_t*>(target_ids.data),
+            static_cast<float*>(output.data), valid_rows, logits.ne[0]);
+    };
+    if (logits.dtype == DType::FP32)
+        launch.template operator()<float>();
+    else
+        launch.template operator()<__nv_bfloat16>();
     CUDA_CHECK(cudaGetLastError());
 }
 
@@ -62,7 +69,9 @@ void target_logprobs(const Tensor& logits, const Tensor& target_ids, std::int32_
     if (logits.ne[0] <= 0 || logits.ne[1] <= 0 || valid_rows <= 0 || valid_rows > logits.ne[0])
         throw std::invalid_argument("target_logprobs: invalid column or row domain");
     const auto columns = logits.ne[1];
-    common::operand::tensor(logits, DType::BF16, {logits.ne[0], columns}, alignof(std::uint16_t),
+    common::operand::tensor(logits, logits.dtype == DType::FP32 ? DType::FP32 : DType::BF16,
+                            {logits.ne[0], columns},
+                            logits.dtype == DType::FP32 ? alignof(float) : alignof(std::uint16_t),
                             op, "logits", execution.device());
     common::operand::tensor(target_ids, DType::I32, {columns}, alignof(std::int32_t), op,
                             "target_ids", execution.device());

@@ -101,6 +101,19 @@ Tensor matrix_window(Tensor& t, std::int32_t cols) {
     return t.slice(1, 0, cols);
 }
 
+// MTP proposals retain BF16 semantics even when their scratch aliases FP32 step storage.
+Tensor bf16_window(Tensor& t, std::int32_t cols) {
+    const Tensor window = matrix_window(t, cols);
+    return window.dtype == DType::BF16
+               ? window
+               : Tensor(window.data, window.device, DType::BF16, {t.ne[0], cols});
+}
+
+void require_logits_window(const Tensor& t, std::int32_t rows, std::int32_t cols,
+                           const char* label) {
+    require_tensor_window(t, t.dtype == DType::FP32 ? DType::FP32 : DType::BF16, rows, cols, label);
+}
+
 class ScopedPositions {
 public:
     ScopedPositions(const Tensor*& slot, const Tensor& positions) : slot_(slot) {
@@ -457,8 +470,7 @@ void TextContext::mtp_prefill_chunk(const Tensor& ids, const Tensor& hidden,
         }
         require_tensor_shape(*final_hidden, DType::BF16, {dimension(config_.hidden_size), 1},
                              "MTP final prefill hidden");
-        require_tensor_shape(*logits, DType::BF16, {dimension(config_.vocab_size), 1},
-                             "MTP final prefill logits");
+        require_logits_window(*logits, dimension(config_.vocab_size), 1, "MTP final prefill logits");
         require_tensor_shape(*draft_token, DType::I32, {1}, "MTP final prefill draft token");
     }
 
@@ -576,7 +588,7 @@ void TextContext::proposal_argmax(const Tensor& hidden, Tensor& logits, Tensor& 
     require_tensor_shape(hidden, DType::BF16, {dimension(config_.hidden_size), T},
                          "proposal hidden");
     require_tensor_shape(proposal_tokens, DType::I32, {T}, "proposal tokens");
-    require_tensor_window(logits, DType::BF16, dimension(config_.vocab_size), T, "proposal logits");
+    require_logits_window(logits, dimension(config_.vocab_size), T, "proposal logits");
     nvtx::ScopedRange proposal_range(nvtx::Name::MtpProposal, nvtx::Category::Mtp,
                                      static_cast<std::uint64_t>(T));
     if (proposal_head_ != nullptr) {
@@ -592,7 +604,7 @@ void TextContext::proposal_argmax(const Tensor& hidden, Tensor& logits, Tensor& 
                                    execution_);
         }
     } else {
-        Tensor output_logits = matrix_window(logits, T);
+        Tensor output_logits = bf16_window(logits, T);
         project(hidden, mtp_->output_head, output_logits, work_, execution_);
         ops::argmax(output_logits, proposal_tokens,
                     dimension(parameters_.model.resources().public_token_count), execution_);
@@ -620,8 +632,7 @@ void TextContext::mtp_forward_batch(const Tensor& ids, const Tensor& hidden,
         if (logits == nullptr || draft_token == nullptr) {
             throw std::invalid_argument("MTP logits and draft_token outputs are required");
         }
-        require_tensor_shape(*logits, DType::BF16, {dimension(config_.vocab_size), 1},
-                             "MTP logits");
+        require_logits_window(*logits, dimension(config_.vocab_size), 1, "MTP logits");
         require_tensor_shape(*draft_token, DType::I32, {1}, "MTP draft token");
     }
 
@@ -659,7 +670,7 @@ void TextContext::mtp_forward_ar_step(const Tensor& token, const Tensor& previou
                          "MTP AR previous hidden");
     require_tensor_shape(mtp_hidden, DType::BF16, {dimension(config_.hidden_size), 1},
                          "MTP AR output hidden");
-    require_tensor_shape(logits, DType::BF16, {dimension(config_.vocab_size), 1}, "MTP AR logits");
+    require_logits_window(logits, dimension(config_.vocab_size), 1, "MTP AR logits");
     require_tensor_shape(draft_token, DType::I32, {1}, "MTP AR draft token");
 
     auto position_scope  = work_.scope();
@@ -691,7 +702,7 @@ void TextContext::ordinary_decode_batch(const Tensor& ids, const Tensor& cache_p
                          "ordinary decode Linear Attention destination slots");
     require_tensor_shape(hidden, DType::BF16, {dimension(config_.hidden_size), batch},
                          "ordinary decode hidden");
-    require_tensor_shape(logits, DType::BF16, {dimension(config_.vocab_size), batch},
+    require_tensor_shape(logits, io_.logits.dtype, {dimension(config_.vocab_size), batch},
                          "ordinary decode logits");
 
     work_.reset();
@@ -745,7 +756,7 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
                          "target verify batch Linear Attention slots");
     require_tensor_shape(hidden, DType::BF16, {dimension(config_.hidden_size), width, batch},
                          "target verify batch hidden");
-    require_tensor_shape(logits, DType::BF16, {dimension(config_.vocab_size), width, batch},
+    require_tensor_shape(logits, io_.logits.dtype, {dimension(config_.vocab_size), width, batch},
                          "target verify batch logits");
     require_tensor_shape(target_tokens, DType::I32, {width, batch}, "target verify batch tokens");
 

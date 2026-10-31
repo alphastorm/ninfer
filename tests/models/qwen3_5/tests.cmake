@@ -11,6 +11,11 @@ ninfer_add_test(ninfer_qwen3_5_dflash_window_test
           "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/round_buffers.cpp"
   LIBRARIES ninfer_core)
 
+ninfer_add_test(ninfer_qwen3_5_head_logits_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_head_logits.cpp"
+          "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/round_buffers.cpp"
+  LIBRARIES ninfer_core ninfer::json)
+
 ninfer_add_test(ninfer_qwen3_5_runtime_mechanisms_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_runtime_mechanisms.cpp"
   LIBRARIES ninfer_engine ninfer_core)
