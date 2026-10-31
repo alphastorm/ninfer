@@ -112,6 +112,22 @@ set_tests_properties(ninfer_device_sync_empty_test PROPERTIES
 ninfer_add_test(ninfer_decode_graph_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_decode_graph.cpp"
   LIBRARIES ninfer_core)
 
+ninfer_add_test(ninfer_decode_graph_capture_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_decode_graph_capture.cpp"
+  LIBRARIES ninfer_core)
+ninfer_cuda_test_interposition(ninfer_decode_graph_capture_test)
+if(WIN32)
+  # The GPU-free process still loads cudart. The configure step's PATH is not
+  # inherited by a separate CI test step; bind the discovered DLL directory.
+  set_tests_properties(ninfer_decode_graph_capture_test PROPERTIES
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:ninfer_test_cudart>")
+else()
+  foreach(symbol IN ITEMS cudaStreamBeginCapture cudaStreamEndCapture cudaGraphDestroy)
+    target_link_options(ninfer_decode_graph_capture_test PRIVATE "LINKER:--wrap=${symbol}")
+  endforeach()
+endif()
+set_tests_properties(ninfer_decode_graph_capture_test PROPERTIES LABELS "host")
+
 ninfer_add_test(ninfer_gpu_keep_warm_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_gpu_keep_warm.cpp"
   LIBRARIES ninfer_core)
