@@ -588,7 +588,7 @@ public:
     [[nodiscard]] rt::ResourceReservation<Resources> reserve_units(std::span<const Unit> units) {
         require(units.size() == 1, "Engine reserves one unit per row");
         if (live(units.front().sequence).script == Script::ExportPressure &&
-            events_.stall_released.load() && staged_exports_ != 0) {
+            staged_exports_ != 0) {
             events_.record([](Events::State& state) { state.export_blocked = true; });
             return {.shortage = {.kv_page_groups = {1}}};
         }
@@ -1551,7 +1551,6 @@ void resident_waits_for_export() {
     harness.events().await([](const Events::State& state) { return state.bound == 2; },
                            "the export-blocked resident");
     CallbackWriter writer([&] {
-        harness.release_stalls();
         harness.events().await([](const Events::State& state) { return state.export_blocked; },
                                "resident pressure while the export lease is held");
         // Waiting for the lease must not freeze rows whose next unit already fits.
@@ -1562,6 +1561,7 @@ void resident_waits_for_export() {
     });
     const auto saved = harness.core().export_session(kSession, "exported", writer, {});
     require(saved.state == rt::DurableExportState::Exported, "held export did not complete");
+    harness.release_stalls();
     require_finished(harness.await(resident), FinishReason::OutputLimit,
                      "resident after export pin retirement");
     require(harness.core().is_available(), "export retirement failed the Engine");
