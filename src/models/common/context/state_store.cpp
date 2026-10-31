@@ -52,6 +52,45 @@ StateImageStore::ReadLease StateImageStore::read(Handle handle) {
     return ReadLease(*this, handle, object.content_epoch);
 }
 
+bool StateImageStore::prepare_host_export(std::span<const Handle> images,
+                                          CudaExecutionView execution) {
+    std::size_t missing = 0;
+    for (const auto image : images) {
+        const auto& object = require(image);
+        if (object.role != StateImageRole::CheckpointImmutable)
+            throw std::logic_error("StateImage export requires immutable content");
+        if (object.destination_pinned || has_pending_replica(object) ||
+            (object.device_slot && object.source_pins != 0))
+            return false;
+        missing += !object.host_slot;
+    }
+    // Reserve the whole set before submitting copies: a capacity refusal must not partially
+    // demote the export's sources or leave asynchronous writes into returned Host allocations.
+    std::vector<Transfer> transfers;
+    transfers.reserve(missing);
+    for (const auto image : images) {
+        if (host_resident(image)) continue;
+        auto transfer = reserve_device_to_host(image);
+        if (!transfer) return false;
+        transfers.push_back(std::move(*transfer));
+    }
+    if (!transfers.empty()) {
+        try {
+            for (const auto& transfer : transfers) transfer.enqueue(execution);
+            CUDA_CHECK(cudaStreamSynchronize(execution.stream()));
+        } catch (...) {
+            (void)cudaStreamSynchronize(execution.stream());
+            throw;
+        }
+        for (auto& transfer : transfers) transfer.publish(false);
+    }
+    for (const auto image : images) {
+        if (device_resident(image) && !drop_device_replica(image))
+            throw std::logic_error("StateImage export could not release its Device replica");
+    }
+    return true;
+}
+
 StateImageStore::Destination::Destination(StateImageStore& store, Handle image)
     : store_(&store), image_(image) {
     if (store.role(image) != StateImageRole::ReservedDestination)

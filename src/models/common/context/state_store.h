@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -135,6 +136,13 @@ public:
     };
 
     [[nodiscard]] ReadLease read(Handle image);
+
+    // Before long-lived export readers are acquired, materialize immutable images in the
+    // counted Host arena and release their Device replicas. Producers must already be settled.
+    // Returns false without changing residency if a Device reader or Host capacity prevents
+    // preparation. On success, read(image).host_view() does not retain execution slots.
+    [[nodiscard]] bool prepare_host_export(std::span<const Handle> images,
+                                           CudaExecutionView execution);
 
     StateImageStore(StateImageStorage& device, HostContextArena* host,
                     std::uint32_t logical_capacity);

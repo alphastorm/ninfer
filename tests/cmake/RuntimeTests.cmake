@@ -60,6 +60,23 @@ ninfer_add_test(ninfer_checkpoint_owner_test
   LIBRARIES ninfer_runtime_support)
 set_tests_properties(ninfer_checkpoint_owner_test PROPERTIES LABELS "host" TIMEOUT 30)
 
+ninfer_add_test(ninfer_export_state_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_export_state.cpp"
+          "${PROJECT_SOURCE_DIR}/src/models/common/context/state_store.cpp"
+  LIBRARIES ninfer_core)
+ninfer_cuda_test_interposition(ninfer_export_state_test)
+if(WIN32)
+  set_tests_properties(ninfer_export_state_test PROPERTIES
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:ninfer_test_cudart>")
+else()
+  foreach(symbol IN ITEMS cudaGetDeviceCount cudaGetDevice cudaSetDevice cudaSetDeviceFlags
+      cudaGetDeviceProperties cudaGetDeviceProperties_v2 cudaStreamCreateWithFlags
+      cudaStreamDestroy cudaMallocHost cudaFreeHost cudaMemcpyAsync cudaStreamSynchronize)
+    target_link_options(ninfer_export_state_test PRIVATE "LINKER:--wrap=${symbol}")
+  endforeach()
+endif()
+set_tests_properties(ninfer_export_state_test PROPERTIES LABELS "host" TIMEOUT 30)
+
 ninfer_add_test(ninfer_kv_capacity_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_kv_capacity.cpp"
   LIBRARIES ninfer_runtime_support)
