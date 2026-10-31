@@ -61,6 +61,14 @@ reader lease。只要旧 owner 还有 leased 检查点，新请求就只能独�
 GPU-free `ninfer_checkpoint_owner_test` 使用真实 `CheckpointStore::Lease` 覆盖导入、终点
 supersession、兄弟分叉、取消和 reader 退休；此规则与 DFlash2、MTP 或具体 GPU 架构无关。
 
+Qwen3.5 durable export 在取得长期 State reader 之前，先把完整不可变 State 镜像复制到已计费的
+Host arena，并归还 Device 副本。所有 Host 目的先预约、复制完成后才发布；容量不足或仍有
+Device reader 时拒绝本次 export，不拆除所有权保护。已有 Host 副本不重复复制。随后磁盘写入只
+持有 Host State reader，分叉可恢复到独立 Device 槽，不必等待整个 KV/State 文件写完。
+DFlash2 的 local ring、hidden 和 recurrent state 一起逐字节保存；没有新 frontier、重算或
+舍弃检查点。GPU-free `ninfer_export_state_test` 用真实 State store 覆盖三槽全满、export reader
+存活时恢复、输出副本独立性、容量拒绝和复制失败后的恢复。它不替代 GPU 输出一致性和 TTFT 验收。
+
 <a id="capacity"></a>
 ## 3. 容量与执行许可
 

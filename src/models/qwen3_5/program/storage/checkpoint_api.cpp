@@ -442,6 +442,9 @@ ExportLease Program::prepare_checkpoint_export(std::span<const CheckpointHandle>
         // Retire native producers once. Off-lock copies never resolve a live handle again.
         p.device.synchronize();
         CUDA_CHECK(cudaStreamSynchronize(p.device.transfer_stream()));
+        // Disk serialization can outlive many requests. Pin Host State replicas, not every
+        // execution slot: forks must be able to restore while this export still owns readers.
+        capacity(p.state_store->prepare_host_export(images, p.device.transfer_view()));
         for (std::size_t pool = 0; pool < out->index.pools.size(); ++pool) {
             auto& saved = out->index.pools[pool];
             if (saved.pages.empty()) continue;
@@ -492,14 +495,12 @@ ExportLease Program::prepare_checkpoint_export(std::span<const CheckpointHandle>
                                           native.state_bytes, std::string(64, '0'), 256});
             out->index.states.push_back({native.state_layout_sha256, payload, 0, native.state_bytes});
             out->states.push_back(p.state_store->read(image));
-            const bool host = p.state_store->host_resident(image);
-            const auto source = host ? out->states.back().host_view() :
-                ConstMemorySpan(p.state_images->storage().image(out->states.back().device_slot()));
+            const auto source = out->states.back().host_view();
             ExportRecord record{payload, 0, static_cast<std::size_t>(native.state_bytes)};
             for (const auto& field : schema.fields)
                 record.copies.push_back({static_cast<const std::byte*>(source.data) + field.tensor.region.offset,
                     field.tensor.region.offset, field.layer_stride, field.layer_stride,
-                    field.tensor.region.bytes, field.layers, !host});
+                    field.tensor.region.bytes, field.layers, false});
             out->staging = std::max(out->staging, record.bytes);
             out->records.push_back(std::move(record));
         }
