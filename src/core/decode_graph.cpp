@@ -74,6 +74,9 @@ void DecodeGraphDefinition::capture(cudaStream_t stream, const std::function<voi
 }
 
 DecodeGraphCapture::DecodeGraphCapture(cudaStream_t stream) : stream_(stream) {
+    if (stream_ == nullptr || stream_ == cudaStreamLegacy) {
+        throw std::invalid_argument("CUDA Graph capture requires a non-legacy stream");
+    }
     check_graph(cudaStreamBeginCapture(stream_, cudaStreamCaptureModeThreadLocal),
                 "cudaStreamBeginCapture");
 }
