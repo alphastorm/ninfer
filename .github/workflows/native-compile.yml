@@ -82,7 +82,7 @@ jobs:
             ninfer_automatic_checkpoint_queue_test ninfer_io_uring_checkpoint_backend_test \
             ninfer_io_uring_checkpoint_read_queue_test \
             ninfer_qwen3_5_loading_test ninfer_qwen3_5_state_image_layout_test \
-            ninfer_rk4v4_codec_test ninfer_rk4v4_test ninfer_decode_graph_capture_test \
+            ninfer_rk4v4_codec_test ninfer_rk4v4_pages_test ninfer_rk4v4_test ninfer_decode_graph_capture_test \
             ninfer_qwen3_5_head_logits_test ninfer_cli_options_test ninfer_serve_options_test \
             ninfer_request_log_test ninfer_linear_split_two_output_test ninfer_fp32_logits_test
       # Do not execute ninfer-serve or the numerical Op test: they require a GPU host.
@@ -90,7 +90,7 @@ jobs:
         shell: bash
         run: |
           ctest --test-dir build --output-on-failure --no-tests=error \
-            -R '^ninfer_(decode_graph_capture|rk4v4_codec|public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|memory|http_transport|qwen3_5_(loading|head_logits|state_image_layout)|cli_options|serve_options|request_log|engine_core|kv_capacity|speculative_metrics|metrics|engine_checkpoint_(control|adapter)|resource_manager|checkpoint_owner|export_state|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue|io_uring_checkpoint_(backend|read_queue|handle-allocation|teardown))_test$'
+            -R '^ninfer_(decode_graph_capture|rk4v4_(codec|pages)|public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|memory|http_transport|qwen3_5_(loading|head_logits|state_image_layout)|cli_options|serve_options|request_log|engine_core|kv_capacity|speculative_metrics|metrics|engine_checkpoint_(control|adapter)|resource_manager|checkpoint_owner|export_state|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue|io_uring_checkpoint_(backend|read_queue|handle-allocation|teardown))_test$'
       - name: Cache statistics
         if: always()
         run: ccache --show-stats
