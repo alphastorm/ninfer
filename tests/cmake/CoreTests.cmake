@@ -3,11 +3,12 @@
 add_executable(ninfer_public_api_test "${CMAKE_CURRENT_LIST_DIR}/../test_public_api.cpp")
 target_include_directories(ninfer_public_api_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
 add_test(NAME ninfer_public_api_test COMMAND ninfer_public_api_test)
+ninfer_test_host_lanes(ninfer_public_api_test ninfer_public_api_test bounded native)
 
 ninfer_add_test(ninfer_rk4v4_codec_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_rk4v4_codec.cpp"
   LIBRARIES ninfer_core)
-set_tests_properties(ninfer_rk4v4_codec_test PROPERTIES LABELS "host")
 
 ninfer_add_test(ninfer_checkpoint_io_contract_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_checkpoint_io_contract.cpp"
@@ -23,26 +24,30 @@ set_tests_properties(ninfer_checkpoint_io_contract_test
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   ninfer_add_test(ninfer_io_uring_checkpoint_backend_test
+    HOST_LANES bounded native
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_io_uring_checkpoint_backend.cpp"
             ${PROJECT_SOURCE_DIR}/src/runtime/platform/linux/io_uring_checkpoint_backend.cpp
     LIBRARIES ninfer_checkpoint_contract ninfer_durable_io)
   target_compile_definitions(ninfer_io_uring_checkpoint_backend_test
     PRIVATE NINFER_IO_URING_TESTING=1)
   set_tests_properties(ninfer_io_uring_checkpoint_backend_test
-    PROPERTIES LABELS "host" SKIP_RETURN_CODE 77)
+    PROPERTIES SKIP_RETURN_CODE 77)
   ninfer_add_test(ninfer_io_uring_checkpoint_read_queue_test
+    HOST_LANES bounded native
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_io_uring_checkpoint_read_queue.cpp"
             ${PROJECT_SOURCE_DIR}/src/runtime/platform/linux/io_uring_checkpoint_backend.cpp
     LIBRARIES ninfer_checkpoint_contract ninfer_durable_io)
   target_compile_definitions(ninfer_io_uring_checkpoint_read_queue_test
     PRIVATE NINFER_IO_URING_TESTING=1)
   set_tests_properties(ninfer_io_uring_checkpoint_read_queue_test
-    PROPERTIES LABELS "host" SKIP_RETURN_CODE 77 TIMEOUT 60)
+    PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
   foreach(case IN ITEMS handle-allocation teardown)
     add_test(NAME ninfer_io_uring_checkpoint_${case}_test
       COMMAND ninfer_io_uring_checkpoint_read_queue_test ${case})
     set_tests_properties(ninfer_io_uring_checkpoint_${case}_test
-      PROPERTIES LABELS "host" TIMEOUT 60)
+      PROPERTIES TIMEOUT 60)
+    ninfer_test_host_lanes(ninfer_io_uring_checkpoint_${case}_test
+      ninfer_io_uring_checkpoint_read_queue_test bounded native)
   endforeach()
 endif()
 ninfer_add_test(ninfer_uint128_test
@@ -53,9 +58,9 @@ add_test(NAME ninfer_uint128_exact_test
 set_tests_properties(ninfer_uint128_test ninfer_uint128_exact_test PROPERTIES LABELS "host")
 
 ninfer_add_test(ninfer_durable_file_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../io/test_durable_file.cpp"
   LIBRARIES ninfer_durable_io)
-set_tests_properties(ninfer_durable_file_test PROPERTIES LABELS "host")
 if(WIN32)
   foreach(case IN ITEMS pinned-destination reparse-guard identity-guards directory-publication extended-paths)
     add_test(NAME ninfer_durable_file_${case}_test COMMAND ninfer_durable_file_test ${case})
@@ -84,6 +89,7 @@ if(WIN32)
 endif()
 foreach(part IN ITEMS system task_pool executor)
   ninfer_add_test(ninfer_cpu_${part}_test
+    HOST_LANES bounded native
     SOURCES "${CMAKE_CURRENT_LIST_DIR}/../cpu/test_${part}.cpp"
     LIBRARIES ninfer_cpu)
   set_tests_properties(ninfer_cpu_${part}_test PROPERTIES TIMEOUT 30)
@@ -113,6 +119,7 @@ ninfer_add_test(ninfer_decode_graph_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../t
   LIBRARIES ninfer_core)
 
 ninfer_add_test(ninfer_decode_graph_capture_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_decode_graph_capture.cpp"
   LIBRARIES ninfer_core)
 ninfer_cuda_test_interposition(ninfer_decode_graph_capture_test)
@@ -126,7 +133,6 @@ else()
     target_link_options(ninfer_decode_graph_capture_test PRIVATE "LINKER:--wrap=${symbol}")
   endforeach()
 endif()
-set_tests_properties(ninfer_decode_graph_capture_test PROPERTIES LABELS "host")
 
 ninfer_add_test(ninfer_gpu_keep_warm_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_gpu_keep_warm.cpp"
@@ -137,6 +143,7 @@ ninfer_add_test(ninfer_tensor_test       SOURCES "${CMAKE_CURRENT_LIST_DIR}/../t
   LIBRARIES ninfer_core)
 
 ninfer_add_test(ninfer_memory_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_memory.cpp"
+  HOST_LANES native
   LIBRARIES ninfer_core)
 
 ninfer_add_test(ninfer_nf4_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_nf4.cpp"
@@ -185,12 +192,14 @@ ninfer_add_test(ninfer_host_timing_test
   LIBRARIES ninfer_core)
 
 ninfer_add_test(ninfer_jinja_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../text/test_jinja.cpp"
   LIBRARIES ninfer_jinja ninfer::json)
 
 add_test(NAME ninfer_chat_templates_test
   COMMAND ${Python3_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/text/test_chat_templates.py
           $<TARGET_FILE:ninfer_jinja_test>)
+ninfer_test_host_lanes(ninfer_chat_templates_test ninfer_jinja_test bounded native)
 
 ninfer_add_test(ninfer_weight_bank_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_weight_bank.cpp"
   LIBRARIES ninfer_core)

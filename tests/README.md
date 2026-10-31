@@ -88,6 +88,34 @@ After building, `ctest --preset dev` runs the same CTest suite. See
 
 The chat-template reference test uses Python Jinja2.
 
+### GPU-free CI selection
+
+CMake declarations own the Linux host selections and their executable build dependencies:
+
+```bash
+cmake --build build --parallel 2 --target ninfer_host_bounded_tests
+ctest --test-dir build --output-on-failure --no-tests=error -L '^host-bounded$'
+
+cmake --build build --parallel 2 --target ninfer_host_native_tests
+ctest --test-dir build --output-on-failure --no-tests=error -L '^host-native$'
+```
+
+Use `HOST_LANES bounded native` in `ninfer_add_test` for a GPU-free contract selected by both
+Linux workflows, or only the applicable lane. For direct `add_test` registrations, including
+Python oracles and cases sharing an executable, call
+`ninfer_test_host_lanes(test_name executable_target bounded native)` after registration.
+The helper appends `host` and the lane labels and adds the executable to the corresponding
+aggregate build target. Do not overwrite those labels with a later `LABELS` assignment.
+The broader existing `host` label is not the bounded selection: it also includes contracts
+outside these CI closures. The Windows checkpoint selection is unchanged.
+
+Keep GPU-freedom explicit during review: several host contracts interpose CUDA, so linkage
+alone cannot distinguish them from device tests. New GPU-free CI contracts must declare their
+lane here, not add test names or regex alternatives to workflow files.
+The migration PR's Linux job prints both label-selected sets and compares them with the
+explicit selectors in frozen N16 (`26fa28d0`), failing on any missing or extra test.
+That proof runs only for `ci/ctest-labels`, so it does not freeze future CMake-only additions.
+
 The bounded Linux job in `.github/workflows/build.yml` builds and runs the GPU-free
 `ninfer_io_uring_checkpoint_read_queue_test`. It checks that partial submission and invalid
 completion attribution make a closed ring unavailable, preserve the original failure for queued
