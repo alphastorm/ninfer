@@ -116,7 +116,12 @@ ninfer_add_test(ninfer_decode_graph_capture_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_decode_graph_capture.cpp"
   LIBRARIES ninfer_core)
 ninfer_cuda_test_interposition(ninfer_decode_graph_capture_test)
-if(NOT WIN32)
+if(WIN32)
+  # The GPU-free process still loads cudart. The configure step's PATH is not
+  # inherited by a separate CI test step; bind the discovered DLL directory.
+  set_tests_properties(ninfer_decode_graph_capture_test PROPERTIES
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:ninfer_test_cudart>")
+else()
   foreach(symbol IN ITEMS cudaStreamBeginCapture cudaStreamEndCapture cudaGraphDestroy)
     target_link_options(ninfer_decode_graph_capture_test PRIVATE "LINKER:--wrap=${symbol}")
   endforeach()
