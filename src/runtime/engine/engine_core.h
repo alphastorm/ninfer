@@ -2230,9 +2230,11 @@ private:
                     if (!instance_.program->has_context_operation()) { continue; }
                     break;
                 }
-                // A save can still complete. Pending is not Native impossibility and must
-                // neither fail the oldest resident nor consume another destructive plan.
-                if (checkpoints_.pending()) { break; }
+                // A save can still complete. Off-worker export leases pin Native cache
+                // resources even without a pending pressure callback. Their retirement
+                // releases capacity; neither case is Native impossibility or permission
+                // to consume another destructive plan.
+                if (checkpoints_.pending() || checkpoint_exports_in_flight_ != 0) { break; }
                 if (recovering == lane) {
                     throw std::logic_error("protected recovery exceeded its Native reservation");
                 }
