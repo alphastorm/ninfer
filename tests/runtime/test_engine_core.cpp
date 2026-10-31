@@ -139,6 +139,7 @@ public:
         bool binding_held     = false;
         bool pause_started    = false;
         bool paused           = false;
+        bool export_blocked   = false;
     };
 
     template <class Update>
@@ -179,12 +180,13 @@ enum class Script : std::uint8_t {
     Pressure,        // Stall; its unit cannot be reserved while a victim is active.
     VictimHold,      // Stall; its pause stays in flight until cancellation aborts it.
     VictimPause,     // Stall; its pause publishes Replay state, whose restore never fits.
+    ExportPressure, // Stall; released units need the capacity pinned by a checkpoint export.
 };
 
 [[nodiscard]] bool stalls(Script script) noexcept {
     return script == Script::Stall || script == Script::DecodeFailure ||
            script == Script::Pressure || script == Script::VictimHold ||
-           script == Script::VictimPause;
+           script == Script::VictimPause || script == Script::ExportPressure;
 }
 
 [[nodiscard]] bool victim(Script script) noexcept {
@@ -585,6 +587,11 @@ public:
 
     [[nodiscard]] rt::ResourceReservation<Resources> reserve_units(std::span<const Unit> units) {
         require(units.size() == 1, "Engine reserves one unit per row");
+        if (live(units.front().sequence).script == Script::ExportPressure &&
+            events_.stall_released.load() && staged_exports_ != 0) {
+            events_.record([](Events::State& state) { state.export_blocked = true; });
+            return {.shortage = {.kv_page_groups = {1}}};
+        }
         if (live(units.front().sequence).script == Script::Pressure &&
             std::any_of(lanes_.begin(), lanes_.end(),
                         [](const Lane& lane) { return lane.active && victim(lane.script); })) {
@@ -1144,6 +1151,22 @@ public:
     [[nodiscard]] bool finish() override { return true; }
 };
 
+class CallbackWriter final : public rt::ContinuationCheckpointWriter {
+public:
+    explicit CallbackWriter(std::function<void()> callback) : callback_(std::move(callback)) {}
+
+    bool write_file(std::string_view, std::uint64_t, std::uint64_t, std::span<const std::byte>,
+                    std::uint32_t) override {
+        callback_();
+        return true;
+    }
+
+    [[nodiscard]] bool finish() override { return true; }
+
+private:
+    std::function<void()> callback_;
+};
+
 // Aborts an uncommitted restore on the worker, as destroying DurableEngineImport does.
 struct Restore {
     rt::PreparedEngineCheckpoint prepared;
@@ -1517,6 +1540,33 @@ void durable_export_release() {
     require_durable(stats, {.catalog = 1, .host = 1}, "durable export lease retirement");
 }
 
+// A completed sibling's off-worker export can pin the only reclaimable KV while a
+// resident needs its next unit. This is temporary pressure, not native impossibility.
+void resident_waits_for_export() {
+    Harness harness(2, true);
+    auto completed = harness.submit_turn(Script::Complete, "exported");
+    require_finished(harness.await(completed), FinishReason::OutputLimit, "export source");
+    harness.core().response_stored(kSession, "exported");
+    auto resident = harness.submit(Script::ExportPressure, 1);
+    harness.events().await([](const Events::State& state) { return state.bound == 2; },
+                           "the export-blocked resident");
+    CallbackWriter writer([&] {
+        harness.release_stalls();
+        harness.events().await([](const Events::State& state) { return state.export_blocked; },
+                               "resident pressure while the export lease is held");
+        // Waiting for the lease must not freeze rows whose next unit already fits.
+        auto sibling = harness.submit(Script::Complete, 1);
+        require_finished(harness.await(sibling), FinishReason::OutputLimit,
+                         "runnable sibling during an export");
+        require(harness.core().is_available(), "export pressure failed the Engine");
+    });
+    const auto saved = harness.core().export_session(kSession, "exported", writer, {});
+    require(saved.state == rt::DurableExportState::Exported, "held export did not complete");
+    require_finished(harness.await(resident), FinishReason::OutputLimit,
+                     "resident after export pin retirement");
+    require(harness.core().is_available(), "export retirement failed the Engine");
+}
+
 // An older turn that completes after a newer turn was acknowledged can never become the session's
 // committed endpoint. It is not named for the session, so saving it reports absence instead of a
 // retryable tag race; a newer unacknowledged turn keeps its name and the acknowledged endpoint
@@ -1571,6 +1621,7 @@ int main() {
         Case{"durable_import_commit", durable_import_commit},
         Case{"durable_import_abort", durable_import_abort},
         Case{"durable_export_release", durable_export_release},
+        Case{"resident_waits_for_export", resident_waits_for_export},
         Case{"late_turn_after_acknowledgement", late_turn_after_acknowledgement},
     };
     int failures = 0;
