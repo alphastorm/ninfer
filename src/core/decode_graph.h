@@ -28,6 +28,7 @@ private:
 
 // An unfinished capture is discarded on scope exit. All participating streams must
 // rejoin the origin before finish(); the definition owns the resulting graph.
+// The legacy default stream (nullptr or cudaStreamLegacy) is not capturable.
 class DecodeGraphCapture {
 public:
     explicit DecodeGraphCapture(cudaStream_t stream);

@@ -16,7 +16,9 @@ int run(int heads, int width, int depth, int batch, bool masked, bool graph) {
     const int qheads = heads == 4 ? 24 : 16, live = depth + width;
     const int pages = (live + 63)/64, physical = batch*pages + 1;
     const auto device = cuda_environment().context.device();
-    const auto execution = cuda_environment().default_execution;
+    // Graph capture cannot use the fixture's legacy default stream. Use the same
+    // owned nonblocking compute stream as production, including eager warmup.
+    const auto execution = cuda_environment().context.execution_view();
     std::vector<int> tables(pages*batch), rows(batch), valid(batch, width), positions(width*batch);
     for (int b = 0; b < batch; ++b) {
         rows[b] = batch-1-b;
@@ -77,6 +79,9 @@ int run(int heads, int width, int depth, int batch, bool masked, bool graph) {
     const auto bytes = ops::causal_softmax_attention_workspace_capacity_bytes(geometry,KvCacheStorage::Rk4V4,envelope,batch,width,width,execution.multiprocessor_count());
     DeviceBuffer scratch(device,bytes); MemoryArena arena(scratch.span());
     const auto invoke = [&] { ops::causal_softmax_attention(tq,tk,tv,tp,tc,tr,geometry,0.0625f,cache,envelope,arena,out,execution); };
+    // Fixture uploads/fills use the legacy stream; finish them before handing
+    // these buffers to the independent nonblocking stream, outside capture.
+    cuda_synchronize();
     invoke(); cuda_synchronize();
     if (graph) {
         DecodeGraphDefinition definition;
@@ -135,7 +140,7 @@ int run(int heads, int width, int depth, int batch, bool masked, bool graph) {
         failures += verify_reduction("rk4 FP64 attention",actual,expected,criterion);
     }
     failures += ck.verify_guards("rk4 keys")+cv.verify_guards("rk4 values")+sk.verify_guards("rk4 key scales")+sv.verify_guards("rk4 value scales")+output.verify_guards("rk4 output");
-    std::cout << "rk4 h="<<heads<<" W="<<width<<" depth="<<depth<<" B="<<batch<<" masked="<<masked<<" failures="<<failures<<'\n';
+    std::cout << "rk4 h="<<heads<<" W="<<width<<" depth="<<depth<<" B="<<batch<<" masked="<<masked<<" graph="<<graph<<" failures="<<failures<<'\n';
     return failures;
 }
 }

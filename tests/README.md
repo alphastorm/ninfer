@@ -134,6 +134,13 @@ independent FP64 represented-cache oracle with the unchanged INT8 numerical budg
 `ninfer_session_checkpoint_store_test` also checks RK4V4 same-format restore and
 cross-format/native-codec-version refusal without quarantining valid checkpoints.
 
+The RK4V4 oracle uses the owned nonblocking compute stream, not the fixture's legacy
+default stream. Upload/fill completion and warmup synchronization happen before capture.
+`ninfer_decode_graph_capture_test` is GPU-free: it interposes only graph CUDA entry points
+while exercising the real capture owner, rejects null/explicit legacy streams before CUDA
+or the body runs, and checks valid capture, failed-body cleanup, and recovery. It does not
+replace the real RK4V4 graph-replay numerical test.
+
 Run the RMSNorm and GDN control families together:
 
 ```bash
