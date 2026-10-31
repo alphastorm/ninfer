@@ -109,9 +109,10 @@ def product_protocol_fixture() -> dict:
     }
 
 
-# v0.7.0-qwen38-3090-beta.2, the RTX 3090 lane omp-ninfer v0.13.1 shipped: its installed lifecycle
+# v0.7.0-qwen38-3090-beta.3, the RTX 3090 lane omp-ninfer v0.14.0 shipped: its installed lifecycle
 # scripts and its GPU-owner policy are the predecessor state later releases install over.
-PREDECESSOR_3090 = "7a25cd72f490183e4113f1e84e68e36d653ddd28"
+PREDECESSOR_3090 = "2c6f423bd817b6534158553e1b34ab4959c43165"
+PREDECESSOR_3090_BETA2 = "7a25cd72f490183e4113f1e84e68e36d653ddd28"
 SYNTHETIC_GPU_UUID = "GPU-00000000-0000-4000-8000-000000003090"
 SYNTHETIC_GPU_PCI = "00000000:65:00.0"
 # The protected-state ACLs are Windows-only and are qualified on Windows hosts. These scenarios
@@ -183,21 +184,21 @@ def synthetic_nvidia_smi(program_files: Path, power_limit_w: int) -> Path:
     return limit
 
 
-def running_predecessor_3090(directory: Path) -> SimpleNamespace:
-    """A state root as the v0.13.1 RTX 3090 lane leaves it before its controller takes the GPU
-    owner: the beta.2 lifecycle controllers installed and hash-bound by the lifecycle state, and
+def running_predecessor_3090(directory: Path, predecessor: str = PREDECESSOR_3090) -> SimpleNamespace:
+    """A state root as the shipped RTX 3090 lane leaves it before its controller takes the GPU
+    owner: the predecessor lifecycle controllers installed and hash-bound by the lifecycle state, and
     the card at the owner's own power limit. Only fields the stop and status read are recorded."""
-    spec = json.loads(committed_bytes(PREDECESSOR_3090, "packaging/windows/lanes/rtx3090/release-spec.json"))
+    spec = json.loads(committed_bytes(predecessor, "packaging/windows/lanes/rtx3090/release-spec.json"))
     policy = spec["lifecycle"]["gpu_owner_controller_protocol"]
     root = directory / spec["lifecycle"]["state_root_name"]
     program_files = directory / "Program Files"
     power_limit = synthetic_nvidia_smi(program_files, policy["owner_power_limit_w"])
-    install_script(committed_bytes(PREDECESSOR_3090, "packaging/windows/Control-Release.ps1"),
+    install_script(committed_bytes(predecessor, "packaging/windows/Control-Release.ps1"),
                    root / "Control-Release.ps1")
     owner_controller = root / "gpu-owner" / "Control-GpuOwner.ps1"
     owner_sha256 = install_script(
-        committed_bytes(PREDECESSOR_3090, "packaging/windows/Control-GpuOwner.ps1"), owner_controller)
-    instance = f"{spec['release_id']}-{PREDECESSOR_3090[:12]}"
+        committed_bytes(predecessor, "packaging/windows/Control-GpuOwner.ps1"), owner_controller)
+    instance = f"{spec['release_id']}-{predecessor[:12]}"
     release_root = root / "releases" / instance
     record = {
         "release_root": str(release_root),
@@ -206,7 +207,7 @@ def running_predecessor_3090(directory: Path) -> SimpleNamespace:
         "deployment_profile": spec["deployment_profile"], "build_profile": spec["build_profile"],
         "cuda_architecture": spec["gpu"]["cuda_architecture"],
         "upstream_base_sha": spec["source"]["upstream_base_sha"],
-        "lineage_base_sha": spec["source"]["lineage_base_sha"], "patch_stack_sha": PREDECESSOR_3090,
+        "lineage_base_sha": spec["source"]["lineage_base_sha"], "patch_stack_sha": predecessor,
         "model_artifact_sha256": spec["model"]["sha256"],
         "managed_stop": spec["lifecycle"]["managed_stop"],
         "graceful_stop_timeout_seconds": spec["lifecycle"]["graceful_stop_timeout_seconds"],
@@ -277,6 +278,7 @@ if($null -eq $observed.handoff_refusal){
   & $Bundle -Action stop -StateRoot $ownerStateRoot @successorPolicy|Out-Null
   $observed.successor=Get-OwnerObservation
 }
+$observed.outer_prior_power_limit_w=[int](Get-Content -Raw -LiteralPath (Join-Path $ownerStateRoot 'lease.json')|ConvertFrom-Json).prior_power_limit_w
 $observed|ConvertTo-Json -Compress -Depth 4
 """
 
@@ -299,8 +301,8 @@ def interrupted_upgrade(directory: Path) -> SimpleNamespace:
     lease, and the incumbent's trees beside the candidate's. Controllers log what they are asked."""
     root = directory / "qwen38-3090-native"
     operation = "5" * 32
-    candidate = "qwen38-3090-native-v0.7.0-beta.3-" + "c" * 12
-    incumbent = "qwen38-3090-native-v0.7.0-beta.2-" + "b" * 12
+    candidate = "qwen38-3090-native-v0.8.0-beta.1-" + "c" * 12
+    incumbent = "qwen38-3090-native-v0.7.0-beta.3-" + PREDECESSOR_3090[:12]
     transaction_root = root / "receipts" / "install-transactions" / operation
     snapshots = transaction_root / "snapshots"
     snapshots.mkdir(parents=True)
@@ -484,6 +486,7 @@ LAUNCH_PREAMBLE = """Set-StrictMode -Version Latest
 function Assert-SelectedGpuIdentity { 0 }
 function Get-NetTCPConnection { }
 function Get-ScheduledTask { }
+function Get-CimInstance { }
 $statePath=Join-Path $StateRoot 'state.json'
 $state=Get-Content -Raw -LiteralPath $statePath|ConvertFrom-Json
 $release=$state.releases.PSObject.Properties[[string]$state.active_release].Value
@@ -524,7 +527,11 @@ function Start-ScheduledTask {
   $global:server=Start-Process -FilePath ([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName) -ArgumentList @('-NoProfile','-NonInteractive','-Command','Start-Sleep -Seconds 120') -PassThru
   [IO.File]::WriteAllText($runtimePath,([ordered]@{artifact_type='ninfer_windows_runtime_state';schema_version=2;release_id=[string]$state.active_release;pid=$global:server.Id;start_time_utc_ticks=$global:server.StartTime.ToUniversalTime().Ticks}|ConvertTo-Json))
 }
-function Get-CimInstance { [pscustomobject]@{ExecutablePath=[string]$release.server_executable} }
+function Get-CimInstance {
+  if($null -ne $global:server -and -not $global:server.HasExited){
+    [pscustomobject]@{ExecutablePath=[string]$release.server_executable;ProcessId=$global:server.Id}
+  }
+}
 function Stop-ManagedProcess {
   if($StopOutcome -ceq 'survived'){throw 'owned server process did not stop'}
   $global:server.Kill();$global:server.WaitForExit();Remove-Item -LiteralPath $runtimePath
@@ -1786,8 +1793,8 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         controller = (WINDOWS / "Control-Release.ps1").read_text(encoding="utf-8")
         run = controller[controller.index("function Invoke-Run"):]
         run = run[:run.index("\nfunction ")]
-        self.assertIn("if ($ownerLeaseHeld -and -not (Test-ManagedActionInProgress)) "
-                      "{ Restore-GpuOwnerLease }", run)
+        self.assertIn("($null -eq $process -or $process.HasExited)", run)
+        self.assertIn("-not (Test-ManagedActionInProgress)) { Restore-GpuOwnerLease }", run)
         probe = controller[controller.index("function Test-ManagedActionInProgress"):]
         self.assertIn("action.lock", probe[:probe.index("\nfunction ")])
         owner = (WINDOWS / "Control-GpuOwner.ps1").read_text(encoding="utf-8")
@@ -2612,37 +2619,61 @@ foreach($suffix in @('missing','inspection')){{
 
     @unittest.skipIf(sys.platform == "win32", "the synthetic nvidia-smi is a POSIX shell script")
     def test_upgrade_retires_the_running_incumbent_lease_before_the_successor_policy(self) -> None:
-        """alphastorm/omp-ninfer#94: a running v0.13.1 RTX 3090 lane holds the GPU owner under the
-        beta.2 policy, and its successor caps the card differently. The installer judges that lease
+        """alphastorm/omp-ninfer#94/#116: beta.2 changed-cap and beta.3 equal-cap transitions.
+        The installer judges the lease
         under the incumbent's own policy and hash-bound controller, lets the incumbent's managed stop
         retire it, and only then applies the successor's policy, which takes the card at its cap.
         A lease the stop hands back to an owner pause that predates the lane stays the
-        predecessor's, and the successor's policy refuses it before replacing anything."""
+        predecessor's: equal-cap accepts it and changed-cap refuses it."""
         successor_spec = WINDOWS / "lanes/rtx3090/release-spec.json"
         successor_cap = json.loads(successor_spec.read_text(encoding="utf-8"))[
             "lifecycle"]["gpu_owner_controller_protocol"]["qualified_power_limit_w"]
-        for paused_before_launch in (False, True):
-            with self.subTest(paused_before_launch=paused_before_launch), \
+        for predecessor, paused_before_launch in (
+                (head, paused) for head in (PREDECESSOR_3090_BETA2, PREDECESSOR_3090)
+                for paused in (False, True)):
+            with self.subTest(predecessor=predecessor, paused_before_launch=paused_before_launch), \
                     tempfile.TemporaryDirectory() as directory:
-                lane = running_predecessor_3090(Path(directory))
+                lane = running_predecessor_3090(Path(directory), predecessor)
                 bundle = Path(directory) / "package" / "Control-GpuOwner.ps1"
                 install_script((WINDOWS / "Control-GpuOwner.ps1").read_bytes(), bundle)
                 values = {"StateRoot": lane.root, "ProgramFiles": lane.program_files,
                           "Gpu": SYNTHETIC_GPU_UUID, "GpuPci": SYNTHETIC_GPU_PCI}
                 self.invoke(ps_assignments(PausedBeforeLaunch=paused_before_launch, **values)
                             + ps_definitions(lane.root / "Control-Release.ps1") + PREDECESSOR_ACQUIRES_OWNER)
+                inner = json.loads((lane.root / "gpu-owner-lease.json").read_text())
+                self.assertEqual(inner["prior_paused"], paused_before_launch)
+                self.assertEqual(inner["phase"], "released")
                 observed = self.invoke(
                     ps_assignments(SuccessorSpec=successor_spec, Bundle=bundle, PowerLimit=lane.power_limit,
                                    Journal=Path(directory) / "journal.json", **values)
                     + ps_definitions(WINDOWS / "Install-Release.ps1") + UPGRADE_HANDOFF)
                 cap = lane.policy["qualified_power_limit_w"]
-                self.assertNotEqual(cap, successor_cap)
+                self.assertEqual(cap, 350 if predecessor == PREDECESSOR_3090 else 300)
+                self.assertEqual(successor_cap, 350)
                 held = {"power_limit_w": cap, "owner_lease_cap_w": cap, "release_lease": True}
                 self.assertEqual(observed["held"], held)
                 self.assertEqual(observed["validated"], held)
                 self.assertTrue(observed["incumbent_touched"])
+                self.assertEqual(observed["outer_prior_power_limit_w"], 370)
                 if paused_before_launch:
-                    self.assertIsNotNone(observed["handoff_refusal"])
+                    if cap == successor_cap:
+                        self.assertIsNone(observed["handoff_refusal"])
+                        self.assertEqual(observed["successor"], {
+                            "power_limit_w": cap, "owner_lease_cap_w": cap, "release_lease": False})
+                        restored = self.invoke(
+                            ps_assignments(**values) + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+$env:ProgramFiles=$ProgramFiles
+function Get-CimInstance { }
+Acquire-GpuOwnerLease
+$prior=(Get-GpuOwnerLease).prior_paused
+Restore-GpuOwnerLease
+$outer=Read-JsonFile (Join-Path (Join-Path $StateRoot 'gpu-owner-state') 'lease.json')
+@{prior=$prior;inner=Test-Path (Join-Path $StateRoot 'gpu-owner-lease.json');paused=$outer.paused;cap=$outer.qualified_power_limit_w;prior_w=$outer.prior_power_limit_w}|ConvertTo-Json -Compress
+""")
+                        self.assertEqual(restored, {"prior": True, "inner": False, "paused": True,
+                                                    "cap": 350, "prior_w": 370})
+                    else:
+                        self.assertIsNotNone(observed["handoff_refusal"])
                     self.assertEqual(observed["retired"], {
                         "power_limit_w": cap, "owner_lease_cap_w": cap, "release_lease": False})
                 else:
@@ -2659,6 +2690,225 @@ foreach($suffix in @('missing','inspection')){{
             ps_assignments(StateRoot=upgrade.root, Journal=upgrade.journal, Mode=mode,
                            LiveImages=";".join(str(image) for image in live_images))
             + ps_definitions(WINDOWS / "Install-Release.ps1") + ROLLBACK_ATTEMPT)
+
+    def test_directory_interruption_repairs_and_reinstalls_over_beta3(self) -> None:
+        """DB-R1: interrupt immediately after mkdir, before its caller can publish anything."""
+        for field, kind in (("release_root", "releases"), ("secret_directory", "secrets"),
+                            ("cache_root", "cache"), ("stage_path", None)):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
+                upgrade = interrupted_upgrade(Path(directory))
+                for target in upgrade.candidate_targets:
+                    shutil.rmtree(target)
+                journal = json.loads(upgrade.journal.read_text())
+                journal["flags"] = {key: False for key in journal["flags"]}
+                for key in ("release_root", "secret_directory", "cache_root", "stage_path"):
+                    journal[key] = None
+                upgrade.journal.write_text(json.dumps(journal))
+                target = (upgrade.root / kind / upgrade.candidate if kind else
+                          upgrade.root / ("staging-" + journal["operation_id"]))
+                observed = self.invoke(
+                    ps_assignments(StateRoot=upgrade.root, Journal=upgrade.journal, Target=target, Field=field)
+                    + ps_definitions(WINDOWS / "Install-Release.ps1") + """
+function New-Item([string]$ItemType,[string]$Path){
+  [IO.Directory]::CreateDirectory($Path)|Out-Null
+  throw 'interrupted immediately after mkdir'
+}
+$transaction=Read-JsonFile $Journal
+try{New-TransactionDirectory $transaction $Field $Target}catch{}
+$durable=Read-JsonFile $Journal
+@{recorded=$durable.$Field;exists=(Test-Path -LiteralPath $Target)}|ConvertTo-Json -Compress
+""")
+                self.assertTrue(observed["exists"])
+                self.assertEqual(observed["recorded"], str(target))
+                self.assertTrue(self.rollback_attempt(upgrade, "repair")["completed"])
+                self.assertFalse(target.exists())
+                self.invoke(ps_assignments(Journal=upgrade.journal, Target=target, Field=field)
+                            + ps_definitions(WINDOWS / "Install-Release.ps1") + """
+$transaction=Read-JsonFile $Journal
+New-TransactionDirectory $transaction $Field $Target
+'{}'
+""")
+                self.assertTrue(target.is_dir())
+                self.assertTrue(all(path.is_dir() for path in upgrade.incumbent_trees))
+
+    def test_incomplete_shutdown_blocks_rollback_and_repeated_repair(self) -> None:
+        """DB-R2: real managed Stop consumes a launch-bound report; no cache is disposable."""
+        for complete, refused in ((False, 0), (True, 1)):
+            with self.subTest(complete=complete, refused=refused), tempfile.TemporaryDirectory() as directory:
+                upgrade = interrupted_upgrade(Path(directory))
+                report_path = upgrade.candidate_targets[0] / "shutdown.json"
+                report_path.write_text(json.dumps({
+                    "artifact_type": "ninfer_serve_shutdown_report", "schema_version": 1,
+                    "launch_id": "1" * 32, "complete": complete, "saved": 0, "skipped": 0,
+                    "refused": refused,
+                }))
+                runtime = {
+                    "artifact_type": "ninfer_windows_runtime_state", "schema_version": 2,
+                    "release_id": upgrade.candidate, "pid": 4242, "start_time_utc_ticks": 1,
+                    "managed_stop": "stop-event", "stop_event": "Global\\NInfer-Serve-Stop-" + "1" * 32,
+                    "launch_id": "1" * 32, "shutdown_report": str(report_path),
+                }
+                runtime_path = upgrade.root / "runtime.json"
+                runtime_path.write_text(json.dumps(runtime))
+                # Real Stop, JSON I/O and receipt publication; Windows process/event APIs are stubs.
+                (upgrade.root / "Control-Release.ps1").write_text(
+                    "param([string]$Action,[string]$StateRoot)\n$ErrorActionPreference='Stop'\n"
+                    + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+function Get-State { Read-JsonFile (Join-Path $StateRoot 'state.json') }
+function Get-Release { [pscustomobject]@{managed_stop='stop-event';graceful_stop_timeout_seconds=1;server_executable=(Join-Path $StateRoot 'server.exe')} }
+$script:live=-not(Test-Path (Join-Path $StateRoot 'last-stop.json'))
+$script:child=[pscustomobject]@{Id=4242;HasExited=$false;ExitCode=0}
+$script:child|Add-Member ScriptMethod WaitForExit {$this.HasExited=$true;$script:live=$false}
+function Get-OwnedProcess { if($script:live){$script:child} }
+function Get-CimInstance { }
+function Get-ScheduledTaskInfo { }
+function Wait-ManagedWrapperExit { $true }
+function Request-ManagedStop { 'signalled' }
+Stop-ManagedProcess
+""")
+                for mode in ("rollback", "repair"):
+                    result = self.rollback_attempt(upgrade, mode)
+                    self.assertFalse(result["completed"], result)
+                    self.assertIn("incomplete", result["failure"])
+                    self.assertTrue(runtime_path.exists())
+                    self.assertTrue(all(path.exists() for path in upgrade.candidate_targets))
+                    self.assertEqual(json.loads(upgrade.journal.read_text())["status"], "repair_required")
+                    self.assertEqual(json.loads((upgrade.root / "last-stop.json").read_text())["outcome"],
+                                     "graceful_incomplete_shutdown")
+                    self.assertEqual(json.loads((upgrade.root / "state.json").read_text())["active_release"],
+                                     upgrade.candidate)
+
+    @unittest.skipIf(sys.platform == "win32", "the synthetic nvidia-smi is a POSIX shell script")
+    def test_nonrunning_beta3_stale_inner_lease_refuses_before_cutover(self) -> None:
+        """CM-R2: killed beta.3 wrapper left its lease; successor bytes differ, caps do not."""
+        with tempfile.TemporaryDirectory() as directory:
+            lane = running_predecessor_3090(Path(directory))
+            values = {"StateRoot": lane.root, "ProgramFiles": lane.program_files,
+                      "Gpu": SYNTHETIC_GPU_UUID, "GpuPci": SYNTHETIC_GPU_PCI}
+            self.invoke(ps_assignments(PausedBeforeLaunch=False, **values)
+                        + ps_definitions(lane.root / "Control-Release.ps1") + PREDECESSOR_ACQUIRES_OWNER)
+            bundle = Path(directory) / "package" / "Control-GpuOwner.ps1"
+            install_script((WINDOWS / "Control-GpuOwner.ps1").read_bytes() + b"\n# successor identity\n", bundle)
+            before = {name: (lane.root / name).read_bytes()
+                      for name in ("state.json", "gpu-owner-lease.json", "gpu-owner-state/lease.json")}
+            observed = self.invoke(
+                ps_assignments(Bundle=bundle, **values)
+                + ps_definitions(WINDOWS / "Install-Release.ps1") + """
+$env:ProgramFiles=$ProgramFiles
+$ownerStateRoot=Join-Path $StateRoot 'gpu-owner-state'
+$oldState=Read-JsonFile (Join-Path $StateRoot 'state.json')
+$policy=Get-GpuOwnerPolicyArguments $oldState.gpu_owner $Gpu
+$failure=$null
+try{Assert-GpuOwnerUpgradeReady $oldState $false $Bundle $policy ([pscustomobject]@{uuid=$Gpu;pci_bus_id=$GpuPci})}
+catch{$failure=$_.Exception.Message}
+@{failure=$failure}|ConvertTo-Json -Compress
+""")
+            self.assertIn("non-running incumbent", observed["failure"] or "")
+            for name, content in before.items():
+                self.assertEqual((lane.root / name).read_bytes(), content)
+            # Recovery stays with the original hash-bound controller, never the successor.
+            self.invoke(ps_assignments(**values) + """
+$env:ProgramFiles=$ProgramFiles
+function Get-ScheduledTask { }
+function Get-ScheduledTaskInfo { }
+& (Join-Path $StateRoot 'Control-Release.ps1') -Action Stop -StateRoot $StateRoot|Out-Null
+'{}'
+""")
+            self.assertFalse((lane.root / "gpu-owner-lease.json").exists())
+            self.assertEqual(int(lane.power_limit.read_text()), 370)
+            observed = self.invoke(ps_assignments(Bundle=bundle, **values)
+                                   + ps_definitions(WINDOWS / "Install-Release.ps1") + """
+$env:ProgramFiles=$ProgramFiles
+$ownerStateRoot=Join-Path $StateRoot 'gpu-owner-state'
+$oldState=Read-JsonFile (Join-Path $StateRoot 'state.json')
+Assert-GpuOwnerUpgradeReady $oldState $false $Bundle (Get-GpuOwnerPolicyArguments $oldState.gpu_owner $Gpu) ([pscustomobject]@{uuid=$Gpu;pci_bus_id=$GpuPci})
+'{}'
+""")
+            self.assertEqual(observed, {})
+
+    def test_failed_child_kill_retains_attribution_with_and_without_managed_action(self) -> None:
+        """GA-R1: exercise Invoke-Run's actual finally with a live child whose Kill throws."""
+        run = ps_function((WINDOWS / "Control-Release.ps1").read_text(), "Invoke-Run")
+        run = run.replace("[Diagnostics.Process]::Start($startInfo)", "(Start-FixtureChild)")
+        for action_held in (False, True):
+            with self.subTest(action_held=action_held), tempfile.TemporaryDirectory() as directory:
+                lane = installed_release(Path(directory))
+                observed = self.invoke(ps_assignments(StateRoot=lane.root, ActionHeld=action_held)
+                                      + ps_definitions(WINDOWS / "Control-Release.ps1")
+                                      + run + LAUNCH_PREAMBLE + """
+$script:live=$false
+$script:child=[pscustomobject]@{Id=4242;HasExited=$false;StartTime=[DateTime]::UtcNow}
+$script:child|Add-Member ScriptMethod Kill { throw 'injected Kill denial' }
+function Start-FixtureChild { $script:live=$true;return $script:child }
+function Acquire-GpuOwnerLease {
+  Write-JsonAtomic (Join-Path $StateRoot 'gpu-owner-lease.json') @{artifact_type='ninfer_gpu_owner_lease';schema_version=1}
+}
+function Restore-GpuOwnerLease { Remove-Item -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json') }
+function Test-ManagedActionInProgress { $ActionHeld -ceq 'True' }
+function Get-CimInstance { if($script:live){[pscustomobject]@{ExecutablePath=$release.server_executable;ProcessId=4242}} }
+$failure=$null
+try{Invoke-Run}catch{$failure=$_.Exception.Message}
+function Get-OwnedProcess { if($script:live){$script:child} }
+function Request-ManagedStop { 'failed: injected event refusal' }
+function Stop-LaunchNow { }
+function Wait-ManagedWrapperExit { $true }
+$stop=$null
+try{Stop-ManagedRelease}catch{$stop=$_.Exception.Message}
+@{failure=$failure;stop=$stop;runtime=Test-Path (Join-Path $StateRoot 'runtime.json');lease=Test-Path (Join-Path $StateRoot 'gpu-owner-lease.json')}|ConvertTo-Json -Compress
+""")
+                self.assertIn("Kill denial", observed["failure"])
+                self.assertIn("did not stop", observed["stop"])
+                self.assertTrue(observed["runtime"])
+                self.assertTrue(observed["lease"])
+
+    def test_launch_intent_is_durable_before_child_spawn(self) -> None:
+        """DB-U1: the actual Run body reaches the spawn boundary with attribution already durable."""
+        run = ps_function((WINDOWS / "Control-Release.ps1").read_text(), "Invoke-Run")
+        run = run.replace("[Diagnostics.Process]::Start($startInfo)", "(Start-FixtureChild)")
+        with tempfile.TemporaryDirectory() as directory:
+            lane = installed_release(Path(directory))
+            observed = self.invoke(ps_assignments(StateRoot=lane.root)
+                                  + ps_definitions(WINDOWS / "Control-Release.ps1")
+                                  + run + LAUNCH_PREAMBLE + """
+function Acquire-GpuOwnerLease { }
+function Restore-GpuOwnerLease { }
+$script:before=$null
+function Start-FixtureChild {
+  $script:before=Get-RuntimeState
+  throw 'spawn boundary'
+}
+try{Invoke-Run}catch{}
+@{published=$null -ne $script:before;runtime=$script:before}|ConvertTo-Json -Compress -Depth 4
+""")
+            self.assertTrue(observed["published"])
+            self.assertIsNone(observed["runtime"]["pid"])
+            self.assertIsNone(observed["runtime"]["start_time_utc_ticks"])
+            self.assertRegex(observed["runtime"]["launch_id"], r"^[0-9a-f]{32}$")
+
+    def test_dead_wrapper_unpublished_child_prevents_stop_and_owner_restore(self) -> None:
+        """DB-U1: no runtime PID; Windows census reports a surviving child of the killed wrapper."""
+        for pending_record in (False, True):
+            with self.subTest(pending_record=pending_record), tempfile.TemporaryDirectory() as directory:
+                lane = installed_release(Path(directory))
+                observed = self.invoke(
+                    ps_assignments(StateRoot=lane.root, Pending=pending_record)
+                    + ps_definitions(WINDOWS / "Control-Release.ps1") + LAUNCH_PREAMBLE + """
+$leasePath=Join-Path $StateRoot 'gpu-owner-lease.json'
+Write-JsonAtomic $leasePath @{artifact_type='ninfer_gpu_owner_lease';schema_version=1;prior_paused=$false}
+if($Pending -ceq 'True'){
+  Write-JsonAtomic (Join-Path $StateRoot 'runtime.json') @{pid=$null;release_id=$state.active_release}
+}
+function Get-CimInstance { [pscustomobject]@{ExecutablePath=$release.server_executable;ProcessId=4242} }
+function Get-ScheduledTaskInfo { }
+function Wait-ManagedWrapperExit { $true }
+$stop=$null;$restore=$null
+try{Stop-ManagedProcess}catch{$stop=$_.Exception.Message}
+try{Restore-GpuOwnerLease}catch{$restore=$_.Exception.Message}
+@{stop=$stop;restore=$restore;lease=Test-Path $leasePath}|ConvertTo-Json -Compress
+""")
+                self.assertIn("unattributed", observed["stop"] or "")
+                self.assertIn("unattributed", observed["restore"] or "")
+                self.assertTrue(observed["lease"])
 
     @staticmethod
     def upgrade_observation(upgrade: SimpleNamespace) -> dict:

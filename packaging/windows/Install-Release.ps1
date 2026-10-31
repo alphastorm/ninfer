@@ -819,13 +819,13 @@ function Set-TransactionFlag([object]$Transaction, [string]$Name) {
     Write-InstallTransaction $Transaction
 }
 
-# A transaction owns, and its rollback deletes, only what it created. Each directory is created
-# exclusively and recorded as a cleanup target only once it exists, so a refused install never
-# selects a tree that was already there.
+# install.lock serializes creation in the protected root. Refuse pre-existing trees, then publish
+# the cleanup intent before mkdir: repair must also cover death immediately after creation.
 function New-TransactionDirectory([object]$Transaction, [string]$Field, [string]$Path) {
-    New-Item -ItemType Directory -Path $Path | Out-Null
+    if (Test-Path -LiteralPath $Path) { throw "transaction directory already exists: $Path" }
     Set-ObjectProperty $Transaction $Field $Path
     Write-InstallTransaction $Transaction
+    New-Item -ItemType Directory -Path $Path | Out-Null
 }
 
 function New-CandidateDirectories(
@@ -894,6 +894,12 @@ function Assert-GpuOwnerUpgradeReady(
     [object]$SelectedGpu
 ) {
     if (-not $IncumbentRunning) {
+        # A dead wrapper can leave the inner claim even when outer status accepts an equal cap.
+        # Replacing its controller would strand that claim under the successor's identity.
+        # Keep the original lifecycle intact so its managed Stop can reconcile it first.
+        if (Test-Path -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json')) {
+            throw 'non-running incumbent retains a GPU-owner lease; reconcile with its original managed Stop before upgrading'
+        }
         Assert-GpuOwnerAttestation $SuccessorController $SuccessorPolicy $SelectedGpu
         return
     }

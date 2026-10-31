@@ -456,6 +456,7 @@ function Restore-GpuOwnerLease {
     if ($null -ne (Get-OwnedProcess (Get-RuntimeState) (Get-Release $state ([string]$state.active_release)))) {
         throw 'the GPU-owner lease stays held while the release server still runs'
     }
+    Assert-NoReleaseProcess (Get-Release $state ([string]$state.active_release))
     $owner = Get-GpuOwner $state
     if ($null -eq $owner -or
         [string]$lease.controller_sha256 -cne [string]$owner.controller_sha256) {
@@ -527,6 +528,25 @@ function Get-RuntimeState {
     $path = Join-Path $StateRoot 'runtime.json'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
     try { return Read-JsonFile $path } catch { return $null }
+}
+
+# Absence of a PID record is not proof of exit: a wrapper can die between spawn and publication.
+# An image census cannot safely adopt/kill that child, but it can withhold ownership and cleanup.
+function Assert-NoReleaseProcess([object]$Release) {
+    $expected = [IO.Path]::GetFullPath([string]$Release.server_executable)
+    foreach ($entry in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+        if ([string]::IsNullOrWhiteSpace([string]$entry.ExecutablePath)) {
+            $name = $entry.PSObject.Properties['Name']
+            if ($null -ne $name -and [string]$name.Value -ieq [IO.Path]::GetFileName($expected)) {
+                throw 'cannot exclude an unattributed release server with an unreadable image path'
+            }
+            continue
+        }
+        if ([string]::Equals([IO.Path]::GetFullPath([string]$entry.ExecutablePath),
+                             $expected, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "unattributed release server still runs: $($entry.ProcessId); retain runtime and GPU-owner lease until exit is proven"
+        }
+    }
 }
 
 # A release installed before the stop-event channel existed is stopped the only way it can be:
@@ -974,13 +994,17 @@ function Stop-ManagedProcess {
             $receipt.reason = 'the owned server process survived termination'
             throw 'owned server process did not stop'
         }
+        Assert-NoReleaseProcess $release
 
         # What the shutdown achieved comes from the server's own report, written after its flush.
         # The wrapper's task result cannot say: with redirected streams it never sees the child's
         # exit code, and a terminated task never reports zero anyway. It is recorded as context.
         $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
         $receipt.wrapper_result = if ($null -eq $info) { $null } else { [int]$info.LastTaskResult }
-        if ($receipt.outcome -ceq 'graceful') {
+        # A wrapper that already exited, or a repeated repair, still has the same launch's report.
+        # Keep runtime.json until this check succeeds; otherwise a second Stop would erase refusal.
+        if ($null -eq $runtime) { $runtime = Get-RuntimeState }
+        if ($null -ne $runtime) {
             $report = $null
             $reportPath = if ($null -eq $runtime -or
                               $null -eq $runtime.PSObject.Properties['shutdown_report']) { $null }
@@ -999,8 +1023,10 @@ function Stop-ManagedProcess {
                 [string]::IsNullOrWhiteSpace($expectedLaunch) -or
                 $null -eq $report.PSObject.Properties['launch_id'] -or
                 [string]$report.launch_id -cne $expectedLaunch) {
-                $receipt.outcome = 'graceful_unreported'
-                $receipt.reason = 'the server exited on request without a shutdown report bound to this launch'
+                if ($receipt.outcome -ceq 'graceful') {
+                    $receipt.outcome = 'graceful_unreported'
+                    $receipt.reason = 'the server exited on request without a shutdown report bound to this launch'
+                }
             }
             else {
                 $receipt.sessions_saved = [int]$report.saved
@@ -1011,7 +1037,8 @@ function Stop-ManagedProcess {
                     [int]$report.refused -lt 0 -or
                     -not [bool]$report.complete -or [int]$report.refused -ne 0) {
                     $receipt.outcome = 'graceful_incomplete_shutdown'
-                    $receipt.reason = "the shutdown could not save $([int]$report.refused) live session(s); their state is lost"
+                    $receipt.reason = "incomplete shutdown: $([int]$report.refused) live session(s) refused; preserve candidate checkpoints and reconcile before rollback"
+                    throw $receipt.reason
                 }
             }
         }
@@ -1056,6 +1083,7 @@ function Start-ManagedRelease {
     if (-not (Wait-ManagedWrapperExit ([string]$state.task_name) ([DateTime]::UtcNow.AddSeconds(120)))) {
         throw 'a managed wrapper still holds the run lock; the previous launch has not finished'
     }
+    Assert-NoReleaseProcess $release
 
     Acquire-GpuOwnerLease
     try {
@@ -1252,6 +1280,7 @@ function Invoke-Run {
         }
         Assert-FileHash ([string]$release.server_executable) ([string]$release.binary_sha256) 'server executable before launch'
         Assert-FileHash ([string]$release.config_file) ([string]$release.config_sha256) 'server config before launch'
+        Assert-NoReleaseProcess $release
         Acquire-GpuOwnerLease
         $ownerLeaseHeld = $true
         $startInfo = [Diagnostics.ProcessStartInfo]::new()
@@ -1271,15 +1300,14 @@ function Invoke-Run {
             $requestLogOffset = [Int64]$logItem.Length
             $requestLogCreationTicks = [Int64]$logItem.CreationTimeUtc.Ticks
         }
-        $process = [Diagnostics.Process]::Start($startInfo)
-        $stdoutCopy = $process.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
-        $stderrCopy = $process.StandardError.BaseStream.CopyToAsync($stderrStream)
+        # Publish launch attribution before spawning. A null PID means the wrapper may have died
+        # during spawn, never that the release is stopped; the image census closes that interval.
         $runtimeRecord = [ordered]@{
                 artifact_type = 'ninfer_windows_runtime_state'
                 schema_version = 2
                 release_id = [string]$state.active_release
-                pid = $process.Id
-                start_time_utc_ticks = $process.StartTime.ToUniversalTime().Ticks
+                pid = $null
+                start_time_utc_ticks = $null
                 managed_stop = [string]$stopPlan.mode
                 stop_event = $stopEventName
                 shutdown_report = $shutdownReport
@@ -1292,6 +1320,12 @@ function Invoke-Run {
                 request_log_creation_utc_ticks = $requestLogCreationTicks
             }
         Write-JsonAtomic (Join-Path $StateRoot 'runtime.json') $runtimeRecord
+        $process = [Diagnostics.Process]::Start($startInfo)
+        $runtimeRecord.pid = $process.Id
+        $runtimeRecord.start_time_utc_ticks = $process.StartTime.ToUniversalTime().Ticks
+        Write-JsonAtomic (Join-Path $StateRoot 'runtime.json') $runtimeRecord
+        $stdoutCopy = $process.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
+        $stderrCopy = $process.StandardError.BaseStream.CopyToAsync($stderrStream)
         $gpuDeadline = [DateTime]::UtcNow.AddSeconds(600)
         $requestLogSchema = if ([int]$config.schema_version -eq 4) { 30 } else { 0 }
         while (-not (Test-ServerStartGpu $requestLog ([string]$release.gpu_uuid) $requestLogOffset $requestLogCreationTicks $process.Id $resolvedGpuIndex ([string]$release.gpu_name) $requestLogSchema)) {
@@ -1343,16 +1377,13 @@ function Invoke-Run {
             }
         }
         finally {
-            if ($null -ne $state) {
-                $runtime = Get-RuntimeState
-                if ($null -ne $runtime -and [string]$runtime.release_id -ceq [string]$state.active_release) {
-                    Remove-Item -LiteralPath (Join-Path $StateRoot 'runtime.json') -Force -ErrorAction SilentlyContinue
-                }
-            }
+            # Stop owns retirement of runtime.json, including the launch-bound shutdown verdict.
+            # Failed Kill must not discard attribution or return the GPU owner to its prior cap.
             if ($null -ne $lock) { $lock.Dispose() }
             # A controller action owns restoration while holding action.lock. Otherwise the
-            # wrapper restores its own lease, after releasing run.lock.
-            if ($ownerLeaseHeld -and -not (Test-ManagedActionInProgress)) { Restore-GpuOwnerLease }
+            # wrapper restores its own lease only after proving its child exited.
+            if ($ownerLeaseHeld -and ($null -eq $process -or $process.HasExited) -and
+                -not (Test-ManagedActionInProgress)) { Restore-GpuOwnerLease }
         }
     }
 }
