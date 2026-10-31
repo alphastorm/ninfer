@@ -7,8 +7,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <new>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <vector>
 
@@ -133,15 +135,80 @@ void test_poisoned_queue(const std::filesystem::path& root, bool attribution_fai
             "a newly created queue could not recover after the old ring failed");
 }
 
+void test_handle_allocation_failure(const std::filesystem::path& root) {
+    const auto payload = root / "allocation-payload";
+    const std::vector<std::byte> bytes(4096, std::byte{0x6d});
+    {
+        std::ofstream output(payload, std::ios::binary);
+        output.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+        output.close();
+        require(bool(output), "could not write allocation-failure payload");
+    }
+    auto queue = make_io_uring_checkpoint_read_queue(root);
+    std::vector<std::byte> destination(bytes.size());
+    const ContinuationCheckpointReadRequest request{0, destination};
+    io_uring_checkpoint_test_pause_worker(true);
+    io_uring_checkpoint_test_fail_next_handle_allocation();
+    bool allocation_failed = false;
+    try {
+        (void)queue->submit(payload, {&request, 1});
+    } catch (const std::bad_alloc&) {
+        allocation_failed = true;
+    } catch (...) {
+        io_uring_checkpoint_test_pause_worker(false);
+        throw;
+    }
+    // Logically retire/reuse caller memory before allowing any queued worker to run.
+    std::fill(destination.begin(), destination.end(), std::byte{0x37});
+    io_uring_checkpoint_test_pause_worker(false);
+    queue.reset(); // join, including the unreturned batch on the unfixed implementation
+    require(allocation_failed, "handle allocation fault was not exercised");
+    require(std::all_of(destination.begin(), destination.end(),
+                        [](std::byte value) { return value == std::byte{0x37}; }),
+            "submission failure left a worker writing retired caller memory");
+    auto replacement = make_io_uring_checkpoint_read_queue(root);
+    replacement->submit(payload, {&request, 1})->wait();
+    require(destination == bytes, "read did not recover after handle allocation failure");
+}
+
+void test_delayed_teardown(const std::filesystem::path& root) {
+    const auto payload = root / "delayed-payload";
+    {
+        std::ofstream output(payload, std::ios::binary);
+        const std::string bytes(4096, '\x6d');
+        output.write(bytes.data(), bytes.size());
+        output.close();
+        require(bool(output), "could not write delayed teardown payload");
+    }
+    const auto evidence = io_uring_checkpoint_test_delayed_teardown(payload);
+    std::cout << "accepted=" << evidence.accepted << " retired=" << evidence.retired
+              << " pending_at_failure=" << evidence.pending_at_failure
+              << " poisoned_buffer_unchanged=" << evidence.poisoned_buffer_unchanged << '\n';
+    require(evidence.accepted == 2 && evidence.pending_at_failure == 2,
+            "delayed teardown did not exercise accepted outstanding operations");
+    require(evidence.retired == evidence.accepted,
+            "fatal reset released buffers without retiring every accepted operation by CQE");
+    require(evidence.poisoned_buffer_unchanged,
+            "delayed I/O modified the retired poisoned buffer");
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
     try {
         TempDirectory root;
+        if (argc == 2 && std::string_view(argv[1]) == "teardown") {
+            test_delayed_teardown(root.path);
+            return 0;
+        }
         const auto capability = probe_io_uring_checkpoint_capability(root.path);
         if (!capability.available) {
             std::cout << "SKIP: native io_uring/O_DIRECT unavailable: " << capability.reason << '\n';
             return 77;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "handle-allocation") {
+            test_handle_allocation_failure(root.path);
+            return 0;
         }
         test_poisoned_queue(root.path, false);
         test_poisoned_queue(root.path, true);

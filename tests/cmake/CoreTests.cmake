@@ -38,6 +38,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     PRIVATE NINFER_IO_URING_TESTING=1)
   set_tests_properties(ninfer_io_uring_checkpoint_read_queue_test
     PROPERTIES LABELS "host" SKIP_RETURN_CODE 77 TIMEOUT 60)
+  foreach(case IN ITEMS handle-allocation teardown)
+    add_test(NAME ninfer_io_uring_checkpoint_${case}_test
+      COMMAND ninfer_io_uring_checkpoint_read_queue_test ${case})
+    set_tests_properties(ninfer_io_uring_checkpoint_${case}_test
+      PROPERTIES LABELS "host" TIMEOUT 60)
+  endforeach()
 endif()
 ninfer_add_test(ninfer_uint128_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../cpu/test_uint128.cpp")

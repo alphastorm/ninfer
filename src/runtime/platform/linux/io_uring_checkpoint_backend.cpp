@@ -38,6 +38,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <span>
 #include <string>
@@ -81,6 +82,9 @@ constexpr std::string_view kPublicationUncertain = ".publication-uncertain";
 #if defined(NINFER_IO_URING_TESTING)
 std::atomic<bool> fail_next_submitted_batch{false};
 std::atomic<bool> fail_next_completion_key{false};
+std::atomic<bool> fail_next_handle_allocation{false};
+std::atomic<bool> pause_read_worker{false};
+thread_local IoUringCheckpointTeardownEvidence* teardown_evidence = nullptr;
 std::atomic<bool> fail_submit_followup{false};
 std::atomic<bool> fail_publication_marker_fsync{false};
 std::atomic<int> fail_publication_fsyncs{0};
@@ -123,6 +127,11 @@ int submit_io_uring(int ring_fd, unsigned submissions) {
 #endif
     const int result =
         static_cast<int>(::syscall(SYS_io_uring_enter, ring_fd, submissions, 0U, 0U, nullptr, 0U));
+#if defined(NINFER_IO_URING_TESTING)
+    if (teardown_evidence != nullptr && result > 0) {
+        teardown_evidence->accepted += static_cast<unsigned>(result);
+    }
+#endif
     return result;
 }
 
@@ -263,9 +272,8 @@ public:
         try {
             execute_unchecked(requests, results);
         } catch (...) {
-            // Closing the ring cancels and joins every request owned by this io_uring context
-            // before caller-owned bounce buffers and descriptors unwind. The ring is poisoned and
-            // deliberately cannot be reused after an attribution or syscall failure.
+            // Retire accepted requests by CQE before caller storage unwinds. close(2) alone
+            // is not a join: kernel io_ring_ctx_wait_and_kill schedules asynchronous exit work.
             reset();
             throw;
         }
@@ -275,7 +283,7 @@ public:
         if (requests.empty() || requests.size() != results.size()) {
             throw CheckpointContractError("io_uring request/result batch is invalid");
         }
-        if (requests.size() > capacity()) {
+        if (requests.size() > capacity() || requests.size() > kRequestedRingEntries) {
             throw CheckpointContractError("io_uring request batch exceeds the queue capacity");
         }
         if (next_batch_id_ == std::numeric_limits<std::uint32_t>::max()) {
@@ -302,9 +310,18 @@ public:
             sqe.len                    = request.length;
             sqe.fsync_flags            = request.fsync_flags;
             sqe.user_data              = batch_tag | (index + 1U);
+#if defined(NINFER_IO_URING_TESTING)
+            // A real timeout holds the following regular-file read in the kernel.
+            if (teardown_evidence != nullptr && index == 0) {
+                sqe.flags = IOSQE_IO_HARDLINK;
+            }
+#endif
             sq_array_[(tail + static_cast<std::uint32_t>(index)) & *sq_mask_] = sqe_index;
             results[index] = std::numeric_limits<std::int32_t>::min();
         }
+        batch_start_ = tail;
+        batch_size_ = static_cast<unsigned>(requests.size());
+        outstanding_ = (1U << batch_size_) - 1U;
         std::atomic_ref(*sq_tail_).store(tail + static_cast<std::uint32_t>(requests.size()),
                                          std::memory_order_release);
 
@@ -321,8 +338,17 @@ public:
             }
             submitted += static_cast<std::size_t>(result);
         }
+#if defined(NINFER_IO_URING_TESTING)
+        if (teardown_evidence != nullptr) {
+            const std::uint32_t ready =
+                std::atomic_ref(*cq_tail_).load(std::memory_order_acquire) -
+                std::atomic_ref(*cq_head_).load(std::memory_order_relaxed);
+            teardown_evidence->pending_at_failure =
+                teardown_evidence->accepted - ready;
+            throw_system_error("injected failure with delayed read accepted", EIO);
+        }
+#endif
 
-        std::array<bool, kRequestedRingEntries> observed{};
         std::size_t completed = 0;
         while (completed < requests.size()) {
             std::uint32_t cq_head = std::atomic_ref(*cq_head_).load(std::memory_order_relaxed);
@@ -342,21 +368,27 @@ public:
                 }
                 const std::size_t index =
                     static_cast<std::size_t>((key & 0xffffffffULL) - 1U);
-                if (observed[index]) {
+                const std::uint32_t bit = 1U << index;
+                if ((outstanding_ & bit) == 0) {
                     throw CheckpointContractError("io_uring returned a duplicate completion");
                 }
-                observed[index] = true;
+                outstanding_ &= ~bit;
                 results[index]  = cqe.res;
                 ++completed;
+#if defined(NINFER_IO_URING_TESTING)
+                if (teardown_evidence != nullptr) { ++teardown_evidence->retired; }
+#endif
                 ++cq_head;
+                // Commit each consumed CQE, including when a later CQE is invalid.
+                std::atomic_ref(*cq_head_).store(cq_head, std::memory_order_release);
             }
-            std::atomic_ref(*cq_head_).store(cq_head, std::memory_order_release);
             if (completed == requests.size()) { break; }
 
             const int result = static_cast<int>(::syscall(SYS_io_uring_enter, ring_fd_.get(), 0U,
                                                           1U, IORING_ENTER_GETEVENTS, nullptr, 0U));
             if (result < 0 && errno != EINTR) { throw_last_error("io_uring_enter wait"); }
         }
+        batch_size_ = 0;
     }
 
     [[nodiscard]] std::int32_t execute_one(const RingRequest& request) {
@@ -395,9 +427,92 @@ public:
     }
 
 private:
+    [[noreturn]] static void retirement_failed() noexcept {
+        // Unwinding would release memory still potentially owned by the kernel.
+        std::fputs("fatal: io_uring checkpoint retirement could not be proved\n", stderr);
+        std::abort();
+    }
+
+    void retire_outstanding() noexcept {
+        if (batch_size_ == 0) { return; }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        // This ring has no SQPOLL and a single submitting thread. After enter returns,
+        // SQ head identifies exactly the consumed prefix, even on partial/failed submit.
+        // Retract the unconsumed suffix before submitting any cancellation.
+        const std::uint32_t head = std::atomic_ref(*sq_head_).load(std::memory_order_acquire);
+        const unsigned accepted = head - batch_start_;
+        if (accepted > batch_size_) { retirement_failed(); }
+        outstanding_ &= (1U << accepted) - 1U;
+        std::atomic_ref(*sq_tail_).store(head, std::memory_order_release);
+
+        // One cancel per original user_data works without the Linux 5.19 CANCEL_ALL flags.
+        // A cancel CQE (including -EALREADY/-ENOENT) is NOT the original operation's CQE.
+        std::uint32_t cancellations = outstanding_;
+        unsigned cancel_count = 0;
+        for (unsigned index = 0; index < accepted; ++index) {
+            if ((outstanding_ & (1U << index)) == 0) { continue; }
+            const std::uint32_t slot = (head + cancel_count) & *sq_mask_;
+            io_uring_sqe& sqe = sqes_[slot];
+            std::memset(&sqe, 0, sizeof(sqe));
+            sqe.opcode = IORING_OP_ASYNC_CANCEL;
+            sqe.fd = -1;
+            sqe.addr = (static_cast<std::uint64_t>(next_batch_id_) << 32U) | (index + 1U);
+            sqe.user_data = index + 1U; // batch zero is reserved for cancellation CQEs
+            sq_array_[(head + cancel_count) & *sq_mask_] = slot;
+            ++cancel_count;
+        }
+        std::atomic_ref(*sq_tail_).store(head + cancel_count, std::memory_order_release);
+        unsigned submitted = 0;
+        while (submitted < cancel_count) {
+            if (std::chrono::steady_clock::now() >= deadline) { retirement_failed(); }
+            const int result = static_cast<int>(::syscall(
+                SYS_io_uring_enter, ring_fd_.get(), cancel_count - submitted, 0U, 0U, nullptr, 0U));
+            if (result < 0) {
+                if (errno == EINTR) { continue; }
+                retirement_failed();
+            }
+            if (result == 0 || static_cast<unsigned>(result) > cancel_count - submitted) {
+                retirement_failed();
+            }
+            submitted += static_cast<unsigned>(result);
+        }
+        while (outstanding_ != 0 || cancellations != 0) {
+            if (std::chrono::steady_clock::now() >= deadline) { retirement_failed(); }
+            std::uint32_t cq_head = std::atomic_ref(*cq_head_).load(std::memory_order_relaxed);
+            const std::uint32_t cq_tail = std::atomic_ref(*cq_tail_).load(std::memory_order_acquire);
+            while (cq_head != cq_tail) {
+                const io_uring_cqe& cqe = cqes_[cq_head & *cq_mask_];
+                const std::uint64_t index = cqe.user_data & 0xffffffffULL;
+                const std::uint64_t batch = cqe.user_data >> 32U;
+                if (index == 0 || index > accepted ||
+                    (batch != 0 && batch != next_batch_id_)) {
+                    retirement_failed();
+                }
+                const std::uint32_t bit = 1U << (index - 1U);
+                auto& pending = batch == 0 ? cancellations : outstanding_;
+                if ((pending & bit) == 0) { retirement_failed(); }
+                if (batch == 0 && cqe.res != 0 && cqe.res != -ENOENT && cqe.res != -EALREADY) {
+                    retirement_failed();
+                }
+                pending &= ~bit;
+#if defined(NINFER_IO_URING_TESTING)
+                if (batch != 0 && teardown_evidence != nullptr) { ++teardown_evidence->retired; }
+#endif
+                ++cq_head;
+                std::atomic_ref(*cq_head_).store(cq_head, std::memory_order_release);
+            }
+            if (outstanding_ == 0 && cancellations == 0) { break; }
+            // Run pending task_work/overflow flushing without an unbounded GETEVENTS wait.
+            const int result = static_cast<int>(::syscall(
+                SYS_io_uring_enter, ring_fd_.get(), 0U, 0U, IORING_ENTER_GETEVENTS, nullptr, 0U));
+            if (result < 0 && errno != EINTR) { retirement_failed(); }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        batch_size_ = 0;
+    }
+
     void reset() noexcept {
-        // Closing first synchronously tears down/cancels the io_uring context while every submitted
-        // request still references live caller storage. Mappings are released only afterward.
+        retire_outstanding();
         ring_fd_.reset();
         if (sqes_map_ != nullptr) { ::munmap(sqes_map_, sqes_bytes_); }
         if (single_mmap_) {
@@ -449,6 +564,9 @@ private:
     std::uint32_t* cq_entries_   = nullptr;
     io_uring_cqe* cqes_          = nullptr;
     std::uint32_t next_batch_id_ = 0;
+    std::uint32_t batch_start_   = 0;
+    unsigned batch_size_        = 0;
+    std::uint32_t outstanding_   = 0;
 };
 
 class AlignedBuffer {
@@ -1182,6 +1300,50 @@ void io_uring_checkpoint_test_fail_next_completion_key() noexcept {
     fail_next_completion_key.store(true, std::memory_order_release);
 }
 
+void io_uring_checkpoint_test_fail_next_handle_allocation() noexcept {
+    fail_next_handle_allocation.store(true, std::memory_order_release);
+}
+
+void io_uring_checkpoint_test_pause_worker(bool paused) noexcept {
+    pause_read_worker.store(paused, std::memory_order_release);
+    pause_read_worker.notify_all();
+}
+
+IoUringCheckpointTeardownEvidence
+io_uring_checkpoint_test_delayed_teardown(const std::filesystem::path& path) {
+    UniqueFd file(::open(path.c_str(), O_RDONLY | O_CLOEXEC));
+    if (!file) { throw_last_error("open delayed teardown payload"); }
+    NativeIoUring ring;
+    ring.initialize();
+    std::array<std::byte, 4096> buffer{};
+    __kernel_timespec delay{0, 250'000'000};
+    const std::array requests{
+        RingRequest{IORING_OP_TIMEOUT, -1, 0, &delay, 1, 0},
+        RingRequest{IORING_OP_READ, file.get(), 0, buffer.data(), buffer.size(), 0},
+    };
+    std::array<std::int32_t, 2> results{};
+    IoUringCheckpointTeardownEvidence evidence;
+    teardown_evidence = &evidence;
+    try {
+        ring.execute(requests, results);
+    } catch (const std::system_error& error) {
+        teardown_evidence = nullptr;
+        if (error.code() != std::errc::io_error) { throw; }
+    } catch (...) {
+        teardown_evidence = nullptr;
+        throw;
+    }
+    teardown_evidence = nullptr;
+    // Reuse the destination after failure, but keep the allocation mapped so a late
+    // kernel write is observable without depending on a userspace sanitizer.
+    buffer.fill(std::byte{0x37});
+    std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    evidence.poisoned_buffer_unchanged =
+        std::all_of(buffer.begin(), buffer.end(),
+                    [](std::byte value) { return value == std::byte{0x37}; });
+    return evidence;
+}
+
 void io_uring_checkpoint_test_fail_publication_and_rollback_fsync() noexcept {
     fail_publication_fsyncs.store(2, std::memory_order_release);
 }
@@ -1869,20 +2031,26 @@ public:
 
         auto completion = std::make_shared<PendingCheckpointRead>(std::move(file), file_bytes,
                                                                   requests);
-        {
-            std::lock_guard lock(mutex_);
-            ensure_accepting();
-            queue_.push_back(completion);
-        }
-        pending_.notify_one();
-        // The caller owns a handle to the same completion the worker fills in.
+        // Allocate the caller's handle before publishing borrowed destinations to the worker.
         struct Handle final : ContinuationCheckpointReadCompletion {
             explicit Handle(std::shared_ptr<PendingCheckpointRead> shared)
                 : shared_(std::move(shared)) {}
             void wait() override { shared_->wait(); }
             std::shared_ptr<PendingCheckpointRead> shared_;
         };
-        return std::make_unique<Handle>(std::move(completion));
+#if defined(NINFER_IO_URING_TESTING)
+        if (fail_next_handle_allocation.exchange(false, std::memory_order_acq_rel)) {
+            throw std::bad_alloc();
+        }
+#endif
+        auto handle = std::make_unique<Handle>(completion);
+        {
+            std::lock_guard lock(mutex_);
+            ensure_accepting();
+            queue_.push_back(std::move(completion));
+        }
+        pending_.notify_one();
+        return handle;
     }
 
 private:
@@ -1915,6 +2083,9 @@ private:
             }
             if (!error) {
                 try {
+#if defined(NINFER_IO_URING_TESTING)
+                    pause_read_worker.wait(true, std::memory_order_acquire);
+#endif
                     execute(*job);
                 } catch (...) {
                     error = std::current_exception();

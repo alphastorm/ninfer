@@ -761,6 +761,38 @@ remain `CheckpointContractError`. The store rejects a missing or unavailable sel
 native read queue as `Unavailable/IoUnavailable`: retryable, no quarantine and no
 fallback. It does not silently substitute a buffered/direct reader or skip
 authentication.
+The Linux queue allocates its returned completion handle before making a batch
+visible to the worker. A failed submission therefore leaves no untracked access to
+caller memory; the reader's existing completion drain covers every accepted batch.
+On fatal ring failure, the single submitting thread retracts SQEs not consumed by
+the kernel (the ring does not use SQPOLL), cancels every remaining accepted request
+by its unique `user_data`, and drains both original and cancellation CQEs before
+closing the ring or releasing borrowed/bounce storage. A cancellation CQE alone is
+not retirement: `-EALREADY` requires waiting for the original request's CQE.
+Unattributable completions, cancellation/drain syscall failures, or failure to drain
+within 30 seconds terminate the process without unwinding buffers. Normal
+successful read/publication behavior is unchanged.
+
+This relies on the original one-shot operation's completion semantics, not a
+synchronous-close guarantee. The liburing
+[`io_uring_prep_cancel(3)` notes](https://man7.org/linux/man-pages/man3/io_uring_prep_cancel.3.html#NOTES)
+require waiting for the target completion after `-EALREADY`; cancel-by-user-data
+does not require the Linux 5.19 `CANCEL_ALL`/`CANCEL_ANY` flags.
+[`io_uring_cancelation(7)`](https://man7.org/linux/man-pages/man7/io_uring_cancelation.7.html)
+also distinguishes ring shutdown from explicitly waiting for CQEs before freeing
+resources and notes that hardware-submitted disk I/O may not be cancelable.
+In [Linux v6.8 `io_uring/io_uring.c`](https://github.com/torvalds/linux/blob/v6.8/io_uring/io_uring.c),
+`io_uring_release` calls `io_ring_ctx_wait_and_kill`, which schedules
+`io_ring_exit_work` asynchronously. Closing the fd is not the buffer-lifetime
+barrier. `io_submit_sqes` commits the consumed SQ head before returning; retracting
+the unconsumed suffix is valid only under this backend's single-thread/no-SQPOLL
+invariant. The retirement deadline bounds userspace retries and CQE polling; it
+cannot interrupt a kernel syscall stuck in the kernel.
+GPU-free `ninfer_io_uring_checkpoint_handle-allocation_test` and
+`ninfer_io_uring_checkpoint_teardown_test` cover the delayed-worker allocation
+failure and a kernel-delayed regular-file read, respectively; the latter requires
+every original CQE and checks a poisoned destination after failure. Neither test
+is a GPU performance or power-loss durability qualification.
 No new dependency is authorized by this contract.
 
 ## K7 — result, error and receipt taxonomy
