@@ -128,6 +128,18 @@ The default invocation also runs packed and context attention. Large causal orac
 use at most eight CPU workers while preserving each output's FP64 accumulation order; small cases
 remain serial. The runner reports elapsed time per KV type.
 
+`ninfer_rk4v4_codec_test` is GPU-free: independent FP64 golden bytes/scales,
+codec round trips, zero/subnormal groups, and exact capacity arithmetic.
+`ninfer_rk4v4_test` is the dedicated native GPU oracle: standalone/fused append bytes,
+cached attention, both D256 geometries, decode, MTP3 W=4, DFlash2 W=8,
+parallel/grouped/tiled prefill through 2048, C2 dense/ragged/fully masked rows,
+fragmented page mappings, graph replay, and depths through 262143. It uses an
+independent FP64 represented-cache oracle with the unchanged INT8 numerical budget
+(relative L2 0.02; gross absolute 0.0011 plus relative-to-max 0.04). Run with
+`NINFER_OP_REPORT_STATS=1`; no GPU absence/skip is a numerical pass.
+`ninfer_session_checkpoint_store_test` also checks RK4V4 same-format restore and
+cross-format/native-codec-version refusal without quarantining valid checkpoints.
+
 Run the RMSNorm and GDN control families together:
 
 ```bash
@@ -309,10 +321,10 @@ NINFER_TEST_SPECULATIVE=mtp NINFER_TEST_BATCH=2 \
   ./build/tests/ninfer_qwen3_5_prefix_real_test
 ```
 
-KV choices are `bf16`, `int8`, `fp8`, `nvfp4`, and `k8v4`; backend choices are `none`, `mtp`,
+KV choices are `bf16`, `int8`, `fp8`, `nvfp4`, `k8v4`, and `rk4v4`; backend choices are `none`, `mtp`,
 `dflash`, and `dflash2`, requiring an artifact with the selected component. Batch defaults to 2;
 `NINFER_TEST_DRAFT_TOKENS` overrides the default MTP3 or DFlash7 block. The DFlash2-specific
-integration executable also accepts all five KV names as its fifth positional argument and rejects
+integration executable also accepts all six KV names as its fifth positional argument and rejects
 unknown names.
 
 Continuation and pressure recovery have dedicated entries:
@@ -479,7 +491,7 @@ NINFER_TEST_ARTIFACT=out/qwen3_8_27b_nvfp4.ninfer \
 ```
 
 Arguments are K, Graph enabled, optimized head enabled, maximum B, target KV (`bf16`, `int8`,
-`fp8`, `nvfp4`, or `k8v4`), Vision enabled, and extra Device StateImage slots. Defaults are
+`fp8`, `nvfp4`, `k8v4`, or `rk4v4`), Vision enabled, and extra Device StateImage slots. Defaults are
 `15 1 1 8 bf16 0 3`. Run GPU integration tests serially. The individual Op suites remain the
 numerical/state-transition oracle; the fixed Engine fixture does not define bit parity across
 arbitrary floating-point routes.

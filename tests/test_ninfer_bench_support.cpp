@@ -188,6 +188,11 @@ int test_cli_contract() {
     const qb::BenchOptions k8v4 =
         parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--kv-dtype", "k8v4"});
     failures += expect(k8v4.kv_cache == ninfer::KvCacheStorage::Fp8KeyNvfp4Value, "K8V4 KV");
+    const auto rk4v4 =
+        parse_for_test({"ninfer_bench", "--weights", "model.ninfer", "--kv-dtype", "rk4v4"});
+    failures += expect(rk4v4.kv_cache == ninfer::KvCacheStorage::Rk4V4, "RK4V4 KV");
+    failures += expect_string(qb::kv_cache_name(ninfer::KvCacheStorage::Rk4V4), "rk4v4",
+                              "RK4V4 report name");
     failures += expect(qb::usage_text("ninfer_bench").find("nvfp4|k8v4") != std::string::npos,
                        "benchmark help omits new KV modes");
     failures += expect_string(qb::kv_cache_name(ninfer::KvCacheStorage::Nvfp4Group16), "nvfp4",

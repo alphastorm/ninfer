@@ -761,7 +761,7 @@ int test_kv_layout_runtime_fingerprint_rejection() {
     }, publish_fixture);
     int failures = check(saved.has_value(), "BF16 checkpoint publishes");
     if (!saved) { return failures; }
-    for (const auto storage : {"int8", "fp8"}) {
+    for (const auto storage : {"int8", "fp8", "rk4v4"}) {
         auto changed = identity;
         changed["engine"]["kv_dtype"] = storage;
         refresh_config_digest(changed);
@@ -775,6 +775,30 @@ int test_kv_layout_runtime_fingerprint_rejection() {
                           compatible.checkpoint && compatible.checkpoint->generation == saved->generation,
                       "wrong KV profile does not quarantine the compatible checkpoint");
     compatible.checkpoint.reset();
+    auto rk4 = identity;
+    rk4["engine"]["kv_dtype"] = "rk4v4";
+    rk4["native_layout"]["pools"][0]["storage_type"] = "rk4v4_h256_lloyd_g64_s4_g32_v1";
+    refresh_config_digest(rk4);
+    const auto packed = store.save(responses, rk4, [&](ContinuationCheckpointWriter& writer) {
+        if (!write_state_fixture(writer, payload)) return DurableExportResult{.state = runtime::DurableExportState::Refused};
+        return exported_fixture({.frontier_tokens = 100000, .restored_tokens = 97500,
+                                 .payload_bytes = payload.size()});
+    }, publish_fixture);
+    failures += check(packed.has_value(), "rk4v4 fingerprint is supported");
+    if (packed) {
+        auto same = store.load(responses.client_session_sha256, rk4);
+        failures += check(same.state == SessionCheckpointLoadState::Available && same.checkpoint,
+                          "rk4v4 checkpoint restores under the identical format");
+        same.checkpoint.reset();
+        for (const auto* format : {"bf16", "int8_group64", "rk4v4_h256_lloyd_g64_s4_g32_v2"}) {
+            auto changed = rk4;
+            changed["native_layout"]["pools"][0]["storage_type"] = format;
+            refresh_config_digest(changed);
+            const auto refused = store.load(responses.client_session_sha256, changed);
+            failures += check(refused.state == SessionCheckpointLoadState::Incompatible && !refused.checkpoint,
+                              "native codec identity alone refuses a cross-format restore");
+        }
+    }
     auto unsupported = identity;
     unsupported["responses"]["codec"] = "ninfer-responses-cbor/999";
     refresh_config_digest(unsupported);

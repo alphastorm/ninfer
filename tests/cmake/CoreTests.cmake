@@ -4,6 +4,11 @@ add_executable(ninfer_public_api_test "${CMAKE_CURRENT_LIST_DIR}/../test_public_
 target_include_directories(ninfer_public_api_test PRIVATE ${PROJECT_SOURCE_DIR}/include)
 add_test(NAME ninfer_public_api_test COMMAND ninfer_public_api_test)
 
+ninfer_add_test(ninfer_rk4v4_codec_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_rk4v4_codec.cpp"
+  LIBRARIES ninfer_core)
+set_tests_properties(ninfer_rk4v4_codec_test PROPERTIES LABELS "host")
+
 ninfer_add_test(ninfer_checkpoint_io_contract_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_checkpoint_io_contract.cpp"
   LIBRARIES ninfer_checkpoint_contract)

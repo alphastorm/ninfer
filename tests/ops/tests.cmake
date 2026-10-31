@@ -51,6 +51,10 @@ ninfer_add_op_test(ninfer_kv_cache_append_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_kv_cache_append.cpp"
   LIBRARIES ninfer_ops)
 
+ninfer_add_op_test(ninfer_rk4v4_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_rk4v4.cpp"
+  LIBRARIES ninfer_ops)
+
 ninfer_add_op_test(ninfer_rmsnorm_rope_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_rmsnorm_rope.cpp"
   LIBRARIES ninfer_ops)

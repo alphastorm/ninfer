@@ -226,7 +226,7 @@ The official artifacts provide the following capabilities, with optional compone
 - image, multi-image, video, and mixed multimodal messages;
 - chunked prefill, exact-batch CUDA Graph decode, and startup-bounded batched decode;
 - MTP speculative decoding with draft windows from one to five;
-- BF16, INT8, FP8, NVFP4, and K8V4 KV storage;
+- BF16, INT8, FP8, NVFP4, and K8V4 KV storage; opt-in RK4V4 for native D256 Qwen3.5-family attention;
 - offline causal-perplexity scoring;
 - private and shared exact-prefix reuse with Device/Host State and KV retention;
 - model-aware sampling defaults and explicit sampler overrides;

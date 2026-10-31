@@ -65,6 +65,7 @@ runtime::DurableEngineIdentity engine_identity(const EngineOptions& options,
     case KvCacheStorage::Fp8E4M3Row256: kv = "fp8"; break;
     case KvCacheStorage::Fp8KeyNvfp4Value: kv = "k8v4"; break;
     case KvCacheStorage::Nvfp4Group16: kv = "nvfp4"; break;
+    case KvCacheStorage::Rk4V4: kv = "rk4v4"; break;
     }
     const char* backend;
     switch (options.speculative.backend) {

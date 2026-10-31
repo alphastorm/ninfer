@@ -152,7 +152,7 @@ bool validate_session_checkpoint_runtime_fingerprint(const Json& value) noexcept
                         "use_cuda_graph"}) || !u32(e.at("max_context"), true) ||
             !u32(e.at("kv_capacity"), true) || !u32(e.at("max_concurrency"), true) ||
             !u32(e.at("prefill_chunk"), true) || !u32(e.at("draft_window")) ||
-            !named(e.at("kv_dtype"), {"bf16", "int8", "fp8", "k8v4"}) ||
+            !named(e.at("kv_dtype"), {"bf16", "int8", "fp8", "k8v4", "rk4v4"}) ||
             !named(e.at("speculative_backend"), {"none", "mtp", "dflash", "dflash2"}) ||
             !named(e.at("proposal_head"), {"full", "optimized"}) ||
             !e.at("enable_vision").is_boolean() || !e.at("use_cuda_graph").is_boolean()) { return false; }

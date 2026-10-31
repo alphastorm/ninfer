@@ -12,7 +12,7 @@
 namespace ninfer::ops::detail {
 
 template <class G, class S, bool MultiBatch, bool Masked, bool Writable, class Input,
-          bool ParallelQueries = false>
+          bool ParallelQueries = false, bool Packed = false>
 void launch_int8_kv_grouped_mma(const CausalAttentionOperands& p, Int8KvCacheView<Writable> cache,
                                 Input input, CausalKvPartition partition, CausalPartialView partial,
                                 cudaStream_t stream) {
@@ -28,7 +28,7 @@ void launch_int8_kv_grouped_mma(const CausalAttentionOperands& p, Int8KvCacheVie
     if constexpr (Input::writes_cache)
         if (!input.k || !input.v) throw std::invalid_argument("INT8 append requires K/V");
     constexpr auto kernel =
-        int8_kv_grouped_mma_kernel<G, S, MultiBatch, Masked, Input, ParallelQueries>;
+        int8_kv_grouped_mma_kernel<G, S, MultiBatch, Masked, Input, ParallelQueries, Packed>;
     constexpr int bytes = S::kDynamicArena ? S::kArenaBytes : 0;
     (void)common::prepare_shared<bytes, kernel, true>();
     const dim3 grid(G::KVHeads * (ParallelQueries ? common::div_up(p.width, S::kTokenTile) : 1),
@@ -40,7 +40,7 @@ void launch_int8_kv_grouped_mma(const CausalAttentionOperands& p, Int8KvCacheVie
     CUDA_CHECK(cudaGetLastError());
 }
 
-template <class G, class S>
+template <class G, class S, bool Packed = false>
 void launch_int8_kv_tiled_mma(const CausalAttentionOperands& p, Int8KvReadView cache,
                               cudaStream_t stream) {
     validate_quantized_causal_operands<G>(p, cache);
@@ -51,9 +51,10 @@ void launch_int8_kv_tiled_mma(const CausalAttentionOperands& p, Int8KvReadView c
             if constexpr (FullBlocks)
                 return int8_kv_full_blocks_mma_kernel<G, S, Metadata>;
             else
-                return int8_kv_tiled_mma_kernel<G, S, Metadata>;
+                return int8_kv_tiled_mma_kernel<G, S, Metadata, Packed>;
         }();
-        const int shared      = common::prepare_shared<S::kSharedBytes, kernel, true>();
+        constexpr int bytes = S::kSharedBytes + (Packed ? S::kKeyRows * 4 * sizeof(__half) : 0);
+        const int shared      = common::prepare_shared<bytes, kernel, true>();
         const dim3 grid(common::div_up(p.width, S::kQueryRows), G::QHeads);
         kernel<<<grid, S::kThreads, shared, stream>>>(
             p.q, cache.keys, cache.values, cache.key_scales, cache.value_scales, metadata,
@@ -63,8 +64,10 @@ void launch_int8_kv_tiled_mma(const CausalAttentionOperands& p, Int8KvReadView c
     const auto invoke = [&]<class Metadata>(Metadata metadata) {
 #if defined(NINFER_SM86) || defined(NINFER_SM89)
         // Ragged rows keep the original masked kernel, including during graph replay.
-        if (!cache.valid_columns && (p.width == 1024 || p.width == 2048))
-            return launch.template operator()<true>(metadata);
+        if constexpr (!Packed) {
+            if (!cache.valid_columns && (p.width == 1024 || p.width == 2048))
+                return launch.template operator()<true>(metadata);
+        }
 #endif
         launch.template operator()<false>(metadata);
     };

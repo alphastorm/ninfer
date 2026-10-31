@@ -227,7 +227,7 @@ std::size_t causal_softmax_attention_workspace_capacity_bytes(
         return detail::fp8_kv_workspace_bytes(q_heads, batch_size, min_width, max_width, envelope,
                                               multiprocessor_count);
 
-    if (cache_storage == KvCacheStorage::Int8Group64)
+    if (cache_storage == KvCacheStorage::Int8Group64 || cache_storage == KvCacheStorage::Rk4V4)
         return detail::int8_kv_workspace_bytes(q_heads, batch_size, min_width, max_width, envelope,
                                                multiprocessor_count);
 
@@ -283,7 +283,7 @@ void causal_softmax_attention(const Tensor& q, const Tensor& k, const Tensor& v,
     if (cache.storage == KvCacheStorage::Fp8E4M3Row256) {
         detail::fp8_kv_append_attention(q, k, v, positions, valid_columns, kv_table_rows, scale,
                                         cache, envelope, workspace, out, execution);
-    } else if (cache.storage == KvCacheStorage::Int8Group64) {
+    } else if (cache.storage == KvCacheStorage::Int8Group64 || cache.storage == KvCacheStorage::Rk4V4) {
         detail::int8_kv_append_attention(q, k, v, positions, valid_columns, kv_table_rows, scale,
                                          cache, envelope, workspace, out, execution);
     } else if (cache.storage == KvCacheStorage::Nvfp4Group16) {
@@ -322,7 +322,7 @@ void causal_softmax_attention_cached(const Tensor& q, const Tensor& positions,
         return;
     }
 
-    if (cache.storage == KvCacheStorage::Int8Group64) {
+    if (cache.storage == KvCacheStorage::Int8Group64 || cache.storage == KvCacheStorage::Rk4V4) {
         detail::int8_kv_cached_attention(q, positions, scale, cache, envelope, workspace, out,
                                          execution);
         return;

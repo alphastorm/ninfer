@@ -2,6 +2,7 @@
 #include "ops/common/quant/integer.cuh"
 #include "ops/kv_cache/kernels/hadamard.cuh"
 #include "ops/kv_cache/kernels/layout.cuh"
+#include "ops/kv_cache/kernels/rk4v4.cuh"
 #include "ops/softmax_attention/kernels/causal/tile_io.cuh"
 #include "ops/softmax_attention/kernels/causal/operands.h"
 #include "ops/softmax_attention/kernels/causal/int8/schedule.cuh"
@@ -10,7 +11,7 @@
 
 namespace ninfer::ops::detail {
 
-template <typename Geometry, typename Schedule, typename Metadata>
+template <typename Geometry, typename Schedule, typename Metadata, bool Packed = false>
 __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
     const __nv_bfloat16* __restrict__ q, const std::int8_t* __restrict__ cache_k,
     const std::int8_t* __restrict__ cache_v, const __half* __restrict__ cache_k_scale,
@@ -22,6 +23,7 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
     constexpr int Bc            = Schedule::kKeyRows;
     constexpr int DB16          = 128;
     constexpr int Groups        = 4;
+    constexpr int ValueGroups   = Packed ? 8 : Groups;
     constexpr int GroupKc       = kv::kInt8Group / 32;
     constexpr int QKNt          = Bc / 8;
     constexpr int PVNtPerWarp   = D / (Schedule::kDConsumers * 8);
@@ -47,7 +49,7 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
     __half* k_scale_s =
         reinterpret_cast<__half*>(reinterpret_cast<unsigned char*>(p_s) + Schedule::kPBytes);
     __half* v_scale_s    = k_scale_s + Bc * Groups;
-    float* alpha_s       = reinterpret_cast<float*>(v_scale_s + Bc * Groups);
+    float* alpha_s       = reinterpret_cast<float*>(v_scale_s + Bc * ValueGroups);
     float* final_l_s     = alpha_s + Br;
     __nv_bfloat16* q_b16 = reinterpret_cast<__nv_bfloat16*>(q_i8);
     __nv_bfloat16* k_b16 = reinterpret_cast<__nv_bfloat16*>(k_i8);
@@ -107,15 +109,22 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
         for (int key_l = tid; key_l < Bc; key_l += Schedule::kThreads) {
             const int key = tile_k0 + key_l;
             __half* kd    = &k_scale_s[key_l * Groups];
-            __half* vd    = &v_scale_s[key_l * Groups];
+            __half* vd    = &v_scale_s[key_l * ValueGroups];
             if (key <= max_query_abs) {
                 const std::int64_t off = kv::Int8G64Layout<Geometry::KVHeads>::scale_offset(
                     physical_page, kv_head, 0, key & kv::kPageMask);
                 common::cp_async<8>(kd, &cache_k_scale[off]);
-                common::cp_async<8>(vd, &cache_v_scale[off]);
+                if constexpr (Packed) {
+                    const auto vo = kv::page_major_offset<8, Geometry::KVHeads>(
+                        physical_page, kv_head, key & kv::kPageMask, 0);
+                    common::cp_async<16>(vd, &cache_v_scale[vo]);
+                } else {
+                    common::cp_async<8>(vd, &cache_v_scale[off]);
+                }
             } else {
                 common::store_vec(kd, make_int2(0, 0));
-                common::store_vec(vd, make_int2(0, 0));
+                if constexpr (Packed) common::store_vec(vd, make_int4(0, 0, 0, 0));
+                else common::store_vec(vd, make_int2(0, 0));
             }
         }
 #pragma unroll 1
@@ -129,8 +138,15 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
             if (key <= max_query_abs) {
                 const std::int64_t off = kv::Int8G64Layout<Geometry::KVHeads>::code_offset(
                     physical_page, kv_head, d, key & kv::kPageMask);
-                common::cp_async<16, Cache::cg>(kd, &cache_k[off]);
-                common::cp_async<16, Cache::cg>(vd, &cache_v[off]);
+                if constexpr (Packed) {
+                    const auto packed = kv::page_major_offset<128, Geometry::KVHeads>(
+                        physical_page, kv_head, key & kv::kPageMask, d / 2);
+                    common::store_vec(kd, kv::rk4_expand16<true>(&cache_k[packed]));
+                    common::store_vec(vd, kv::rk4_expand16<false>(&cache_v[packed]));
+                } else {
+                    common::cp_async<16, Cache::cg>(kd, &cache_k[off]);
+                    common::cp_async<16, Cache::cg>(vd, &cache_v[off]);
+                }
             } else {
                 common::store_vec(kd, make_int4(0, 0, 0, 0));
                 common::store_vec(vd, make_int4(0, 0, 0, 0));
@@ -327,10 +343,11 @@ __global__ __maxnreg__(Schedule::kMaxRegisters) void int8_kv_tiled_mma_kernel(
                 const int key   = k0 + key_l;
                 __half* dst     = &v_f16[key_l * D + common::swizzle_xor_64(key_l, d)];
                 if (key <= max_query_abs) {
-                    const int grp = d >> 6;
+                    constexpr int ScaleLanes = Packed ? 4 : 8;
+                    const int grp = d / (Packed ? 32 : 64);
                     __half vs     = __float2half_rn(0.0f);
-                    if ((lane & 7) == 0) { vs = v_scale_s[key_l * Groups + grp]; }
-                    vs = __shfl_sync(FullMask, vs, grp * 8);
+                    if ((lane & (ScaleLanes - 1)) == 0) { vs = v_scale_s[key_l * ValueGroups + grp]; }
+                    vs = __shfl_sync(FullMask, vs, grp * ScaleLanes);
                     common::store_vec(dst, common::int8_dequant_f16x8(&v_i8[key_l * D + d], vs));
                 } else {
                     common::store_vec(dst, make_int4(0, 0, 0, 0));

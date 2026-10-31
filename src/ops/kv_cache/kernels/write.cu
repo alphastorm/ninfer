@@ -6,6 +6,7 @@
 #include "ops/kv_cache/kernels/write/int8.cuh"
 #include "ops/kv_cache/kernels/write/k8v4.cuh"
 #include "ops/kv_cache/kernels/write/nvfp4.cuh"
+#include "ops/kv_cache/kernels/write/rk4v4.cuh"
 
 #include <stdexcept>
 #include <type_traits>
@@ -48,6 +49,8 @@ void launch_quantized(const WriteArguments& a, Metadata metadata, cudaStream_t s
                 return write_i8_page_kernel<G, Metadata>;
             else
                 return write_i8_kernel<G, Metadata, Batch>;
+        } else if constexpr (Storage == KvCacheStorage::Rk4V4) {
+            return write_rk4_kernel<G, Metadata, Batch, Page>;
         } else if constexpr (Storage == KvCacheStorage::Fp8E4M3Row256) {
             if constexpr (Page)
                 return write_fp8_page_kernel<G, Metadata>;
@@ -69,7 +72,8 @@ void launch_quantized(const WriteArguments& a, Metadata metadata, cudaStream_t s
         }
     }();
     using Code =
-        std::conditional_t<Storage == KvCacheStorage::Int8Group64, std::int8_t, std::uint8_t>;
+        std::conditional_t<Storage == KvCacheStorage::Int8Group64 ||
+                               Storage == KvCacheStorage::Rk4V4, std::int8_t, std::uint8_t>;
     using KeyScale =
         std::conditional_t<Storage == KvCacheStorage::Nvfp4Group16, std::uint8_t, __half>;
     using ValueScale = std::conditional_t<Storage == KvCacheStorage::Nvfp4Group16 ||
@@ -124,6 +128,8 @@ void storage_dispatch(KvCacheStorage storage, PagedWriteInstance instance, const
         return launch_instance<KvCacheStorage::BFloat16, G>(instance, a, metadata, stream);
     case KvCacheStorage::Int8Group64:
         return launch_instance<KvCacheStorage::Int8Group64, G>(instance, a, metadata, stream);
+    case KvCacheStorage::Rk4V4:
+        return launch_instance<KvCacheStorage::Rk4V4, G>(instance, a, metadata, stream);
     case KvCacheStorage::Fp8E4M3Row256:
         return launch_instance<KvCacheStorage::Fp8E4M3Row256, G>(instance, a, metadata, stream);
     case KvCacheStorage::Nvfp4Group16:

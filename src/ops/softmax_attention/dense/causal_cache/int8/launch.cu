@@ -6,12 +6,13 @@
 namespace ninfer::ops::detail {
 namespace {
 
-template <class G, int Tokens, class Input, bool Writable>
+template <bool Packed, class G, int Tokens, class Input, bool Writable>
 void grouped(const CausalAttentionOperands& p, Int8KvCacheView<Writable> cache, Input input,
              CausalKvPartition partition, CausalPartialView partial, cudaStream_t stream) {
     using Instance    = Int8KvGroupedInstance<G, Tokens>;
     const auto invoke = [&]<bool MultiBatch, bool Masked>() {
-        launch_int8_kv_grouped_mma<G, typename Instance::Schedule, MultiBatch, Masked>(
+        launch_int8_kv_grouped_mma<G, typename Instance::Schedule, MultiBatch, Masked,
+                                  Writable, Input, false, Packed>(
             p, cache, input, partition, partial, stream);
         launch_causal_natural_merge<G, typename Instance::Merge, MultiBatch, Masked, false>(
             p, cache.valid_columns, partition, partial, stream);
@@ -29,14 +30,14 @@ void grouped(const CausalAttentionOperands& p, Int8KvCacheView<Writable> cache, 
     }
 }
 
-template <class G, class Input, bool Writable>
+template <bool Packed, class G, class Input, bool Writable>
 void grouped_instance(const CausalAttentionOperands& p, Int8KvCacheView<Writable> cache,
                       Input input, CausalKvPartition partition, CausalPartialView partial,
                       cudaStream_t stream) {
     switch (p.width) {
 #define NINFER_INT8_GROUPED(T)                                                                     \
     case T:                                                                                        \
-        return grouped<G, T>(p, cache, input, partition, partial, stream)
+        return grouped<Packed, G, T>(p, cache, input, partition, partial, stream)
         NINFER_INT8_GROUPED(1);
         NINFER_INT8_GROUPED(2);
         NINFER_INT8_GROUPED(3);
@@ -50,7 +51,7 @@ void grouped_instance(const CausalAttentionOperands& p, Int8KvCacheView<Writable
     throw std::logic_error("INT8 grouped plan exceeds the selected token tile");
 }
 
-template <class Input>
+template <bool Packed, class Input>
 void execute_grouped(const Tensor& q, const Tensor& positions, float scale,
                      PagedKVBatchLayerView cache, const Tensor* valid, const Tensor* rows,
                      Input input, const Int8KvCausalPlan& plan, MemoryArena& workspace, Tensor& out,
@@ -62,18 +63,18 @@ void execute_grouped(const Tensor& q, const Tensor& positions, float scale,
                                                   plan.partition.capacity, plan.batch);
     const auto p = make_causal_operands(q, positions, out, scale, plan.envelope.max_visible_keys);
     if (plan.query_heads == 24)
-        grouped_instance<CausalD256H24Kv4>(p, view, input, plan.partition, partial.view(), stream);
+        grouped_instance<Packed, CausalD256H24Kv4>(p, view, input, plan.partition, partial.view(), stream);
     else
-        grouped_instance<CausalD256H16Kv2>(p, view, input, plan.partition, partial.view(), stream);
+        grouped_instance<Packed, CausalD256H16Kv2>(p, view, input, plan.partition, partial.view(), stream);
 }
 
-template <class G, int Tokens>
+template <bool Packed, class G, int Tokens>
 void parallel_grouped(const CausalAttentionOperands& p, Int8KvReadView cache,
                       CausalKvPartition partition, CausalPartialView partial, cudaStream_t stream) {
     using Instance    = Int8KvGroupedInstance<G, Tokens>;
     const auto invoke = [&]<bool MultiBatch, bool Masked>() {
         launch_int8_kv_grouped_mma<G, typename Instance::Schedule, MultiBatch, Masked, false,
-                                   CausalCachedInput, true>(p, cache, {}, partition, partial,
+                                   CausalCachedInput, true, Packed>(p, cache, {}, partition, partial,
                                                             stream);
         launch_causal_natural_merge<G, typename Instance::Merge, MultiBatch, Masked, false>(
             p, cache.valid_columns, partition, partial, stream);
@@ -91,24 +92,26 @@ void parallel_grouped(const CausalAttentionOperands& p, Int8KvReadView cache,
     }
 }
 
+template <bool Packed>
 void execute_parallel(const CausalAttentionOperands& p, Int8KvReadView cache,
                       const Int8KvCausalPlan& plan, MemoryArena& workspace, cudaStream_t stream) {
     auto scope         = workspace.scope();
     const auto partial = allocate_causal_partials(workspace, plan.query_heads, plan.width,
                                                   plan.partition.capacity, plan.batch);
     if (plan.query_heads == 24)
-        parallel_grouped<CausalD256H24Kv4, Int8KvCausalPlan::kTokenTile>(p, cache, plan.partition,
+        parallel_grouped<Packed, CausalD256H24Kv4, Int8KvCausalPlan::kTokenTile>(p, cache, plan.partition,
                                                                          partial.view(), stream);
     else
-        parallel_grouped<CausalD256H16Kv2, Int8KvCausalPlan::kTokenTile>(p, cache, plan.partition,
+        parallel_grouped<Packed, CausalD256H16Kv2, Int8KvCausalPlan::kTokenTile>(p, cache, plan.partition,
                                                                          partial.view(), stream);
 }
 
+template <bool Packed>
 void tiled(const CausalAttentionOperands& p, Int8KvReadView cache, cudaStream_t stream) {
     if (p.query_heads == 24)
-        launch_int8_kv_tiled_mma<CausalD256H24Kv4, Int8KvTiledInstance>(p, cache, stream);
+        launch_int8_kv_tiled_mma<CausalD256H24Kv4, Int8KvTiledInstance, Packed>(p, cache, stream);
     else
-        launch_int8_kv_tiled_mma<CausalD256H16Kv2, Int8KvTiledInstance>(p, cache, stream);
+        launch_int8_kv_tiled_mma<CausalD256H16Kv2, Int8KvTiledInstance, Packed>(p, cache, stream);
 }
 
 } // namespace
@@ -121,6 +124,7 @@ void int8_kv_append_attention(const Tensor& q, const Tensor& k, const Tensor& v,
     const cudaStream_t stream = execution.stream();
     const auto plan           = select_int8_kv_causal_plan(q.ne[1], q.ne[2], q.ne[3], envelope,
                                                            execution.multiprocessor_count());
+    const auto run = [&]<bool Packed>() {
     if (plan.family != Int8KvFamily::Grouped) {
         kv::launch_paged_write(select_int8_kv_write(k.ne[1], k.ne[2], k.ne[3]), k, v, positions,
                                valid, rows, cache, stream);
@@ -128,15 +132,18 @@ void int8_kv_append_attention(const Tensor& q, const Tensor& k, const Tensor& v,
         const auto view =
             make_quantized_causal_cache_view<Int8KvCacheView<false>>(cache, &valid, &rows);
         if (plan.family == Int8KvFamily::Tiled)
-            tiled(p, view, stream);
+            tiled<Packed>(p, view, stream);
         else
-            execute_parallel(p, view, plan, workspace, stream);
+            execute_parallel<Packed>(p, view, plan, workspace, stream);
     } else {
-        execute_grouped(q, positions, scale, cache, &valid, &rows,
+        execute_grouped<Packed>(q, positions, scale, cache, &valid, &rows,
                         CausalAppendInput{static_cast<const __nv_bfloat16*>(k.data),
                                           static_cast<const __nv_bfloat16*>(v.data)},
                         plan, workspace, out, stream);
     }
+    };
+    if (cache.storage == KvCacheStorage::Rk4V4) run.template operator()<true>();
+    else run.template operator()<false>();
 }
 
 void int8_kv_cached_attention(const Tensor& q, const Tensor& positions, float scale,
@@ -147,16 +154,20 @@ void int8_kv_cached_attention(const Tensor& q, const Tensor& positions, float sc
     const auto plan =
         select_int8_kv_causal_plan(q.ne[1], q.ne[2], 1, envelope, execution.multiprocessor_count());
     const auto view = single_row_paged_kv_batch_view(cache);
+    const auto run = [&]<bool Packed>() {
     if (plan.family == Int8KvFamily::Tiled)
-        tiled(make_causal_operands(q, positions, out, scale, envelope.max_visible_keys),
+        tiled<Packed>(make_causal_operands(q, positions, out, scale, envelope.max_visible_keys),
               make_quantized_causal_cache_view<Int8KvCacheView<false>>(view), stream);
     else if (plan.family == Int8KvFamily::ParallelGrouped)
-        execute_parallel(make_causal_operands(q, positions, out, scale, envelope.max_visible_keys),
+        execute_parallel<Packed>(make_causal_operands(q, positions, out, scale, envelope.max_visible_keys),
                          make_quantized_causal_cache_view<Int8KvCacheView<false>>(view), plan,
                          workspace, stream);
     else
-        execute_grouped(q, positions, scale, view, nullptr, nullptr, CausalCachedInput{}, plan,
+        execute_grouped<Packed>(q, positions, scale, view, nullptr, nullptr, CausalCachedInput{}, plan,
                         workspace, out, stream);
+    };
+    if (cache.storage == KvCacheStorage::Rk4V4) run.template operator()<true>();
+    else run.template operator()<false>();
 }
 
 } // namespace ninfer::ops::detail

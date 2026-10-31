@@ -29,6 +29,7 @@ const char* kv_name(KvCacheStorage storage) {
     case KvCacheStorage::Int8Group64: return "int8";
     case KvCacheStorage::Fp8E4M3Row256: return "fp8";
     case KvCacheStorage::Fp8KeyNvfp4Value: return "k8v4";
+    case KvCacheStorage::Rk4V4: return "rk4v4";
     case KvCacheStorage::Nvfp4Group16: break;
     }
     throw std::invalid_argument("unsupported durable KV storage");
