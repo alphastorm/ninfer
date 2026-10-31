@@ -149,6 +149,15 @@ remain serial. The runner reports elapsed time per KV type.
 
 `ninfer_rk4v4_codec_test` is GPU-free: independent FP64 golden bytes/scales,
 codec round trips, zero/subnormal groups, and exact capacity arithmetic.
+`ninfer_rk4v4_pages_test` is the GPU-free true-cold transport diagnostic: independent
+FP64 reference rows in the 16-layer/four-head geometry, 1024-token chunks versus a
+3066-token checkpoint plus 27-token tail, reversed physical pages, real pool D2H/H2D
+copy planning with interposed CUDA transport, opaque file round-trip, and exact
+production-codebook reads. Its scope is identical K/V inputs, not identical prompt
+tokens through different transformer execution widths. It does not execute native
+Program export/import, attention kernels, or sampling; a pass cannot waive the
+model-level exact-token true-cold gate. `ninfer_export_state_test` separately exercises
+I18's real StateImage Host materialization and fork restore with interposed CUDA copies.
 `ninfer_rk4v4_test` is the dedicated native GPU oracle: standalone/fused append bytes,
 cached attention, both D256 geometries, decode, MTP3 W=4, DFlash2 W=8,
 parallel/grouped/tiled prefill through 2048, C2 dense/ragged/fully masked rows,
