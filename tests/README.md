@@ -158,6 +158,18 @@ tokens through different transformer execution widths. It does not execute nativ
 Program export/import, attention kernels, or sampling; a pass cannot waive the
 model-level exact-token true-cold gate. `ninfer_export_state_test` separately exercises
 I18's real StateImage Host materialization and fork restore with interposed CUDA copies.
+
+Diagnostic branch only (never merge into a release): `NINFER_TRUECOLD_T1_DIR`
+enables read-only captures for the 3093-token RK4V4/DFlash2-K7/C1 T1 case.
+Use a fresh private directory per server process. It records canonical KV and
+StateImage bytes immediately after a 3066-token restore and after 3093-token prefill,
+plus the original target-logit column licensing generated token 32 (raw bytes,
+dtype, top 20, top-two margin, and selected token). Existing captures are never
+overwritten. It adds synchronization and disk I/O, so its timings are not speed/fit
+qualification evidence. It does not change chunk sizes, kernels, graph enablement,
+sampling, or cached-prefix policy. Without the environment variable it does no
+capture. This instrumentation is isolated from the mergeable host-test commit.
+
 `ninfer_rk4v4_test` is the dedicated native GPU oracle: standalone/fused append bytes,
 cached attention, both D256 geometries, decode, MTP3 W=4, DFlash2 W=8,
 parallel/grouped/tiled prefill through 2048, C2 dense/ragged/fully masked rows,

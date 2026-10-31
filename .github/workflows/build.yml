@@ -91,6 +91,8 @@ jobs:
             src/ops/CMakeFiles/ninfer_ops.dir/linear/kernels/q4/q4_a16_sliced_k_mma.cu.o \
             src/ops/CMakeFiles/ninfer_ops.dir/kv_cache/kernels/write.cu.o \
             src/ops/CMakeFiles/ninfer_ops.dir/softmax_attention/dense/causal_cache/int8/launch.cu.o \
+            src/models/CMakeFiles/ninfer_model_runtime.dir/qwen3_5/program/prefill.cpp.o \
+            src/models/CMakeFiles/ninfer_model_runtime.dir/qwen3_5/program/decode.cpp.o \
             tests/CMakeFiles/ninfer_rk4v4_test.dir/ops/test_rk4v4.cpp.o \
             src/ops/CMakeFiles/ninfer_ops.dir/linear/swiglu/q4/shapes/n34816_k5120/small.cu.o
       - name: Run only GPU-free CTest contracts
@@ -206,6 +208,8 @@ jobs:
             ninfer_checkpoint_io_contract_test ninfer_direct_storage_checkpoint_backend_test `
             ninfer_durable_file_test ninfer_session_checkpoint_store_test ninfer_automatic_checkpoint_queue_test `
             ninfer_qwen3_5_head_logits_test ninfer_cli_options_test `
+            src/models/CMakeFiles/ninfer_model_runtime.dir/qwen3_5/program/prefill.cpp.obj `
+            src/models/CMakeFiles/ninfer_model_runtime.dir/qwen3_5/program/decode.cpp.obj `
             src/serve/CMakeFiles/ninfer_serve.dir/stop_event.cpp.obj `
             src/serve/CMakeFiles/ninfer_serve.dir/session_checkpoint_service.cpp.obj
           if ($LASTEXITCODE -ne 0) { throw 'Windows platform C++ compile failed' }

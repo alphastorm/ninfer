@@ -1,5 +1,6 @@
 #include "models/common/qwen/vision/prefill.h"
 #include "models/qwen3_5/program/program_impl.h"
+#include "models/qwen3_5/program/truecold_diagnostic.h"
 #include "models/common/context/work.h"
 #include "models/qwen3_5/program/execution_context.h"
 #include "models/qwen3_5/execution/linear.h"
@@ -521,6 +522,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
     std::uint32_t processed_prompt_tokens = 0;
     const auto started                    = context::Clock::now();
     try {
+        if (staged.prompt_tokens == 3093 && staged.base == 3066 && staged.cursor == staged.base)
+            truecold_diagnostic::snapshot(*this, sequence, "restored-input");
         context::StateImageSelectors selectors = state_selectors(sequence);
         Tensor rewrite_capture_hidden;
         Tensor* rewrite_capture_hidden_ptr = nullptr;
@@ -747,6 +750,8 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                                       (staged.vision ? staged.vision->elapsed_seconds() : 0.0);
         const std::uint32_t prompt_tokens = staged.prompt_tokens;
 
+        if (prompt_tokens == 3093)
+            truecold_diagnostic::snapshot(*this, sequence, "prefill");
         validate_licensed_tokens(std::span<const TokenId>(host_tokens, 1));
         if (sequence.ledger.size() != prompt_tokens) {
             throw std::logic_error("candidate token ledger does not match prompt length");

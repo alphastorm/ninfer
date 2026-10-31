@@ -1,4 +1,5 @@
 #include "models/qwen3_5/program/program_impl.h"
+#include "models/qwen3_5/program/truecold_diagnostic.h"
 #include "models/common/context/work.h"
 #include "models/qwen3_5/program/execution_context.h"
 #include "models/qwen3_5/program/graph_execution.h"
@@ -765,6 +766,8 @@ runtime::BatchedGeneratedRound ProgramImpl::decode_dflash_batch(
                     capacity) {
                 throw std::runtime_error("DFlash batch returned invalid row metadata");
             }
+            truecold_diagnostic::logits(*this, sequence, row,
+                                       static_cast<unsigned>(count_i), base_E);
             const std::span<const TokenId> row_tokens(dflash_host_egress->licensed_tokens.data() +
                                                           row * width,
                                                       static_cast<std::size_t>(count_i));
