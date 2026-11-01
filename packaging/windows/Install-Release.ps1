@@ -967,6 +967,13 @@ function Assert-TransactionCandidateQuiescent([object]$Transaction, [string]$Sta
         [string](Read-JsonFile $StatePath).active_release -ceq [string]$Transaction.instance_id) {
         & $ControllerPath -Action Stop -StateRoot $StateRoot | Out-Null
     }
+    # Retained launch attribution is a cleanup hold, including after a partial lifecycle restore.
+    # Only the operator's explicit controller Reconcile retires an incomplete candidate launch.
+    $runtimePath = Join-Path $StateRoot 'runtime.json'
+    if ((Test-Path -LiteralPath $runtimePath -PathType Leaf) -and
+        [string](Read-JsonFile $runtimePath).release_id -ceq [string]$Transaction.instance_id) {
+        throw 'candidate shutdown attribution remains incomplete; reconcile explicitly before destructive installer repair'
+    }
     $releaseRoot = [string]$Transaction.release_root
     if (-not [string]::IsNullOrWhiteSpace($releaseRoot)) {
         $running = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Where-Object {
