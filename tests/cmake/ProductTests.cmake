@@ -1,4 +1,5 @@
 ninfer_add_test(ninfer_media_decode_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_media_decode.cpp"
   LIBRARIES ninfer_media_decode)
 
@@ -19,6 +20,7 @@ target_include_directories(ninfer_perplexity_evaluation_test PRIVATE
   ${PROJECT_SOURCE_DIR}/apps/perplexity)
 
 ninfer_add_test(ninfer_cli_options_test
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_cli_options.cpp" ${PROJECT_SOURCE_DIR}/apps/cli/options.cpp
   LIBRARIES ninfer_runtime_support ninfer_product_logging)
 
@@ -66,6 +68,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 ninfer_add_test(ninfer_session_checkpoint_store_test
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_session_checkpoint_store.cpp"
   NEEDS_SOURCE_DIR
   LIBRARIES ninfer_session_checkpoint_store)
@@ -75,12 +78,15 @@ if(WIN32)
     COMMAND ninfer_session_checkpoint_store_test current_flush)
   set_tests_properties(ninfer_session_checkpoint_store_current_flush_test
     PROPERTIES LABELS "host;durable" TIMEOUT 180)
+  ninfer_test_host_lanes(ninfer_session_checkpoint_store_current_flush_test
+    ninfer_session_checkpoint_store_test windows)
   add_test(NAME ninfer_session_checkpoint_store_protected_long_root_test
     COMMAND ninfer_session_checkpoint_store_test protected_long_root)
   set_tests_properties(ninfer_session_checkpoint_store_protected_long_root_test
     PROPERTIES LABELS "host;durable;elevated" TIMEOUT 180)
 endif()
 ninfer_add_test(ninfer_automatic_checkpoint_queue_test
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_automatic_checkpoint_queue.cpp"
   NEEDS_SOURCE_DIR
   LIBRARIES ninfer_session_checkpoint_store)
@@ -95,29 +101,34 @@ if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     COMMAND ninfer_session_checkpoint_store_test disk_full_capacity)
   set_tests_properties(ninfer_session_checkpoint_store_capacity_test
     PROPERTIES LABELS "host;durable" TIMEOUT 180)
+  ninfer_test_host_lanes(ninfer_session_checkpoint_store_capacity_test
+    ninfer_session_checkpoint_store_test bounded native windows)
 endif()
 ninfer_add_test(ninfer_checkpoint_policy_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_checkpoint_policy.cpp")
 set_tests_properties(ninfer_session_checkpoint_store_test ninfer_automatic_checkpoint_queue_test
-  ninfer_checkpoint_policy_test PROPERTIES LABELS "host" TIMEOUT 180)
+  ninfer_checkpoint_policy_test PROPERTIES TIMEOUT 180)
+set_tests_properties(ninfer_checkpoint_policy_test PROPERTIES LABELS "host")
 
 ninfer_add_test(ninfer_anthropic_schema_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_anthropic_schema.cpp"
   LIBRARIES ninfer_serve)
 
 ninfer_add_test(ninfer_serve_options_test
+  HOST_LANES native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_serve_options.cpp"
   LIBRARIES ninfer_serve)
 
 ninfer_add_test(ninfer_request_log_test
+  HOST_LANES native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_request_log.cpp"
   LIBRARIES ninfer_serve)
 
 ninfer_add_test(ninfer_metrics_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_metrics.cpp"
           ${PROJECT_SOURCE_DIR}/src/serve/metrics.cpp
   LIBRARIES ninfer::json Threads::Threads)
-set_tests_properties(ninfer_metrics_test PROPERTIES LABELS "host")
 
 ninfer_add_test(ninfer_http_error_handler_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_http_error_handler.cpp"
@@ -133,5 +144,6 @@ ninfer_add_test(ninfer_stop_event_test
 set_tests_properties(ninfer_stop_event_test PROPERTIES SKIP_RETURN_CODE 77)
 
 ninfer_add_test(ninfer_http_transport_test
+  HOST_LANES native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_http_transport.cpp"
   LIBRARIES ninfer_serve)
