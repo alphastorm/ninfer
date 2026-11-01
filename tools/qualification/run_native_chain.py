@@ -77,13 +77,13 @@ def finalize(orchestrator, state_path: Path, receipt_path: Path, stage: dict) ->
     persisted = store.parse_object(orchestrator.state_path.read_text(encoding='utf-8'))
     summary = store.parse_object((orchestrator.config.state_dir / 'qualification-summary.json').read_text())
     # The composer validates a completed projection of persisted phase evidence.
-    # Durable native state must not claim success until every publication succeeds.
+    # Persist native success before any completion publication becomes visible.
     lane = native.stage_lane_qualification({**persisted, 'status': 'passed'}, summary, orchestrator.lane)
+    orchestrator.state['status'] = 'passed'
+    orchestrator._save()
     native.atomic_json(orchestrator.config.state_dir / (orchestrator.lane.name + '.json'), lane)
     store.publish_completed(state_path, receipt_path, stage,
                             {'status': 'passed', 'part': stage['part'], 'binding': stage['binding']})
-    orchestrator.state['status'] = 'passed'
-    orchestrator._save()
 
 
 def run_part(config_path: Path, attempt: str, part: str) -> None:
@@ -159,6 +159,8 @@ New-Item -ItemType Directory -Path $root -ErrorAction Stop|Out-Null
             # quiescence and write-ahead restoration obligation without replaying tests.
             orchestrator.phase('preflight', orchestrator.preflight)
         for name in GROUPS[part]:
+            if name == 'restore':
+                cleanup_started = True
             orchestrator.phase(name, getattr(orchestrator, METHODS.get(name, name)))
             if name == 'package':
                 package = orchestrator.state['phases'][name]['receipt']['package']['sha256']
@@ -178,7 +180,10 @@ New-Item -ItemType Directory -Path $root -ErrorAction Stop|Out-Null
                                     {'status': 'passed', 'part': part, 'binding': binding})
     except BaseException as error:
         stage['status'] = 'failed'
-        store.atomic_json(state_path, stage)
+        try:
+            store.atomic_json(state_path, stage)
+        except BaseException as state_error:
+            error.add_note(f'failed stage state could not be saved: {state_error}')
         if orchestrator is not None:
             try:
                 restored = orchestrator.state.get('phases', {}).get('restore', {}).get('status') == 'passed'
@@ -188,7 +193,10 @@ New-Item -ItemType Directory -Path $root -ErrorAction Stop|Out-Null
                 error.add_note(f'cleanup failed: {cleanup_error}')
             finally:
                 orchestrator.state['status'] = 'failed'
-                orchestrator._save()
+                try:
+                    orchestrator._save()
+                except BaseException as state_error:
+                    error.add_note(f'failed native state could not be saved: {state_error}')
         raise
 
 

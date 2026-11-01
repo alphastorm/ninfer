@@ -77,11 +77,16 @@ def publish_completed(state_path: Path, receipt_path: Path, state: dict, receipt
 
 
 def completed_receipt(state_path: Path, receipt_path: Path) -> dict:
+    """Require bound passed state, including native state for a chain finish."""
     state = parse_object(state_path.read_text(encoding='utf-8-sig'))
     receipt = parse_object(receipt_path.read_text(encoding='utf-8-sig'))
     if (state.get('status') != 'passed' or receipt.get('status') != 'passed'
             or receipt.get('state_sha256') != file_sha256(state_path)):
         raise ValueError('continuation requires a completed receipt bound to persisted state')
+    if state.get('part') == 'finish':
+        native_state = parse_object((state_path.parent / 'native/state.json').read_text(encoding='utf-8-sig'))
+        if native_state.get('status') != 'passed':
+            raise ValueError('completed finish receipt requires passed native state')
     return receipt
 
 
