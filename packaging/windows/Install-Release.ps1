@@ -963,8 +963,8 @@ function Stop-IncumbentForUpgrade(
 # from the candidate's release root. Like the controller, refuse a same-name server whose blank
 # image path cannot prove its absence. The rollback itself never removes a GPU-owner lease.
 function Assert-TransactionCandidateQuiescent([object]$Transaction, [string]$StatePath, [string]$ControllerPath) {
-    if (-not (Get-TransactionFlag $Transaction 'state_activated')) { return }
-    if ((Test-Path -LiteralPath $StatePath -PathType Leaf) -and
+    if ((Get-TransactionFlag $Transaction 'state_activated') -and
+        (Test-Path -LiteralPath $StatePath -PathType Leaf) -and
         [string](Read-JsonFile $StatePath).active_release -ceq [string]$Transaction.instance_id) {
         & $ControllerPath -Action Stop -StateRoot $StateRoot | Out-Null
     }

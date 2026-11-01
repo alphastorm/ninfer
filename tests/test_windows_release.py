@@ -3079,6 +3079,36 @@ try{Restore-GpuOwnerLease}catch{$restore=$_.Exception.Message}
                 "log": ["task:register", "incumbent:Start"],
             })
 
+    def test_preactivation_rollback_censuses_candidate_root_before_cleanup(self) -> None:
+        """A copied candidate can run before state activation; only Stop is activation-gated."""
+        for image in ("candidate-tool", None, "", " \t\r\n"):
+            with self.subTest(image=image), tempfile.TemporaryDirectory() as directory:
+                upgrade = interrupted_upgrade(Path(directory))
+                state_path = upgrade.root / "state.json"
+                shutil.copyfile(upgrade.snapshots / "state.bin", state_path)
+                shutil.copyfile(upgrade.snapshots / "controller.bin", upgrade.root / "Control-Release.ps1")
+                (upgrade.root / "gpu-owner-lease.json").unlink()
+                journal = json.loads(upgrade.journal.read_text())
+                journal["flags"] = {name: False for name in journal["flags"]}
+                journal["phase"] = "candidate_copied"
+                upgrade.journal.write_text(json.dumps(journal))
+                before_state = state_path.read_bytes()
+                process = {
+                    "ProcessId": 4242, "Name": "ninfer-serve.exe",
+                    "ExecutablePath": str(upgrade.candidate_targets[0] / "bin" / "helper.exe")
+                    if image == "candidate-tool" else image,
+                }
+                observed = self.rollback_attempt(upgrade, "rollback", live_processes=(process,))
+                self.assertFalse(observed["completed"], observed)
+                self.assertIn("candidate quiescence", observed["failure"])
+                self.assertTrue(all(path.exists() for path in upgrade.candidate_targets))
+                self.assertEqual(state_path.read_bytes(), before_state)
+                self.assertFalse((upgrade.root / "controller.log").exists())
+                self.assertTrue(self.rollback_attempt(upgrade, "repair")["completed"])
+                self.assertTrue(all(not path.exists() for path in upgrade.candidate_targets))
+                self.assertEqual(state_path.read_bytes(), before_state)
+                self.assertFalse((upgrade.root / "controller.log").exists())
+
     def test_repair_refuses_unreadable_server_images_until_census_clears(self) -> None:
         """Fork #51: synthetic CIM evidence, not a real-Windows unreadable-image reproduction.
         Restored or missing lifecycle state cannot prove that an unattributed server exited."""
