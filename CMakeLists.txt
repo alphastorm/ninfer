@@ -49,6 +49,7 @@ endif()
 
 include(cmake/Dependencies.cmake)
 include(cmake/BuildIdentity.cmake)
+include(cmake/CudaDeterminism.cmake)
 include(cmake/NinferTargets.cmake)
 
 # --- Subdirectories ----------------------------------------------------------
