@@ -24,7 +24,7 @@ concurrency:
 jobs:
   linux:
     name: Linux CUDA 13 / host tests / bounded sm_120a compile
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
@@ -116,7 +116,7 @@ jobs:
   full-runtime:
     name: Weekly or manual full Linux runtime compile
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full_build)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
