@@ -365,7 +365,7 @@ def interrupted_upgrade(directory: Path) -> SimpleNamespace:
 
 # One rollback or repair attempt over a journal, as the installer runs it. Progress lines and the
 # Windows task and process APIs are stand-ins: task registration is logged, and Win32_Process
-# reports exactly the images listed in $LiveImages.
+# reports exactly the synthetic census entries in $LiveProcesses.
 ROLLBACK_ATTEMPT = """Set-StrictMode -Version Latest
 $statePath=Join-Path $StateRoot 'state.json'
 $controllerPath=Join-Path $StateRoot 'Control-Release.ps1'
@@ -376,7 +376,7 @@ $controllerLog=Join-Path $StateRoot 'controller.log'
 function Write-InstallEvent { }
 function Register-ScheduledTask { Add-Content -LiteralPath $controllerLog -Value 'task:register' }
 function Unregister-ScheduledTask { Add-Content -LiteralPath $controllerLog -Value 'task:unregister' }
-function Get-CimInstance { foreach($image in @($LiveImages -split ';'|Where-Object{$_})){[pscustomobject]@{ProcessId=4242;ExecutablePath=$image}} }
+function Get-CimInstance { $LiveProcesses|ConvertFrom-Json }
 $transaction=Get-Content -Raw -LiteralPath $Journal|ConvertFrom-Json
 $outcome=[ordered]@{completed=$true;failure=$null}
 try{Invoke-InstallTransactionRollback $transaction $statePath $controllerPath $ownerControllerPath $Mode|Out-Null}
@@ -2763,10 +2763,11 @@ $outer=Read-JsonFile (Join-Path (Join-Path $StateRoot 'gpu-owner-state') 'lease.
                         "power_limit_w": successor_cap, "owner_lease_cap_w": successor_cap,
                         "release_lease": False})
 
-    def rollback_attempt(self, upgrade: SimpleNamespace, mode: str, live_images: tuple[Path, ...] = ()) -> dict:
+    def rollback_attempt(self, upgrade: SimpleNamespace, mode: str,
+                         live_processes: tuple[dict[str, object], ...] = ()) -> dict:
         return self.invoke(
             ps_assignments(StateRoot=upgrade.root, Journal=upgrade.journal, Mode=mode,
-                           LiveImages=";".join(str(image) for image in live_images))
+                           LiveProcesses=json.dumps(live_processes))
             + ps_definitions(WINDOWS / "Install-Release.ps1") + ROLLBACK_ATTEMPT)
 
     def test_directory_interruption_repairs_and_reinstalls_over_beta3(self) -> None:
@@ -3063,7 +3064,9 @@ try{Restore-GpuOwnerLease}catch{$restore=$_.Exception.Message}
                            diagnostics=["candidate stop: owned server process did not stop"])
             upgrade.journal.write_text(json.dumps(journal), encoding="utf-8")
             server = upgrade.root / "releases" / upgrade.candidate / "bin" / "ninfer-serve.exe"
-            self.assertFalse(self.rollback_attempt(upgrade, "repair", live_images=(server,))["completed"])
+            self.assertFalse(self.rollback_attempt(
+                upgrade, "repair", live_processes=({"ProcessId": 4242, "ExecutablePath": str(server)},)
+            )["completed"])
             self.assertEqual(self.upgrade_observation(upgrade), {
                 "status": "repair_required", "active_release": upgrade.incumbent, "controller": "incumbent",
                 "candidate_targets": [True] * 4, "incumbent_trees": True, "candidate_lease": False,
@@ -3075,6 +3078,67 @@ try{Restore-GpuOwnerLease}catch{$restore=$_.Exception.Message}
                 "candidate_targets": [False] * 4, "incumbent_trees": True, "candidate_lease": False,
                 "log": ["task:register", "incumbent:Start"],
             })
+
+    def test_repair_refuses_unreadable_server_images_until_census_clears(self) -> None:
+        """Fork #51: synthetic CIM evidence, not a real-Windows unreadable-image reproduction.
+        Restored or missing lifecycle state cannot prove that an unattributed server exited."""
+        for state_present in (True, False):
+            for image, name in ((None, "ninfer-serve.exe"), ("", "NINFER-SERVE.EXE"),
+                                (" \t\r\n", "NInfer-Serve.exe")):
+                with self.subTest(state_present=state_present, image=image, name=name), \
+                        tempfile.TemporaryDirectory() as directory:
+                    upgrade = interrupted_upgrade(Path(directory))
+                    state_path = upgrade.root / "state.json"
+                    if state_present:
+                        shutil.copyfile(upgrade.snapshots / "state.bin", state_path)
+                    else:
+                        state_path.unlink()
+                    shutil.copyfile(upgrade.snapshots / "controller.bin", upgrade.root / "Control-Release.ps1")
+                    (upgrade.root / "gpu-owner-lease.json").unlink()
+                    before = {path: path.read_bytes() for path in upgrade.root.rglob("*")
+                              if path.is_file() and path != upgrade.journal}
+                    entry = {"ProcessId": 4242, "Name": name, "ExecutablePath": image}
+                    observed = self.rollback_attempt(upgrade, "repair", live_processes=(entry,))
+                    self.assertFalse(observed["completed"], observed)
+                    for diagnostic in ("unreadable image path", name, "4242"):
+                        self.assertIn(diagnostic, observed["failure"])
+                    journal = json.loads(upgrade.journal.read_text(encoding="utf-8"))
+                    self.assertEqual(journal["status"], "repair_required")
+                    self.assertEqual(journal["phase"], "repair_incomplete")
+                    self.assertTrue(any("unreadable image path" in item for item in journal["diagnostics"]))
+                    self.assertEqual({path: path.read_bytes() for path in before}, before)
+                    self.assertEqual(state_path.exists(), state_present)
+                    self.assertFalse((upgrade.root / "controller.log").exists())
+                    self.assertTrue(all(path.exists() for path in upgrade.candidate_targets))
+                    self.assertTrue(self.rollback_attempt(upgrade, "repair")["completed"])
+                    self.assertEqual(self.upgrade_observation(upgrade), {
+                        "status": "repaired", "active_release": upgrade.incumbent, "controller": "incumbent",
+                        "candidate_targets": [False] * 4, "incumbent_trees": True, "candidate_lease": False,
+                        "log": ["task:register", "incumbent:Start"],
+                    })
+
+    def test_repair_allows_unrelated_blank_and_readable_foreign_images(self) -> None:
+        """The controller's same-name guard is not a refusal of every blank CIM image."""
+        entries = [
+            {"ProcessId": 4242, "Name": "unrelated.exe", "ExecutablePath": image}
+            for image in (None, "", " \t\r\n")
+        ] + [{"ProcessId": 4242, "ExecutablePath": image} for image in (None, "", " \t\r\n")]
+        for entry in (*entries, None):
+            with self.subTest(entry=entry), tempfile.TemporaryDirectory() as directory:
+                upgrade = interrupted_upgrade(Path(directory))
+                shutil.copyfile(upgrade.snapshots / "state.bin", upgrade.root / "state.json")
+                shutil.copyfile(upgrade.snapshots / "controller.bin", upgrade.root / "Control-Release.ps1")
+                (upgrade.root / "gpu-owner-lease.json").unlink()
+                if entry is None:
+                    entry = {"ProcessId": 4242, "Name": "ninfer-serve.exe",
+                             "ExecutablePath": str(Path(directory) / "foreign" / "bin" / "ninfer-serve.exe")}
+                observed = self.rollback_attempt(upgrade, "repair", live_processes=(entry,))
+                self.assertTrue(observed["completed"], observed)
+                self.assertEqual(self.upgrade_observation(upgrade), {
+                    "status": "repaired", "active_release": upgrade.incumbent, "controller": "incumbent",
+                    "candidate_targets": [False] * 4, "incumbent_trees": True, "candidate_lease": False,
+                    "log": ["task:register", "incumbent:Start"],
+                })
 
     def test_a_refused_install_never_deletes_a_tree_it_did_not_create(self) -> None:
         """alphastorm/omp-ninfer#89 L7: an install refused over an unregistered same-instance tree
