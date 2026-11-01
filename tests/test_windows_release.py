@@ -1028,6 +1028,25 @@ class QualificationRestorationTests(unittest.TestCase):
             cleanup.assert_not_called()
             self.assertEqual(subject.state["phases"], {})
 
+    def test_c1_only_c2_refuses_constructor_before_checkpoint_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = SimpleNamespace(
+                source_root=ROOT, candidate_source=None, lane="fixture",
+                state_dir=Path(temporary), scratch_task_suffix="UNIT",
+            )
+            lane = SimpleNamespace(name="fixture", spec={}, config={"engine": {"max_concurrency": 2}})
+            with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="")), \
+                    patch.object(qualify_native.Lane, "load", return_value=lane), \
+                    patch.object(qualify_native, "validate_scratch_configuration"), \
+                    patch.object(qualify_native.Orchestrator, "_load_state") as load:
+                with self.assertRaisesRegex(
+                    qualify_native.LaneError,
+                    r"packaged agent_protocol.py is C1-only; lane requires engine.max_concurrency=2",
+                ):
+                    qualify_native.Orchestrator(config)
+            load.assert_not_called()
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+
     def ready_for_receipt(self, directory: Path) -> qualify_native.Orchestrator:
         subject = self.orchestrator(directory)
         subject.lane.spec["deployment_profile"] = "candidate-profile"

@@ -835,6 +835,8 @@ class Orchestrator:
         self.head8 = self.head[:8]
         self.lane = Lane.load(config.source_root, config.lane, self.head)
         validate_scratch_configuration(config, self.lane.spec)
+        # Staged callers may dispatch phases themselves instead of using execute().
+        self.preflight_protocol()
         self.script = Path(__file__).resolve()
         self.script_sha = sha256_file(self.script)
         self.state_path = config.state_dir / "state.json"
