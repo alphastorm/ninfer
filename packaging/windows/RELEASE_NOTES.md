@@ -16,33 +16,46 @@ continues to collect its transitive DLLs from the selected vcpkg installation.
 ## 2026-11-01 — Managed shutdown reconciliation (next release)
 
 Managed Stop treats absent, unreadable, malformed or foreign-launch shutdown reports
-for a stop-event launch as incomplete, as well as every forced-stop outcome. It
-retains `runtime.json`, the report and the candidate cache. Installer transaction
-rollback and `-RepairInterruptedInstall` refuse destructive cleanup while that
-launch attribution remains, even if a partial rollback restored the incumbent.
-The controller's `Rollback` still only swaps installed release pointers; it never
-deletes release or cache trees.
+for a stop-event launch as incomplete, including forced or terminal-failure outcomes
+of that launch. A predecessor that declares no stop-event channel keeps its normal
+termination behavior; its forced termination does not create a final-save hold.
 
-An incomplete `last-stop.json` outcome is sticky: managed Start and scheduled Run
-refuse a replacement launch, and a later Stop cannot clear the hold even if a
-clean report appears. To reconcile, first inspect and retain any needed report,
-logs and candidate checkpoints, then explicitly accept that refused or unreported
-live-session progress may be unavailable:
+An incomplete Stop retains `runtime.json` and appends that launch's runtime
+attribution and first stop receipt to the schema-1 `shutdown-holds.json` record,
+bound to its release identity and release root. Managed Start and scheduled Run
+remain available. A replacement launch may publish a new runtime/report and its
+later clean Stop completes normally, but neither operation clears earlier holds.
+
+Installer transaction rollback and `-RepairInterruptedInstall` still abort all
+restoration while a candidate may run or its GPU-owner restoration remains
+incomplete. Once the candidate is proven stopped, a final-save hold instead allows
+the non-destructive state/controller/task/owner restoration and incumbent restart.
+Every candidate tree remains intact, the transaction ends in `held_cleanup`, and
+the diagnostic names explicit reconciliation followed by installer repair. Repeated
+repair neither deletes held trees nor re-registers/restarts the restored incumbent.
+The controller's `Rollback` still swaps installed release pointers without deleting
+release or cache trees.
+
+To reconcile, first inspect and retain any needed hold records, logs, reports and
+candidate checkpoints, then explicitly accept that refused or unreported
+live-session progress may be unavailable. Use the updated packaged controller,
+not an older controller that rollback restored:
 
 ```powershell
-.\Control-Release.ps1 -Action Reconcile -StateRoot $stateRoot
+.\Control-Release.ps1 -Action Reconcile -StateRoot $stateRoot -ReleaseId $heldReleaseId
 .\Install-Release.ps1 -RepairInterruptedInstall -StateRoot $stateRoot
 ```
 
-Reconcile requires the retained candidate's lifecycle/controller to remain active,
-proves that its server and wrapper have exited, restores the GPU-owner lease, and
-retires launch attribution with an `operator_reconciled` stop receipt. It does not
-recover unsaved sessions or itself delete checkpoints. Run installer repair only
-when candidate-cache deletion is intended; after reconciliation, Start can instead
-reuse the retained candidate. If earlier recovery restored a different lifecycle,
-retain the evidence and restore the candidate's original lifecycle/controller
-before reconciliation; do not delete `runtime.json` or edit a stop verdict to bypass
-the hold.
+Reconcile selects holds by release id, proves no process runs from that release
+root (including refusing unreadable server-image attribution), and clears only
+those holds. The held release need not be active: its incumbent may keep serving,
+and that incumbent's runtime and GPU ownership are left untouched. For an active
+held release, the wrapper must also exit and ownership is restored before the
+hold clears. Reconcile does not recover unsaved sessions or delete checkpoints.
+The subsequent installer repair deletes the retained transaction-owned candidate
+trees without restoring or restarting the incumbent again. Do not edit a hold or
+delete attribution to bypass the explicit acknowledgement. Uninstall refuses
+held checkpoints before task removal; reconcile every held release first.
 
 ## 2026-10-30 — Native installer recovery and ownership
 

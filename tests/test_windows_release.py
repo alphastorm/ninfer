@@ -2947,6 +2947,9 @@ $later=$null
 try{Stop-ManagedProcess}catch{$later=$_.Exception.Message}
 $holds=if(Test-Path $holdPath){@(Read-JsonFile $holdPath).holds}else{@()}
 $sameHolds=(Test-Path $holdPath) -and [IO.File]::ReadAllText($holdPath) -ceq $beforeHolds
+$uninstall=$null
+function Unregister-ScheduledTask { throw 'uninstall-task-removal-reached' }
+try{Uninstall-ManagedRelease}catch{$uninstall=$_.Exception.Message}
 $liveReconcile=$null
 function Get-CimInstance { [pscustomobject]@{Name='ninfer-serve.exe';ExecutablePath=$release.server_executable;ProcessId=4242} }
 try{Reconcile-ManagedShutdown ([string]$state.active_release)}catch{$liveReconcile=$_.Exception.Message}
@@ -2954,7 +2957,7 @@ $stillHeld=Test-Path $holdPath
 function Get-CimInstance { }
 $reconcile=$null
 try{Reconcile-ManagedShutdown ([string]$state.active_release)}catch{$reconcile=$_.Exception.Message}
-@{first=$first;launches=$launches;start=$start;later=$later;holds=@($holds);same_holds=$sameHolds;live_reconcile=$liveReconcile;still_held=$stillHeld;reconcile=$reconcile;retired=(-not(Test-Path $runtimePath));cleared=(-not(Test-Path $holdPath))}|ConvertTo-Json -Depth 12 -Compress
+@{first=$first;launches=$launches;start=$start;later=$later;holds=@($holds);same_holds=$sameHolds;uninstall=$uninstall;live_reconcile=$liveReconcile;still_held=$stillHeld;reconcile=$reconcile;retired=(-not(Test-Path $runtimePath));cleared=(-not(Test-Path $holdPath))}|ConvertTo-Json -Depth 12 -Compress
 """)
             self.assertIn("incomplete", observed["first"])
             for failure in observed["launches"].values():
@@ -2965,6 +2968,8 @@ try{Reconcile-ManagedShutdown ([string]$state.active_release)}catch{$reconcile=$
             self.assertEqual(observed["holds"][0]["runtime"]["launch_id"], "1" * 32)
             self.assertEqual(observed["holds"][0]["stop_receipt"]["sessions_refused"], 1)
             self.assertTrue(observed["same_holds"])
+            self.assertIn("Reconcile", observed["uninstall"])
+            self.assertNotIn("uninstall-task-removal-reached", observed["uninstall"])
             self.assertIn("still runs", observed["live_reconcile"])
             self.assertTrue(observed["still_held"])
             self.assertIsNone(observed["reconcile"])
@@ -2992,10 +2997,11 @@ function Get-ScheduledTaskInfo { }
 function Restore-GpuOwnerLease { }
 $failure=$null
 try{Stop-ManagedRelease}catch{$failure=$_.Exception.Message}
+$receipt=Get-ManagedStopReceipt
 function Acquire-GpuOwnerLease { throw 'ownership-acquisition-reached' }
 $start=$null
 try{Start-ManagedRelease}catch{$start=$_.Exception.Message}
-@{failure=$failure;start=$start;runtime=(Test-Path $runtimePath);hold=(Test-Path (Join-Path $StateRoot 'shutdown-holds.json'));receipt=(Get-ManagedStopReceipt)}|ConvertTo-Json -Depth 6 -Compress
+@{failure=$failure;start=$start;runtime=(Test-Path $runtimePath);hold=(Test-Path (Join-Path $StateRoot 'shutdown-holds.json'));receipt=$receipt}|ConvertTo-Json -Depth 6 -Compress
 """)
             self.assertIsNone(observed["failure"])
             self.assertEqual(observed["start"], "ownership-acquisition-reached")
@@ -3003,6 +3009,33 @@ try{Start-ManagedRelease}catch{$start=$_.Exception.Message}
             self.assertFalse(observed["hold"])
             self.assertEqual(observed["receipt"]["mode"], "terminate")
             self.assertEqual(observed["receipt"]["outcome"], "terminated")
+
+    def test_reconcile_accepts_a_held_release_after_first_install_state_restore(self) -> None:
+        """A first-install rollback restores absence of state.json, not an active incumbent."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release_id = "candidate-" + "c" * 12
+            release = root / "releases" / release_id
+            release.mkdir(parents=True)
+            hold_path = root / "shutdown-holds.json"
+            hold_path.write_text(json.dumps({
+                "artifact_type": "ninfer_windows_shutdown_holds", "schema_version": 1,
+                "holds": [{
+                    "release_id": release_id, "release_root": str(release),
+                    "runtime": {"release_id": release_id, "pid": None, "launch_id": "1" * 32},
+                    "stop_receipt": {"release_id": release_id, "mode": "stop-event",
+                                     "outcome": "graceful_unreported", "forced": False},
+                }],
+            }))
+            self.invoke(ps_assignments(StateRoot=root, HeldRelease=release_id)
+                        + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+function Get-CimInstance { }
+function Restore-GpuOwnerLease { throw 'no incumbent ownership exists to restore' }
+Reconcile-ManagedShutdown $HeldRelease
+'{}'
+""")
+            self.assertFalse(hold_path.exists())
+            self.assertTrue(release.is_dir())
 
     @unittest.skipIf(sys.platform == "win32", "the synthetic nvidia-smi is a POSIX shell script")
     def test_nonrunning_beta3_stale_inner_lease_refuses_before_cutover(self) -> None:
