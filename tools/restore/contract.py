@@ -95,10 +95,14 @@ class Budget:
 class Events:
     def __init__(self, emit, instance):
         self.emit, self.instance = emit, instance
+        self.context = {}
     def __call__(self, name, **fields):
         self.emit(dict(event=name, clock_domain='observer.monotonic', units='ns',
                        process_instance=self.instance, monotonic_ns=time.monotonic_ns(),
-                       wall_ns=time.time_ns(), **fields))
+                       wall_ns=time.time_ns(), **(self.context | fields)))
+
+class HTTPStatusError(OSError):
+    pass
 
 class Transport:
     """One attempt per operation. A deadline limits total reads, not just each socket read."""
@@ -135,7 +139,7 @@ class Transport:
             document = json.loads(b''.join(chunks) or b'{}')
             self.events('http.end', sequence=sequence, status=response.status, document=document,
                         http_request_id=response.getheader('x-request-id'))
-            if response.status >= 400: raise RuntimeError(f'HTTP {response.status} on {path}')
+            if response.status >= 400: raise HTTPStatusError(f'HTTP {response.status} on {path}')
             return document
         except Exception as error:
             self.events('http.error', sequence=sequence, error=type(error).__name__, detail=str(error))
@@ -174,22 +178,27 @@ def ready(status, schedule, budget, events, now=time.monotonic, sleep=time.sleep
     raise TimeoutError('readiness deadline/attempt cap exhausted')
 
 def measured(transport, previous, prompt, events):
-    stop = threading.Event(); changed = []; failure = []; last = None
+    stop = threading.Event(); changed = []; last = None
+    started = time.monotonic()
     def observe():
         nonlocal last
         while not stop.is_set():
             try: value = transport.request('/v1/ninfer/checkpoints/status', timeout=30)
             except Exception as error: value = {'error':type(error).__name__, 'detail':str(error)}
             events('checkpoint.observation', status=value)
-            if value != last: changed.append(value); last = value
+            if value != last:
+                changed.append({'t_s':round(time.monotonic()-started,2), **value})
+                last = value
             stop.wait(1.)
     thread = threading.Thread(target=observe)
     thread.start(); started = time.monotonic()
-    try: document = transport.respond(prompt, previous, 256)
+    try:
+        document = transport.respond(prompt, previous, 256)
+        wall = time.monotonic()-started
     finally:
         stop.set(); thread.join(timeout=31)
         if thread.is_alive(): raise RuntimeError('checkpoint observer did not stop')
-    return document, {'wall_s':round(time.monotonic()-started, 3), 'status_polls':changed}
+    return document, {'wall_s':round(wall, 3), 'status_polls':changed}
 
 def self_test():
     assert cells(1) == [(1,c) for c in 'ABDCHGEF'] + [(2,c) for c in 'FEGH']

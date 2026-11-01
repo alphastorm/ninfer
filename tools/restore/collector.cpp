@@ -2,6 +2,8 @@
 #include "core/restore_trace.h"
 #include <cupti.h>
 #include <cuda.h>
+#include <generated_cuda_meta.h>
+#include <generated_cuda_runtime_api_meta.h>
 #include <dlfcn.h>
 #include <array>
 #include <atomic>
@@ -36,6 +38,26 @@ void CUPTIAPI callback(void*, CUpti_CallbackDomain domain, CUpti_CallbackId id, 
                       event.correlationId, event.contextUid,
                       reinterpret_cast<std::uintptr_t>(event.context));
         if (event.callbackSite == CUPTI_API_ENTER) symbol(event.symbolName, event.correlationId, domain);
+        const bool exit = event.callbackSite == CUPTI_API_EXIT;
+        const int result = exit && event.functionReturnValue
+            ? *static_cast<const int*>(event.functionReturnValue) : -1;
+        if (exit) output().emit("cuda.api.result", {}, domain, id, event.correlationId, result);
+        if (domain == CUPTI_CB_DOMAIN_DRIVER_API &&
+            std::strcmp(event.functionName, "cuModuleGetFunction") == 0) {
+            const auto& p = *static_cast<const cuModuleGetFunction_params*>(event.functionParams);
+            output().emit("cuda.lookup.module", {}, event.correlationId, exit,
+                          reinterpret_cast<std::uintptr_t>(p.hmod),
+                          exit && result == 0 ? reinterpret_cast<std::uintptr_t>(*p.hfunc) : 0);
+            if (!exit) symbol(p.name, event.correlationId, domain);
+        }
+        if (domain == CUPTI_CB_DOMAIN_RUNTIME_API &&
+            std::strcmp(event.functionName, "cudaLibraryGetKernel") == 0) {
+            const auto& p = *static_cast<const cudaLibraryGetKernel_v12060_params*>(event.functionParams);
+            output().emit("cuda.lookup.library", {}, event.correlationId, exit,
+                          reinterpret_cast<std::uintptr_t>(p.library),
+                          exit && result == 0 ? reinterpret_cast<std::uintptr_t>(*p.pKernel) : 0);
+            if (!exit) symbol(p.name, event.correlationId, domain);
+        }
     } else if (domain == CUPTI_CB_DOMAIN_RESOURCE) {
         const auto& event = *static_cast<const CUpti_ResourceData*>(data);
         std::uint32_t context = 0;
