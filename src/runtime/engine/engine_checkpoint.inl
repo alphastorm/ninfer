@@ -407,18 +407,18 @@ private:
         }
     }
     void run_checkpoint_commands() {
-        std::list<std::function<void()>> commands;
         {
             std::lock_guard lock(queue_mutex_);
-            commands.swap(checkpoint_commands_);
+            checkpoint_command_batch_.swap(checkpoint_commands_);
         }
-        for (auto& command : commands) { command(); }
+        for (auto& command : checkpoint_command_batch_) { command(); }
         // Every worker turn starts here. Gates that finished requests, operations and dropped
         // tokens left behind retire once no native owner names their session; native
         // ownership is only stable on this worker.
         checkpoints_.retire_unowned([&](std::string_view digest) {
             return resources_.holds_durable_session(digest);
         });
+        checkpoint_command_batch_.clear();
     }
     bool checkpoint_pressure(std::span<PressureCheckpointVictim> victims) {
         if (victims.empty()) { return true; }
