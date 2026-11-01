@@ -131,6 +131,8 @@ On the never-merge P17 integration branch, the Linux proof also includes the fro
 selectors (`e1b99a9a`), and Windows compares its label with the union of N16, #64 and #68
 (`84e8cd99`). The proofs run only for the migration PR or integration branch, so they do not
 freeze future CMake-only additions.
+The integration push also runs the separate RDC double-build workflow and both release-driver
+invariant jobs; no pull request or GPU execution is needed to qualify this combined CI state.
 
 The bounded Linux job in `.github/workflows/build.yml` builds and runs the GPU-free
 `ninfer_io_uring_checkpoint_read_queue_test`. It checks that partial submission and invalid
