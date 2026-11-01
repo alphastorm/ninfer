@@ -556,6 +556,7 @@ private:
                                std::get_if<GenerationFirstTokenObservation>(&event)) {
                     if (caller_error == nullptr) {
                         try {
+                            restore_trace::event("first.token.callback", {}, request->id);
                             request->observation.first_token(*first_token);
                         } catch (...) { fail_consumer(); }
                     }
