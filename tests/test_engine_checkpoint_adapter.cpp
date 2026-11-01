@@ -5,13 +5,15 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
-#include <deque>
+#include <cstdlib>
 #include <exception>
 #include <future>
 #include <iostream>
 #include <limits>
+#include <list>
 #include <map>
 #include <mutex>
+#include <new>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -20,6 +22,31 @@
 #include <type_traits>
 #include <utility>
 #include <vector>
+
+namespace {
+// Caller injection reaches real task/queue allocations. Post-writer injection also
+// covers the worker, including the next command drain after an inline export.
+thread_local std::ptrdiff_t allocations_before_failure = -1;
+thread_local std::size_t allocation_calls = 0;
+thread_local bool checkpoint_worker_thread = false;
+std::atomic<bool> fail_worker_allocations{false};
+std::atomic<std::size_t> injected_worker_drains{0};
+}
+
+void* operator new(std::size_t size) {
+    ++allocation_calls;
+    if (allocations_before_failure == 0 ||
+        (checkpoint_worker_thread && fail_worker_allocations.load())) {
+        allocations_before_failure = -1;
+        throw std::bad_alloc();
+    }
+    if (allocations_before_failure > 0) { --allocations_before_failure; }
+    if (void* memory = std::malloc(size ? size : 1)) { return memory; }
+    throw std::bad_alloc();
+}
+
+void operator delete(void* memory) noexcept { std::free(memory); }
+void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 
 namespace {
 using namespace ninfer::runtime;
@@ -66,6 +93,9 @@ struct ExportProgram {
     };
     std::vector<Image> images;
     bool refuse_export = false;
+    unsigned export_acquisitions = 0;
+    unsigned export_retirements = 0;
+    bool off_worker_retirement = false;
     static constexpr unsigned device_capacity = 3;
 
     struct Reservation {
@@ -78,16 +108,22 @@ struct ExportProgram {
     struct Lease {
         ExportProgram* owner = nullptr;
         std::vector<int> handles;
+        std::thread::id worker;
         explicit Lease(ExportProgram& program, std::span<const int> points) {
             if (program.refuse_export) { return; }
             handles.assign(points.begin(), points.end());
             owner = &program;
+            worker = std::this_thread::get_id();
+            ++owner->export_acquisitions;
             for (const int point : handles) { ++owner->images.at(point).readers; }
         }
         Lease(Lease&& other) noexcept
-            : owner(std::exchange(other.owner, nullptr)), handles(std::move(other.handles)) {}
+            : owner(std::exchange(other.owner, nullptr)), handles(std::move(other.handles)),
+              worker(other.worker) {}
         ~Lease() {
             if (owner) {
+                owner->off_worker_retirement |= std::this_thread::get_id() != worker;
+                ++owner->export_retirements;
                 for (const int point : handles) { --owner->images.at(point).readers; }
             }
         }
@@ -257,6 +293,21 @@ struct NullWriter final : ContinuationCheckpointWriter {
     bool finish() override { return true; }
 };
 
+struct AllocationFailureWriter final : ContinuationCheckpointWriter {
+    bool fail;
+    WriterFailure failure;
+    explicit AllocationFailureWriter(bool writer_throws) : fail(writer_throws) {}
+    ~AllocationFailureWriter() override { fail_worker_allocations.store(false); }
+    bool write_file(std::string_view, std::uint64_t, std::uint64_t, std::span<const std::byte>,
+                    std::uint32_t) override { return true; }
+    bool finish() override {
+        fail_worker_allocations.store(true);
+        allocations_before_failure = 0;
+        if (fail) { throw failure; }
+        return true;
+    }
+};
+
 template <class ModelContract>
 class AdapterFixture {
     using Checkpoint = int;
@@ -268,7 +319,8 @@ class AdapterFixture {
     std::mutex checkpoint_provider_mutex_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
-    std::deque<std::function<void()>> checkpoint_commands_;
+    std::list<std::function<void()>> checkpoint_commands_;
+    std::list<std::function<void()>> checkpoint_command_batch_;
     std::thread worker_;
     std::unique_lock<std::mutex>* checkpoint_execution_lock_ = nullptr;
     std::size_t checkpoint_exports_in_flight_ = 0;
@@ -293,6 +345,7 @@ public:
     AdapterFixture() = default;
     explicit AdapterFixture(typename ModelContract::Program& program) : instance_{&program} {
         worker_ = std::thread([this] {
+            checkpoint_worker_thread = true;
             for (;;) {
                 {
                     std::unique_lock lock(queue_mutex_);
@@ -302,6 +355,7 @@ public:
                 std::mutex execution;
                 std::unique_lock lock(execution);
                 checkpoint_execution_lock_ = &lock;
+                if (fail_worker_allocations.load()) { ++injected_worker_drains; }
                 run_checkpoint_commands();
             }
         });
@@ -348,6 +402,7 @@ public:
     void evict(const std::string& session) {
         on_worker([&] { resources_.owners.erase(session); });
     }
+    auto reserve_turn() { return reserve_checkpoint_command([] {}); }
     void turn() { on_worker([] {}); }
     std::size_t gates() const { return checkpoints_.gate_count(); }
     void complete_first_resume() {
@@ -411,6 +466,79 @@ void isolated_import_waits_for_export(bool writer_throws) {
             "completed export still owns a native reader or pending-capacity claim");
     require(core.isolated_admission() && core.on_worker([&] { return program.images.size() == 8; }),
             "second session could not admit by lossless Host demotion after export retirement");
+}
+
+void export_retirement_survives_allocation_failure(bool writer_throws, bool inline_worker = false) {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    core.restore("first");
+    core.complete_first_resume();
+    const auto before = core.progress();
+    AllocationFailureWriter writer(writer_throws);
+    // Queue this turn without allocating after injection starts. Inline retirement
+    // must also survive a fresh worker drain, not just the current callback.
+    auto drain = core.reserve_turn();
+    const auto drains_before = injected_worker_drains.load();
+    DurableExportResult result;
+    bool writer_failed = false;
+    bool allocation_failed = false;
+    const auto save = [&] {
+        try { result = core.save(writer); }
+        catch (const WriterFailure&) { writer_failed = true; }
+        catch (const std::bad_alloc&) { allocation_failed = true; }
+        return std::exchange(allocations_before_failure, -1) == 0;
+    };
+    const bool allocation_unused = inline_worker ? core.on_worker(save) : save();
+    drain();
+    fail_worker_allocations.store(false);
+    require(injected_worker_drains.load() > drains_before,
+            "post-writer allocation injection did not reach a worker command drain");
+    require(!allocation_failed && allocation_unused,
+            "export retirement allocated after taking its native lease");
+    require(writer_failed == writer_throws &&
+                (writer_throws || result.state == DurableExportState::Exported),
+            "allocation failure replaced the writer result or exception");
+    const auto after = core.progress();
+    require(after.first == before.first + 1 && after.second == before.second + 1,
+            "allocation-safe retirement did not release capacity exactly once");
+    require(core.on_worker([&] {
+        return program.export_acquisitions == 1 && program.export_retirements == 1 &&
+               !program.off_worker_retirement && program.pinned_device_slots() == 0;
+    }) && !core.capacity_pending() && core.isolated_admission(),
+            "allocation-safe retirement lost worker ownership or native capacity");
+}
+
+void export_command_allocation_failures_precede_native_lease() {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    core.restore("first");
+    core.complete_first_resume();
+    NullWriter writer;
+    const auto start = allocation_calls;
+    require(core.save(writer).state == DurableExportState::Exported,
+            "allocation-counting export did not complete");
+    const auto allocations = allocation_calls - start;
+    require(allocations != 0, "export did not exercise caller command allocation");
+    const auto before = core.progress();
+    for (std::size_t index = 0; index < allocations; ++index) {
+        allocations_before_failure = static_cast<std::ptrdiff_t>(index);
+        bool failed = false;
+        try { (void)core.save(writer); }
+        catch (const std::bad_alloc&) { failed = true; }
+        allocations_before_failure = -1;
+        require(failed, "injected command allocation failure was not exercised");
+        require(core.progress() == before && !core.capacity_pending() &&
+                    core.on_worker([&] {
+                        return program.export_acquisitions == 1 &&
+                               program.export_retirements == 1 &&
+                               !program.off_worker_retirement &&
+                               program.pinned_device_slots() == 0;
+                    }),
+                "command allocation failure acquired or retired a native export lease");
+    }
+    require(core.save(writer).state == DurableExportState::Exported &&
+                core.progress().first == before.first + 1,
+            "export did not recover after command allocation failure");
 }
 
 void overlapping_exports_retain_progress_until_last_release() {
@@ -543,6 +671,15 @@ int main() {
         {"paused_request_settlement", paused_request_settles_by_native_replay},
         {"export_success", [] { isolated_import_waits_for_export(false); }},
         {"export_writer_exception", [] { isolated_import_waits_for_export(true); }},
+        {"export_retirement_allocation_failure",
+         [] { export_retirement_survives_allocation_failure(false); }},
+        {"export_writer_exception_allocation_failure",
+         [] { export_retirement_survives_allocation_failure(true); }},
+        {"inline_export_retirement_allocation_failure",
+         [] { export_retirement_survives_allocation_failure(false, true); }},
+        {"inline_export_writer_exception_allocation_failure",
+         [] { export_retirement_survives_allocation_failure(true, true); }},
+        {"export_command_allocation_failure", export_command_allocation_failures_precede_native_lease},
         {"overlapping_exports", overlapping_exports_retain_progress_until_last_release},
         {"genuine_capacity", genuine_capacity_and_unprepared_export_do_not_defer},
         {"unseen_session_gates", unseen_sessions_leave_bounded_gates},
