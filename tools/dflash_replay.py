@@ -33,6 +33,7 @@ def replay(trace):
     if mode == 3 and (r, h, cap) != (16, 44, 3):
         raise ValueError("CAL policy changed")
     history, armed, capped, lows, decisions = [], mode == 2, mode == 2, [], []
+    previous_end = 0
     for ordinal, row in enumerate(rows):
         k, p, a, licensed, committed = (row[name] for name in (
             "physical_k", "extent", "accepted", "licensed", "committed"))
@@ -47,18 +48,22 @@ def replay(trace):
         if (row["ordinal"] != ordinal or not 1 <= k <= 15 or
                 not 0 <= a <= p <= k or licensed != a + 1 or
                 not 0 <= committed <= licensed or
+                not 1 <= row["batch"] <= 8 or not 0 <= row["row"] < row["batch"] or
+                not 0 <= row["lane"] < 8 or row["output_offset"] < previous_end or
+                row["frontier"] != len(prompt) + row["output_offset"] - 1 or
                 row["output_offset"] + committed > len(output) or
                 (row["discarded"] and committed != 0) or
                 (committed != licensed and not row["terminal"])):
             raise ValueError(f"invalid commit-bound record {ordinal}")
+        previous_end = row["output_offset"] + committed
         if row["terminal"] and ordinal != len(rows) - 1:
             raise ValueError("trace continues after terminal commit")
         expected_cap = mode == 2 or (armed and capped)
         if (row["armed"], row["capped"]) != (armed, expected_cap):
             raise ValueError(f"C++/replay decision mismatch at round {ordinal}")
-        if not (row["budget_clipped"] or row["capacity_clipped"]):
-            if p != (min(k, cap) if expected_cap else k):
-                raise ValueError("extent does not match decision")
+        limit = min(k, cap) if expected_cap else k
+        if p > limit or (not (row["budget_clipped"] or row["capacity_clipped"]) and p != limit):
+            raise ValueError("extent does not match decision")
         if mode != 0 and k != 7:
             raise ValueError("governor changed physical width")
         decisions.append({"armed": armed, "capped": expected_cap})

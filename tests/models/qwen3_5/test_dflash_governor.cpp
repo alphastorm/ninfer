@@ -159,13 +159,17 @@ DFlashTrace trace_fixture() {
     trace.options = {.mode = DFlashMode::Adaptive, .rounds = 8, .threshold = 20, .cap = 3};
     trace.request_sha256 = std::string(64, 'a');
     trace.prompt_token_ids = {11, 12};
+    trace.output_token_ids = {13}; // Prefill-first output precedes decode round zero.
     spec::ExtentCap state(trace.options);
+    std::uint32_t previous_append = 0;
     for (std::uint32_t i = 0; i < 16; ++i) {
         const auto p = state.limit(7);
         auto obs = observation(i == 9 ? p : 1, p);
         if (i == 15) { obs.terminal = true; obs.committed = 1; }
-        DFlashRoundRecord record{.ordinal = i, .frontier = 2 + i * 2,
-                                 .physical_k = 7, .extent = p, .previous_append = 2,
+        DFlashRoundRecord record{.ordinal = i,
+                                 .frontier = static_cast<std::uint32_t>(
+                                     trace.prompt_token_ids.size() + trace.output_token_ids.size() - 1),
+                                 .physical_k = 7, .extent = p, .previous_append = previous_append,
                                  .batch = 1, .row = 0, .lane = 3, .graph_class = 2,
                                  .graph_envelope = 8192, .accepted = obs.accepted,
                                  .licensed = obs.licensed, .committed = obs.committed,
@@ -174,6 +178,7 @@ DFlashTrace trace_fixture() {
         const TokenId tokens[8] = {21, 22, 23, 24, 25, 26, 27, 28};
         spec::append_trace(trace, record, {tokens, obs.committed});
         state.commit(obs);
+        previous_append = obs.committed;
     }
     return trace;
 }
@@ -190,6 +195,7 @@ void trace() {
     auto discarded = value;
     discarded.rounds.back().discarded = true;
     discarded.rounds.back().committed = 0;
+    discarded.output_token_ids.resize(discarded.rounds.back().output_offset);
     require(product::dflash_trace_json(discarded).at("rounds").back().at("discarded") == true,
             "discarded native verification must remain visible without learning");
     value.rounds.resize(spec::kTraceRoundLimit);
