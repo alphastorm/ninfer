@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
+import shutil
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -13,6 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tools.qualification import driver_state as driver
 from tools.qualification import run_native_chain as chain
+import importlib.util
+_spec = importlib.util.spec_from_file_location('upgrade_driver', ROOT / 'packaging/windows/run_upgrade_rehearsal.py')
+upgrade = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(upgrade)
 
 
 class DriverInvariantTests(unittest.TestCase):
@@ -191,6 +197,130 @@ class DriverInvariantTests(unittest.TestCase):
             state = json.loads((self.root / 'outputs/recovery/native/state.json').read_text())
             with self.assertRaises(ValueError):
                 driver.require_phases(state, phase.parents[1], ['protocol'])
+
+    def run_powershell(self, script):
+        executable = shutil.which('pwsh')
+        self.assertIsNotNone(executable, 'CI must provide PowerShell for driver contracts')
+        path = self.root / 'contract.ps1'
+        path.write_text(script, encoding='utf-8')
+        result = subprocess.run([executable, '-NoProfile', '-NonInteractive', '-File', str(path)],
+                                text=True, capture_output=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_upgrade_transport_failure_then_fresh_completed_chain(self):
+        config = self.root / 'upgrade.json'
+        driver.atomic_json(config, {'evidence_parent': str(self.root / 'evidence'),
+                                   'immutable_roots': [str(self.root / 'inputs')],
+                                   'command': ['transport'], 'lock_command': ['lock'],
+                                   'timeout_seconds': 60})
+        def response(command, **kwargs):
+            value = {'status': 'passed', 'scenario': command[-1], 'restored': True,
+                     'census': {'rows': []}, 'state_sha256': 'a' * 64}
+            return subprocess.CompletedProcess(command, 0, json.dumps(value), '')
+        with patch.object(upgrade.subprocess, 'run', return_value=subprocess.CompletedProcess([], 1, '', 'failed')):
+            with self.assertRaises(subprocess.CalledProcessError):
+                upgrade.execute(config, 'failed')
+        self.assertFalse((self.root / 'evidence/failed/running.json').exists())
+        with patch.object(upgrade.subprocess, 'run', side_effect=response) as transport:
+            upgrade.execute(config, 'recovery')
+            self.assertEqual([call.args[0][-1] for call in transport.call_args_list], list(upgrade.SCENARIOS))
+        for scenario in upgrade.SCENARIOS:
+            output = self.root / 'evidence/recovery'
+            receipt = driver.completed_receipt(output / (scenario + '.state.json'), output / (scenario + '.json'))
+            self.assertEqual(receipt['remote_state_sha256'], 'a' * 64)
+        with self.assertRaises(FileExistsError):
+            upgrade.execute(config, 'recovery')
+
+    def test_powershell_parsing_anchors_and_census_cardinality(self):
+        source = str(ROOT / 'packaging/windows').replace("'", "''")
+        self.run_powershell(r"""
+$ErrorActionPreference='Stop'
+$source='""" + source + r"""'
+foreach($name in @('Invoke-UpgradeInstall.ps1','Invoke-UpgradeRehearsal.ps1')) {
+ $tokens=$null;$errors=$null
+ $ast=[Management.Automation.Language.Parser]::ParseFile((Join-Path $source $name),[ref]$tokens,[ref]$errors)
+ if($errors.Count){throw ($errors|Out-String)}
+ foreach($function in $ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$true)) {
+  if($function.Name -in @('Find-Line','AssertDisjoint','Require','Save','ReadJson','PublishReceipt')) {Invoke-Expression $function.Extent.Text}
+ }
+}
+$lines=@(Get-Content (Join-Path $source 'Install-Release.ps1'))
+$activation=Find-Line $lines "Set-TransactionFlag `$transaction 'task_touched'"
+$start=Find-Line $lines '& $controllerPath -Action Start -StateRoot $StateRoot | Out-Null' $activation
+if($start -le $activation){throw 'first Start precedes activation'}
+$null=Find-Line $lines '$failures = [Collections.Generic.List[string]]::new()'
+foreach($count in @(0,1,2)) {
+ $rows=@(for($i=0;$i -lt $count;$i++){@{pid=$i}})
+ $decoded=(@{rows=$rows}|ConvertTo-Json -Compress|ConvertFrom-Json)
+ if($decoded.rows -isnot [Array] -or $decoded.rows.Count -ne $count){throw 'census cardinality changed'}
+}
+$root=Join-Path ([IO.Path]::GetTempPath()) 'driver-inputs'
+try {AssertDisjoint (Join-Path $root 'logs') $root;throw 'accepted-overlap'} catch {
+ if($_.Exception.Message -eq 'accepted-overlap'){throw}
+}
+$state=Join-Path $PSScriptRoot 'state.json';$receipt=Join-Path $PSScriptRoot 'receipt.json'
+Save $state @{status='running';restored=$false}
+try {$null=PublishReceipt $state $receipt @{rows=@()};throw 'accepted-incomplete'} catch {
+ if($_.Exception.Message -eq 'accepted-incomplete'){throw}
+}
+if(Test-Path $receipt){throw 'receipt published before state'}
+Save $state @{status='passed';restored=$true;scenario='running'}
+$published=PublishReceipt $state $receipt @{rows=@()}
+if($published.state_sha256 -cne (Get-FileHash $state -Algorithm SHA256).Hash.ToLowerInvariant()){throw 'receipt not bound to state'}
+""")
+
+    def test_upgrade_scenarios_use_actual_predecessor_and_transaction_order(self):
+        source = str(ROOT / 'packaging/windows/Invoke-UpgradeRehearsal.ps1').replace("'", "''")
+        scratch = str(self.root).replace("'", "''")
+        self.run_powershell(r"""
+$ErrorActionPreference='Stop'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile('""" + source + r"""',[ref]$tokens,[ref]$errors)
+foreach($function in $ast.FindAll({param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst]},$true)) {
+ if($function.Name -in @('InvokeScenario','Require')){Invoke-Expression $function.Extent.Text}
+}
+$stateRoot='""" + scratch + r"""'
+Set-Content (Join-Path $stateRoot 'Control-Release.ps1') 'param($Action,$StateRoot)'
+$settings=@{incumbent=@{package_sha256='old'};candidate=@{package_sha256='new'}}
+function Observe {return $script:active}
+function Journals {return $script:journals}
+function ReadJson($Path) {
+ if($Path -like '*failure-receipt.json'){return @{failure='release listen port is already owned'}}
+ return @{status='repaired';phase='repair_completed'}
+}
+function Absent($Journal) {$script:absent++}
+function Install($Release,$Mode,$Tag) {
+ $script:calls+=($Release+'/'+$Mode)
+ if($Release -eq 'incumbent' -or $Mode -eq 'repair') {
+  $script:active=@{active='old-id';package='old';prior_paused=$false;owner_sha256='owner'}
+  return 0
+ }
+ if($Mode -eq 'fault'){
+  $script:journals=@(@{status='rolled_back';phase='rollback_completed';journal_path=(Join-Path $stateRoot 'journal.json')})
+  return 1
+ }
+ if($Mode -eq 'interrupt'){
+  $script:journals=@(@{status='in_progress';instance_id='new-id';journal_path='pending'})
+  return 1
+ }
+ $script:active=@{active='new-id';package='new';previous='old-id';prepared=$null
+  effective_weights=@{converted_device_bytes=1;host_mapped_bytes=1}}
+ $script:journals+=@{status='completed';phase='completed';task_was_running=$true;flags=@{incumbent_touched=$true}}
+ return 0
+}
+foreach($Scenario in @('running','rollback','repair')){
+ $script:calls=@();$script:journals=@();$script:absent=0
+ InvokeScenario
+ $expected=switch($Scenario){
+  'running' {'incumbent/install,candidate/install'}
+  'rollback' {'incumbent/install,candidate/fault'}
+  'repair' {'incumbent/install,candidate/interrupt,candidate/repair,candidate/install'}
+ }
+ if(($script:calls -join ',') -cne $expected){throw 'scenario order differs'}
+ if($Scenario -ne 'running' -and $script:absent -ne 1){throw 'candidate cleanup not checked'}
+}
+""")
+
 
 if __name__ == '__main__':
     unittest.main()
