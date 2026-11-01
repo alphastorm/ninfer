@@ -85,6 +85,8 @@ empty census.
 
 The GPU-free `release-drivers` Actions job runs the invariant suite on Linux and Windows,
 including namespace, JSON boundary, receipt ordering and native chain failure/recovery checks
-with fake providers. The chain boundary regressions retain the real native constructor, state
-loader, phase publisher, preflight and restoration logic while replacing external providers.
+with fake providers. The chain boundary regressions retain the real native constructor, lane
+loader, state loader, phase publisher, preflight and restoration logic while replacing external
+providers. Lane specification/configuration fixtures use the repository's complete lane schemas
+so newly required fields propagate to every real-orchestrator boundary test.
 No CTest selection or numerical/acceptance tolerance is changed.

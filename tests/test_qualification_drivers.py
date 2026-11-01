@@ -228,11 +228,16 @@ class NativeChainBoundaryTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         fixture = self.root / 'fixture.json'
         fixture.write_text('[]', encoding='utf-8')
+        lane_root = ROOT / 'packaging/windows/lanes/rtx4090'
+        self.lane = chain.native.Lane(
+            'rtx4090', json.loads((lane_root / 'release-spec.json').read_text()),
+            json.loads((lane_root / 'server-config.json').read_text()))
+        self.scratch_root = 'Q:/work/{attempt}-target/' + self.lane.spec['lifecycle']['state_root_name']
         self.values = {field.name: '' for field in dataclasses.fields(chain.native.Config)}
         self.values.update(
             source_root=str(self.root / 'source'), long_fixture=str(fixture), transfer_tool=None,
-            lane='lane', builder='builder', target='target', incumbent_state_root=None,
-            candidate_source='a' * 40, scratch_state_root='Q:/work/{attempt}-target/managed',
+            lane=self.lane.name, builder='builder', target='target', incumbent_state_root=None,
+            candidate_source='a' * 40, scratch_state_root=self.scratch_root,
             scratch_port=18200, pressure_port=18201, api_key_file='R:/inputs/key',
             qualified_runtime_bin=None, qualified_build_receipt=None, gpu_uuid=None)
         self.settings = {
@@ -258,16 +263,19 @@ class NativeChainBoundaryTests(unittest.TestCase):
                 if '$ompModels=' in script:
                     return {'incumbent_state_root': self.config.incumbent_state_root or '',
                             'incumbent_was_running': case.host['incumbent_running'],
-                            'omp_models': ['ninfer-client-acceptance/model']}
+                            'omp_models': ['ninfer-client-acceptance/' + case.lane.model_id]}
                 if '$modelPath=' in script:
                     case.host.update(incumbent_running=False, candidate_running=False)
-                    return {'lineage_exists': case.host['installed'], 'model_sha256': 'model',
-                            'power_limit_w': 100, 'gpu': 'Test GPU'}
+                    return {'lineage_exists': case.host['installed'],
+                            'model_sha256': case.lane.model_sha256,
+                            'power_limit_w': case.lane.owner_power_limit_w,
+                            'gpu': case.lane.spec['gpu']['name']}
                 if "$incumbentState='untouched'" in script:
                     case.host['candidate_running'] = False
                     case.host['incumbent_running'] = bool(
                         self.state.get('found_incumbent', {}).get('incumbent_was_running'))
-                    return {'status': 'passed', 'process_count': 0, 'power_limit_w': 100}
+                    return {'status': 'passed', 'process_count': 0,
+                            'power_limit_w': case.lane.owner_power_limit_w}
                 if 'scratch_retired' in script:
                     return {'status': 'passed', 'scratch_retired': True}
                 if 'attempt namespace already exists' in script:
@@ -275,16 +283,18 @@ class NativeChainBoundaryTests(unittest.TestCase):
                 raise AssertionError('unexpected remote provider call')
 
         self.orchestrator = LifecycleOrchestrator
-        lane = chain.native.Lane('lane', {
-            'release_id': 'candidate', 'model': {'sha256': 'model'}, 'gpu': {'name': 'Test GPU'},
-            'lifecycle': {'state_root_name': 'managed', 'task_name': 'candidate',
-                          'gpu_owner_controller_protocol': {'owner_power_limit_w': 100}}},
-            {'model_id': 'model'})
+        def run(args, **kwargs):
+            output = ''
+            if args[:2] == ['git', 'rev-parse']:
+                output = 'a' * 40
+            elif args[:2] == ['git', 'show']:
+                # Supply actual repository bytes to the real Lane.load and protocol
+                # preflight; new required schema fields propagate to every boundary test.
+                output = (ROOT / args[2].split(':', 1)[1]).read_text()
+            return SimpleNamespace(stdout=output)
         for target, name, value in (
                 (chain, 'ChainOrchestrator', LifecycleOrchestrator),
-                (chain.native.Lane, 'load', lambda *args: lane),
-                (chain.native, 'run', lambda args, **kwargs: SimpleNamespace(
-                    stdout='a' * 40 if args[:2] == ['git', 'rev-parse'] else '')),
+                (chain.native, 'run', run),
                 (chain.native, 'stage_lane_qualification', lambda *args: {'status': 'passed'})):
             mock = patch.object(target, name, value)
             mock.start()
@@ -337,7 +347,7 @@ class NativeChainBoundaryTests(unittest.TestCase):
                         'controller': str(directory),
                         'builder': f'Q:/work/{attempt}-builder',
                         'target': f'Q:/work/{attempt}-target',
-                        'scratch': f'Q:/work/{attempt}-target/managed'}
+                        'scratch': self.scratch_root.replace('{attempt}', attempt)}
                     self.values.clear()
                     self.values.update(original)
                     self.values[key] = roots[kind] + '/frozen'
@@ -360,7 +370,7 @@ class NativeChainBoundaryTests(unittest.TestCase):
                 constructor.assert_not_called()
                 self.assertFalse((self.root / 'outputs' / f'invalid-{index}').exists())
                 self.settings.update(builder_parent='Q:/work', target_parent='Q:/work')
-                self.values['scratch_state_root'] = 'Q:/work/{attempt}-target/managed'
+                self.values['scratch_state_root'] = self.scratch_root
 
     def test_continuation_binds_each_imported_driver_module(self):
         self.run_part('cpu')
@@ -384,6 +394,13 @@ class NativeChainBoundaryTests(unittest.TestCase):
             self.assertEqual(subject.loaded['phases'][name], expected[name])
         self.assertEqual(self.calls.count('neutral_build'), 1)
         driver.require_phases(subject.state, subject.config.state_dir, chain.prior_phases('correctness'))
+
+    def test_real_constructor_loads_complete_repository_lane_schema(self):
+        self.run_part('cpu')
+        lane = self.instances[-1].lane
+        lane_root = ROOT / 'packaging/windows/lanes/rtx4090'
+        self.assertEqual(lane.config, json.loads((lane_root / 'server-config.json').read_text()))
+        self.assertEqual(lane.spec, json.loads((lane_root / 'release-spec.json').read_text()))
 
     def test_successor_groups_requiesce_restored_incumbent_without_measured_replay(self):
         self.values['incumbent_state_root'] = 'R:/incumbent'
@@ -449,7 +466,7 @@ class NativeChainBoundaryTests(unittest.TestCase):
                     fail()
                 original_store(path, value)
             def publish_native(path, value):
-                if failure_at == 'lane' and path.name == 'lane.json':
+                if failure_at == 'lane' and path.name == self.lane.name + '.json':
                     fail()
                 original_native(path, value)
             with self.subTest(failure_at=failure_at), \
