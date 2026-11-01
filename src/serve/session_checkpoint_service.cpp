@@ -4,7 +4,7 @@
 #include "core/sha256.h"
 #include "ninfer/build_info.h"
 #include "ninfer/engine.h"
-#include "product/speculative_options.h"
+#include "runtime/engine/checkpoint_identity.h"
 #include "serve/client_identity.h"
 #include "serve/opaque_id.h"
 #include "serve/server_identity.h"
@@ -22,18 +22,6 @@ using Access = runtime::CheckpointEngineAccess;
 using Reason = runtime::DurableReason;
 using ImportState = runtime::DurableImportState;
 using Json = nlohmann::json;
-
-const char* kv_name(KvCacheStorage storage) {
-    switch (storage) {
-    case KvCacheStorage::BFloat16: return "bf16";
-    case KvCacheStorage::Int8Group64: return "int8";
-    case KvCacheStorage::Fp8E4M3Row256: return "fp8";
-    case KvCacheStorage::Fp8KeyNvfp4Value: return "k8v4";
-    case KvCacheStorage::Rk4V4: return "rk4v4";
-    case KvCacheStorage::Nvfp4Group16: break;
-    }
-    throw std::invalid_argument("unsupported durable KV storage");
-}
 
 runtime::RuntimeFingerprintV2 startup_fingerprint(Engine& engine, const ServeOptions& options) {
     const auto build = build_info();
@@ -59,14 +47,7 @@ runtime::RuntimeFingerprintV2 startup_fingerprint(Engine& engine, const ServeOpt
         .model_id = resolve_public_model_id(options, load.model_name), .weights_id = options.artifact_sha256};
     value.frontend = Access::frontend_identity(engine);
     value.native_layout = Access::checkpoint_layout(engine);
-    value.engine = {.max_context = effective.max_context, .kv_capacity = memory.kv_capacity,
-        .kv_dtype = kv_name(effective.kv_cache), .max_concurrency = effective.max_concurrency,
-        .prefill_chunk = memory.prefill_chunk,
-        .speculative_backend = product::speculative_backend_name(effective.speculative.backend),
-        .draft_window = effective.speculative.draft_tokens,
-        .proposal_head = effective.speculative.proposal_head == ProposalHead::Optimized ? "optimized" : "full",
-        .enable_vision = effective.enable_vision, .use_cuda_graph = effective.use_cuda_graph,
-        .fp32_head_logits = effective.fp32_head_logits};
+    value.engine = runtime::engine_identity(effective, memory);
     value.responses.codec = kResponseStoreSnapshotCodec;
     value.deployment.profile = options.deployment_profile;
     value.deployment.effective_config_sha256 = session_checkpoint_effective_config_sha256(value);
