@@ -13,6 +13,24 @@ The native dependency manifest includes libjpeg-turbo for the Pillow-compatible
 JPEG decoder. CMake resolves `JPEG::JPEG` explicitly; native runtime packaging
 continues to collect its transitive DLLs from the selected vcpkg installation.
 
+## 2026-11-01 — Native C2 protocol qualification
+
+Native qualification checks the protocol smoke tool from the committed packaging
+revision before any phase or target-side action. A literal
+`SUPPORTS_CONCURRENT_SESSION_TELEMETRY = True` declares that the packaged tool
+accepts positive integer concurrency; tools without that declaration are C1-only
+and are refused for a C2 lane at preflight, not after build and installation.
+The package still carries the committed smoke tool into `bin\qualification`;
+there is no qualification-tool override.
+
+Protocol and reduced-Host-pressure phase receipts record the lane's configured
+`max_concurrency`. C2 retains every idle-scheduler and exact request-correlated
+decode-token-delta assertion; capacity two does not permit unrelated requests
+during this serial telemetry probe. Host tests cover C1 and C2 paths, including
+busy snapshots and incorrect token deltas. The next native package must still
+exercise both phases on hardware at its shipped concurrency before qualification
+can be claimed.
+
 ## 2026-10-30 — Native installer recovery and ownership
 
 Directory cleanup intent is journaled before creation under the installer lock,

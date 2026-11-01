@@ -23,6 +23,9 @@ else:
     )
 
 
+# Native qualification reads this literal from the committed packaged tool before any host action.
+SUPPORTS_CONCURRENT_SESSION_TELEMETRY = True
+
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PRIVATE_REUSE_PATHS = {
     "private_endpoint",
