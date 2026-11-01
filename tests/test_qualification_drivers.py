@@ -554,6 +554,24 @@ class NativeChainBoundaryTests(unittest.TestCase):
         self.assertEqual(calls, ['cleanup'])
         self.assertEqual(self.stage_state('cpu')['status'], 'failed')
 
+    def test_final_restore_failure_does_not_cleanup_twice(self):
+        for part in list(chain.GROUPS)[:-1]:
+            self.run_part(part)
+        calls = []
+        original = self.orchestrator.remote_json
+        def fail_restore(subject, host, script, timeout=600):
+            if "$incumbentState='untouched'" in script:
+                calls.append('restore')
+                raise RuntimeError('injected final restoration failure')
+            return original(subject, host, script, timeout)
+        with patch.object(self.orchestrator, 'remote_json', fail_restore):
+            with self.assertRaisesRegex(RuntimeError, 'injected final restoration failure'):
+                self.run_part('finish')
+        self.assertEqual(calls, ['restore'])
+        self.assertEqual(self.stage_state('finish')['status'], 'failed')
+        self.assertEqual(self.instances[-1].state['phases']['restore']['status'], 'failed')
+        self.assertEqual(self.instances[-1].state['status'], 'failed')
+
     def test_phase_failure_persists_failed_stage_when_cleanup_raises(self):
         def cleanup(subject):
             self.assertEqual(self.stage_state('cpu')['status'], 'failed')
@@ -565,6 +583,34 @@ class NativeChainBoundaryTests(unittest.TestCase):
         self.assertEqual(self.stage_state('cpu')['status'], 'failed')
         self.assertEqual(self.instances[-1].state['status'], 'failed')
 
+    def test_failed_stage_persistence_cannot_skip_cleanup_or_replace_phase_error(self):
+        self.values['incumbent_state_root'] = 'R:/incumbent'
+        self.host['incumbent_running'] = True
+        calls = []
+        original_store, original_cleanup = driver.atomic_json, self.orchestrator.cleanup
+        phase_error = RuntimeError('injected phase failure')
+        def persist(path, value):
+            if path.name == 'cpu.state.json' and value.get('status') == 'failed':
+                calls.append('failed-stage-save')
+                raise OSError('injected failed-stage persistence failure')
+            original_store(path, value)
+        def cleanup(subject):
+            calls.append('cleanup')
+            original_cleanup(subject)
+        with patch.object(self.orchestrator, 'neutral_build', side_effect=phase_error), \
+                patch.object(driver, 'atomic_json', side_effect=persist), \
+                patch.object(self.orchestrator, 'cleanup', cleanup):
+            with self.assertRaises(BaseException) as raised:
+                self.run_part('cpu')
+        self.assertEqual(calls, ['failed-stage-save', 'cleanup'])
+        self.assertIs(raised.exception, phase_error)
+        self.assertIn('injected failed-stage persistence failure', '\n'.join(raised.exception.__notes__))
+        self.assertTrue(self.host['incumbent_running'])
+        self.assertFalse(self.host['candidate_running'])
+        subject = self.instances[-1]
+        self.assertEqual(subject._load_state()['status'], 'failed')
+        self.assertEqual(subject.state['restoration']['status'], 'passed')
+
     def test_namespace_refusal_records_failure_without_cleanup(self):
         with patch.object(self.orchestrator, 'remote_json', side_effect=ValueError(
                 'attempt namespace already exists')), patch.object(self.orchestrator, 'cleanup') as cleanup:
@@ -573,7 +619,68 @@ class NativeChainBoundaryTests(unittest.TestCase):
         cleanup.assert_not_called()
         self.assertEqual(self.stage_state('cpu')['status'], 'failed')
 
-    def test_failed_final_publication_never_persists_passed_native_state(self):
+    def test_completion_publications_follow_persisted_native_passed_state(self):
+        for part in list(chain.GROUPS)[:-1]:
+            self.run_part(part)
+        original_store, original_native = driver.atomic_json, chain.native.atomic_json
+        calls = []
+        def observe(path, value):
+            if (path.name in (self.lane.name + '.json', 'finish.json') or
+                    (path.name == 'finish.state.json' and value.get('status') == 'passed')):
+                calls.append(path.name)
+                self.assertEqual(self.instances[-1]._load_state()['status'], 'passed')
+        def publish_store(path, value):
+            observe(path, value)
+            original_store(path, value)
+        def publish_native(path, value):
+            observe(path, value)
+            original_native(path, value)
+        with patch.object(driver, 'atomic_json', side_effect=publish_store), \
+                patch.object(chain.native, 'atomic_json', side_effect=publish_native):
+            self.run_part('finish')
+        self.assertEqual(calls, [self.lane.name + '.json', 'finish.state.json', 'finish.json'])
+        directory = self.root / 'outputs/attempt'
+        self.assertEqual(driver.completed_receipt(
+            directory / 'finish.state.json', directory / 'finish.json')['status'], 'passed')
+
+    def test_native_passed_state_failure_prevents_completion_publication(self):
+        for part in list(chain.GROUPS)[:-1]:
+            self.run_part(part)
+        original = chain.native.atomic_json
+        directory = self.root / 'outputs/attempt'
+        def persist(path, value):
+            if path == directory / 'native/state.json' and value.get('status') == 'passed':
+                raise OSError('injected native passed-state persistence failure')
+            original(path, value)
+        with patch.object(chain.native, 'atomic_json', side_effect=persist):
+            with self.assertRaisesRegex(OSError, 'native passed-state persistence failure'):
+                self.run_part('finish')
+        self.assertFalse((directory / 'native' / (self.lane.name + '.json')).exists())
+        self.assertFalse((directory / 'finish.json').exists())
+        self.assertEqual(self.stage_state('finish')['status'], 'failed')
+        self.assertEqual(self.instances[-1]._load_state()['status'], 'failed')
+
+    def test_finish_receipt_refuses_nonpassed_native_state(self):
+        for part in chain.GROUPS:
+            self.run_part(part)
+        subject = self.instances[-1]
+        directory = self.root / 'outputs/attempt'
+        def completed():
+            return driver.completed_receipt(directory / 'finish.state.json', directory / 'finish.json')
+        self.assertEqual(completed()['status'], 'passed')
+        for status in ('not_started', 'running', 'paused', 'failed'):
+            with self.subTest(status=status):
+                chain.native.atomic_json(subject.state_path, {**subject.state, 'status': status})
+                self.assertEqual(subject._load_state()['status'], status)
+                with self.assertRaisesRegex(ValueError, 'native state'):
+                    completed()
+        subject.state_path.unlink()
+        with self.assertRaises((ValueError, FileNotFoundError)):
+            completed()
+        subject._save()
+        self.assertEqual(completed()['status'], 'passed')
+
+    def test_failed_final_publication_leaves_failed_native_state(self):
         original_store, original_native = driver.atomic_json, chain.native.atomic_json
         for failure_at in ('compose', 'lane', 'stage_state', 'stage_receipt'):
             attempt = 'final-' + failure_at.replace('_', '-')
@@ -606,8 +713,7 @@ class NativeChainBoundaryTests(unittest.TestCase):
                 with self.assertRaisesRegex(OSError, 'final publication failure'):
                     self.run_part('finish', attempt)
                 cleanup.assert_not_called()
-                self.assertEqual(len(saw), 1)
-                self.assertNotEqual(saw[0], 'passed')
+                self.assertEqual(saw, ['running' if failure_at == 'compose' else 'passed'])
                 self.assertEqual(self.stage_state('finish', attempt)['status'], 'failed')
                 self.assertEqual(self.instances[-1].state['status'], 'failed')
 
