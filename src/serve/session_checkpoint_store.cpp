@@ -2352,7 +2352,9 @@ SessionCheckpointStore::load(std::string_view session_sha256,
         // evidence: report Incompatible (clean-replay path) and mutate nothing, so
         // clearing the flag restores the generation (council CR-20260831-originauth
         // grok R2). Off-strict, locally-produced legacy generations keep loading.
+        restore_trace::event("manifest.origin.begin");
         const auto origin = manifest_origin_state(root, manifest_text, options_.origin_mac_key);
+        restore_trace::event("manifest.origin.end");
         switch (origin) {
         case ManifestOriginState::Authentic: break;
         case ManifestOriginState::Forged:

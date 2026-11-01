@@ -1477,9 +1477,11 @@ private:
         masks.outputs[0] = &request->output;
         auto* provider   = request->output.constrained() ? &masks : nullptr;
         ProgramCallScope program_call(*this);
+        restore_trace::event("prefill.enqueue", {}, request->id);
         auto progress = instance_.program->advance_prefill(*request->sequence,
                                                            &program_call.failed_timing(), provider);
         program_call.finish(progress.timing);
+        restore_trace::event("prefill.complete", {}, request->id);
         if (!request->first_output_timing) {
             record_execution_work(request->prefill_work, progress.timing);
         }
@@ -2019,7 +2021,8 @@ private:
                         resources_.source_revocations(request->id);
                     request->admitted_at = binding_started;
                     restore_trace::event("binding.admitted", {}, request->id,
-                                         restore_trace::monotonic_ns());
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            binding_started.time_since_epoch()).count());
                     request->host_timing.queue_wait_ns =
                         elapsed_ns(request->submitted, *request->admitted_at);
                     request->queue_wait_recorded = true;
