@@ -32,14 +32,14 @@ ServeOptions parse(std::vector<std::string> arguments) {
 
 int main() {
     int failures = 0;
-    const auto dflash = parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2",
+    const auto measured_dflash = parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2",
                                "--draft-tokens", "7", "--dflash-governor", "calibrate",
                                "--dflash-trace", "--request-log-jsonl", "requests.jsonl"});
-    failures += check(dflash.dflash.mode == ninfer::DFlashMode::Calibrate &&
-                          dflash.dflash.trace, "serve BUILD T options lost");
+    failures += check(measured_dflash.dflash.mode == ninfer::DFlashMode::Calibrate &&
+                          measured_dflash.dflash.trace, "serve BUILD T options lost");
     GenerationRequest measured;
     measured.client_request_id = std::string(64, 'a');
-    const auto armed = to_request_options(measured, dflash, {}, false);
+    const auto armed = to_request_options(measured, measured_dflash, {}, false);
     failures += check(armed.execution.dflash.mode == ninfer::DFlashMode::Calibrate &&
                           armed.execution.dflash_request_sha256 == std::string(64, 'a'),
                       "serve options must create independent request-owned policy");
