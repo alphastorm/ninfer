@@ -58,7 +58,8 @@ Apps or tests enable the internal product support components: media acquisition,
 logging and serving. This is one derived condition, not a separate user option. FFmpeg and libjpeg
 belong to model media decoding and remain required when apps are disabled. CMake discovers libjpeg
 as `JPEG::JPEG`; the native Windows manifest supplies it through `libjpeg-turbo`.
-Curl and spdlog are needed only for product support. A Python 3 interpreter is found when tests are configured. The larger Python
+Curl and spdlog are needed only for product support. A Python 3 interpreter is required for
+Linux NVIDIA CUDA compilation and when tests are configured. The larger Python
 pytest suites and conversion/evaluation scripts run separately from CMake and CTest.
 
 CUDA 13.4 and Python 3.11 describe the maintained environment, not configuration version gates.
@@ -159,6 +160,51 @@ retain `-lineinfo`.
 Source-list maintenance must preserve language, architecture, RDC mode, device-link ownership
 and numerical compiler options. Splitting a manifest does not reduce kernel instantiation work
 or justify combining shape translation units or enabling unity builds.
+
+## Build reproducibility
+
+Linux NVIDIA CUDA builds use `cmake/CudaDeterminism.cmake` and the repository-owned
+`tools/release/deterministic-nvcc.py` compile launcher. It chains an existing launcher
+such as ccache, adds `--objdir-as-tempdir` to prevent PID-derived STT_FILE names, and
+seeds each translation unit with its repository-relative path. nvcc's documented
+string seed form uses a 32-bit CRC; CI checks that project CUDA source paths have
+distinct seeds. Do not substitute the old out-of-tree 64-bit numeric seed launcher:
+CUDA 13.1.115 still produced changing module-ID suffixes with that seed form, even
+when temporary names were fixed. Bounded probes on `layer_norm.cu` reproduced the
+failure and showed stable module IDs, PTX and object bytes with 32-bit/string seeds.
+No CUDA internal compiler phases, archive flags or post-link rewrites are needed.
+
+The root CMake policy is inherited by the release preset, the Docker build stage and
+`tools/env/build.sh`; an explicit empty compiler launcher disables caching, not this
+policy. Python 3 is therefore a Linux build prerequisite. Native Windows compiler
+policy is unchanged. Runtime-image publication wraps already-checked binaries and
+does not compile them. Reproducibility currently means identical source/build paths,
+not relocation to another absolute directory or a different toolchain version.
+
+The PR-only `RDC build determinism` workflow uses a GPU-free CUDA 13.1 runner pinned to
+`ubuntu-24.04` and a 30-minute job bound. The image matches the NVIDIA toolkit package
+repository rather than a floating distribution's host headers.
+`tools/release/check-rdc-determinism.py --work <new-directory>`
+configures two empty build trees at the same path with ccache disabled. It builds only
+the three-source RDC fixture, its resolved static archive and host executable, and the
+production `layer_norm.cu` object. The fixture has same-basename sources with
+internal-linkage template kernels and a cross-translation-unit device reference.
+It uses `ninfer_cuda_archive`, not a separate device-link policy.
+
+Every retained object, device-link object, archive and executable must have identical
+complete bytes and matching inventories. The report includes SHA-256 values, first
+differing offsets, section hashes and symbol/build-id differences. A second device
+link, archive and host link with fixed input objects distinguishes propagated compile
+differences from independent downstream nondeterminism. None of these binaries runs;
+this is a build invariant, not a GPU correctness or performance qualification.
+
+The fixture is deliberately not a CTest registration: its oracle is the double-build
+driver, and the workflow never builds the full runtime. A passing bounded check is
+not full release identity. After publication, the release build owner must perform
+one full clean double build with frozen source, dependencies, toolchain, options and
+source/build paths; compare every ELF and archive, all three apps and the packaged
+payload without normalization or a first-build exception. That hardware follow-up
+remains separate from this PR check.
 
 ## Consumers and verification
 
