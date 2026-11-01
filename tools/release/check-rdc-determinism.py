@@ -102,45 +102,6 @@ def capture(build, destination):
         shutil.copyfile(build / name, target)
 
 
-def probes(source, build, evidence):
-    """Failure-only attribution: test documented seeds and temporary-name controls."""
-    nvcc = shutil.which("nvcc")
-    results = {}
-    variants = {
-        "seed64_keep": ["--frandom-seed=0x123456789abcdef0", "--keep"],
-        "seed32_keep": ["--frandom-seed=12345", "--keep"],
-        "seed32hex_keep": ["--frandom-seed=0x12345", "--keep"],
-        "seed_string_keep": ["--frandom-seed=normalization/layer_norm.cu", "--keep"],
-        "seed32_objdir": ["--frandom-seed=12345", "--objdir-as-tempdir"],
-        "seed32_keep_epoch": ["--frandom-seed=12345", "--keep"],
-    }
-    for name, flags in variants.items():
-        outputs = []
-        logs = []
-        root = build / "probe"
-        for _ in range(2):
-            shutil.rmtree(root, ignore_errors=True)
-            root.mkdir()
-            env = dict(os.environ)
-            if name.endswith("_epoch"):
-                env["SOURCE_DATE_EPOCH"] = "1"
-            command = [nvcc, "-std=c++20", "-arch=sm_120a", "-rdc=true", "-lineinfo", "-O3",
-                       "-I", str(source / "include"), "-I", str(source / "src"),
-                       *flags, "-c", str(source / "src/ops/normalization/layer_norm.cu"),
-                       "-o", "layer_norm.o"]
-            result = subprocess.run(command, cwd=root, env=env, stdout=subprocess.PIPE,
-                                    stderr=subprocess.STDOUT)
-            logs.append({"exit": result.returncode, "output": result.stdout.decode(errors="replace")})
-            outputs.append({p.name: digest(p.read_bytes()) for p in root.iterdir()
-                            if p.is_file() and p.suffix in (".o", ".ptx", ".module_id")})
-            module = root / "layer_norm.module_id"
-            if module.exists():
-                outputs[-1]["module_id_text"] = module.read_text()
-        results[name] = {"rounds": outputs, "equal": bool(outputs[0]) and outputs[0] == outputs[1],
-                         "logs": logs}
-    (evidence / "probes.json").write_text(json.dumps(results, indent=2) + "\n")
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--work", type=Path, required=True, help="new, disposable output directory")
@@ -151,6 +112,11 @@ def main():
     build = root / "build"
     evidence = root / "evidence"
     evidence.mkdir()
+
+    def save_log(name, data):
+        text = data.decode(errors="replace").replace(str(source), "<source>").replace(str(root), "<work>")
+        (evidence / name).write_text(text)
+
     os.environ["CCACHE_DISABLE"] = "1"
     configuration = ["cmake", "-S", str(source), "-B", str(build), "-G", "Ninja",
                      "-DCMAKE_BUILD_TYPE=Release", "-DCMAKE_CUDA_ARCHITECTURES=120a",
@@ -161,12 +127,12 @@ def main():
                      "-DNINFER_BUILD_PROFILE=ci-rdc-determinism"]
     compilation = ["cmake", "--build", str(build), "--parallel", "2", "--verbose",
                    "--target", TARGET, REAL_OBJECT]
-    (evidence / "toolchain.txt").write_bytes(run(["nvcc", "--version"]) + run(["c++", "--version"]))
+    save_log("toolchain.txt", run(["nvcc", "--version"]) + run(["c++", "--version"]))
     for number in (1, 2):
         if build.exists():
             shutil.rmtree(build)
-        (evidence / f"configure{number}.log").write_bytes(run(configuration))
-        (evidence / f"build{number}.log").write_bytes(run(compilation))
+        save_log(f"configure{number}.log", run(configuration))
+        save_log(f"build{number}.log", run(compilation))
         capture(build, root / f"round{number}")
     result = compare(root / "round1", root / "round2", evidence)
     # Rebuild only the downstream stages with the second round's fixed objects.
@@ -174,7 +140,7 @@ def main():
     for path in (build / "tests/libninfer_rdc_fixture.a", build / f"tests/{TARGET}"):
         path.unlink()
     (build / DEVICE_LINK).unlink()
-    (evidence / "relink.log").write_bytes(run(compilation))
+    save_log("relink.log", run(compilation))
     capture(build, root / "relink")
     result["fixed_input_relink"] = compare(root / "round2", root / "relink", evidence)
     result["ccache_disabled"] = True
@@ -183,8 +149,6 @@ def main():
     for row in result["artifacts"]:
         print(f'{row["stage"]}: {row["name"]}: {"identical" if row["equal"] else "DIFFERENT"}; '
               f'sections={",".join(row["differing_sections"])}', flush=True)
-    if not result["equal"]:
-        probes(source, build, evidence)
     if not result["equal"] or not result["fixed_input_relink"]["equal"]:
         raise SystemExit("RDC double build differs; see comparison.json and symbol/section evidence")
 
