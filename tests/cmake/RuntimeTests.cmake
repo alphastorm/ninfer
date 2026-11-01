@@ -18,7 +18,7 @@ ninfer_add_test(ninfer_engine_checkpoint_control_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_checkpoint_control.cpp"
   LIBRARIES ninfer_core Threads::Threads)
 ninfer_add_test(ninfer_engine_checkpoint_adapter_test
-  HOST_LANES bounded native
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_checkpoint_adapter.cpp"
   LIBRARIES ninfer_core Threads::Threads)
 ninfer_add_test(ninfer_engine_core_test
@@ -64,7 +64,7 @@ ninfer_add_test(ninfer_checkpoint_owner_test
 set_tests_properties(ninfer_checkpoint_owner_test PROPERTIES TIMEOUT 30)
 
 ninfer_add_test(ninfer_export_state_test
-  HOST_LANES bounded native
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_export_state.cpp"
           "${PROJECT_SOURCE_DIR}/src/models/common/context/state_store.cpp"
   LIBRARIES ninfer_core)
