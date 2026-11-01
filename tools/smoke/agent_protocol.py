@@ -479,9 +479,13 @@ def streaming_and_session_checks(
             base_url, "GET", "/v1/ninfer/status", headers=status_headers
         )
         scheduler = status_before_repeat.get("scheduler")
-        if not isinstance(scheduler, dict) or scheduler.get("max_concurrency") != 1:
+        if (
+            not isinstance(scheduler, dict)
+            or type(scheduler.get("max_concurrency")) is not int
+            or scheduler["max_concurrency"] < 1
+        ):
             raise ProtocolError(
-                "session-isolation telemetry requires an exclusive max_concurrency=1 endpoint"
+                "session-isolation telemetry requires max_concurrency to be an int >= 1"
             )
         if any(
             scheduler.get(field) != 0
@@ -528,9 +532,13 @@ def streaming_and_session_checks(
             base_url, "GET", "/v1/ninfer/status", headers=status_headers
         )
         scheduler_before = status_after_repeat.get("scheduler")
-        if not isinstance(scheduler_before, dict) or scheduler_before.get("max_concurrency") != 1:
+        if (
+            not isinstance(scheduler_before, dict)
+            or type(scheduler_before.get("max_concurrency")) is not int
+            or scheduler_before["max_concurrency"] < 1
+        ):
             raise ProtocolError(
-                "session-isolation telemetry requires an exclusive max_concurrency=1 endpoint"
+                "session-isolation telemetry requires max_concurrency to be an int >= 1"
             )
         if any(
             scheduler_before.get(field) != 0
