@@ -5,8 +5,21 @@ function(ninfer_test_includes target)
   target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 endfunction()
 
+add_custom_target(ninfer_host_bounded_tests)
+add_custom_target(ninfer_host_native_tests)
+
+# Keep CTest selection and the executable build closure in the same declaration.
+# A case or Python oracle may share another test's executable target.
+function(ninfer_test_host_lanes name target)
+  set_property(TEST ${name} APPEND PROPERTY LABELS host)
+  foreach(lane IN LISTS ARGN)
+    set_property(TEST ${name} APPEND PROPERTY LABELS "host-${lane}")
+    add_dependencies(ninfer_host_${lane}_tests ${target})
+  endforeach()
+endfunction()
+
 function(ninfer_add_test name)
-  cmake_parse_arguments(PARSE_ARGV 1 arg "NEEDS_SOURCE_DIR" "" "SOURCES;LIBRARIES")
+  cmake_parse_arguments(PARSE_ARGV 1 arg "NEEDS_SOURCE_DIR" "" "SOURCES;LIBRARIES;HOST_LANES")
   add_executable(${name} ${arg_SOURCES})
   ninfer_test_includes(${name})
   target_link_libraries(${name} PRIVATE ${arg_LIBRARIES})
@@ -16,6 +29,9 @@ function(ninfer_add_test name)
       NINFER_PYTHON_EXECUTABLE="${Python3_EXECUTABLE}")
   endif()
   add_test(NAME ${name} COMMAND ${name})
+  if(arg_HOST_LANES)
+    ninfer_test_host_lanes(${name} ${name} ${arg_HOST_LANES})
+  endif()
 endfunction()
 
 # CUDA 13.3's Windows import archive defines every API in one loader object. Pulling

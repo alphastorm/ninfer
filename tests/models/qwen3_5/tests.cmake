@@ -3,15 +3,18 @@ ninfer_add_test(ninfer_qwen3_5_loading_real_test
   LIBRARIES ninfer_model_loading)
 
 ninfer_add_test(ninfer_qwen3_5_loading_test
+  HOST_LANES native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_loading.cpp"
   LIBRARIES ninfer_model_loading)
 
 ninfer_add_test(ninfer_qwen3_5_dflash_window_test
+  HOST_LANES bounded
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_dflash_window.cpp"
           "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/round_buffers.cpp"
   LIBRARIES ninfer_core)
 
 ninfer_add_test(ninfer_qwen3_5_head_logits_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_head_logits.cpp"
           "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/round_buffers.cpp"
   LIBRARIES ninfer_core ninfer::json)
@@ -25,6 +28,7 @@ ninfer_add_test(ninfer_qwen3_5_state_image_test
   LIBRARIES ninfer_engine ninfer_core)
 
 ninfer_add_test(ninfer_qwen3_5_state_image_layout_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_state_image_layout.cpp"
           "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/state/state_image.cpp"
           "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/state/decoder_state.cpp"

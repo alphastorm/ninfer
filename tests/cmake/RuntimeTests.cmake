@@ -3,8 +3,8 @@ ninfer_add_test(ninfer_scheduler_test
   LIBRARIES ninfer_runtime_support)
 
 ninfer_add_test(ninfer_speculative_metrics_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_speculative_metrics.cpp")
-set_tests_properties(ninfer_speculative_metrics_test PROPERTIES LABELS "host")
 
 add_test(NAME ninfer_engine_cache_gate_test
   COMMAND ${Python3_EXECUTABLE} -B "${CMAKE_CURRENT_LIST_DIR}/../test_engine_cache_gate.py")
@@ -14,14 +14,15 @@ ninfer_add_test(ninfer_engine_options_test
   LIBRARIES ninfer_engine ninfer_core ninfer::json)
 set_tests_properties(ninfer_engine_options_test PROPERTIES LABELS "host")
 ninfer_add_test(ninfer_engine_checkpoint_control_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_checkpoint_control.cpp"
   LIBRARIES ninfer_core Threads::Threads)
-set_tests_properties(ninfer_engine_checkpoint_control_test PROPERTIES LABELS "host")
 ninfer_add_test(ninfer_engine_checkpoint_adapter_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_checkpoint_adapter.cpp"
   LIBRARIES ninfer_core Threads::Threads)
-set_tests_properties(ninfer_engine_checkpoint_adapter_test PROPERTIES LABELS "host")
 ninfer_add_test(ninfer_engine_core_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_engine_core.cpp"
   LIBRARIES ninfer_runtime_support ninfer_core Threads::Threads)
 # DeviceContext only binds the Engine worker; the test presents one device to the linked CUDA
@@ -34,7 +35,7 @@ if(NOT WIN32)
     target_link_options(ninfer_engine_core_test PRIVATE "LINKER:--wrap=${symbol}")
   endforeach()
 endif()
-set_tests_properties(ninfer_engine_core_test PROPERTIES LABELS "host" TIMEOUT 120)
+set_tests_properties(ninfer_engine_core_test PROPERTIES TIMEOUT 120)
 add_executable(ninfer_durable_contract_headers_test
   "${CMAKE_CURRENT_LIST_DIR}/../test_durable_contract_headers.cpp")
 ninfer_test_includes(ninfer_durable_contract_headers_test)
@@ -52,15 +53,18 @@ ninfer_add_test(ninfer_context_cost_test
   LIBRARIES ninfer_runtime_support ninfer::json)
 
 ninfer_add_test(ninfer_resource_manager_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_resource_manager.cpp"
   LIBRARIES ninfer_runtime_support)
 
 ninfer_add_test(ninfer_checkpoint_owner_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_checkpoint_owner.cpp"
   LIBRARIES ninfer_runtime_support)
-set_tests_properties(ninfer_checkpoint_owner_test PROPERTIES LABELS "host" TIMEOUT 30)
+set_tests_properties(ninfer_checkpoint_owner_test PROPERTIES TIMEOUT 30)
 
 ninfer_add_test(ninfer_export_state_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_export_state.cpp"
           "${PROJECT_SOURCE_DIR}/src/models/common/context/state_store.cpp"
   LIBRARIES ninfer_core)
@@ -76,9 +80,10 @@ else()
     target_link_options(ninfer_export_state_test PRIVATE "LINKER:--wrap=${symbol}")
   endforeach()
 endif()
-set_tests_properties(ninfer_export_state_test PROPERTIES LABELS "host" TIMEOUT 30)
+set_tests_properties(ninfer_export_state_test PROPERTIES TIMEOUT 30)
 
 ninfer_add_test(ninfer_kv_capacity_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_kv_capacity.cpp"
   LIBRARIES ninfer_runtime_support)
 
@@ -87,10 +92,12 @@ ninfer_add_test(ninfer_sampling_defaults_test
   LIBRARIES ninfer_engine ninfer_core)
 
 ninfer_add_test(ninfer_grammar_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_grammar.cpp"
   LIBRARIES ninfer_grammar)
 
 ninfer_add_test(ninfer_regex_choice_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../text/test_regex_choice.cpp"
   LIBRARIES ninfer_grammar ninfer::json)
 
@@ -98,8 +105,10 @@ add_test(NAME ninfer_regex_choice_oracle_test
   COMMAND ${CMAKE_COMMAND} -E env
     "NINFER_REGEX_PROBE=$<TARGET_FILE:ninfer_regex_choice_test>"
     ${Python3_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/text/test_regex_choice.py)
+ninfer_test_host_lanes(ninfer_regex_choice_oracle_test ninfer_regex_choice_test bounded native)
 
 ninfer_add_test(ninfer_json_schema_test
+  HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../text/test_json_schema.cpp"
   LIBRARIES ninfer_grammar ninfer::json)
 
@@ -107,3 +116,4 @@ add_test(NAME ninfer_json_schema_oracle_test
   COMMAND ${CMAKE_COMMAND} -E env
     "NINFER_SCHEMA_PROBE=$<TARGET_FILE:ninfer_json_schema_test>"
     ${Python3_EXECUTABLE} -B ${PROJECT_SOURCE_DIR}/tests/text/test_json_schema.py)
+ninfer_test_host_lanes(ninfer_json_schema_oracle_test ninfer_json_schema_test bounded native)
