@@ -122,6 +122,12 @@ the Windows set. Each compares the labels with its explicit selector in frozen N
 failing on any missing or extra test. These proofs run only for `ci/ctest-labels`, so they do not
 freeze future CMake-only additions.
 
+Jobs that install the Linux CUDA 13.1 toolkit use `ubuntu-24.04`, matching the NVIDIA package
+repository. A floating runner migration can introduce incompatible host headers before project
+compilation; Ubuntu 26.04's glibc declarations conflict with this toolkit's `rsqrt` declarations.
+The stdlib-only `test_workflow_runner_pins.py` contract rejects floating `*-latest` runner labels
+on CUDA-installing jobs. Non-CUDA host-tooling jobs may continue to use floating runners.
+
 The bounded Linux job in `.github/workflows/build.yml` builds and runs the GPU-free
 `ninfer_io_uring_checkpoint_read_queue_test`. It checks that partial submission and invalid
 completion attribution make a closed ring unavailable, preserve the original failure for queued
