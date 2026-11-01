@@ -27,6 +27,7 @@
 #include <exception>
 #include <future>
 #include <limits>
+#include <list>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -2692,7 +2693,9 @@ private:
     ResourceManagement resources_;
     CheckpointControl checkpoints_;
     std::mutex checkpoint_provider_mutex_;
-    std::deque<std::function<void()>> checkpoint_commands_;
+    std::list<std::function<void()>> checkpoint_commands_;
+    // Worker-only batch: construct any allocating sentinel before the worker starts.
+    std::list<std::function<void()>> checkpoint_command_batch_;
     std::unique_lock<std::mutex>* checkpoint_execution_lock_ = nullptr;
     // Worker-owned: prepared export leases may outlive all resident requests.
     std::size_t checkpoint_exports_in_flight_ = 0;
