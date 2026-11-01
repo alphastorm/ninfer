@@ -13,6 +13,37 @@ The native dependency manifest includes libjpeg-turbo for the Pillow-compatible
 JPEG decoder. CMake resolves `JPEG::JPEG` explicitly; native runtime packaging
 continues to collect its transitive DLLs from the selected vcpkg installation.
 
+## 2026-11-01 — Managed shutdown reconciliation (next release)
+
+Managed Stop treats absent, unreadable, malformed or foreign-launch shutdown reports
+for a stop-event launch as incomplete, as well as every forced-stop outcome. It
+retains `runtime.json`, the report and the candidate cache. Installer transaction
+rollback and `-RepairInterruptedInstall` refuse destructive cleanup while that
+launch attribution remains, even if a partial rollback restored the incumbent.
+The controller's `Rollback` still only swaps installed release pointers; it never
+deletes release or cache trees.
+
+An incomplete `last-stop.json` outcome is sticky: managed Start and scheduled Run
+refuse a replacement launch, and a later Stop cannot clear the hold even if a
+clean report appears. To reconcile, first inspect and retain any needed report,
+logs and candidate checkpoints, then explicitly accept that refused or unreported
+live-session progress may be unavailable:
+
+```powershell
+.\Control-Release.ps1 -Action Reconcile -StateRoot $stateRoot
+.\Install-Release.ps1 -RepairInterruptedInstall -StateRoot $stateRoot
+```
+
+Reconcile requires the retained candidate's lifecycle/controller to remain active,
+proves that its server and wrapper have exited, restores the GPU-owner lease, and
+retires launch attribution with an `operator_reconciled` stop receipt. It does not
+recover unsaved sessions or itself delete checkpoints. Run installer repair only
+when candidate-cache deletion is intended; after reconciliation, Start can instead
+reuse the retained candidate. If earlier recovery restored a different lifecycle,
+retain the evidence and restore the candidate's original lifecycle/controller
+before reconciliation; do not delete `runtime.json` or edit a stop verdict to bypass
+the hold.
+
 ## 2026-10-30 — Native installer recovery and ownership
 
 Directory cleanup intent is journaled before creation under the installer lock,
