@@ -202,6 +202,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows MSVC configure failed' }
           cmake --build build --parallel 2 --target ninfer_core ninfer_cpu `
             ninfer_decode_graph_capture_test ninfer_export_state_test `
+            ninfer_engine_checkpoint_adapter_test `
             ninfer_checkpoint_directstorage_windows ninfer_direct_storage_checkpoint_windows_test `
             ninfer_checkpoint_io_contract_test ninfer_direct_storage_checkpoint_backend_test `
             ninfer_durable_file_test ninfer_session_checkpoint_store_test ninfer_automatic_checkpoint_queue_test `
@@ -213,5 +214,5 @@ jobs:
         shell: pwsh
         run: |
           ctest --test-dir build --output-on-failure `
-            -R '^ninfer_(decode_graph_capture|export_state|checkpoint_io_contract|direct_storage_checkpoint_backend|durable_file(_(pinned-destination|reparse-guard|identity-guards|directory-publication|extended-paths))?|session_checkpoint_store(_(current_flush|capacity))?|automatic_checkpoint_queue|qwen3_5_head_logits|cli_options)_test$'
+            -R '^ninfer_(decode_graph_capture|export_state|engine_checkpoint_adapter|checkpoint_io_contract|direct_storage_checkpoint_backend|durable_file(_(pinned-destination|reparse-guard|identity-guards|directory-publication|extended-paths))?|session_checkpoint_store(_(current_flush|capacity))?|automatic_checkpoint_queue|qwen3_5_head_logits|cli_options)_test$'
           if ($LASTEXITCODE -ne 0) { throw 'Windows host contracts failed' }
