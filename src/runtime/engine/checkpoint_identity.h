@@ -30,7 +30,8 @@ inline DurableEngineIdentity engine_identity(const EngineOptions& options,
             .draft_window = options.speculative.draft_tokens,
             .proposal_head = options.speculative.proposal_head == ProposalHead::Optimized
                 ? "optimized" : "full",
-            .enable_vision = options.enable_vision, .use_cuda_graph = options.use_cuda_graph};
+            .enable_vision = options.enable_vision, .use_cuda_graph = options.use_cuda_graph,
+            .fp32_head_logits = options.fp32_head_logits};
 }
 
 } // namespace ninfer::runtime

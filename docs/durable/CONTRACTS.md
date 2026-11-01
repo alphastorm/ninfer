@@ -250,6 +250,11 @@ hex. Stable names replace enum ordinals (e.g. `bf16`, `int8`, `fp8`, `k8v4`; `no
 `mtp`, `dflash`, `dflash2`; proposal `full`/`optimized`). NVFP4 is not a shipped durable
 profile. Configuration values are resolved values, not auto-policy requests.
 
+Engine import and serving startup use the same effective engine-identity projection,
+including `fp32_head_logits`. An enabled checkpoint may restore with the opt-in still
+enabled; changing it to disabled is an identity mismatch, not corruption. The option
+remains default OFF and this identity rule does not qualify or enable any shipped profile.
+
 **Excluded:** host bytes, cache slots, retention limits, Responses record/byte budgets,
 disk quota, staging/write buffers, timeouts, keep-warm, filesystem location, GPU UUID,
 CUDA ordinal, raw session/prompt-cache keys and secrets. They govern admission or
