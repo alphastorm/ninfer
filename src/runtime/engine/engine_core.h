@@ -1,4 +1,5 @@
 #pragma once
+#include "core/restore_trace.h"
 
 // Small fixed-capacity request execution for every backend.
 
@@ -628,6 +629,7 @@ private:
         const bool need_now         = !request->first_token || observe_wall;
         const Clock::time_point now = need_now ? Clock::now() : Clock::time_point{};
         if (!request->first_token) {
+            restore_trace::event("first.token", {}, request->id);
             request->first_token = now;
             if (request->observation.first_token) {
                 GenerationFirstTokenObservation observation{
@@ -1469,6 +1471,7 @@ private:
             throw std::logic_error("prefill request has no sequence handle");
         }
         setup.finish();
+        restore_trace::Span prefill_span("prefill.execute", request->id);
         RoundMasks masks;
         masks.outputs[0] = &request->output;
         auto* provider   = request->output.constrained() ? &masks : nullptr;
@@ -1574,6 +1577,7 @@ private:
                 observe_scheduling(request, GenerationSchedulingTransition::Restored);
             } else {
                 request->initial_binding_ns = elapsed_ns(*request->admitted_at, Clock::now());
+                restore_trace::event("binding.complete", {}, request->id, request->initial_binding_ns);
                 if (control.summary.reused_prompt_tokens) {
                     ++cumulative_stats_.checkpoint_selections;
                 } else {
@@ -1768,6 +1772,7 @@ private:
     void finish_source_wait(const std::shared_ptr<Request>& request,
                             Clock::time_point now) noexcept {
         if (!request->source_wait_started) { return; }
+        restore_trace::event("source.wait.end", {}, request->id);
         request->admission.source_wait_seconds +=
             static_cast<double>(elapsed_ns(*request->source_wait_started, now)) * 1.0e-9;
         request->source_wait_started.reset();
@@ -1778,6 +1783,7 @@ private:
                                  bool restoring) {
         resources_.retain_source(*instance_.program, request->id, choice);
         if (!restoring && choice.source.reused_tokens && !request->source_wait_started) {
+            restore_trace::event("source.wait.begin", {}, request->id);
             request->source_wait_started = Clock::now();
         } else if (!restoring && !choice.source.reused_tokens) {
             finish_source_wait(request, Clock::now());
@@ -1785,6 +1791,7 @@ private:
     }
 
     bool try_admit_one(bool restoring) {
+        restore_trace::Span admission_span("admission.select", restoring);
         if (instance_.program->has_context_operation()) { return false; }
         const auto lane = free_lane();
         if (!lane && restoring) {
@@ -2010,6 +2017,8 @@ private:
                     request->admission.revoked_checkpoints =
                         resources_.source_revocations(request->id);
                     request->admitted_at = binding_started;
+                    restore_trace::event("binding.admitted", {}, request->id,
+                                         restore_trace::monotonic_ns());
                     request->host_timing.queue_wait_ns =
                         elapsed_ns(request->submitted, *request->admitted_at);
                     request->queue_wait_recorded = true;
@@ -2373,10 +2382,12 @@ private:
     }
 
     void idle_wait(std::unique_lock<std::mutex>& lock) {
+        restore_trace::Span idle_span("queue.idle");
         const auto wake = [&] {
             return stopping_ || !pending_.empty() || !checkpoint_commands_.empty();
         };
         if (keep_warm_ && std::exchange(keep_warm_armed_, false)) {
+            restore_trace::event("keepwarm.disarm");
             const auto until = Clock::now() + keep_warm_grace_;
             while (!wake() && Clock::now() < until) {
                 if (!keep_warm_->launch()) {
@@ -2409,6 +2420,7 @@ private:
                 }
             }
             std::unique_lock execution_lock(execution_mutex_);
+            restore_trace::Span execution_span("worker.execution");
             checkpoint_execution_lock_ = &execution_lock;
             checkpoints_.retire_release_pins();
             checkpoints_.begin_turn();
@@ -2586,6 +2598,7 @@ private:
             }
             // Arm only after an execution/context unit, not after a failed admission scan.
             keep_warm_armed_ = keep_warm_armed_ || executed;
+            restore_trace::event("keepwarm.armed", {}, keep_warm_armed_, executed);
             execution_lock.unlock();
             if (!executed) {
                 std::unique_lock lock(queue_mutex_);

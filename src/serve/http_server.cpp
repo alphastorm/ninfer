@@ -1,4 +1,5 @@
 #include "serve/http_server.h"
+#include "core/restore_trace.h"
 
 #include "serve/anthropic_messages.h"
 #include "serve/client_identity.h"
@@ -476,7 +477,9 @@ void HttpServer::register_routes() {
             [this](const httplib::Request& req, httplib::Response& res) { handle_checkpoint_delete(req, res); });
     }
     server_.Get("/v1/ninfer/status", [this](const httplib::Request&, httplib::Response& res) {
+        restore_trace::Span status_span("status.handler");
         const bool available = service_->is_available();
+        restore_trace::event("status.available", res.get_header_value("x-request-id"), available);
         res.status = available ? 200 : 503;
         res.set_header("Cache-Control", "no-store");
         res.set_content(format_status_json(options_, service_->engine_options(), public_model_id_,
@@ -692,6 +695,7 @@ bool HttpServer::listen() {
     }
     bool result = false;
     try {
+        restore_trace::event("listen.enter");
         result = server_.listen_after_bind();
     } catch (...) {
         stop_stats_reporter();

@@ -7,6 +7,7 @@
 
 #ifndef CPPHTTPLIB_HTTPLIB_H
 #define CPPHTTPLIB_HTTPLIB_H
+#include "../../src/core/restore_trace.h"
 
 #define CPPHTTPLIB_VERSION "0.54.1"
 #define CPPHTTPLIB_VERSION_NUM "0x003601"
@@ -13668,6 +13669,7 @@ inline bool Server::listen_internal() {
   {
     std::unique_ptr<TaskQueue> task_queue(new_task_queue());
 
+    ninfer::restore_trace::event("accept.loop.enter");
     while (svr_sock_ != INVALID_SOCKET) {
 #ifndef _WIN32
       if (idle_interval_sec_ > 0 || idle_interval_usec_ > 0) {

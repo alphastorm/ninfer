@@ -1,4 +1,5 @@
 #include "product/logging/logging.h"
+#include "core/restore_trace.h"
 #include "product/logging/startup_log.h"
 #include "serve/generation_service.h"
 #include "serve/http_server.h"
@@ -19,6 +20,9 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#if defined(__linux__)
+#include <dlfcn.h>
+#endif
 
 namespace {
 
@@ -32,6 +36,7 @@ void handle_signal(int) {
 } // namespace
 
 int main(int argc, char** argv) {
+    ninfer::restore_trace::event("process.start");
     if (argc == 2 && std::string_view(argv[1]) == "--version") {
         std::cout << ninfer::format_build_info("ninfer-serve") << '\n';
         return 0;
@@ -69,20 +74,29 @@ int main(int argc, char** argv) {
         if (!options.stop_event.empty()) {
             stop_watcher.emplace(options.stop_event, [&server] { return server.stop(); });
         }
+        ninfer::restore_trace::event("bind.begin");
         if (!server.bind()) {
             operational_log.bind_failure(options.host, options.port);
             return 1;
         }
+        ninfer::restore_trace::event("bind.end");
 
         ninfer::serve::GenerationService service(options, startup_log.observer());
+#if defined(__linux__)
+        if (auto query = reinterpret_cast<void (*)()>(dlsym(RTLD_DEFAULT, "restore_cuda_loading_mode")))
+            query();
+#endif
         startup_log.engine_ready(service.load_summary());
+        ninfer::restore_trace::event("engine.ready");
         operational_log.engine_capacity(service);
 
         using Clock                            = std::chrono::steady_clock;
         const Clock::time_point warmup_started = Clock::now();
         operational_log.warmup_started();
         try {
+            ninfer::restore_trace::event("warmup.begin");
             service.warmup();
+            ninfer::restore_trace::event("warmup.end");
         } catch (const std::exception& exception) {
             const double seconds =
                 std::chrono::duration<double>(Clock::now() - warmup_started).count();
@@ -91,7 +105,9 @@ int main(int argc, char** argv) {
         }
         operational_log.warmup_complete(
             std::chrono::duration<double>(Clock::now() - warmup_started).count());
+        ninfer::restore_trace::event("checkpoint.attach.begin");
         server.attach(service);
+        ninfer::restore_trace::event("checkpoint.attach.end");
 
         g_server.store(&server);
         std::signal(SIGINT, handle_signal);

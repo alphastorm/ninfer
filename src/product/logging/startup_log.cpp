@@ -1,4 +1,5 @@
 #include "product/logging/startup_log.h"
+#include "core/restore_trace.h"
 
 #include "product/logging/logging.h"
 #include "product/logging/pretty_format.h"
@@ -212,6 +213,11 @@ struct StartupLogRenderer::Impl {
     ~Impl() { progress->clear(); }
 
     void render(const StartupEvent& event) {
+        restore_trace::event("startup.phase", {}, static_cast<std::uint64_t>(event.phase),
+                             static_cast<std::uint64_t>(event.status), event.current,
+                             event.total, event.elapsed_ns);
+        if (event.phase == StartupPhase::HostContextPin)
+            restore_trace::resources("host.pin");
         const PhasePresentation presentation = phase_presentation(event.phase);
         const std::size_t index              = static_cast<std::size_t>(event.phase);
         switch (event.status) {

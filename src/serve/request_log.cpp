@@ -1,4 +1,5 @@
 #include "serve/request_log.h"
+#include "core/restore_trace.h"
 #include "serve/server_identity.h"
 #include "product/constraint_observation.h"
 #include "product/logging/pretty_format.h"
@@ -983,6 +984,7 @@ JsonlRequestLog::JsonlRequestLog(const std::string& path,
         throw std::invalid_argument("request JSONL log must not overwrite the model artifact");
     }
     server_instance_id_ = new_server_instance_id();
+    restore_trace::event("server.instance", server_instance_id_);
     output_.open(path_, std::ios::out | std::ios::app);
     if (!output_) {
         throw std::runtime_error("failed to open request JSONL log for append: " + path_);
@@ -1006,6 +1008,10 @@ void JsonlRequestLog::write_server_start(const ServeOptions& options,
 }
 
 void JsonlRequestLog::write_request_start(const RequestLogContext& context) {
+    restore_trace::event("request.start.http", context.http_request_id, context.id);
+    restore_trace::event("request.start.response", context.response_id, context.id);
+    if (context.client_session_sha256)
+        restore_trace::event("request.start.session", *context.client_session_sha256, context.id);
     if (!enabled()) { return; }
     append(format_request_start_json(server_instance_id_, unix_time_ms(), context));
 }
@@ -1013,6 +1019,9 @@ void JsonlRequestLog::write_request_start(const RequestLogContext& context) {
 void JsonlRequestLog::write_request_scheduling(
     std::uint64_t request_id, const std::string& http_request_id,
     const ninfer::GenerationSchedulingObservation& observation) {
+    restore_trace::event("request.engine", http_request_id, request_id,
+                         observation.engine_request_id,
+                         static_cast<std::uint64_t>(observation.transition));
     if (!enabled()) { return; }
     append(format_request_scheduling_json(server_instance_id_, unix_time_ms(), request_id,
                                           http_request_id, observation));
@@ -1025,6 +1034,7 @@ void JsonlRequestLog::write_request_rejected(const RequestRejectionLogContext& c
 
 void JsonlRequestLog::write_request_done(const RequestLogContext& context,
                                          const GenerationOutcome& outcome) {
+    restore_trace::event("request.done", context.response_id, context.id);
     if (!enabled()) { return; }
     append(format_request_done_json(server_instance_id_, unix_time_ms(), context, outcome));
 }
