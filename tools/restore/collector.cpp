@@ -2,8 +2,6 @@
 #include "core/restore_trace.h"
 #include <cupti.h>
 #include <cuda.h>
-#include <generated_cuda_meta.h>
-#include <generated_cuda_runtime_api_meta.h>
 #include <dlfcn.h>
 #include <array>
 #include <atomic>
