@@ -635,7 +635,8 @@ class MultiGpuHostTests(unittest.TestCase):
         subject = SimpleNamespace(
             state_root="C:/state", target_root="C:/qualification", gpu_uuid="GPU-00000000-0000-0000-0000-000000000001",
             lane=SimpleNamespace(model_id="model", spec=json.loads(
-                (WINDOWS / "lanes/rtx3090/release-spec.json").read_text())),
+                (WINDOWS / "lanes/rtx3090/release-spec.json").read_text()),
+                config=json.loads((WINDOWS / "lanes/rtx3090/server-config.json").read_text())),
             remote_json=lambda host, script, **kwargs: captured.append(script) or {
                 "status": "passed", "protocol": product_protocol_fixture()},
             config=SimpleNamespace(target="not-contacted", pressure_port=18201),
