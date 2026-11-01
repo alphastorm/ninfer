@@ -247,7 +247,7 @@ function Get-PendingInstallTransactions([string]$TransactionsRoot) {
             [string]$transaction.journal_path -cne $journalPath) {
             throw "installer transaction journal envelope mismatch: $journalPath"
         }
-        if ([string]$transaction.status -cin @('in_progress', 'repair_required')) {
+        if ([string]$transaction.status -cin @('in_progress', 'repair_required', 'held_cleanup')) {
             Write-Output $transaction
         }
     }
@@ -952,31 +952,73 @@ function Stop-IncumbentForUpgrade(
     [object]$SelectedGpu
 ) {
     Set-TransactionFlag $Transaction 'incumbent_touched'
-    & $controllerPath -Action Stop -StateRoot $StateRoot | Out-Null
+    $state = Read-JsonFile (Join-Path $StateRoot 'state.json')
+    $incumbent = [string]$state.active_release
+    try { & $controllerPath -Action Stop -StateRoot $StateRoot | Out-Null }
+    catch {
+        if (-not (Test-ReleaseShutdownHeld $incumbent)) { throw }
+        Assert-NoReleaseRootProcess ([string]$state.releases.PSObject.Properties[$incumbent].Value.release_root)
+        Assert-ReleaseGpuOwnerRetired $incumbent
+    }
     Assert-GpuOwnerAttestation $SuccessorController $SuccessorPolicy $SelectedGpu
 }
 
-# The candidate is quiescent once nothing it launched can still run. While the lifecycle state
-# names it active it may be running, and its own controller stops it, restoring the GPU owner and
-# retiring the lease it holds; a stop that fails leaves that state in place, so a repair re-attempts
-# the same stop for the same instance. Whatever the state names, no process may still execute
-# from the candidate's release root. The rollback itself never removes a GPU-owner lease.
-function Assert-TransactionCandidateQuiescent([object]$Transaction, [string]$StatePath, [string]$ControllerPath) {
-    if (-not (Get-TransactionFlag $Transaction 'state_activated')) { return }
-    if ((Test-Path -LiteralPath $StatePath -PathType Leaf) -and
-        [string](Read-JsonFile $StatePath).active_release -ceq [string]$Transaction.instance_id) {
-        & $ControllerPath -Action Stop -StateRoot $StateRoot | Out-Null
+function Test-ReleaseShutdownHeld([string]$ReleaseId) {
+    $path = Join-Path $StateRoot 'shutdown-holds.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
+    $document = Read-JsonFile $path
+    if ($document.artifact_type -cne 'ninfer_windows_shutdown_holds' -or
+        [int]$document.schema_version -ne 1) {
+        throw 'shutdown hold envelope mismatch'
     }
-    $releaseRoot = [string]$Transaction.release_root
-    if (-not [string]::IsNullOrWhiteSpace($releaseRoot)) {
-        $running = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Where-Object {
-                -not [string]::IsNullOrWhiteSpace([string]$_.ExecutablePath) -and
-                (Test-PathWithinRoot ([string]$_.ExecutablePath) $releaseRoot)
-            } | ForEach-Object { [string]$_.ProcessId })
+    return @($document.holds | Where-Object {
+            [string]$_.release_id -ceq $ReleaseId
+        }).Count -ne 0
+}
+
+function Assert-NoReleaseRootProcess([string]$ReleaseRoot) {
+    if (-not [string]::IsNullOrWhiteSpace($ReleaseRoot)) {
+        $running = @(foreach ($entry in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+                if ([string]::IsNullOrWhiteSpace([string]$entry.ExecutablePath)) {
+                    $name = $entry.PSObject.Properties['Name']
+                    if ($null -ne $name -and [string]$name.Value -ieq 'ninfer-serve.exe') {
+                        throw "cannot exclude an unattributed candidate server with an unreadable image path: $($name.Value) ($($entry.ProcessId))"
+                    }
+                    continue
+                }
+                if (Test-PathWithinRoot ([string]$entry.ExecutablePath) $ReleaseRoot) {
+                    [string]$entry.ProcessId
+                }
+            })
         if ($running.Count -ne 0) {
             throw "candidate processes still run from its release root: $([string]::Join(', ', $running))"
         }
     }
+}
+
+function Assert-ReleaseGpuOwnerRetired([string]$ReleaseId) {
+    $leasePath = Join-Path $StateRoot 'gpu-owner-lease.json'
+    if ((Test-Path -LiteralPath $leasePath -PathType Leaf) -and
+        [string](Read-JsonFile $leasePath).release_id -ceq $ReleaseId) {
+        throw 'candidate GPU-owner restoration remains incomplete; retain its controller and lifecycle for retry'
+    }
+}
+
+# Incomplete save evidence holds only destructive candidate cleanup. A surviving or unattributed
+# process still aborts all restoration. The rollback itself never removes a GPU-owner lease.
+function Assert-TransactionCandidateQuiescent([object]$Transaction, [string]$StatePath, [string]$ControllerPath) {
+    if (-not (Get-TransactionFlag $Transaction 'state_activated')) { return }
+    $stopFailure = $null
+    if ((Test-Path -LiteralPath $StatePath -PathType Leaf) -and
+        [string](Read-JsonFile $StatePath).active_release -ceq [string]$Transaction.instance_id) {
+        try { & $ControllerPath -Action Stop -StateRoot $StateRoot | Out-Null }
+        catch { $stopFailure = $_ }
+    }
+    Assert-NoReleaseRootProcess ([string]$Transaction.release_root)
+    if ($null -ne $stopFailure -and -not (Test-ReleaseShutdownHeld ([string]$Transaction.instance_id))) {
+        throw $stopFailure
+    }
+    Assert-ReleaseGpuOwnerRetired ([string]$Transaction.instance_id)
 }
 
 function Invoke-InstallTransactionRollback(
@@ -988,6 +1030,8 @@ function Invoke-InstallTransactionRollback(
 ) {
     $failures = [Collections.Generic.List[string]]::new()
     $cleanupActions = [Collections.Generic.List[object]]::new()
+    $alreadyRestored = [string]$Transaction.status -ceq 'held_cleanup'
+    $cleanupHeld = $false
     Write-InstallEvent "${Mode}_started" "Installer $Mode started" ([ordered]@{
             operation_id = [string]$Transaction.operation_id
             phase = [string]$Transaction.phase
@@ -995,9 +1039,12 @@ function Invoke-InstallTransactionRollback(
 
     # Nothing is restored, deleted, or restarted until the candidate is proven quiescent: one that
     # may still run keeps the lifecycle state, controller, trees, and lease that stop it.
-    try { Assert-TransactionCandidateQuiescent $Transaction $StatePath $ControllerPath }
+    try {
+        Assert-TransactionCandidateQuiescent $Transaction $StatePath $ControllerPath
+        $cleanupHeld = Test-ReleaseShutdownHeld ([string]$Transaction.instance_id)
+    }
     catch { $failures.Add("candidate quiescence: $(Get-BoundedDiagnostic $_.Exception.Message)") }
-    if ($failures.Count -eq 0) {
+    if ($failures.Count -eq 0 -and -not $alreadyRestored) {
         if (Get-TransactionFlag $Transaction 'state_activated') {
             try { Restore-PersistedFileSnapshot $StatePath $Transaction.snapshots.state }
             catch { $failures.Add("state restore: $(Get-BoundedDiagnostic $_.Exception.Message)") }
@@ -1030,25 +1077,27 @@ function Invoke-InstallTransactionRollback(
         }
     }
 
-    # The candidate's trees are deleted, and the incumbent restarted, only over the restored
-    # lifecycle: against a state that still names the candidate, the restart would launch it.
+    # Cleanup and incumbent restart both require the restored lifecycle. A save hold prevents
+    # only cleanup: a proven-stopped candidate must not strand the incumbent out of service.
     if ($failures.Count -eq 0) {
-        $cleanupTargets = @(Get-TransactionCleanupTargets $Transaction)
-        Write-InstallEvent 'cleanup_inventory' 'Enumerated interrupted install cleanup targets' ([ordered]@{
-                operation_id = [string]$Transaction.operation_id
-                target_count = $cleanupTargets.Count
-                targets = @($cleanupTargets | ForEach-Object { [string]$_.kind })
-            })
-        foreach ($target in $cleanupTargets) {
-            try {
-                $cleanupActions.Add((Remove-InstallTreeStreaming $target))
-            }
-            catch {
-                $failures.Add("$([string]$target.kind) cleanup: $(Get-BoundedDiagnostic $_.Exception.Message)")
+        if (-not $cleanupHeld) {
+            $cleanupTargets = @(Get-TransactionCleanupTargets $Transaction)
+            Write-InstallEvent 'cleanup_inventory' 'Enumerated interrupted install cleanup targets' ([ordered]@{
+                    operation_id = [string]$Transaction.operation_id
+                    target_count = $cleanupTargets.Count
+                    targets = @($cleanupTargets | ForEach-Object { [string]$_.kind })
+                })
+            foreach ($target in $cleanupTargets) {
+                try {
+                    $cleanupActions.Add((Remove-InstallTreeStreaming $target))
+                }
+                catch {
+                    $failures.Add("$([string]$target.kind) cleanup: $(Get-BoundedDiagnostic $_.Exception.Message)")
+                }
             }
         }
 
-        if (Get-TransactionFlag $Transaction 'incumbent_touched') {
+        if (-not $alreadyRestored -and (Get-TransactionFlag $Transaction 'incumbent_touched')) {
             try { & $ControllerPath -Action Start -StateRoot $StateRoot | Out-Null }
             catch { $failures.Add("incumbent restart: $(Get-BoundedDiagnostic $_.Exception.Message)") }
         }
@@ -1058,6 +1107,17 @@ function Invoke-InstallTransactionRollback(
     $diagnosticArray = @($failures | Select-Object -First 16 | ForEach-Object { [string]$_ })
     Set-ObjectProperty $Transaction 'cleanup_actions' $cleanupArray
     Set-ObjectProperty $Transaction 'diagnostics' $diagnosticArray
+    if ($failures.Count -eq 0 -and $cleanupHeld) {
+        $diagnostic = "candidate final save incomplete; prior lifecycle restored, candidate trees retained; run the updated packaged controller -Action Reconcile -ReleaseId $([string]$Transaction.instance_id), then -RepairInterruptedInstall"
+        Set-ObjectProperty $Transaction 'status' 'held_cleanup'
+        Set-ObjectProperty $Transaction 'phase' "${Mode}_cleanup_held"
+        Set-ObjectProperty $Transaction 'diagnostics' @($diagnostic)
+        Write-InstallTransaction $Transaction
+        Write-InstallEvent "${Mode}_cleanup_held" $diagnostic ([ordered]@{
+                operation_id = [string]$Transaction.operation_id
+            })
+        throw "installer $Mode held cleanup: $diagnostic"
+    }
     if ($failures.Count -eq 0) {
         Set-ObjectProperty $Transaction 'status' $(if ($Mode -ceq 'repair') { 'repaired' } else { 'rolled_back' })
         Set-ObjectProperty $Transaction 'phase' $(if ($Mode -ceq 'repair') { 'repair_completed' } else { 'rollback_completed' })
@@ -1069,7 +1129,7 @@ function Invoke-InstallTransactionRollback(
         return $cleanupArray
     }
 
-    Set-ObjectProperty $Transaction 'status' 'repair_required'
+    Set-ObjectProperty $Transaction 'status' $(if ($alreadyRestored) { 'held_cleanup' } else { 'repair_required' })
     Set-ObjectProperty $Transaction 'phase' "${Mode}_incomplete"
     Write-InstallTransaction $Transaction
     Write-InstallEvent ($Mode + '_incomplete') "Installer $Mode requires repair" ([ordered]@{

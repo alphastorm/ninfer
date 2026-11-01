@@ -1745,12 +1745,13 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         self.assertRegex(terminate, r"try \{\s*\n\s*Stop-Process -Id \$live\.Id -Force")
         stop = body("Stop-ManagedProcess")
         # Fresh reads, not the opening snapshot, decide what still needs stopping.
-        self.assertEqual(stop.count("Get-OwnedProcess (Get-RuntimeState) $release"), 2)
-        self.assertEqual(terminate.count("Get-OwnedProcess (Get-RuntimeState) $Release"), 2)
+        self.assertEqual(stop.count("Get-OwnedProcess (Get-ReleaseRuntime ([string]$state.active_release)) $release"), 2)
+        self.assertEqual(terminate.count("Get-OwnedProcess (Get-ReleaseRuntime ([string]$Receipt.release_id)) $Release"), 2)
         self.assertIn("Stop-LaunchNow $release $taskName $receipt", stop)
         # The receipt records every outcome, including the ones that throw.
         self.assertRegex(stop, r"finally \{\s*\n(\s*.*\n)*?\s*Write-ManagedStopReceipt \$receipt")
-        self.assertIn("graceful_incomplete_shutdown", stop)
+        self.assertIn("Set-ManagedShutdownVerdict $runtime $receipt", stop)
+        self.assertIn("graceful_incomplete_shutdown", body("Set-ManagedShutdownVerdict"))
         # Concurrent mutating actions cannot interleave over the lease.
         for action in ("Start-ManagedRelease", "Stop-ManagedRelease"):
             self.assertIn(f"Invoke-WithActionLock {{ {action}", controller)
@@ -1774,7 +1775,7 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         self.assertEqual(request.count("catch"), 3)
         self.assertLess(stop.index("try {"), stop.index("Request-ManagedStop $eventName"))
         # A shutdown report is evidence only when it is this launch's.
-        self.assertIn("[string]$report.launch_id -cne $expectedLaunch", stop)
+        self.assertIn("[string]$report.launch_id -cne $expectedLaunch", body("Set-ManagedShutdownVerdict"))
         run = body("Invoke-Run")
         self.assertIn("launch_id = $launchId", run)
         # A launch that ended by request must not be retried by the scheduler.
@@ -1833,17 +1834,31 @@ class SharedLifecycleTreeTests(unittest.TestCase):
         # One prior launch's logs survive, because they are what explains a stop.
         self.assertIn('Move-Item -LiteralPath $log -Destination "$log.previous"', run)
 
+    def test_census_names_are_optional_under_strict_mode(self) -> None:
+        for script, functions in (
+            ("Control-Release.ps1", ("Assert-NoReleaseProcess", "Reconcile-ManagedShutdown")),
+            ("Install-Release.ps1", ("Assert-NoReleaseRootProcess",)),
+        ):
+            source = (WINDOWS / script).read_text()
+            for function in functions:
+                with self.subTest(script=script, function=function):
+                    body = ps_function(source, function)
+                    self.assertNotRegex(body, r"\$entry\.Name\b")
+                    self.assertIn("$entry.PSObject.Properties['Name']", body)
+
     def test_the_server_reports_a_shutdown_that_lost_state(self) -> None:
         """The manager can only record what the server tells it: a flush that could not save a
         live session must fail the exit, not log and return zero."""
         controller = (WINDOWS / "Control-Release.ps1").read_text()
         stop = ps_function(controller, "Stop-ManagedProcess")
-        self.assertIn("[int]$report.schema_version -ne 1", stop)
-        self.assertIn("$report.complete -isnot [bool]", stop)
-        self.assertIn("[int]$report.refused -ne 0", stop)
+        verdict = ps_function(controller, "Set-ManagedShutdownVerdict")
+        self.assertIn("Set-ManagedShutdownVerdict $runtime $receipt", stop)
+        self.assertIn("[int]$report.schema_version -ne 1", verdict)
+        self.assertIn("$report.complete -isnot [bool]", verdict)
+        self.assertIn("[int]$report.refused -ne 0", verdict)
         self.assertIn("sessions_skipped = $null", stop)
-        self.assertIn("$receipt.sessions_skipped = [int]$report.skipped", stop)
-        self.assertIn("graceful_incomplete_shutdown", stop)
+        self.assertIn("$Receipt.sessions_skipped = [int]$report.skipped", verdict)
+        self.assertIn("graceful_incomplete_shutdown", verdict)
 
     def test_shared_scripts_carry_no_lane_literals(self) -> None:
         """One tree serves every lane: GPU names, architectures, power figures, release ids, and
@@ -2121,6 +2136,331 @@ class PowerShellContractTests(unittest.TestCase):
         if result.returncode != 0:
             self.fail(f"PowerShell exited {result.returncode}: {result.stderr.strip()}")
         return json.loads(result.stdout)
+
+    def dispatch_action(self, lane: SimpleNamespace, action: str, preamble: str = "",
+                        release_id: str = "") -> dict:
+        """Run the public parameter binder and dispatcher; replace only fixture OS boundaries."""
+        source = (WINDOWS / "Control-Release.ps1").read_text()
+        self.assertEqual(source.count("switch ($Action) {"), 1)
+        controller = lane.root / "Control-Release.ps1"
+        install_script(source.replace("switch ($Action) {", preamble + "\nswitch ($Action) {").encode(),
+                       controller)
+        return self.invoke(ps_assignments(Controller=controller, StateRoot=lane.root,
+                                          RequestedAction=action, ReleaseId=release_id) + """
+$failure=$null;$status=$null
+try{
+  $arguments=@{Action=$RequestedAction;StateRoot=$StateRoot}
+  if($ReleaseId){$arguments.ReleaseId=$ReleaseId}
+  $text=(& $Controller @arguments|Out-String).Trim()
+  if($text){$status=$text|ConvertFrom-Json}
+}catch{$failure=$_.Exception.Message}
+@{failure=$failure;status=$status}|ConvertTo-Json -Depth 20 -Compress
+""")
+
+    @staticmethod
+    def write_launch(lane: SimpleNamespace, release_id: str | None = None,
+                     report: dict | None = None) -> dict:
+        state = json.loads((lane.root / "state.json").read_text())
+        release_id = release_id or state["active_release"]
+        record = state["releases"][release_id]
+        report_path = Path(record["release_root"]) / "logs" / "shutdown.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        if report is not None:
+            report_path.write_text(json.dumps(report))
+        runtime = {
+            "artifact_type": "ninfer_windows_runtime_state", "schema_version": 2,
+            "release_id": release_id, "pid": None, "start_time_utc_ticks": None,
+            "managed_stop": "stop-event", "launch_id": "1" * 32,
+            "stop_event": "Global\\NInfer-Serve-Stop-" + "1" * 32,
+            "shutdown_report": str(report_path),
+        }
+        (lane.root / "runtime.json").write_text(json.dumps(runtime))
+        return runtime
+
+    def test_dispatch_restart_and_rollback_continue_after_held_idle_stop(self) -> None:
+        for action, recover_start in (("Restart", ""), ("Rollback", ""),
+                                      ("Rollback", "after-launch"), ("Rollback", "before-launch")):
+            with self.subTest(action=action, recover_start=recover_start), \
+                    tempfile.TemporaryDirectory() as directory:
+                lane = installed_release(Path(directory))
+                state_path = lane.root / "state.json"
+                state = json.loads(state_path.read_text())
+                current = state["active_release"]
+                previous = "previous-" + "b" * 12
+                record = copy.deepcopy(state["releases"][current])
+                record["release_root"] = str(lane.root / "releases" / previous)
+                record["server_executable"] = str(Path(record["release_root"]) / "bin/ninfer-serve.exe")
+                state["releases"][previous] = record
+                state["previous_release"] = previous
+                state["gpu_owner"] = {"controller_sha256": "f" * 64}
+                state_path.write_text(json.dumps(state))
+                runtime = self.write_launch(lane, report={
+                    "artifact_type": "ninfer_serve_shutdown_report", "schema_version": 1,
+                    "launch_id": "1" * 32, "complete": True,
+                    "saved": 1, "skipped": 0, "refused": 0,
+                } if recover_start == "after-launch" else None)
+                lease_path = lane.root / "gpu-owner-lease.json"
+                lease_path.write_text(json.dumps({
+                    "artifact_type": "ninfer_gpu_owner_lease", "schema_version": 1,
+                    "release_id": current, "controller_sha256": "f" * 64, "prior_paused": False,
+                }))
+                observed = self.dispatch_action(lane, action, ps_assignments(RecoverStart=recover_start) + """
+function Get-CimInstance { }
+function Get-ScheduledTask { }
+function Get-ScheduledTaskInfo { }
+function Wait-ManagedWrapperExit { $true }
+function Get-GpuOwner($State) { $State.gpu_owner }
+function Invoke-GpuOwner($State,$OwnerAction) {
+  Add-Content -LiteralPath (Join-Path $StateRoot 'actions.log') -Value "owner:$OwnerAction"
+  if($OwnerAction -ceq 'status'){[pscustomobject]@{paused=$false}}
+}
+$script:starts=0
+function Start-ManagedRelease {
+  if(Test-Path (Join-Path $StateRoot 'gpu-owner-lease.json')){throw 'previous GPU-owner lease stranded'}
+  $script:starts++
+  $state=Get-State
+  Add-Content -LiteralPath (Join-Path $StateRoot 'actions.log') -Value "start:$($state.active_release)"
+  if($RecoverStart -and $script:starts -eq 1){
+    if($RecoverStart -ceq 'after-launch'){
+      $release=Get-Release $state ([string]$state.active_release)
+      Write-JsonAtomic (Join-Path $StateRoot 'runtime.json') @{artifact_type='ninfer_windows_runtime_state';schema_version=2;release_id=$state.active_release;pid=$null;managed_stop='stop-event';launch_id=('2'*32);shutdown_report=(Join-Path $release.release_root 'logs/shutdown.json')}
+      Write-JsonAtomic (Join-Path $StateRoot 'gpu-owner-lease.json') @{artifact_type='ninfer_gpu_owner_lease';schema_version=1;release_id=$state.active_release;controller_sha256=('f'*64);prior_paused=$false}
+    }
+    throw 'injected previous-release startup failure'
+  }
+}
+""")
+                if recover_start:
+                    self.assertEqual(observed["failure"], "injected previous-release startup failure")
+                else:
+                    self.assertIsNone(observed["failure"], observed)
+                restored = json.loads(state_path.read_text())
+                target = previous if action == "Rollback" and not recover_start else current
+                self.assertEqual(restored["active_release"], target)
+                self.assertFalse(lease_path.exists())
+                holds = json.loads((lane.root / "shutdown-holds.json").read_text())["holds"]
+                if recover_start == "after-launch":
+                    self.assertEqual(holds[0]["runtime"]["launch_id"], "2" * 32)
+                else:
+                    self.assertEqual(holds[0]["runtime"], runtime)
+                self.assertEqual([hold["release_id"] for hold in holds],
+                                 [previous] if recover_start == "after-launch" else [current])
+                actions = (lane.root / "actions.log").read_text().splitlines()
+                self.assertEqual(actions[0:2], ["owner:start", "owner:status"])
+                self.assertIn("start:" + target, actions)
+                if recover_start:
+                    self.assertEqual([entry for entry in actions if entry.startswith("start:")],
+                                     ["start:" + previous, "start:" + current])
+
+    def test_dispatch_restart_retains_lease_when_release_root_is_not_idle(self) -> None:
+        for image in ("helper", None, "", " \t\r\n"):
+            with self.subTest(image=image), tempfile.TemporaryDirectory() as directory:
+                lane = installed_release(Path(directory))
+                self.write_launch(lane)
+                lease = lane.root / "gpu-owner-lease.json"
+                lease.write_text(json.dumps({"artifact_type": "ninfer_gpu_owner_lease",
+                                             "schema_version": 1, "release_id": "candidate"}))
+                expected = "unreadable" if image != "helper" else "unattributed"
+                executable = str(lane.bin / "helper.exe") if image == "helper" else image
+                observed = self.dispatch_action(lane, "Restart", ps_assignments(Image=executable or "") + """
+function Get-CimInstance { [pscustomobject]@{Name='ninfer-serve.exe';ExecutablePath=$Image;ProcessId=4242} }
+function Get-ScheduledTaskInfo { }
+function Wait-ManagedWrapperExit { $true }
+function Start-ManagedRelease { throw 'replacement launch reached' }
+""")
+                self.assertIn(expected, observed["failure"] or "")
+                self.assertNotIn("replacement launch reached", observed["failure"] or "")
+                self.assertTrue(lease.exists())
+
+    def test_dispatch_stop_refuses_foreign_runtime_without_cross_release_hold(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lane = installed_release(Path(directory))
+            runtime = self.write_launch(lane)
+            runtime["release_id"] = "foreign-" + "b" * 12
+            runtime_path = lane.root / "runtime.json"
+            runtime_path.write_text(json.dumps(runtime))
+            observed = self.dispatch_action(lane, "Stop", """
+function Get-CimInstance { }
+function Get-ScheduledTaskInfo { }
+function Wait-ManagedWrapperExit { $true }
+""")
+            self.assertIn("another release", observed["failure"] or "")
+            self.assertFalse((lane.root / "shutdown-holds.json").exists())
+            self.assertEqual(json.loads(runtime_path.read_text()), runtime)
+
+    def test_dispatch_stop_keeps_known_foreign_launch_attributed_to_its_own_release(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lane = installed_release(Path(directory))
+            state_path = lane.root / "state.json"
+            state = json.loads(state_path.read_text())
+            current = state["active_release"]
+            foreign = "foreign-" + "b" * 12
+            record = copy.deepcopy(state["releases"][current])
+            record["release_root"] = str(lane.root / "releases" / foreign)
+            record["server_executable"] = str(Path(record["release_root"]) / "bin/ninfer-serve.exe")
+            state["releases"][foreign] = record
+            state_path.write_text(json.dumps(state))
+            runtime = self.write_launch(lane, foreign)
+            observed = self.dispatch_action(lane, "Stop", """
+function Get-CimInstance { }
+function Get-ScheduledTask { }
+function Get-ScheduledTaskInfo { }
+function Wait-ManagedWrapperExit { $true }
+""")
+            self.assertIsNone(observed["failure"], observed)
+            holds = json.loads((lane.root / "shutdown-holds.json").read_text())["holds"]
+            self.assertEqual([hold["release_id"] for hold in holds], [foreign])
+            self.assertEqual(holds[0]["release_root"], record["release_root"])
+            self.assertEqual(holds[0]["runtime"], runtime)
+            self.assertEqual(json.loads((lane.root / "runtime.json").read_text()), runtime)
+
+    def test_dispatch_start_preserves_start_failure_after_held_idle_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lane = installed_release(Path(directory))
+            observed = self.dispatch_action(lane, "Start", LAUNCH_PREAMBLE + """
+$state.gpu_owner=[pscustomobject]@{controller_sha256=('f'*64)}
+Write-JsonAtomic $statePath $state
+function Get-GpuOwner($State) { $State.gpu_owner }
+function Invoke-GpuOwner($State,$OwnerAction) { if($OwnerAction -ceq 'status'){[pscustomobject]@{paused=$false}} }
+function Wait-ManagedWrapperExit { $true }
+function Get-ScheduledTaskInfo { }
+function Acquire-GpuOwnerLease {
+  Write-JsonAtomic (Join-Path $StateRoot 'gpu-owner-lease.json') @{artifact_type='ninfer_gpu_owner_lease';schema_version=1;release_id=$state.active_release;controller_sha256=('f'*64);prior_paused=$false}
+}
+function Start-ScheduledTask {
+  Write-JsonAtomic (Join-Path $StateRoot 'runtime.json') @{artifact_type='ninfer_windows_runtime_state';schema_version=2;release_id=$state.active_release;pid=$null;managed_stop='stop-event';launch_id=('1'*32);shutdown_report=(Join-Path $release.release_root 'logs/shutdown.json')}
+}
+function Wait-Ready { throw 'injected startup failure' }
+""")
+            self.assertEqual(observed["failure"], "injected startup failure")
+            self.assertFalse((lane.root / "gpu-owner-lease.json").exists())
+            self.assertEqual(len(json.loads((lane.root / "shutdown-holds.json").read_text())["holds"]), 1)
+
+    def test_dispatch_uninstall_rechecks_holds_created_by_its_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lane = installed_release(Path(directory))
+            self.write_launch(lane)
+            observed = self.dispatch_action(lane, "Uninstall", """
+function Get-CimInstance { }
+function Get-ScheduledTaskInfo { }
+function Wait-ManagedWrapperExit { $true }
+function Unregister-ScheduledTask { throw 'task removal reached despite a new shutdown hold' }
+""")
+            self.assertIn("uninstall retains held checkpoints", observed["failure"] or "")
+            self.assertTrue((lane.root / "shutdown-holds.json").exists())
+            self.assertTrue(lane.release.is_dir())
+
+    def test_dispatch_reconcile_without_state_reports_no_active_release(self) -> None:
+        for entry in ({}, {"Name": "unrelated.exe"}, {"Name": "NINFER-SERVE.EXE"}):
+            with self.subTest(entry=entry), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                release_id = "candidate-" + "c" * 12
+                release = root / "releases" / release_id
+                release.mkdir(parents=True)
+                hold_path = root / "shutdown-holds.json"
+                hold_path.write_text(json.dumps({
+                    "artifact_type": "ninfer_windows_shutdown_holds", "schema_version": 1,
+                    "holds": [{
+                        "release_id": release_id, "release_root": str(release),
+                        "runtime": {"release_id": release_id, "pid": None, "launch_id": "1" * 32},
+                        "stop_receipt": {"release_id": release_id, "mode": "stop-event",
+                                         "outcome": "graceful_unreported", "forced": False},
+                    }],
+                }))
+                process = {"ProcessId": 4242, "ExecutablePath": "", **entry}
+                observed = self.dispatch_action(
+                    SimpleNamespace(root=root), "Reconcile",
+                    ps_assignments(ProcessJson=json.dumps(process)) + """
+function Get-CimInstance { $ProcessJson|ConvertFrom-Json }
+function Restore-GpuOwnerLease { throw 'no incumbent ownership exists to restore' }
+""", release_id)
+                if entry.get("Name") == "NINFER-SERVE.EXE":
+                    self.assertIn("unreadable", observed["failure"] or "")
+                    self.assertTrue(hold_path.exists())
+                else:
+                    self.assertIsNone(observed["failure"], observed)
+                    self.assertIsNone(observed["status"]["release_id"])
+                    self.assertEqual(observed["status"]["process_state"], "stopped")
+                    self.assertEqual(observed["status"]["task_state"], "missing")
+                    self.assertFalse(hold_path.exists())
+                self.assertTrue(release.is_dir())
+
+    def test_dispatch_run_records_unreported_previous_launch_before_replacement(self) -> None:
+        for report in (None, {"artifact_type": "ninfer_serve_shutdown_report", "schema_version": 1,
+                              "launch_id": "1" * 32, "complete": False,
+                              "saved": 0, "skipped": 0, "refused": 1},
+                       {"artifact_type": "ninfer_serve_shutdown_report", "schema_version": 1,
+                        "launch_id": "1" * 32, "complete": True,
+                        "saved": 1, "skipped": 0, "refused": 0}):
+            with self.subTest(report=report), tempfile.TemporaryDirectory() as directory:
+                lane = installed_release(Path(directory))
+                runtime = self.write_launch(lane, report=report)
+                observed = self.dispatch_action(lane, "Run", LAUNCH_PREAMBLE + """
+function Acquire-GpuOwnerLease { throw 'replacement launch boundary reached' }
+""")
+                self.assertEqual(observed["failure"], "replacement launch boundary reached")
+                holds_path = lane.root / "shutdown-holds.json"
+                if report is None or not report["complete"]:
+                    self.assertTrue(holds_path.exists(), "Run erased evidence without first holding it")
+                    holds = json.loads(holds_path.read_text())["holds"]
+                    self.assertEqual(len(holds), 1)
+                    self.assertEqual(holds[0]["runtime"], runtime)
+                    self.assertIn(holds[0]["stop_receipt"]["outcome"],
+                                  ("graceful_unreported", "graceful_incomplete_shutdown"))
+                else:
+                    self.assertFalse(holds_path.exists())
+
+    def test_upgrade_handoff_tolerates_held_stop_only_after_census_and_lease_retirement(self) -> None:
+        for scenario in ("idle", "live-helper", "blank-server", "owner-restore-failure"):
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                lane = installed_release(Path(directory))
+                self.write_launch(lane)
+                state = json.loads((lane.root / "state.json").read_text())
+                lease = lane.root / "gpu-owner-lease.json"
+                lease.write_text(json.dumps({"artifact_type": "ninfer_gpu_owner_lease",
+                                             "schema_version": 1, "release_id": state["active_release"]}))
+                entry = ({"ExecutablePath": str(lane.bin / "helper.exe"), "ProcessId": 4242}
+                         if scenario == "live-helper" else
+                         {"Name": "ninfer-serve.exe", "ExecutablePath": "", "ProcessId": 4242}
+                         if scenario == "blank-server" else None)
+                preamble = ps_assignments(Scenario=scenario, ProcessJson=json.dumps(entry)) + """
+function Get-CimInstance { if($ProcessJson -cne 'null'){$ProcessJson|ConvertFrom-Json} }
+function Get-ScheduledTaskInfo { }
+function Wait-ManagedWrapperExit { $true }
+function Restore-GpuOwnerLease {
+  if($Scenario -ceq 'owner-restore-failure'){throw 'injected GPU-owner restoration failure'}
+  Remove-Item -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json') -Force -ErrorAction SilentlyContinue
+}
+"""
+                controller = lane.root / "Control-Release.ps1"
+                source = (WINDOWS / "Control-Release.ps1").read_text()
+                install_script(source.replace("switch ($Action) {", preamble + "\nswitch ($Action) {").encode(),
+                               controller)
+                observed = self.invoke(
+                    ps_assignments(StateRoot=lane.root, ProcessJson=json.dumps(entry))
+                    + ps_definitions(WINDOWS / "Install-Release.ps1") + """
+function Get-CimInstance { if($ProcessJson -cne 'null'){$ProcessJson|ConvertFrom-Json} }
+function Write-InstallEvent { }
+$script:attested=$false
+function Assert-GpuOwnerAttestation { $script:attested=$true }
+$controllerPath=Join-Path $StateRoot 'Control-Release.ps1'
+$transaction=[pscustomobject]@{journal_path=(Join-Path $StateRoot 'upgrade-journal.json');updated_utc=$null;flags=[pscustomobject]@{incumbent_touched=$false}}
+$failure=$null
+try{Stop-IncumbentForUpgrade $transaction 'successor-controller' @{} ([pscustomobject]@{})}
+catch{$failure=$_.Exception.Message}
+@{failure=$failure;attested=$script:attested;touched=$transaction.flags.incumbent_touched}|ConvertTo-Json -Compress
+""")
+                self.assertTrue(observed["touched"])
+                if scenario == "idle":
+                    self.assertIsNone(observed["failure"], observed)
+                    self.assertTrue(observed["attested"])
+                    self.assertFalse(lease.exists())
+                    self.assertTrue((lane.root / "shutdown-holds.json").exists())
+                else:
+                    self.assertIsNotNone(observed["failure"], observed)
+                    self.assertFalse(observed["attested"])
+                    self.assertTrue(lease.exists())
+                    self.assertTrue(lane.release.exists())
 
     def test_fp32_head_option_is_strictly_boolean_and_opt_in(self) -> None:
         controller = (WINDOWS / "Control-Release.ps1").read_text()
@@ -2810,51 +3150,232 @@ New-TransactionDirectory $transaction $Field $Target
                 self.assertTrue(all(path.is_dir() for path in upgrade.incumbent_trees))
 
     def test_incomplete_shutdown_blocks_rollback_and_repeated_repair(self) -> None:
-        """DB-R2: real managed Stop consumes a launch-bound report; no cache is disposable."""
-        for complete, refused in ((False, 0), (True, 1)):
-            with self.subTest(complete=complete, refused=refused), tempfile.TemporaryDirectory() as directory:
-                upgrade = interrupted_upgrade(Path(directory))
-                report_path = upgrade.candidate_targets[0] / "shutdown.json"
-                report_path.write_text(json.dumps({
-                    "artifact_type": "ninfer_serve_shutdown_report", "schema_version": 1,
-                    "launch_id": "1" * 32, "complete": complete, "saved": 0, "skipped": 0,
-                    "refused": refused,
-                }))
-                runtime = {
-                    "artifact_type": "ninfer_windows_runtime_state", "schema_version": 2,
-                    "release_id": upgrade.candidate, "pid": 4242, "start_time_utc_ticks": 1,
-                    "managed_stop": "stop-event", "stop_event": "Global\\NInfer-Serve-Stop-" + "1" * 32,
-                    "launch_id": "1" * 32, "shutdown_report": str(report_path),
-                }
-                runtime_path = upgrade.root / "runtime.json"
-                runtime_path.write_text(json.dumps(runtime))
-                # Real Stop, JSON I/O and receipt publication; Windows process/event APIs are stubs.
-                (upgrade.root / "Control-Release.ps1").write_text(
-                    "param([string]$Action,[string]$StateRoot)\n$ErrorActionPreference='Stop'\n"
-                    + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+        """DB-R2: refuse destructive cleanup, not non-destructive incumbent restoration."""
+        for scenario in ("incomplete", "refused"):
+            with self.subTest(scenario=scenario):
+                self.assert_shutdown_recovery(scenario)
+
+    def test_unproven_shutdown_retains_candidate_until_explicit_reconcile(self) -> None:
+        """#50: neither process exit nor a later repair proves that the final save completed."""
+        for scenario in (
+            "absent", "exited-absent", "unreadable", "malformed", "wrong-launch", "graceful_wait_expired",
+            "graceful_nonzero_exit", "terminated", "signal_failed",
+        ):
+            with self.subTest(scenario=scenario):
+                self.assert_shutdown_recovery(scenario)
+
+    def assert_shutdown_recovery(self, scenario: str) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            upgrade = interrupted_upgrade(Path(directory))
+            report_path = upgrade.candidate_targets[0] / "shutdown.json"
+            report = {
+                "artifact_type": "ninfer_serve_shutdown_report", "schema_version": 1,
+                "launch_id": "2" * 32 if scenario == "wrong-launch" else "1" * 32,
+                "complete": scenario != "incomplete", "saved": 0, "skipped": 0,
+                "refused": 1 if scenario == "refused" else 0,
+            }
+            if scenario not in ("absent", "exited-absent"):
+                report_path.write_text("not JSON" if scenario == "unreadable" else
+                                       "{}" if scenario == "malformed" else json.dumps(report))
+            runtime_path = upgrade.root / "runtime.json"
+            runtime = {
+                "artifact_type": "ninfer_windows_runtime_state", "schema_version": 2,
+                "release_id": upgrade.candidate, "pid": 4242, "start_time_utc_ticks": 1,
+                "managed_stop": "stop-event", "launch_id": "1" * 32,
+                "stop_event": None if scenario == "terminated" else "Global\\NInfer-Serve-Stop-" + "1" * 32,
+                "shutdown_report": str(report_path),
+            }
+            runtime_path.write_text(json.dumps(runtime))
+            (upgrade.root / "Control-Release.ps1").write_text(
+                "param([string]$Action,[string]$StateRoot)\n$ErrorActionPreference='Stop'\n"
+                + ps_assignments(Scenario=scenario)
+                + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+Set-StrictMode -Version Latest
 function Get-State { Read-JsonFile (Join-Path $StateRoot 'state.json') }
-function Get-Release { [pscustomobject]@{managed_stop='stop-event';graceful_stop_timeout_seconds=1;server_executable=(Join-Path $StateRoot 'server.exe')} }
-$script:live=-not(Test-Path (Join-Path $StateRoot 'last-stop.json'))
-$script:child=[pscustomobject]@{Id=4242;HasExited=$false;ExitCode=0}
-$script:child|Add-Member ScriptMethod WaitForExit {$this.HasExited=$true;$script:live=$false}
+function Get-Release {
+  $root=Join-Path (Join-Path $StateRoot 'releases') (Get-State).active_release
+  [pscustomobject]@{managed_stop='stop-event';graceful_stop_timeout_seconds=1;release_root=$root;server_executable=(Join-Path $root 'bin/ninfer-serve.exe')}
+}
+$script:live=$Scenario -cne 'exited-absent' -and -not(Test-Path (Join-Path $StateRoot 'last-stop.json'))
+$script:child=[pscustomobject]@{Id=4242;HasExited=$false;ExitCode=$(if($Scenario -ceq 'graceful_nonzero_exit'){9}else{0})}
+$script:child|Add-Member ScriptMethod WaitForExit {
+  if($Scenario -cne 'graceful_wait_expired'){$this.HasExited=$true;$script:live=$false}
+}
 function Get-OwnedProcess { if($script:live){$script:child} }
 function Get-CimInstance { }
 function Get-ScheduledTaskInfo { }
 function Wait-ManagedWrapperExit { $true }
-function Request-ManagedStop { 'signalled' }
-Stop-ManagedProcess
+function Request-ManagedStop { if($Scenario -ceq 'signal_failed'){'failed: injected denial'}else{'signalled'} }
+function Stop-LaunchNow { param($Release,$TaskName,$Receipt);$script:live=$false;$script:child.HasExited=$true;$Receipt.forced=$true }
+function Restore-GpuOwnerLease { Remove-Item -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json') -Force -ErrorAction SilentlyContinue }
+if($Action -ceq 'Stop'){Stop-ManagedRelease}
 """)
-                for mode in ("rollback", "repair"):
-                    result = self.rollback_attempt(upgrade, mode)
-                    self.assertFalse(result["completed"], result)
-                    self.assertIn("incomplete", result["failure"])
-                    self.assertTrue(runtime_path.exists())
-                    self.assertTrue(all(path.exists() for path in upgrade.candidate_targets))
-                    self.assertEqual(json.loads(upgrade.journal.read_text())["status"], "repair_required")
-                    self.assertEqual(json.loads((upgrade.root / "last-stop.json").read_text())["outcome"],
-                                     "graceful_incomplete_shutdown")
-                    self.assertEqual(json.loads((upgrade.root / "state.json").read_text())["active_release"],
-                                     upgrade.candidate)
+            first_hold = None
+            for mode in ("rollback", "repair"):
+                result = self.rollback_attempt(upgrade, mode)
+                self.assertFalse(result["completed"], result)
+                self.assertTrue(all(path.exists() for path in upgrade.candidate_targets))
+                self.assertEqual(json.loads(upgrade.journal.read_text())["status"], "held_cleanup")
+                self.assertEqual(json.loads((upgrade.root / "state.json").read_text())["active_release"],
+                                 upgrade.incumbent)
+                self.assertIn("Reconcile", result["failure"])
+                self.assertIn("-RepairInterruptedInstall", result["failure"])
+                self.assertFalse((upgrade.root / "gpu-owner-lease.json").exists())
+                holds = json.loads((upgrade.root / "shutdown-holds.json").read_text())["holds"]
+                self.assertEqual(len(holds), 1)
+                self.assertEqual(holds[0]["runtime"], runtime)
+                expected = ("graceful_unreported" if scenario in
+                            ("absent", "exited-absent", "unreadable", "malformed", "wrong-launch")
+                            else "graceful_incomplete_shutdown" if scenario in ("incomplete", "refused")
+                            else scenario)
+                self.assertEqual(holds[0]["stop_receipt"]["outcome"], expected)
+                if first_hold is None:
+                    first_hold = holds[0]
+                self.assertEqual(holds[0], first_hold)
+            self.assertEqual((upgrade.root / "controller.log").read_text().split().count("incumbent:Start"), 1)
+            # Reconcile an inactive candidate without touching the incumbent's current attribution.
+            incumbent_runtime = json.dumps({"release_id": upgrade.incumbent, "pid": None})
+            runtime_path.write_text(incumbent_runtime)
+            self.invoke(ps_assignments(StateRoot=upgrade.root, HeldRelease=upgrade.candidate)
+                        + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+function Get-State { Read-JsonFile (Join-Path $StateRoot 'state.json') }
+function Get-CimInstance { }
+function Restore-GpuOwnerLease { throw 'must not restore incumbent ownership' }
+Reconcile-ManagedShutdown $HeldRelease
+'{}'
+""")
+            self.assertEqual(runtime_path.read_text(), incumbent_runtime)
+            self.assertFalse((upgrade.root / "shutdown-holds.json").exists())
+            self.assertTrue(self.rollback_attempt(upgrade, "repair")["completed"])
+            self.assertTrue(all(not path.exists() for path in upgrade.candidate_targets))
+            self.assertTrue(all(path.exists() for path in upgrade.incumbent_trees))
+
+    def test_refused_final_save_survives_start_run_and_a_later_clean_stop(self) -> None:
+        """#50: retain the refused launch independently without refusing replacement service."""
+        with tempfile.TemporaryDirectory() as directory:
+            lane = installed_release(Path(directory))
+            observed = self.invoke(
+                ps_assignments(StateRoot=lane.root)
+                + ps_definitions(WINDOWS / "Control-Release.ps1") + LAUNCH_PREAMBLE + """
+$reportPath=Join-Path $release.release_root 'logs/shutdown.json'
+$runtimePath=Join-Path $StateRoot 'runtime.json'
+$launch='11111111111111111111111111111111'
+Write-JsonAtomic $reportPath @{artifact_type='ninfer_serve_shutdown_report';schema_version=1;launch_id=$launch;complete=$false;saved=0;skipped=0;refused=1}
+Write-JsonAtomic $runtimePath @{artifact_type='ninfer_windows_runtime_state';schema_version=2;release_id=$state.active_release;pid=$null;managed_stop='stop-event';stop_event=('Global\\NInfer-Serve-Stop-'+$launch);launch_id=$launch;shutdown_report=$reportPath}
+function Wait-ManagedWrapperExit { $true }
+function Get-ScheduledTaskInfo { }
+function Acquire-GpuOwnerLease { throw 'ownership-acquisition-reached' }
+function Restore-GpuOwnerLease { }
+$first=$null
+try{Stop-ManagedProcess}catch{$first=$_.Exception.Message}
+$holdPath=Join-Path $StateRoot 'shutdown-holds.json'
+$beforeHolds=if(Test-Path $holdPath){[IO.File]::ReadAllText($holdPath)}else{''}
+$launches=[ordered]@{}
+foreach($entry in @('Start-ManagedRelease','Invoke-Run')){
+  try{& $entry;$launches[$entry]='returned'}catch{$launches[$entry]=$_.Exception.Message}
+}
+function Acquire-GpuOwnerLease { }
+function Wait-Ready { }
+function Start-ScheduledTask {
+  $next='22222222222222222222222222222222'
+  Write-JsonAtomic $runtimePath @{artifact_type='ninfer_windows_runtime_state';schema_version=2;release_id=$state.active_release;pid=$null;managed_stop='stop-event';stop_event=('Global\\NInfer-Serve-Stop-'+$next);launch_id=$next;shutdown_report=$reportPath}
+  Write-JsonAtomic $reportPath @{artifact_type='ninfer_serve_shutdown_report';schema_version=1;launch_id=$next;complete=$true;saved=1;skipped=0;refused=0}
+}
+$start=$null
+try{Start-ManagedRelease}catch{$start=$_.Exception.Message}
+$later=$null
+try{Stop-ManagedProcess}catch{$later=$_.Exception.Message}
+$holds=if(Test-Path $holdPath){@(Read-JsonFile $holdPath).holds}else{@()}
+$sameHolds=(Test-Path $holdPath) -and [IO.File]::ReadAllText($holdPath) -ceq $beforeHolds
+$uninstall=$null
+function Unregister-ScheduledTask { throw 'uninstall-task-removal-reached' }
+try{Uninstall-ManagedRelease}catch{$uninstall=$_.Exception.Message}
+$liveReconcile=$null
+function Get-CimInstance { [pscustomobject]@{Name='ninfer-serve.exe';ExecutablePath=$release.server_executable;ProcessId=4242} }
+try{Reconcile-ManagedShutdown ([string]$state.active_release)}catch{$liveReconcile=$_.Exception.Message}
+$stillHeld=Test-Path $holdPath
+function Get-CimInstance { }
+$reconcile=$null
+try{Reconcile-ManagedShutdown ([string]$state.active_release)}catch{$reconcile=$_.Exception.Message}
+@{first=$first;launches=$launches;start=$start;later=$later;holds=@($holds);same_holds=$sameHolds;uninstall=$uninstall;live_reconcile=$liveReconcile;still_held=$stillHeld;reconcile=$reconcile;retired=(-not(Test-Path $runtimePath));cleared=(-not(Test-Path $holdPath))}|ConvertTo-Json -Depth 12 -Compress
+""")
+            self.assertIn("incomplete", observed["first"])
+            for failure in observed["launches"].values():
+                self.assertEqual(failure, "ownership-acquisition-reached")
+            self.assertIsNone(observed["start"])
+            self.assertIsNone(observed["later"])
+            self.assertEqual(len(observed["holds"]), 1)
+            self.assertEqual(observed["holds"][0]["runtime"]["launch_id"], "1" * 32)
+            self.assertEqual(observed["holds"][0]["stop_receipt"]["sessions_refused"], 1)
+            self.assertTrue(observed["same_holds"])
+            self.assertIn("Reconcile", observed["uninstall"])
+            self.assertNotIn("uninstall-task-removal-reached", observed["uninstall"])
+            self.assertIn("still runs", observed["live_reconcile"])
+            self.assertTrue(observed["still_held"])
+            self.assertIsNone(observed["reconcile"])
+            self.assertTrue(observed["retired"])
+            self.assertTrue(observed["cleared"])
+
+    def test_terminate_mode_stop_and_restart_do_not_create_a_shutdown_hold(self) -> None:
+        """#50 is scoped to stop-event launches; predecessor termination stays ordinary."""
+        with tempfile.TemporaryDirectory() as directory:
+            lane = installed_release(Path(directory))
+            observed = self.invoke(
+                ps_assignments(StateRoot=lane.root)
+                + ps_definitions(WINDOWS / "Control-Release.ps1") + LAUNCH_PREAMBLE + """
+$release.PSObject.Properties.Remove('managed_stop')
+$release.PSObject.Properties.Remove('graceful_stop_timeout_seconds')
+Write-JsonAtomic $statePath $state
+$runtimePath=Join-Path $StateRoot 'runtime.json'
+Write-JsonAtomic $runtimePath @{artifact_type='ninfer_windows_runtime_state';schema_version=2;release_id=$state.active_release;pid=4242;start_time_utc_ticks=1}
+$script:live=$true
+$script:child=[pscustomobject]@{Id=4242;HasExited=$false}
+function Get-OwnedProcess { if($script:live){$script:child} }
+function Stop-LaunchNow { param($Release,$TaskName,$Receipt);$script:live=$false;$script:child.HasExited=$true;$Receipt.forced=$true }
+function Wait-ManagedWrapperExit { $true }
+function Get-ScheduledTaskInfo { }
+function Restore-GpuOwnerLease { }
+$failure=$null
+try{Stop-ManagedRelease}catch{$failure=$_.Exception.Message}
+$receipt=Get-ManagedStopReceipt
+function Acquire-GpuOwnerLease { throw 'ownership-acquisition-reached' }
+$start=$null
+try{Start-ManagedRelease}catch{$start=$_.Exception.Message}
+@{failure=$failure;start=$start;runtime=(Test-Path $runtimePath);hold=(Test-Path (Join-Path $StateRoot 'shutdown-holds.json'));receipt=$receipt}|ConvertTo-Json -Depth 6 -Compress
+""")
+            self.assertIsNone(observed["failure"])
+            self.assertEqual(observed["start"], "ownership-acquisition-reached")
+            self.assertFalse(observed["runtime"])
+            self.assertFalse(observed["hold"])
+            self.assertEqual(observed["receipt"]["mode"], "terminate")
+            self.assertEqual(observed["receipt"]["outcome"], "terminated")
+
+    def test_reconcile_accepts_a_held_release_after_first_install_state_restore(self) -> None:
+        """A first-install rollback restores absence of state.json, not an active incumbent."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            release_id = "candidate-" + "c" * 12
+            release = root / "releases" / release_id
+            release.mkdir(parents=True)
+            hold_path = root / "shutdown-holds.json"
+            hold_path.write_text(json.dumps({
+                "artifact_type": "ninfer_windows_shutdown_holds", "schema_version": 1,
+                "holds": [{
+                    "release_id": release_id, "release_root": str(release),
+                    "runtime": {"release_id": release_id, "pid": None, "launch_id": "1" * 32},
+                    "stop_receipt": {"release_id": release_id, "mode": "stop-event",
+                                     "outcome": "graceful_unreported", "forced": False},
+                }],
+            }))
+            self.invoke(ps_assignments(StateRoot=root, HeldRelease=release_id)
+                        + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+function Get-CimInstance { }
+function Restore-GpuOwnerLease { throw 'no incumbent ownership exists to restore' }
+Reconcile-ManagedShutdown $HeldRelease
+'{}'
+""")
+            self.assertFalse(hold_path.exists())
+            self.assertTrue(release.is_dir())
 
     @unittest.skipIf(sys.platform == "win32", "the synthetic nvidia-smi is a POSIX shell script")
     def test_nonrunning_beta3_stale_inner_lease_refuses_before_cutover(self) -> None:
