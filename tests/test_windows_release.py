@@ -788,6 +788,7 @@ class QualificationRestorationTests(unittest.TestCase):
         )
         subject.state_path = directory / "state.json"
         subject.receipt_dir = directory / "receipts"
+        subject.target_root = "C:/qualification-stage"
         subject.state = {
             "gpu_uuid": "GPU-00000000-0000-4000-8000-000000003090",
             "phases": {}, "restoration": {"status": "required"},
@@ -995,6 +996,8 @@ class QualificationRestorationTests(unittest.TestCase):
                 subject.lane.config["engine"]["max_concurrency"] = capacity
 
                 def local(command, **kwargs):
+                    if command[:2] == ["git", "show"] and command[2].endswith("/server-config.json"):
+                        return SimpleNamespace(stdout=json.dumps({"engine": {"max_concurrency": capacity}}))
                     return SimpleNamespace(stdout=source if command[:2] == ["git", "show"] else "")
 
                 found = {"incumbent_state_root": "", "incumbent_was_running": False,
@@ -1007,6 +1010,10 @@ class QualificationRestorationTests(unittest.TestCase):
                 self.assertEqual(receipt["lane"], "rtx3090")
                 commands.assert_any_call(
                     ["git", "show", "packaging-source:tools/smoke/agent_protocol.py"],
+                    cwd=subject.config.source_root,
+                )
+                commands.assert_any_call(
+                    ["git", "show", "packaging-source:packaging/windows/lanes/rtx3090/server-config.json"],
                     cwd=subject.config.source_root,
                 )
 
@@ -1046,6 +1053,107 @@ class QualificationRestorationTests(unittest.TestCase):
                     qualify_native.Orchestrator(config)
             load.assert_not_called()
             self.assertEqual(list(Path(temporary).iterdir()), [])
+
+    def test_packaged_concurrency_mismatch_refuses_before_checkpoint_or_remote_effect(self) -> None:
+        for candidate_capacity, packaged_capacity in ((2, 1), (1, 2)):
+            with self.subTest(candidate=candidate_capacity), tempfile.TemporaryDirectory() as temporary:
+                config = SimpleNamespace(
+                    source_root=ROOT, candidate_source="candidate-source", lane="fixture",
+                    state_dir=Path(temporary), scratch_task_suffix="UNIT",
+                )
+                lane = SimpleNamespace(
+                    name="fixture", spec={}, config={"engine": {"max_concurrency": candidate_capacity}},
+                )
+
+                def local(command, **kwargs):
+                    if command[:2] == ["git", "rev-parse"]:
+                        return SimpleNamespace(stdout="packaging-source")
+                    if command[:2] == ["git", "show"]:
+                        source = (
+                            json.dumps({"engine": {"max_concurrency": packaged_capacity}})
+                            if command[2].endswith("/server-config.json") else
+                            "SUPPORTS_CONCURRENT_SESSION_TELEMETRY = True\n"
+                        )
+                        return SimpleNamespace(stdout=source)
+                    return SimpleNamespace(stdout="")
+
+                with patch.object(qualify_native, "run", side_effect=local), \
+                        patch.object(qualify_native.Lane, "load", return_value=lane), \
+                        patch.object(qualify_native, "validate_scratch_configuration"), \
+                        patch.object(qualify_native.Orchestrator, "_load_state") as load, \
+                        patch.object(qualify_native.Orchestrator, "remote_json") as remote:
+                    with self.assertRaisesRegex(
+                        qualify_native.LaneError,
+                        rf"packaged engine.max_concurrency={packaged_capacity} disagrees with "
+                        rf"candidate lane engine.max_concurrency={candidate_capacity}",
+                    ):
+                        qualify_native.Orchestrator(config)
+                load.assert_not_called()
+                remote.assert_not_called()
+                self.assertEqual(list(Path(temporary).iterdir()), [])
+
+    def test_tool_only_upgrade_reruns_protocol_receipts_without_concurrency(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            subject = self.orchestrator(Path(temporary))
+            subject.config.resume = subject.config.upgrade_orchestrator_state = True
+            subject.config.scratch_port, subject.config.pressure_port = 18210, 18200
+            subject.tool_head = "advanced-tool-source"
+            subject.script_sha = "advanced-orchestrator"
+            predecessor = {
+                **subject.state, "source_commit": subject.head, "lane": subject.lane.name,
+                "orchestrator_sha256": "predecessor-orchestrator",
+                "qualification_tool_commit": subject.head,
+                "scratch_binding": {
+                    "state_root_sha256": hashlib.sha256(
+                        str(qualify_native.PureWindowsPath(subject.state_root)).casefold().encode()
+                    ).hexdigest(),
+                    "task_suffix": subject.config.scratch_task_suffix,
+                    "port": subject.config.scratch_port, "pressure_port": subject.config.pressure_port,
+                },
+                "phases": {
+                    name: {"status": "passed", "receipt": {"status": "passed", "legacy": True}}
+                    for name in ("protocol", "pressure_protocol")
+                },
+            }
+            qualify_native.atomic_json(subject.state_path, predecessor)
+            with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="")) as commands:
+                subject.state = subject._load_state()
+            commands.assert_called_once()
+            self.assertEqual(commands.call_args.args[0][1:3], ["diff", "--name-only"])
+            self.assertEqual(subject.state["orchestrator_revisions"], ["predecessor-orchestrator"])
+            self.assertEqual(subject.state["source_commit"], subject.head)
+            for name in ("protocol", "pressure_protocol"):
+                fresh = {"status": "passed", "max_concurrency": 1}
+                with self.subTest(phase=name), \
+                        patch.object(subject, "remote_json", return_value={"ok": True}), \
+                        patch.object(subject, name, return_value=fresh) as action:
+                    self.assertEqual(subject.phase(name, action), fresh)
+                    action.assert_called_once_with()
+
+    def test_resume_requires_matching_integer_protocol_concurrency(self) -> None:
+        for capacity in (1, 2):
+            for name in ("protocol", "pressure_protocol"):
+                for recorded in (None, True, False, str(capacity), 3 - capacity, capacity):
+                    with self.subTest(capacity=capacity, phase=name, recorded=recorded), \
+                            tempfile.TemporaryDirectory() as temporary:
+                        subject = self.orchestrator(Path(temporary))
+                        subject.config.resume = True
+                        subject.lane.config["engine"]["max_concurrency"] = capacity
+                        receipt = {"status": "passed"}
+                        if recorded is not None:
+                            receipt["max_concurrency"] = recorded
+                        subject.state["phases"][name] = {"status": "passed", "receipt": receipt}
+                        fresh = {"status": "passed", "max_concurrency": capacity}
+                        with patch.object(subject, "remote_json", return_value={"ok": True}) as remote, \
+                                patch.object(subject, name, return_value=fresh) as action:
+                            result = subject.phase(name, action)
+                        if type(recorded) is int and recorded == capacity:
+                            self.assertIs(result, receipt)
+                            action.assert_not_called()
+                        else:
+                            self.assertEqual(result, fresh)
+                            action.assert_called_once_with()
+                            remote.assert_not_called()
 
     def ready_for_receipt(self, directory: Path) -> qualify_native.Orchestrator:
         subject = self.orchestrator(directory)

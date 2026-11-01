@@ -22,9 +22,14 @@ accepts positive integer concurrency; tools without that declaration are C1-only
 and are refused for a C2 lane at preflight, not after build and installation.
 The package still carries the committed smoke tool into `bin\qualification`;
 there is no qualification-tool override.
+When the candidate source and packaging revision differ, preflight also reads the
+committed packaging configuration and refuses a `max_concurrency` mismatch with the
+candidate lane before checkpoint state or target-side actions.
 
 Protocol and reduced-Host-pressure phase receipts record the lane's configured
-`max_concurrency`. C2 retains every idle-scheduler and exact request-correlated
+`max_concurrency`. Resume reuses either receipt only when it records the matching
+integer concurrency; predecessor receipts without that field, or with a different
+value, must rerun the phase. C2 retains every idle-scheduler and exact request-correlated
 decode-token-delta assertion; capacity two does not permit unrelated requests
 during this serial telemetry probe. Host tests cover C1 and C2 paths, including
 busy snapshots and incorrect token deltas. The next native package must still

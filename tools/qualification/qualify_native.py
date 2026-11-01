@@ -940,6 +940,10 @@ if($LASTEXITCODE -ne 0){throw 'target GPU selection failed'}
     def verify_checkpoint(self, name: str, receipt: dict[str, Any]) -> bool:
         if name == "preflight":
             return False  # Every window must re-establish target quiescence and found state.
+        if name in ("protocol", "pressure_protocol"):
+            capacity = receipt.get("max_concurrency")
+            if type(capacity) is not int or capacity != self.lane.config["engine"]["max_concurrency"]:
+                return False
         try:
             if name == "neutral_build":
                 script = f"""
@@ -1070,6 +1074,18 @@ $limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=pow
                     isinstance(statement.value, ast.Constant) and statement.value.value is True
                 )
         max_concurrency = self.lane.config["engine"]["max_concurrency"]
+        if self.head != self.tool_head:
+            packaged_config = json.loads(run(
+                ["git", "show",
+                 f"{self.tool_head}:packaging/windows/lanes/{self.lane.name}/server-config.json"],
+                cwd=self.config.source_root,
+            ).stdout)
+            packaged_capacity = packaged_config.get("engine", {}).get("max_concurrency")
+            if type(packaged_capacity) is not int or packaged_capacity != max_concurrency:
+                raise LaneError(
+                    f"packaged engine.max_concurrency={packaged_capacity} disagrees with "
+                    f"candidate lane engine.max_concurrency={max_concurrency}"
+                )
         if max_concurrency > 1 and not concurrent_telemetry:
             raise LaneError(
                 "packaged agent_protocol.py is C1-only; "
