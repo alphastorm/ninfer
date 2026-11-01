@@ -419,6 +419,11 @@ Host replicas stream under leases. Release pins on the Engine worker after trans
 retire, including cancellation. Recheck session/tag epoch before publishing `current`;
 newer live work makes the export stale. The store must serialize that final check
 with same-session publication so a check→publish race cannot overwrite newer state.
+Off-worker exports reserve the retirement task, future and queue node before taking
+native leases. The worker reuses a preconstructed command batch, including its list
+sentinel, so neither enqueueing nor draining retirement allocates after a writer
+completes or throws. Each prepared export releases its capacity/admission notification
+exactly once, after its native pins retire.
 
 Import validates/authenticates bounded metadata before payload-sized reservations.
 Reserve checkpoint slots, Host StateImage destinations, inactive KV histories and

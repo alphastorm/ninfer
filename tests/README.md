@@ -384,6 +384,14 @@ or a checkpoint operation changes native state, the next statistics publication 
 observer has read statistics, so a result delivered before publication fails deterministically.
 Run it with `ctest --test-dir build -R '^ninfer_engine_core_test$' --output-on-failure`.
 
+`ninfer_engine_checkpoint_adapter_test` includes the production checkpoint adapter in a
+GPU-free host-native fixture. Allocation-failure cases check that command allocation fails
+before acquiring a native export lease and that successful or throwing writers retire leases
+without further caller or worker allocation, releasing capacity exactly once. Injection stays
+armed through a fresh worker command drain, including after an inline export, so allocating
+empty-list sentinels are covered on MSVC. Linux and Windows host-contract CI select this
+executable; the native-compile workflow also runs it.
+
 The `attention` scenario checks the selected KV type, chunked prefill, concurrent Graph decode
 across a resource tier, prefix continuation, and workspace bounds:
 
