@@ -388,6 +388,7 @@ $outcome|ConvertTo-Json -Compress
 # transaction recorded, in one fresh state root per scenario.
 CANDIDATE_CREATION = """Set-StrictMode -Version Latest
 function Write-InstallEvent { }
+function Get-CimInstance { }
 $observed=[ordered]@{}
 foreach($scenario in @($Scenarios -split ';')){
   $StateRoot=Join-Path $Directory $scenario
@@ -2778,6 +2779,10 @@ $outer=Read-JsonFile (Join-Path (Join-Path $StateRoot 'gpu-owner-state') 'lease.
                 upgrade = interrupted_upgrade(Path(directory))
                 for target in upgrade.candidate_targets:
                     shutil.rmtree(target)
+                # No activation or launch has happened at this directory-creation boundary.
+                shutil.copyfile(upgrade.snapshots / "state.bin", upgrade.root / "state.json")
+                shutil.copyfile(upgrade.snapshots / "controller.bin", upgrade.root / "Control-Release.ps1")
+                (upgrade.root / "gpu-owner-lease.json").unlink()
                 journal = json.loads(upgrade.journal.read_text())
                 journal["flags"] = {key: False for key in journal["flags"]}
                 for key in ("release_root", "secret_directory", "cache_root", "stage_path"):
