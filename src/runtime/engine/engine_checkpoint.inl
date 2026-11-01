@@ -2,6 +2,7 @@
 // its device-bound worker. Disk publication uses only CheckpointControl's independent gate.
     template <class Function>
     auto checkpoint_call(Function&& function) -> std::invoke_result_t<Function> {
+        restore_trace::Span checkpoint_span("checkpoint.command");
         using Result = std::invoke_result_t<Function>;
         if (std::this_thread::get_id() == worker_.get_id()) {
             struct Relock {
@@ -19,6 +20,7 @@
             std::lock_guard lock(queue_mutex_);
             if (stopping_) { throw std::runtime_error("checkpoint worker is stopping"); }
             checkpoint_commands_.emplace_back([command] { (*command)(); });
+            restore_trace::event("checkpoint.queue.depth", {}, checkpoint_commands_.size());
         }
         queue_cv_.notify_one();
         return result.get();
@@ -395,7 +397,10 @@ private:
             std::lock_guard lock(queue_mutex_);
             commands.swap(checkpoint_commands_);
         }
-        for (auto& command : commands) { command(); }
+        for (auto& command : commands) {
+            restore_trace::Span command_span("checkpoint.worker");
+            command();
+        }
         // Every worker turn starts here. Gates that finished requests, operations and dropped
         // tokens left behind retire once no native owner names their session; native
         // ownership is only stable on this worker.

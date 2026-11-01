@@ -1,4 +1,5 @@
 #include "models/qwen3_5/program/program_impl.h"
+#include "core/restore_trace.h"
 #include "models/qwen3_5/program/storage/checkpoint_codec.h"
 #include "models/common/qwen/vision/control.h"
 #include "runtime/contract/continuation_checkpoint.h"
@@ -605,6 +606,7 @@ CheckpointValidation Program::validate_checkpoint_import(const DurableCheckpoint
 
 ImportReservation Program::prepare_checkpoint_import(const DurableCheckpointSet& set,
     const ContinuationCheckpointReader& reader, const DurableLimits& limits) {
+    restore_trace::Span import_span("native.import.worker");
     auto out = std::make_unique<ImportReservation::Impl>();
     auto& p = *impl_;
     out->owner = &p;
@@ -700,6 +702,7 @@ ImportReservation Program::prepare_checkpoint_import(const DurableCheckpointSet&
 }
 
 std::vector<CheckpointHandle> Program::commit_import(ImportReservation&& prepared) {
+    restore_trace::Span commit_span("native.import.commit");
     if (!prepared.valid() || prepared.impl_->owner != impl_.get())
         throw std::logic_error("checkpoint import is foreign, refused or consumed");
     auto& value = *prepared.impl_;

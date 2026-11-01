@@ -1,4 +1,5 @@
 #include "models/common/context/migration.h"
+#include "core/restore_trace.h"
 
 #include <algorithm>
 #include <cmath>
@@ -129,6 +130,8 @@ void MigrationBatch::reset_plan() {
 }
 
 void MigrationBatch::submit() {
+    restore_trace::Span submit_span("migration.submit");
+    restore_trace::resources("binding.begin");
     require_reserved();
     // Capture Host runs while their byte ranges are held. Later extent partitioning may change
     // capabilities but cannot return these ranges while the per-page readers remain alive.
@@ -158,15 +161,21 @@ void MigrationBatch::submit() {
     stage_       = Stage::Submitting;
     auto& device = *context_->device_;
     context_->source_ready_.record(device.stream());
+    restore_trace::event("migration.source.record");
     context_->source_ready_.wait(device.transfer_stream());
+    restore_trace::event("migration.source.dependency");
     const auto measure = [&](Resource resource, Direction direction, auto&& enqueue) {
         const auto index   = timer_index(resource, direction);
         auto& observed     = context_->measured_[index];
         observed.resource  = resource;
         observed.direction = direction;
         context_->timers_[index].start();
+        restore_trace::event("migration.cuda.start", {}, index);
         enqueue(observed);
+        restore_trace::event("migration.enqueue.end", {}, index,
+                             observed.work.payload_bytes, observed.work.copy_operations);
         context_->timers_[index].record_stop();
+        restore_trace::event("migration.cuda.stop", {}, index);
     };
     for (auto direction : {Direction::DeviceToHost, Direction::HostToDevice}) {
         const auto matches = [&](const StateCopy& copy) {
@@ -178,7 +187,9 @@ void MigrationBatch::submit() {
             for (auto& copy : state_copies_) {
                 if (!matches(copy)) continue;
                 const auto work = copy.transfer.work();
+                restore_trace::event("state.enqueue.begin", {}, work.payload_bytes, work.copy_operations);
                 copy.transfer.enqueue(device.transfer_view());
+                restore_trace::event("state.enqueue.end");
                 observed.work.payload_bytes += work.payload_bytes;
                 observed.work.copy_operations += work.copy_operations;
                 ++observed.image_count;
@@ -221,8 +232,11 @@ void MigrationBatch::submit() {
             if (!value.restores.empty())
                 measure({pool}, Direction::HostToDevice, [&](auto& observed) {
                     for (const auto& run : value.restores) {
+                        restore_trace::event("kv.enqueue.begin", {}, index,
+                                             run.work.payload_bytes, run.work.copy_operations);
                         const auto actual =
                             physical.copy_from_host(run.host, run.device, device.transfer_stream());
+                        restore_trace::event("kv.enqueue.end", {}, index);
                         check_work(run.work, actual);
                         observed.work.payload_bytes += actual.payload_bytes;
                         observed.work.copy_operations += actual.copy_operations;
@@ -240,6 +254,7 @@ void MigrationBatch::submit() {
         }
     }
     context_->completed_.record(device.transfer_stream());
+    restore_trace::event("migration.completion.record");
     stage_ = Stage::Submitted;
 }
 
@@ -263,6 +278,7 @@ std::vector<runtime::ContextTransferObservation> MigrationBatch::observations() 
 }
 
 void MigrationBatch::publish() {
+    restore_trace::Span publish_span("migration.publish");
     if (stage_ != Stage::Submitted || cancelled_ || !ready())
         throw std::logic_error("migration publication precedes completion");
     state_groups_.clear();
@@ -280,6 +296,7 @@ void MigrationBatch::publish() {
     backups_.clear();
     for (auto& value : bindings_) value.reservation.publish_restores();
     stage_ = Stage::Published;
+    restore_trace::resources("binding.end");
 }
 
 void MigrationBatch::release_reservations() {

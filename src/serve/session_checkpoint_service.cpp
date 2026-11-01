@@ -1,4 +1,5 @@
 #include "serve/session_checkpoint_service.h"
+#include "core/restore_trace.h"
 
 #include "core/io/durable_file.h"
 #include "core/sha256.h"
@@ -172,6 +173,9 @@ void SessionCheckpointService::receipt(std::string_view kind, std::string_view s
 
 runtime::DurableImportResult SessionCheckpointService::restore(
     std::string_view session, std::optional<std::string_view> required_response) {
+    restore_trace::Span restore_span("durable.restore");
+    restore_trace::event("durable.session", session);
+    restore_trace::resources("import.begin");
     const auto finish = [&](runtime::DurableImportResult result, std::string_view origin = "not_checked") {
         receipt("restore", import_name(result.state), result.reason,
                 result.state == ImportState::Imported && result.reason == Reason::None,
@@ -197,6 +201,7 @@ runtime::DurableImportResult SessionCheckpointService::restore(
         return finish({.state = state, .reason = loaded.reason});
     }
     auto& verified = *loaded.checkpoint;
+    restore_trace::event("durable.generation", verified.generation);
     target.expected_tag = verified.responses.latest_response_id;
     const std::string_view origin = verified.origin_authenticated ? "authenticated" : "unauthenticated";
     if (verified.responses.replay_only) {
@@ -211,6 +216,7 @@ runtime::DurableImportResult SessionCheckpointService::restore(
         receipt(value);
         return result;
     }
+    restore_trace::event("native.import.queued");
     auto prepared = [&]() -> runtime::DurablePrepareResult {
         try {
             return Access::prepare_import(engine_, target, *verified.engine, fingerprint_,
@@ -221,12 +227,16 @@ runtime::DurableImportResult SessionCheckpointService::restore(
             return {.state = runtime::DurablePrepareState::Unavailable, .reason = Reason::IoUnavailable};
         }
     }();
+    restore_trace::event("native.import.return");
+    restore_trace::resources("import.end");
     runtime::DurableImportResult result;
     if (prepared.state != runtime::DurablePrepareState::Prepared || !prepared.prepared) {
         result = prepared_refusal(prepared);
     } else {
+        restore_trace::event("lineage.publish.begin");
         result = commit_openai_response_restore(responses_, std::move(verified.responses), guard,
                                                 [&] { return prepared.prepared->commit(); });
+        restore_trace::event("lineage.publish.end");
         if (result.state != ImportState::Imported) { prepared.prepared->abort(); }
     }
     if (result.state == ImportState::Corrupt) {
@@ -237,6 +247,8 @@ runtime::DurableImportResult SessionCheckpointService::restore(
 
 SessionCheckpointService::SaveOutcome SessionCheckpointService::save_session(
     std::string_view session, std::optional<std::string_view> expected_tag, bool allow_covered) {
+    restore_trace::Span export_span("durable.export");
+    restore_trace::event("export.session", session, allow_covered);
     // A Response DELETE owns the same session operation through durable publication and RAM
     // deletion. No pre-delete snapshot may enter save() after a successful deletion.
     auto operation_mutex = session_operation(session);

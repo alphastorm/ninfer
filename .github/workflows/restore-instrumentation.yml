@@ -1,0 +1,29 @@
+name: Restore instrumentation GPU-free contracts
+on:
+  push:
+    branches: ['rebase/p17-restore-instr-*']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Check event ordering, ID correlation and transport arithmetic
+        run: |
+          g++ -std=c++20 -O2 -pthread -Isrc tools/restore/check.cpp -o /tmp/restore-check
+          RESTORE_TRACE_FILE=/tmp/restore-events.bin /tmp/restore-check /tmp/restore-events.bin
+          python3 -B tools/restore/contract.py
+      - name: Install GPU-free CUDA tracing headers
+        run: |
+          curl --fail --location --retry 3 --output /tmp/cuda-keyring.deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i /tmp/cuda-keyring.deb
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends cuda-cupti-dev-13-1 cuda-cudart-dev-13-1 cuda-driver-dev-13-1
+      - name: Compile collector without loading CUDA or requiring a GPU
+        run: |
+          g++ -std=c++20 -O2 -shared -fPIC -fvisibility=hidden -pthread -Isrc -I/usr/local/cuda-13.1/include tools/restore/collector.cpp -o /tmp/restore-collector.so -L/usr/local/cuda-13.1/lib64 -L/usr/local/cuda-13.1/lib64/stubs -lcupti -lcuda

@@ -1,4 +1,5 @@
 #include "core/gpu_keep_warm.h"
+#include "core/restore_trace.h"
 
 #include <stdexcept>
 #include <string>
@@ -37,14 +38,17 @@ GpuKeepWarm::~GpuKeepWarm() {
 bool GpuKeepWarm::launch() const noexcept {
     const cudaError_t previous = cudaStreamQuery(stream_);
     if (previous == cudaErrorNotReady) {
+        restore_trace::event("keepwarm.skip", "outstanding");
         // cudaStreamQuery may leave NotReady in the worker's last-error slot. Do not let the
         // Engine's next launch check mistake an outstanding warm spin for a model error.
         (void)cudaGetLastError();
         return true;
     }
     if (previous != cudaSuccess) { return false; }
+    restore_trace::event("keepwarm.previous.complete");
     const auto busy_ns = std::chrono::nanoseconds(busy_).count();
     gpu_keep_warm_spin_kernel<<<1, 32, 0, stream_>>>(static_cast<unsigned long long>(busy_ns));
+    restore_trace::event("keepwarm.launch");
     return cudaGetLastError() == cudaSuccess;
 }
 

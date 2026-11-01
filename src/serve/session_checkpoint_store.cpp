@@ -1,4 +1,5 @@
 #include "serve/session_checkpoint_store.h"
+#include "core/restore_trace.h"
 
 #include "core/io/durable_file.h"
 #include "core/sha256.h"
@@ -1494,6 +1495,8 @@ public:
 
     bool read_file(std::string_view path, std::uint64_t offset,
                    std::span<std::byte> destination) const override {
+        restore_trace::Span read_span("payload.read.verify");
+        restore_trace::event("payload.bytes", path, offset, destination.size());
         std::lock_guard verify_lock(verify_mutex_);
         const auto found = files_->find(path);
         if (found == files_->end() || offset > found->second.bytes ||
@@ -1554,9 +1557,13 @@ public:
                 const std::size_t next_begin = landed_begin + landed_count;
                 std::size_t next_count       = 0;
                 if (overlap && next_begin < destination.size()) { next_count = issue(next_begin); }
+                restore_trace::event("payload.wait.begin", {}, landed_count);
                 issued.front()->wait();
+                restore_trace::event("payload.wait.end", {}, landed_count);
                 issued.erase(issued.begin());
+                restore_trace::event("payload.sha.begin", {}, landed_count);
                 state.hasher.update(destination.subspan(landed_begin, landed_count));
+                restore_trace::event("payload.sha.end", {}, landed_count);
                 state.next_offset += landed_count;
                 if (!overlap && next_begin < destination.size()) { next_count = issue(next_begin); }
                 if (next_count == 0) { break; }
@@ -1586,6 +1593,7 @@ public:
     }
 
     [[nodiscard]] bool verify_complete() const override {
+        restore_trace::Span verify_span("payload.verify.complete");
         std::lock_guard verify_lock(verify_mutex_);
         if (verification_failed_ ||
             failure_reason_.load(std::memory_order_relaxed) != runtime::DurableReason::None) {
@@ -2324,6 +2332,7 @@ SessionCheckpointLoadResult
 SessionCheckpointStore::load(std::string_view session_sha256,
                              const nlohmann::json& runtime_fingerprint,
                              std::optional<std::string_view> required_response_id) {
+    restore_trace::Span manifest_span("manifest.load.authenticate");
     if (!valid_digest(session_sha256)) {
         return {.state = SessionCheckpointLoadState::Missing,
                  .reason = runtime::DurableReason::NoSessionRecords};

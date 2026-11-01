@@ -1,4 +1,5 @@
 #include "serve/http_server.h"
+#include "core/restore_trace.h"
 
 #include "serve/http_transport.h"
 #include "serve/client_identity.h"
@@ -258,6 +259,9 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
     OpenAIResponsesCreateRequest request;
     OpenAIResponsesResolvedPrompt resolved;
     const std::string id = new_openai_response_id();
+    restore_trace::Span handler_span("responses.handler");
+    restore_trace::event("http.request", res.get_header_value("x-request-id"));
+    restore_trace::event("http.response", id);
     try {
         RequestLimits limits;
         limits.default_max_tokens = options_.default_max_tokens;
@@ -267,8 +271,10 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                                 has_client_session_header(req));
         require_authenticated_client_identity(request.prompt.generation, !options_.api_key.empty());
         validate_openai_model(request.prompt.model, public_model_id_);
+        restore_trace::event("previous.lookup.begin", id);
         resolved = resolve_openai_responses_prompt(request.prompt, openai_responses_store_, id,
                                                    request.store, checkpoints_.restore);
+        restore_trace::event("previous.lookup.end", id);
     } catch (const ApiException& exception) {
         write_openai_error(res, responses_error(exception.error()));
         return;
@@ -297,6 +303,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
                                                       request.prompt.generation.client_session_sha256,
                                                       checkpoints_.publication_changed);
         }
+        restore_trace::event("service.prepare.begin", id);
         prepared = service_->prepare(
             resolved.generation,
             request.stream ? GenerationConsumerMode::Streaming : GenerationConsumerMode::Aggregate,
@@ -306,6 +313,7 @@ void HttpServer::handle_responses(const httplib::Request& req, httplib::Response
             [&req] { return client_disconnected(req); }, std::move(resolved.cache_hints),
             request.store && request.prompt.generation.client_session_sha256
                 ? std::string_view(id) : std::string_view{});
+        restore_trace::event("service.prepare.end", id);
     } catch (const ApiException& exception) {
         const ApiError error = responses_error(exception.error());
         record_request_rejected(make_request_rejection_log_context(
