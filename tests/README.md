@@ -128,6 +128,9 @@ The migration PR's Linux job prints both Linux label-selected sets, and its Wind
 the Windows set. Each compares the labels with its explicit selector in frozen N16 (`26fa28d0`),
 failing on any missing or extra test. These proofs run only for `ci/ctest-labels`, so they do not
 freeze future CMake-only additions.
+The never-merge `rebase/p17-fork-integration-2` push also runs the separate RDC double-build
+workflow and both release-driver invariant jobs; no pull request or GPU execution is needed
+to qualify this combined CI state.
 
 Jobs that install the Linux CUDA 13.1 toolkit use `ubuntu-24.04`, matching the NVIDIA package
 repository. A floating runner migration can introduce incompatible host headers before project
