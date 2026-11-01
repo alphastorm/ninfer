@@ -11,16 +11,15 @@ ninfer_add_test(ninfer_rk4v4_codec_test
   LIBRARIES ninfer_core)
 
 ninfer_add_test(ninfer_checkpoint_io_contract_test
+  HOST_LANES windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_checkpoint_io_contract.cpp"
   LIBRARIES ninfer_checkpoint_contract)
 
 ninfer_add_test(ninfer_direct_storage_checkpoint_backend_test
+  HOST_LANES windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_direct_storage_checkpoint_backend.cpp"
           ${PROJECT_SOURCE_DIR}/src/runtime/windows/direct_storage_checkpoint_backend.cpp
   LIBRARIES ninfer_checkpoint_contract)
-
-set_tests_properties(ninfer_checkpoint_io_contract_test
-  ninfer_direct_storage_checkpoint_backend_test PROPERTIES LABELS "host")
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   ninfer_add_test(ninfer_io_uring_checkpoint_backend_test
@@ -58,13 +57,14 @@ add_test(NAME ninfer_uint128_exact_test
 set_tests_properties(ninfer_uint128_test ninfer_uint128_exact_test PROPERTIES LABELS "host")
 
 ninfer_add_test(ninfer_durable_file_test
-  HOST_LANES bounded native
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../io/test_durable_file.cpp"
   LIBRARIES ninfer_durable_io)
 if(WIN32)
   foreach(case IN ITEMS pinned-destination reparse-guard identity-guards directory-publication extended-paths)
     add_test(NAME ninfer_durable_file_${case}_test COMMAND ninfer_durable_file_test ${case})
     set_tests_properties(ninfer_durable_file_${case}_test PROPERTIES LABELS "host;durable")
+    ninfer_test_host_lanes(ninfer_durable_file_${case}_test ninfer_durable_file_test windows)
   endforeach()
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
@@ -119,7 +119,7 @@ ninfer_add_test(ninfer_decode_graph_test SOURCES "${CMAKE_CURRENT_LIST_DIR}/../t
   LIBRARIES ninfer_core)
 
 ninfer_add_test(ninfer_decode_graph_capture_test
-  HOST_LANES bounded native
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_decode_graph_capture.cpp"
   LIBRARIES ninfer_core)
 ninfer_cuda_test_interposition(ninfer_decode_graph_capture_test)

@@ -20,7 +20,7 @@ target_include_directories(ninfer_perplexity_evaluation_test PRIVATE
   ${PROJECT_SOURCE_DIR}/apps/perplexity)
 
 ninfer_add_test(ninfer_cli_options_test
-  HOST_LANES bounded native
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_cli_options.cpp" ${PROJECT_SOURCE_DIR}/apps/cli/options.cpp
   LIBRARIES ninfer_runtime_support ninfer_product_logging)
 
@@ -68,7 +68,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 ninfer_add_test(ninfer_session_checkpoint_store_test
-  HOST_LANES bounded native
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_session_checkpoint_store.cpp"
   NEEDS_SOURCE_DIR
   LIBRARIES ninfer_session_checkpoint_store)
@@ -78,13 +78,15 @@ if(WIN32)
     COMMAND ninfer_session_checkpoint_store_test current_flush)
   set_tests_properties(ninfer_session_checkpoint_store_current_flush_test
     PROPERTIES LABELS "host;durable" TIMEOUT 180)
+  ninfer_test_host_lanes(ninfer_session_checkpoint_store_current_flush_test
+    ninfer_session_checkpoint_store_test windows)
   add_test(NAME ninfer_session_checkpoint_store_protected_long_root_test
     COMMAND ninfer_session_checkpoint_store_test protected_long_root)
   set_tests_properties(ninfer_session_checkpoint_store_protected_long_root_test
     PROPERTIES LABELS "host;durable;elevated" TIMEOUT 180)
 endif()
 ninfer_add_test(ninfer_automatic_checkpoint_queue_test
-  HOST_LANES bounded native
+  HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_automatic_checkpoint_queue.cpp"
   NEEDS_SOURCE_DIR
   LIBRARIES ninfer_session_checkpoint_store)
@@ -100,7 +102,7 @@ if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set_tests_properties(ninfer_session_checkpoint_store_capacity_test
     PROPERTIES LABELS "host;durable" TIMEOUT 180)
   ninfer_test_host_lanes(ninfer_session_checkpoint_store_capacity_test
-    ninfer_session_checkpoint_store_test bounded native)
+    ninfer_session_checkpoint_store_test bounded native windows)
 endif()
 ninfer_add_test(ninfer_checkpoint_policy_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_checkpoint_policy.cpp")

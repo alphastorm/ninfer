@@ -7,6 +7,7 @@ endfunction()
 
 add_custom_target(ninfer_host_bounded_tests)
 add_custom_target(ninfer_host_native_tests)
+add_custom_target(ninfer_host_windows_tests)
 
 # Keep CTest selection and the executable build closure in the same declaration.
 # A case or Python oracle may share another test's executable target.
