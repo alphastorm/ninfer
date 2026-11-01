@@ -89,6 +89,9 @@ std::string usage_text(const char* argv0) {
            "       [--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4] [--spec mtp|dflash|dflash2 --draft-tokens "
            "N]\n"
            "       [--lm-head-draft]\n"
+           "       [--dflash-governor off|adaptive|force|calibrate] [--dflash-cap 1|2|3]\n"
+           "       [--dflash-rounds 8|16|32] [--dflash-threshold N]\n"
+           "       [--dflash-trace FILE --dflash-request-sha256 SHA256]\n"
            "       [--temperature F] [--top-p F] [--top-k N] [--min-p F]\n"
            "       [--presence-penalty F] [--frequency-penalty F] [--seed N] [--greedy]\n"
            "       [--stop-token-id N]... [--stop <text>]... [--reasoning-stop <text>]...\n"
@@ -166,6 +169,19 @@ Options parse_options(int argc, char** argv) {
             options.speculative.backend = product::parse_speculative_backend(value(arg));
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = parse_u32(value(arg), "draft-tokens");
+        } else if (arg == "--dflash-governor") {
+            options.dflash.mode = product::parse_dflash_mode(value(arg));
+        } else if (arg == "--dflash-rounds") {
+            options.dflash.rounds = parse_u32(value(arg), "dflash-rounds");
+        } else if (arg == "--dflash-threshold") {
+            options.dflash.threshold = parse_u32(value(arg), "dflash-threshold");
+        } else if (arg == "--dflash-cap") {
+            options.dflash.cap = parse_u32(value(arg), "dflash-cap");
+        } else if (arg == "--dflash-trace") {
+            options.dflash.trace = true;
+            options.dflash_trace_path = value(arg);
+        } else if (arg == "--dflash-request-sha256") {
+            options.dflash_request_sha256 = value(arg);
         } else if (arg == "--lm-head-draft") {
             options.speculative.proposal_head = ProposalHead::Optimized;
         } else if (arg == "--raw-output") {
@@ -249,6 +265,11 @@ Options parse_options(int argc, char** argv) {
         throw std::invalid_argument("--kv-capacity must be at least --max-context");
     }
     product::validate_speculative_cli_options(options.speculative);
+    product::validate_dflash_options(options.dflash, options.speculative);
+    if (options.dflash.trace && options.dflash_trace_path.empty())
+        throw std::invalid_argument("--dflash-trace requires a nonempty output file");
+    if (options.dflash.trace)
+        product::validate_dflash_trace_sha(options.dflash_request_sha256);
     if (options.enable_thinking == false && options.reasoning_effort &&
         *options.reasoning_effort != ReasoningEffort::None) {
         throw std::invalid_argument("--reasoning-effort cannot be combined with --no-thinking");

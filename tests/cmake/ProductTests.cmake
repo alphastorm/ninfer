@@ -26,6 +26,11 @@ ninfer_add_test(ninfer_cli_options_test
 
 target_include_directories(ninfer_cli_options_test PRIVATE ${PROJECT_SOURCE_DIR}/apps/cli)
 
+if(TARGET ninfer)
+  add_test(NAME ninfer_cli_help_test COMMAND ninfer --help)
+  ninfer_test_host_lanes(ninfer_cli_help_test ninfer native)
+endif()
+
 ninfer_add_test(ninfer_openai_schema_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_openai_schema.cpp"
   LIBRARIES ninfer_serve)

@@ -111,6 +111,8 @@ RequestBasePlan ProgramImpl::plan_request(qwen::PreparedPromptData&& prompt,
                                                ? FinishReason::OutputLimit
                                                : FinishReason::ContextCapacity;
     base->sampling                       = translate_sampling(options.sampling);
+    base->dflash                         = options.dflash;
+    base->dflash_request_sha256          = options.dflash_request_sha256;
     base->allow_prefix_reuse             = options.allow_prefix_reuse && prompt.identity.reusable;
     base->summary.publish_continuation =
         options.allow_prefix_reuse && prompt.identity.reusable && context_cache.enabled;

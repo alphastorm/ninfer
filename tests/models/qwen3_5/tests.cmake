@@ -4,8 +4,15 @@ ninfer_add_test(ninfer_qwen3_5_loading_real_test
 
 ninfer_add_test(ninfer_qwen3_5_dflash_governor_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_dflash_governor.cpp"
+          "${PROJECT_SOURCE_DIR}/src/models/qwen3_5/program/round_buffers.cpp"
+          "${PROJECT_SOURCE_DIR}/src/models/common/context/work.cpp"
   LIBRARIES ninfer_core ninfer::json)
 ninfer_test_host_lanes(ninfer_qwen3_5_dflash_governor_test
+  ninfer_qwen3_5_dflash_governor_test bounded native windows)
+add_test(NAME ninfer_dflash_replay_test
+  COMMAND ${Python3_EXECUTABLE} -B "${PROJECT_SOURCE_DIR}/tools/dflash_replay.py"
+    --cpp-fixture $<TARGET_FILE:ninfer_qwen3_5_dflash_governor_test>)
+ninfer_test_host_lanes(ninfer_dflash_replay_test
   ninfer_qwen3_5_dflash_governor_test bounded native windows)
 
 ninfer_add_test(ninfer_qwen3_5_loading_test

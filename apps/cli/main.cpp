@@ -4,6 +4,7 @@
 #include "product/logging/startup_log.h"
 #include "product/prompt_input/prompt_input.h"
 #include "product/speculative_options.h"
+#include "product/dflash_trace.h"
 
 #include "ninfer/engine.h"
 #include "ninfer/build_info.h"
@@ -312,6 +313,8 @@ int main(int argc, char** argv) {
         request.execution.sampling                = cli.sampling;
         request.execution.requested_output_tokens = cli.max_new;
         request.execution.thinking.budget         = cli.thinking_budget;
+        request.execution.dflash                  = cli.dflash;
+        request.execution.dflash_request_sha256   = cli.dflash_request_sha256;
         request.stop.token_ids                    = cli.stop_token_ids;
         request.stop.strings                      = cli.stop_strings;
         request.output.raw                        = cli.raw_output;
@@ -364,6 +367,12 @@ int main(int argc, char** argv) {
             std::cerr << '\n';
         }
         print_generation_summary(result, sampling, engine.memory_summary());
+        if (result.speculative.dflash_trace) {
+            std::ofstream trace(cli.dflash_trace_path, std::ios::binary);
+            trace << ninfer::product::dflash_trace_json(*result.speculative.dflash_trace) << '\n';
+            trace.close();
+            if (!trace) throw std::runtime_error("failed to write DFlash trace");
+        }
         return 0;
     } catch (const std::exception& error) {
         logger->error("{}", ninfer::product::format_pretty_text(error.what()));

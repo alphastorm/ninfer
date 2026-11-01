@@ -3,6 +3,7 @@
 #include "product/constraint_observation.h"
 #include "product/logging/pretty_format.h"
 #include "product/speculative_options.h"
+#include "product/dflash_trace.h"
 
 #include <spdlog/logger.h>
 
@@ -817,6 +818,9 @@ std::string format_request_done_json(const std::string& server_instance_id, std:
             ? first_output_timing_json(*outcome.metrics.first_output_timing)
             : Json(nullptr);
     record["speculative"] = speculative_json(outcome.metrics);
+    if (outcome.metrics.dflash_trace)
+        record["speculative"]["dflash_trace"] =
+            product::dflash_trace_json(*outcome.metrics.dflash_trace);
     record["generation"]  = Json{{"engine_request_id", outcome.metrics.engine_request_id},
                                  {"scheduling", scheduling_json(outcome.metrics.scheduling)},
                                  {"admission", admission_json(outcome.metrics.admission)}};

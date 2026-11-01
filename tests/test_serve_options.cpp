@@ -32,6 +32,32 @@ ServeOptions parse(std::vector<std::string> arguments) {
 
 int main() {
     int failures = 0;
+    const auto dflash = parse({"ninfer-serve", "model.ninfer", "--spec", "dflash2",
+                               "--draft-tokens", "7", "--dflash-governor", "calibrate",
+                               "--dflash-trace", "--request-log-jsonl", "requests.jsonl"});
+    failures += check(dflash.dflash.mode == ninfer::DFlashMode::Calibrate &&
+                          dflash.dflash.trace, "serve BUILD T options lost");
+    GenerationRequest measured;
+    measured.client_request_id = std::string(64, 'a');
+    const auto armed = to_request_options(measured, dflash, {}, false);
+    failures += check(armed.execution.dflash.mode == ninfer::DFlashMode::Calibrate &&
+                          armed.execution.dflash_request_sha256 == std::string(64, 'a'),
+                      "serve options must create independent request-owned policy");
+    failures += check(parse({"ninfer-serve", "model.ninfer"}).dflash.mode ==
+                          ninfer::DFlashMode::Off,
+                      "serve governor must default off");
+    for (const auto& arguments : {
+        std::vector<std::string>{"ninfer-serve", "model.ninfer", "--spec", "dflash2",
+                                  "--draft-tokens", "6", "--dflash-governor", "force"},
+        std::vector<std::string>{"ninfer-serve", "model.ninfer", "--spec", "dflash2",
+                                  "--draft-tokens", "7", "--dflash-trace"},
+        std::vector<std::string>{"ninfer-serve", "model.ninfer", "--spec", "dflash2",
+                                  "--draft-tokens", "7", "--dflash-governor", "calibrate",
+                                  "--dflash-cap", "1"}}) {
+        bool rejected = false;
+        try { (void)parse(arguments); } catch (const std::invalid_argument&) { rejected = true; }
+        failures += check(rejected, "ineligible or unlogged BUILD T option accepted");
+    }
 
     const std::string binary_sha(64, '1');
     const std::string artifact_sha(64, '2');

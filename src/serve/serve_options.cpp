@@ -207,6 +207,8 @@ std::string serve_usage_text(const char* argv0) {
            "[--session-checkpoint-staging-mib N] [--session-checkpoint-write-buffer-mib N] "
            "[--session-checkpoint-min-tokens N] [--session-checkpoint-require-origin-auth] "
            "[--kv-dtype bf16|int8|fp8|nvfp4|k8v4|rk4v4] [--spec mtp|dflash|dflash2 --draft-tokens N] "
+           "[--dflash-governor off|adaptive|force|calibrate] [--dflash-cap 1|2|3] "
+           "[--dflash-rounds 8|16|32] [--dflash-threshold N] [--dflash-trace] "
            "[--default-max-tokens N] [--default-thinking-budget N] "
            "[--vision] [--no-cuda-graph] [--fp32-head-logits] [--no-prefix-reuse] "
            "[--chat-template FILE] [--lm-head-draft] [--no-thinking] [--preserve-thinking] "
@@ -462,6 +464,19 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         } else if (arg == "--draft-tokens") {
             options.speculative.draft_tokens = static_cast<std::uint32_t>(
                 parse_nonnegative_int(require_value("--draft-tokens"), "draft-tokens"));
+        } else if (arg == "--dflash-governor") {
+            options.dflash.mode = product::parse_dflash_mode(require_value("--dflash-governor"));
+        } else if (arg == "--dflash-rounds") {
+            options.dflash.rounds = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--dflash-rounds"), "dflash-rounds"));
+        } else if (arg == "--dflash-threshold") {
+            options.dflash.threshold = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--dflash-threshold"), "dflash-threshold"));
+        } else if (arg == "--dflash-cap") {
+            options.dflash.cap = static_cast<std::uint32_t>(
+                parse_nonnegative_int(require_value("--dflash-cap"), "dflash-cap"));
+        } else if (arg == "--dflash-trace") {
+            options.dflash.trace = true;
         } else if (arg == "--default-max-tokens") {
             options.default_max_tokens =
                 parse_nonnegative_int(require_value("--default-max-tokens"), "default-max-tokens");
@@ -548,6 +563,9 @@ ServeOptions parse_serve_options(int argc, char** argv) {
         throw std::invalid_argument("--prefill-chunk must be a positive multiple of 128");
     }
     product::validate_speculative_cli_options(options.speculative);
+    product::validate_dflash_options(options.dflash, options.speculative);
+    if (options.dflash.trace && options.request_log_jsonl.empty())
+        throw std::invalid_argument("--dflash-trace requires --request-log-jsonl");
     if (default_max_tokens_explicit) {
         if (options.default_max_tokens <= 0) {
             throw std::invalid_argument("--default-max-tokens must be positive");

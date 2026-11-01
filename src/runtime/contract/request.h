@@ -11,6 +11,8 @@ namespace ninfer::runtime {
 // and validated these values before constructing the runtime request.
 struct ResolvedExecutionOptions {
     ResolvedSamplingParameters sampling;
+    DFlashOptions dflash;
+    std::string dflash_request_sha256;
     std::uint32_t requested_output_tokens = 0;
     bool allow_prefix_reuse               = true;
     ThinkingControlOptions thinking;
