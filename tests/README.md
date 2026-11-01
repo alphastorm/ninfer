@@ -59,6 +59,13 @@ It includes the actual startup planner's tile helper through the header-only JSO
 These run in the bounded host CI lanes (serving options in the native lane).
 The Windows packaging contract distinguishes an explicitly null option from an omitted field.
 
+`ninfer_session_checkpoint_store_test` also checks every effective durable engine-identity
+field through the pure projection shared by Engine and serving. Its FP32-enabled restart
+case writes an authenticated checkpoint, reloads and verifies exact payload bytes, and
+publishes the restored Responses lineage only when the engine identity agrees. Disabling
+the opt-in refuses that checkpoint without quarantining it. This is a GPU-free identity
+and storage regression, not native codec import or FP32 model/profile qualification.
+
 `ninfer_fp32_logits_test` needs a GPU. It checks all seven supported head formats against an
 independent FP64 projection oracle at T=1,2,7,8,9,16,17,24,32,33,65, plus unrounded near-tie
 argmax, single/multi-block sampling, causal logprobs, and MTP/DFlash2 acceptance at batch 2.
