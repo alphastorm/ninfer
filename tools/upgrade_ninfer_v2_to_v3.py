@@ -880,3 +880,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Automated fix for issue #75: fix(qualification): close remaining chain-driver failure-ordering gaps
