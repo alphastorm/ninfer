@@ -23,8 +23,17 @@ termination behavior; its forced termination does not create a final-save hold.
 An incomplete Stop retains `runtime.json` and appends that launch's runtime
 attribution and first stop receipt to the schema-1 `shutdown-holds.json` record,
 bound to its release identity and release root. Managed Start and scheduled Run
-remain available. A replacement launch may publish a new runtime/report and its
+remain available. Before replacing runtime/report attribution, Run records any
+unreported or incomplete final save from the previous stop-event launch. A
+replacement launch may publish a new runtime/report and its
 later clean Stop completes normally, but neither operation clears earlier holds.
+
+Restart, controller Rollback (including failed-target recovery), startup cleanup
+and installer upgrade handoff can proceed past an incomplete Stop only after
+the launch is held, the entire release root is proven idle and its GPU-owner
+lease is restored. Unreadable same-name server images still refuse the transition.
+Standalone Stop continues to report the incomplete final save. Uninstall checks
+again after stopping, so a newly recorded hold also prevents task or tree removal.
 
 Installer transaction rollback and `-RepairInterruptedInstall` still abort all
 restoration while a candidate may run or its GPU-owner restoration remains
@@ -46,12 +55,16 @@ not an older controller that rollback restored:
 .\Install-Release.ps1 -RepairInterruptedInstall -StateRoot $stateRoot
 ```
 
+Held candidates must be reconciled before uninstalling with an older controller.
+
 Reconcile selects holds by release id, proves no process runs from that release
 root (including refusing unreadable server-image attribution), and clears only
 those holds. The held release need not be active: its incumbent may keep serving,
 and that incumbent's runtime and GPU ownership are left untouched. For an active
 held release, the wrapper must also exit and ownership is restored before the
 hold clears. Reconcile does not recover unsaved sessions or delete checkpoints.
+After a first-install rollback restored absence of `state.json`, Reconcile
+reports successful lifecycle status with no active release.
 The subsequent installer repair deletes the retained transaction-owned candidate
 trees without restoring or restarting the incumbent again. Do not edit a hold or
 delete attribution to bypass the explicit acknowledgement. Uninstall refuses

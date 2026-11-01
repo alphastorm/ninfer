@@ -952,11 +952,18 @@ function Stop-IncumbentForUpgrade(
     [object]$SelectedGpu
 ) {
     Set-TransactionFlag $Transaction 'incumbent_touched'
-    & $controllerPath -Action Stop -StateRoot $StateRoot | Out-Null
+    $state = Read-JsonFile (Join-Path $StateRoot 'state.json')
+    $incumbent = [string]$state.active_release
+    try { & $controllerPath -Action Stop -StateRoot $StateRoot | Out-Null }
+    catch {
+        if (-not (Test-ReleaseShutdownHeld $incumbent)) { throw }
+        Assert-NoReleaseRootProcess ([string]$state.releases.PSObject.Properties[$incumbent].Value.release_root)
+        Assert-ReleaseGpuOwnerRetired $incumbent
+    }
     Assert-GpuOwnerAttestation $SuccessorController $SuccessorPolicy $SelectedGpu
 }
 
-function Test-TransactionShutdownHeld([object]$Transaction) {
+function Test-ReleaseShutdownHeld([string]$ReleaseId) {
     $path = Join-Path $StateRoot 'shutdown-holds.json'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $false }
     $document = Read-JsonFile $path
@@ -965,8 +972,36 @@ function Test-TransactionShutdownHeld([object]$Transaction) {
         throw 'shutdown hold envelope mismatch'
     }
     return @($document.holds | Where-Object {
-            [string]$_.release_id -ceq [string]$Transaction.instance_id
+            [string]$_.release_id -ceq $ReleaseId
         }).Count -ne 0
+}
+
+function Assert-NoReleaseRootProcess([string]$ReleaseRoot) {
+    if (-not [string]::IsNullOrWhiteSpace($ReleaseRoot)) {
+        $running = @(foreach ($entry in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+                if ([string]::IsNullOrWhiteSpace([string]$entry.ExecutablePath)) {
+                    $name = $entry.PSObject.Properties['Name']
+                    if ($null -ne $name -and [string]$name.Value -ieq 'ninfer-serve.exe') {
+                        throw "cannot exclude an unattributed candidate server with an unreadable image path: $($name.Value) ($($entry.ProcessId))"
+                    }
+                    continue
+                }
+                if (Test-PathWithinRoot ([string]$entry.ExecutablePath) $ReleaseRoot) {
+                    [string]$entry.ProcessId
+                }
+            })
+        if ($running.Count -ne 0) {
+            throw "candidate processes still run from its release root: $([string]::Join(', ', $running))"
+        }
+    }
+}
+
+function Assert-ReleaseGpuOwnerRetired([string]$ReleaseId) {
+    $leasePath = Join-Path $StateRoot 'gpu-owner-lease.json'
+    if ((Test-Path -LiteralPath $leasePath -PathType Leaf) -and
+        [string](Read-JsonFile $leasePath).release_id -ceq $ReleaseId) {
+        throw 'candidate GPU-owner restoration remains incomplete; retain its controller and lifecycle for retry'
+    }
 }
 
 # Incomplete save evidence holds only destructive candidate cleanup. A surviving or unattributed
@@ -979,24 +1014,11 @@ function Assert-TransactionCandidateQuiescent([object]$Transaction, [string]$Sta
         try { & $ControllerPath -Action Stop -StateRoot $StateRoot | Out-Null }
         catch { $stopFailure = $_ }
     }
-    $releaseRoot = [string]$Transaction.release_root
-    if (-not [string]::IsNullOrWhiteSpace($releaseRoot)) {
-        $running = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Where-Object {
-                -not [string]::IsNullOrWhiteSpace([string]$_.ExecutablePath) -and
-                (Test-PathWithinRoot ([string]$_.ExecutablePath) $releaseRoot)
-            } | ForEach-Object { [string]$_.ProcessId })
-        if ($running.Count -ne 0) {
-            throw "candidate processes still run from its release root: $([string]::Join(', ', $running))"
-        }
-    }
-    if ($null -ne $stopFailure -and -not (Test-TransactionShutdownHeld $Transaction)) {
+    Assert-NoReleaseRootProcess ([string]$Transaction.release_root)
+    if ($null -ne $stopFailure -and -not (Test-ReleaseShutdownHeld ([string]$Transaction.instance_id))) {
         throw $stopFailure
     }
-    $leasePath = Join-Path $StateRoot 'gpu-owner-lease.json'
-    if ((Test-Path -LiteralPath $leasePath -PathType Leaf) -and
-        [string](Read-JsonFile $leasePath).release_id -ceq [string]$Transaction.instance_id) {
-        throw 'candidate GPU-owner restoration remains incomplete; retain its controller and lifecycle for retry'
-    }
+    Assert-ReleaseGpuOwnerRetired ([string]$Transaction.instance_id)
 }
 
 function Invoke-InstallTransactionRollback(
@@ -1019,7 +1041,7 @@ function Invoke-InstallTransactionRollback(
     # may still run keeps the lifecycle state, controller, trees, and lease that stop it.
     try {
         Assert-TransactionCandidateQuiescent $Transaction $StatePath $ControllerPath
-        $cleanupHeld = Test-TransactionShutdownHeld $Transaction
+        $cleanupHeld = Test-ReleaseShutdownHeld ([string]$Transaction.instance_id)
     }
     catch { $failures.Add("candidate quiescence: $(Get-BoundedDiagnostic $_.Exception.Message)") }
     if ($failures.Count -eq 0 -and -not $alreadyRestored) {
