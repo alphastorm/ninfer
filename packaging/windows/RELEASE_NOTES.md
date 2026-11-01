@@ -1,5 +1,24 @@
 # NInfer native Windows lanes
 
+## 2026-11-01 — Uninstall restores prior paused-owner power (next release)
+
+Uninstall restores the GPU owner's recorded prior power limit after the managed
+server and wrapper have stopped, before removing the state root. This also applies
+when the outer release lease captured `prior_paused=true`: ordinary Stop keeps that
+pre-existing pause and the qualified safe cap, but uninstall consumes the inner
+owner record through its existing UUID-bound `start`/restore path. No lane cap or
+ordinary Stop policy changes.
+
+If restoration fails, uninstall leaves the state root and prior-power record for
+retry instead of discarding them. Inspect the retained `gpu-owner-state/lease.json`
+and its `prior_power_limit_w` under the original UUID/PCI-bound owner policy. The
+existing manual recovery path is an explicit, UUID-selected
+`nvidia-smi -i $gpuUuid -pl $priorPowerLimitW` after all managed processes exit;
+confirm the value is the recorded valid prior limit, not an inferred default.
+Do not lift the qualified cap under a running release or delete the record before
+restoration succeeds. Real-card power restoration remains a hardware qualification,
+not a claim made by the portable regression fixture.
+
 Installer rollback and repair census the candidate release root even before
 activation; only the candidate's managed Stop requires activated lifecycle state.
 
