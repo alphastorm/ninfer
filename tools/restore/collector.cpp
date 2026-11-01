@@ -84,13 +84,13 @@ void CUPTIAPI complete_buffer(CUcontext context, std::uint32_t stream, std::uint
     while ((result = cuptiActivityGetNextRecord(data, valid, &record)) == CUPTI_SUCCESS) {
         switch (record->kind) {
         case CUPTI_ACTIVITY_KIND_MEMCPY: {
-            const auto& r = *reinterpret_cast<CUpti_ActivityMemcpy*>(record);
+            const auto& r = *reinterpret_cast<CUpti_ActivityMemcpy6*>(record);
             output().emit("cuda.copy", {}, r.correlationId, r.contextId, r.streamId, r.start, r.end, r.bytes);
             output().emit("cuda.copy.kind", {}, r.correlationId, r.copyKind, r.srcKind, r.dstKind);
             break;
         }
         case CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL: {
-            const auto& r = *reinterpret_cast<CUpti_ActivityKernel4*>(record);
+            const auto& r = *reinterpret_cast<CUpti_ActivityKernel11*>(record);
             output().emit("cuda.kernel", {}, r.correlationId, r.contextId, r.streamId, r.start, r.end);
             symbol(r.name, r.correlationId, CUPTI_ACTIVITY_KIND_CONCURRENT_KERNEL);
             break;
