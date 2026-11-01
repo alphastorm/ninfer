@@ -14,6 +14,7 @@ import subprocess
 
 TARGET = "ninfer_rdc_determinism"
 REAL_OBJECT = "src/ops/CMakeFiles/ninfer_ops.dir/normalization/layer_norm.cu.o"
+DEVICE_LINK = "CMakeFiles/ninfer_rdc_fixture.dir/cmake_device_link.o"
 
 
 def run(command, *, cwd=None):
@@ -91,7 +92,8 @@ def compare(left, right, evidence):
 
 
 def capture(build, destination):
-    names = [Path("tests") / TARGET, Path("tests/libninfer_rdc_fixture.a"), Path(REAL_OBJECT)]
+    names = [Path("tests") / TARGET, Path("tests/libninfer_rdc_fixture.a"),
+             Path(REAL_OBJECT), Path(DEVICE_LINK)]
     names += [p.relative_to(build) for p in (build / "tests/CMakeFiles").rglob("*.o")
               if "ninfer_rdc_" in p.as_posix()]
     for name in names:
@@ -103,13 +105,12 @@ def capture(build, destination):
 def probes(source, build, evidence):
     """Failure-only attribution: test documented seeds and temporary-name controls."""
     nvcc = shutil.which("nvcc")
-    (evidence / "cudafe-help.txt").write_bytes(
-        subprocess.run([str(Path(nvcc).parent / "cudafe++"), "--help"],
-                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout)
     results = {}
     variants = {
         "seed64_keep": ["--frandom-seed=0x123456789abcdef0", "--keep"],
         "seed32_keep": ["--frandom-seed=12345", "--keep"],
+        "seed32hex_keep": ["--frandom-seed=0x12345", "--keep"],
+        "seed_string_keep": ["--frandom-seed=normalization/layer_norm.cu", "--keep"],
         "seed32_objdir": ["--frandom-seed=12345", "--objdir-as-tempdir"],
         "seed32_keep_epoch": ["--frandom-seed=12345", "--keep"],
     }
@@ -123,13 +124,18 @@ def probes(source, build, evidence):
             env = dict(os.environ)
             if name.endswith("_epoch"):
                 env["SOURCE_DATE_EPOCH"] = "1"
-            command = [nvcc, "-std=c++20", "-arch=sm_120a", "-rdc=true", "-lineinfo",
-                       *flags, "-c", str(source / "tests/cmake/rdc/left/kernel.cu"), "-o", "kernel.o"]
+            command = [nvcc, "-std=c++20", "-arch=sm_120a", "-rdc=true", "-lineinfo", "-O3",
+                       "-I", str(source / "include"), "-I", str(source / "src"),
+                       *flags, "-c", str(source / "src/ops/normalization/layer_norm.cu"),
+                       "-o", "layer_norm.o"]
             result = subprocess.run(command, cwd=root, env=env, stdout=subprocess.PIPE,
                                     stderr=subprocess.STDOUT)
-            logs.append(result.stdout.decode(errors="replace"))
+            logs.append({"exit": result.returncode, "output": result.stdout.decode(errors="replace")})
             outputs.append({p.name: digest(p.read_bytes()) for p in root.iterdir()
                             if p.is_file() and p.suffix in (".o", ".ptx", ".module_id")})
+            module = root / "layer_norm.module_id"
+            if module.exists():
+                outputs[-1]["module_id_text"] = module.read_text()
         results[name] = {"rounds": outputs, "equal": bool(outputs[0]) and outputs[0] == outputs[1],
                          "logs": logs}
     (evidence / "probes.json").write_text(json.dumps(results, indent=2) + "\n")
@@ -167,8 +173,7 @@ def main():
     # This separates propagated compile differences from independent link/archive drift.
     for path in (build / "tests/libninfer_rdc_fixture.a", build / f"tests/{TARGET}"):
         path.unlink()
-    for path in (build / "tests/CMakeFiles/ninfer_rdc_fixture.dir").rglob("cmake_device_link.o"):
-        path.unlink()
+    (build / DEVICE_LINK).unlink()
     (evidence / "relink.log").write_bytes(run(compilation))
     capture(build, root / "relink")
     result["fixed_input_relink"] = compare(root / "round2", root / "relink", evidence)

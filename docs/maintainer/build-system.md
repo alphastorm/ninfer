@@ -160,6 +160,31 @@ Source-list maintenance must preserve language, architecture, RDC mode, device-l
 and numerical compiler options. Splitting a manifest does not reduce kernel instantiation work
 or justify combining shape translation units or enabling unity builds.
 
+## Build reproducibility
+
+The PR-only `RDC build determinism` workflow uses a GPU-free CUDA 13.1 runner and a
+30-minute job bound. `tools/release/check-rdc-determinism.py --work <new-directory>`
+configures two empty build trees at the same path with ccache disabled. It builds only
+the three-source RDC fixture, its resolved static archive and host executable, and the
+production `layer_norm.cu` object. The fixture has same-basename sources with
+internal-linkage template kernels and a cross-translation-unit device reference.
+It uses `ninfer_cuda_archive`, not a separate device-link policy.
+
+Every retained object, device-link object, archive and executable must have identical
+complete bytes and matching inventories. The report includes SHA-256 values, first
+differing offsets, section hashes and symbol/build-id differences. A second device
+link, archive and host link with fixed input objects distinguishes propagated compile
+differences from independent downstream nondeterminism. None of these binaries runs;
+this is a build invariant, not a GPU correctness or performance qualification.
+
+The fixture is deliberately not a CTest registration: its oracle is the double-build
+driver, and the workflow never builds the full runtime. A passing bounded check is
+not full release identity. After publication, the release build owner must perform
+one full clean double build with frozen source, dependencies, toolchain, options and
+source/build paths; compare every ELF and archive, all three apps and the packaged
+payload without normalization or a first-build exception. That hardware follow-up
+remains separate from this PR check.
+
 ## Consumers and verification
 
 `apps/CMakeLists.txt` explicitly defines the three product executables. Tests and benchmarks
