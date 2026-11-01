@@ -2856,6 +2856,138 @@ Stop-ManagedProcess
                     self.assertEqual(json.loads((upgrade.root / "state.json").read_text())["active_release"],
                                      upgrade.candidate)
 
+    def test_unproven_shutdown_retains_candidate_until_explicit_reconcile(self) -> None:
+        """#50: neither process exit nor a later repair proves that the final save completed."""
+        scenarios = (
+            "absent", "unreadable", "wrong-launch", "graceful_wait_expired",
+            "graceful_nonzero_exit", "terminated", "signal_failed",
+        )
+        for scenario in scenarios:
+            with self.subTest(scenario=scenario), tempfile.TemporaryDirectory() as directory:
+                upgrade = interrupted_upgrade(Path(directory))
+                report_path = upgrade.candidate_targets[0] / "shutdown.json"
+                report = {
+                    "artifact_type": "ninfer_serve_shutdown_report", "schema_version": 1,
+                    "launch_id": "1" * 32, "complete": True, "saved": 1, "skipped": 0, "refused": 0,
+                }
+                if scenario == "wrong-launch":
+                    report["launch_id"] = "2" * 32
+                if scenario != "absent":
+                    report_path.write_text("not JSON" if scenario == "unreadable" else json.dumps(report))
+                runtime_path = upgrade.root / "runtime.json"
+                runtime_path.write_text(json.dumps({
+                    "artifact_type": "ninfer_windows_runtime_state", "schema_version": 2,
+                    "release_id": upgrade.candidate, "pid": 4242, "start_time_utc_ticks": 1,
+                    "managed_stop": "stop-event", "launch_id": "1" * 32,
+                    "stop_event": None if scenario == "terminated" else "Global\\NInfer-Serve-Stop-" + "1" * 32,
+                    "shutdown_report": str(report_path),
+                }))
+                attribution = runtime_path.read_bytes()
+                (upgrade.root / "Control-Release.ps1").write_text(
+                    "param([string]$Action,[string]$StateRoot)\n$ErrorActionPreference='Stop'\n"
+                    + ps_assignments(Scenario=scenario)
+                    + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+Set-StrictMode -Version Latest
+function Get-State { Read-JsonFile (Join-Path $StateRoot 'state.json') }
+function Get-Release { [pscustomobject]@{managed_stop='stop-event';graceful_stop_timeout_seconds=1;server_executable=(Join-Path $StateRoot 'server.exe')} }
+$script:live=-not(Test-Path (Join-Path $StateRoot 'last-stop.json'))
+$script:child=[pscustomobject]@{Id=4242;HasExited=$false;ExitCode=$(if($Scenario -ceq 'graceful_nonzero_exit'){9}else{0})}
+$script:child|Add-Member ScriptMethod WaitForExit {
+  if($Scenario -cne 'graceful_wait_expired'){$this.HasExited=$true;$script:live=$false}
+}
+function Get-OwnedProcess { if($script:live){$script:child} }
+function Get-CimInstance { }
+function Get-ScheduledTaskInfo { }
+function Wait-ManagedWrapperExit { $true }
+function Request-ManagedStop { if($Scenario -ceq 'signal_failed'){'failed: injected denial'}else{'signalled'} }
+function Stop-LaunchNow { param($Release,$TaskName,$Receipt);$script:live=$false;$script:child.HasExited=$true;$Receipt.forced=$true }
+function Restore-GpuOwnerLease { Remove-Item -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json') -Force -ErrorAction SilentlyContinue }
+if($Action -ceq 'Stop'){Stop-ManagedProcess}
+elseif($Action -ceq 'Reconcile'){Reconcile-ManagedShutdown}
+""")
+                for mode in ("rollback", "repair"):
+                    result = self.rollback_attempt(upgrade, mode)
+                    self.assertFalse(result["completed"], result)
+                    self.assertIn("incomplete", result["failure"])
+                    self.assertEqual(runtime_path.read_bytes(), attribution)
+                    self.assertTrue(all(path.exists() for path in upgrade.candidate_targets))
+                    self.assertEqual(json.loads(upgrade.journal.read_text())["status"], "repair_required")
+                    receipt = json.loads((upgrade.root / "last-stop.json").read_text())
+                    self.assertEqual(receipt["outcome"], "graceful_unreported" if scenario in
+                                     ("absent", "unreadable", "wrong-launch") else scenario)
+                self.invoke(ps_assignments(StateRoot=upgrade.root) + """
+& (Join-Path $StateRoot 'Control-Release.ps1') -Action Reconcile -StateRoot $StateRoot
+'{}'
+""")
+                self.assertFalse(runtime_path.exists())
+                self.assertEqual(json.loads((upgrade.root / "last-stop.json").read_text())["outcome"],
+                                 "operator_reconciled")
+                self.assertTrue(self.rollback_attempt(upgrade, "repair")["completed"])
+                self.assertTrue(all(not path.exists() for path in upgrade.candidate_targets))
+                self.assertTrue(all(path.exists() for path in upgrade.incumbent_trees))
+
+    def test_refused_final_save_blocks_start_and_scheduled_run_until_reconcile(self) -> None:
+        """#50: a new launch cannot clear the report or replace a refused launch's attribution."""
+        with tempfile.TemporaryDirectory() as directory:
+            lane = installed_release(Path(directory))
+            observed = self.invoke(
+                ps_assignments(StateRoot=lane.root)
+                + ps_definitions(WINDOWS / "Control-Release.ps1") + LAUNCH_PREAMBLE + """
+$reportPath=Join-Path $release.release_root 'logs/shutdown.json'
+$runtimePath=Join-Path $StateRoot 'runtime.json'
+$launch='11111111111111111111111111111111'
+Write-JsonAtomic $reportPath @{artifact_type='ninfer_serve_shutdown_report';schema_version=1;launch_id=$launch;complete=$false;saved=0;skipped=0;refused=1}
+Write-JsonAtomic $runtimePath @{artifact_type='ninfer_windows_runtime_state';schema_version=2;release_id=$state.active_release;pid=$null;managed_stop='stop-event';stop_event=('Global\\NInfer-Serve-Stop-'+$launch);launch_id=$launch;shutdown_report=$reportPath}
+function Wait-ManagedWrapperExit { $true }
+function Get-ScheduledTaskInfo { }
+function Acquire-GpuOwnerLease { throw 'ownership-acquisition-reached' }
+function Restore-GpuOwnerLease { }
+$first=$null
+try{Stop-ManagedProcess}catch{$first=$_.Exception.Message}
+$beforeRuntime=[IO.File]::ReadAllText($runtimePath)
+$beforeReport=[IO.File]::ReadAllText($reportPath)
+$launches=[ordered]@{}
+foreach($entry in @('Start-ManagedRelease','Invoke-Run')){
+  try{& $entry;$launches[$entry]='returned'}catch{$launches[$entry]=$_.Exception.Message}
+}
+$sameRuntime=(Test-Path $runtimePath) -and [IO.File]::ReadAllText($runtimePath) -ceq $beforeRuntime
+$sameReport=(Test-Path $reportPath) -and [IO.File]::ReadAllText($reportPath) -ceq $beforeReport
+# Even a now-clean report is not operator acknowledgement of the earlier refusal.
+Write-JsonAtomic $reportPath @{artifact_type='ninfer_serve_shutdown_report';schema_version=1;launch_id=$launch;complete=$true;saved=1;skipped=0;refused=0}
+$later=$null
+try{Stop-ManagedProcess}catch{$later=$_.Exception.Message}
+$held=Test-Path $runtimePath
+$reconcile=$null
+try{Reconcile-ManagedShutdown}catch{$reconcile=$_.Exception.Message}
+@{first=$first;launches=$launches;same_runtime=$sameRuntime;same_report=$sameReport;later=$later;held=$held;reconcile=$reconcile;retired=(-not(Test-Path $runtimePath));outcome=(Get-ManagedStopReceipt).outcome}|ConvertTo-Json -Depth 4 -Compress
+""")
+            self.assertIn("incomplete", observed["first"])
+            for failure in observed["launches"].values():
+                self.assertIn("reconcile", failure.lower())
+                self.assertNotIn("ownership-acquisition-reached", failure)
+            self.assertTrue(observed["same_runtime"])
+            self.assertTrue(observed["same_report"])
+            self.assertIn("incomplete", observed["later"])
+            self.assertTrue(observed["held"])
+            self.assertIsNone(observed["reconcile"])
+            self.assertTrue(observed["retired"])
+            self.assertEqual(observed["outcome"], "operator_reconciled")
+
+    def test_repair_retains_shutdown_attribution_after_lifecycle_restore(self) -> None:
+        """#50: an earlier partial rollback cannot make retained candidate evidence disposable."""
+        with tempfile.TemporaryDirectory() as directory:
+            upgrade = interrupted_upgrade(Path(directory))
+            shutil.copyfile(upgrade.snapshots / "state.bin", upgrade.root / "state.json")
+            shutil.copyfile(upgrade.snapshots / "controller.bin", upgrade.root / "Control-Release.ps1")
+            (upgrade.root / "runtime.json").write_text(json.dumps({
+                "artifact_type": "ninfer_windows_runtime_state", "schema_version": 2,
+                "release_id": upgrade.candidate, "pid": None, "launch_id": "1" * 32,
+            }))
+            result = self.rollback_attempt(upgrade, "repair")
+            self.assertFalse(result["completed"], result)
+            self.assertIn("reconcile", result["failure"].lower())
+            self.assertTrue(all(path.exists() for path in upgrade.candidate_targets))
+
     @unittest.skipIf(sys.platform == "win32", "the synthetic nvidia-smi is a POSIX shell script")
     def test_nonrunning_beta3_stale_inner_lease_refuses_before_cutover(self) -> None:
         """CM-R2: killed beta.3 wrapper left its lease; successor bytes differ, caps do not."""
