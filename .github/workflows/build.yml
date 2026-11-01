@@ -24,7 +24,7 @@ concurrency:
 jobs:
   linux:
     name: Linux CUDA 13 / host tests / bounded sm_120a compile
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
@@ -133,6 +133,7 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_release_package.py'
           python3 -m unittest discover -s tests -p 'test_lifecycle_container.py'
           python3 -m unittest discover -s tests -p 'test_agent_protocol.py'
+          python3 -m unittest discover -s tests -p 'test_workflow_runner_pins.py'
           /usr/bin/python3 -m pytest -q tests/bench/ttft/test_measurements.py tests/test_serve_corpus.py
       - name: Run portable Windows lifecycle release contracts
         shell: bash
@@ -144,7 +145,7 @@ jobs:
   full-runtime:
     name: Weekly or manual full Linux runtime compile
     if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.full_build)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
       CCACHE_DIR: ${{ github.workspace }}/.cache/ccache
