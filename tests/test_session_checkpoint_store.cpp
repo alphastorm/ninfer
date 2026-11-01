@@ -1,6 +1,7 @@
 #include "core/io/durable_file.h"
 #include "core/sha256.h"
 #include "runtime/engine/checkpoint_control.h"
+#include "runtime/engine/checkpoint_identity.h"
 #include "serve/session_checkpoint_store.h"
 #include "serve/server_identity.h"
 #include "checkpoint_write_fault.h"
@@ -405,6 +406,129 @@ bool write_state_fixture(ContinuationCheckpointWriter& writer,
                           std::span<const std::byte> bytes) {
     return writer.write_file("engine/index.cbor", 0, 0, {}, 1) &&
            write_chunked(writer, "engine/state/0.bin", bytes);
+}
+
+int test_effective_engine_identity() {
+    EngineOptions options;
+    options.max_context = 3072;
+    options.max_concurrency = 3;
+    options.kv_capacity = KvCapacityPolicy::automatic();
+    options.prefill_chunk = 0;
+    MemorySummary memory;
+    memory.kv_capacity = 6144;
+    memory.prefill_chunk = 512;
+    int failures = check(!options.fp32_head_logits, "FP32 head logits must remain opt-in");
+    const std::pair<KvCacheStorage, const char*> storage[] = {
+        {KvCacheStorage::BFloat16, "bf16"}, {KvCacheStorage::Int8Group64, "int8"},
+        {KvCacheStorage::Fp8E4M3Row256, "fp8"}, {KvCacheStorage::Fp8KeyNvfp4Value, "k8v4"},
+        {KvCacheStorage::Nvfp4Group16, "nvfp4"}, {KvCacheStorage::Rk4V4, "rk4v4"},
+    };
+    const std::pair<SpeculativeBackend, const char*> backends[] = {
+        {SpeculativeBackend::None, "none"}, {SpeculativeBackend::Mtp, "mtp"},
+        {SpeculativeBackend::DFlash, "dflash"}, {SpeculativeBackend::DFlash2, "dflash2"},
+    };
+    for (const auto& [kv, kv_name] : storage) {
+        options.kv_cache = kv;
+        for (const auto& [backend, backend_name] : backends) {
+            options.speculative.backend = backend;
+            options.speculative.draft_tokens = backend == SpeculativeBackend::None ? 0 : 7;
+            for (const auto proposal : {ProposalHead::Full, ProposalHead::Optimized}) {
+                options.speculative.proposal_head = proposal;
+                for (unsigned flags = 0; flags < 8; ++flags) {
+                    options.enable_vision = (flags & 1) != 0;
+                    options.use_cuda_graph = (flags & 2) != 0;
+                    options.fp32_head_logits = (flags & 4) != 0;
+                    const runtime::DurableEngineIdentity expected{
+                        .max_context = 3072, .kv_capacity = 6144, .kv_dtype = kv_name,
+                        .max_concurrency = 3, .prefill_chunk = 512,
+                        .speculative_backend = backend_name,
+                        .draft_window = backend == SpeculativeBackend::None ? 0U : 7U,
+                        .proposal_head = proposal == ProposalHead::Optimized ? "optimized" : "full",
+                        .enable_vision = options.enable_vision,
+                        .use_cuda_graph = options.use_cuda_graph,
+                        .fp32_head_logits = options.fp32_head_logits};
+                    if (runtime::engine_identity(options, memory) != expected) {
+                        return failures + check(false,
+                            "effective engine identity differs from serving K2 fields "
+                            "(including FP32 head logits)");
+                    }
+                }
+            }
+        }
+    }
+    return failures;
+}
+
+int test_fp32_checkpoint_restart_compatibility() {
+    TemporaryDirectory temporary;
+    const auto responses = sample_snapshot();
+    const auto payload = engine_payload();
+    EngineOptions options;
+    options.max_context = 128;
+    options.max_concurrency = 2;
+    options.use_cuda_graph = false;
+    options.fp32_head_logits = true;
+    MemorySummary memory;
+    memory.kv_capacity = 128;
+    memory.prefill_chunk = 128;
+    // Independent serving fixture: every field is fixed, with only the opt-in changed.
+    auto enabled = fingerprint();
+    enabled["engine"]["fp32_head_logits"] = true;
+    refresh_config_digest(enabled);
+    const runtime::DurableEngineIdentity expected{
+        .max_context = 128, .kv_capacity = 128, .kv_dtype = "bf16",
+        .max_concurrency = 2, .prefill_chunk = 128, .speculative_backend = "none",
+        .draft_window = 0, .proposal_head = "full", .enable_vision = false,
+        .use_cuda_graph = false, .fp32_head_logits = true};
+    const SessionCheckpointStoreOptions storage{
+        .root = temporary.path, .disk_quota_bytes = 8ULL << 20,
+        .staging_bytes = 1ULL << 20, .origin_mac_key = std::string(32, 'k'),
+        .require_origin_auth = true, .read_queue = std::make_shared<TestReadQueue>()};
+    {
+        SessionCheckpointStore store(storage);
+        const auto saved = store.save(responses, enabled,
+            [&](ContinuationCheckpointWriter& writer) {
+                if (!write_state_fixture(writer, payload)) { return DurableExportResult{}; }
+                return exported_fixture({.frontier_tokens = 4096, .restored_tokens = 4096,
+                                          .payload_bytes = payload.size()});
+            }, publish_fixture);
+        if (!saved) { return check(false, "FP32-enabled checkpoint did not publish"); }
+    }
+    SessionCheckpointStore restarted(storage);
+    auto loaded = restarted.load(responses.client_session_sha256, enabled,
+                                 responses.latest_response_id);
+    int failures = check(loaded.state == SessionCheckpointLoadState::Available &&
+                             loaded.checkpoint && loaded.checkpoint->origin_authenticated,
+                         "FP32-enabled restart did not load its authenticated checkpoint");
+    if (!loaded.checkpoint) { return failures; }
+    OpenAIResponsesStore restored(8, 1ULL << 20);
+    const auto guard = restored.begin_restore(responses.client_session_sha256);
+    // Exercise the exact production engine-identity comparison before verified publication.
+    // Native codec import and GPU execution are deliberately outside this host fixture.
+    failures += check(restored.restore_session(loaded.checkpoint->responses, guard, [&] {
+        if (runtime::engine_identity(options, memory) != expected) { return false; }
+        std::vector<std::byte> bytes(payload.size());
+        return loaded.checkpoint->engine->read_file("engine/state/0.bin", 0, bytes) &&
+               bytes == payload && loaded.checkpoint->engine->verify_complete();
+    }), "FP32-enabled checkpoint cannot restore with the same effective engine identity");
+    failures += check(restored.get_for_session(responses.latest_response_id,
+                                               responses.client_session_sha256) != nullptr,
+                      "FP32-enabled restore did not publish its response lineage");
+    loaded.checkpoint.reset();
+    options.fp32_head_logits = false;
+    auto disabled = enabled;
+    disabled["engine"]["fp32_head_logits"] = false;
+    refresh_config_digest(disabled);
+    const auto refused = restarted.load(responses.client_session_sha256, disabled);
+    failures += check(runtime::engine_identity(options, memory) != expected &&
+                          refused.state == SessionCheckpointLoadState::Incompatible &&
+                          refused.reason == runtime::DurableReason::FingerprintMismatch &&
+                          !refused.checkpoint,
+                      "FP32-enabled checkpoint was not refused with the opt-in disabled");
+    failures += check(restarted.load(responses.client_session_sha256, enabled).state ==
+                          SessionCheckpointLoadState::Available,
+                      "FP32 option mismatch quarantined a compatible checkpoint");
+    return failures;
 }
 
 #ifdef _WIN32
@@ -3256,6 +3380,8 @@ int main(int argc, char** argv) {
     }
     int failures = 0;
     failures += test_checkpoint_failure_diagnostics_are_content_safe();
+    failures += test_effective_engine_identity();
+    failures += test_fp32_checkpoint_restart_compatibility();
     failures += test_quota_stale_publication_preserves_unrelated_currents();
     failures += test_ordinary_pressure_preserves_same_size_corrupt_victim();
     failures += test_replay_only_survivors_are_durable_without_native_authority();
