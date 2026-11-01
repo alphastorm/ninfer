@@ -181,8 +181,10 @@ policy is unchanged. Runtime-image publication wraps already-checked binaries an
 does not compile them. Reproducibility currently means identical source/build paths,
 not relocation to another absolute directory or a different toolchain version.
 
-The PR-only `RDC build determinism` workflow uses a GPU-free CUDA 13.1 runner and a
-30-minute job bound. `tools/release/check-rdc-determinism.py --work <new-directory>`
+The PR-only `RDC build determinism` workflow uses a GPU-free CUDA 13.1 runner pinned to
+`ubuntu-24.04` and a 30-minute job bound. The image matches the NVIDIA toolkit package
+repository rather than a floating distribution's host headers.
+`tools/release/check-rdc-determinism.py --work <new-directory>`
 configures two empty build trees at the same path with ccache disabled. It builds only
 the three-source RDC fixture, its resolved static archive and host executable, and the
 production `layer_norm.cu` object. The fixture has same-basename sources with
