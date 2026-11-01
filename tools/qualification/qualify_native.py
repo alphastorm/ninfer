@@ -16,6 +16,7 @@ omp-ninfer's ``scripts/hosts/pscp.py``); one host copies locally.
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import dataclasses
 from decimal import Decimal
@@ -777,7 +778,7 @@ def stage_lane_qualification(state: dict[str, Any], summary: dict[str, Any], lan
         },
         "limitations": [
             "Public packages retain port 18082 and were not executed. The isolated installed rehearsals differ only in listen.port.",
-            "C1 and the recorded shared-Host pressure budget are the qualified profiles; no multi-GPU inference or smaller-host claim.",
+            "Protocol and shared-Host pressure probes use the configured concurrency; benchmark C1 denotes serial traffic, not a C1-only engine. No multi-GPU inference or smaller-host claim.",
             "Restart proves the two recorded short sessions, not loss-free shutdown of every live session.",
         ],
         "beta_qualified": True,
@@ -834,6 +835,8 @@ class Orchestrator:
         self.head8 = self.head[:8]
         self.lane = Lane.load(config.source_root, config.lane, self.head)
         validate_scratch_configuration(config, self.lane.spec)
+        # Staged callers may dispatch phases themselves instead of using execute().
+        self.preflight_protocol()
         self.script = Path(__file__).resolve()
         self.script_sha = sha256_file(self.script)
         self.state_path = config.state_dir / "state.json"
@@ -937,6 +940,10 @@ if($LASTEXITCODE -ne 0){throw 'target GPU selection failed'}
     def verify_checkpoint(self, name: str, receipt: dict[str, Any]) -> bool:
         if name == "preflight":
             return False  # Every window must re-establish target quiescence and found state.
+        if name in ("protocol", "pressure_protocol"):
+            capacity = receipt.get("max_concurrency")
+            if type(capacity) is not int or capacity != self.lane.config["engine"]["max_concurrency"]:
+                return False
         try:
             if name == "neutral_build":
                 script = f"""
@@ -1051,7 +1058,42 @@ $limit=[int][double](nvidia-smi.exe -i {ps_quote(self.gpu_uuid)} --query-gpu=pow
             script = TARGET_CONTROLLER_GUARD + script
         return compact_json_from_output(remote_ps(host, script, timeout=timeout))
 
+    def preflight_protocol(self) -> None:
+        # windows_support_files packages these committed bytes at tool_head, not the runtime source.
+        source = run(
+            ["git", "show", f"{self.tool_head}:tools/smoke/agent_protocol.py"],
+            cwd=self.config.source_root,
+        ).stdout
+        concurrent_telemetry = False
+        for statement in ast.parse(source).body:
+            if isinstance(statement, ast.Assign) and any(
+                isinstance(target, ast.Name) and target.id == "SUPPORTS_CONCURRENT_SESSION_TELEMETRY"
+                for target in statement.targets
+            ):
+                concurrent_telemetry = (
+                    isinstance(statement.value, ast.Constant) and statement.value.value is True
+                )
+        max_concurrency = self.lane.config["engine"]["max_concurrency"]
+        if self.head != self.tool_head:
+            packaged_config = json.loads(run(
+                ["git", "show",
+                 f"{self.tool_head}:packaging/windows/lanes/{self.lane.name}/server-config.json"],
+                cwd=self.config.source_root,
+            ).stdout)
+            packaged_capacity = packaged_config.get("engine", {}).get("max_concurrency")
+            if type(packaged_capacity) is not int or packaged_capacity != max_concurrency:
+                raise LaneError(
+                    f"packaged engine.max_concurrency={packaged_capacity} disagrees with "
+                    f"candidate lane engine.max_concurrency={max_concurrency}"
+                )
+        if max_concurrency > 1 and not concurrent_telemetry:
+            raise LaneError(
+                "packaged agent_protocol.py is C1-only; "
+                f"lane requires engine.max_concurrency={max_concurrency}"
+            )
+
     def preflight(self) -> dict[str, Any]:
+        self.preflight_protocol()
         if run(["git", "status", "--porcelain"], cwd=self.config.source_root).stdout.strip():
             raise LaneError("source worktree must be clean before qualification")
         runtime_diff = run(
@@ -1608,6 +1650,7 @@ $v=Get-Content $out -Raw | ConvertFrom-Json
 """
         receipt = self.remote_json(self.config.target, script, timeout=1200)
         require_product_protocol(receipt["protocol"])
+        receipt["max_concurrency"] = self.lane.config["engine"]["max_concurrency"]
         return receipt
 
     def pressure_protocol(self) -> dict[str, Any]:
@@ -1723,6 +1766,7 @@ finally{{
         if receipt.get("status") != "passed":
             raise LaneError("pressure protocol did not pass; its logs and store are retained")
         require_product_protocol(receipt["protocol"])
+        receipt["max_concurrency"] = self.lane.config["engine"]["max_concurrency"]
         # Do not discard evidence until the caller has validated the actual protocol result.
         remote_ps(self.config.target, f"""
 $ErrorActionPreference='Stop'
@@ -2009,6 +2053,9 @@ $owned=@(Get-CimInstance Win32_Process -Filter "Name='ninfer-serve.exe'"|Where-O
                 "builder_root": self.builder_root,
                 "target_root": self.target_root,
             }
+        # Refuse incompatible package tools before phase dispatch or the target-side cleanup path.
+        # Direct preflight callers run the same read-only check.
+        self.preflight_protocol()
         actions: tuple[tuple[str, Callable[[], dict[str, Any]]], ...] = (
             ("preflight", self.preflight),
             ("neutral_build", self.neutral_build),
