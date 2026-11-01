@@ -1438,6 +1438,9 @@ function Uninstall-ManagedRelease {
         # in the finally below. With the task gone nothing can launch afterwards.
         Invoke-WithActionLock {
             Stop-ManagedRelease
+            # Whole-root removal also retires a pause that predates the release lease. Restore
+            # its recorded prior limit now, or leave its record and the state root for retry.
+            Invoke-GpuOwner $state 'start' | Out-Null
             Unregister-ScheduledTask -TaskName ([string]$state.task_name) -Confirm:$false -ErrorAction SilentlyContinue
             if ($null -ne (Get-OwnedProcess (Get-RuntimeState) (Get-Release $state ([string]$state.active_release)))) {
                 throw 'a server process survived the uninstall stop'

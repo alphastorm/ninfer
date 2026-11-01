@@ -3508,5 +3508,66 @@ try{Restore-GpuOwnerLease}catch{$restore=$_.Exception.Message}
                 self.assertEqual(observed, expected)
 
 
+    @unittest.skipIf(sys.platform == "win32", "the synthetic nvidia-smi is a POSIX shell script")
+    def test_uninstall_restores_prior_power_even_when_owner_was_already_paused(self) -> None:
+        """#54: removing the whole root must not discard a pre-existing pause's prior limit."""
+        policy = json.loads((WINDOWS / "lanes/rtx3090/release-spec.json").read_text())[
+            "lifecycle"]["gpu_owner_controller_protocol"]
+        for prior_paused, deny_restore in ((False, False), (True, False), (True, True)):
+            with self.subTest(prior_paused=prior_paused, deny_restore=deny_restore), \
+                    tempfile.TemporaryDirectory() as directory:
+                lane = installed_release(Path(directory))
+                program_files = Path(directory) / "Program Files"
+                power_limit = synthetic_nvidia_smi(program_files, policy["owner_power_limit_w"])
+                owner = lane.root / "gpu-owner" / "Control-GpuOwner.ps1"
+                owner_sha256 = install_script((WINDOWS / "Control-GpuOwner.ps1").read_bytes(), owner)
+                state_path = lane.root / "state.json"
+                state = json.loads(state_path.read_text())
+                state["gpu_owner"] = {
+                    "controller_path": str(owner), "controller_sha256": owner_sha256,
+                    "state_root": str(lane.root / "gpu-owner-state"),
+                    "qualified_power_limit_w": policy["qualified_power_limit_w"],
+                    "prior_power_limit_range_w": policy["prior_power_limit_range_w"],
+                }
+                state_path.write_text(json.dumps(state))
+                tool = power_limit.parent / "nvidia-smi.exe"
+                if deny_restore:
+                    tool.write_text(tool.read_text().replace(
+                        '  -pl) echo "$4" > "$limit" ;;',
+                        f'  -pl) [ "$4" != {policy["owner_power_limit_w"]} ] || exit 9; '
+                        'echo "$4" > "$limit" ;;',
+                    ))
+                observed = self.invoke(
+                    ps_assignments(StateRoot=lane.root, ProgramFiles=program_files,
+                                   PriorPaused=prior_paused)
+                    + ps_definitions(WINDOWS / "Control-Release.ps1") + """
+$env:ProgramFiles=$ProgramFiles
+function Get-CimInstance { }
+function Get-ScheduledTask { }
+function Get-ScheduledTaskInfo { }
+function Wait-ManagedWrapperExit { $true }
+function Unregister-ScheduledTask { }
+$state=Get-State
+if($PriorPaused -ceq 'True'){Invoke-GpuOwner $state 'stop'|Out-Null}
+Acquire-GpuOwnerLease
+$captured=(Get-GpuOwnerLease).prior_paused
+$failure=$null;$receipt=$null
+try{$receipt=Uninstall-ManagedRelease|ConvertFrom-Json}catch{$failure=$_.Exception.Message}
+@{prior_paused=$captured;failure=$failure;receipt=$receipt;root_retained=(Test-Path $StateRoot);power_record_retained=(Test-Path (Join-Path $StateRoot 'gpu-owner-state/lease.json'))}|ConvertTo-Json -Depth 6 -Compress
+""")
+                self.assertEqual(observed["prior_paused"], prior_paused)
+                if deny_restore:
+                    self.assertIsNotNone(observed["failure"])
+                    self.assertTrue(observed["root_retained"])
+                    self.assertTrue(observed["power_record_retained"])
+                    self.assertEqual(int(power_limit.read_text()), policy["qualified_power_limit_w"])
+                else:
+                    self.assertIsNone(observed["failure"])
+                    self.assertEqual(observed["receipt"]["status"], "passed")
+                    self.assertFalse(observed["root_retained"])
+                    self.assertEqual(int(power_limit.read_text()), policy["owner_power_limit_w"])
+                    self.assertTrue((Path(directory) / "models" / "model.ninfer").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
