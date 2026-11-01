@@ -2,6 +2,12 @@ ninfer_add_test(ninfer_qwen3_5_loading_real_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_loading_real.cpp"
   LIBRARIES ninfer_model_loading)
 
+ninfer_add_test(ninfer_qwen3_5_dflash_governor_test
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_dflash_governor.cpp"
+  LIBRARIES ninfer_core ninfer::json)
+ninfer_test_host_lanes(ninfer_qwen3_5_dflash_governor_test
+  ninfer_qwen3_5_dflash_governor_test bounded native windows)
+
 ninfer_add_test(ninfer_qwen3_5_loading_test
   HOST_LANES native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/test_loading.cpp"
