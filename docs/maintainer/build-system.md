@@ -195,8 +195,11 @@ Every retained object, device-link object, archive and executable must have iden
 complete bytes and matching inventories. The report includes SHA-256 values, first
 differing offsets, section hashes and symbol/build-id differences. A second device
 link, archive and host link with fixed input objects distinguishes propagated compile
-differences from independent downstream nondeterminism. None of these binaries runs;
-this is a build invariant, not a GPU correctness or performance qualification.
+differences from independent downstream nondeterminism. Symbol/build-id reports use
+distinct `round1-vs-round2_*.diff` and `round2-vs-relink_*.diff` filenames, with the
+corresponding round names in their diff headers, so both comparisons retain their
+original diagnostics. None of these binaries runs; this is a build invariant, not a
+GPU correctness or performance qualification.
 
 The fixture is deliberately not a CTest registration: its oracle is the double-build
 driver, and the workflow never builds the full runtime. A passing bounded check is

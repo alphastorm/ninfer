@@ -81,9 +81,11 @@ def compare(left, right, evidence):
             command = ["ar", "tv"] if name.endswith(".a") else ["readelf", "-W", "-s", "-n"]
             first = run([*command, str(left / name)]).decode(errors="replace")
             second = run([*command, str(right / name)]).decode(errors="replace")
-            report = evidence / (name.replace("/", "_") + ".diff")
+            report = evidence / (
+                f"{left.name}-vs-{right.name}_" + name.replace("/", "_") + ".diff")
             report.write_text("".join(difflib.unified_diff(
-                first.splitlines(True), second.splitlines(True), fromfile="round1", tofile="round2")))
+                first.splitlines(True), second.splitlines(True),
+                fromfile=left.name, tofile=right.name)))
     return {
         "equal": bool(rows) and names_left == names_right and all(r["equal"] for r in rows),
         "missing": sorted(names_left - names_right), "extra": sorted(names_right - names_left),
