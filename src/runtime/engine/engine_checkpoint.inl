@@ -2,7 +2,6 @@
 // its device-bound worker. Disk publication uses only CheckpointControl's independent gate.
     template <class Function>
     auto checkpoint_call(Function&& function) -> std::invoke_result_t<Function> {
-        using Result = std::invoke_result_t<Function>;
         if (std::this_thread::get_id() == worker_.get_id()) {
             struct Relock {
                 std::unique_lock<std::mutex>& lock;
@@ -12,16 +11,7 @@
             if (scope.acquired) { scope.lock.lock(); }
             return std::forward<Function>(function)();
         }
-        auto command = std::make_shared<std::packaged_task<Result()>>(
-            std::forward<Function>(function));
-        auto result = command->get_future();
-        {
-            std::lock_guard lock(queue_mutex_);
-            if (stopping_) { throw std::runtime_error("checkpoint worker is stopping"); }
-            checkpoint_commands_.emplace_back([command] { (*command)(); });
-        }
-        queue_cv_.notify_one();
-        return result.get();
+        return reserve_checkpoint_command(std::forward<Function>(function))();
     }
 
     void set_pressure_checkpoint_handler(std::shared_ptr<PressureCheckpointHandler> handler) {
@@ -95,6 +85,29 @@
             std::optional<Lease> lease;
             bool prepared_export = false;
             DurableExportResult result;
+            const auto release_export = [&] {
+                checkpoint_change([&] {
+                    // Native readers can pin every idle Device image while the writer
+                    // runs off-lock. Retire them before advertising usable capacity.
+                    lease.reset();
+                    if (prepared_export) {
+                        prepared_export = false;
+                        --checkpoint_exports_in_flight_;
+                        scheduler_.capacity_released();
+                        request_admission_check();
+                        queue_cv_.notify_all();
+                    }
+                });
+            };
+            const bool worker = std::this_thread::get_id() == worker_.get_id();
+            // Reserve the task, future and queue node before acquiring any native readers.
+            // Enqueueing this command after either writer exit cannot allocate.
+            std::optional<decltype(reserve_checkpoint_command(release_export))> retirement;
+            if (!worker) { retirement.emplace(reserve_checkpoint_command(release_export)); }
+            const auto retire_export = [&] {
+                if (retirement) { (*retirement)(); }
+                else { release_export(); }
+            };
             checkpoint_call([&] {
                 if (failed_) { result.reason = DurableReason::IoUnavailable; return; }
                 const auto gate = checkpoints_.session(digest);
@@ -122,24 +135,9 @@
                 result.reason = lease->reason();
             });
             if (!lease) { return result; }
-            const auto release_export = [&] {
-                checkpoint_change([&] {
-                    // Native readers can pin every idle Device image while the writer
-                    // runs off-lock. Retire them before advertising usable capacity.
-                    lease.reset();
-                    if (prepared_export) {
-                        prepared_export = false;
-                        --checkpoint_exports_in_flight_;
-                        scheduler_.capacity_released();
-                        request_admission_check();
-                        queue_cv_.notify_all();
-                    }
-                });
-            };
             try {
                 // Inline worker saves use the same off-execution-lock writer boundary as an
                 // external control caller. The immutable lease alone owns copied content.
-                const bool worker = std::this_thread::get_id() == worker_.get_id();
                 std::unique_lock<std::mutex>* execution =
                     worker && checkpoint_execution_lock_->owns_lock() ? checkpoint_execution_lock_ : nullptr;
                 if (execution) { execution->unlock(); }
@@ -153,10 +151,10 @@
                 }
                 if (execution) { execution->lock(); }
             } catch (...) {
-                release_export();
+                retire_export();
                 throw;
             }
-            release_export();
+            retire_export();
             return result;
         }
     }
@@ -346,6 +344,25 @@
     }
 
 private:
+    // Own every fallible part of a worker command before it can become mandatory cleanup.
+    template <class Function>
+    auto reserve_checkpoint_command(Function&& function) {
+        using Result = std::invoke_result_t<Function>;
+        auto command = std::make_shared<std::packaged_task<Result()>>(
+            std::forward<Function>(function));
+        auto result = command->get_future();
+        std::list<std::function<void()>> commands;
+        commands.emplace_back([command] { (*command)(); });
+        return [this, commands = std::move(commands), result = std::move(result)]() mutable -> Result {
+            {
+                std::lock_guard lock(queue_mutex_);
+                if (stopping_) { throw std::runtime_error("checkpoint worker is stopping"); }
+                checkpoint_commands_.splice(checkpoint_commands_.end(), commands);
+            }
+            queue_cv_.notify_one();
+            return result.get();
+        };
+    }
     // Runs a checkpoint operation that changes catalog entries or physical occupancy. As with a
     // terminal response, its result or exception reaches the caller only after the published
     // runtime statistics include that change.
@@ -390,7 +407,7 @@ private:
         }
     }
     void run_checkpoint_commands() {
-        std::deque<std::function<void()>> commands;
+        std::list<std::function<void()>> commands;
         {
             std::lock_guard lock(queue_mutex_);
             commands.swap(checkpoint_commands_);

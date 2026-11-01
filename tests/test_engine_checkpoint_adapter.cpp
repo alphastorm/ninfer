@@ -6,11 +6,11 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
-#include <deque>
 #include <exception>
 #include <future>
 #include <iostream>
 #include <limits>
+#include <list>
 #include <map>
 #include <mutex>
 #include <new>
@@ -313,7 +313,7 @@ class AdapterFixture {
     std::mutex checkpoint_provider_mutex_;
     std::mutex queue_mutex_;
     std::condition_variable queue_cv_;
-    std::deque<std::function<void()>> checkpoint_commands_;
+    std::list<std::function<void()>> checkpoint_commands_;
     std::thread worker_;
     std::unique_lock<std::mutex>* checkpoint_execution_lock_ = nullptr;
     std::size_t checkpoint_exports_in_flight_ = 0;
@@ -458,7 +458,7 @@ void isolated_import_waits_for_export(bool writer_throws) {
             "second session could not admit by lossless Host demotion after export retirement");
 }
 
-void export_retirement_survives_allocation_failure(bool writer_throws) {
+void export_retirement_survives_allocation_failure(bool writer_throws, bool inline_worker = false) {
     ExportProgram program;
     AdapterFixture<ExportContract> core(program);
     core.restore("first");
@@ -468,10 +468,13 @@ void export_retirement_survives_allocation_failure(bool writer_throws) {
     DurableExportResult result;
     bool writer_failed = false;
     bool allocation_failed = false;
-    try { result = core.save(writer); }
-    catch (const WriterFailure&) { writer_failed = true; }
-    catch (const std::bad_alloc&) { allocation_failed = true; }
-    const bool allocation_unused = std::exchange(allocations_before_failure, -1) == 0;
+    const auto save = [&] {
+        try { result = core.save(writer); }
+        catch (const WriterFailure&) { writer_failed = true; }
+        catch (const std::bad_alloc&) { allocation_failed = true; }
+        return std::exchange(allocations_before_failure, -1) == 0;
+    };
+    const bool allocation_unused = inline_worker ? core.on_worker(save) : save();
     require(!allocation_failed && allocation_unused,
             "export retirement allocated after taking its native lease");
     require(writer_failed == writer_throws &&
@@ -654,6 +657,10 @@ int main() {
          [] { export_retirement_survives_allocation_failure(false); }},
         {"export_writer_exception_allocation_failure",
          [] { export_retirement_survives_allocation_failure(true); }},
+        {"inline_export_retirement_allocation_failure",
+         [] { export_retirement_survives_allocation_failure(false, true); }},
+        {"inline_export_writer_exception_allocation_failure",
+         [] { export_retirement_survives_allocation_failure(true, true); }},
         {"export_command_allocation_failure", export_command_allocation_failures_precede_native_lease},
         {"overlapping_exports", overlapping_exports_retain_progress_until_last_release},
         {"genuine_capacity", genuine_capacity_and_unprepared_export_do_not_defer},
