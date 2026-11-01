@@ -29,8 +29,18 @@ def execute(config_path: Path, attempt: str) -> None:
         if not config['lock_command'] or not config['command'] or any(not isinstance(x, str) or not x for x in command):
             raise ValueError('lock and transport must be nonempty argument arrays')
         try:
-            result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                                    timeout=config['timeout_seconds'])
+            try:
+                result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                        timeout=config['timeout_seconds'])
+            except subprocess.TimeoutExpired as error:
+                # TimeoutExpired can carry bytes even with text=True.
+                for stream, partial in (('stdout', error.stdout), ('stderr', error.stderr)):
+                    log_path = directory / (scenario + '.' + stream + '.log')
+                    if isinstance(partial, bytes):
+                        log_path.write_bytes(partial)
+                    else:
+                        log_path.write_text(partial or '', encoding='utf-8')
+                raise
             (directory / (scenario + '.stdout.log')).write_text(result.stdout)
             (directory / (scenario + '.stderr.log')).write_text(result.stderr)
             result.check_returncode()

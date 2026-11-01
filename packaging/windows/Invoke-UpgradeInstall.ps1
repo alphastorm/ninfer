@@ -22,6 +22,11 @@ function Find-Line([string[]]$Lines, [string]$Anchor, [int]$After = 0) {
     if ($matches.Count -ne 1) { throw 'installer injection anchor is missing or ambiguous' }
     return [int]$matches[0]
 }
+function Save([string]$Path, [object]$Value) {
+    $temporary = $Path + '.tmp'
+    [IO.File]::WriteAllText($temporary, ($Value | ConvertTo-Json -Depth 40 -Compress), [Text.UTF8Encoding]::new($false))
+    Move-Item -LiteralPath $temporary -Destination $Path -Force
+}
 $global:RehearsalEvidence = $Evidence
 $global:RehearsalMode = $Mode
 $global:RehearsalPort = [int]$settings.port
@@ -37,8 +42,7 @@ try {
         $breakpoints += Set-PSBreakpoint -Script $installer -Line $activated -Action {
             if ($global:RehearsalMode -eq 'interrupt') {
                 # The parent verifies persisted state/journal, not this assertion alone.
-                @{installer_pid=$PID;phase='candidate_activated'} | ConvertTo-Json -Compress |
-                    Set-Content -LiteralPath (Join-Path $global:RehearsalEvidence 'interrupt-ready.json') -Encoding UTF8
+                Save (Join-Path $global:RehearsalEvidence 'interrupt-ready.json') @{installer_pid=$PID;phase='candidate_activated'}
                 while ($true) { Start-Sleep -Milliseconds 100 }
             }
         }
@@ -47,8 +51,7 @@ try {
                 $global:RehearsalBlocker = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $global:RehearsalPort)
                 $global:RehearsalBlocker.ExclusiveAddressUse = $true
                 $global:RehearsalBlocker.Start()
-                @{installer_pid=$PID;fault='first-start-port-occupied'} | ConvertTo-Json -Compress |
-                    Set-Content -LiteralPath (Join-Path $global:RehearsalEvidence 'fault.json') -Encoding UTF8
+                Save (Join-Path $global:RehearsalEvidence 'fault.json') @{installer_pid=$PID;fault='first-start-port-occupied'}
             }
         }
         $breakpoints += Set-PSBreakpoint -Script $installer -Line $rollback -Action {
@@ -71,8 +74,7 @@ try {
     }
     $code = 0
 } catch {
-    @{message=[string]$_.Exception.Message} | ConvertTo-Json -Compress |
-        Set-Content -LiteralPath (Join-Path $Evidence 'failure.json') -Encoding UTF8
+    Save (Join-Path $Evidence 'failure.json') @{message=[string]$_.Exception.Message}
 } finally {
     if ($null -ne $global:RehearsalBlocker) { $global:RehearsalBlocker.Stop() }
     if ($breakpoints.Count) { $breakpoints | Remove-PSBreakpoint }
