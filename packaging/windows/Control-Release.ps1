@@ -1,12 +1,15 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('Run', 'Status', 'Start', 'Stop', 'Restart', 'Rollback', 'Uninstall')]
+    [ValidateSet('Run', 'Status', 'Start', 'Stop', 'Restart', 'Rollback', 'Uninstall', 'Reconcile')]
     [string]$Action,
 
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
-    [string]$StateRoot
+    [string]$StateRoot,
+
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
+    [string]$ReleaseId
 )
 
 Set-StrictMode -Version Latest
@@ -539,6 +542,16 @@ function Get-RuntimeState {
     try { return Read-JsonFile $path } catch { return $null }
 }
 
+function Get-ReleaseRuntime([string]$ReleaseId) {
+    $runtime = Get-RuntimeState
+    if ($null -ne $runtime) {
+        $identity = $runtime.PSObject.Properties['release_id']
+        if ($null -eq $identity) { throw 'runtime attribution has no release identity; retain it for reconciliation' }
+        if ([string]$identity.Value -cne $ReleaseId) { return $null }
+    }
+    return $runtime
+}
+
 # Absence of a PID record is not proof of exit: a wrapper can die between spawn and publication.
 # An image census cannot safely adopt/kill that child, but it can withhold ownership and cleanup.
 function Assert-NoReleaseProcess([object]$Release) {
@@ -551,8 +564,7 @@ function Assert-NoReleaseProcess([object]$Release) {
             }
             continue
         }
-        if ([string]::Equals([IO.Path]::GetFullPath([string]$entry.ExecutablePath),
-                             $expected, [StringComparison]::OrdinalIgnoreCase)) {
+        if (Test-PathWithinRoot ([string]$entry.ExecutablePath) ([string]$Release.release_root)) {
             throw "unattributed release server still runs: $($entry.ProcessId); retain runtime and GPU-owner lease until exit is proven"
         }
     }
@@ -625,6 +637,142 @@ function Get-ManagedStopReceipt {
     $path = Join-Path $StateRoot 'last-stop.json'
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return $null }
     try { return Read-JsonFile $path } catch { return $null }
+}
+
+function Test-IncompleteManagedStop([object]$Receipt) {
+    if ($null -eq $Receipt) { return $false }
+    return [string]$Receipt.mode -ceq 'stop-event' -and
+        ($Receipt.forced -or [string]$Receipt.outcome -cin @(
+            'graceful_unreported', 'graceful_incomplete_shutdown', 'graceful_wait_expired',
+            'graceful_nonzero_exit', 'terminated', 'signal_failed',
+            'wrapper_cleanup_stalled', 'still_running'
+        ))
+}
+
+function Set-ManagedShutdownVerdict([object]$Runtime, [object]$Receipt) {
+    $report = $null
+    $reportPath = if ($null -eq $Runtime.PSObject.Properties['shutdown_report']) { $null }
+                  else { [string]$Runtime.shutdown_report }
+    if (-not [string]::IsNullOrWhiteSpace($reportPath) -and
+        (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
+        try { $report = Read-JsonFile $reportPath } catch { $report = $null }
+    }
+    $expectedLaunch = if ($null -eq $Runtime.PSObject.Properties['launch_id']) { $null }
+                      else { [string]$Runtime.launch_id }
+    $reportFieldsPresent = $null -ne $report
+    foreach ($field in @('artifact_type', 'schema_version', 'launch_id', 'complete',
+                          'saved', 'skipped', 'refused')) {
+        if ($null -eq $report -or $null -eq $report.PSObject.Properties[$field]) {
+            $reportFieldsPresent = $false
+        }
+    }
+    if ($reportFieldsPresent) {
+        foreach ($field in @('schema_version', 'saved', 'skipped', 'refused')) {
+            $value = $report.PSObject.Properties[$field].Value
+            if (-not ($value -is [int] -or $value -is [long]) -or
+                $value -lt 0 -or $value -gt [int]::MaxValue) {
+                $reportFieldsPresent = $false
+            }
+        }
+    }
+    if (-not $reportFieldsPresent -or
+        [string]$report.artifact_type -cne 'ninfer_serve_shutdown_report' -or
+        [int]$report.schema_version -ne 1 -or
+        [string]::IsNullOrWhiteSpace($expectedLaunch) -or
+        [string]$report.launch_id -cne $expectedLaunch) {
+        if ($Receipt.outcome -cin @('graceful', 'already_stopped')) {
+            $Receipt.outcome = 'graceful_unreported'
+        }
+        $Receipt.reason = 'incomplete shutdown: no readable shutdown report bound to this launch; preserve candidate checkpoints and use -Action Reconcile before installer repair'
+        return
+    }
+    $Receipt.sessions_saved = [int]$report.saved
+    $Receipt.sessions_skipped = [int]$report.skipped
+    $Receipt.sessions_refused = [int]$report.refused
+    if ($report.complete -isnot [bool] -or -not [bool]$report.complete -or [int]$report.refused -ne 0) {
+        $Receipt.outcome = 'graceful_incomplete_shutdown'
+        $Receipt.reason = "incomplete shutdown: $([int]$report.refused) live session(s) refused; preserve candidate checkpoints and use -Action Reconcile before installer repair"
+    }
+}
+
+function Get-ManagedShutdownHolds {
+    $path = Join-Path $StateRoot 'shutdown-holds.json'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return }
+    $document = Read-JsonFile $path
+    if ($document.artifact_type -cne 'ninfer_windows_shutdown_holds' -or
+        [int]$document.schema_version -ne 1) {
+        throw 'shutdown hold envelope mismatch'
+    }
+    foreach ($hold in @($document.holds)) {
+        if ([string]$hold.release_id -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$' -or
+            -not (Test-SamePath ([string]$hold.release_root) (Join-Path (Join-Path $StateRoot 'releases') ([string]$hold.release_id)))) {
+            throw 'shutdown hold release root is outside its installed release identity'
+        }
+        Write-Output $hold
+    }
+}
+
+function Save-ManagedShutdownHold([object]$Release, [object]$Runtime, [object]$Receipt) {
+    $holds = @(Get-ManagedShutdownHolds)
+    $attribution = ConvertTo-Json -InputObject $Runtime -Depth 16 -Compress
+    foreach ($hold in $holds) {
+        if ([string]$hold.release_id -ceq [string]$Receipt.release_id -and
+            (ConvertTo-Json -InputObject $hold.runtime -Depth 16 -Compress) -ceq $attribution) {
+            return
+        }
+    }
+    # The live runtime/report may be replaced by a later launch. Keep this launch's attribution
+    # and first incomplete verdict separately; a clean Stop never retires these immutable entries.
+    $hold = [ordered]@{
+        release_id = [string]$Receipt.release_id
+        release_root = [string]$Release.release_root
+        runtime = $Runtime
+        stop_receipt = $Receipt
+    }
+    Write-JsonAtomic (Join-Path $StateRoot 'shutdown-holds.json') ([ordered]@{
+            artifact_type = 'ninfer_windows_shutdown_holds'
+            schema_version = 1
+            holds = @($holds) + @($hold)
+        })
+}
+
+function Save-PreviousManagedShutdownHold([object]$State) {
+    $runtime = Get-RuntimeState
+    if ($null -eq $runtime) { return }
+    $mode = $runtime.PSObject.Properties['managed_stop']
+    if ($null -eq $mode -or [string]$mode.Value -cne 'stop-event') { return }
+    # A retry may follow pointer restoration. Resolve the prior launch's own release, never
+    # attribute its missing final save to whichever release happens to be active now.
+    if ($null -eq $runtime.PSObject.Properties['release_id'] -or
+        $null -eq $State.releases.PSObject.Properties[[string]$runtime.release_id]) {
+        throw 'runtime attribution belongs to another release that is not installed; retain it for reconciliation'
+    }
+    $release = Get-Release $State ([string]$runtime.release_id)
+    Assert-NoReleaseProcess $release
+    $now = [DateTime]::UtcNow.ToString('o')
+    $receipt = [ordered]@{
+        artifact_type = 'ninfer_windows_managed_stop_receipt'
+        schema_version = 1
+        release_id = [string]$runtime.release_id
+        mode = 'stop-event'
+        graceful_wait_seconds = [int](Get-ManagedStopPlan $release).timeout_seconds
+        outcome = 'already_stopped'
+        forced = $false
+        exit_code = $null
+        wrapper_result = $null
+        sessions_saved = $null
+        sessions_skipped = $null
+        sessions_refused = $null
+        reason = $null
+        pid = $runtime.pid
+        started_utc = $now
+        completed_utc = $now
+        elapsed_seconds = 0.0
+    }
+    Set-ManagedShutdownVerdict $runtime $receipt
+    if (Test-IncompleteManagedStop $receipt) {
+        Save-ManagedShutdownHold $release $runtime $receipt
+    }
 }
 
 function Invoke-ServerStatus([object]$Release) {
@@ -748,6 +896,26 @@ function Assert-RuntimeGpuReady([object]$Release) {
 }
 
 function Get-StatusObject {
+    if (-not (Test-Path -LiteralPath (Join-Path $StateRoot 'state.json') -PathType Leaf)) {
+        return [ordered]@{
+            artifact_type = 'ninfer_windows_lifecycle_status'
+            schema_version = 4
+            release_id = $null
+            prepared_release_id = $null
+            previous_release_id = $null
+            task_name = $null
+            task_start_mode = 'explicit-on-demand'
+            task_state = 'missing'
+            process_state = 'stopped'
+            endpoint_state = 'unavailable'
+            gpu_owner = [ordered]@{
+                managed = $false
+                lease_active = Test-Path -LiteralPath (Join-Path $StateRoot 'gpu-owner-lease.json') -PathType Leaf
+            }
+            server = $null
+            last_stop = Get-ManagedStopReceipt
+        }
+    }
     $state = Get-State
     $release = Get-Release $state ([string]$state.active_release)
     $runtime = Get-RuntimeState
@@ -883,10 +1051,10 @@ function Stop-LaunchNow([object]$Release, [string]$TaskName, [object]$Receipt) {
     }
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     while ([DateTime]::UtcNow -lt $deadline) {
-        if ($null -eq (Get-OwnedProcess (Get-RuntimeState) $Release)) { return }
+        if ($null -eq (Get-OwnedProcess (Get-ReleaseRuntime ([string]$Receipt.release_id)) $Release)) { return }
         Start-Sleep -Milliseconds 250
     }
-    $live = Get-OwnedProcess (Get-RuntimeState) $Release
+    $live = Get-OwnedProcess (Get-ReleaseRuntime ([string]$Receipt.release_id)) $Release
     if ($null -ne $live) {
         try {
             Stop-Process -Id $live.Id -Force
@@ -900,7 +1068,10 @@ function Stop-LaunchNow([object]$Release, [string]$TaskName, [object]$Receipt) {
 function Stop-ManagedProcess {
     $state = Get-State
     $release = Get-Release $state ([string]$state.active_release)
-    $runtime = Get-RuntimeState
+    $runtime = Get-ReleaseRuntime ([string]$state.active_release)
+    if ($null -eq $runtime -and $null -ne (Get-RuntimeState)) {
+        Save-PreviousManagedShutdownHold $state
+    }
     $taskName = [string]$state.task_name
     $plan = Get-ManagedStopPlan $release
     $eventName = Get-RuntimeStopEvent $runtime ([string]$state.active_release)
@@ -978,7 +1149,7 @@ function Stop-ManagedProcess {
         # and the force-kill, and return while the newly launched server keeps serving. It also
         # gives a wrapper that is merely unwinding its grace first, so a graceful stop does not
         # kill the cleanup it just asked for.
-        if ($null -ne (Get-OwnedProcess (Get-RuntimeState) $release)) {
+        if ($null -ne (Get-OwnedProcess (Get-ReleaseRuntime ([string]$state.active_release)) $release)) {
             if ($receipt.outcome -ceq 'graceful') { $receipt.outcome = 'graceful_wait_expired' }
             if ($receipt.outcome -ceq 'already_stopped') {
                 $receipt.outcome = 'terminated'
@@ -998,7 +1169,7 @@ function Stop-ManagedProcess {
                 throw 'the managed wrapper did not release the run lock after its server stopped'
             }
         }
-        if ($null -ne (Get-OwnedProcess (Get-RuntimeState) $release)) {
+        if ($null -ne (Get-OwnedProcess (Get-ReleaseRuntime ([string]$state.active_release)) $release)) {
             $receipt.outcome = 'still_running'
             $receipt.reason = 'the owned server process survived termination'
             throw 'owned server process did not stop'
@@ -1011,58 +1182,107 @@ function Stop-ManagedProcess {
         $info = Get-ScheduledTaskInfo -TaskName $taskName -ErrorAction SilentlyContinue
         $receipt.wrapper_result = if ($null -eq $info) { $null } else { [int]$info.LastTaskResult }
         # A wrapper that already exited, or a repeated repair, still has the same launch's report.
-        # Keep runtime.json until this check succeeds; otherwise a second Stop would erase refusal.
-        if ($null -eq $runtime) { $runtime = Get-RuntimeState }
-        if ($null -ne $runtime) {
-            $report = $null
-            $reportPath = if ($null -eq $runtime -or
-                              $null -eq $runtime.PSObject.Properties['shutdown_report']) { $null }
-                          else { [string]$runtime.shutdown_report }
-            if (-not [string]::IsNullOrWhiteSpace($reportPath) -and
-                (Test-Path -LiteralPath $reportPath -PathType Leaf)) {
-                try { $report = Read-JsonFile $reportPath } catch { $report = $null }
-            }
-            # The report must be this launch's: the server echoes the launch identity the
-            # wrapper handed it, so a report a previous launch left behind - or one anything
-            # else wrote - is not evidence about this stop.
-            $expectedLaunch = if ($null -eq $runtime -or $null -eq $runtime.PSObject.Properties['launch_id']) { $null } else { [string]$runtime.launch_id }
-            if ($null -eq $report -or
-                [string]$report.artifact_type -cne 'ninfer_serve_shutdown_report' -or
-                [int]$report.schema_version -ne 1 -or
-                [string]::IsNullOrWhiteSpace($expectedLaunch) -or
-                $null -eq $report.PSObject.Properties['launch_id'] -or
-                [string]$report.launch_id -cne $expectedLaunch) {
-                if ($receipt.outcome -ceq 'graceful') {
-                    $receipt.outcome = 'graceful_unreported'
-                    $receipt.reason = 'the server exited on request without a shutdown report bound to this launch'
-                }
-            }
-            else {
-                $receipt.sessions_saved = [int]$report.saved
-                $receipt.sessions_skipped = [int]$report.skipped
-                $receipt.sessions_refused = [int]$report.refused
-                if ($report.complete -isnot [bool] -or
-                    [int]$report.saved -lt 0 -or [int]$report.skipped -lt 0 -or
-                    [int]$report.refused -lt 0 -or
-                    -not [bool]$report.complete -or [int]$report.refused -ne 0) {
-                    $receipt.outcome = 'graceful_incomplete_shutdown'
-                    $receipt.reason = "incomplete shutdown: $([int]$report.refused) live session(s) refused; preserve candidate checkpoints and reconcile before rollback"
-                    throw $receipt.reason
-                }
-            }
+        # Retain live attribution on failure; the separate hold below survives later launches.
+        if ($null -eq $runtime) { $runtime = Get-ReleaseRuntime ([string]$state.active_release) }
+        if ($plan.mode -ceq 'stop-event' -and $null -ne $runtime) {
+            Set-ManagedShutdownVerdict $runtime $receipt
         }
-        Remove-Item -LiteralPath (Join-Path $StateRoot 'runtime.json') -Force -ErrorAction SilentlyContinue
+        if (Test-IncompleteManagedStop $receipt) {
+            if ([string]::IsNullOrWhiteSpace([string]$receipt.reason)) {
+                $receipt.reason = "incomplete shutdown ($($receipt.outcome)); preserve candidate checkpoints and use -Action Reconcile before installer repair"
+            }
+            throw $receipt.reason
+        }
+        if ($null -ne $runtime) {
+            Remove-Item -LiteralPath (Join-Path $StateRoot 'runtime.json') -Force -ErrorAction SilentlyContinue
+        }
     }
     finally {
         $receipt.completed_utc = [DateTime]::UtcNow.ToString('o')
         $receipt.elapsed_seconds = [Math]::Round(([DateTime]::UtcNow - $started).TotalSeconds, 3)
+        if ((Test-IncompleteManagedStop $receipt) -and $null -ne $runtime) {
+            Save-ManagedShutdownHold $release $runtime $receipt
+        }
         Write-ManagedStopReceipt $receipt
     }
 }
 
-function Stop-ManagedRelease([bool]$RestoreOwner = $true) {
-    Stop-ManagedProcess
-    if ($RestoreOwner) { Restore-GpuOwnerLease }
+function Stop-ManagedRelease([bool]$AllowIncomplete = $false) {
+    $stopped = $false
+    try {
+        try { Stop-ManagedProcess; $stopped = $true }
+        catch {
+            $receipt = Get-ManagedStopReceipt
+            if (-not (Test-IncompleteManagedStop $receipt) -or
+                [string]$receipt.reason -cne $_.Exception.Message -or
+                [string]$receipt.outcome -cin @('wrapper_cleanup_stalled', 'still_running')) { throw }
+            $state = Get-State
+            $runtime = Get-ReleaseRuntime ([string]$state.active_release)
+            $attribution = ConvertTo-Json -InputObject $runtime -Depth 16 -Compress
+            $held = @(Get-ManagedShutdownHolds | Where-Object {
+                    [string]$_.release_id -ceq [string]$state.active_release -and
+                    [string]$receipt.release_id -ceq [string]$state.active_release -and
+                    (ConvertTo-Json -InputObject $_.runtime -Depth 16 -Compress) -ceq $attribution
+                })
+            if ($held.Count -eq 0) { throw }
+            Assert-NoReleaseProcess (Get-Release $state ([string]$state.active_release))
+            $stopped = $true
+            # Stop still reports an incomplete final save. Non-destructive transitions may
+            # proceed only with this exact launch held and its whole release root proven idle.
+            if (-not $AllowIncomplete) { throw }
+        }
+    }
+    finally { if ($stopped) { Restore-GpuOwnerLease } }
+}
+
+function Reconcile-ManagedShutdown([string]$HeldReleaseId) {
+    if ([string]::IsNullOrWhiteSpace($HeldReleaseId)) {
+        throw 'Reconcile requires -ReleaseId naming the held release'
+    }
+    $holds = @(Get-ManagedShutdownHolds)
+    $selected = @($holds | Where-Object { [string]$_.release_id -ceq $HeldReleaseId })
+    if ($selected.Count -eq 0) { throw 'no incomplete shutdown is held for this release' }
+    $releaseRoot = [string]$selected[0].release_root
+    $state = if (Test-Path -LiteralPath (Join-Path $StateRoot 'state.json') -PathType Leaf) { Get-State } else { $null }
+    $active = $null -ne $state -and [string]$state.active_release -ceq $HeldReleaseId
+    if ($active -and
+        -not (Wait-ManagedWrapperExit ([string]$state.task_name) ([DateTime]::UtcNow.AddSeconds(120)))) {
+        throw 'the managed wrapper must exit before shutdown reconciliation'
+    }
+    # An inactive candidate can be reconciled while its restored incumbent serves. Prove the
+    # held release's whole image root idle, not the active release's shared task or run lock.
+    foreach ($entry in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+        if ([string]::IsNullOrWhiteSpace([string]$entry.ExecutablePath)) {
+            $name = $entry.PSObject.Properties['Name']
+            if ($null -ne $name -and [string]$name.Value -ieq 'ninfer-serve.exe') {
+                throw 'cannot exclude a held release server with an unreadable image path'
+            }
+        }
+        elseif (Test-PathWithinRoot ([string]$entry.ExecutablePath) $releaseRoot) {
+            throw 'a process still runs from the held release; stop it before reconciliation'
+        }
+    }
+    if ($active) { Restore-GpuOwnerLease }
+    $runtime = Get-RuntimeState
+    if ($null -ne $runtime) {
+        $attribution = ConvertTo-Json -InputObject $runtime -Depth 16 -Compress
+        foreach ($hold in $selected) {
+            if ((ConvertTo-Json -InputObject $hold.runtime -Depth 16 -Compress) -ceq $attribution) {
+                Remove-Item -LiteralPath (Join-Path $StateRoot 'runtime.json') -Force
+                break
+            }
+        }
+    }
+    $remaining = @($holds | Where-Object { [string]$_.release_id -cne $HeldReleaseId })
+    $path = Join-Path $StateRoot 'shutdown-holds.json'
+    if ($remaining.Count -eq 0) { Remove-Item -LiteralPath $path -Force }
+    else {
+        Write-JsonAtomic $path ([ordered]@{
+                artifact_type = 'ninfer_windows_shutdown_holds'
+                schema_version = 1
+                holds = $remaining
+            })
+    }
 }
 
 function Start-ManagedRelease {
@@ -1102,7 +1322,7 @@ function Start-ManagedRelease {
     catch {
         $startFailure = $_
         $cleanupFailures = [Collections.Generic.List[string]]::new()
-        try { Stop-ManagedProcess } catch { $cleanupFailures.Add("candidate stop: $($_.Exception.Message)") }
+        try { Stop-ManagedRelease -AllowIncomplete $true } catch { $cleanupFailures.Add("candidate stop: $($_.Exception.Message)") }
         try { Restore-GpuOwnerLease } catch { $cleanupFailures.Add("GPU-owner restore: $($_.Exception.Message)") }
         if ($cleanupFailures.Count -ne 0) {
             throw [InvalidOperationException]::new(
@@ -1265,6 +1485,9 @@ function Invoke-Run {
         $stopEventName = $null
         $shutdownReport = $null
         $launchId = [Guid]::NewGuid().ToString('N')
+        # A scheduled retry can arrive before any explicit Stop. Preserve the previous
+        # launch's final-save evidence before replacing either its report or runtime record.
+        Save-PreviousManagedShutdownHold $state
         if ([string]$stopPlan.mode -ceq 'stop-event') {
             # One identity per launch, carried by the event name and echoed in the report the
             # server writes, so the report the controller reads is provably this launch's.
@@ -1437,7 +1660,13 @@ function Uninstall-ManagedRelease {
         # its handle must be closed before that delete, the same reason install.lock is released
         # in the finally below. With the task gone nothing can launch afterwards.
         Invoke-WithActionLock {
-            Stop-ManagedRelease
+            if (@(Get-ManagedShutdownHolds).Count -ne 0) {
+                throw 'uninstall retains held checkpoints; use -Action Reconcile for each held release first'
+            }
+            Stop-ManagedRelease -AllowIncomplete $true
+            if (@(Get-ManagedShutdownHolds).Count -ne 0) {
+                throw 'uninstall retains held checkpoints; use -Action Reconcile for each held release first'
+            }
             # Whole-root removal also retires a pause that predates the release lease. Restore
             # its recorded prior limit now, or leave its record and the state root for retry.
             Invoke-GpuOwner $state 'start' | Out-Null
@@ -1510,8 +1739,8 @@ switch ($Action) {
     'Restart' {
         Invoke-WithActionLock {
             Assert-NoPreparedRelease (Get-State)
-            Stop-ManagedRelease $false
             try {
+                Stop-ManagedRelease -AllowIncomplete $true
                 Start-ManagedRelease
             }
             catch {
@@ -1531,7 +1760,7 @@ switch ($Action) {
             $current = [string]$state.active_release
             $previous = [string]$state.previous_release
             Get-Release $state $previous | Out-Null
-            Stop-ManagedRelease
+            Stop-ManagedRelease -AllowIncomplete $true
             $state.active_release = $previous
             $state.previous_release = $current
             Write-JsonAtomic (Join-Path $StateRoot 'state.json') $state
@@ -1539,17 +1768,22 @@ switch ($Action) {
                 Start-ManagedRelease
             }
             catch {
-                Stop-ManagedRelease
+                $startFailure = $_
+                Stop-ManagedRelease -AllowIncomplete $true
                 $state.active_release = $current
                 $state.previous_release = $previous
                 Write-JsonAtomic (Join-Path $StateRoot 'state.json') $state
                 Start-ManagedRelease
-                throw
+                throw $startFailure
             }
         }
         Get-StatusObject | ConvertTo-Json -Depth 20
     }
     'Uninstall' {
         Uninstall-ManagedRelease
+    }
+    'Reconcile' {
+        Invoke-WithActionLock { Reconcile-ManagedShutdown $ReleaseId }
+        Get-StatusObject | ConvertTo-Json -Depth 20
     }
 }
