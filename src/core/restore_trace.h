@@ -37,7 +37,7 @@ struct Record {
 static_assert(sizeof(Record) == 256);
 inline void copy(char* out, std::size_t size, std::string_view text) noexcept {
     const auto n = text.size() < size - 1 ? text.size() : size - 1;
-    std::memcpy(out, text.data(), n);
+    if (n) std::memcpy(out, text.data(), n);
     out[n] = 0;
 }
 class Recorder {
