@@ -1,5 +1,8 @@
 # NInfer native Windows lanes
 
+Installer rollback and repair census the candidate release root even before
+activation; only the candidate's managed Stop requires activated lifecycle state.
+
 Concurrent residents now wait for in-flight checkpoint export leases when the
 next execution unit cannot reclaim their pinned cache resources. Other rows whose
 units fit can still run. Export retirement releases the pins and wakes admission;
