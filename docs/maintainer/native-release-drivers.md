@@ -68,6 +68,73 @@ A started/failed group is not retryable under the same attempt. Preserve it, dia
 and register a fresh attempt; do not remove `.started` files or manufacture completion receipts. In particular,
 metadata-only finalization is not permission to replay a measured phase.
 
+## Upgrade rehearsal
+
+Stage these two repository files together on the Windows executor:
+`packaging/windows/Invoke-UpgradeRehearsal.ps1` and `Invoke-UpgradeInstall.ps1`.
+The controller runs all three scenarios under the supplied lock command:
+
+```sh
+python -B packaging/windows/run_upgrade_rehearsal.py --config "$UPGRADE_DRIVER_CONFIG" --attempt "$ATTEMPT"
+```
+
+The controller config supplies `evidence_parent`, `immutable_roots` (input directories),
+`lock_command` (argument array), `command` (transport argument array ending with the staged
+PowerShell driver and `-Config` plus its private Windows config filename), and
+`timeout_seconds`. Use a stdout-preserving, exit-status-preserving transport. Its logs and
+working directory must be outside immutable input roots; do not let a transport create the
+fresh attempt root before the driver. The Windows driver also refuses overlapping input/output
+roots, including every configured read-only canonical root. Keep the outer transport deadline
+beyond the scenario's installer and cleanup budgets;
+retain the release window's independent supervisor/restoration guard on transport loss.
+
+The Windows config supplies:
+
+- `output_parent`, `state_root_leaf`, `task_name`: registered scratch parent and the lane's
+  specification leaf/task base. Each scenario claims its own `<attempt>-<scenario>` root.
+- `incumbent` and `candidate`: objects containing `installer`, `installer_sha256`, `package`,
+  `package_sha256`, `running_power_limit_w`; candidate also supplies the exact `instance_id` declared by its release ID
+  and source prefix. Freeze these against the authenticated component closure, not filenames.
+- `model`, `api_key_file`, `gpu_uuid`, `port`, `owner_power_limit_w`: explicit registered inputs.
+- `canonical_roots`: nonempty read-only census list; state/task XML/lease presence must remain
+  unchanged. Canonicals are never installed, stopped, renamed or deleted by the driver.
+
+Use an attempt of at most 23 safe characters for the upgrade task suffix. The Windows host
+must have an elevated Windows PowerShell, the unchanged package lifecycle helpers beside each
+installer, the actual predecessor assets, model/key, and the existing native lane prerequisites.
+The scratch volume must retain the unchanged 60 GiB free-space floor. Each installer child has
+a 900-second limit; logs and transaction evidence are retained. Running observations retain
+the predecessor/candidate power and inner/outer owner-lease assertions; candidate effective
+Device and Host weight counters must both be positive.
+The three scenarios are:
+
+1. **running**: install and start the real predecessor, upgrade it, require candidate health,
+   exact active instance/package identity, predecessor pointers and a completed running-handoff transaction.
+2. **rollback**: open an exclusive loopback listener immediately before the candidate's first
+   Start. Release it at rollback entry. Require the specific occupied-port failure, completed
+   rollback, deletion of the four transaction-created trees and healthy exact predecessor,
+   including its saved previous/prepared lifecycle pointers.
+3. **repair**: pause after durable candidate activation. The parent verifies the persisted
+   journal, active instance and owned child PID before interruption. Invoke the unchanged
+   `-RepairInterruptedInstall`, require repair/cleanup and healthy predecessor, then reinstall
+   the same instance successfully.
+
+Fault injection uses hash-pinned installer bytes and unique source anchors, not fixed line
+numbers, edited packages, a fabricated server or a shipped production fault hook. A missing
+or ambiguous anchor refuses the attempt. These scenarios do **not** claim to test a candidate
+server's failed Stop, access-denied Kill, an inherited paused owner, or every crash interval.
+
+Managed cleanup repairs interrupted transactions with the initiating installer, including
+incumbent transactions before state or instance identity exists. It stops only the scratch
+installation when state exists, unregisters its exact task even without state, and checks
+process/lease/task absence, original power and unchanged canonicals. Independent cleanup steps
+continue after an assertion fails; terminal state retains cleanup errors without masking the
+primary scenario exception. Failure never publishes success. Completed state precedes the
+state-hashed receipt; controller continuation consumes only completed receipts.
+Native transport accepts a complete pretty JSON object or a
+terminal compact receipt after progress text; the upgrade compact boundary explicitly rejects
+pretty/multiline output. Neither parser searches inside a pretty object for a nested receipt.
+
 ## Evidence and privacy
 
 All driver directories and raw qualification receipts are private window evidence. Keep keys,
@@ -84,7 +151,8 @@ rows; failed rehearsal census preserves `rows: null` plus its error instead of i
 empty census.
 
 The GPU-free `release-drivers` Actions job runs the invariant suite on Linux and Windows,
-including namespace, JSON boundary, receipt ordering and native chain failure/recovery checks
-with fake providers. The chain boundary regressions retain the real native constructor, state
-loader, phase publisher, preflight and restoration logic while replacing external providers.
+including namespace, JSON boundary, receipt ordering, PowerShell parsing/anchor checks, the
+three rehearsal scenario transitions and native chain failure/recovery checks with fake
+providers. The chain boundary regressions retain the real native constructor, state loader,
+phase publisher, preflight and restoration logic while replacing external providers.
 No CTest selection or numerical/acceptance tolerance is changed.
