@@ -635,7 +635,8 @@ class MultiGpuHostTests(unittest.TestCase):
         subject = SimpleNamespace(
             state_root="C:/state", target_root="C:/qualification", gpu_uuid="GPU-00000000-0000-0000-0000-000000000001",
             lane=SimpleNamespace(model_id="model", spec=json.loads(
-                (WINDOWS / "lanes/rtx3090/release-spec.json").read_text())),
+                (WINDOWS / "lanes/rtx3090/release-spec.json").read_text()),
+                config=json.loads((WINDOWS / "lanes/rtx3090/server-config.json").read_text())),
             remote_json=lambda host, script, **kwargs: captured.append(script) or {
                 "status": "passed", "protocol": product_protocol_fixture()},
             config=SimpleNamespace(target="not-contacted", pressure_port=18201),
@@ -783,6 +784,7 @@ class QualificationRestorationTests(unittest.TestCase):
             name="rtx3090", release_id="candidate", state_root="C:/candidate",
             task_name="candidate-task", owner_power_limit_w=370, model_sha256="model-sha",
             model_id="q38-ninfer", spec={"gpu": {"name": "NVIDIA GeForce RTX 3090"}},
+            config={"engine": {"max_concurrency": 1}},
         )
         subject.state_path = directory / "state.json"
         subject.receipt_dir = directory / "receipts"
@@ -951,6 +953,99 @@ class QualificationRestorationTests(unittest.TestCase):
             with patch.object(subject, "preflight", return_value={"fresh": True}) as action:
                 self.assertEqual(subject.phase("preflight", action), {"fresh": True})
                 action.assert_called_once_with()
+
+    def test_c1_only_packaged_protocol_refuses_c2_before_target_preflight(self) -> None:
+        flag = "SUPPORTS_CONCURRENT_SESSION_TELEMETRY"
+        for source in (
+            "# legacy C1-only tool\n", f"{flag} = False\n", f"{flag} = 1\n",
+            f"{flag} = 'True'\n", f"def local():\n    {flag} = True\n",
+        ):
+            with self.subTest(source=source), tempfile.TemporaryDirectory() as temporary:
+                subject = self.orchestrator(Path(temporary))
+                subject.lane.config["engine"]["max_concurrency"] = 2
+
+                def local(command, **kwargs):
+                    return SimpleNamespace(stdout=source if command[:2] == ["git", "show"] else "")
+
+                found = {"incumbent_state_root": "", "incumbent_was_running": False,
+                         "omp_models": ["ninfer-client-acceptance/q38-ninfer"]}
+                status = {"lineage_exists": False, "power_limit_w": 370,
+                          "gpu": "NVIDIA GeForce RTX 3090", "model_sha256": ""}
+                with patch.object(qualify_native, "run", side_effect=local) as commands, \
+                        patch.object(subject, "remote_json", side_effect=[found, status]) as remote, \
+                        patch.object(subject, "_save") as save:
+                    with self.assertRaisesRegex(
+                        qualify_native.LaneError,
+                        r"packaged agent_protocol.py is C1-only; lane requires engine.max_concurrency=2",
+                    ):
+                        subject.preflight()
+                remote.assert_not_called()
+                save.assert_not_called()
+                self.assertFalse(any(call.args[0][0] == "ssh" for call in commands.call_args_list))
+                self.assertNotIn("found_incumbent", subject.state)
+
+    def test_protocol_capability_preflight_uses_packaging_revision_for_c1_and_c2(self) -> None:
+        for capacity, source in (
+            (1, "# legacy C1-only tool\n"),
+            (2, "SUPPORTS_CONCURRENT_SESSION_TELEMETRY = True\n"),
+        ):
+            with self.subTest(max_concurrency=capacity), tempfile.TemporaryDirectory() as temporary:
+                subject = self.orchestrator(Path(temporary))
+                subject.tool_head = "packaging-source"
+                subject.lane.config["engine"]["max_concurrency"] = capacity
+
+                def local(command, **kwargs):
+                    return SimpleNamespace(stdout=source if command[:2] == ["git", "show"] else "")
+
+                found = {"incumbent_state_root": "", "incumbent_was_running": False,
+                         "omp_models": ["ninfer-client-acceptance/q38-ninfer"]}
+                status = {"lineage_exists": False, "power_limit_w": 370,
+                          "gpu": "NVIDIA GeForce RTX 3090", "model_sha256": ""}
+                with patch.object(qualify_native, "run", side_effect=local) as commands, \
+                        patch.object(subject, "remote_json", side_effect=[found, status]):
+                    receipt = subject.preflight()
+                self.assertEqual(receipt["lane"], "rtx3090")
+                commands.assert_any_call(
+                    ["git", "show", "packaging-source:tools/smoke/agent_protocol.py"],
+                    cwd=subject.config.source_root,
+                )
+
+    def test_c1_only_c2_refusal_runs_no_phase_or_cleanup(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            subject = self.orchestrator(Path(temporary))
+            subject.lane.config["engine"]["max_concurrency"] = 2
+            subject.config.dry_run = False
+            subject.config.through_phase = "preflight"
+            with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="")), \
+                    patch.object(subject, "phase", return_value={}) as phase, \
+                    patch.object(subject, "cleanup") as cleanup:
+                with self.assertRaisesRegex(
+                    qualify_native.LaneError,
+                    r"packaged agent_protocol.py is C1-only; lane requires engine.max_concurrency=2",
+                ):
+                    subject.execute()
+            phase.assert_not_called()
+            cleanup.assert_not_called()
+            self.assertEqual(subject.state["phases"], {})
+
+    def test_c1_only_c2_refuses_constructor_before_checkpoint_state(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = SimpleNamespace(
+                source_root=ROOT, candidate_source=None, lane="fixture",
+                state_dir=Path(temporary), scratch_task_suffix="UNIT",
+            )
+            lane = SimpleNamespace(name="fixture", spec={}, config={"engine": {"max_concurrency": 2}})
+            with patch.object(qualify_native, "run", return_value=SimpleNamespace(stdout="")), \
+                    patch.object(qualify_native.Lane, "load", return_value=lane), \
+                    patch.object(qualify_native, "validate_scratch_configuration"), \
+                    patch.object(qualify_native.Orchestrator, "_load_state") as load:
+                with self.assertRaisesRegex(
+                    qualify_native.LaneError,
+                    r"packaged agent_protocol.py is C1-only; lane requires engine.max_concurrency=2",
+                ):
+                    qualify_native.Orchestrator(config)
+            load.assert_not_called()
+            self.assertEqual(list(Path(temporary).iterdir()), [])
 
     def ready_for_receipt(self, directory: Path) -> qualify_native.Orchestrator:
         subject = self.orchestrator(directory)
@@ -1360,11 +1455,32 @@ class ScratchQualificationTests(unittest.TestCase):
 
         subject = SimpleNamespace(
             state_root="C:/unit-state", target_root="C:/unit-stage", gpu_uuid="GPU-unit-fixture",
-            lane=SimpleNamespace(spec=self.spec, model_id="unit-model"),
+            lane=SimpleNamespace(spec=self.spec, config=self.config, model_id="unit-model"),
             config=SimpleNamespace(target="unit-target", pressure_port=18200),
             remote_json=remote_json,
         )
         return subject, scripts
+
+    def test_protocol_and_pressure_receipts_record_configured_lane_concurrency(self) -> None:
+        for lane, capacity in (("rtx4090", 1), ("rtx3090", 2)):
+            self.config = json.loads((WINDOWS / f"lanes/{lane}/server-config.json").read_text())
+            self.spec = json.loads((WINDOWS / f"lanes/{lane}/release-spec.json").read_text())
+            self.assertEqual(self.config["engine"]["max_concurrency"], capacity)
+            for phase in ("protocol", "pressure_protocol"):
+                with self.subTest(lane=lane, phase=phase):
+                    subject, scripts = self.pressure_subject({
+                        "status": "passed", "protocol": product_protocol_fixture(),
+                    })
+                    with patch.object(qualify_native, "remote_ps") as cleanup:
+                        receipt = getattr(qualify_native.Orchestrator, phase)(subject)
+                    self.assertEqual(receipt["max_concurrency"], capacity)
+                    self.assertIn("bin\\qualification\\agent_protocol.py", scripts[0])
+                    self.assertNotIn("qualification_tool_override", receipt)
+                    if phase == "pressure_protocol":
+                        self.assertIn("'--max-concurrency',[string]$c.engine.max_concurrency", scripts[0])
+                        cleanup.assert_called_once()
+                    else:
+                        cleanup.assert_not_called()
 
     def test_pressure_transport_failure_preserves_store_and_drained_logs(self) -> None:
         subject, scripts = self.pressure_subject(qualify_native.LaneError("unit transport failure"))
