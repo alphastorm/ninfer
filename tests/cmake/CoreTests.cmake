@@ -10,6 +10,21 @@ ninfer_add_test(ninfer_rk4v4_codec_test
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_rk4v4_codec.cpp"
   LIBRARIES ninfer_core)
 
+ninfer_add_test(ninfer_rk4v4_pages_test
+  HOST_LANES bounded native windows
+  SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_rk4v4_pages.cpp"
+  LIBRARIES ninfer_core)
+ninfer_cuda_test_interposition(ninfer_rk4v4_pages_test)
+if(WIN32)
+  set_tests_properties(ninfer_rk4v4_pages_test PROPERTIES
+    ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:ninfer_test_cudart>")
+else()
+  foreach(symbol IN ITEMS cudaDeviceGetAttribute cudaMallocHost cudaFreeHost cudaMemcpy2DAsync)
+    target_link_options(ninfer_rk4v4_pages_test PRIVATE "LINKER:--wrap=${symbol}")
+  endforeach()
+endif()
+set_tests_properties(ninfer_rk4v4_pages_test PROPERTIES TIMEOUT 120)
+
 ninfer_add_test(ninfer_checkpoint_io_contract_test
   HOST_LANES windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_checkpoint_io_contract.cpp"
