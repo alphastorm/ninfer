@@ -21,6 +21,12 @@ GROUPS = {
     'finish': ('omp', 'benchmark_c1', 'receipt', 'restore'),
 }
 METHODS = {'private_path_scan': 'private_scan', 'context_128k': 'context', 'benchmark_c1': 'benchmark'}
+IMMUTABLE_INPUTS = (
+    'source_root', 'long_fixture', 'transfer_tool', 'builder_vcpkg', 'builder_cuda_compiler',
+    'builder_cxx_compiler', 'model_path', 'omp_root', 'incumbent_state_root',
+    'dependency_sbom_tool', 'vcpkg_resolved', 'cuda_inventory', 'third_party_inventory',
+    'runtime_inventory', 'api_key_file', 'qualified_runtime_bin', 'qualified_build_receipt',
+)
 
 
 class ChainOrchestrator(native.Orchestrator):
@@ -65,30 +71,26 @@ def prior_phases(part: str) -> list[str]:
     raise ValueError('unknown chain stage')
 
 
-def finalize(orchestrator) -> None:
+def finalize(orchestrator, state_path: Path, receipt_path: Path, stage: dict) -> None:
     store.require_phases(orchestrator.state, orchestrator.config.state_dir, list(native.PHASES))
-    orchestrator.state['status'] = 'passed'
-    orchestrator._save()  # The public receipt must never precede the state it claims.
+    orchestrator._save()
     persisted = store.parse_object(orchestrator.state_path.read_text(encoding='utf-8'))
     summary = store.parse_object((orchestrator.config.state_dir / 'qualification-summary.json').read_text())
-    lane = native.stage_lane_qualification(persisted, summary, orchestrator.lane)
+    # The composer validates a completed projection of persisted phase evidence.
+    # Durable native state must not claim success until every publication succeeds.
+    lane = native.stage_lane_qualification({**persisted, 'status': 'passed'}, summary, orchestrator.lane)
     native.atomic_json(orchestrator.config.state_dir / (orchestrator.lane.name + '.json'), lane)
+    store.publish_completed(state_path, receipt_path, stage,
+                            {'status': 'passed', 'part': stage['part'], 'binding': stage['binding']})
+    orchestrator.state['status'] = 'passed'
+    orchestrator._save()
 
 
 def run_part(config_path: Path, attempt: str, part: str) -> None:
     raw = config_path.read_bytes()
     settings = store.parse_object(raw.decode('utf-8-sig'))
     parent = Path(settings['evidence_parent'])
-    directory = store.claim_attempt(parent, attempt) if part == 'cpu' else parent / attempt
-    binding = hashlib.sha256(raw + Path(__file__).read_bytes() + Path(native.__file__).read_bytes()).hexdigest()
-    previous = list(GROUPS)[:list(GROUPS).index(part)]
-    for name in previous:
-        receipt = store.completed_receipt(directory / (name + '.state.json'), directory / (name + '.json'))
-        if receipt.get('binding') != binding:
-            raise ValueError('continuation inputs or driver changed; use a new attempt')
-    # An interrupted or failed group is evidence, never an implicit retry opportunity.
-    with (directory / (part + '.started')).open('x') as stream:
-        stream.write(binding + '\n')
+    directory = parent / attempt
     values = {key: value.replace('{attempt}', attempt) if isinstance(value, str) else value
               for key, value in settings['native'].items()}
     for key in ('source_root', 'long_fixture', 'transfer_tool'):
@@ -97,17 +99,8 @@ def run_part(config_path: Path, attempt: str, part: str) -> None:
     values.update(state_dir=directory / 'native', resume=False, dry_run=False,
                   through_phase=None, upgrade_orchestrator_state=False, scratch_task_suffix=attempt)
     config = native.Config(**values)
-    orchestrator = ChainOrchestrator(config)
     builder = settings['builder_parent'].rstrip('/\\') + '/' + attempt + '-builder'
     target = settings['target_parent'].rstrip('/\\') + '/' + attempt + '-target'
-    store.require_disjoint_logs(str(directory), [str(config.source_root)])
-    orchestrator.builder_root = builder
-    for attr, leaf in (('builder_source', 'source'), ('builder_build', 'build'),
-                       ('builder_bin', 'neutral-bin'), ('builder_out_a', 'package-a'),
-                       ('builder_out_b', 'package-b'), ('builder_scratch_a', 'scratch-a'),
-                       ('builder_scratch_b', 'scratch-b'), ('builder_script', 'qualify_native.py')):
-        setattr(orchestrator, attr, builder + '/' + leaf)
-    orchestrator.target_root = target
     scratch = native.PureWindowsPath(config.scratch_state_root)
     if ('..' in scratch.parts or not scratch.is_absolute()
             or not scratch.is_relative_to(native.PureWindowsPath(target))):
@@ -115,21 +108,56 @@ def run_part(config_path: Path, attempt: str, part: str) -> None:
     if any(not native.PureWindowsPath(root).is_absolute() or '..' in native.PureWindowsPath(root).parts
            for root in (builder, target)):
         raise ValueError('attempt parents must be absolute Windows paths without traversal')
-    store.require_phases(orchestrator.state, config.state_dir, prior_phases(part))
+    immutable = [str(config_path), *(str(getattr(config, key)) for key in IMMUTABLE_INPUTS
+                                    if getattr(config, key))]
+    for root in (str(parent), str(directory), builder, target, config.scratch_state_root):
+        store.require_disjoint_logs(root, immutable)
+    # Nothing above this line may create an attempt, marker, state or remote namespace.
+    if part == 'cpu':
+        store.claim_attempt(parent, attempt)
+    digest = hashlib.sha256()
+    for content in (raw, Path(__file__).read_bytes(), Path(store.__file__).read_bytes(),
+                    Path(native.__file__).read_bytes()):
+        digest.update(hashlib.sha256(content).digest())
+    binding = digest.hexdigest()
+    previous = list(GROUPS)[:list(GROUPS).index(part)]
+    for name in previous:
+        receipt = store.completed_receipt(directory / (name + '.state.json'), directory / (name + '.json'))
+        if receipt.get('binding') != binding:
+            raise ValueError('continuation inputs or driver changed; use a new attempt')
+    # An interrupted or failed group is evidence, never an implicit retry opportunity.
+    with (directory / (part + '.started')).open('x') as stream:
+        stream.write(binding + '\n')
     state_path, receipt_path = directory / (part + '.state.json'), directory / (part + '.json')
     stage = {'status': 'running', 'part': part, 'binding': binding}
     store.atomic_json(state_path, stage)
-    if part == 'cpu':
-        # A namespace refusal must not enter cleanup against the pre-existing namespace.
-        for host, root in ((config.builder, builder), (config.target, target)):
-            orchestrator.remote_json(host, f"""
+    orchestrator = None
+    cleanup_required = cleanup_started = False
+    try:
+        orchestrator = ChainOrchestrator(config)
+        orchestrator.builder_root = builder
+        for attr, leaf in (('builder_source', 'source'), ('builder_build', 'build'),
+                           ('builder_bin', 'neutral-bin'), ('builder_out_a', 'package-a'),
+                           ('builder_out_b', 'package-b'), ('builder_scratch_a', 'scratch-a'),
+                           ('builder_scratch_b', 'scratch-b'), ('builder_script', 'qualify_native.py')):
+            setattr(orchestrator, attr, builder + '/' + leaf)
+        orchestrator.target_root = target
+        store.require_phases(orchestrator.state, config.state_dir, prior_phases(part))
+        if part == 'cpu':
+            # A namespace refusal must not clean up a pre-existing namespace.
+            for host, root in ((config.builder, builder), (config.target, target)):
+                orchestrator.remote_json(host, f"""
 $ErrorActionPreference='Stop'
 $root={native.ps_quote(root)}
 if(Test-Path -LiteralPath $root){{throw 'attempt namespace already exists'}}
 New-Item -ItemType Directory -Path $root -ErrorAction Stop|Out-Null
 [Console]::Out.WriteLine('{{"status":"passed"}}')
 """)
-    try:
+        cleanup_required = True
+        if part != 'cpu':
+            # Prior cleanup restored the incumbent. Re-establish the new window's
+            # quiescence and write-ahead restoration obligation without replaying tests.
+            orchestrator.phase('preflight', orchestrator.preflight)
         for name in GROUPS[part]:
             orchestrator.phase(name, getattr(orchestrator, METHODS.get(name, name)))
             if name == 'package':
@@ -138,19 +166,29 @@ New-Item -ItemType Directory -Path $root -ErrorAction Stop|Out-Null
                     raise ValueError('qualification package differs from the frozen candidate')
         if part == 'finish':
             orchestrator.state['scratch_retirement'] = orchestrator.retire_scratch()
-            finalize(orchestrator)
+            finalize(orchestrator, state_path, receipt_path, stage)
         else:
+            cleanup_started = True
             orchestrator.cleanup()
             if orchestrator.state['restoration'].get('status') != 'passed':
                 raise ValueError('inter-stage restoration failed')
             orchestrator.state['status'] = 'paused'
             orchestrator._save()
-        store.publish_completed(state_path, receipt_path, stage,
-                                {'status': 'passed', 'part': part, 'binding': binding})
-    except BaseException:
-        orchestrator.cleanup()
+            store.publish_completed(state_path, receipt_path, stage,
+                                    {'status': 'passed', 'part': part, 'binding': binding})
+    except BaseException as error:
         stage['status'] = 'failed'
         store.atomic_json(state_path, stage)
+        if orchestrator is not None:
+            try:
+                restored = orchestrator.state.get('phases', {}).get('restore', {}).get('status') == 'passed'
+                if cleanup_required and not cleanup_started and not restored:
+                    orchestrator.cleanup()
+            except BaseException as cleanup_error:
+                error.add_note(f'cleanup failed: {cleanup_error}')
+            finally:
+                orchestrator.state['status'] = 'failed'
+                orchestrator._save()
         raise
 
 

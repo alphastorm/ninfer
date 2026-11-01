@@ -1,6 +1,8 @@
 """GPU-free regressions distilled from the private release wrappers."""
+import dataclasses
 import hashlib
 import json
+import ntpath
 from pathlib import Path
 import tempfile
 import unittest
@@ -67,6 +69,31 @@ class DriverInvariantTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             driver.require_disjoint_logs('Q:/work', ['Q:/work/inputs'])
 
+    def test_windows_drive_roots_overlap_in_both_directions(self):
+        for logs, root in (('Q:/logs', 'q:/'), ('Q:/', 'q:/inputs'),
+                           ('Q:/', 'q:\\'), ('Q:/logs', 'Q:/logs/inputs')):
+            with self.subTest(logs=logs, root=root), self.assertRaises(ValueError):
+                driver.require_disjoint_logs(logs, [root])
+        driver.require_disjoint_logs('Q:/logs', ['R:/'])
+        driver.require_disjoint_logs('Q:/inputs-other', ['Q:/inputs'])
+
+    def test_windows_relative_paths_use_one_case_insensitive_absolute_namespace(self):
+        with patch.object(driver, 'os', SimpleNamespace(name='nt')), \
+                patch.object(ntpath, 'abspath', side_effect=lambda value: ntpath.normpath(
+                    ntpath.join('Q:/Workspace', value))):
+            for logs, root in (('logs/output', 'q:/WORKSPACE/LOGS'),
+                               ('Q:/Workspace/Inputs/log', 'inputs'),
+                               ('./Logs/../Inputs', 'q:/workspace/INPUTS'),
+                               ('logs', 'Q:/Workspace/LOGS/inputs')):
+                with self.subTest(logs=logs, root=root), self.assertRaises(ValueError):
+                    driver.require_disjoint_logs(logs, [root])
+            driver.require_disjoint_logs('logs', ['Q:/Workspace/inputs'])
+
+    @unittest.skipIf(driver.os.name == 'nt', 'POSIX filesystem-root semantics')
+    def test_posix_filesystem_root_overlaps_descendants(self):
+        with self.assertRaises(ValueError):
+            driver.require_disjoint_logs(str(self.root), ['/'])
+
     def test_state_persisted_before_completed_receipt(self):
         state_path, receipt_path = self.root / 'state.json', self.root / 'receipt.json'
         driver.atomic_json(state_path, {'status': 'running'})
@@ -119,7 +146,6 @@ class DriverInvariantTests(unittest.TestCase):
                 subject.remote_json('builder', 'script')
 
     def test_native_chain_failure_then_fresh_recovery_and_completion(self):
-        import dataclasses
         values = {field.name: '' for field in dataclasses.fields(chain.native.Config)}
         values.update(source_root=str(self.root / 'source'), long_fixture=str(self.root / 'fixture'),
                       transfer_tool=None, scratch_state_root='Q:/work/{attempt}-target/managed')
@@ -168,7 +194,7 @@ class DriverInvariantTests(unittest.TestCase):
 
         def compose(state, summary, lane):
             path = self.root / 'outputs' / 'recovery' / 'native' / 'state.json'
-            self.assertEqual(json.loads(path.read_text())['status'], 'passed')
+            self.assertNotEqual(json.loads(path.read_text())['status'], 'passed')
             self.assertEqual(state['status'], 'passed')
             return {'status': 'passed'}
 
@@ -191,6 +217,253 @@ class DriverInvariantTests(unittest.TestCase):
             state = json.loads((self.root / 'outputs/recovery/native/state.json').read_text())
             with self.assertRaises(ValueError):
                 driver.require_phases(state, phase.parents[1], ['protocol'])
+
+
+class NativeChainBoundaryTests(unittest.TestCase):
+    """Use the real constructor, state loader, phase publisher, preflight and cleanup."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        fixture = self.root / 'fixture.json'
+        fixture.write_text('[]', encoding='utf-8')
+        self.values = {field.name: '' for field in dataclasses.fields(chain.native.Config)}
+        self.values.update(
+            source_root=str(self.root / 'source'), long_fixture=str(fixture), transfer_tool=None,
+            lane='lane', builder='builder', target='target', incumbent_state_root=None,
+            candidate_source='a' * 40, scratch_state_root='Q:/work/{attempt}-target/managed',
+            scratch_port=18200, pressure_port=18201, api_key_file='R:/inputs/key',
+            qualified_runtime_bin=None, qualified_build_receipt=None, gpu_uuid=None)
+        self.settings = {
+            'evidence_parent': str(self.root / 'outputs'), 'builder_parent': 'Q:/work',
+            'target_parent': 'Q:/work', 'native': self.values, 'expected_package_sha256': 'package'}
+        self.config_path = self.root / 'config.json'
+        self.calls = []
+        self.instances = []
+        self.host = {'incumbent_running': False, 'candidate_running': False, 'installed': False}
+        case = self
+
+        class LifecycleOrchestrator(chain.ChainOrchestrator):
+            def __init__(self, config):
+                super().__init__(config)
+                self.loaded = json.loads(json.dumps(self.state))
+                case.instances.append(self)
+
+            @property
+            def gpu_uuid(self):
+                return self.state.setdefault('gpu_uuid', 'GPU-01234567-89ab-cdef-0123-456789abcdef')
+
+            def remote_json(self, host, script, timeout=600):
+                if '$ompModels=' in script:
+                    return {'incumbent_state_root': self.config.incumbent_state_root or '',
+                            'incumbent_was_running': case.host['incumbent_running'],
+                            'omp_models': ['ninfer-client-acceptance/model']}
+                if '$modelPath=' in script:
+                    case.host.update(incumbent_running=False, candidate_running=False)
+                    return {'lineage_exists': case.host['installed'], 'model_sha256': 'model',
+                            'power_limit_w': 100, 'gpu': 'Test GPU'}
+                if "$incumbentState='untouched'" in script:
+                    case.host['candidate_running'] = False
+                    case.host['incumbent_running'] = bool(
+                        self.state.get('found_incumbent', {}).get('incumbent_was_running'))
+                    return {'status': 'passed', 'process_count': 0, 'power_limit_w': 100}
+                if 'scratch_retired' in script:
+                    return {'status': 'passed', 'scratch_retired': True}
+                if 'attempt namespace already exists' in script:
+                    return {'status': 'passed'}
+                raise AssertionError('unexpected remote provider call')
+
+        self.orchestrator = LifecycleOrchestrator
+        lane = chain.native.Lane('lane', {
+            'release_id': 'candidate', 'model': {'sha256': 'model'}, 'gpu': {'name': 'Test GPU'},
+            'lifecycle': {'state_root_name': 'managed', 'task_name': 'candidate',
+                          'gpu_owner_controller_protocol': {'owner_power_limit_w': 100}}},
+            {'model_id': 'model'})
+        for target, name, value in (
+                (chain, 'ChainOrchestrator', LifecycleOrchestrator),
+                (chain.native.Lane, 'load', lambda *args: lane),
+                (chain.native, 'run', lambda args, **kwargs: SimpleNamespace(
+                    stdout='a' * 40 if args[:2] == ['git', 'rev-parse'] else '')),
+                (chain.native, 'stage_lane_qualification', lambda *args: {'status': 'passed'})):
+            mock = patch.object(target, name, value)
+            mock.start()
+            self.addCleanup(mock.stop)
+        for name in chain.native.PHASES:
+            if name in ('preflight', 'restore'):
+                continue
+            def provider(subject, name=name):
+                case.calls.append(name)
+                case.assertFalse(case.host['incumbent_running'], 'successor did not quiesce incumbent')
+                receipt = {'status': 'passed'}
+                if name == 'package':
+                    receipt['package'] = {'sha256': 'package'}
+                if name == 'transfer_install':
+                    case.host['installed'] = True
+                if name in ('pressure_protocol', 'security'):
+                    case.host['candidate_running'] = False
+                if name in ('context_128k', 'restart', 'omp', 'protocol'):
+                    case.assertTrue(case.host['installed'])
+                    case.host['candidate_running'] = True
+                if name == 'receipt':
+                    receipt['status'] = 'restore-pending'
+                    driver.atomic_json(subject.config.state_dir / 'qualification-summary.json', receipt)
+                return receipt
+            mock = patch.object(LifecycleOrchestrator, chain.METHODS.get(name, name), provider)
+            mock.start()
+            self.addCleanup(mock.stop)
+
+    def run_part(self, part, attempt='attempt'):
+        driver.atomic_json(self.config_path, self.settings)
+        chain.run_part(self.config_path, attempt, part)
+
+    def stage_state(self, part, attempt='attempt'):
+        return json.loads((self.root / 'outputs' / attempt / (part + '.state.json')).read_text())
+
+    def test_every_mutable_root_rejects_every_immutable_input_before_construction(self):
+        inputs = (
+            'source_root', 'long_fixture', 'transfer_tool', 'builder_vcpkg', 'builder_cuda_compiler',
+            'builder_cxx_compiler', 'model_path', 'omp_root', 'incumbent_state_root',
+            'dependency_sbom_tool', 'vcpkg_resolved', 'cuda_inventory', 'third_party_inventory',
+            'runtime_inventory', 'api_key_file', 'qualified_runtime_bin', 'qualified_build_receipt')
+        original = dict(self.values)
+        with patch.object(chain, 'ChainOrchestrator', side_effect=AssertionError(
+                'overlap must be refused before orchestrator construction')) as constructor:
+            for index, key in enumerate(inputs):
+                for kind in ('controller', 'builder', 'target', 'scratch'):
+                    attempt = f'overlap-{index}-{kind}'
+                    directory = self.root / 'outputs' / attempt
+                    roots = {
+                        'controller': str(directory),
+                        'builder': f'Q:/work/{attempt}-builder',
+                        'target': f'Q:/work/{attempt}-target',
+                        'scratch': f'Q:/work/{attempt}-target/managed'}
+                    self.values.clear()
+                    self.values.update(original)
+                    self.values[key] = roots[kind] + '/frozen'
+                    with self.subTest(input=key, mutable=kind), self.assertRaises(ValueError):
+                        self.run_part('cpu', attempt)
+                    self.assertFalse(directory.exists())
+                    constructor.assert_not_called()
+
+    def test_invalid_remote_roots_leave_no_attempt_artifacts(self):
+        for index, (key, value) in enumerate((
+                ('builder_parent', 'relative'), ('target_parent', 'Q:/work/../escape'),
+                ('scratch_state_root', 'Q:/foreign/managed'))):
+            with self.subTest(key=key), patch.object(chain, 'ChainOrchestrator') as constructor:
+                if key in self.settings:
+                    self.settings[key] = value
+                else:
+                    self.values[key] = value
+                with self.assertRaises(ValueError):
+                    self.run_part('cpu', f'invalid-{index}')
+                constructor.assert_not_called()
+                self.assertFalse((self.root / 'outputs' / f'invalid-{index}').exists())
+                self.settings.update(builder_parent='Q:/work', target_parent='Q:/work')
+                self.values['scratch_state_root'] = 'Q:/work/{attempt}-target/managed'
+
+    def test_continuation_binds_each_imported_driver_module(self):
+        self.run_part('cpu')
+        original = Path.read_bytes
+        for module in (driver, chain.native, chain):
+            def changed(path, module=module):
+                return original(path) + (b'\n# changed driver bytes\n'
+                                         if path == Path(module.__file__) else b'')
+            with self.subTest(module=module.__name__), patch.object(Path, 'read_bytes', changed):
+                with self.assertRaisesRegex(ValueError, 'driver changed'):
+                    self.run_part('protocol')
+            self.assertFalse((self.root / 'outputs/attempt/protocol.started').exists())
+
+    def test_real_state_loader_preserves_prior_groups_with_resume_false(self):
+        self.run_part('cpu')
+        expected = json.loads((self.root / 'outputs/attempt/native/state.json').read_text())['phases']
+        self.run_part('protocol')
+        subject = self.instances[-1]
+        self.assertFalse(subject.config.resume)
+        for name in chain.GROUPS['cpu']:
+            self.assertEqual(subject.loaded['phases'][name], expected[name])
+        self.assertEqual(self.calls.count('neutral_build'), 1)
+        driver.require_phases(subject.state, subject.config.state_dir, chain.prior_phases('correctness'))
+
+    def test_successor_groups_requiesce_restored_incumbent_without_measured_replay(self):
+        self.values['incumbent_state_root'] = 'R:/incumbent'
+        self.host['incumbent_running'] = True
+        for part in chain.GROUPS:
+            with self.subTest(part=part):
+                self.run_part(part)
+                self.assertTrue(self.host['incumbent_running'])
+                self.assertFalse(self.host['candidate_running'])
+        for name in self.calls:
+            self.assertEqual(self.calls.count(name), 1, name)
+        self.assertEqual(self.instances[-1].state['status'], 'passed')
+
+    def test_restoration_failure_does_not_cleanup_twice(self):
+        calls = []
+        def fail(subject):
+            calls.append('cleanup')
+            subject.state['restoration'] = {'status': 'failed'}
+        with patch.object(self.orchestrator, 'cleanup', fail):
+            with self.assertRaisesRegex(ValueError, 'inter-stage restoration failed'):
+                self.run_part('cpu')
+        self.assertEqual(calls, ['cleanup'])
+        self.assertEqual(self.stage_state('cpu')['status'], 'failed')
+
+    def test_phase_failure_persists_failed_stage_when_cleanup_raises(self):
+        def cleanup(subject):
+            self.assertEqual(self.stage_state('cpu')['status'], 'failed')
+            raise OSError('injected cleanup failure')
+        with patch.object(self.orchestrator, 'neutral_build', side_effect=RuntimeError(
+                'injected phase failure')), patch.object(self.orchestrator, 'cleanup', cleanup):
+            with self.assertRaisesRegex(RuntimeError, 'injected phase failure'):
+                self.run_part('cpu')
+        self.assertEqual(self.stage_state('cpu')['status'], 'failed')
+        self.assertEqual(self.instances[-1].state['status'], 'failed')
+
+    def test_namespace_refusal_records_failure_without_cleanup(self):
+        with patch.object(self.orchestrator, 'remote_json', side_effect=ValueError(
+                'attempt namespace already exists')), patch.object(self.orchestrator, 'cleanup') as cleanup:
+            with self.assertRaisesRegex(ValueError, 'namespace already exists'):
+                self.run_part('cpu')
+        cleanup.assert_not_called()
+        self.assertEqual(self.stage_state('cpu')['status'], 'failed')
+
+    def test_failed_final_publication_never_persists_passed_native_state(self):
+        original_store, original_native = driver.atomic_json, chain.native.atomic_json
+        for failure_at in ('compose', 'lane', 'stage_state', 'stage_receipt'):
+            attempt = 'final-' + failure_at.replace('_', '-')
+            for part in list(chain.GROUPS)[:-1]:
+                self.run_part(part, attempt)
+            saw = []
+            def fail():
+                state = json.loads((self.root / 'outputs' / attempt / 'native/state.json').read_text())
+                saw.append(state['status'])
+                raise OSError('injected final publication failure')
+            def compose(*args):
+                if failure_at == 'compose':
+                    fail()
+                return {'status': 'passed'}
+            def publish_store(path, value):
+                if ((failure_at == 'stage_receipt' and path.name == 'finish.json') or
+                        (failure_at == 'stage_state' and path.name == 'finish.state.json'
+                         and value.get('status') == 'passed')):
+                    fail()
+                original_store(path, value)
+            def publish_native(path, value):
+                if failure_at == 'lane' and path.name == 'lane.json':
+                    fail()
+                original_native(path, value)
+            with self.subTest(failure_at=failure_at), \
+                    patch.object(chain.native, 'stage_lane_qualification', side_effect=compose), \
+                    patch.object(chain.native, 'atomic_json', side_effect=publish_native), \
+                    patch.object(driver, 'atomic_json', side_effect=publish_store), \
+                    patch.object(self.orchestrator, 'cleanup') as cleanup:
+                with self.assertRaisesRegex(OSError, 'final publication failure'):
+                    self.run_part('finish', attempt)
+                cleanup.assert_not_called()
+                self.assertEqual(len(saw), 1)
+                self.assertNotEqual(saw[0], 'passed')
+                self.assertEqual(self.stage_state('finish', attempt)['status'], 'failed')
+                self.assertEqual(self.instances[-1].state['status'], 'failed')
 
 if __name__ == '__main__':
     unittest.main()
