@@ -36,10 +36,9 @@ def execute(config_path: Path, attempt: str) -> None:
                 # TimeoutExpired can carry bytes even with text=True.
                 for stream, partial in (('stdout', error.stdout), ('stderr', error.stderr)):
                     log_path = directory / (scenario + '.' + stream + '.log')
-                    if isinstance(partial, bytes):
-                        log_path.write_bytes(partial)
-                    else:
-                        log_path.write_text(partial or '', encoding='utf-8')
+                    # Retain text partials as UTF-8 bytes without platform newline translation.
+                    payload = partial if isinstance(partial, bytes) else (partial or '').encode('utf-8')
+                    log_path.write_bytes(payload)
                 raise
             (directory / (scenario + '.stdout.log')).write_text(result.stdout)
             (directory / (scenario + '.stderr.log')).write_text(result.stderr)

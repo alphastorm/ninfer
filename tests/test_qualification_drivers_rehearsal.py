@@ -141,7 +141,7 @@ $start=@($ast.EndBlock.Statements | Where-Object {
 })[0].Extent.StartOffset
 $caught=$null
 try {Invoke-Expression $text.Substring($start)} catch {$caught=$_.Exception.Message}
-""" + assertions, functions=('Require', 'ReadJson', 'Save', 'Journals'))
+""" + assertions, functions=('Require', 'ReadJson', 'Save', 'Journals', 'ScratchTask'))
 
     def test_rollback_rejects_changed_lifecycle_pointers(self):
         for field in ('previous', 'prepared'):
@@ -175,6 +175,14 @@ foreach($Scenario in @('running','rollback','repair')) {
                                   'immutable_roots': [str(self.root / 'inputs')],
                                   'command': ['transport'], 'lock_command': ['lock'],
                                   'timeout_seconds': 1})
+        original_open = Path.open
+
+        def windows_log_open(path, mode='r', *args, **kwargs):
+            # Exercise Windows text-mode translation even on a POSIX test runner.
+            if path.suffix == '.log' and 'b' not in mode and kwargs.get('newline') is None:
+                kwargs['newline'] = '\r\n'
+            return original_open(path, mode, *args, **kwargs)
+
         for index, (stdout, stderr, expected_out, expected_err) in enumerate((
                 (b'partial\xff progress\n', b'partial error\n', b'partial\xff progress\n', b'partial error\n'),
                 ('text progress\n', 'text error\n', b'text progress\n', b'text error\n'),
@@ -182,7 +190,8 @@ foreach($Scenario in @('running','rollback','repair')) {
             with self.subTest(index=index):
                 failure = subprocess.TimeoutExpired(['transport'], 1, output=stdout, stderr=stderr)
                 attempt = 'timeout-' + str(index)
-                with patch.object(upgrade.subprocess, 'run', side_effect=failure):
+                with patch.object(Path, 'open', windows_log_open), \
+                        patch.object(upgrade.subprocess, 'run', side_effect=failure):
                     with self.assertRaises(subprocess.TimeoutExpired):
                         upgrade.execute(config, attempt)
                 directory = self.root / 'evidence' / attempt
@@ -191,7 +200,7 @@ foreach($Scenario in @('running','rollback','repair')) {
                 self.assertEqual((directory / 'running.stdout.log').read_bytes(), expected_out)
                 self.assertEqual((directory / 'running.stderr.log').read_bytes(), expected_err)
 
-    def test_cleanup_repairs_incumbent_and_unregisters_task_without_state(self):
+    def test_cleanup_repairs_incumbent_but_preserves_unowned_task_without_state(self):
         for instance in ("'old-id'", '$null'):
             with self.subTest(instance=instance):
                 self.cleanup('$journalInstance=' + instance + '\n' + r"""
@@ -201,10 +210,91 @@ Save $journalPath @{instance_id=$journalInstance;status='in_progress';started_ut
 """, r"""
 if($caught -cne 'primary-scenario-failure'){throw 'lost the interrupted-incumbent failure'}
 if(($script:repairs -join ',') -cne 'incumbent/repair'){throw 'did not repair the incumbent journal'}
-if(-not $script:unregistered){throw 'orphaned the scratch task without state.json'}
+if($script:unregistered){throw 'unregistered a task without lifecycle ownership state'}
 $final=ReadJson $statePath
-if($final.status -cne 'failed' -or $final.restored -ne $true){throw 'interrupted-incumbent cleanup state is incorrect'}
+if($final.status -cne 'failed' -or $final.restored -ne $false){throw 'interrupted-incumbent cleanup state is incorrect'}
+if($final.cleanup_errors -notcontains 'refusing to unregister scratch task without matching lifecycle state'){throw 'missing ownership refusal evidence'}
 if(-not (Test-Path (Join-Path $evidence 'census.json'))){throw 'cleanup census missing'}
+""")
+
+    def test_cleanup_refuses_task_owned_by_another_scratch_root(self):
+        for binding in ('missing', 'foreign'):
+            with self.subTest(binding=binding):
+                setup = r"""
+$script:scenarioFails=$false
+$otherRoot=Join-Path $scratch 'other-output/managed'
+New-Item -ItemType Directory -Path $otherRoot -Force | Out-Null
+Save (Join-Path $otherRoot 'state.json') @{task_name=$expectedTask}
+$script:task | Add-Member -NotePropertyName StateRoot -NotePropertyValue $otherRoot
+"""
+                if binding == 'foreign':
+                    setup += "Save (Join-Path $stateRoot 'state.json') @{task_name='foreign-task'}\n"
+                self.cleanup(setup, r"""
+if($script:unregistered -or $null -eq $script:task){throw 'removed another scratch root task'}
+if((ReadJson (Join-Path $otherRoot 'state.json')).task_name -cne $expectedTask){throw 'changed another scratch root state'}
+if(-not $caught){throw 'accepted cleanup without task ownership'}
+$final=ReadJson $statePath
+if($final.status -cne 'failed' -or $final.restored -ne $false){throw 'reported restoration without task ownership'}
+if($final.cleanup_errors -notcontains 'refusing to unregister scratch task without matching lifecycle state'){throw 'missing ownership refusal evidence'}
+if($script:published){throw 'published a receipt without task ownership'}
+""")
+
+    def test_cleanup_records_nonterminating_task_lookup_failures(self):
+        for failing_probe in (1, 2):
+            with self.subTest(failing_probe=failing_probe):
+                self.cleanup('$script:failingProbe=' + str(failing_probe) + '\n' + r"""
+$script:scenarioFails=$false
+$script:taskProbes=0
+Save (Join-Path $stateRoot 'state.json') @{task_name=$expectedTask}
+Set-Content (Join-Path $stateRoot 'Control-Release.ps1') @'
+param($Action,$StateRoot)
+@{process_state='stopped';gpu_owner=@{lease_active=$false;current_paused=$false}} | ConvertTo-Json -Compress
+'@
+function Get-ScheduledTask {
+ [CmdletBinding()]
+ param([string]$TaskName)
+ $script:taskProbes++
+ if($script:taskProbes -ge $script:failingProbe) {
+  Write-Error 'scratch-task-provider-failure' -ErrorId ScratchTaskProviderFailure -Category ResourceUnavailable
+  return
+ }
+ return $script:task
+}
+function Unregister-ScheduledTask {param($TaskName,[switch]$Confirm)
+ $script:unregistered=$true
+ # The task remains registered, so a failed final probe cannot prove absence.
+}
+""", r"""
+$final=ReadJson $statePath
+if($final.cleanup_errors -notcontains 'scratch-task-provider-failure'){throw 'scheduler lookup failure was not retained'}
+if($final.status -cne 'failed' -or $final.restored -ne $false){throw 'reported restoration after a failed task lookup'}
+if(-not $caught -or $null -eq $script:task){throw 'accepted an unobserved registered task'}
+if($script:taskProbes -ne 2){throw 'skipped an independent scratch task probe'}
+if($script:published){throw 'published a receipt after a failed task lookup'}
+""")
+
+    def test_cleanup_accepts_only_scheduler_task_not_found_as_absent(self):
+        for error_id in ('CmdletizationQuery_NotFound_TaskName', 'TaskProviderUnavailable'):
+            with self.subTest(error_id=error_id):
+                self.cleanup("$script:taskErrorId='" + error_id + "'\n" + r"""
+$script:scenarioFails=$false
+$script:task=$null
+function Get-ScheduledTask {
+ [CmdletBinding()]
+ param([string]$TaskName)
+ Write-Error 'task lookup returned no object' -ErrorId $script:taskErrorId -Category ObjectNotFound
+}
+""", r"""
+$final=ReadJson $statePath
+if($script:taskErrorId -ceq 'CmdletizationQuery_NotFound_TaskName') {
+ if($caught -or $final.status -cne 'passed' -or $final.restored -ne $true){throw 'task-not-found was not treated as absent'}
+ if(-not $script:published){throw 'did not publish a restored no-task scenario'}
+} else {
+ if(-not $caught -or $final.restored -ne $false){throw 'unrelated ObjectNotFound error was treated as task absence'}
+ if($final.cleanup_errors -notcontains 'task lookup returned no object'){throw 'lookup failure evidence missing'}
+ if($script:published){throw 'published a receipt after an unrelated lookup error'}
+}
+if($script:unregistered){throw 'unregistered an absent task'}
 """)
 
     def test_cleanup_repairs_early_candidate_journal_with_no_instance_yet(self):
@@ -216,7 +306,7 @@ Save $journalPath @{instance_id=$null;status='in_progress';started_utc='2026-01-
 """, r"""
 if($caught -cne 'primary-scenario-failure'){throw 'lost the early candidate failure'}
 if(($script:repairs -join ',') -cne 'candidate/repair'){throw 'did not use the interrupted candidate installer'}
-if(-not $script:unregistered -or (ReadJson $statePath).restored -ne $true){throw 'early candidate cleanup failed'}
+if($script:unregistered -or (ReadJson $statePath).restored -ne $false){throw 'early candidate cleanup claimed task ownership without state'}
 """)
 
     def test_missing_transaction_directory_does_not_abort_predecessor_stop(self):
@@ -255,6 +345,11 @@ if($script:published){throw 'published a receipt after failed cleanup'}
     def test_cleanup_running_task_is_unregistered_and_census_failure_is_recorded(self):
         self.cleanup(r"""
 $script:scenarioFails=$false
+Save (Join-Path $stateRoot 'state.json') @{task_name=$expectedTask}
+Set-Content (Join-Path $stateRoot 'Control-Release.ps1') @'
+param($Action,$StateRoot)
+@{process_state='stopped';gpu_owner=@{lease_active=$false;current_paused=$false}} | ConvertTo-Json -Compress
+'@
 $script:task.State='Running'
 $script:censusFails=$true
 """, r"""

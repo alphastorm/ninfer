@@ -51,6 +51,17 @@ function Journals([switch]$All) {
         ReadJson (Join-Path $_.FullName 'journal.json')
     } | Where-Object { $All -or $_.instance_id -ceq $settings.candidate.instance_id } | Sort-Object started_utc)
 }
+function ScratchTask {
+    try { return Get-ScheduledTask -TaskName $expectedTask -ErrorAction Stop }
+    catch {
+        # Windows PowerShell reports an unmatched TaskName through this specific query error.
+        if ($_.FullyQualifiedErrorId -ceq 'CmdletizationQuery_NotFound_TaskName,Get-ScheduledTask' -and
+            $_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound) {
+            return $null
+        }
+        throw
+    }
+}
 function Observe {
     $state = ReadJson (Join-Path $stateRoot 'state.json')
     $release = $state.releases.PSObject.Properties[[string]$state.active_release].Value
@@ -220,17 +231,21 @@ try {
             Require ((Install $script:installingRelease 'repair' 'cleanup-repair') -eq 0) 'cleanup repair failed'
         }
     } catch { $cleanupErrors.Add([string]$_.Exception.Message) }
+    $taskOwned = $false
     try {
         if (Test-Path (Join-Path $stateRoot 'state.json')) {
             $bound = ReadJson (Join-Path $stateRoot 'state.json')
             Require ($bound.task_name -ceq $expectedTask) 'refusing cleanup of a foreign task'
+            # A matching name alone is not ownership; this scratch root must have lifecycle state.
+            $taskOwned = $true
             $stopped = (& (Join-Path $stateRoot 'Control-Release.ps1') -Action Stop -StateRoot $stateRoot | Out-String) | ConvertFrom-Json
             Require ($stopped.process_state -eq 'stopped' -and $stopped.gpu_owner.lease_active -eq $false -and $stopped.gpu_owner.current_paused -eq $false) 'managed cleanup did not release ownership'
         }
     } catch { $cleanupErrors.Add([string]$_.Exception.Message) }
     try {
-        $task = Get-ScheduledTask -TaskName $expectedTask -ErrorAction SilentlyContinue
+        $task = ScratchTask
         if ($null -ne $task) {
+            Require $taskOwned 'refusing to unregister scratch task without matching lifecycle state'
             if ($task.State -eq 'Running') { $cleanupErrors.Add('scratch task remains running') }
             Unregister-ScheduledTask -TaskName $expectedTask -Confirm:$false
         }
@@ -255,7 +270,7 @@ try {
         Require (-not (Test-Path (Join-Path $stateRoot 'gpu-owner-lease.json')) -and -not (Test-Path (Join-Path $stateRoot 'gpu-owner-state/lease.json'))) 'scratch leases remain'
     } catch { $cleanupErrors.Add([string]$_.Exception.Message) }
     try {
-        Require ($null -eq (Get-ScheduledTask -TaskName $expectedTask -ErrorAction SilentlyContinue)) 'scratch task remains'
+        Require ($null -eq (ScratchTask)) 'scratch task remains'
     } catch { $cleanupErrors.Add([string]$_.Exception.Message) }
     try {
         Require ((ConvertTo-Json -InputObject @(Canonical) -Depth 10 -Compress) -ceq $beforeCanonical) 'canonical state changed'
