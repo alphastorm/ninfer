@@ -79,6 +79,9 @@ class BatterySelectionTests(unittest.TestCase):
                                   expect_binary_sha256=None, expect_model_artifact_sha256=None,
                                   expect_config_sha256=None, expect_deployment_profile=None)
 
+    def test_packaged_tool_declares_concurrent_session_telemetry(self) -> None:
+        self.assertIs(getattr(protocol, 'SUPPORTS_CONCURRENT_SESSION_TELEMETRY', False), True)
+
     def test_public_has_no_status_or_private_identity_assertions(self) -> None:
         with patch.object(protocol, 'wait_for_health'), \
              patch.object(protocol, 'json_response', return_value={'input_tokens': 5}) as request, \
@@ -255,30 +258,36 @@ class SessionReplayTests(unittest.TestCase):
                     self.replay('private_input_replay', snapshots=snapshots)
 
     def test_non_quiescent_scheduler_fails_at_every_snapshot(self) -> None:
-        for snapshot in (0, 1, 2):
-            for field in ('running', 'prefilling', 'decode_ready', 'waiting',
-                          'materializing', 'capture_pending'):
-                snapshots = [
-                    self.status('root', 10), self.status('private_input_replay', 11),
-                    self.status('root', 12),
-                ]
-                snapshots[snapshot]['scheduler'][field] = 1
-                message = 'not quiescent' if snapshot < 2 else 'not request-correlated'
-                with self.subTest(snapshot=snapshot, field=field), \
-                     self.assertRaisesRegex(protocol.ProtocolError, message):
-                    self.replay('private_input_replay', snapshots=snapshots)
+        for capacity in (1, 2):
+            for snapshot in (0, 1, 2):
+                for field in ('running', 'prefilling', 'decode_ready', 'waiting',
+                              'materializing', 'capture_pending'):
+                    snapshots = [
+                        self.status('root', 10), self.status('private_input_replay', 11),
+                        self.status('root', 12),
+                    ]
+                    for status in snapshots:
+                        status['scheduler']['max_concurrency'] = capacity
+                    snapshots[snapshot]['scheduler'][field] = 1
+                    message = 'not quiescent' if snapshot < 2 else 'not request-correlated'
+                    with self.subTest(max_concurrency=capacity, snapshot=snapshot, field=field), \
+                         self.assertRaisesRegex(protocol.ProtocolError, message):
+                        self.replay('private_input_replay', snapshots=snapshots)
 
     def test_wrong_decode_delta_fails_repeat_and_isolated_requests(self) -> None:
-        for snapshot in (1, 2):
-            for delta in (0, 2):
-                snapshots = [
-                    self.status('root', 10), self.status('private_input_replay', 11),
-                    self.status('root', 12),
-                ]
-                snapshots[snapshot]['scheduler']['committed_decode_tokens'] = 10 + snapshot - 1 + delta
-                with self.subTest(snapshot=snapshot, delta=delta), \
-                     self.assertRaisesRegex(protocol.ProtocolError, 'not request-correlated'):
-                    self.replay('private_input_replay', snapshots=snapshots)
+        for capacity in (1, 2):
+            for snapshot in (1, 2):
+                for delta in (0, 2):
+                    snapshots = [
+                        self.status('root', 10), self.status('private_input_replay', 11),
+                        self.status('root', 12),
+                    ]
+                    for status in snapshots:
+                        status['scheduler']['max_concurrency'] = capacity
+                    snapshots[snapshot]['scheduler']['committed_decode_tokens'] = 10 + snapshot - 1 + delta
+                    with self.subTest(max_concurrency=capacity, snapshot=snapshot, delta=delta), \
+                         self.assertRaisesRegex(protocol.ProtocolError, 'not request-correlated'):
+                        self.replay('private_input_replay', snapshots=snapshots)
 
     def test_root_repeat_still_fails_with_content_safe_cache_evidence(self) -> None:
         with self.assertRaises(protocol.ProtocolError) as raised:
