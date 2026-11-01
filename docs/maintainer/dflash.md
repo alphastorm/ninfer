@@ -313,3 +313,169 @@ The finite model implementation is in
 [`program/storage/draft_context.cpp`](../../src/models/qwen3_5/program/storage/draft_context.cpp).
 Workspace planners and CUDA Graph profiles use the selected parameters and startup widths. Native
 Ops retain their own format, shape, numerical and state-transition contracts.
+
+## Round forms and low-yield governor
+
+**Design only; not implemented or enabled.** This section and the
+[P17 preregistration](../../bench/measurements/p17-dflash2-low-accept/preregistration.md)
+address [#58](https://github.com/alphastorm/ninfer/issues/58). Measurements and implementation
+are queued until design acceptance and v0.16.0 publication. No profile, engine default,
+mathematical contract or acceptance gate changes with this document.
+
+### Problem and first mechanism
+
+On the retained N16 RTX 4090 `log-024@0` request, K7 emits 3.515 decode tokens per
+round versus MTP3's 3.343, but costs about 27.03 versus 24.00 ms per round. The
+weighted 108-case ratio is 1.273582 while this case is 0.933832. This is a
+round-cost versus yield problem, not evidence that DFlash2 always yields less.
+The first output comes from prefill; the explanatory yield uses 1023 decode
+outputs, whereas the existing speed gate uses completion tokens/decode seconds.
+
+The first measurable action is **ExtentCap**: leave physical K=7, W=8, proposal
+work, graph selection, allocations and append capacity unchanged; on selected
+rounds reduce P using the existing proposal-extent/target-valid-prefix path.
+Set `P=min(7,cap,budget-1,capacity-F-1)` with saturating budget handling and
+`target_valid_columns=P+1`; preserve `proposal_valid_columns=8`. Both extent
+calculations and the target RoPE positions in `decode.cpp` must agree. This
+saves only work actually controlled by the live prefix, not full-width GEMMs,
+the draft stack or selector. Its profitability is deliberately unproven.
+
+Do not implement variable physical widths merely to measure ExtentCap. Build T
+needs only the integer governor, commit-bound observations and opt-in trace.
+Static or request-wide smaller windows are rejected as production mechanisms:
+retained K6/K5 floor ratios are about 0.863/0.867; K3 also failed. Those arms are
+useful calibration controls, not candidates to retry unchanged.
+
+### Request arming and round choice
+
+The disabled path is the current path. For enabled requests, start unarmed and
+collect a fixed-size integer ring of A from informative, fully committed Long
+rounds with P=7. Arm once the last R observations have sum at most H; R and H
+come from the frozen grid, never from timings or a case name. Sticky arming
+lasts only for that request. Exclude zero-extent, budget/capacity-clipped,
+discarded and partially published terminal rounds from learning.
+
+After arming, a Long round with A<=cap predicts a capped next round; a Long
+round with A>cap predicts Long. A capped round that saturates its effective
+extent predicts Long next; otherwise remain capped. The first armed choice
+uses the last informative Long observation. Non-informative observations do
+not change predictor state. Forced-cap mode is diagnostic only. Observe at the
+successful commit boundary, not when speculative egress first arrives.
+
+Each unarmed row retains precisely its old extent and ingress fields. With
+ExtentCap, mixed batches retain physical W=8 and individual live extents; no
+neighbor may arm another row. Future Short/LookupSkip forms require **every**
+row to be armed, eligible and to choose that same form; otherwise use Long,
+retaining only independently planned ExtentCaps. This prevents a neighboring
+armed row from changing an unarmed row's physical route. No shared history,
+timing-driven decision, host-derived RNG identity or request-class override.
+
+Reset on new request/lane reuse, including same-length ledger replacement.
+An in-process suspension/resume of the same request preserves its control
+state and excludes replay work from observations. New requests restored from
+checkpoints start unarmed; this proposal does not add persisted governor state.
+Trace and lookup storage, when enabled, are bounded and request-owned.
+
+### Conditional forms, identity and memory
+
+| Form | Change | Admission |
+|---|---|---|
+| Long / ExtentCap | Same W=8; only per-row live P changes | First characterization; no new graphs or device buffers |
+| Short | One smaller physical K, selected per round | Only calibrated S2 admission; atomic width/append/replay work |
+| LookupSkip | Keep W=8 and context append; replace proposer with exact prior-token lookup and one-hot q | Only token-accurate S2 admission; unconstrained rows only |
+| Post-draft verify width | Split draft/verify graphs; decide after draft readiness | Separate design if cheaper forms fail; charge host synchronization |
+| MTP fallback | Dual weights, KV, graphs and state catch-up | Rejected for this bounded memory/cost envelope |
+
+MTP fallback has no demonstrated fit within the existing 640/768 MiB admission
+headroom, would require a second resident backend and current MTP state or
+re-prefill, and is not a cheap switch. Do not promote the earlier unmeasured
+weight/KV estimates into a proof of exact required bytes or absolute impossibility.
+
+Identity classes describe obligations, not established properties:
+
+- **0, execution identity:** disabled/unarmed requests use the v0.16 graph
+  definitions, route, ingress values and existing buffer layout. Trace-off
+  candidate outputs must equal the retained K7 reference. Instrumented graphs
+  are a separate diagnostic variant and cannot claim graph identity.
+- **1, fixed-route conditional identity:** ExtentCap and LookupSkip need
+  column causality *and* partition invariance of committed KV/GDN/features,
+  including graph-tier transitions. Fixed W alone proves neither.
+- **1-prime, width-conditional identity:** additionally requires H_W for a
+  Short width. No width is currently admitted: retained K6 and K5 outputs and
+  token IDs differ from same-source K7 on the only common measured case.
+- **2, output-changing route:** still requires valid target verification,
+  deterministic repeats and all existing quality/agent gates. A failed class-1
+  identity experiment stops class-1 admission; class-2 promotion needs an
+  explicit accepted disposition, never a silent relabel to bypass a gate.
+
+Greedy target authority is not a proof of byte identity across numerical
+routes. For stochastic requests, retain the actual conditional q and sparse
+rejection correction, position/purpose RNG keys and commit-only penalty
+updates. Changing a proposal/partition can change samples without establishing
+distribution correctness by itself. Do not extend this experiment's greedy
+identity evidence to stochastic/grammar semantics without their existing tests.
+
+At capacity 131072, N16 has six DFlash2 forward topology classes **and one
+finish class** per exact batch size: seven speculative executables at C1,
+56 at maximum C8, excluding ordinary graphs. ExtentCap adds zero. A separate
+Short form adds seven per B (56 across B=1..8); LookupSkip conservatively
+budgets six forward executables per B, sharing Long finish only after binding
+equality is demonstrated. A different topology optimization requires evidence.
+Per-executable memory and capture time are unknown, not 15/30 MiB estimates.
+Future additional graph/buffer memory is capped at 64 MiB per enabled lane,
+without consuming the required 640 MiB RTX 4090 / 768 MiB RTX 3090 admission
+reserve. Measure actual cold-start peak, post-capture availability and capture
+time; an allocator estimate alone cannot qualify WDDM fit.
+
+### Verified N16 coupling audit
+
+Anchors below refer to `26fa28d0e7834515508fc07ac503164a6effc820`, before this
+documentation change; paths are under `src/` unless stated otherwise.
+
+| Assumption | Source and corrected answer |
+|---|---|
+| U1: feature-sink lane stride | `models/qwen3_5/execution/text.cpp:180-200` uses `batch_width` for the source view, but destination lane pitch comes from `pending_features.nb[2]`. `ops/indexing/indexing.cu:145-169` requires equal logical widths and honors destination strides. A Short destination width slice must retain the Long lane pitch; a new lane-stride field is not automatically necessary. |
+| U2: transaction width consumers | No literal `draft_window+1` occurs in `program/transactions/`. Actual resolution is `models/qwen3_5/program/prefill.cpp:319-366,440-457`: penalty-token slices, terminal hidden gather and host egress row stride need width-aware views. Replay records/fold are startup-bound in `program_impl.cpp:75-77` and `planning/startup.cpp:140-150`; auditing only pending metadata is insufficient. |
+| U3: tensor prefix views | `core/tensor.cpp:123-153` requires contiguous equal-numel `view`; `slice` preserves strides. A dense prefix can be composed as flatten, bounded slice, reshape for contiguous scratch. Never pack persistent lane-addressed features or records as if they were round scratch. No generic reinterpret API is required for T. |
+| U4: eager captures | `models/qwen3_5/program/graphs.cpp:435-442,517-535` eagerly captures every exact B=1..max; finish has one profile. `graphs.cpp:37-70` instantiates per topology. `planning/graph_profiles.cpp:52-63` supplies six forward classes at 131072, not six finish classes. |
+| U5: histogram | Final B1/B2 on both cards: attempted `[291,291,291,290,290,290,289]`, accepted `[197,155,121,87,68,56,48]`. Earlier proposed `[197,157,121,87,68,55,47]` is not N16 evidence despite equal totals. |
+| U6: append-only ledger | Active commits append (`program/prefill.cpp:457`, `transactions/commit.cpp:255`, `decode.cpp:336`); new binding replaces the ledger (`transactions/binding.cpp:339`). Resume reinstalls sampling separately (`binding.cpp:335`). An index keyed only on length/shrink is unsafe across rebinding; bind ownership/reset to request identity. |
+| U7: ingress layout | `program/round_buffers.h:87-110` has fixed max-sized flat arrays; `round_buffers.cpp:330-373` binds dense startup-width tensors at fixed field offsets. `decode.cpp:675-681` writes RoPE with `row*width`. Reinterpret only within each field, never across adjacent arrays; preserve complete Long ingress bytes. |
+
+### Post-acceptance implementation order and host seams
+
+1. Add default-off policy/trace options in `include/ninfer/types.h`,
+   `src/product/speculative_options.h` and the existing CLI/serve parsers.
+   Extend existing option tests for backend eligibility, bounds and diagnostic
+   force mode. No profile enables them.
+2. Add a small pure integer governor under
+   `src/models/qwen3_5/program/speculative/`; attach request-owned state in
+   `program_impl.h`. Test golden observation/decision sequences, exact arming,
+   clipping, saturation, partial commit, cancellation, reuse and resume.
+3. Wire ExtentCap in `program/decode.cpp`, commit observation in
+   `program/transactions/commit.cpp`, and reset in existing request installation.
+   Host tests compare every old/new unarmed ingress field, offsets and bytes,
+   B=1/8, mixed eligibility, budget/capacity edges and graph tiers. Existing
+   fixed-width buffers, sink, replay fold and append remain unchanged.
+4. Add bounded opt-in round traces at commit, with serialization through the
+   existing request-log path and an offline replay consumer. Keep device-score
+   copies out of default graphs; record host counters first. Test schema,
+   terminal truncation, overflow refusal and C++/replay decision equivalence.
+   This completes measurement build T; no Short or LookupSkip infrastructure.
+5. Execute S1, calibrate S2, then implement only admitted conditional forms.
+   Short is one atomic change across `round_buffers.{h,cpp}`,
+   `execution_context.h`, `execution/draft.cpp`, `program/decode.cpp`,
+   `program/prefill.cpp`, graph capture/planning and ReplaySSM views/fold
+   binding. Split Long append capacity from round width; preserve fixed
+   persistent lane pitches. Test Long-to-Short after eight committed columns,
+   nonzero lanes, partial terminal penalty updates, grammar strides and C8.
+6. LookupSkip, if admitted, adds a request-epoch-bound prior-token index,
+   separate lookup ingress, draft-skip forward graph and retained sparse-q
+   verification. Host tests cover longest suffix 4/3/2, most-recent prior
+   occurrence, no future-token access, collision equality, rebinding, grammar
+   exclusion and one-hot candidate uniqueness. GPU acceptance remains S3/S4.
+
+Do not add compatibility sentinels such as width zero meaning “legacy.”
+Conditional width changes must migrate every consumer together. Host tests
+can prove layouts and state-machine transitions, not CUDA numerical identity,
+phase cost, replay prediction accuracy or speed.
