@@ -642,6 +642,9 @@ runtime::PrefillStepResult ProgramImpl::advance_prefill(SequenceState& sequence,
                 if (result.processed_tokens == 0 || result.processed_tokens > remaining) {
                     throw std::logic_error("ordinary prefill chunk made invalid progress");
                 }
+                if (staged.prompt_tokens == 3093)
+                    truecold_diagnostic::prefill_chunk(*this, staged.cursor,
+                        result.processed_tokens, remaining, split_frontier);
                 staged.cursor += result.processed_tokens;
                 processed_prompt_tokens += result.processed_tokens;
                 remaining -= result.processed_tokens;

@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <numeric>
+#include <optional>
 
 namespace ninfer::models::qwen3_5::detail::truecold_diagnostic {
 inline const std::filesystem::path& root() {
@@ -49,6 +50,17 @@ inline std::string hash(std::span<const std::byte> bytes) {
 inline void write_json(const std::filesystem::path& path, const nlohmann::json& value) {
     const auto text = value.dump(2);
     write_bytes(path, std::as_bytes(std::span(text.data(), text.size())));
+}
+inline void prefill_chunk(const ProgramImpl& p, std::uint32_t base, std::uint32_t width,
+                          std::uint32_t nominal, std::optional<std::uint32_t> split) {
+    if (!enabled(p)) return;
+    // Record the completed scheduler decision, not a replacement attention plan.
+    // No device reads or synchronization: dispatch is reconstructed from these inputs.
+    const auto path = directory("prefill-chunk-" + std::to_string(base));
+    write_json(path / "metadata.json", {{"base", base}, {"processed_tokens", width},
+        {"nominal_tokens", nominal}, {"split_frontier", split ? nlohmann::json(*split) : nullptr},
+        {"multiprocessor_count", p.device.multiprocessor_count()},
+        {"scope", "3093-token reference prefill; actual width after capture/rewrite splitting"}});
 }
 inline void snapshot(ProgramImpl& p, const SequenceState& sequence, const char* phase) {
     if (!enabled(p)) return;
@@ -142,6 +154,10 @@ inline void logits(ProgramImpl& p, const SequenceState& sequence, std::size_t ro
     write_bytes(path / "logits.bin", raw);
     write_json(path / "metadata.json", {{"step", 32}, {"base_execution_frontier", base},
         {"column", column}, {"licensed", licensed}, {"dtype", tensor.dtype == DType::FP32 ? "fp32" : "bf16"},
+        {"query_width", tensor.ne[1]},
+        {"proposal_extent", p.dflash_host_ingress->proposal_extents[row]},
+        {"accepted_drafts", p.dflash_host_egress->accepted_drafts[row]},
+        {"multiprocessor_count", p.device.multiprocessor_count()},
         {"vocabulary", vocab}, {"top20", top}, {"top2_margin", values[ids[0]] - values[ids[1]]},
         {"ledger_tokens", sequence.ledger.size()},
         {"ledger_sha256", hash(std::as_bytes(std::span(sequence.ledger)))},

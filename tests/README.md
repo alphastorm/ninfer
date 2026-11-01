@@ -169,6 +169,12 @@ overwritten. It adds synchronization and disk I/O, so its timings are not speed/
 qualification evidence. It does not change chunk sizes, kernels, graph enablement,
 sampling, or cached-prefix policy. Without the environment variable it does no
 capture. This instrumentation is isolated from the mergeable host-test commit.
+The reference arms also record each completed prefill chunk's base, actual width,
+nominal width, split frontier, and SM count in `prefill-chunk-<base>/metadata.json`.
+These CPU-only records distinguish capture/rewrite splitting from nominal chunk
+size; they do not install an alternate attention planner. Step-32 metadata includes
+query width, proposal extent, accepted drafts, and SM count for split reconstruction.
+Per-step logits before step 32 are not captured.
 
 `ninfer_rk4v4_test` is the dedicated native GPU oracle: standalone/fused append bytes,
 cached attention, both D256 geometries, decode, MTP3 W=4, DFlash2 W=8,
