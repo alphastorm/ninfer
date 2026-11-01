@@ -5,6 +5,7 @@ import hashlib
 import http.client
 import json
 import math
+import socket
 import threading
 import time
 from dataclasses import dataclass
@@ -104,6 +105,22 @@ class Events:
 class HTTPStatusError(OSError):
     pass
 
+class FirstByteFile:
+    def __init__(self, stream, observe):
+        self.stream, self.observe, self.seen = stream, observe, False
+    def readline(self, size=-1):
+        if self.seen or size == 0:
+            return self.stream.readline(size)
+        first = self.stream.read(1)
+        if first:
+            self.seen = True
+            self.observe()
+        if first == b'\n' or size == 1:
+            return first
+        return first + self.stream.readline(-1 if size < 0 else size-1)
+    def __getattr__(self, key):
+        return getattr(self.stream, key)
+
 class Transport:
     """One attempt per operation. A deadline limits total reads, not just each socket read."""
     def __init__(self, url, key, session, events, budget):
@@ -118,13 +135,31 @@ class Transport:
         method = method or ('POST' if payload is not None else 'GET')
         self.events('http.begin', sequence=sequence, path=path, method=method)
         conn = http.client.HTTPConnection(self.url.hostname, self.url.port, timeout=max(.001, deadline-time.monotonic()))
+        observer = self.events
+        class Response(http.client.HTTPResponse):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                self.fp = FirstByteFile(self.fp, lambda: observer('http.first_byte', sequence=sequence))
+        conn.response_class = Response
+        timer = None
+        live_socket = None
         try:
+            conn.connect()
+            live_socket = conn.sock
+            def abort():
+                try: live_socket.shutdown(socket.SHUT_RDWR)
+                except OSError: pass
+            remaining = deadline-time.monotonic()
+            if remaining <= 0: raise TimeoutError('HTTP connect exhausted total deadline')
+            live_socket.settimeout(remaining)
+            timer = threading.Timer(remaining, abort)
+            timer.daemon = True
+            timer.start()
             conn.request(method, path, body=json.dumps(payload).encode() if payload is not None else None,
                          headers={'Authorization':'Bearer '+self.key, 'Content-Type':'application/json',
                                   'X-NInfer-Session':self.session})
             response = conn.getresponse()
-            # HTTP status/header arrival is the first observable response byte boundary.
-            self.events('http.first_byte', sequence=sequence, status=response.status,
+            self.events('http.headers', sequence=sequence, status=response.status,
                         http_request_id=response.getheader('x-request-id'))
             chunks, size = [], 0
             while True:
@@ -134,7 +169,7 @@ class Transport:
                 chunk = response.read1(65536)
                 if not chunk: break
                 size += len(chunk)
-                if size > 16*1024*1024: raise RuntimeError('HTTP evidence exceeds 16 MiB')
+                if size > 2*1024*1024: raise RuntimeError('HTTP evidence exceeds 2 MiB')
                 chunks.append(chunk)
             document = json.loads(b''.join(chunks) or b'{}')
             self.events('http.end', sequence=sequence, status=response.status, document=document,
@@ -144,7 +179,10 @@ class Transport:
         except Exception as error:
             self.events('http.error', sequence=sequence, error=type(error).__name__, detail=str(error))
             raise
-        finally: conn.close()
+        finally:
+            if timer: timer.cancel()
+            conn.close()
+            if live_socket: live_socket.close()
     def status(self, timeout): return self.request('/v1/ninfer/status', timeout=timeout)
     def respond(self, content, previous, max_output):
         body = dict(model='q38-ninfer', input=content, store=True, temperature=0,
@@ -201,6 +239,11 @@ def measured(transport, previous, prompt, events):
     return document, {'wall_s':round(wall, 3), 'status_polls':changed}
 
 def self_test():
+    import io
+    seen=[]
+    stream=FirstByteFile(io.BytesIO(b'HTTP/1.1 200 OK\r\nX: y\r\n'),lambda:seen.append(True))
+    assert stream.readline()==b'HTTP/1.1 200 OK\r\n'
+    assert stream.readline()==b'X: y\r\n' and seen==[True]
     assert cells(1) == [(1,c) for c in 'ABDCHGEF'] + [(2,c) for c in 'FEGH']
     assert cells(2) == [(2,c) for c in 'CDBA'] + [(3,c) for c in 'CDBAEFHG']
     assert len({(b,c) for w in (1,2) for b,c in cells(w)}) == 24
