@@ -24,15 +24,19 @@
 #include <vector>
 
 namespace {
-// Caller-thread-only injection reaches the real task and queue allocations without
-// changing the production adapter or failing unrelated worker allocations.
+// Caller injection reaches real task/queue allocations. Post-writer injection also
+// covers the worker, including the next command drain after an inline export.
 thread_local std::ptrdiff_t allocations_before_failure = -1;
 thread_local std::size_t allocation_calls = 0;
+thread_local bool checkpoint_worker_thread = false;
+std::atomic<bool> fail_worker_allocations{false};
+std::atomic<std::size_t> injected_worker_drains{0};
 }
 
 void* operator new(std::size_t size) {
     ++allocation_calls;
-    if (allocations_before_failure == 0) {
+    if (allocations_before_failure == 0 ||
+        (checkpoint_worker_thread && fail_worker_allocations.load())) {
         allocations_before_failure = -1;
         throw std::bad_alloc();
     }
@@ -293,9 +297,11 @@ struct AllocationFailureWriter final : ContinuationCheckpointWriter {
     bool fail;
     WriterFailure failure;
     explicit AllocationFailureWriter(bool writer_throws) : fail(writer_throws) {}
+    ~AllocationFailureWriter() override { fail_worker_allocations.store(false); }
     bool write_file(std::string_view, std::uint64_t, std::uint64_t, std::span<const std::byte>,
                     std::uint32_t) override { return true; }
     bool finish() override {
+        fail_worker_allocations.store(true);
         allocations_before_failure = 0;
         if (fail) { throw failure; }
         return true;
@@ -338,6 +344,7 @@ public:
     AdapterFixture() = default;
     explicit AdapterFixture(typename ModelContract::Program& program) : instance_{&program} {
         worker_ = std::thread([this] {
+            checkpoint_worker_thread = true;
             for (;;) {
                 {
                     std::unique_lock lock(queue_mutex_);
@@ -347,6 +354,7 @@ public:
                 std::mutex execution;
                 std::unique_lock lock(execution);
                 checkpoint_execution_lock_ = &lock;
+                if (fail_worker_allocations.load()) { ++injected_worker_drains; }
                 run_checkpoint_commands();
             }
         });
@@ -393,6 +401,7 @@ public:
     void evict(const std::string& session) {
         on_worker([&] { resources_.owners.erase(session); });
     }
+    auto reserve_turn() { return reserve_checkpoint_command([] {}); }
     void turn() { on_worker([] {}); }
     std::size_t gates() const { return checkpoints_.gate_count(); }
     void complete_first_resume() {
@@ -465,6 +474,10 @@ void export_retirement_survives_allocation_failure(bool writer_throws, bool inli
     core.complete_first_resume();
     const auto before = core.progress();
     AllocationFailureWriter writer(writer_throws);
+    // Queue this turn without allocating after injection starts. Inline retirement
+    // must also survive a fresh worker drain, not just the current callback.
+    auto drain = core.reserve_turn();
+    const auto drains_before = injected_worker_drains.load();
     DurableExportResult result;
     bool writer_failed = false;
     bool allocation_failed = false;
@@ -475,6 +488,10 @@ void export_retirement_survives_allocation_failure(bool writer_throws, bool inli
         return std::exchange(allocations_before_failure, -1) == 0;
     };
     const bool allocation_unused = inline_worker ? core.on_worker(save) : save();
+    drain();
+    fail_worker_allocations.store(false);
+    require(injected_worker_drains.load() > drains_before,
+            "post-writer allocation injection did not reach a worker command drain");
     require(!allocation_failed && allocation_unused,
             "export retirement allocated after taking its native lease");
     require(writer_failed == writer_throws &&
