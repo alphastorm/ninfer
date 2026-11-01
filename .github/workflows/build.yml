@@ -22,6 +22,20 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
+  release-drivers:
+    name: GPU-free release driver invariants
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Exercise release driver boundaries
+        run: python -m unittest discover -s tests -p test_qualification_drivers.py -v
+
   linux:
     name: Linux CUDA 13 / host tests / bounded sm_120a compile
     runs-on: ubuntu-latest
