@@ -36,7 +36,9 @@ jobs:
             python3-jinja2 python3-jsonschema
           echo /usr/local/cuda-13.1/bin >> "$GITHUB_PATH"
       - name: Compare two clean bounded builds without executing CUDA
-        run: python3 -B tools/release/check-rdc-determinism.py --work "$RUNNER_TEMP/rdc-double-build"
+        run: |
+          python3 -B tests/test_cuda_determinism.py
+          python3 -B tools/release/check-rdc-determinism.py --work "$RUNNER_TEMP/rdc-double-build"
       - name: Retain byte, section and symbol attribution
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

@@ -58,7 +58,8 @@ Apps or tests enable the internal product support components: media acquisition,
 logging and serving. This is one derived condition, not a separate user option. FFmpeg and libjpeg
 belong to model media decoding and remain required when apps are disabled. CMake discovers libjpeg
 as `JPEG::JPEG`; the native Windows manifest supplies it through `libjpeg-turbo`.
-Curl and spdlog are needed only for product support. A Python 3 interpreter is found when tests are configured. The larger Python
+Curl and spdlog are needed only for product support. A Python 3 interpreter is required for
+Linux NVIDIA CUDA compilation and when tests are configured. The larger Python
 pytest suites and conversion/evaluation scripts run separately from CMake and CTest.
 
 CUDA 13.4 and Python 3.11 describe the maintained environment, not configuration version gates.
@@ -161,6 +162,24 @@ and numerical compiler options. Splitting a manifest does not reduce kernel inst
 or justify combining shape translation units or enabling unity builds.
 
 ## Build reproducibility
+
+Linux NVIDIA CUDA builds use `cmake/CudaDeterminism.cmake` and the repository-owned
+`tools/release/deterministic-nvcc.py` compile launcher. It chains an existing launcher
+such as ccache, adds `--objdir-as-tempdir` to prevent PID-derived STT_FILE names, and
+seeds each translation unit with its repository-relative path. nvcc's documented
+string seed form uses a 32-bit CRC; CI checks that project CUDA source paths have
+distinct seeds. Do not substitute the old out-of-tree 64-bit numeric seed launcher:
+CUDA 13.1.115 still produced changing module-ID suffixes with that seed form, even
+when temporary names were fixed. Bounded probes on `layer_norm.cu` reproduced the
+failure and showed stable module IDs, PTX and object bytes with 32-bit/string seeds.
+No CUDA internal compiler phases, archive flags or post-link rewrites are needed.
+
+The root CMake policy is inherited by the release preset, the Docker build stage and
+`tools/env/build.sh`; an explicit empty compiler launcher disables caching, not this
+policy. Python 3 is therefore a Linux build prerequisite. Native Windows compiler
+policy is unchanged. Runtime-image publication wraps already-checked binaries and
+does not compile them. Reproducibility currently means identical source/build paths,
+not relocation to another absolute directory or a different toolchain version.
 
 The PR-only `RDC build determinism` workflow uses a GPU-free CUDA 13.1 runner and a
 30-minute job bound. `tools/release/check-rdc-determinism.py --work <new-directory>`
