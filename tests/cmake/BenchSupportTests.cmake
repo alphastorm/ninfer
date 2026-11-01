@@ -19,3 +19,4 @@ target_include_directories(ninfer_context_cost_measure_test PRIVATE
   ${PROJECT_SOURCE_DIR}/bench/context_cost)
 
 add_test(NAME ninfer_context_cost_measure_test COMMAND ninfer_context_cost_measure_test)
+ninfer_test_host_lanes(ninfer_context_cost_measure_test ninfer_context_cost_measure_test bounded native)

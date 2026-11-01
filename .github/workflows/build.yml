@@ -65,26 +65,16 @@ jobs:
             -DPython3_EXECUTABLE=/usr/bin/python3 \
             -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=ON -DNINFER_BUILD_BENCHMARKS=OFF \
             -DNINFER_BUILD_PROFILE=ci-sm120a -DNINFER_UPSTREAM_BASE_SHA="$(git rev-parse 64d10fbf)"
+      # Register GPU-free tests with HOST_LANES in their CMake declaration (or
+      # ninfer_test_host_lanes for shared-executable/Python cases). Use bounded,
+      # native, or both; the helper labels the test and builds its executable.
+      # CUDA interposition makes GPU-freedom impossible to infer from linkage,
+      # so review new host tests for this annotation; do not add workflow lists.
       - name: Build host targets and bounded native CUDA objects
         shell: bash
         run: |
           set -euo pipefail
-          cmake --build build --parallel 2 --target ninfer_core \
-            ninfer_public_api_test ninfer_cpu_system_test ninfer_cpu_task_pool_test \
-            ninfer_cpu_executor_test ninfer_context_cost_measure_test ninfer_jinja_test \
-            ninfer_grammar_test ninfer_json_schema_test ninfer_regex_choice_test \
-            ninfer_media_decode_test \
-            ninfer_qwen3_5_dflash_window_test \
-            ninfer_qwen3_5_head_logits_test ninfer_cli_options_test \
-            ninfer_qwen3_5_state_image_layout_test \
-            ninfer_rk4v4_codec_test ninfer_decode_graph_capture_test \
-            ninfer_engine_core_test ninfer_kv_capacity_test \
-            ninfer_speculative_metrics_test ninfer_metrics_test \
-            ninfer_engine_checkpoint_control_test ninfer_engine_checkpoint_adapter_test ninfer_resource_manager_test \
-            ninfer_checkpoint_owner_test ninfer_export_state_test \
-            ninfer_durable_file_test ninfer_session_checkpoint_store_test \
-            ninfer_automatic_checkpoint_queue_test ninfer_io_uring_checkpoint_backend_test \
-            ninfer_io_uring_checkpoint_read_queue_test \
+          cmake --build build --parallel 2 --target ninfer_core ninfer_host_bounded_tests \
             src/serve/CMakeFiles/ninfer_serve.dir/session_checkpoint_service.cpp.o \
             tests/CMakeFiles/ninfer_session_checkpoint_service_real_test.dir/test_session_checkpoint_service_real.cpp.o \
             src/ops/CMakeFiles/ninfer_ops.dir/linear/projection/fp32.cu.o \
@@ -93,11 +83,49 @@ jobs:
             src/ops/CMakeFiles/ninfer_ops.dir/softmax_attention/dense/causal_cache/int8/launch.cu.o \
             tests/CMakeFiles/ninfer_rk4v4_test.dir/ops/test_rk4v4.cpp.o \
             src/ops/CMakeFiles/ninfer_ops.dir/linear/swiglu/q4/shapes/n34816_k5120/small.cu.o
+      # Migration-only proof: pin the old selectors without retaining a second
+      # hand-maintained list or preventing later CMake-only test additions.
+      - name: Prove both host labels equal the N16 explicit selections
+        if: github.head_ref == 'ci/ctest-labels' || github.ref_name == 'ci/ctest-labels'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build -N -L '^host-bounded$'
+          ctest --test-dir build -N -L '^host-native$'
+          python3 - <<'PY'
+          import json
+          import re
+          import subprocess
+
+          base = "26fa28d0e7834515508fc07ac503164a6effc820"
+          def catalog(*args):
+              return json.loads(subprocess.check_output(
+                  ["ctest", "--test-dir", "build", "-N", "--show-only=json-v1", *args],
+                  text=True))["tests"]
+
+          names = {test["name"] for test in catalog()}
+          for lane, workflow in (("bounded", "build.yml"), ("native", "native-compile.yml")):
+              source = subprocess.check_output(
+                  ["git", "show", f"{base}:.github/workflows/{workflow}"], text=True)
+              step = source.split("- name: Run only GPU-free CTest contracts\n", 1)[1]
+              step = step.split("\n      - name:", 1)[0]
+              pattern = re.search(r"-R '([^']+)'", step).group(1)
+              expected = {name for name in names if re.fullmatch(pattern, name)}
+              actual = {test["name"] for test in catalog("-L", f"^host-{lane}$")}
+              print(f"\nN16 {workflow} explicit selection ({len(expected)}):")
+              print("\n".join(sorted(expected)))
+              print(f"\nctest -N -L '^host-{lane}$' ({len(actual)}):")
+              print("\n".join(sorted(actual)))
+              if not expected or expected != actual:
+                  raise SystemExit(
+                      f"{lane} selection differs: missing={sorted(expected - actual)}, "
+                      f"extra={sorted(actual - expected)}")
+              print(f"\nPASS: {lane} selections are identical ({len(actual)} tests)", flush=True)
+          PY
       - name: Run only GPU-free CTest contracts
         shell: bash
         run: |
-          ctest --test-dir build --output-on-failure \
-            -R '^ninfer_(decode_graph_capture|rk4v4_codec|public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|qwen3_5_(dflash_window|head_logits|state_image_layout)|cli_options|engine_core|kv_capacity|speculative_metrics|metrics|engine_checkpoint_(control|adapter)|resource_manager|checkpoint_owner|export_state|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue|io_uring_checkpoint_(backend|read_queue|handle-allocation|teardown))_test$'
+          ctest --test-dir build --output-on-failure --no-tests=error -L '^host-bounded$'
       - name: Run ported host-only tooling tests
         shell: bash
         run: |
@@ -200,18 +228,46 @@ jobs:
             -DNINFER_BUILD_APPS=ON -DBUILD_TESTING=ON -DNINFER_BUILD_BENCHMARKS=OFF `
             -DNINFER_BUILD_PROFILE=ci-windows-platform "-DNINFER_UPSTREAM_BASE_SHA=$base"
           if ($LASTEXITCODE -ne 0) { throw 'Windows MSVC configure failed' }
-          cmake --build build --parallel 2 --target ninfer_core ninfer_cpu `
-            ninfer_decode_graph_capture_test ninfer_export_state_test `
+          cmake --build build --parallel 2 --target ninfer_core ninfer_cpu ninfer_host_windows_tests `
             ninfer_checkpoint_directstorage_windows ninfer_direct_storage_checkpoint_windows_test `
-            ninfer_checkpoint_io_contract_test ninfer_direct_storage_checkpoint_backend_test `
-            ninfer_durable_file_test ninfer_session_checkpoint_store_test ninfer_automatic_checkpoint_queue_test `
-            ninfer_qwen3_5_head_logits_test ninfer_cli_options_test `
             src/serve/CMakeFiles/ninfer_serve.dir/stop_event.cpp.obj `
             src/serve/CMakeFiles/ninfer_serve.dir/session_checkpoint_service.cpp.obj
           if ($LASTEXITCODE -ne 0) { throw 'Windows platform C++ compile failed' }
+      - name: Prove Windows host label equals the N16 explicit selection
+        if: github.head_ref == 'ci/ctest-labels' || github.ref_name == 'ci/ctest-labels'
+        shell: bash
+        run: |
+          set -euo pipefail
+          ctest --test-dir build -N -L '^host-windows$'
+          python - <<'PY'
+          import json
+          import re
+          import subprocess
+
+          base = "26fa28d0e7834515508fc07ac503164a6effc820"
+          def catalog(*args):
+              return json.loads(subprocess.check_output(
+                  ["ctest", "--test-dir", "build", "-N", "--show-only=json-v1", *args],
+                  text=True))["tests"]
+
+          names = {test["name"] for test in catalog()}
+          source = subprocess.check_output(
+              ["git", "show", f"{base}:.github/workflows/build.yml"], text=True)
+          step = source.split("- name: Run GPU-free Windows checkpoint and quota contracts\n", 1)[1]
+          step = step.split("\n      - name:", 1)[0]
+          pattern = re.search(r"-R '([^']+)'", step).group(1)
+          expected = {name for name in names if re.fullmatch(pattern, name)}
+          actual = {test["name"] for test in catalog("-L", "^host-windows$")}
+          print(f"N16 Windows explicit selection ({len(expected)}):\n" + "\n".join(sorted(expected)))
+          print(f"host-windows ({len(actual)}):\n" + "\n".join(sorted(actual)))
+          if not expected or expected != actual:
+              raise SystemExit(
+                  f"windows selection differs: missing={sorted(expected - actual)}, "
+                  f"extra={sorted(actual - expected)}")
+          print(f"PASS: windows selections are identical ({len(actual)} tests)", flush=True)
+          PY
       - name: Run GPU-free Windows checkpoint and quota contracts
         shell: pwsh
         run: |
-          ctest --test-dir build --output-on-failure `
-            -R '^ninfer_(decode_graph_capture|export_state|checkpoint_io_contract|direct_storage_checkpoint_backend|durable_file(_(pinned-destination|reparse-guard|identity-guards|directory-publication|extended-paths))?|session_checkpoint_store(_(current_flush|capacity))?|automatic_checkpoint_queue|qwen3_5_head_logits|cli_options)_test$'
+          ctest --test-dir build --output-on-failure --no-tests=error -L '^host-windows$'
           if ($LASTEXITCODE -ne 0) { throw 'Windows host contracts failed' }

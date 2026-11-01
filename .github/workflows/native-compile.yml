@@ -65,32 +65,21 @@ jobs:
       # The serve dependency closure compiles the complete native runtime, including
       # qwen3_5/load.cpp's SM86/SM89 DFlash2 seam and all linear/small-T kernels.
       # Bound the build to this app and selected regressions, not every test/benchmark.
+      # Register new GPU-free contracts with HOST_LANES native in CMake; shared
+      # executables/Python cases use ninfer_test_host_lanes. The helper owns both
+      # labels and build dependencies. CUDA-interposing tests cannot be classified
+      # cheaply by linkage, so review this annotation instead of adding lists here.
       - name: Build serve app, native runtime and regression targets
         shell: bash
         run: |
           set -euo pipefail
-          cmake --build build --parallel 2 --target ninfer_core ninfer-serve \
-            ninfer_public_api_test ninfer_cpu_system_test ninfer_cpu_task_pool_test \
-            ninfer_cpu_executor_test ninfer_context_cost_measure_test ninfer_jinja_test \
-            ninfer_grammar_test ninfer_json_schema_test ninfer_regex_choice_test \
-            ninfer_media_decode_test ninfer_memory_test ninfer_http_transport_test \
-            ninfer_engine_core_test ninfer_kv_capacity_test \
-            ninfer_speculative_metrics_test ninfer_metrics_test \
-            ninfer_engine_checkpoint_control_test ninfer_engine_checkpoint_adapter_test ninfer_resource_manager_test \
-            ninfer_checkpoint_owner_test ninfer_export_state_test \
-            ninfer_durable_file_test ninfer_session_checkpoint_store_test \
-            ninfer_automatic_checkpoint_queue_test ninfer_io_uring_checkpoint_backend_test \
-            ninfer_io_uring_checkpoint_read_queue_test \
-            ninfer_qwen3_5_loading_test ninfer_qwen3_5_state_image_layout_test \
-            ninfer_rk4v4_codec_test ninfer_rk4v4_test ninfer_decode_graph_capture_test \
-            ninfer_qwen3_5_head_logits_test ninfer_cli_options_test ninfer_serve_options_test \
-            ninfer_request_log_test ninfer_linear_split_two_output_test ninfer_fp32_logits_test
+          cmake --build build --parallel 2 --target ninfer_core ninfer-serve ninfer_host_native_tests \
+            ninfer_rk4v4_test ninfer_linear_split_two_output_test ninfer_fp32_logits_test
       # Do not execute ninfer-serve or the numerical Op test: they require a GPU host.
       - name: Run only GPU-free CTest contracts
         shell: bash
         run: |
-          ctest --test-dir build --output-on-failure --no-tests=error \
-            -R '^ninfer_(decode_graph_capture|rk4v4_codec|public_api|cpu_(system|task_pool|executor)|context_cost_measure|jinja|chat_templates|grammar|json_schema(_oracle)?|regex_choice(_oracle)?|media_decode|memory|http_transport|qwen3_5_(loading|head_logits|state_image_layout)|cli_options|serve_options|request_log|engine_core|kv_capacity|speculative_metrics|metrics|engine_checkpoint_(control|adapter)|resource_manager|checkpoint_owner|export_state|durable_file|session_checkpoint_store(_capacity)?|automatic_checkpoint_queue|io_uring_checkpoint_(backend|read_queue|handle-allocation|teardown))_test$'
+          ctest --test-dir build --output-on-failure --no-tests=error -L '^host-native$'
       - name: Cache statistics
         if: always()
         run: ccache --show-stats

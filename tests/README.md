@@ -88,6 +88,40 @@ After building, `ctest --preset dev` runs the same CTest suite. See
 
 The chat-template reference test uses Python Jinja2.
 
+### GPU-free CI selection
+
+CMake declarations own the host selections and their executable build dependencies:
+
+```bash
+cmake --build build --parallel 2 --target ninfer_host_bounded_tests
+ctest --test-dir build --output-on-failure --no-tests=error -L '^host-bounded$'
+
+cmake --build build --parallel 2 --target ninfer_host_native_tests
+ctest --test-dir build --output-on-failure --no-tests=error -L '^host-native$'
+
+cmake --build build --parallel 2 --target ninfer_host_windows_tests
+ctest --test-dir build --output-on-failure --no-tests=error -L '^host-windows$'
+```
+
+Use `HOST_LANES bounded native` in `ninfer_add_test` for a GPU-free contract selected by both
+Linux workflows; add `windows` for the Windows checkpoint lane, or select only the applicable
+lanes. For direct `add_test` registrations, including
+Python oracles and cases sharing an executable, call
+`ninfer_test_host_lanes(test_name executable_target bounded native)` after registration.
+The helper appends `host` and the lane labels and adds the executable to the corresponding
+aggregate build target. Do not overwrite those labels with a later `LABELS` assignment.
+The broader existing `host` label is not the bounded selection: it also includes contracts
+outside these CI closures. The Windows aggregate preserves the existing checkpoint selection;
+compile-only DirectStorage targets and serve objects remain explicit workflow targets.
+
+Keep GPU-freedom explicit during review: several host contracts interpose CUDA, so linkage
+alone cannot distinguish them from device tests. New GPU-free CI contracts must declare their
+lane here, not add test names or regex alternatives to workflow files.
+The migration PR's Linux job prints both Linux label-selected sets, and its Windows job prints
+the Windows set. Each compares the labels with its explicit selector in frozen N16 (`26fa28d0`),
+failing on any missing or extra test. These proofs run only for `ci/ctest-labels`, so they do not
+freeze future CMake-only additions.
+
 The bounded Linux job in `.github/workflows/build.yml` builds and runs the GPU-free
 `ninfer_io_uring_checkpoint_read_queue_test`. It checks that partial submission and invalid
 completion attribution make a closed ring unavailable, preserve the original failure for queued
