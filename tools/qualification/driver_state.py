@@ -37,15 +37,19 @@ def require_census(value: dict) -> list[dict]:
 def require_disjoint_logs(logs: str, roots: list[str]) -> None:
     # Windows path semantics also apply when a POSIX controller validates remote paths.
     def normalized(value):
-        if ntpath.splitdrive(value)[0] or '\\' in value:
-            return ntpath.normcase(ntpath.normpath(value)).rstrip('\\')
-        return str(Path(value).resolve()).rstrip('/')
-    log = normalized(logs)
+        if os.name == 'nt' or ntpath.splitdrive(value)[0] or '\\' in value:
+            return ntpath, ntpath.normcase(ntpath.abspath(value))
+        return os.path, str(Path(value).resolve())
+    flavor, log = normalized(logs)
     for root in roots:
-        source = normalized(root)
-        separator = '\\' if '\\' in source else '/'
-        if (log == source or log.startswith(source + separator)
-                or source.startswith(log + separator)):
+        source_flavor, source = normalized(root)
+        if source_flavor is not flavor:
+            continue
+        try:
+            common = flavor.commonpath((log, source))
+        except ValueError:  # Different Windows drives cannot overlap.
+            continue
+        if common in (log, source):
             raise ValueError("mutable logs and immutable input roots must be disjoint")
 
 

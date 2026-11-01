@@ -16,7 +16,7 @@ The external JSON config has these keys:
 
 | Key | Contract |
 |---|---|
-| `evidence_parent` | Controller-side mutable evidence parent, outside the source checkout |
+| `evidence_parent` | Controller-side mutable evidence parent, disjoint from every immutable input |
 | `builder_parent`, `target_parent` | Existing protected Windows scratch parents; the driver exclusively creates `<attempt>-builder` and `<attempt>-target` beneath them |
 | `expected_package_sha256` | Exact frozen public candidate package digest; the qualification repack must match it |
 | `lock_commands` | Object with `cpu`, `protocol`, `correctness`, `security`, `finish` argument arrays; each command holds the registered lock while running the appended child command |
@@ -39,18 +39,33 @@ Hosts are SSH aliases; SSH config outside the repository supplies ports, users a
 The dependency inventories, API key and OMP fixture must already be staged at registered paths.
 No private bootstrap script or source patch is required.
 
-The five groups execute all 15 existing phases in their canonical order. Select the registered
-card lock for ordinary groups and the timing-isolation lock required by the security gate.
-Every group restores before releasing its lock; the final group retires the exact scratch
-installation/task after restoration. The underlying orchestrator's gates and public
-lane receipt schema are unchanged. Qualification state is saved as passed before lane receipt
-composition; the composer receives persisted state, not a future in-memory claim.
+Before creating an attempt directory, marker or orchestrator, the driver compares its evidence
+parent and attempt directory, builder/target attempt roots and managed scratch root against all
+configured immutable inputs, including the configuration file, checkout, fixtures, toolchains,
+inventories, model, API key, OMP fixture, incumbent namespace and qualified runtime/build receipt.
+Overlap in either direction is refused without creating attempt artifacts. Windows paths use
+one case-insensitive absolute namespace, including relative controller paths and drive roots.
+
+The five groups execute all 15 existing phases in their canonical order. Each successor group
+also re-runs preflight under its own lock: preceding cleanup may have restarted the incumbent,
+so the new window must re-establish target quiescence and its write-ahead restoration obligation.
+Completed build, protocol, pressure and timing measurements are not replayed. Select the
+registered card lock for ordinary groups and the timing-isolation lock required by the security
+gate. Every group restores before releasing its lock; the final group retires the exact scratch
+installation/task after restoration. The underlying orchestrator's gates and public lane receipt
+schema are unchanged. Lane composition validates a completed projection of persisted phase
+evidence. Native state is saved as passed only after lane and final group publication complete;
+publication failure records failed state instead. A failed restoration is not retried implicitly,
+and stage failure is persisted before cleanup so a cleanup exception cannot leave a running stage.
 
 For a deliberately paused chain, `--continue-from security` (or another group) requires every
 preceding group's completed, state-bound receipt, unchanged config/tool bytes and matching
-phase receipt hashes. It does not rerun protocol or pressure tests. A started/failed group is
-not retryable under the same attempt. Preserve it, diagnose the cause and register a fresh
-attempt; do not remove `.started` files or manufacture completion receipts. In particular,
+phase receipt hashes. Tool binding includes the chain, shared `driver_state.py` and native
+orchestrator modules. The native constructor loads and validates prior state independently of
+`resume`; the driver keeps `resume=False` so only explicitly selected phases execute, rather
+than checkpoint-skipping a newly entered group. It does not rerun protocol or pressure tests.
+A started/failed group is not retryable under the same attempt. Preserve it, diagnose the cause
+and register a fresh attempt; do not remove `.started` files or manufacture completion receipts. In particular,
 metadata-only finalization is not permission to replay a measured phase.
 
 ## Upgrade rehearsal
@@ -69,7 +84,8 @@ PowerShell driver and `-Config` plus its private Windows config filename), and
 `timeout_seconds`. Use a stdout-preserving, exit-status-preserving transport. Its logs and
 working directory must be outside immutable input roots; do not let a transport create the
 fresh attempt root before the driver. The Windows driver also refuses overlapping input/output
-roots. Keep the outer transport deadline beyond the scenario's installer and cleanup budgets;
+roots, including every configured read-only canonical root. Keep the outer transport deadline
+beyond the scenario's installer and cleanup budgets;
 retain the release window's independent supervisor/restoration guard on transport loss.
 
 The Windows config supplies:
@@ -93,10 +109,11 @@ Device and Host weight counters must both be positive.
 The three scenarios are:
 
 1. **running**: install and start the real predecessor, upgrade it, require candidate health,
-   exact package identity, predecessor pointers and a completed running-handoff transaction.
+   exact active instance/package identity, predecessor pointers and a completed running-handoff transaction.
 2. **rollback**: open an exclusive loopback listener immediately before the candidate's first
    Start. Release it at rollback entry. Require the specific occupied-port failure, completed
-   rollback, deletion of the four transaction-created trees and healthy exact predecessor.
+   rollback, deletion of the four transaction-created trees and healthy exact predecessor,
+   including its saved previous/prepared lifecycle pointers.
 3. **repair**: pause after durable candidate activation. The parent verifies the persisted
    journal, active instance and owned child PID before interruption. Invoke the unchanged
    `-RepairInterruptedInstall`, require repair/cleanup and healthy predecessor, then reinstall
@@ -107,11 +124,14 @@ numbers, edited packages, a fabricated server or a shipped production fault hook
 or ambiguous anchor refuses the attempt. These scenarios do **not** claim to test a candidate
 server's failed Stop, access-denied Kill, an inherited paused owner, or every crash interval.
 
-Managed cleanup repairs an interrupted transaction, stops only the scratch installation,
-unregisters its exact task, and checks process/lease/task absence, original power and unchanged
-canonicals. Failure never publishes success. Completed state precedes the state-hashed receipt;
-controller continuation consumes only completed receipts. Census `rows` is always an array,
-including zero or one process. Native transport accepts a complete pretty JSON object or a
+Managed cleanup repairs interrupted transactions with the initiating installer, including
+incumbent transactions before state or instance identity exists. It stops only the scratch
+installation when state exists, unregisters its exact task even without state, and checks
+process/lease/task absence, original power and unchanged canonicals. Independent cleanup steps
+continue after an assertion fails; terminal state retains cleanup errors without masking the
+primary scenario exception. Failure never publishes success. Completed state precedes the
+state-hashed receipt; controller continuation consumes only completed receipts.
+Native transport accepts a complete pretty JSON object or a
 terminal compact receipt after progress text; the upgrade compact boundary explicitly rejects
 pretty/multiline output. Neither parser searches inside a pretty object for a nested receipt.
 
@@ -123,6 +143,16 @@ logs outside the repository. Publish only the product's reviewed, privacy-saniti
 and neutral driver result; never copy the entire evidence tree into a PR or release. Preserve
 failed attempts and refer to them by neutral identifiers in public reports.
 
+Upgrade-rehearsal evidence must bind exact rollback previous/prepared pointers and the running
+candidate identity. Rehearsal output must exclude canonical-root descendants, interruption
+markers must be created atomically, and failed attempts must retain transport logs together
+with independent cleanup and final-state evidence. Successful census receipts use an array of
+rows; failed rehearsal census preserves `rows: null` plus its error instead of inventing an
+empty census.
+
 The GPU-free `release-drivers` Actions job runs the invariant suite on Linux and Windows,
-including PowerShell parsing/anchor checks and the three scenario state transitions with fake
-providers. No CTest selection or numerical/acceptance tolerance is changed.
+including namespace, JSON boundary, receipt ordering, PowerShell parsing/anchor checks, the
+three rehearsal scenario transitions and native chain failure/recovery checks with fake
+providers. The chain boundary regressions retain the real native constructor, state loader,
+phase publisher, preflight and restoration logic while replacing external providers.
+No CTest selection or numerical/acceptance tolerance is changed.
