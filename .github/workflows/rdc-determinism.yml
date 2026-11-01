@@ -1,6 +1,8 @@
 name: RDC build determinism
 
 on:
+  push:
+    branches: ['rebase/p17-fork-integration-5']
   pull_request:
 
 permissions:
