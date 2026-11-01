@@ -960,7 +960,8 @@ function Stop-IncumbentForUpgrade(
 # names it active it may be running, and its own controller stops it, restoring the GPU owner and
 # retiring the lease it holds; a stop that fails leaves that state in place, so a repair re-attempts
 # the same stop for the same instance. Whatever the state names, no process may still execute
-# from the candidate's release root. The rollback itself never removes a GPU-owner lease.
+# from the candidate's release root. Like the controller, refuse a same-name server whose blank
+# image path cannot prove its absence. The rollback itself never removes a GPU-owner lease.
 function Assert-TransactionCandidateQuiescent([object]$Transaction, [string]$StatePath, [string]$ControllerPath) {
     if (-not (Get-TransactionFlag $Transaction 'state_activated')) { return }
     if ((Test-Path -LiteralPath $StatePath -PathType Leaf) -and
@@ -969,10 +970,19 @@ function Assert-TransactionCandidateQuiescent([object]$Transaction, [string]$Sta
     }
     $releaseRoot = [string]$Transaction.release_root
     if (-not [string]::IsNullOrWhiteSpace($releaseRoot)) {
-        $running = @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop | Where-Object {
-                -not [string]::IsNullOrWhiteSpace([string]$_.ExecutablePath) -and
-                (Test-PathWithinRoot ([string]$_.ExecutablePath) $releaseRoot)
-            } | ForEach-Object { [string]$_.ProcessId })
+        $expected = Join-Path (Join-Path $releaseRoot 'bin') 'ninfer-serve.exe'
+        $running = @(foreach ($entry in @(Get-CimInstance -ClassName Win32_Process -ErrorAction Stop)) {
+                if ([string]::IsNullOrWhiteSpace([string]$entry.ExecutablePath)) {
+                    $name = $entry.PSObject.Properties['Name']
+                    if ($null -ne $name -and [string]$name.Value -ieq [IO.Path]::GetFileName($expected)) {
+                        throw "cannot exclude an unattributed candidate server with an unreadable image path: $($name.Value) ($($entry.ProcessId))"
+                    }
+                    continue
+                }
+                if (Test-PathWithinRoot ([string]$entry.ExecutablePath) $releaseRoot) {
+                    [string]$entry.ProcessId
+                }
+            })
         if ($running.Count -ne 0) {
             throw "candidate processes still run from its release root: $([string]::Join(', ', $running))"
         }
