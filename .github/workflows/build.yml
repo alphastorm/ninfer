@@ -133,6 +133,7 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_release_package.py'
           python3 -m unittest discover -s tests -p 'test_lifecycle_container.py'
           python3 -m unittest discover -s tests -p 'test_agent_protocol.py'
+          python3 -m unittest discover -s tests -p 'test_workflow_runner_pins.py'
           /usr/bin/python3 -m pytest -q tests/bench/ttft/test_measurements.py tests/test_serve_corpus.py
       - name: Run portable Windows lifecycle release contracts
         shell: bash
