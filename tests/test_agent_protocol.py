@@ -166,7 +166,8 @@ class SessionReplayTests(unittest.TestCase):
             },
         }
 
-    def replay(self, repeat_path: str, isolated_path: str = 'root') -> tuple:
+    def replay(self, repeat_path: str, isolated_path: str = 'root', *,
+               snapshots: list[dict] | None = None) -> tuple:
         usage = {
             'prompt_tokens': 1600, 'completion_tokens': 2, 'total_tokens': 1602,
             'prompt_tokens_details': {'cached_tokens': 0},
@@ -176,9 +177,13 @@ class SessionReplayTests(unittest.TestCase):
             'choices': [{'message': {'content': 'Yes'}, 'finish_reason': 'stop'}],
             'usage': usage,
         }
+        if snapshots is None:
+            snapshots = [
+                self.status('root', 10), self.status(repeat_path, 11),
+                self.status(isolated_path, 12),
+            ]
         replies = [
-            response, self.status('root', 10), self.status(repeat_path, 11),
-            response, self.status(isolated_path, 12),
+            response, snapshots[0], snapshots[1], response, snapshots[2],
         ]
         streamed_usage = {**usage, 'prompt_tokens_details': {'cached_tokens': 1590}}
         with patch.object(protocol, 'json_response', side_effect=replies), \
@@ -206,6 +211,74 @@ class SessionReplayTests(unittest.TestCase):
     def test_private_repeat_and_public_foreign_path_pass(self) -> None:
         result = self.replay('private_input_replay')
         self.assertEqual(result[-2:], ('private_input_replay', 'root'))
+
+    def test_quiescent_concurrent_endpoint_passes_session_telemetry(self) -> None:
+        for capacity in (1, 2, 8):
+            snapshots = [
+                self.status('root', 10), self.status('private_input_replay', 11),
+                self.status('root', 12),
+            ]
+            for status in snapshots:
+                status['scheduler']['max_concurrency'] = capacity
+            with self.subTest(max_concurrency=capacity):
+                result = self.replay('private_input_replay', snapshots=snapshots)
+                self.assertEqual(result[-2:], ('private_input_replay', 'root'))
+
+    def test_missing_or_zero_concurrency_fails_before_and_after_repeat(self) -> None:
+        for snapshot in (0, 1):
+            for capacity in (None, 0):
+                snapshots = [
+                    self.status('root', 10), self.status('private_input_replay', 11),
+                    self.status('root', 12),
+                ]
+                scheduler = snapshots[snapshot]['scheduler']
+                if capacity is None:
+                    scheduler.pop('max_concurrency')
+                else:
+                    scheduler['max_concurrency'] = capacity
+                with self.subTest(snapshot=snapshot, max_concurrency=capacity), \
+                     self.assertRaisesRegex(protocol.ProtocolError,
+                                            'session-isolation telemetry requires'):
+                    self.replay('private_input_replay', snapshots=snapshots)
+
+    def test_concurrency_must_be_a_positive_integer_not_bool_or_float(self) -> None:
+        for snapshot in (0, 1):
+            for capacity in (True, False, 1.0, '2', -1):
+                snapshots = [
+                    self.status('root', 10), self.status('private_input_replay', 11),
+                    self.status('root', 12),
+                ]
+                snapshots[snapshot]['scheduler']['max_concurrency'] = capacity
+                with self.subTest(snapshot=snapshot, max_concurrency=capacity), \
+                     self.assertRaisesRegex(protocol.ProtocolError,
+                                            'session-isolation telemetry requires'):
+                    self.replay('private_input_replay', snapshots=snapshots)
+
+    def test_non_quiescent_scheduler_fails_at_every_snapshot(self) -> None:
+        for snapshot in (0, 1, 2):
+            for field in ('running', 'prefilling', 'decode_ready', 'waiting',
+                          'materializing', 'capture_pending'):
+                snapshots = [
+                    self.status('root', 10), self.status('private_input_replay', 11),
+                    self.status('root', 12),
+                ]
+                snapshots[snapshot]['scheduler'][field] = 1
+                message = 'not quiescent' if snapshot < 2 else 'not request-correlated'
+                with self.subTest(snapshot=snapshot, field=field), \
+                     self.assertRaisesRegex(protocol.ProtocolError, message):
+                    self.replay('private_input_replay', snapshots=snapshots)
+
+    def test_wrong_decode_delta_fails_repeat_and_isolated_requests(self) -> None:
+        for snapshot in (1, 2):
+            for delta in (0, 2):
+                snapshots = [
+                    self.status('root', 10), self.status('private_input_replay', 11),
+                    self.status('root', 12),
+                ]
+                snapshots[snapshot]['scheduler']['committed_decode_tokens'] = 10 + snapshot - 1 + delta
+                with self.subTest(snapshot=snapshot, delta=delta), \
+                     self.assertRaisesRegex(protocol.ProtocolError, 'not request-correlated'):
+                    self.replay('private_input_replay', snapshots=snapshots)
 
     def test_root_repeat_still_fails_with_content_safe_cache_evidence(self) -> None:
         with self.assertRaises(protocol.ProtocolError) as raised:
