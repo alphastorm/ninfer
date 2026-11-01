@@ -19,6 +19,8 @@ The collector records all runtime/driver API and resource callbacks without prel
 modules or inspecting module bytes; activity records cover copies, kernels, functions,
 CUDA events and synchronization. Function names are losslessly segmented into `cuda.symbol`
 records. `cuda.loading.effective` is queried after engine initialization and before warmup.
+The same boundary records the runtime API version and compile-time runtime version;
+library load/unload handles and driver/runtime function lookups retain API correlation IDs.
 CUPTI fixed callback buffers use 8 MiB; its device pool is limited to four 1-MiB buffers.
 The server recorder and collector recorder each use 8 MiB, below the 64-MiB logging cap.
 Driver-internal allocations are not claimed as observer-owned buffers.
