@@ -2,6 +2,7 @@
 #include "core/restore_trace.h"
 #include <cupti.h>
 #include <cuda.h>
+#include <cuda_runtime_api.h>
 #include <dlfcn.h>
 #include <array>
 #include <atomic>
@@ -56,6 +57,31 @@ void CUPTIAPI callback(void*, CUpti_CallbackDomain domain, CUpti_CallbackId id, 
                           exit && result == 0 ? reinterpret_cast<std::uintptr_t>(*p.pKernel) : 0);
             if (!exit) symbol(p.name, event.correlationId, domain);
         }
+        if (domain == CUPTI_CB_DOMAIN_DRIVER_API &&
+            std::strcmp(event.functionName, "cuLibraryGetKernel") == 0) {
+            const auto& p = *static_cast<const cuLibraryGetKernel_params*>(event.functionParams);
+            output().emit("cuda.lookup.library", {}, event.correlationId, exit,
+                          reinterpret_cast<std::uintptr_t>(p.library),
+                          exit && result == 0 ? reinterpret_cast<std::uintptr_t>(*p.pKernel) : 0);
+            if (!exit) symbol(p.name, event.correlationId, domain);
+        }
+        std::uintptr_t library = 0;
+        if (domain == CUPTI_CB_DOMAIN_DRIVER_API) {
+            if (exit && result == 0 && std::strcmp(event.functionName, "cuLibraryLoadData") == 0)
+                library = reinterpret_cast<std::uintptr_t>(*static_cast<const cuLibraryLoadData_params*>(event.functionParams)->library);
+            if (exit && result == 0 && std::strcmp(event.functionName, "cuLibraryLoadFromFile") == 0)
+                library = reinterpret_cast<std::uintptr_t>(*static_cast<const cuLibraryLoadFromFile_params*>(event.functionParams)->library);
+            if (!exit && std::strcmp(event.functionName, "cuLibraryUnload") == 0)
+                library = reinterpret_cast<std::uintptr_t>(static_cast<const cuLibraryUnload_params*>(event.functionParams)->library);
+        } else {
+            if (exit && result == 0 && std::strcmp(event.functionName, "cudaLibraryLoadData") == 0)
+                library = reinterpret_cast<std::uintptr_t>(*static_cast<const cudaLibraryLoadData_v12060_params*>(event.functionParams)->library);
+            if (exit && result == 0 && std::strcmp(event.functionName, "cudaLibraryLoadFromFile") == 0)
+                library = reinterpret_cast<std::uintptr_t>(*static_cast<const cudaLibraryLoadFromFile_v12060_params*>(event.functionParams)->library);
+            if (!exit && std::strcmp(event.functionName, "cudaLibraryUnload") == 0)
+                library = reinterpret_cast<std::uintptr_t>(static_cast<const cudaLibraryUnload_v12060_params*>(event.functionParams)->library);
+        }
+        if (library) output().emit("cuda.library", event.functionName, domain, id, event.correlationId, library);
     } else if (domain == CUPTI_CB_DOMAIN_RESOURCE) {
         const auto& event = *static_cast<const CUpti_ResourceData*>(data);
         std::uint32_t context = 0;
@@ -164,4 +190,7 @@ extern "C" __attribute__((visibility("default"))) void restore_cuda_loading_mode
     const auto result = cuModuleGetLoadingMode(&mode);
     const auto version = cuDriverGetVersion(&driver);
     output().emit("cuda.loading.effective", {}, result, mode, version, driver);
+    int runtime = 0;
+    const auto runtime_result = cudaRuntimeGetVersion(&runtime);
+    output().emit("cuda.runtime.version", {}, runtime_result, runtime, CUDART_VERSION);
 }
