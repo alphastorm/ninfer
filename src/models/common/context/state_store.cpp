@@ -1,5 +1,6 @@
 #include "models/common/context/state_store.h"
 
+#include <cstdio>
 #include <limits>
 #include <stdexcept>
 
@@ -66,12 +67,25 @@ bool StateImageStore::prepare_host_export(std::span<const Handle> images,
     }
     // Reserve the whole set before submitting copies: a capacity refusal must not partially
     // demote the export's sources or leave asynchronous writes into returned Host allocations.
+    const auto diagnostic_free = host_ ? host_->free_bytes() : 0;
     std::vector<Transfer> transfers;
     transfers.reserve(missing);
     for (const auto image : images) {
         if (host_resident(image)) continue;
         auto transfer = reserve_device_to_host(image);
-        if (!transfer) return false;
+        if (!transfer) {
+            const auto bytes = device_->image_bytes();
+            if (host_ && bytes && missing <= std::numeric_limits<std::size_t>::max() / bytes &&
+                missing * bytes > diagnostic_free) {
+                std::fprintf(stderr,
+                    "{\"schema\":\"ninfer-export-host-classification/1\","
+                    "\"base_sha\":\"0628db0b0997c8bda4ac37c8e84da95986890014\","
+                    "\"native_site\":\"StateImageStore::prepare_host_export\","
+                    "\"kind\":\"HostCapacity\",\"shortage_bytes\":%zu}\n",
+                    missing * bytes - diagnostic_free);
+            }
+            return false;
+        }
         transfers.push_back(std::move(*transfer));
     }
     if (!transfers.empty()) {
