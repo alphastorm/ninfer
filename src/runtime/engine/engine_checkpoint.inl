@@ -94,7 +94,8 @@
                         prepared_export = false;
                         --checkpoint_exports_in_flight_;
                         scheduler_.capacity_released();
-                        notify_checkpoint_progress();
+                        request_admission_check();
+                        queue_cv_.notify_all();
                     }
                 });
             };
@@ -181,8 +182,7 @@
                         const auto lossless_excluded = resources_.export_reclaim_exclusions(points, false);
                         if (!redundant_used) {
                             redundant_used = true;
-                            changed = true;
-                            (void)program.release_redundant_host(lossless_excluded);
+                            changed = program.release_redundant_host(lossless_excluded) || changed;
                         }
                         if (kind == Kind::HostContiguity) {
                             if (!freed()) break;
@@ -223,20 +223,22 @@
                                     if (!a || !b || a->bytes != b->bytes || a->sha256 != b->sha256) return false;
                                     result.proof_pins.push_back(std::move(pin));
                                     result.proof_pins.push_back(std::move(current));
-                                    changed = true;
                                     return resources_.release_proven_durable_victim(
                                         program, victim, closure, *cursor, points, excluded);
                                 };
                                 released = prove();
                             }
-                            if (released) ++result.reclaim.reclaimed_owners;
+                            if (released) {
+                                changed = true;
+                                ++result.reclaim.reclaimed_owners;
+                            }
                             else ++result.reclaim.reclaim_declined;
                         }
                         while (freed() < shortage && ordinary_steps < ordinary_bound) {
-                            changed = true;
                             const auto progress = resources_.reclaim(
                                 program, {.host_bytes = shortage - freed()}, excluded, *cursor);
                             if (progress != ReclaimProgress::Changed) break;
+                            changed = true;
                             ++ordinary_steps;
                             ++result.reclaim.reclaimed_cache_steps;
                         }

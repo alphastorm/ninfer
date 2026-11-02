@@ -396,14 +396,17 @@ Run it with `ctest --test-dir build -R '^ninfer_engine_core_test$' --output-on-f
 Its export-reclaim matrix uses the same Host ledger and production Engine entry point:
 stopped/Pending handlers, fresh proof failures, retained result pins, automatic/survivor
 intent, contiguity-only cleanup, zero arena progress, residual ordinary deficits,
-pressure re-entry and non-observed save notifications. `ninfer_resource_manager_test`
-checks whole physical closures, strict logical-owner exclusivity and source protections.
+pressure re-entry, non-observed refused-save reclaim notifications and observed prepared
+export retirement. `ninfer_resource_manager_test` checks whole physical closures, strict
+logical-owner exclusivity and source protections, including freeing a victim's private Host
+bytes while a protected physical sharer retains shared pages.
 `ninfer_export_state_test` checks typed shortages, contiguity, Busy, absent arena,
 all-or-nothing reservation and failed-copy cleanup with real StateImageStore ownership.
 `ninfer_session_checkpoint_export_test` links the real service/store with a scripted
 Engine adapter for proof-pin quota/publication lifetime, receipt propagation (including
 DELETE survivor replay), automatic intent and the publication-conditioned second final
-pass. It does not substitute for native byte validation. The store test also proves
+pass, including exact refusal counting when a second-pass save throws. It does not
+substitute for native byte validation. The store test also proves
 callback pinning is catalog-unlocked and later saves can evict after pins retire.
 
 `ninfer_engine_checkpoint_adapter_test` includes the production checkpoint adapter in a
@@ -411,7 +414,11 @@ GPU-free host-native fixture. Allocation-failure cases check that command alloca
 before acquiring a native export lease and that successful or throwing writers retire leases
 without further caller or worker allocation, releasing capacity exactly once. Injection stays
 armed through a fresh worker command drain, including after an inline export, so allocating
-empty-list sentinels are covered on MSVC. Linux and Windows host-contract CI select this
+empty-list sentinels are covered on MSVC. The production automatic coordinator retries a
+TransactionBusy pressure save after another session's export retires without other engine
+activity; no-op reclaim refusals emit no capacity/admission event. The queue regression
+retains the prohibition on a partially reclaiming refused save waking its own retry.
+Linux and Windows host-contract CI select this
 executable; the native-compile workflow also runs it.
 
 The `attention` scenario checks the selected KV type, chunked prefill, concurrent Graph decode

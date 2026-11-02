@@ -549,8 +549,8 @@ bool SessionCheckpointService::final_save() noexcept {
         }
         if (summary.saved) {
             for (const auto& session : capacity_refused) {
-                const auto outcome = save_session(session, {}, true, runtime::DurableSaveIntent::Final);
                 --summary.refused;
+                const auto outcome = save_session(session, {}, true, runtime::DurableSaveIntent::Final);
                 count(outcome);
             }
         }

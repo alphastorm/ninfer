@@ -234,7 +234,11 @@ separately counts successful storage operations
 refused automatic save advance its own retry clock.
 `notify_checkpoint_progress` instead signals admission and completion without
 advancing observed engine progress ([`engine_checkpoint.inl:30–36`][e-notify]).
-Keep the engine-only Capacity predicate; automatic saves will not use Tier 2.
+Prepared export-lease retirement is different: it releases real native pins and
+must use observed admission progress so another session's deferred TransactionBusy
+or Capacity save can retry without unrelated engine activity. A refused prepare
+holds no lease and has no retirement event. Keep the engine-only Capacity
+predicate; automatic saves will not use Tier 2.
 
 Receipt keys are produced by [`session_checkpoint_service.cpp:89–96,139–151`][e-receipts].
 K7 explicitly permits additive bounded counts/durations
@@ -337,7 +341,11 @@ Tier 2's closure combines the victim's entire handle set with eligible ordinary
 handles from that same frozen cursor which pin the same physical images/pages,
 including superseded unnamed owners and shared prefix entries. Ordinary closure
 members must pass all Tier 3 eligibility checks; the named victim must pass the
-single-owner proof in §3.3. Use native sharing information and existing catalog
+single-owner proof in §3.3. Expand a physical release group only when every
+not-yet-included holder is an eligible ordinary member. Skip a group containing
+a protected holder rather than declining the victim: that holder keeps the
+shared pages resident, while the victim's private backing may still be freed.
+Use native sharing information and existing catalog
 membership, not logical-size sums or a second ownership catalog. Quote the union
 once and commit it as one plan; neither the victim-only nor ordinary-only quote
 is the release authority. Removed ordinary members are also consumed in the
@@ -470,11 +478,16 @@ mutation must notify `scheduler_.capacity_released()` and admission even if a
 subsequent step refuses or throws, but must **not** advance observed checkpoint
 progress. Use the save-completion path's non-observed notification (E6), or an
 equivalent admission signal; do not call the observed `request_admission_check`
-for save-owned reclaim/cleanup notifications. A refused automatic save must not
+for save-owned reclaim/cleanup notifications. No-op tiers emit no capacity or
+admission notification: count a change only after redundant cleanup releases
+content, ordinary reclaim returns Changed, or proven-victim release succeeds.
+A refused automatic save must not
 wake its own retry. `checkpoint_change` publishes the resulting stats. Preserve
 the prepared export's separate, exactly-once in-flight decrement and capacity
-notification on retirement, using the same non-observed admission discipline for
-save-owned completion. Unrelated execution progress remains observed.
+notification on retirement, using observed `request_admission_check` and a queue
+wakeup after the native pins retire. This can unblock another session waiting on
+the export/save lease; refused prepares have no lease to retire and cannot
+self-wake through this path. Service completion wakeups remain non-observed.
 
 ### 3.5 Lock discipline and concurrency
 
@@ -486,7 +499,7 @@ save-owned completion. Unrelated execution progress remains observed.
 | Lease writer and buffered finish | Immutable copy leases only | No Engine execution lock or publication gate |
 | Store quota, publication and post-publish quota | Service-owned victim readers remain live through `store_.save`; store lock as in E1 | No early pin retirement at Engine command/writer completion; no worker command while holding the catalog lock |
 | Final pointer publication | Target gate, then store mutex in callback | No Program access or worker command wait |
-| Native lease retirement | Worker via `checkpoint_change` | No outstanding writer/copy using the lease |
+| Native lease retirement | Worker via `checkpoint_change`; observed admission progress after pins retire | No outstanding writer/copy using the lease |
 
 Incoming submissions can advance epochs while proof is running, but cannot run
 native work concurrently with this worker command. Recapture epoch/points/tag
@@ -516,9 +529,9 @@ checkpoint saves is a qualification observation, not a bounded live-save guarant
 | Physical progress, not guessed bytes | Native Host quote before release, arena occupancy delta afterwards. |
 | No destructive fragmentation treatment | HostContiguity runs Tier 1 only; at most one extra prepare after measured progress. |
 | No automatic worker-held victim proof | Tier 2 enabled only for final and explicit operator checkpoint saves. |
-| No automatic self-wake | Save-owned mutation/cleanup notifies admission without advancing observed checkpoint progress; Capacity predicate stays engine-only. |
+| No automatic self-wake | Refused-save mutation/cleanup is non-observed and no-op tiers do not notify; refused prepares hold no export lease. Prepared export retirement is observed and can wake another session's retry; Capacity predicate stays engine-only. |
 | Bounded work | Fixed V/C, consumed candidates including zero-progress steps, `2+V+C` per-command ceiling; at most one publication-conditioned second final-save pass. |
-| Worker affinity and truthful stats | Preparation/destruction under `checkpoint_change`; non-observed admission notifications on save-owned mutation and retirement. |
+| Worker affinity and truthful stats | Preparation/destruction under `checkpoint_change`; actual reclaim changes notify non-observed admission, prepared export retirement notifies observed admission exactly once. |
 | Stable refusal and disk contracts | Same K7 states/reasons, unchanged checkpoint schema, no new controller policy. |
 | Retry exhaustion never authorizes destruction | Existing Pending/retry-budget rules remain intact. |
 
@@ -561,9 +574,11 @@ update. Keep `now.engine != before.engine` for deferred Capacity, the existing
 bounded retry counter, publication waits, I/O predicate and Pending semantics.
 Retain the existing test that storage progress alone cannot cure Capacity
 ([`test_automatic_checkpoint_queue.cpp:159–196`][e-queue-test]). Automatic saves
-cannot use newly proven durable victims because they do not use Tier 2. Reclaim
-mutations and save completion must notify scheduler/admission without advancing
-the observed engine clock (§3.4), including after a partially reclaiming refusal.
+cannot use newly proven durable victims because they do not use Tier 2. Actual
+reclaim mutations and service completion notify admission without advancing the
+observed engine clock (§3.4), including after a partially reclaiming refusal.
+Prepared export retirement advances the observed clock so another session's
+TransactionBusy or Capacity retry can run; no-op reclaim tiers do not notify.
 The sole additional final-save pass is publication-conditioned and bounded as in
 §3.4, not a new automatic retry predicate.
 
@@ -584,7 +599,7 @@ The sole additional final-save pass is publication-conditioned and bounded as in
 | Smaller native interface / fragmentation | Replace the internal bool and migrate callers; preserve typed byte-deficit versus contiguity classification through the lease. No invented fragmentation byte target, compatibility output pointer or optional accessor fallback. |
 | Retry budget / order | Use owner-vector order; derive `2+V+C` from consumed work, including closure removal and zero-arena-progress candidates. Final-save orchestration adds at most one Capacity-only pass after actual first-pass publication; import's bound stays unchanged. |
 | Proof pin lifetime / disk quota | Command-scoped pins are too short: E1's quota passes can retire another session's current generation. Return readers to service scope through the reclaiming save; permit Quota refusal, and preserve ordinary quota eviction by later saves after pin release. |
-| Automatic progress / save intent | E6's admission helper advances observed progress. Use non-observed save-owned notifications; withdraw storage-triggered Capacity retries. Only final and explicit checkpoint saves use Tier 2; automatic and survivor exports use Tiers 1/3. |
+| Automatic progress / save intent | Reclaim mutation and service completion use non-observed notifications; prepared export retirement remains observed to wake other sessions. Withdraw storage-triggered Capacity retries. Only final and explicit checkpoint saves use Tier 2; automatic and survivor exports use Tiers 1/3. |
 | Physical release closure / residual deficit | Victim-only and ordinary-only quotes can both be zero for shared backing (E5). Quote/commit one eligible closure; any export-set intersection declines the victim. Tier 3 requests only shortage minus measured bytes already freed. |
 | Survivor-export receipts | `erase_response` bypasses `save_session`/`SaveOutcome` (E1). Carry its native reclaim summary and share the receipt helper, including its existing replay fallback. |
 | Incident refusal site | The reported Capacity reason does not prove which native refusal fired. Keep this open until the predecessor red fixture records the site through the new internal classification; no green claim before that evidence. |
@@ -619,7 +634,7 @@ validation, and re-pin failures. These are test controls, not production fallbac
 | Full-set preservation | Every selected target point reaches the writer; old target off-chain cache can be dropped, shared target handles cannot. |
 | Fork sharing | Second owner with a different tag/session, same tag, or unnamed active owner shares a handle: whole proven-victim release declines. Use the existing ResourceManager test fixture in `tests/runtime/test_resource_manager.cpp` for real carry/forget behavior. |
 | Shared-image release closure | A durable victim plus eligible unnamed superseded/shared-prefix handles pin the same image/pages. Victim-only and ordinary-only quotes are zero; the union frees bytes and commits once. Neither single-owner-only nor ordinary-only quote is used as authority; no double-counting. |
-| Closure/export intersection | Any closure member intersects the protected export set: decline the entire victim before proof/commit, never partially release its named owner. Other protected or durable/active sharers also decline an ineligible closure. |
+| Closure/export intersection | A named victim handle intersects the protected export set: decline the entire victim before proof/commit, never partially release its named owner. Skip physical groups containing protected ordinary holders; release the victim's private bytes while shared pages remain resident. Recheck every included member before commit. |
 | Physical quote versus zero arena gain | A positive page quote releases pages but not their Host extent. Consume that candidate, continue to a later candidate that frees arena bytes, and prepare only after the positive measured delta. A truly zero whole-closure quote skips proof. |
 | Priority and protection | Final/explicit: redundant before proven closure before ordinary; automatic/survivor: redundant before ordinary. Active/waiting/binding/leased handles and paused snapshots survive. Ordinary cache keeps existing ranking. |
 | Remaining Tier 3 deficit | Earlier tiers free part of the shortage; ordinary cache can cover only the remainder. Request the remainder so the all-or-nothing planner can commit the sufficient plan. |
@@ -630,8 +645,9 @@ validation, and re-pin failures. These are test controls, not production fallbac
 | Concurrent epoch / writer / cleanup | Submission during victim proof or writer makes publication stale when appropriate; writer still off-lock; refused and prepared leases destroyed on worker; writer failure retires exactly once. |
 | Stats and scheduling | Reclaim followed by success, refusal or injected failure publishes catalog/occupancy; scheduler/admission notifications do not advance observed checkpoint progress for save-owned mutations/cleanup. Existing `durable_import_commit`, `durable_import_abort`, `durable_export_release`, `resident_waits_for_export` remain valid. |
 | Refused automatic save after partial reclaim | Sample progress before save; partial Tier 1/3 reclaim then Capacity refusal must not self-wake its deferred retry, including completion/cleanup notifications. Independent observed engine progress still wakes it within the existing budget. |
+| Another export retires / no-op reclaim | A TransactionBusy pressure save retries after another session's export retires with no other engine activity. A refused prepare whose tiers change nothing emits no capacity/admission notification. |
 | Survivor-export receipt | `erase_response`'s native survivor-save receipt contains the same reclaim keys as other save paths; preserve the summary through store refusal and any existing replay fallback, without changing committed/origin/dir_sync. |
-| Order-dependent two-session final save | The first session is Capacity-refused; the second publishes and becomes a provable victim. One Capacity-only second pass saves the first and Stop completes, with each session counted once. No second pass without first-pass publication, no retry of non-Capacity refusals, and never a third pass. |
+| Order-dependent two-session final save | The first session is Capacity-refused; the second publishes and becomes a provable victim. One Capacity-only second pass saves the first and Stop completes, with each session counted once even if the second save throws. No second pass without first-pass publication, no retry of non-Capacity refusals, and never a third pass. |
 
 Extend `ninfer_export_state_test` for exact shortage, typed contiguity-only allocation,
 Busy, no arena, partial reservation rollback, and failed-copy cleanup. Add native

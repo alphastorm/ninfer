@@ -226,6 +226,10 @@ public:
             for (const auto& group : groups) {
                 if (std::none_of(group.sources.begin(), group.sources.end(),
                                 [&](auto h) { return contains(closure, h); })) continue;
+                if (std::any_of(group.sources.begin(), group.sources.end(), [&](auto h) {
+                        return !contains(closure, h) && !proven_victim_member_eligible(
+                            program, h, false, cursor, exported, ordinary_excluded);
+                    })) continue;
                 for (auto h : group.sources)
                     if (!contains(closure, h)) { closure.push_back(h); expanded = true; }
             }
@@ -253,6 +257,17 @@ public:
     }
 
 private:
+    bool proven_victim_member_eligible(
+        Program& program, Handle handle, bool named, const ReclaimCursor& cursor,
+        std::span<const Handle> exported, std::span<const Handle> ordinary_excluded) const {
+        return !contains(exported, handle) && references(handle) &&
+            program.valid_checkpoint(handle) && !program.checkpoint_metadata(handle).leased &&
+            may_revoke({&handle, 1}, {ReclaimPurpose::OptionalWrite}) &&
+            (named || (!contains(ordinary_excluded, handle) &&
+                std::any_of(cursor.victims.begin(), cursor.victims.end(),
+                            [&](const auto& entry) { return entry.handle == handle; })));
+    }
+
     bool proven_victim_eligible(
         Program& program, const DurableVictim& victim, std::span<const Handle> closure,
         const ReclaimCursor& cursor, std::span<const Handle> exported,
@@ -270,14 +285,10 @@ private:
                     return false;
         }
         for (auto handle : closure) {
-            if (contains(exported, handle) || !references(handle) ||
-                !program.valid_checkpoint(handle) || program.checkpoint_metadata(handle).leased ||
-                !may_revoke({&handle, 1}, {ReclaimPurpose::OptionalWrite})) return false;
             const bool named = std::any_of(owner->points.begin(), owner->points.end(),
                                           [&](const auto& p) { return p.handle == handle; });
-            if (!named && (contains(ordinary_excluded, handle) ||
-                std::none_of(cursor.victims.begin(), cursor.victims.end(),
-                             [&](const auto& entry) { return entry.handle == handle; }))) return false;
+            if (!proven_victim_member_eligible(
+                    program, handle, named, cursor, exported, ordinary_excluded)) return false;
         }
         return program.host_bytes_released(closure) > 0;
     }

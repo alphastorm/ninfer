@@ -423,7 +423,9 @@ Off-worker exports reserve the retirement task, future and queue node before tak
 native leases. The worker reuses a preconstructed command batch, including its list
 sentinel, so neither enqueueing nor draining retirement allocates after a writer
 completes or throws. Each prepared export releases its capacity/admission notification
-exactly once, after its native pins retire.
+exactly once, after its native pins retire. This retirement advances observed Engine
+progress, allowing another session's TransactionBusy or Capacity save to retry without
+unrelated execution.
 
 Export preparation distinguishes a contended Host **byte deficit** from Busy, absent
 Host storage, deterministic staging/empty-arena limits and a contiguity-only miss.
@@ -438,7 +440,11 @@ set, active owners and waiting/binding sources. Only explicit operator checkpoin
 saves and final saves may then byte-prove other inactive durable owners. Each victim's
 entire handle set must be single-owner exclusive, unleased and OptionalWrite-revocable.
 Its eligible ordinary physical sharers join one native-quoted release closure. Any
-export-set intersection or protected closure member declines the whole victim.
+export-set intersection with the victim's named handles declines the whole victim.
+Expand a physical group only when all its not-yet-included holders are eligible
+ordinary members; skip a group with any protected holder, leaving its shared pages
+resident while still permitting the victim's private Host bytes to be released.
+Recheck every included member and the positive native quote immediately before commit.
 Fresh native payload validation and re-pinning the same current index (length and
 SHA-256) authorize this narrowly scoped guard-free release; it never enqueues another
 save. Import retains its existing guarded release and retry policy.
@@ -455,8 +461,11 @@ Candidate membership is frozen per command. Zero-arena-progress releases consume
 work and continue the scan, but never authorize another prepare. With V initial
 durable candidates and C ordinary cursor handles, prepares are bounded by `2+V+C`.
 Pressure-callback re-entry may prepare/write, but cannot reclaim an outer quoted plan.
-Save-owned mutation and retirement wake scheduler/admission without advancing the
-observed checkpoint progress clock, so a refused automatic save cannot wake itself.
+Actual reclaim mutation wakes scheduler/admission without advancing the observed
+checkpoint progress clock; no-op reclaim tiers emit no capacity/admission notification.
+A refused automatic save cannot wake itself: its reclaim/completion notifications are
+non-observed, and a refused prepare holds no export lease. Prepared export retirement
+releases real pins and advances observed progress to wake other sessions' deferred saves.
 Native page quotes are not arena occupancy: receipts count actual per-release arena
 deltas before any re-materialization.
 
@@ -467,7 +476,8 @@ That save cannot quota-evict a just-reclaimed victim; it may instead refuse with
 After pins retire, later independent saves retain ordinary disk-quota policy.
 Final save freezes its session list and, only if the first pass published a save,
 retries Capacity-refused sessions once. Each session is counted by its final outcome,
-there is no third pass, and any remaining refusal still fails Stop closed.
+including a second-pass exception counted as one refusal; there is no third pass,
+and any remaining refusal still fails Stop closed.
 
 Import validates/authenticates bounded metadata before payload-sized reservations.
 Reserve checkpoint slots, Host StateImage destinations, inactive KV histories and
