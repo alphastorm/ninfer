@@ -306,13 +306,20 @@ def main() -> int:
                 require(cached >= b["frontier"] - args.frontier_tolerance, "B did not restore the saved native frontier")
                 require(digest_file(pointer) == a_pointer and payload_shape(checkpoints, sessions[0]) == a,
                         "reclaiming save changed or quota-evicted A")
-                code, _ = request("GET", "/v1/responses/" + a_seed["id"], capability=sessions[0])
-                require(code == 200, "cold victim A is not loadable after restart")
                 receipt["restart"] = {"cached_tokens": cached, "continuation_sha256": hashlib.sha256(
                     semantic_text(restored).encode()).hexdigest(), "a_current_unchanged": True}
-                receipt["second_stop"] = active.stop({"saved": 1, "skipped": 1, "refused": 0, "complete": True})
+                # B's restored continuation fills the calibrated arena and its newest points are not
+                # yet durable, so importing A now would contend with B (Capacity refusal on the
+                # first 5090 run). Save B through the second Stop, then load A alone.
+                receipt["second_stop"] = active.stop({"saved": 1, "skipped": 0, "refused": 0, "complete": True})
                 active = None
                 require(digest_file(pointer) == a_pointer, "second Stop changed A's covered generation")
+                active = Server(4, checkpoints, capacity)
+                code, _ = request("GET", "/v1/responses/" + a_seed["id"], capability=sessions[0])
+                require(code == 200, "cold victim A is not loadable after restart")
+                receipt["victim_load_stop"] = active.stop({"saved": 0, "skipped": 1, "refused": 0, "complete": True})
+                active = None
+                require(digest_file(pointer) == a_pointer, "loading A changed its covered generation")
             receipt["passed"] = True
         finally:
             if active is not None:

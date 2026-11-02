@@ -512,8 +512,10 @@ Keep all geometry/backend options identical across those invocations. The red co
 uses the same instrumented binary, not a rebuild or an uninstrumented substitute.
 The runner compares that deficit with its calibrated pre-stop metrics. No predecessor
 or candidate GPU result is implied by host CI. Candidate green requires exact shutdown
-totals, positive reclaimed owners/bytes, deterministic native restore, an unchanged and
-loadable victim generation, and a separately checked second Stop. Qualify each shipped
+totals, positive reclaimed owners/bytes, deterministic native restore, an unchanged victim
+generation, a separately checked second Stop that saves B's continuation, and then a
+fresh server that loads the cold victim alone (B's restored continuation fills the
+calibrated arena, so loading A beside it would be a Capacity refusal). Qualify each shipped
 native component's event/report/restore route and the built container's SIGTERM route;
 the runtime image does not build or execute CTest. Retain the long-session managed-Stop
 release rehearsal in addition to this calibrated trigger.
