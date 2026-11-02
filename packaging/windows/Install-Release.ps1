@@ -50,7 +50,28 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 
 function Read-JsonFile([string]$Path) {
-    return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "missing state file" }
+    $text = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+    if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) {
+        return ConvertFrom-Json -InputObject $text -DateKind String
+    }
+    return Convert-RecordDatesToStrings (ConvertFrom-Json -InputObject $text)
+}
+
+function Convert-RecordDatesToStrings([object]$Value) {
+    # Older supported shells deserialize ISO timestamps as DateTime. Our durable records use
+    # UTC round-trip strings; keep those strings rather than reserializing a shortened date.
+    if ($Value -is [DateTime]) { return $Value.ToUniversalTime().ToString('o') }
+    if ($Value -is [array]) {
+        $items = @(foreach ($item in $Value) { Convert-RecordDatesToStrings $item })
+        return ,$items
+    }
+    if ($Value -is [pscustomobject]) {
+        foreach ($property in $Value.PSObject.Properties) {
+            $property.Value = Convert-RecordDatesToStrings $property.Value
+        }
+    }
+    return $Value
 }
 
 function Get-TrustedNvidiaSmiPath {
@@ -158,7 +179,9 @@ function Get-LaunchKey([object]$Runtime) {
 function Get-RuntimeStrict {
     $runtime = Read-AttributionJson 'runtime.json'
     if ($null -eq $runtime) { return $null }
+    $schema = Get-AttributionField $runtime 'schema_version'
     if ([string](Get-AttributionField $runtime 'artifact_type') -cne 'ninfer_windows_runtime_state' -or
+        -not ($schema -is [int] -or $schema -is [long]) -or
         (Get-AttributionField $runtime 'schema_version') -cnotin @(1, 2) -or
         $null -eq $runtime.PSObject.Properties['pid'] -or
         $null -eq $runtime.PSObject.Properties['start_time_utc_ticks']) {
@@ -199,7 +222,9 @@ function Get-ShutdownHolds {
     if ($null -eq $envelope) {
         return [pscustomobject]@{artifact_type='ninfer_windows_shutdown_holds';schema_version=1;holds=@()}
     }
+    $schema = Get-AttributionField $envelope 'schema_version'
     if ([string](Get-AttributionField $envelope 'artifact_type') -cne 'ninfer_windows_shutdown_holds' -or
+        -not ($schema -is [int] -or $schema -is [long]) -or
         (Get-AttributionField $envelope 'schema_version') -cne 1 -or
         (Get-AttributionField $envelope 'holds') -isnot [array]) { throw 'invalid shutdown holds envelope' }
     $keys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -216,11 +241,13 @@ function Get-ShutdownHolds {
         }
         if (
             [string]$entry.runtime.artifact_type -cne 'ninfer_windows_runtime_state' -or
+            -not ($entry.runtime.schema_version -is [int] -or $entry.runtime.schema_version -is [long]) -or
             $entry.runtime.schema_version -cne 2 -or
             [string](Get-LaunchKey $entry.runtime) -cne $key -or
             [string]$entry.runtime.release_id -cne $id -or
             [string]$entry.runtime.managed_stop -cne 'stop-event' -or
             [string]$entry.stop_receipt.artifact_type -cne 'ninfer_windows_managed_stop_receipt' -or
+            -not ($entry.stop_receipt.schema_version -is [int] -or $entry.stop_receipt.schema_version -is [long]) -or
             $entry.stop_receipt.schema_version -cne 1 -or
             [string]$entry.stop_receipt.launch_id -cne $key -or
             [string]$entry.stop_receipt.release_id -cne $id -or
@@ -238,8 +265,10 @@ function Get-ShutdownHolds {
 
 function Get-StickyStopReceipt {
     $receipt = Read-AttributionJson 'last-stop.json'
+    $schema = Get-AttributionField $receipt 'schema_version'
     if ($null -ne $receipt -and
         ([string](Get-AttributionField $receipt 'artifact_type') -cne 'ninfer_windows_managed_stop_receipt' -or
+         -not ($schema -is [int] -or $schema -is [long]) -or
          (Get-AttributionField $receipt 'schema_version') -cne 1 -or
          (Get-AttributionField $receipt 'forced') -isnot [bool] -or
          [string](Get-AttributionField $receipt 'mode') -cnotin @('stop-event', 'terminate') -or
@@ -1306,6 +1335,7 @@ function Invoke-InstallTransactionRollback(
 ) {
     $cleanupActions = [Collections.Generic.List[object]]::new()
     $restored = Test-LifecycleRestored $Transaction
+    $restoredPhase = if ($restored) { [string]$Transaction.phase } else { $null }
     $heldStatus = [string]$Transaction.status -ceq 'held_cleanup'
     $touched = $false
     foreach ($flag in @('state_activated', 'controller_touched', 'task_touched',
@@ -1363,6 +1393,7 @@ function Invoke-InstallTransactionRollback(
             # on a later Start, cleanup, or diagnostic failure.
             Set-TransactionPhase $Transaction "${Mode}_lifecycle_restored"
             $restored = $true
+            $restoredPhase = [string]$Transaction.phase
             if ($null -ne $runFence) { $runFence.Dispose(); $runFence = $null }
             if ($null -ne $actionFence) { $actionFence.Dispose(); $actionFence = $null }
         }
@@ -1419,7 +1450,8 @@ function Invoke-InstallTransactionRollback(
         $failure = $_
         $stillHeld = [string]$Transaction.status -ceq 'held_cleanup'
         Set-ObjectProperty $Transaction 'status' $(if ($stillHeld) { 'held_cleanup' } else { 'repair_required' })
-        if (-not $restored) { Set-ObjectProperty $Transaction 'phase' "${Mode}_incomplete" }
+        if ($restored) { Set-ObjectProperty $Transaction 'phase' $restoredPhase }
+        else { Set-ObjectProperty $Transaction 'phase' "${Mode}_incomplete" }
         Set-ObjectProperty $Transaction 'diagnostics' @("${stage}: $(Get-BoundedDiagnostic $failure.Exception.Message)")
         Set-ObjectProperty $Transaction 'cleanup_actions' @($cleanupActions | ForEach-Object { $_ })
         Write-InstallTransaction $Transaction

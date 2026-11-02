@@ -1850,6 +1850,26 @@ class ScratchQualificationTests(unittest.TestCase):
 
 
 class SharedLifecycleTreeTests(unittest.TestCase):
+    def test_shutdown_attribution_helpers_share_one_mutation_domain(self) -> None:
+        controller = (WINDOWS / "Control-Release.ps1").read_text()
+        installer = (WINDOWS / "Install-Release.ps1").read_text()
+        for name in ("Read-JsonFile", "Convert-RecordDatesToStrings", "Write-JsonAtomic",
+                     "Invoke-WithHoldsLock", "Assert-HoldsLock", "Read-AttributionJson",
+                     "Get-AttributionField", "Get-LaunchRoot", "Get-LaunchKey", "Get-RuntimeStrict",
+                     "Assert-SameLaunch", "Get-ShutdownHolds", "Get-StickyStopReceipt", "Remove-RuntimeForLaunch",
+                     "Enter-LaunchFence"):
+            with self.subTest(helper=name):
+                self.assertEqual(ps_function(controller, name).strip(), ps_function(installer, name).strip())
+        publication = ps_function(controller, "Write-JsonAtomic")
+        self.assertIn("[IO.File]::Replace", publication)
+        self.assertIn("[IO.File]::Move", publication)
+        self.assertNotIn("Remove-Item", publication)
+        self.assertNotIn("Move-Item", publication)
+        self.assertIn("Assert-HoldsLock", publication)
+        self.assertNotIn("ConvertTo-Json", ps_function(controller, "Assert-SameLaunch"))
+        self.assertIn("$envelope.holds = @(", ps_function(controller, "Invoke-Reconcile"))
+        self.assertNotIn("Invoke-WithActionLock", ps_function(controller, "Invoke-Reconcile"))
+
     def test_native_protocol_uses_canonical_product_smoke(self) -> None:
         options = SimpleNamespace(
             lane_dir="packaging/windows/lanes/rtx3090", lifecycle_dir="packaging/windows",
@@ -2501,6 +2521,9 @@ function Request-ManagedStop {
 function Stop-ScheduledTask {
     [IO.File]::WriteAllText((Join-Path $StateRoot 'child-exit'),'force')
 }
+function Unregister-ScheduledTask {
+    [IO.File]::WriteAllText((Join-Path $StateRoot 'task-removed'),'removed')
+}
 function Start-ScheduledTask {
     $psi=[Diagnostics.ProcessStartInfo]::new()
     $psi.FileName=[Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
@@ -2862,6 +2885,16 @@ function Enter-LaunchFence([string]$Name,[int]$TimeoutSeconds=1){ & $script:real
             lease = json.loads((lane.root / "gpu-owner-lease.json").read_text())
             self.assertEqual(lease["release_id"], lane.instance)
             self.assertFalse(lease["prior_paused"])
+            inner = (lane.root / "gpu-owner-state" / "lease.json").read_bytes()
+            lease["release_id"] = "predecessor"
+            (lane.root / "gpu-owner-lease.json").write_text(json.dumps(lease))
+            repeated = self.dispatch(lane, "Restart")
+            self.assertEqual(repeated.returncode, 0, repeated.stderr)
+            refreshed = json.loads((lane.root / "gpu-owner-lease.json").read_text())
+            self.assertEqual(refreshed["release_id"], lane.instance)
+            self.assertEqual(refreshed["controller_sha256"], lease["controller_sha256"])
+            self.assertEqual(refreshed["prior_paused"], lease["prior_paused"])
+            self.assertEqual((lane.root / "gpu-owner-state" / "lease.json").read_bytes(), inner)
             self.assertEqual(self.dispatch(lane, "Stop").returncode, 0)
             self.assertFalse((lane.root / "gpu-owner-lease.json").exists())
             (lane.root / "ready-fails").touch()
@@ -2901,6 +2934,56 @@ function Enter-LaunchFence([string]$Name,[int]$TimeoutSeconds=1){ & $script:real
             self.assertEqual(len(list((lane.root / "receipts").glob("shutdown-reconcile-*.json"))), 1)
             self.assertNotEqual(self.dispatch(lane, "Reconcile", "-ReleaseId", lane.instance,
                                              packaged=True).returncode, 0)
+
+    def test_t7_exited_newer_runtime_is_not_acknowledged_or_deleted(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lane = dispatcher_fixture(Path(directory))
+            self.seed(lane, report={"refused": 1})
+            self.dispatch(lane, "Stop")
+            newer = self.seed(lane, "2" * 32, {})
+            result = self.dispatch(lane, "Reconcile", "-ReleaseId", lane.instance)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(json.loads(result.stdout)["census_result"], "idle")
+            self.assertEqual(json.loads((lane.root / "runtime.json").read_text()), newer)
+            self.assertEqual(self.holds(lane), [])
+
+    def test_t4_run_consumes_removed_predecessor_before_replacing_its_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lane = dispatcher_fixture(Path(directory))
+            old = self.seed(lane)
+            old["release_id"] = "removed-predecessor"
+            old["shutdown_report"] = str(lane.root / "releases" / old["release_id"] / "logs" / "shutdown.json")
+            (lane.root / "runtime.json").write_text(json.dumps(old))
+            process = self.dispatch(lane, "Run", background=True)
+            self.addCleanup(lambda p=process: p.poll() is None and p.kill())
+            self.wait_file(lane.root / "wrapper-ready", process)
+            held = self.holds(lane)[0]
+            self.assertEqual(held["runtime"], old)
+            self.assertEqual(held["stop_receipt"]["outcome"], "graceful_unreported")
+            (lane.root / "child-exit").touch()
+            stdout, stderr = process.communicate(timeout=30)
+            self.assertEqual(process.returncode, 0, stdout + stderr)
+            self.assertEqual(self.dispatch(lane, "Stop").returncode, 0)
+            self.assertEqual(self.holds(lane), [held])
+
+    def test_t11_uninstall_refuses_historical_and_new_holds_before_task_removal(self) -> None:
+        for historical in (False, True):
+            with self.subTest(historical=historical), tempfile.TemporaryDirectory() as directory:
+                lane = dispatcher_fixture(Path(directory))
+                self.seed(lane, report={"refused": 1})
+                if historical:
+                    self.dispatch(lane, "Stop")
+                result = self.dispatch(lane, "Uninstall")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(lane.release.exists())
+                self.assertFalse((lane.root / "task-removed").exists())
+                self.assertEqual(len(self.holds(lane)), 1)
+                acknowledged = self.dispatch(lane, "Reconcile", "-ReleaseId", lane.instance)
+                self.assertEqual(acknowledged.returncode, 0, acknowledged.stderr)
+                removed = self.dispatch(lane, "Uninstall")
+                self.assertEqual(removed.returncode, 0, removed.stderr)
+                self.assertFalse(lane.root.exists())
+                self.assertTrue((Path(directory) / "models" / "model.ninfer").exists())
 
     def test_t8_persisted_failure_is_sticky_but_unwritten_observation_is_not_invented(self) -> None:
         for artifact in ("shutdown-holds.json", "last-stop.json"):
@@ -2993,6 +3076,75 @@ function Enter-LaunchFence([string]$Name,[int]$TimeoutSeconds=1){ & $script:real
                     self.assertFalse((lane.root / "gpu-owner-state" / "lease.json").exists())
                     self.assertFalse(json.loads((lane.root / "gpu-owner-state" / "owner.json").read_text())["paused"])
                     self.assertEqual(self.holds(lane), [])
+
+    def test_t3_neutral_installer_branches_allow_both_wrappers_to_hand_back_owner(self) -> None:
+        for legacy in (False, True):
+            for restored in (False, True):
+                with self.subTest(legacy=legacy, restored=restored), tempfile.TemporaryDirectory() as directory:
+                    lane = dispatcher_fixture(Path(directory))
+                    dispatcher_owner(lane)
+                    if legacy:
+                        source = committed_bytes("0628db0b0997c8bda4ac37c8e84da95986890014",
+                                                 "packaging/windows/Control-Release.ps1")
+                        source = source.replace(b"[Diagnostics.Process]::Start($startInfo)", b"(Start-FixtureChild)")
+                        source = source.replace(b"switch ($Action) {",
+                                                DISPATCH_BOUNDARIES.encode() + b"\nswitch ($Action) {")
+                        install_script(source, lane.root / "Control-Release.ps1")
+                    started = self.dispatch(lane, "Start")
+                    self.assertEqual(started.returncode, 0, started.stderr)
+                    journal = self.first_install_journal(lane)
+                    transaction = json.loads(journal.read_text())
+                    candidate = "inactive-candidate"
+                    transaction["instance_id"] = candidate
+                    for field, kind in (("release_root", "releases"), ("secret_directory", "secrets"),
+                                        ("cache_root", "cache")):
+                        transaction[field] = str(lane.root / kind / candidate)
+                        Path(transaction[field]).mkdir(parents=True)
+                    transaction["flags"] = {key: False for key in transaction["flags"]}
+                    if restored:
+                        transaction.update(status="repair_required", phase="repair_lifecycle_restored",
+                                           diagnostics=["candidate cleanup: retry"])
+                    else:
+                        transaction["phase"] = "candidate_copied"
+                    journal.write_text(json.dumps(transaction))
+                    gate = lane.root / "installer-leaf"
+                    injection = ps_assignments(Gate=gate) + r"""
+$script:readHolds=${function:Get-ShutdownHolds}
+$script:paused=$false
+function Get-ShutdownHolds {
+    $envelope=& $script:readHolds
+    if(-not $script:paused){
+        $script:paused=$true
+        [IO.File]::WriteAllText(($Gate+'.entered'),'entered')
+        $deadline=[DateTime]::UtcNow.AddSeconds(20)
+        while(-not(Test-Path ($Gate+'.release'))){
+            if([DateTime]::UtcNow -ge $deadline){throw 'fixture installer leaf deadline'}
+            Start-Sleep -Milliseconds 50
+        }
+    }
+    return $envelope
+}
+"""
+                    script = ("$ErrorActionPreference='Stop';$WarningPreference='SilentlyContinue';\n" +
+                              ps_assignments(StateRoot=lane.root, Journal=journal, Mode="repair", LiveProcesses="[]")
+                              + ps_definitions(WINDOWS / "Install-Release.ps1") + injection + ROLLBACK_ATTEMPT)
+                    process = subprocess.Popen([POWERSHELL, "-NoProfile", "-NonInteractive", "-Command", script],
+                                               stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    self.addCleanup(lambda p=process: p.poll() is None and p.kill())
+                    self.wait_file(Path(str(gate) + ".entered"), process)
+                    (lane.root / "child-exit").touch()
+                    self.wait_file(lane.root / "wrapper-probed")
+                    self.assertEqual((lane.root / "wrapper-probed").read_text(), "False")
+                    Path(str(gate) + ".release").touch()
+                    stdout, stderr = process.communicate(timeout=30)
+                    self.assertEqual(process.returncode, 0, stderr)
+                    self.assertIn("completed", json.loads(stdout))
+                    deadline = time.monotonic() + 20
+                    while (lane.root / "gpu-owner-lease.json").exists() and time.monotonic() < deadline:
+                        time.sleep(.1)
+                    self.assertFalse((lane.root / "gpu-owner-lease.json").exists())
+                    self.assertFalse((lane.root / "gpu-owner-state" / "lease.json").exists())
+                    self.assertFalse(json.loads((lane.root / "gpu-owner-state" / "owner.json").read_text())["paused"])
 
     def test_t5_latest_same_key_runtime_is_held(self) -> None:
         for changed_key in (False, True):
@@ -3509,6 +3661,7 @@ foreach($value in @('N/A','-1','1.5')){{
             subject.builder_out_a, subject.builder_out_b = "D:/C3/public-a", "D:/C3/public-b"
             subject.builder_scratch_a, subject.builder_scratch_b = "D:/C3/scratch-a", "D:/C3/scratch-b"
             subject.target_root = "C:/qualification"
+            subject.state_path = root / "state.json"
             subject.state = {"gpu_uuid": "GPU-00000000-0000-4000-8000-000000004090",
                              "phases": {"package": {"receipt": {"scratch_package": {
                                  "package": {"sha256": "e" * 64}}}}}}
@@ -3516,6 +3669,8 @@ foreach($value in @('N/A','-1','1.5')){{
 
             def capture(host: str, script: str, **kwargs: object) -> None:
                 scripts.append(script)
+                if "status='stop-observed'" in script:
+                    return {"status": "stop-observed", "held_launch_ids": []}
                 raise CapturedScript
 
             subject.remote_json = capture
@@ -3545,7 +3700,7 @@ foreach($path in @({literal})){{
 }}
 ConvertTo-Json -InputObject @($failures) -Compress
 """)
-            self.assertEqual(len(scripts), 8)
+            self.assertEqual(len(scripts), 9)
             self.assertEqual(errors, [])
 
     def test_schema4_and_rollback_arguments_execute_without_aliases(self) -> None:
@@ -4046,7 +4201,7 @@ try{Restore-GpuOwnerLease}catch{$restore=$_.Exception.Message}
             self.assertEqual(self.upgrade_observation(upgrade), {
                 "status": "repaired", "active_release": upgrade.incumbent, "controller": "incumbent",
                 "candidate_targets": [False] * 4, "incumbent_trees": True, "candidate_lease": False,
-                "log": ["candidate:Stop", "task:register", "incumbent:Stop", "task:register", "incumbent:Start"],
+                "log": ["candidate:Stop", "task:register", "candidate:Stop", "task:register", "incumbent:Start"],
             })
 
     def test_repair_keeps_every_tree_while_a_candidate_process_still_runs(self) -> None:

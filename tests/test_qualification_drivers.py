@@ -728,6 +728,7 @@ def load_tests(loader, tests, pattern):
     spec.loader.exec_module(module)
     tests.addTests(loader.loadTestsFromTestCase(module.ManagedShutdownDispatcherTests))
     tests.addTests(loader.loadTestsFromTestCase(module.QualificationRestorationTests))
+    tests.addTests(loader.loadTestsFromTestCase(module.SharedLifecycleTreeTests))
     return tests
 
 

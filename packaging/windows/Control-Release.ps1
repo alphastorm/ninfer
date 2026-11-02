@@ -8,6 +8,7 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$StateRoot,
 
+    [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]*$')]
     [string]$ReleaseId,
 
     [switch]$AllowHeld
@@ -29,7 +30,27 @@ Assert-NInferProtectedStateRoot $StateRoot
 
 function Read-JsonFile([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "missing state file" }
-    return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+    $text = Get-Content -LiteralPath $Path -Raw -Encoding UTF8
+    if ((Get-Command ConvertFrom-Json).Parameters.ContainsKey('DateKind')) {
+        return ConvertFrom-Json -InputObject $text -DateKind String
+    }
+    return Convert-RecordDatesToStrings (ConvertFrom-Json -InputObject $text)
+}
+
+function Convert-RecordDatesToStrings([object]$Value) {
+    # Older supported shells deserialize ISO timestamps as DateTime. Our durable records use
+    # UTC round-trip strings; keep those strings rather than reserializing a shortened date.
+    if ($Value -is [DateTime]) { return $Value.ToUniversalTime().ToString('o') }
+    if ($Value -is [array]) {
+        $items = @(foreach ($item in $Value) { Convert-RecordDatesToStrings $item })
+        return ,$items
+    }
+    if ($Value -is [pscustomobject]) {
+        foreach ($property in $Value.PSObject.Properties) {
+            $property.Value = Convert-RecordDatesToStrings $property.Value
+        }
+    }
+    return $Value
 }
 
 # engine.gpu_keep_warm_ms is optional: a release packaged before the runtime learned
@@ -188,7 +209,9 @@ function Get-LaunchKey([object]$Runtime) {
 function Get-RuntimeStrict {
     $runtime = Read-AttributionJson 'runtime.json'
     if ($null -eq $runtime) { return $null }
+    $schema = Get-AttributionField $runtime 'schema_version'
     if ([string](Get-AttributionField $runtime 'artifact_type') -cne 'ninfer_windows_runtime_state' -or
+        -not ($schema -is [int] -or $schema -is [long]) -or
         (Get-AttributionField $runtime 'schema_version') -cnotin @(1, 2) -or
         $null -eq $runtime.PSObject.Properties['pid'] -or
         $null -eq $runtime.PSObject.Properties['start_time_utc_ticks']) {
@@ -229,7 +252,9 @@ function Get-ShutdownHolds {
     if ($null -eq $envelope) {
         return [pscustomobject]@{artifact_type='ninfer_windows_shutdown_holds';schema_version=1;holds=@()}
     }
+    $schema = Get-AttributionField $envelope 'schema_version'
     if ([string](Get-AttributionField $envelope 'artifact_type') -cne 'ninfer_windows_shutdown_holds' -or
+        -not ($schema -is [int] -or $schema -is [long]) -or
         (Get-AttributionField $envelope 'schema_version') -cne 1 -or
         (Get-AttributionField $envelope 'holds') -isnot [array]) { throw 'invalid shutdown holds envelope' }
     $keys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -246,11 +271,13 @@ function Get-ShutdownHolds {
         }
         if (
             [string]$entry.runtime.artifact_type -cne 'ninfer_windows_runtime_state' -or
+            -not ($entry.runtime.schema_version -is [int] -or $entry.runtime.schema_version -is [long]) -or
             $entry.runtime.schema_version -cne 2 -or
             [string](Get-LaunchKey $entry.runtime) -cne $key -or
             [string]$entry.runtime.release_id -cne $id -or
             [string]$entry.runtime.managed_stop -cne 'stop-event' -or
             [string]$entry.stop_receipt.artifact_type -cne 'ninfer_windows_managed_stop_receipt' -or
+            -not ($entry.stop_receipt.schema_version -is [int] -or $entry.stop_receipt.schema_version -is [long]) -or
             $entry.stop_receipt.schema_version -cne 1 -or
             [string]$entry.stop_receipt.launch_id -cne $key -or
             [string]$entry.stop_receipt.release_id -cne $id -or
@@ -268,8 +295,10 @@ function Get-ShutdownHolds {
 
 function Get-StickyStopReceipt {
     $receipt = Read-AttributionJson 'last-stop.json'
+    $schema = Get-AttributionField $receipt 'schema_version'
     if ($null -ne $receipt -and
         ([string](Get-AttributionField $receipt 'artifact_type') -cne 'ninfer_windows_managed_stop_receipt' -or
+         -not ($schema -is [int] -or $schema -is [long]) -or
          (Get-AttributionField $receipt 'schema_version') -cne 1 -or
          (Get-AttributionField $receipt 'forced') -isnot [bool] -or
          [string](Get-AttributionField $receipt 'mode') -cnotin @('stop-event', 'terminate') -or
@@ -1146,6 +1175,17 @@ function New-StopReceipt([object]$Runtime, [string]$Id, [object]$Plan) {
     }
 }
 
+function Get-LaunchStopPlan([object]$Runtime, [object]$Release) {
+    $plan = Get-ManagedStopPlan $Release
+    if ($null -eq $Runtime) { return $plan }
+    # The slot records the capability actually launched, not a later installed record's
+    # capabilities. Legacy records without a channel remain terminate-only.
+    if ([string](Get-AttributionField $Runtime 'managed_stop') -ceq 'stop-event') {
+        return [pscustomobject]@{mode='stop-event';timeout_seconds=[int]$plan.timeout_seconds}
+    }
+    return [pscustomobject]@{mode='terminate';timeout_seconds=30}
+}
+
 function Test-NonCleanStopReceipt([object]$Receipt) {
     return $null -ne $Receipt -and [string]$Receipt.mode -ceq 'stop-event' -and
         ([bool]$Receipt.forced -or [string]$Receipt.outcome -cnotin @('graceful', 'already_stopped'))
@@ -1161,6 +1201,8 @@ function Set-StopReportVerdict([object]$Runtime, [object]$Release, [object]$Rece
     }
     $valid = $null -ne $report -and
         [string](Get-AttributionField $report 'artifact_type') -ceq 'ninfer_serve_shutdown_report' -and
+        ((Get-AttributionField $report 'schema_version') -is [int] -or
+         (Get-AttributionField $report 'schema_version') -is [long]) -and
         (Get-AttributionField $report 'schema_version') -ceq 1 -and
         [string](Get-AttributionField $report 'launch_id') -ceq [string](Get-LaunchKey $Runtime) -and
         (Get-AttributionField $report 'complete') -is [bool]
@@ -1242,7 +1284,7 @@ function Invoke-LaunchAdmission([object]$State) {
     $release = Resolve-RuntimeRelease $snapshot $State
     if ($null -ne (Get-OwnedProcess $snapshot $release)) { throw 'a prior attributable launch still runs' }
     Assert-NoReleaseProcess $release
-    $plan = Get-ManagedStopPlan $release
+    $plan = Get-LaunchStopPlan $snapshot $release
     $receipt = New-StopReceipt $snapshot ([string]$snapshot.release_id) $plan
     $result = Complete-LaunchRetirement $snapshot $release $receipt
     if ($result.held_launch_ids.Count -ne 0) { Write-Warning 'prior final-save evidence remains held until explicit Reconcile' }
@@ -1269,7 +1311,7 @@ function Stop-ManagedProcess {
     $release = if ($null -eq $runtime) { Get-Release $state ([string]$state.active_release) }
                else { Resolve-RuntimeRelease $runtime $state }
     $id = if ($null -eq $runtime) { [string]$state.active_release } else { [string]$runtime.release_id }
-    $plan = Get-ManagedStopPlan $release
+    $plan = Get-LaunchStopPlan $runtime $release
     $receipt = New-StopReceipt $runtime $id $plan
     $fence = $null
     $persistenceFailure = $null
