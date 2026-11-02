@@ -1,5 +1,17 @@
 # NInfer native Windows lanes
 
+## 2026-11-02 — Native component 0.8.0-beta.2 (qualification pending)
+
+The native component candidates are `v0.8.0-qwen38-4090-beta.2` and
+`v0.8.0-qwen38-3090-beta.2`. Both include the durable-export Host reclamation
+fix and its review remediations. Their release, deployment and build identities
+advance together; model bytes, runtime shape, admission reserves and GPU-owner
+policies remain unchanged from `0.8.0-beta.1`.
+
+Package-build receipts remain `hardware-pending`. Both candidates require fresh
+exact-source build, package, GPU, lifecycle and restoration evidence before
+qualification; prior-component receipts are not evidence for these bytes.
+
 ## 2026-11-01 — Uninstall restores prior paused-owner power (next release)
 
 Uninstall restores the GPU owner's recorded prior power limit after the managed
