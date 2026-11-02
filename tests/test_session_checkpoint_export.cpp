@@ -16,12 +16,13 @@
 #include <utility>
 
 namespace {
-thread_local bool fail_next_allocation = false;
+thread_local std::size_t allocation_failure_size = 0;
 thread_local unsigned allocation_failures = 0;
 }
 
 void* operator new(std::size_t size) {
-    if (std::exchange(fail_next_allocation, false)) {
+    if (allocation_failure_size && size == allocation_failure_size) {
+        allocation_failure_size = 0;
         ++allocation_failures;
         throw std::bad_alloc();
     }
@@ -84,15 +85,14 @@ StoredOpenAIResponse response(const std::string& session, std::string id, unsign
     return out;
 }
 struct ReceiptLog : std::stringbuf {
-    bool fail_after_export = false;
+    std::size_t fail_after_export = 0;
     std::streamsize xsputn(const char* text, std::streamsize size) override {
         const auto written = std::stringbuf::xsputn(text, size);
         if (fail_after_export &&
             std::string_view(text, size).find("\"state\":\"exported\"") != std::string_view::npos) {
-            fail_after_export = false;
-            // Receipt emission is the last first-pass action. Fail the next save's
-            // operation/snapshot acquisition, outside save_session's inner catch.
-            fail_next_allocation = true;
+            // Target the next save's session-key copy, outside save_session's inner
+            // catch, without failing syncstream buffer teardown after this receipt.
+            allocation_failure_size = std::exchange(fail_after_export, 0);
         }
         return written;
     }
@@ -118,7 +118,7 @@ struct Fixture {
         service = std::make_unique<SessionCheckpointService>(engine, options, responses, std::nullopt);
     }
     ~Fixture() {
-        fail_next_allocation = false;
+        allocation_failure_size = 0;
         service.reset();
         std::clog.rdbuf(previous);
         std::error_code ignored;
@@ -183,10 +183,10 @@ void final_second_pass_exception_counts_once() {
         return exported(writer);
     };
     const auto failures = allocation_failures;
-    f.logs.fail_after_export = true;
+    f.logs.fail_after_export = a.size() + 1;
     require(!f.service->final_save(), "second-pass exception weakened fail-closed stop");
     require(allocation_failures == failures + 1 && !f.logs.fail_after_export &&
-                !fail_next_allocation && script.calls[order.front()] == 1 &&
+                !allocation_failure_size && script.calls[order.front()] == 1 &&
                 script.calls[order.back()] == 1,
             "exception did not escape second-pass save_session before export");
     const auto report = f.report();
