@@ -195,6 +195,7 @@ def running_predecessor_3090(directory: Path, predecessor: str = PREDECESSOR_309
     """A state root as the shipped RTX 3090 lane leaves it before its controller takes the GPU
     owner: the predecessor lifecycle controllers installed and hash-bound by the lifecycle state, and
     the card at the owner's own power limit. Only fields the stop and status read are recorded."""
+    directory = directory.resolve()
     spec = json.loads(committed_bytes(predecessor, "packaging/windows/lanes/rtx3090/release-spec.json"))
     policy = spec["lifecycle"]["gpu_owner_controller_protocol"]
     root = directory / spec["lifecycle"]["state_root_name"]
@@ -306,6 +307,7 @@ def interrupted_upgrade(directory: Path) -> SimpleNamespace:
     """An upgrade that activated and started its candidate, as its journal and files record it:
     every replaced lifecycle file snapshotted, the candidate active and holding the GPU-owner
     lease, and the incumbent's trees beside the candidate's. Controllers log what they are asked."""
+    directory = directory.resolve()
     root = directory / "qwen38-3090-native"
     operation = "5" * 32
     candidate = "qwen38-3090-native-v0.8.0-beta.2-" + "c" * 12
@@ -434,6 +436,7 @@ def installed_release(directory: Path) -> SimpleNamespace:
     """One RTX 3090 release laid out as Install-Release.ps1 leaves it: the closed bin set, the
     package's inner manifest retained in receipts and bound to the record by its hash, the
     lane's own server configuration, and an external pinned model."""
+    directory = directory.resolve()
     lane = WINDOWS / "lanes" / "rtx3090"
     spec = json.loads((lane / "release-spec.json").read_text(encoding="utf-8"))
     root = directory / spec["lifecycle"]["state_root_name"]
@@ -2392,9 +2395,25 @@ POWERSHELL = shutil.which("pwsh") or shutil.which("powershell")
 
 DISPATCH_BOUNDARIES = r"""
 $WarningPreference='SilentlyContinue'
-function Assert-SelectedGpuIdentity { 0 }
+function Assert-SelectedGpuIdentity {
+    $gate=Join-Path $StateRoot 'admission-Run'
+    if($Action -ceq 'Run' -and (Test-Path $gate)){
+        [IO.File]::WriteAllText(($gate+'.entered'),'entered')
+        $deadline=[DateTime]::UtcNow.AddSeconds(20)
+        while(-not(Test-Path ($gate+'.release'))){
+            if([DateTime]::UtcNow -ge $deadline){throw 'fixture admission barrier deadline'}
+            Start-Sleep -Milliseconds 50
+        }
+    }
+    0
+}
 function Get-NetTCPConnection { }
 function Get-ScheduledTask {
+    $wrapperPath=Join-Path $StateRoot 'wrapper.pid'
+    if((Test-Path $wrapperPath) -and
+       $null -ne (Get-Process -Id ([int][IO.File]::ReadAllText($wrapperPath)) -ErrorAction SilentlyContinue)){
+        return [pscustomobject]@{State='Running'}
+    }
     $probe=$null
     try {
         $probe=[IO.File]::Open((Join-Path $StateRoot 'run.lock'),'OpenOrCreate','ReadWrite','None')
@@ -2423,6 +2442,7 @@ function Get-ScheduledTaskInfo {
     }
 }
 function Request-ManagedStop {
+    if(Test-Path (Join-Path $StateRoot 'signal-fails')){return 'failed: fixture event denial'}
     [IO.File]::WriteAllText((Join-Path $StateRoot 'child-exit'),'stop')
     return 'signalled'
 }
@@ -2437,6 +2457,7 @@ function Start-ScheduledTask {
     $psi.RedirectStandardOutput=$true
     $psi.RedirectStandardError=$true
     $wrapper=[Diagnostics.Process]::Start($psi)
+    $script:fixtureWrapper=$wrapper
     [IO.File]::WriteAllText((Join-Path $StateRoot 'wrapper.pid'),[string]$wrapper.Id)
 }
 function Start-FixtureChild {
@@ -2456,8 +2477,14 @@ function Test-ServerStartGpu {
 function Wait-Ready {
     $deadline=[DateTime]::UtcNow.AddSeconds(20)
     while([DateTime]::UtcNow -lt $deadline){
+        if($script:fixtureWrapper.HasExited){
+            throw ('fixture wrapper exited: '+$script:fixtureWrapper.StandardError.ReadToEnd())
+        }
         $rt=Get-RuntimeState
-        if($null -ne $rt -and $rt.gpu_uuid_verified){return}
+        if($null -ne $rt -and $rt.gpu_uuid_verified){
+            if(Test-Path (Join-Path $StateRoot 'ready-fails')){throw 'fixture original readiness failure'}
+            return
+        }
         Start-Sleep -Milliseconds 100
     }
     throw 'fixture wrapper never published ready attribution'
@@ -2474,6 +2501,10 @@ if(Test-Path $stateFile){
 }
 $script:publication=${function:Write-JsonAtomic}
 function Write-JsonAtomic([string]$Path,[object]$Value) {
+    $fault=Join-Path $StateRoot 'fault-publish'
+    if((Test-Path $fault) -and [IO.Path]::GetFileName($Path) -ceq [IO.File]::ReadAllText($fault)){
+        throw 'fixture publication denial'
+    }
     $barrier=Join-Path $StateRoot ('barrier-'+$Action)
     if([IO.Path]::GetFileName($Path) -ceq 'shutdown-holds.json' -and (Test-Path $barrier)){
         [IO.File]::WriteAllText(($barrier+'.entered'),'entered')
@@ -2484,6 +2515,12 @@ function Write-JsonAtomic([string]$Path,[object]$Value) {
         }
     }
     & $script:publication $Path $Value
+}
+$script:realActionProbe=${function:Test-ManagedActionInProgress}
+function Test-ManagedActionInProgress {
+    $result=& $script:realActionProbe
+    [IO.File]::WriteAllText((Join-Path $StateRoot 'wrapper-probed'),[string]$result)
+    return $result
 }
 """
 
@@ -2515,6 +2552,33 @@ if($null -ne $runtime.shutdown_report){
     return lane
 
 
+def dispatcher_owner(lane: SimpleNamespace) -> None:
+    controller = lane.root / "gpu-owner" / "Control-GpuOwner.ps1"
+    controller.parent.mkdir()
+    controller.write_text(r"""
+param([string]$Action,[string]$StateRoot,[string]$GpuUuid)
+New-Item -ItemType Directory -Force -Path $StateRoot|Out-Null
+$state=Join-Path $StateRoot 'owner.json'
+$lease=Join-Path $StateRoot 'lease.json'
+$paused=if(Test-Path $state){[bool](Get-Content -Raw $state|ConvertFrom-Json).paused}else{$false}
+if($Action -ceq 'stop'){
+    if(-not $paused){[IO.File]::WriteAllText($lease,'{"prior_paused":false}')}
+    $paused=$true
+}
+if($Action -ceq 'start'){$paused=$false;Remove-Item $lease -ErrorAction SilentlyContinue}
+[IO.File]::WriteAllText($state,(@{paused=$paused}|ConvertTo-Json))
+if($Action -ceq 'status'){
+    @{paused=$paused;gpu_uuid=$GpuUuid;gpu_pci_bus_id='""" + SYNTHETIC_GPU_PCI + r"""'}|ConvertTo-Json -Compress
+}
+""")
+    state = json.loads((lane.root / "state.json").read_text())
+    state["gpu_owner"] = {
+        "controller_path": str(controller), "controller_sha256": hashlib.sha256(controller.read_bytes()).hexdigest(),
+        "state_root": str(lane.root / "gpu-owner-state"),
+    }
+    (lane.root / "state.json").write_text(json.dumps(state))
+
+
 @unittest.skipUnless(POWERSHELL, "PowerShell runtime is required for dispatcher regressions")
 class ManagedShutdownDispatcherTests(unittest.TestCase):
     def dispatch(self, lane: SimpleNamespace, action: str, *args: str,
@@ -2537,6 +2601,11 @@ class ManagedShutdownDispatcherTests(unittest.TestCase):
             "shutdown_report": str(lane.release / "logs" / "shutdown.json"),
         }
         (lane.root / "runtime.json").write_text(json.dumps(runtime))
+        if mode == "terminate":
+            state_path = lane.root / "state.json"
+            state = json.loads(state_path.read_text())
+            state["releases"][lane.instance]["managed_stop"] = mode
+            state_path.write_text(json.dumps(state))
         if report is not None:
             report = {"artifact_type": "ninfer_serve_shutdown_report", "schema_version": 1,
                       "launch_id": key, "complete": True, "saved": 0, "skipped": 0, "refused": 0,
@@ -2596,6 +2665,168 @@ class ManagedShutdownDispatcherTests(unittest.TestCase):
             self.assertEqual(self.holds(lane), held)
             self.assertFalse((lane.root / "runtime.json").exists())
 
+    def test_t1_allowheld_and_force_override_a_complete_report(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lane = dispatcher_fixture(Path(directory))
+            self.seed(lane, report={"refused": 1})
+            result = self.dispatch(lane, "Stop", "-AllowHeld")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(self.holds(lane)), 1)
+            started = self.dispatch(lane, "Start")
+            self.assertEqual(started.returncode, 0, started.stderr)
+            (lane.root / "signal-fails").touch()
+            result = self.dispatch(lane, "Stop", "-AllowHeld")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            forced = self.holds(lane)[1]["stop_receipt"]
+            self.assertTrue(forced["forced"])
+            self.assertEqual(forced["outcome"], "signal_failed")
+            self.assertEqual(forced["sessions_refused"], None)  # first intention is immutable
+            report = json.loads((lane.release / "logs" / "shutdown.json").read_text())
+            self.assertTrue(report["complete"])
+
+    def test_t3_restart_accepts_held_but_failed_start_keeps_its_original_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lane = dispatcher_fixture(Path(directory))
+            dispatcher_owner(lane)
+            self.seed(lane, report={"complete": False})
+            result = self.dispatch(lane, "Restart")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(len(self.holds(lane)), 1)
+            lease = json.loads((lane.root / "gpu-owner-lease.json").read_text())
+            self.assertEqual(lease["release_id"], lane.instance)
+            self.assertFalse(lease["prior_paused"])
+            self.assertEqual(self.dispatch(lane, "Stop").returncode, 0)
+            self.assertFalse((lane.root / "gpu-owner-lease.json").exists())
+            (lane.root / "ready-fails").touch()
+            result = self.dispatch(lane, "Start")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("fixture original readiness failure", result.stderr)
+            self.assertFalse((lane.root / "gpu-owner-lease.json").exists(), result.stderr)
+
+    def test_t3_owner_restore_failure_is_not_tolerated_as_a_hold(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lane = dispatcher_fixture(Path(directory))
+            self.seed(lane, report={"refused": 1})
+            (lane.root / "gpu-owner-lease.json").write_text(json.dumps({
+                "artifact_type": "ninfer_gpu_owner_lease", "schema_version": 1,
+                "release_id": lane.instance, "controller_sha256": "e" * 64,
+                "prior_paused": False, "phase": "released",
+            }))
+            result = self.dispatch(lane, "Stop", "-AllowHeld")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("different controller identity", result.stderr)
+            self.assertFalse((lane.root / "runtime.json").exists())
+            self.assertTrue((lane.root / "gpu-owner-lease.json").exists())
+            self.assertEqual(len(self.holds(lane)), 1)
+
+    def test_t7_packaged_reconcile_without_state_and_last_ack_empty_envelope(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lane = dispatcher_fixture(Path(directory))
+            self.seed(lane, report={"refused": 1})
+            self.dispatch(lane, "Stop")
+            (lane.root / "state.json").unlink()
+            result = self.dispatch(lane, "Reconcile", "-ReleaseId", lane.instance, packaged=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            receipt = json.loads(result.stdout)
+            self.assertFalse(receipt["lifecycle_state_present"])
+            self.assertEqual(receipt["census_result"], "idle")
+            self.assertEqual(self.holds(lane), [])
+            self.assertEqual(len(list((lane.root / "receipts").glob("shutdown-reconcile-*.json"))), 1)
+            self.assertNotEqual(self.dispatch(lane, "Reconcile", "-ReleaseId", lane.instance,
+                                             packaged=True).returncode, 0)
+
+    def test_t8_persisted_failure_is_sticky_but_unwritten_observation_is_not_invented(self) -> None:
+        for artifact in ("shutdown-holds.json", "last-stop.json"):
+            with self.subTest(artifact=artifact), tempfile.TemporaryDirectory() as directory:
+                lane = dispatcher_fixture(Path(directory))
+                self.seed(lane, report={"refused": 1})
+                fault = lane.root / "fault-publish"
+                fault.write_text(artifact)
+                first = self.dispatch(lane, "Stop", "-AllowHeld")
+                self.assertNotEqual(first.returncode, 0)
+                self.assertTrue((lane.root / "runtime.json").exists())
+                prior = ((lane.root / "last-stop.json").read_bytes()
+                         if (lane.root / "last-stop.json").exists() else None)
+                fault.unlink()
+                self.seed(lane, report={})
+                second = self.dispatch(lane, "Stop")
+                if artifact == "shutdown-holds.json":
+                    self.assertNotEqual(second.returncode, 0)
+                    self.assertEqual(self.holds(lane)[0]["stop_receipt"], json.loads(prior))
+                else:
+                    self.assertEqual(second.returncode, 0, second.stderr)
+                    self.assertFalse((lane.root / "shutdown-holds.json").exists())
+
+    def test_t12_strict_corruption_and_unattributable_census_preserve_everything(self) -> None:
+        for corrupt in ("runtime", "holds", "missing-with-temp", "blank-name", "missing-name"):
+            with self.subTest(corrupt=corrupt), tempfile.TemporaryDirectory() as directory:
+                lane = dispatcher_fixture(Path(directory))
+                self.seed(lane, report={})
+                if corrupt == "runtime":
+                    (lane.root / "runtime.json").write_text("{")
+                elif corrupt == "holds":
+                    (lane.root / "shutdown-holds.json").write_text('{"holds":null}')
+                elif corrupt == "missing-with-temp":
+                    (lane.root / "shutdown-holds.json.dead.tmp").write_text("{}")
+                else:
+                    row = {"ProcessId": 4242, "ExecutablePath": None}
+                    if corrupt == "blank-name":
+                        row["Name"] = ""
+                    (lane.root / "census.json").write_text(json.dumps([row]))
+                runtime = (lane.root / "runtime.json").read_bytes()
+                result = self.dispatch(lane, "Stop", "-AllowHeld")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual((lane.root / "runtime.json").read_bytes(), runtime)
+                self.assertTrue(lane.release.exists())
+                self.assertNotEqual(self.dispatch(lane, "Start").returncode, 0)
+
+    def test_t6_reconcile_never_suppresses_either_wrappers_owner_handback(self) -> None:
+        for legacy in (False, True):
+            for active_new in (False, True):
+                with self.subTest(legacy=legacy, active_new=active_new), tempfile.TemporaryDirectory() as directory:
+                    lane = dispatcher_fixture(Path(directory))
+                    dispatcher_owner(lane)
+                    self.seed(lane, report={"refused": 1})
+                    self.dispatch(lane, "Stop")
+                    selected = lane.instance
+                    if not active_new:
+                        selected = "removed-candidate"
+                        envelope = json.loads((lane.root / "shutdown-holds.json").read_text())
+                        hold = envelope["holds"][0]
+                        hold["release_id"] = selected
+                        hold["release_root"] = str(lane.root / "releases" / selected)
+                        hold["runtime"]["release_id"] = selected
+                        hold["runtime"]["shutdown_report"] = str(lane.root / "releases" / selected / "logs" / "shutdown.json")
+                        hold["stop_receipt"]["release_id"] = selected
+                        (lane.root / "shutdown-holds.json").write_text(json.dumps(envelope))
+                    if legacy:
+                        source = committed_bytes("0628db0b0997c8bda4ac37c8e84da95986890014",
+                                                 "packaging/windows/Control-Release.ps1")
+                        source = source.replace(b"[Diagnostics.Process]::Start($startInfo)", b"(Start-FixtureChild)")
+                        source = source.replace(b"switch ($Action) {",
+                                                DISPATCH_BOUNDARIES.encode() + b"\nswitch ($Action) {")
+                        install_script(source, lane.root / "Control-Release.ps1")
+                    result = self.dispatch(lane, "Start")
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    barrier = lane.root / "barrier-Reconcile"
+                    barrier.touch()
+                    process = self.dispatch(lane, "Reconcile", "-ReleaseId", selected, background=True, packaged=True)
+                    self.addCleanup(lambda p=process: p.poll() is None and p.kill())
+                    self.wait_file(Path(str(barrier) + ".entered"))
+                    (lane.root / "child-exit").touch()
+                    self.wait_file(lane.root / "wrapper-probed")
+                    self.assertEqual((lane.root / "wrapper-probed").read_text(), "False")
+                    Path(str(barrier) + ".release").touch()
+                    stdout, stderr = process.communicate(timeout=30)
+                    self.assertEqual(process.returncode, 0, stdout + stderr)
+                    deadline = time.monotonic() + 20
+                    while (lane.root / "gpu-owner-lease.json").exists() and time.monotonic() < deadline:
+                        time.sleep(.1)
+                    self.assertFalse((lane.root / "gpu-owner-lease.json").exists())
+                    self.assertFalse((lane.root / "gpu-owner-state" / "lease.json").exists())
+                    self.assertFalse(json.loads((lane.root / "gpu-owner-state" / "owner.json").read_text())["paused"])
+                    self.assertEqual(self.holds(lane), [])
+
     def test_t5_latest_same_key_runtime_is_held(self) -> None:
         for changed_key in (False, True):
             with self.subTest(changed_key=changed_key), tempfile.TemporaryDirectory() as directory:
@@ -2637,6 +2868,8 @@ class ManagedShutdownDispatcherTests(unittest.TestCase):
                 (lane.root / "runtime.json").write_text(json.dumps(runtime))
                 barrier = lane.root / ("barrier-" + first)
                 barrier.touch()
+                if first == "Run":
+                    (lane.root / "admission-Run").touch()
                 args = ("-ReleaseId", lane.instance) if first == "Reconcile" else ()
                 one = self.dispatch(lane, first, *args, background=True)
                 self.addCleanup(lambda p=one: p.poll() is None and p.kill())
@@ -2649,6 +2882,11 @@ class ManagedShutdownDispatcherTests(unittest.TestCase):
                 self.assertIsNone(two.poll(), "second writer must wait for the actual holds leaf")
                 self.assertEqual({h["launch_id"] for h in self.holds(lane)}, {"a" * 32, "c" * 32})
                 Path(str(barrier) + ".release").touch()
+                if first == "Run":
+                    self.wait_file(lane.root / "admission-Run.entered")
+                    stdout, stderr = two.communicate(timeout=30)
+                    self.assertEqual(two.returncode, 0, stdout + stderr)
+                    (lane.root / "admission-Run.release").touch()
                 self.wait_file(lane.root / "wrapper-ready")
                 (lane.root / "child-exit").touch()
                 for process in (one, two):

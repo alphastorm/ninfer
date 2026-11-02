@@ -142,7 +142,7 @@ function Get-AttributionField([object]$Record, [string]$Name) {
 
 function Get-LaunchRoot([string]$Id) {
     if ($Id -cnotmatch '^[A-Za-z0-9][A-Za-z0-9._-]*$') { throw 'invalid launch release id' }
-    return Join-Path (Join-Path $StateRoot 'releases') $Id
+    return [IO.Path]::GetFullPath((Join-Path (Join-Path $StateRoot 'releases') $Id))
 }
 
 function Get-LaunchKey([object]$Runtime) {
@@ -198,9 +198,14 @@ function Get-ShutdownHolds {
         $key = [string](Get-AttributionField $entry 'launch_id')
         $id = [string](Get-AttributionField $entry 'release_id')
         $root = Get-LaunchRoot $id
-        if ($key -cnotmatch '^[0-9a-f]{32}$' -or -not $keys.Add($key) -or
-            -not [string]::Equals([IO.Path]::GetFullPath([string]$entry.release_root),
-                                  $root, [StringComparison]::OrdinalIgnoreCase) -or
+        if ($key -cnotmatch '^[0-9a-f]{32}$' -or -not $keys.Add($key)) {
+            throw 'invalid or duplicate shutdown hold launch key'
+        }
+        if (-not [string]::Equals([IO.Path]::GetFullPath([string]$entry.release_root),
+                                  $root, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'shutdown hold canonical root mismatch'
+        }
+        if (
             [string](Get-LaunchKey $entry.runtime) -cne $key -or
             [string]$entry.runtime.release_id -cne $id -or
             [string]$entry.runtime.managed_stop -cne 'stop-event' -or
@@ -209,7 +214,7 @@ function Get-ShutdownHolds {
             [string]$entry.stop_receipt.launch_id -cne $key -or
             [string]$entry.stop_receipt.release_id -cne $id -or
             [string]$entry.stop_receipt.mode -cne 'stop-event') {
-            throw 'invalid or conflicting shutdown hold binding'
+            throw 'invalid or conflicting shutdown hold runtime/receipt binding'
         }
     }
     return $envelope
