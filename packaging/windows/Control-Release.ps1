@@ -115,7 +115,7 @@ function Write-JsonAtomic([string]$Path, [object]$Value) {
                            [Text.UTF8Encoding]::new($false))
     # Keep an interrupted first publication visible to strict readers. Replacement never
     # unlinks a destination: concurrent readers see the complete old or complete new file.
-    if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary, $Path, $null) }
+    if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary, $Path, [NullString]::Value) }
     else { [IO.File]::Move($temporary, $Path) }
 }
 

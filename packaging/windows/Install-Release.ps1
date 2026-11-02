@@ -85,7 +85,7 @@ function Write-JsonAtomic([string]$Path, [object]$Value) {
                            [Text.UTF8Encoding]::new($false))
     # Keep an interrupted first publication visible to strict readers. Replacement never
     # unlinks a destination: concurrent readers see the complete old or complete new file.
-    if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary, $Path, $null) }
+    if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary, $Path, [NullString]::Value) }
     else { [IO.File]::Move($temporary, $Path) }
 }
 
@@ -1179,6 +1179,55 @@ function Test-LifecycleRestored([object]$Transaction) {
     return [string]$Transaction.phase -cin @('rollback_lifecycle_restored', 'repair_lifecycle_restored')
 }
 
+function Complete-InterruptedTransactionRetirement([object]$Transaction) {
+    $snapshot = Invoke-WithHoldsLock {
+        $runtime = Get-RuntimeStrict
+        $holds = Get-ShutdownHolds
+        if ($null -ne $runtime -and [string]$runtime.release_id -ceq [string]$Transaction.instance_id -and
+            @($holds.holds | Where-Object {
+                [string]$_.launch_id -ceq [string](Get-LaunchKey $runtime)
+            }).Count -ne 0) { return $runtime }
+    }
+    if ($null -eq $snapshot) { return }
+    $task = Get-ScheduledTask -TaskName ([string]$Transaction.task_name) -ErrorAction SilentlyContinue
+    if ($null -ne $task -and [string]$task.State -ceq 'Running') {
+        throw 'interrupted held retirement still has a managed wrapper; explicitly Stop, then retry repair'
+    }
+    Assert-TransactionCandidateCensus $Transaction
+    $fence = Enter-LaunchFence 'run'
+    try {
+        Assert-TransactionCandidateCensus $Transaction
+        Invoke-WithHoldsLock {
+            $holds = Get-ShutdownHolds
+            if (@($holds.holds | Where-Object {
+                [string]$_.launch_id -ceq [string](Get-LaunchKey $snapshot)
+            }).Count -eq 0) { throw 'held retirement selection changed' }
+            Remove-RuntimeForLaunch $snapshot
+        }
+    }
+    finally { $fence.Dispose() }
+}
+
+function Assert-RestorationRootsIdle([string]$StatePath) {
+    $roots = Invoke-WithHoldsLock {
+        $runtime = Get-RuntimeStrict
+        if ($null -ne $runtime) { Get-LaunchRoot ([string]$runtime.release_id) }
+        if (Test-Path -LiteralPath $StatePath -PathType Leaf) {
+            $state = Read-JsonFile $StatePath
+            if ($null -ne $state.PSObject.Properties['releases']) {
+                Get-LaunchRoot ([string]$state.active_release)
+            }
+        }
+        $leasePath = Join-Path $StateRoot 'gpu-owner-lease.json'
+        if (Test-Path -LiteralPath $leasePath -PathType Leaf) {
+            Get-LaunchRoot ([string](Read-JsonFile $leasePath).release_id)
+        }
+    }
+    foreach ($root in @($roots | Select-Object -Unique)) {
+        Assert-TransactionCandidateCensus ([pscustomobject]@{release_root=[string]$root})
+    }
+}
+
 function Assert-TransactionCleanupRecords([object]$Transaction, [string]$StatePath,
                                            [bool]$RefreshedIncumbent = $false) {
     return Invoke-WithHoldsLock {
@@ -1241,6 +1290,7 @@ function Invoke-InstallTransactionRollback(
                 $actionFence = Enter-LaunchFence 'action'
                 $runFence = Enter-LaunchFence 'run'
                 Assert-TransactionCandidateCensus $Transaction
+                Assert-RestorationRootsIdle $StatePath
                 Invoke-WithHoldsLock {
                     Get-ShutdownHolds | Out-Null
                     if ($null -ne (Get-RuntimeStrict)) { throw 'Stop the serving launch, then retry repair; runtime slot is not empty' }
@@ -1277,7 +1327,10 @@ function Invoke-InstallTransactionRollback(
             if ($null -ne $runFence) { $runFence.Dispose(); $runFence = $null }
             if ($null -ne $actionFence) { $actionFence.Dispose(); $actionFence = $null }
         }
-        else { Assert-TransactionCandidateCensus $Transaction }
+        else {
+            Assert-TransactionCandidateCensus $Transaction
+            Complete-InterruptedTransactionRetirement $Transaction
+        }
 
         $oldDiagnostics = @(Get-AttributionField $Transaction 'diagnostics')
         $cleanupRetry = $oldDiagnostics.Count -ne 0 -and
@@ -1291,6 +1344,7 @@ function Invoke-InstallTransactionRollback(
             $refreshedIncumbent = (Get-Command -Name $ControllerPath).Parameters.ContainsKey('AllowHeld')
         }
         $stage = 'candidate cleanup'
+        Complete-InterruptedTransactionRetirement $Transaction
         $candidateHolds = @(Assert-TransactionCleanupRecords $Transaction $StatePath $refreshedIncumbent)
         if ($candidateHolds.Count -ne 0) {
             Set-ObjectProperty $Transaction 'status' 'held_cleanup'
@@ -1794,6 +1848,11 @@ try {
         $activationRun = Enter-LaunchFence 'run'
         Assert-TransactionCandidateCensus $transaction
         if ($null -ne $oldState) {
+            $currentState = Read-JsonFile $statePath
+            if ([string]$currentState.active_release -cne [string]$oldState.active_release -or
+                [string]$currentState.previous_release -cne [string]$oldState.previous_release) {
+                throw 'installed lifecycle changed during candidate preparation; retry only after repair'
+            }
             $oldRelease = $oldState.releases.PSObject.Properties[[string]$oldState.active_release].Value
             Assert-TransactionCandidateCensus ([pscustomobject]@{release_root=[string]$oldRelease.release_root})
         }

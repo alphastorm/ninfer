@@ -2524,7 +2524,8 @@ class ManagedShutdownDispatcherTests(unittest.TestCase):
                    "-Action", action, "-StateRoot", str(lane.root), "-WarningAction", "SilentlyContinue", *args]
         if background:
             return subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        return subprocess.run(command, capture_output=True, text=True, timeout=45)
+        lane.last_result = subprocess.run(command, capture_output=True, text=True, timeout=45)
+        return lane.last_result
 
     def seed(self, lane: SimpleNamespace, key: str = "1" * 32, report: dict | None = None,
              mode: str = "stop-event") -> dict:
@@ -2545,7 +2546,8 @@ class ManagedShutdownDispatcherTests(unittest.TestCase):
 
     def holds(self, lane: SimpleNamespace) -> list[dict]:
         path = lane.root / "shutdown-holds.json"
-        self.assertTrue(path.exists(), "incomplete final-save evidence must become a durable hold")
+        self.assertTrue(path.exists(), "incomplete final-save evidence must become a durable hold: " +
+                        getattr(lane, "last_result", SimpleNamespace(stderr="")).stderr)
         return json.loads(path.read_text())["holds"]
 
     def wait_file(self, path: Path) -> None:
@@ -2716,7 +2718,7 @@ class ManagedShutdownDispatcherTests(unittest.TestCase):
                            + ps_definitions(WINDOWS / "Install-Release.ps1") + ROLLBACK_ATTEMPT)
                 result = PowerShellContractTests().invoke(attempt)
                 self.assertFalse(result["completed"])
-                self.assertEqual(json.loads(journal.read_text())["status"], "held_cleanup")
+                self.assertEqual(json.loads(journal.read_text())["status"], "held_cleanup", result)
                 held = self.holds(lane)
                 runtime = json.loads((lane.root / "runtime.json").read_text())
                 self.assertEqual(runtime["release_id"], incumbent)
