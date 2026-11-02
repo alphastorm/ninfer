@@ -270,6 +270,7 @@ struct Stream {
 struct ExportLease::Impl {
     DurablePrepareState state = DurablePrepareState::Prepared;
     DurableReason reason = DurableReason::None;
+    context::StateImageStore::HostPreparation host;
     DurableCheckpointStats stats;
     DurableCheckpointSet index;
     DurableLimits limits;
@@ -289,6 +290,12 @@ ExportLease::~ExportLease() = default;
 DurablePrepareState ExportLease::state() const noexcept { return impl_ ? impl_->state : DurablePrepareState::PolicyDisabled; }
 DurableReason ExportLease::reason() const noexcept { return impl_ ? impl_->reason : DurableReason::Cancelled; }
 DurableCheckpointStats ExportLease::stats() const noexcept { return impl_ ? impl_->stats : DurableCheckpointStats{}; }
+context::StateImageStore::HostPreparation::Kind ExportLease::host_shortage_kind() const noexcept {
+    return impl_ ? impl_->host.kind : context::StateImageStore::HostPreparation::Kind::Prepared;
+}
+std::size_t ExportLease::host_shortage_bytes() const noexcept {
+    return impl_ ? impl_->host.shortage_bytes : 0;
+}
 const DurableCheckpointSet& ExportLease::index() const {
     if (!impl_ || !impl_->written) throw std::logic_error("checkpoint index requires completed export");
     return impl_->index;
@@ -439,12 +446,33 @@ ExportLease Program::prepare_checkpoint_export(std::span<const CheckpointHandle>
                 saved.pages.push_back(id);
             }
         }
+        // Reject deterministic limits before materializing Host replicas or evicting cache.
+        std::uint64_t resident_bytes = 0;
+        const auto add_payload = [&](std::uint64_t count, std::uint64_t bytes) {
+            capacity(bytes <= limits.staging_bytes);
+            capacity(!count || bytes <= (UINT64_MAX - resident_bytes) / count);
+            resident_bytes += count * bytes;
+        };
+        add_payload(images.size(), native.state_bytes);
+        for (std::size_t pool = 0; pool < out->index.pools.size(); ++pool) {
+            const auto count = page_handles[pool].size();
+            if (!count) continue;
+            const auto& physical = history_store(pool).pages().physical_pool();
+            for (const auto& plane : physical.geometry().planes)
+                if (plane.tokens_per_row != 1)
+                    throw Refusal{DurablePrepareState::PolicyDisabled, DurableReason::UnsupportedCodec};
+            add_payload(count, plan_host_kv_page_layout(physical.geometry()).page_stride);
+        }
+        capacity(p.host_context_arena && resident_bytes <= p.host_context_arena->capacity_bytes() &&
+                 images.size() <= p.state_store->capacity() && histories.size() <=
+                     p.text_kv_histories->capacity() + (p.backend_kv_histories ? p.backend_kv_histories->capacity() : 0));
         // Retire native producers once. Off-lock copies never resolve a live handle again.
         p.device.synchronize();
         CUDA_CHECK(cudaStreamSynchronize(p.device.transfer_stream()));
         // Disk serialization can outlive many requests. Pin Host State replicas, not every
         // execution slot: forks must be able to restore while this export still owns readers.
-        capacity(p.state_store->prepare_host_export(images, p.device.transfer_view()));
+        out->host = p.state_store->prepare_host_export(images, p.device.transfer_view());
+        capacity(out->host.kind == context::StateImageStore::HostPreparation::Kind::Prepared);
         for (std::size_t pool = 0; pool < out->index.pools.size(); ++pool) {
             auto& saved = out->index.pools[pool];
             if (saved.pages.empty()) continue;
@@ -472,8 +500,6 @@ ExportLease Program::prepare_checkpoint_export(std::span<const CheckpointHandle>
                 for (std::size_t plane = 0; plane < physical.plane_count(); ++plane) {
                     const auto& geometry = physical.geometry().planes[plane];
                     const auto& packed = host_layout.planes[plane];
-                    if (geometry.tokens_per_row != 1)
-                        throw Refusal{DurablePrepareState::PolicyDisabled, DurableReason::UnsupportedCodec};
                     const auto width = static_cast<std::size_t>(page.committed_tokens / geometry.tokens_per_row) *
                         geometry.leading_extent * dtype_size(geometry.dtype);
                     if (!width) continue;
@@ -504,7 +530,6 @@ ExportLease Program::prepare_checkpoint_export(std::span<const CheckpointHandle>
             out->staging = std::max(out->staging, record.bytes);
             out->records.push_back(std::move(record));
         }
-        capacity(out->staging <= limits.staging_bytes);
         // Dense payload IDs are remapped once to the contract's lexicographic path order.
         std::vector<std::uint32_t> order(out->index.payloads.size()), remap(order.size());
         for (std::uint32_t i = 0; i < order.size(); ++i) order[i] = i;
@@ -528,13 +553,11 @@ ExportLease Program::prepare_checkpoint_export(std::span<const CheckpointHandle>
             check(file.bytes <= UINT64_MAX - out->stats.payload_bytes);
             out->stats.payload_bytes += file.bytes;
         }
-        // Acknowledged durability must be restorable into an otherwise empty matching arena.
-        capacity(p.host_context_arena && out->stats.payload_bytes <= p.host_context_arena->capacity_bytes() &&
-                 images.size() <= p.state_store->capacity() && histories.size() <=
-                     p.text_kv_histories->capacity() + (p.backend_kv_histories ? p.backend_kv_histories->capacity() : 0));
         out->stats.payload_bytes += codec::encode(out->index).size();
     } catch (const Refusal& failure) {
+        const auto host = out->host;
         out = std::make_unique<ExportLease::Impl>(); out->state = failure.state; out->reason = failure.reason;
+        out->host = host;
     } catch (const std::invalid_argument&) {
         out = std::make_unique<ExportLease::Impl>(); out->state = DurablePrepareState::Corrupt; out->reason = DurableReason::InvalidIndex;
     } catch (const std::bad_alloc&) {

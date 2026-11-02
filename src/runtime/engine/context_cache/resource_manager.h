@@ -193,6 +193,108 @@ public:
         return released;
     }
 
+    // Optional export writes protect ownership explicitly; the ordinary cursor alone does not.
+    [[nodiscard]] std::vector<Handle> export_reclaim_exclusions(
+        std::span<const Handle> exported, bool durable_names) const {
+        std::vector<Handle> result(exported.begin(), exported.end());
+        const auto add = [&](Handle handle) {
+            if (!contains(result, handle)) result.push_back(handle);
+        };
+        for (const auto& owner : owners_)
+            if (owner.active || (durable_names && !owner.durable_session.empty()))
+                for (const auto& point : owner.points) add(point.handle);
+        for (const auto& waiting : waiting_)
+            for (auto handle : waiting.held) add(handle);
+        return result;
+    }
+
+    // Native physical-owner groups expand the named owner's complete set, not logical sizes.
+    // Freeze this plan before byte proof, then recheck it immediately before guard-free commit.
+    [[nodiscard]] std::vector<Handle> proven_victim_closure(
+        Program& program, const DurableVictim& victim, const ReclaimCursor& cursor,
+        std::span<const Handle> exported, std::span<const Handle> ordinary_excluded) const {
+        auto closure = points(victim.token);
+        if (closure.empty()) return {};
+        std::vector<Handle> catalog;
+        catalog.reserve(cursor.victims.size());
+        for (const auto& entry : cursor.victims)
+            if (program.valid_checkpoint(entry.handle)) catalog.push_back(entry.handle);
+        const auto groups = program.plan_releases(catalog, {}, {.host_bytes = 1});
+        bool expanded;
+        do {
+            expanded = false;
+            for (const auto& group : groups) {
+                if (std::none_of(group.sources.begin(), group.sources.end(),
+                                [&](auto h) { return contains(closure, h); })) continue;
+                if (std::any_of(group.sources.begin(), group.sources.end(), [&](auto h) {
+                        return !contains(closure, h) && !proven_victim_member_eligible(
+                            program, h, false, cursor, exported, ordinary_excluded);
+                    })) continue;
+                for (auto h : group.sources)
+                    if (!contains(closure, h)) { closure.push_back(h); expanded = true; }
+            }
+        } while (expanded);
+        if (!proven_victim_eligible(program, victim, closure, cursor, exported, ordinary_excluded))
+            return {};
+        return closure;
+    }
+
+    bool release_proven_durable_victim(
+        Program& program, const DurableVictim& victim, std::span<const Handle> closure,
+        ReclaimCursor& cursor, std::span<const Handle> exported,
+        std::span<const Handle> ordinary_excluded) {
+        if (!proven_victim_eligible(program, victim, closure, cursor, exported, ordinary_excluded))
+            return false;
+        // No callback or allocation between the whole-set preflight and native release/forget.
+        for (auto handle : closure) {
+            if (!program.release_checkpoint(handle))
+                throw std::logic_error("proven export release changed before commit");
+            forget(handle);
+        }
+        std::erase_if(owners_, [](const auto& owner) { return !owner.active && owner.points.empty(); });
+        std::erase_if(cursor.victims, [&](const auto& entry) { return contains(closure, entry.handle); });
+        return true;
+    }
+
+private:
+    bool proven_victim_member_eligible(
+        Program& program, Handle handle, bool named, const ReclaimCursor& cursor,
+        std::span<const Handle> exported, std::span<const Handle> ordinary_excluded) const {
+        return !contains(exported, handle) && references(handle) &&
+            program.valid_checkpoint(handle) && !program.checkpoint_metadata(handle).leased &&
+            may_revoke({&handle, 1}, {ReclaimPurpose::OptionalWrite}) &&
+            (named || (!contains(ordinary_excluded, handle) &&
+                std::any_of(cursor.victims.begin(), cursor.victims.end(),
+                            [&](const auto& entry) { return entry.handle == handle; })));
+    }
+
+    bool proven_victim_eligible(
+        Program& program, const DurableVictim& victim, std::span<const Handle> closure,
+        const ReclaimCursor& cursor, std::span<const Handle> exported,
+        std::span<const Handle> ordinary_excluded) const {
+        const auto* owner = find_owner(victim.token);
+        if (!owner || owner->active || owner->points.empty() || victim.session.empty() ||
+            victim.tag.empty() || owner->durable_session != victim.session ||
+            owner->checkpoint_tag != victim.tag || closure.empty()) return false;
+        for (const auto& point : owner->points) {
+            if (!contains(closure, point.handle)) return false;
+            for (const auto& other : owners_)
+                if (other.token != victim.token &&
+                    std::any_of(other.points.begin(), other.points.end(),
+                                [&](const auto& p) { return p.handle == point.handle; }))
+                    return false;
+        }
+        for (auto handle : closure) {
+            const bool named = std::any_of(owner->points.begin(), owner->points.end(),
+                                          [&](const auto& p) { return p.handle == handle; });
+            if (!proven_victim_member_eligible(
+                    program, handle, named, cursor, exported, ordinary_excluded)) return false;
+        }
+        return program.host_bytes_released(closure) > 0;
+    }
+
+public:
+
     struct CatalogOccupancy {
         std::uint32_t private_entries = 0;
         std::uint32_t shared_entries = 0;

@@ -139,10 +139,14 @@ public:
 
     // Before long-lived export readers are acquired, materialize immutable images in the
     // counted Host arena and release their Device replicas. Producers must already be settled.
-    // Returns false without changing residency if a Device reader or Host capacity prevents
-    // preparation. On success, read(image).host_view() does not retain execution slots.
-    [[nodiscard]] bool prepare_host_export(std::span<const Handle> images,
-                                           CudaExecutionView execution);
+    struct HostPreparation {
+        enum class Kind { Prepared, Busy, NoHostArena, HostCapacity, HostContiguity };
+        Kind kind = Kind::Prepared;
+        std::size_t shortage_bytes = 0;
+    };
+    // A refusal leaves residency unchanged. Prepared readers retain no execution slots.
+    [[nodiscard]] HostPreparation prepare_host_export(std::span<const Handle> images,
+                                                      CudaExecutionView execution);
 
     StateImageStore(StateImageStorage& device, HostContextArena* host,
                     std::uint32_t logical_capacity);

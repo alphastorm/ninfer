@@ -12,13 +12,13 @@ from pathlib import Path
 import re
 import secrets
 import shutil
-import signal
 import subprocess
 import tempfile
 import time
 from typing import NoReturn
 import urllib.error
 import urllib.request
+from serve_real_process import ManagedProcess
 
 
 def digest_file(path: Path) -> str:
@@ -132,7 +132,8 @@ def main() -> int:
                 # Authentication is file-based: no credential value enters the projection.
                 config_sha = hashlib.sha256(json.dumps(argv, separators=(",", ":")).encode()).hexdigest()
                 argv.extend(("--config-sha256", config_sha))
-                self.child = subprocess.Popen(argv, stdout=self.log, stderr=subprocess.STDOUT)
+                self.process = ManagedProcess(argv, self.log)
+                self.child = self.process.child
                 deadline = time.monotonic() + 180
                 try:
                     while time.monotonic() < deadline:
@@ -149,16 +150,10 @@ def main() -> int:
                     reraise_after_stop(error, self.terminate)
 
             def terminate(self) -> dict:
-                if self.child.poll() is None:
-                    self.child.send_signal(signal.SIGTERM)
                 try:
-                    code = self.child.wait(timeout=180)
-                except subprocess.TimeoutExpired:
-                    self.child.kill()
-                    self.child.wait()
+                    code = self.process.stop()
+                finally:
                     self.log.close()
-                    raise RuntimeError("managed final-save deadline exceeded") from None
-                self.log.close()
                 require(code == 0, "production stop did not acknowledge final saves")
                 require(self.report.is_file(), "synchronous shutdown report missing")
                 report = json.loads(self.report.read_text(encoding="utf-8"))

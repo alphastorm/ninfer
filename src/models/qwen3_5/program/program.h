@@ -2,6 +2,7 @@
 
 #include "ninfer/types.h"
 #include "models/common/context/checkpoint_store.h"
+#include "models/common/context/state_store.h"
 #include "runtime/contract/execution.h"
 #include "runtime/contract/resources.h"
 #include "runtime/contract/durable_engine_api.h"
@@ -414,6 +415,8 @@ public:
     [[nodiscard]] runtime::DurablePrepareState state() const noexcept;
     [[nodiscard]] runtime::DurableReason reason() const noexcept;
     [[nodiscard]] runtime::DurableCheckpointStats stats() const noexcept;
+    [[nodiscard]] context::StateImageStore::HostPreparation::Kind host_shortage_kind() const noexcept;
+    [[nodiscard]] std::size_t host_shortage_bytes() const noexcept;
     [[nodiscard]] const runtime::DurableCheckpointSet& index() const;
     // No Program access: immutable views, a dedicated stream, bounded staging and disk I/O only.
     [[nodiscard]] runtime::DurableExportResult write(runtime::ContinuationCheckpointWriter&);

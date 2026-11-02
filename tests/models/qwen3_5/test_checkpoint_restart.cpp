@@ -373,6 +373,31 @@ int main(int argc, char** argv) {
             require(!fs::exists(root), "restart export directory already exists"); fs::create_directories(root);
             auto seed = generate(device, *program, seed_prompt(frontend), std::nullopt, true, scenario);
             require(seed.points.size() == 3, "test did not retain anchor, input and endpoint");
+            {
+                const auto before = program->physical_usage();
+                const auto refused = program->prepare_checkpoint_export(
+                    seed.points, {.staging_bytes = native_layout.state_bytes - 1});
+                const auto after = program->physical_usage();
+                require(refused.state() == DurablePrepareState::CapacityRefused &&
+                            refused.host_shortage_bytes() == 0 &&
+                            before.occupied == after.occupied &&
+                            before.host_state_slots == after.host_state_slots,
+                        "deterministic staging refusal demoted export sources");
+            }
+            {
+                options.context_cache.host_capacity_bytes = native_layout.state_bytes;
+                auto limited = make_program();
+                options.context_cache.host_capacity_bytes = 1ULL << 30;
+                auto absolute_seed = generate(device, *limited, seed_prompt(frontend), std::nullopt, true, scenario);
+                const auto before = limited->physical_usage();
+                const auto refused = limited->prepare_checkpoint_export(absolute_seed.points, {});
+                const auto after = limited->physical_usage();
+                require(absolute_seed.points.size() == 3 &&
+                            refused.state() == DurablePrepareState::CapacityRefused &&
+                            refused.host_shortage_bytes() == 0 && before.occupied == after.occupied,
+                        "absolute empty-arena refusal demoted sources or invented a contended deficit");
+                release(*limited, absolute_seed.points);
+            }
             DurableCheckpointStats stats;
             DurableCheckpointSet index;
             {

@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace ninfer {
 class Engine;
@@ -127,11 +128,25 @@ struct DurableSessionEpoch {
     }
 };
 
+enum class DurableSaveIntent : std::uint8_t { Automatic, Explicit, Final, Survivor };
+
+struct DurableExportReclaim {
+    bool considered = false;
+    std::uint64_t prepare_attempts = 0;
+    std::uint64_t reclaimed_owners = 0;
+    std::uint64_t reclaim_declined = 0;
+    std::uint64_t reclaimed_cache_steps = 0;
+    std::uint64_t reclaimed_host_bytes = 0;
+};
+
 struct DurableExportResult {
     DurableExportState state = DurableExportState::Refused;
     DurableReason reason = DurableReason::None;
     DurableCheckpointStats stats;
     DurableSessionEpoch captured_epoch;
+    DurableExportReclaim reclaim;
+    // Caller retains these through the enclosing store save, including both quota passes.
+    std::vector<std::shared_ptr<const ContinuationCheckpointReader>> proof_pins;
 };
 
 struct DurablePublicationResult {
@@ -220,7 +235,8 @@ public:
     // leases until copies retire. Recheck expected tag/epoch before caller publishes current.
     [[nodiscard]] static DurableExportResult export_session(
         Engine&, std::string_view session_sha256, std::string_view expected_tag,
-        ContinuationCheckpointWriter&, const DurableLimits&);
+        ContinuationCheckpointWriter&, const DurableLimits&,
+        DurableSaveIntent = DurableSaveIntent::Automatic);
 
     // Mandatory for live saves: serialize the final tag/epoch check and current-pointer
     // replace+sync with submission/finish epoch changes under the SAME per-session gate.

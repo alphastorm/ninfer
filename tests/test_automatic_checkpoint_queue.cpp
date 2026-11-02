@@ -1,5 +1,6 @@
 #include "serve/automatic_checkpoint_queue.h"
 #include "serve/session_checkpoint_store.h"
+#include "runtime/engine/checkpoint_control.h"
 #include "checkpoint_write_fault.h"
 
 #include <atomic>
@@ -226,6 +227,44 @@ int automatic_retry_budget_and_terminal_refusal() {
     failures += check(victim.outcome == Outcome::Settled && victim.reason == Reason::UnsupportedCodec,
                       "reported nonretryable pressure refusal did not settle with its reason");
     coordinator.drain();
+    return failures;
+}
+
+int partially_reclaiming_refusal_does_not_self_wake() {
+    ProgressFixture f;
+    f.refusal = Reason::Capacity;
+    ninfer::runtime::CheckpointControl engine;
+    const auto initial_progress = engine.observed_progress();
+    AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view, std::optional<std::string_view> tag) {
+            // EngineCore's matching regression proves these notifications follow real
+            // partial Host reclaim. Exercise the coordinator against the real clock here.
+            engine.notify_progress(false);
+            return f.save(tag);
+        },
+        [&] { auto progress = f.observe(); progress.engine = engine.observed_progress(); return progress; },
+        [&] { engine.notify_progress(false); f.notify(); });
+    Victim victim{std::string(64, 'd'), "resp_retry"};
+    coordinator.save_before_eviction({&victim, 1});
+    int failures = check(f.wait([&] { return f.completed == 1 && f.probes >= 4; }),
+                         "partially reclaiming Capacity attempt did not defer");
+    {
+        std::lock_guard lock(f.mutex);
+        failures += check(f.calls == 1 && engine.observed_progress() == initial_progress,
+                          "save-owned cleanup woke its own Capacity retry");
+        f.refusal = Reason::None;
+    }
+    engine.notify_progress();
+    failures += check(f.wait([&] { return f.completed == 2; }),
+                      "independent Engine progress did not wake deferred Capacity");
+    coordinator.drain();
+    coordinator.save_before_eviction({&victim, 1});
+    failures += check(victim.outcome == Outcome::Settled && victim.reason == Reason::None,
+                      "retained settled pressure answer disappeared at drain");
+    Victim fresh{std::string(64, 'e'), "new-pressure"};
+    coordinator.save_before_eviction({&fresh, 1});
+    failures += check(fresh.outcome == Outcome::Pending,
+                      "new pressure after drain fabricated a settled save");
     return failures;
 }
 
@@ -475,6 +514,7 @@ int main() {
     failures += pressure_callback_does_not_wait_for_restore_commit();
     failures += automatic_retry_requires_matching_progress();
     failures += automatic_retry_budget_and_terminal_refusal();
+    failures += partially_reclaiming_refusal_does_not_self_wake();
     failures += publication_abandonment_completes_pressure();
     failures += durable_record_delete_preserves_survivors();
     failures += durable_delete_retains_disk_only_records();

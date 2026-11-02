@@ -423,7 +423,61 @@ Off-worker exports reserve the retirement task, future and queue node before tak
 native leases. The worker reuses a preconstructed command batch, including its list
 sentinel, so neither enqueueing nor draining retirement allocates after a writer
 completes or throws. Each prepared export releases its capacity/admission notification
-exactly once, after its native pins retire.
+exactly once, after its native pins retire. This retirement advances observed Engine
+progress, allowing another session's TransactionBusy or Capacity save to retry without
+unrelated execution.
+
+Export preparation distinguishes a contended Host **byte deficit** from Busy, absent
+Host storage, deterministic staging/empty-arena limits and a contiguity-only miss.
+Host preparation reserves every missing image before copying; a refused preparation
+leaves residency unchanged. Deterministic native limits are checked before Host
+materialization. A later codec, allocation, writer or publication refusal need not
+restore Device residency: the complete Host continuation remains valid.
+
+One worker `checkpoint_change` command may reclaim before retrying that same requested
+tag. It first removes redundant Host replicas, protecting the entire selected export
+set, active owners and waiting/binding sources. Only explicit operator checkpoint
+saves and final saves may then byte-prove other inactive durable owners. Each victim's
+entire handle set must be single-owner exclusive, unleased and OptionalWrite-revocable.
+Its eligible ordinary physical sharers join one native-quoted release closure. Any
+export-set intersection with the victim's named handles declines the whole victim.
+Expand a physical group only when all its not-yet-included holders are eligible
+ordinary members; skip a group with any protected holder, leaving its shared pages
+resident while still permitting the victim's private Host bytes to be released.
+Recheck every included member and the positive native quote immediately before commit.
+Fresh native payload validation and re-pinning the same current index (length and
+SHA-256) authorize this narrowly scoped guard-free release; it never enqueues another
+save. Import retains its existing guarded release and retry policy.
+
+Finally, ordinary Host cache reclaim uses its fixed cursor, existing native ranking,
+OptionalWrite rights and only the **residual measured byte deficit**. All durable
+names, active owners, waiting/binding sources and exported handles are excluded;
+paused snapshots are not offered. Automatic and survivor exports use only the lossless
+and ordinary tiers, never worker-held victim byte proof. No oracle grants no durable
+reclaim authority. A contiguity-only miss permits lossless cleanup and at most one
+additional prepare after positive measured arena progress, never destructive reclaim.
+
+Candidate membership is frozen per command. Zero-arena-progress releases consume
+work and continue the scan, but never authorize another prepare. With V initial
+durable candidates and C ordinary cursor handles, prepares are bounded by `2+V+C`.
+Pressure-callback re-entry may prepare/write, but cannot reclaim an outer quoted plan.
+Actual reclaim mutation wakes scheduler/admission without advancing the observed
+checkpoint progress clock; no-op reclaim tiers emit no capacity/admission notification.
+A refused automatic save cannot wake itself: its reclaim/completion notifications are
+non-observed, and a refused prepare holds no export lease. Prepared export retirement
+releases real pins and advances observed progress to wake other sessions' deferred saves.
+Native page quotes are not arena occupancy: receipts count actual per-release arena
+deltas before any re-materialization.
+
+The export result returns both proof readers and a reclaim summary. The service holds
+those readers **outside the exporter callback until the full store save returns or
+unwinds**, including staging quota, pointer publication and post-publication quota.
+That save cannot quota-evict a just-reclaimed victim; it may instead refuse with Quota.
+After pins retire, later independent saves retain ordinary disk-quota policy.
+Final save freezes its session list and, only if the first pass published a save,
+retries Capacity-refused sessions once. Each session is counted by its final outcome,
+including a second-pass exception counted as one refusal; there is no third pass,
+and any remaining refusal still fails Stop closed.
 
 Import validates/authenticates bounded metadata before payload-sized reservations.
 Reserve checkpoint slots, Host StateImage destinations, inactive KV histories and
@@ -887,6 +941,13 @@ or `ntfs-write-through`; absent on failed save or restore (not a fake empty succ
 applicable byte/visibility/durability gates satisfied. Save success means durable
 publication, not merely Engine export. Engine export stats are not a publication ack.
 Receipts may add bounded elapsed durations/counts, never optional identity bypasses.
+When export reclaim was considered, explicit, automatic, final and DELETE survivor-save
+receipts also contain unsigned `prepare_attempts`, `reclaimed_owners`, `reclaim_declined`,
+`reclaimed_cache_steps`, and `reclaimed_host_bytes`. Owners are not distinct sessions;
+a durable closure counts once, not once per ordinary member. Counts survive native,
+store and publication refusal and the existing survivor replay fallback. Zero released
+owners with positive bytes can mean lossless replica cleanup. These fields never imply
+publication or change `committed`, `origin`, `dir_sync`, refusal reasons or disk schemas.
 An acknowledged responses-only restore adds `replay_only: true` and has zero native
 statistics; `imported` in that receipt denotes guarded Responses publication, not
 native import or reclaimability. Its save still requires authenticated origin and

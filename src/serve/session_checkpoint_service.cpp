@@ -95,6 +95,15 @@ Json operation(std::string_view kind, std::string_view state, Reason reason, boo
         {"states", stats.states}, {"pages", stats.pages}};
 }
 
+void reclaim_fields(Json& value, const runtime::DurableExportReclaim& reclaim) {
+    if (!reclaim.considered) return;
+    value["prepare_attempts"] = reclaim.prepare_attempts;
+    value["reclaimed_owners"] = reclaim.reclaimed_owners;
+    value["reclaim_declined"] = reclaim.reclaim_declined;
+    value["reclaimed_cache_steps"] = reclaim.reclaimed_cache_steps;
+    value["reclaimed_host_bytes"] = reclaim.reclaimed_host_bytes;
+}
+
 runtime::DurableImportResult prepared_refusal(const runtime::DurablePrepareResult& prepared) {
     switch (prepared.state) {
     case runtime::DurablePrepareState::CapacityRefused:
@@ -143,10 +152,12 @@ void SessionCheckpointService::receipt(const Json& value) const noexcept {
 
 void SessionCheckpointService::receipt(std::string_view kind, std::string_view state, Reason reason,
                                       bool committed, const runtime::DurableCheckpointStats& stats,
-                                      std::string_view origin, std::string_view dir_sync) const noexcept {
+                                      std::string_view origin, std::string_view dir_sync,
+                                      const runtime::DurableExportReclaim& reclaim) const noexcept {
     try {
         auto value = operation(kind, state, reason, committed, stats, origin);
         if (!dir_sync.empty()) { value["dir_sync"] = dir_sync; }
+        reclaim_fields(value, reclaim);
         receipt(value);
     } catch (...) {}
 }
@@ -217,7 +228,8 @@ runtime::DurableImportResult SessionCheckpointService::restore(
 }
 
 SessionCheckpointService::SaveOutcome SessionCheckpointService::save_session(
-    std::string_view session, std::optional<std::string_view> expected_tag, bool allow_covered) {
+    std::string_view session, std::optional<std::string_view> expected_tag, bool allow_covered,
+    runtime::DurableSaveIntent intent) {
     // A Response DELETE owns the same session operation through durable publication and RAM
     // deletion. No pre-delete snapshot may enter save() after a successful deletion.
     auto operation_mutex = session_operation(session);
@@ -237,13 +249,19 @@ SessionCheckpointService::SaveOutcome SessionCheckpointService::save_session(
         outcome.tag = std::move(snapshot->latest_response_id);
         return outcome;
     }
+    // The store runs quota and publication after the exporter returns. Victim generations
+    // must remain pinned through those passes, including a refused reclaiming save.
+    std::vector<std::shared_ptr<const runtime::ContinuationCheckpointReader>> proof_pins;
     try {
         if (snapshot->replay_only) {
             outcome.saved = store_.save_responses(*snapshot, fingerprint_json_, &outcome.skip);
         } else {
             outcome.saved = store_.save(*snapshot, fingerprint_json_,
             [&](runtime::ContinuationCheckpointWriter& writer) {
-                return Access::export_session(engine_, session, tag, writer, limits_);
+                auto result = Access::export_session(engine_, session, tag, writer, limits_, intent);
+                outcome.reclaim = result.reclaim;
+                proof_pins = std::move(result.proof_pins);
+                return result;
             },
             [&](runtime::DurableSessionEpoch epoch, const std::function<bool()>& commit) {
                 return Access::publish_export(engine_, session, tag, epoch, commit);
@@ -259,7 +277,7 @@ SessionCheckpointService::SaveOutcome SessionCheckpointService::save_session(
 }
 
 Json SessionCheckpointService::save(std::string_view session) {
-    const auto outcome = save_session(session, {}, false);
+    const auto outcome = save_session(session, {}, false, runtime::DurableSaveIntent::Explicit);
     Json result;
     if (outcome.saved) {
         result = operation("save", "exported", Reason::None, true, outcome.saved->engine,
@@ -269,6 +287,7 @@ Json SessionCheckpointService::save(std::string_view session) {
         result = operation("save", outcome.skip.export_state == runtime::DurableExportState::Stale
                                       ? "stale" : "refused", outcome.skip.durable_reason, false);
     }
+    reclaim_fields(result, outcome.reclaim);
     receipt(result);
     if (outcome.saved) {
         storage_progress_.fetch_add(1);
@@ -339,13 +358,21 @@ bool SessionCheckpointService::erase_response(const std::string& id, const std::
                     return true;
                 }
                 runtime::SessionCheckpointSkipDetail skip;
+                runtime::DurableExportReclaim reclaim;
+                std::vector<std::shared_ptr<const runtime::ContinuationCheckpointReader>> proof_pins;
                 const auto& tag = survivors->latest_response_id;
                 operation = "delete_save_survivors";
-                auto saved = survivors->replay_only
+                std::optional<SessionCheckpointSaveResult> saved;
+                try {
+                saved = survivors->replay_only
                     ? store_.save_responses(*survivors, fingerprint_json_, &skip)
                     : store_.save(*survivors, fingerprint_json_,
                     [&](runtime::ContinuationCheckpointWriter& writer) {
-                        return Access::export_session(engine_, session, tag, writer, limits_);
+                        auto result = Access::export_session(
+                            engine_, session, tag, writer, limits_, runtime::DurableSaveIntent::Survivor);
+                        reclaim = result.reclaim;
+                        proof_pins = std::move(result.proof_pins);
+                        return result;
                     },
                     [&](runtime::DurableSessionEpoch epoch, const std::function<bool()>& commit) {
                         return Access::publish_export(engine_, session, tag, epoch, commit);
@@ -358,9 +385,19 @@ bool SessionCheckpointService::erase_response(const std::string& id, const std::
                     operation = "delete_save_replay_survivors";
                     saved = store_.save_responses(*survivors, fingerprint_json_, &skip);
                 }
-                if (!saved) { refusal = skip.durable_reason; return false; }
+                } catch (...) {
+                    receipt("save", "refused", skip.durable_reason == Reason::None
+                                ? Reason::IoUnavailable : skip.durable_reason,
+                            false, {}, "not_checked", {}, reclaim);
+                    throw;
+                }
+                if (!saved) {
+                    refusal = skip.durable_reason;
+                    receipt("save", "refused", refusal, false, {}, "not_checked", {}, reclaim);
+                    return false;
+                }
                 receipt("save", "exported", Reason::None, true, saved->engine,
-                        saved->origin_authenticated ? "authenticated" : "unauthenticated", saved->dir_sync);
+                        saved->origin_authenticated ? "authenticated" : "unauthenticated", saved->dir_sync, reclaim);
                 return true;
             }, &refusal, prior.checkpoint ? &prior.checkpoint->responses : nullptr);
     }
@@ -435,10 +472,11 @@ AutomaticCheckpointResult SessionCheckpointService::automatic_save(
         storage_progress_.fetch_add(1);
         receipt("save", "exported", Reason::None, true, outcome.saved->engine,
                 outcome.saved->origin_authenticated ? "authenticated" : "unauthenticated",
-                outcome.saved->dir_sync);
+                outcome.saved->dir_sync, outcome.reclaim);
     } else if (!outcome.covered) {
         receipt("save", outcome.skip.export_state == runtime::DurableExportState::Stale
-                            ? "stale" : "refused", outcome.skip.durable_reason, false);
+                            ? "stale" : "refused", outcome.skip.durable_reason, false,
+                            {}, "not_checked", {}, outcome.reclaim);
     }
     // A responses-only generation promises replay, not a native continuation. The reported
     // absence of a native index settles pressure without presenting it as byte-validated.
@@ -486,18 +524,34 @@ bool SessionCheckpointService::final_save() noexcept {
     automatic_.drain();
     ShutdownCheckpointSummary summary;
     try {
-        for (const auto& session : responses_.session_digests()) {
-            const auto outcome = save_session(session);
+        const auto sessions = responses_.session_digests();
+        std::vector<std::string> capacity_refused;
+        capacity_refused.reserve(sessions.size());
+        const auto count = [&](const SaveOutcome& outcome) {
             if (outcome.saved) {
                 ++summary.saved;
                 receipt("save", "exported", Reason::None, true, outcome.saved->engine,
                         outcome.saved->origin_authenticated ? "authenticated" : "unauthenticated",
-                        outcome.saved->dir_sync);
+                        outcome.saved->dir_sync, outcome.reclaim);
             } else if (outcome.covered || outcome.skip.durable_reason == Reason::NoSessionRecords) {
                 ++summary.skipped;
             } else {
                 ++summary.refused;
-                receipt("save", "refused", outcome.skip.durable_reason, false);
+                receipt("save", "refused", outcome.skip.durable_reason, false,
+                        {}, "not_checked", {}, outcome.reclaim);
+            }
+        };
+        for (const auto& session : sessions) {
+            const auto outcome = save_session(session, {}, true, runtime::DurableSaveIntent::Final);
+            count(outcome);
+            if (!outcome.saved && !outcome.covered && outcome.skip.durable_reason == Reason::Capacity)
+                capacity_refused.push_back(session);
+        }
+        if (summary.saved) {
+            for (const auto& session : capacity_refused) {
+                --summary.refused;
+                const auto outcome = save_session(session, {}, true, runtime::DurableSaveIntent::Final);
+                count(outcome);
             }
         }
     } catch (...) { ++summary.refused; }

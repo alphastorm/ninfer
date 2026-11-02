@@ -52,8 +52,9 @@ StateImageStore::ReadLease StateImageStore::read(Handle handle) {
     return ReadLease(*this, handle, object.content_epoch);
 }
 
-bool StateImageStore::prepare_host_export(std::span<const Handle> images,
-                                          CudaExecutionView execution) {
+StateImageStore::HostPreparation StateImageStore::prepare_host_export(
+    std::span<const Handle> images, CudaExecutionView execution) {
+    using Kind = HostPreparation::Kind;
     std::size_t missing = 0;
     for (const auto image : images) {
         const auto& object = require(image);
@@ -61,17 +62,27 @@ bool StateImageStore::prepare_host_export(std::span<const Handle> images,
             throw std::logic_error("StateImage export requires immutable content");
         if (object.destination_pinned || has_pending_replica(object) ||
             (object.device_slot && object.source_pins != 0))
-            return false;
+            return {Kind::Busy};
         missing += !object.host_slot;
     }
+    if (missing && !host_) return {Kind::NoHostArena};
+    const auto bytes = device_->image_bytes();
+    if (missing && bytes > std::numeric_limits<std::size_t>::max() / missing)
+        throw std::bad_alloc();
+    const auto required = missing * bytes;
+    const auto free = host_ ? host_->free_bytes() : 0;
     // Reserve the whole set before submitting copies: a capacity refusal must not partially
     // demote the export's sources or leave asynchronous writes into returned Host allocations.
     std::vector<Transfer> transfers;
     transfers.reserve(missing);
     for (const auto image : images) {
         if (host_resident(image)) continue;
-        auto transfer = reserve_device_to_host(image);
-        if (!transfer) return false;
+        auto allocation = host_->allocate(bytes);
+        if (!allocation)
+            return required > free ? HostPreparation{Kind::HostCapacity, required - free}
+                                   : HostPreparation{Kind::HostContiguity};
+        auto transfer = reserve_device_to_host(image, std::move(*allocation));
+        if (!transfer) return {Kind::Busy};
         transfers.push_back(std::move(*transfer));
     }
     if (!transfers.empty()) {
@@ -88,7 +99,7 @@ bool StateImageStore::prepare_host_export(std::span<const Handle> images,
         if (device_resident(image) && !drop_device_replica(image))
             throw std::logic_error("StateImage export could not release its Device replica");
     }
-    return true;
+    return {};
 }
 
 StateImageStore::Destination::Destination(StateImageStore& store, Handle image)

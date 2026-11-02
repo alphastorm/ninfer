@@ -71,7 +71,7 @@
 
     [[nodiscard]] DurableExportResult export_session(
         std::string_view digest, std::string_view tag, ContinuationCheckpointWriter& writer,
-        const DurableLimits& limits) {
+        const DurableLimits& limits, DurableSaveIntent intent = DurableSaveIntent::Automatic) {
         using Program = typename ModelContract::Program;
         if constexpr (!requires(Program& program, std::span<const Checkpoint> points) {
             program.prepare_checkpoint_export(points, limits);
@@ -108,31 +108,155 @@
                 if (retirement) { (*retirement)(); }
                 else { release_export(); }
             };
-            checkpoint_call([&] {
-                if (failed_) { result.reason = DurableReason::IoUnavailable; return; }
+            checkpoint_change([&] {
                 const auto gate = checkpoints_.session(digest);
-                std::lock_guard lock(gate->mutex);
-                // The captured token keeps this gate until the caller's publication recheck.
-                result.captured_epoch = {gate->epoch.value, gate};
-                // Absence is native: an evicted endpoint is not indexed whether or not its
-                // session's gate was retired since. A resident endpoint other than the
-                // acknowledged one is a tag mismatch.
-                bool pending = false;
-                const auto points = resources_.session_points(*instance_.program, digest, tag, pending);
-                if (points.empty()) {
-                    result.reason = pending ? DurableReason::TransactionBusy
-                                            : DurableReason::SessionNotIndexed;
-                    return;
+                auto& program = *instance_.program;
+                using Manager = std::remove_reference_t<decltype(resources_)>;
+                std::optional<typename Manager::ReclaimCursor> cursor;
+                std::vector<typename Manager::DurableVictim> victims;
+                std::vector<std::vector<Checkpoint>> closures;
+                std::vector<Checkpoint> excluded;
+                std::size_t victim_index = 0, ordinary_steps = 0, ordinary_bound = 0;
+                bool redundant_used = false, contiguity_retry = false, changed = false;
+                const auto oracle = (intent == DurableSaveIntent::Explicit || intent == DurableSaveIntent::Final)
+                    ? checkpoints_.oracle() : nullptr;
+                const auto notify = [&] {
+                    if (changed) {
+                        scheduler_.capacity_released();
+                        notify_checkpoint_progress();
+                    }
+                };
+                try {
+                    for (;;) {
+                        if (failed_) { result.reason = DurableReason::IoUnavailable; break; }
+                        std::vector<Checkpoint> points;
+                        {
+                            std::lock_guard lock(gate->mutex);
+                            result.captured_epoch = {gate->epoch.value, gate};
+                            bool pending = false;
+                            points = resources_.session_points(program, digest, tag, pending);
+                            if (points.empty()) {
+                                result.reason = pending ? DurableReason::TransactionBusy
+                                                        : DurableReason::SessionNotIndexed;
+                                break;
+                            }
+                            if (gate->tag != tag) {
+                                result.state = DurableExportState::Stale;
+                                result.reason = DurableReason::TagMismatch;
+                                break;
+                            }
+                            ++result.reclaim.prepare_attempts;
+                            lease.emplace(program.prepare_checkpoint_export(points, limits));
+                        }
+                        result.reason = lease->reason();
+                        if (lease->state() == DurablePrepareState::Prepared) {
+                            prepared_export = true;
+                            ++checkpoint_exports_in_flight_;
+                            break;
+                        }
+                        const auto state = lease->state();
+                        const auto kind = lease->host_shortage_kind();
+                        using Kind = decltype(kind);
+                        const auto shortage = lease->host_shortage_bytes();
+                        lease.reset();
+                        if (state != DurablePrepareState::CapacityRefused ||
+                            result.reason != DurableReason::Capacity || checkpoint_pressure_depth_ ||
+                            contiguity_retry ||
+                            (kind != Kind::HostContiguity &&
+                             (kind != Kind::HostCapacity || !shortage))) break;
+                        result.reclaim.considered = true;
+                        const auto before = program.physical_usage().occupied.host_bytes;
+                        struct AccountProgress {
+                            Program& program;
+                            DurableExportReclaim& summary;
+                            std::size_t before;
+                            ~AccountProgress() {
+                                const auto after = program.physical_usage().occupied.host_bytes;
+                                if (before > after) summary.reclaimed_host_bytes += before - after;
+                            }
+                        } account{program, result.reclaim, before};
+                        const auto freed = [&] {
+                            const auto now = program.physical_usage().occupied.host_bytes;
+                            return before > now ? before - now : 0;
+                        };
+                        const auto lossless_excluded = resources_.export_reclaim_exclusions(points, false);
+                        if (!redundant_used) {
+                            redundant_used = true;
+                            changed = program.release_redundant_host(lossless_excluded) || changed;
+                        }
+                        if (kind == Kind::HostContiguity) {
+                            if (!freed()) break;
+                            contiguity_retry = true;
+                            continue;
+                        }
+                        if (!cursor) {
+                            cursor.emplace(resources_.begin_reclaim(
+                                program, std::nullopt, {ReclaimPurpose::OptionalWrite}));
+                            ordinary_bound = cursor->victims.size();
+                            if (oracle) victims = resources_.durable_victims(digest);
+                            result.proof_pins.reserve(2 * victims.size());
+                            excluded = resources_.export_reclaim_exclusions(points, true);
+                            closures.reserve(victims.size());
+                            for (const auto& victim : victims)
+                                closures.push_back(resources_.proven_victim_closure(
+                                    program, victim, *cursor, points, excluded));
+                        }
+                        while (freed() < shortage && victim_index < victims.size()) {
+                            const auto& closure = closures[victim_index];
+                            const auto& victim = victims[victim_index++];
+                            bool released = false;
+                            if (!closure.empty()) {
+                                const auto prove = [&]() {
+                                    auto pin = oracle->pin_recoverable(victim.session, victim.tag);
+                                    if (!pin) return false;
+                                    auto verification = pin->fresh_reader();
+                                    if (!verification) return false;
+                                    DurableCheckpointSet set;
+                                    if (read_checkpoint_index(*verification, limits, set) != DurableReason::None)
+                                        return false;
+                                    const auto validated = program.validate_checkpoint_import(set, *verification, limits);
+                                    if (validated.state != decltype(validated.state)::Validated) return false;
+                                    auto current = oracle->pin_recoverable(victim.session, victim.tag);
+                                    if (!current) return false;
+                                    const auto a = pin->file_descriptor("engine/index.cbor");
+                                    const auto b = current->file_descriptor("engine/index.cbor");
+                                    if (!a || !b || a->bytes != b->bytes || a->sha256 != b->sha256) return false;
+                                    result.proof_pins.push_back(std::move(pin));
+                                    result.proof_pins.push_back(std::move(current));
+                                    return resources_.release_proven_durable_victim(
+                                        program, victim, closure, *cursor, points, excluded);
+                                };
+                                released = prove();
+                            }
+                            if (released) {
+                                changed = true;
+                                ++result.reclaim.reclaimed_owners;
+                            }
+                            else ++result.reclaim.reclaim_declined;
+                        }
+                        while (freed() < shortage && ordinary_steps < ordinary_bound) {
+                            const auto progress = resources_.reclaim(
+                                program, {.host_bytes = shortage - freed()}, excluded, *cursor);
+                            if (progress != ReclaimProgress::Changed) break;
+                            changed = true;
+                            ++ordinary_steps;
+                            ++result.reclaim.reclaimed_cache_steps;
+                        }
+                        if (!freed()) break;
+                    }
+                } catch (const std::bad_alloc&) {
+                    // Optional reclaim cannot turn a capacity refusal into an Engine failure.
+                    lease.reset();
+                    if (!result.reclaim.considered || result.reason != DurableReason::Capacity) {
+                        notify();
+                        throw;
+                    }
+                } catch (...) {
+                    lease.reset();
+                    notify();
+                    throw;
                 }
-                if (gate->tag != tag) {
-                    result.state = DurableExportState::Stale;
-                    result.reason = DurableReason::TagMismatch;
-                    return;
-                }
-                lease.emplace(instance_.program->prepare_checkpoint_export(points, limits));
-                prepared_export = lease->state() == DurablePrepareState::Prepared;
-                if (prepared_export) { ++checkpoint_exports_in_flight_; }
-                result.reason = lease->reason();
+                notify();
             });
             if (!lease) { return result; }
             try {
@@ -143,8 +267,12 @@
                 if (execution) { execution->unlock(); }
                 try {
                     const auto epoch = result.captured_epoch;
+                    const auto reclaim = result.reclaim;
+                    auto pins = std::move(result.proof_pins);
                     result = lease->write(writer);
                     result.captured_epoch = epoch;
+                    result.reclaim = reclaim;
+                    result.proof_pins = std::move(pins);
                 } catch (...) {
                     if (execution) { execution->lock(); }
                     throw;
@@ -422,10 +550,17 @@ private:
     }
     bool checkpoint_pressure(std::span<PressureCheckpointVictim> victims) {
         if (victims.empty()) { return true; }
+        using Core = std::remove_pointer_t<decltype(this)>;
+        struct PressureScope {
+            Core& core;
+            ~PressureScope() {
+                core.checkpoint_execution_lock_->lock();
+                --core.checkpoint_pressure_depth_;
+            }
+        } scope{*this};
+        ++checkpoint_pressure_depth_;
         checkpoint_execution_lock_->unlock();
-        const bool settled = checkpoints_.settle(victims);
-        checkpoint_execution_lock_->lock();
-        return settled;
+        return checkpoints_.settle(victims);
     }
     bool checkpoint_request_settled(const Request& request) {
         // A paused request has not acknowledged a final response. Native owns its

@@ -393,12 +393,32 @@ or a checkpoint operation changes native state, the next statistics publication 
 observer has read statistics, so a result delivered before publication fails deterministically.
 Run it with `ctest --test-dir build -R '^ninfer_engine_core_test$' --output-on-failure`.
 
+Its export-reclaim matrix uses the same Host ledger and production Engine entry point:
+stopped/Pending handlers, fresh proof failures, retained result pins, automatic/survivor
+intent, contiguity-only cleanup, zero arena progress, residual ordinary deficits,
+pressure re-entry, non-observed refused-save reclaim notifications and observed prepared
+export retirement. `ninfer_resource_manager_test` checks whole physical closures, strict
+logical-owner exclusivity and source protections, including freeing a victim's private Host
+bytes while a protected physical sharer retains shared pages.
+`ninfer_export_state_test` checks typed shortages, contiguity, Busy, absent arena,
+all-or-nothing reservation and failed-copy cleanup with real StateImageStore ownership.
+`ninfer_session_checkpoint_export_test` links the real service/store with a scripted
+Engine adapter for proof-pin quota/publication lifetime, receipt propagation (including
+DELETE survivor replay), automatic intent and the publication-conditioned second final
+pass, including exact refusal counting when a second-pass save throws. It does not
+substitute for native byte validation. The store test also proves
+callback pinning is catalog-unlocked and later saves can evict after pins retire.
+
 `ninfer_engine_checkpoint_adapter_test` includes the production checkpoint adapter in a
 GPU-free host-native fixture. Allocation-failure cases check that command allocation fails
 before acquiring a native export lease and that successful or throwing writers retire leases
 without further caller or worker allocation, releasing capacity exactly once. Injection stays
 armed through a fresh worker command drain, including after an inline export, so allocating
-empty-list sentinels are covered on MSVC. Linux and Windows host-contract CI select this
+empty-list sentinels are covered on MSVC. The production automatic coordinator retries a
+TransactionBusy pressure save after another session's export retires without other engine
+activity; no-op reclaim refusals emit no capacity/admission event. The queue regression
+retains the prohibition on a partially reclaiming refused save waking its own retry.
+Linux and Windows host-contract CI select this
 executable; the native-compile workflow also runs it.
 
 The `attention` scenario checks the selected KV type, chunked prefill, concurrent Graph decode
@@ -448,6 +468,65 @@ On Linux, `ninfer_session_checkpoint_service_real_test` builds the durable-servi
 service on `NINFER_TEST_ARTIFACT`, refuses the close of its staged shutdown report, and requires
 `final_save()` to fail without publishing the report, then to publish it normally. Durable serving
 rejects dirty build provenance, so it needs a clean-source build.
+
+`ninfer_serve_shutdown_capacity_real_test` is the production Stop pressure regression
+(`gpu;real;durable`, serial, skip 77 only when no explicit artifact is selected). Under
+an authorized GPU window, select `NINFER_TEST_ARTIFACT`, its optional SHA-256, and
+`NINFER_TEST_DEVICE_STATE_SLOTS` for the actual artifact/backend/GPU. Slots are **extra**
+capacity, not total lanes; the runner deliberately has no universal slot default.
+`NINFER_TEST_SPEC` defaults to `dflash2`. Direct invocation accepts `--prompt-lines`,
+`--max-context`, `--kv-capacity`, `--roomy-host-mib` and `--receipt`.
+It calibrates A, B and the subsequent stored B continuation, excludes index bytes from
+empty-arena fit, chooses byte-exact Host capacity, and verifies actual Host KV/state,
+Device state and reservation metrics before Stop. A configured but nonconstructible
+pressure fixture fails; it never reports an unexercised green. POSIX uses SIGTERM;
+Windows opens/signals the server-created stop event with the production ACL.
+
+Run predecessor red and candidate green as separate clean builds. The predecessor
+mode `--expect-defect --predecessor-classification FILE` additionally requires a
+classification-only diagnostic receipt bound to `0628db0b0997c8bda4ac37c8e84da95986890014`.
+That JSON has `base_sha`, `source_sha`, `binary_sha256`, `diagnostic_delta_sha` (the
+separately identified instrumentation commit), `native_site` equal to
+`StateImageStore::prepare_host_export`, `kind` equal to `HostCapacity`, and measured
+`shortage_bytes`. A public Capacity reason alone is not the required refusal-site proof.
+The diagnostic-only branch `p17/78-predecessor-classification` has head
+`a73f4fa02fa1d81b934a109fc66f4abd21eb51ec`: exactly that predecessor plus a JSON
+stderr record at its existing failed Host reservation. It does not change the return,
+allocation or copy path. Build it cleanly, then use the **candidate's runner** for all
+three commands below. `--classify` executes the calibrated predecessor fixture and
+extracts its native log into the binary-bound JSON; it rejects absent, duplicate,
+non-byte-shortage or wrong-source diagnostics.
+
+```sh
+: "${NINFER_TEST_ARTIFACT:?select the authorized artifact}"
+: "${NINFER_TEST_DEVICE_STATE_SLOTS:?select extra slots for this artifact/backend}"
+: "${NINFER_PREDECESSOR_SERVER:?select the clean diagnostic binary}"
+: "${NINFER_CANDIDATE_SERVER:?select the clean candidate binary}"
+export NINFER_TEST_ARTIFACT NINFER_TEST_DEVICE_STATE_SLOTS
+export NINFER_TEST_SPEC="${NINFER_TEST_SPEC:-dflash2}"
+python3 tests/test_serve_shutdown_capacity_real.py \
+  --server "$NINFER_PREDECESSOR_SERVER" --classify \
+  --diagnostic-delta-sha a73f4fa02fa1d81b934a109fc66f4abd21eb51ec \
+  --predecessor-classification predecessor-classification.json --receipt classification-proof.json
+python3 tests/test_serve_shutdown_capacity_real.py \
+  --server "$NINFER_PREDECESSOR_SERVER" --expect-defect \
+  --predecessor-classification predecessor-classification.json --receipt predecessor-red.json
+python3 tests/test_serve_shutdown_capacity_real.py \
+  --server "$NINFER_CANDIDATE_SERVER" --receipt candidate-green.json
+```
+
+Keep all geometry/backend options identical across those invocations. The red command
+uses the same instrumented binary, not a rebuild or an uninstrumented substitute.
+The runner compares that deficit with its calibrated pre-stop metrics. No predecessor
+or candidate GPU result is implied by host CI. Candidate green requires exact shutdown
+totals, positive reclaimed owners/bytes, deterministic native restore, an unchanged victim
+generation, a second Stop after which B's restored continuation is durable (a pressure
+save may publish it first, so that Stop either skips or saves B), and then a fresh
+server that loads the cold victim alone (B's restored continuation fills the calibrated
+arena, so loading A beside it would be a Capacity refusal). Qualify each shipped
+native component's event/report/restore route and the built container's SIGTERM route;
+the runtime image does not build or execute CTest. Retain the long-session managed-Stop
+release rehearsal in addition to this calibrated trigger.
 
 `ninfer_qwen3_5_tools_real_test [none|mtp|dflash|dflash2] [graph|eager|basic|snapshot|replay|cancel] [concurrency]`
 uses `NINFER_TEST_ARTIFACT` for strict tools, thinking, raw continuation, mixed batches, and

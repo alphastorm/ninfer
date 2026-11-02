@@ -2699,6 +2699,7 @@ private:
     std::unique_lock<std::mutex>* checkpoint_execution_lock_ = nullptr;
     // Worker-owned: prepared export leases may outlive all resident requests.
     std::size_t checkpoint_exports_in_flight_ = 0;
+    std::size_t checkpoint_pressure_depth_ = 0;
     // Worker-owned: raised at the start of the next worker turn.
     std::exception_ptr checkpoint_publication_failure_;
 

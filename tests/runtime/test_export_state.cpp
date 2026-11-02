@@ -75,6 +75,7 @@ const char* CUDARTAPI NINFER_EXPORT_STATE_CUDA(cudaGetErrorString)(cudaError_t) 
 namespace {
 using namespace ninfer;
 using Store = models::context::StateImageStore;
+using HostKind = Store::HostPreparation::Kind;
 
 void require(bool value, std::string_view message) {
     if (!value) throw std::runtime_error(std::string(message));
@@ -137,14 +138,15 @@ void export_leased_fork(DeviceContext& device) {
     exports.clear();
 
     const auto before = copies;
-    require(f.images.prepare_host_export(f.sources, device.transfer_view()), "prepare Host export");
+    require(f.images.prepare_host_export(f.sources, device.transfer_view()).kind == HostKind::Prepared,
+            "prepare Host export");
     require(copies == before + 3 && f.images.device_occupied() == 0 &&
                 f.images.host_occupied() == 3, "one copy per missing Host replica frees all slots");
     for (std::size_t i = 0; i < f.sources.size(); ++i) {
         exports.push_back(f.images.read(f.sources[i]));
         require(exports.back().epoch() == f.epochs[i], "export retains the original content epoch");
     }
-    require(f.images.prepare_host_export(f.sources, device.transfer_view()) && copies == before + 3,
+    require(f.images.prepare_host_export(f.sources, device.transfer_view()).kind == HostKind::Prepared && copies == before + 3,
             "overlapping Host export readers require no additional copies");
     const auto destination = f.images.reserve_logical_destination();
     require(destination.has_value(), "independent fork identity reservation");
@@ -181,7 +183,7 @@ void existing_host_replica(DeviceContext& device) {
     CUDA_CHECK(cudaStreamSynchronize(device.transfer_stream()));
     backup->publish(true);
     const auto before = copies;
-    require(f.images.prepare_host_export(f.sources, device.transfer_view()) &&
+    require(f.images.prepare_host_export(f.sources, device.transfer_view()).kind == HostKind::Prepared &&
                 copies == before + 2 && f.images.device_occupied() == 0,
             "existing Host replica is reused and its Device replica is released");
 }
@@ -190,7 +192,10 @@ void failure_recovery(DeviceContext& device) {
     for (const auto slots : {0U, 2U}) {
         Fixture f(device.device(), slots);
         const auto before = copies;
-        require(!f.images.prepare_host_export(f.sources, device.transfer_view()) && copies == before,
+        const auto result = f.images.prepare_host_export(f.sources, device.transfer_view());
+        require(result.kind == HostKind::HostCapacity &&
+                    result.shortage_bytes == (3 - slots) * f.schema.image_stride && copies == before &&
+                    f.host.reserved_bytes() == 0,
                 "all Host capacity is reserved before any copy");
         f.unchanged_device_sources();
     }
@@ -198,7 +203,8 @@ void failure_recovery(DeviceContext& device) {
     {
         auto reader = f.images.read(f.sources[1]);
         const auto before = copies;
-        require(!f.images.prepare_host_export(f.sources, device.transfer_view()) && copies == before,
+        const auto result = f.images.prepare_host_export(f.sources, device.transfer_view());
+        require(result.kind == HostKind::Busy && result.shortage_bytes == 0 && copies == before,
                 "an existing Device reader is never invalidated to prepare export");
     }
     f.unchanged_device_sources();
@@ -215,9 +221,54 @@ void failure_recovery(DeviceContext& device) {
     require(failed && error_strings == before_errors + 1 && synchronizations > before_sync,
             "partial enqueue failure settles submitted copies before reservation rollback");
     f.unchanged_device_sources();
-    require(f.images.prepare_host_export(f.sources, device.transfer_view()) &&
+    require(f.images.prepare_host_export(f.sources, device.transfer_view()).kind == HostKind::Prepared &&
                 f.images.device_occupied() == 0 && f.images.host_occupied() == 3,
             "failed preparation can recover and complete on the same sources");
+}
+
+void unavailable_and_fragmented(DeviceContext& device) {
+    Fixture f(device.device(), 3);
+    Store no_host(f.physical, nullptr, 3);
+    const auto source = no_host.reserve_logical_destination();
+    require(source.has_value(), "logical source without Host");
+    // Empty preparation needs neither storage nor copies.
+    require(no_host.prepare_host_export({}, device.transfer_view()).kind == HostKind::Prepared,
+            "empty set requires no Host arena");
+    require(no_host.release(*source), "release unused logical reservation");
+
+    // Two holes together fit one image, but neither hole is a contiguous image.
+    const auto unit = HostContextArena::alignment;
+    require(f.schema.image_stride >= 2 * unit, "fixture image spans multiple allocation units");
+    HostContextArena fragmented(2 * f.schema.image_stride, unit);
+    auto left = fragmented.allocate(f.schema.image_stride - unit);
+    auto barrier = fragmented.allocate(unit);
+    auto right = fragmented.allocate(f.schema.image_stride - unit);
+    auto end = fragmented.allocate(unit);
+    require(left && barrier && right && end, "fragmentation allocations");
+    left.reset();
+    right.reset();
+    // Use a separate physical store so logical source slots have one owner.
+    StateImageStorage physical({f.backing.data(), f.backing.size(), device.device()}, f.schema);
+    Store images(physical, &fragmented, 8);
+    const auto image = images.reserve_destination();
+    require(image.has_value(), "fragmentation source");
+    images.complete_initialization(*image);
+    images.freeze(*image);
+    images.retain_checkpoint_reference(*image);
+    const auto result = images.prepare_host_export({&*image, 1}, device.transfer_view());
+    require(result.kind == HostKind::HostContiguity && result.shortage_bytes == 0 &&
+                images.device_resident(*image) && fragmented.reserved_bytes() == 2 * unit,
+            "contiguity is not a destructive byte deficit");
+
+    StateImageStorage absent_physical({f.backing.data(), f.backing.size(), device.device()}, f.schema);
+    Store absent(absent_physical, nullptr, 3);
+    const auto missing = absent.reserve_destination();
+    require(missing.has_value(), "no-arena source");
+    absent.complete_initialization(*missing);
+    absent.freeze(*missing);
+    const auto unavailable = absent.prepare_host_export({&*missing, 1}, device.transfer_view());
+    require(unavailable.kind == HostKind::NoHostArena && unavailable.shortage_bytes == 0,
+            "no arena is not contended capacity");
 }
 } // namespace
 
@@ -227,6 +278,7 @@ int main() {
         export_leased_fork(device);
         existing_host_replica(device);
         failure_recovery(device);
+        unavailable_and_fragmented(device);
         std::cout << "PASS export State readers release execution slots without changing bytes\n";
         return 0;
     } catch (const std::exception& error) {
