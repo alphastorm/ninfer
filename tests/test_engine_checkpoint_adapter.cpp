@@ -218,6 +218,8 @@ struct ExportResources {
     using DurableVictim = Victim;
     struct ReclaimCursor { std::vector<int> victims; };
     struct Shortage { std::size_t host_bytes = 0; };
+    bool release_guard_enabled = false;
+    void enable_release_guard(bool enabled) { release_guard_enabled = enabled; }
     ReclaimCursor begin_reclaim(ExportProgram&, std::nullopt_t, ReclaimRights) { return {}; }
     std::vector<int> export_reclaim_exclusions(std::span<const int> points, bool) const {
         return {points.begin(), points.end()};
@@ -406,6 +408,9 @@ public:
             (void)checkpoint_pressure({&victim, 1});
         });
     }
+    void pressure_handler(std::shared_ptr<PressureCheckpointHandler> handler) {
+        set_pressure_checkpoint_handler(std::move(handler));
+    }
     // Restore whose epoch was captured before its disk load; None means Imported.
     DurableReason restore_captured(const std::string& session, DurableSessionEpoch captured) {
         IndexReader reader;
@@ -440,8 +445,9 @@ public:
     void complete_first_resume() {
         on_worker([&] { instance_.program->complete_first_resume(resources_.owners.at("first").points); });
     }
-    DurableExportResult save(const std::string& session, ContinuationCheckpointWriter& writer) {
-        return export_session(session, "turn", writer, {});
+    DurableExportResult save(const std::string& session, ContinuationCheckpointWriter& writer,
+                             DurableSaveIntent intent = DurableSaveIntent::Automatic) {
+        return export_session(session, "turn", writer, {}, intent);
     }
     DurableExportResult save(ContinuationCheckpointWriter& writer) { return save("first", writer); }
     bool isolated_admission() {
@@ -695,9 +701,9 @@ void pressure_callback_export_does_not_reclaim() {
     DurableExportResult result;
     NullWriter writer;
     handler->callback = [&] {
-        result = core.export_session("first", "turn", writer, {}, DurableSaveIntent::Explicit);
+        result = core.save("first", writer, DurableSaveIntent::Explicit);
     };
-    core.set_pressure_checkpoint_handler(handler);
+    core.pressure_handler(handler);
     core.on_worker([&] { program.refuse_export = true; program.host_refusal = true; });
     core.run_pressure();
     require(handler->calls == 1 && result.reason == DurableReason::Capacity &&
