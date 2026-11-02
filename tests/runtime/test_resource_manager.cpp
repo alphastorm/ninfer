@@ -2219,7 +2219,7 @@ void test_proven_export_closure_and_protections() {
         const auto closure = f.cache.proven_victim_closure(f.program, victim, cursor, exported, excluded);
         if (protection) {
             require(closure.empty() && f.program.released.empty(),
-                    "ineligible physical closure was partially authorized: " + std::to_string(protection));
+                    ("ineligible physical closure was partially authorized: " + std::to_string(protection)).c_str());
         } else {
             require(closure.size() == 2 && f.cache.release_proven_durable_victim(
                         f.program, victim, closure, cursor, exported, excluded) &&
