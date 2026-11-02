@@ -1704,7 +1704,8 @@ void export_proven_victim() {
                 saved.reclaim.reclaimed_host_bytes == kCheckpointHostBytes &&
                 saved.reclaim.reclaimed_cache_steps == 0,
             "fresh proof must bypass stopped/Pending handler and retain both generation pins");
-    require(h.core().checkpoint_progress() == clock, "save-owned release advanced observed progress");
+    require(h.core().checkpoint_progress() == clock + 1,
+            "prepared export retirement did not advance observed progress exactly once");
     require(h.core().publish_export(kSession, "b", saved.captured_epoch, [] { return true; }).state ==
                 rt::DurableExportState::Exported, "reclaim lost the publication gate");
     require_durable(h.observed_stats(), {.catalog = 1, .host = 1}, "proven victim release stats");
@@ -1791,7 +1792,7 @@ void export_zero_progress_and_residual() {
         require(result.state == rt::DurableExportState::Exported &&
                     result.reclaim.reclaimed_cache_steps == 1 &&
                     result.reclaim.reclaimed_host_bytes == 3 * kCheckpointHostBytes / 2 &&
-                    result.reclaim.prepare_attempts == 2 && h.core().checkpoint_progress() == clock,
+                    result.reclaim.prepare_attempts == 2 && h.core().checkpoint_progress() == clock + 1,
                 "ordinary all-or-nothing plan was given the original rather than residual deficit");
     }
     {

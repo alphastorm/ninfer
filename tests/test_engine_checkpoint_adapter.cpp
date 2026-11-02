@@ -1,5 +1,6 @@
 #include "runtime/engine/checkpoint_control.h"
 #include "runtime/engine/context_cache/types.h"
+#include "serve/automatic_checkpoint_queue.h"
 
 #include <algorithm>
 #include <array>
@@ -90,6 +91,7 @@ struct ExportProgram {
     struct Usage { struct { std::size_t host_bytes = 0; } occupied; };
     Usage physical_usage() const { return {}; }
     unsigned redundant_calls = 0;
+    unsigned reclaim_calls = 0;
     std::size_t release_redundant_host(std::span<const int>) { ++redundant_calls; return 0; }
     struct Image {
         bool device = false;
@@ -99,6 +101,7 @@ struct ExportProgram {
     std::vector<Image> images;
     bool refuse_export = false;
     bool host_refusal = false;
+    bool serialize_exports = false;
     unsigned export_acquisitions = 0;
     unsigned export_retirements = 0;
     bool off_worker_retirement = false;
@@ -116,8 +119,11 @@ struct ExportProgram {
         std::vector<int> handles;
         std::thread::id worker;
         bool host_refusal = false;
+        bool busy = false;
         explicit Lease(ExportProgram& program, std::span<const int> points) {
             host_refusal = program.host_refusal;
+            busy = program.serialize_exports && program.export_acquisitions != program.export_retirements;
+            if (busy) { return; }
             if (program.refuse_export) { return; }
             handles.assign(points.begin(), points.end());
             owner = &program;
@@ -127,7 +133,7 @@ struct ExportProgram {
         }
         Lease(Lease&& other) noexcept
             : owner(std::exchange(other.owner, nullptr)), handles(std::move(other.handles)),
-              worker(other.worker), host_refusal(other.host_refusal) {}
+              worker(other.worker), host_refusal(other.host_refusal), busy(other.busy) {}
         ~Lease() {
             if (owner) {
                 owner->off_worker_retirement |= std::this_thread::get_id() != worker;
@@ -138,7 +144,9 @@ struct ExportProgram {
         DurablePrepareState state() const {
             return owner ? DurablePrepareState::Prepared : DurablePrepareState::CapacityRefused;
         }
-        DurableReason reason() const { return owner ? DurableReason::None : DurableReason::Capacity; }
+        DurableReason reason() const {
+            return owner ? DurableReason::None : busy ? DurableReason::TransactionBusy : DurableReason::Capacity;
+        }
         enum class HostKind { Prepared, HostCapacity, HostContiguity };
         HostKind host_shortage_kind() const { return host_refusal ? HostKind::HostCapacity : HostKind::Prepared; }
         std::size_t host_shortage_bytes() const { return host_refusal ? 1 : 0; }
@@ -220,7 +228,7 @@ struct ExportResources {
     struct Shortage { std::size_t host_bytes = 0; };
     bool release_guard_enabled = false;
     void enable_release_guard(bool enabled) { release_guard_enabled = enabled; }
-    ReclaimCursor begin_reclaim(ExportProgram&, std::nullopt_t, ReclaimRights) { return {}; }
+    ReclaimCursor begin_reclaim(ExportProgram&, std::nullopt_t, ReclaimRights) { return {{0}}; }
     std::vector<int> export_reclaim_exclusions(std::span<const int> points, bool) const {
         return {points.begin(), points.end()};
     }
@@ -228,7 +236,8 @@ struct ExportResources {
                                          std::span<const int>, std::span<const int>) { return {}; }
     bool release_proven_durable_victim(ExportProgram&, const Victim&, std::span<const int>,
         ReclaimCursor&, std::span<const int>, std::span<const int>) { return false; }
-    ReclaimProgress reclaim(ExportProgram&, Shortage, std::span<const int>, ReclaimCursor&) {
+    ReclaimProgress reclaim(ExportProgram& program, Shortage, std::span<const int>, ReclaimCursor&) {
+        ++program.reclaim_calls;
         return ReclaimProgress::Blocked;
     }
     std::map<std::string, Owner, std::less<>> owners;
@@ -464,6 +473,8 @@ public:
             return std::pair(scheduler_.capacity_events, admission_notifications_);
         });
     }
+    std::uint64_t observed_progress() const { return checkpoint_progress(); }
+    void save_completed() { notify_checkpoint_progress(); }
     bool capacity_pending() {
         return on_worker([&] { return admission_capacity_progress_pending(false); });
     }
@@ -498,7 +509,7 @@ void isolated_import_waits_for_export(bool writer_throws) {
     } catch (const WriterFailure&) { threw = true; }
     require(threw == writer_throws, "writer exception was swallowed or manufactured");
     const auto after = core.progress();
-    require(after.first == before.first + 1 && after.second == before.second,
+    require(after.first == before.first + 1 && after.second == before.second + 1,
             "export retirement did not publish one capacity/admission event");
     require(!core.capacity_pending() && core.on_worker([&] { return program.pinned_device_slots() == 0; }),
             "completed export still owns a native reader or pending-capacity claim");
@@ -537,7 +548,7 @@ void export_retirement_survives_allocation_failure(bool writer_throws, bool inli
                 (writer_throws || result.state == DurableExportState::Exported),
             "allocation failure replaced the writer result or exception");
     const auto after = core.progress();
-    require(after.first == before.first + 1 && after.second == before.second,
+    require(after.first == before.first + 1 && after.second == before.second + 1,
             "allocation-safe retirement did not release capacity exactly once");
     require(core.on_worker([&] {
         return program.export_acquisitions == 1 && program.export_retirements == 1 &&
@@ -600,9 +611,92 @@ void overlapping_exports_retain_progress_until_last_release() {
     second.release();
     require(saving_second.get().state == DurableExportState::Exported, "second overlapping export failed");
     const auto after = core.progress();
-    require(after.first == before.first + 2 && after.second == before.second &&
+    require(after.first == before.first + 2 && after.second == before.second + 2 &&
                 !core.capacity_pending() && core.isolated_admission(),
             "last export retirement failed to unblock lossless admission");
+}
+
+void automatic_retry_after_other_export_retires() {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    core.restore("first");
+    core.restore("second");
+    core.on_worker([&] { program.serialize_exports = true; });
+    BlockingWriter writer;
+    auto saving = std::async(std::launch::async, [&] { return core.save(writer); });
+    ReleaseWriter release{writer};
+    writer.wait_until_blocked();
+    std::mutex mutex;
+    std::condition_variable cv;
+    unsigned calls = 0, completed = 0, probes = 0;
+    DurableReason reason = DurableReason::None;
+    const auto wait = [&](const auto& predicate) {
+        std::unique_lock lock(mutex);
+        return cv.wait_for(lock, 2s, predicate);
+    };
+    ninfer::serve::AutomaticCheckpointCoordinator coordinator(
+        [&](std::string_view session, std::optional<std::string_view> tag) {
+            NullWriter output;
+            const auto result = core.save(std::string(session), output);
+            std::lock_guard lock(mutex);
+            ++calls;
+            reason = result.reason;
+            return ninfer::serve::AutomaticCheckpointResult{std::string(*tag), result.reason};
+        },
+        [&] {
+            std::lock_guard lock(mutex);
+            ++probes;
+            cv.notify_all();
+            return ninfer::serve::CheckpointSaveProgress{core.observed_progress()};
+        },
+        [&] {
+            core.save_completed();
+            std::lock_guard lock(mutex);
+            ++completed;
+            cv.notify_all();
+        });
+    PressureCheckpointVictim victim{"second", "turn"};
+    coordinator.save_before_eviction({&victim, 1});
+    require(wait([&] { return completed == 1 && probes >= 4; }),
+            "automatic save did not defer while another export held the lease");
+    {
+        std::lock_guard lock(mutex);
+        require(calls == 1 && reason == DurableReason::TransactionBusy &&
+                    victim.outcome == PressureCheckpointOutcome::Pending,
+                "held export did not produce a non-spinning TransactionBusy pressure retry");
+    }
+    const auto clock = core.observed_progress();
+    writer.release();
+    require(saving.get().state == DurableExportState::Exported, "blocking export did not finish");
+    require(wait([&] { return completed == 2; }),
+            "another export's retirement left the automatic save Pending without engine activity");
+    coordinator.save_before_eviction({&victim, 1});
+    {
+        std::lock_guard lock(mutex);
+        require(calls == 2 && reason == DurableReason::None &&
+                    victim.outcome == PressureCheckpointOutcome::Settled &&
+                    core.observed_progress() == clock + 2,
+                "export retirement did not retry and settle the deferred pressure save exactly once");
+    }
+    coordinator.drain();
+}
+
+void unchanged_reclaim_refusal_does_not_notify() {
+    ExportProgram program;
+    AdapterFixture<ExportContract> core(program);
+    core.restore("first");
+    core.on_worker([&] { program.refuse_export = true; program.host_refusal = true; });
+    const auto before = core.progress();
+    const auto clock = core.observed_progress();
+    NullWriter writer;
+    const auto result = core.save(writer);
+    require(result.reason == DurableReason::Capacity && result.reclaim.considered &&
+                result.reclaim.prepare_attempts == 1 && result.reclaim.reclaimed_owners == 0 &&
+                result.reclaim.reclaimed_cache_steps == 0 && result.reclaim.reclaimed_host_bytes == 0 &&
+                program.redundant_calls == 1 && program.reclaim_calls == 1,
+            "unchanged refusal did not exhaust the lossless and blocked ordinary tiers");
+    require(core.progress() == before && core.observed_progress() == clock,
+            "unchanged reclaim refusal emitted a capacity/admission notification");
 }
 
 void genuine_capacity_and_unprepared_export_do_not_defer() {
@@ -746,6 +840,8 @@ int main() {
          [] { export_retirement_survives_allocation_failure(true, true); }},
         {"export_command_allocation_failure", export_command_allocation_failures_precede_native_lease},
         {"overlapping_exports", overlapping_exports_retain_progress_until_last_release},
+        {"automatic_retry_after_export_retirement", automatic_retry_after_other_export_retires},
+        {"unchanged_reclaim_refusal", unchanged_reclaim_refusal_does_not_notify},
         {"pressure_callback_export", pressure_callback_export_does_not_reclaim},
         {"genuine_capacity", genuine_capacity_and_unprepared_export_do_not_defer},
         {"unseen_session_gates", unseen_sessions_leave_bounded_gates},

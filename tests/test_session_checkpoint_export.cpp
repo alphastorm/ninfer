@@ -11,6 +11,25 @@
 #include <map>
 #include <chrono>
 #include <future>
+#include <cstdlib>
+#include <new>
+#include <utility>
+
+namespace {
+thread_local bool fail_next_allocation = false;
+thread_local unsigned allocation_failures = 0;
+}
+
+void* operator new(std::size_t size) {
+    if (std::exchange(fail_next_allocation, false)) {
+        ++allocation_failures;
+        throw std::bad_alloc();
+    }
+    if (void* memory = std::malloc(size ? size : 1)) return memory;
+    throw std::bad_alloc();
+}
+void operator delete(void* memory) noexcept { std::free(memory); }
+void operator delete(void* memory, std::size_t) noexcept { std::free(memory); }
 
 using namespace ninfer;
 using namespace ninfer::runtime;
@@ -64,6 +83,20 @@ StoredOpenAIResponse response(const std::string& session, std::string id, unsign
     out.response = {{"id", out.id}, {"object", "response"}, {"status", "completed"}};
     return out;
 }
+struct ReceiptLog : std::stringbuf {
+    bool fail_after_export = false;
+    std::streamsize xsputn(const char* text, std::streamsize size) override {
+        const auto written = std::stringbuf::xsputn(text, size);
+        if (fail_after_export &&
+            std::string_view(text, size).find("\"state\":\"exported\"") != std::string_view::npos) {
+            fail_after_export = false;
+            // Receipt emission is the last first-pass action. Fail the next save's
+            // operation/snapshot acquisition, outside save_session's inner catch.
+            fail_next_allocation = true;
+        }
+        return written;
+    }
+};
 struct Fixture {
     std::filesystem::path root = std::filesystem::temp_directory_path() /
         ("checkpoint-export-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
@@ -71,8 +104,8 @@ struct Fixture {
     ServeOptions options;
     OpenAIResponsesStore responses{16, 1ULL << 20};
     std::unique_ptr<SessionCheckpointService> service;
-    std::ostringstream logs;
-    std::streambuf* previous = std::clog.rdbuf(logs.rdbuf());
+    ReceiptLog logs;
+    std::streambuf* previous = std::clog.rdbuf(&logs);
     explicit Fixture(std::uint64_t quota = 1ULL << 24) {
         script = {};
         options.api_key = std::string(32, 'k');
@@ -85,6 +118,7 @@ struct Fixture {
         service = std::make_unique<SessionCheckpointService>(engine, options, responses, std::nullopt);
     }
     ~Fixture() {
+        fail_next_allocation = false;
         service.reset();
         std::clog.rdbuf(previous);
         std::error_code ignored;
@@ -135,6 +169,30 @@ void final_second_pass() {
                 script.calls[order.back()] == 1, "unbounded or non-publication-backed final-save retry");
         for (const auto& receipt : f.receipts()) has_summary(receipt);
     }
+}
+void final_second_pass_exception_counts_once() {
+    Fixture f;
+    const std::string a(64, 'a'), b(64, 'b');
+    f.responses.put(response(a, "resp_a", 1));
+    f.responses.put(response(b, "resp_b", 2));
+    const auto order = f.responses.session_digests();
+    script.export_now = [&](std::string_view session, auto& writer, DurableSaveIntent intent) {
+        require(intent == DurableSaveIntent::Final, "second-pass exception lost final intent");
+        if (session == order.front())
+            return DurableExportResult{.reason = DurableReason::Capacity, .reclaim = summary()};
+        return exported(writer);
+    };
+    const auto failures = allocation_failures;
+    f.logs.fail_after_export = true;
+    require(!f.service->final_save(), "second-pass exception weakened fail-closed stop");
+    require(allocation_failures == failures + 1 && !f.logs.fail_after_export &&
+                !fail_next_allocation && script.calls[order.front()] == 1 &&
+                script.calls[order.back()] == 1,
+            "exception did not escape second-pass save_session before export");
+    const auto report = f.report();
+    require(report.at("saved") == 1 && report.at("refused") == 1 &&
+                report.at("skipped") == 0 && report.at("complete") == false,
+            "second-pass save_session exception counted the refusal twice");
 }
 void receipts_and_survivors() {
     for (unsigned mode = 0; mode != 6; ++mode) {
@@ -305,6 +363,7 @@ int main() {
         receipts_and_survivors();
         automatic_receipt();
         service_proof_pin_lifetime();
+        final_second_pass_exception_counts_once();
         std::cout << "PASS service export lifecycle\n";
         return 0;
     }

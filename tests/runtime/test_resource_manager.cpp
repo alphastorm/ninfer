@@ -2230,6 +2230,37 @@ void test_proven_export_closure_and_protections() {
     }
 }
 
+void test_proven_export_skips_protected_physical_groups() {
+    using namespace ninfer::runtime;
+    for (bool exported_holder : {false, true}) {
+        Fixture f(128);
+        const auto shared = f.program.host_block(64);
+        const auto private_block = f.program.host_block(64);
+        const auto named = f.program.add({1, 2}, {shared, private_block}, Role::Continuation);
+        const auto protected_point = f.program.add({9}, {shared}, Role::Continuation);
+        const auto owner = f.publish(named, 1);
+        const auto protected_owner = f.publish(protected_point, 2);
+        f.cache.set_checkpoint_identity(owner, "victim", "tag");
+        std::vector<Handle> exported;
+        if (exported_holder) exported.push_back(protected_point);
+        else f.cache.set_checkpoint_identity(protected_owner, "protected", "tag");
+        auto cursor = f.cache.begin_reclaim(f.program, {}, {ReclaimPurpose::OptionalWrite});
+        const auto excluded = f.cache.export_reclaim_exclusions(exported, true);
+        const auto victim = f.cache.durable_victims("protected").front();
+        unsigned guards = 0;
+        f.cache.set_release_guard([&](auto) { ++guards; return false; });
+        require(f.program.host_bytes_released({&named, 1}) == 64,
+                "fixture must quote only the victim's private Host bytes");
+        const auto closure = f.cache.proven_victim_closure(f.program, victim, cursor, exported, excluded);
+        require(closure == std::vector<Handle>{named} &&
+                    f.cache.release_proven_durable_victim(
+                        f.program, victim, closure, cursor, exported, excluded) &&
+                    !f.program.valid_checkpoint(named) && f.program.valid_checkpoint(protected_point) &&
+                    f.program.physical_usage().occupied.host_bytes == 64 && guards == 0,
+                "protected physical sharer prevented Tier 2 from freeing private Host bytes");
+    }
+}
+
 void test_proven_export_logical_owner_exclusivity() {
     using namespace ninfer::runtime;
     for (unsigned sharing = 0; sharing != 4; ++sharing) {
@@ -2261,6 +2292,7 @@ void test_proven_export_logical_owner_exclusivity() {
 int main() {
     try {
         test_proven_export_closure_and_protections();
+        test_proven_export_skips_protected_physical_groups();
         test_proven_export_logical_owner_exclusivity();
         test_abandoned_turn_preserves_committed_owner();
         test_pending_checkpoint_blocks_complete_destructive_plan();

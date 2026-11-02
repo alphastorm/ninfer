@@ -20,7 +20,7 @@ ninfer_add_test(ninfer_engine_checkpoint_control_test
 ninfer_add_test(ninfer_engine_checkpoint_adapter_test
   HOST_LANES bounded native windows
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../test_engine_checkpoint_adapter.cpp"
-  LIBRARIES ninfer_core Threads::Threads)
+  LIBRARIES ninfer_core ninfer_session_checkpoint_store Threads::Threads)
 ninfer_add_test(ninfer_engine_core_test
   HOST_LANES bounded native
   SOURCES "${CMAKE_CURRENT_LIST_DIR}/../runtime/test_engine_core.cpp"
