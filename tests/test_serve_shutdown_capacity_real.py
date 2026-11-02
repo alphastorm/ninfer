@@ -211,12 +211,14 @@ def main() -> int:
                     self.log.close()
                     raise
             def stop(self, expected):
+                # expected: one exact report, or a tuple of acceptable exact reports.
                 try: code = self.process.stop(timeout=300)
                 finally: self.log.close()
                 require(self.report.is_file(), "synchronous shutdown report missing")
                 report = json.loads(self.report.read_text(encoding="utf-8"))
                 observed = {name: report[name] for name in ("saved", "skipped", "refused", "complete")}
-                require(observed == expected and (code == 0) == expected["complete"], "unexpected Stop result or exit status")
+                allowed = expected if isinstance(expected, tuple) else (expected,)
+                require(observed in allowed and (code == 0) == observed["complete"], "unexpected Stop result or exit status")
                 return observed
             def receipts(self):
                 values = []
@@ -308,11 +310,18 @@ def main() -> int:
                         "reclaiming save changed or quota-evicted A")
                 receipt["restart"] = {"cached_tokens": cached, "continuation_sha256": hashlib.sha256(
                     semantic_text(restored).encode()).hexdigest(), "a_current_unchanged": True}
-                # B's restored continuation fills the calibrated arena and its newest points are not
-                # yet durable, so importing A now would contend with B (Capacity refusal on the
-                # first 5090 run). Save B through the second Stop, then load A alone.
-                receipt["second_stop"] = active.stop({"saved": 1, "skipped": 0, "refused": 0, "complete": True})
+                # B's restored continuation fills the calibrated arena, so importing A beside it is
+                # a Capacity refusal (first 5090 run). Completing the continuation can also queue a
+                # pressure save that publishes B before Stop (later 5090 runs); otherwise Stop
+                # saves B. Either way B's current generation must be the continuation.
+                receipt["second_stop"] = active.stop((
+                    {"saved": 0, "skipped": 1, "refused": 0, "complete": True},
+                    {"saved": 1, "skipped": 0, "refused": 0, "complete": True}))
                 active = None
+                durable = payload_shape(checkpoints, sessions[1])
+                shape = ("states", "state_bytes", "kv_bytes", "native_bytes", "frontier")
+                require({k: durable[k] for k in shape} == {k: next_b[k] for k in shape},
+                        "B's restored continuation is not durable after the second Stop")
                 require(digest_file(pointer) == a_pointer, "second Stop changed A's covered generation")
                 active = Server(4, checkpoints, capacity)
                 code, _ = request("GET", "/v1/responses/" + a_seed["id"], capability=sessions[0])
