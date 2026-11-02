@@ -301,7 +301,7 @@ def interrupted_upgrade(directory: Path) -> SimpleNamespace:
     lease, and the incumbent's trees beside the candidate's. Controllers log what they are asked."""
     root = directory / "qwen38-3090-native"
     operation = "5" * 32
-    candidate = "qwen38-3090-native-v0.8.0-beta.1-" + "c" * 12
+    candidate = "qwen38-3090-native-v0.8.0-beta.2-" + "c" * 12
     incumbent = "qwen38-3090-native-v0.7.0-beta.3-" + PREDECESSOR_3090[:12]
     transaction_root = root / "receipts" / "install-transactions" / operation
     snapshots = transaction_root / "snapshots"
@@ -2169,7 +2169,7 @@ class LaneSpecificationTests(unittest.TestCase):
                     "draft_tokens": {"min": 7, "max": 7},
                 }
                 if not blackwell:
-                    self.assertEqual(version, "0.8.0-beta.1")
+                    self.assertEqual(version, "0.8.0-beta.2")
                     self.assertEqual(spec["source"]["lineage_base_sha"],
                                      "752dd887be6a9cdb2da6217f3b664b3c03ed33ae")
                     expected_shape.update({
